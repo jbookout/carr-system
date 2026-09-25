@@ -376,8 +376,10 @@ export const REGISTRY_V75_VERSION = "scac-mutation-registry.v75";
 // v76 admits the DoctorCRE v5 slice done-record's automated marker
 // (migration 0619): register-slice-criteria-from-catalog,
 // bind-slice-criterion-evidence, record-release-slice-members,
-// auto-mark-slice-completion, list-shipped-releases (writer/reader) and
-// rebind-slice-criterion-evidence, set-slice-mark-hold (authorityOnly), and
+// propose-slice-completion, list-shipped-releases,
+// pending-slice-completion-proposals (writer/reader) and
+// rebind-slice-criterion-evidence, set-slice-mark-hold,
+// confirm-slice-completions (authorityOnly), and
 // narrows register-slice-checkable-done's evidence kinds. Chained over v75
 // (0618) by migration 0620. The runtime selector (mutation-registry.js)
 // moves to v76.
@@ -1554,7 +1556,7 @@ export const POST_0618_FORWARD_V75_DB_CATALOG_BASELINE = Object.freeze({
 export const POST_0620_FORWARD_V76_DB_CATALOG_BASELINE = Object.freeze({
   ...POST_0618_FORWARD_V75_DB_CATALOG_BASELINE,
   projection_version: "scac-db-catalog-projection.v76",
-  secdef_execute: { count: 943, digest: "sha256:8eac3660e7f5ce333f25be27eb54055a0b56c7b4d2d229e1aacdad6249a7ce04" },
+  secdef_execute: { count: 945, digest: "sha256:b8a25aceea4914379c0498a8329ae9a75f68aa05fc76392384c6cac067e79388" },
 });
 
 export const JOB_DEFINITION_BASELINE = Object.freeze({

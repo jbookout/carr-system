@@ -6,11 +6,13 @@ import {
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
 // v76 is the runtime selector after the DoctorCRE v5 slice done-record's
 // automated marker (migration 0619, sealed by 0620 over v75). Its sealed
-// catalog admits seven new verbs -- register-slice-criteria-from-catalog,
+// catalog admits nine new verbs -- register-slice-criteria-from-catalog,
 // bind-slice-criterion-evidence, record-release-slice-members,
-// auto-mark-slice-completion and list-shipped-releases (writer/reader), and
-// rebind-slice-criterion-evidence and set-slice-mark-hold (authorityOnly) --
-// and register-slice-checkable-done's narrowed evidence kinds.
+// propose-slice-completion, list-shipped-releases and
+// pending-slice-completion-proposals (writer/reader), and
+// rebind-slice-criterion-evidence, set-slice-mark-hold and
+// confirm-slice-completions (authorityOnly) -- and
+// register-slice-checkable-done's narrowed evidence kinds.
 //
 // Superseded note (v75): v75 was the runtime selector after V5-A05 delivery cadence (migration 0617,
 // cadence receipts, server-derived escalation routing, the held-until-morning

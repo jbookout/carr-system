@@ -233,6 +233,27 @@ class WorkflowCutoverFake {
         created_at: "2026-09-25T00:00:00Z" }] };
     }
 
+    // 0619 round 3: automation proposes; a partner confirms in a batch.
+    if (sql.includes("ops.propose_slice_completion")) {
+      const [sliceId, receipt, reason] = params;
+      this.proposeCalls = [...(this.proposeCalls ?? []), params];
+      if (sliceId === "V5-HELD") throw new Error("slice_mark_held_by_partner: V5-HELD");
+      return { rows: [{ id: "55000000-0000-0000-0000-000000000001", slice_id: sliceId,
+        criteria_receipt: JSON.parse(receipt).map(el => ({ ...el, pass: true })), reason,
+        proposed_by_actor_slug: "joe-local", created_at: "2026-09-25T00:00:00Z" }] };
+    }
+    if (sql.includes("ops.confirm_slice_completions")) {
+      const [sliceIds, reason, key] = params;
+      this.confirmCalls = [...(this.confirmCalls ?? []), params];
+      if (!reason) throw new Error("reason_required");
+      return { rows: [...new Set(sliceIds)].sort().map(sliceId => sliceId === "V5-HELD"
+        ? { slice_id: sliceId, outcome: "held", mark_id: null, proposal_id: null, criteria_receipt: null }
+        : { slice_id: sliceId, outcome: "confirmed", mark_id: `mark-${key}`, proposal_id: "p1", criteria_receipt: [] }) };
+    }
+    if (sql.includes("ops.pending_slice_completion_proposals")) {
+      return { rows: [{ pending: [{ slice_id: "V5-F08", proposal_id: "p1", passes_now: true }] }] };
+    }
+
     if (sql.includes("ops.read_slice_completion")) {
       const [sliceId] = params;
       const rows = this.slices.filter(s => s.slice_id === sliceId);
@@ -349,16 +370,19 @@ test("every door that can change what a live workflow may enqueue is authority-o
   // 0619: the partner override doors are authority-only; the automated
   // seat's doors ride the writer connection (the database refuses any actor
   // outside ops.slice_marker_seat).
-  for (const name of ["rebind-slice-criterion-evidence", "set-slice-mark-hold"]) {
+  for (const name of ["rebind-slice-criterion-evidence", "set-slice-mark-hold", "confirm-slice-completions"]) {
     assert.equal(TOOLS[name].authorityOnly, true, `${name} must be authority-only`);
     assert.equal(TOOLS[name].write, true);
   }
   for (const name of ["register-slice-criteria-from-catalog", "bind-slice-criterion-evidence",
-    "record-release-slice-members", "auto-mark-slice-completion"]) {
+    "record-release-slice-members", "propose-slice-completion"]) {
     assert.equal(TOOLS[name].authorityOnly, undefined, `${name} is a seat door on the writer connection`);
     assert.equal(TOOLS[name].write, true);
   }
   assert.equal(TOOLS["list-shipped-releases"].write, false);
+  assert.equal(TOOLS["pending-slice-completion-proposals"].write, false);
+  // Automation proposes; no writer-connection verb can set complete.
+  assert.equal(TOOLS["auto-mark-slice-completion"], undefined);
   assert.deepEqual(TOOLS["mark-slice-progress"].inputSchema.properties.status.enum, ["in_progress", "blocked"]);
   assert.equal("status" in TOOLS["mark-slice-completion"].inputSchema.properties, false);
 });
@@ -565,6 +589,44 @@ test("bind-slice-criterion-evidence passes bound_member_id to the door and surfa
     assert.ok(denied, `the seat's schema refuses evidence_kind=${kind}`);
   }
   assert.equal(client.bindCalls.length, 2, "a schema refusal never reaches the door");
+});
+
+test("propose-slice-completion records a proposal, never a mark, and surfaces the door's refusal", async () => {
+  const client = new WorkflowCutoverFake();
+  const receipt = [{ criterion: "scanner flags PHI", evidence_ref: "54000000-0000-0000-0000-000000000001" }];
+  const ok = await executeRegisteredTool(client, AGENT, "propose-slice-completion", {
+    idempotency_key: "60000000-0000-0000-0000-000000000041", slice_id: "V5-F08", criteria_receipt: receipt,
+    reason: "every criterion proven",
+  });
+  assert.equal(ok.status, "proposed");
+  assert.equal(ok.awaiting_partner_confirmation, true);
+  assert.equal(ok.proposal_id, "55000000-0000-0000-0000-000000000001");
+  assert.equal("marked_via" in ok, false);
+  const held = await rejected(() => executeRegisteredTool(client, AGENT, "propose-slice-completion", {
+    idempotency_key: "60000000-0000-0000-0000-000000000042", slice_id: "V5-HELD", criteria_receipt: receipt,
+  }));
+  assert.equal(held.error, "slice_completion_proposal_refused");
+  assert.match(held.detail, /slice_mark_held_by_partner/);
+});
+
+test("confirm-slice-completions is one partner act for many slices, with a per-slice outcome", async () => {
+  const client = new WorkflowCutoverFake();
+  const out = await executeRegisteredTool(client, AUTHORITY_AGENT, "confirm-slice-completions", {
+    idempotency_key: "60000000-0000-0000-0000-000000000043", slice_ids: ["V5-F08", "V5-HELD", "V5-J303"],
+    reason: "partner confirms the batch",
+  });
+  assert.equal(out.confirmed, 2);
+  assert.equal(out.not_confirmed, 1);
+  assert.deepEqual(out.results.map(r => [r.slice_id, r.outcome]),
+    [["V5-F08", "confirmed"], ["V5-HELD", "held"], ["V5-J303", "confirmed"]]);
+  assert.deepEqual(client.confirmCalls[0], [["V5-F08", "V5-HELD", "V5-J303"], "partner confirms the batch",
+    "60000000-0000-0000-0000-000000000043"]);
+  const noReason = await rejected(() => executeRegisteredTool(client, AUTHORITY_AGENT, "confirm-slice-completions", {
+    idempotency_key: "60000000-0000-0000-0000-000000000044", slice_ids: ["V5-F08"],
+  }));
+  assert.ok(noReason, "a confirmation needs a reason");
+  const pending = await executeRegisteredTool(client, AGENT, "pending-slice-completion-proposals", {});
+  assert.deepEqual(pending, { ok: true, count: 1, pending: [{ slice_id: "V5-F08", proposal_id: "p1", passes_now: true }] });
 });
 
 test("read-slice-completion returns the server's live done_state alongside the latest mark", async () => {

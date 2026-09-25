@@ -41,11 +41,29 @@ Covered:
              (job_receipt) only for a completion receipt of the bound job;
              unbound never passes, even with a ref that would prove another
              binding.
-  MARKER     auto completion refuses while any criterion is unproven and
-             succeeds, marked_via=automation, once all are; progress records the
-             server-derived actor only (none is refused, a caller slug is
-             ignored); a partner hold refuses every non-authority mark until
-             released; a partner's own complete mark holds too.
+  TERMINAL   automation can never SET complete: no auto-complete door exists,
+             the writer holds no complete door, the shared complete body refuses
+             any non-partner caller, and a CHECK refuses a complete row not
+             marked_via='authority' even when the owner writes it.
+  MARKER     a proposal refuses while any criterion is unproven; once all are
+             proven the seat PROPOSES and the slice stays unmarked-complete;
+             ops.confirm_slice_completions (partner) re-evaluates at confirm time
+             (a partner unbind after the proposal -> not_proven), refuses a held
+             slice (held) and a proposal older than the latest mark
+             (stale_proposal), confirms in a batch with per-slice outcomes
+             (confirmed / no_proposal / unknown_slice), replays idempotently and
+             reports already_complete; progress records the server-derived actor
+             only; a partner hold refuses every non-authority mark, bind and
+             proposal until released; a partner complete holds too.
+  PROBES     the round-2 reviewer's four holes as refusals or proposal-only:
+             A1 a partner shipped_release registration naming no member is
+             refused, and a seat-forged member only ever yields a proposal;
+             A2 a catalog the seat rewrote itself, registered, bound and proposed
+             yields a proposal and no complete mark; A3 wording that names a
+             refusal or a human observation allows nothing, and the rest can only
+             be proposed; A4 a partner-confirmed member re-bound by the seat to
+             another criterion stays a proposal.
+  RACES      (committed, two logins) are in ops/slice-done-marker-race-local-pg-gate.py.
   PORTFOLIO  accepted_record passes only for the CURRENT, INTACT accepted
              revision of the catalog portfolio (a real propose / independent
              review / partner accept through the portfolio doors) and fails the
@@ -140,7 +158,7 @@ def provision_logins(cur: Any) -> None:
             raise RuntimeError(f"{login} must hold exactly {bundle}, holds {sorted(runtime)}")
 
 
-def install_catalog(cur: Any) -> None:
+def install_catalog(cur: Any, extra: list[dict] | None = None) -> None:
     """Point the catalog doctrine section at a fixture revision naming two
     slices, creating the document and section when this database has none."""
     actor_id = cur.execute(
@@ -162,7 +180,7 @@ def install_catalog(cur: Any) -> None:
         {"proposed_id": SLICE, "checkable_done": CRITERIA},
         {"proposed_id": SLICE_OTHER, "checkable_done": ["other criterion"]},
         {"proposed_id": SLICE_PF, "checkable_done": PF_CRITERIA},
-    ]})
+    ] + (extra or [])})
     version = int(section[1] or 0) + 1
     revision = cur.execute(
         """insert into doctrine_revision(section_id,version,actor_id,body,plain_text,content_hash,commit_message)
@@ -264,7 +282,7 @@ def run(cur: Any) -> str | None:
         ("register from catalog", "select * from ops.register_slice_criteria_from_catalog(%s,%s)", (SLICE, uuid.uuid4())),
         ("bind", BIND, bind_args(SLICE, CRITERIA[0], "shipped_release", member_id=str(uuid.uuid4()))),
         ("record members", "select * from ops.record_release_slice_members(%s,%s)", ("none", Jsonb([member("a")]))),
-        ("auto complete", "select ops.auto_mark_slice_completion(%s,%s,'r',%s)", (SLICE, receipt({}), uuid.uuid4())),
+        ("propose complete", "select ops.propose_slice_completion(%s,%s,'r',%s)", (SLICE, receipt({}), uuid.uuid4())),
     ]
     for acting in (None, "claude"):
         with as_login(cur, WRITER, acting):
@@ -277,8 +295,32 @@ def run(cur: Any) -> str | None:
             ("hold", "select ops.set_slice_mark_hold(%s,'hold','blocked','r',%s)", (SLICE, uuid.uuid4())),
             ("partner complete", "select ops.mark_slice_completion(%s,%s,'r',%s)", (SLICE, receipt({}), uuid.uuid4())),
             ("partner register", "select ops.register_slice_checkable_done(%s,'[]'::jsonb,%s)", (SLICE, uuid.uuid4())),
+            ("partner confirm", "select * from ops.confirm_slice_completions(array[%s],'r',%s)", (SLICE, uuid.uuid4())),
+            ("the shared complete body", "select ops.slice_mark_complete_insert(%s,%s,'r',%s,'joe-local','authority')",
+             (SLICE, receipt({}), uuid.uuid4())),
         ]:
             expect_refusal(cur, query, params, f"seat {label}", match="permission denied")
+
+    # ----------------------------------------------------------------- TERMINAL
+    # No automation door to complete exists, and the writer can execute no
+    # function that writes a complete mark.
+    if cur.execute("select to_regprocedure('ops.auto_mark_slice_completion(text,jsonb,text,uuid)')").fetchone()[0]:
+        return "an automation complete door (ops.auto_mark_slice_completion) still exists"
+    writer_complete = cur.execute(
+        """select p.oid::regprocedure::text from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+            where n.nspname = 'ops' and p.proname in ('mark_slice_completion', 'confirm_slice_completions',
+                                                      'slice_mark_complete_insert')
+              and has_function_privilege('carr_writer', p.oid, 'execute')""").fetchall()
+    if writer_complete:
+        return f"the writer can execute a complete door: {writer_complete}"
+    expect_refusal(cur, "select ops.slice_mark_complete_insert(%s,%s,'r',%s,'joe-local','automation')",
+                   (SLICE, receipt({}), uuid.uuid4()), "the shared complete body called for automation (owner)",
+                   match="slice_complete_is_a_partner_act")
+    expect_refusal(cur, """insert into ops.slice_completion_mark (slice_id,status,criteria_receipt,reason,marked_by_actor_slug,
+                                                                  idempotency_key,marked_via)
+                           values (%s,'complete','[]'::jsonb,'r','joe-local',%s,'automation')""",
+                   (SLICE, uuid.uuid4()), "an automation complete row written directly (owner)",
+                   match="slice_completion_mark_complete_is_partner")
     with as_login(cur, AUTHORITY, SEAT):
         for label, query, params in seat_doors:
             expect_refusal(cur, query, params, f"authority login {label}", match="permission denied")
@@ -442,9 +484,21 @@ def run(cur: Any) -> str | None:
 
     # ------------------------------------------------------------------- MARKER
     full = {CRITERIA[0]: mine, CRITERIA[1]: good_job, CRITERIA[2]: mine}
+    propose = "select id::text, proposed_by_actor_slug from ops.propose_slice_completion(%s,%s,%s,%s)"
+    confirm = "select slice_id, outcome, mark_id::text, proposal_id::text from ops.confirm_slice_completions(%s,%s,%s)"
+
+    def latest() -> tuple:
+        return cur.execute("""select status, marked_via, marked_by_actor_slug, confirmed_proposal_id::text
+                                from ops.slice_completion_mark where slice_id=%s order by mark_seq desc limit 1""",
+                           (SLICE,)).fetchone() or ()
+
+    def confirm_one(slice_id: str = SLICE, key: uuid.UUID | None = None) -> tuple:
+        with as_login(cur, AUTHORITY):
+            return cur.execute(confirm, ([slice_id], "partner confirms", key or uuid.uuid4())).fetchone()
+
     with as_login(cur, WRITER, SEAT):
-        expect_refusal(cur, "select ops.auto_mark_slice_completion(%s,%s,'r',%s)", (SLICE, receipt(full), uuid.uuid4()),
-                       "auto completion with an unbound criterion", match="every_criterion_proven")
+        expect_refusal(cur, propose, (SLICE, receipt(full), "r", uuid.uuid4()),
+                       "a proposal with an unbound criterion", match="every_criterion_proven")
         prog = cur.execute(
             "select status, marked_via, marked_by_actor_slug from ops.mark_slice_progress(%s,'in_progress',%s,'partial',%s,'ignored')",
             (SLICE, receipt(full), uuid.uuid4())).fetchone()
@@ -461,25 +515,38 @@ def run(cur: Any) -> str | None:
             (SLICE, receipt(full), uuid.uuid4())).fetchone()
     if prog != ("writer", "claude"):
         return f"writer progress recorded a caller-supplied actor: {prog}"
+    if confirm_one()[1] != "no_proposal":
+        return "a slice with no proposal was not reported no_proposal"
     # Partner binds the runtime criterion to the job too; partner wins.
     with as_login(cur, AUTHORITY):
         cur.execute(REBIND, bind_args(SLICE, CRITERIA[2], "live_check", "job_receipt", job_key,
                                       reason="partner: job proves it"))
     full[CRITERIA[2]] = good_job
+    # Every criterion proven: automation PROPOSES; the slice is not complete.
     with as_login(cur, WRITER, SEAT):
-        done = cur.execute("select status, marked_via, marked_by_actor_slug from ops.auto_mark_slice_completion(%s,%s,'all proven',%s)",
-                           (SLICE, receipt(full), uuid.uuid4())).fetchone()
-    if done != ("complete", "automation", SEAT):
-        return f"auto completion did not mark complete as automation: {done}"
-    # Partner rebind wins: unbinding criterion 0 makes it unprovable.
+        p1 = cur.execute(propose, (SLICE, receipt(full), "all proven", uuid.uuid4())).fetchone()
+    if p1[1] != SEAT or latest()[0] != "in_progress":
+        return f"a proven proposal changed the slice's mark or lost its actor: {p1} / {latest()}"
+    with as_login(cur, READER):
+        st = cur.execute("select ops.read_slice_done_state(%s)", (SLICE,)).fetchone()[0]
+        pending = cur.execute("select ops.pending_slice_completion_proposals()").fetchone()[0]
+    if not st["awaiting_partner_confirmation"] or st["latest_proposal"]["id"] != p1[0] \
+            or [x["slice_id"] for x in pending if x["slice_id"] == SLICE] != [SLICE] \
+            or not next(x for x in pending if x["slice_id"] == SLICE)["passes_now"]:
+        return f"the proposal is not reported as awaiting partner confirmation: {st.get('latest_proposal')} / {pending}"
+    # Confirmation re-evaluates NOW: a partner unbind after the proposal makes it not_proven.
     with as_login(cur, AUTHORITY):
         cur.execute(REBIND, bind_args(SLICE, CRITERIA[0], "unbound", reason="partner: not a source criterion"))
     if evaluate(full) != [False, True, True]:
         return f"a partner unbind did not override the binding: {evaluate(full)}"
+    rechecked = confirm_one()
+    if rechecked[1] != "not_proven" or rechecked[2] is not None or latest()[0] != "in_progress":
+        return f"confirmation did not re-check the bindings at confirm time: {rechecked} / {latest()}"
     with as_login(cur, AUTHORITY):
         cur.execute(REBIND, bind_args(SLICE, CRITERIA[0], "shipped_release", member_id=mine, reason="partner: restore"))
 
-    # Partner hold refuses every non-authority mark until released.
+    # A hold committed after the proposal blocks its confirmation; the release
+    # leaves it stale, so automation must propose again.
     with as_login(cur, AUTHORITY):
         held = cur.execute("select status, marked_via from ops.set_slice_mark_hold(%s,'hold','blocked','partner says wait',%s)",
                            (SLICE, uuid.uuid4())).fetchone()
@@ -487,9 +554,11 @@ def run(cur: Any) -> str | None:
                        "a hold at complete", match="slice_hold_status_invalid")
     if held != ("blocked", "authority_hold"):
         return f"partner hold was not recorded: {held}"
+    if confirm_one()[1] != "held":
+        return "a held slice's proposal was confirmed"
     with as_login(cur, WRITER, SEAT):
-        expect_refusal(cur, "select ops.auto_mark_slice_completion(%s,%s,'r',%s)", (SLICE, receipt(full), uuid.uuid4()),
-                       "auto completion over a partner hold", match="slice_mark_held_by_partner")
+        expect_refusal(cur, propose, (SLICE, receipt(full), "r", uuid.uuid4()),
+                       "a proposal over a partner hold", match="slice_mark_held_by_partner")
         expect_refusal(cur, "select ops.mark_slice_progress(%s,'in_progress',%s,'r',%s,'x')", (SLICE, receipt(full), uuid.uuid4()),
                        "seat progress over a partner hold", match="slice_mark_held_by_partner")
     with as_login(cur, WRITER, "claude"):
@@ -499,17 +568,41 @@ def run(cur: Any) -> str | None:
         cur.execute("select ops.set_slice_mark_hold(%s,'release',null,'go ahead',%s)", (SLICE, uuid.uuid4()))
         expect_refusal(cur, "select ops.set_slice_mark_hold(%s,'release',null,'again',%s)", (SLICE, uuid.uuid4()),
                        "releasing an unheld slice", match="slice_mark_not_held")
+    if confirm_one()[1] != "stale_proposal":
+        return "a proposal made before a hold/release was confirmed"
+    # Any later mark (here automation's own progress) also leaves a proposal stale.
     with as_login(cur, WRITER, SEAT):
-        again_done = cur.execute("select status from ops.auto_mark_slice_completion(%s,%s,'re-proven',%s)",
-                                 (SLICE, receipt(full), uuid.uuid4())).fetchone()[0]
-    if again_done != "complete":
-        return f"automation could not mark after the hold was released: {again_done}"
-    # A partner complete holds too.
+        cur.execute(propose, (SLICE, receipt(full), "re-proven", uuid.uuid4()))
+        cur.execute("select ops.mark_slice_progress(%s,'in_progress',%s,'later',%s,'x')", (SLICE, receipt(full), uuid.uuid4()))
+    if confirm_one()[1] != "stale_proposal":
+        return "a proposal older than the latest mark was confirmed"
+    with as_login(cur, WRITER, SEAT):
+        p3 = cur.execute(propose, (SLICE, receipt(full), "re-proven", uuid.uuid4())).fetchone()
+    # One partner act, many slices: per-slice outcomes, idempotent replay.
+    batch_key = uuid.uuid4()
     with as_login(cur, AUTHORITY):
-        cur.execute("select ops.mark_slice_completion(%s,%s,'partner confirms',%s)", (SLICE, receipt(full), uuid.uuid4()))
+        rows = cur.execute(confirm, ([SLICE, "V5-NOPE", SLICE_PF, SLICE], "partner confirms the batch", batch_key)).fetchall()
+        replay = cur.execute(confirm, ([SLICE, "V5-NOPE", SLICE_PF], "partner confirms the batch", batch_key)).fetchall()
+        actor = cur.execute("select ops.authority_actor_slug()").fetchone()[0]
+    outcomes = {r[0]: r[1] for r in rows}
+    if outcomes != {SLICE: "confirmed", "V5-NOPE": "unknown_slice", SLICE_PF: "unknown_slice"} or len(rows) != 3:
+        return f"batch confirmation outcomes wrong: {rows}"
+    mark = next(r for r in rows if r[0] == SLICE)
+    if mark[3] != p3[0] or latest() != ("complete", "authority", actor, p3[0]):
+        return f"the confirmation did not write a partner complete mark for the proposal: {mark} / {latest()}"
+    if {r[0]: (r[1], r[2]) for r in replay} != {r[0]: (r[1], r[2]) for r in rows}:
+        return f"replaying the batch key did not return the same marks: {replay} / {rows}"
+    if confirm_one()[1] != "already_complete":
+        return "a second confirmation of a complete slice was not reported already_complete"
+    # A partner complete holds: no automated mark or proposal over it.
     with as_login(cur, WRITER, SEAT):
         expect_refusal(cur, "select ops.mark_slice_progress(%s,'in_progress',%s,'r',%s,'x')", (SLICE, receipt(full), uuid.uuid4()),
                        "seat progress over a partner complete", match="slice_mark_held_by_partner")
+        expect_refusal(cur, propose, (SLICE, receipt(full), "r", uuid.uuid4()),
+                       "a proposal over a partner complete", match="slice_mark_held_by_partner")
+    # The direct partner door still works (and holds).
+    with as_login(cur, AUTHORITY):
+        cur.execute("select ops.mark_slice_completion(%s,%s,'partner confirms',%s)", (SLICE, receipt(full), uuid.uuid4()))
 
     # A partner hold also blocks an automated BIND (on a fresh slice).
     with as_login(cur, WRITER, SEAT):
@@ -524,6 +617,11 @@ def run(cur: Any) -> str | None:
         cur.execute("select ops.set_slice_mark_hold(%s,'release',null,'go ahead',%s)", (SLICE_OTHER, uuid.uuid4()))
     with as_login(cur, WRITER, SEAT):
         cur.execute(BIND, bind_args(SLICE_OTHER, "other criterion", "shipped_release", member_id=theirs))
+
+    # ------------------------------------------------------------------- PROBES
+    problem = probes_a1_a3_a4(cur, rel_ok, mine)
+    if problem:
+        return problem
 
     # -------------------------------------------------------------- READ STATE
     with as_login(cur, READER):
@@ -700,9 +798,9 @@ def portfolio_section(cur: Any, token: str, release_key: str, zt01_member: str) 
     if live != {counts: (accepted, True), negatives: (None, False), effects: (accepted, True)}:
         return f"read_slice_done_state candidates/candidate_passes wrong before any effect: {live}"
     with as_login(cur, WRITER, SEAT):
-        expect_refusal(cur, "select ops.auto_mark_slice_completion(%s,%s,'r',%s)",
+        expect_refusal(cur, "select ops.propose_slice_completion(%s,%s,'r',%s)",
                        (SLICE_PF, Jsonb([{"criterion": c, "evidence_ref": all_refs[c]} for c in PF_CRITERIA]),
-                        uuid.uuid4()), "auto completion with the negatives unbound", match="every_criterion_proven")
+                        uuid.uuid4()), "a proposal with the negatives unbound", match="every_criterion_proven")
 
     # Only a partner decides the negatives (here: the shipped PR whose CI gate
     # exercised them).
@@ -740,12 +838,134 @@ def portfolio_section(cur: Any, token: str, release_key: str, zt01_member: str) 
         return "a tampered accepted revision still passed accepted_record"
     cur.execute("rollback to savepoint sdm_tamper")
 
+    pf_receipt = Jsonb([{"criterion": c, "evidence_ref": all_refs[c]} for c in PF_CRITERIA])
     with as_login(cur, WRITER, SEAT):
-        done = cur.execute("select status, marked_via from ops.auto_mark_slice_completion(%s,%s,'all proven',%s)",
-                           (SLICE_PF, Jsonb([{"criterion": c, "evidence_ref": all_refs[c]} for c in PF_CRITERIA]),
-                            uuid.uuid4())).fetchone()
-    if done != ("complete", "automation"):
-        return f"automation could not complete a slice proven by the new kinds: {done}"
+        cur.execute("select ops.propose_slice_completion(%s,%s,'all proven',%s)", (SLICE_PF, pf_receipt, uuid.uuid4()))
+    # An effect created after the proposal, before confirmation: not_proven.
+    cur.execute("savepoint sdm_late_effect")
+    cur.execute("set local session_replication_role=replica")
+    cur.execute("""insert into ops.job (definition_key,definition_version,idempotency_key,scheduled_for,max_attempts,timeout_seconds)
+                   values ('sdm-gate-effect',1,%s,now(),1,30)""", (uuid.uuid4().hex,))
+    cur.execute("set local session_replication_role=origin")
+    with as_login(cur, AUTHORITY):
+        late = cur.execute("select outcome from ops.confirm_slice_completions(array[%s],'confirm',%s)",
+                           (SLICE_PF, uuid.uuid4())).fetchone()[0]
+    cur.execute("rollback to savepoint sdm_late_effect")
+    if late != "not_proven":
+        return f"an effect created after the proposal did not stop its confirmation: {late}"
+    with as_login(cur, AUTHORITY):
+        done = cur.execute("select outcome from ops.confirm_slice_completions(array[%s],'confirm',%s)",
+                           (SLICE_PF, uuid.uuid4())).fetchone()[0]
+    if done != "confirmed" or cur.execute(
+            "select status, marked_via from ops.slice_completion_mark where slice_id=%s order by mark_seq desc limit 1",
+            (SLICE_PF,)).fetchone() != ("complete", "authority"):
+        return f"a partner could not confirm a slice proven by the new kinds: {done}"
+    return probe_a2(cur, token, accepted)
+
+
+def set_catalog_as_seat(cur: Any, slices: list[dict]) -> None:
+    """The reviewer's A2 setup: the WRITER login with the seat actor rewrites the
+    catalog section body (the rows write-doctrine-section writes)."""
+    body = json.dumps({"slices": slices})
+    with as_login(cur, WRITER, SEAT):
+        sec = cur.execute("""select s.id, s.current_version from doctrine_section s join doctrine_document d on d.id=s.document_id
+                              where d.slug=%s and s.section_key=%s""", (CATALOG_DOC, CATALOG_SECTION)).fetchone()
+        actor = cur.execute("select id from actor where slug='sdm-gate-fixture'").fetchone()[0]
+        version = int(sec[1]) + 1
+        rev = cur.execute(
+            """insert into doctrine_revision(section_id,version,actor_id,body,plain_text,content_hash,commit_message)
+               values (%s,%s,%s,%s,%s,%s,'seat rewrite') returning id""",
+            (sec[0], version, actor, Jsonb({"text": body}), body, hashlib.sha256(body.encode()).hexdigest())).fetchone()[0]
+        cur.execute("update doctrine_section set current_revision_id=%s, current_version=%s where id=%s", (rev, version, sec[0]))
+
+
+def no_complete_mark(cur: Any, slice_id: str) -> bool:
+    return not cur.execute("select exists (select 1 from ops.slice_completion_mark where slice_id=%s and status='complete')",
+                           (slice_id,)).fetchone()[0]
+
+
+A3_WORDING = [
+    # The reviewer's A3 wordings. Refusal and human-observation wording allows
+    # nothing; D04's still maps to the effect-free check, which is harmless now
+    # that a seat binding can only ever be PROPOSED complete.
+    ("restore into production is refused", []),
+    ("Joe observes zero side effects for a week", []),
+    ("inactive registration has zero analytics/network effect", ["live_check:portfolio_acceptance_effect_free"]),
+]
+
+
+def probes_a1_a3_a4(cur: Any, release_key: str, confirmed_member: str) -> str | None:
+    # A1: a partner registration of shipped_release names no member, so it is
+    # refused; a member the seat forged can only ever back a PROPOSAL.
+    probe = "V5-ZT04"
+    install_catalog(cur, extra=[{"proposed_id": probe, "checkable_done": ["the change ships"]}])
+    with as_login(cur, AUTHORITY):
+        expect_refusal(cur, "select * from ops.register_slice_checkable_done(%s,%s,%s)",
+                       (probe, Jsonb([{"criterion": "the change ships", "evidence_kind": "shipped_release"}]), uuid.uuid4()),
+                       "A1 a partner shipped_release registration naming no member",
+                       match="shipped_release_registration_needs_a_named_member")
+    with as_login(cur, WRITER, SEAT):
+        cur.execute("select * from ops.register_slice_criteria_from_catalog(%s,%s)", (probe, uuid.uuid4()))
+        forged = cur.execute("select id::text from ops.record_release_slice_members(%s,%s) where slice_id=%s",
+                             (release_key, Jsonb([{"slice_id": probe, "commit_sha": "e" * 40, "subject": f"{probe}: forged",
+                                                   "attribution": "explicit"}]), probe)).fetchone()[0]
+        cur.execute(BIND, bind_args(probe, "the change ships", "shipped_release", member_id=forged))
+        expect_refusal(cur, "select ops.propose_slice_completion(%s,%s,'r',%s)",
+                       (probe, Jsonb([{"criterion": "the change ships", "evidence_ref": forged}]), uuid.uuid4()),
+                       "A1 a proposal on a forged, unconfirmed member", match="every_criterion_proven")
+    if not no_complete_mark(cur, probe):
+        return "A1: a forged member reached complete"
+    # A3: the reviewer's wordings.
+    with as_login(cur, READER):
+        for wording, kinds_expected in A3_WORDING:
+            kinds_got = cur.execute("select ops.slice_criterion_allowed_kinds(%s)", (wording,)).fetchone()[0]
+            if kinds_got != kinds_expected:
+                return f"A3: {wording!r} allows {kinds_got}, expected {kinds_expected}"
+    # A4: the seat re-binds a partner-confirmed member to ANOTHER criterion: a
+    # proposal only, so the other criterion stays unproven and nothing can be
+    # proposed, let alone completed.
+    a4 = "V5-ZT05"
+    install_catalog(cur, extra=[{"proposed_id": a4, "checkable_done": ["part one ships", "part two ships"]}])
+    with as_login(cur, WRITER, SEAT):
+        cur.execute("select * from ops.register_slice_criteria_from_catalog(%s,%s)", (a4, uuid.uuid4()))
+        m = cur.execute("select id::text from ops.record_release_slice_members(%s,%s) where slice_id=%s",
+                        (release_key, Jsonb([member("a4", a4)]), a4)).fetchone()[0]
+        cur.execute(BIND, bind_args(a4, "part one ships", "shipped_release", member_id=m))
+    with as_login(cur, AUTHORITY):
+        cur.execute(REBIND, bind_args(a4, "part one ships", "shipped_release", member_id=m, reason="partner confirms"))
+    with as_login(cur, WRITER, SEAT):
+        cur.execute(BIND, bind_args(a4, "part two ships", "shipped_release", member_id=m))
+        a4_receipt = Jsonb([{"criterion": c, "evidence_ref": m} for c in ("part one ships", "part two ships")])
+        expect_refusal(cur, "select ops.propose_slice_completion(%s,%s,'r',%s)", (a4, a4_receipt, uuid.uuid4()),
+                       "A4 a proposal on a member re-bound across criteria", match="every_criterion_proven")
+    got = {e["criterion"]: e["pass"] for e in cur.execute(
+        "select ops.slice_completion_evaluate(%s,%s)", (a4, a4_receipt)).fetchone()[0]}
+    if got != {"part one ships": True, "part two ships": False} or not no_complete_mark(cur, a4):
+        return f"A4: a re-bound confirmed member proved another criterion: {got}"
+    del confirmed_member
+    return None
+
+
+def probe_a2(cur: Any, token: str, accepted: str) -> str | None:
+    """A2: the seat writes the catalog itself, registers, binds kinds automation
+    may make effective, and proposes: a proposal, never a complete mark."""
+    s2 = "V5-ZT09"
+    criteria = ["portfolio acyclic", "acceptance has zero effect"]
+    set_catalog_as_seat(cur, [{"proposed_id": s2, "checkable_done": criteria}])
+    with as_login(cur, WRITER, SEAT):
+        cur.execute("select * from ops.register_slice_criteria_from_catalog(%s,%s)", (s2, uuid.uuid4()))
+        cur.execute(BIND, bind_args(s2, criteria[0], "accepted_record", "portfolio_revision_acceptance", CATALOG_PORTFOLIO))
+        cur.execute(BIND, bind_args(s2, criteria[1], "live_check", "portfolio_acceptance_effect_free", CATALOG_PORTFOLIO))
+        proposal = cur.execute("select id::text from ops.propose_slice_completion(%s,%s,'r',%s)",
+                               (s2, Jsonb([{"criterion": c, "evidence_ref": accepted} for c in criteria]),
+                                uuid.uuid4())).fetchone()[0]
+    with as_login(cur, READER):
+        st = cur.execute("select ops.read_slice_done_state(%s)", (s2,)).fetchone()[0]
+        marked = cur.execute("select slice_id from ops.read_slice_completion(%s)", (s2,)).fetchone()
+    if not no_complete_mark(cur, s2) or st["latest_mark"] is not None or (marked and marked[0]) \
+            or not st["awaiting_partner_confirmation"] or st["latest_proposal"]["id"] != proposal:
+        return f"A2: a slice the seat wrote, bound and proposed is not proposal-only: {st}"
+    del token
     return None
 
 
@@ -760,10 +980,12 @@ def main() -> int:
                 return fail(problem)
     except Exception as exc:  # noqa: BLE001 — a gate reports, it never crashes silently
         return fail(f"{type(exc).__name__}: {exc}")
-    print("slice-done-marker-local-pg-gate: PASS — seat/partner authority, catalog-only registration, "
-          "a wording-derived allowlist, forged-subject members refused, seat shipped_release as a partner-confirmed proposal, "
-          "refusal_proof refused, server-resolved live_check/accepted_record/unbound evidence, once-only automation binding with "
-          "partner override, and the partner hold over marks and binds, all under production-shaped logins")
+    print("slice-done-marker-local-pg-gate: PASS — automation proposes and never sets complete (no door, refused body, "
+          "table CHECK); partner batch confirmation re-evaluates at confirm time and refuses held, stale and unproven "
+          "proposals; reviewer probes A1-A4 are refusals or proposal-only; seat/partner authority, catalog-only "
+          "registration, a wording-derived allowlist, forged-subject members refused, refusal_proof refused, "
+          "server-resolved evidence, once-only automation binding with partner override, and the partner hold over "
+          "marks, binds and proposals, all under production-shaped logins")
     return 0
 
 

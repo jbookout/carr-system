@@ -45,7 +45,8 @@ TWO LANES, one tick:
             9 a db/schema.sql follow-up PR when step 4 applied anything
            10 after SHIPPED, best-effort: ops/slice-done-marker.py --release-key K
               marks the DoctorCRE v5 slices this release shipped (register from
-              the catalog, bind, gather server-resolved evidence, mark). It is
+              the catalog, bind, gather server-resolved evidence, mark progress and
+              PROPOSE complete; only a partner confirms complete). It is
               STARTED DETACHED, outside the pipeline's single-run lock: the run
               records `slice_marker` (pid and log) and returns at once, so a slow
               marker can never delay the next tick. It never fails, blocks or

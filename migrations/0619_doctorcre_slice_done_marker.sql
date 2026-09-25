@@ -63,20 +63,38 @@
 --     server also refuses a member whose subject does not name the slice.
 --
 --   * The automated seat (ops.slice_marker_seat: the local machine actors)
---     may register from the catalog, bind, record release membership and mark
---     complete through its own writer doors. Joe's standing maximum-automation
---     ruling (decision b729859d); the guarantee is unchanged because every
---     criterion is still recomputed from server-resolved evidence. Every mark
---     records marked_via (authority / automation / writer / authority_hold /
---     authority_release) and the actor.
+--     may register from the catalog, bind, record release membership, mark
+--     in_progress/blocked and PROPOSE complete through its own writer doors
+--     (Joe's standing maximum-automation ruling, decision b729859d). It can
+--     never SET complete: there is no automation door to complete, the shared
+--     complete body refuses any caller but a partner, and a CHECK on
+--     ops.slice_completion_mark refuses a complete row not marked_via
+--     'authority'.
+--
+--   * Complete is a partner act. ops.propose_slice_completion (seat) records
+--     a proposal in ops.slice_completion_proposal, recomputed from
+--     server-resolved evidence. ops.confirm_slice_completions (authority,
+--     actor from ops.authority_actor_slug()) confirms many slices in one call:
+--     per slice it re-evaluates the latest proposal's receipt NOW against each
+--     criterion's effective binding and writes complete only when every
+--     criterion still resolves, no partner holds the slice, and no mark was
+--     written after the proposal. ops.mark_slice_completion (authority) stays
+--     the direct partner door.
 --
 --   * Partner override. ops.set_slice_mark_hold (authority) appends a held
 --     in_progress/blocked mark; while a partner mark is the latest, every
---     non-authority mark is refused. The partner releases the hold with the
---     same door. A partner's own complete mark also holds.
+--     non-authority mark, bind and proposal is refused, and confirmation
+--     reports the slice held. The partner releases the hold with the same
+--     door; a proposal made before the hold is stale and must be re-proposed.
 --
--- Nothing here marks any slice. The marker (ops/slice-done-marker.py) does,
--- through the verbs.
+--   * One lock per slice. Every door that reads or writes a slice's marks,
+--     bindings, proposals or registration first takes
+--     pg_advisory_xact_lock(hashtextextended('slice-done:' || slice_id, 0)),
+--     so a hold, a bind, a proposal and a confirmation of the same slice are
+--     serialised and a later one always sees the earlier one's commit.
+--
+-- Nothing here marks any slice. The marker (ops/slice-done-marker.py) proposes
+-- through the verbs; a partner confirms.
 
 -- ===========================================================================
 -- The automated seat
@@ -88,7 +106,7 @@ create table if not exists ops.slice_marker_seat (
 );
 
 comment on table ops.slice_marker_seat is
-  'DoctorCRE v5 slice done-record: the non-human actor slugs (carr.acting_actor_slug, server-derived by the MCP layer) allowed to register slice criteria from the catalog, bind unbound criteria once, record release membership and mark slices complete automatically. Every criterion is still recomputed server-side from evidence.';
+  'DoctorCRE v5 slice done-record: the non-human actor slugs (carr.acting_actor_slug, server-derived by the MCP layer) allowed to register slice criteria from the catalog, bind unbound criteria once, record release membership, mark progress and PROPOSE completion. Only a partner confirms complete.';
 
 revoke all on table ops.slice_marker_seat from public, carr_writer, carr_jobs, carr_authority;
 grant select on table ops.slice_marker_seat to carr_reader;
@@ -114,6 +132,18 @@ end;
 $$;
 
 revoke all on function ops.slice_marker_seat_actor() from public;
+
+-- The per-slice lock every slice done-record door takes first. Transaction-
+-- scoped: released at commit or rollback. Re-entrant within a transaction.
+create or replace function ops.slice_done_lock(p_slice_id text)
+returns void
+language sql volatile
+set search_path = pg_catalog
+as $$
+  select pg_advisory_xact_lock(hashtextextended('slice-done:' || coalesce(p_slice_id, ''), 0))
+$$;
+
+revoke all on function ops.slice_done_lock(text) from public;
 
 -- ===========================================================================
 -- The catalog, read server-side
@@ -270,13 +300,16 @@ create trigger slice_criterion_binding_append_only
 -- from the criterion's own catalog wording, as 'kind:source' ('kind:' when the
 -- kind has no source). The seat cannot pick a weaker kind than this allows; a
 -- partner rebind is not limited by it. Order matters: the first rule that
--- matches decides.
---   restore wording              -> live_check on staging_restore_only_result
+-- matches decides. The two "nothing" rules come first, so wording that names a
+-- refusal or a human observation is never bound by a later, looser rule
+-- ("restore into production is refused", "Joe observes zero side effects").
+-- Whatever the seat binds, it can only PROPOSE complete; a partner confirms.
 --   refuse / negative / bypass   -> nothing (refusal_proof needs a server-
 --                                   recorded gate result, and none exists)
+--   runtime / human outcomes     -> nothing (no server row can show them)
+--   restore wording              -> live_check on staging_restore_only_result
 --   acyclic (the portfolio graph)-> accepted_record on the portfolio acceptance
 --   zero ... effects             -> live_check portfolio_acceptance_effect_free
---   runtime / human outcomes     -> nothing (no server row can show them)
 --   anything else                -> shipped_release (a proposal until a partner
 --                                   confirms it)
 create or replace function ops.slice_criterion_allowed_kinds(p_criterion text)
@@ -285,12 +318,12 @@ language sql immutable
 set search_path = pg_catalog
 as $$
   select case
-    when p_criterion ~* 'restor' then array['live_check:staging_restore_only_result']
     when p_criterion ~* '(refus|negative|bypass)' then array[]::text[]
-    when p_criterion ~* 'acyclic' then array['accepted_record:portfolio_revision_acceptance']
-    when p_criterion ~* 'zero' and p_criterion ~* 'effect' then array['live_check:portfolio_acceptance_effect_free']
     when p_criterion ~* '(observ|pilot|decid|measur|partner|joe|dell|week|month|adopt|survey|feedback|interview|one-use|fresh exact)'
       then array[]::text[]
+    when p_criterion ~* 'restor' then array['live_check:staging_restore_only_result']
+    when p_criterion ~* 'acyclic' then array['accepted_record:portfolio_revision_acceptance']
+    when p_criterion ~* 'zero' and p_criterion ~* 'effect' then array['live_check:portfolio_acceptance_effect_free']
     else array['shipped_release:']
   end
 $$;
@@ -371,6 +404,7 @@ declare
   v_reg ops.slice_checkable_done_registry%rowtype;
   v_row ops.slice_criterion_binding%rowtype;
 begin
+  perform ops.slice_done_lock(p_slice_id);
   if p_idempotency_key is null then
     raise exception 'idempotency_key_required';
   end if;
@@ -498,6 +532,7 @@ declare
   v_c text;
 begin
   v_actor := ops.slice_marker_seat_actor();
+  perform ops.slice_done_lock(p_slice_id);
   if p_idempotency_key is null then
     raise exception 'idempotency_key_required';
   end if;
@@ -557,6 +592,7 @@ declare
   v_version integer;
 begin
   v_authority_actor := ops.authority_actor_slug();
+  perform ops.slice_done_lock(p_slice_id);
   if p_idempotency_key is null then
     raise exception 'idempotency_key_required';
   end if;
@@ -613,6 +649,13 @@ begin
     end if;
     if v_kind = 'refusal_proof' then
       raise exception 'refusal_proof_has_no_server_gate_source: %', v_el->>'criterion';
+    end if;
+    -- A shipped_release criterion must name ONE release member, which a
+    -- registration cannot do: register it unbound and name the member with
+    -- rebind-slice-criterion-evidence. Otherwise any member row the seat
+    -- recorded for this slice would resolve it.
+    if v_kind = 'shipped_release' then
+      raise exception 'shipped_release_registration_needs_a_named_member: register % unbound and bind its member', v_el->>'criterion';
     end if;
     insert into ops.slice_checkable_done_registry (
       slice_id, criterion, evidence_kind, workflow_key, workflow_version,
@@ -768,7 +811,54 @@ grant execute on function ops.list_shipped_releases(p_since timestamp with time 
 alter table ops.slice_completion_mark
   add column if not exists marked_via text
     check (marked_via is null or marked_via in
-      ('authority', 'automation', 'writer', 'authority_hold', 'authority_release'));
+      ('authority', 'automation', 'writer', 'authority_hold', 'authority_release')),
+  add column if not exists confirmed_proposal_id uuid;
+
+-- The terminal state is a partner act, at the table: no door, present or
+-- future, can store a complete mark that a partner did not write.
+alter table ops.slice_completion_mark
+  add constraint slice_completion_mark_complete_is_partner
+    check (status <> 'complete' or marked_via = 'authority') not valid;
+
+-- ===========================================================================
+-- Proposals: automation's last word. A proposal is NOT a mark and changes no
+-- slice's state; only ops.confirm_slice_completions (a partner) turns one
+-- into a complete mark, after re-evaluating it.
+-- ===========================================================================
+create table if not exists ops.slice_completion_proposal (
+  id uuid primary key default gen_random_uuid(),
+  slice_id text not null references ops.slice_checkable_done_registration (slice_id),
+  -- Recomputed server-side by ops.slice_completion_evaluate at proposal time;
+  -- every element passed then. Confirmation recomputes it again.
+  criteria_receipt jsonb not null check (jsonb_typeof(criteria_receipt) = 'array'),
+  reason text not null check (btrim(reason) <> ''),
+  proposed_by_actor_slug text not null,
+  -- The slice's latest mark_seq when proposed (0 when unmarked). Any mark
+  -- written after it makes the proposal stale.
+  basis_mark_seq bigint not null,
+  idempotency_key uuid not null unique,
+  proposal_seq bigint generated always as identity unique,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists slice_completion_proposal_slice_idx
+  on ops.slice_completion_proposal (slice_id, proposal_seq desc);
+
+comment on table ops.slice_completion_proposal is
+  'DoctorCRE v5: append-only proposals, by the automated slice-marker seat, that a slice is complete. Never a mark: a partner confirms with ops.confirm_slice_completions, which re-evaluates every criterion at that moment.';
+
+revoke all on table ops.slice_completion_proposal from public, carr_writer, carr_jobs, carr_authority;
+grant select on table ops.slice_completion_proposal to carr_reader;
+
+create or replace function ops.refuse_slice_completion_proposal_rewrite()
+returns trigger language plpgsql as $$
+begin
+  raise exception 'slice_completion_proposal is append-only';
+end $$;
+
+create trigger slice_completion_proposal_append_only
+  before update or delete on ops.slice_completion_proposal
+  for each row execute function ops.refuse_slice_completion_proposal_rewrite();
 
 -- A partner mark (authority complete, or a hold) is the latest mark: every
 -- non-authority mark is refused until the partner releases it.
@@ -873,8 +963,9 @@ begin
          and pl.workflow_version = p_workflow_version
     ) into v;
   elsif p_kind = 'shipped_release' then
-    -- Only the ONE member named at bind time (when the binding names one).
-    if p_bound_member_id is not null and p_ref <> p_bound_member_id then
+    -- Only the ONE member named at bind time. A shipped_release binding that
+    -- names no member (none can be registered that way) never resolves.
+    if p_bound_member_id is null or p_ref <> p_bound_member_id then
       return false;
     end if;
     select exists (
@@ -949,13 +1040,8 @@ begin
      where a.portfolio_ref = p_key
        and a.portfolio_revision_id = ops.portfolio_current_accepted_revision(p_key)
      order by a.accepted_at desc limit 1;
-  elsif p_kind = 'shipped_release' and p_bound_member_id is not null then
-    v := p_bound_member_id;
   elsif p_kind = 'shipped_release' then
-    select m.id into v from ops.release_slice_member m join ops.release r on r.id = m.release_id
-     where m.slice_id = p_slice_id and r.environment = 'production' and r.state = 'complete'
-       and r.git_sha = m.release_git_sha
-     order by coalesce(r.ended_at, r.updated_at) desc, m.commit_sha limit 1;
+    v := p_bound_member_id;
   end if;
   return v;
 end;
@@ -1071,6 +1157,7 @@ declare
   v_acting text := nullif(btrim(coalesce(current_setting('carr.acting_actor_slug', true), '')), '');
   v_via text;
 begin
+  perform ops.slice_done_lock(p_slice_id);
   if p_idempotency_key is null then
     raise exception 'idempotency_key_required';
   end if;
@@ -1114,7 +1201,8 @@ comment on function ops.mark_slice_progress(text, text, jsonb, text, uuid, text)
 revoke all on function ops.mark_slice_progress(text, text, jsonb, text, uuid, text) from public;
 grant execute on function ops.mark_slice_progress(text, text, jsonb, text, uuid, text) to carr_writer;
 
--- Shared body of the two complete doors.
+-- The shared complete body. A partner act only: every caller that is not a
+-- partner door is refused here, before anything is read.
 create or replace function ops.slice_mark_complete_insert(
   p_slice_id text, p_criteria_receipt jsonb, p_reason text, p_idempotency_key uuid,
   p_actor text, p_via text
@@ -1127,6 +1215,10 @@ declare
   v_row ops.slice_completion_mark%rowtype;
   v_computed jsonb;
 begin
+  perform ops.slice_done_lock(p_slice_id);
+  if p_via is distinct from 'authority' then
+    raise exception 'slice_complete_is_a_partner_act: automation may only propose (ops.propose_slice_completion)';
+  end if;
   if p_idempotency_key is null then
     raise exception 'idempotency_key_required';
   end if;
@@ -1137,9 +1229,6 @@ begin
     end if;
     return v_existing;
   end if;
-  if p_via = 'automation' and ops.slice_mark_held(p_slice_id) then
-    raise exception 'slice_mark_held_by_partner: %', p_slice_id;
-  end if;
 
   v_computed := ops.slice_completion_evaluate(p_slice_id, p_criteria_receipt);
   if exists (select 1 from jsonb_array_elements(v_computed) el where (el->>'pass')::boolean is not true) then
@@ -1149,7 +1238,7 @@ begin
   insert into ops.slice_completion_mark (
     slice_id, status, criteria_receipt, reason, marked_by_actor_slug, idempotency_key, marked_via
   ) values (
-    p_slice_id, 'complete', v_computed, p_reason, p_actor, p_idempotency_key, p_via
+    p_slice_id, 'complete', v_computed, p_reason, p_actor, p_idempotency_key, 'authority'
   ) returning * into v_row;
   return v_row;
 end;
@@ -1178,26 +1267,231 @@ comment on function ops.mark_slice_completion(text, jsonb, text, uuid) is
 revoke all on function ops.mark_slice_completion(text, jsonb, text, uuid) from public;
 grant execute on function ops.mark_slice_completion(text, jsonb, text, uuid) to carr_authority;
 
-create or replace function ops.auto_mark_slice_completion(
+-- Automation's door to the terminal state: a PROPOSAL, never a mark.
+create or replace function ops.propose_slice_completion(
   p_slice_id text,
   p_criteria_receipt jsonb,
   p_reason text,
   p_idempotency_key uuid
-) returns ops.slice_completion_mark
+) returns ops.slice_completion_proposal
 language plpgsql security definer
 set search_path = pg_catalog, ops
 as $$
+declare
+  v_actor text;
+  v_existing ops.slice_completion_proposal%rowtype;
+  v_latest ops.slice_completion_mark%rowtype;
+  v_row ops.slice_completion_proposal%rowtype;
+  v_computed jsonb;
 begin
-  return ops.slice_mark_complete_insert(p_slice_id, p_criteria_receipt, p_reason, p_idempotency_key,
-    ops.slice_marker_seat_actor(), 'automation');
+  v_actor := ops.slice_marker_seat_actor();
+  perform ops.slice_done_lock(p_slice_id);
+  if p_idempotency_key is null then
+    raise exception 'idempotency_key_required';
+  end if;
+  select * into v_existing from ops.slice_completion_proposal where idempotency_key = p_idempotency_key;
+  if found then
+    if v_existing.slice_id is distinct from p_slice_id then
+      raise exception 'idempotency_key_reused_for_a_different_proposal';
+    end if;
+    return v_existing;
+  end if;
+  if p_reason is null or btrim(p_reason) = '' then
+    raise exception 'reason_required';
+  end if;
+  if ops.slice_mark_held(p_slice_id) then
+    raise exception 'slice_mark_held_by_partner: %', p_slice_id;
+  end if;
+  select * into v_latest from ops.slice_completion_mark where slice_id = p_slice_id order by mark_seq desc limit 1;
+  if v_latest.status = 'complete' then
+    raise exception 'slice_already_complete: %', p_slice_id;
+  end if;
+  v_computed := ops.slice_completion_evaluate(p_slice_id, p_criteria_receipt);
+  if exists (select 1 from jsonb_array_elements(v_computed) el where (el->>'pass')::boolean is not true) then
+    raise exception 'slice_completion_proposal_requires_every_criterion_proven';
+  end if;
+  insert into ops.slice_completion_proposal (
+    slice_id, criteria_receipt, reason, proposed_by_actor_slug, basis_mark_seq, idempotency_key
+  ) values (
+    p_slice_id, v_computed, p_reason, v_actor, coalesce(v_latest.mark_seq, 0), p_idempotency_key
+  ) returning * into v_row;
+  return v_row;
 end;
 $$;
 
-comment on function ops.auto_mark_slice_completion(text, jsonb, text, uuid) is
-  'DoctorCRE v5 automation door: append status=complete exactly as ops.mark_slice_completion would -- every criterion recomputed from server-resolved evidence -- for an actor in ops.slice_marker_seat. Refused while a partner mark holds the slice.';
+comment on function ops.propose_slice_completion(text, jsonb, text, uuid) is
+  'DoctorCRE v5 automation door: PROPOSE that a slice is complete. Every criterion is recomputed from server-resolved evidence and must pass; the proposal is recorded in ops.slice_completion_proposal and changes no mark. Only a partner turns it into complete, with ops.confirm_slice_completions. Seat-only; refused while a partner holds the slice or once it is complete. Idempotent on p_idempotency_key.';
 
-revoke all on function ops.auto_mark_slice_completion(text, jsonb, text, uuid) from public;
-grant execute on function ops.auto_mark_slice_completion(text, jsonb, text, uuid) to carr_writer;
+revoke all on function ops.propose_slice_completion(text, jsonb, text, uuid) from public;
+grant execute on function ops.propose_slice_completion(text, jsonb, text, uuid) to carr_writer;
+
+-- The complete mark a batch confirmation writes for one slice has a key
+-- derived from the batch key, so a replayed batch returns the same marks.
+create or replace function ops.slice_confirm_mark_key(p_batch_key uuid, p_slice_id text)
+returns uuid
+language sql immutable
+set search_path = pg_catalog
+as $$ select md5('slice-confirm:' || p_batch_key::text || ':' || p_slice_id)::uuid $$;
+
+revoke all on function ops.slice_confirm_mark_key(uuid, text) from public;
+
+-- Partner batch door: one act confirms many proposals. Per slice, under the
+-- slice lock: refused (reported, not raised) when held, already complete,
+-- with no proposal, with a proposal older than the slice's latest mark, or
+-- when any criterion no longer resolves NOW.
+create or replace function ops.confirm_slice_completions(
+  p_slice_ids text[],
+  p_reason text,
+  p_idempotency_key uuid
+) returns table (slice_id text, outcome text, mark_id uuid, proposal_id uuid, criteria_receipt jsonb)
+language plpgsql security definer
+set search_path = pg_catalog, ops
+as $$
+#variable_conflict use_column
+declare
+  v_actor text;
+  v_slice text;
+  v_key uuid;
+  v_existing ops.slice_completion_mark%rowtype;
+  v_latest ops.slice_completion_mark%rowtype;
+  v_prop ops.slice_completion_proposal%rowtype;
+  v_computed jsonb;
+  v_row ops.slice_completion_mark%rowtype;
+begin
+  v_actor := ops.authority_actor_slug();
+  if p_idempotency_key is null then
+    raise exception 'idempotency_key_required';
+  end if;
+  if p_slice_ids is null or cardinality(p_slice_ids) = 0 then
+    raise exception 'slice_ids_required_nonempty';
+  end if;
+  if cardinality(p_slice_ids) > 200 then
+    raise exception 'slice_ids_at_most_200';
+  end if;
+  if p_reason is null or btrim(p_reason) = '' then
+    raise exception 'reason_required';
+  end if;
+  -- One fixed order, so two concurrent batches take slice locks alike.
+  for v_slice in
+    select d.s from (select distinct btrim(x) as s from unnest(p_slice_ids) x
+                      where x is not null and btrim(x) <> '') d
+     order by d.s collate "C"
+  loop
+    perform ops.slice_done_lock(v_slice);
+    slice_id := v_slice; mark_id := null; proposal_id := null; criteria_receipt := null;
+    v_key := ops.slice_confirm_mark_key(p_idempotency_key, v_slice);
+    select * into v_existing from ops.slice_completion_mark m where m.idempotency_key = v_key;
+    if found then
+      if v_existing.slice_id = v_slice and v_existing.status = 'complete' and v_existing.marked_via = 'authority' then
+        outcome := 'confirmed'; mark_id := v_existing.id; proposal_id := v_existing.confirmed_proposal_id;
+        criteria_receipt := v_existing.criteria_receipt;
+      else
+        outcome := 'idempotency_key_conflict';
+      end if;
+      return next;
+      continue;
+    end if;
+    if not exists (select 1 from ops.slice_checkable_done_registration r where r.slice_id = v_slice) then
+      outcome := 'unknown_slice';
+      return next;
+      continue;
+    end if;
+    v_latest := null;
+    select * into v_latest from ops.slice_completion_mark m where m.slice_id = v_slice order by m.mark_seq desc limit 1;
+    if v_latest.status = 'complete' then
+      outcome := 'already_complete'; mark_id := v_latest.id;
+      return next;
+      continue;
+    end if;
+    if ops.slice_mark_held(v_slice) then
+      outcome := 'held'; mark_id := v_latest.id;
+      return next;
+      continue;
+    end if;
+    v_prop := null;
+    select * into v_prop from ops.slice_completion_proposal p where p.slice_id = v_slice order by p.proposal_seq desc limit 1;
+    if v_prop.id is null then
+      outcome := 'no_proposal';
+      return next;
+      continue;
+    end if;
+    proposal_id := v_prop.id;
+    if coalesce(v_latest.mark_seq, 0) > v_prop.basis_mark_seq then
+      outcome := 'stale_proposal'; mark_id := v_latest.id;
+      return next;
+      continue;
+    end if;
+    -- Re-evaluate NOW: every criterion's effective binding, every ref.
+    begin
+      v_computed := ops.slice_completion_evaluate(v_slice, v_prop.criteria_receipt);
+    exception when others then
+      v_computed := null;
+    end;
+    if v_computed is null
+       or exists (select 1 from jsonb_array_elements(v_computed) el where (el->>'pass')::boolean is not true) then
+      outcome := 'not_proven'; criteria_receipt := v_computed;
+      return next;
+      continue;
+    end if;
+    insert into ops.slice_completion_mark (
+      slice_id, status, criteria_receipt, reason, marked_by_actor_slug, idempotency_key,
+      marked_via, confirmed_proposal_id
+    ) values (
+      v_slice, 'complete', v_computed, p_reason, v_actor, v_key, 'authority', v_prop.id
+    ) returning * into v_row;
+    outcome := 'confirmed'; mark_id := v_row.id; criteria_receipt := v_computed;
+    return next;
+  end loop;
+end;
+$$;
+
+comment on function ops.confirm_slice_completions(text[], text, uuid) is
+  'DoctorCRE v5 partner authority door: confirm many slices complete in one act. Per slice (under the slice lock) it takes the latest automated proposal, re-evaluates every criterion against its effective binding NOW, and writes a complete mark (marked_via authority, actor ops.authority_actor_slug(), confirmed_proposal_id) only when all still pass. Outcomes per slice: confirmed, held, already_complete, no_proposal, stale_proposal (a mark was written after the proposal), not_proven, unknown_slice, idempotency_key_conflict. Idempotent on p_idempotency_key.';
+
+revoke all on function ops.confirm_slice_completions(text[], text, uuid) from public;
+grant execute on function ops.confirm_slice_completions(text[], text, uuid) to carr_authority;
+
+-- Read: the proposals a partner could confirm now (latest per slice, not
+-- held, not complete, not stale), each with whether it still passes.
+create or replace function ops.pending_slice_completion_proposals()
+returns jsonb
+language plpgsql stable security definer
+set search_path = pg_catalog, ops
+as $$
+declare
+  v_out jsonb := '[]'::jsonb;
+  v_p record;
+  v_computed jsonb;
+begin
+  for v_p in
+    select p.*, (select max(m.mark_seq) from ops.slice_completion_mark m where m.slice_id = p.slice_id) as latest_seq
+      from (select distinct on (x.slice_id) x.* from ops.slice_completion_proposal x
+             order by x.slice_id, x.proposal_seq desc) p
+     order by p.slice_id collate "C"
+  loop
+    continue when ops.slice_mark_held(v_p.slice_id);
+    continue when coalesce(v_p.latest_seq, 0) > v_p.basis_mark_seq;
+    begin
+      v_computed := ops.slice_completion_evaluate(v_p.slice_id, v_p.criteria_receipt);
+    exception when others then
+      v_computed := null;
+    end;
+    v_out := v_out || jsonb_build_array(jsonb_build_object(
+      'slice_id', v_p.slice_id, 'proposal_id', v_p.id, 'proposed_by', v_p.proposed_by_actor_slug,
+      'reason', v_p.reason, 'created_at', v_p.created_at,
+      'passes_now', v_computed is not null and not exists (
+        select 1 from jsonb_array_elements(v_computed) el where (el->>'pass')::boolean is not true),
+      'criteria_receipt', coalesce(v_computed, v_p.criteria_receipt)));
+  end loop;
+  return v_out;
+end;
+$$;
+
+comment on function ops.pending_slice_completion_proposals() is
+  'DoctorCRE v5 read door: the latest automated completion proposal of every slice a partner could confirm now (not held, not complete, no mark since), each re-evaluated on this read (passes_now). The list a partner hands to ops.confirm_slice_completions.';
+
+revoke all on function ops.pending_slice_completion_proposals() from public;
+grant execute on function ops.pending_slice_completion_proposals() to carr_reader;
 
 -- Partner override: hold (unmark to in_progress / blocked) or release.
 create or replace function ops.set_slice_mark_hold(
@@ -1218,6 +1512,7 @@ declare
   v_status text;
 begin
   v_actor := ops.authority_actor_slug();
+  perform ops.slice_done_lock(p_slice_id);
   if p_idempotency_key is null then
     raise exception 'idempotency_key_required';
   end if;
@@ -1260,7 +1555,7 @@ end;
 $$;
 
 comment on function ops.set_slice_mark_hold(text, text, text, text, uuid) is
-  'DoctorCRE v5 partner authority door: hold a slice at in_progress or blocked (overriding or unmarking any automated mark, including complete), or release the hold so automation may mark it again. Appends a mark; never rewrites one.';
+  'DoctorCRE v5 partner authority door: hold a slice at in_progress or blocked (overriding or unmarking any mark, including a partner complete; a pending proposal becomes stale and confirmation reports the slice held), or release the hold so automation may mark and propose again. Appends a mark; never rewrites one. Takes the slice lock.';
 
 revoke all on function ops.set_slice_mark_hold(text, text, text, text, uuid) from public;
 grant execute on function ops.set_slice_mark_hold(text, text, text, text, uuid) to carr_authority;
@@ -1276,6 +1571,7 @@ as $$
 declare
   v_reg ops.slice_checkable_done_registration%rowtype;
   v_latest ops.slice_completion_mark%rowtype;
+  v_prop ops.slice_completion_proposal%rowtype;
   v_criteria jsonb := '[]'::jsonb;
   v_r record;
   v_b record;
@@ -1294,6 +1590,7 @@ begin
     end;
   end if;
   select * into v_latest from ops.slice_completion_mark where slice_id = p_slice_id order by mark_seq desc limit 1;
+  select * into v_prop from ops.slice_completion_proposal where slice_id = p_slice_id order by proposal_seq desc limit 1;
   if v_reg.slice_id is not null then
     for v_r in select * from ops.slice_checkable_done_registry where slice_id = p_slice_id order by created_at, criterion loop
       select * into v_b from ops.slice_effective_binding(p_slice_id, v_r.criterion);
@@ -1336,6 +1633,16 @@ begin
     'catalog_allowed_kinds', v_catalog,
     'criteria', v_criteria,
     'held_by_partner', ops.slice_mark_held(p_slice_id),
+    'latest_proposal', case when v_prop.id is null then null else jsonb_build_object(
+      'id', v_prop.id, 'proposed_by', v_prop.proposed_by_actor_slug, 'reason', v_prop.reason,
+      'basis_mark_seq', v_prop.basis_mark_seq, 'created_at', v_prop.created_at,
+      'criteria_receipt', v_prop.criteria_receipt,
+      'stale', coalesce(v_latest.mark_seq, 0) > v_prop.basis_mark_seq) end,
+    -- A proposal a partner could confirm now (confirmation re-evaluates it).
+    'awaiting_partner_confirmation', v_prop.id is not null
+      and coalesce(v_latest.mark_seq, 0) <= v_prop.basis_mark_seq
+      and not ops.slice_mark_held(p_slice_id)
+      and v_latest.status is distinct from 'complete',
     'latest_mark', case when v_latest.id is null then null else jsonb_build_object(
       'id', v_latest.id, 'status', v_latest.status, 'marked_via', v_latest.marked_via,
       'marked_by', v_latest.marked_by_actor_slug, 'reason', v_latest.reason,

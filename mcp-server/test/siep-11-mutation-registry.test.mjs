@@ -409,13 +409,14 @@ test("reviewed MCP inventory is an exact immutable projection of the assembled r
   // read: advance-journey-one-clock and read-journey-one-clock.
   // V5-A05 delivery cadence (0617) adds three: cadence-status (a read on the
   // writer connection), record-cadence-receipt and raise-delivery-cadence-alert.
-  // The slice done-record marker (0619) adds seven: six writes
+  // The slice done-record marker (0619) adds nine: seven writes
   // (register-slice-criteria-from-catalog, bind/rebind-slice-criterion-evidence,
-  // record-release-slice-members, auto-mark-slice-completion,
-  // set-slice-mark-hold) and one read (list-shipped-releases).
-  assert.equal(rows.length, 306);
-  assert.equal(rows.filter(row => row.write).length, 217);
-  assert.equal(rows.filter(row => !row.write).length, 89);
+  // record-release-slice-members, propose-slice-completion,
+  // confirm-slice-completions, set-slice-mark-hold) and two reads
+  // (list-shipped-releases, pending-slice-completion-proposals).
+  assert.equal(rows.length, 308);
+  assert.equal(rows.filter(row => row.write).length, 218);
+  assert.equal(rows.filter(row => !row.write).length, 90);
   assert.deepEqual(rows.map(row => row.operation), Object.keys(TOOLS).sort());
   assert.equal(Object.isFrozen(TOOLS), true);
   assert.equal(Object.isFrozen(TOOLS["add-loop"]), true);

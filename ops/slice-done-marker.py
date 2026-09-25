@@ -48,15 +48,19 @@ WHAT ONE RUN DOES, per catalog slice (the catalog is doctrine
      missing fact "awaiting partner confirmation". The previous mark is never
      evidence of anything; the server re-resolves every ref on completion.
   5. Mark (Jev semantic_creation S1): every criterion has evidence ->
-     auto-mark-slice-completion (the server recomputes and may refuse);
-     any criterion no kind allows (or a partner unbound), or a slice parked by
-     Joe -> blocked with the reason; otherwise in_progress naming each missing
-     fact (a shipped criterion with no matched change yet, a proposal awaiting
-     partner confirmation, a row that does not pass). --dry-run reads the
-     server's catalog_allowed_kinds for an unregistered slice and reports what
-     it would bind. The previous mark
-     is read for one thing only: not re-writing an identical mark. A
-     partner-held slice is skipped.
+     propose-slice-completion (the server recomputes and may refuse). The
+     marker NEVER sets complete, and no door lets it: a proposal changes no
+     mark, and the slice becomes complete only when a partner confirms it with
+     confirm-slice-completions (many slices in one act;
+     pending-slice-completion-proposals lists them), which re-evaluates every
+     criterion at that moment. Any criterion no kind allows (or a partner
+     unbound), or a slice parked by Joe -> blocked with the reason; otherwise
+     in_progress naming each missing fact (a shipped criterion with no matched
+     change yet, a binding proposal awaiting partner confirmation, a row that
+     does not pass). --dry-run reads the server's catalog_allowed_kinds for an
+     unregistered slice and reports what it would bind. The previous mark and
+     proposal are read for one thing only: not re-writing an identical one. A
+     partner-held slice (including a partner-confirmed complete) is skipped.
 
 It never writes a file outside out/slice-done-marker/, never force-anything,
 and a failure is a nonzero exit the pipeline records without failing the
@@ -94,6 +98,9 @@ OUT_DIR = REPO / "out" / "slice-done-marker"
 PORTFOLIO_REF = "DoctorCre-v5"
 # Sources whose key is the portfolio ref.
 PORTFOLIO_SOURCES = {"portfolio_revision_acceptance", "portfolio_acceptance_effect_free"}
+# Automation never sets complete: a proven slice is PROPOSED, and a partner
+# confirms it (confirm-slice-completions re-evaluates every criterion then).
+AWAITING = "every criterion proven; proposed complete, awaiting partner confirmation (confirm-slice-completions)"
 
 
 class MarkerError(RuntimeError):
@@ -376,20 +383,21 @@ class Marker:
                 missing.append(f"{c} -> {kind} evidence is partner-registered; the marker does not resolve it")
 
         if not missing and not unbound and criteria:
-            latest = state.get("latest_mark") or {}
-            prior = {el.get("criterion"): el.get("evidence_ref") for el in latest.get("criteria_receipt") or []}
-            if latest.get("status") == "complete" and prior == refs:
-                return SliceOutcome(sid, "complete", "every criterion proven", "unchanged", refs)
+            proposal = state.get("latest_proposal") or {}
+            prior = {el.get("criterion"): el.get("evidence_ref") for el in proposal.get("criteria_receipt") or []}
+            if state.get("awaiting_partner_confirmation") and prior == refs:
+                return SliceOutcome(sid, "proposed", AWAITING, "unchanged", refs)
             if self.dry_run:
-                return SliceOutcome(sid, "complete", "all criteria proven", "dry-run", refs)
+                return SliceOutcome(sid, "proposed", "all criteria proven; would propose complete", "dry-run", refs)
             try:
-                self.call("auto-mark-slice-completion", {
-                    "idempotency_key": ikey("complete", sid, (state.get("latest_mark") or {}).get("id"), refs),
+                self.call("propose-slice-completion", {
+                    "idempotency_key": ikey("propose", sid, (state.get("latest_mark") or {}).get("id"),
+                                            proposal.get("id"), refs),
                     "slice_id": sid, "reason": "every criterion proven by server-resolved evidence",
                     "criteria_receipt": [{"criterion": c, "evidence_ref": refs[c]} for c in criteria]})
-                return SliceOutcome(sid, "complete", "every criterion proven", "complete", refs)
+                return SliceOutcome(sid, "proposed", AWAITING, "proposed", refs)
             except MarkerError as exc:
-                missing.append(f"server refused completion: {str(exc)[:300]}")
+                missing.append(f"server refused the completion proposal: {str(exc)[:300]}")
         if unbound:
             return self._write(sid, state, "blocked", "blocked: " + "; ".join(unbound + missing), refs)
         return self._write(sid, state, "in_progress", "missing: " + "; ".join(missing), refs)

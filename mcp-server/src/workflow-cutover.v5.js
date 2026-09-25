@@ -46,12 +46,15 @@
 // the release pipeline and run.sh call act as) gets its own writer doors:
 // register-slice-criteria-from-catalog (criteria read server-side from the
 // catalog doctrine, never passed in), bind-slice-criterion-evidence (once per
-// criterion), record-release-slice-members, and auto-mark-slice-completion,
-// which recomputes every criterion exactly as mark-slice-completion does. The
-// seat is checked in SQL against the server-derived carr.acting_actor_slug.
-// A partner keeps the last word: rebind-slice-criterion-evidence and
-// set-slice-mark-hold (both authorityOnly) override any automated binding or
-// mark, and a held slice refuses every non-authority mark.
+// criterion), record-release-slice-members, and propose-slice-completion,
+// which recomputes every criterion exactly as mark-slice-completion does but
+// records only a PROPOSAL. Automation never sets complete: a partner confirms
+// many proposals in one act with confirm-slice-completions (authorityOnly),
+// which re-evaluates every criterion at that moment. The seat is checked in
+// SQL against the server-derived carr.acting_actor_slug. A partner keeps the
+// last word: rebind-slice-criterion-evidence and set-slice-mark-hold (both
+// authorityOnly) override any automated binding or mark, and a held slice
+// refuses every non-authority mark, bind and proposal.
 //
 // NOTHING HERE RETIRES A REAL PRODUCTION WORKFLOW. `retire-workflow-cutover-
 // plan` requires concrete already-existing evidence rows; this slice adds no
@@ -570,29 +573,70 @@ export function workflowCutoverTools({ withEnvelope, ToolError }) {
       }),
     },
 
-    "auto-mark-slice-completion": {
+    "propose-slice-completion": {
       write: true,
-      description: "Automated slice-marker seat only: append status=complete for a registered slice_id exactly as mark-slice-completion would -- criteria_receipt lists every registered criterion once with the evidence_ref proving it, the server resolves each ref against the criterion's effective binding and refuses unless every one is proven; the caller's pass claim is never read. Refused while a partner mark holds the slice. Idempotent on idempotency_key.",
+      description: "Automated slice-marker seat only: PROPOSE that a registered slice_id is complete. criteria_receipt lists every registered criterion once with the evidence_ref proving it; the server resolves each ref against the criterion's effective binding and refuses unless every one is proven. The proposal changes no mark: the slice becomes complete only when a partner confirms it with confirm-slice-completions, which re-evaluates it then. Refused while a partner holds the slice or once it is complete. Idempotent on idempotency_key.",
       inputSchema: completionSchema(),
-      handler: async (c, actor, args) => withEnvelope(c, actor, "auto-mark-slice-completion", args, async () => {
+      handler: async (c, actor, args) => withEnvelope(c, actor, "propose-slice-completion", args, async () => {
         let row;
         try {
           row = (await c.query(
-            "select * from ops.auto_mark_slice_completion($1,$2::jsonb,$3,$4)",
+            "select * from ops.propose_slice_completion($1,$2::jsonb,$3,$4)",
             [args.slice_id, JSON.stringify(args.criteria_receipt), args.reason ?? null, args.idempotency_key],
           )).rows[0];
         } catch (err) {
-          throw new ToolError({ error: "slice_completion_mark_refused", detail: String(err.message || err) });
+          throw new ToolError({ error: "slice_completion_proposal_refused", detail: String(err.message || err) });
         }
-        if (!row) throw new ToolError({ error: "slice_completion_mark_refused" });
-        return { ok: true, id: row.id, slice_id: row.slice_id, status: row.status, marked_via: row.marked_via,
-          criteria_receipt: row.criteria_receipt, created_at: row.created_at };
+        if (!row) throw new ToolError({ error: "slice_completion_proposal_refused" });
+        return { ok: true, proposal_id: row.id, slice_id: row.slice_id, status: "proposed",
+          awaiting_partner_confirmation: true, criteria_receipt: row.criteria_receipt, created_at: row.created_at };
       }),
+    },
+
+    "confirm-slice-completions": {
+      write: true, authorityOnly: true,
+      description: "Partner authority only: confirm many slices complete in one act. For each slice_id the server takes the latest automated proposal, re-evaluates every criterion against its effective binding NOW, and writes complete only when all still pass. Per-slice outcome: confirmed, held (a partner hold), already_complete, no_proposal, stale_proposal (a mark was written after the proposal; re-propose), not_proven (a criterion no longer resolves), unknown_slice. Nothing is confirmed that is not listed. pending-slice-completion-proposals lists what is waiting. A reason is required. Idempotent on idempotency_key.",
+      inputSchema: {
+        type: "object", additionalProperties: false,
+        properties: {
+          idempotency_key: { type: "string" },
+          slice_ids: { type: "array", minItems: 1, maxItems: 200, items: { type: "string", minLength: 1 } },
+          reason: { type: "string", minLength: 1 },
+        },
+        required: ["idempotency_key", "slice_ids", "reason"],
+      },
+      handler: async (c, actor, args) => withEnvelope(c, actor, "confirm-slice-completions", args, async () => {
+        let rows;
+        try {
+          rows = (await c.query(
+            "select * from ops.confirm_slice_completions($1::text[],$2,$3)",
+            [args.slice_ids, args.reason, args.idempotency_key],
+          )).rows;
+        } catch (err) {
+          throw new ToolError({ error: "slice_completion_confirm_refused", detail: String(err.message || err) });
+        }
+        const results = rows.map(r => ({ slice_id: r.slice_id, outcome: r.outcome, mark_id: r.mark_id ?? null,
+          proposal_id: r.proposal_id ?? null, criteria_receipt: r.criteria_receipt ?? null }));
+        return { ok: true, confirmed: results.filter(r => r.outcome === "confirmed").length,
+          not_confirmed: results.filter(r => r.outcome !== "confirmed").length, results };
+      }),
+    },
+
+    "pending-slice-completion-proposals": {
+      write: false,
+      description: "Read: every slice whose latest automated completion proposal a partner could confirm now (not held, not complete, no mark since the proposal), each re-evaluated on this read (passes_now) with its criteria receipt. Hand the slice_ids to confirm-slice-completions.",
+      inputSchema: { type: "object", additionalProperties: false, properties: {} },
+      handler: async (c) => {
+        const pending = (await c.query(
+          "select ops.pending_slice_completion_proposals() as pending",
+        )).rows[0]?.pending ?? [];
+        return { ok: true, count: pending.length, pending };
+      },
     },
 
     "set-slice-mark-hold": {
       write: true, authorityOnly: true,
-      description: "Partner authority only: action='hold' appends a held in_progress or blocked mark (overriding or unmarking any automated mark, including complete) -- while held, no automated or writer mark is accepted; action='release' lifts the hold so automation may mark the slice again. A reason is required. Appends; never rewrites a mark. Idempotent on idempotency_key.",
+      description: "Partner authority only: action='hold' appends a held in_progress or blocked mark (overriding or unmarking any mark, including complete) -- while held, no automated or writer mark, bind or proposal is accepted and confirmation reports the slice held; a proposal made before the hold is stale. action='release' lifts the hold so automation may mark and propose again. A reason is required. Appends; never rewrites a mark. Idempotent on idempotency_key.",
       inputSchema: {
         type: "object", additionalProperties: false,
         properties: {
@@ -622,7 +666,7 @@ export function workflowCutoverTools({ withEnvelope, ToolError }) {
 
     "read-slice-completion": {
       write: false,
-      description: "Q153: read the current (most recent) explicit completion mark for one slice_id (marked:false when never marked), plus done_state: registration, each criterion's effective evidence binding, its newest server-found candidate and candidate_passes (recomputed from the live rows on this read, never from a mark), partner-hold state and the slice's shipped release members.",
+      description: "Q153: read the current (most recent) explicit completion mark for one slice_id (marked:false when never marked), plus done_state: registration, each criterion's effective evidence binding, its newest server-found candidate and candidate_passes (recomputed from the live rows on this read, never from a mark), partner-hold state, the latest completion proposal and whether it awaits partner confirmation, and the slice's shipped release members.",
       inputSchema: {
         type: "object", additionalProperties: false,
         properties: { slice_id: { type: "string", minLength: 1 } },

@@ -88,6 +88,7 @@ class FakeServer:
         self.bindings: dict[tuple[str, str], list[dict]] = {}
         self.members: list[dict] = []
         self.marks: dict[str, list[dict]] = {}
+        self.proposals: dict[str, list[dict]] = {}
         self.calls: list[tuple[str, dict]] = []
         self.refuse_complete = False
         self.portfolio_receipt = PORTFOLIO_RECEIPT
@@ -209,16 +210,33 @@ class FakeServer:
             "criteria_receipt": self.receipt(sid, args["criteria_receipt"])})
         return {"ok": True}
 
-    def v_auto_mark_slice_completion(self, args):
+    def v_propose_slice_completion(self, args):
+        """Automation's only door to the terminal state: a proposal, never a mark."""
         sid = args["slice_id"]
         if self.refuse_complete or self.held(sid):
-            raise sdm.MarkerError("slice_completion_mark_refused")
+            raise sdm.MarkerError("slice_completion_proposal_refused")
         rec = self.receipt(sid, args["criteria_receipt"])
         if not all(r["pass"] for r in rec) or {r["criterion"] for r in rec} != set(self.registered[sid]):
-            raise sdm.MarkerError("slice_completion_complete_requires_every_criterion_proven")
-        self.marks.setdefault(sid, []).append({"id": f"mark-{sid}-{len(self.marks.get(sid, []))}",
-            "status": "complete", "reason": args.get("reason"), "marked_via": "automation", "criteria_receipt": rec})
+            raise sdm.MarkerError("slice_completion_proposal_requires_every_criterion_proven")
+        marks = self.marks.get(sid) or []
+        self.proposals.setdefault(sid, []).append({"id": f"prop-{sid}-{len(self.proposals.get(sid, []))}",
+            "criteria_receipt": rec, "basis": len(marks)})
         return {"ok": True}
+
+    def awaiting(self, sid):
+        props = self.proposals.get(sid) or []
+        return bool(props) and props[-1]["basis"] == len(self.marks.get(sid) or []) and not self.held(sid)
+
+    def partner_confirms(self, sid):
+        """confirm-slice-completions: re-evaluate the latest proposal NOW."""
+        if not self.awaiting(sid):
+            return "not_awaiting"
+        rec = self.receipt(sid, self.proposals[sid][-1]["criteria_receipt"])
+        if not all(r["pass"] for r in rec):
+            return "not_proven"
+        self.marks.setdefault(sid, []).append({"id": f"mark-{sid}-{len(self.marks.get(sid, []))}",
+            "status": "complete", "reason": "partner", "marked_via": "authority", "criteria_receipt": rec})
+        return "confirmed"
 
     def hold(self, sid):
         self.marks.setdefault(sid, []).append({"id": f"hold-{sid}", "status": "blocked", "reason": "partner",
@@ -251,7 +269,9 @@ class FakeServer:
             "registered": sid in self.registered, "criteria": criteria, "release_members": members,
             "catalog_allowed_kinds": ({c: allowed_kinds(c) for c in entry["checkable_done"]}
                                       if entry and sid not in self.registered else None),
-            "held_by_partner": self.held(sid), "latest_mark": marks[-1] if marks else None}}
+            "held_by_partner": self.held(sid), "latest_mark": marks[-1] if marks else None,
+            "latest_proposal": (self.proposals.get(sid) or [None])[-1],
+            "awaiting_partner_confirmation": self.awaiting(sid)}}
 
 
 def fake_git(commits, reach):
@@ -337,19 +357,40 @@ class Run(unittest.TestCase):
         self.assertEqual(set(server.marks), {c["proposed_id"] for c in CATALOG})
         self.assertFalse(any(m["status"] == "complete" for ms in server.marks.values() for m in ms))
 
-    def test_a_partner_confirmation_completes_the_slice(self):
+    def test_the_marker_proposes_and_only_a_partner_confirmation_completes(self):
         server = FakeServer()
         marker(server).run()
         server.confirm("V5-F08", F08_SHIP)
         out = by_id(marker(server).run({"V5-F08"}))
-        self.assertEqual(out["V5-F08"].status, "complete", out["V5-F08"])
-        self.assertEqual(server.marks["V5-F08"][-1]["status"], "complete")
-        self.assertTrue(all(r["pass"] for r in server.marks["V5-F08"][-1]["criteria_receipt"]))
-        # A later run finds the same proof and writes nothing.
+        # Every criterion proven: the marker PROPOSES; it never writes complete.
+        self.assertEqual((out["V5-F08"].status, out["V5-F08"].wrote), ("proposed", "proposed"), out["V5-F08"])
+        self.assertIn("awaiting partner confirmation", out["V5-F08"].reason)
+        self.assertNotEqual(server.marks["V5-F08"][-1]["status"], "complete")
+        self.assertNotIn("auto-mark-slice-completion", [v for v, _ in server.calls])
+        self.assertTrue(all(r["pass"] for r in server.proposals["V5-F08"][-1]["criteria_receipt"]))
+        # A later run finds the same pending proposal and writes nothing.
         before = len(server.writes())
         out = by_id(marker(server).run({"V5-F08"}))
-        self.assertEqual((out["V5-F08"].status, out["V5-F08"].wrote), ("complete", "unchanged"))
+        self.assertEqual((out["V5-F08"].status, out["V5-F08"].wrote), ("proposed", "unchanged"))
         self.assertEqual(server.writes()[before:], [])
+        # The partner confirms; the slice is complete and the marker then leaves it alone.
+        self.assertEqual(server.partner_confirms("V5-F08"), "confirmed")
+        self.assertEqual(server.marks["V5-F08"][-1]["marked_via"], "authority")
+        before = len(server.writes())
+        out = by_id(marker(server).run({"V5-F08"}))
+        self.assertEqual(out["V5-F08"].wrote, "skipped")
+        self.assertEqual(server.writes()[before:], [])
+
+    def test_no_marker_call_can_set_complete(self):
+        server = FakeServer()
+        marker(server).run()
+        server.confirm("V5-F08", F08_SHIP)
+        server.partner_bind("V5-S00", S00_NEG, "shipped_release", member_of(server, "V5-S00"))
+        marker(server).run()
+        self.assertTrue(server.proposals)
+        verbs = {v for v, _ in server.calls}
+        self.assertFalse(verbs & {"auto-mark-slice-completion", "mark-slice-completion", "confirm-slice-completions"})
+        self.assertFalse(any(m["status"] == "complete" for ms in server.marks.values() for m in ms))
 
     def test_the_kind_is_the_servers_and_refusal_proof_is_never_bound(self):
         server = FakeServer()
@@ -398,14 +439,14 @@ class Run(unittest.TestCase):
         self.assertNotIn(("V5-F08", F08_SHIP), server.bindings)
         self.assertEqual(out["V5-F08"].status, "in_progress")
 
-    def test_server_refusal_of_completion_is_recorded_as_in_progress(self):
+    def test_server_refusal_of_the_proposal_is_recorded_as_in_progress(self):
         server = FakeServer()
         marker(server).run()
         server.confirm("V5-F08", F08_SHIP)
         server.refuse_complete = True
         out = by_id(marker(server).run({"V5-F08"}))
         self.assertEqual(out["V5-F08"].status, "in_progress")
-        self.assertIn("server refused completion", out["V5-F08"].reason)
+        self.assertIn("server refused the completion proposal", out["V5-F08"].reason)
 
     def test_missing_live_receipt_names_the_source(self):
         server = FakeServer(restore_receipt=None)
@@ -442,28 +483,37 @@ class Run(unittest.TestCase):
         member = member_of(server, "V5-S00")
         server.partner_bind("V5-S00", S00_NEG, "shipped_release", member)
         out = by_id(marker(server).run({"V5-S00"}))
-        self.assertEqual(out["V5-S00"].status, "complete", out["V5-S00"])
-        refs = {r["criterion"]: r["evidence_ref"] for r in server.marks["V5-S00"][-1]["criteria_receipt"]}
+        self.assertEqual(out["V5-S00"].status, "proposed", out["V5-S00"])
+        refs = {r["criterion"]: r["evidence_ref"] for r in server.proposals["V5-S00"][-1]["criteria_receipt"]}
         self.assertEqual(refs, {S00_COUNTS: PORTFOLIO_RECEIPT, S00_NEG: member, S00_EFFECTS: PORTFOLIO_RECEIPT})
 
     def _s00_complete(self, server):
         marker(server).run({"V5-S00"})
         server.partner_bind("V5-S00", S00_NEG, "shipped_release", member_of(server, "V5-S00"))
 
-    def test_state_comes_from_live_reads_not_the_previous_mark(self):
-        # Complete once; then the accepted revision stops recomputing intact.
-        # The earlier complete mark proves nothing: the next run reads the
-        # live candidate_passes, marks the slice back to in_progress and says why.
+    def test_state_comes_from_live_reads_not_the_previous_proposal(self):
+        # Proposed once; then the accepted revision stops recomputing intact.
+        # The earlier proposal proves nothing: the next run reads the live
+        # candidate_passes, marks the slice in_progress (which leaves the
+        # proposal stale, so a partner cannot confirm it) and says why.
         server = FakeServer()
         self._s00_complete(server)
         marker(server).run({"V5-S00"})
-        self.assertEqual(server.marks["V5-S00"][-1]["status"], "complete")
+        self.assertTrue(server.awaiting("V5-S00"))
         server.portfolio_intact = False
         out = by_id(marker(server).run({"V5-S00"}))
         self.assertEqual(out["V5-S00"].status, "in_progress")
         self.assertEqual(server.marks["V5-S00"][-1]["status"], "in_progress")
+        self.assertFalse(server.awaiting("V5-S00"))
         self.assertIn("does not pass on a live read", out["V5-S00"].reason)
         self.assertNotIn("bind-slice-criterion-evidence", server.writes()[-1:])
+
+    def test_confirmation_re_evaluates_the_proposal(self):
+        server = FakeServer()
+        self._s00_complete(server)
+        marker(server).run({"V5-S00"})
+        server.portfolio_effects = 1
+        self.assertEqual(server.partner_confirms("V5-S00"), "not_proven")
 
     def test_an_effect_in_the_acceptance_window_is_named_missing(self):
         server = FakeServer()
