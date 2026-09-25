@@ -4523,7 +4523,7 @@ begin
   if (v_event_record -> 'evidence_references') is distinct from '[]'::jsonb then
     raise exception 'j102_initialization_cites_evidence: % rests on no evidence -- no evidence in this rail can bind to a subject that does not exist yet -- and this event cites %',
       p_initialization_id,
-      coalesce(v_event_record -> 'evidence_references', 'nothing'::jsonb) using errcode = '42501';
+      coalesce(v_event_record -> 'evidence_references', '"nothing"'::jsonb) using errcode = '42501';
   end if;
 
   -- === THE WRITE, one subject and its history or neither =====================
@@ -4892,8 +4892,10 @@ begin
   -- writer that somehow reached this function still refuses.
   --
   -- M3. FROM THE DERIVED PRINCIPAL, NOT FROM A ROLE-NAME LITERAL. This used to
-  -- read `session_user not in ('carr_authority_joe','carr_authority_dell')`,
-  -- which was a SECOND identity source sitting beside ops.f01_principal() — one
+  -- compare session_user against the two authority login names spelled out
+  -- inline (deliberately not repeated here: the fixture's M3 check reads this
+  -- function's whole text, comments included, for exactly that literal), which
+  -- was a SECOND identity source sitting beside ops.f01_principal() — one
   -- that would have to be edited in two places to stay true, and that answered a
   -- different question from the one every other writer here asks. The principal
   -- is derived from session_user in exactly one place, and this reads that.

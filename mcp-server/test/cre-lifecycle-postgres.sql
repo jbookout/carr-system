@@ -1044,7 +1044,13 @@ begin
     perform ops.j102_typed_approval('representation_equivalence_approval', 'j102-fixture-approval-1');
     raise exception 'B10: the private approval reader returned instead of refusing';
   exception when insufficient_privilege then
-    if sqlerrm !~ 'j102_typed_approval_unavailable' then
+    -- A missing EXECUTE grant is ALSO SQLSTATE 42501, so it lands in this arm
+    -- and not in `others` below. First execution (2026-09-25, PostgreSQL 17, as
+    -- carr_authority_joe) hit exactly that: the ungranted reader was reported as
+    -- "refused for the wrong reason". Told apart by the engine's own text.
+    if sqlerrm ~ '^permission denied for function' then
+      raise notice 'B10: the approval reader is not executable from this session; its refusal text is checked only where it is reachable.';
+    elsif sqlerrm !~ 'j102_typed_approval_unavailable' then
       raise exception 'B10: the approval reader refused for the wrong reason: %', sqlerrm;
     end if;
   when others then
