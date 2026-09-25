@@ -30,6 +30,7 @@ import {
   v5J102MigrationReadiness,
 } from "../src/cre-lifecycle.v5.js";
 import { createCreLifecycleStore } from "../src/cre-lifecycle-store.v5.js";
+import { createRecordSourceAuthorityStore } from "../src/record-source-authority-store.v5.js";
 
 const DSN = {
   joe: process.env.CARR_J102_LIVE_PG_DSN_JOE,
@@ -91,6 +92,29 @@ function storeFor(name) {
 }
 
 const ACTORS = { joe: JOE, dell: DELL, agent: AGENT, joe_writer: JOE };
+
+/** F01's own store over the same per-principal pools. */
+function f01StoreFor(name) {
+  return createRecordSourceAuthorityStore({
+    db: {
+      async query() { throw new Error("f01StoreFor: transaction() is always used"); },
+      async transaction(fn) {
+        const client = await (await pool(name)).connect();
+        try {
+          await client.query("BEGIN");
+          const out = await fn({ query: (t, p) => client.query(t, p) });
+          await client.query("COMMIT");
+          return out;
+        } catch (e) {
+          await client.query("ROLLBACK").catch(() => {});
+          throw e;
+        } finally {
+          client.release();
+        }
+      },
+    },
+  });
+}
 function as(name) {
   const store = storeFor(name);
   const ctx = { actor: ACTORS[name] };
@@ -115,14 +139,16 @@ const D = s => `sha256:${sha(s)}`;
 // or J102 would not write for a real caller.
 // ---------------------------------------------------------------------------
 
+/**
+ * A document version, through F01's OWN store door (recordDocumentIdentity), so
+ * this suite depends on F01's exported contract rather than on the arity of one
+ * of its SQL writers. Declared an original first-party record: the bytes are
+ * synthetic and authored here.
+ */
 async function f01Document(name, { document_class, states }) {
   const document_id = id("doc");
   const content_digest = D(document_id);
-  const now = (await sql(name, "select ops.f01_now_text() as now"))[0].now;
-  const actor = (await sql(name, "select ops.f01_context_actor_slug() as a"))[0].a;
-  const record = {
-    schema_version: "doctorcre-v5-f01-stored-document-version.v1",
-    tenant: ORGANIZATION_TENANT_ID,
+  const document = {
     document_class,
     neon_identity: { document_id, version_no: 1, content_digest },
     object_storage_identity: { object_key: `j102/live/${document_id}`, content_digest,
@@ -134,19 +160,15 @@ async function f01Document(name, { document_class, states }) {
     signature_state: "fully_executed",
     validity_state: "effective",
     version_state: "current",
-    official_filing_state: "filed",
-    prior_document_digest: null,
-    recorded_by: actor,
-    recorded_at: now,
     ...states,
   };
-  const envelope = {
-    schema_version: "doctorcre-v5-f01-stored-record-envelope.v1",
-    record_kind: "stored_document_version", tenant: ORGANIZATION_TENANT_ID,
-    record, record_digest: digest(record),
-  };
-  await sql(name, "select ops.f01_record_document($1::jsonb, null, $2::text, $3::text)",
-    [JSON.stringify(envelope), key(), D(key())]);
+  const answer = await f01StoreFor(name).recordDocumentIdentity({
+    idempotency_key: key(), document,
+    source: { provenance_state: "original_first_party",
+      basis_statement: "synthetic J102 live fixture: authored in this record layer" },
+  }, { actor: ACTORS[name] });
+  assert.equal(answer.decision, "allow",
+    `F01 document door: ${answer.decision}/${answer.reason_id}: ${JSON.stringify(answer).slice(0, 600)}`);
   return { document_id, version_no: 1, content_digest };
 }
 
@@ -342,8 +364,7 @@ test("a lease deal walks prospect to closed and paid, live, as a verified partne
 test("a purchase deal is executed but PENDING through diligence, and closes only on its closing date", { skip: SKIP }, async () => {
   const joe = as("joe");
   const { deal } = await pendingDeal("purchase");
-  const contract = await f01Document("joe", { document_class: "purchase_contract",
-    states: { validity_state: "draft" } });
+  const contract = await f01Document("joe", { document_class: "purchase_contract" });
   await linkDocument("joe", contract, "deal", deal);
   ok(await joe.recordDealExecution({ idempotency_key: key(), subject_ref: REF("deal", deal),
     evidence_refs: [{ evidence_kind: "signed_purchase_contract", ...docRef(contract) }] }),
@@ -411,8 +432,7 @@ const DEAL_STEPS = {
       evidence_refs: [{ evidence_kind: "executed_lease", ...docRef(doc) }] }), "lease exec");
   },
   async purchase_exec(d) {
-    const doc = await f01Document("joe", { document_class: "purchase_contract",
-      states: { validity_state: "draft" } });
+    const doc = await f01Document("joe", { document_class: "purchase_contract" });
     await linkDocument("joe", doc, "deal", d.deal);
     return ok(await as("joe").recordDealExecution({ idempotency_key: key(),
       subject_ref: REF("deal", d.deal),
@@ -616,8 +636,7 @@ async function admittingEvidence(transition_id, s) {
       return [{ evidence_kind: "executed_lease", ...docRef(doc) }];
     }
     case "record-purchase-contract-execution": {
-      const doc = await f01Document("joe", { document_class: "purchase_contract",
-        states: { validity_state: "draft" } });
+      const doc = await f01Document("joe", { document_class: "purchase_contract" });
       await linkDocument("joe", doc, "deal", s.id);
       return [{ evidence_kind: "signed_purchase_contract", ...docRef(doc) }];
     }
@@ -808,7 +827,10 @@ async function evidenceOfKind(kind, family) {
         { signature_state: "unsigned", validity_state: "draft" });
     case "executed_lease": return doc("lease", "deal", family.deal);
     case "signed_purchase_contract":
-      return doc("purchase_contract", "deal", family.deal, { validity_state: "draft" });
+      // F01 refuses a fully executed draft (draft_cannot_be_fully_executed), so a
+      // signed purchase contract is `effective` in F01's vocabulary even while
+      // the deal is pending through diligence.
+      return doc("purchase_contract", "deal", family.deal);
     case "commission_agreement": return doc("commission_agreement", "deal", family.deal);
     case "counterparty_loi_acceptance": {
       const art = await f01Artifact("joe");

@@ -2574,10 +2574,16 @@ begin
         'recorded_at', v_now);
       v_result := ops.f01_record_document(
         v_doc_envelope,
+        -- The envelope repeats the three "claims nothing" flags at ITS level too:
+        -- F01's f01_docsource_claims_nothing constraint reads both, so an
+        -- envelope that states them only inside the record is refused. Found on
+        -- the first run against F01's numbered migration rather than domain.sql.
         jsonb_build_object(
           'schema_version', 'doctorcre-v5-f01-stored-record-envelope.v1',
           'record_kind', 'stored_document_source_provenance', 'tenant', v_tenant,
-          'record', v_prov_record, 'record_digest', ops.f01_digest_jsonb(v_prov_record)),
+          'record', v_prov_record, 'record_digest', ops.f01_digest_jsonb(v_prov_record),
+          'is_exhaustive_inventory', false, 'establishes_coverage', false,
+          'permits_deletion', false),
         -- NO DERIVATIVE LINK. An original names no source, and the writer refuses
         -- a link on a non-derived document by name, so passing one would be
         -- inventing exactly the derivative coverage this fixture must not claim.
