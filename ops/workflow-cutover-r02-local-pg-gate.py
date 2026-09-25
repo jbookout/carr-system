@@ -68,7 +68,7 @@ def expect_refusal(cur, sql: str, params: tuple, label: str, *, match: str | Non
 
 
 def insert_job_definition(cur, key: str, *, canary_enabled: bool | None = True) -> None:
-    contract = {"entrypoint": "fixture"}
+    contract: dict[str, object] = {"entrypoint": "fixture"}
     if canary_enabled is not None:
         contract["canary"] = {"enabled": canary_enabled}
     cur.execute(
