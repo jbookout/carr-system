@@ -1393,3 +1393,65 @@ test("Q103 LIVE: an untraceable move of a subject the transition only READS refu
   assert.equal(answer.records_written, 0);
   assert.deepEqual(await reconciliationItems("engagement", eng), [], "nothing to reconcile: nothing of the caller's is lost");
 });
+
+// ===========================================================================
+// THE DATABASE COMPARE-AND-SWAP, PROVED DETERMINISTICALLY.
+// The store reads the row, decides, and hands the write to
+// ops.j102_apply_transition. Another partner's write can commit in that window.
+// The store's own staleness judgement cannot see it (it already read), so the
+// ONLY thing standing between that window and a lost update is the SQL
+// compare-and-swap. This hook commits the other write on a different connection
+// at exactly that moment, on the SAME field, so a disabled CAS loses Dell's
+// payment and this test fails. (The disjoint-field race above cannot prove this:
+// the field-level check would hide a missing CAS there.)
+// ===========================================================================
+
+/** A store whose transaction runs `inject` (other connections) just before the SQL writer. */
+function racingStoreFor(name, inject) {
+  let fired = false;
+  return createCreLifecycleStore({ db: {
+    async query() { throw new Error("racingStoreFor: transaction() is always used"); },
+    async transaction(fn) {
+      const client = await (await pool(name)).connect();
+      try {
+        await client.query("BEGIN");
+        const out = await fn({ query: async (text, params) => {
+          if (!fired && /ops\.j102_apply_transition\(/.test(text)) {
+            fired = true;
+            await inject();
+          }
+          return client.query(text, params);
+        } });
+        await client.query("COMMIT");
+        return out;
+      } catch (e) {
+        await client.query("ROLLBACK").catch(() => {});
+        throw e;
+      } finally {
+        client.release();
+      }
+    },
+  } });
+}
+
+test("CAS LIVE: a same-field write committed between the store's read and the SQL writer is refused by the database, never overwritten", { skip: SKIP }, async () => {
+  const d = await dealWith("lease", ["lease_exec"]);
+  const base = (await body("joe", "deal", d.deal)).state_digest;
+  const payment = await fact("joe", "payment", "deal", d.deal, { detail: "synthetic" });
+  let injected = false;
+  const store = racingStoreFor("joe", async () => {
+    ok(await axisCall("dell", d.deal, "payment_state", "payment_received", "payment", base,
+      { payment_level: "partially_paid" }), "Dell lands inside Joe's window");
+    injected = true;
+  });
+  await assert.rejects(
+    store.recordDealAxis({ idempotency_key: key(),
+      subject_ref: { subject_kind: "deal", subject_id: d.deal, expected_state_digest: base },
+      evidence_refs: [{ evidence_kind: "payment_received", record_id: payment }],
+      declared: { axis: "payment_state", payment_level: "paid" } }, { actor: JOE }),
+    e => /j102_stale_subject_digest/.test(String(e?.message)) && e?.code === "40001",
+    "the database compare-and-swap refuses the stale write with a serialization failure");
+  assert.equal(injected, true, "the race actually happened inside the window");
+  const after = (await body("joe", "deal", d.deal)).state;
+  assert.equal(after.payment_state, "partially_paid", "Dell's committed payment survives");
+});

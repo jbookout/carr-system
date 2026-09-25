@@ -1702,7 +1702,10 @@ export function createCreLifecycleStore({ db } = {}) {
       // what the handler already held. Any other disagreement — a wider
       // database class, a different person, an authorityOnly operation — still
       // refuses, because it cannot be attributed.
+      // humanOnly is excluded as well as authorityOnly: an act reserved to a human
+      // must never proceed under a class the database says is not one.
       const adoptable = OPERATION_SCHEMAS[operation]?.authorityOnly === false &&
+        OPERATION_SCHEMAS[operation]?.humanOnly === false &&
         principal.authorization_class === "verified_partner" && principal.human === true &&
         dbPrincipal.authorization_class === "sponsored_agent" && dbPrincipal.human === false;
       if (!adoptable) {
@@ -2791,10 +2794,29 @@ export function createCreLifecycleStore({ db } = {}) {
         records_written: 0, readback: null,
       });
     }
+    // THE SECOND READ MUST BE THE ROW THE VERDICT JUDGED. The characterization
+    // (which transition moved the row, which fields it wrote) came from the
+    // first read; if the row moved AGAIN in between, labelling the newer row with
+    // the older characterization would file a false account. So the digests form
+    // a chain, each link checked: first read == verdict (by construction), this
+    // read == verdict (below; otherwise a retryable refusal, nothing filed), and
+    // ops.j102_record_reconciliation_item re-binds the item's current digest to
+    // the committed row UNDER ITS OWN LOCK. No row lock is taken here: these
+    // roles hold no UPDATE privilege on the table, deliberately, and the writer's
+    // lock is the one that decides.
     const stored = await readSubjectVerified(client, subject_kind, subject_id);
     if (stored == null) {
       return result(operation, "refuse", "subject_not_found", {
         actor_slug: principal.slug, subject_kind, subject_id, records_written: 0, readback: null,
+      });
+    }
+    if (stored.state_digest !== verdict.current_version_digest) {
+      return result(operation, "refuse", "subject_moved_again_during_reconciliation", {
+        actor_slug: principal.slug, transition_id, subject_kind, subject_id,
+        judged_version_digest: verdict.current_version_digest,
+        current_version_digest: stored.state_digest,
+        why: "the row moved again between the concurrency judgement and filing its reconciliation item; nothing was filed and nothing moved — re-read and decide again",
+        records_written: 0, readback: null,
       });
     }
     const intent = requestDigest(operation, request, principal);
