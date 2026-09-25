@@ -83,18 +83,15 @@
 // names each with the exact minimal change that would produce it. Neither is
 // stubbed, defaulted, or answered from a caller.
 //
-// WIRED AT SOURCE IS NOT REGISTERED AT RUNTIME, and this module makes only the
-// first claim. It touches no tools.js, no mutation registry and no generated
-// catalog; v5J102ToolRegistrations() is a DESCRIPTION and every entry still
-// carries its four false flags. Nothing here claims an executed end-to-end run:
-// the Node suite exercises these paths against a scripted handle, and the SQL
-// fixture remains unexecuted.
+// REGISTERED. v5J102ToolRegistrations() is the description tools.js registers
+// from through creLifecycleStoreTools() at the end of this file: every verb on
+// the writer connection, so mcp.js's setWriterActorContext sets the actor and the
+// server-verified sponsor for each call. The twenty-one verbs are sealed in SCAC
+// v78 (migration 0631) over the store SQL numbered as migration 0630. What stays
+// false is `accepted`: registration is not a partner's acceptance.
 //
-// WHAT THIS MODULE IS NOT. It registers nothing: v5J102ToolRegistrations() below
-// is a DESCRIPTION the parent may register from, and this file does not touch
-// tools.js, mcp.js, the mutation registry or any generated catalog. It performs
-// no provider call, calls no Salesforce API, sends nothing, and completes no
-// acceptance.
+// WHAT THIS MODULE IS NOT. It performs no provider call, calls no Salesforce API,
+// sends nothing, and completes no acceptance.
 
 import { canonicalJson, digest } from "./artifact-trust.js";
 import {
@@ -1214,11 +1211,11 @@ export function v5J102ToolRegistrations() {
     // requirement that is not the operative one.
     ...associationPrerequisite(name),
     ...primarySubjectPrerequisite(name),
-    // The parent still owes all four of these; naming them keeps the seam honest
-    // rather than implying this module closed them.
-    registered_in_scac: false,
-    registered_in_mutation_registry: false,
-    migration_bound: false,
+    // Registered in tools.js, sealed in SCAC v78 (0631) and bound to migration
+    // 0630. Acceptance is a partner's act and is never claimed here.
+    registered_in_scac: true,
+    registered_in_mutation_registry: true,
+    migration_bound: true,
     accepted: false,
   }));
   // THE AUTHORITY-ROUTED DOOR TO THE SAME FACT WRITER. The server routes a verb
@@ -4180,3 +4177,138 @@ for (const [kind, entry] of Object.entries(V5_J102_ABSENT_EVIDENCE_READERS)) {
       `the absent-reader registry names "${kind}", which is not established from a typed approval`);
   }
 }
+
+// ---------------------------------------------------------------------------
+// THE DOOR: the J102 verbs, ready for tools.js's registerTools.
+//
+// Every verb, the one read included, runs on the WRITER connection. mcp.js
+// opens that transaction, sets the authenticated actor and the server-verified
+// sponsor with setWriterActorContext (carr.acting_actor_slug,
+// carr.verified_human_actor_slug, carr.sponsoring_human_slug), and routes an
+// authorityOnly verb over the partner's authority credential. The store then
+// derives the principal and the sponsoring partner from THAT transaction
+// (ops.f01_principal, ops.j102_sponsoring_partner) and refuses when they
+// disagree with the handler. The read declares writerConnection without write,
+// so mcp.js opens it `begin read only`: the reader connection carries no actor
+// context, and a lifecycle read derives its principal like every other call.
+// ---------------------------------------------------------------------------
+
+const J102_TOOL_KEY_SCHEMAS = deepFreeze({
+  schema_version: { type: "string" },
+  idempotency_key: { type: "string" },
+  selector: { type: "object" },
+  fact: { type: "object" },
+  link: { type: "object" },
+  related_refs: { type: "object" },
+  declared: { type: "object" },
+  subject_ref: { type: "object" },
+  evidence_refs: { type: "array" },
+  opportunity_id: { type: "string" },
+  opportunity_name: { type: "string" },
+  opportunity_phase: { type: "string" },
+  observed_at: { type: "string" },
+  linked_subject_kind: { type: "string" },
+  linked_subject_id: { type: "string" },
+  correction_record_id: { type: "string" },
+  corrected_fields: { type: "array" },
+  reason: { type: "string" },
+  edits: { type: "array" },
+});
+
+const J102_DATABASE_REFUSAL = /^((?:j102|f01)_[a-z0-9_]+)/;
+const J102_ERROR_NAMES = Object.freeze(["V5J102StoreError", "V5J102Error"]);
+
+/** The closed JSON schema for one verb, built from the store's own key list. */
+export function v5J102ToolInputSchema(operation) {
+  const schema = OPERATION_SCHEMAS[operation];
+  if (!schema) {
+    throw new V5J102StoreError("unknown_operation", `"${operation}" is not a J102 operation`, { operation });
+  }
+  const properties = {};
+  for (const key of schema.keys) {
+    if (!J102_TOOL_KEY_SCHEMAS[key]) {
+      throw new V5J102StoreError("tool_key_without_schema",
+        `${operation} accepts "${key}" but the door declares no JSON type for it`, { operation, key });
+    }
+    properties[key] = { ...J102_TOOL_KEY_SCHEMAS[key] };
+  }
+  return { type: "object", additionalProperties: false, properties, required: [...schema.required] };
+}
+
+/**
+ * A handle over ONE already-open client whose transaction() runs the body on
+ * that same client. mcp.js owns BEGIN/COMMIT for every verb; a store that
+ * issued its own would commit half a verb, or warn and nest.
+ */
+export function v5J102TransactionScopedHandle(client) {
+  if (!client || typeof client.query !== "function") {
+    throw new V5J102StoreError("database_handle_required", "the verb has no open database client");
+  }
+  const handle = {
+    query: (text, params) => client.query(text, params),
+    transaction: fn => fn(handle),
+  };
+  return handle;
+}
+
+/** Translate a J102 refusal into the tool surface's refusal, keeping its code. */
+export function v5J102ToolRefusal(error, ToolError) {
+  if (error && J102_ERROR_NAMES.includes(error.name) && typeof error.code === "string") {
+    return new ToolError({
+      error: error.code, message: error.message,
+      ...(error.detail !== undefined ? { detail: error.detail } : {}),
+    });
+  }
+  const match = typeof error?.message === "string" ? J102_DATABASE_REFUSAL.exec(error.message) : null;
+  if (match && typeof error?.code === "string") {
+    return new ToolError({ error: match[1], message: error.message, sqlstate: error.code });
+  }
+  return null;
+}
+
+/**
+ * The J102 verbs for tools.js. `createStore` is injectable for the offline
+ * suite; production uses the store above.
+ */
+export function creLifecycleStoreTools({
+  withEnvelope, ToolError, createStore = createCreLifecycleStore,
+} = {}) {
+  if (typeof withEnvelope !== "function" || typeof ToolError !== "function") {
+    throw new V5J102StoreError("tool_wiring_incomplete",
+      "creLifecycleStoreTools needs the shared withEnvelope and ToolError");
+  }
+  const tools = {};
+  for (const registration of v5J102ToolRegistrations()) {
+    const { name, store_operation, write, humanOnly, authorityOnly, handler: method, role } = registration;
+    const run = async (client, actor, args) => {
+      const store = createStore({ db: v5J102TransactionScopedHandle(client) });
+      try {
+        const answer = await store[method](args ?? {}, { actor: { ...(actor ?? {}) } });
+        return {
+          ok: answer.decision !== "refuse",
+          ...answer,
+          effects: { ...answer.effects, database_writes: write ? "j102_record_layer_rows_only" : 0 },
+        };
+      } catch (error) {
+        const refusal = v5J102ToolRefusal(error, ToolError);
+        if (refusal) throw refusal;
+        throw error;
+      }
+    };
+    tools[name] = {
+      write,
+      writerConnection: true,
+      ...(humanOnly ? { humanOnly: true } : {}),
+      ...(authorityOnly ? { authorityOnly: true } : {}),
+      description: `DoctorCRE v5 J102 CRE lifecycle. ${role}`,
+      inputSchema: v5J102ToolInputSchema(store_operation),
+      handler: write
+        ? async (c, actor, args) => withEnvelope(c, actor, name, args, () => run(c, actor, args))
+        : async (c, actor, args) => run(c, actor, args),
+    };
+  }
+  return tools;
+}
+
+// The door must cover exactly the operations the store serves.
+for (const operation of V5_J102_OPERATIONS) v5J102ToolInputSchema(operation);

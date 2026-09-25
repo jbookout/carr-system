@@ -487,10 +487,10 @@ test("the registration description is a description, and it says what the parent
     assert.ok(V5_J102_OPERATIONS.includes(entry.store_operation));
     assert.ok(entry.role.length > 0, `${entry.name} states its role`);
     assert.ok(entry.handler.length > 0);
-    // Four things this module deliberately did NOT do.
-    assert.equal(entry.registered_in_scac, false);
-    assert.equal(entry.registered_in_mutation_registry, false);
-    assert.equal(entry.migration_bound, false);
+    // Registered, sealed (v78) and migration-bound (0630); never accepted.
+    assert.equal(entry.registered_in_scac, true);
+    assert.equal(entry.registered_in_mutation_registry, true);
+    assert.equal(entry.migration_bound, true);
     assert.equal(entry.accepted, false);
   }
   const schemas = v5J102StoreOperationSchemas();
@@ -2620,12 +2620,22 @@ test("the store requires an injected handle and opens no connection of its own",
 // to feed. A map that is correct and unused would pass the first half and fail
 // the second.
 //
-// NOTHING HERE EXECUTES SQL. The candidate is source, has never been applied, and
-// these assertions are about its bytes.
+// NOTHING HERE EXECUTES SQL. These assertions are about the reviewed source's
+// bytes; the live suite and the db-gate execute it as migration 0630.
 // ---------------------------------------------------------------------------
 
 const CANDIDATE_SQL = readFileSync(
   new URL("../../ops/cre-lifecycle.candidate.sql", import.meta.url), "utf8");
+
+test("migration 0630 IS the reviewed candidate, byte for byte", () => {
+  // Everything this suite proves about the candidate is only a proof about what
+  // runs if the numbered migration is the same bytes. A hand edit to either one
+  // alone fails here.
+  const migration = readFileSync(
+    new URL("../../migrations/0630_cre_lifecycle.sql", import.meta.url), "utf8");
+  assert.equal(migration, CANDIDATE_SQL);
+  assert.match(CANDIDATE_SQL, /NUMBERED AS migrations\/0630_cre_lifecycle\.sql, byte for byte/);
+});
 
 /** The admission map, read out of the candidate SQL's dollar-quoted JSON. */
 function admissionPolicy() {

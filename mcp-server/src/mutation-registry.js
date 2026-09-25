@@ -4,7 +4,13 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v77 is the runtime selector after DoctorCRE V5-F01's record homes, source
+// v78 is the runtime selector after DoctorCRE V5-J102's healthcare CRE
+// lifecycle (migrations 0630/0631). Its sealed catalog admits twenty-one new
+// verbs -- read-cre-lifecycle (a read on the writer connection) and twenty
+// writes, one humanOnly and six authorityOnly in all -- and preserves v77 and
+// earlier as history.
+//
+// Superseded note (v77): v77 was the runtime selector after DoctorCRE V5-F01's record homes, source
 // authority and document identity (migrations 0626/0627). Its sealed catalog
 // admits nine new verbs -- read-record-source-authority (a read) and the
 // eight record-source-authority writes, two of them humanOnly and
@@ -102,7 +108,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v77.generated.js";
+} from "./scac-mutation-registry.v78.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 

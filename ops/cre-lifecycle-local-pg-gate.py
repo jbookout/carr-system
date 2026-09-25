@@ -3,8 +3,9 @@
 # doctrine: runbook
 """V5-J102 live acceptance on a disposable loopback sibling database.
 
-WHAT IT PROVES. The CRE lifecycle's candidate SQL (ops/cre-lifecycle.candidate.sql)
-executes on top of the migrated schema, and then, against real PostgreSQL:
+WHAT IT PROVES. The CRE lifecycle is a numbered migration (0630, sealed by 0631),
+so the migrated schema already carries it; the gate refuses to run on a schema that
+does not. Then, against real PostgreSQL:
 
   * the SQL fixture (mcp-server/test/cre-lifecycle-postgres.sql) passes as a
     verified partner (Joe, Dell) and runs its admitted groups as a sponsored agent;
@@ -13,8 +14,7 @@ executes on top of the migrated schema, and then, against real PostgreSQL:
     writer-credential attribution split, and the Q081 migration shadow.
 
 WHERE. Never in the CI database itself. A sibling is copied from it (so it carries
-every numbered migration), F01's domain.sql is added only when F01 is not yet a
-migration there, the J102 SQL is applied, and the sibling is always dropped.
+every numbered migration, F01 and J102 included) and is always dropped.
 
 CLUSTER STATE IS RESTORED. The two authority logins and carr_writer's LOGIN are
 cluster-global; whatever this gate adds is recorded first and put back after, so a
@@ -38,9 +38,6 @@ import psycopg
 from psycopg import sql
 
 REPO = Path(__file__).resolve().parents[1]
-J102_SQL = REPO / "ops/cre-lifecycle.candidate.sql"
-F01_DOMAIN_SQL = REPO / "domain.sql"
-F01_DOCUMENT_SOURCE_SQL = REPO / "ops/document-derivative-registration.candidate.sql"
 FIXTURE = REPO / "mcp-server/test/cre-lifecycle-postgres.sql"
 LIVE_SUITE = "test/cre-lifecycle-live-pg.v5.test.mjs"
 AUTHORITY_LOGINS = ("carr_authority_joe", "carr_authority_dell")
@@ -191,21 +188,14 @@ def main() -> int:
     try:
         with principals(base) as password, sibling(base) as dsn:
             with psycopg.connect(dsn) as con, con.cursor() as cur:
-                cur.execute("select to_regprocedure('ops.f01_principal()') is not null")
+                cur.execute("select to_regprocedure('ops.f01_principal()') is not null, "
+                            "to_regprocedure('ops.j102_sponsoring_partner()') is not null, "
+                            "exists(select 1 from public.schema_migrations "
+                            "where filename='0630_cre_lifecycle.sql')")
                 probe = cur.fetchone()
-                f01_migrated = bool(probe and probe[0])
-            if not f01_migrated:
-                # Until F01 lands as a numbered migration, its two unnumbered
-                # hunks stand in for it: domain.sql, then the document-source
-                # hunk that carries the six-argument document writer F01's store
-                # door calls. Once F01 is migrated this branch never runs.
-                for path in (F01_DOMAIN_SQL, F01_DOCUMENT_SOURCE_SQL):
-                    done = psql(dsn, path, env={"PGOPTIONS": "--client-min-messages=warning"})
-                    if done.returncode:
-                        return fail(f"{path.name} did not apply: {done.stderr[-800:]}")
-            done = psql(dsn, J102_SQL, env={"PGOPTIONS": "--client-min-messages=warning"})
-            if done.returncode:
-                return fail(f"the J102 candidate SQL did not apply: {done.stderr[-800:]}")
+            if not (probe and all(probe)):
+                return fail("the migrated schema does not carry F01 and J102 (0630); "
+                            "apply every numbered migration first")
 
             # The SQL fixture: both partners must pass every runnable group; the
             # agent runs the groups its class admits and names the rest.

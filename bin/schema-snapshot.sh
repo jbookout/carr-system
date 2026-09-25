@@ -973,6 +973,17 @@ if [ "$F01_RECORD_SOURCE_AUTHORITY_REGISTRY_APPLIED" = t ] && [ "$GLOBAL_BOUNDAR
   echo "schema-snapshot: F01 record source authority v77 is applied without v76 predecessor" >&2
   exit 1
 fi
+CRE_LIFECYCLE_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0631_cre_lifecycle_scac_successor.sql')" \
+  2>/dev/null)"
+case "$CRE_LIFECYCLE_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read J102 CRE lifecycle v78 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$CRE_LIFECYCLE_REGISTRY_APPLIED" = t ] && [ "$F01_RECORD_SOURCE_AUTHORITY_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: J102 CRE lifecycle v78 is applied without v77 predecessor" >&2
+  exit 1
+fi
 
 # WR-000117. 0530 is the registry successor half of the atomic (0529,0530)
 # group, so probing the SUCCESSOR and not the domain migration is what says the
@@ -2464,6 +2475,17 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                                                                               SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v76'"
                                                                               SCAC_FULL_SET_SEAL_COUNT=76
                                                                               SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v77_current()"
+                                                                              if [ "$CRE_LIFECYCLE_REGISTRY_APPLIED" = t ]; then
+                                                                                SCAC_CURRENT_NUMBER=78
+                                                                                SCAC_VERSION_COUNT=78
+                                                                                SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v78'")"
+                                                                                SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v78'")"
+                                                                                SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v78.generated.js"
+                                                                                SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v78'"
+                                                                                SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v77'"
+                                                                                SCAC_FULL_SET_SEAL_COUNT=77
+                                                                                SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v78_current()"
+                                                                              fi
                                                                             fi
                                                                           fi
                                                                         fi

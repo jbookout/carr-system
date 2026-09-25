@@ -61,6 +61,10 @@ import { emitGateZeroOutcome } from "./gate-zero-assurance.v5.js";
 import { benchmarkAcceptanceStoreTools } from "./benchmark-acceptance-store.v5.js";
 import { modelRoleStoreTools } from "./model-role-store.v5.js";
 import { recordSourceAuthorityStoreTools } from "./record-source-authority-store.v5.js";
+// V5-J102's healthcare CRE lifecycle door: every verb on the writer connection
+// through mcp.js's setWriterActorContext, which sets the actor and the
+// server-verified sponsor the store and SQL writers derive attribution from.
+import { creLifecycleStoreTools } from "./cre-lifecycle-store.v5.js";
 import { foundationAssuranceMinimumTools } from
   "./foundation-assurance-minimum-producer.v5.js";
 // V5-S01's live door: the settled global boundaries evaluated at the dispatch
@@ -8219,6 +8223,7 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "benchmark-acceptance": "mcp-server/src/benchmark-acceptance-store.v5.js",
   "model-role-store": "mcp-server/src/model-role-store.v5.js",
   "record-source-authority": "mcp-server/src/record-source-authority-store.v5.js",
+  "cre-lifecycle": "mcp-server/src/cre-lifecycle-store.v5.js",
   "foundation-assurance": "mcp-server/src/foundation-assurance-minimum-producer.v5.js",
   "global-boundaries-door": "mcp-server/src/global-boundaries-door.v5.js",
   "journey-one-clock-door": "mcp-server/src/journey-one-clock-door.v5.js",
@@ -9356,6 +9361,7 @@ registerTools(benchmarkAcceptanceStoreTools({
   "benchmark-acceptance");
 registerTools(modelRoleStoreTools({ withEnvelope, writeEvent, ToolError }),
   "model-role-store");
+registerTools(creLifecycleStoreTools({ withEnvelope, ToolError }), "cre-lifecycle");
 registerTools(recordSourceAuthorityStoreTools({ withEnvelope, ToolError }),
   "record-source-authority");
 registerTools(foundationAssuranceMinimumTools({
