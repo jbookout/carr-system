@@ -74,10 +74,11 @@ def as_login(cur: Any, login: str) -> Iterator[None]:
     who = cur.execute("select session_user::text, current_user::text").fetchone()
     if who != (login, login):
         raise RuntimeError(f"expected session and current user {login!r}, got {who!r}")
-    try:
-        yield
-    finally:
-        cur.execute("reset session authorization")
+    # No `finally`: after a database error the transaction is aborted and a
+    # reset would only replace the real error with "current transaction is
+    # aborted". The whole transaction rolls back on the way out anyway.
+    yield
+    cur.execute("reset session authorization")
 
 
 def expect_refusal(cur: Any, query: str, params: tuple, label: str, *, match: str) -> None:
