@@ -1511,7 +1511,7 @@ participant_role party_link_kind vendor_category vendor_disposition \
 vendor_relationship_level diagnostic_route submarket_condition doctrine_edge_type \
 doctrine_review_policy actor retrieval_proposal retrieval_ranking_policy \
 ops.guidance_registry ops.rule_delivery_policy \
-ops.rule_delivery_activation_target"
+ops.rule_delivery_activation_target ops.slice_marker_seat"
 
 VOCAB_ARGS=""
 for t in $VOCAB_TABLES; do

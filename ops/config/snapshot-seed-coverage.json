@@ -68,7 +68,8 @@
     "submarket_condition": "closed vocabulary, foreign-key target",
     "vendor_category": "closed vocabulary, foreign-key target",
     "vendor_disposition": "closed vocabulary, foreign-key target",
-    "vendor_relationship_level": "closed vocabulary, foreign-key target"
+    "vendor_relationship_level": "closed vocabulary, foreign-key target",
+    "ops.slice_marker_seat": "0619's two automated slice-marker seat rows (joe-local, dell-local): internal machine-actor slugs and a one-line note each; no client, party, deal, event or credential. The seat doors refuse every actor not in it, so a rebuild without these rows would silently stop the slice done-record from ever firing"
   },
   "carried_subset": {
     "ops.work_request": "CARRIED IN PART, SIEP program rows only: the ops.work_request rows that ops.siep_package_contract.work_request_id points at, restored by the SIEP manifest block in bin/schema-snapshot.sh with the insert guards and seals disabled for the restore and the manifest digest asserted afterwards. Those rows are internal program configuration created by 0324's own literal package list: requester and owner 'joe', no client, party, deal, event, doctrine or credential reference, and their only outbound foreign key is public.actor, which this snapshot already carries. NEVER the sourced captures (WR-000001 onward) - those are operational history."
