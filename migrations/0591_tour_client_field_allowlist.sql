@@ -38,16 +38,25 @@
 --      fire.
 --   5. Client VALUE safety. ops.tour_client_text_violation() is the one value
 --      rule for the eight client fields and returns the name of the first
---      rule a text breaks. It first normalizes the text (NFKC, so full-width
---      digits and the full-width @ read as plain ones; invisible formatting
---      characters such as zero-width joiners and soft hyphens removed; every
---      run of ASCII or Unicode spaces collapsed to one space; ends trimmed)
---      -- the text a browser shows and the PDF prints -- then:
---      email (a dotted domain after an @, or bob@landlord written tight),
---      url, phone (ten digits however grouped: 251 555 01 00,
---      251 . . 555 . . 0100, 251/555/0100, (251)5550100; only the 3-3-4
---      shape joins across wide separators, so "Renovated 2021 - 2026 (12
---      suites)" passes), local_phone (555-0100, 555 - 0100;
+--      rule a text breaks. It first applies NFKC and a CHARACTER ALLOWLIST:
+--      after NFKC a value may hold only printable ASCII, the section,
+--      degree and plus-minus signs, Latin-1 and Latin Extended-A letters with
+--      the multiplication sign, the en and em dash, curly quotes, the bullet
+--      and the ellipsis; anything else (direction overrides, invisible and
+--      default-ignorable characters, combining marks, other scripts' digits)
+--      is refused as character:U+XXXX, naming the first such code point.
+--      The stored value is checked first against the same set plus the
+--      Unicode spaces and full-width ASCII, the only characters NFKC is
+--      trusted to fold, so a character newer than PostgreSQL's Unicode
+--      version cannot fold differently here and in JavaScript.
+--      It then collapses spaces and trims -- the text a browser shows and the
+--      PDF prints -- and applies: email (a dotted domain after an @, a word
+--      against an @, (at)/[at] before a domain), url (including .realty,
+--      .health, .co and the other listed endings, a spaced .com, and
+--      "dot com"), phone (ten digits however grouped: 251 555 01 00,
+--      251 . . 555 . . 0100, 251/555/0100, 251|555|0100, (251)5550100; only
+--      the 3-3-4 shape joins across wide separators, so "Renovated 2021 -
+--      2026 (12 suites)" passes), local_phone (555-0100, 555 - 0100;
 --      a dash range after a suite word whose second number has no leading
 --      zero, such as "Suites 100-1200", is set aside; "Unit 555-0100" is
 --      not), international_phone (+44 ..., + 44 ..., 011 44 ...),
@@ -59,10 +68,12 @@
 --      "Suites 101-1050") passes; a shared corpus
 --      (mcp-server/test/fixtures/tour-client-text-corpus.json) is run through
 --      this function and its JavaScript copy (mcp-server/src/
---      tour-client-value-safety.js) alike. Documented residuals, left to the
---      human review before a seal and pinned in the corpus: spelled-out
---      contacts ("two five one 555 0100", "bob(at)landlord.co"), bare domains
---      outside the url endings ("bayside.health") and "Suite 555-1234".
+--      tour-client-value-safety.js) alike, and a sweep of every BMP code
+--      point and a sample of the astral planes proves the two agree.
+--      Documented residuals, left to the human review before a seal and
+--      pinned in the corpus: digits spelled out or swapped for look-alike
+--      letters ("two five one 555 0100", "251-555-O1OO") and "Suite
+--      555-1234".
 --      ops.tour_client_value_violation() applies it to a field value,
 --      including every part of size / asking_economics, and
 --      ops.tour_public_value_safe uses it for the client fields.
@@ -90,32 +101,40 @@ returns integer language sql immutable parallel safe as $$ select 120 $$;
 create or replace function ops.tour_client_route_label_pattern()
 returns text language sql immutable parallel safe as $$ select '^[A-Za-z0-9]{1,3}$'::text $$;
 
--- The invisible formatting characters (soft hyphen, Mongolian vowel
--- separator, zero-width space/non-joiner/joiner, direction marks, word joiner,
--- invisible operators, BOM) are removed after NFKC and before any rule reads a
--- value.
-create or replace function ops.tour_client_text_format_chars_pattern()
-returns text language sql immutable parallel safe as $$ select '[\u00ad\u180e\u200b-\u200f\u2060-\u2064\ufeff]'::text $$;
+-- CHARACTER ALLOWLIST. After NFKC a client value may hold only printable
+-- ASCII, the section/degree/plus-minus signs, Latin-1 and Latin Extended-A
+-- letters with the multiplication sign, the en and em dash, curly quotes,
+-- the bullet and the ellipsis. The pattern matches the first character
+-- OUTSIDE that set; any match refuses the value as character:U+XXXX. NFKC
+-- first folds the no-break and other compatibility spaces to ASCII spaces and
+-- full-width, superscript, circled and mathematical forms to ASCII, so what
+-- remains outside the set -- direction overrides and isolates, invisible and
+-- default-ignorable characters, variation selectors, tags, fillers, combining
+-- marks, other scripts' digits -- is refused by default.
+create or replace function ops.tour_client_text_disallowed_pattern()
+returns text language sql immutable parallel safe as $$ select '[^ -~\u00a7\u00b0\u00b1\u00c0-\u00f6\u00f8-\u017f\u2013\u2014\u2018\u2019\u201c\u201d\u2022\u2026]'::text $$;
 
--- Then every run of spaces -- ASCII and the Unicode spaces (no-break, thin,
--- narrow no-break, ideographic, line/paragraph separators) -- becomes ONE
--- ASCII space and the ends are trimmed: the text a browser shows and the PDF
--- prints.
-create or replace function ops.tour_client_text_space_run_pattern()
-returns text language sql immutable parallel safe as $$ select '[ \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+'::text $$;
+-- The same set checked on the value AS STORED, before NFKC, plus the only
+-- characters NFKC is trusted to fold into it: the no-break and other Unicode
+-- spaces and full-width ASCII (U+FF01-U+FF5E). Everything else is refused
+-- before NFKC runs, so the database (PostgreSQL's Unicode version) and the
+-- JavaScript copy (Node's, which is newer) cannot disagree about a character
+-- assigned after the older version: those fold in one engine only.
+create or replace function ops.tour_client_text_disallowed_source_pattern()
+returns text language sql immutable parallel safe as $$ select '[^ -~\u00a0\u00a7\u00b0\u00b1\u00c0-\u00f6\u00f8-\u017f\u2000-\u200a\u2013\u2014\u2018\u2019\u201c\u201d\u2022\u2026\u202f\u205f\u3000\uff01-\uff5e]'::text $$;
 
 -- Before the phone rules read a value, a number shaped 3-3-4 is joined across
--- separators of up to five characters of space ( ) . and any dash, or across
--- one slash, underscore or comma (251 . . 555 . . 0100, 251/555/0100). Only
--- that shape joins across wide separators, so year and count ranges
+-- separators of up to five characters of space ( ) . x and a dash, or across
+-- one of , / _ ~ | : * or the bullet (251 . . 555 . . 0100, 251/555/0100).
+-- Only that shape joins across wide separators, so year and count ranges
 -- ("Renovated 2021 - 2026 (12 suites)") and thousands (120,000 SF) do not.
 create or replace function ops.tour_client_text_phone_join_pattern()
-returns text language sql immutable parallel safe as $$ select '(^|[^0-9])([0-9]{3})(?:[ ().\u2010-\u2015\u2212\ufe58\ufe63\uff0d-]{0,5}|[,/_])([0-9]{3})(?:[ ().\u2010-\u2015\u2212\ufe58\ufe63\uff0d-]{0,5}|[,/_])([0-9]{4})(?![0-9])'::text $$;
+returns text language sql immutable parallel safe as $$ select '(^|[^0-9])([0-9]{3})(?:[ ().xX\u2013\u2014-]{0,5}|[,/_~|:*\u2022])([0-9]{3})(?:[ ().xX\u2013\u2014-]{0,5}|[,/_~|:*\u2022])([0-9]{4})(?![0-9])'::text $$;
 
--- Then digits separated by one or two of space . and any dash are joined
+-- Then digits separated by one or two of space . and a dash are joined
 -- (251 555 01 00, 1-251-555-0100).
 create or replace function ops.tour_client_text_digit_join_pattern()
-returns text language sql immutable parallel safe as $$ select '([0-9])[ .\u2010-\u2015\u2212\ufe58\ufe63\uff0d-]{1,2}(?=[0-9])'::text $$;
+returns text language sql immutable parallel safe as $$ select '([0-9])[ .\u2013\u2014-]{1,2}(?=[0-9])'::text $$;
 
 -- A suite/unit/room RANGE is set aside before the seven-digit local-number
 -- rule: two numbers of 1-4 digits joined by a dash, the second without a
@@ -123,7 +142,7 @@ returns text language sql immutable parallel safe as $$ select '([0-9])[ .\u2010
 -- "Unit 555-0100" and "Ste #555.0100" are still read as phones.
 create or replace function ops.tour_client_text_suite_range_pattern()
 returns text language sql immutable parallel safe as $$
-  select '(^|[^A-Za-z])(suites?|ste|units?|rooms?)[.:#]?[ ]?#?[0-9]{1,4}[ ]?[\u2010-\u2015\u2212\ufe58\ufe63\uff0d-][ ]?[1-9][0-9]{0,3}(?![0-9])'::text
+  select '(^|[^A-Za-z])(suites?|ste|units?|rooms?)[.:#]?[ ]?#?[0-9]{1,4}[ ]?[\u2013\u2014-][ ]?[1-9][0-9]{0,3}(?![0-9])'::text
 $$;
 
 -- Case-insensitive, checked in ordinal order; the first match names the
@@ -133,30 +152,33 @@ create or replace function ops.tour_client_text_rules()
 returns table(ordinal integer, rule text, target text, pattern text)
 language sql immutable parallel safe as $$
   values
-    (1, 'email', 'raw', '[A-Za-z0-9._%+-] ?@ ?[A-Za-z0-9_-]+([.][A-Za-z0-9_-]+)*[.][A-Za-z]{2,}|[A-Za-z0-9._%+-]@[A-Za-z0-9_-]*[A-Za-z]'),
-    (2, 'url', 'raw', 'https?://|www[.]|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]*[.](com|net|org|io|biz|info|us)([^A-Za-z0-9]|$)'),
+    (1, 'email', 'raw', '[A-Za-z0-9._%+-] ?@ ?[A-Za-z0-9_-]+([.][A-Za-z0-9_-]+)*[.][A-Za-z]{2,}|[A-Za-z0-9._%+-]( @|@ ?)[A-Za-z0-9_-]*[A-Za-z]|[A-Za-z0-9._%+-] ?[(\[] ?at ?[)\]] ?[A-Za-z0-9_-]+([.][A-Za-z0-9_-]+)*[.][A-Za-z]{2,}'),
+    (2, 'url', 'raw', 'https?://|www[.]|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]*[.](com|net|org|io|biz|info|us|co|ai|app|realty|health|properties|homes|law|care|clinic|gov|edu|me)([^A-Za-z0-9]|$)|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]* ?[.] ?(com|net|org)([^A-Za-z0-9]|$)|(^|[^A-Za-z])[(\[]? ?dot ?[)\]]? ?(com|net|org|co)([^A-Za-z]|$)'),
     (3, 'phone', 'digits', '(^|[^0-9])1?[2-9][0-9]{9}([^0-9]|$)'),
-    (4, 'local_phone', 'nosuite', '(^|[^0-9])[2-9][0-9]{2} ?[.\u2010-\u2015\u2212\ufe58\ufe63\uff0d-] ?[0-9]{4}([^0-9]|$)'),
+    (4, 'local_phone', 'nosuite', '(^|[^0-9])[2-9][0-9]{2} ?[.\u2013\u2014-] ?[0-9]{4}([^0-9]|$)'),
     (5, 'international_phone', 'digits', '[+] ?[0-9]{8,}|(^|[^0-9])(011|00)[1-9][0-9]{6,}([^0-9]|$)'),
     (6, 'access_code', 'raw', '(^|[^A-Za-z])(gate|door|key|entry|garage|alarm|keypad|access|lock)[ -]?(codes?|combos?|combination|pins?|passwords?)([^A-Za-z]|$)'),
     (7, 'lockbox', 'raw', '(^|[^A-Za-z])(lock[ -]?box(es)?|passcodes?)([^A-Za-z]|$)'),
     (8, 'internal_note', 'raw', '(^|[^A-Za-z])(internal[ -]?(notes?|only|use)|confidential|do not (share|disclose)|broker[ -]only|not for (the )?clients?)([^A-Za-z]|$)')
 $$;
 
+-- The text a client reads: NFKC, space runs collapsed, ends trimmed. Only
+-- meaningful for a value the allowlist admits.
 create or replace function ops.tour_client_text_normalize(p_text text)
 returns text language sql immutable parallel safe as $$
-  select regexp_replace(regexp_replace(regexp_replace(normalize(p_text, NFKC),
-           ops.tour_client_text_format_chars_pattern(), '', 'g'),
-           ops.tour_client_text_space_run_pattern(), ' ', 'g'), '^ | $', '', 'g')
+  select regexp_replace(regexp_replace(normalize(p_text, NFKC), ' +', ' ', 'g'), '^ | $', '', 'g')
 $$;
 
 create or replace function ops.tour_client_text_violation(p_text text)
 returns text language sql immutable parallel safe as $$
   select case
     when p_text is null then 'not_text'
-    when p_text ~ '[[:cntrl:]]' then 'control_character'
+    -- C0 and C1 controls and DEL, as explicit code points: [[:cntrl:]]
+    -- follows the database locale, and the JavaScript copy has none.
+    when p_text ~ '[\u0001-\u001f\u007f-\u009f]' then 'control_character'
     else (
       select case
+        when c.bad is not null then 'character:U+' || upper(lpad(to_hex(ascii(c.bad)), greatest(4, length(to_hex(ascii(c.bad)))), '0'))
         when n.t = '' then 'empty'
         when char_length(n.t) > ops.tour_client_text_max_chars() then 'too_long'
         else (
@@ -171,7 +193,9 @@ returns text language sql immutable parallel safe as $$
            order by r.ordinal
            limit 1)
       end
-      from (select ops.tour_client_text_normalize(p_text) t) n)
+      from (select coalesce(substring(p_text from ops.tour_client_text_disallowed_source_pattern()),
+                            substring(normalize(p_text, NFKC) from ops.tour_client_text_disallowed_pattern())) bad) c,
+           (select ops.tour_client_text_normalize(p_text) t) n)
   end
 $$;
 
@@ -305,7 +329,7 @@ returns boolean language sql stable set search_path=pg_catalog,ops,public,pg_tem
 $$;
 
 revoke all on function ops.tour_client_text_max_chars(), ops.tour_client_route_label_pattern(),
-  ops.tour_client_text_format_chars_pattern(), ops.tour_client_text_space_run_pattern(),
+  ops.tour_client_text_disallowed_pattern(), ops.tour_client_text_disallowed_source_pattern(),
   ops.tour_client_text_normalize(text), ops.tour_client_text_phone_join_pattern(),
   ops.tour_client_text_digit_join_pattern(), ops.tour_client_text_suite_range_pattern(),
   ops.tour_client_text_rules(), ops.tour_client_text_violation(text), ops.tour_client_text_safe(text),

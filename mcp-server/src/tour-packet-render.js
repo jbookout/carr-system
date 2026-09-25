@@ -58,11 +58,10 @@ function plainText(value, path, maximum = MAX_FIELD_CHARS, contactScreen = true)
  * A client field value: plain text judged by the shared client value-safety
  * rule alone, so the PDF never refuses a value the list and map show
  * ("36602-1234", "Available 03-15-2027"). The renderer prints exactly the
- * text that rule judged -- normalizeClientText(value): NFKC, invisible
- * formatting characters removed, space runs collapsed -- so nothing the PDF
- * prints has escaped the rule, and a full-width or zero-width-joined value
- * cannot print differently from the text the database and the browser share
- * judged.
+ * text that rule judged -- normalizeClientText(value): NFKC, space runs
+ * collapsed, ends trimmed -- so nothing the PDF prints has escaped the rule,
+ * and a full-width value cannot print differently from the text the database
+ * and the browser share judged.
  */
 function clientText(value, path) {
   plainText(value, path, CLIENT_TEXT_MAX_CHARS, false);

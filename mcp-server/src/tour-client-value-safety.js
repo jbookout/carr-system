@@ -20,10 +20,9 @@
 // The rule is aimed at text a person would type, not at deliberate evasion.
 // Documented residuals, left to the human review every projection gets before
 // it is sealed (and pinned in the corpus's `residual` list so any change to
-// them is visible): spelled-out contacts ("two five one 555 0100",
-// "bob(at)landlord.co"), bare domains outside the url rule's endings
-// ("bayside.health"), and a suite word before a dash pair whose second number
-// has no leading zero ("Suite 555-1234").
+// them is visible): digits spelled out or swapped for look-alike letters
+// ("two five one 555 0100", "251-555-O1OO"), and a suite word before a dash
+// pair whose second number has no leading zero ("Suite 555-1234").
 //
 // Refusal is the only outcome. Nothing here rewrites or redacts a value: a
 // value that fails is not shown, and the seal that would have sealed it
@@ -32,36 +31,54 @@
 export const CLIENT_TEXT_MAX_CHARS = 120;
 export const CLIENT_ROUTE_LABEL_PATTERN = "^[A-Za-z0-9]{1,3}$";
 
+// CHARACTER ALLOWLIST. After Unicode compatibility normalization (NFKC:
+// JavaScript normalize('NFKC'), PostgreSQL normalize(t, NFKC)) a client value
+// may hold ONLY:
+//   printable ASCII                              U+0020-U+007E
+//   section sign, degree sign, plus-minus        U+00A7 U+00B0 U+00B1
+//   Latin-1 letters and the multiplication sign  U+00C0-U+00F6 (x = U+00D7)
+//   Latin-1 and Latin Extended-A letters         U+00F8-U+017F
+//   en and em dash                               U+2013 U+2014
+//   curly quotes                                 U+2018 U+2019 U+201C U+201D
+//   bullet, ellipsis                             U+2022 U+2026
+// NFKC first turns the no-break and other compatibility spaces into ASCII
+// spaces, full-width letters, digits and @ into ASCII, and superscript, circled
+// and mathematical digits into plain digits. Anything else -- direction
+// overrides and isolates, zero-width and other invisible or default-ignorable
+// characters, variation selectors, tags, fillers, Braille blank, combining
+// marks, other scripts' digits -- is refused, and the refusal names the first
+// such code point ("character:U+202E"). This replaces the earlier denylist of
+// invisible characters: a character nobody has thought of yet is refused by
+// default.
+export const CLIENT_TEXT_DISALLOWED =
+  "[^ -~\\u00a7\\u00b0\\u00b1\\u00c0-\\u00f6\\u00f8-\\u017f\\u2013\\u2014\\u2018\\u2019\\u201c\\u201d\\u2022\\u2026]";
+// The same set, checked on the value AS STORED, before NFKC, plus the only
+// characters NFKC is trusted to fold into it: the no-break and other Unicode
+// spaces (U+00A0, U+2000-U+200A, U+202F, U+205F, U+3000) and full-width ASCII
+// (U+FF01-U+FF5E). Everything else is refused before NFKC runs. The reason is
+// parity: JavaScript and PostgreSQL ship different Unicode versions, and a
+// character assigned after PostgreSQL's (U+A7F1, U+1CCEB, the outlined digits
+// U+1CCF0-U+1CCF9) folds to ASCII in one engine and not the other. The
+// decompositions of these old characters are frozen by Unicode's stability
+// policy, so both engines read them identically.
+export const CLIENT_TEXT_DISALLOWED_SOURCE =
+  "[^ -~\\u00a0\\u00a7\\u00b0\\u00b1\\u00c0-\\u00f6\\u00f8-\\u017f\\u2000-\\u200a\\u2013\\u2014\\u2018\\u2019\\u201c\\u201d\\u2022\\u2026\\u202f\\u205f\\u3000\\uff01-\\uff5e]";
 
-// Every dash a phone number may be written with: hyphen, non-breaking hyphen,
-// figure dash, en/em dash, horizontal bar, minus sign, small and full-width
-// hyphen-minus (the ASCII hyphen last, as a bracket expression needs).
-const DASHES = "\\u2010-\\u2015\\u2212\\ufe58\\ufe63\\uff0d-";
+// The dashes that survive the allowlist: ASCII hyphen, en and em dash (the
+// ASCII hyphen last, as a bracket expression needs). NFKC folds the small and
+// full-width hyphen-minus to ASCII; the other Unicode dashes are refused.
+const DASHES = "\\u2013\\u2014-";
 
-// Before any rule reads a value it is put in the form a client reads:
-//   1. Unicode compatibility normalization (NFKC): full-width digits and
-//      letters, the full-width @ and the compatibility spaces become their
-//      plain forms (JavaScript normalize('NFKC'), PostgreSQL
-//      normalize(t, NFKC));
-//   2. the invisible formatting characters -- soft hyphen, Mongolian vowel
-//      separator, zero-width space/non-joiner/joiner, direction marks, word
-//      joiner, invisible operators, BOM -- are removed;
-//   3. every run of spaces, ASCII or Unicode, becomes ONE ASCII space and the
-//      ends are trimmed.
-// That text is what the browser share emits and the PDF prints, so every
-// engine judges exactly what a client would see.
-export const CLIENT_TEXT_FORMAT_CHARS = "[\\u00ad\\u180e\\u200b-\\u200f\\u2060-\\u2064\\ufeff]";
-export const CLIENT_TEXT_SPACE_RUN = "[ \\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]+";
 // Before the phone rules read a value, a number shaped 3-3-4 is joined across
-// separators of up to five characters of space ( ) . and any dash (251 . .
-// 555 . . 0100, 251 ( 555 ) 0100), or across one slash, underscore or comma
-// (251/555/0100, 251,555,0100). A country code or leading +1 in front stays
-// outside the join and the ten digits still read as a phone. Only the 3-3-4
-// shape joins across wide separators, so year and count ranges do not
-// ("Renovated 2021 - 2026 (12 suites)"), and a comma joins only a single-comma
-// 3-3-4 group, so thousands do not (120,000 SF).
+// separators of up to five characters of space ( ) . x and any dash (251 . .
+// 555 . . 0100, 251 ( 555 ) 0100, 251 x 555 x 0100), or across one of
+// , / _ ~ | : * or the bullet (251/555/0100, 251|555|0100). A country code or
+// leading +1 in front stays outside the join and the ten digits still read as
+// a phone. Only the 3-3-4 shape joins across wide separators, so year and count
+// ranges do not ("Renovated 2021 - 2026 (12 suites)"), and a comma joins only
+// a single-comma 3-3-4 group, so thousands do not (120,000 SF).
 export const CLIENT_TEXT_PHONE_JOIN = Object.freeze({
-  pattern: `(^|[^0-9])([0-9]{3})(?:[ ().${DASHES}]{0,5}|[,/_])([0-9]{3})(?:[ ().${DASHES}]{0,5}|[,/_])([0-9]{4})(?![0-9])`,
+  pattern: `(^|[^0-9])([0-9]{3})(?:[ ().xX${DASHES}]{0,5}|[,/_~|:*\\u2022])([0-9]{3})(?:[ ().xX${DASHES}]{0,5}|[,/_~|:*\\u2022])([0-9]{4})(?![0-9])`,
   replacement: "$1$2$3$4",
 });
 // Then any digits separated by one or two of space . and any dash are joined,
@@ -79,17 +96,23 @@ export const CLIENT_TEXT_SUITE_RANGE = Object.freeze({
   replacement: "$1 ",
 });
 
+// A web domain ending: the common ones and the real-estate and health ones.
+const DOMAIN_ENDINGS = "com|net|org|io|biz|info|us|co|ai|app|realty|health|properties|homes|law|care|clinic|gov|edu|me";
+
 // Case-insensitive, checked in this order; the first rule that matches names
 // the refusal. `target` is the text the rule reads: the normalized value
 // (raw), with digit groups joined (digits), or with suite ranges set aside
 // (nosuite).
 export const CLIENT_TEXT_RULES = Object.freeze([
-  // an email address: a dotted domain after an @ (spaced or not), or a word
-  // written tight against both sides of an @ ("bob@landlord");
-  // "4,200 RSF @ $28.50/SF" and "2 suites @ 1,200 SF" are not one
-  Object.freeze({ rule: "email", target: "raw", pattern: "[A-Za-z0-9._%+-] ?@ ?[A-Za-z0-9_-]+([.][A-Za-z0-9_-]+)*[.][A-Za-z]{2,}|[A-Za-z0-9._%+-]@[A-Za-z0-9_-]*[A-Za-z]" }),
-  // a URL or a bare web domain (its name holds a letter: "Hwy 90.US 29" is a road)
-  Object.freeze({ rule: "url", target: "raw", pattern: "https?://|www[.]|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]*[.](com|net|org|io|biz|info|us)([^A-Za-z0-9]|$)" }),
+  // an email address: a dotted domain after an @ (spaced or not); a word
+  // against an @ with at most one side spaced ("bob@landlord", "bob @landlord");
+  // or (at) / [at] before a dotted domain. "4,200 RSF @ $28.50/SF" and
+  // "Rate @ market" are not one.
+  Object.freeze({ rule: "email", target: "raw", pattern: "[A-Za-z0-9._%+-] ?@ ?[A-Za-z0-9_-]+([.][A-Za-z0-9_-]+)*[.][A-Za-z]{2,}|[A-Za-z0-9._%+-]( @|@ ?)[A-Za-z0-9_-]*[A-Za-z]|[A-Za-z0-9._%+-] ?[(\\[] ?at ?[)\\]] ?[A-Za-z0-9_-]+([.][A-Za-z0-9_-]+)*[.][A-Za-z]{2,}" }),
+  // a URL, a bare web domain (its name holds a letter: "Hwy 90.US 29" is a
+  // road), a spaced .com/.net/.org ("landlord .com"), or a spelled-out
+  // "dot com" / "[dot] com"
+  Object.freeze({ rule: "url", target: "raw", pattern: `https?://|www[.]|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]*[.](${DOMAIN_ENDINGS})([^A-Za-z0-9]|$)|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]* ?[.] ?(com|net|org)([^A-Za-z0-9]|$)|(^|[^A-Za-z])[(\\[]? ?dot ?[)\\]]? ?(com|net|org|co)([^A-Za-z]|$)` }),
   // a North-American phone number, however its ten digits are grouped
   Object.freeze({ rule: "phone", target: "digits", pattern: "(^|[^0-9])1?[2-9][0-9]{9}([^0-9]|$)" }),
   // a seven-digit local number: 555-0100, 555 - 0100 (exchange 2-9, as NANP requires)
@@ -106,22 +129,35 @@ export const CLIENT_TEXT_RULES = Object.freeze([
 ]);
 
 const RULES = CLIENT_TEXT_RULES.map(entry => ({ ...entry, regex: new RegExp(entry.pattern, "i") }));
-const FORMAT_CHARS = new RegExp(CLIENT_TEXT_FORMAT_CHARS, "g");
-const SPACE_RUN = new RegExp(CLIENT_TEXT_SPACE_RUN, "g");
+const DISALLOWED = new RegExp(CLIENT_TEXT_DISALLOWED);
+const DISALLOWED_SOURCE = new RegExp(CLIENT_TEXT_DISALLOWED_SOURCE);
 const PHONE_JOIN = new RegExp(CLIENT_TEXT_PHONE_JOIN.pattern, "g");
 const DIGIT_JOIN = new RegExp(CLIENT_TEXT_DIGIT_JOIN.pattern, "g");
 const SUITE_RANGE = new RegExp(CLIENT_TEXT_SUITE_RANGE.pattern, "gi");
 const ROUTE_LABEL = new RegExp(CLIENT_ROUTE_LABEL_PATTERN);
-// C0 controls (tab, newline and carriage return included) and DEL.
-const CONTROL = /[\u0000-\u001F\u007F]/;
+// C0 controls (tab, newline and carriage return included), DEL and the C1
+// controls -- the same explicit code points the database checks.
+const CONTROL = /[\u0000-\u001F\u007F-\u009F]/;
 
 /**
  * The text every client rule reads and every client surface shows: NFKC,
- * formatting characters removed, space runs collapsed to one space, ends
- * trimmed. Mirrors ops.tour_client_text_normalize.
+ * space runs collapsed to one space, ends trimmed. Only meaningful for a value
+ * the allowlist admits. Mirrors ops.tour_client_text_normalize.
  */
 export function normalizeClientText(value) {
-  return value.normalize("NFKC").replace(FORMAT_CHARS, "").replace(SPACE_RUN, " ").replace(/^ | $/g, "");
+  return value.normalize("NFKC").replace(/ +/g, " ").replace(/^ | $/g, "");
+}
+
+/**
+ * "U+202E" for the first character outside the allowlist -- first in the
+ * stored value (the source set), then in NFKC(value) -- or null.
+ */
+export function firstDisallowedCodePoint(value) {
+  for (const [text, pattern] of [[value, DISALLOWED_SOURCE], [value.normalize("NFKC"), DISALLOWED]]) {
+    const match = pattern.exec(text);
+    if (match) return `U+${text.codePointAt(match.index).toString(16).toUpperCase().padStart(4, "0")}`;
+  }
+  return null;
 }
 
 /**
@@ -131,6 +167,8 @@ export function normalizeClientText(value) {
 export function clientTextViolation(value, maximum = CLIENT_TEXT_MAX_CHARS) {
   if (typeof value !== "string") return "not_text";
   if (CONTROL.test(value)) return "control_character";
+  const disallowed = firstDisallowedCodePoint(value);
+  if (disallowed) return `character:${disallowed}`;
   const text = normalizeClientText(value);
   if (!text) return "empty";
   // Counted in code points, as PostgreSQL char_length() counts.

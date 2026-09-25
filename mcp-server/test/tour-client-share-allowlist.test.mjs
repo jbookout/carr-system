@@ -9,6 +9,7 @@
 // sealed projection or share response is built from and proves it never comes
 // out the other side.
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
@@ -17,9 +18,9 @@ import {
   isClientTourFieldKey,
 } from "../src/tour-operations-contract.js";
 import {
-  CLIENT_ROUTE_LABEL_PATTERN, CLIENT_TEXT_DIGIT_JOIN, CLIENT_TEXT_FORMAT_CHARS, CLIENT_TEXT_MAX_CHARS, CLIENT_TEXT_PHONE_JOIN, CLIENT_TEXT_RULES,
-  CLIENT_TEXT_SPACE_RUN, CLIENT_TEXT_SUITE_RANGE,
-  clientSafeMetric, clientTextViolation, isClientRouteLabel, isClientSafeText, normalizeClientText,
+  CLIENT_ROUTE_LABEL_PATTERN, CLIENT_TEXT_DIGIT_JOIN, CLIENT_TEXT_DISALLOWED, CLIENT_TEXT_DISALLOWED_SOURCE, CLIENT_TEXT_MAX_CHARS, CLIENT_TEXT_PHONE_JOIN,
+  CLIENT_TEXT_RULES, CLIENT_TEXT_SUITE_RANGE,
+  clientSafeMetric, clientTextViolation, firstDisallowedCodePoint, isClientRouteLabel, isClientSafeText, normalizeClientText,
 } from "../src/tour-client-value-safety.js";
 import { renderTourPacket, TourPacketRenderError } from "../src/tour-packet-render.js";
 import { tourRightsProjectionTools } from "../src/tour-rights-projection.js";
@@ -310,61 +311,109 @@ test("the client value rule passes ordinary CRE text and refuses contact, access
   assert.ok(ORDINARY.length >= 60 && CORPUS.refused.length >= 30);
   for (const value of ORDINARY) assert.equal(clientTextViolation(value), null, JSON.stringify(value));
   for (const [value, rule] of CORPUS.refused) assert.equal(clientTextViolation(value), rule, JSON.stringify(value));
+  // Accepted false positives: refused, under the named reason.
+  for (const [value, rule] of CORPUS.known_refused) assert.equal(clientTextViolation(value), rule, JSON.stringify(value));
   assert.equal(clientTextViolation("A".repeat(CLIENT_TEXT_MAX_CHARS)), null);
   assert.equal(clientTextViolation("A".repeat(CLIENT_TEXT_MAX_CHARS + 1)), "too_long");
   // Counted in code points, as PostgreSQL char_length() counts.
-  assert.equal(clientTextViolation("\u{1F3E5}".repeat(CLIENT_TEXT_MAX_CHARS)), null);
+  assert.equal(clientTextViolation("\u00e9".repeat(CLIENT_TEXT_MAX_CHARS)), null);
   assert.equal(clientTextViolation("Available\nnow"), "control_character");
+  assert.equal(clientTextViolation("Available\u0085now"), "control_character");
   for (const [value, rule] of [[null, "not_text"], [undefined, "not_text"], [4, "not_text"], [{}, "not_text"], ["", "empty"], ["   ", "empty"],
-    ["   ", "empty"], ["　", "empty"]])
+    ["\u00a0\u2009\u202f", "empty"], ["\u3000", "empty"]])
     assert.equal(clientTextViolation(value), rule, JSON.stringify(value));
-  // Unicode spaces are read as spaces, and space runs as one space -- the text
-  // a browser shows and the PDF prints.
-  assert.equal(normalizeClientText("  Suite  210  "), "Suite 210");
-  assert.equal(normalizeClientText("251   555    0100"), "251 555 0100");
-  // NFKC first, then the invisible formatting characters go, then spaces.
-  assert.equal(normalizeClientText("２５１－５５５"), "251-555");
-  assert.equal(normalizeClientText("Suite­ 2‍1⁠0᠎"), "Suite 210");
-  assert.equal(normalizeClientText("Ｂayside　Medical Plaza﻿"), "Bayside Medical Plaza");
-  for (const invisible of ["­", "᠎", "​", "‌", "‍", "‎", "‏", "⁠", "⁡", "⁤", "﻿"]) {
-    assert.equal(clientTextViolation(`251${invisible}555${invisible}0100`), "phone", JSON.stringify(invisible));
-    assert.equal(clientTextViolation(invisible.repeat(3)), "empty", JSON.stringify(invisible));
+  // NFKC, then space runs collapse to one space: the text a browser shows and
+  // the PDF prints.
+  assert.equal(normalizeClientText("\u00a0 Suite\u2009\u2009210 \u202f"), "Suite 210");
+  assert.equal(normalizeClientText("251\u00a0\u00a0\u00a0555    0100"), "251 555 0100");
+  assert.equal(normalizeClientText("\uff12\uff15\uff11\uff0d\uff15\uff15\uff15"), "251-555");
+  assert.equal(normalizeClientText("\uff22ayside\u3000Medical Plaza"), "Bayside Medical Plaza");
+  // The character allowlist: the review's blocker, displayed as "Gate code
+  // 4411" and as an internal note, is refused by its first code point.
+  assert.equal(clientTextViolation("\u202e1144 edoc etaG"), "character:U+202E");
+  assert.equal(clientTextViolation("\u202etegdub no thgit si tneilc :eton lanretnI"), "character:U+202E");
+  for (const cp of [0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069, 0x061c, 0x200b, 0x200c, 0x200d, 0x200e, 0x200f,
+    0x00ad, 0x180e, 0x2060, 0x2064, 0xfeff, 0xfe00, 0xfe0f, 0x034f, 0x180b, 0x180d, 0x3164, 0x115f, 0x1160, 0x17b4, 0x17b5, 0x2800,
+    0x0660, 0x06f0, 0x2010, 0x2011, 0x2012, 0x2015, 0x2212, 0x00b7, 0x2027, 0x2043, 0x2044, 0x0300, 0x20e3, 0x2028, 0x1680, 0x00f7,
+    0xe0001, 0xe0020, 0xe007f, 0xe0100, 0x1f3e5, 0x1ccf0, 0xa7f1]) {
+    const hex = cp.toString(16).toUpperCase().padStart(4, "0");
+    assert.equal(clientTextViolation(`Suite ${String.fromCodePoint(cp)}210`), `character:U+${hex}`, hex);
   }
-  for (const dash of ["‐", "‑", "‒", "–", "—", "―", "−", "﹘", "﹣", "－"]) {
-    assert.equal(clientTextViolation(`251${dash}555${dash}0100`), "phone", JSON.stringify(dash));
-    assert.equal(clientTextViolation(`Owner 251 ${dash} 555 ${dash} 0100`), "phone", JSON.stringify(dash));
-    assert.equal(clientTextViolation(`cell 555${dash}0100`), "local_phone", JSON.stringify(dash));
-    assert.equal(clientTextViolation(`Suites 101${dash}104 contiguous`), null, JSON.stringify(dash));
-  }
+  // What the allowlist admits.
+  for (const value of ["Caf\u00e9 \u00c5 \u0141\u00f3d\u017a \u017f", "\u201cA\u201d \u2018b\u2019 \u2013 \u2014 \u2022 \u2026 \u00a7 1 \u00b0 \u00b1 \u00d7 2"])
+    assert.equal(clientTextViolation(value), null, value);
+  // A character newer than PostgreSQL's Unicode version is refused before NFKC
+  // could fold it one way here and another way there.
+  assert.equal(firstDisallowedCodePoint("\u{1ccf5}"), "U+1CCF5");
+  assert.equal(firstDisallowedCodePoint("\u2460"), "U+2460");
+  assert.equal(firstDisallowedCodePoint("\u0149"), "U+02BC");
+  assert.equal(firstDisallowedCodePoint("\uff21\u00a0\u3000"), null);
   // Only a 3-3-4 group joins across wide separators; years and counts do not.
   assert.equal(clientTextViolation("Renovated 2021 - 2026 (12 suites)"), null);
   assert.equal(clientTextViolation("Owner 251 - 555 - 0100"), "phone");
   assert.equal(clientTextViolation("251 . . 555 . . 0100"), "phone");
   assert.equal(clientTextViolation("251 ( 555 ) 0100"), "phone");
-  // A slash, underscore or comma joins only one-character 3-3-4 groups.
-  for (const sep of ["/", "_", ","]) assert.equal(clientTextViolation(`251${sep}555${sep}0100`), "phone", sep);
+  assert.equal(clientTextViolation("251 x 555 x 0100"), "phone");
+  // One-character separators join only 3-3-4 groups.
+  for (const sep of ["/", "_", ",", "~", "|", ":", "*", "\u2022"]) assert.equal(clientTextViolation(`251${sep}555${sep}0100`), "phone", sep);
   assert.equal(clientTextViolation("Suites 201-204, 1200 SF"), null);
   assert.equal(clientTextViolation("120,000 SF"), null);
-  // word@word is an email with or without a dotted domain; a spaced @ before a
-  // price is not.
-  assert.equal(clientTextViolation("bob@landlord"), "email");
-  assert.equal(clientTextViolation("bob＠landlord"), "email");
-  assert.equal(clientTextViolation("4,200 RSF @ $28.50"), null);
+  assert.equal(clientTextViolation("Time: 10:30 am tours"), null);
+  // Email: a word against an @ (one side may be spaced), (at)/[at] before a
+  // domain; a spaced @ before a price or a word is not one.
+  for (const value of ["bob@landlord", "bob @landlord", "bob@ landlord", "bob\uff20landlord", "bob(at)landlord.co", "bob [at] landlord.health"])
+    assert.equal(clientTextViolation(value), "email", value);
+  for (const value of ["4,200 RSF @ $28.50", "Rate @ market"]) assert.equal(clientTextViolation(value), null, value);
+  // Domains: the wider ending list, a spaced .com, and "dot com".
+  for (const value of ["landlord.realty", "bayside.health", "landlord.co", "bayside.clinic", "landlord .com", "landlord. com", "bob at landlord dot com", "landlord [dot] org"])
+    assert.equal(clientTextViolation(value), "url", value);
+  for (const value of ["Hwy 90.US 29 corner", "Dept. Health offices nearby", "Baldwin Co. Care Center"]) assert.equal(clientTextViolation(value), null, value);
   // The documented residuals are still allowed; pinned so a change is visible.
   assert.ok(CORPUS.residual.length >= 7);
   for (const value of CORPUS.residual) assert.equal(clientTextViolation(value), null, JSON.stringify(value));
   // The cap is measured on that text: a padded 120-character value passes.
-  assert.equal(clientTextViolation(` ${"A".repeat(CLIENT_TEXT_MAX_CHARS)} `), null);
-  assert.equal(clientTextViolation(`A${" ".repeat(10)}${"A".repeat(CLIENT_TEXT_MAX_CHARS - 2)}`), null);
+  assert.equal(clientTextViolation(`\u00a0${"A".repeat(CLIENT_TEXT_MAX_CHARS)}\u00a0`), null);
+  assert.equal(clientTextViolation(`A${"\u00a0".repeat(10)}${"A".repeat(CLIENT_TEXT_MAX_CHARS - 2)}`), null);
   for (const value of SMUGGLED) assert.equal(isClientSafeText(value), false, JSON.stringify(value));
   for (const label of ["A", "B", "12", "A1"]) assert.equal(isClientRouteLabel(label), true, label);
   for (const label of ["Stop 1", "ABCD", "", " A", "A-", "Stop A: Owner Bob 251-555-0100", null])
     assert.equal(isClientRouteLabel(label), false, String(label));
 });
 
+// The code points the sweep judges: every BMP code point but the surrogates,
+// and a sample of the astral planes (every 251st, plus the tags, the variation
+// selector supplement, the mathematical digits, the digit-comma forms, the
+// outlined digits and an emoji). The Postgres proof judges the same list.
+function sweepCodePoints() {
+  const cps = [];
+  for (let cp = 1; cp <= 0xffff; cp++) if (cp < 0xd800 || cp > 0xdfff) cps.push(cp);
+  const astral = new Set();
+  for (let cp = 0x10000; cp <= 0x10ffff; cp += 251) astral.add(cp);
+  for (const [lo, hi] of [[0xe0000, 0xe007f], [0xe0100, 0xe01ef], [0x1d7ce, 0x1d7ff], [0x1f100, 0x1f10c], [0x1ccf0, 0x1ccf9], [0x1f3e5, 0x1f3e5]])
+    for (let cp = lo; cp <= hi; cp++) astral.add(cp);
+  return [...cps, ...[...astral].sort((a, b) => a - b)];
+}
+
+test("every BMP code point and an astral sample get the same verdict from both engines", () => {
+  const verdict = sweepCodePoints().map(cp => [cp, clientTextViolation(`a${String.fromCodePoint(cp)}a`)]);
+  const ranges = [];
+  for (const [cp, v] of verdict) {
+    if (v !== null) continue;
+    const last = ranges.at(-1);
+    if (last && last[1] === cp - 1) last[1] = cp; else ranges.push([cp, cp]);
+  }
+  const allow = ranges.map(([lo, hi]) => lo === hi ? lo.toString(16) : `${lo.toString(16)}-${hi.toString(16)}`).join(",");
+  const full = crypto.createHash("md5").update(verdict.map(([cp, v]) => `${cp.toString(16)}=${v ?? ""}`).join(",")).digest("hex");
+  // Only allowlisted characters (and the spaces and full-width ASCII NFKC
+  // folds into them) are admitted.
+  assert.equal(allow, "20-3f,41-7e,a0,a7,b0-b1,c0-f6,f8-13e,141-148,14a-17f,2000-200a,2013-2014,2018-2019,201c-201d,2022,2026,202f,205f,3000,ff01-ff1f,ff21-ff5e");
+  const proof = fs.readFileSync(path.join(root, "mcp-server/test/tour-client-share-allowlist-postgres.sql"), "utf8");
+  assert.ok(proof.includes(`if v_allow is distinct from '${allow}' then`), "the proof pins the same allowed set");
+  assert.ok(proof.includes(`if md5(v_full) <> '${full}' then`), "the proof pins the same verdict for every swept code point");
+});
+
 // How the proof spells a corpus string: a plain literal, or a U&'' literal
-// with \XXXX escapes when it holds anything beyond printable ASCII (the
-// no-break and thin spaces, en dashes and ± of the corpus).
+// with \XXXX escapes when it holds anything beyond printable ASCII.
 function sqlLiteral(value) {
   if (/^[\x20-\x7e]*$/.test(value)) return `'${value.replaceAll("'", "''")}'`;
   const body = Array.from(value).map(ch => {
@@ -381,7 +430,7 @@ test("the Postgres proof runs the same corpus through the database rule", () => 
   const proof = fs.readFileSync(path.join(root, "mcp-server/test/tour-client-share-allowlist-postgres.sql"), "utf8");
   const literal = sqlLiteral;
   for (const value of ORDINARY) assert.ok(proof.includes(literal(value)), `proof lacks ordinary ${value}`);
-  for (const [value, rule] of CORPUS.refused)
+  for (const [value, rule] of [...CORPUS.refused, ...CORPUS.known_refused])
     assert.ok(proof.includes(`(${literal(value)},${literal(rule)})`), `proof lacks refused ${value} -> ${rule}`);
   const residual = proof.split("  -- The documented residuals", 2)[1]?.split("end loop;", 1)[0];
   assert.ok(residual, "proof pins the documented residuals");
@@ -422,14 +471,17 @@ test("the JavaScript value rule and the database value rule are the same text", 
   assert.deepEqual(sqlRules.map(({ rule, target, pattern }) => ({ rule, target, pattern })), CLIENT_TEXT_RULES.map(entry => ({ ...entry })));
   assert.ok(migration.includes(`select '${CLIENT_TEXT_DIGIT_JOIN.pattern}'::text`), "digit join pattern parity");
   assert.ok(migration.includes(`select '${CLIENT_TEXT_SUITE_RANGE.pattern}'::text`), "suite range pattern parity");
-  assert.ok(migration.includes(`select '${CLIENT_TEXT_SPACE_RUN}'::text`), "space run pattern parity");
-  assert.ok(migration.includes(`select '${CLIENT_TEXT_FORMAT_CHARS}'::text`), "format characters pattern parity");
+  assert.ok(migration.includes(`select '${CLIENT_TEXT_DISALLOWED}'::text`), "character allowlist parity");
+  assert.ok(migration.includes(`select '${CLIENT_TEXT_DISALLOWED_SOURCE}'::text`), "stored-value allowlist parity");
   assert.ok(migration.includes(`select '${CLIENT_TEXT_PHONE_JOIN.pattern}'::text`), "3-3-4 phone join pattern parity");
-  // NFKC, then formatting characters removed, then space runs, then the ends:
-  // the same order as normalizeClientText.
-  assert.match(sqlBody(migration, "tour_client_text_normalize").replace(/\s+/g, " "),
-    /regexp_replace\(regexp_replace\(regexp_replace\(normalize\(p_text, NFKC\), ops\.tour_client_text_format_chars_pattern\(\), '', 'g'\), ops\.tour_client_text_space_run_pattern\(\), ' ', 'g'\), '\^ \| \$', '', 'g'\)/, "normalize parity");
-  assert.match(sqlBody(migration, "tour_client_text_violation"), /from \(select ops\.tour_client_text_normalize\(p_text\) t\) n/);
+  // NFKC, then space runs, then the ends: the same order as normalizeClientText.
+  assert.ok(sqlBody(migration, "tour_client_text_normalize").includes(
+    "regexp_replace(regexp_replace(normalize(p_text, NFKC), ' +', ' ', 'g'), '^ | $', '', 'g')"), "normalize parity");
+  // The stored value first, then NFKC(value), each against its set.
+  assert.match(sqlBody(migration, "tour_client_text_violation").replace(/\s+/g, " "),
+    /coalesce\(substring\(p_text from ops\.tour_client_text_disallowed_source_pattern\(\)\), substring\(normalize\(p_text, NFKC\) from ops\.tour_client_text_disallowed_pattern\(\)\)\) bad/);
+  assert.ok(sqlBody(migration, "tour_client_text_violation").includes("when p_text ~ '[\\u0001-\\u001f\\u007f-\\u009f]' then 'control_character'"), "control parity");
+  assert.match(sqlBody(migration, "tour_client_text_violation"), /\(select ops\.tour_client_text_normalize\(p_text\) t\) n\)/);
   const violation = sqlBody(migration, "tour_client_text_violation");
   assert.ok(violation.replace(/\s+/g, " ").includes(`regexp_replace(regexp_replace(n.t, ops.tour_client_text_phone_join_pattern(), '${CLIENT_TEXT_PHONE_JOIN.replacement.replace(/\$(\d)/g, "\\$1")}', 'g'), ops.tour_client_text_digit_join_pattern(), '${CLIENT_TEXT_DIGIT_JOIN.replacement.replace("$1", "\\1")}', 'g')`), "digits target parity");
   assert.ok(violation.includes(`ops.tour_client_text_suite_range_pattern(), '${CLIENT_TEXT_SUITE_RANGE.replacement.replace("$1", "\\1")}', 'gi')`));
@@ -519,10 +571,10 @@ test("the PDF renderer admits exactly the client allowlist and refuses the same 
   assert.throws(() => renderTourPacket({ ...packet, properties: [{ ...cleanStop, parking: "P".repeat(CLIENT_TEXT_MAX_CHARS + 1) }] }), refused("tour_packet_overflow"));
   assert.throws(() => renderTourPacket({ ...packet, properties: [{ ...cleanStop, route_label: "Stop 1" }] }), refused("tour_packet_invalid_route_label"));
   // The PDF prints exactly the normalized text the rule judged: full-width
-  // letters folded, zero-width joiners and soft hyphens gone, spaces collapsed.
+  // letters folded, Unicode spaces read as spaces, space runs collapsed.
   const printed = renderTourPacket({ ...packet, properties: [{ ...cleanStop,
-    name: "\uff22ayside\u200d Medical\u00a0\u00a0Plaza",
-    parking: "Suite\u00ad 2\u20601\u200b0",
+    name: "\uff22ayside\u3000Medical\u00a0\u00a0Plaza",
+    parking: "Suite\u2009\u2009210\u202f",
     size: { value: 4200, unit: "\uff33\uff26" } }] }).facts.properties[0];
   assert.equal(printed.name, "Bayside Medical Plaza");
   assert.equal(printed.parking, "Suite 210");
