@@ -11,6 +11,7 @@ pg_dump/age pipeline, SQL observation, size floors and atomic promotion.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
@@ -20,6 +21,7 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -272,6 +274,204 @@ def refusal_case(
     return run
 
 
+def load_guard_module(guard_path: Path):
+    spec = importlib.util.spec_from_file_location("carr_backup_guard_direct", guard_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def case_stop_child_reap_timeout_still_cleans_up(root: Path, guard_path: Path = GUARD) -> None:
+    """Regression test for the encrypted_dump() finally-block cleanup.
+
+    stop_child() kills a still-running dump/age child with SIGTERM, then
+    SIGKILL if that doesn't reap it in time. Reaping a just-SIGKILL'd child
+    can itself time out under real system load — this is exactly what
+    produced the original flake: an unguarded second `child.wait(timeout=2)`
+    call let subprocess.TimeoutExpired escape stop_child(), which escaped
+    encrypted_dump()'s finally block BEFORE temporary.unlink() ran, leaving
+    a private ciphertext temp file behind and masking the guard's real
+    BackupError.
+
+    This mocks subprocess.Popen.wait(timeout=...) to always raise
+    TimeoutExpired (simulating that slow-reap condition deterministically,
+    regardless of real host load) and os.killpg to a no-op (so this proves
+    only the exception-handling control flow, not real signal delivery).
+    Against the pre-fix code this fails: either the private temp file
+    survives, or the original 'synthetic guard deadline' error is replaced
+    by an uncaught TimeoutExpired. Against the fixed code both symptoms are
+    gone.
+    """
+    real = load_guard_module(guard_path)
+
+    case = root / "stop-child-reap-timeout"
+    out = case / "out"
+    case.mkdir()
+    out.mkdir()
+    fake_bin = case / "fake-bin"
+    fake_bin.mkdir()
+
+    dump_started = case / "dump.started"
+    age_started = case / "age.started"
+
+    # A pg_dump that outlives the guard's refusal, so stop_child() still
+    # finds it alive (poll() is None) when the finally block runs.
+    executable(fake_bin / "pg_dump", """#!/usr/bin/env python3
+import os
+import time
+from pathlib import Path
+Path(os.environ["CARR_TEST_DUMP_STARTED"]).write_text("started", encoding="utf-8")
+time.sleep(2)
+""")
+    executable(fake_bin / "age", """#!/usr/bin/env python3
+import os
+import sys
+from pathlib import Path
+Path(os.environ["CARR_TEST_AGE_STARTED"]).write_text("started", encoding="utf-8")
+sys.stdin.buffer.read()
+""")
+
+    class FakeGuard:
+        def __init__(self) -> None:
+            self.dsn = DSN
+            self.snapshot = "00000003-00000001-1"
+            self.tables: list[dict] = []
+            self.acks = 0
+
+        def ack(self) -> None:
+            self.acks += 1
+            if dump_started.exists() and age_started.exists():
+                raise real.BackupError("synthetic guard deadline")
+
+    output = out / "carr-test.sql.age"
+    recipient = "age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
+
+    env_patch = {
+        "CARR_TEST_DUMP_STARTED": str(dump_started),
+        "CARR_TEST_AGE_STARTED": str(age_started),
+        "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}",
+    }
+
+    original_wait = subprocess.Popen.wait
+
+    def wait_times_out_when_given_a_timeout(self, timeout=None):
+        if timeout is not None:
+            raise subprocess.TimeoutExpired(cmd=getattr(self, "args", "?"), timeout=timeout)
+        return original_wait(self, timeout=timeout)
+
+    raised: BaseException | None = None
+    with mock.patch.dict(os.environ, env_patch), \
+         mock.patch.object(subprocess.Popen, "wait", wait_times_out_when_given_a_timeout), \
+         mock.patch("os.killpg"):
+        try:
+            real.encrypted_dump(FakeGuard(), output, recipient, str(fake_bin / "pg_dump"), 10000, 0.01)
+        except BaseException as exc:  # capture ANY exception, including a masking one
+            raised = exc
+
+    assert raised is not None, "stop-child-reap-timeout: encrypted_dump unexpectedly succeeded"
+    assert isinstance(raised, real.BackupError), (
+        f"stop-child-reap-timeout: original BackupError was masked by cleanup: {raised!r}"
+    )
+    assert "synthetic guard deadline" in str(raised), (
+        f"stop-child-reap-timeout: unexpected error content: {raised!r}"
+    )
+
+    leftovers = [p for p in out.iterdir() if p.name.startswith(".") and p.name.endswith(".tmp")]
+    assert not leftovers, f"stop-child-reap-timeout: private temp file leaked: {leftovers}"
+
+
+def case_finally_survives_stop_child_raising(root: Path, guard_path: Path = GUARD) -> None:
+    """Regression test for encrypted_dump()'s cleanup structure itself.
+
+    stop_child() is now hardened to never raise (see
+    case_stop_child_reap_timeout_still_cleans_up), but encrypted_dump()'s
+    finally block was ALSO changed to give each cleanup step its own
+    try/finally, specifically so a future/unknown failure in one step can
+    never skip the ones after it. That structure is only exercised when a
+    cleanup step actually raises — which the fixed stop_child() no longer
+    does — so this test forces the issue directly: it monkeypatches
+    real.stop_child itself to raise an arbitrary exception, and checks that
+    temporary.unlink() still runs and the guard's original BackupError is
+    still what propagates (not the injected stop_child failure). Against a
+    version of encrypted_dump() with a single flat
+    `stop_child(dump); stop_child(age); pump.join(...); temporary.unlink()`
+    finally (no nested try/finally), this fails — the injected exception
+    replaces the original error and skips the unlink. Against the fixed
+    nested structure it passes.
+    """
+    real = load_guard_module(guard_path)
+
+    case = root / "finally-survives-stop-child-raising"
+    out = case / "out"
+    case.mkdir()
+    out.mkdir()
+    fake_bin = case / "fake-bin"
+    fake_bin.mkdir()
+
+    dump_started = case / "dump.started"
+    age_started = case / "age.started"
+
+    executable(fake_bin / "pg_dump", """#!/usr/bin/env python3
+import os
+import time
+from pathlib import Path
+Path(os.environ["CARR_TEST_DUMP_STARTED"]).write_text("started", encoding="utf-8")
+time.sleep(2)
+""")
+    executable(fake_bin / "age", """#!/usr/bin/env python3
+import os
+import sys
+from pathlib import Path
+Path(os.environ["CARR_TEST_AGE_STARTED"]).write_text("started", encoding="utf-8")
+sys.stdin.buffer.read()
+""")
+
+    class FakeGuard:
+        def __init__(self) -> None:
+            self.dsn = DSN
+            self.snapshot = "00000003-00000001-1"
+            self.tables: list[dict] = []
+            self.acks = 0
+
+        def ack(self) -> None:
+            self.acks += 1
+            if dump_started.exists() and age_started.exists():
+                raise real.BackupError("synthetic guard deadline")
+
+    output = out / "carr-test.sql.age"
+    recipient = "age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
+
+    env_patch = {
+        "CARR_TEST_DUMP_STARTED": str(dump_started),
+        "CARR_TEST_AGE_STARTED": str(age_started),
+        "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}",
+    }
+
+    def stop_child_always_raises(child):
+        raise RuntimeError("injected: pretend stop_child misbehaves")
+
+    raised: BaseException | None = None
+    with mock.patch.dict(os.environ, env_patch), \
+         mock.patch.object(real, "stop_child", stop_child_always_raises):
+        try:
+            real.encrypted_dump(FakeGuard(), output, recipient, str(fake_bin / "pg_dump"), 10000, 0.01)
+        except BaseException as exc:  # capture ANY exception, including a masking one
+            raised = exc
+
+    assert raised is not None, "finally-survives-stop-child-raising: encrypted_dump unexpectedly succeeded"
+    assert isinstance(raised, real.BackupError), (
+        f"finally-survives-stop-child-raising: original BackupError was masked "
+        f"by the injected stop_child failure: {raised!r}"
+    )
+    assert "synthetic guard deadline" in str(raised), (
+        f"finally-survives-stop-child-raising: unexpected error content: {raised!r}"
+    )
+
+    leftovers = [p for p in out.iterdir() if p.name.startswith(".") and p.name.endswith(".tmp")]
+    assert not leftovers, f"finally-survives-stop-child-raising: private temp file leaked: {leftovers}"
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="carr-backup-wrapper-selftest-") as raw:
         root = Path(raw)
@@ -345,9 +545,12 @@ def main() -> int:
         )
         assert "synthetic guard deadline" in hung.stderr, hung.stderr
 
+        case_stop_child_reap_timeout_still_cleans_up(root)
+        case_finally_survives_stop_child_raising(root)
+
     print(
         "backup-dump-selftest: real helper pipeline argv/env, passthrough, failures, "
-        "deadline, floors and survivor passed"
+        "deadline, floors, survivor and reap-timeout cleanup passed"
     )
     return 0
 

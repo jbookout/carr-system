@@ -364,20 +364,39 @@ class DumpObserver:
 
 
 def stop_child(child: subprocess.Popen | None) -> None:
+    # Nothing here may raise past this function: it runs from
+    # encrypted_dump()'s finally block, where an escaping exception would
+    # skip the cleanup steps after it (in particular temporary.unlink(),
+    # which must always run) and can replace/mask the real BackupError the
+    # caller is already propagating. Besides ProcessLookupError (the pid
+    # is already gone), os.killpg can also raise PermissionError -- e.g. if
+    # the pid was reaped and reused between our poll() check and the
+    # signal, or under a sandboxing layer that restricts signalling -- so
+    # every OS-level failure here is caught broadly (OSError) and reported
+    # rather than left to propagate.
     if child is None or child.poll() is not None:
         return
     try:
         os.killpg(child.pid, signal.SIGTERM)
-    except ProcessLookupError:
+    except OSError as exc:
+        print(f'backup-guard: could not SIGTERM child pid {child.pid}: {exc}', file=sys.stderr)
+    try:
+        child.wait(timeout=2)
+        return
+    except subprocess.TimeoutExpired:
         pass
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except OSError as exc:
+        print(f'backup-guard: could not SIGKILL child pid {child.pid}: {exc}', file=sys.stderr)
     try:
         child.wait(timeout=2)
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(child.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        child.wait(timeout=2)
+        # Under real system load, reaping a just-SIGKILL'd child can still
+        # time out. Report it rather than silently swallowing a child we
+        # could not confirm dead.
+        print(f'backup-guard: could not reap child pid {child.pid} after SIGKILL',
+              file=sys.stderr)
 
 
 def dump_connection(dsn: str) -> tuple[dict[str, str], str]:
@@ -468,11 +487,34 @@ def encrypted_dump(guard: Guard, output: Path, recipient: str, pg_dump: str,
             return {'file': str(output), 'bytes': size, 'floor': floor,
                     'table_count': len(observer.seen)}
     finally:
-        stop_child(dump)
-        stop_child(age)
-        if pump is not None:
-            pump.join(timeout=2)
-        temporary.unlink(missing_ok=True)
+        # Every cleanup step runs, unconditionally, and NONE of them may
+        # replace whatever the `try` block above is already propagating (a
+        # BackupError, or a clean return). A bare nested try/finally does
+        # NOT give that guarantee: if one of these steps raises while an
+        # earlier exception is already unwinding, Python has the new
+        # exception replace/mask the original -- exactly the failure mode
+        # this is guarding against, just moved one level up. stop_child()
+        # itself is hardened not to raise (see its own comment), but this
+        # is the second, independent line of defense: even an unexpected
+        # failure here is reported, never raised past this function.
+        cleanup_failures: list[tuple[str, BaseException]] = []
+
+        def cleanup_step(description: str, action) -> None:
+            try:
+                action()
+            except BaseException as exc:  # noqa: BLE001 - see comment above
+                cleanup_failures.append((description, exc))
+
+        cleanup_step('stop dump child', lambda: stop_child(dump))
+        cleanup_step('stop age child', lambda: stop_child(age))
+        cleanup_step('join transfer thread',
+                     lambda: pump.join(timeout=2) if pump is not None else None)
+        cleanup_step('remove private temp file',
+                     lambda: temporary.unlink(missing_ok=True))
+
+        for description, exc in cleanup_failures:
+            print(f'backup-guard: cleanup step failed ({description}): {exc!r}',
+                  file=sys.stderr)
 
 
 def main() -> int:
