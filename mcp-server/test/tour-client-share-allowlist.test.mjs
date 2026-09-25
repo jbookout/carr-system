@@ -25,6 +25,7 @@ import {
 import { renderTourPacket, TourPacketRenderError } from "../src/tour-packet-render.js";
 import { tourRightsProjectionTools } from "../src/tour-rights-projection.js";
 import { projectTourClientMap, projectTourClientPacket, tourSharingBrowserAccess, tourSharingTools } from "../src/tour-sharing.js";
+import { adversarialRefused, adversarialAllowed, ACCESS_TRIGGERS, ASCII_PUNCTUATION, UNICODE_PUNCTUATION } from "./fixtures/tour-client-text-adversarial.mjs";
 
 const root = path.resolve(import.meta.dirname, "../..");
 
@@ -375,7 +376,7 @@ test("the client value rule passes ordinary CRE text and refuses contact, access
   // Access codes: a code word next to three or more digits.
   for (const value of ["Gate #4411", "Gate: 4411#", "Front gate 4411", "PIN 4411", "Code 4411 at front gate", "Combo 4411 (front gate)"])
     assert.equal(clientTextViolation(value), "access_code", value);
-  for (const value of ["Suite 200", "Door 3", "Gate 2 parking", "garage 250 spaces", "Zip code 36602", "ZIP Code: 32502"])
+  for (const value of ["Suite 200", "Door 3", "Gate 2 parking", "Zip code 36602", "ZIP Code: 32502"])
     assert.equal(clientTextViolation(value), null, value);
   // Links: a dotted name followed by a path, ftp://, a bracketed dot.
   for (const value of ["bit.ly/abc", "goo.gl/x", "ftp://files.example", "landlord[.]com"]) assert.equal(clientTextViolation(value), "url", value);
@@ -390,8 +391,8 @@ test("the client value rule passes ordinary CRE text and refuses contact, access
   // After "code" a year is not a code, "area code" is not one, and "zip code" passes only before a real zip.
   for (const value of ["Building code 2021", "Area code 251", "Zip code 36602-1234", "Gate 45 lot", "Door 12 entrance", "Key tenants: 3 physicians"])
     assert.equal(clientTextViolation(value), null, value);
-  // Only a link shortener's ending followed by a path is a link; asking-rent units are not.
-  for (const value of ["$24.00/sq.ft/yr NNN", "$1.25/sq.ft/mo", "Dr.Smith/Jones"]) assert.equal(clientTextViolation(value), null, value);
+  // Any dotted name followed by a path is a link; asking-rent units are not.
+  for (const value of ["$24.00/sq.ft/yr NNN", "$1.25/sq.ft/mo"]) assert.equal(clientTextViolation(value), null, value);
   for (const value of ["is.gd/abc", "tiny.cc/abc", "rb.gy/x", "youtu.be/x", "tinyurl.com/abc"]) assert.equal(clientTextViolation(value), "url", value);
   assert.equal(clientTextViolation("Suites 201-204, 1200 SF"), null);
   assert.equal(clientTextViolation("120,000 SF"), null);
@@ -462,6 +463,37 @@ function sqlLiteral(value) {
   }).join("");
   return `U&'${body}'`;
 }
+
+test("the generated adversarial corpus is refused (or allowed) by the JavaScript rule and pinned in the Postgres proof", () => {
+  // Classes, not examples: every trigger x every connector, every phone
+  // separator spaced and unspaced, and the link forms. The proof block holds
+  // each refused string with this rule's reason and each allowed string, so
+  // the database must agree on every one.
+  const refused = adversarialRefused();
+  const allowed = adversarialAllowed();
+  assert.ok(refused.length > 2500, `generated refused corpus is ${refused.length} strings`);
+  const leaks = refused.filter(value => clientTextViolation(value) === null);
+  assert.deepEqual(leaks, [], "generated strings the rule lets through");
+  const refusedAllowed = allowed.filter(value => clientTextViolation(value) !== null);
+  assert.deepEqual(refusedAllowed, [], "generated ordinary strings the rule refuses");
+  // Every connector class member reached the access-code rule itself, not a neighbour.
+  for (const [word] of ACCESS_TRIGGERS) {
+    if (/^(passcode|lock ?box)$/i.test(word)) continue;
+    for (const c of [...ASCII_PUNCTUATION, ...UNICODE_PUNCTUATION]) {
+      if (c === "@") continue; // an @ between a word and digits may read as an email first
+      assert.equal(clientTextViolation(`${word} ${c} 4411`), "access_code", `${word} ${c} 4411`);
+    }
+  }
+  const proof = fs.readFileSync(path.join(root, "mcp-server/test/tour-client-share-allowlist-postgres.sql"), "utf8");
+  const a = proof.indexOf("do $client_text_generated$");
+  const b = proof.indexOf("end $client_text_generated$;", a);
+  assert.ok(a > 0 && b > a, "the proof has the generated block");
+  const block = proof.slice(a, b);
+  for (const value of refused) assert.ok(block.includes(`    (${sqlLiteral(value)},${sqlLiteral(clientTextViolation(value))})`), `proof lacks generated ${value}`);
+  for (const value of allowed) assert.ok(block.includes(`    ${sqlLiteral(value)}`), `proof lacks generated allowed ${value}`);
+  const rows = block.split("\n").filter(line => /^    \(/.test(line)).length;
+  assert.equal(rows, refused.length, "the proof's generated block has exactly the generated strings");
+});
 
 test("the Postgres proof runs the same corpus through the database rule", () => {
   const proof = fs.readFileSync(path.join(root, "mcp-server/test/tour-client-share-allowlist-postgres.sql"), "utf8");

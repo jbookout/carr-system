@@ -55,12 +55,12 @@
 --      PDF prints -- and applies: email (a dotted domain after an @, a word
 --      against an @, (at)/[at] before a domain), url (including .realty,
 --      .health, .co and the other listed endings, a spaced .com, and
---      "dot com", ftp://, landlord[.]com, and a link shortener's name
---      followed by a path such as bit.ly/abc or is.gd/x; "$24.00/sq.ft/yr"
---      passes), phone (ten digits however grouped: 251 555 01 00,
---      251 . . 555 . . 0100, 251 / 555 / 0100, 251 | 555 | 0100, 251?555?0100,
---      a bullet, multiplication, plus-minus, degree, section or quote
---      sign between the groups, (251)5550100; only
+--      "dot com", ftp://, landlord[.]com, the newer and shortener endings
+--      (.xyz, .estate, .in, .to, .ly ...), and ANY dotted name followed by a
+--      path such as linktr.ee/bob, except a unit abbreviation before the
+--      slash: "$24.00/sq.ft/yr" passes), phone (ten digits however grouped:
+--      251 555 01 00, 251 # 555 # 0100, 251@555@0100, any run of up to six
+--      non-alphanumerics or x between the groups, (251)5550100; only
 --      the 3-3-4 shape joins across wide separators, so "Renovated 2021 -
 --      2026 (12 suites)" passes), local_phone (555-0100, 555 - 0100;
 --      a dash range after a suite word whose second number has no leading
@@ -68,12 +68,16 @@
 --      not), international_phone (+44 ..., + 44 ..., 011 44 ...),
 --      access_code (gate/door/key/entry/alarm/
 --      keypad/lock + code/combo/PIN/password, as whole words; or a
---      gate/door/keypad/alarm/lock/combo/PIN/passcode/key/entry/access/code
---      word before three or more digits, joined by up to four of space : # =
---      * quotes ( [ and dashes with an optional "is" or "no.": "Gate: #4411",
---      "PIN is 4411", "Gate (4411)"; not a year after "code" ("Building code
---      2021"), not "area code 251", and "zip code" only before a real zip:
---      "Zip code 36602" passes, "Zip code 4411" does not), lockbox,
+--      trigger word (gate, code, PIN, combo, key, entry, access, call box,
+--      entrance, password, passcode, security, box, lockbox, keypad, alarm,
+--      supra, garage, door, lock; plurals too) before three or more digits,
+--      joined by up to six non-alphanumerics with an optional is/no/number/
+--      num, the digits possibly split ("Gate. 4411", "Gate number 4411",
+--      "Gate: 4-4-1-1"). A 19xx/20xx year followed by a building-event word
+--      is a year ("Alarm 2021 upgrade"); a bare year is a code ("Code: 2021")
+--      except after a code-book name ("Building code 2021"); "24/7" is a
+--      schedule; "area code" passes only before exactly three plain digits
+--      and "zip code" only before a real zip), lockbox,
 --      internal_note, too_long (120), control_character, empty. The rules
 --      are whole-word and number-aware so ordinary listing text ("Westgate
 --      Pines", "4,200 RSF @ $28.50/SF", "Fire alarm system upgraded 2025",
@@ -134,15 +138,15 @@ create or replace function ops.tour_client_text_disallowed_source_pattern()
 returns text language sql immutable parallel safe as $$ select '[^ -~\u00a0\u00a7\u00b0\u00b1\u00c0-\u00f6\u00f8-\u013e\u0141-\u0148\u014a-\u017f\u2000-\u200a\u2010\u2011\u2013\u2014\u2018\u2019\u201c\u201d\u2022\u2026\u202f\u205f\u3000\uff01-\uff5e]'::text $$;
 
 -- Before the phone rules read a value, a number shaped 3-3-4 is joined across
--- separators of up to five characters of space ( ) . x, a dash, / | : * ~ _ ;
--- + and the allowlisted symbols (multiplication sign, bullet, plus-minus,
--- degree, section sign, straight and curly quotes), listed one by one, or
--- across exactly one of , ! ? & = ^ $ % \ ` { } < > (251 . . 555 . . 0100,
--- 251 / 555 / 0100, 251?555?0100). The comma joins only alone. Only
+-- any run of up to six characters that are not a letter or a digit, and the
+-- letter x: a class, not a list (251 # 555 # 0100, 251@555@0100,
+-- 251 x 555 x 0100). Six, because the fold makes a doubled ellipsis six dots.
+-- A run starting with a comma and a space is a list and does not join
+-- ("Suites 201-204, 1200 SF"); 251,555,0100 and 251 , 555 , 0100 do. Only
 -- that shape joins across wide separators, so year and count ranges
 -- ("Renovated 2021 - 2026 (12 suites)") and thousands (120,000 SF) do not.
 create or replace function ops.tour_client_text_phone_join_pattern()
-returns text language sql immutable parallel safe as $$ select '(^|[^0-9])([0-9]{3})(?:[ ().xX\u00d7\u2022\u00b1\u00b0\u00a7\u2018\u2019\u201c\u201d"''/|:*~_;+\u2013\u2014-]{0,5}|[,!?&=^$%\\`{}<>])([0-9]{3})(?:[ ().xX\u00d7\u2022\u00b1\u00b0\u00a7\u2018\u2019\u201c\u201d"''/|:*~_;+\u2013\u2014-]{0,5}|[,!?&=^$%\\`{}<>])([0-9]{4})(?![0-9])'::text $$;
+returns text language sql immutable parallel safe as $$ select '(^|[^0-9])([0-9]{3})(?!, )[^A-WYZa-wyz0-9]{0,6}([0-9]{3})(?!, )[^A-WYZa-wyz0-9]{0,6}([0-9]{4})(?![0-9])'::text $$;
 
 -- Then digits separated by one or two of space . and a dash are joined
 -- (251 555 01 00, 1-251-555-0100).
@@ -166,11 +170,11 @@ returns table(ordinal integer, rule text, target text, pattern text)
 language sql immutable parallel safe as $$
   values
     (1, 'email', 'raw', '[A-Za-z0-9._%+-] ?@ ?[A-Za-z0-9_-]+([.][A-Za-z0-9_-]+)*[.][A-Za-z]{2,}|[A-Za-z0-9._%+-]( @|@ ?)[A-Za-z0-9_-]*[A-Za-z]|[A-Za-z0-9._%+-] ?[(\[] ?at ?[)\]] ?[A-Za-z0-9_-]+([.][A-Za-z0-9_-]+)*[.][A-Za-z]{2,}'),
-    (2, 'url', 'raw', '(https?|ftp)://|www[.]|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]*[.](com|net|org|io|biz|info|us|co|ai|app|realty|health|properties|homes|law|care|clinic|gov|edu|me)([^A-Za-z0-9]|$)|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]* ?[.] ?(com|net|org)([^A-Za-z0-9]|$)|(^|[^A-Za-z])[(\[]? ?dot ?[)\]]? ?(com|net|org|co)([^A-Za-z]|$)|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]* ?[(\[] ?[.] ?[)\]] ?[A-Za-z]{2,}|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]*[.](ly|gl|gd|cc|gy|be)/[A-Za-z0-9]'),
+    (2, 'url', 'raw', '(https?|ftp)://|www[.]|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]*[.](com|net|org|io|biz|info|us|co|ai|app|realty|health|properties|homes|law|care|clinic|gov|edu|me|xyz|site|online|link|page|tv|ca|uk|de|estate|land|group|llc|pro|ee|to|in|at|do|id|ly|gl|gd|cc|gy|be)([^A-Za-z0-9]|$)|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]* ?[.] ?(com|net|org)([^A-Za-z0-9]|$)|(^|[^A-Za-z])[(\[]? ?dot ?[)\]]? ?(com|net|org|co)([^A-Za-z]|$)|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]* ?[(\[] ?[.] ?[)\]] ?[A-Za-z]{2,}|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]*[.](?!(ft|yr|mo|sf|ac|mi|yd)/)[A-Za-z]{2,}/[A-Za-z0-9]'),
     (3, 'phone', 'digits', '(^|[^0-9])1?[2-9][0-9]{9}([^0-9]|$)'),
     (4, 'local_phone', 'nosuite', '(^|[^0-9])[2-9][0-9]{2} ?[.\u2013\u2014-] ?[0-9]{4}([^0-9]|$)'),
     (5, 'international_phone', 'digits', '[+] ?[0-9]{8,}|(^|[^0-9])(011|00)[1-9][0-9]{6,}([^0-9]|$)'),
-    (6, 'access_code', 'raw', '(^|[^A-Za-z])(gate|door|key|entry|garage|alarm|keypad|access|lock)[ -]?(codes?|combos?|combination|pins?|passwords?)([^A-Za-z]|$)|(^|[^A-Za-z])(gate|door|keypad|alarm|lock|combo|pin|passcode|key|entry|access)[ :#=*"''(\[\u201c\u201d\u2018\u2019\u2013\u2014-]{0,4}((is|no[.]?)[ :#=*"''(\[\u201c\u201d\u2018\u2019\u2013\u2014-]{0,4})?[0-9]{3,}|(^|[^A-Za-z])(?<!zip )(?<!zip)(?<!zip-)(?<!area )(?<!area)(?<!area-)code[ :#=*"''(\[\u201c\u201d\u2018\u2019\u2013\u2014-]{0,4}((is|no[.]?)[ :#=*"''(\[\u201c\u201d\u2018\u2019\u2013\u2014-]{0,4})?(?!(19|20)[0-9]{2}([^0-9]|$))[0-9]{3,}|(^|[^A-Za-z])zip[ -]?code[ :#=*"''(\[\u201c\u201d\u2018\u2019\u2013\u2014-]{0,4}((is|no[.]?)[ :#=*"''(\[\u201c\u201d\u2018\u2019\u2013\u2014-]{0,4})?(?![0-9]{5}(-[0-9]{4})?([^0-9]|$))[0-9]{3,}'),
+    (6, 'access_code', 'raw', '(^|[^A-Za-z])(gate|door|key|entry|garage|alarm|keypad|access|lock)[ -]?(codes?|combos?|combination|pins?|passwords?)([^A-Za-z]|$)|(^|[^A-Za-z])(gate|pin|combo|combination|key|entry|entries|access|call ?box|entrance|password|passcode|security|securities|lock ?box|box|keypad|alarm|supra|garage|door|lock)(e?s)?[^A-Za-z0-9]{0,6}((is|no|number|num)[^A-Za-z0-9]{0,6})?(?!(19|20)[0-9]{2}[^A-Za-z0-9]{1,3}(upgrad|renovat|remodel|retrofit|replac|install|updat|built|build|construct|lease|deliver|complet|edition|standard|complian|expan|refresh|addition|rebuil|conver|inspect|certif|vintage|budget))(?!24[^A-Za-z0-9]?7([^0-9]|$))[0-9]([^A-Za-z0-9]?[0-9]){2,}|(^|[^A-Za-z])(?<!zip )(?<!zip-)(?<!area )(?<!area-)(?<!building )(?<!fire )(?<!electrical )(?<!plumbing )(?<!mechanical )(?<!energy )(?<!zoning )(?<!safety )(?<!health )codes?[^A-Za-z0-9]{0,6}((is|no|number|num)[^A-Za-z0-9]{0,6})?(?!(19|20)[0-9]{2}[^A-Za-z0-9]{1,3}(upgrad|renovat|remodel|retrofit|replac|install|updat|built|build|construct|lease|deliver|complet|edition|standard|complian|expan|refresh|addition|rebuil|conver|inspect|certif|vintage|budget))(?!24[^A-Za-z0-9]?7([^0-9]|$))[0-9]([^A-Za-z0-9]?[0-9]){2,}|(^|[^A-Za-z])(building|fire|electrical|plumbing|mechanical|energy|zoning|safety|health) codes?[^A-Za-z0-9]{0,6}((is|no|number|num)[^A-Za-z0-9]{0,6})?(?!(19|20)[0-9]{2}([^0-9]|$))(?!(19|20)[0-9]{2}[^A-Za-z0-9]{1,3}(upgrad|renovat|remodel|retrofit|replac|install|updat|built|build|construct|lease|deliver|complet|edition|standard|complian|expan|refresh|addition|rebuil|conver|inspect|certif|vintage|budget))(?!24[^A-Za-z0-9]?7([^0-9]|$))[0-9]([^A-Za-z0-9]?[0-9]){2,}|(^|[^A-Za-z])zip[ -]?codes?[^A-Za-z0-9]{0,6}((is|no|number|num)[^A-Za-z0-9]{0,6})?(?![0-9]{5}(-[0-9]{4})?([^0-9]|$))[0-9]([^A-Za-z0-9]?[0-9]){2,}|(^|[^A-Za-z])area[ -]?codes?[^A-Za-z0-9]{0,6}((is|no|number|num)[^A-Za-z0-9]{0,6})?([0-9]{4}|[0-9]{1,3}[^A-Za-z0-9][0-9])'),
     (7, 'lockbox', 'raw', '(^|[^A-Za-z])(lock[ -]?box(es)?|passcodes?)([^A-Za-z]|$)'),
     (8, 'internal_note', 'raw', '(^|[^A-Za-z])(internal[ -]?(notes?|only|use)|confidential|do not (share|disclose)|broker[ -]only|not for (the )?clients?)([^A-Za-z]|$)')
 $$;

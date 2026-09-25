@@ -75,20 +75,20 @@ export const CLIENT_TEXT_DISALLOWED_SOURCE =
 const DASHES = "\\u2013\\u2014-";
 
 // Before the phone rules read a value, a number shaped 3-3-4 is joined across
-// separators of up to five characters of space ( ) . x, a dash, / | : * ~ _ ;
-// + and the allowlisted symbols x (U+00D7), bullet, plus-minus, degree,
-// section sign and the straight and curly quotes (251 . . 555 . . 0100,
-// 251 ( 555 ) 0100, 251 / 555 / 0100, 251 \u2022 555 \u2022 0100,
-// 251\u00d7555\u00d70100). They are listed one by one: a blanket
-// non-alphanumeric class would also join "Suites 201-204, 1200 SF". Or it is
-// joined across exactly one of , ! ? & = ^ $ % \ ` { } < > (251,555,0100,
-// 251?555?0100). A country code or
-// leading +1 in front stays outside the join and the ten digits still read as
-// a phone. Only the 3-3-4 shape joins across wide separators, so year and count
-// ranges do not ("Renovated 2021 - 2026 (12 suites)"), and a comma joins only
-// a single-comma 3-3-4 group, so thousands do not (120,000 SF).
+// any run of up to six characters that are not a letter or a digit, and the
+// letter x (251 # 555 # 0100, 251@555@0100, 251 x 555 x 0100,
+// 251 \u2022 555 \u2022 0100, 251 . . 555 . . 0100). It is a class, not a list:
+// every punctuation mark, symbol and space joins. Six, because the fold turns
+// the ellipsis into three dots and a doubled one into six. The one exception
+// is a run that starts with a comma and a space, which is a list: "Suites
+// 201-204, 1200 SF" does not join, while 251,555,0100 and 251 , 555 , 0100
+// do. Thousands (120,000 SF) never form the 3-3-4 shape. A country code or leading +1 stays
+// outside the join and the ten digits still read as a phone. Only the 3-3-4
+// shape joins across these runs, so year and count ranges do not ("Renovated
+// 2021 - 2026 (12 suites)").
+const PHONE_SEPARATOR = "(?!, )[^A-WYZa-wyz0-9]{0,6}";
 export const CLIENT_TEXT_PHONE_JOIN = Object.freeze({
-  pattern: `(^|[^0-9])([0-9]{3})(?:[ ().xX\\u00d7\\u2022\\u00b1\\u00b0\\u00a7\\u2018\\u2019\\u201c\\u201d"'/|:*~_;+${DASHES}]{0,5}|[,!?&=^$%\\\\\`{}<>])([0-9]{3})(?:[ ().xX\\u00d7\\u2022\\u00b1\\u00b0\\u00a7\\u2018\\u2019\\u201c\\u201d"'/|:*~_;+${DASHES}]{0,5}|[,!?&=^$%\\\\\`{}<>])([0-9]{4})(?![0-9])`,
+  pattern: `(^|[^0-9])([0-9]{3})${PHONE_SEPARATOR}([0-9]{3})${PHONE_SEPARATOR}([0-9]{4})(?![0-9])`,
   replacement: "$1$2$3$4",
 });
 // Then any digits separated by one or two of space . and any dash are joined,
@@ -106,8 +106,35 @@ export const CLIENT_TEXT_SUITE_RANGE = Object.freeze({
   replacement: "$1 ",
 });
 
-// A web domain ending: the common ones and the real-estate and health ones.
-const DOMAIN_ENDINGS = "com|net|org|io|biz|info|us|co|ai|app|realty|health|properties|homes|law|care|clinic|gov|edu|me";
+// A web domain ending: the common ones, the real-estate and health ones, the
+// newer generic ones and the country endings link shorteners use (lnkd.in,
+// amzn.to, s.id, linktr.ee, bit.do, shorturl.at, bit.ly, goo.gl, is.gd,
+// tiny.cc, rb.gy, youtu.be).
+const DOMAIN_ENDINGS = "com|net|org|io|biz|info|us|co|ai|app|realty|health|properties|homes|law|care|clinic|gov|edu|me|xyz|site|online|link|page|tv|ca|uk|de|estate|land|group|llc|pro|ee|to|in|at|do|id|ly|gl|gd|cc|gy|be";
+// The unit abbreviations a rate is written with ("$24.00/sq.ft/yr"): a dotted
+// name ending in one of these before a slash is a rate, not a link.
+const UNIT_ENDINGS = "ft|yr|mo|sf|ac|mi|yd";
+
+// Access-code building blocks. A trigger word and three or more digits are
+// joined by up to six characters that are not letters or digits (six, as for
+// phones, because the fold makes the ellipsis three dots) (any
+// punctuation, symbol or space: "Gate. 4411", "Gate -> 4411", "Gate | 4411"),
+// optionally around "is", "no", "number" or "num" ("Gate number 4411"). The
+// digits may be split by single non-alphanumerics ("44 11", "4-4-1-1").
+const NOT_ALNUM = "[^A-Za-z0-9]";
+const ACCESS_LINK = `${NOT_ALNUM}{0,6}((is|no|number|num)${NOT_ALNUM}{0,6})?`;
+const ACCESS_DIGITS = `[0-9](${NOT_ALNUM}?[0-9]){2,}`;
+// The trigger words, each with an optional plural.
+const ACCESS_WORDS = "gate|pin|combo|combination|key|entry|entries|access|call ?box|entrance|password|passcode|security|securities|lock ?box|box|keypad|alarm|supra|garage|door|lock";
+// A 19xx/20xx year is not a code when a building-event word follows it
+// ("Alarm 2021 upgrade", "Lock 1998 renovation", "Key 2027 lease-up"), for
+// every trigger. A bare year is still a code ("Code: 2021", "Code 2014 at the
+// gate"), except after a code-book name ("Building code 2021"), and "24/7" is
+// a schedule ("Access 24/7").
+const YEAR_EVENT_WORDS = "upgrad|renovat|remodel|retrofit|replac|install|updat|built|build|construct|lease|deliver|complet|edition|standard|complian|expan|refresh|addition|rebuil|conver|inspect|certif|vintage|budget";
+const NOT_A_YEAR_EVENT = `(?!(19|20)[0-9]{2}${NOT_ALNUM}{1,3}(${YEAR_EVENT_WORDS}))(?!24${NOT_ALNUM}?7([^0-9]|$))`;
+const CODE_BOOKS = "building|fire|electrical|plumbing|mechanical|energy|zoning|safety|health";
+const NOT_AFTER_CODE_BOOK = CODE_BOOKS.split("|").map(word => `(?<!${word} )`).join("");
 
 // Case-insensitive, checked in this order; the first rule that matches names
 // the refusal. `target` is the text the rule reads: the normalized value
@@ -122,10 +149,10 @@ export const CLIENT_TEXT_RULES = Object.freeze([
   // a URL (http, https, ftp), a bare web domain (its name holds a letter:
   // "Hwy 90.US 29" is a road), a spaced .com/.net/.org ("landlord .com"), a
   // spelled-out "dot com" / "[dot] com", a bracketed dot ("landlord[.]com"),
-  // or a link shortener's name followed by a path ("bit.ly/abc", "goo.gl/x",
-  // "is.gd/x"; "tinyurl.com/abc" is a bare domain already). Only shortener
-  // endings: "$24.00/sq.ft/yr" and "Dr.Smith/Jones" are asking rent and names
-  Object.freeze({ rule: "url", target: "raw", pattern: `(https?|ftp)://|www[.]|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]*[.](${DOMAIN_ENDINGS})([^A-Za-z0-9]|$)|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]* ?[.] ?(com|net|org)([^A-Za-z0-9]|$)|(^|[^A-Za-z])[(\\[]? ?dot ?[)\\]]? ?(com|net|org|co)([^A-Za-z]|$)|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]* ?[(\\[] ?[.] ?[)\\]] ?[A-Za-z]{2,}|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]*[.](ly|gl|gd|cc|gy|be)/[A-Za-z0-9]` }),
+  // or ANY dotted name followed by a path ("bit.ly/abc", "linktr.ee/bob",
+  // "qr.link/x"), except a unit abbreviation before the slash
+  // ("$24.00/sq.ft/yr", "$1.25/sq.ft/mo")
+  Object.freeze({ rule: "url", target: "raw", pattern: `(https?|ftp)://|www[.]|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]*[.](${DOMAIN_ENDINGS})([^A-Za-z0-9]|$)|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]* ?[.] ?(com|net|org)([^A-Za-z0-9]|$)|(^|[^A-Za-z])[(\\[]? ?dot ?[)\\]]? ?(com|net|org|co)([^A-Za-z]|$)|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]* ?[(\\[] ?[.] ?[)\\]] ?[A-Za-z]{2,}|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]*[.](?!(${UNIT_ENDINGS})/)[A-Za-z]{2,}/[A-Za-z0-9]` }),
   // a North-American phone number, however its ten digits are grouped
   Object.freeze({ rule: "phone", target: "digits", pattern: "(^|[^0-9])1?[2-9][0-9]{9}([^0-9]|$)" }),
   // a seven-digit local number: 555-0100, 555 - 0100 (exchange 2-9, as NANP requires)
@@ -134,16 +161,15 @@ export const CLIENT_TEXT_RULES = Object.freeze([
   Object.freeze({ rule: "international_phone", target: "digits", pattern: "[+] ?[0-9]{8,}|(^|[^0-9])(011|00)[1-9][0-9]{6,}([^0-9]|$)" }),
   // access-code wording, as whole words: gate code, door combo, entry PIN,
   // alarm code, keypad code ("Westgate Pines", "Fire alarm system" pass); or a
-  // gate/door/keypad/alarm/lock/combo/PIN/passcode/key/entry/access/code word
-  // before three or more digits, joined by up to four of space : # = * quotes
-  // ( [ and dashes, with an optional "is" or "no." ("Gate: #4411", "PIN-4411",
-  // "Gate is 4411", "Gate (4411)", "Gate no. 4411"). "Door 3", "Gate 2
-  // parking" and "garage 250 spaces" pass. After "code" a year is not a code
-  // ("Building code 2021"), "area code 251" is not one, and "zip code" passes
-  // only before a real zip (five digits, or ZIP+4): "Zip code 36602" passes,
-  // "Zip code 4411" is refused. Lookbehind and lookahead read alike in
-  // PostgreSQL ARE and JavaScript.
-  Object.freeze({ rule: "access_code", target: "raw", pattern: `(^|[^A-Za-z])(gate|door|key|entry|garage|alarm|keypad|access|lock)[ -]?(codes?|combos?|combination|pins?|passwords?)([^A-Za-z]|$)|(^|[^A-Za-z])(gate|door|keypad|alarm|lock|combo|pin|passcode|key|entry|access)[ :#=*\"'(\\[\\u201c\\u201d\\u2018\\u2019${DASHES}]{0,4}((is|no[.]?)[ :#=*\"'(\\[\\u201c\\u201d\\u2018\\u2019${DASHES}]{0,4})?[0-9]{3,}|(^|[^A-Za-z])(?<!zip )(?<!zip)(?<!zip-)(?<!area )(?<!area)(?<!area-)code[ :#=*\"'(\\[\\u201c\\u201d\\u2018\\u2019${DASHES}]{0,4}((is|no[.]?)[ :#=*\"'(\\[\\u201c\\u201d\\u2018\\u2019${DASHES}]{0,4})?(?!(19|20)[0-9]{2}([^0-9]|$))[0-9]{3,}|(^|[^A-Za-z])zip[ -]?code[ :#=*\"'(\\[\\u201c\\u201d\\u2018\\u2019${DASHES}]{0,4}((is|no[.]?)[ :#=*\"'(\\[\\u201c\\u201d\\u2018\\u2019${DASHES}]{0,4})?(?![0-9]{5}(-[0-9]{4})?([^0-9]|$))[0-9]{3,}` }),
+  // trigger word (plural too) before three or more digits, joined as the
+  // building blocks above say ("Gate. 4411", "Call box #4411", "Gates 4411",
+  // "Gate number 4411", "Gate: 44 11"). "Door 3" and "Gate 2 parking" pass.
+  // "code" is read on its own: not after "zip" or "area" or a code-book name.
+  // "zip code" passes only before a real zip (five digits or ZIP+4), "area
+  // code" only before exactly three plain digits ("Area code 251"), and a
+  // code-book code before a bare year ("Building code 2021"). Lookbehind and
+  // lookahead read alike in PostgreSQL ARE and JavaScript.
+  Object.freeze({ rule: "access_code", target: "raw", pattern: `(^|[^A-Za-z])(gate|door|key|entry|garage|alarm|keypad|access|lock)[ -]?(codes?|combos?|combination|pins?|passwords?)([^A-Za-z]|$)|(^|[^A-Za-z])(${ACCESS_WORDS})(e?s)?${ACCESS_LINK}${NOT_A_YEAR_EVENT}${ACCESS_DIGITS}|(^|[^A-Za-z])(?<!zip )(?<!zip-)(?<!area )(?<!area-)${NOT_AFTER_CODE_BOOK}codes?${ACCESS_LINK}${NOT_A_YEAR_EVENT}${ACCESS_DIGITS}|(^|[^A-Za-z])(${CODE_BOOKS}) codes?${ACCESS_LINK}(?!(19|20)[0-9]{2}([^0-9]|$))${NOT_A_YEAR_EVENT}${ACCESS_DIGITS}|(^|[^A-Za-z])zip[ -]?codes?${ACCESS_LINK}(?![0-9]{5}(-[0-9]{4})?([^0-9]|$))${ACCESS_DIGITS}|(^|[^A-Za-z])area[ -]?codes?${ACCESS_LINK}([0-9]{4}|[0-9]{1,3}${NOT_ALNUM}[0-9])` }),
   Object.freeze({ rule: "lockbox", target: "raw", pattern: "(^|[^A-Za-z])(lock[ -]?box(es)?|passcodes?)([^A-Za-z]|$)" }),
   // internal-note wording (a free-text note cannot be recognised in general;
   // the length cap bounds the rest)
