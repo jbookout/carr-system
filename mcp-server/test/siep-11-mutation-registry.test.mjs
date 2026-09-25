@@ -106,6 +106,8 @@ import {
   REGISTRY_V73_VERSION,
   REGISTRY_V74_VERSION,
   REGISTRY_V75_VERSION,
+  REGISTRY_V76_VERSION,
+  REGISTRY_V77_VERSION,
   NOTIFICATION_PREFERENCES_FORWARD_DB_CATALOG_BASELINE,
   SESSION_IDENTITY_FORWARD_DB_CATALOG_BASELINE,
   DISPATCH_SPINE_FORWARD_DB_CATALOG_BASELINE,
@@ -364,6 +366,10 @@ const generatedV74 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v74.generated.js", import.meta.url), "utf8");
 const generatedV75 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v75.generated.js", import.meta.url), "utf8");
+const generatedV76 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v76.generated.js", import.meta.url), "utf8");
+const generatedV77 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v77.generated.js", import.meta.url), "utf8");
 const v25Migration = fs.readFileSync(
   new URL("../../migrations/0501_scheduled_job_admission_and_scac_successor.sql",
     import.meta.url), "utf8");
@@ -406,9 +412,13 @@ test("reviewed MCP inventory is an exact immutable projection of the assembled r
   // read: advance-journey-one-clock and read-journey-one-clock.
   // V5-A05 delivery cadence (0617) adds three: cadence-status (a read on the
   // writer connection), record-cadence-receipt and raise-delivery-cadence-alert.
-  assert.equal(rows.length, 299);
-  assert.equal(rows.filter(row => row.write).length, 211);
-  assert.equal(rows.filter(row => !row.write).length, 88);
+  // DoctorCRE V5-S01's global boundaries door (0625) adds one read:
+  // read-global-boundaries.
+  // DoctorCRE V5-F01 (0626) adds eight writes and one read: the
+  // record-source-authority door's nine verbs.
+  assert.equal(rows.length, 309);
+  assert.equal(rows.filter(row => row.write).length, 219);
+  assert.equal(rows.filter(row => !row.write).length, 90);
   assert.deepEqual(rows.map(row => row.operation), Object.keys(TOOLS).sort());
   assert.equal(Object.isFrozen(TOOLS), true);
   assert.equal(Object.isFrozen(TOOLS["add-loop"]), true);
@@ -1012,11 +1022,17 @@ test("the ACTIVE runtime registry is v63, and a stale v19 import fails admission
   // registered none; v70 and v71 registered none; v72 registers the ten V5-R02
   // workflow-cutover and slice-completion verbs; v73 registered none; v74
   // registers the two V5-M01 Journey 1 clock door verbs; v75 registers the
-  // three V5-A05 delivery-cadence verbs.
-  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V75_VERSION);
-  const v75SelectorDigest = generatedV75.match(
+  // three V5-A05 delivery-cadence verbs; v76 registers the V5-S01
+  // read-global-boundaries verb; v77 registers the nine V5-F01
+  // record-source-authority verbs.
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V77_VERSION);
+  const v77SelectorDigest = generatedV77.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
-  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, v75SelectorDigest);
+  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, v77SelectorDigest);
+  assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV76.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
+  assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV75.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
   assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV74.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
   assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV72.match(
@@ -1299,7 +1315,7 @@ test("the v21 frontier re-digested only source, and v63 is what the runtime now 
   // v22 through all three. v26 DOES register a verb, so the selector moves with
   // it — an unregistered operation is refused at the door, so the runtime has
   // to read the registry that knows record-gate-zero-read-only-outcome.
-  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V75_VERSION);
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V77_VERSION);
   const v21GeneratedDigest = generatedV21.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
   const v21GeneratedVersion = generatedV21.match(
@@ -1342,7 +1358,7 @@ test("the v21 frontier re-digested only source, and v63 is what the runtime now 
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
   const v63GeneratedDigest = generatedV63.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
-  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, generatedV75.match(
+  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, generatedV77.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
   assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV74.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
@@ -1440,7 +1456,7 @@ test("the v21 frontier re-digested only source, and v63 is what the runtime now 
   // what assertRegisteredOperation reads, and WR-000109 moved
   // patch-deal-field's schema_digest into v28. A loop still comparing against
   // v27 would assert the superseded contract and fail at the door.
-  const liveRows = frozenInventory(REGISTRY_V75_VERSION);
+  const liveRows = frozenInventory(REGISTRY_V77_VERSION);
   for (const name of Object.keys(TOOLS)) {
     const admitted = await assertRegisteredOperation(name, TOOLS[name], {});
     assert.equal(admitted.ingress_key, `mcp-tool:${name}`);
@@ -1593,12 +1609,12 @@ test("v33 seals the notification preference pair and preserves v32", () => {
   const v33GeneratedDigest = generatedV33.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
   assert.notEqual(`sha256:${v33GeneratedDigest}`, HISTORICAL_REGISTRY_SEALS.v32.digest);
-  // The complete generated frontier now includes the v75 successor;
+  // The complete generated frontier now includes the v77 successor;
   // 0527 remains handwritten and does not move that count.
   assert.equal(Object.keys(renderGeneratedFrontier())
-    .filter(path => path.startsWith("migrations/")).length, 81);
+    .filter(path => path.startsWith("migrations/")).length, 83);
   assert.equal(Object.keys(renderGeneratedFrontier())
-    .filter(path => path.startsWith("mcp-server/src/")).length, 72);
+    .filter(path => path.startsWith("mcp-server/src/")).length, 74);
 });
 
 test("v34 seals the session identity read pair and preserves v33", () => {
@@ -2575,7 +2591,7 @@ test("the v23 frontier re-digested only source, so it did not move the runtime i
   // verb either, so the import stayed on v22 through v23, v24 and v25, and only
   // moved again at v26 when the Gate Zero outcome verb arrived. What this test
   // records is that v23 was NOT the reason it moved.
-  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V75_VERSION);
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V77_VERSION);
   assert.notEqual(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V23_VERSION);
   const v23GeneratedVersion = generatedV23.match(
     /^export const SCAC_MUTATION_REGISTRY_VERSION = "([^"]+)";$/m)[1];
@@ -2851,14 +2867,14 @@ test("the v36 successor preserves the exact v35 seal and measures both catalog p
 });
 
 test("the complete source-only frontier is byte-reproducible from frozen inputs", () => {
-  assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS, REGISTRY_V75_VERSION), true);
+  assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS, REGISTRY_V77_VERSION), true);
   const paths = assertGeneratedFrontierMatchesCommitted();
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
-  assert.equal(migrations.length, 81);
+  assert.equal(migrations.length, 83);
   assert.deepEqual(migrations.map(path => path.match(/migrations\/(\d{4})_/)[1]),
-    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545", "0547", "0548", "0549", "0550", "0551", "0552", "0553", "0555", "0557", "0558", "0559", "0560", "0561", "0562", "0563", "0564", "0566", "0567", "0568", "0569", "0570", "0572", "0576", "0578", "0581", "0582", "0584", "0585", "0588", "0589", "0600", "0603", "0609", "0614", "0618"]);
-  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 72);
-  assert.equal(paths.length, 153);
+    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545", "0547", "0548", "0549", "0550", "0551", "0552", "0553", "0555", "0557", "0558", "0559", "0560", "0561", "0562", "0563", "0564", "0566", "0567", "0568", "0569", "0570", "0572", "0576", "0578", "0581", "0582", "0584", "0585", "0588", "0589", "0600", "0603", "0609", "0614", "0618", "0625", "0627"]);
+  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 74);
+  assert.equal(paths.length, 157);
   // 0502 IS DELIBERATELY ABSENT FROM THIS LIST. It is a hand-authored domain
   // migration under its own review, not a generated artifact, so nothing here
   // reproduces it byte for byte and it must not appear among the frontier's
