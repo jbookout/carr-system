@@ -111,6 +111,7 @@ import {
   REGISTRY_V78_VERSION,
   REGISTRY_V79_VERSION,
   REGISTRY_V80_VERSION,
+  REGISTRY_V81_VERSION,
   NOTIFICATION_PREFERENCES_FORWARD_DB_CATALOG_BASELINE,
   SESSION_IDENTITY_FORWARD_DB_CATALOG_BASELINE,
   DISPATCH_SPINE_FORWARD_DB_CATALOG_BASELINE,
@@ -379,6 +380,8 @@ const generatedV79 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v79.generated.js", import.meta.url), "utf8");
 const generatedV80 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v80.generated.js", import.meta.url), "utf8");
+const generatedV81 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v81.generated.js", import.meta.url), "utf8");
 const v25Migration = fs.readFileSync(
   new URL("../../migrations/0501_scheduled_job_admission_and_scac_successor.sql",
     import.meta.url), "utf8");
@@ -435,8 +438,9 @@ test("reviewed MCP inventory is an exact immutable projection of the assembled r
   // correspondence-readiness and read-correspondence-thread. No send verb.
   // DoctorCRE V5-J102 (0704) adds twenty writes and one read: the CRE
   // lifecycle door's twenty-one verbs.
-  assert.equal(rows.length, 343);
-  assert.equal(rows.filter(row => row.write).length, 248);
+  // amend-closed-loop (defect a2c04ffa, loop c7265238) adds one write.
+  assert.equal(rows.length, 344);
+  assert.equal(rows.filter(row => row.write).length, 249);
   assert.equal(rows.filter(row => !row.write).length, 95);
   assert.deepEqual(rows.map(row => row.operation), Object.keys(TOOLS).sort());
   assert.equal(Object.isFrozen(TOOLS), true);
@@ -1045,11 +1049,14 @@ test("the ACTIVE runtime registry is v63, and a stale v19 import fails admission
   // read-global-boundaries verb; v77 registers the nine V5-F01
   // record-source-authority verbs; v78 registers the nine slice done-record
   // verbs; v79 registers the four V5-J103 governed correspondence verbs; v80
-  // registers the twenty-one V5-J102 CRE lifecycle verbs.
-  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V80_VERSION);
-  const v80SelectorDigest = generatedV80.match(
+  // registers the twenty-one V5-J102 CRE lifecycle verbs; v81 registers the
+  // one amend-closed-loop verb (defect a2c04ffa, loop c7265238).
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V81_VERSION);
+  const v81SelectorDigest = generatedV81.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
-  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, v80SelectorDigest);
+  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, v81SelectorDigest);
+  assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV80.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
   assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV79.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
   assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV78.match(
@@ -1342,7 +1349,7 @@ test("the v21 frontier re-digested only source, and v63 is what the runtime now 
   // v22 through all three. v26 DOES register a verb, so the selector moves with
   // it — an unregistered operation is refused at the door, so the runtime has
   // to read the registry that knows record-gate-zero-read-only-outcome.
-  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V80_VERSION);
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V81_VERSION);
   const v21GeneratedDigest = generatedV21.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
   const v21GeneratedVersion = generatedV21.match(
@@ -1385,7 +1392,9 @@ test("the v21 frontier re-digested only source, and v63 is what the runtime now 
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
   const v63GeneratedDigest = generatedV63.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
-  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, generatedV80.match(
+  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, generatedV81.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
+  assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV80.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
   assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV77.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
@@ -1485,7 +1494,7 @@ test("the v21 frontier re-digested only source, and v63 is what the runtime now 
   // what assertRegisteredOperation reads, and WR-000109 moved
   // patch-deal-field's schema_digest into v28. A loop still comparing against
   // v27 would assert the superseded contract and fail at the door.
-  const liveRows = frozenInventory(REGISTRY_V80_VERSION);
+  const liveRows = frozenInventory(REGISTRY_V81_VERSION);
   for (const name of Object.keys(TOOLS)) {
     const admitted = await assertRegisteredOperation(name, TOOLS[name], {});
     assert.equal(admitted.ingress_key, `mcp-tool:${name}`);
@@ -2620,7 +2629,7 @@ test("the v23 frontier re-digested only source, so it did not move the runtime i
   // verb either, so the import stayed on v22 through v23, v24 and v25, and only
   // moved again at v26 when the Gate Zero outcome verb arrived. What this test
   // records is that v23 was NOT the reason it moved.
-  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V80_VERSION);
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V81_VERSION);
   assert.notEqual(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V23_VERSION);
   const v23GeneratedVersion = generatedV23.match(
     /^export const SCAC_MUTATION_REGISTRY_VERSION = "([^"]+)";$/m)[1];
@@ -2896,7 +2905,7 @@ test("the v36 successor preserves the exact v35 seal and measures both catalog p
 });
 
 test("the complete source-only frontier is byte-reproducible from frozen inputs", () => {
-  assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS, REGISTRY_V80_VERSION), true);
+  assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS, REGISTRY_V81_VERSION), true);
   const paths = assertGeneratedFrontierMatchesCommitted();
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
   assert.equal(migrations.length, 86);

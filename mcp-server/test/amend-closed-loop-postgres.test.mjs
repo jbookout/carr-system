@@ -70,6 +70,36 @@ async function connect(pg) {
   return client;
 }
 
+/** Two real connections racing under Promise.all is not, by itself, a
+ * reliable reproduction of a lost-update race: nothing guarantees the two
+ * sessions' `select version from loop_item ...` queries are actually
+ * in flight AT THE SAME TIME rather than one finishing (and committing)
+ * before the other's read even starts, which would produce a correct
+ * version_conflict with or without `for update`. This patches both clients'
+ * `query` so that EITHER session's first "select version from loop_item"
+ * call blocks until the OTHER session has also reached its own — forcing
+ * genuine overlap on the exact statement the lock (or its absence) governs,
+ * deterministically, regardless of scheduler or network timing. */
+function synchronizeFirstVersionRead(clientA, clientB) {
+  let readyA, readyB;
+  const aReady = new Promise((resolve) => { readyA = resolve; });
+  const bReady = new Promise((resolve) => { readyB = resolve; });
+  function wrap(client, signalSelf, waitForOther) {
+    const original = client.query.bind(client);
+    let intercepted = false;
+    client.query = (text, params) => {
+      if (!intercepted && typeof text === "string" && text.startsWith("select version from loop_item")) {
+        intercepted = true;
+        signalSelf();
+        return waitForOther.then(() => original(text, params));
+      }
+      return original(text, params);
+    };
+  }
+  wrap(clientA, readyA, bReady);
+  wrap(clientB, readyB, aReady);
+}
+
 async function mintActor(admin, slug) {
   const r = await admin.query(
     `insert into public.actor(slug, kind, display_name, active) values ($1,'automation',$1,true)
@@ -375,6 +405,7 @@ test("DB: for update really serializes two concurrent amends against the same ba
     // succeeding against the stale one it read.
     await a.query("begin");
     await b.query("begin");
+    synchronizeFirstVersionRead(a, b);
     const attemptA = TOOLS["amend-closed-loop"].handler(a, actor, {
       idempotency_key: randomUUID(), loop_id, base_version: version,
       outcome: "Session A's correction of the placeholder outcome.", reason: "session A" })
@@ -429,6 +460,7 @@ test("DB MUTANT: removing versionGuard's `for update` breaks the concurrency pro
 
     await a.query("begin");
     await b.query("begin");
+    synchronizeFirstVersionRead(a, b);
     const attemptA = mutant.TOOLS["amend-closed-loop"].handler(a, actor, {
       idempotency_key: randomUUID(), loop_id, base_version: version,
       outcome: "Session A's correction of the placeholder outcome.", reason: "session A" })
