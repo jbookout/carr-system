@@ -29,7 +29,7 @@ import {
   v5J102TransitionContract,
   v5J102MigrationReadiness,
 } from "../src/cre-lifecycle.v5.js";
-import { createCreLifecycleStore } from "../src/cre-lifecycle-store.v5.js";
+import { createCreLifecycleStore, v5J102StoreEnvelope } from "../src/cre-lifecycle-store.v5.js";
 import { createRecordSourceAuthorityStore } from "../src/record-source-authority-store.v5.js";
 
 const DSN = {
@@ -58,10 +58,14 @@ const pools = {};
 async function pool(name) {
   if (pools[name]) return pools[name];
   if (!pg) pg = (await import("pg")).default;
-  const config = { connectionString: name === "agent" || name === "joe_writer"
-    ? DSN.writer : DSN[name], max: 2 };
-  if (name === "agent") config.options = "-c carr.acting_actor_slug=codex";
-  if (name === "joe_writer") config.options = "-c carr.acting_actor_slug=joe";
+  const writer = ["agent", "joe_writer", "agent_unsponsored", "agent_as_dell"].includes(name);
+  const config = { connectionString: writer ? DSN.writer : DSN[name], max: 2 };
+  // mcp.js sets carr.sponsoring_human_slug transaction-locally from the
+  // authenticated grant on every write; each pool stands in for that here.
+  if (name === "agent") config.options = "-c carr.acting_actor_slug=codex -c carr.sponsoring_human_slug=joe";
+  if (name === "joe_writer") config.options = "-c carr.acting_actor_slug=joe -c carr.sponsoring_human_slug=joe";
+  if (name === "agent_unsponsored") config.options = "-c carr.acting_actor_slug=codex";
+  if (name === "agent_as_dell") config.options = "-c carr.acting_actor_slug=codex -c carr.sponsoring_human_slug=dell";
   pools[name] = new pg.Pool(config);
   return pools[name];
 }
@@ -91,7 +95,8 @@ function storeFor(name) {
   });
 }
 
-const ACTORS = { joe: JOE, dell: DELL, agent: AGENT, joe_writer: JOE };
+const ACTORS = { joe: JOE, dell: DELL, agent: AGENT, joe_writer: JOE,
+  agent_unsponsored: AGENT, agent_as_dell: AGENT };
 
 /** F01's own store over the same per-principal pools. */
 function f01StoreFor(name) {
@@ -1625,4 +1630,117 @@ test("RULING (b) LIVE: a sibling committed inside the store's window is refused 
     assert.match(ix.pred, new RegExp(st), `the backstop covers ${st}`);
   }
   assert.doesNotMatch(ix.pred, /selected_winner|loi_withdrawn|loi_rejected|superseded/);
+});
+
+// ===========================================================================
+// OWNER RULING (c), 2026-09-25: every lifecycle row and event is recorded UNDER
+// THE SPONSORING PARTNER, derived from the authenticated login and never from a
+// caller field.
+// ===========================================================================
+
+async function sponsorOf(subject_kind, subject_id) {
+  const [row] = await sql("joe",
+    `select c.updated_by, c.sponsoring_partner,
+            c.envelope -> 'record' ->> 'sponsoring_partner' as enveloped,
+            (select jsonb_agg(jsonb_build_array(e.recorded_by, e.sponsoring_partner) order by e.event_seq)
+               from ops.j102_subject_event e
+              where e.tenant = c.tenant and e.subject_kind = c.subject_kind and e.subject_id = c.subject_id) as events
+       from ops.j102_subject_current c
+      where c.subject_kind = $1 and c.subject_id = $2`, [subject_kind, subject_id]);
+  return row;
+}
+
+test("RULING (c) LIVE: an agent's write is recorded under its sponsoring partner, a partner's under themself", { skip: SKIP }, async () => {
+  const byAgent = id("rel");
+  ok(await as("agent").initializeProspectRelationship({ idempotency_key: key(),
+    declared: { new_subject_id: byAgent } }), "agent creates a prospect");
+  const a = await sponsorOf("relationship", byAgent);
+  assert.equal(a.updated_by, "codex", "the agent is who wrote it");
+  assert.equal(a.sponsoring_partner, "joe", "and it is recorded under Joe, its sponsor");
+  assert.equal(a.enveloped, "joe", "inside the hashed envelope too");
+  assert.deepEqual(a.events, [["codex", "joe"]], "and on its event");
+  assert.equal((await body("joe", "relationship", byAgent)).sponsoring_partner, "joe",
+    "the subject reader surfaces it");
+
+  const byDell = id("rel");
+  ok(await as("dell").initializeProspectRelationship({ idempotency_key: key(),
+    declared: { new_subject_id: byDell } }), "Dell creates a prospect");
+  assert.deepEqual([(await sponsorOf("relationship", byDell)).sponsoring_partner,
+    (await sponsorOf("relationship", byDell)).events], ["dell", [["dell", "dell"]]]);
+
+  // Ruling (e) and (c) together: Joe over the writer credential is a
+  // sponsored_agent under his own slug, recorded under himself.
+  const byJoeWriter = id("rel");
+  ok(await as("joe_writer").initializeProspectRelationship({ idempotency_key: key(),
+    declared: { new_subject_id: byJoeWriter } }), "Joe over the writer credential");
+  assert.deepEqual([(await sponsorOf("relationship", byJoeWriter)).updated_by,
+    (await sponsorOf("relationship", byJoeWriter)).sponsoring_partner], ["joe", "joe"]);
+
+  // A transition stamps it too, on the moved row and on every event it appends.
+  const d = await dealWith("lease", ["lease_exec"]);
+  ok(await axisCall("agent", d.deal, "invoice_state", "invoice_issued", "invoice",
+    (await body("joe", "deal", d.deal)).state_digest), "the agent records an invoice");
+  const moved = await sponsorOf("deal", d.deal);
+  assert.equal(moved.updated_by, "codex");
+  assert.equal(moved.sponsoring_partner, "joe");
+  assert.deepEqual(moved.events.at(-1), ["codex", "joe"]);
+});
+
+test("RULING (c) LIVE: a caller-supplied sponsor is refused, at the store and at the SQL writer", { skip: SKIP }, async () => {
+  // At the door: the field is derived-only, wherever the caller puts it.
+  for (const payload of [
+    { idempotency_key: key(), sponsoring_partner: "dell", declared: { new_subject_id: id("rel") } },
+    { idempotency_key: key(), declared: { new_subject_id: id("rel"), sponsoring_partner: "dell" } },
+  ]) {
+    await assert.rejects(as("agent").initializeProspectRelationship(payload),
+      e => ["caller_derived_field_refused", "unknown_field"].includes(e?.code),
+      "a sponsor named by the caller never reaches the database");
+  }
+
+  // Past the door: an envelope that names a different partner than the login
+  // derives is refused by the writer itself, even with its digests correct.
+  const tamper = text => /ops\.j102_initialize_subject\(/.test(text);
+  const store = createCreLifecycleStore({ db: {
+    async query() { throw new Error("transaction() is always used"); },
+    async transaction(fn) {
+      const client = await (await pool("agent")).connect();
+      try {
+        await client.query("BEGIN");
+        const out = await fn({ query: async (text, params) => {
+          if (tamper(text)) {
+            const env = JSON.parse(params[2]);
+            params = [...params];
+            params[2] = JSON.stringify(v5J102StoreEnvelope("stored_lifecycle_subject",
+              { ...env.record, sponsoring_partner: "dell" }, { alone_sufficient: false }));
+          }
+          return client.query(text, params);
+        } });
+        await client.query("COMMIT");
+        return out;
+      } catch (e) {
+        await client.query("ROLLBACK").catch(() => {});
+        throw e;
+      } finally {
+        client.release();
+      }
+    },
+  } });
+  const target = id("rel");
+  await assert.rejects(
+    store.initializeProspectRelationship({ idempotency_key: key(),
+      declared: { new_subject_id: target } }, { actor: AGENT }),
+    e => /j102_sponsor_mismatch/.test(String(e?.message)) && e?.code === "42501",
+    "the writer re-derives the sponsor and refuses the envelope's claim");
+  assert.equal(await sponsorOf("relationship", target), undefined, "nothing landed");
+
+  // A login with no verified sponsor cannot write at all; one whose server
+  // sponsor disagrees with the handler's is refused before any write.
+  await assert.rejects(
+    as("agent_unsponsored").initializeProspectRelationship({ idempotency_key: key(),
+      declared: { new_subject_id: id("rel") } }),
+    e => /j102_sponsor_unavailable/.test(String(e?.message)));
+  await assert.rejects(
+    as("agent_as_dell").initializeProspectRelationship({ idempotency_key: key(),
+      declared: { new_subject_id: id("rel") } }),
+    e => e?.code === "sponsor_context_mismatch");
 });

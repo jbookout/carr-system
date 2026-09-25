@@ -188,10 +188,11 @@ begin
   for v_relation, v_columns in
     select * from (values
       ('j102_subject_current', array['tenant', 'subject_kind', 'subject_id', 'envelope',
-        'envelope_digest', 'state_digest', 'parent_id', 'deal_state', 'updated_by', 'updated_at']),
+        'envelope_digest', 'state_digest', 'parent_id', 'deal_state', 'updated_by',
+        'sponsoring_partner', 'updated_at']),
       ('j102_subject_event', array['tenant', 'event_seq', 'subject_kind', 'subject_id',
         'event_kind', 'transition_id', 'envelope', 'envelope_digest', 'event_digest',
-        'recorded_by', 'recorded_at', 'idempotency_key']),
+        'recorded_by', 'sponsoring_partner', 'recorded_at', 'idempotency_key']),
       -- The three columns and the author class the corrections added. A database
       -- holding the older four-column-short shape is exactly the case this block
       -- exists to name.
@@ -334,6 +335,11 @@ create table if not exists ops.j102_subject_current (
   -- likewise CHECK-bound to the envelope.
   deal_state        text,
   updated_by        text not null,
+  -- OWNER RULING (c), 2026-09-25: every write is recorded UNDER THE SPONSORING
+  -- PARTNER. Derived by ops.j102_sponsoring_partner() from the authenticated
+  -- login -- the partner's own slug on a partner's session, the server-verified
+  -- sponsor on an agent's -- and never from a caller field.
+  sponsoring_partner text not null check (sponsoring_partner in ('joe', 'dell')),
   updated_at        timestamptz not null,
   primary key (tenant, subject_kind, subject_id),
   constraint j102_subject_tenant check (tenant = ops.f01_tenant()),
@@ -354,6 +360,8 @@ create table if not exists ops.j102_subject_current (
     check (deal_state is not distinct from envelope -> 'record' -> 'state' ->> 'deal_state'),
   constraint j102_subject_updated_by_matches_envelope
     check (updated_by = envelope -> 'record' ->> 'updated_by'),
+  constraint j102_subject_sponsor_matches_envelope
+    check (sponsoring_partner = envelope -> 'record' ->> 'sponsoring_partner'),
   -- HIGH-5, STRUCTURALLY. WHAT ESTABLISHED THIS SUBJECT'S STATE is a field
   -- ops.j102_subject returns as the row's provenance and the transition receipt
   -- echoes back in its readback, and it lived inside the hashed bytes bound to
@@ -416,9 +424,14 @@ create table if not exists ops.j102_subject_event (
   envelope_digest   text not null,
   event_digest      text not null,
   recorded_by       text not null,
+  -- Owner ruling (c): the partner this history row is recorded under, derived
+  -- exactly as on the subject row.
+  sponsoring_partner text not null check (sponsoring_partner in ('joe', 'dell')),
   recorded_at       timestamptz not null,
   idempotency_key   text not null,
   constraint j102_event_tenant check (tenant = ops.f01_tenant()),
+  constraint j102_event_sponsor_matches_envelope
+    check (sponsoring_partner = envelope -> 'record' ->> 'sponsoring_partner'),
   constraint j102_event_envelope_digest
     check (envelope_digest = ops.f01_digest_jsonb(envelope)),
   constraint j102_event_digest_bound
@@ -910,6 +923,7 @@ begin
     -- the one named above -- lies between the two.
     'prior_state_digest', v_verified -> 'record' ->> 'prior_state_digest',
     'updated_by', v_row.updated_by,
+    'sponsoring_partner', v_row.sponsoring_partner,
     'updated_at', ops.f01_instant_text(v_row.updated_at),
     'integrity', 'recomputed_from_committed_row');
 end;
@@ -1263,9 +1277,10 @@ select $policy$
   "stored_event_schema_version": "doctorcre-v5-j102-stored-lifecycle-event.v1",
   "event_schema_version": "doctorcre-v5-j102-lifecycle-event.v1",
   "stored_subject_record_keys": ["schema_version", "tenant", "subject_kind", "subject_id",
-    "state", "established_by_transition", "prior_state_digest", "updated_by", "updated_at"],
+    "state", "established_by_transition", "prior_state_digest", "updated_by",
+    "sponsoring_partner", "updated_at"],
   "stored_event_record_keys": ["schema_version", "tenant", "event", "transition_id",
-    "evidence_references", "recorded_by", "recorded_at"],
+    "evidence_references", "recorded_by", "sponsoring_partner", "recorded_at"],
   "event_identity_keys": ["schema_version", "event_kind", "subject_kind", "subject_id"],
   "evidence_reference_keys": ["evidence_kind", "source", "reference"],
   "parent_reference_fields": {
@@ -2686,6 +2701,43 @@ comment on function ops.j102_recheck_evidence(jsonb,text,text,text) is
 -- written -- a decision taken against an unlocked read is a decision taken
 -- against a value that can move underneath it.
 -- ---------------------------------------------------------------------------
+-- ---------------------------------------------------------------------------
+-- OWNER RULING (c), 2026-09-25: THE SPONSORING PARTNER, DERIVED.
+--
+-- A verified partner's own session is its own sponsor. Anyone else -- a
+-- sponsored agent, or a partner whose call ran on the writer credential -- is
+-- recorded under the sponsor the SERVER established for this transaction
+-- (mcp.js setWriterActorContext sets carr.sponsoring_human_slug from the
+-- authenticated grant, transaction-local, never from a caller argument). No
+-- verified sponsor, no write: an unattributable row is refused, not defaulted.
+-- ---------------------------------------------------------------------------
+create or replace function ops.j102_sponsoring_partner()
+returns text language plpgsql stable security definer
+set search_path = pg_catalog, ops, public
+as $$
+declare
+  v_principal jsonb := ops.f01_principal();
+  v_setting text := nullif(current_setting('carr.sponsoring_human_slug', true), '');
+begin
+  if v_principal ->> 'authorization_class' = 'verified_partner' then
+    if v_setting is not null and v_setting is distinct from v_principal ->> 'actor_slug' then
+      raise exception 'j102_sponsor_context_conflict: % is a verified partner, and this transaction names % as its sponsor',
+        v_principal ->> 'actor_slug', v_setting using errcode = '42501';
+    end if;
+    return v_principal ->> 'actor_slug';
+  end if;
+  if v_setting is null or v_setting not in ('joe', 'dell') then
+    raise exception 'j102_sponsor_unavailable: % acts as % and this transaction carries no verified sponsoring partner',
+      coalesce(v_principal ->> 'actor_slug', 'an unnamed actor'),
+      coalesce(v_principal ->> 'authorization_class', 'no class') using errcode = '42501';
+  end if;
+  return v_setting;
+end;
+$$;
+
+comment on function ops.j102_sponsoring_partner() is
+  'Owner ruling (c): the partner a lifecycle write is recorded under -- the partner themselves, or the server-established sponsor of an agent or writer-credential session. Refuses when none is established.';
+
 create or replace function ops.j102_apply_transition(
   p_transition_id text,
   p_expected_state_digests jsonb,
@@ -2700,6 +2752,7 @@ set search_path = pg_catalog, ops, public
 as $$
 declare
   v_actor text := ops.f01_context_actor_slug();
+  v_sponsor text := ops.j102_sponsoring_partner();
   -- BLOCK-1. THE ACTOR'S CLASS, DERIVED FROM THE SAME PRINCIPAL THE ACTOR IS.
   -- The writer used to ask only WHO was writing. Whether that who was ENTITLED to
   -- perform this particular transition lived in JavaScript -- `authorityOnly` in
@@ -2924,6 +2977,10 @@ begin
     if (v_record ->> 'updated_by') is distinct from v_actor then
       raise exception 'j102_actor_injection_refused: updated_by is derived, never supplied'
         using errcode = '42501';
+    end if;
+    if (v_record ->> 'sponsoring_partner') is distinct from v_sponsor then
+      raise exception 'j102_sponsor_mismatch: the write is recorded under %, derived from the authenticated login, and the request names %',
+        v_sponsor, coalesce(v_record ->> 'sponsoring_partner', 'none') using errcode = '42501';
     end if;
     -- H4. THE INSTANT IS THE DATABASE'S, verified against this transaction's own
     -- clock and then stamped from it. A caller-chosen updated_at is refused here
@@ -3160,6 +3217,10 @@ begin
     if (v_record ->> 'recorded_by') is distinct from v_actor then
       raise exception 'j102_actor_injection_refused: recorded_by is derived, never supplied'
         using errcode = '42501';
+    end if;
+    if (v_record ->> 'sponsoring_partner') is distinct from v_sponsor then
+      raise exception 'j102_sponsor_mismatch: the event is recorded under %, derived from the authenticated login, and the request names %',
+        v_sponsor, coalesce(v_record ->> 'sponsoring_partner', 'none') using errcode = '42501';
     end if;
     if (v_record ->> 'recorded_at') is distinct from v_txn_now_text then
       raise exception 'j102_clock_injection_refused: recorded_at is the database transaction time %, not %',
@@ -3798,14 +3859,14 @@ begin
     -- parameter.
     insert into ops.j102_subject_current as c
       (tenant, subject_kind, subject_id, envelope, envelope_digest, state_digest,
-       parent_id, deal_state, updated_by, updated_at)
+       parent_id, deal_state, updated_by, sponsoring_partner, updated_at)
     values (
       ops.f01_tenant(), v_kind, v_id, v_envelope, ops.f01_digest_jsonb(v_envelope),
       ops.f01_digest_jsonb(v_state),
       coalesce(v_state ->> 'relationship_id', v_state ->> 'engagement_id',
                v_state ->> 'assignment_id'),
       v_state ->> 'deal_state',
-      v_actor, v_txn_now)
+      v_actor, v_sponsor, v_txn_now)
     on conflict (tenant, subject_kind, subject_id) do update
       set envelope = excluded.envelope,
           envelope_digest = excluded.envelope_digest,
@@ -3813,6 +3874,7 @@ begin
           parent_id = excluded.parent_id,
           deal_state = excluded.deal_state,
           updated_by = excluded.updated_by,
+          sponsoring_partner = excluded.sponsoring_partner,
           updated_at = excluded.updated_at;
     v_subject_digests := v_subject_digests ||
       jsonb_build_object(v_kind || ':' || v_id, ops.f01_digest_jsonb(v_state));
@@ -3842,7 +3904,7 @@ begin
     end if;
     insert into ops.j102_subject_event
       (tenant, subject_kind, subject_id, event_kind, transition_id, envelope, envelope_digest,
-       event_digest, recorded_by, recorded_at, idempotency_key)
+       event_digest, recorded_by, sponsoring_partner, recorded_at, idempotency_key)
     values (
       ops.f01_tenant(),
       v_record -> 'event' ->> 'subject_kind',
@@ -3850,7 +3912,7 @@ begin
       v_record -> 'event' ->> 'event_kind',
       v_record ->> 'transition_id',
       v_envelope, ops.f01_digest_jsonb(v_envelope), ops.f01_digest_jsonb(v_record),
-      v_actor, v_txn_now, p_idempotency_key);
+      v_actor, v_sponsor, v_txn_now, p_idempotency_key);
     v_event_digests := v_event_digests || jsonb_build_array(ops.f01_digest_jsonb(v_record));
   end loop;
 
@@ -4048,6 +4110,7 @@ set search_path = pg_catalog, ops, public
 as $$
 declare
   v_actor text := ops.f01_context_actor_slug();
+  v_sponsor text := ops.j102_sponsoring_partner();
   v_class text := ops.f01_principal() ->> 'authorization_class';
   v_policy jsonb := ops.j102_admission_policy();
   v_contract jsonb;
@@ -4170,6 +4233,10 @@ begin
   if (v_record ->> 'updated_by') is distinct from v_actor then
     raise exception 'j102_actor_injection_refused: updated_by is derived, never supplied'
       using errcode = '42501';
+  end if;
+  if (v_record ->> 'sponsoring_partner') is distinct from v_sponsor then
+    raise exception 'j102_sponsor_mismatch: the subject is recorded under %, derived from the authenticated login, and the request names %',
+      v_sponsor, coalesce(v_record ->> 'sponsoring_partner', 'none') using errcode = '42501';
   end if;
   if (v_record ->> 'updated_at') is distinct from v_txn_now_text then
     raise exception 'j102_clock_injection_refused: updated_at is the database transaction time %, not %',
@@ -4499,6 +4566,10 @@ begin
     raise exception 'j102_actor_injection_refused: recorded_by is derived, never supplied'
       using errcode = '42501';
   end if;
+  if (v_event_record ->> 'sponsoring_partner') is distinct from v_sponsor then
+    raise exception 'j102_sponsor_mismatch: the event is recorded under %, derived from the authenticated login, and the request names %',
+      v_sponsor, coalesce(v_event_record ->> 'sponsoring_partner', 'none') using errcode = '42501';
+  end if;
   if (v_event_record ->> 'recorded_at') is distinct from v_txn_now_text then
     raise exception 'j102_clock_injection_refused: recorded_at is the database transaction time %, not %',
       v_txn_now_text, coalesce(v_event_record ->> 'recorded_at', 'null') using errcode = '42501';
@@ -4602,23 +4673,23 @@ begin
   v_state_digest := ops.f01_digest_jsonb(v_state);
   insert into ops.j102_subject_current
     (tenant, subject_kind, subject_id, envelope, envelope_digest, state_digest,
-     parent_id, deal_state, updated_by, updated_at)
+     parent_id, deal_state, updated_by, sponsoring_partner, updated_at)
   values (
     ops.f01_tenant(), v_kind, v_id, p_subject_envelope,
     ops.f01_digest_jsonb(p_subject_envelope), v_state_digest,
     coalesce(v_state ->> 'relationship_id', v_state ->> 'engagement_id',
              v_state ->> 'assignment_id'),
     v_state ->> 'deal_state',
-    v_actor, v_txn_now);
+    v_actor, v_sponsor, v_txn_now);
   v_event_digest := ops.f01_digest_jsonb(v_event_record);
   insert into ops.j102_subject_event
     (tenant, subject_kind, subject_id, event_kind, transition_id, envelope, envelope_digest,
-     event_digest, recorded_by, recorded_at, idempotency_key)
+     event_digest, recorded_by, sponsoring_partner, recorded_at, idempotency_key)
   values (
     ops.f01_tenant(), v_event ->> 'subject_kind', v_event ->> 'subject_id',
     v_event ->> 'event_kind', v_event_record ->> 'transition_id',
     p_event_envelope, ops.f01_digest_jsonb(p_event_envelope), v_event_digest,
-    v_actor, v_txn_now, p_idempotency_key);
+    v_actor, v_sponsor, v_txn_now, p_idempotency_key);
 
   v_result := jsonb_build_object(
     'operation', v_operation,
@@ -5871,7 +5942,7 @@ revoke all on function ops.j102_verify_envelope(jsonb,text,text,text),
   ops.j102_subject(text,text), ops.j102_first_party_record(text,text),
   ops.j102_evidence_subject_link(text,text,integer,text,text,text),
   ops.j102_compatibility_view(text,text), ops.j102_migration_readiness(),
-  ops.j102_migration_shadow_snapshot(),
+  ops.j102_migration_shadow_snapshot(), ops.j102_sponsoring_partner(),
   ops.j102_read(text,jsonb), ops.j102_admission_policy(),
   ops.j102_expected_value(jsonb,jsonb,jsonb,jsonb,jsonb,jsonb),
   ops.j102_recheck_evidence(jsonb,text,text,text)
@@ -5880,7 +5951,7 @@ grant execute on function ops.j102_verify_envelope(jsonb,text,text,text),
   ops.j102_subject(text,text), ops.j102_first_party_record(text,text),
   ops.j102_evidence_subject_link(text,text,integer,text,text,text),
   ops.j102_compatibility_view(text,text), ops.j102_migration_readiness(),
-  ops.j102_migration_shadow_snapshot(),
+  ops.j102_migration_shadow_snapshot(), ops.j102_sponsoring_partner(),
   ops.j102_read(text,jsonb),
   -- THE ADMISSION MAP IS READABLE, deliberately. It confers nothing: it decides
   -- no request, it is IMMUTABLE, it takes no argument, and everything in it is

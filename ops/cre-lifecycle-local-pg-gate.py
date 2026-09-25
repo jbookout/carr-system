@@ -212,7 +212,10 @@ def main() -> int:
             for who, login, options in (
                 ("joe", "carr_authority_joe", ""),
                 ("dell", "carr_authority_dell", ""),
-                ("agent", "carr_writer", "-c carr.acting_actor_slug=claude-ci"),
+                # The server sets the sponsor transaction-locally on every write
+                # (mcp.js setWriterActorContext); a session stands in for it here.
+                ("agent", "carr_writer",
+                 "-c carr.acting_actor_slug=claude-ci -c carr.sponsoring_human_slug=joe"),
             ):
                 run = psql(as_login(dsn, login, password), FIXTURE,
                            env={"PGOPTIONS": f"--client-min-messages=notice {options}".strip()})

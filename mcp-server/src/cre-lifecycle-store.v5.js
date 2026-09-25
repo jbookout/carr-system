@@ -101,6 +101,7 @@ import {
   ORGANIZATION_TENANT_ID,
   isKnownActor,
   authorizationClassForActor,
+  personalScopeForActor,
 } from "./identity.js";
 import { V5_NO_EFFECTS } from "./global-boundaries.v5.js";
 import {
@@ -412,7 +413,8 @@ export const V5_J102_OPEN_OWNER_QUESTIONS = Object.freeze([
     status: "ruled_by_owner",
     ruling: "(c) yes, like a partner, recorded as sponsored_agent under the sponsoring partner.",
     ruled_on: "2026-09-25",
-    today: "All three initializations admit verified_partner and sponsored_agent. The row and event record the AGENT's slug and the class sponsored_agent, both derived by the database from the writer credential. The sponsoring partner is established by the handler's authentication and is not stamped on the lifecycle row; stamping it would widen the subject and event shapes.",
+    today: "DONE. All three initializations admit verified_partner and sponsored_agent. Every lifecycle subject row and event row now carries `sponsoring_partner`: the partner's own slug on a partner's session, the server-verified sponsor on an agent's or a writer-credential session. The store takes it from the authenticated grant (identity.js personalScopeForActor), the database derives it independently (ops.j102_sponsoring_partner(), from f01_principal and the server-set carr.sponsoring_human_slug), the store refuses when the two disagree, the SQL writers refuse an envelope naming any other value (j102_sponsor_mismatch), and a CHECK binds the column to the hashed envelope. A caller-supplied `sponsoring_partner` is refused as a derived-only field.",
+    encoded_by: ["store principal.sponsoring_partner", "ops.j102_sponsoring_partner()", "writer j102_sponsor_mismatch", "column CHECKs on subject and event"],
     why_unsettled: "It is not: the owner ratified the parity.",
     residual_to_weigh: "`initialize-prospect-relationship` has no parent, no evidence and no rate bound, so an authenticated sponsored agent can create prospect rows limited only by id uniqueness.",
     encoded_without_a_ruling: false,
@@ -487,7 +489,7 @@ function deepFreeze(value) {
 
 export const V5_J102_DERIVED_ONLY_FIELDS = deepFreeze([
   "tenant", "now", "server_time", "recorded_at", "evaluated_at", "updated_at",
-  "recorded_by", "updated_by", "sponsor", "sponsoring_human_slug",
+  "recorded_by", "updated_by", "sponsor", "sponsoring_human_slug", "sponsoring_partner",
   "authenticated_identity", "human", "via", "client_id",
   "subject", "subjects", "related", "current_state", "prior_state",
   "evidence", "evidence_record", "document", "artifact", "record", "approval",
@@ -1403,12 +1405,33 @@ function assertAuthenticatedContext(context) {
       { actor_slug: actor.slug, authorization_class,
         admitted: [...V5_J102_ACTOR_CLASSES] });
   }
+  // OWNER RULING (c), 2026-09-25: EVERY WRITE IS RECORDED UNDER THE SPONSORING
+  // PARTNER. The same server-derived sponsor mcp.js hands the database as
+  // carr.sponsoring_human_slug: a partner's own session is its own sponsor, an
+  // agent's is the sponsor its authenticated grant carries. Never a payload field.
+  const scope = personalScopeForActor(actor);
+  if (scope?.status !== "personal" || !["joe", "dell"].includes(scope.sponsor)) {
+    fail("sponsoring_partner_unavailable",
+      `${actor.slug} carries no verified sponsoring partner, so no lifecycle write can be recorded under one`,
+      { actor_slug: actor.slug, scope_status: scope?.status ?? null });
+  }
   return deepFreeze({
     slug: actor.slug,
     human: actor.human === true,
     authorization_class,
+    sponsoring_partner: scope.sponsor,
     derived_by: "authenticated_handler_context",
   });
+}
+
+/**
+ * The kernel's actor is WHO decides; the sponsor is under whom the write is
+ * RECORDED, which only the store and the SQL writer stamp. The kernel's actor
+ * shape stays closed at its four keys.
+ */
+function kernelActor(principal) {
+  const { sponsoring_partner: _recordedUnder, ...actor } = principal;
+  return actor;
 }
 
 function assertOperationAuthority(operation, principal) {
@@ -1461,7 +1484,8 @@ export function v5J102StoreEnvelope(record_kind, record, extra = {}) {
   return storeEnvelope(record_kind, record, extra);
 }
 
-export function storedSubjectRecord({ subject, transition_id, prior_state_digest, updated_by, updated_at }) {
+export function storedSubjectRecord({ subject, transition_id, prior_state_digest, updated_by,
+  sponsoring_partner, updated_at }) {
   return {
     schema_version: V5_J102_STORED_SUBJECT_SCHEMA_VERSION,
     tenant: ORGANIZATION_TENANT_ID,
@@ -1471,11 +1495,13 @@ export function storedSubjectRecord({ subject, transition_id, prior_state_digest
     established_by_transition: transition_id,
     prior_state_digest: prior_state_digest ?? null,
     updated_by,
+    sponsoring_partner,
     updated_at,
   };
 }
 
-export function storedEventRecord({ event, transition_id, evidence_references, recorded_by, recorded_at }) {
+export function storedEventRecord({ event, transition_id, evidence_references, recorded_by,
+  sponsoring_partner, recorded_at }) {
   return {
     schema_version: V5_J102_STORED_EVENT_SCHEMA_VERSION,
     tenant: ORGANIZATION_TENANT_ID,
@@ -1493,6 +1519,7 @@ export function storedEventRecord({ event, transition_id, evidence_references, r
     // database enforces both, separately.
     evidence_references: [...evidence_references],
     recorded_by,
+    sponsoring_partner,
     recorded_at,
   };
 }
@@ -1697,7 +1724,8 @@ export function createCreLifecycleStore({ db } = {}) {
    */
   async function openOperation(client, operation, principal) {
     const row = await one(client,
-      "SELECT ops.f01_principal() AS principal, ops.f01_now_text() AS server_now");
+      "SELECT ops.f01_principal() AS principal, ops.f01_now_text() AS server_now, " +
+      "ops.j102_sponsoring_partner() AS sponsoring_partner");
     if (!row) {
       fail("transaction_context_unavailable",
         "the database did not return a principal; the transaction context was never established",
@@ -1708,6 +1736,14 @@ export function createCreLifecycleStore({ db } = {}) {
       fail("actor_context_mismatch",
         "the database-derived actor is not the handler's authenticated actor; the write cannot be attributed",
         { operation, handler_actor: principal.slug, database_actor: dbPrincipal?.actor_slug ?? null });
+    }
+    // The database derives the sponsor from the login on its own side; the
+    // handler's and the database's must agree, or the write is not attributable.
+    if (row.sponsoring_partner !== principal.sponsoring_partner) {
+      fail("sponsor_context_mismatch",
+        "the database-derived sponsoring partner is not the handler's; the write cannot be recorded under either",
+        { operation, handler_sponsoring_partner: principal.sponsoring_partner,
+          database_sponsoring_partner: row.sponsoring_partner ?? null });
     }
     // THE CLASS IS COMPARED ON EVERY OPERATION, not only the authorityOnly ones.
     // It used to be checked only where authority was required, which left the
@@ -1749,6 +1785,9 @@ export function createCreLifecycleStore({ db } = {}) {
           slug: principal.slug,
           human: false,
           authorization_class: "sponsored_agent",
+          // Ruling (e): under the partner's own slug; ruling (c): under the
+          // partner as sponsor. The same partner, both checked above.
+          sponsoring_partner: principal.sponsoring_partner,
           derived_by: "server_established_transaction_context",
         }),
         credential_split: deepFreeze({
@@ -2676,7 +2715,7 @@ export function createCreLifecycleStore({ db } = {}) {
         subject: loadedSubject.state,
         related,
         evidence,
-        actor: principal,
+        actor: kernelActor(principal),
         // The selector chose the transition above and stops here; only the
         // kernel's own declared vocabulary crosses into the judgement.
         declared: domainDeclared,
@@ -2770,12 +2809,14 @@ export function createCreLifecycleStore({ db } = {}) {
           // the pair if they ever do.
           prior_state_digest: expectedStateDigests[`${kind}:${state.subject_id}`],
           updated_by: principal.slug,
+          sponsoring_partner: principal.sponsoring_partner,
           updated_at: now,
         }), { alone_sufficient: false }));
       const eventEnvelopes = evaluated.events.map(event =>
         storeEnvelope("stored_lifecycle_event", storedEventRecord({
           event, transition_id, evidence_references,
-          recorded_by: principal.slug, recorded_at: now,
+          recorded_by: principal.slug, sponsoring_partner: principal.sponsoring_partner,
+          recorded_at: now,
         }), { append_only: true }));
 
       const row = await one(client,
@@ -2871,7 +2912,7 @@ export function createCreLifecycleStore({ db } = {}) {
       current_version_digest: stored.state_digest,
       incoming,
       ...(concurrent === null ? {} : { concurrent }),
-      actor: principal,
+      actor: kernelActor(principal),
     });
     if (evaluated.decision !== "reconcile" ||
         evaluated.reconciliation_item.conflict_kind !== verdict.conflict_kind) {
@@ -3106,7 +3147,7 @@ export function createCreLifecycleStore({ db } = {}) {
         initialization_id: schema.initialization,
         related,
         declared,
-        actor: principal,
+        actor: kernelActor(principal),
         now,
         ...(activeSiblings === undefined ? {} : { active_negotiations_for_property: activeSiblings }),
       });
@@ -3134,6 +3175,7 @@ export function createCreLifecycleStore({ db } = {}) {
         transition_id: schema.initialization,
         prior_state_digest: null,
         updated_by: principal.slug,
+        sponsoring_partner: principal.sponsoring_partner,
         updated_at: now,
       }), { alone_sufficient: false });
       // AN EMPTY EVIDENCE CITATION, and it is a positive statement rather than an
@@ -3146,6 +3188,7 @@ export function createCreLifecycleStore({ db } = {}) {
         transition_id: schema.initialization,
         evidence_references: [],
         recorded_by: principal.slug,
+        sponsoring_partner: principal.sponsoring_partner,
         recorded_at: now,
       }), { append_only: true });
 
@@ -3907,7 +3950,7 @@ export function createCreLifecycleStore({ db } = {}) {
           ...edit, edited_by: principal.slug, edited_at: now,
         })),
         ...(concurrent.length === 0 ? {} : { concurrent }),
-        actor: principal,
+        actor: kernelActor(principal),
       });
 
       const base = {

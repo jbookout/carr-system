@@ -223,12 +223,17 @@ class FakeDb {
     if (text === "ROLLBACK") { this.rolledBack += 1; return { rows: [] }; }
 
     if (text.includes("ops.f01_principal()") && text.includes("ops.f01_now_text()")) {
+      const principal = this.script.principal ?? {
+        actor_slug: "joe", human: true, authorization_class: "verified_partner",
+        derived_by: "server_established_transaction_context",
+      };
       return { rows: [{
-        principal: this.script.principal ?? {
-          actor_slug: "joe", human: true, authorization_class: "verified_partner",
-          derived_by: "server_established_transaction_context",
-        },
+        principal,
         server_now: this.script.server_now ?? SERVER_NOW,
+        // Ruling (c): what ops.j102_sponsoring_partner() derives — the partner
+        // itself, or (for every synthetic agent here) its sponsor, joe.
+        sponsoring_partner: "sponsoring_partner" in this.script ? this.script.sponsoring_partner
+          : principal.authorization_class === "verified_partner" ? principal.actor_slug : "joe",
       }] };
     }
     if (text.includes("ops.j102_replay_outcome(")) {
@@ -1218,6 +1223,37 @@ test("the parent chain must be named in full, and a related subject nothing read
     related_refs: { engagement: { subject_kind: "engagement", subject_id: "eng-synthetic-1" } },
   }, ctx(JOE)), e => e instanceof V5J102StoreError && e.code === "unexpected_related_subject");
   assert.equal(db.calls.length, 0);
+});
+
+test("OWNER RULING (c): the row and event carry the sponsoring partner, and a disagreeing database sponsor refuses", async () => {
+  const AGENT_PRINCIPAL = { actor_slug: "codex", human: false, authorization_class: "sponsored_agent" };
+  const db = new FakeDb({ subjects: {}, principal: AGENT_PRINCIPAL });
+  const made = await createCreLifecycleStore({ db }).initializeProspectRelationship({
+    idempotency_key: "j102-fixture-sponsor-1", declared: { new_subject_id: "rel-synthetic-7" },
+  }, ctx(AGENT));
+  assert.equal(made.decision, "allow");
+  const [, , subjectJson, eventJson] = db.paramsFor("j102_initialize_subject");
+  assert.equal(JSON.parse(subjectJson).record.sponsoring_partner, "joe");
+  assert.equal(JSON.parse(subjectJson).record.updated_by, "codex");
+  assert.equal(JSON.parse(eventJson).record.sponsoring_partner, "joe");
+
+  const disagreeing = new FakeDb({ subjects: {}, principal: AGENT_PRINCIPAL, sponsoring_partner: "dell" });
+  await assert.rejects(createCreLifecycleStore({ db: disagreeing }).initializeProspectRelationship({
+    idempotency_key: "j102-fixture-sponsor-2", declared: { new_subject_id: "rel-synthetic-8" },
+  }, ctx(AGENT)), e => e instanceof V5J102StoreError && e.code === "sponsor_context_mismatch");
+  assert.equal(disagreeing.callsTo("j102_initialize_subject").length, 0, "refused before any write");
+
+  await assert.rejects(createCreLifecycleStore({ db: new FakeDb({ subjects: {} }) })
+    .initializeProspectRelationship({ idempotency_key: "j102-fixture-sponsor-3",
+      sponsoring_partner: "dell", declared: { new_subject_id: "rel-synthetic-9" } }, ctx(JOE)),
+  e => e instanceof V5J102StoreError &&
+    ["caller_derived_field_refused", "unknown_field"].includes(e.code));
+
+  await assert.rejects(createCreLifecycleStore({ db: new FakeDb({ subjects: {} }) })
+    .initializeProspectRelationship({ idempotency_key: "j102-fixture-sponsor-4",
+      declared: { new_subject_id: "rel-synthetic-10" } },
+    ctx({ slug: "codex", display: "Codex", human: false, via: "oauth-google" })),
+  e => e instanceof V5J102StoreError);
 });
 
 test("a prospect and a negotiation are created by their own operations, with their own parents", async () => {
