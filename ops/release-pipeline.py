@@ -725,9 +725,13 @@ class Pipeline:
                           capability="health_baseline_hard_error")
         return findings, complete, baseline_res.rc
 
-    def health_gate(self, cwd: Path, baseline: tuple[list[dict], bool, int]) -> None:
+    def health_gate(self, cwd: Path, baseline: tuple[list[dict], bool, int]) -> list[str]:
         """Fail the release on a NEW canonical finding, not on standing debt
-        that already existed before this promote.
+        that already existed before this promote. Returns the list of
+        `excused` time-rolling findings from `health_regression` — round 13:
+        a caller (`release_worker`) folds this into the shipped-release
+        receipt so an unattributed clock-driven finding is visible even on
+        a release that passes, not only inside a failing gate's log.
 
         `./run.sh health` reads canonical database state — export receipts,
         active-rule gaps, loose-work, credentials — almost none of which is
@@ -757,7 +761,7 @@ class Pipeline:
         if not complete:
             raise StepFailed("health", res.rc or 1, res.log,
                               "health read did not complete — an unavailable read is never a pass")
-        new = health_regression([] if not baseline_complete else baseline_findings, findings)
+        new, excused = health_regression([] if not baseline_complete else baseline_findings, findings)
         # NARROW backstop for point A ("a nonzero health exit with no new
         # finding line now passes... any rc != 0 must fail") and point 3 of
         # the second AND third rounds of review — NOT the "hard runtime
@@ -801,14 +805,20 @@ class Pipeline:
         if new:
             n = len(self.executed) + 1
             findings_log = self.run_dir / f"{n:02d}-health-new-findings.log"
+            excused_section = (
+                "\n\nExcused as clock noise, never attributed to this release (time-rolling, "
+                "not attributed — see HEALTH_REGRESSION_FIRST_APPEARANCE_ALLOWLIST):\n"
+                + "\n".join(f"- {line}" for line in excused) + "\n"
+            ) if excused else ""
             findings_log.write_text(
                 "New canonical finding(s) since the pre-promote baseline "
                 "(ops/release-pipeline.py health_gate; full health output is in the "
                 "health-baseline/health run logs alongside this file, not repeated here):\n"
-                + "\n".join(f"- {line}" for line in new) + "\n", encoding="utf-8")
+                + "\n".join(f"- {line}" for line in new) + "\n" + excused_section, encoding="utf-8")
             raise StepFailed("health", res.rc or 1, str(findings_log),
                               "new canonical finding(s) since the pre-promote baseline: "
                               + "; ".join(new))
+        return excused
 
     def _release_worktree_ready(self, name: str, wt: Path, mcp: Path, sha: str, *,
                                 mark_mutated: bool) -> None:
@@ -1461,7 +1471,7 @@ class Pipeline:
             live = self.http(lane_cfg["live_release_url"])
             if (live.get("git_sha") or {}).get("value") != sha:
                 raise StepFailed("verify-live", 1, "", "production /release does not serve the released SHA")
-        self.health_gate(wt, health_baseline)
+        health_excused = self.health_gate(wt, health_baseline)
 
         # 9. the schema snapshot goes back to main through its own PR
         schema_pr = None
@@ -1477,6 +1487,7 @@ class Pipeline:
                 "review_rule": ev.get("review_rule"), "reviewed_sha": ev.get("reviewed_sha"),
                 "pr_head_sha": ev.get("pr_head_sha"), "verifier": ev["verifier"],
                 "verifier_evidence": ev["verifier_evidence"], "test_evidence": ev["test_evidence"],
+                "health_time_rolling_not_attributed": health_excused,
                 "schema_pr": schema_pr, "run_dir": str(self.run_dir)}
 
     def _release_exists(self, wt: Path, py: str, key: str) -> bool:
@@ -1680,49 +1691,69 @@ HEALTH_REGRESSION_EXCLUDED_KEYS = frozenset({"repo_loose_work"})
 # information, not clock noise. `doctrine_gate` still sits OFF this
 # allowlist and is unaffected: it keeps the original count-sensitive rule
 # in full (see health_regression's docstring and the code below).
+#
+# ROUND 13 CORRECTION: round 12's "a new subject still fails" half brought
+# back exactly the clock-driven false failure the first-appearance excuse
+# existed to prevent. A job's own due window can pass during the tens of
+# minutes a release takes between the pre-promote baseline read and the
+# post-promote live read — nothing about THIS release causes that, the
+# clock alone does — and that job then shows up as a brand-new
+# `job_missing_due` subject with no baseline entry, which round 12 would
+# fail. Round 13 takes every key on this allowlist OUT of the regression
+# comparison entirely: neither a new subject NOR a count rise on an
+# allowlisted key is ever attributed to a release. They are never hidden —
+# `_canonical_health` still records them as ordinary findings (unchanged),
+# and `health_gate` lists every one of them, explicitly labeled "time-
+# rolling, not attributed", in both the release receipt (a shipped
+# release) and the new-findings log (a failed one) — but none of them can
+# ever be the REASON a release fails. `doctrine_gate` stays off this
+# allowlist and is unaffected: still fully count-sensitive, new subject
+# and count rise both still fail it, exactly as before round 12.
 HEALTH_REGRESSION_FIRST_APPEARANCE_ALLOWLIST = frozenset(
     {"export_receipt", "job_missing_due", "doctrine_stale"})
 
 
-def health_regression(baseline: list[dict], live: list[dict]) -> list[str]:
-    """The live finding(s) that should fail THIS release: a (key, subject)
-    pair absent from the baseline, a count that rose since the baseline, or
-    any live finding whose hard_error flag is set — unconditionally, never
-    excused by a matching baseline entry, because a structural
-    whole-section-unreadable read is never acceptable standing debt (point A
-    of an independent review of PR #1237: "export receipts UNREADABLE" must
-    always fail, every release, until it is fixed). A count that FELL, or is
-    unchanged, is not a regression — improvement and no-op are both allowed
-    to pass, which is the whole point of diffing against a baseline instead
-    of failing on any standing finding.
+def health_regression(baseline: list[dict], live: list[dict]) -> tuple[list[str], list[str]]:
+    """Returns `(bad, excused)`. `bad` is the live finding(s) that should
+    fail THIS release: a (key, subject) pair absent from the baseline, a
+    count that rose since the baseline, or any live finding whose
+    hard_error flag is set — unconditionally, never excused by a matching
+    baseline entry, because a structural whole-section-unreadable read is
+    never acceptable standing debt (point A of an independent review of PR
+    #1237: "export receipts UNREADABLE" must always fail, every release,
+    until it is fixed). A count that FELL, or is unchanged, is not a
+    regression — improvement and no-op are both allowed to pass, which is
+    the whole point of diffing against a baseline instead of failing on any
+    standing finding.
 
-    `time_rolling` findings on `HEALTH_REGRESSION_FIRST_APPEARANCE_ALLOWLIST`
-    (`export_receipt`'s STALE variant, `job_missing_due`, `doctrine_stale` —
-    confirmed clock-driven, not release-driven) are compared by SUBJECT SET
-    ONLY, never by count (round 12, point 2, overriding the round-2-through-11
-    rule below for these three keys specifically): a subject already present
-    in the baseline is excused NO MATTER HOW ITS COUNT MOVED, because this
-    gate runs once, after promote, on a SHA that is never retried — an
-    already-known-broken sub-daily job whose `job_missing_due` count climbs a
-    little on every single run would otherwise fail every release forever,
-    which is a permanent gate jam, not a useful regression signal. A subject
-    with NO baseline entry at all is still a regression: a job crossing its
-    due window, or a section going STALE, for the very first time is new
-    information worth surfacing, not clock noise to hide. See
-    `HEALTH_REGRESSION_FIRST_APPEARANCE_ALLOWLIST`'s own comment for exactly
-    which keys qualify and why; `doctrine_gate` is `time_rolling=True` but
-    deliberately NOT on this allowlist, because a release that introduces 40
-    gate failures where there were 0 before is a real regression and must
-    still fail regardless of whether it lands as a new subject or a count
-    rise on one already present.
+    `excused` is every live finding whose key is on `HEALTH_REGRESSION_
+    FIRST_APPEARANCE_ALLOWLIST` (`export_receipt`'s STALE variant,
+    `job_missing_due`, `doctrine_stale`) — round 13, point [coordinator]:
+    round 12 tried excusing an allowlisted key's already-present subjects
+    while still failing a brand-new one, but a new subject is exactly what
+    a job's due window crossing during the tens of minutes a release takes
+    produces, bringing back the clock-driven false failure the allowlist
+    existed to prevent in the first place. Round 13 takes these three keys
+    OUT of the regression comparison ENTIRELY — neither a new subject nor a
+    count rise on an allowlisted key can ever land in `bad`, regardless of
+    whether the baseline had any entry for it at all. They are never
+    hidden, though: every one of them is still recorded as an ordinary
+    finding by `_canonical_health` (unchanged) and is returned here,
+    explicitly, so the caller can list it — visibly labeled "time-rolling,
+    not attributed" — in both a shipped release's receipt and a failed
+    release's new-findings log, so nothing about them disappears from view,
+    they simply cannot be the REASON a release fails.
 
-    Every OTHER `time_rolling` key (i.e. `doctrine_gate`, the only one today)
-    stays fully count-sensitive, the original round-2/round-4 rule: a
-    (key, subject) pair with NO baseline entry at all still fails as "new"
-    (see `test_point2r4_a_new_doctrine_gate_finding_with_no_baseline_still_
-    fails` in ops/release-pipeline-selftest.py), and a count RISE against an
-    EXISTING baseline entry also still fails — only a FALL (or no change) is
-    excused as clock noise for these non-allowlisted keys.
+    Every OTHER `time_rolling` key (i.e. `doctrine_gate`, the only one
+    today) stays fully count-sensitive, unaffected by any of this, the
+    original round-2/round-4 rule: a (key, subject) pair with NO baseline
+    entry at all still fails as "new" (see `test_point2r4_a_new_doctrine_
+    gate_finding_with_no_baseline_still_fails` in ops/release-pipeline-
+    selftest.py), and a count RISE against an EXISTING baseline entry also
+    still fails — only a FALL (or no change) is excused as clock noise for
+    this non-allowlisted key, because a release that introduces 40 gate
+    failures where there were 0 before is a real regression and must still
+    fail, whether that lands as a new subject or a rising count.
 
     Note for a reader of a failing gate: `count` accumulates by (key,
     subject) within one run (see tools/health-check.py's `_canonical_
@@ -1732,15 +1763,13 @@ def health_regression(baseline: list[dict], live: list[dict]) -> list[str]:
     split the subject by rule id rather than read the aggregate as exact.
     This applies with extra force to `job_missing_due`, whose subject is
     the job's definition key alone: several DIFFERENT missing due-windows
-    for the same job accumulate onto ONE (key, subject) count, so a truly
-    new missed window and an old one simply aging forward are not
-    distinguishable from the count alone. Telling those apart needs a
-    window-level identity this schema does not carry today; that is a
-    known scoping limit of the (key, subject, count) aggregate, not
-    something this diff can fix by comparing counts more cleverly.
+    for the same job accumulate onto ONE (key, subject) count — moot for
+    `bad` now that this key is never count-compared, but still relevant to
+    reading what `excused` reports.
     """
     baseline_by_key_subject = {(row["key"], row["subject"]): row for row in baseline}
-    bad = []
+    bad: list[str] = []
+    excused: list[str] = []
     for row in live:
         if row["key"] in HEALTH_REGRESSION_EXCLUDED_KEYS:
             continue
@@ -1751,28 +1780,12 @@ def health_regression(baseline: list[dict], live: list[dict]) -> list[str]:
         prior = baseline_by_key_subject.get((row["key"], row["subject"]))
         if row.get("time_rolling"):
             if row["key"] in HEALTH_REGRESSION_FIRST_APPEARANCE_ALLOWLIST:
-                # Round 12, point 2: the reviewer refuted the round-9-through-
-                # 11 rule for an ALLOWLISTED key (only a first appearance was
-                # excused; a count rise on an already-present subject still
-                # failed). The gate runs once, after promote, and never
-                # retries the SHA — so an already-known-broken sub-daily job
-                # (job_missing_due) whose due-window count climbs a little on
-                # EVERY run would fail EVERY release forever, which is a
-                # permanent gate jam, not a regression signal. For these
-                # three confirmed-clock-driven keys, compare only the SET of
-                # subjects against the baseline, never the count: a subject
-                # already present in the baseline — however its count moved,
-                # up or down — is not a regression. A subject with NO
-                # baseline entry at all is still a regression (this reverses
-                # the round-4 "first appearance is excused" rule for these
-                # keys specifically): a job crossing its due window, or a
-                # section going STALE, for the very first time is new
-                # information the release should surface, not clock noise to
-                # hide — only an ALREADY-KNOWN clock-driven finding aging
-                # forward on the same subject is the noise this allowlist
-                # exists to excuse.
-                if prior is None:
-                    bad.append(f"{row['key']}[{row['subject']}]: new subject — {detail}")
+                # Round 13: these three confirmed-clock-driven keys are OUT
+                # of the comparison entirely — neither a new subject nor a
+                # count rise ever fails the gate — but every one is still
+                # reported back, labeled, so nothing is hidden.
+                excused.append(f"{row['key']}[{row['subject']}]: time-rolling, not "
+                               f"attributed — {detail}")
                 continue
             # Every other time_rolling key (doctrine_gate) stays fully
             # count-sensitive: a release that introduces 40 gate failures
@@ -1791,7 +1804,7 @@ def health_regression(baseline: list[dict], live: list[dict]) -> list[str]:
         elif row.get("count", 0) > prior.get("count", 0):
             bad.append(f"{row['key']}[{row['subject']}]: count {prior.get('count')} -> "
                        f"{row.get('count')} — {detail}")
-    return bad
+    return bad, excused
 
 
 def parse_json_field(text: str, field: str, step: str) -> str:

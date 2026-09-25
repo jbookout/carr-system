@@ -824,12 +824,14 @@ class HealthGate(Base):
         runner = FakeRunner(live=live, health_baseline_findings=[yesterday], health_findings=[today])
         self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
 
-    def test_round12_allowlisted_new_subject_is_still_a_regression(self):
-        # The other half of round 12, point 2: a subject with NO baseline
-        # entry at all is now the case that fails (reversing round 4's
-        # "first appearance is excused" rule for allowlisted keys
-        # specifically) — a job crossing its due window for the very first
-        # time is new information the release should surface.
+    def test_round13_allowlisted_new_subject_passes(self):
+        # Round 13 reverses round 12's other half: making a brand-new
+        # subject fail brought back exactly the clock-driven false failure
+        # the allowlist existed to prevent — a job's own due window can
+        # pass during the tens of minutes a release takes, turning it into
+        # a "new" job_missing_due subject with no baseline entry, through
+        # no fault of the release. A new subject on an allowlisted key is
+        # now excused, same as an existing one, regardless of count.
         self.fx.commit({"mcp-server/src/a.js": "1"})
         existing = _finding("job_missing_due", "hourly-sync MISSING DUE execution for 09:00",
                             subject="hourly-sync", time_rolling=True, count=1)
@@ -838,8 +840,42 @@ class HealthGate(Base):
         live = {"sha": self.fx.base}
         runner = FakeRunner(live=live, health_baseline_findings=[existing],
                             health_findings=[existing, new_job])
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
+
+    def test_round13_a_new_non_time_rolling_key_still_fails(self):
+        # A new (key, subject) pair that is NOT time_rolling at all (so not
+        # eligible for the allowlist regardless of the key name) still
+        # fails as an ordinary new regression — round 13 only takes
+        # time_rolling, allowlisted keys out of the comparison.
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        new_credential_gap = _finding("credential_health", "new-integration token expiring",
+                                      subject="new-integration")
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live, health_baseline_findings=[],
+                            health_findings=[new_credential_gap])
         self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 1)
-        self.assertIn("weekly-report", self.fx.records()[-1].get("detail", ""))
+        self.assertIn("new-integration", self.fx.records()[-1].get("detail", ""))
+
+    def test_round13_receipt_lists_the_unattributed_time_rolling_findings(self):
+        # "Keep them in the findings and the receipt, visibly listed as
+        # time-rolling, not attributed, so nothing is hidden": a release
+        # that PASSES (no non-allowlisted regression) still carries every
+        # allowlisted time_rolling finding forward into the shipped-release
+        # receipt (releases.jsonl), explicitly labeled, even though none of
+        # them influenced the pass/fail outcome.
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        missing_due = _finding("job_missing_due", "hourly-sync MISSING DUE execution for 09:00",
+                               subject="hourly-sync", time_rolling=True, count=1)
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live, health_baseline_findings=[], health_findings=[missing_due])
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
+        record = self.fx.records()[-1]
+        self.assertEqual(record.get("status"), "shipped")
+        unattributed = record.get("health_time_rolling_not_attributed", [])
+        self.assertEqual(len(unattributed), 1)
+        self.assertIn("job_missing_due", unattributed[0])
+        self.assertIn("hourly-sync", unattributed[0])
+        self.assertIn("time-rolling, not attributed", unattributed[0])
 
     def test_round12_rule_enforcement_count_rise_still_fails(self):
         # "Keep every other key count-sensitive": rule_enforcement is not
@@ -870,15 +906,16 @@ class HealthGate(Base):
         self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 1)
         self.assertIn("doctrine_gate", self.fx.records()[-1].get("detail", ""))
 
-    def test_point2r4_allowlisted_keys_now_fail_a_first_appearance(self):
-        # Round 12 REVERSES this rule for an allowlisted key (it read
-        # "...still_excuse_a_first_appearance" through round 11): export_
-        # receipt (the STALE branch) and job_missing_due now FAIL on a
-        # first appearance with no baseline entry, since round 12 treats a
-        # brand-new subject as real new information, not clock noise —
-        # only an ALREADY-PRESENT subject is excused now, regardless of
-        # count (see test_round12_allowlisted_existing_subject_count_rise_
-        # is_excused above).
+    def test_point2r4_allowlisted_keys_still_excuse_a_first_appearance(self):
+        # Round 12 briefly reversed this (making a first appearance fail);
+        # round 13 reverses it back and goes further — a key on the
+        # allowlist is now out of the comparison entirely, so export_
+        # receipt (the STALE branch) and job_missing_due are excused on a
+        # first appearance with no baseline entry, exactly as through
+        # round 11, AND (unlike round 11) an existing subject's count rise
+        # is excused too (see test_round12_allowlisted_existing_subject_
+        # count_rise_is_excused and test_round13_allowlisted_new_subject_
+        # passes above, which cover that half explicitly).
         self.fx.commit({"mcp-server/src/a.js": "1"})
         stale_export = _finding("export_receipt", "STALE vendors.xlsx (last ok 2026-09-20)",
                                 subject="vendors.xlsx", time_rolling=True)
@@ -887,22 +924,21 @@ class HealthGate(Base):
         live = {"sha": self.fx.base}
         runner = FakeRunner(live=live, health_baseline_findings=[],
                             health_findings=[stale_export, missing_due])
-        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 1)
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
 
-    def test_round7_doctrine_stale_first_appearance_now_fails(self):
+    def test_round7_doctrine_stale_first_appearance_is_excused(self):
         # Round 7 excused doctrine_stale's first appearance as clock noise;
-        # round 12 reverses that for every allowlisted key, doctrine_stale
-        # included — a section crossing review_after for the very first
-        # time, with nothing in the baseline to compare against, is now
-        # treated as new information worth surfacing rather than hidden.
+        # round 12 briefly reversed it; round 13 restores the excuse (and
+        # extends it to a count rise too) — a section crossing review_after
+        # for the very first time, with nothing in the baseline to compare
+        # against, is clock noise this release did not cause.
         self.fx.commit({"mcp-server/src/a.js": "1"})
         new_stale = _finding("doctrine_stale", "2 stale sections", count=2,
                              time_rolling=True)
         live = {"sha": self.fx.base}
         runner = FakeRunner(live=live, health_baseline_findings=[],
                             health_findings=[new_stale])
-        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 1)
-        self.assertIn("new subject", self.fx.records()[-1].get("detail", ""))
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
 
     def test_round7_doctrine_gate_is_still_not_on_the_allowlist(self):
         # Confirms the allowlist addition is scoped to doctrine_stale only:
