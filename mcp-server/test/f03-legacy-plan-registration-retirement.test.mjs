@@ -46,14 +46,17 @@ class RecordingClient {
     const sql = text.replace(/\s+/g, " ").trim();
     this.statements.push(sql);
     if (sql.startsWith("select pg_advisory_xact_lock")) return { rows: [{}] };
-    if (sql.startsWith("select request_hash, response from tool_call")) {
+    if (sql.startsWith("select request_hash, response")) {
       const key = params[0];
       if (this.ledger.has(key)) return { rows: [this.ledger.get(key)] };
       if (this.seeded.has(key)) return { rows: [{ request_hash: lastRequestHash, response: this.seeded.get(key) }] };
       return { rows: [] };
     }
     if (sql.startsWith("insert into tool_call")) {
-      this.ledger.set(params[0], { request_hash: params[3], response: JSON.parse(params[4]) });
+      // Keep the identity the envelope writes, in its insert's parameter order,
+      // so a replay is judged against a row that says who made it.
+      this.ledger.set(params[0], { request_hash: params[3], response: JSON.parse(params[4]),
+        actor_id: params[2], organization_tenant_id: params[7] });
       return { rows: [] };
     }
     if (sql.startsWith("select * from ops.engineering_register_slice_plan(")) {
@@ -138,10 +141,10 @@ test("a fresh valid v2 plan registers, then the same key replays without a secon
   const second = await register(client, structuredClone(call));
   assert.deepEqual(second, { replayed: true, ...first });
   assert.equal(client.registered, 1, "a replay must not register again");
-  assert.deepEqual(client.statements.slice(statementsBefore), [
-    "select pg_advisory_xact_lock(hashtextextended($1, 0))",
-    "select request_hash, response from tool_call where idempotency_key=$1",
-  ]);
+  const replayStatements = client.statements.slice(statementsBefore);
+  assert.equal(replayStatements.length, 2, JSON.stringify(replayStatements));
+  assert.ok(replayStatements[0].startsWith("select pg_advisory_xact_lock"));
+  assert.ok(replayStatements[1].startsWith("select request_hash, response"));
 });
 
 test("a stored v2 key re-sent with different content is key reuse, not a replay", async () => {
