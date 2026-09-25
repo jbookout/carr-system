@@ -26,7 +26,13 @@ by the new one.
 
 MESSAGE SEMANTICS (loop 620). The same module is also wired once at
 UserPromptSubmit, the earliest seam that carries the partner's actual message.
-Jev judges which pack-layer rules bind that message; code rejects unknown and
+Which pack-layer rules bind that message is decided in
+ops/rule_trigger_delivery.py: the `prompt_regex` rows Jev compiled once per
+rule are matched first; a machine envelope stops there with zero Jev
+requests, and a human prompt then gets one budgeted judgment (a ranking plus
+single-rule binding requests for its top 7, stale rules always included; a
+deterministic word-overlap shortlist stands in when the ranking request is
+unavailable) — at most 8 Jev requests per human prompt; code rejects unknown and
 already-loaded layer-zero candidates; the existing authenticated
 standing-context door supplies the authoritative rule text and identity before
 one typed advisory receipt is injected. The content_regex rows no longer run
@@ -374,10 +380,12 @@ def _generalized_receipt(payload: dict, response: dict, trigger_ids: list[str],
 
 
 def _semantic_adviser(situation: str, session_id: str | None = None) -> list[dict]:
-    # The verdict cache is keyed on the hook payload's own session_id; with
-    # none it is off (ops/jev_rule_select.py _session_id), never pooled.
-    path = REPO / "ops/jev_rule_select.py"
-    spec = importlib.util.spec_from_file_location("jev_rule_select_live", path)
+    # Compiled-trigger match, then (human prompts only) one budgeted Jev
+    # judgment of at most 8 requests (ops/rule_trigger_delivery.py). The
+    # session is the hook payload's own session_id; with none, nothing is
+    # deduped or pooled.
+    path = REPO / "ops/rule_trigger_delivery.py"
+    spec = importlib.util.spec_from_file_location("rule_trigger_delivery_live", path)
     if spec is None or spec.loader is None:
         raise RuntimeError("semantic selector unavailable")
     module = importlib.util.module_from_spec(spec)
@@ -497,7 +505,7 @@ def _process_prompt(payload: dict, runner: Callable,
     except Exception:
         build = _build_unavailable()
     try:
-        selected = (adviser(prompt) if adviser
+        selected = (adviser(prompt) if adviser is not None
                     else _semantic_adviser(prompt, payload["session_id"]))
         if not isinstance(selected, list):
             raise RuntimeError("semantic selector returned malformed advice")

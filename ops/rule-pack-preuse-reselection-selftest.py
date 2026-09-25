@@ -759,9 +759,13 @@ def gen_selector_result(*, packs: list[str], ids: list[str], mode: str = "shadow
     }
 
 
-def find_row(*, kind: str, contains: str):
+def find_row(*, kind: str, contains: str, source: str | None = None):
+    # The rows these checks were written against are the reviewed ones; the
+    # Jev-compiled rows (source jev_compiled) have their own checks below.
     for row in TRIGGER_ROWS.values():
-        if row["kind"] == kind and contains in row["pattern"]:
+        if (row["kind"] == kind and contains in row["pattern"]
+                and (row.get("source") == source if source
+                     else row.get("source") != "jev_compiled")):
             return row
     raise AssertionError(f"no compiled {kind} trigger contains {contains!r}")
 
@@ -1069,7 +1073,7 @@ finally:
     rail._semantic_adviser = _real_semantic_adviser
 with tempfile.TemporaryDirectory() as fake_repo:
     (Path(fake_repo) / "ops").mkdir()
-    (Path(fake_repo) / "ops/jev_rule_select.py").write_text(
+    (Path(fake_repo) / "ops/rule_trigger_delivery.py").write_text(
         "SEEN = []\n"
         "def advise(situation, **kwargs):\n"
         "    SEEN.append(kwargs)\n"
@@ -1175,6 +1179,30 @@ if len(agent_row["rule_ids"]) > 1:
     check("a same-set, consistently-reordered (unsorted) rule_ids/rules pair still fails "
           "validate_generalized_receipt on the sortedness invariant alone",
           not contract.validate_generalized_receipt(reordered, repo=REPO))
+
+# COMPILED-TRIGGER WIRING (2026-09-25). The default message adviser is now the
+# compiled-trigger matcher with its budgeted judgment; that it receives the
+# session (for its per-session dedupe) is checked above.
+prompt_rows = [row for row in TRIGGER_ROWS.values() if row["kind"] == "prompt_regex"]
+check("the compiled table carries prompt_regex rows", bool(prompt_rows))
+leaky = [row["trigger_id"] for row in prompt_rows
+         if rail._row_matches("Bash", {"command": "x " * 3 + row["pattern"]}, row)]
+check("prompt_regex rows never fire on a PreToolUse payload", leaky == [], leaky)
+check("the trigger table with prompt_regex rows still loads for the PreToolUse rail",
+      len(contract.load_trigger_table(REPO)) == len(TRIGGER_TABLE["triggers"]))
+
+# A background-task notification gets the real advisory's skip, not a Jev
+# call, and the receipt it rides on still validates and requires nothing.
+build_module = load("jev_build_advisory_hooktest", REPO / "ops/jev_build_advisory.py")
+notification = ("<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n"
+                "<summary>Agent \"x\" finished</summary>\n</task-notification>")
+skip_output = rail.process(prompt_payload(prompt=notification), runner=Runner(),
+                           adviser=lambda _t: [], build_adviser=build_module.advise)
+skip_row = json.loads(context(skip_output))
+check("a task notification's build receipt carries the skipped advisory and validates",
+      skip_row["schema"] == contract.BUILD_RECEIPT_SCHEMA
+      and skip_row["advisory"] == build_module.skipped()
+      and contract.validate_build_receipt(skip_row, repo=REPO))
 
 if FAILURES:
     print("rule-pack-preuse-reselection-selftest: FAIL")
