@@ -224,6 +224,13 @@ class Fixture:
         self.repo = tmp / "repo"
         git(tmp, "init", "--bare", "-b", "main", str(self.origin))
         git(tmp, "clone", str(self.origin), str(self.repo))
+        # Machine state is not history, exactly as the real checkout's
+        # .gitignore has it. Without this, commit()'s `git add -A` swept the
+        # stub `.venv/bin/python` (written below) into every test's first
+        # post-base commit, so a commit meant to be docs-only was no longer
+        # canary-ignored; and it swept the pipeline's own out/release-pipeline
+        # state into any commit made after a tick.
+        (self.repo / ".git" / "info" / "exclude").write_text(".venv\nout/\n")
         git(self.repo, "config", "user.email", "t@example.invalid")
         git(self.repo, "config", "user.name", "t")
         self.base = self.commit({"README.md": "x"})
@@ -1142,7 +1149,10 @@ class ReviewGate(Base):
     """B1: the approval must be trusted, the latest verdict, and fresh."""
 
     def blocked_reason(self, comments_for_head):
-        sha = self.fx.commit({"mcp-server/src/a.js": "1"})
+        # distinct content per call: a repeat call must add a real code commit,
+        # not an empty one (see Fixture's info/exclude)
+        self._calls = getattr(self, "_calls", 0) + 1
+        sha = self.fx.commit({"mcp-server/src/a.js": str(self._calls)})
         n = FakeGitHub().pr_number(sha)
         runner = FakeRunner()
         self.assertEqual(self.fx.pipeline(runner, github=FakeGitHub(comments={n: comments_for_head(n)}))
