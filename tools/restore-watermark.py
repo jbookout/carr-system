@@ -48,10 +48,26 @@ only thing a restore can be compared EXACTLY against is the artifact itself.
                own read_at (review H3). No channel has one today, so every
                unsettled item stays quarantined.
 
-Nothing here writes to a database. No credential value is printed: the age
+WHAT IS AUTHORITY (review K3): only verify-restore's stdout PIPED into
+mcp-server/bin/recovery-matrix-evaluate.mjs, as bin/restore-rehearse.sh does
+and records. out/restore-exercise-receipt.json is a copy for the operator; an
+evaluator verdict on that file is not a restore result.
+
+TRUSTED BINARIES (review K2): `age` and `gh` are never taken from PATH. They
+are resolved once from TRUSTED_BIN_DIRS, symlinks followed, and refused when
+the real file sits inside this repository, in a temporary directory, or is
+group- or world-writable. The GitHub reads made through
+ops/backup-workflow-status.py use the same pinned `gh`.
+
+CLOCK (review K4): the finish instant and the binding stamp are this
+machine's clock; verify-restore compares it with the target server's
+clock_timestamp() and refuses a skew over MAX_CLOCK_SKEW_SECONDS.
+
+Nothing here writes to a database; every session is opened with
+default_transaction_read_only=on. No credential value is printed: the age
 identity is a file path handed to `age`, the DSN is read from the
 environment, and the provider key is sent only as a header. fetch-copy and
-verify-restore call the GitHub API through the logged-in `gh`.
+verify-restore call the GitHub API through the logged-in, pinned `gh`.
 """
 from __future__ import annotations
 
@@ -61,8 +77,10 @@ import importlib.util
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 import zipfile
@@ -73,7 +91,7 @@ from typing import Any, Callable, Iterable
 REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
-from lib.recovery_evidence import bind, canonical_json  # noqa: E402
+from lib.recovery_evidence import CORE_TABLES, bind, canonical_json, check_clock_skew  # noqa: E402
 
 COPY_RE = re.compile(
     rb'^COPY ((?:"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*))\.((?:"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*))'
@@ -101,6 +119,8 @@ SESSION_SETTINGS = (
     ("TimeZone", "UTC"), ("client_encoding", "UTF8"), ("standard_conforming_strings", "on"),
     ("default_transaction_read_only", "on"), ("search_path", "pg_catalog"),
 )
+# Review K5: every session this file opens is read-only from its first statement.
+READ_ONLY_OPTIONS = "-c default_transaction_read_only=on"
 TABLES_SQL = """
 select n.nspname, c.relname
   from pg_class c join pg_namespace n on n.oid = c.relnamespace
@@ -192,7 +212,7 @@ def restored_watermark(dsn: str, artifact: dict[str, dict[str, Any]]) -> dict[st
     import psycopg  # the repo venv's driver; imported here so the pure subcommands need none
 
     out: dict[str, dict[str, Any]] = {}
-    with psycopg.connect(dsn, autocommit=True) as conn:
+    with psycopg.connect(dsn, autocommit=True, options=READ_ONLY_OPTIONS) as conn:
         with conn.cursor() as cur:
             for name, value in SESSION_SETTINGS:
                 cur.execute("select set_config(%s, %s, false)", (name, value))
@@ -241,6 +261,55 @@ def file_digest(path: Path) -> str:
 
 # ── the independently held copy, read back from the store ────────────────────
 
+TRUSTED_BIN_DIRS = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin")
+
+
+def _untrusted_roots() -> tuple[Path, ...]:
+    """This repository (any worktree of it) and every temporary-directory root."""
+    return (REPO.resolve(), REPO.resolve().parents[2] if REPO.resolve().parent.name == "worktrees" else REPO.resolve(),
+            Path(tempfile.gettempdir()).resolve(), Path("/tmp").resolve(), Path("/var/tmp").resolve(),
+            Path("/private/var/folders"), Path("/var/folders"))
+
+
+def _untrusted_location(real: Path, roots: Iterable[Path] | None = None) -> str | None:
+    """Why this resolved binary may not be trusted, or None."""
+    for root in (_untrusted_roots() if roots is None else roots):
+        if real == root or root in real.parents:
+            return f"it lives under {root}"
+    mode = real.stat().st_mode
+    if mode & (stat.S_IWGRP | stat.S_IWOTH):
+        return "it is group- or world-writable"
+    return None
+
+
+def _trusted_binary(name: str) -> str:
+    """The absolute path of `name`, from TRUSTED_BIN_DIRS only; PATH is never consulted (review K2)."""
+    for directory in TRUSTED_BIN_DIRS:
+        candidate = Path(directory) / name
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            real = candidate.resolve()
+            why = _untrusted_location(real)
+            if why:
+                raise ValueError(f"refusing {name} at {real}: {why}")
+            return str(real)
+    raise ValueError(f"{name} is not installed in any of {', '.join(TRUSTED_BIN_DIRS)}")
+
+
+class _PinnedGh:
+    """Stands in for `subprocess` inside ops/backup-workflow-status.py: its `gh` is the pinned one."""
+
+    def __init__(self, gh: str):
+        self.gh = gh
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(subprocess, name)
+
+    def run(self, argv, *args, **kwargs):
+        if argv and argv[0] == "gh":
+            argv = [self.gh, *argv[1:]]
+        return subprocess.run(argv, *args, **kwargs)
+
+
 def _status_module():
     spec = importlib.util.spec_from_file_location("backup_workflow_status", REPO / "ops" / "backup-workflow-status.py")
     if spec is None or spec.loader is None:
@@ -249,6 +318,7 @@ def _status_module():
     # Registered before it runs: its dataclasses resolve annotations through sys.modules.
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
+    module.subprocess = _PinnedGh(_trusted_binary("gh"))
     return module
 
 
@@ -282,9 +352,12 @@ def _check_bound_to_run(bws, repository: str, identity, run: dict[str, Any], ite
     write an identical envelope. _backup_run narrows who that can be: the run
     must be on main, scheduled or dispatched, on a commit in main's history,
     and its backup workflow file must be byte-identical to main's now, so a
-    manually dispatched run of an EDITED backup-nightly is refused. What
-    remains is another workflow already on main writing a forged Check;
-    admitting workflows to main is the control there.
+    manually dispatched run of an EDITED backup-nightly is refused — and
+    editing backup-nightly.yml therefore makes every earlier run unverifiable
+    (fails closed) until a fresh nightly runs. What remains is another
+    workflow already on main writing a forged Check; admitting workflows to
+    main is the control there, and tools/test_workflow_checks_write_grant.py
+    fails CI if any workflow but backup-nightly.yml is granted checks: write.
     """
     check_suite = item.get("check_suite")
     suite_id = check_suite.get("id") if isinstance(check_suite, dict) else None
@@ -397,7 +470,7 @@ def download_copy(repository: str, artifact_id: int, out_dir: Path) -> tuple[Pat
     out_dir.mkdir(parents=True, exist_ok=True)
     archive = out_dir / "artifact.zip"
     with archive.open("wb") as fh:
-        got = subprocess.run(["gh", "api", f"/repos/{repository}/actions/artifacts/{artifact_id}/zip"],
+        got = subprocess.run([_trusted_binary("gh"), "api", f"/repos/{repository}/actions/artifacts/{artifact_id}/zip"],
                              stdout=fh, stderr=subprocess.PIPE, timeout=600, check=False)
     if got.returncode:
         raise ValueError(f"artifact download failed: {got.stderr.decode(errors='replace').strip()[-200:]}")
@@ -429,7 +502,7 @@ def artifact_watermark_from(dump: Path, identity: Path) -> dict[str, dict[str, A
     """Decrypt the dump THIS process downloaded and count what it carries. The plaintext is a pipe only."""
     if not identity.is_file():
         raise ValueError("the age identity file does not exist")
-    proc = subprocess.Popen([AGE, "--decrypt", "-i", str(identity), str(dump)],
+    proc = subprocess.Popen([_trusted_binary(AGE), "--decrypt", "-i", str(identity), str(dump)],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     assert proc.stdout is not None and proc.stderr is not None
     parse_error: ValueError | None = None
@@ -473,12 +546,27 @@ def _utc_seconds(value: datetime) -> str:
     return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _dsn_dbname(dsn: str) -> str:
+    from psycopg.conninfo import conninfo_to_dict
+
+    return str(conninfo_to_dict(dsn).get("dbname") or "")
+
+
+INHERITED_DATABASE = "neondb"
+POINT_IN_TIME_SLACK_SECONDS = 300
+
+
 def branch_target_start(project_id: str, branch_id: str, dsn: str) -> str:
     """The throwaway branch as the PROVIDER reports it; its creation is the restore's earliest start.
 
     Refused unless the branch exists, is not the default (production) branch or
-    a protected one, is a child of the default branch, and the DSN's host is
-    one of THIS branch's endpoints (so the watermark read is of this branch).
+    a protected one, is a child of the default branch taken from its HEAD (not
+    a point in time), the DSN's host is one of THIS branch's endpoints, and the
+    DSN's database is one the restore created: review K1 — a child branch
+    already holds production's databases, and one taken at dump time holds a
+    neondb equal to the artifact, so pointing at an inherited database would
+    pass with nothing restored. So neondb, and any database name that also
+    exists on the parent branch, is refused.
     """
     listed = _neon(f"/projects/{project_id}/branches").get("branches") or []
     defaults = [b.get("id") for b in listed if b.get("default")]
@@ -491,6 +579,16 @@ def branch_target_start(project_id: str, branch_id: str, dsn: str) -> str:
         raise ValueError("the restore target is the production (default) or a protected branch; refusing")
     if branch.get("parent_id") != defaults[0]:
         raise ValueError("the restore target branch is not a child of the production branch")
+    dbname = _dsn_dbname(dsn)
+    if not dbname or dbname == INHERITED_DATABASE:
+        raise ValueError(f"RESTORE_DSN names database {dbname or '(none)'!r}, which the branch inherited; "
+                         "the restore must target a database it created")
+    inherited = {str(d.get("name")) for d in (_neon(f"/projects/{project_id}/branches/{defaults[0]}/databases")
+                                              .get("databases") or [])}
+    if not inherited:
+        raise ValueError("the provider reported no databases on the production branch; cannot rule out an inherited target")
+    if dbname in inherited:
+        raise ValueError(f"database {dbname!r} also exists on the production branch; the branch inherited it")
     hosts = {str(e.get("host")) for e in (_neon(f"/projects/{project_id}/branches/{branch_id}/endpoints")
                                           .get("endpoints") or [])}
     if _dsn_host(dsn) not in hosts:
@@ -498,6 +596,9 @@ def branch_target_start(project_id: str, branch_id: str, dsn: str) -> str:
     created = _instant(branch.get("created_at"))
     if created is None:
         raise ValueError("the provider reported no creation instant for the branch")
+    parent_point = _instant(branch.get("parent_timestamp"))
+    if parent_point is not None and (created - parent_point).total_seconds() > POINT_IN_TIME_SLACK_SECONDS:
+        raise ValueError("the restore target branch was taken from an earlier point in time, not production's head")
     return _utc_seconds(created)
 
 
@@ -508,11 +609,22 @@ def local_target_start(dsn: str) -> str:
         raise ValueError("a local-cluster target must be reached over a socket path or loopback")
     import psycopg
 
-    with psycopg.connect(dsn, autocommit=True, options="-c default_transaction_read_only=on") as conn:
+    with psycopg.connect(dsn, autocommit=True, options=READ_ONLY_OPTIONS) as conn:
         started = conn.execute("select pg_postmaster_start_time()").fetchone()
     if not started or not isinstance(started[0], datetime):
         raise ValueError("the local cluster reported no start instant")
     return _utc_seconds(started[0])
+
+
+def server_clock(dsn: str) -> datetime:
+    """The target server's clock_timestamp(), read-only (review K4)."""
+    import psycopg
+
+    with psycopg.connect(dsn, autocommit=True, options=READ_ONLY_OPTIONS) as conn:
+        got = conn.execute("select clock_timestamp()").fetchone()
+    if not got or not isinstance(got[0], datetime):
+        raise ValueError("the restore target reported no clock")
+    return got[0]
 
 
 def verify_restore(*, repository: str, run_id: int, identity: Path, target_kind: str, dsn: str,
@@ -531,8 +643,12 @@ def verify_restore(*, repository: str, run_id: int, identity: Path, target_kind:
     archive, dump = download_copy(repository, record.pop("_artifact_id"), work_dir)
     observed = file_digest(archive)
     artifact = artifact_watermark_from(dump, identity)
+    missing = [t for t in CORE_TABLES if int(artifact.get(t, {}).get("rows", 0)) <= 0]
+    if missing:
+        raise ValueError(f"the artifact carries no rows for core table(s) {', '.join(missing)}; not a record-layer dump")
     restored = restored_watermark(dsn, artifact)
     finished = now()  # this process's own clock, after its last read; it also stamps the binding
+    check_clock_skew(finished, server_clock(dsn), "the restore target server")
     finished_at = _utc_seconds(finished)
     receipt = {
         "receipt_kind": RECEIPT_KIND,
@@ -597,9 +713,8 @@ def census_digest(items: list[dict[str, Any]]) -> str:
 def restored_outbound_items(dsn: str) -> list[dict[str, Any]]:
     import psycopg
 
-    with psycopg.connect(dsn, autocommit=True) as conn:
+    with psycopg.connect(dsn, autocommit=True, options=READ_ONLY_OPTIONS) as conn:
         with conn.cursor() as cur:
-            cur.execute("set default_transaction_read_only = on")
             cur.execute(OUTBOUND_SQL)
             return [outbound_item(*row) for row in cur.fetchall()]
 

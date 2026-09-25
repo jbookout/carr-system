@@ -173,6 +173,14 @@ while [ $# -gt 0 ]; do
     # restore-exercise-receipt.v1, and it re-reads the provider to verify it.
     # Without it the exact watermark still gates; no receipt is written, because
     # a local backups/ file has no independently recorded digest to hold it to.
+    #
+    # RUNBOOK NOTE (review H2): a run counts only while the
+    # .github/workflows/backup-nightly.yml at its commit is byte-identical to
+    # main's. EDITING backup-nightly.yml MAKES EVERY EARLIER RUN UNVERIFIABLE —
+    # verify-restore refuses them (fails closed). After such an edit merges,
+    # wait for (or dispatch from main) a fresh nightly run and rehearse against
+    # that run id. Only backup-nightly.yml may hold `checks: write`
+    # (tools/test_workflow_checks_write_grant.py fails CI otherwise).
     --backup-run-id) [ $# -ge 2 ] || { echo "FAIL: --backup-run-id needs a workflow run id" >&2; exit 2; }
                    case "$2" in (*[!0-9]*|'') echo "FAIL: --backup-run-id must be a number" >&2; exit 2 ;; esac
                    BACKUP_RUN_ID="$2"; shift 2 ;;
@@ -221,6 +229,7 @@ REHEARSE_SUMMARY=""
 REST_PCT=""
 REST_ROWS=""
 REST_TABLES=""
+EXERCISE_VERDICT=""
 
 BRANCH_ID=""
 WORKDIR=""
@@ -338,6 +347,9 @@ record_rehearsal() {                      # record_rehearsal <exit-code>
   else
     detail="${DIE_REASON:-aborted during preflight, before a dump was selected}"
   fi
+  # Review K3: the restore-exercise verdict recorded is the one decided on the
+  # PIPED verify-restore output; the receipt file in out/ is only a copy.
+  [ -n "$EXERCISE_VERDICT" ] && detail="$detail; exercise=$EXERCISE_VERDICT (piped verify-restore verdict; receipt file is a copy)"
   # ops.run's detail column is one redacted line: no secrets, no client
   # content — and nothing here is either, only a filename, a byte count, a
   # percentage and a duration.
@@ -981,6 +993,12 @@ case $? in
      FAILS=$((FAILS + 1)) ;;
   *) die "the exact watermark comparison could not be read" ;;
 esac
+exercise_reason() {
+  # The evaluator's reason_id, or why there is none (verify-restore refused).
+  "$PY" -c 'import json,sys
+try: print(json.load(open(sys.argv[1]))["reason_id"])
+except Exception: print("verify_restore_refused")' "$WORKDIR/exercise-verdict.json" 2>/dev/null || print -r -- "verify_restore_refused"
+}
 if [ -n "$BACKUP_RUN_ID" ]; then
   mkdir -p "$REPO/out"
   RECEIPT_PATH="$REPO/out/restore-exercise-receipt.json"
@@ -990,23 +1008,33 @@ if [ -n "$BACKUP_RUN_ID" ]; then
     # Review G4: a rehearsal that failed phase 4 (the production comparison)
     # or phase 5 writes and verifies NO receipt; the evaluator never sees one.
     say "  FAIL  no restore-exercise receipt: $FAILS earlier assertion(s) failed" >&2
-  elif mkdir -p "$COPYDIR/verify" \
-     && RESTORE_DSN="$RESTORE_URL" "$PY" "$REPO/tools/restore-watermark.py" verify-restore \
-          --repository "$BACKUP_REPOSITORY" --run-id "$BACKUP_RUN_ID" --identity "$IDENTITY" \
-          --target-kind disposable_branch --project-id "$PROJECT_ID" --branch-id "$BRANCH_ID" \
-          --work-dir "$COPYDIR/verify" > "$WORKDIR/receipt.verified.json" \
-     && mv "$WORKDIR/receipt.verified.json" "$RECEIPT_PATH"; then
-    # Review H1: the receipt is built ENTIRELY by verify-restore, while this
-    # branch still exists (the EXIT trap deletes it later). It looks the Check
-    # up itself, downloads and hashes the artifact itself, decrypts and counts
-    # it itself, reads the restored watermark itself, reads the branch from
-    # the provider (start = branch creation) and takes the finish from its own
-    # clock. Nothing computed above in this script feeds the receipt. It is
-    # judged fresh for 15 minutes.
-    say "  ok    restore-exercise receipt (every decisive fact read by verify-restore, bound): $RECEIPT_PATH"
-    say "        evaluate: node mcp-server/bin/recovery-matrix-evaluate.mjs restore $RECEIPT_PATH"
+  # Review H1: the receipt is built ENTIRELY by verify-restore, while this
+  # branch still exists (the EXIT trap deletes it later). It looks the Check
+  # up itself, downloads and hashes the artifact itself, decrypts and counts
+  # it itself, reads the restored watermark itself, reads the branch and its
+  # databases from the provider (start = branch creation) and takes the
+  # finish from its own clock. Nothing computed above in this script feeds it.
+  #
+  # Review K3: the AUTHORITY is the evaluator's verdict on verify-restore's
+  # stdout, PIPED straight in — decided here and recorded in this run's ops.run
+  # row. The receipt file the tee leaves in out/ is the operator's copy; a
+  # verdict computed later on that file is not a restore result.
+  elif mkdir -p "$COPYDIR/verify" && (
+         set -o pipefail
+         RESTORE_DSN="$RESTORE_URL" "$PY" "$REPO/tools/restore-watermark.py" verify-restore \
+           --repository "$BACKUP_REPOSITORY" --run-id "$BACKUP_RUN_ID" --identity "$IDENTITY" \
+           --target-kind disposable_branch --project-id "$PROJECT_ID" --branch-id "$BRANCH_ID" \
+           --work-dir "$COPYDIR/verify" \
+           | tee "$WORKDIR/receipt.verified.json" \
+           | node "$REPO/mcp-server/bin/recovery-matrix-evaluate.mjs" restore - > "$WORKDIR/exercise-verdict.json"
+       ); then
+    EXERCISE_VERDICT="$(exercise_reason)"
+    mv "$WORKDIR/receipt.verified.json" "$RECEIPT_PATH"
+    say "  ok    restore exercise PASSED on the piped verify-restore output: $EXERCISE_VERDICT"
+    say "        (copy of the bound receipt, not authority: $RECEIPT_PATH)"
   else
-    say "  FAIL  verify-restore could not produce the restore-exercise receipt" >&2
+    EXERCISE_VERDICT="$(exercise_reason)"
+    say "  FAIL  restore exercise did not pass on the piped verify-restore output: $EXERCISE_VERDICT" >&2
     FAILS=$((FAILS + 1))
   fi
 else

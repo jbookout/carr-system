@@ -19,6 +19,16 @@ deliberately recomputes the digest can forge one. The binding stops stale
 evidence, evidence edited after its re-read, and evidence that skipped the
 re-read path; authenticating the verifier would need a key the repository does
 not hold.
+
+WHAT IS AUTHORITY (review K3): only the output of `restore-watermark.py
+verify-restore` or `pitr-restore-proof.py prove` PIPED straight into
+mcp-server/bin/recovery-matrix-evaluate.mjs. A bound file saved to disk is the
+operator's copy; an evaluator verdict on that file is not a recovery result,
+because nothing proves the file is what the verifier printed.
+
+CLOCK ASSUMPTION (review K4): verified_at and the receipt instants come from
+the verifying machine's clock. Each verifier cross-checks that clock against
+the database server it just read and refuses a skew over MAX_CLOCK_SKEW_SECONDS.
 """
 from __future__ import annotations
 
@@ -26,6 +36,22 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from typing import Any
+
+# The tables a real restore of the record layer must carry rows in: the restore
+# verifier requires each in the artifact watermark with rows > 0 (review K2),
+# and the PITR proof counts them on its branch.
+CORE_TABLES = ("public.party", "ops.run")
+
+MAX_CLOCK_SKEW_SECONDS = 180
+
+
+def check_clock_skew(local: datetime, server: datetime, what: str) -> None:
+    """Refuse when this machine's clock and the server's differ by more than MAX_CLOCK_SKEW_SECONDS."""
+    skew = abs((local - server).total_seconds())
+    if skew > MAX_CLOCK_SKEW_SECONDS:
+        raise ValueError(f"the local clock differs from {what}'s by {skew:.0f}s (limit {MAX_CLOCK_SKEW_SECONDS}s); "
+                         "fix the clock before verifying")
+
 
 VERIFIERS = {
     "restore_exercise": "tools/restore-watermark.py verify-restore",

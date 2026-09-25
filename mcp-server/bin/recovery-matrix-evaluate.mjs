@@ -1,8 +1,15 @@
 #!/usr/bin/env node
 // recovery-matrix-evaluate.mjs — evaluate V5-F08 recovery evidence from JSON.
 //
-//   node mcp-server/bin/recovery-matrix-evaluate.mjs restore  <restore-exercise-receipt.json>
+//   node mcp-server/bin/recovery-matrix-evaluate.mjs restore  <restore-exercise-receipt.json | ->
 //   node mcp-server/bin/recovery-matrix-evaluate.mjs rpo      <rpo-evidence.json | ->
+//
+// WHAT IS AUTHORITY (review K3): a restore or RPO verdict counts only when its
+// input is the verifier's stdout PIPED in ("-") — `restore-watermark.py
+// verify-restore | ... restore -` or `pitr-restore-proof.py prove | ... rpo -`.
+// A verdict computed on a saved file is a replay for the operator's eyes: the
+// binding is not a signature, so nothing proves the file is what the verifier
+// printed.
 //   node mcp-server/bin/recovery-matrix-evaluate.mjs matrix   <matrix-evidence.json | ->
 //   node mcp-server/bin/recovery-matrix-evaluate.mjs outbound <outbound-request.json | ->
 //   node mcp-server/bin/recovery-matrix-evaluate.mjs degraded <dependency> [<dependency> ...]

@@ -45,7 +45,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -62,6 +62,16 @@ if spec is None or spec.loader is None:
     raise ImportError(f"cannot load {TOOL}")
 rw = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(rw)
+
+
+REAL_TRUSTED_BINARY = rw._trusted_binary
+
+
+def pin_binaries(case: unittest.TestCase, bindir) -> None:
+    """Point the verifier's trusted-binary resolution at fixture stand-ins for this test."""
+    patcher = mock.patch.object(rw, "_trusted_binary", lambda name: str(Path(bindir) / name))
+    patcher.start()
+    case.addCleanup(patcher.stop)
 
 DUMP = '''--
 -- PostgreSQL database dump
@@ -248,7 +258,11 @@ class RestoredReader(unittest.TestCase):
             def cursor(self):
                 return Cursor()
 
-        return mock.Mock(connect=lambda dsn, autocommit: Conn())
+        def connect(dsn, autocommit, options=None):
+            executed.append(("connect-options", options))
+            return Conn()
+
+        return mock.Mock(connect=connect)
 
     def test_rows_split_across_chunks_are_reassembled_and_hashed_like_the_artifact(self):
         executed: list = []
@@ -257,6 +271,8 @@ class RestoredReader(unittest.TestCase):
         with mock.patch.dict(sys.modules, {"psycopg": driver}):
             got = rw.restored_watermark("dsn", artifact)
         self.assertEqual(got["public.party"], {k: artifact["public.party"][k] for k in ("rows", "content_digest")})
+        # K5: read-only from the very first statement, not only after a set_config
+        self.assertEqual(executed[0], ("connect-options", "-c default_transaction_read_only=on"))
         self.assertIn(("select set_config(%s, %s, false)", ("default_transaction_read_only", "on")), executed)
         self.assertIn(("select set_config(%s, %s, false)", ("TimeZone", "UTC")), executed)
         self.assertIn(('COPY "public"."party" (id, name) TO STDOUT', None), executed)
@@ -343,6 +359,7 @@ class FakeProvider:
 class CopyRecordFromProvider(unittest.TestCase):
     def setUp(self):
         self.fake = FakeProvider()
+        pin_binaries(self, "/pinned")
         real = rw._status_module()
         real.api = self.fake.api
         patcher = mock.patch.object(rw, "_status_module", return_value=real)
@@ -449,7 +466,7 @@ class CopyRecordFromProvider(unittest.TestCase):
                 gh.parent.mkdir()
                 gh.write_text(f"#!/bin/sh\ncat '{t / 'artifact.bin'}'\n")
                 gh.chmod(0o755)
-                with mock.patch.dict(os.environ, {"PATH": f"{gh.parent}:{os.environ['PATH']}"}):
+                with mock.patch.object(rw, "_trusted_binary", lambda name, d=gh.parent: str(d / name)):
                     with self.assertRaisesRegex(ValueError, "exactly one carr-YYYYMMDD.sql.age"):
                         rw.fetch_copy(REPO_SLUG, RUN_ID, t / "out")
 
@@ -474,7 +491,7 @@ class CopyRecordFromProvider(unittest.TestCase):
             gh.parent.mkdir()
             gh.write_text(f"#!/bin/sh\ncat '{t / 'artifact.bin'}'\n")
             gh.chmod(0o755)
-            with mock.patch.dict(os.environ, {"PATH": f"{gh.parent}:{os.environ['PATH']}"}):
+            with mock.patch.object(rw, "_trusted_binary", lambda name, d=gh.parent: str(d / name)):
                 archive, dump = rw.fetch_copy(REPO_SLUG, RUN_ID, t / "out")
             self.assertEqual(rw.file_digest(archive), ZIP_DIGEST)
             self.assertEqual(dump.read_bytes(), b"age-encrypted-bytes")
@@ -494,15 +511,17 @@ class VerifyRestore(unittest.TestCase):
     """Review H1: every decisive fact in the receipt is read by verify-restore itself."""
 
     NOW = datetime(2026, 9, 24, 10, 30, tzinfo=timezone.utc)
+    server_now = NOW
 
     def setUp(self):
         self.fake = FakeProvider()
+        self.tmp = Path(tempfile.mkdtemp(prefix="carr-f08-verify-"))
+        pin_binaries(self, self.tmp / "bin")
         real = rw._status_module()
         real.api = self.fake.api
         patcher = mock.patch.object(rw, "_status_module", return_value=real)
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.tmp = Path(tempfile.mkdtemp(prefix="carr-f08-verify-"))
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.serve(DUMP.encode())
         bindir = self.tmp / "bin"
@@ -512,9 +531,6 @@ class VerifyRestore(unittest.TestCase):
         (bindir / "age").write_text("#!/bin/sh\n[ \"$1\" = --decrypt ] && [ \"$2\" = -i ] && [ -f \"$3\" ] || exit 1\ncat \"$4\"\n")
         for tool in ("gh", "age"):
             (bindir / tool).chmod(0o755)
-        env = mock.patch.dict(os.environ, {"PATH": f"{bindir}:{os.environ['PATH']}"})
-        env.start()
-        self.addCleanup(env.stop)
         self.identity = self.tmp / "identity.txt"
         self.identity.write_text("stand-in identity\n")
 
@@ -535,6 +551,7 @@ class VerifyRestore(unittest.TestCase):
             return json.loads(json.dumps(got))
 
         with mock.patch.object(rw, "local_target_start", return_value="2026-09-24T10:00:00Z") as start, \
+             mock.patch.object(rw, "server_clock", return_value=self.server_now), \
              mock.patch.object(rw, "restored_watermark", restored_reader):
             receipt = rw.verify_restore(repository=REPO_SLUG, run_id=RUN_ID, identity=self.identity,
                                         target_kind="disposable_local_cluster", dsn="host=/tmp/sock dbname=r",
@@ -611,13 +628,77 @@ class VerifyRestore(unittest.TestCase):
         self.assertEqual(receipt["copy"]["recorded_artifact_digest"], self.digest)
 
     def test_the_artifact_watermark_is_the_downloaded_copys_not_a_claim(self):
-        # A copy whose content is ONE table: the verifier counts one table, and a
-        # target holding the full restore no longer matches it.
-        self.serve(b"COPY public.t (id) FROM stdin;\n1\n\\.\n")
+        # A copy that carries the core tables but not the rest: the verifier counts
+        # what the DOWNLOADED copy carries, and a full restore no longer matches it.
+        self.serve(b"COPY public.party (id) FROM stdin;\n1\n\\.\nCOPY ops.run (id) FROM stdin;\n1\n\\.\n")
         full = rw.strip_columns(rw.watermark_from_dump(DUMP.splitlines()))
         receipt, _ = self.verify(restored=full)
-        self.assertEqual(list(receipt["artifact_watermark"]), ["public.t"])
+        self.assertEqual(sorted(receipt["artifact_watermark"]), ["ops.run", "public.party"])
         self.assertEqual(json.loads(self.evaluate(receipt).stdout)["reason_id"], "watermark_mismatch")
+
+    def test_k2_an_artifact_without_rows_in_every_core_table_is_refused(self):
+        # The reviewer's shim printed ONE COPY row; that is not a record-layer dump.
+        for plaintext in (b"COPY public.t (id) FROM stdin;\n1\n\\.\n",
+                          b"COPY public.party (id) FROM stdin;\n1\n\\.\n",
+                          b"COPY public.party (id) FROM stdin;\n1\n\\.\nCOPY ops.run (id) FROM stdin;\n\\.\n"):
+            self.serve(plaintext)
+            with self.assertRaisesRegex(ValueError, "no rows for core table"):
+                self.verify()
+
+    def test_k2_a_path_shim_is_never_used(self):
+        # A shim `age` first on PATH that prints a plausible dump: it is not consulted.
+        shim = self.tmp / "shim"
+        shim.mkdir()
+        (shim / "age").write_text("#!/bin/sh\nprintf 'COPY public.party (id) FROM stdin;\\n1\\n\\\\.\\n'\n")
+        (shim / "age").chmod(0o755)
+        empty = self.tmp / "no-binaries-here"
+        empty.mkdir()
+        with mock.patch.dict(os.environ, {"PATH": f"{shim}:{os.environ['PATH']}"}), \
+             mock.patch.object(rw, "TRUSTED_BIN_DIRS", (str(empty),)):
+            with self.assertRaisesRegex(ValueError, "age is not installed in any of"):
+                REAL_TRUSTED_BINARY("age")
+            # and the shim's directory, named as trusted, is refused: it is a temp directory
+            with mock.patch.object(rw, "TRUSTED_BIN_DIRS", (str(shim),)):
+                with self.assertRaisesRegex(ValueError, "refusing age .*lives under"):
+                    REAL_TRUSTED_BINARY("age")
+        # a trusted-looking directory whose entry resolves into the repository is refused
+        link_dir = self.tmp / "linkdir"
+        link_dir.mkdir()
+        (link_dir / "age").symlink_to(REPO / "bin" / "restore-rehearse.sh")
+        with mock.patch.object(rw, "TRUSTED_BIN_DIRS", (str(link_dir),)):
+            with self.assertRaisesRegex(ValueError, f"lives under {REPO}"):
+                REAL_TRUSTED_BINARY("age")
+        # a group- or world-writable binary is refused wherever it lives
+        loose = self.tmp / "loose"
+        loose.write_text("#!/bin/sh\n")
+        loose.chmod(0o777)
+        self.assertEqual(rw._untrusted_location(loose.resolve(), roots=()), "it is group- or world-writable")
+        # a non-executable file, or a directory, with the name is skipped, not used
+        first, second = self.tmp / "d1", self.tmp / "d2"
+        for d in (first, second):
+            d.mkdir()
+        (first / "age").write_text("#!/bin/sh\n")
+        (first / "age").chmod(0o644)
+        (first / "gh").mkdir()
+        for name in ("age", "gh"):
+            (second / name).write_text("#!/bin/sh\n")
+            (second / name).chmod(0o755)
+        with mock.patch.object(rw, "TRUSTED_BIN_DIRS", (str(first), str(second))), \
+             mock.patch.object(rw, "_untrusted_roots", lambda: ()):
+            self.assertEqual(REAL_TRUSTED_BINARY("age"), str((second / "age").resolve()))
+            self.assertEqual(REAL_TRUSTED_BINARY("gh"), str((second / "gh").resolve()))
+        loose.chmod(0o775)  # group-writable alone is enough
+        self.assertEqual(rw._untrusted_location(loose.resolve(), roots=()), "it is group- or world-writable")
+        loose.chmod(0o755)
+        self.assertIsNone(rw._untrusted_location(loose.resolve(), roots=()))
+
+    def test_k4_a_local_clock_skewed_from_the_targets_is_refused(self):
+        for skew in (timedelta(minutes=4), -timedelta(minutes=4)):
+            self.server_now = self.NOW + skew
+            with self.assertRaisesRegex(ValueError, "local clock differs from the restore target server"):
+                self.verify()
+        self.server_now = self.NOW + timedelta(minutes=2)
+        self.verify()
 
     def test_a_copy_age_cannot_decrypt_or_an_absent_identity_is_refused(self):
         (self.tmp / "bin" / "age").write_text("#!/bin/sh\necho 'no identity matched' >&2\nexit 1\n")
@@ -650,7 +731,7 @@ class RestoreTarget(unittest.TestCase):
     """The target and its start instant, read from the provider (branch) or the cluster (local)."""
 
     PROJECT, DEFAULT, BRANCH = "proj", "br-prod", "br-restore"
-    DSN = "host=ep-restore.example.test port=5432 dbname=neondb user=u"
+    DSN = "host=ep-restore.example.test port=5432 dbname=carr_restore user=u"
 
     def setUp(self):
         self.branches = {
@@ -659,11 +740,14 @@ class RestoreTarget(unittest.TestCase):
                           "created_at": "2026-09-24T09:59:58.700Z"},
         }
         self.endpoints = {self.BRANCH: [{"host": "ep-restore.example.test"}]}
+        self.parent_databases = [{"name": "neondb"}, {"name": "carr_archive"}]
 
     def neon(self, path):
         base = f"/projects/{self.PROJECT}/branches"
         if path == base:
             return {"branches": list(self.branches.values())}
+        if path == f"{base}/{self.DEFAULT}/databases":
+            return {"databases": self.parent_databases}
         if path.endswith("/endpoints"):
             return {"endpoints": self.endpoints.get(path.split("/")[-2], [])}
         bid = path.rsplit("/", 1)[1]
@@ -699,6 +783,29 @@ class RestoreTarget(unittest.TestCase):
             with mock.patch.object(rw, "_neon", self.neon):
                 rw.branch_target_start(self.PROJECT, self.DEFAULT, self.DSN)
 
+    def test_k1_an_inherited_database_is_refused_even_when_it_matches_the_artifact(self):
+        # The reviewer's bypass: RESTORE_DSN at the branch's inherited neondb. A
+        # branch taken at dump time holds a neondb equal to the artifact, so the
+        # watermarks would agree with nothing restored. Refused before any read.
+        dsn = self.DSN.replace("dbname=carr_restore", "dbname=neondb")
+        with self.assertRaisesRegex(ValueError, "which the branch inherited"):
+            self.start(dsn)
+        # any other database that also exists on the parent was inherited too
+        with self.assertRaisesRegex(ValueError, "also exists on the production branch"):
+            self.start(self.DSN.replace("dbname=carr_restore", "dbname=carr_archive"))
+        with self.assertRaisesRegex(ValueError, "which the branch inherited"):
+            self.start("host=ep-restore.example.test port=5432 user=u")
+        self.parent_databases = []
+        with self.assertRaisesRegex(ValueError, "no databases on the production branch"):
+            self.start()
+
+    def test_k1_a_branch_taken_from_an_earlier_point_in_time_is_refused(self):
+        self.branches[self.BRANCH]["parent_timestamp"] = "2026-09-24T03:05:00Z"  # the dump's time
+        with self.assertRaisesRegex(ValueError, "earlier point in time"):
+            self.start()
+        self.branches[self.BRANCH]["parent_timestamp"] = "2026-09-24T09:55:00Z"  # head, within the slack
+        self.assertEqual(self.start(), "2026-09-24T09:59:58Z")
+
     def test_a_local_cluster_target_must_be_a_socket_or_loopback(self):
         with self.assertRaisesRegex(ValueError, "socket path or loopback"):
             rw.local_target_start("host=db.example.test dbname=r")
@@ -709,12 +816,29 @@ class RestoreTarget(unittest.TestCase):
                 rw._neon("/projects/p/branches")
 
 
-class RehearsalReceiptGate(unittest.TestCase):
-    """G4: the rehearsal's own receipt block, run with a stub tool, writes a receipt only on a clean run."""
+class PinnedGh(unittest.TestCase):
+    def test_k2_the_status_modules_github_reads_use_the_pinned_gh(self):
+        with mock.patch.object(rw, "_trusted_binary", lambda name: f"/pinned/{name}"):
+            module = rw._status_module()
+        calls = []
+        with mock.patch.object(rw.subprocess, "run", lambda argv, *a, **k: calls.append(argv)):
+            module.subprocess.run(["gh", "api", "/x"], capture_output=True)
+            module.subprocess.run(["git", "status"])
+        self.assertEqual(calls, [["/pinned/gh", "api", "/x"], ["git", "status"]])
+        self.assertIs(module.subprocess.TimeoutExpired, subprocess.TimeoutExpired)
+        # with no trusted gh installed, the module cannot be loaded at all
+        with mock.patch.object(rw, "TRUSTED_BIN_DIRS", ("/nonexistent-carr-bin",)):
+            with self.assertRaisesRegex(ValueError, "gh is not installed"):
+                rw._status_module()
 
-    def run_block(self, fails: int, verify_exit: int = 0):
+
+class RehearsalReceiptGate(unittest.TestCase):
+    """G4/K3: the rehearsal's own block, run with stubs: the verdict is decided on the PIPED verify-restore output."""
+
+    def run_block(self, fails: int, verify_exit: int = 0, verdict: str = "restore_exercise_exact"):
         text = REHEARSE.read_text()
-        m = re.search(r'(if \[ -n "\$BACKUP_RUN_ID" \]; then\n  mkdir -p "\$REPO/out"\n.*?\nfi\n)', text, re.S)
+        m = re.search(r'(exercise_reason\(\) \{\n.*?\nif \[ -n "\$BACKUP_RUN_ID" \]; then\n  mkdir -p "\$REPO/out"\n.*?\nfi\n)',
+                      text, re.S)
         if m is None:
             self.fail("receipt block not found in bin/restore-rehearse.sh")
         with tempfile.TemporaryDirectory() as tmp:
@@ -723,23 +847,38 @@ class RehearsalReceiptGate(unittest.TestCase):
             (t / "out" / "restore-exercise-receipt.json").write_text('{"stale": true}')
             calls = t / "calls.log"
             stub = t / "stub.sh"
-            stub.write_text(f"#!/bin/sh\necho \"$2\" >> '{calls}'\necho \"$*|$RESTORE_DSN\" >> '{calls}.args'\n"
-                            f"case \"$2\" in verify-restore) echo '{{\"bound\":1}}'; exit {verify_exit};; esac\n")
+            # `$PY -c ...` (the script's own helpers) runs the real interpreter; the tool call is stubbed.
+            stub.write_text(f"#!/bin/sh\nif [ \"$1\" = -c ]; then exec '{sys.executable}' \"$@\"; fi\n"
+                            f"echo \"$2\" >> '{calls}'\necho \"$*|$RESTORE_DSN\" >> '{calls}.args'\n"
+                            f"case \"$2\" in verify-restore) [ {verify_exit} -eq 0 ] && echo '{{\"bound\":1}}'; exit {verify_exit};; esac\n")
             stub.chmod(0o755)
-            script = ("say() { print -r -- \"$*\"; }\n"
+            # The evaluator stand-in: records what reached it on stdin, answers like the real one.
+            node = (f"node() {{ print -r -- \"$*\" >> '{t}/node.args'; cat > '{t}/node.stdin'; "
+                    f"[ -s '{t}/node.stdin' ] || return 2; "
+                    f"print -r -- '{{\"reason_id\":\"{verdict}\"}}'; "
+                    f"[ '{verdict}' = restore_exercise_exact ]; }}\n")
+            script = ("say() { print -r -- \"$*\"; }\n" + node +
                       f"REPO='{t}'; WORKDIR='{t}'; COPYDIR='{t}'; PY='{stub}'; FAILS={fails}; BACKUP_RUN_ID=101\n"
                       "BACKUP_REPOSITORY=o/r; IDENTITY=/k; PROJECT_ID=proj; BRANCH_ID=br-r; RESTORE_URL=dsn-value\n"
-                      + m.group(1) + "print -r -- \"FAILS=$FAILS\"\n")
+                      "EXERCISE_VERDICT=''\n"
+                      + m.group(1) + "print -r -- \"FAILS=$FAILS\"; print -r -- \"VERDICT=$EXERCISE_VERDICT\"\n")
             got = subprocess.run(["zsh", "-c", script], capture_output=True, text=True)
             receipt = t / "out" / "restore-exercise-receipt.json"
             self.args = (t / "calls.log.args").read_text() if (t / "calls.log.args").exists() else ""
-            return (got.stdout, calls.read_text().split() if calls.exists() else [],
+            self.node_args = (t / "node.args").read_text() if (t / "node.args").exists() else ""
+            self.node_stdin = (t / "node.stdin").read_text() if (t / "node.stdin").exists() else None
+            return (got.stdout + got.stderr, calls.read_text().split() if calls.exists() else [],
                     receipt.read_text() if receipt.exists() else None)
 
-    def test_a_clean_run_writes_the_verified_output_as_the_receipt(self):
+    def test_a_clean_run_judges_the_piped_output_and_keeps_only_a_copy(self):
         out, calls, receipt = self.run_block(0)
         self.assertEqual(calls, ["verify-restore"])
-        self.assertEqual(json.loads(receipt), {"bound": 1})
+        # K3: the evaluator read verify-restore's stdout through the pipe ("restore -"), not a file.
+        self.assertIn("recovery-matrix-evaluate.mjs restore -", self.node_args)
+        self.assertEqual(json.loads(self.node_stdin), {"bound": 1})
+        self.assertEqual(json.loads(receipt), {"bound": 1})  # the tee's copy, for the operator
+        self.assertIn("VERDICT=restore_exercise_exact", out)
+        self.assertIn("not authority", out)
         # H1: verify-restore is handed the run and the target, never a fact the script computed.
         self.assertIn("--run-id 101 --identity /k --target-kind disposable_branch --project-id proj --branch-id br-r",
                       self.args)
@@ -752,13 +891,27 @@ class RehearsalReceiptGate(unittest.TestCase):
         out, calls, receipt = self.run_block(1)
         self.assertEqual(calls, [])
         self.assertIsNone(receipt)
+        self.assertIsNone(self.node_stdin)
         self.assertIn("FAILS=1", out)
 
-    def test_a_failed_verify_leaves_no_receipt_and_counts_a_failure(self):
+    def test_a_refused_verify_leaves_no_receipt_and_counts_a_failure(self):
         out, calls, receipt = self.run_block(0, verify_exit=1)
         self.assertEqual(calls, ["verify-restore"])
         self.assertIsNone(receipt)
         self.assertIn("FAILS=1", out)
+        self.assertIn("VERDICT=verify_restore_refused", out)
+
+    def test_an_evaluator_failure_on_the_piped_receipt_fails_the_rehearsal(self):
+        out, calls, receipt = self.run_block(0, verdict="watermark_mismatch")
+        self.assertIsNone(receipt)
+        self.assertIn("FAILS=1", out)
+        self.assertIn("VERDICT=watermark_mismatch", out)
+
+    def test_the_recorded_outcome_names_the_piped_verdict_as_authority(self):
+        text = REHEARSE.read_text()
+        self.assertIn('detail="$detail; exercise=$EXERCISE_VERDICT (piped verify-restore verdict; receipt file is a copy)"',
+                      text)
+        self.assertNotIn("evaluate: node mcp-server/bin/recovery-matrix-evaluate.mjs restore $RECEIPT_PATH", text)
 
 
 class OutboundCensus(unittest.TestCase):
@@ -983,7 +1136,7 @@ class EndToEndDisposableCluster(unittest.TestCase):
         fake.artifact.update(digest=zdigest, size_in_bytes=len(blob))
         fake.summary.update(artifact_digest=zdigest, artifact_bytes=len(blob))
         receipt = self.tmp / "receipt.json"
-        with mock.patch.dict(os.environ, {"PATH": f"{bindir}:{os.environ['PATH']}"}):
+        with mock.patch.object(rw, "_trusted_binary", lambda name: str(bindir / name)):
             bound, verdict = self.verify_and_evaluate(fake, receipt)
             self.assertEqual(verdict.returncode, 0, verdict.stdout + verdict.stderr)
             self.assertEqual(json.loads(verdict.stdout)["reason_id"], "restore_exercise_exact")

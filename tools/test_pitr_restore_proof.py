@@ -35,6 +35,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -300,9 +301,9 @@ class OperationsLog(Base):
 
 
 class ProveAndVerify(Base):
-    def fake_db(self, *, branch_rows, production_rows=None):
+    def fake_db(self, *, branch_rows, production_rows=None, clock_offset=0.0):
         """A connect() whose sessions answer the proof's queries; the probe writes return server-stamped rows."""
-        clock = {"t": datetime(2026, 9, 24, 12, 0, 0, tzinfo=timezone.utc).timestamp()}
+        clock = {"t": time.time() - 120 + clock_offset}  # tracks the real clock, as a server would
         written = {}
 
         class Conn:
@@ -340,9 +341,9 @@ class ProveAndVerify(Base):
 
         return lambda uri, read_only, attempts=40: Conn(uri, read_only)
 
-    def run_prove(self, branch_rows, now=None, production_rows=None, branch_host="branch-{bid}-host"):
+    def run_prove(self, branch_rows, now=None, production_rows=None, branch_host="branch-{bid}-host", clock_offset=0.0):
         uris = {"br-prod": "postgresql://u@prod-host/neondb"}
-        self.db = self.fake_db(branch_rows=branch_rows, production_rows=production_rows)
+        self.db = self.fake_db(branch_rows=branch_rows, production_rows=production_rows, clock_offset=clock_offset)
         with self.admission(), \
              mock.patch.object(proof, "connection_uri", lambda bid: uris.get(bid, f"postgresql://u@{branch_host.format(bid=bid)}/neondb?branch")), \
              mock.patch.object(proof, "connect", self.db):
@@ -409,6 +410,13 @@ class ProveAndVerify(Base):
         with self.assertRaisesRegex(proof.ProofError, "parent's host"):
             self.run_prove(lambda w: [w["positive"]], branch_host="prod-host")
         self.assertEqual(list(self.fake.branches), ["br-prod"])
+
+    def test_k4_a_local_clock_skewed_from_the_servers_is_refused_and_torn_down(self):
+        for offset in (3600.0, -3600.0):
+            with self.assertRaisesRegex(proof.ProofError, "local clock differs from the production server"):
+                self.run_prove(lambda w: [w["positive"]], clock_offset=offset)
+            self.assertEqual(list(self.fake.branches), ["br-prod"])
+        self.run_prove(lambda w: [w["positive"]], clock_offset=100.0)  # inside the limit
 
     def test_a_branch_that_survives_teardown_confirms_no_delete(self):
         self.fake.delete_sticks = True

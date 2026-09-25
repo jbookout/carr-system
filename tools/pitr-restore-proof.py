@@ -39,6 +39,14 @@ printed on stdout, stamped with the binding (lib/recovery_evidence.py) that
 mcp-server/bin/recovery-matrix-evaluate.mjs `rpo -` requires; progress lines go
 to stderr. out/pitr-restore-proof.json is a copy for the operator's eyes only.
 
+WHAT IS AUTHORITY (review K3): only this stdout PIPED into the evaluator, as
+bin/pitr-restore-proof.sh does. An evaluator verdict on the saved file is not
+an RPO result: nothing proves the file is what this process printed.
+
+CLOCK (review K4): T and the probe instants are the DATABASE's clock; the
+binding stamp is this machine's. Before binding, the proof compares the two
+and refuses a skew over lib/recovery_evidence.MAX_CLOCK_SKEW_SECONDS.
+
 WHAT IS WRITTEN. Production business data is never written. The only writes
 are the two probe rows, through the one function migration 0597 made for them,
 on the owner connection; ops.pitr_probe is append-only. Every other production
@@ -82,7 +90,7 @@ from typing import Any
 REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
-from lib.recovery_evidence import bind  # noqa: E402
+from lib.recovery_evidence import CORE_TABLES, bind, check_clock_skew  # noqa: E402
 API = "https://console.neon.tech/api/v2"
 PROJECT_ID = "steep-field-48688294"
 DATABASE = "neondb"
@@ -92,7 +100,6 @@ STALE_AFTER = timedelta(hours=1)
 LIFETIME_MINUTES = 60
 PROBE_MARGIN_SECONDS = 60          # V5_PITR_PROBE_MARGIN_SECONDS, plus one second of slack below
 NEGATIVE_MARGIN_SECONDS = 5        # V5_PITR_NEGATIVE_MARGIN_SECONDS, plus one second of slack below
-CORE_TABLES = ("public.party", "ops.run")
 OUT = REPO / "out" / "pitr-restore-proof.json"
 STATE = REPO / "out" / "pitr-proof-branches.json"
 DELETE_RETRIES = 6                 # a 423 (the branch has an operation running) is retried with backoff
@@ -459,6 +466,11 @@ def prove(now: datetime | None = None) -> dict:
         # Production re-read (read-only, a fresh session): the rows the probes claim to be.
         with connect(connection_uri(production_id), read_only=True) as conn:
             rows = read_probes(conn, [positive["id"], negative["id"]])
+            server_now = datetime.fromtimestamp(db_now(conn), timezone.utc)
+        try:
+            check_clock_skew(datetime.now(timezone.utc), server_now, "the production server")
+        except ValueError as exc:
+            raise ProofError(str(exc)) from None
         readback = {"positive": rows.get(positive["id"]), "negative": rows.get(negative["id"]), "read_at": iso_now()}
         retention_seconds, retention_read_at = retention()
     finally:
