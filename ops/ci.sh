@@ -1263,6 +1263,20 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     return
   fi
 
+  # V5-F01 record homes, source authority and document identity: both SQL
+  # fixtures (each on its own template copy of this database) and the nine
+  # registered verbs end to end as carr_writer and the authority login. It
+  # commits only into the copies it creates and drops them on the way out.
+  if [ -f mcp-server/test/record-source-authority-live-pg.v5.test.mjs ]; then
+    if ! DATABASE_URL="$dsn" CARR_F01_DB_REQUIRED=1 PSQL="$psql_bin" \
+         run_quiet "$LOGDIR/record-source-authority-live-pg.log" \
+         node --test mcp-server/test/record-source-authority-live-pg.v5.test.mjs; then
+      tail -40 "$LOGDIR/record-source-authority-live-pg.log" >&2
+      bad migration "V5-F01 record-source-authority PostgreSQL acceptance failed"
+      return
+    fi
+  fi
+
   # Continuity bindings and append-only records need actual PostgreSQL proof.
   if ! run_quiet "$LOGDIR/codex-continuity-postgres.log" \
        "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
