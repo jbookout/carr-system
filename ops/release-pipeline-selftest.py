@@ -63,8 +63,10 @@ class FakeRunner:
                  health_baseline_marker: bool = True, health_marker: bool = True,
                  health_baseline_findings: list | None = None, health_findings: list | None = None,
                  health_baseline_out_extra: str = "", health_out_extra: str = "",
-                 health_baseline_write_json: bool = True, health_write_json: bool = True):
+                 health_baseline_write_json: bool = True, health_write_json: bool = True,
+                 outputs: dict | None = None):
         self.fail_at, self.pending, self.live = fail_at, pending, live
+        self.outputs = outputs or {}
         self.wrangler_out = wrangler_out
         # Defaults: a clean, COMPLETE health read with no findings, on both
         # the pre-promote baseline and the post-promote read — every scenario
@@ -127,7 +129,10 @@ class FakeRunner:
         if name in ("health-baseline", "health"):
             return rp.Result(0 if name != self.fail_at else 7, self._health_output(name, argv))
         if name == self.fail_at:
-            return rp.Result(7, "boom")
+            failed_out = self.outputs.get(name, "boom")
+            log.parent.mkdir(parents=True, exist_ok=True)
+            log.write_text(failed_out, encoding="utf-8")
+            return rp.Result(7, failed_out)
         if name == "release-key":
             key = argv[argv.index("--key") + 1]
             return rp.Result(0 if key.endswith("-01") else 2, "")
@@ -136,6 +141,7 @@ class FakeRunner:
             "migrate-plan": f"applied: 10   pending: {self.pending}",
             "upload": f"uploaded only\n  provider version: {VERSION}\n",
             "wrangler-auth": self.wrangler_out,
+            **self.outputs,
         }.get(name, "ok")
         if name == "promote" and self.live is not None:
             upload = next(a for n, a in self.calls if n == "upload")
@@ -462,6 +468,89 @@ class StagingGuard(Base):
         self.assertIn("upload", runner.names())
         self.assertNotIn("promote", runner.names())
         self.assertEqual(self.fx.records()[-1]["step"], "staging")
+
+
+DO_V0 = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
+DO_MARKER = f"DO migration applied: tag=v1-workflow-census-anchor from=none version={DO_V0}\n"
+
+
+class DurableObjectMigration(Base):
+    """bin/deploy-worker.sh applies a pending Durable Object migration inside
+    the upload step; the pipeline carries its marker into the run record."""
+
+    def test_no_migration_records_none(self):
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        live = {"sha": self.fx.base}
+        self.assertEqual(self.fx.pipeline(FakeRunner(live=live), live=live).tick(["worker"]), 0)
+        rec = self.fx.records()[-1]
+        self.assertEqual(rec["status"], "shipped")
+        self.assertIsNone(rec["do_migration"])
+
+    def test_applied_migration_is_recorded_and_the_normal_path_continues(self):
+        self.fx.commit({"mcp-server/wrangler.toml": "[[migrations]]\n"})
+        live = {"sha": self.fx.base}
+        # The migration deploy's own version is the candidate the wrapper prints.
+        runner = FakeRunner(live=live, outputs={
+            "upload": DO_MARKER + f"Durable Object migration release\n  provider version: {DO_V0}\n"})
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
+        names = runner.names()
+        self.assertLess(names.index("upload"), names.index("staging"))
+        self.assertLess(names.index("staging"), names.index("promote"))
+        self.assertIn("health", names)
+        promote = next(a for n, a in runner.calls if n == "promote")
+        self.assertEqual(promote[promote.index("--promote-version") + 1], DO_V0)
+        rec = self.fx.records()[-1]
+        self.assertEqual(rec["status"], "shipped")
+        self.assertEqual(rec["provider_version_id"], DO_V0)
+        self.assertEqual(rec["do_migration"], {"applied": True, "possibly_applied": False,
+                                               "tag": "v1-workflow-census-anchor",
+                                               "from_tag": None, "provider_version_id": DO_V0})
+
+    def test_upload_failure_after_the_migration_dispatches_forward_fix(self):
+        sha = self.fx.commit({"mcp-server/wrangler.toml": "[[migrations]]\n"})
+        runner, verbs = FakeRunner(fail_at="upload", outputs={
+            "upload": DO_MARKER + "REFUSED: the migration is applied, but Production /release did not read back\n"}), []
+        self.assertEqual(self.fx.pipeline(runner, verbs=verbs).tick(["worker"]), 1)
+        self.assertNotIn("staging", runner.names())
+        self.assertNotIn("promote", runner.names())
+        rec = self.fx.records()[-1]
+        self.assertEqual((rec["status"], rec["step"]), ("failed", "upload"))
+        self.assertEqual(rec["do_migration"]["tag"], "v1-workflow-census-anchor")
+        self.assertEqual(self.fx.state()["worker"]["failed_sha"], sha)
+        body = verbs[0][1]["body"]
+        self.assertIn("A DURABLE OBJECT MIGRATION WAS APPLIED", body)
+        self.assertIn("forward", body)
+
+    def test_possibly_applied_migration_dispatches_forward_fix(self):
+        self.fx.commit({"mcp-server/wrangler.toml": "[[migrations]]\n"})
+        runner, verbs = FakeRunner(fail_at="upload", outputs={
+            "upload": "DO migration possibly applied: tag=v1-workflow-census-anchor from=none version=unknown\n"
+                      "REFUSED: the migration deploy exited 1 and the Worker reports tag unknown\n"}), []
+        self.assertEqual(self.fx.pipeline(runner, verbs=verbs).tick(["worker"]), 1)
+        rec = self.fx.records()[-1]
+        self.assertEqual(rec["do_migration"]["possibly_applied"], True)
+        self.assertEqual(rec["do_migration"]["applied"], False)
+        body = verbs[0][1]["body"]
+        self.assertIn("A DURABLE OBJECT MIGRATION WAS POSSIBLY APPLIED", body)
+        self.assertIn("forward", body)
+        self.assertIn("blocks rollback", body)
+
+    def test_upload_failure_without_the_marker_claims_no_migration(self):
+        self.fx.commit({"mcp-server/wrangler.toml": "[[migrations]]\n"})
+        runner, verbs = FakeRunner(fail_at="upload", outputs={
+            "upload": "REFUSED: the target Worker's applied Durable Object migration tag could not be determined\n"}), []
+        self.assertEqual(self.fx.pipeline(runner, verbs=verbs).tick(["worker"]), 1)
+        self.assertIsNone(self.fx.records()[-1]["do_migration"])
+        self.assertNotIn("DURABLE OBJECT MIGRATION", verbs[0][1]["body"])
+
+    def test_marker_parser(self):
+        self.assertIsNone(rp.parse_do_migration("uploaded only\n"))
+        got = rp.parse_do_migration("x\nDO migration applied: tag=v2 from=v1 version=unknown\n")
+        self.assertEqual(got, {"applied": True, "possibly_applied": False, "tag": "v2", "from_tag": "v1",
+                               "provider_version_id": None})
+        got = rp.parse_do_migration(f"DO migration possibly applied: tag=v2 from=none version={DO_V0}\n")
+        self.assertEqual(got, {"applied": False, "possibly_applied": True, "tag": "v2", "from_tag": None,
+                               "provider_version_id": DO_V0})
 
 
 def _finding(key, detail, *, subject="", count=1, hard_error=False, time_rolling=False):

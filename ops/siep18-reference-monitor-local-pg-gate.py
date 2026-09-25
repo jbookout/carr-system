@@ -21,7 +21,7 @@ from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connec
 
 REPO = Path(__file__).resolve().parents[1]
 
-# 0603 installs v72 as the live frontier and demotes v71 to sealed history.
+# 0609 installs v73 as the live frontier and demotes v72 to sealed history.
 # Both are pinned: an unreviewed frontier, or a v40 row the successor rewrote
 # instead of sealing, has to fail this gate closed.
 #
@@ -41,7 +41,7 @@ SEALED_PREDECESSOR_MIGRATION = (
     "migrations/0603_doctorcre_r02_scac_successor.sql"
 )
 LIVE_REGISTRY_MIGRATION = (
-    "migrations/0611_delivery_cadence_a05_scac_successor.sql"
+    "migrations/0609_deploy_worker_do_migration_reseal.sql"
 )
 
 LIVE_CATALOG_CURRENT_FN = f"ops.scac_mutation_catalog_v{LIVE_REGISTRY_ORDINAL}_current()"

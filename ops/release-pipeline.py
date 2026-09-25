@@ -33,7 +33,12 @@ TWO LANES, one tick:
             2 tools/staging-project-replacement.py prepare --apply --local-checks-green
             3 tools/provision-staging-app-writer.py --apply
             4 bin/migrate-prod.sh (dry) and, only when it lists pending, --apply
-            5 bin/deploy-worker.sh --upload-version  (verifier bound HERE)
+            5 bin/deploy-worker.sh --upload-version  (verifier bound HERE; a pending
+              Durable Object migration is applied first: Production attachment
+              check, staging precheck, then a deploy of S whose own version
+              becomes the candidate, so Production has moved before steps 6-8
+              for that release only; see the do-migration block there. Its tag
+              lands in the run record)
             6 bin/deploy-worker.sh --env staging --recovery-step forward_fix
             7 bin/deploy-worker.sh --promote-version <id from step 5>
             8 live /release reads back S, ./run.sh health
@@ -546,7 +551,8 @@ def next_release_key(today: str, exists: Callable[[str], bool]) -> str:
 
 
 def queue_turn(lane: str, sha: str, step: str, rc: int, log: str, record_path: str,
-               db_ahead_of_worker: bool = False, *, run_id: str, attempt: int = 1) -> dict:
+               db_ahead_of_worker: bool = False, *, run_id: str, attempt: int = 1,
+               do_migration: dict | None = None) -> dict:
     """msg_id is derived from (sha, step, run id): the room insert is `on
     conflict (msg_id) do nothing`, so a second, different failure of the same
     SHA must never share an id with the first. The queue key gains a suffix on
@@ -556,6 +562,13 @@ def queue_turn(lane: str, sha: str, step: str, rc: int, log: str, record_path: s
              "(db_ahead_of_worker: true): the database is ahead of the serving Worker, so the fix "
              "must keep the new schema working with the currently deployed Worker.\n"
              if db_ahead_of_worker else "")
+    if do_migration:
+        what = ("WAS APPLIED" if do_migration.get("applied")
+                else "WAS POSSIBLY APPLIED (the deploy's outcome could not be read back)")
+        ahead += (f"A DURABLE OBJECT MIGRATION {what} in this run (tag {do_migration.get('tag')}): "
+                  f"treat Production as serving {sha[:12]} through the deploy that applied it. Cloudflare "
+                  "blocks rollback to any version from before that migration, so the fix is forward "
+                  "only and must keep working with the migrated Durable Object class.\n")
     body = (f"@queue enqueue target=claude-desktop cap=repo-write priority=P1 runtime=3h "
             f"key={key} :: Fix forward: {lane} release of {sha[:12]} failed at {step}\n"
             f"The scripted release pipeline (ops/release-pipeline.py) stopped: step `{step}` "
@@ -603,6 +616,7 @@ class Pipeline:
         self.executed: list[str] = []   # step names that actually ran, in order
         self.worktrees: list[tuple[Path, Path]] = []
         self.db_ahead_of_worker = False
+        self.do_migration: dict | None = None   # a Durable Object migration the upload step applied
         self.mutated = False   # set when the first worktree is created; nothing before it writes
 
     # -- plumbing ---------------------------------------------------------
@@ -1413,10 +1427,12 @@ class Pipeline:
         ok, res = (False, "no SHA") if not sha else self.dispatch(
             state, lane, sha, queue_turn(lane, sha, step, rc, log, str(self.store.records_path),
                                          db_ahead_of_worker=self.db_ahead_of_worker,
+                                         do_migration=self.do_migration,
                                          run_id=self.run_id, attempt=attempt))
         self.store.record({"lane": lane, "sha": sha, "from_sha": base, "status": "failed",
                            "step": step, "rc": rc, "log": log, "detail": detail,
                            "db_ahead_of_worker": self.db_ahead_of_worker,
+                           "do_migration": self.do_migration,
                            "run_dir": str(self.run_dir), "executed": list(self.executed),
                            "dispatched": ok, "run_id": self.run_id})
         if not ok:
@@ -1523,11 +1539,30 @@ class Pipeline:
         # 5. upload the immutable candidate, verifier bound at upload time
         key = ("<next free r-%s-NN>" % self.today) if self.dry_run else next_release_key(
             self.today, lambda k: self._release_exists(wt, py, k))
-        up = self.step("upload", ["bin/deploy-worker.sh", "--upload-version", "--release-sha", sha,
-                                  "--release-key", key, "--test-evidence", ev["test_evidence"],
-                                  "--security-evidence", ev["security_evidence"],
-                                  "--verifier", ev["verifier"], "--verifier-evidence", ev["verifier_evidence"],
-                                  *budget], wt, env=self.deploy_env())
+        #    A pending Durable Object migration is applied INSIDE this step
+        #    (bin/deploy-worker.sh: `versions upload` cannot apply one): the
+        #    Production attachment check and the staging precheck first, and
+        #    Production traffic moves only after both are green. The migration
+        #    deploy's own version is then the candidate, so for that release
+        #    steps 6-8 run after Production has moved (their database writers
+        #    need an uploaded Production version, which cannot exist earlier).
+        #    Its marker line is carried into the run record whether the step
+        #    then succeeds or fails.
+        if self.dry_run:
+            self.out("  [dry-run] the upload step first applies any pending Durable Object migration: "
+                     "Production attachments unchanged, S to staging and its checks green, then a deploy "
+                     "of S (100% traffic) whose version is the candidate; it refuses before Production "
+                     "when the applied tag is unknown, attachments differ or the staging precheck fails")
+        try:
+            up = self.step("upload", ["bin/deploy-worker.sh", "--upload-version", "--release-sha", sha,
+                                      "--release-key", key, "--test-evidence", ev["test_evidence"],
+                                      "--security-evidence", ev["security_evidence"],
+                                      "--verifier", ev["verifier"], "--verifier-evidence", ev["verifier_evidence"],
+                                      *budget], wt, env=self.deploy_env())
+        except StepFailed as failed:
+            self.do_migration = parse_do_migration(read_log(failed.log))
+            raise
+        self.do_migration = parse_do_migration(up.out)
         version = "<provider version from upload>" if self.dry_run else parse_provider_version(up)
 
         # 6. staging forward-fix rehearsal; promotion is unreachable unless it returned 0
@@ -1562,6 +1597,7 @@ class Pipeline:
         if not self.dry_run:
             self.remove_worktrees()
         return {"release_key": key, "provider_version_id": version, "migrations_applied": pending,
+                "do_migration": self.do_migration,
                 "pr": ev["pr"], "prs": ev["prs"], "reviews": ev.get("reviews", []),
                 "review_rule": ev.get("review_rule"), "reviewed_sha": ev.get("reviewed_sha"),
                 "pr_head_sha": ev.get("pr_head_sha"), "verifier": ev["verifier"],
@@ -1907,6 +1943,34 @@ def parse_json_field(text: str, field: str, step: str) -> str:
             if isinstance(obj, dict) and isinstance(obj.get(field), str):
                 return obj[field]
     raise StepFailed(step, 1, "", f"no {field} in output")
+
+
+DO_MIGRATION_RE = re.compile(
+    r"^DO migration (?P<kind>applied|possibly applied): tag=(?P<tag>\S+) from=(?P<from_tag>\S+) "
+    r"version=(?P<version>\S+)$",
+    re.MULTILINE)
+
+
+def parse_do_migration(text: str) -> dict | None:
+    """The Durable Object migration bin/deploy-worker.sh applied (or possibly
+    applied: the deploy's outcome could not be read back) in the upload step,
+    from its one marker line; None when it applied none."""
+    hits = list(DO_MIGRATION_RE.finditer(text or ""))
+    if not hits:
+        return None
+    m = hits[-1]
+    version = m.group("version")
+    applied = m.group("kind") == "applied"
+    return {"applied": applied, "possibly_applied": not applied, "tag": m.group("tag"),
+            "from_tag": None if m.group("from_tag") == "none" else m.group("from_tag"),
+            "provider_version_id": version if UUID_RE.fullmatch(version) else None}
+
+
+def read_log(path: str) -> str:
+    try:
+        return Path(path).read_text(encoding="utf-8") if path else ""
+    except OSError:
+        return ""
 
 
 def parse_provider_version(res: Result) -> str:
