@@ -341,6 +341,19 @@ def probe_live(entry: dict) -> bool:
     return True
 
 
+class QueueCompletionPostFailed(Exception):
+    """The flash-local FINAL completion post to the room failed.
+
+    Raised only by run_once's post_flash_completion hook, wrapping the bare
+    RuntimeError add_room_turn raises (verb_io.py's contract). It is a distinct
+    type, not a RuntimeError, so run_once's per-desk handler can contain exactly
+    this failure to its own desk while every OTHER RuntimeError — a
+    conversational delivery or handle_pending post failure — still aborts the
+    cycle before state is saved, so that turn is retried rather than recorded as
+    consumed (PR #1254 round 2 review, finding 2).
+    """
+
+
 def _post_completion_payload(completion: dict, *, add_room_turn, seat: str) -> None:
     """Post one already-built queue completion payload into the room.
 
@@ -870,14 +883,18 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
                     is_flash_local = entry.get("kind") == "flash-local"
 
                     def post_flash_completion(completion: dict) -> None:
-                        # Posted from INSIDE finish_pending_posted, before Hermes is
-                        # marked terminal — see that method's docstring for why a
-                        # failed post must not lose the reply for good (PR #1254
-                        # round 2, finding 3). A raise here propagates up through
-                        # start() unchanged; the per-desk except below (RuntimeError,
-                        # queue_dispatch.QueueDispatchError) catches it so one desk's
-                        # failed post never aborts the cycle for the others.
-                        _post_completion_payload(completion, add_room_turn=add_room_turn, seat=post_seat)
+                        # Posted from INSIDE finish_pending_posted, only for a FINAL
+                        # outcome and before Hermes is marked terminal — see that
+                        # method's docstring for why a failed post must not lose the
+                        # reply for good, and why a retry never posts. A post
+                        # failure is re-raised as QueueCompletionPostFailed so the
+                        # per-desk handler below contains exactly this failure to
+                        # this desk, and nothing else.
+                        try:
+                            _post_completion_payload(
+                                completion, add_room_turn=add_room_turn, seat=post_seat)
+                        except RuntimeError as exc:
+                            raise QueueCompletionPostFailed(str(exc)) from exc
 
                     queue_outcome = queue_executor.start(
                         desk_queue_targets[name], dispatch_call=dispatch_queue,
@@ -985,14 +1002,15 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
             errors.append({"desk": name, "error": code, "detail": str(e)[:500]})
             # A queue outage says nothing about whether the named desk is live.
             registry_ext.stamp_heartbeat(name, live=live_by_desk.get(name, True), path=registry.path)
-        except RuntimeError as e:
-            # add_room_turn raises a bare RuntimeError on failure (verb_io.py's own
-            # contract). The one place that can fire mid-desk here is the
-            # flash-local completion post (post_flash_completion, above) — Hermes
-            # was never marked terminal for it (finish_pending_posted posts BEFORE
-            # that mutation), so the claim just ages out and Hermes' own recovery
-            # returns the task to its retry phase. This must cost only this desk's
-            # cycle, not the whole bridge run (PR #1254 round 2, finding 3).
+        except QueueCompletionPostFailed as e:
+            # ONLY the flash-local final completion post (post_flash_completion,
+            # above). Hermes was never marked terminal for it (finish_pending_posted
+            # posts BEFORE that mutation), so the claim just ages out and Hermes'
+            # own recovery returns the task to its retry phase. This must cost only
+            # this desk's cycle, not the whole bridge run. Any other RuntimeError
+            # (a conversational delivery, a handle_pending post) is deliberately
+            # NOT caught here: it aborts the cycle before save_state, so the turn
+            # it was carrying is retried rather than saved as consumed.
             if name in required_queue_desks:
                 queue_scan_complete = False
             errors.append({"desk": name, "error": "queue_completion_post_failed", "detail": str(e)[:500]})

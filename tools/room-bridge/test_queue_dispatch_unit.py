@@ -557,7 +557,8 @@ class QueueDispatchTests(unittest.TestCase):
         self.assertIn('entry.get("kind") == "flash-local"', source)
         self.assertIn("include_reply=is_flash_local", source)
         self.assertIn("def post_flash_completion(completion: dict) -> None:", source)
-        self.assertIn("_post_completion_payload(completion, add_room_turn=add_room_turn, seat=post_seat)", source)
+        self.assertIn("completion, add_room_turn=add_room_turn, seat=post_seat)", source)
+        self.assertIn("raise QueueCompletionPostFailed(str(exc)) from exc", source)
         self.assertIn("post_completion=post_flash_completion if is_flash_local else None", source)
         self.assertLess(source.index("def post_flash_completion"),
                         source.index("queue_outcome = queue_executor.start"))
@@ -1146,6 +1147,292 @@ class ReplyWordingTests(unittest.TestCase):
         source = inspect.getsource(queue_dispatch.QueueDeskExecutor.completion_payload)
         self.assertNotIn("bounded, redacted exception", source.lower())
         self.assertIn("stripped and truncated", source.lower())
+
+
+class KeyReuseRoom:
+    """A fake add_room_turn that ENFORCES the server's idempotency rule
+    (mcp-server/src/tools.js withEnvelope): the same idempotency_key with a
+    different body raises key_reuse (verb_io surfaces that as RuntimeError), and
+    the same key with the same body is a no-op replay. Posts without a key (the
+    heartbeat, receipts) are simply recorded."""
+
+    def __init__(self):
+        self.by_key: dict[str, str] = {}
+        self.turns: list[dict] = []
+        self.replays: list[str] = []
+
+    def __call__(self, **kwargs):
+        key = kwargs.get("idempotency_key")
+        body = kwargs.get("body")
+        if key is not None:
+            if key in self.by_key:
+                if self.by_key[key] != body:
+                    raise RuntimeError(f"add-room-turn failed: key_reuse ({key})")
+                self.replays.append(key)
+                return {"replayed": True}
+            self.by_key[key] = body
+        self.turns.append(kwargs)
+        return {"seq": len(self.turns)}
+
+    def completions(self) -> list[dict]:
+        return [json.loads(t["body"])["queue_completion"] for t in self.turns
+                if str(t.get("idempotency_key") or "").startswith("queue-completion:")]
+
+
+class RetryCountingAdapter(FakeAdapter):
+    """Hermes retry evidence that grows with each reclaim, like the real board."""
+
+    def __init__(self, tasks: list[dict], *, limit: int = 3):
+        super().__init__(tasks)
+        self.limit = limit
+        self.reclaims = 0
+
+    def retry_attempt(self, task_id: str, _prefix: str) -> tuple[int, int]:
+        self.calls.append(("retry_attempt", task_id))
+        return (self.reclaims, self.limit)
+
+    def reclaim(self, task_id: str, reason: str) -> None:
+        super().reclaim(task_id, reason)
+        self.reclaims += 1
+
+
+class FinalCompletionOnlyTests(unittest.TestCase):
+    """PR #1254 round 2 review, finding 1: the flash-local completion used to be
+    posted BEFORE the result line was parsed, so a protocol error that scheduled a
+    retry had already told the room "blocked: result_protocol_error", and the
+    retried attempt's real completion then collided with that post under the one
+    key queue-completion:<task_id> (server key_reuse). Only a FINAL completion may
+    ever be posted, and still before the Hermes terminal mutation."""
+
+    FLASH_CATALOG = FlashReplyReachesTheRoomTests.FLASH_CATALOG
+    _flash_task = staticmethod(FlashReplyReachesTheRoomTests._flash_task)
+
+    @staticmethod
+    def _good(answer: str) -> str:
+        return answer + "\nCARR_QUEUE_RESULT " + json.dumps(
+            {"v": 1, "task_id": "t_queue0001", "outcome": "success", "summary": "Answered."},
+            separators=(",", ":"))
+
+    def _post(self, room: KeyReuseRoom):
+        return lambda completion: bridge._post_completion_payload(
+            completion, add_room_turn=room, seat="hermes")
+
+    def test_protocol_error_retry_then_success_posts_one_final_completion(self):
+        room = KeyReuseRoom()
+        adapter = RetryCountingAdapter([self._flash_task()])
+        controller = queue_dispatch.QueueDeskExecutor(catalog=self.FLASH_CATALOG, adapter=adapter)
+
+        first = controller.start(
+            "flash", dispatch_call=lambda _p: {"status": "completed", "result": "An answer, no result line."},
+            include_reply=True, retry_protocol_errors=True, post_completion=self._post(room),
+        )
+        self.assertEqual(first["outcome"], "retry_scheduled")
+        self.assertEqual(room.completions(), [], "a retry must post nothing to the room")
+
+        second = controller.start(
+            "flash", dispatch_call=lambda _p: {"status": "completed", "result": self._good("The real answer.")},
+            include_reply=True, retry_protocol_errors=True, post_completion=self._post(room),
+        )
+        self.assertEqual(second["outcome"], "done")
+        completions = room.completions()
+        self.assertEqual(len(completions), 1, completions)
+        self.assertEqual(completions[0]["outcome"], "success")
+        self.assertEqual(completions[0]["reply"], "The real answer.")
+        self.assertEqual(sum(call[0] == "complete" for call in adapter.calls), 1)
+        self.assertFalse(any(c.get("outcome") == "blocked" for c in completions))
+
+    def test_retry_exhausted_block_posts_one_final_blocked_completion_before_the_block(self):
+        room = KeyReuseRoom()
+        adapter = RetryCountingAdapter([self._flash_task()], limit=3)
+        controller = queue_dispatch.QueueDeskExecutor(catalog=self.FLASH_CATALOG, adapter=adapter)
+        posted_before_block: list[bool] = []
+        post = self._post(room)
+
+        def recording_post(completion: dict) -> None:
+            posted_before_block.append(not any(call[0] == "block" for call in adapter.calls))
+            post(completion)
+
+        outcomes = []
+        # Flash's prose differs run to run; every attempt fumbles the result line.
+        for attempt in range(3):
+            outcomes.append(controller.start(
+                "flash",
+                dispatch_call=lambda _p, n=attempt: {"status": "completed", "result": f"Attempt {n} prose."},
+                include_reply=True, retry_protocol_errors=True, post_completion=recording_post,
+            ))
+        self.assertEqual([o["outcome"] for o in outcomes],
+                         ["retry_scheduled", "retry_scheduled", "blocked"])
+        self.assertEqual(outcomes[-1]["code"], "result_protocol_error")
+        completions = room.completions()
+        self.assertEqual(len(completions), 1, completions)
+        self.assertEqual(completions[0]["outcome"], "blocked")
+        self.assertEqual(completions[0]["code"], "result_protocol_error")
+        self.assertEqual(completions[0]["reply"], "Attempt 2 prose.")
+        self.assertEqual(posted_before_block, [True])
+        self.assertEqual(sum(call[0] == "block" for call in adapter.calls), 1)
+
+    def test_a_failed_final_post_on_an_exhausted_retry_leaves_hermes_unblocked(self):
+        adapter = RetryCountingAdapter([self._flash_task()], limit=1)
+        controller = queue_dispatch.QueueDeskExecutor(catalog=self.FLASH_CATALOG, adapter=adapter)
+
+        def failing_post(_completion: dict) -> None:
+            raise RuntimeError("add-room-turn unreachable")
+
+        with self.assertRaises(RuntimeError):
+            controller.start(
+                "flash", dispatch_call=lambda _p: {"status": "completed", "result": "no line"},
+                include_reply=True, retry_protocol_errors=True, post_completion=failing_post,
+            )
+        self.assertFalse(any(call[0] in {"block", "complete"} for call in adapter.calls))
+
+    def test_crash_after_post_replays_the_identical_final_body(self):
+        """The post landed but the Hermes transition did not (crash); the same
+        final result re-posts the identical body, which the server replays."""
+        room = KeyReuseRoom()
+        adapter = RetryCountingAdapter([self._flash_task()])
+        controller = queue_dispatch.QueueDeskExecutor(catalog=self.FLASH_CATALOG, adapter=adapter)
+        real_complete = adapter.complete
+        crashes = []
+
+        def crashing_complete(*args):
+            if not crashes:
+                crashes.append(True)
+                raise OSError("bridge killed mid-transition")
+            return real_complete(*args)
+
+        adapter.complete = crashing_complete  # type: ignore[method-assign]
+        run = dict(dispatch_call=lambda _p: {"status": "completed", "result": self._good("Same answer.")},
+                   include_reply=True, retry_protocol_errors=True, post_completion=self._post(room))
+        with self.assertRaises(OSError):
+            controller.start("flash", **run)
+        self.assertEqual(controller.start("flash", **run)["outcome"], "done")
+        self.assertEqual(room.replays, ["queue-completion:t_queue0001"])
+        self.assertEqual(len(room.completions()), 1)
+
+    def test_bridge_cycles_protocol_error_then_success_finish_the_task(self):
+        """The same defect end to end through run_once: a seatless flash-local desk,
+        the real executor, and a room that enforces key_reuse. Two cycles must
+        finish the Hermes task with exactly one success completion and no
+        queue_completion_post_failed error."""
+        room = KeyReuseRoom()
+        adapter = RetryCountingAdapter([self._flash_task()])
+        executor = queue_dispatch.QueueDeskExecutor(catalog=self.FLASH_CATALOG, adapter=adapter)
+        replies = iter(["An answer, no result line.", self._good("The real answer.")])
+
+        class FakeQueue:
+            catalog = self.FLASH_CATALOG
+
+            def handle(self, _turn, *, room):
+                return {"handled": False}
+
+            def reconcile_disabled_targets(self):
+                return {"scanned": 0, "blocked": [], "diagnostics": []}
+
+        def dispatch_fn(name, _prompt, **_kwargs):
+            self.assertEqual(name, "flash-model")
+            return {"status": "completed", "result": next(replies)}
+
+        saved_is_up = flash_wire.is_up
+        flash_wire.is_up = lambda *_a, **_k: True
+        summaries = []
+        try:
+            with tempfile.TemporaryDirectory() as root:
+                registry = desks.Registry(Path(root) / "desks.json")
+                registry.register("flash-model", "flash-local")
+                self.assertFalse(registry.entries()["flash-model"].get("room_seat"))
+                for cycle_now in ["2026-09-24T12:00:00+00:00", "2026-09-24T12:10:00+00:00"]:
+                    summaries.append(bridge.run_once(
+                        state_path=Path(root) / "state.json",
+                        read_room=lambda *_a, **_k: {"turns": []},
+                        add_room_turn=room, registry=registry,
+                        queue_service=FakeQueue(), queue_executor=executor,
+                        queue_projector=lambda **_k: [], dispatch_fn=dispatch_fn,
+                        desk_state_dir=Path(root) / "desk-state",
+                        probe_auth=lambda _entry: True, read_profiles=lambda: [],
+                        now_fn=lambda n=cycle_now: n, log=lambda _msg: None,
+                    ))
+        finally:
+            flash_wire.is_up = saved_is_up
+
+        for summary in summaries:
+            self.assertFalse(any(e.get("error") == "queue_completion_post_failed"
+                                 for e in summary["errors"]), summary["errors"])
+        self.assertEqual(sum(call[0] == "complete" for call in adapter.calls), 1, adapter.calls)
+        completions = room.completions()
+        self.assertEqual([c["outcome"] for c in completions], ["success"])
+        self.assertEqual(completions[0]["reply"], "The real answer.")
+
+
+class ConversationalRuntimeErrorTests(unittest.TestCase):
+    """PR #1254 round 2 review, finding 2: the per-desk handler added for the
+    flash-local completion post must not swallow any OTHER RuntimeError. A
+    conversational reply that cannot be posted must abort the cycle before
+    state is saved, so the dequeued turn is retried rather than lost."""
+
+    def test_conversational_delivery_runtime_error_is_not_swallowed_and_turn_is_retried(self):
+        class FakeQueue:
+            catalog: dict = {"v": 1, "targets": {}}
+
+            def handle(self, _turn, *, room):
+                return {"handled": False}
+
+            def reconcile_disabled_targets(self):
+                return {"scanned": 0, "blocked": [], "diagnostics": []}
+
+        class FakeExecutor:
+            catalog: dict = {"targets": {}}
+
+            def start(self, *_a, **_k):
+                raise AssertionError("no queue target is configured")
+
+        turn = {"seq": 7, "msg_id": "22222222-2222-4222-8222-222222222222",
+                "seat": "joe", "kind": "turn", "body": "What is the renewal date?"}
+        dispatched: list[str] = []
+
+        def dispatch_fn(name, prompt, **_kwargs):
+            dispatched.append(name)
+            return {"status": "completed", "result": "It renews in 2028."}
+
+        replies: list[dict] = []
+        fail = [True]
+
+        def add_room_turn(**kwargs):
+            if kwargs.get("seat") == "sol" and fail[0]:
+                raise RuntimeError("add-room-turn failed: network")
+            replies.append(kwargs)
+            return {"seq": 99}
+
+        with tempfile.TemporaryDirectory() as root:
+            registry = type("Registry", (), {
+                "entries": lambda self: {"codex-desk": {"kind": "codex-session", "room_seat": "sol"}},
+                "path": Path(root) / "desks.json",
+            })()
+            state_path = Path(root) / "state.json"
+
+            def cycle():
+                return bridge.run_once(
+                    state_path=state_path,
+                    read_room=lambda *_a, **_k: {"turns": [turn]},
+                    add_room_turn=add_room_turn, registry=registry,
+                    queue_service=FakeQueue(), queue_executor=FakeExecutor(),
+                    queue_projector=lambda **_k: [], dispatch_fn=dispatch_fn,
+                    desk_state_dir=Path(root) / "desk-state",
+                    probe_auth=lambda _entry: True, read_profiles=lambda: [],
+                    log=lambda _msg: None,
+                )
+
+            with self.assertRaises(RuntimeError):
+                cycle()
+            # Nothing was saved, so the dequeued turn is not recorded as consumed.
+            self.assertFalse(state_path.exists())
+
+            fail[0] = False
+            summary = cycle()
+        self.assertEqual(dispatched, ["codex-desk", "codex-desk"])
+        self.assertTrue(any(r.get("seat") == "sol" and r.get("body") == "It renews in 2028."
+                            for r in replies), replies)
+        self.assertFalse(any(e.get("error") == "queue_completion_post_failed"
+                             for e in summary["errors"]), summary["errors"])
 
 
 def main() -> int:
