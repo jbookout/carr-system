@@ -262,6 +262,12 @@ WRITE_ACTION_EXACT = {
                                   # prefix (a future mark-* read must not inherit this class).
     "mark-slice-progress",       # DoctorCRE V5-R02 (Q153): the writer-side in_progress/blocked
                                   # mark beside mark-slice-completion; same exact-entry reasoning.
+    "auto-mark-slice-completion",  # slice done-marker (0612): the automated seat's complete
+                                  # mark. Exact entry for mark-slice-completion's reason.
+    "bind-slice-criterion-evidence",    # slice done-marker (0612): binds an unbound criterion
+                                  # to server-resolved evidence, once. "bind" is not a prefix.
+    "rebind-slice-criterion-evidence",  # slice done-marker (0612): the partner override of a
+                                  # binding; exact entry, same reasoning.
     "cancel-workflow-cutover-plan",  # DoctorCRE V5-R02: cancels an active cutover plan so it
                                   # stops governing enqueue. Exact entry, like
                                   # cancel-capability-session -- no blanket "cancel" prefix.
