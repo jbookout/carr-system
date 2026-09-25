@@ -673,6 +673,15 @@ class PostCallTests(unittest.TestCase):
         for judge in (lambda _s, _o: None, raises, lambda _s, _o: 999):
             self.assertEqual(post_call.transcript_chunks({"segments": segments}, limit=10000, choose_cut=judge), plain)
 
+    def test_many_small_segments_still_offer_jev_at_most_four_boundaries(self) -> None:
+        segments = [{"speaker": "Joe", "text": f"s{i:03d} " + "w" * 80} for i in range(300)]
+        seen: list[list[int]] = []
+        post_call.transcript_chunks({"segments": segments}, limit=10000,
+                                    choose_cut=lambda _s, o: seen.append(o))
+        self.assertTrue(seen)
+        for options in seen:
+            self.assertEqual(len(options), post_call.MAX_CUT_CANDIDATES)
+
     def test_the_size_limit_cut_is_always_one_of_the_options(self) -> None:
         segments = self.long_segments()
         plain = post_call.transcript_chunks({"segments": segments}, limit=10000)
