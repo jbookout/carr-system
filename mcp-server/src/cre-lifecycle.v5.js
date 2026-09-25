@@ -3944,7 +3944,8 @@ export function compareMigrationShadow(request) {
 
 const READINESS_KEYS = Object.freeze(["tenant", "caller_census", "shadow_runs", "latest_shadow_run"]);
 const SHADOW_RUN_KEYS = Object.freeze([
-  "run_digest", "compared_rows", "matching_rows", "differing_rows", "unlinked_rows", "clean",
+  "run_digest", "compared_rows", "matching_rows", "differing_rows", "unlinked_rows",
+  "many_to_one_subjects", "subjects_without_legacy_row", "snapshot_current", "clean",
 ]);
 const CENSUS_KEYS = Object.freeze([
   "census_ref", "enumerated_callers", "migrated_callers", "attested_by", "attested_at",
@@ -3991,9 +3992,12 @@ export function v5J102MigrationReadiness(request) {
     ? 0 : assertSafeInteger(request.shadow_runs, "request.shadow_runs", { min: 0, max: 1000000 });
   // THE NEWEST SHADOW RUN, as ops.j102_run_migration_shadow recorded it. Its
   // cleanliness is RE-DERIVED from its counts here, never read off its `clean`
-  // flag: a run is clean only when it compared something, found no difference and
-  // left no legacy row unlinked — an unlinked row is an unmigrated, untested row.
-  // A flag that disagrees with its own counts is refused, not believed.
+  // flag: a run is clean only when it compared something, found no difference,
+  // left no legacy row unlinked, mapped no two legacy rows onto one subject, and
+  // left no Salesforce-referenced subject without a legacy row (owner ruling (f)).
+  // A flag that disagrees with its own counts is refused, not believed. And a
+  // clean run is PROOF only while `snapshot_current` holds: the reader recomputes
+  // both input digests, and a run over a snapshot that has moved is stale.
   let latest = null;
   if (request.latest_shadow_run !== undefined && request.latest_shadow_run !== null) {
     const raw = assertObject(request.latest_shadow_run, "request.latest_shadow_run");
@@ -4005,6 +4009,9 @@ export function v5J102MigrationReadiness(request) {
       run_digest: assertDigestRef(raw.run_digest, "request.latest_shadow_run.run_digest"),
       compared_rows: count("compared_rows"), matching_rows: count("matching_rows"),
       differing_rows: count("differing_rows"), unlinked_rows: count("unlinked_rows"),
+      many_to_one_subjects: count("many_to_one_subjects"),
+      subjects_without_legacy_row: count("subjects_without_legacy_row"),
+      snapshot_current: assertBoolean(raw.snapshot_current, "request.latest_shadow_run.snapshot_current"),
     };
     if (latest.compared_rows !== latest.matching_rows + latest.differing_rows) {
       fail("shadow_run_counts_inconsistent",
@@ -4012,14 +4019,15 @@ export function v5J102MigrationReadiness(request) {
         { path: "request.latest_shadow_run" });
     }
     latest.clean = latest.compared_rows > 0 && latest.differing_rows === 0 &&
-      latest.unlinked_rows === 0;
+      latest.unlinked_rows === 0 && latest.many_to_one_subjects === 0 &&
+      latest.subjects_without_legacy_row === 0;
     if (assertBoolean(raw.clean, "request.latest_shadow_run.clean") !== latest.clean) {
       fail("shadow_run_clean_flag_contradicts_counts",
         "request.latest_shadow_run.clean disagrees with the run's own counts",
         { path: "request.latest_shadow_run.clean", derived: latest.clean });
     }
   }
-  const shadowClean = latest?.clean === true;
+  const shadowClean = latest?.clean === true && latest.snapshot_current === true;
   return deepFreeze({
     schema_version: V5_J102_COMPATIBILITY_SCHEMA_VERSION,
     tenant: ORGANIZATION_TENANT_ID,
@@ -4044,7 +4052,9 @@ export function v5J102MigrationReadiness(request) {
         fact: "shadow_comparison_clean_run",
         why: latest === null
           ? "No migration shadow has been run; ops.j102_run_migration_shadow produces one."
-          : "The newest migration shadow run is not clean: it found differences or unlinked legacy rows, which a person must resolve before it counts as proof.",
+          : !latest.clean
+            ? "The newest migration shadow run is not clean: it found differences, unlinked legacy rows, many-to-one mappings or referenced subjects with no legacy row, which a person must resolve before it counts as proof."
+            : "The newest migration shadow run was clean over a snapshot that has since moved; run it again.",
         produced_by: "ops.j102_run_migration_shadow",
       }]),
     ]),

@@ -5435,6 +5435,20 @@ comment on function ops.j102_compatibility_view(text,text) is
 -- unlinked. An unlinked row is a row nobody has migrated; excluding it would
 -- report "clean" over exactly the rows that were never tested.
 --
+-- OWNER RULING (f), 2026-09-25: THE RUN IS BOUND TO A SNAPSHOT AND CHECKS BOTH
+-- DIRECTIONS. ops.j102_migration_shadow_snapshot() digests the legacy input
+-- (every public.deal row the comparison reads) and the projection input (every
+-- Salesforce reference to an assignment or deal, with that subject's current
+-- state digest). The run records both, and refuses (40001) if either moved while
+-- it ran. Readiness RECOMPUTES both: a clean run over a snapshot that has since
+-- moved is stale and no longer proof. Two further faults spoil a run:
+--   * MANY-TO-ONE: two or more legacy rows resolve to the same J102 subject pair,
+--     so the old world counts one deal twice where the new world has one.
+--   * A SUBJECT WITH NO LEGACY ROW: a J102 assignment or deal carries Salesforce
+--     references and not one of them names a legacy row. A subject with no
+--     Salesforce reference at all was born in J102 and has no legacy counterpart
+--     to compare; the caller census, not the shadow, answers for callers blind to it.
+--
 -- TWO NORMALIZATIONS, both stated. The legacy `closed` fact is `closed_on is not
 -- null` (the legacy table has no flag). A legacy NULL outcome and a projected NULL
 -- outcome are both read as 'open' -- "no outcome recorded yet" -- so a pending
@@ -5450,6 +5464,10 @@ create table if not exists ops.j102_migration_shadow_run (
   matching_rows     integer not null check (matching_rows >= 0),
   differing_rows    integer not null check (differing_rows >= 0),
   unlinked_rows     integer not null check (unlinked_rows >= 0),
+  many_to_one_subjects        integer not null check (many_to_one_subjects >= 0),
+  subjects_without_legacy_row integer not null check (subjects_without_legacy_row >= 0),
+  legacy_snapshot_digest      text not null,
+  projection_snapshot_digest  text not null,
   clean             boolean not null,
   envelope          jsonb not null,
   envelope_digest   text not null,
@@ -5465,11 +5483,16 @@ create table if not exists ops.j102_migration_shadow_run (
   constraint j102_shadow_run_counts_add_up
     check (compared_rows = matching_rows + differing_rows),
   constraint j102_shadow_run_clean_is_derived
-    check (clean = (compared_rows > 0 and differing_rows = 0 and unlinked_rows = 0)),
+    check (clean = (compared_rows > 0 and differing_rows = 0 and unlinked_rows = 0
+                    and many_to_one_subjects = 0 and subjects_without_legacy_row = 0)),
   constraint j102_shadow_run_matches_envelope
     check ((envelope -> 'record' ->> 'compared_rows')::integer = compared_rows
        and (envelope -> 'record' ->> 'differing_rows')::integer = differing_rows
        and (envelope -> 'record' ->> 'unlinked_rows')::integer = unlinked_rows
+       and (envelope -> 'record' ->> 'many_to_one_subjects')::integer = many_to_one_subjects
+       and (envelope -> 'record' ->> 'subjects_without_legacy_row')::integer = subjects_without_legacy_row
+       and envelope -> 'record' ->> 'legacy_snapshot_digest' = legacy_snapshot_digest
+       and envelope -> 'record' ->> 'projection_snapshot_digest' = projection_snapshot_digest
        and (envelope -> 'record' ->> 'clean')::boolean = clean
        and envelope -> 'record' ->> 'recorded_by' = recorded_by)
 );
@@ -5483,6 +5506,30 @@ create trigger j102_migration_shadow_run_no_truncate before truncate
 drop trigger if exists j102_migration_shadow_run_append_only on ops.j102_migration_shadow_run;
 create trigger j102_migration_shadow_run_append_only before update or delete
   on ops.j102_migration_shadow_run for each row execute function ops.j102_guard_append_only();
+
+create or replace function ops.j102_migration_shadow_snapshot()
+returns jsonb language sql stable security definer
+set search_path = pg_catalog, ops, public
+as $$
+  select jsonb_build_object(
+    'legacy_snapshot_digest', ops.f01_digest_jsonb(coalesce((
+      select jsonb_agg(jsonb_build_array(d.id::text, d.salesforce_id, d.phase, d.outcome,
+                                         d.closed_on::text) order by d.id)
+        from public.deal d), '[]'::jsonb)),
+    'projection_snapshot_digest', ops.f01_digest_jsonb(coalesce((
+      select jsonb_agg(jsonb_build_array(r.reference_seq, r.opportunity_id,
+                                         r.linked_subject_kind, r.linked_subject_id,
+                                         s.state_digest) order by r.reference_seq)
+        from ops.j102_salesforce_reference r
+        left join ops.j102_subject_current s
+          on s.tenant = r.tenant and s.subject_kind = r.linked_subject_kind
+         and s.subject_id = r.linked_subject_id
+       where r.tenant = ops.f01_tenant()
+         and r.linked_subject_kind in ('assignment', 'deal')), '[]'::jsonb)));
+$$;
+
+comment on function ops.j102_migration_shadow_snapshot() is
+  'Q081 / owner ruling (f): the digests of both inputs the migration shadow reads. A run records them; readiness recomputes them, so a clean run over a moved snapshot is stale.';
 
 create or replace function ops.j102_run_migration_shadow(
   p_idempotency_key text, p_request_digest text)
@@ -5499,9 +5546,11 @@ declare
   v_compared integer := 0; v_matching integer := 0; v_differing integer := 0;
   v_unlinked integer := 0; v_record jsonb; v_envelope jsonb; v_digest text;
   v_seq bigint; v_result jsonb; v_clean boolean;
+  v_snapshot jsonb; v_many jsonb; v_orphans jsonb;
 begin
   v_replay := ops.j102_claim_idempotency('run-migration-shadow', p_idempotency_key, p_request_digest);
   if v_replay is not null then return v_replay; end if;
+  v_snapshot := ops.j102_migration_shadow_snapshot();
   for v_legacy in
     select d.id::text as legacy_row_id, d.salesforce_id, d.phase, d.outcome, d.closed_on
       from public.deal d
@@ -5564,14 +5613,52 @@ begin
       'assignment_id', v_assignment, 'deal_id', v_deal,
       'differences', v_differences));
   end loop;
-  v_clean := v_compared > 0 and v_differing = 0 and v_unlinked = 0;
+  -- MANY-TO-ONE: legacy rows that resolve to the same (assignment, deal) pair.
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'assignment_id', g.assignment_id, 'deal_id', g.deal_id,
+           'legacy_row_ids', g.ids) order by g.assignment_id, g.deal_id), '[]'::jsonb)
+    into v_many
+    from (select r ->> 'assignment_id' as assignment_id, r ->> 'deal_id' as deal_id,
+                 jsonb_agg(r ->> 'legacy_row_id' order by r ->> 'legacy_row_id') as ids
+            from jsonb_array_elements(v_rows) r
+           where r ->> 'status' <> 'unlinked'
+           group by 1, 2 having count(*) > 1) g;
+  -- A SUBJECT WITH NO LEGACY ROW: it carries Salesforce references, and none
+  -- of them names an opportunity any legacy row holds.
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'subject_kind', x.linked_subject_kind, 'subject_id', x.linked_subject_id,
+           'opportunity_ids', x.opps) order by x.linked_subject_kind, x.linked_subject_id), '[]'::jsonb)
+    into v_orphans
+    from (select r.linked_subject_kind, r.linked_subject_id,
+                 jsonb_agg(distinct r.opportunity_id) as opps
+            from ops.j102_salesforce_reference r
+           where r.tenant = ops.f01_tenant() and r.linked_subject_kind in ('assignment', 'deal')
+             and exists (select 1 from ops.j102_subject_current s
+                          where s.tenant = r.tenant and s.subject_kind = r.linked_subject_kind
+                            and s.subject_id = r.linked_subject_id)
+           group by 1, 2
+          having not bool_or(exists (select 1 from public.deal d
+                                      where d.salesforce_id = r.opportunity_id))) x;
+  -- THE SNAPSHOT HELD: nothing either side reads moved while this ran.
+  if ops.j102_migration_shadow_snapshot() is distinct from v_snapshot then
+    raise exception 'j102_shadow_snapshot_moved: a legacy row or a linked lifecycle subject changed while the shadow ran; run it again'
+      using errcode = '40001';
+  end if;
+  v_clean := v_compared > 0 and v_differing = 0 and v_unlinked = 0
+             and jsonb_array_length(v_many) = 0 and jsonb_array_length(v_orphans) = 0;
   v_record := jsonb_build_object(
     'record_kind', 'stored_migration_shadow_run',
     'tenant', ops.f01_tenant(),
     'compared_rows', v_compared, 'matching_rows', v_matching,
     'differing_rows', v_differing, 'unlinked_rows', v_unlinked,
+    'many_to_one_subjects', jsonb_array_length(v_many),
+    'subjects_without_legacy_row', jsonb_array_length(v_orphans),
+    'legacy_snapshot_digest', v_snapshot ->> 'legacy_snapshot_digest',
+    'projection_snapshot_digest', v_snapshot ->> 'projection_snapshot_digest',
     'clean', v_clean,
     'rows', v_rows,
+    'many_to_one', v_many,
+    'subjects_without_legacy_rows', v_orphans,
     'normalizations', jsonb_build_array(
       'legacy closed = closed_on is not null',
       'a null outcome on either side reads as open'),
@@ -5582,19 +5669,29 @@ begin
   v_envelope := jsonb_build_object(
     'record_kind', 'stored_migration_shadow_run', 'record', v_record, 'record_digest', v_digest);
   insert into ops.j102_migration_shadow_run
-    (tenant, compared_rows, matching_rows, differing_rows, unlinked_rows, clean,
+    (tenant, compared_rows, matching_rows, differing_rows, unlinked_rows,
+     many_to_one_subjects, subjects_without_legacy_row,
+     legacy_snapshot_digest, projection_snapshot_digest, clean,
      envelope, envelope_digest, run_digest, recorded_by, recorded_at, idempotency_key)
-  values (ops.f01_tenant(), v_compared, v_matching, v_differing, v_unlinked, v_clean,
+  values (ops.f01_tenant(), v_compared, v_matching, v_differing, v_unlinked,
+     jsonb_array_length(v_many), jsonb_array_length(v_orphans),
+     v_snapshot ->> 'legacy_snapshot_digest', v_snapshot ->> 'projection_snapshot_digest', v_clean,
      v_envelope, ops.f01_digest_jsonb(v_envelope), v_digest, v_actor, v_txn_now, p_idempotency_key)
   returning run_seq into v_seq;
   v_result := jsonb_build_object(
     'operation', 'run-migration-shadow', 'decision', 'allow',
     'reason_id', case when v_clean then 'shadow_run_clean'
-                      when v_compared = 0 and v_unlinked = 0 then 'shadow_run_found_no_legacy_rows'
+                      when v_compared = 0 and v_unlinked = 0 and jsonb_array_length(v_orphans) = 0
+                        then 'shadow_run_found_no_legacy_rows'
                       else 'shadow_run_found_differences_or_unlinked_rows' end,
     'actor_slug', v_actor, 'run_seq', v_seq, 'run_digest', v_digest,
     'compared_rows', v_compared, 'matching_rows', v_matching,
-    'differing_rows', v_differing, 'unlinked_rows', v_unlinked, 'clean', v_clean,
+    'differing_rows', v_differing, 'unlinked_rows', v_unlinked,
+    'many_to_one_subjects', jsonb_array_length(v_many),
+    'subjects_without_legacy_row', jsonb_array_length(v_orphans),
+    'legacy_snapshot_digest', v_snapshot ->> 'legacy_snapshot_digest',
+    'projection_snapshot_digest', v_snapshot ->> 'projection_snapshot_digest',
+    'clean', v_clean,
     'committed_at', v_txn_now_text,
     'legacy_rows_modified', 0, 'retires_any_caller', false, 'external_effects', false);
   return ops.j102_settle_idempotency('run-migration-shadow', p_idempotency_key, v_result);
@@ -5602,36 +5699,49 @@ end;
 $$;
 
 comment on function ops.j102_run_migration_shadow(text,text) is
-  'Q081: compare every legacy public.deal row with the J102 projection its Salesforce reference links, and append one immutable digest-bound run record. Modifies neither side and retires nobody; an unlinked row keeps the run from being clean.';
+  'Q081: compare every legacy public.deal row with the J102 projection its Salesforce reference links, and append one immutable digest-bound run record bound to the snapshot of both inputs. Modifies neither side and retires nobody; an unlinked row, a many-to-one mapping or a referenced subject with no legacy row keeps the run from being clean.';
 
 create or replace function ops.j102_migration_readiness()
 returns jsonb language plpgsql stable security definer
 set search_path = pg_catalog, ops, public
 as $$
 declare v_run ops.j102_migration_shadow_run%rowtype; v_latest jsonb; v_missing jsonb;
+  v_now_snapshot jsonb; v_current boolean := false; v_proof boolean := false;
 begin
   select * into v_run from ops.j102_migration_shadow_run
    where tenant = ops.f01_tenant() order by run_seq desc limit 1;
   if found then
     perform ops.j102_verify_envelope(v_run.envelope, v_run.envelope_digest, v_run.run_digest,
                                      'stored_migration_shadow_run');
+    -- A RUN IS PROOF ONLY OF THE SNAPSHOT IT READ. Recomputed here, now.
+    v_now_snapshot := ops.j102_migration_shadow_snapshot();
+    v_current := (v_now_snapshot ->> 'legacy_snapshot_digest') = v_run.legacy_snapshot_digest
+             and (v_now_snapshot ->> 'projection_snapshot_digest') = v_run.projection_snapshot_digest;
+    v_proof := v_run.clean and v_current;
     v_latest := jsonb_build_object(
       'run_seq', v_run.run_seq, 'run_digest', v_run.run_digest,
       'recorded_at', ops.f01_instant_text(v_run.recorded_at), 'recorded_by', v_run.recorded_by,
       'compared_rows', v_run.compared_rows, 'matching_rows', v_run.matching_rows,
       'differing_rows', v_run.differing_rows, 'unlinked_rows', v_run.unlinked_rows,
+      'many_to_one_subjects', v_run.many_to_one_subjects,
+      'subjects_without_legacy_row', v_run.subjects_without_legacy_row,
+      'legacy_snapshot_digest', v_run.legacy_snapshot_digest,
+      'projection_snapshot_digest', v_run.projection_snapshot_digest,
+      'snapshot_current', v_current,
       'clean', v_run.clean);
   end if;
   v_missing := jsonb_build_array(jsonb_build_object(
     'fact', 'exact_caller_census',
     'why', 'Q081 permits retiring the old interface only after migration proof, and no verified enumeration of the callers and projections still reading the legacy shape exists in this record layer.',
     'produced_by', 'not_produced_by_this_slice'));
-  if v_latest is null or not v_run.clean then
+  if not v_proof then
     v_missing := v_missing || jsonb_build_array(jsonb_build_object(
       'fact', 'shadow_comparison_clean_run',
       'why', case when v_latest is null
                then 'No migration shadow has been run; ops.j102_run_migration_shadow produces one.'
-               else 'The newest migration shadow run is not clean: it found differences or unlinked legacy rows, which a person must resolve before it counts as proof.' end,
+               when not v_run.clean
+               then 'The newest migration shadow run is not clean: it found differences, unlinked legacy rows, many-to-one mappings or referenced subjects with no legacy row, which a person must resolve before it counts as proof.'
+               else 'The newest migration shadow run was clean over a snapshot that has since moved; run it again.' end,
       'produced_by', 'ops.j102_run_migration_shadow'));
   end if;
   return jsonb_build_object(
@@ -5640,7 +5750,7 @@ begin
     'may_retire_callers', false,
     'migration_complete', false,
     'caller_census_verified', false,
-    'shadow_comparison_clean_run', coalesce(v_run.clean, false),
+    'shadow_comparison_clean_run', v_proof,
     'latest_shadow_run', v_latest,
     'compatibility_view_available', true,
     'big_bang_rename', false,
@@ -5761,6 +5871,7 @@ revoke all on function ops.j102_verify_envelope(jsonb,text,text,text),
   ops.j102_subject(text,text), ops.j102_first_party_record(text,text),
   ops.j102_evidence_subject_link(text,text,integer,text,text,text),
   ops.j102_compatibility_view(text,text), ops.j102_migration_readiness(),
+  ops.j102_migration_shadow_snapshot(),
   ops.j102_read(text,jsonb), ops.j102_admission_policy(),
   ops.j102_expected_value(jsonb,jsonb,jsonb,jsonb,jsonb,jsonb),
   ops.j102_recheck_evidence(jsonb,text,text,text)
@@ -5769,6 +5880,7 @@ grant execute on function ops.j102_verify_envelope(jsonb,text,text,text),
   ops.j102_subject(text,text), ops.j102_first_party_record(text,text),
   ops.j102_evidence_subject_link(text,text,integer,text,text,text),
   ops.j102_compatibility_view(text,text), ops.j102_migration_readiness(),
+  ops.j102_migration_shadow_snapshot(),
   ops.j102_read(text,jsonb),
   -- THE ADMISSION MAP IS READABLE, deliberately. It confers nothing: it decides
   -- no request, it is IMMUTABLE, it takes no argument, and everything in it is

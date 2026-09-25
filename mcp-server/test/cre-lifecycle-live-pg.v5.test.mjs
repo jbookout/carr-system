@@ -1232,7 +1232,10 @@ function assertKernelAgrees(sqlReadiness) {
   const kernel = v5J102MigrationReadiness({ tenant: ORGANIZATION_TENANT_ID,
     latest_shadow_run: r === null ? null : {
       run_digest: r.run_digest, compared_rows: r.compared_rows, matching_rows: r.matching_rows,
-      differing_rows: r.differing_rows, unlinked_rows: r.unlinked_rows, clean: r.clean } });
+      differing_rows: r.differing_rows, unlinked_rows: r.unlinked_rows,
+      many_to_one_subjects: r.many_to_one_subjects,
+      subjects_without_legacy_row: r.subjects_without_legacy_row,
+      snapshot_current: r.snapshot_current, clean: r.clean } });
   assert.equal(kernel.shadow_comparison_clean_run, sqlReadiness.shadow_comparison_clean_run ?? false);
   assert.equal(kernel.may_retire_callers, sqlReadiness.may_retire_callers);
   assert.deepEqual(kernel.missing_facts.map(f => [f.fact, f.produced_by]),
@@ -1265,6 +1268,10 @@ test("Q081 LIVE: the shadow compares old and new side by side, reports every dif
   const differing = await legacyRow({ salesforce_id: sfB, phase: "closing", outcome: "won",
     closed_on: "2026-09-20" });
   const unlinked = await legacyRow({ phase: "research" });
+  // RULING (f): a J102 deal whose Salesforce opportunity no legacy row holds.
+  const d2 = await dealWith("lease", ["lease_exec"]);
+  const sfC = `006SYN${RUN}C`;
+  await linkOpportunity(sfC, "deal", d2.deal);
   const snapshot = async () => owner(
     "select id::text, phase, outcome, closed_on::text, version, updated_at::text from public.deal order by id");
   const legacyBefore = await snapshot();
@@ -1274,8 +1281,11 @@ test("Q081 LIVE: the shadow compares old and new side by side, reports every dif
   const run = ok(await as("agent").runMigrationShadow({ idempotency_key: runKey }),
     "a sponsored agent runs the shadow");
   assert.equal(run.actor_slug, "codex");
-  assert.deepEqual([run.compared_rows, run.matching_rows, run.differing_rows, run.unlinked_rows, run.clean],
-    [2, 1, 1, 1, false]);
+  assert.deepEqual([run.compared_rows, run.matching_rows, run.differing_rows, run.unlinked_rows,
+    run.many_to_one_subjects, run.subjects_without_legacy_row, run.clean],
+  [2, 1, 1, 1, 1, 1, false]);
+  assert.match(run.legacy_snapshot_digest, /^sha256:[0-9a-f]{64}$/);
+  assert.match(run.projection_snapshot_digest, /^sha256:[0-9a-f]{64}$/);
   assert.equal(run.legacy_rows_modified, 0);
   assert.equal(run.retires_any_caller, false);
 
@@ -1287,6 +1297,12 @@ test("Q081 LIVE: the shadow compares old and new side by side, reports every dif
   assert.deepEqual(byId[differing].differences.map(x => [x.field, x.legacy, x.projected]),
     [["phase", "closing", "legal"], ["closed", true, false], ["outcome", "won", "open"]]);
   assert.equal(byId[unlinked].status, "unlinked");
+  // MANY-TO-ONE is named: both legacy rows resolve to the one J102 deal.
+  assert.deepEqual(record.many_to_one.map(m => [m.deal_id, [...m.legacy_row_ids].sort()]),
+    [[d.deal, [matching, differing].sort()]]);
+  // And the subject with no legacy row is named with the opportunity it claims.
+  assert.deepEqual(record.subjects_without_legacy_rows.map(x => [x.subject_kind, x.subject_id, x.opportunity_ids]),
+    [["deal", d2.deal, [sfC]]]);
 
   assert.deepEqual(await snapshot(), legacyBefore, "no legacy row was touched");
   assert.equal((await subject("joe", "deal", d.deal)).readback.body.state_digest, dealBefore,
@@ -1308,23 +1324,48 @@ test("Q081 LIVE: the shadow compares old and new side by side, reports every dif
   // A person resolves the two problem rows (here: the synthetic rows go away),
   // and the next run is clean — and STILL retires nobody without a census.
   await owner("delete from public.deal where id = any($1::uuid[])", [[differing, unlinked]]);
+  const found = await legacyRow({ salesforce_id: sfC, phase: "legal" });
   const clean = ok(await as("joe").runMigrationShadow({ idempotency_key: key() }), "clean run");
-  assert.deepEqual([clean.compared_rows, clean.matching_rows, clean.differing_rows, clean.unlinked_rows, clean.clean],
-    [1, 1, 0, 0, true]);
+  assert.deepEqual([clean.compared_rows, clean.matching_rows, clean.differing_rows, clean.unlinked_rows,
+    clean.many_to_one_subjects, clean.subjects_without_legacy_row, clean.clean],
+  [2, 2, 0, 0, 0, 0, true]);
   const after = await readiness();
   assert.equal(after.shadow_comparison_clean_run, true);
   assert.equal(after.latest_shadow_run.run_seq, clean.run_seq);
   assert.equal(after.may_retire_callers, false, "a clean shadow is not a caller census");
   assert.equal(after.migration_complete, false);
   assert.deepEqual(after.missing_facts.map(f => f.fact), ["exact_caller_census"]);
+  assert.equal(after.latest_shadow_run.snapshot_current, true);
   assertKernelAgrees(after);
+
+  // A CLEAN RUN IS PROOF ONLY OF ITS SNAPSHOT. A legacy row arriving after the
+  // run moves the snapshot, and the reader stops counting the run.
+  const late = await legacyRow({ phase: "research" });
+  const stale = await readiness();
+  assert.equal(stale.latest_shadow_run.clean, true, "the run itself stays clean");
+  assert.equal(stale.latest_shadow_run.snapshot_current, false);
+  assert.equal(stale.shadow_comparison_clean_run, false, "but it is stale");
+  assert.match(stale.missing_facts[1].why, /snapshot that has since moved/);
+  assertKernelAgrees(stale);
+  // The binding is to CONTENT: remove the late row and the same run is current again.
+  await owner("delete from public.deal where id = $1::uuid", [late]);
+  assert.equal((await readiness()).shadow_comparison_clean_run, true,
+    "the snapshot the run read is the snapshot again");
+  // The same thing from the NEW side: a linked subject moving also stales it.
+  ok(await axisCall("joe", d2.deal, "payment_state", "payment_received", "payment",
+    (await body("joe", "deal", d2.deal)).state_digest, { payment_level: "partially_paid" }),
+  "a linked deal moves");
+  const moved = await readiness();
+  assert.equal(moved.latest_shadow_run.snapshot_current, false, "a moved linked subject stales the run");
+  assert.equal(moved.shadow_comparison_clean_run, false);
+  assertKernelAgrees(moved);
 
   // The run history is the runner's alone.
   await assert.rejects(sql("agent",
     "insert into ops.j102_migration_shadow_run (tenant) values ('x')"), /permission denied|j102_/);
   await assert.rejects(sql("joe",
     "delete from ops.j102_migration_shadow_run"), /permission denied|j102_/);
-  await owner("delete from public.deal where id = $1::uuid", [matching]);
+  await owner("delete from public.deal where id = any($1::uuid[])", [[matching, found]]);
 });
 
 // ===========================================================================
