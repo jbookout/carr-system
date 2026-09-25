@@ -21,6 +21,7 @@ DESK KINDS:
   claude-desktop   a queue-only Claude background session, handed to Desktop
   codex-session    a standing Codex thread, resumed per task through the CLI
   codex-live       a live Codex app-server, addressed by its unix socket
+  flash-local      the local Flash model itself, answering direct questions (flash_wire.py)
 
 BOTH KINDS KEEP THEIR CONTEXT, and that is the whole point. Joe, 2026-08-20:
 "codex should be able to do the same thing as you. It has its own context. I
@@ -51,7 +52,7 @@ NAME_OK = re.compile(r"^[a-z0-9][a-z0-9-]{1,40}$")
 # /tmp/cc-socks/79534.sock — a process, not a desk
 PID_SOCKET = re.compile(r"^\d+\.sock$")
 
-KINDS = ("claude-session", "claude-desktop", "codex-session", "codex-live")
+KINDS = ("claude-session", "claude-desktop", "codex-session", "codex-live", "flash-local")
 # the old name for the Codex kind, before it carried a thread
 KIND_ALIASES = {"codex-exec": "codex-session"}
 EFFORT_CHOICES = ("minimal", "low", "medium", "high", "xhigh")
@@ -180,6 +181,10 @@ class Registry:
                 # session's authority or leaving a hidden prompt waiting.
                 "permission_mode": str(permission_mode or "dontAsk"),
             }
+        elif kind == "flash-local":
+            # The model and effort are fixed by the direct protocol (ops/config/model-routes.v1.json): Flash,
+            # thinking off. Recorded on the entry so a dispatch still names both, as every delegation must.
+            entry = {"kind": kind, "model": "flash", "effort": "minimal"}
         elif kind == "codex-live":
             if not socket:
                 raise DeskError("missing_socket", "a codex-live desk needs --socket")
