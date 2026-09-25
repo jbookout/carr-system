@@ -3,10 +3,13 @@
 
 The server is an in-memory fake of the 0612 doors: it keeps registrations,
 bindings, release members and append-only marks, resolves evidence refs
-itself (a shipped_release ref must be this slice's member; a live_check ref
-must be the fake's successful receipt), and refuses completion unless every
-criterion resolves -- so the marker's own claims are never what passes a
-slice. git and Jev are fakes too; nothing here touches a network or a
+itself (a shipped_release / refusal_proof ref must be this slice's member; a
+live_check ref must be the fake's successful receipt; an accepted_record or
+effect-free ref must be the current acceptance of the DoctorCre-v5 portfolio
+while it is intact and, for effect-free, effect-less), recomputes each
+criterion's candidate_passes on EVERY read, and refuses completion unless
+every criterion resolves -- so the marker's own claims, and its previous
+marks, are never what passes a slice. git and Jev are fakes too; nothing here touches a network or a
 database. The real SQL semantics are proven by
 ops/slice-done-marker-local-pg-gate.py.
 """
@@ -38,7 +41,13 @@ CATALOG = [
      "checkable_done": ["quiet hours respected"]},
     {"proposed_id": "V5-D03", "title": "Recording successor", "item_kind": "deferred_successor",
      "checkable_done": ["retention policy decided"]},
+    {"proposed_id": "V5-S00", "title": "Portfolio constitution", "item_kind": "coding_slice",
+     "checkable_done": ["exact node/edge/child counts and acyclicity pass",
+                        "self-review, stale hash and executable-effect negatives refuse",
+                        "accepted portfolio creates zero ops.job/capability/product effects"]},
 ]
+SHA_S00 = "d" * 40
+PORTFOLIO_RECEIPT = "00000000-0000-4000-8000-0000000000aa"
 SHA_F08 = "a" * 40
 SHA_J303 = "b" * 40
 SHA_R03 = "c" * 40
@@ -57,6 +66,9 @@ class FakeServer:
         self.marks: dict[str, list[dict]] = {}
         self.calls: list[tuple[str, dict]] = []
         self.refuse_complete = False
+        self.portfolio_receipt = PORTFOLIO_RECEIPT
+        self.portfolio_intact = True
+        self.portfolio_effects = 0
 
     def __call__(self, verb, args):
         self.calls.append((verb, json.loads(json.dumps(args))))
@@ -91,21 +103,42 @@ class FakeServer:
         key = (args["slice_id"], args["criterion"])
         if key in self.bindings:
             raise sdm.MarkerError("criterion_already_bound")
-        self.bindings[key] = {"kind": args["evidence_kind"], "source": args["live_check_source"], "via": "automation"}
+        if args["evidence_kind"] == "refusal_proof" and not args.get("write_required_reason"):
+            raise sdm.MarkerError("slice_criterion_binding_check")
+        self.bindings[key] = {"kind": args["evidence_kind"], "source": args["live_check_source"],
+                              "key": args.get("live_check_key"), "write_reason": args.get("write_required_reason"),
+                              "via": "automation"}
         return {"ok": True}
 
     def partner_bind(self, sid, criterion, kind):
-        self.bindings[(sid, criterion)] = {"kind": kind, "source": None, "via": "authority"}
+        self.bindings[(sid, criterion)] = {"kind": kind, "source": None, "key": None, "via": "authority"}
+
+    def _portfolio_ok(self, b, ref):
+        return (ref is not None and ref == self.portfolio_receipt and self.portfolio_intact
+                and b.get("key") == "DoctorCre-v5")
 
     def resolve(self, sid, criterion, ref):
         b = self.bindings.get((sid, criterion))
         if not b or ref is None:
             return False
-        if b["kind"] == "shipped_release":
+        if b["kind"] in ("shipped_release", "refusal_proof"):
             return any(m["id"] == ref and m["slice_id"] == sid for m in self.members)
+        if b["kind"] == "accepted_record":
+            return b["source"] == "portfolio_revision_acceptance" and self._portfolio_ok(b, ref)
+        if b["kind"] == "live_check" and b["source"] == "portfolio_acceptance_effect_free":
+            return self._portfolio_ok(b, ref) and self.portfolio_effects == 0
         if b["kind"] == "live_check":
             return ref == self.restore_receipt
         return False
+
+    def candidate(self, b):
+        if not b:
+            return None
+        if b["kind"] == "accepted_record" or b["source"] == "portfolio_acceptance_effect_free":
+            return self.portfolio_receipt
+        if b["kind"] == "live_check":
+            return self.restore_receipt
+        return None
 
     def receipt(self, sid, items):
         return [{"criterion": i["criterion"], "evidence_ref": i["evidence_ref"],
@@ -151,8 +184,9 @@ class FakeServer:
                 "criterion": c, "evidence_kind": b["kind"] if b else "unbound",
                 "binding_source": f"binding:{b['via']}" if b else "registration",
                 "automation_bound": bool(b and b["via"] == "automation"),
-                "live_check_source": b["source"] if b else None, "live_check_key": None,
-                "live_check_candidate": self.restore_receipt if b and b["kind"] == "live_check" else None})
+                "live_check_source": b["source"] if b else None, "live_check_key": b.get("key") if b else None,
+                "live_check_candidate": self.candidate(b),
+                "candidate_passes": self.resolve(sid, c, self.candidate(b))})
         marks = self.marks.get(sid) or []
         return {"ok": True, "done_state": {
             "registered": sid in self.registered, "criteria": criteria, "release_members": members,
@@ -184,6 +218,9 @@ class FakeJev:
             if qid.startswith("semantic_creation_bind_"):
                 c = state["criteria"][int(qid.rsplit("_", 1)[1])]
                 pick = ("restore_exercise" if "restore" in c else
+                        "accepted_portfolio_record" if "acyclicity" in c else
+                        "refusal_needs_write" if "negatives refuse" in c else
+                        "acceptance_effect_free" if "zero ops.job" in c else
                         "runtime_outcome" if "observed" in c or "decided" in c else "source_behaviour")
                 answers[qid] = {"type": "choice", "choice": pick, "probabilities": {pick: self.bind_prob}}
             else:
@@ -191,13 +228,14 @@ class FakeJev:
         return answers
 
 
-COMMITS = [(SHA_R03, "R03 sweep runner keeps HEAD==pin (#850)"),
+COMMITS = [(SHA_S00, "S00 portfolio negatives gate (#9)"),
+           (SHA_R03, "R03 sweep runner keeps HEAD==pin (#850)"),
            (SHA_J303, "J303 client-shared tours allowlist (#12)"),
            (SHA_F08, SRC)]
 
 
 def marker(server, jev=None, commits=COMMITS, reach=None):
-    reach = reach if reach is not None else {REL1: {SHA_F08}, REL2: {SHA_F08, SHA_R03}}
+    reach = reach if reach is not None else {REL1: {SHA_F08, SHA_S00}, REL2: {SHA_F08, SHA_R03, SHA_S00}}
     return sdm.Marker(call=server, git_run=fake_git(commits, reach), ask=jev or FakeJev(), out=lambda _s: None)
 
 
@@ -240,7 +278,8 @@ class Run(unittest.TestCase):
     def test_membership_goes_to_the_earliest_containing_release_and_skips_roadmap_ids(self):
         server = FakeServer()
         marker(server).run()
-        self.assertEqual([(m["release_key"], m["slice_id"]) for m in server.members], [("r-1", "V5-F08")])
+        self.assertEqual(sorted((m["release_key"], m["slice_id"]) for m in server.members),
+                         [("r-1", "V5-F08"), ("r-1", "V5-S00")])
 
     def test_a_second_run_writes_nothing(self):
         server = FakeServer()
@@ -287,7 +326,7 @@ class Run(unittest.TestCase):
         server = FakeServer(restore_receipt=None)
         out = by_id(marker(server).run())
         self.assertEqual(out["V5-F08"].status, "in_progress")
-        self.assertIn("no successful staging_restore_only_result receipt", out["V5-F08"].reason)
+        self.assertIn("no staging_restore_only_result row", out["V5-F08"].reason)
 
     def test_a_partner_decided_criterion_is_never_reclassified(self):
         # A partner explicitly UNBOUND a criterion Jev would call source
@@ -300,6 +339,51 @@ class Run(unittest.TestCase):
                          [v for v, a in server.calls if a.get("slice_id") == "V5-R03"])
         self.assertEqual(server.bindings[("V5-R03", "quiet hours respected")]["via"], "authority")
         self.assertEqual(out["V5-R03"].status, "blocked")
+
+    def test_accepted_record_refusal_proof_and_effect_free_complete_a_slice(self):
+        server = FakeServer()
+        out = by_id(marker(server).run({"V5-S00"}))
+        self.assertEqual(out["V5-S00"].status, "complete", out["V5-S00"])
+        crit = CATALOG[-1]["checkable_done"]
+        b = {c: server.bindings[("V5-S00", c)] for c in crit}
+        self.assertEqual((b[crit[0]]["kind"], b[crit[0]]["source"], b[crit[0]]["key"]),
+                         ("accepted_record", "portfolio_revision_acceptance", "DoctorCre-v5"))
+        self.assertEqual((b[crit[1]]["kind"], b[crit[1]]["source"]), ("refusal_proof", "ci_gate"))
+        self.assertTrue(b[crit[1]]["write_reason"])
+        self.assertEqual((b[crit[2]]["kind"], b[crit[2]]["source"], b[crit[2]]["key"]),
+                         ("live_check", "portfolio_acceptance_effect_free", "DoctorCre-v5"))
+        refs = {r["criterion"]: r["evidence_ref"] for r in server.marks["V5-S00"][-1]["criteria_receipt"]}
+        member = next(m["id"] for m in server.members if m["slice_id"] == "V5-S00")
+        self.assertEqual(refs, {crit[0]: PORTFOLIO_RECEIPT, crit[1]: member, crit[2]: PORTFOLIO_RECEIPT})
+
+    def test_state_comes_from_live_reads_not_the_previous_mark(self):
+        # Complete once; then the accepted revision stops recomputing intact.
+        # The earlier complete mark proves nothing: the next run reads the
+        # live candidate_passes, marks the slice back to in_progress and says why.
+        server = FakeServer()
+        marker(server).run({"V5-S00"})
+        self.assertEqual(server.marks["V5-S00"][-1]["status"], "complete")
+        server.portfolio_intact = False
+        out = by_id(marker(server).run({"V5-S00"}))
+        self.assertEqual(out["V5-S00"].status, "in_progress")
+        self.assertEqual(server.marks["V5-S00"][-1]["status"], "in_progress")
+        self.assertIn("does not pass on a live read", out["V5-S00"].reason)
+        self.assertNotIn("bind-slice-criterion-evidence", server.writes()[-1:])
+
+    def test_an_effect_in_the_acceptance_window_is_named_missing(self):
+        server = FakeServer()
+        server.portfolio_effects = 1
+        out = by_id(marker(server).run({"V5-S00"}))
+        self.assertEqual(out["V5-S00"].status, "in_progress")
+        self.assertIn("accepted portfolio creates zero ops.job/capability/product effects -> the newest "
+                      "portfolio_acceptance_effect_free for DoctorCre-v5 row", out["V5-S00"].reason)
+
+    def test_no_accepted_portfolio_leaves_it_missing(self):
+        server = FakeServer()
+        server.portfolio_receipt = None
+        out = by_id(marker(server).run({"V5-S00"}))
+        self.assertEqual(out["V5-S00"].status, "in_progress")
+        self.assertIn("no portfolio_revision_acceptance for DoctorCre-v5 row", out["V5-S00"].reason)
 
     def test_dry_run_writes_nothing(self):
         server = FakeServer()
