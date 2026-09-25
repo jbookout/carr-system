@@ -4,10 +4,16 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v74 is the runtime selector after V5-S01's live door (migration 0615).
+// v75 is the runtime selector after V5-S01's live door (migration 0615).
 // Its sealed catalog admits one new read verb, read-global-boundaries (the
 // read projection of the settled v5 global boundaries and the dispatch
 // door's shadow counters, mcp-server/src/global-boundaries-door.v5.js), and
+// preserves v74 and earlier as history.
+//
+// Superseded note (v74): v74 is the runtime selector after DoctorCRE V5-M01's live door to the
+// Journey 1 clock runtime (migration 0614). Its sealed catalog admits two new
+// verbs -- read-journey-one-clock (a read) and advance-journey-one-clock (a
+// writer write that refuses before any query in every deployed Worker) -- and
 // preserves earlier versions as history; v73 (the bin/deploy-worker.sh
 // re-digest) registered no verb, so the selector stayed on v72 until v74.
 //
@@ -84,7 +90,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v74.generated.js";
+} from "./scac-mutation-registry.v75.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 
