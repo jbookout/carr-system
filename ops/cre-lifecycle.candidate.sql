@@ -391,6 +391,17 @@ create unique index if not exists j102_one_pending_deal_per_assignment
   on ops.j102_subject_current (tenant, parent_id)
   where subject_kind = 'deal' and deal_state = 'pending';
 
+-- Owner ruling 2026-09-25: at most ONE ACTIVE property negotiation per
+-- (tenant, assignment, property). Dead negotiations and a selected winner are
+-- outside the predicate, so they never block a new one. The state list is the
+-- admission map's `active_negotiation_states`, restated here because an index
+-- predicate must be immutable; the parity suite compares the two.
+create unique index if not exists j102_one_active_negotiation_per_property
+  on ops.j102_subject_current (tenant, parent_id, (envelope -> 'record' -> 'state' ->> 'property_id'))
+  where subject_kind = 'property_negotiation'
+    and (envelope -> 'record' -> 'state' ->> 'negotiation_state')
+        in ('loi_drafted', 'loi_submitted', 'loi_countered', 'loi_accepted');
+
 comment on index ops.j102_one_pending_deal_per_assignment is
   'Q078/Q095 structurally: one pending Deal per Assignment. Cancelled and closed deals are excluded, so an assignment may hold many historical deals and only one live one.';
 
@@ -1280,6 +1291,7 @@ select $policy$
     "routine_fields_registered": 0,
     "field_class_registry": {
       "active_engagement_count": "lifecycle",
+      "party_id": "lifecycle",
       "active_lease_draft_target_id": "lifecycle",
       "assignment_id": "lifecycle",
       "assignment_phase": "lifecycle",
@@ -1315,6 +1327,7 @@ select $policy$
       "version_no": "document"
     }
   },
+  "active_negotiation_states": ["loi_drafted", "loi_submitted", "loi_countered", "loi_accepted"],
   "initializations": {
     "initialize-prospect-relationship": {
       "subject_kind": "relationship",
@@ -1324,11 +1337,13 @@ select $policy$
       "requires_evidence": false,
       "parent_subject_kind": null,
       "declared_identifiers": [],
+      "optional_declared_identifiers": ["party_id"],
       "creation_shape": {
         "subject_kind": { "op": "const", "value": "relationship" },
         "subject_id": { "op": "proposed_subject_id", "subject": "relationship" },
         "relationship_state": { "op": "const", "value": "prospect" },
-        "active_engagement_count": { "op": "const", "value": 0 }
+        "active_engagement_count": { "op": "const", "value": 0 },
+        "party_id": { "op": "optional_declared_identifier", "field": "party_id" }
       },
       "required_context": [],
       "event": {
@@ -1348,6 +1363,7 @@ select $policy$
       "parent_subject_kind": "engagement",
       "parent_reference_field": "engagement_id",
       "declared_identifiers": [],
+      "optional_declared_identifiers": [],
       "creation_shape": {
         "subject_kind": { "op": "const", "value": "assignment" },
         "subject_id": { "op": "proposed_subject_id", "subject": "assignment" },
@@ -1388,6 +1404,8 @@ select $policy$
       "parent_subject_kind": "assignment",
       "parent_reference_field": "assignment_id",
       "declared_identifiers": ["property_id"],
+      "optional_declared_identifiers": [],
+      "unique_active_per_property": true,
       "creation_shape": {
         "subject_kind": { "op": "const", "value": "property_negotiation" },
         "subject_id": { "op": "proposed_subject_id", "subject": "property_negotiation" },
@@ -2162,6 +2180,10 @@ begin
     -- derivable from the committed row, the coupled subjects or the re-read
     -- evidence -- and the transition writer refuses a kind it does not expect.
     return jsonb_build_object('kind', 'declared_identifier', 'field', p_effect -> 'field');
+  elsif v_op = 'optional_declared_identifier' then
+    -- The party link (owner ruling 2026-09-25): a declared identifier that MAY be
+    -- null. When present, the writer binds it to an existing CARR party row.
+    return jsonb_build_object('kind', 'optional_declared_identifier', 'field', p_effect -> 'field');
   elsif v_op = 'unbound' then
     return jsonb_build_object('kind', 'unbound', 'why', p_effect -> 'why');
   elsif v_op = 'proposed_subject_id' then
@@ -4420,11 +4442,50 @@ begin
           p_initialization_id, v_kind, v_id, v_field, v_expected_value -> 'values',
           coalesce(v_actual_value, 'null'::jsonb) using errcode = '42501';
       end if;
+    elsif (v_expected_value ->> 'kind') = 'optional_declared_identifier' then
+      if not (coalesce(v_contract -> 'optional_declared_identifiers', '[]'::jsonb) ? v_field) then
+        raise exception 'j102_declared_identifier_not_permitted: % declares the optional identifiers %, and this map computes one for %',
+          p_initialization_id, v_contract -> 'optional_declared_identifiers', v_field
+          using errcode = '22023';
+      end if;
+      if jsonb_typeof(v_actual_value) is distinct from 'null' then
+        if jsonb_typeof(v_actual_value) is distinct from 'string'
+           or (v_actual_value #>> '{}') !~ '^[A-Za-z0-9][A-Za-z0-9._:/@!+=-]{0,127}$' then
+          raise exception 'j102_created_subject_field_not_canonical: % creates % % with % as an optional declared identifier, and this request supplies %',
+            p_initialization_id, v_kind, v_id, v_field, v_actual_value using errcode = '42501';
+        end if;
+        -- THE PARTY LINK POINTS AT A REAL PARTY, checked here where the row
+        -- lands: a reference to an id nobody holds is a dangling reference
+        -- wearing the shape of identity.
+        if v_field = 'party_id' and not exists (
+             select 1 from public.party p where p.id::text = (v_actual_value #>> '{}')) then
+          raise exception 'j102_party_not_found: % names party %, and no CARR party record has that id',
+            p_initialization_id, v_actual_value #>> '{}' using errcode = '23503';
+        end if;
+        v_declared := v_declared || jsonb_build_object(v_field, v_actual_value);
+      end if;
     else
       raise exception 'j102_expected_value_kind_unsupported: % computes % for %.%, which this writer does not compare',
         p_initialization_id, v_expected_value ->> 'kind', v_kind, v_field using errcode = '22023';
     end if;
   end loop;
+
+  -- ONE ACTIVE NEGOTIATION PER PROPERTY (owner ruling 2026-09-25), re-checked
+  -- here in the writer's own transaction; the partial unique index
+  -- j102_one_active_negotiation_per_property is the structural backstop for a
+  -- concurrent pair both passing this check.
+  if coalesce((v_contract ->> 'unique_active_per_property')::boolean, false)
+     and exists (
+       select 1 from ops.j102_subject_current s
+        where s.tenant = ops.f01_tenant()
+          and s.subject_kind = 'property_negotiation'
+          and s.parent_id = v_state ->> 'assignment_id'
+          and s.envelope -> 'record' -> 'state' ->> 'property_id' = v_state ->> 'property_id'
+          and (ops.j102_admission_policy() -> 'active_negotiation_states')
+                ? (s.envelope -> 'record' -> 'state' ->> 'negotiation_state')) then
+    raise exception 'j102_active_negotiation_exists: assignment % already holds an active negotiation on property %',
+      v_state ->> 'assignment_id', v_state ->> 'property_id' using errcode = '23505';
+  end if;
 
   -- === THE HISTORY, in the same transaction ==================================
   v_event_record := p_event_envelope -> 'record';

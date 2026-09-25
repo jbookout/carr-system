@@ -97,7 +97,7 @@ const ctx = actor => ({ actor });
 
 const relationshipState = (over = {}) => ({
   subject_kind: "relationship", subject_id: "rel-synthetic-1",
-  relationship_state: "prospect", active_engagement_count: 0, ...over,
+  relationship_state: "prospect", active_engagement_count: 0, party_id: null, ...over,
 });
 const assignmentState = (over = {}) => ({
   subject_kind: "assignment", subject_id: "asg-synthetic-1",
@@ -273,6 +273,11 @@ class FakeDb {
         return { rows: [{ body: { operation: "read-cre-lifecycle", kind, body: byKind[kind] } }] };
       }
       return { rows: [{ body: this.script.read_body ?? { body: null } }] };
+    }
+
+    // Owner ruling (b): the store's census of live sibling negotiations.
+    if (text.includes("SELECT subject_id FROM ops.j102_subject_current")) {
+      return { rows: (this.script.active_negotiations ?? []).map(subject_id => ({ subject_id })) };
     }
 
     for (const fn of ["j102_apply_transition", "j102_initialize_subject",
@@ -3124,8 +3129,13 @@ test("SQL parity: the map's INITIALIZATIONS are the kernel's initialization cont
       "subject_kind", "subject_id",
       ...(contract.parent_reference_field === null ? [] : [contract.parent_reference_field]),
       ...contract.declared_identifiers,
+      ...contract.optional_declared_identifiers,
       ...Object.keys(contract.initial_state),
     ])].sort(), `${id} creation shape covers exactly the created row`);
+    assert.deepEqual(admitted.optional_declared_identifiers, contract.optional_declared_identifiers,
+      `${id} optional_declared_identifiers`);
+    assert.equal(admitted.unique_active_per_property === true, contract.unique_active_per_property,
+      `${id} one-active-per-property`);
     for (const [field, value] of Object.entries(contract.initial_state)) {
       const effect = admitted.creation_shape[field];
       assert.ok(effect, `${id} fixes ${field} in the SQL creation shape too`);
@@ -3681,6 +3691,8 @@ function expectedValue(effect, ctx) {
     // says which layer answers which.
     case "declared_identifier":
       return { kind: "declared_identifier", field: effect.field };
+    case "optional_declared_identifier":
+      return { kind: "optional_declared_identifier", field: effect.field };
     case "proposed_subject_id":
       return { kind: "exact", value: orNull(at(ctx.ids, effect.subject)) };
     case "subject_field":
@@ -4069,7 +4081,7 @@ const canonicalReferences = evidence =>
   }));
 
 const REL = { subject_kind: "relationship", subject_id: "j102-rel-1",
-  relationship_state: "prospect", active_engagement_count: 0 };
+  relationship_state: "prospect", active_engagement_count: 0, party_id: null };
 const CLIENT = { ...REL, relationship_state: "client", active_engagement_count: 1 };
 const ENG = { subject_kind: "engagement", subject_id: "j102-eng-1",
   relationship_id: "j102-rel-1", engagement_state: "active",
@@ -4610,7 +4622,8 @@ test("SQL parity: the effect vocabulary in the map is exactly the one the SQL im
     CANDIDATE_SQL.indexOf("comment on function ops.j102_expected_value"));
   const sqlOps = [...new Set([...source.matchAll(/v_op = '([a-z_]+)'/g)].map(m => m[1]))].sort();
   const readable = ["case_on_evidence", "case_on_field", "const", "declared_identifier",
-    "evidence_fact", "one_of", "prior_plus", "prior_plus_conditional", "proposed_subject_id",
+    "evidence_fact", "one_of", "optional_declared_identifier", "prior_plus",
+    "prior_plus_conditional", "proposed_subject_id",
     "subject_field", "supplied_evidence_kind", "unbound"];
   assert.deepEqual(sqlOps, readable,
     "the SQL interpreter implements exactly the ops this suite can evaluate");
@@ -4723,6 +4736,8 @@ const runInitWalk = walk => evaluateLifecycleInitialization({
   declared: walk.declared,
   actor: walk.actor,
   now: NOW,
+  ...(walk.initialization_id === "initialize-property-negotiation"
+    ? { active_negotiations_for_property: walk.active_negotiations_for_property ?? [] } : {}),
 });
 
 /**
@@ -4743,6 +4758,7 @@ function proposedFor(walk) {
     subject_id: walk.declared.new_subject_id,
     ...parent,
     ...Object.fromEntries(contract.declared_identifiers.map(f => [f, walk.declared[f]])),
+    ...Object.fromEntries(contract.optional_declared_identifiers.map(f => [f, walk.declared[f] ?? null])),
     ...contract.initial_state,
   };
 }
@@ -4820,6 +4836,18 @@ function initializationComplaints(policy, walk, answer) {
   };
   const compare = (label, effect, actual) => {
     const expected = expectedValue(effect, ctx);
+    if (expected.kind === "optional_declared_identifier") {
+      // Null when the caller named nothing; otherwise the same identifier rule,
+      // bound to the declared value. (The writer also binds it to a real party.)
+      const declaredValue = walk.declared[expected.field] ?? null;
+      if (actual !== declaredValue) {
+        complaints.push(`${label}: the kernel bound ${show(actual)} and the caller declared ${show(declaredValue)}`);
+      }
+      if (actual !== null && (typeof actual !== "string" || !IDENT_SHAPE.test(actual))) {
+        complaints.push(`${label}: ${show(actual)} is not a permitted identifier`);
+      }
+      return;
+    }
     if (expected.kind === "declared_identifier") {
       // SQL holds the SHAPE; the kernel binds the VALUE. Both halves are asserted
       // here, and neither is asserted as the other.

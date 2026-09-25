@@ -1407,7 +1407,7 @@ test("Q103 LIVE: an untraceable move of a subject the transition only READS refu
 // ===========================================================================
 
 /** A store whose transaction runs `inject` (other connections) just before the SQL writer. */
-function racingStoreFor(name, inject) {
+function racingStoreFor(name, inject, writer = /ops\.j102_apply_transition\(/) {
   let fired = false;
   return createCreLifecycleStore({ db: {
     async query() { throw new Error("racingStoreFor: transaction() is always used"); },
@@ -1416,7 +1416,7 @@ function racingStoreFor(name, inject) {
       try {
         await client.query("BEGIN");
         const out = await fn({ query: async (text, params) => {
-          if (!fired && /ops\.j102_apply_transition\(/.test(text)) {
+          if (!fired && writer.test(text)) {
             fired = true;
             await inject();
           }
@@ -1454,4 +1454,112 @@ test("CAS LIVE: a same-field write committed between the store's read and the SQ
   assert.equal(injected, true, "the race actually happened inside the window");
   const after = (await body("joe", "deal", d.deal)).state;
   assert.equal(after.payment_state, "partially_paid", "Dell's committed payment survives");
+});
+
+// ===========================================================================
+// OWNER RULINGS (a) and (b), 2026-09-25, encoded and proved live.
+// ===========================================================================
+
+test("RULING (a) LIVE: a prospect may name its CARR party; a party nobody holds refuses", { skip: SHADOW_SKIP }, async () => {
+  const [row] = await owner(
+    `insert into public.party (kind, name, created_by, updated_by)
+     select 'org', $1, a.id, a.id from (select id from public.actor order by id limit 1) a
+     returning id::text as id`, [`j102 live party ${RUN}`]);
+  assert.ok(row?.id, "the owner seeded one party (needs one actor row)");
+  const linked = id("rel");
+  ok(await as("joe").initializeProspectRelationship({ idempotency_key: key(),
+    declared: { new_subject_id: linked, party_id: row.id } }), "prospect with a party link");
+  assert.equal((await body("joe", "relationship", linked)).state.party_id, row.id);
+  const unlinked = id("rel");
+  ok(await as("joe").initializeProspectRelationship({ idempotency_key: key(),
+    declared: { new_subject_id: unlinked } }), "prospect with no party");
+  assert.equal((await body("joe", "relationship", unlinked)).state.party_id, null);
+  await assert.rejects(
+    as("joe").initializeProspectRelationship({ idempotency_key: key(),
+      declared: { new_subject_id: id("rel"), party_id: randomUUID() } }),
+    e => /j102_party_not_found/.test(String(e?.message)),
+    "a party id no CARR party holds is a dangling reference and refuses at the writer");
+});
+
+test("RULING (b) LIVE: one ACTIVE negotiation per assignment and property; a new one opens once the old is no longer active", { skip: SKIP }, async () => {
+  const { rel, eng, asg } = await openedAssignment("joe");
+  const property = id("prop");
+  const first = id("neg");
+  ok(await as("joe").initializePropertyNegotiation({ idempotency_key: key(),
+    related_refs: { assignment: REF("assignment", asg) },
+    declared: { new_subject_id: first, property_id: property } }), "first negotiation");
+  const dup = await as("dell").initializePropertyNegotiation({ idempotency_key: key(),
+    related_refs: { assignment: REF("assignment", asg) },
+    declared: { new_subject_id: id("neg"), property_id: property } });
+  assert.equal(dup.decision, "refuse");
+  assert.equal(dup.reason_id, "active_negotiation_exists_for_property");
+  assert.deepEqual(dup.refusal_detail.active_negotiation_ids, [first], "the refusal names the live sibling");
+  // Per PROPERTY: the same assignment may negotiate another property.
+  ok(await as("dell").initializePropertyNegotiation({ idempotency_key: key(),
+    related_refs: { assignment: REF("assignment", asg) },
+    declared: { new_subject_id: id("neg"), property_id: id("prop") } }), "a different property");
+
+  // Once the first is no longer active (won, then its deal failed and the
+  // assignment returned to search), the same property may be negotiated again.
+  const deal = id("deal");
+  const loi = await f01Document("joe", { document_class: "letter_of_intent",
+    states: { signature_state: "unsigned", validity_state: "draft" } });
+  await linkDocument("joe", loi, "property_negotiation", first);
+  ok(await as("joe").recordLoiSubmission({ idempotency_key: key(),
+    subject_ref: REF("property_negotiation", first),
+    related_refs: { assignment: REF("assignment", asg) },
+    evidence_refs: [{ evidence_kind: "submitted_loi", ...docRef(loi) }] }), "LOI submission");
+  const acceptance = await f01Artifact("joe");
+  await linkArtifact("joe", acceptance, "property_negotiation", first);
+  ok(await as("joe").recordLoiAcceptance({ idempotency_key: key(),
+    subject_ref: REF("property_negotiation", first),
+    evidence_refs: [{ evidence_kind: "counterparty_loi_acceptance", artifact_digest: acceptance }] }),
+  "LOI acceptance");
+  const commitment = await fact("joe", "winning_property_commitment", "assignment", asg,
+    { detail: "synthetic winner selection" });
+  ok(await as("joe").commitWinningProperty({ idempotency_key: key(),
+    subject_ref: REF("assignment", asg),
+    related_refs: { property_negotiation: REF("property_negotiation", first) },
+    evidence_refs: [{ evidence_kind: "winner_selection_commitment", record_id: commitment }],
+    declared: { instrument_kind: "lease", new_deal_id: deal } }), "commit winning property");
+  const failure = await fact("joe", "deal_failure", "deal", deal, { reason: "synthetic" });
+  ok(await as("joe").cancelPendingDeal({ idempotency_key: key(), subject_ref: REF("deal", deal),
+    related_refs: { assignment: REF("assignment", asg), engagement: REF("engagement", eng),
+      relationship: REF("relationship", rel) },
+    evidence_refs: [{ evidence_kind: "deal_failure_record", record_id: failure }],
+    declared: { return_phase: "search" } }), "cancel pending deal");
+  assert.equal((await body("joe", "property_negotiation", first)).state.negotiation_state,
+    "selected_winner", "the old winner is not ACTIVE");
+  ok(await as("joe").initializePropertyNegotiation({ idempotency_key: key(),
+    related_refs: { assignment: REF("assignment", asg) },
+    declared: { new_subject_id: id("neg"), property_id: property } }),
+  "the same property reopens once nothing on it is active");
+});
+
+test("RULING (b) LIVE: a sibling committed inside the store's window is refused by the WRITER; the partial unique index backs it", { skip: SKIP }, async () => {
+  const { asg } = await openedAssignment("joe");
+  const property = id("prop");
+  let injected = false;
+  const store = racingStoreFor("joe", async () => {
+    ok(await as("dell").initializePropertyNegotiation({ idempotency_key: key(),
+      related_refs: { assignment: REF("assignment", asg) },
+      declared: { new_subject_id: id("neg"), property_id: property } }),
+    "Dell opens the negotiation inside Joe's window");
+    injected = true;
+  }, /ops\.j102_initialize_subject\(/);
+  await assert.rejects(
+    store.initializePropertyNegotiation({ idempotency_key: key(),
+      related_refs: { assignment: REF("assignment", asg) },
+      declared: { new_subject_id: id("neg"), property_id: property } }, { actor: JOE }),
+    e => /j102_active_negotiation_exists/.test(String(e?.message)) && e?.code === "23505",
+    "the census the kernel saw was empty; the writer re-checks the committed rows");
+  assert.equal(injected, true, "the race actually happened inside the window");
+  const [ix] = await sql("joe",
+    `select indisunique as u, pg_get_expr(indpred, indrelid) as pred from pg_index
+      where indexrelid = 'ops.j102_one_active_negotiation_per_property'::regclass`);
+  assert.equal(ix?.u, true, "the backstop index is UNIQUE");
+  for (const st of ["loi_drafted", "loi_submitted", "loi_countered", "loi_accepted"]) {
+    assert.match(ix.pred, new RegExp(st), `the backstop covers ${st}`);
+  }
+  assert.doesNotMatch(ix.pred, /selected_winner|loi_withdrawn|loi_rejected|superseded/);
 });

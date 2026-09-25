@@ -119,6 +119,7 @@ import {
   evaluateConcurrentEdit,
   evaluateConcurrentTransition,
   evaluateLifecycleInitialization,
+  V5_J102_ACTIVE_NEGOTIATION_STATES,
   v5J102TransitionWrites,
   evaluateLifecycleTransition,
   projectOwnershipAndFreshness,
@@ -808,7 +809,7 @@ const TRANSITION_PAYLOAD_KEYS = Object.freeze([
 const INITIALIZATION_PAYLOAD_KEYS = Object.freeze([
   "schema_version", "idempotency_key", "related_refs", "declared",
 ]);
-const INITIALIZATION_DECLARED_KEYS = Object.freeze(["new_subject_id", "property_id"]);
+const INITIALIZATION_DECLARED_KEYS = Object.freeze(["new_subject_id", "property_id", "party_id"]);
 const RELATED_REF_KEYS = Object.freeze([
   "relationship", "engagement", "assignment", "property_negotiation", "deal",
 ]);
@@ -2929,6 +2930,7 @@ export function createCreLifecycleStore({ db } = {}) {
       // The initialization refusals name the condition that failed, the context
       // link that did not hold, and the identifier that was missing or unread.
       "unmet_field", "missing_declared_identifier", "unexpected_declared_identifier",
+      "active_negotiation_ids",
       "expected_id", "loaded_id"]) {
       if (evaluated[key] !== undefined) detail[key] = evaluated[key];
     }
@@ -3053,6 +3055,22 @@ export function createCreLifecycleStore({ db } = {}) {
         });
       }
 
+      // ONE ACTIVE NEGOTIATION PER PROPERTY (owner ruling 2026-09-25): the live
+      // siblings are LOADED here and handed to the kernel, which refuses by
+      // name; the SQL writer re-checks and a partial unique index backstops.
+      let activeSiblings;
+      if (contract.unique_active_per_property === true) {
+        const assignmentId = related.assignment?.subject_id ?? null;
+        activeSiblings = assignmentId === null || typeof declared.property_id !== "string" ? [] :
+          (await client.query(
+            `SELECT subject_id FROM ops.j102_subject_current
+              WHERE tenant = ops.f01_tenant() AND subject_kind = 'property_negotiation'
+                AND parent_id = $1 AND envelope -> 'record' -> 'state' ->> 'property_id' = $2
+                AND envelope -> 'record' -> 'state' ->> 'negotiation_state' = ANY($3::text[])
+              ORDER BY subject_id`,
+            [assignmentId, declared.property_id, [...V5_J102_ACTIVE_NEGOTIATION_STATES]]))
+            .rows.map(r => r.subject_id);
+      }
       const evaluated = evaluateLifecycleInitialization({
         tenant: ORGANIZATION_TENANT_ID,
         initialization_id: schema.initialization,
@@ -3060,6 +3078,7 @@ export function createCreLifecycleStore({ db } = {}) {
         declared,
         actor: principal,
         now,
+        ...(activeSiblings === undefined ? {} : { active_negotiations_for_property: activeSiblings }),
       });
       if (evaluated.decision !== "allow") {
         return result(operation, evaluated.decision, evaluated.reason_id, {

@@ -643,7 +643,14 @@ export const V5_J102_DEAL_AXES = deepFreeze([
   "commission_agreement_state", "invoice_state", "payment_state", "completion_state",
 ]);
 
+// `party_id` (owner ruling 2026-09-25, party link): an OPTIONAL declared
+// reference from a prospect relationship to the CARR party record. Optional, so
+// a relationship with no known party is still a relationship; the SQL writer
+// holds a supplied value to an existing public.party row.
 const RELATIONSHIP_KEYS = Object.freeze([
+  "subject_kind", "subject_id", "relationship_state", "active_engagement_count", "party_id",
+]);
+const RELATIONSHIP_REQUIRED = Object.freeze([
   "subject_kind", "subject_id", "relationship_state", "active_engagement_count",
 ]);
 const ENGAGEMENT_KEYS = Object.freeze([
@@ -666,7 +673,7 @@ const DEAL_KEYS = Object.freeze([
 ]);
 
 const SUBJECT_SHAPES = deepFreeze({
-  relationship: { keys: RELATIONSHIP_KEYS, required: RELATIONSHIP_KEYS },
+  relationship: { keys: RELATIONSHIP_KEYS, required: RELATIONSHIP_REQUIRED },
   // `effective_from` is NOT required, and that is a finding rather than an
   // oversight. F01's document identity carries preparation, delivery, signature,
   // validity and version states; it carries no dated effective window. An
@@ -716,7 +723,7 @@ const SUBJECT_ENUMS = deepFreeze({
 const IDENT_FIELDS = deepFreeze([
   "subject_id", "relationship_id", "engagement_id", "assignment_id", "property_id",
   "pending_deal_id", "selected_property_id", "active_lease_draft_target_id",
-  "multi_target_exception_ref",
+  "multi_target_exception_ref", "party_id",
 ]);
 const INSTANT_FIELDS = deepFreeze(["effective_from", "effective_to", "closing_date"]);
 const COUNT_FIELDS = deepFreeze(["open_negotiation_count", "active_engagement_count"]);
@@ -2550,6 +2557,7 @@ const INITIALIZATIONS = deepFreeze({
     parent: null,
     required_context: [],
     declared_identifiers: [],
+    optional_declared_identifiers: ["party_id"],
     initial_state: { relationship_state: "prospect", active_engagement_count: 0 },
     event_kind: "relationship_initialized",
     event_detail_fields: ["relationship_state"],
@@ -2617,6 +2625,7 @@ const INITIALIZATIONS = deepFreeze({
       },
     ],
     declared_identifiers: [],
+    optional_declared_identifiers: [],
     initial_state: {
       assignment_phase: "research", open_negotiation_count: 0,
       selected_property_id: null, active_lease_draft_target_id: null,
@@ -2656,6 +2665,12 @@ const INITIALIZATIONS = deepFreeze({
       },
     ],
     declared_identifiers: ["property_id"],
+    optional_declared_identifiers: [],
+    // Owner ruling 2026-09-25: at most ONE ACTIVE negotiation per (tenant,
+    // assignment, property). The store supplies the live siblings it loaded; the
+    // SQL writer re-checks under its own transaction and a partial unique index
+    // is the structural backstop.
+    unique_active_per_property: true,
     initial_state: { negotiation_state: "loi_drafted" },
     event_kind: "property_negotiation_initialized",
     event_detail_fields: ["assignment_id", "property_id", "negotiation_state"],
@@ -2664,6 +2679,15 @@ const INITIALIZATIONS = deepFreeze({
 });
 
 export const V5_J102_INITIALIZATION_IDS = deepFreeze(Object.keys(INITIALIZATIONS).sort());
+
+/**
+ * The negotiation states that count as ACTIVE for the one-per-property rule.
+ * A dead negotiation (rejected, withdrawn, superseded) does not block a new one,
+ * and neither does `selected_winner`: it has become a Deal, and while that Deal
+ * is pending the assignment is `committed`, which already refuses a new draft;
+ * once a cancellation reopens the assignment, the property may be pursued again.
+ */
+export const V5_J102_ACTIVE_NEGOTIATION_STATES = deepFreeze(["loi_drafted", "loi_submitted", "loi_countered", "loi_accepted"]);
 
 /** Which initialization creates each subject kind, or null for the coupled ones. */
 export const V5_J102_INITIALIZED_SUBJECT_KINDS = deepFreeze(
@@ -2683,6 +2707,8 @@ export function v5J102InitializationContract(initialization_id) {
     parent_subject_kind: c.parent === null ? null : c.parent.kind,
     parent_reference_field: c.parent === null ? null : c.parent.field,
     declared_identifiers: [...c.declared_identifiers],
+    optional_declared_identifiers: [...c.optional_declared_identifiers],
+    unique_active_per_property: c.unique_active_per_property === true,
     required_context: c.required_context.map(rule => ({
       subject: rule.subject,
       chained_from: rule.chained_from === undefined ? null : { ...rule.chained_from },
@@ -2705,12 +2731,16 @@ export function v5J102InitializationContract(initialization_id) {
 
 const INITIALIZATION_REQUEST_KEYS = Object.freeze([
   "tenant", "initialization_id", "related", "declared", "actor", "now",
+  // The ids of the ACTIVE negotiations the store loaded for the same assignment
+  // and property. Required (fail closed) for a property negotiation, refused for
+  // anything else.
+  "active_negotiations_for_property",
 ]);
 // `new_subject_id` names the row being created; `property_id` is the one further
 // identifier a negotiation needs and nothing can derive. THERE IS NO EVIDENCE KEY
 // AND NO STATE KEY: a request naming one is an unknown field, and a request
 // naming a phase, a state or an approval is refused by the two guards before that.
-const INITIALIZATION_DECLARED_KEYS = Object.freeze(["new_subject_id", "property_id"]);
+const INITIALIZATION_DECLARED_KEYS = Object.freeze(["new_subject_id", "property_id", "party_id"]);
 
 function initializationResult(fields) {
   return deepFreeze({
@@ -2817,9 +2847,16 @@ export function evaluateLifecycleInitialization(request) {
   // identifier nothing would read. It refuses rather than being dropped in
   // silence, because a caller that named a property on a relationship has
   // misunderstood which row it is creating.
+  for (const field of c.optional_declared_identifiers) {
+    if (declared[field] === undefined) continue;
+    if (typeof declared[field] !== "string") {
+      return refuseInit("declared_identifier_malformed", { malformed_declared_identifier: field });
+    }
+    assertExternalIdent(declared[field], `request.declared.${field}`, { maxLength: 128 });
+  }
   for (const field of INITIALIZATION_DECLARED_KEYS) {
     if (field === "new_subject_id" || declared[field] === undefined) continue;
-    if (!c.declared_identifiers.includes(field)) {
+    if (!c.declared_identifiers.includes(field) && !c.optional_declared_identifiers.includes(field)) {
       return refuseInit("declared_identifier_not_used", { unexpected_declared_identifier: field });
     }
   }
@@ -2867,8 +2904,33 @@ export function evaluateLifecycleInitialization(request) {
     subject_id,
     ...(c.parent === null ? {} : { [c.parent.field]: parent.subject_id }),
     ...Object.fromEntries(c.declared_identifiers.map(field => [field, declared[field]])),
+    ...Object.fromEntries(c.optional_declared_identifiers.map(field => [field, declared[field] ?? null])),
     ...c.initial_state,
   }, "created_state");
+
+  // ONE ACTIVE NEGOTIATION PER PROPERTY (owner ruling 2026-09-25). Checked after
+  // the parent chain, so the refusal is about THIS assignment and property.
+  if (c.unique_active_per_property === true) {
+    const siblings = request.active_negotiations_for_property;
+    if (!Array.isArray(siblings)) {
+      return refuseInit("active_negotiation_census_absent", {
+        why: "the store did not say which negotiations are already active for this assignment and property, so one-per-property cannot be judged",
+      });
+    }
+    siblings.forEach((id, i) => assertExternalIdent(id,
+      `request.active_negotiations_for_property[${i}]`, { maxLength: 128 }));
+    if (siblings.length > 0) {
+      return refuseInit("active_negotiation_exists_for_property", {
+        assignment_id: parent.subject_id, property_id: declared.property_id,
+        active_negotiation_ids: [...siblings].sort(),
+        active_negotiation_states: [...V5_J102_ACTIVE_NEGOTIATION_STATES],
+      });
+    }
+  } else if (request.active_negotiations_for_property !== undefined) {
+    fail("unknown_field",
+      "request.active_negotiations_for_property is read only for a property negotiation",
+      { path: "request.active_negotiations_for_property" });
+  }
 
   const detail = {};
   for (const field of c.event_detail_fields) {
@@ -3208,6 +3270,7 @@ export const V5_J102_FIELD_CLASS_REGISTRY = deepFreeze({
   property_id: "lifecycle",
   // Q069 / Q077 — the client and the engagement.
   relationship_state: "lifecycle", active_engagement_count: "lifecycle",
+  party_id: "lifecycle",
   engagement_state: "lifecycle", representation_basis: "lifecycle",
   effective_from: "lifecycle", effective_to: "lifecycle",
   // Q080 / Q095 — the assignment and its negotiations.

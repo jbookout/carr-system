@@ -2151,7 +2151,7 @@ begin
   -- ========================================================================
   v_state := jsonb_build_object(
     'subject_kind', 'relationship', 'subject_id', v_walk_rel_id,
-    'relationship_state', 'prospect', 'active_engagement_count', 0);
+    'relationship_state', 'prospect', 'active_engagement_count', 0, 'party_id', null);
   v_rec := jsonb_build_object(
     'schema_version', v_subject_schema, 'tenant', v_tenant,
     'subject_kind', 'relationship', 'subject_id', v_walk_rel_id,
@@ -2247,7 +2247,7 @@ begin
   begin
     v_rec2 := jsonb_set(v_rec, '{state}', jsonb_build_object(
       'subject_kind', 'relationship', 'subject_id', v_walk_rel_id,
-      'relationship_state', 'client', 'active_engagement_count', 1));
+      'relationship_state', 'client', 'active_engagement_count', 1, 'party_id', null));
     perform ops.j102_initialize_subject('initialize-prospect-relationship',
       jsonb_build_object('relationship:' || v_walk_rel_id, null),
       jsonb_build_object(
@@ -2632,7 +2632,7 @@ begin
     v_rel_digest := ops.j102_subject('relationship', v_walk_rel_id) ->> 'state_digest';
     v_state := jsonb_build_object(
       'subject_kind', 'relationship', 'subject_id', v_walk_rel_id,
-      'relationship_state', 'client', 'active_engagement_count', 1);
+      'relationship_state', 'client', 'active_engagement_count', 1, 'party_id', null);
     v_rec := jsonb_build_object(
       'schema_version', v_subject_schema, 'tenant', v_tenant,
       'subject_kind', 'relationship', 'subject_id', v_walk_rel_id,
@@ -2986,7 +2986,7 @@ begin
     --      relationship row to point at rather than a placeholder digest.
     v_state := jsonb_build_object(
       'subject_kind', 'relationship', 'subject_id', v_walk_rel_id_2,
-      'relationship_state', 'prospect', 'active_engagement_count', 0);
+      'relationship_state', 'prospect', 'active_engagement_count', 0, 'party_id', null);
     v_rec := jsonb_build_object(
       'schema_version', v_subject_schema, 'tenant', v_tenant,
       'subject_kind', 'relationship', 'subject_id', v_walk_rel_id_2,
@@ -3079,7 +3079,7 @@ begin
     begin
       v_state := jsonb_build_object(
         'subject_kind', 'relationship', 'subject_id', v_walk_rel_id_3,
-        'relationship_state', 'prospect', 'active_engagement_count', 0);
+        'relationship_state', 'prospect', 'active_engagement_count', 0, 'party_id', null);
       v_rec2 := jsonb_build_object(
         'schema_version', v_subject_schema, 'tenant', v_tenant,
         'subject_kind', 'relationship', 'subject_id', v_walk_rel_id_3,
