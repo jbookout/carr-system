@@ -589,7 +589,7 @@ PYEOF
   # the next tools/somewhere/deeper/test_x.py turns a gate red asking to be
   # decided, rather than sitting in the tree looking like coverage.
   local eligible=""
-  for t in ops/*-selftest.py tools/*-selftest.py tools/test-*.py tools/test_*.py \
+  for t in ops/*-selftest.py tools/test-*.py tools/test_*.py tools/*-selftest.py \
            tools/room-bridge/test_*_unit.py \
            tools/room-bridge/test_activation_reliability.py; do
     [ -f "$t" ] || continue
