@@ -1505,13 +1505,15 @@ export const POST_0609_FORWARD_V73_DB_CATALOG_BASELINE = Object.freeze({
   projection_version: "scac-db-catalog-projection.v73",
   secdef_execute: { count: 918, digest: "sha256:bdddf81e132dc167671e9a25047c625e040633e40d6c9255fb9946d43a1401ef" },
 });
-// Placeholder pending live PG17 readback: V5-A05 adds three new SECURITY
-// DEFINER-reachable mcp-tool verbs (cadence-status, record-cadence-receipt,
-// raise-delivery-cadence-alert) plus their EXECUTE grants.
+// Measured on the disposable PG17 local-db-ci migration lane after 0610:
+// V5-A05's SECURITY DEFINER doors (cadence status, record receipt, the
+// assurance-cadence batch, the 11-argument ops.mint_notification) and their
+// EXECUTE grants; notification_quiet_now and notification_morning_release_at
+// are owner-only and add no grant rows.
 export const POST_0611_FORWARD_V74_DB_CATALOG_BASELINE = Object.freeze({
   ...POST_0609_FORWARD_V73_DB_CATALOG_BASELINE,
   projection_version: "scac-db-catalog-projection.v74",
-  secdef_execute: { count: 927, digest: "sha256:56a06e4e527a4860cad2e336400d9c3a4cbea65514a0ed9bc893839bb3f92d05" },
+  secdef_execute: { count: 927, digest: "sha256:70b57f64b1d27432ded108e349c461ccc577b50a139f26da72f65f311790d0fa" },
 });
 
 export const JOB_DEFINITION_BASELINE = Object.freeze({
@@ -16380,7 +16382,8 @@ export function renderDeliveryCadenceA05RegistrySql(rows,
     .replaceAll(`<>${oldSeal.sourceEntryCount}`, `<>${newSeal.sourceEntryCount}`)
     .replaceAll(`,${oldSeal.entryCount},${oldSeal.sourceEntryCount},`,
       `,${newSeal.entryCount},${newSeal.sourceEntryCount},`)
-    .replaceAll("Deploy worker do migration reseal v73 seed or entry-set seal drifted",
+    // The label rename above has already run, so match the renamed text.
+    .replaceAll("Delivery cadence A05 v73 seed or entry-set seal drifted",
       "Delivery cadence A05 v74 seed or entry-set seal drifted");
   const versionListMarker =
     "'scac-mutation-registry.v49','scac-mutation-registry.v50','scac-mutation-registry.v51','scac-mutation-registry.v52','scac-mutation-registry.v53','scac-mutation-registry.v54','scac-mutation-registry.v55','scac-mutation-registry.v56','scac-mutation-registry.v57','scac-mutation-registry.v58','scac-mutation-registry.v59','scac-mutation-registry.v60','scac-mutation-registry.v61','scac-mutation-registry.v62','scac-mutation-registry.v63','scac-mutation-registry.v64','scac-mutation-registry.v65','scac-mutation-registry.v66','scac-mutation-registry.v67','scac-mutation-registry.v68','scac-mutation-registry.v69','scac-mutation-registry.v70','scac-mutation-registry.v71','scac-mutation-registry.v72','scac-mutation-registry.v74'";

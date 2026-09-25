@@ -3,7 +3,7 @@
 -- decision-ready quiet-hours queue -- the production store and doors behind
 -- mcp-server/src/delivery-cadence-a05.v5.js's pure classifiers.
 --
--- THREE THINGS THIS MIGRATION ADDS, and nothing else:
+-- WHAT THIS MIGRATION ADDS, and nothing else:
 --
 --   1. ops.v5_a05_cadence_receipt -- append-only evidence that a subject's
 --      assurance cadence checked in, expiring 14 days after issuance
@@ -27,13 +27,22 @@
 --      ops.mint_notification's own inline quiet-hours boolean (0521:216-223).
 --      ops.mint_notification is then redefined (DROP + CREATE, because adding
 --      a parameter changes the argument-type signature and CREATE OR REPLACE
---      cannot widen it) to call the extracted helper and take one new
---      trailing parameter, p_bypass_quiet_hours boolean default false. Every
---      existing 9-argument call site -- investigation.js's record-signal is
---      the only one -- resolves to this same function with the new parameter
---      defaulted false, UNCHANGED BEHAVIOUR, because Postgres permits a call
---      that omits trailing defaulted arguments. record-signal's own verb
---      schema is not touched by this migration.
+--      cannot widen it) to call the extracted helper and take two new
+--      trailing parameters, p_bypass_quiet_hours and p_hold_for_morning, both
+--      boolean default false. Every existing 9-argument call site --
+--      investigation.js's record-signal is the only one -- resolves to this
+--      same function with both defaulted false, UNCHANGED BEHAVIOUR, because
+--      Postgres permits a call that omits trailing defaulted arguments.
+--      record-signal's own verb schema is not touched by this migration.
+--
+--   4. The morning hold (PR #1236 review round 2, item 2): a
+--      held_until_morning delivery state with a server-computed held_until
+--      on ops.notification_delivery, ops.notification_morning_release_at, and
+--      the feed and morning-brief batch reads that hide a held item until its
+--      hold ends. See the section comment below.
+--
+-- Sealed by 0611 as SCAC v74 over main's v73 (0609); the pair is one atomic
+-- migration group in tools/migrate.py.
 --
 -- WHAT THIS IS NOT: a second quiet-hours computation. ops.notification_preference
 -- (0521/0527) remains the only quiet-hours preference store and
@@ -383,11 +392,72 @@ comment on function ops.notification_preference_facts() is
   'WR-000116/V5-A05: reads the acting actor''s own notification preferences and whether quiet hours cover this instant, via ops.notification_quiet_now (the one quiet-hours computation; this no longer carries its own copy). ZERO arguments: the actor is resolved inside the body.';
 
 -- ---------------------------------------------------------------------------
--- ops.mint_notification, redefined with one new trailing parameter.
+-- Held-until-morning delivery (PR #1236 review, round 2, item 2).
+--
+-- checkable_done 2 says "ordinary blockers batch": an ordinary alert that
+-- needs Joe's authority belongs to the morning approval batch, not to the
+-- moment it was raised. Before this, a batch_for_morning alert was minted with
+-- its device row `pending` at 15:00 exactly like an interruption. Now the mint
+-- takes p_hold_for_morning, and a held notification's delivery rows carry the
+-- explicit state 'held_until_morning' plus the server-computed instant the
+-- hold ends (held_until). The feed and the morning-brief batch both hide a
+-- held notification until that instant; nothing pushes it before then.
+--
+-- The morning window is the recipient's own: it opens at the end of their
+-- quiet hours when they have set any, else at 07:00, in their preference
+-- timezone (UTC when unset, the same default the quiet-hours computation
+-- uses), and stays open for four hours. An alert raised INSIDE the window is
+-- not held -- it is already morning. No device push sender exists in this
+-- repository (tools/restore-watermark.py PROVIDER_READERS is empty), so a held
+-- row is never handed to a provider; restore-watermark classifies it with the
+-- other non-pending, provider-free rows.
+-- ---------------------------------------------------------------------------
+
+alter table ops.notification_delivery add column held_until timestamptz;
+alter table ops.notification_delivery drop constraint notification_delivery_state_check;
+alter table ops.notification_delivery add constraint notification_delivery_state_check
+  check (state = any (array['pending','delivered','suppressed_quiet_hours','failed','held_until_morning']));
+alter table ops.notification_delivery drop constraint notification_delivery_check1;
+alter table ops.notification_delivery add constraint notification_delivery_check1
+  check ((state in ('pending','held_until_morning')) = (settled_at is null));
+alter table ops.notification_delivery add constraint notification_delivery_held_until_matches_state
+  check ((state = 'held_until_morning') = (held_until is not null));
+
+comment on column ops.notification_delivery.held_until is
+  'V5-A05: when a held_until_morning row''s hold ends -- the start of the recipient''s next morning window, computed by ops.notification_morning_release_at at mint time. Null for every other state.';
+
+create or replace function ops.notification_morning_release_at(p_actor uuid)
+returns timestamptz language plpgsql stable security definer
+set search_path = pg_catalog, ops, public
+as $$
+declare v_pref ops.notification_preference%rowtype; v_tz text; v_open time;
+        v_local timestamp; v_today_open timestamp;
+begin
+  select * into v_pref from ops.notification_preference where actor = p_actor;
+  v_tz := coalesce(v_pref.timezone, 'UTC');
+  v_open := case when v_pref.quiet_hours_start is not null and v_pref.quiet_hours_end is not null
+                 then v_pref.quiet_hours_end else time '07:00' end;
+  v_local := now() at time zone v_tz;
+  v_today_open := date_trunc('day', v_local) + v_open;
+  if v_local >= v_today_open and v_local < v_today_open + interval '4 hours' then
+    return now(); -- inside the morning window: nothing to hold.
+  end if;
+  if v_local < v_today_open then
+    return v_today_open at time zone v_tz;
+  end if;
+  return (v_today_open + interval '1 day') at time zone v_tz;
+end;
+$$;
+
+comment on function ops.notification_morning_release_at(uuid) is
+  'V5-A05: the start of the actor''s next morning window (quiet-hours end, else 07:00, in their preference timezone; four hours long), or now() when called inside it. Owner-only; ops.mint_notification calls it.';
+
+-- ---------------------------------------------------------------------------
+-- ops.mint_notification, redefined with two new trailing parameters.
 -- DROP + CREATE because the argument-type list changes; every existing
 -- 9-argument call (investigation.js record-signal, the only one) still
--- resolves here with p_bypass_quiet_hours defaulted false -- unchanged
--- behaviour for every caller that does not know this parameter exists.
+-- resolves here with both new parameters defaulted false -- unchanged
+-- behaviour for every caller that does not know they exist.
 -- ---------------------------------------------------------------------------
 
 -- The role-bundle full-rebuild composer (tools/schema_snapshot_grants.py)
@@ -405,15 +475,21 @@ drop function ops.mint_notification(text,uuid,text,text,text,text,text,text,text
 create function ops.mint_notification(
   p_event_source text, p_event_ref uuid, p_subject_type text, p_subject_ref text,
   p_reason text, p_severity text, p_deep_link text, p_dedupe_key text,
-  p_recipient_slug text, p_bypass_quiet_hours boolean default false)
+  p_recipient_slug text, p_bypass_quiet_hours boolean default false,
+  p_hold_for_morning boolean default false)
 returns jsonb language plpgsql security definer set search_path=pg_catalog,ops,public
 as $$
 declare v_recipient uuid; v_id uuid; v_prior uuid; v_quiet boolean; v_source_exists boolean;
+        v_release timestamptz; v_held boolean := false;
 begin
   if not (pg_has_role(current_user, 'carr_writer', 'member')
        or pg_has_role(current_user, 'carr_authority', 'member')) then
     raise exception using errcode = '42501',
       message = 'minting a notification requires the writer or authority capability';
+  end if;
+  if p_bypass_quiet_hours and p_hold_for_morning then
+    raise exception 'a notification cannot both bypass quiet hours and be held for morning'
+      using errcode = '22023';
   end if;
 
   select (case p_event_source
@@ -449,30 +525,99 @@ begin
       'notification_id', v_prior, 'recipient_actor', v_recipient);
   end if;
 
-  insert into ops.notification_delivery(notification_id, channel, state)
-  values (v_id, 'in_app', 'pending');
+  -- V5-A05 morning hold: computed once, applied to every channel alike, so
+  -- the in-app row and the device row agree on when the hold ends.
+  if p_hold_for_morning then
+    v_release := ops.notification_morning_release_at(v_recipient);
+    v_held := v_release > now();
+  end if;
+
+  if v_held then
+    insert into ops.notification_delivery(notification_id, channel, state, settled_at, held_until)
+    values (v_id, 'in_app', 'held_until_morning', null, v_release);
+  else
+    insert into ops.notification_delivery(notification_id, channel, state)
+    values (v_id, 'in_app', 'pending');
+  end if;
 
   if exists (select 1 from ops.notification_preference where actor = v_recipient and device_opt_in) then
-    -- THE ONLY BEHAVIOURAL CHANGE FROM 0521: p_bypass_quiet_hours, true only for
-    -- V5-A05's urgent (security_incident/data_loss/outward_harm) reason ids
-    -- (mcp-server/src/delivery-cadence-a05.v5.js classifyEscalationReason),
-    -- short-circuits the SAME quiet-hours computation rather than replacing it
-    -- with a second one. record-signal never sets this argument, so its calls
-    -- are byte-identical to 0521's behaviour.
-    v_quiet := (not p_bypass_quiet_hours) and ops.notification_quiet_now(v_recipient);
-    insert into ops.notification_delivery(notification_id, channel, state, settled_at)
-    values (v_id, 'device',
-            case when v_quiet then 'suppressed_quiet_hours' else 'pending' end,
-            case when v_quiet then now() else null end);
+    if v_held then
+      insert into ops.notification_delivery(notification_id, channel, state, settled_at, held_until)
+      values (v_id, 'device', 'held_until_morning', null, v_release);
+    else
+      -- p_bypass_quiet_hours, true only for V5-A05's server-verified urgent
+      -- (security_incident/data_loss/outward_harm) alerts, short-circuits the
+      -- SAME quiet-hours computation rather than replacing it with a second
+      -- one. record-signal never sets either new argument, so its calls are
+      -- byte-identical to 0521's behaviour.
+      v_quiet := (not p_bypass_quiet_hours) and ops.notification_quiet_now(v_recipient);
+      insert into ops.notification_delivery(notification_id, channel, state, settled_at)
+      values (v_id, 'device',
+              case when v_quiet then 'suppressed_quiet_hours' else 'pending' end,
+              case when v_quiet then now() else null end);
+    end if;
   end if;
 
   return jsonb_build_object('ok', true, 'minted', true, 'notification_id', v_id,
     'recipient_actor', v_recipient, 'severity', p_severity, 'dedupe_key', p_dedupe_key,
-    'bypassed_quiet_hours', p_bypass_quiet_hours);
+    'bypassed_quiet_hours', p_bypass_quiet_hours,
+    'held_for_morning', v_held, 'held_until', case when v_held then v_release end);
 end $$;
 
-comment on function ops.mint_notification(text,uuid,text,text,text,text,text,text,text,boolean) is
-  'WR-000113/V5-A05: the only notification writer. p_bypass_quiet_hours (default false) is the one addition -- see ops.notification_quiet_now.';
+comment on function ops.mint_notification(text,uuid,text,text,text,text,text,text,text,boolean,boolean) is
+  'WR-000113/V5-A05: the only notification writer. p_bypass_quiet_hours and p_hold_for_morning (both default false) are the only additions -- see ops.notification_quiet_now and ops.notification_morning_release_at.';
+
+-- ---------------------------------------------------------------------------
+-- ops.notification_feed_facts, redefined (same signature, same caller
+-- contract) so a notification held for the morning window is not listed or
+-- counted before its hold ends. Every other row is returned exactly as 0521
+-- returned it.
+-- ---------------------------------------------------------------------------
+
+create or replace function ops.notification_feed_facts(p_after timestamptz, p_limit integer)
+returns jsonb language plpgsql stable security definer set search_path=pg_catalog,ops,public
+as $$
+declare v_actor uuid; v_limit integer; v_rows jsonb; v_unread integer;
+begin
+  if not (pg_has_role(current_user, 'carr_writer', 'member')
+       or pg_has_role(current_user, 'carr_authority', 'member')) then
+    raise exception using errcode = '42501',
+      message = 'reading the notification feed requires the writer or authority capability';
+  end if;
+  v_actor := ops.portfolio_writer_actor_id();
+  v_limit := least(greatest(coalesce(p_limit, 50), 1), 200);
+
+  select coalesce(jsonb_agg(to_jsonb(f) order by f.created_at desc), '[]'::jsonb) into v_rows
+    from (
+      select n.id, n.severity, n.reason, n.subject_type, n.subject_ref, n.deep_link,
+             n.created_at, r.read_at,
+             coalesce((select jsonb_agg(jsonb_build_object('channel', d.channel, 'state', d.state)
+                                        order by d.channel)
+                         from ops.notification_delivery d where d.notification_id = n.id),
+                      '[]'::jsonb) as delivery
+        from ops.notification n
+        left join ops.notification_read r
+          on r.notification_id = n.id and r.recipient_actor = n.recipient_actor
+       where n.recipient_actor = v_actor
+         and (p_after is null or n.created_at > p_after)
+         and not exists (select 1 from ops.notification_delivery h
+                          where h.notification_id = n.id and h.state = 'held_until_morning'
+                            and h.held_until > now())
+       order by n.created_at desc limit v_limit) f;
+
+  select count(*) into v_unread from ops.notification n
+   where n.recipient_actor = v_actor
+     and not exists (select 1 from ops.notification_read r
+                      where r.notification_id = n.id and r.recipient_actor = v_actor)
+     and not exists (select 1 from ops.notification_delivery h
+                      where h.notification_id = n.id and h.state = 'held_until_morning'
+                        and h.held_until > now());
+
+  return jsonb_build_object('ok', true, 'unread_count', v_unread, 'notifications', v_rows);
+end $$;
+
+comment on function ops.notification_feed_facts(timestamptz,integer) is
+  'WR-000113/V5-A05: resolves the caller''s own actor internally and returns only that actor''s notifications, omitting any still held for the morning window. There is no argument for a recipient.';
 
 -- ---------------------------------------------------------------------------
 -- ops.v5_a05_assurance_cadence_batch -- the morning brief's ONLY door onto
@@ -490,12 +635,30 @@ comment on function ops.mint_notification(text,uuid,text,text,text,text,text,tex
 -- directly.
 -- ---------------------------------------------------------------------------
 
+-- Review round 2, item 4: the recipient slug is an argument (morning-brief
+-- runs on the stateless reader connection, which carries no actor context,
+-- and passes its server-derived sponsor exactly as the renewal-queue section
+-- beside it does), so this door itself refuses any slug that is not an active
+-- human partner -- a reader-scoped caller cannot aim it at an arbitrary actor.
+-- It also returns only notifications whose morning hold (if any) has ended,
+-- so the brief is where a held item surfaces, and not before.
 create or replace function ops.v5_a05_assurance_cadence_batch(p_recipient_slug text)
 returns jsonb language plpgsql stable security definer
 set search_path = pg_catalog, ops, public
 as $$
-declare v_result jsonb;
+declare v_result jsonb; v_recipient uuid;
 begin
+  if p_recipient_slug is null or p_recipient_slug not in ('joe', 'dell') then
+    raise exception using errcode = '42501',
+      message = 'the V5-A05 morning batch is readable only for a partner recipient';
+  end if;
+  select id into v_recipient from actor
+   where slug = p_recipient_slug and kind = 'human' and active;
+  if v_recipient is null then
+    raise exception using errcode = '42501',
+      message = 'the V5-A05 morning batch is readable only for an active partner recipient';
+  end if;
+
   select coalesce(jsonb_agg(row_to_json(batch) order by batch.created_at desc), '[]'::jsonb)
     into v_result
   from (
@@ -505,9 +668,12 @@ begin
       join signal_event s on s.id = n.event_ref and n.event_source = 'signal_event'
       left join ops.notification_read r
         on r.notification_id = n.id and r.recipient_actor = n.recipient_actor
-     where n.recipient_actor = (select id from actor where slug = p_recipient_slug and active)
+     where n.recipient_actor = v_recipient
        and s.producer = 'v5-a05-delivery-cadence'
        and r.notification_id is null
+       and not exists (select 1 from ops.notification_delivery h
+                        where h.notification_id = n.id and h.state = 'held_until_morning'
+                          and h.held_until > now())
      order by n.created_at desc
      limit 50
   ) batch;
@@ -516,7 +682,7 @@ end;
 $$;
 
 comment on function ops.v5_a05_assurance_cadence_batch(text) is
-  'V5-A05: the morning brief''s only door onto ops.notification/ops.notification_read for the assurance_cadence section; granted to carr_reader so the reader connection never touches those tables directly.';
+  'V5-A05: the morning brief''s only door onto ops.notification/ops.notification_read for the assurance_cadence section; granted to carr_reader so the reader connection never touches those tables directly. Refuses any recipient that is not an active human partner (joe, dell) and omits items still held for the morning window.';
 
 -- ---------------------------------------------------------------------------
 -- Grants.
@@ -545,9 +711,14 @@ grant execute on function ops.v5_a05_record_cadence_receipt(text,text,uuid) to c
 revoke all on function ops.notification_quiet_now(uuid)
   from public, carr_reader, carr_writer, carr_jobs, carr_authority;
 
-revoke all on function ops.mint_notification(text,uuid,text,text,text,text,text,text,text,boolean)
+-- Owner-only for the same reason: ops.mint_notification (SECURITY DEFINER)
+-- is its only caller.
+revoke all on function ops.notification_morning_release_at(uuid)
   from public, carr_reader, carr_writer, carr_jobs, carr_authority;
-grant execute on function ops.mint_notification(text,uuid,text,text,text,text,text,text,text,boolean)
+
+revoke all on function ops.mint_notification(text,uuid,text,text,text,text,text,text,text,boolean,boolean)
+  from public, carr_reader, carr_writer, carr_jobs, carr_authority;
+grant execute on function ops.mint_notification(text,uuid,text,text,text,text,text,text,text,boolean,boolean)
   to carr_writer, carr_authority;
 
 revoke all on function ops.v5_a05_assurance_cadence_batch(text)

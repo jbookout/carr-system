@@ -334,8 +334,8 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     # V5-A05 delivery cadence: 0610 installs ops.v5_a05_cadence_status,
     # ops.v5_a05_record_cadence_receipt, ops.v5_a05_assurance_cadence_batch,
     # ops.notification_quiet_now and the extended ops.mint_notification
-    # (SECURITY DEFINER writers/readers); 0611 seals that catalog as v73,
-    # chained from main's v72 (0603). Same deferred-epoch-trigger shape as
+    # (SECURITY DEFINER writers/readers); 0611 seals that catalog as v74,
+    # chained from main's v73 (0609). Same deferred-epoch-trigger shape as
     # the pairs above: 0610 applied alone would be refused at commit, so the
     # pair must be one transaction.
     (

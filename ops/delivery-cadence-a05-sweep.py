@@ -6,7 +6,7 @@ Read-only against the record layer except for the ONE write this job owns:
 raise-delivery-cadence-alert, called only when cadence-status (read) reports
 status "missed". A subject that is "current" is left alone.
 "no_receipt_on_record" is ALSO left alone while young -- but
-ops.v5_a05_cadence_status (migration 0592) now starts the interval from a
+ops.v5_a05_cadence_status (migration 0610) now starts the interval from a
 genuine server-side activation anchor when no receipt has ever been issued,
 so a subject that goes a full 14-day interval with zero receipts is reported
 as "missed" too (review finding 3: "no_receipt_on_record forever" meant this
@@ -17,7 +17,14 @@ produced it.
 
 Same call path ops/timebomb-audit.py and tools/cutover-watch.py use: a
 subprocess to `run.sh call <verb> '<json>'`, never the generic MCP call-verb
-passthrough. No seal is owed for this script or its launchd plist (decision
+passthrough. That path authenticates as the partner-sponsored local machine
+credential -- the V5-A05 "system" seat -- so the write below is admitted; and
+cadence-status runs on the writer connection in a read-only transaction
+(writerConnection, PR #1236 review round 2 item 1), because
+ops.v5_a05_cadence_status is not executable by carr_reader. The server
+re-reads the cadence status itself before accepting the miss and derives
+that a replan needs Joe's authority (held for his morning window); this
+script sends no urgency or authority flag, because none would be honoured. No seal is owed for this script or its launchd plist (decision
 05e144eb, 2026-09-24, PR #1174): script and launchd edits no longer reseal.
 
 Bounded v1 scope: ONE subject, (engineering_program, doctorcre-v5) -- the
@@ -112,8 +119,6 @@ def sweep_subject(subject: dict) -> dict:
         "reason_id": "cadence_miss_replan_required",
         "subject_type": subject["subject_type"],
         "subject_ref": subject["subject_ref"],
-        "requires_joe_authority": True,
-        "unresolved_intent": False,
         "detail": f"expired {expires_at}; sweep detected {status.get('days_since_last_receipt')} days since last receipt",
     })
     if not ok:

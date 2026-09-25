@@ -11,7 +11,7 @@ existing unit test for morning-brief runs against a fake client whose stub
 returns `{rows: []}` for any matching query regardless of role -- it cannot
 catch a missing grant, because it never talks to a real Postgres or a real
 role. This gate does: it connects as an unprivileged carr_reader-scoped
-role and calls ops.v5_a05_assurance_cadence_batch (0592) exactly as
+role and calls ops.v5_a05_assurance_cadence_batch (migration 0610) exactly as
 morning-brief's assurance_cadence section does, then asserts the SAME role
 is refused direct SELECT on the two underlying tables.
 """
@@ -94,6 +94,19 @@ def main() -> int:
                     f"exactly once, got {batch!r}"
                 )
 
+            # PR #1236 review round 2, item 4: the door names its recipient by
+            # argument, so it must refuse any slug that is not an active
+            # partner -- a reader-scoped caller cannot aim it at another actor.
+            for foreign in ("codex", "joe-local", "no-such-actor"):
+                cur.execute("savepoint expect_slug_refusal")
+                try:
+                    cur.execute("select ops.v5_a05_assurance_cadence_batch(%s)", (foreign,))
+                except psycopg.errors.InsufficientPrivilege:
+                    cur.execute("rollback to savepoint expect_slug_refusal")
+                else:
+                    raise RuntimeError(
+                        "v5-a05 assurance-cadence reader gate: the batch door answered for "
+                        f"non-partner recipient {foreign!r}")
             # The same reader-scoped role must still be refused DIRECT table
             # access -- the function is the door, not a new blanket grant.
             cur.execute("savepoint expect_refusal")

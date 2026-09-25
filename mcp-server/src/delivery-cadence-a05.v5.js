@@ -31,10 +31,16 @@
 //     Joe as an FYI; that is a different, unbuilt surface.
 //   * "automatic authority widening"       — the ONLY things that can make an
 //     item wake Joe are the closed urgent-reason vocabulary and the two
-//     caller-asserted booleans this module's request schema names outright
-//     (`requires_joe_authority`, `unresolved_intent`). No other field, however
-//     labelled, can raise an item's routing — the request schemas are closed
-//     and an unknown field is a contract violation, not a policy question.
+//     booleans `evaluateEscalationRouting`'s request schema names outright
+//     (`requires_joe_authority`, `unresolved_intent`). Those booleans are NOT
+//     caller assertions in production: `deriveEscalationFacts` below computes
+//     them (and whether an urgent reason may be honoured at all) from the
+//     reason id plus facts the SERVER read — the raising seat's server-derived
+//     class, an open incident record, the server-clock cadence status — and
+//     raise-delivery-cadence-alert feeds only that derivation to the router.
+//     No other field, however labelled, can raise an item's routing — the
+//     request schemas are closed and an unknown field is a contract violation,
+//     not a policy question.
 //   * "clock reset"                        — see above.
 //
 // TWO KINDS OF NO, inherited from global-boundaries.v5.js:
@@ -440,4 +446,114 @@ export function escalationForCadenceMiss(cadenceEvaluation) {
     unresolved_intent: false,
     quiet_now: false,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Server-side derivation of urgency and authority-need (PR #1236 review,
+// round 2, item 3). The caller names a reason id; it never names whether that
+// reason is urgent enough to bypass quiet hours, nor whether it needs Joe's
+// authority. Those are computed HERE, deterministically, from the reason id
+// plus facts the server itself read:
+//
+//   * `seat`            -- the raising actor's class, derived by the verb from
+//                          the server-authenticated actor, never an argument:
+//                          "authority" (a verified human partner), "system"
+//                          (the partner-sponsored local machine credential the
+//                          daily sweep and ops jobs run as) or "other" (model
+//                          agents, bots, reviewers, probes, anything
+//                          unsponsored).
+//   * `incident`        -- the ops.incident row the caller's incident_ref
+//                          names, as the server read it, or null.
+//   * `cadence_status`  -- ops.v5_a05_cadence_status for the subject, read on
+//                          the server clock inside the same transaction.
+//
+// The table, closed and total over the reason vocabulary:
+//
+//   security_incident | data_loss | outward_harm      (urgent)
+//       refused unless the seat is authority or system, AND the incident is
+//       open (not resolved/reviewed), not adjudicated a duplicate, in
+//       production, at SEV-0 or SEV-1. Honoured: urgent routing.
+//   cadence_miss_replan_required                      (ordinary)
+//       refused unless the server-clock cadence status reads "missed". A
+//       replan is Joe's call: requires_joe_authority = true (morning batch).
+//   decision_required                                 (ordinary)
+//       by definition a decision only Joe's authority settles:
+//       requires_joe_authority = true (morning batch).
+//   delivery_blocker | review_blocker                 (ordinary)
+//       neither authority nor unresolved intent: evidence only.
+//
+// No reason in today's closed vocabulary names unresolved intent, so the
+// derivation never sets that axis; the router keeps it so that adding such a
+// reason is a vocabulary change here, not a caller-asserted flag.
+//
+// A refusal is a POLICY ANSWER (ok:false with a stable refusal_id), never a
+// throw: "you may not raise this" is a question the verb answers to its
+// caller. Malformed input is still a contract violation and throws.
+// ---------------------------------------------------------------------------
+
+export const V5_A05_SEATS = deepFreeze(["authority", "system", "other"]);
+export const V5_A05_URGENT_SEATS = deepFreeze(["authority", "system"]);
+export const V5_A05_URGENT_INCIDENT_SEVERITIES = deepFreeze(["SEV-0", "SEV-1"]);
+const CLOSED_INCIDENT_STATES = Object.freeze(["resolved", "reviewed"]);
+const DERIVATION_REQUEST_KEYS = Object.freeze(["reason_id", "seat", "incident", "cadence_status"]);
+const INCIDENT_FACT_KEYS = Object.freeze(["ref", "state", "severity", "environment", "duplicate_of_id"]);
+
+function derivationRefusal(reasonId, refusalId, detail) {
+  return deepFreeze({
+    schema_version: V5_A05_SCHEMA_VERSION, policy_version: V5_A05_POLICY_VERSION,
+    ok: false, reason_id: reasonId, refusal_id: refusalId, ...detail, effects: V5_NO_EFFECTS,
+  });
+}
+
+function derivation(reasonId, requiresJoeAuthority, verifiedBy) {
+  return deepFreeze({
+    schema_version: V5_A05_SCHEMA_VERSION, policy_version: V5_A05_POLICY_VERSION,
+    ok: true, reason_id: reasonId, requires_joe_authority: requiresJoeAuthority,
+    unresolved_intent: false, verified_by: verifiedBy, effects: V5_NO_EFFECTS,
+  });
+}
+
+export function deriveEscalationFacts(request) {
+  assertObject(request, "request");
+  assertClosedKeys(request, DERIVATION_REQUEST_KEYS, "request");
+  assertRequiredKeys(request, DERIVATION_REQUEST_KEYS, "request");
+  const severity = classifyEscalationReason(request.reason_id);
+  if (!V5_A05_SEATS.includes(request.seat))
+    fail("invalid_shape", "request.seat must be one of the closed seat classes",
+      { path: "request.seat", seat: request.seat });
+  let incident = null;
+  if (request.incident !== null) {
+    incident = assertObject(request.incident, "request.incident");
+    assertClosedKeys(incident, INCIDENT_FACT_KEYS, "request.incident");
+    assertRequiredKeys(incident, INCIDENT_FACT_KEYS, "request.incident");
+  }
+  if (request.cadence_status !== null && !V5_A05_CADENCE_STATUSES.includes(request.cadence_status))
+    fail("invalid_shape", "request.cadence_status must be a known cadence status or null",
+      { path: "request.cadence_status" });
+
+  const reasonId = request.reason_id;
+  if (severity === "urgent") {
+    if (!V5_A05_URGENT_SEATS.includes(request.seat))
+      return derivationRefusal(reasonId, "urgent_alert_requires_system_or_authority_seat", { seat: request.seat });
+    if (incident === null)
+      return derivationRefusal(reasonId, "urgent_alert_requires_verified_incident", {});
+    const failed = [];
+    if (CLOSED_INCIDENT_STATES.includes(incident.state)) failed.push("incident_not_open");
+    if (incident.duplicate_of_id !== null) failed.push("incident_adjudicated_duplicate");
+    if (incident.environment !== "production") failed.push("incident_not_production");
+    if (!V5_A05_URGENT_INCIDENT_SEVERITIES.includes(incident.severity)) failed.push("incident_severity_not_urgent");
+    if (failed.length)
+      return derivationRefusal(reasonId, "urgent_alert_incident_not_verified",
+        { incident_ref: incident.ref, failed_checks: failed });
+    return derivation(reasonId, false, { kind: "open_production_incident", incident_ref: incident.ref,
+      incident_severity: incident.severity, seat: request.seat });
+  }
+  if (reasonId === "cadence_miss_replan_required") {
+    if (request.cadence_status !== "missed")
+      return derivationRefusal(reasonId, "cadence_miss_not_verified", { cadence_status: request.cadence_status });
+    return derivation(reasonId, true, { kind: "server_clock_cadence_status", cadence_status: "missed" });
+  }
+  if (reasonId === "decision_required")
+    return derivation(reasonId, true, { kind: "reason_vocabulary" });
+  return derivation(reasonId, false, { kind: "reason_vocabulary" });
 }

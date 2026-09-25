@@ -69935,7 +69935,7 @@
           "effect_class": "audit_side_effect",
           "source_locator": "mcp-server/src/delivery-cadence-a05-tools.js",
           "schema_digest": "b19fb40dfe8a4872ce504f14f429bb528e7991bbe9b897b7d85a0751ca01c55a",
-          "source_digest": "99041d014fe4c2e7cd45afa0e872dc6c8b95fb9954d28c6ba9f5ce40308426a6",
+          "source_digest": "5c9b599489f4cbb1d7fe22a9b5e40da50937c581d00cc5957d59f7b286adff57",
           "write": false,
           "human_only": false,
           "authority_only": false,
@@ -69957,8 +69957,8 @@
           "operation": "raise-delivery-cadence-alert",
           "effect_class": "administrative_mutation",
           "source_locator": "mcp-server/src/delivery-cadence-a05-tools.js",
-          "schema_digest": "eae7d9f5b3f67d9a08f2571369236a615a6c572f09c9dd100099a1e0968b367f",
-          "source_digest": "99041d014fe4c2e7cd45afa0e872dc6c8b95fb9954d28c6ba9f5ce40308426a6",
+          "schema_digest": "681dfa013302809455ce15ed672d611171c4ed8c3a7843378a9b336bf774c4a0",
+          "source_digest": "5c9b599489f4cbb1d7fe22a9b5e40da50937c581d00cc5957d59f7b286adff57",
           "write": true,
           "human_only": false,
           "authority_only": false,
@@ -69981,7 +69981,7 @@
           "effect_class": "administrative_mutation",
           "source_locator": "mcp-server/src/delivery-cadence-a05-tools.js",
           "schema_digest": "29d5a63dbb5c1e1e639426dd6e229889d17a899ceb3f1e6bba98c6c8e619974e",
-          "source_digest": "99041d014fe4c2e7cd45afa0e872dc6c8b95fb9954d28c6ba9f5ce40308426a6",
+          "source_digest": "5c9b599489f4cbb1d7fe22a9b5e40da50937c581d00cc5957d59f7b286adff57",
           "write": true,
           "human_only": false,
           "authority_only": false,
@@ -70003,8 +70003,8 @@
           "operation": "tools/migrate.py",
           "effect_class": "administrative_mutation",
           "source_locator": "tools/migrate.py",
-          "schema_digest": "b97c5354396686ad0c3cfebd80b5c0c55438e9a27ca0b59b49abca13503211d4",
-          "handler_digest": "b97c5354396686ad0c3cfebd80b5c0c55438e9a27ca0b59b49abca13503211d4",
+          "schema_digest": "9e367fdef5c3d242bf6f2640f4a5953bc8f6c368afec6ec9da6f8e58773635f7",
+          "handler_digest": "9e367fdef5c3d242bf6f2640f4a5953bc8f6c368afec6ec9da6f8e58773635f7",
           "write": true,
           "human_only": false,
           "authority_only": true,
@@ -70098,7 +70098,7 @@
         }
       ],
       "expected_count": 916,
-      "expected_sha256": "31d1dd9f105414f0568f75246ea557de647e4d1d78fb8b71d716c0abcce4b19b"
+      "expected_sha256": "e1a1998fb55e66d8b3afa168e4cb3a71bd4f986098563bc986cdc12fcdf8a3b7"
     }
   ],
   "current_source_review": {

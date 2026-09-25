@@ -282,7 +282,7 @@ test("R03-SIGNAL-SURVIVES-MINT-FAILURE: a mint that cannot mint leaves the signa
     // The cheapest honest way to make the mint raise at the REAL call site: take
     // the grant away for the duration of this case, which produces a real 42501.
     await owner.query(
-      "revoke execute on function ops.mint_notification(text,uuid,text,text,text,text,text,text,text,boolean) from carr_writer");
+      "revoke execute on function ops.mint_notification(text,uuid,text,text,text,text,text,text,text,boolean,boolean) from carr_writer");
     try {
       await owner.query("begin");
       await owner.query("set local role carr_writer");
@@ -298,7 +298,7 @@ test("R03-SIGNAL-SURVIVES-MINT-FAILURE: a mint that cannot mint leaves the signa
       await owner.query("reset role").catch(() => {});
       await owner.query("rollback").catch(() => {});
       await owner.query(
-        "grant execute on function ops.mint_notification(text,uuid,text,text,text,text,text,text,text,boolean) to carr_writer");
+        "grant execute on function ops.mint_notification(text,uuid,text,text,text,text,text,text,text,boolean,boolean) to carr_writer");
     }
 
     // THE SIGNAL ROW IS COMMITTED. This is the whole clause: the notification is

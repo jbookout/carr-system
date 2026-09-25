@@ -20,6 +20,7 @@ import {
   V5_A05_URGENT_REASON_IDS,
   assertA05CatalogBinding,
   classifyEscalationReason,
+  deriveEscalationFacts,
   escalationForCadenceMiss,
   evaluateCadenceReceipt,
   evaluateEscalationRouting,
@@ -317,4 +318,69 @@ test("contract: exported vocabularies are frozen and cannot be mutated by a cons
   assert.ok(Object.isFrozen(V5_A05_URGENT_REASON_IDS));
   assert.ok(Object.isFrozen(V5_A05_ORDINARY_REASON_IDS));
   assert.throws(() => { V5_A05_URGENT_REASON_IDS.push("anything"); });
+});
+
+// ---------------------------------------------------------------------------
+// SERVER DERIVATION -- PR #1236 review round 2, item 3. Urgency and
+// authority-need come from the reason id plus server-read facts only.
+// ---------------------------------------------------------------------------
+
+const OPEN_SEV1 = Object.freeze({ ref: "INC-1", state: "investigating", severity: "SEV-1",
+  environment: "production", duplicate_of_id: null });
+const derive = (fields) => deriveEscalationFacts({
+  reason_id: "security_incident", seat: "authority", incident: null, cadence_status: null, ...fields });
+
+test("derivation: an urgent reason is honoured only from a raising seat citing an open production SEV-0/1 incident", () => {
+  for (const reason of V5_A05_URGENT_REASON_IDS) {
+    for (const seat of ["authority", "system"]) {
+      const ok = derive({ reason_id: reason, seat, incident: OPEN_SEV1 });
+      assert.equal(ok.ok, true, `${reason}/${seat}`);
+      assert.equal(ok.requires_joe_authority, false);
+      assert.equal(ok.verified_by.incident_ref, "INC-1");
+      const routed = evaluateEscalationRouting({ reason_id: reason, requires_joe_authority: ok.requires_joe_authority,
+        unresolved_intent: ok.unresolved_intent, quiet_now: true });
+      assert.equal(routed.routing, "deliver_immediately");
+      assert.equal(routed.bypasses_quiet_hours, true);
+    }
+    assert.equal(derive({ reason_id: reason, seat: "other", incident: OPEN_SEV1 }).refusal_id,
+      "urgent_alert_requires_system_or_authority_seat");
+    assert.equal(derive({ reason_id: reason }).refusal_id, "urgent_alert_requires_verified_incident");
+  }
+  const refusedFor = (incident) => derive({ incident: { ...OPEN_SEV1, ...incident } });
+  assert.deepEqual([...refusedFor({ state: "resolved" }).failed_checks], ["incident_not_open"]);
+  assert.deepEqual([...refusedFor({ state: "reviewed" }).failed_checks], ["incident_not_open"]);
+  assert.deepEqual([...refusedFor({ duplicate_of_id: "x" }).failed_checks], ["incident_adjudicated_duplicate"]);
+  assert.deepEqual([...refusedFor({ environment: "staging" }).failed_checks], ["incident_not_production"]);
+  assert.deepEqual([...refusedFor({ severity: "SEV-2" }).failed_checks], ["incident_severity_not_urgent"]);
+  assert.equal(derive({ incident: { ...OPEN_SEV1, severity: "SEV-0" } }).ok, true);
+  assert.equal(refusedFor({ severity: "SEV-3" }).refusal_id, "urgent_alert_incident_not_verified");
+});
+
+test("derivation: ordinary reasons take their authority-need from the reason and the server-clock cadence status", () => {
+  const miss = derive({ reason_id: "cadence_miss_replan_required", cadence_status: "missed" });
+  assert.equal(miss.ok, true);
+  assert.equal(miss.requires_joe_authority, true);
+  for (const status of ["current", "no_receipt_on_record", null]) {
+    assert.equal(derive({ reason_id: "cadence_miss_replan_required", cadence_status: status }).refusal_id,
+      "cadence_miss_not_verified", String(status));
+  }
+  assert.equal(derive({ reason_id: "decision_required" }).requires_joe_authority, true);
+  for (const reason of ["delivery_blocker", "review_blocker"]) {
+    const facts = derive({ reason_id: reason, seat: "other" });
+    assert.equal(facts.ok, true);
+    assert.equal(facts.requires_joe_authority, false);
+    assert.equal(facts.unresolved_intent, false);
+  }
+  // Ordinary reasons never need a seat: evidence and morning batches are open.
+  assert.equal(derive({ reason_id: "decision_required", seat: "other" }).ok, true);
+});
+
+test("derivation: caller booleans have no field to arrive in, and malformed facts are contract violations", () => {
+  assert.throws(() => deriveEscalationFacts({ reason_id: "review_blocker", seat: "other", incident: null,
+    cadence_status: null, requires_joe_authority: true }), V5BoundaryError);
+  assert.throws(() => derive({ seat: "root" }), V5BoundaryError);
+  assert.throws(() => derive({ reason_id: "made_up" }), V5BoundaryError);
+  assert.throws(() => derive({ cadence_status: "late" }), V5BoundaryError);
+  assert.throws(() => derive({ incident: { ...OPEN_SEV1, urgent: true } }), V5BoundaryError);
+  assert.ok(Object.isFrozen(derive({ incident: OPEN_SEV1 })));
 });

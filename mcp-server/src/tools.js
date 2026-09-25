@@ -2960,8 +2960,10 @@ export const TOOLS = {
       // item is simply an unread notification from this producer, surfaced
       // here AND reachable through notification-feed like any other.
       const assuranceCadence = await section(async () => {
-        // Reads through ops.v5_a05_assurance_cadence_batch (0592), a narrow
-        // SECURITY DEFINER function granted to carr_reader -- morning-brief
+        // Reads through ops.v5_a05_assurance_cadence_batch (migration 0610,
+        // sealed as SCAC v74 by 0611), a narrow SECURITY DEFINER function
+        // granted to carr_reader that refuses any non-partner recipient and
+        // hides items still held for the morning window -- morning-brief
         // runs on the reader connection, and ops.notification/
         // ops.notification_read themselves carry no carr_reader grant
         // (tools/test-handler-reads-are-granted.py). Never read those tables
