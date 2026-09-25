@@ -115,3 +115,35 @@ test("the seam call sits after coercion and before the handler, and maps an enfo
   // The door context is never taken from the caller.
   assert.doesNotMatch(body.slice(doorCall, doorCall + 200), /args\.(connectivity|context|now)/);
 });
+
+// #1268 review, robustness: the seam hands the door exactly five inputs, and
+// none of mode, context or log. Any extra key (`mode: args.door_mode`,
+// `context: args.context`, `log: ...`) or a changed value fails here, not just
+// the spellings the previous test happens to name.
+test("the seam passes the door only verb, write, actor, args and now, each from the server", () => {
+  const source = readFileSync(new URL("../src/tools.js", import.meta.url), "utf8");
+  const start = source.indexOf("export async function executeRegisteredTool(");
+  const body = source.slice(start, source.indexOf("\nconst TOOL_REGISTRATION_SOURCE", start));
+  const calls = body.split("passBoundaryDoor(").length - 1;
+  assert.equal(calls, 1, "exactly one door call in the dispatch seam");
+  const open = body.indexOf("passBoundaryDoor({") + "passBoundaryDoor({".length;
+  let depth = 1;
+  let end = open;
+  for (; end < body.length && depth > 0; end += 1) {
+    if (body[end] === "{") depth += 1;
+    else if (body[end] === "}") depth -= 1;
+  }
+  const literal = body.slice(open, end - 1).replace(/\s+/g, " ").trim();
+  assert.equal(body.slice(end, end + 2), ");", "the door call takes one object literal and nothing else");
+  assert.doesNotMatch(literal, /\.\.\./, "no spread can smuggle caller keys into the door input");
+  const entries = literal.split(/,(?![^()]*\))/).map(part => part.trim()).filter(Boolean);
+  const keys = entries.map(entry => entry.split(":")[0].trim());
+  assert.deepEqual(keys, ["verb", "write", "actor", "args", "now"]);
+  assert.deepEqual(entries, [
+    "verb: name",
+    "write: tool.write === true",
+    "actor",
+    "args",
+    "now: new Date().toISOString()",
+  ]);
+});
