@@ -498,6 +498,10 @@ def main():
         # Never inherit an earlier wrapper's routing hint.  Only this payload's
         # existing top-level cwd may nominate an invocation checkout.
         os.environ.pop(INVOCATION_REPO_ENV, None)
+        # Jev calls the gate makes for itself go straight to the vendor; only
+        # the build advisory takes the server path (ops/typesafe_client.py
+        # IN_HOOK_ENV), so no hook spends its time budget on a receipt.
+        os.environ["CARR_JEV_IN_HOOK"] = "1"
         invocation_cwd = _top_level_cwd(raw)
         if invocation_cwd and os.path.isdir(invocation_cwd):
             os.environ[INVOCATION_REPO_ENV] = os.path.abspath(invocation_cwd)

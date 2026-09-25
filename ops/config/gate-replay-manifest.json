@@ -825,6 +825,7 @@
     "lib/claude_continuity_config.py",
     "lib/claude_rule_delivery_dedupe.py",
     "lib/jev_required_actions.py",
+    "lib/jev_server_receipts.py",
     "lib/loadpy.py",
     "lib/local_principal.py",
     "lib/machine_prerequisites.py",

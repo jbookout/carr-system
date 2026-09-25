@@ -60,8 +60,10 @@ KNOWN_HOSTS in hooks/guard-unattended.py.
 
 import json
 import os
+import shutil
 import subprocess
 import time
+import uuid
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -218,7 +220,145 @@ def _session_id():
     return None
 
 
-def _append_call_receipt(questions, facets, result, log_path):
+# THE SERVER-SIDE CALL LOG (2026-09-24, after a reviewer bypassed every Jev gate
+# by appending ONE forged record to a file the gated model can write). The
+# session transcript and out/jev-calls.jsonl are both writable by the model,
+# because the model's shell runs as the same OS user as the hooks and as this
+# client: any local file, local key, or local daemon a hook can use, the model
+# can use too. So the production path no longer calls the vendor from here. It
+# asks the deployed Worker's `ask-jev` verb, which makes the TypeSafe call with
+# the Worker's own secret and appends a server-timestamped receipt to an
+# append-only table (migration 0587) in a short transaction after the vendor
+# answered, through the same write envelope that records a tool_call row for
+# the same idempotency key. lib/jev_required_actions.py credits a required facet
+# only from rows the Worker's read door returns, and that door returns only
+# receipts matched by their ask-jev tool_call row.
+#
+# DETECTABLE, NOT PREVENTED. The model's OS user can read the database owner
+# credential (tools/db-tap.py), so it can insert, backdate or delete receipt
+# rows, or disable the append-only trigger, directly in the database. None of
+# that is prevented. A receipt inserted alone has no ask-jev tool_call row, so
+# the read door never returns it and the integrity audit in `./run.sh health`
+# (read-jev-call-receipt-integrity) flags it, and a disabled trigger. Not
+# caught: a hand-inserted tool_call twin, a genuine receipt edited, backdated
+# or deleted in place, or a trigger disabled and re-enabled between audits.
+# Moving that credential out of the model's reach is Joe's separate, parked
+# decision.
+#
+# The verb is reached the way every local caller reaches the Worker:
+# mcp-server/local-verb.mjs's zero-install HTTPS path with the LOCAL_TOKENS
+# bearer. This module never reads, sees, or forwards that bearer; local-verb.mjs
+# does, from its own 600-mode file.
+#
+# FALLBACK, AND WHY IT IS NOT A BYPASS. If the verb cannot be used (not yet
+# deployed, Worker unreachable, no node, the Worker holds no vendor key), ask()
+# still calls the vendor directly as it always did, so a working Jev is never
+# turned off by a Worker outage. That call has NO server receipt, so the gates
+# treat any facet it was meant to satisfy as UNVERIFIED and say so loudly. The
+# local out/jev-calls.jsonl row records `server_receipt_id: null` and the
+# category of the server failure, never its text.
+SERVER_VERB = "ask-jev"
+PURPOSES = ("call", "build_advisory")
+# Jev calls a HOOK makes for its own purposes (rule selection, supervisors,
+# code review) are not a session's Jev use and must not cost a hook its time
+# budget, so hooks/hook-meter-run.py marks the process and those calls go to
+# the vendor directly. The UserPromptSubmit build advisory is the exception:
+# it always tries the server, because the gates bind to the server's copy.
+# Setting the marker from a shell only makes that shell's calls uncredited.
+IN_HOOK_ENV = "CARR_JEV_IN_HOOK"
+# The Worker caps its own vendor call at 10s; node's start and the round trip
+# get the rest. The whole server attempt never takes more than this share of
+# the caller's timeout, so a failed attempt still leaves time to go direct.
+SERVER_SHARE_OF_TIMEOUT = 0.7
+MIN_DIRECT_SECONDS = 2.0
+
+
+def _local_verb_script():
+    """mcp-server/local-verb.mjs, preferring this checkout's own copy and
+    falling back to the canonical checkout's (every worktree shares one
+    Worker, so either reaches the same verb)."""
+    for root in (REPO, CANONICAL_REPO):
+        candidate = os.path.join(root, "mcp-server", "local-verb.mjs")
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def _node_binary():
+    for candidate in (shutil.which("node"), "/opt/homebrew/bin/node", "/usr/local/bin/node"):
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _server_error_category(stderr):
+    """A fixed category for a failed verb call. Never the raw text: local-verb
+    stderr is the Worker's own error JSON, which carries no credential, but a
+    category is all a receipt or a gate needs."""
+    text = stderr or ""
+    for marker, category in (
+            ('"unknown_tool"', "verb_not_deployed"),
+            ('"jev_proxy_unconfigured"', "worker_key_unbound"),
+            ('"jev_upstream_failed"', "vendor_failed_at_worker"),
+            ("could not reach the deployed Worker", "worker_unreachable"),
+            ("no MCP token", "local_token_missing"),
+            ("refusing MCP token file", "local_token_insecure")):
+        if marker in text:
+            return category
+    return "server_call_failed"
+
+
+def server_ask(state, questions, *, model, facets, purpose, session_id, timeout,
+               runner=None):
+    """Ask the Worker's ask-jev verb. Returns (result, None) on success, where
+    result is {"model", "answers", "usage", "server_receipt": {...}}, or
+    (None, <category>) on any failure. Never raises."""
+    script = _local_verb_script()
+    node = _node_binary()
+    if runner is None and (script is None or node is None):
+        return None, "node_or_local_verb_missing"
+    args = {
+        "idempotency_key": str(uuid.uuid4()),
+        "session_id": session_id,
+        "purpose": purpose,
+        "state": state,
+        "questions": questions,
+        "facets": sorted({str(f) for f in facets}) if facets else [],
+        "model": model,
+    }
+    try:
+        run = runner or subprocess.run
+        proc = run([node or "node", script or "local-verb.mjs", SERVER_VERB,
+                    json.dumps(args, ensure_ascii=False)],
+                   capture_output=True, text=True,
+                   timeout=float(timeout),
+                   stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return None, "server_timeout"
+    except Exception:
+        return None, "server_call_failed"
+    if proc.returncode != 0:
+        return None, _server_error_category(proc.stderr)
+    try:
+        out = json.loads(proc.stdout)
+    except ValueError:
+        return None, "server_response_unparseable"
+    if (not isinstance(out, dict) or out.get("ok") is not True
+            or not isinstance(out.get("answers"), dict)
+            or not isinstance(out.get("receipt_id"), str)):
+        return None, "server_response_malformed"
+    return {
+        "model": out.get("model"),
+        "answers": out["answers"],
+        "usage": out.get("usage") if isinstance(out.get("usage"), dict) else None,
+        "server_receipt": {k: out.get(k) for k in (
+            "receipt_id", "recorded_at", "purpose", "session_id",
+            "state_sha256", "prompt_sha256")},
+    }, None
+
+
+def _append_call_receipt(questions, facets, result, log_path, server_error=None,
+                         session=None):
     """Best-effort, APPEND-ONLY JSONL row, never on the request or the
     answers, never able to turn a successful ask() into a failure. See
     JEV_CALLS_LOG above.
@@ -235,14 +375,21 @@ def _append_call_receipt(questions, facets, result, log_path):
     """
     try:
         answered = result if isinstance(result, dict) else {}
+        server = answered.get("server_receipt") if isinstance(
+            answered.get("server_receipt"), dict) else {}
         row = {
             "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "session": _session_id(),
+            "session": session or _session_id(),
             "question_ids": sorted(questions),
             "facets": sorted({str(f) for f in facets}) if facets else [],
             "model": answered.get("model"),
             "usage": answered.get("usage") if isinstance(answered.get("usage"), dict) else None,
             "ok": True,
+            # Visibility only: the gates never trust this file for credit any
+            # more; they read the server's own rows. A null id says the call
+            # went to the vendor directly and is unverified.
+            "server_receipt_id": server.get("receipt_id"),
+            "server_error": server_error,
         }
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         with open(log_path, "a", encoding="utf-8") as fh:
@@ -253,7 +400,8 @@ def _append_call_receipt(questions, facets, result, log_path):
 
 def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
         api_key=None, retries=RATE_LIMIT_RETRIES, endpoint=ENDPOINT, opener=None,
-        facets=None, calls_log=JEV_CALLS_LOG):
+        facets=None, calls_log=JEV_CALLS_LOG, purpose="call", server_runner=None,
+        session_id=None):
     """Evaluate `state` against a map of questions in ONE request.
 
     `state` is a string, or a mapping when the context has several parts —
@@ -274,9 +422,20 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
     production. On a successful response this also appends one best-effort
     receipt row to `calls_log` (default out/jev-calls.jsonl) — see
     JEV_CALLS_LOG's module-level note for what it carries and why.
+
+    `purpose` is "call" (the default) or "build_advisory" (only
+    ops/jev_build_advisory.py, reached from the UserPromptSubmit hook). The
+    production path — no `opener`, no explicit `api_key` — goes through the
+    Worker's ask-jev verb first so the call leaves a server-side receipt; see
+    SERVER_VERB above for why, and for the direct fallback. `session_id`
+    overrides the session read from the environment (a hook passes its
+    payload's). `server_runner` stands in for subprocess.run in the offline
+    selftest only.
     """
     if not isinstance(questions, dict) or not questions:
         raise TypeSafeError("ask needs a non-empty map of questions")
+    if purpose not in PURPOSES:
+        raise TypeSafeError(f"purpose must be one of {PURPOSES}")
 
     payload = {"state": state, "model": model, "questions": questions}
     body = json.dumps(payload).encode("utf-8")
@@ -289,6 +448,27 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
             "a state fills with detail unrelated to the decision, so trimming "
             "is the fix rather than raising the guard."
         )
+
+    server_error = None
+    started = time.monotonic()
+    in_hook = os.environ.get(IN_HOOK_ENV) == "1" and purpose != "build_advisory"
+    if opener is None and api_key is None and not in_hook:
+        served, server_error = server_ask(
+            state, questions, model=model, facets=facets, purpose=purpose,
+            session_id=session_id or _session_id() or "unbound",
+            timeout=float(timeout) * SERVER_SHARE_OF_TIMEOUT, runner=server_runner)
+        if served is not None:
+            _append_call_receipt(questions, facets, served, calls_log,
+                                 session=session_id)
+            return served
+        # The direct fallback gets only what is left of the caller's budget
+        # (F7: the UserPromptSubmit hook has 20s for everything it does).
+        timeout = float(timeout) - (time.monotonic() - started)
+        if timeout < MIN_DIRECT_SECONDS:
+            raise TypeSafeError(f"Jev server path failed ({server_error}) and no time is "
+                                "left for a direct call")
+    elif in_hook:
+        server_error = "in_hook_direct"
 
     request = urllib.request.Request(
         endpoint, data=body, method="POST",
@@ -313,7 +493,9 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
             # the vendor, so a receipt for it would let a selftest run count
             # as this turn's real Jev evidence.
             if opener is None:
-                _append_call_receipt(questions, facets, result, calls_log)
+                _append_call_receipt(questions, facets, result, calls_log,
+                                     server_error=server_error or "direct_call",
+                                     session=session_id)
             return result
         except urllib.error.HTTPError as err:
             # 429 is documented as expected under load, and the service's own

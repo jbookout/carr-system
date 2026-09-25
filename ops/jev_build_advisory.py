@@ -160,7 +160,7 @@ def _probability(answer: Any) -> float:
 
 
 def advise(partner_request: str, *, client: Any | None = None,
-           timeout: float = 20.0) -> dict:
+           timeout: float = 14.0, session_id: str | None = None) -> dict:
     """Return one typed, attributable reading of a partner's build request."""
     if not isinstance(partner_request, str) or not partner_request.strip():
         raise AdvisoryUnavailable("partner request is empty")
@@ -172,6 +172,13 @@ def advise(partner_request: str, *, client: Any | None = None,
             {"partner_request": partner_request},
             questions(tsc),
             timeout=timeout,
+            # The server keeps this call as a build_advisory receipt, so the
+            # Stop and Agent gates recompute the required facets from the
+            # Worker's own record of Jev's answers rather than from the
+            # transcript copy the gated model can write (ops/typesafe_client.py
+            # SERVER_VERB note).
+            purpose="build_advisory",
+            **({"session_id": session_id} if session_id else {}),
         )
     except Exception as exc:
         raise AdvisoryUnavailable(f"{type(exc).__name__}: Jev unavailable") from None

@@ -114,8 +114,10 @@ from stop_latch import (  # noqa: E402
 
 sys.path.insert(0, REPO)
 from lib.jev_required_actions import (  # noqa: E402
-    current_turn_slice, evaluate_required_actions, jev_calls_log_mentions,
+    chain_view, current_turn_slice, evaluate_required_actions, full_turn_slice,
+    jev_calls_log_mentions, server_read_since, turn_boundary_timestamp, turn_required_facets,
     unexplained_receipts)
+from lib.jev_server_receipts import fetch_receipts_for, session_ids_for  # noqa: E402
 from lib.transcript_read import load_transcript  # noqa: E402
 
 
@@ -1212,40 +1214,83 @@ def jev_audit(row):
         pass
 
 
-def jev_required_actions_check(session, recs):
+# F4: the Worker read's whole budget. This Stop hook has 15s for everything
+# it does; the read gets 6s of it, and a read that runs out falls through to
+# the unreachable-server verdict (every facet unverified, said loudly).
+SERVER_READ_BUDGET_SECONDS = 6.0
+
+
+def jev_required_actions_check(session, recs, anchor_text=None):
     """decision 0b11c89b's Stop-side half. Returns (block, reason, identity)
     with `block` False whenever there is nothing to enforce (no advisory this
     turn, an unavailable advisory, or a readable advisory with no required
     actions) or when this exact turn's finding has already been latched.
+
+    SERVER-VERIFIED (2026-09-24). Credit and the required facets come from the
+    Worker's own receipt rows (lib/jev_server_receipts.py), never from a file
+    the gated model can write; the turn boundary, the prompt advisory copy and
+    the refusal text come only from records on the transcript's uuid chain,
+    anchored on the Stop payload's last_assistant_message. An unreachable
+    server credits nothing and says so in the reopen.
     """
     # The Jev turn is the LIBRARY's turn (a human prompt plus every folded
     # notification, Stop feedback and cross-session message), not this hook's
     # own human_turns() window — that one restarts at a task notification,
     # which would drop a JEV-REFUSED line written before it (round 3).
-    window = current_turn_slice(recs)
+    view = chain_view(recs, anchor_text=anchor_text)
+    trusted = view["recs"]
+    window = current_turn_slice(trusted)
+    full_window = full_turn_slice(recs, trusted)
     texts = [text(rec, {"assistant"}) for rec in window]
-    written_paths = sorted({p for rec in window for p in file_paths(*tool(rec))})
-    result = evaluate_required_actions(recs, texts, JEV_CALLS_LOG, session, written_paths)
-    # FORGERY DETECTION ("detectable, not prevented", decision d47931da).
+    written_paths = sorted({p for rec in full_window for p in file_paths(*tool(rec))})
+    boundary_ts = turn_boundary_timestamp(trusted)
+    # Every real Claude transcript carries uuids, so a real session always
+    # reads the server. A uuid-less transcript with no advisory at all (a
+    # hand-built fixture in another gate's selftest) has nothing to verify and
+    # never reaches the network.
+    # F6: read by session (the payload's id, and the environment's if it
+    # differs) from this turn's own start, not the newest N rows.
+    server = (fetch_receipts_for(session_ids_for(session), server_read_since(trusted),
+                                 budget_seconds=SERVER_READ_BUDGET_SECONDS)
+              if view["chain"] or turn_required_facets(trusted)[0] is not None else None)
+    result = evaluate_required_actions(trusted, texts, JEV_CALLS_LOG, session, written_paths,
+                                       server=server, full_turn_recs=full_window)
+    # FORGERY DETECTION. Records that look like a prompt, an advisory or a
+    # refusal but sit off the uuid chain were ignored above; record them.
+    if boundary_ts is not None:
+        stamp = boundary_ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+        orphans = [o for o in view["orphans"] if (o.get("timestamp") or "") >= stamp]
+    else:
+        orphans = list(view["orphans"])
+    if orphans:
+        jev_audit({"ts": now(), "session": session, "event": "jev_transcript_offchain_record",
+                   "turn_key": result.get("turn_key"), "anchor": view["anchor"],
+                   "records": orphans[:10]})
+    server_block = result.get("server") or {}
+    if server_block.get("unverified_local_receipts"):
+        jev_audit({"ts": now(), "session": session, "event": "jev_local_receipt_unverified",
+                   "turn_key": result.get("turn_key"),
+                   "receipts": server_block["unverified_local_receipts"][:10]})
+    if server_block.get("unmatched_advisories"):
+        jev_audit({"ts": now(), "session": session, "event": "jev_server_advisory_unmatched",
+                   "turn_key": result.get("turn_key"),
+                   "advisories": server_block["unmatched_advisories"][:10]})
     # ask() is the only legitimate writer of out/jev-calls.jsonl and never
     # names it in a tool command, so any tool call in this turn that does is
-    # recorded as a detection event beside the verdict, with the command.
-    mentions = jev_calls_log_mentions(window)
+    # recorded as a detection event beside the verdict, with the command. The
+    # file no longer credits anything, but the attempt is still worth a record.
+    mentions = jev_calls_log_mentions(full_window)
     if mentions:
         jev_audit({"ts": now(), "session": session, "event": "jev_calls_log_named",
                    "turn_key": result.get("turn_key"),
                    "write_like": any(m["write_like"] for m in mentions),
                    "mentions": mentions[:10]})
-    # PROVENANCE BACKSTOP (round 4). The mention check above misses an
-    # indirect write (`f=out/jev-calls; echo x >> $f.jsonl`, a script file).
-    # Every receipt credited to this turn must line up with a Python tool
-    # call (Bash running python, or an Agent in flight) in the transcript;
-    # one that does not is recorded, never blocked.
     unexplained = unexplained_receipts(recs, result.get("credited_receipts") or [])
-    if unexplained:
+    if unexplained and server_block.get("status") != "ok":
         jev_audit({"ts": now(), "session": session, "event": "jev_receipt_unexplained",
                    "turn_key": result.get("turn_key"), "receipts": unexplained[:10]})
-    jev_audit({"ts": now(), "session": session, **result})
+    jev_audit({"ts": now(), "session": session, "chain": view["chain"],
+               "anchor": view["anchor"], **result})
     if result["status"] != "required" or not result["missing"]:
         return False, "", None
     # LATCHED PER TURN, NOT PER SESSION: the identity includes this turn's own
@@ -1260,8 +1305,22 @@ def jev_required_actions_check(session, recs):
         return False, "", None
     missing = ", ".join(result["missing"])
     reason = (f"this turn's Jev build advisory required {missing}, and the turn shows "
-              "neither a Jev call (ops/typesafe_client.py) nor a named refusal "
+              "neither a server-recorded Jev call (ops/typesafe_client.py, which goes "
+              "through the Worker's ask-jev verb) nor a named refusal "
               f"(\"JEV-REFUSED: <facet> <reason>\") for it")
+    if server_block.get("status") and server_block["status"] != "ok":
+        reason += (f". SERVER RECEIPT LOG UNREACHABLE ({server_block.get('reason')}): no Jev "
+                   "call this turn can be verified, so none is credited. This is the gate "
+                   "failing closed on purpose. A named refusal whose reason is not an outage "
+                   "still clears a facet; either way this reopen is latched for the turn and "
+                   "will not repeat")
+    elif server_block.get("unverified_local_receipts"):
+        reason += (". A local receipt claims a call for this turn but the server has no row "
+                   "for it (a call that fell back to the vendor directly, or a forged row); "
+                   "it is not credited")
+    if server_block.get("advisory_basis") == "transcript_unverified":
+        reason += (". The required facets come from the transcript's advisory copy because "
+                   "the server holds no build_advisory row for this turn")
     contradicted = result.get("contradicted_refusals") or []
     if contradicted:
         answered = result.get("jev_answered") or {}
@@ -1385,7 +1444,8 @@ def main():
         # Now one reopen carries both reasons, and both identities are fired
         # so neither repeats. Named req_* so it cannot be confused with
         # #1228's jev_identity (the requirement-checklist reopen).
-        req_blocked, req_reason, req_identity = jev_required_actions_check(session, recs)
+        req_blocked, req_reason, req_identity = jev_required_actions_check(
+            session, recs, anchor_text=payload.get("last_assistant_message"))
 
         if not blocked:
             if req_blocked:
