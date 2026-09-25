@@ -59,6 +59,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Callable, TypeGuard
 
@@ -100,6 +101,22 @@ PATH_INPUT_KEYS = ("file_path", "path", "notebook_path")
 # structure and reject above it rather than judging only a prompt's edges while
 # issuing a receipt that appears to cover the whole message.
 MESSAGE_LIMIT_CHARS = 90_000
+
+# ONE CLOCK FOR THE WHOLE PROMPT HOOK. ops/config/hooks.json kills this hook at
+# 20 s, and a killed hook delivers nothing. The three slow steps run in order
+# — the build advisory (ops/jev_build_advisory.py: one attempt, at most 6 s,
+# no rate-limit retries), the rule judgment (ops/rule_trigger_delivery.py:
+# its own 12 s clock, cut short here so SELECTOR_RESERVE_SECONDS stay for the
+# last step), and the standing-context door — and all of them end by
+# HOOK_BUDGET_SECONDS after the process started, leaving ~2 s for the
+# interpreter and the receipt.
+HOOK_BUDGET_SECONDS = 18.0
+SELECTOR_RESERVE_SECONDS = 4.0
+_HOOK_STARTED = time.monotonic()
+
+
+def _hook_deadline() -> float:
+    return _HOOK_STARTED + HOOK_BUDGET_SECONDS
 
 
 def scheduled_rule_ids() -> list[str]:
@@ -307,8 +324,9 @@ def _generalized_selector_args(packs: list[str], ids: list[str]) -> str:
 def _run_generalized_selector(packs: list[str], ids: list[str], runner: Callable) -> dict:
     command = [str(REPO / "run.sh"), "call", "standing-context",
                _generalized_selector_args(packs, ids)]
+    timeout = max(1.0, min(15.0, _hook_deadline() - time.monotonic()))
     result = runner(command, cwd=str(REPO), capture_output=True, text=True,
-                    timeout=15, check=False, env=_selector_environment())
+                    timeout=timeout, check=False, env=_selector_environment())
     if result.returncode != 0:
         raise RuntimeError("selector returned nonzero")
     try:
@@ -390,7 +408,9 @@ def _semantic_adviser(situation: str, session_id: str | None = None) -> list[dic
         raise RuntimeError("semantic selector unavailable")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.advise(situation, session_id=session_id)
+    deadline = min(time.monotonic() + module.DEADLINE_SECONDS,
+                   _hook_deadline() - SELECTOR_RESERVE_SECONDS)
+    return module.advise(situation, session_id=session_id, deadline=deadline)
 
 
 def _build_adviser(situation: str) -> dict:

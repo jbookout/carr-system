@@ -35,7 +35,10 @@ TWO KINDS OF PROMPT, TWO POLICIES (2026-09-25 design ruling on #1276 review):
         batched questions scored them 0.23-0.71, the same rules asked one at a
         time scored 0.76-0.85 on 14 of 15. Batching was the defect.
     HARD BUDGET: MAX_JEV_CALLS = 1 ranking + BIND_TOP_K binding = 8 requests
-    per human prompt, enforced here and counted in the log.
+    per human prompt, enforced here and counted in the log. HARD CLOCK:
+    DEADLINE_SECONDS (12 s, under the hook's 20 s timeout); once it is near,
+    no further request starts, and the matches plus whatever was judged are
+    returned, with deadline_hit and the unjudged rules in the log.
 
 FAIL OPEN, ALWAYS TOWARD DELIVERY. A missing or malformed compiled file or
 trigger table means nothing matched: a human prompt is then judged over the
@@ -78,6 +81,16 @@ MESSAGE_CHARS = 90_000
 BIND_TOP_K = 7
 MAX_JEV_CALLS = 1 + BIND_TOP_K
 RUBRIC_CHARS = 150
+
+# THE CLOCK. The prompt hook runs under a 20 s timeout (ops/config/hooks.json,
+# rule-pack-preuse-reselection.py); a hook killed at the timeout delivers
+# nothing at all, not even what the compiled triggers already matched. The
+# whole judgment gets DEADLINE_SECONDS from the start of advise(), leaving ~8 s
+# for interpreter start, the standing-context door and the receipt. No request
+# starts with less than MIN_CALL_SECONDS left, and each default request's own
+# timeout is capped at what is left (jev_judge's default is 20 s by itself).
+DEADLINE_SECONDS = 12.0
+MIN_CALL_SECONDS = 1.0
 STATEMENT_CHARS = 4000
 SITUATION_CHARS = 20_000
 
@@ -162,7 +175,7 @@ def _is_envelope(text):
         return False  # cannot tell: treat as a human prompt, which is judged
 
 
-def _default_rank(text, pool, limit, client):
+def _default_rank(text, pool, limit, client, timeout=None, deadline=None):
     """(ranked ids, requests made, ranking model) from ONE ranking Choice.
 
     The same Choice ops/jev_rule_select.narrow asks (rank_question, with its
@@ -176,8 +189,15 @@ def _default_rank(text, pool, limit, client):
     roster = [{"id": rule["id"], "gist": (rule.get("statement") or "")[:RUBRIC_CHARS]}
               for rule in pool]
     try:
+        # retries=0: a 429's retry-after is unbounded, and three retries at
+        # the full timeout each escaped the clock (#1281 review: one ranking
+        # request took 15.1 s against the 12 s deadline).
+        extra = {"retries": 0, "deadline": deadline}
+        if timeout is not None:
+            extra["timeout"] = timeout
         answer = ranker.judge({"situation": text},
-                              {"rank": jrs.rank_question(roster, client)}, client=client)
+                              {"rank": jrs.rank_question(roster, client)}, client=client,
+                              **extra)
     except Exception as exc:
         # An outage must leave a row, as narrow() leaves one (2026-09-23
         # audit). record() never raises; the guard is for a stub without it.
@@ -226,10 +246,14 @@ def _binding_question(client):
     return _sibling("jev_rule_select").binding_question(client)
 
 
-def _default_bind(subject, questions, client):
-    """One single-rule binding request through ops/jev_judge (logged there)."""
+def _default_bind(subject, questions, client, timeout=None, deadline=None):
+    """One single-rule binding request through ops/jev_judge (logged there),
+    with no rate-limit retries and the caller's deadline passed to the client."""
+    extra = {"deadline": deadline, "retries": 0}
+    if timeout is not None:
+        extra["timeout"] = timeout
     return _sibling("jev_rule_select")._sibling("jev_judge").judge(
-        subject, questions, client=client)
+        subject, questions, client=client, **extra)
 
 
 def _rule_titles():
@@ -243,7 +267,7 @@ def _rule_titles():
 
 
 def judge_budgeted(text, rules, always, *, rank=None, ask=None, client=None, titles=None,
-                   keywords=None):
+                   keywords=None, deadline=None, clock=time.monotonic):
     """Judge `always` (stale rules) plus the best-ranked of `rules`, one
     single-rule request each, within MAX_JEV_CALLS.
 
@@ -251,10 +275,17 @@ def judge_budgeted(text, rules, always, *, rank=None, ask=None, client=None, tit
     BIND_TOP_K; the ranking call fills what is left and is skipped when
     nothing is left or when the pool already fits. When the ranking request
     is unavailable the binding budget is not wasted: _overlap_rank picks the
-    shortlist deterministically and it is judged exactly as a ranked one."""
+    shortlist deterministically and it is judged exactly as a ranked one.
+
+    `deadline` is a `clock()` time (default: DEADLINE_SECONDS from now). Once
+    fewer than MIN_CALL_SECONDS remain no further request starts: the rules
+    not yet asked are reported in "unjudged", "deadline_hit" is set, and what
+    was judged so far is still returned."""
+    if deadline is None:
+        deadline = clock() + DEADLINE_SECONDS
     by_id = {rule["id"]: rule for rule in rules}
     report = {"calls": 0, "rank_status": "not_needed", "bind_status": "none",
-              "judged": [], "overflow": []}
+              "judged": [], "overflow": [], "unjudged": [], "deadline_hit": False}
     always = [rule_id for rule_id in always if rule_id in by_id]
     if len(always) > BIND_TOP_K:
         report["overflow"] = always[BIND_TOP_K:]
@@ -266,9 +297,15 @@ def judge_budgeted(text, rules, always, *, rank=None, ask=None, client=None, tit
     if room > 0 and pool:
         if len(pool) <= room:
             ranked = [rule["id"] for rule in pool]
+        elif deadline - clock() < MIN_CALL_SECONDS:
+            report["deadline_hit"] = True
+            report["rank_status"] = "deadline_overlap_fallback"
+            ranked = _overlap_rank(text, pool, room, keywords=keywords or {})
         else:
             try:
-                answer = (rank or _default_rank)(text, pool, room, client)
+                answer = (rank(text, pool, room, client) if rank is not None else
+                          _default_rank(text, pool, room, client,
+                                        timeout=deadline - clock(), deadline=deadline))
                 ranked, made = answer[0], answer[1]
                 ranking_model = answer[2] if len(answer) > 2 else None
                 report["calls"] += made
@@ -279,7 +316,6 @@ def judge_budgeted(text, rules, always, *, rank=None, ask=None, client=None, tit
                 ranked = _overlap_rank(text, pool, room, keywords or {})
             ranked = [rule_id for rule_id in ranked if rule_id in by_id][:room]
     to_judge = always + [rule_id for rule_id in ranked if rule_id not in set(always)]
-    report["judged"] = to_judge
     selected = {}
     if not to_judge:
         return selected, report
@@ -290,7 +326,14 @@ def judge_budgeted(text, rules, always, *, rank=None, ask=None, client=None, tit
     titles = _rule_titles() if titles is None else titles
     question = {"binds": _binding_question(client)}
     failures = 0
-    for rule_id in to_judge[:BIND_TOP_K]:
+    to_judge = to_judge[:BIND_TOP_K]
+    for position, rule_id in enumerate(to_judge):
+        left = deadline - clock()
+        if left < MIN_CALL_SECONDS:
+            report["deadline_hit"] = True
+            report["unjudged"] = to_judge[position:]
+            break
+        report["judged"].append(rule_id)
         rule = by_id[rule_id]
         title, context = titles.get(rule_id, ("", ""))
         statement = (rule.get("statement") or "")[:STATEMENT_CHARS]
@@ -301,7 +344,8 @@ def judge_budgeted(text, rules, always, *, rank=None, ask=None, client=None, tit
         report["calls"] += 1
         try:
             answer = (ask(subject, question, rule_id=rule_id) if ask is not None
-                      else _default_bind(subject, question, client))
+                      else _default_bind(subject, question, client, timeout=left,
+                                         deadline=deadline))
             value = float(answer["answers"]["binds"]["noul"])
         except Exception:
             failures += 1
@@ -312,8 +356,10 @@ def judge_budgeted(text, rules, always, *, rank=None, ask=None, client=None, tit
                 "ranking_model": None if rule_id in always else ranking_model,
                 "binding_model": answer.get("model") or "jev",
                 "source": "stale_judged" if rule_id in always else "ranked_judged"}
-    report["bind_status"] = ("judged" if not failures else
-                             "partial" if failures < len(to_judge) else "unavailable")
+    asked = len(report["judged"])
+    report["bind_status"] = ("deadline" if not asked else
+                             "judged" if not failures else
+                             "partial" if failures < asked else "unavailable")
     if report["calls"] > MAX_JEV_CALLS:  # pragma: no cover - guarded by construction
         raise AssertionError("Jev budget exceeded")
     return selected, report
@@ -321,8 +367,13 @@ def judge_budgeted(text, rules, always, *, rank=None, ask=None, client=None, tit
 
 def advise(situation, *, session_id=None, now=None, triggers_path=TRIGGERS_PATH,
            compiled=None, rules=None, ask=None, client=None, rank=None,
-           delivered_cache=DELIVERED_CACHE, log_path=LOG_PATH, envelope=None):
-    """The rules this message surfaces, within the Jev budget."""
+           delivered_cache=DELIVERED_CACHE, log_path=LOG_PATH, envelope=None,
+           deadline=None):
+    """The rules this message surfaces, within the Jev budget and the clock.
+
+    `deadline` is a time.monotonic() value; by default DEADLINE_SECONDS from
+    now, so the clock covers matching as well as the judgment."""
+    deadline = time.monotonic() + DEADLINE_SECONDS if deadline is None else deadline
     now = time.time() if now is None else now
     text = situation[:MESSAGE_CHARS]
     human = not (_is_envelope(situation) if envelope is None else envelope)
@@ -376,7 +427,8 @@ def advise(situation, *, session_id=None, now=None, triggers_path=TRIGGERS_PATH,
         keywords = {rule_id: list(((entry.get("triggers") or {}).get("keywords") or {}))
                     for rule_id, entry in entries.items() if isinstance(entry, dict)}
         judged, report = judge_budgeted(text, unmatched, always, rank=rank, ask=ask,
-                                        client=client, keywords=keywords)
+                                        client=client, keywords=keywords,
+                                        deadline=deadline)
         for rule_id, row in judged.items():
             selected.setdefault(rule_id, row)
 
@@ -408,6 +460,8 @@ def advise(situation, *, session_id=None, now=None, triggers_path=TRIGGERS_PATH,
           "jev_calls": report["calls"], "rank_status": report["rank_status"],
           "bind_status": report["bind_status"], "judged": report["judged"],
           "overflow": report["overflow"],
+          "deadline_hit": report.get("deadline_hit", False),
+          "unjudged": report.get("unjudged", []),
           "delivered": [row["id"] for row in ordered],
           "situation": situation[:300]}, log_path)
     return ordered
