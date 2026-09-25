@@ -683,17 +683,6 @@ class CanaryAndCI(Base):
         self.assertEqual(self.fx.pipeline(runner, github=FakeGitHub(canary={})).tick(["worker"]), 0)
         self.assertEqual(self.fx.records()[-1]["reason"], "canary_pending")
 
-    def test_a_cancelled_canary_on_a_code_head_cannot_ship_on_older_green(self):
-        # N3: main-canary cancels in progress; head A cancelled, older Z green.
-        z = self.fx.commit({"mcp-server/src/z.js": "1"})
-        a = self.fx.commit({"mcp-server/src/a.js": "1"})
-        for conclusion in ("cancelled", "skipped"):
-            runner = FakeRunner()
-            gh = FakeGitHub(canary={z: ("completed", "success"), a: ("completed", conclusion)})
-            self.assertEqual(self.fx.pipeline(runner, github=gh).tick(["worker"]), 0)
-            self.assertEqual(runner.calls, [])
-            self.assertEqual(self.fx.records()[-1]["reason"], "canary_pending", conclusion)
-
     def test_an_in_progress_canary_holds(self):
         a = self.fx.commit({"mcp-server/src/a.js": "1"})
         gh = FakeGitHub(canary={a: ("in_progress", None)})
@@ -726,6 +715,144 @@ class CanaryAndCI(Base):
         rec = self.fx.records()[-1]
         self.assertEqual(rec["reason"], "ci_not_green")
         self.assertIn(f"PR #{FakeGitHub().pr_number(first)}", rec["detail"])
+
+
+class ReleaseTarget(Base):
+    """The Worker ships up to the NEWEST green-canary commit, not HEAD.
+
+    main-canary runs ~20 minutes with cancel-in-progress while merges land
+    every 10-20 minutes, so HEAD's own run is nearly always in progress or
+    cancelled; demanding HEAD itself be green starved the lane."""
+
+    GREEN, RED = ("completed", "success"), ("completed", "failure")
+
+    def ship(self, gh):
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live)
+        rc = self.fx.pipeline(runner, github=gh, live=live).tick(["worker"])
+        return rc, runner
+
+    def released(self, runner):
+        return [a[a.index("--release-sha") + 1] for n, a in runner.calls if n == "upload"]
+
+    def assert_shipped(self, rc, runner, target):
+        self.assertEqual(rc, 0, self.fx.records()[-1])
+        self.assertEqual(self.released(runner), [target])
+        self.assertEqual(self.fx.state()["worker"]["last_released_sha"], target)
+        rec = self.fx.records()[-1]
+        self.assertEqual((rec["status"], rec["sha"]), ("shipped", target))
+        return rec
+
+    def test_head_in_progress_ships_the_older_green_commit(self):
+        z = self.fx.commit({"mcp-server/src/z.js": "1"})
+        a = self.fx.commit({"mcp-server/src/a.js": "1"})
+        pr_a = FakeGitHub().pr_number(a)
+        # HEAD's PR is unapproved and its CI is red: neither may matter, because
+        # the batch now ends at z and every downstream check names z, not HEAD.
+        gh = FakeGitHub(canary={z: self.GREEN, a: ("in_progress", None)}, red_ci_prs={pr_a},
+                        comments={pr_a: [{"id": 1, "body": "looks fine", "created_at": HEAD_DATE,
+                                          "author_association": "OWNER", "html_url": "x"}]})
+        rc, runner = self.ship(gh)
+        rec = self.assert_shipped(rc, runner, z)
+        self.assertEqual(rec["pr"], FakeGitHub().pr_number(z))
+        self.assertEqual(rec["pr_head_sha"], pr_head(FakeGitHub().pr_number(z)))
+        self.assertNotIn(pr_a, rec["prs"])
+        self.assertNotIn(a, [x for _, argv in runner.calls for x in argv])
+
+    def test_head_cancelled_ships_the_older_green_commit(self):
+        for conclusion in ("cancelled", "skipped"):
+            with self.subTest(conclusion):
+                self.tearDown()
+                self.setUp()
+                z = self.fx.commit({"mcp-server/src/z.js": "1"})
+                a = self.fx.commit({"mcp-server/src/a.js": "1"})
+                gh = FakeGitHub(canary={z: self.GREEN, a: ("completed", conclusion)})
+                self.assert_shipped(*self.ship(gh), z)
+
+    def test_uncanaried_commits_between_are_walked_past(self):
+        z = self.fx.commit({"mcp-server/src/z.js": "1"})
+        b = self.fx.commit({"mcp-server/src/b.js": "1"})
+        a = self.fx.commit({"mcp-server/src/a.js": "1"})
+        gh = FakeGitHub(canary={z: self.GREEN, b: ("completed", "cancelled"), a: ("queued", None)})
+        self.assert_shipped(*self.ship(gh), z)
+
+    def test_a_red_commit_with_no_green_below_blocks(self):
+        r = self.fx.commit({"mcp-server/src/r.js": "1"})
+        h = self.fx.commit({"mcp-server/src/h.js": "1"})
+        gh = FakeGitHub(canary={self.fx.base: self.GREEN, r: self.RED, h: ("in_progress", None)})
+        rc, runner = self.ship(gh)
+        self.assertEqual(rc, 0)
+        self.assertEqual(runner.calls, [])
+        rec = self.fx.records()[-1]
+        self.assertEqual((rec["status"], rec["reason"]), ("blocked", "canary_red"))
+        self.assertIn(r[:12], rec["detail"])
+        self.assertNotIn("last_released_sha", self.fx.state().get("worker", {}))
+
+    def test_a_red_commit_ships_only_the_green_below_it_and_nothing_past_it(self):
+        g = self.fx.commit({"mcp-server/src/g.js": "1"})
+        r = self.fx.commit({"mcp-server/src/r.js": "1"})
+        h = self.fx.commit({"mcp-server/src/h.js": "1"})
+        gh = FakeGitHub(canary={g: self.GREEN, r: self.RED, h: ("in_progress", None)})
+        self.assert_shipped(*self.ship(gh), g)
+        # next tick: HEAD still unverified, the red commit is now the whole story
+        rc, runner = self.ship(gh)
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(self.fx.records()[-1]["reason"], "canary_red")
+        self.assertEqual(self.fx.state()["worker"]["last_released_sha"], g)
+        # a newer red HEAD still ships nothing past the red commits
+        gh.canary[h] = self.RED
+        rc, runner = self.ship(gh)
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(self.fx.records()[-1]["reason"], "canary_red")
+
+    def test_a_green_fix_forward_above_a_red_commit_ships(self):
+        r = self.fx.commit({"mcp-server/src/r.js": "1"})
+        f = self.fx.commit({"mcp-server/src/r.js": "fixed"})
+        gh = FakeGitHub(canary={r: self.RED, f: self.GREEN})
+        self.assert_shipped(*self.ship(gh), f)
+
+    def test_only_ignored_commits_since_the_release_ship_head_as_before(self):
+        # dealroom/*.md is a release path AND canary-ignored: no canary runs,
+        # and the verdict is the last released commit's own green run.
+        self.fx.commit({"dealroom/a.md": "1"})
+        head = self.fx.commit({"dealroom/b.md": "2"})
+        gh = FakeGitHub(canary={self.fx.base: self.GREEN})
+        self.assert_shipped(*self.ship(gh), head)
+
+    def test_ignored_commits_directly_above_the_green_one_ride_along(self):
+        z = self.fx.commit({"mcp-server/src/z.js": "1"})
+        d = self.fx.commit({"docs/n.md": "x"})
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        gh = FakeGitHub(canary={z: self.GREEN, d: ("completed", "cancelled")})
+        self.assert_shipped(*self.ship(gh), d)
+
+    def test_no_green_newer_than_the_last_release_holds(self):
+        a = self.fx.commit({"mcp-server/src/a.js": "1"})
+        b = self.fx.commit({"mcp-server/src/b.js": "1"})
+        gh = FakeGitHub(canary={self.fx.base: self.GREEN, a: ("completed", "cancelled"),
+                                b: ("in_progress", None)})
+        rc, runner = self.ship(gh)
+        self.assertEqual((rc, runner.calls), (0, []))
+        rec = self.fx.records()[-1]
+        self.assertEqual((rec["status"], rec["reason"], rec["sha"]), ("blocked", "canary_pending", b))
+        self.assertNotIn("last_released_sha", self.fx.state().get("worker", {}))
+
+    def test_a_failed_target_is_not_retried_while_head_is_unverified(self):
+        z = self.fx.commit({"mcp-server/src/z.js": "1"})
+        a = self.fx.commit({"mcp-server/src/a.js": "1"})
+        gh = FakeGitHub(canary={z: self.GREEN, a: ("in_progress", None)})
+        verbs: list = []
+        self.assertEqual(self.fx.pipeline(FakeRunner(fail_at="upload"), github=gh, verbs=verbs)
+                         .tick(["worker"]), 1)
+        self.assertEqual(self.fx.state()["worker"]["failed_sha"], z)
+        b = self.fx.commit({"mcp-server/src/b.js": "1"})     # a fix-forward, not yet canaried
+        gh.canary[b] = ("in_progress", None)
+        again = FakeRunner()
+        self.assertEqual(self.fx.pipeline(again, github=gh, verbs=verbs).tick(["worker"]), 0)
+        self.assertEqual(again.calls, [])
+        self.assertEqual(len(verbs), 1)
+        gh.canary[b] = self.GREEN                             # the fix-forward goes green
+        self.assert_shipped(*self.ship(gh), b)
 
 
 class AppLane(Base):

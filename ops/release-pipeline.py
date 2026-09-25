@@ -75,9 +75,14 @@ OWNER/MEMBER/COLLABORATOR, or a configured login) decides; it must be APPROVE;
 and it must carry exactly one `Reviewed-SHA: <40-hex>` line equal to the PR's
 head SHA (no dates: an exact SHA is the only freshness proof). Worker lane
 also: every PR in the batch that touches a release path has a green `ops/ci.sh
---strict` (and secret-class) CI run, and the canary walk may pass only commits
-whose changes are entirely canary-ignored; any other commit needs its own
-completed success (none, in progress, cancelled or skipped all hold).
+--strict` (and secret-class) CI run. The Worker releases up to the NEWEST
+first-parent commit whose own main canary concluded success (plus any
+canary-ignored commits directly above it), not necessarily HEAD: commits whose
+canary is absent, in progress or cancelled are walked past and wait for a later
+green; a red verdict is never shipped nor anything above it until a newer green
+fix-forward; no green commit newer than the last release holds
+(Pipeline.release_target). Review evidence, CI, upload and live readback all
+name that target.
 
 THE TRUST BOUNDARY, stated plainly. Every CARR session posts to GitHub as
 jbookout, which GitHub reports as OWNER. Comment authorship therefore proves only
@@ -775,36 +780,83 @@ class Pipeline:
         ignore = lane_cfg.get("canary_ignored_globs") or []
         return bool(paths) and all(any(_glob_hit(p, g) for g in ignore) for p in paths)
 
-    def canary_green(self, gh: Any, lane_cfg: dict, sha: str) -> None:
-        """Walk back along the first parent from the head. A commit the canary
-        IGNORES (all paths in paths-ignore) may be walked past. Any other commit
-        must itself carry a completed, successful canary: no run yet, a run in
-        progress, or a cancelled/skipped run (main-canary uses
-        cancel-in-progress) all HOLD, so an uncanaried head can never ship on
-        an older green run."""
+    def canary_verdict(self, gh: Any, lane_cfg: dict, commit: str) -> str:
+        """One commit's own main-canary state: 'green', 'red', 'pending' (in
+        progress or queued), 'cancelled' (cancelled/skipped/neutral) or 'none'."""
+        runs = [r for r in gh.runs_for(commit) if r.get("name") == lane_cfg["canary_workflow_name"]]
+        if not runs:
+            return "none"
+        latest = max(runs, key=lambda r: int(r.get("id") or 0))
+        if latest.get("status") != "completed":
+            return "pending"
+        conclusion = latest.get("conclusion")
+        if conclusion == "success":
+            return "green"
+        if conclusion in ("cancelled", "skipped", "neutral"):
+            return "cancelled"
+        return "red"
+
+    def release_target(self, gh: Any, lane_cfg: dict, base: str, head: str) -> str:
+        """The newest first-parent commit in base..head the Worker may ship.
+
+        main-canary runs ~20 minutes with cancel-in-progress while merges land
+        every 10-20 minutes, so HEAD's own run is nearly always in progress or
+        cancelled. Requiring HEAD itself to be green starved the lane; instead
+        walk back from HEAD and ship the NEWEST commit whose own canary
+        concluded success. The canary judges the whole tree at its commit, so:
+          - a commit with no run, a run in progress, or a cancelled/skipped run
+            is walked past (never shipped itself unless it is canary-ignored
+            and sits directly on a green commit, below);
+          - a contiguous run of canary-IGNORED commits (every changed path in
+            paths-ignore) directly above a green commit ships with it: none of
+            them can change the canary's verdict;
+          - a RED verdict excludes itself and everything above it. The walk
+            continues and may ship an older green commit strictly below it,
+            never the red commit. A green commit ABOVE a red one (a
+            fix-forward) is the newest verdict and ships, as before.
+        No green commit newer than `base` is a HOLD (canary_red when a red
+        verdict is what stands in the way, else canary_pending)."""
+        batch = set(self.batch_commits(self.repo, base, head))
         commits = self.git("rev-list", "--first-parent", "--max-count",
-                           str(lane_cfg.get("canary_lookback", 50)), sha).split()
+                           str(lane_cfg.get("canary_lookback", 50)), head).split()
+        candidate: str | None = None       # top of a canary-ignored run awaiting its verdict
+        red: str | None = None             # newest red verdict seen
+        newest_unfinished: tuple[str, str] | None = None
         for commit in commits:
-            runs = [r for r in gh.runs_for(commit) if r.get("name") == lane_cfg["canary_workflow_name"]]
-            ignored = self.canary_ignored(commit, lane_cfg)
-            if not runs:
-                if ignored:
-                    continue
-                raise Blocked("canary_pending", f"no main canary run yet on {commit[:12]}")
-            latest = max(runs, key=lambda r: int(r.get("id") or 0))
-            if latest.get("status") != "completed":
-                raise Blocked("canary_pending", f"main canary on {commit[:12]} has not finished")
-            conclusion = latest.get("conclusion")
-            if conclusion == "success":
-                return
-            if conclusion in ("cancelled", "skipped", "neutral"):
-                if ignored:
-                    continue
-                raise Blocked("canary_pending", f"main canary on {commit[:12]} was {conclusion}; "
-                                                "a verdict on this commit is required")
-            raise Blocked("canary_red", f"main canary on {commit[:12]} concluded {conclusion}")
-        raise Blocked("canary_missing",
-                      f"no main canary verdict within {len(commits)} first-parent commits of {sha[:12]}")
+            if commit not in batch and candidate is None:
+                break                      # at or below the last release, with nothing pending above
+            verdict = self.canary_verdict(gh, lane_cfg, commit)
+            if verdict == "green":
+                target = candidate or commit
+                if target in batch:
+                    return target
+                break
+            if verdict == "red":
+                red = red or commit
+                candidate = None
+                continue
+            if self.canary_ignored(commit, lane_cfg) and verdict in ("none", "cancelled"):
+                if candidate is None and commit in batch:
+                    candidate = commit
+                continue
+            # a code commit with no verdict of its own: not shippable, and it
+            # breaks any ignored run above it (that run's tree is unverified)
+            candidate = None
+            if newest_unfinished is None:
+                newest_unfinished = (commit, verdict)
+        else:
+            if candidate is not None:
+                raise Blocked("canary_missing", f"no main canary verdict within {len(commits)} "
+                                                f"first-parent commits of {head[:12]}")
+        if red is not None:
+            raise Blocked("canary_red", f"main canary on {red[:12]} concluded red and no older green "
+                                        f"commit is newer than the last release {base[:12]}")
+        what = {"none": "has no run yet", "pending": "has not finished",
+                "cancelled": "was cancelled or skipped"}
+        detail = (f"; newest unverified: {newest_unfinished[0][:12]} {what[newest_unfinished[1]]}"
+                  if newest_unfinished else "")
+        raise Blocked("canary_pending", f"no commit newer than the last release {base[:12]} has a green "
+                                        f"main canary{detail}")
 
     def ci_run(self, gh: Any, lane_cfg: dict, pr: int, head_sha: str) -> int:
         ci = [r for r in gh.runs_for(head_sha)
@@ -821,8 +873,9 @@ class Pipeline:
         return run_id
 
     def worker_evidence(self, lane_cfg: dict, base: str, sha: str) -> dict:
+        """Review and CI evidence for the batch base..sha. `sha` is already the
+        canary-chosen release target (run_lane), never a later HEAD."""
         gh = self.github_factory(lane_cfg["github_repo"])
-        self.canary_green(gh, lane_cfg, sha)
         rev = self.review_evidence(gh, lane_cfg, self.repo, base, sha)
         head = rev["head"]
         for item in rev["release_prs"]:   # EVERY release-path PR in the batch, not only the newest
@@ -905,6 +958,14 @@ class Pipeline:
                               capability=name)
 
     # -- lanes --------------------------------------------------------------
+    def _at_or_before(self, a: str, b: str, repo_dir: Path) -> bool:
+        """True when commit `a` is `b` or an ancestor of it."""
+        try:
+            self.git("merge-base", "--is-ancestor", a, b, cwd=repo_dir)
+            return True
+        except StepFailed:
+            return False
+
     def last_released(self, state: dict, lane: str, lane_cfg: dict) -> str:
         sha = (state.get(lane) or {}).get("last_released_sha")
         if sha:
@@ -958,6 +1019,24 @@ class Pipeline:
                 self.git("merge-base", "--is-ancestor", base, sha, cwd=repo_dir)
             except StepFailed:
                 raise Blocked("history_diverged", f"released {base[:12]} is not an ancestor of main {sha[:12]}")
+            if lane == "worker" and classify(self.git("diff", "--name-only", base, sha, cwd=repo_dir)
+                                             .splitlines(), lane_cfg)[0]:
+                # From here on `sha` is the RELEASE TARGET, the newest green
+                # canary commit, not HEAD: review, CI, upload, live readback and
+                # the state/record rows all name it. A doc/test-only batch needs
+                # no canary and still advances to HEAD below.
+                head = sha
+                sha = self.dry_tolerant("canary", lambda: self.release_target(
+                    self.github_factory(lane_cfg["github_repo"]), lane_cfg, base, head), head)
+                if sha != head:
+                    self.out(f"release-pipeline[{lane}]: main is {head[:12]}; newest green canary "
+                             f"target is {sha[:12]}")
+                failed = lane_state.get("failed_sha")
+                if failed and self._at_or_before(sha, failed, repo_dir):
+                    self.out(f"release-pipeline[{lane}]: target {sha[:12]} is at or before the failed "
+                             f"{failed[:12]} ({lane_state.get('failed_step')}); waiting for a green "
+                             "fix-forward")
+                    return 0
             changed = self.git("diff", "--name-only", base, sha, cwd=repo_dir).splitlines()
             needed, hits = classify(changed, lane_cfg)
             self.out(f"release-pipeline[{lane}]: batch {base[:12]}..{sha[:12]}: "
