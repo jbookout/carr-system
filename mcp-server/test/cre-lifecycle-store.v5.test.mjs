@@ -1907,11 +1907,16 @@ test("H1/H3: what remains unwired is two FACTS, not two callers, and each names 
   assert.deepEqual([...V5_J102_COMPOSED_READ_KINDS], ["ownership_and_freshness"]);
 });
 
-test("the open owner questions are recorded as OPEN, and the rail still behaves as if unanswered", () => {
+test("the owner questions: rulings are recorded as ruled, and the one still open behaves as if unanswered", () => {
   const byStatus = kind => V5_J102_OPEN_OWNER_QUESTIONS.filter(q => q.status === kind);
-  assert.equal(V5_J102_OPEN_OWNER_QUESTIONS.length, 4);
-  assert.equal(byStatus("unsettled_pending_owner_ruling").length, 3);
-  assert.equal(byStatus("implementation_assumption_live_and_unratified").length, 1);
+  assert.equal(V5_J102_OPEN_OWNER_QUESTIONS.length, 6);
+  assert.equal(byStatus("unsettled_pending_owner_ruling").length, 1, "only mandate-before-LOI is open");
+  assert.equal(byStatus("ruled_by_owner").length, 5);
+  assert.equal(byStatus("implementation_assumption_live_and_unratified").length, 0);
+  for (const ruled of byStatus("ruled_by_owner")) {
+    assert.ok(ruled.ruling.length > 0 && ruled.ruled_on === "2026-09-25", "each ruling is quoted and dated");
+    assert.equal(ruled.encoded_without_a_ruling, false);
+  }
   for (const entry of V5_J102_OPEN_OWNER_QUESTIONS) {
     assert.ok(entry.question.length > 0);
     assert.ok(entry.today.length > 0, "each says what the rail does with no answer");
@@ -1939,9 +1944,9 @@ test("the open owner questions are recorded as OPEN, and the rail still behaves 
     v5J102InitializationContract("initialize-assignment").initial_state.assignment_phase,
     "research",
     "the created assignment is at research, so open-assignment is not forced by the phase alone");
-  // The one live assumption is labelled as one, and it is the actor-class parity.
-  const parity = byStatus("implementation_assumption_live_and_unratified")[0];
-  assert.equal(parity.encoded_without_a_ruling, true);
+  // The actor-class parity is now the owner's ruling (c), not an assumption.
+  const parity = V5_J102_OPEN_OWNER_QUESTIONS.find(q => q.question.includes("SPONSORED AGENT"));
+  assert.equal(parity.status, "ruled_by_owner");
   assert.deepEqual(
     v5J102InitializationContract("initialize-prospect-relationship").permitted_actor_classes,
     ["verified_partner", "sponsored_agent"]);

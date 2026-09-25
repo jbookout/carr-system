@@ -385,29 +385,55 @@ export const V5_J102_OPEN_OWNER_QUESTIONS = Object.freeze([
     narrow_change_if_the_answer_is_yes: "drop `research` from initialize-property-negotiation's admitted parent phases in the kernel contract and in the SQL admission map. It would also stop a research-scope assignment from ever holding a draft, which is a real cost and part of the decision.",
     encoded_without_a_ruling: false,
   }),
+  // THE OWNER'S RULINGS OF 2026-09-25, kept beside the open question so the
+  // registry shows what was decided, when, and exactly what encodes it.
   Object.freeze({
     question: "what links a J102 relationship to a CARR party or contact record?",
-    status: "unsettled_pending_owner_ruling",
-    today: "Nothing. The relationship shape is closed at subject_kind / subject_id / relationship_state / active_engagement_count, `initialize-prospect-relationship` declares no identifiers beyond the id, and the `relationship_initialized` event carries only the state. The relationship id is therefore the de facto party key, and nothing in the rail detects two prospect rows for one medical group.",
-    why_unsettled: "Q083.D1 settles Salesforce opportunities as external corporate references and is implemented. No accepted decision settles a party or contact key on the subject itself.",
-    narrow_change_if_the_answer_is_yes: "a declared party reference on the relationship shape, which widens a closed subject schema and moves the policy digest — not a change to make without the ruling.",
+    status: "ruled_by_owner",
+    ruling: "(a) an OPTIONAL declared reference from a prospect relationship to the CARR party record.",
+    ruled_on: "2026-09-25",
+    today: "`initialize-prospect-relationship` accepts an optional `party_id`; the relationship row carries it (null when none is named); the SQL writer refuses an id no `public.party` row holds (`j102_party_not_found`). The link makes two prospects for one party DETECTABLE; it does not forbid them.",
+    why_unsettled: "It is not: Q083.D1 left it open and the owner ruled.",
+    encoded_by: ["kernel optional_declared_identifiers", "SQL creation_shape optional_declared_identifier", "writer party existence check"],
     encoded_without_a_ruling: false,
   }),
   Object.freeze({
     question: "may one assignment hold two property negotiations against the SAME property?",
-    status: "unsettled_pending_owner_ruling",
-    today: "Yes, unconstrained. Q095's single-target constraint binds `selected_property_id` and `active_lease_draft_target_id`, which duplicate drafts do not disturb, and no index or check forbids them.",
-    why_unsettled: "Q095.D1 settles concurrent LOIs and the single winning property. It is silent on two negotiations against one property.",
-    narrow_change_if_the_answer_is_yes: "a unique index on (tenant, assignment, property) for property_negotiation rows, plus a kernel refusal so the answer is not only structural.",
+    status: "ruled_by_owner",
+    ruling: "(b) at most one ACTIVE negotiation per (tenant, assignment, property); a dead or closed one does not block a new one.",
+    ruled_on: "2026-09-25",
+    today: "ACTIVE is loi_drafted, loi_submitted, loi_countered and loi_accepted. The store loads the live siblings and the kernel refuses `active_negotiation_exists_for_property`; the SQL writer re-checks committed rows (`j102_active_negotiation_exists`); the partial unique index `ops.j102_one_active_negotiation_per_property` backstops a true race. `selected_winner` is NOT active: a pending deal already holds the assignment at committed, and after a cancelled deal the old winner must not block the property.",
+    why_unsettled: "It is not: Q095.D1 was silent and the owner ruled.",
+    encoded_by: ["kernel refusal", "SQL writer check", "partial unique index"],
     encoded_without_a_ruling: false,
   }),
   Object.freeze({
     question: "may a SPONSORED AGENT create a prospect, an assignment shell or an LOI draft?",
-    status: "implementation_assumption_live_and_unratified",
-    today: "Yes. All three initializations admit verified_partner and sponsored_agent, derived from the rule that the class which may ADVANCE a subject may create it: establish-client-and-engagement, open-assignment and record-loi-submission all admit both. The partner-only acts — commitment, closing, cancellation, correction, and the evidence to subject association — are untouched.",
-    why_unsettled: "No accepted decision names an actor class at all; the verified_partner / sponsored_agent vocabulary is this rail's. Q082.D1 settles only that transitions declare their permitted actors.",
+    status: "ruled_by_owner",
+    ruling: "(c) yes, like a partner, recorded as sponsored_agent under the sponsoring partner.",
+    ruled_on: "2026-09-25",
+    today: "All three initializations admit verified_partner and sponsored_agent. The row and event record the AGENT's slug and the class sponsored_agent, both derived by the database from the writer credential. The sponsoring partner is established by the handler's authentication and is not stamped on the lifecycle row; stamping it would widen the subject and event shapes.",
+    why_unsettled: "It is not: the owner ratified the parity.",
     residual_to_weigh: "`initialize-prospect-relationship` has no parent, no evidence and no rate bound, so an authenticated sponsored agent can create prospect rows limited only by id uniqueness.",
-    encoded_without_a_ruling: true,
+    encoded_without_a_ruling: false,
+  }),
+  Object.freeze({
+    question: "may a concurrent write that no longer matches the current row be re-admitted against it (rebase and re-admit)?",
+    status: "ruled_by_owner",
+    ruling: "(d) ratified.",
+    ruled_on: "2026-09-25",
+    today: "Q103: a disjoint write over exactly one characterized intervening write is re-admitted against the CURRENT row and merged; overlapping or uncharacterized writes file one visible reconciliation item; nothing is overwritten.",
+    why_unsettled: "It is not: the owner ratified it.",
+    encoded_without_a_ruling: false,
+  }),
+  Object.freeze({
+    question: "how is a verified partner recorded when an operation runs on the writer credential?",
+    status: "ruled_by_owner",
+    ruling: "(e) as sponsored_agent under the partner's own slug.",
+    ruled_on: "2026-09-25",
+    today: "A non-authorityOnly, non-humanOnly operation called by a verified partner adopts the credential's sponsored_agent class under the partner's slug and reports the split beside the result; every other disagreement refuses.",
+    why_unsettled: "It is not: the owner ratified it.",
+    encoded_without_a_ruling: false,
   }),
 ]);
 
@@ -4043,6 +4069,11 @@ for (const entry of V5_J102_OPEN_OWNER_QUESTIONS) {
     throw new V5J102StoreError("contract_self_check_failed",
       `"${entry.question}" is encoded and is not labelled an unratified assumption; ` +
       "an unsettled question that has been encoded is a policy invented on somebody's reading");
+  }
+  if (entry.status === "ruled_by_owner" &&
+      (typeof entry.ruling !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(entry.ruled_on ?? ""))) {
+    throw new V5J102StoreError("contract_self_check_failed",
+      `"${entry.question}" claims an owner ruling without quoting it and dating it`);
   }
 }
 

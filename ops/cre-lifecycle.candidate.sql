@@ -5815,9 +5815,8 @@ grant execute on function
   ops.j102_apply_transition(text,jsonb,jsonb,jsonb,jsonb,text,text,jsonb),
   -- The initialization writer reaches the same two bundles as the transition
   -- writer: the three initializations currently admit both actor classes, and
-  -- the function checks the DERIVED class itself. Sponsored-agent parity is an
-  -- unratified implementation assumption, not a partner approval; see the
-  -- store's V5_J102_OPEN_OWNER_QUESTIONS before production acceptance.
+  -- the function checks the DERIVED class itself. Sponsored-agent parity is the
+  -- owner's ruling (c) of 2026-09-25; see the store's V5_J102_OPEN_OWNER_QUESTIONS.
   ops.j102_initialize_subject(text,jsonb,jsonb,jsonb,text,text,jsonb),
   ops.j102_record_first_party_fact(jsonb,text,text),
   ops.j102_record_salesforce_reference(jsonb,text,text),
