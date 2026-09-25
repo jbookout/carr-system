@@ -210,6 +210,28 @@ class WorkflowCutoverFake {
       return { rows: [row] };
     }
 
+    if (sql.includes("ops.read_slice_done_state")) {
+      const [sliceId] = params;
+      return { rows: [{ state: { slice_id: sliceId, registered: this.sliceRegistry.has(sliceId),
+        criteria: (this.sliceRegistry.get(sliceId) ?? []).map(c => ({ criterion: c.criterion,
+          evidence_kind: c.evidence_kind, live_check_candidate: null, candidate_passes: false })),
+        held_by_partner: false, latest_mark: null, release_members: [] } }] };
+    }
+
+    // 0612 bind doors: eight positional arguments, the sixth being
+    // write_required_reason. The database CHECK refuses a refusal_proof
+    // without one; mirrored here so the verb's refusal envelope is exercised.
+    if (sql.includes("ops.bind_slice_criterion_evidence") || sql.includes("ops.rebind_slice_criterion_evidence")) {
+      if (params.length !== 8) throw new Error(`bind doors take eight arguments, got ${params.length}`);
+      const [sliceId, criterion, kind, source, key, writeReason, reason] = params;
+      this.bindCalls = [...(this.bindCalls ?? []), params];
+      if (kind === "refusal_proof" && !writeReason)
+        throw new Error('new row violates check constraint "slice_criterion_binding_check"');
+      return { rows: [{ id: "53000000-0000-0000-0000-000000000001", slice_id: sliceId, criterion,
+        evidence_kind: kind, live_check_source: source, live_check_key: key, write_required_reason: writeReason,
+        bound_via: sql.includes("rebind") ? "authority" : "automation", reason, created_at: "2026-09-25T00:00:00Z" }] };
+    }
+
     if (sql.includes("ops.read_slice_completion")) {
       const [sliceId] = params;
       const rows = this.slices.filter(s => s.slice_id === sliceId);
@@ -323,6 +345,19 @@ test("every door that can change what a live workflow may enqueue is authority-o
   }
   for (const name of ["record-workflow-caller", "mark-slice-progress", "workflow-cutover-board", "read-slice-completion"])
     assert.equal(TOOLS[name].authorityOnly, undefined, `${name} should not be authority-only`);
+  // 0612: the partner override doors are authority-only; the automated
+  // seat's doors ride the writer connection (the database refuses any actor
+  // outside ops.slice_marker_seat).
+  for (const name of ["rebind-slice-criterion-evidence", "set-slice-mark-hold"]) {
+    assert.equal(TOOLS[name].authorityOnly, true, `${name} must be authority-only`);
+    assert.equal(TOOLS[name].write, true);
+  }
+  for (const name of ["register-slice-criteria-from-catalog", "bind-slice-criterion-evidence",
+    "record-release-slice-members", "auto-mark-slice-completion"]) {
+    assert.equal(TOOLS[name].authorityOnly, undefined, `${name} is a seat door on the writer connection`);
+    assert.equal(TOOLS[name].write, true);
+  }
+  assert.equal(TOOLS["list-shipped-releases"].write, false);
   assert.deepEqual(TOOLS["mark-slice-progress"].inputSchema.properties.status.enum, ["in_progress", "blocked"]);
   assert.equal("status" in TOOLS["mark-slice-completion"].inputSchema.properties, false);
 });
@@ -479,4 +514,59 @@ test("read-slice-completion reports marked:false for a slice that was never mark
   const read = await executeRegisteredTool(client, AGENT, "read-slice-completion", { slice_id: "V5-R99" });
   assert.equal(read.marked, false);
   assert.equal(read.status, null);
+});
+
+test("register-slice-criteria-from-catalog takes no criteria: the server reads them from the catalog", () => {
+  const schema = TOOLS["register-slice-criteria-from-catalog"].inputSchema;
+  assert.deepEqual(Object.keys(schema.properties).sort(), ["idempotency_key", "slice_id"]);
+  assert.equal(schema.additionalProperties, false);
+});
+
+test("the seat may bind the new evidence kinds but never 'unbound'; only a partner rebind can unbind", () => {
+  const seatKinds = TOOLS["bind-slice-criterion-evidence"].inputSchema.properties.evidence_kind.enum;
+  assert.deepEqual([...seatKinds].sort(), ["accepted_record", "live_check", "refusal_proof", "shipped_release"]);
+  const partnerKinds = TOOLS["rebind-slice-criterion-evidence"].inputSchema.properties.evidence_kind.enum;
+  assert.deepEqual([...partnerKinds].sort(),
+    ["accepted_record", "live_check", "refusal_proof", "shipped_release", "unbound"]);
+  const sources = TOOLS["bind-slice-criterion-evidence"].inputSchema.properties.live_check_source.enum;
+  for (const source of ["portfolio_revision_acceptance", "portfolio_acceptance_effect_free", "ci_gate"])
+    assert.ok(sources.includes(source), source);
+  const registered = TOOLS["register-slice-checkable-done"].inputSchema.properties.criteria.items.properties;
+  assert.ok(registered.evidence_kind.enum.includes("accepted_record"));
+  assert.ok(registered.evidence_kind.enum.includes("refusal_proof"));
+  assert.ok("write_required_reason" in registered);
+});
+
+test("bind-slice-criterion-evidence passes write_required_reason to the door and surfaces the CHECK refusal", async () => {
+  const client = new WorkflowCutoverFake();
+  const ok = await executeRegisteredTool(client, AGENT, "bind-slice-criterion-evidence", {
+    idempotency_key: "60000000-0000-0000-0000-000000000031", slice_id: "V5-S00",
+    criterion: "negatives refuse", evidence_kind: "refusal_proof", live_check_source: "ci_gate",
+    live_check_key: "ci:merge-gate", write_required_reason: "the negatives are write-verb refusals",
+    reason: "Jev semantic_creation",
+  });
+  assert.equal(ok.write_required_reason, "the negatives are write-verb refusals");
+  assert.equal(ok.bound_via, "automation");
+  assert.deepEqual(client.bindCalls[0].slice(0, 7), ["V5-S00", "negatives refuse", "refusal_proof", "ci_gate",
+    "ci:merge-gate", "the negatives are write-verb refusals", "Jev semantic_creation"]);
+  const refused = await rejected(() => executeRegisteredTool(client, AGENT, "bind-slice-criterion-evidence", {
+    idempotency_key: "60000000-0000-0000-0000-000000000032", slice_id: "V5-S00",
+    criterion: "negatives refuse", evidence_kind: "refusal_proof", live_check_source: "ci_gate",
+    live_check_key: "ci:merge-gate", reason: "no write reason",
+  }));
+  assert.equal(refused.error, "slice_criterion_binding_refused");
+  assert.match(refused.detail, /slice_criterion_binding_check/);
+  const unbind = await rejected(() => executeRegisteredTool(client, AGENT, "bind-slice-criterion-evidence", {
+    idempotency_key: "60000000-0000-0000-0000-000000000033", slice_id: "V5-S00",
+    criterion: "negatives refuse", evidence_kind: "unbound", reason: "seat tries to unbind",
+  }));
+  assert.ok(unbind, "the seat's schema refuses evidence_kind=unbound");
+});
+
+test("read-slice-completion returns the server's live done_state alongside the latest mark", async () => {
+  const client = new WorkflowCutoverFake();
+  const read = await executeRegisteredTool(client, AGENT, "read-slice-completion", { slice_id: "V5-S00" });
+  assert.equal(read.done_state.slice_id, "V5-S00");
+  assert.equal(read.done_state.registered, false);
+  assert.ok(client.calls.some(c => c.sql.includes("ops.read_slice_done_state")));
 });

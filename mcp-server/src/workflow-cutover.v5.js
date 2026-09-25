@@ -618,7 +618,7 @@ export function workflowCutoverTools({ withEnvelope, ToolError }) {
 
     "read-slice-completion": {
       write: false,
-      description: "Q153: read the current (most recent) explicit completion mark for one slice_id (marked:false when never marked), plus done_state: registration, each criterion's effective evidence binding and newest live-check candidate, partner-hold state and the slice's shipped release members.",
+      description: "Q153: read the current (most recent) explicit completion mark for one slice_id (marked:false when never marked), plus done_state: registration, each criterion's effective evidence binding, its newest server-found candidate and candidate_passes (recomputed from the live rows on this read, never from a mark), partner-hold state and the slice's shipped release members.",
       inputSchema: {
         type: "object", additionalProperties: false,
         properties: { slice_id: { type: "string", minLength: 1 } },
