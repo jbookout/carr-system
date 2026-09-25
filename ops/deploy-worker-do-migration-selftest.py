@@ -557,6 +557,75 @@ def main() -> int:
           res["rc"] == 1 and "could not be bound into its release manifest; traffic was not changed" in res["err"]
           and not wrangler_calls(res, "deploy") and "ALREADY" not in res["err"], res["all"][-700:])
 
+    # H. a HAND-WRITTEN receipt must prove, from git history, the steps the tag was
+    # applied with. A tag is applied only by the first deploy that carries it, so
+    # the SHA serving staging now proves nothing if the tag's steps were edited.
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = Path(raw)
+        git = ["git", "-c", "user.name=selftest", "-c", "user.email=selftest@example.test", "-C", str(tmp / "r")]
+        (tmp / "r" / "mcp-server").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(tmp / "r")], check=True, env=GIT_ENV)
+        cfg = tmp / "r" / "mcp-server" / "wrangler.toml"
+        head = '[env.staging]\nname = "carr-mcp-staging"\n'
+
+        def commit(text: str, msg: str) -> str:
+            cfg.write_text(text, encoding="utf-8")
+            subprocess.run([*git, "add", "-A"], check=True, env=GIT_ENV)
+            subprocess.run([*git, "commit", "-q", "-m", msg], check=True, env=GIT_ENV)
+            return subprocess.run([*git, "rev-parse", "HEAD"], check=True, env=GIT_ENV,
+                                  capture_output=True, text=True).stdout.strip()
+
+        d1_text = head + f'\n[[migrations]]\ntag = "{TAG1}"\nnew_sqlite_classes = ["A"]\n'
+        d2_text = head + f'\n[[migrations]]\ntag = "{TAG1}"\nnew_sqlite_classes = ["B"]\n'
+        commit(head, "no migrations")
+        c_intro = commit(d1_text, "introduce the tag with steps D1")
+        c_same = commit(d1_text + "# an unrelated edit\n", "unrelated edit")
+        d1, d2 = expected_digest(d1_text), expected_digest(d2_text)
+
+        def hand_write(ref: str, digest: str, out: Path) -> subprocess.CompletedProcess:
+            return subprocess.run(
+                [sys.executable, str(REPO / "ops" / "worker-do-migration.py"), "tag-receipt", "write",
+                 "--dir", str(out), "--script", "carr-mcp-staging", "--tag", TAG1, "--digest", digest,
+                 "--sha", c_same, "--version-id", VS, "--environment", "staging",
+                 "--history-repo", str(tmp / "r"), "--history-ref", ref],
+                capture_output=True, text=True, env=GIT_ENV)
+
+        done = hand_write(c_same, d1, tmp / "h1")
+        row = json.loads(done.stdout) if done.returncode == 0 else {}
+        proof = row.get("history_proof") or {}
+        check("H1. unchanged since introduced: the hand-written receipt is written with its proof",
+              done.returncode == 0 and proof.get("introduced_in") == c_intro
+              and proof.get("commits_checked") == 2 and proof.get("ref_sha") == c_same
+              and row.get("steps_digest") == d1, done.stdout + done.stderr)
+        chk = subprocess.run([sys.executable, str(REPO / "ops" / "worker-do-migration.py"), "tag-receipt",
+                              "check", "--dir", str(tmp / "h1"), "--script", "carr-mcp-staging",
+                              "--tag", TAG1, "--digest", d1], capture_output=True, text=True)
+        check("H1. ...and the wrapper's receipt check accepts it", chk.returncode == 0
+              and json.loads(chk.stdout).get("match") is True, chk.stdout + chk.stderr)
+
+        done = hand_write(c_same, d2, tmp / "h3")
+        check("H3. a digest the history does not prove is refused and nothing is written",
+              done.returncode == 4 and "not the digest the history proves" in done.stderr
+              and not (tmp / "h3").exists(), done.stdout + done.stderr)
+
+        # the reviewer's sequence: T applied with D1, then T's steps edited to D2
+        c_edit = commit(d2_text, "fix forward edits the tag's steps in place")
+        done = hand_write(c_edit, d2, tmp / "h2")
+        check("H2. the tag's steps edited after introduction: refused (exit 4), no receipt, even though "
+              "the current commit's digest matches",
+              done.returncode == 4 and "changed at " + c_edit[:12] in done.stderr
+              and not (tmp / "h2").exists(), done.stdout + done.stderr)
+
+        done = subprocess.run(
+            [sys.executable, str(REPO / "ops" / "worker-do-migration.py"), "tag-receipt", "write",
+             "--dir", str(tmp / "h4"), "--script", "carr-mcp-staging", "--tag", TAG2, "--digest", d2,
+             "--sha", c_edit, "--version-id", VS, "--environment", "staging",
+             "--history-repo", str(tmp / "r"), "--history-ref", c_edit],
+            capture_output=True, text=True, env=GIT_ENV)
+        check("H4. a tag the history never declared is refused",
+              done.returncode == 4 and "is not declared" in done.stderr and not (tmp / "h4").exists(),
+              done.stdout + done.stderr)
+
     # K. staging already carries the tag
     res = run(source, tags=[TAG1], state={"applied_tag": None, "staging_applied_tag": TAG1})
     check("K1. staging already carries the tag with no durable receipt: refused before staging moves",

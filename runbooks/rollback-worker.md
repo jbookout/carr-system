@@ -73,37 +73,71 @@ before staging or Production moves. Two refusals lead here:
   staging on the tag with no receipt.
 
 **Writing the receipt by hand is safe only when you can prove the steps
-staging applied are the steps `wrangler.toml` declares now.** The receipt's
-`steps_digest` covers the whole `[[migrations]]` list. Prove it this way:
+staging applied the tag with are the steps `wrangler.toml` declares now.** A
+tag is applied only by the FIRST deploy that carries it; every later deploy
+applies nothing. So the SHA staging serves now, from `/release`, proves
+nothing. Here is how it fails:
+1. Deploy S1 applies tag T with steps D1, then fails before writing its receipt.
+2. A fix-forward edits T's steps to D2 but keeps the name T.
+3. Deploy S2 lands on staging and applies nothing new, because T is already applied.
+4. `/release` now shows S2, whose digest D2 equals the current one.
+5. A receipt written from that would certify D2, but staging ran D1.
+
+The receipt's `steps_digest` covers the whole `[[migrations]]` list. You need
+**one** of these two proofs.
+
+**(a) The history proof.** The tag's entry, and every `[[migrations]]` entry
+before it, is identical in every commit on `main` since the commit that
+introduced the tag. `tag-receipt write --history-repo` checks this itself and
+records what it checked in the receipt. It walks main's first-parent history of
+`mcp-server/wrangler.toml` from the commit that introduced the tag. It refuses
+(exit 4, nothing written) in any of these cases:
+- the list up to the tag changed in any later commit;
+- the tag is not the newest entry;
+- `--digest` is not the digest that history proves.
+
+Always pass `--history-repo` for a hand-written receipt. To see the same
+history yourself:
 
 ```sh
-cd ~/carr-system
-curl -s https://<staging host>/release        # note git_sha.value and worker_version.id
-git show <staging git_sha>:mcp-server/wrangler.toml > /tmp/staging-wrangler.toml
-./.venv/bin/python ops/worker-do-migration.py target --config /tmp/staging-wrangler.toml --env staging
-./.venv/bin/python ops/worker-do-migration.py target --config mcp-server/wrangler.toml --env staging
-```
-
-Only if the two `steps_digest` values are identical, and the staging `git_sha`
-is a real commit on `main`, record it:
-
-```sh
+cd ~/carr-system && git fetch -q origin
+git log --first-parent -p origin/main -- mcp-server/wrangler.toml   # read every [[migrations]] hunk since the tag appeared
+./.venv/bin/python ops/worker-do-migration.py target --config mcp-server/wrangler.toml --env staging   # steps_digest
 DIR="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/out/deploy-worker/do-migration-tags"
 ./.venv/bin/python ops/worker-do-migration.py tag-receipt write --dir "$DIR" \
   --script carr-mcp-staging --tag <tag> --digest <steps_digest> \
-  --sha <staging git_sha> --version-id <staging worker_version.id> --environment staging
+  --sha <staging git_sha> --version-id <staging worker_version.id> --environment staging \
+  --history-repo ~/carr-system --history-ref origin/main
 ./.venv/bin/python ops/worker-do-migration.py tag-receipt check --dir "$DIR" \
   --script carr-mcp-staging --tag <tag> --digest <steps_digest>   # must print "match": true
 ```
 
+**(b) The applying-deploy proof,** used only when (a) refuses because the
+steps were edited. Staging's deployment history must identify the deploy that
+APPLIED the tag, not the one serving now. That deploy is the EARLIEST staging
+deployment whose `GIT_SHA` declares the tag in `wrangler.toml`. Walk
+`npx wrangler deployments list --env staging` from oldest to newest, and read
+each version's `GIT_SHA` var with
+`npx wrangler versions view <version-id> --env staging`. The earlier
+deployments must be complete and readable. If any is missing, or has no
+`GIT_SHA`, the applying deploy is unknown. The applying version's `GIT_SHA`
+must be a real commit on `main`, and the `steps_digest` of
+`wrangler.toml` at that commit (from `target --config` on `git show
+<sha>:mcp-server/wrangler.toml`) must equal the current digest. If both hold,
+write the receipt without `--history-repo`. In the incident record, record the
+applying deployment, its version, its SHA and both digests. `--history-repo`
+would rightly refuse here, because the history did change.
+
 Then let the release pipeline retry.
 
 **It is NOT safe when** any of the following holds:
-- the digests differ;
-- staging was deployed from an uncommitted or unknown tree, so `git_sha` does
-  not name what was applied;
-- you cannot read staging's `/release`;
-- the `[[migrations]]` entry for the tag was edited after staging applied it.
+- neither (a) nor (b) holds, for example when the tag's entry was edited and
+  the deploy that applied it cannot be identified;
+- the digest at the applying commit differs from the current one;
+- staging was deployed from an uncommitted or unknown tree, so no commit names
+  what was applied;
+- you cannot read staging's deployment history, or the applying version has no
+  `GIT_SHA`.
 
 In those cases, never write a receipt to get past the refusal: it would certify
 steps staging never ran. Leave the applied tag's entry exactly as it was

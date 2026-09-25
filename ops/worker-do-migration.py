@@ -62,8 +62,13 @@ Subcommands (all output is JSON on stdout; nothing here reads a credential):
               publishes, 4 = they differ (the difference is printed), 3 = unknown
   tag-receipt write|check --dir <dir> --script <name> --tag <tag> --digest <sha256:...>
               [--sha <40-hex> --version-id <uuid> --environment <env>]
+              [--history-repo <checkout> [--history-ref origin/main]]
               the durable per-tag receipt; check exits 4 when it is missing or
-              names other steps
+              names other steps. A HAND-WRITTEN receipt must pass --history-repo:
+              write then refuses (exit 4) unless the tag's [[migrations]] entry
+              and every entry before it are identical in every first-parent
+              commit of the ref since the commit that introduced the tag, and
+              --digest is the digest that history proves
 """
 
 from __future__ import annotations
@@ -74,6 +79,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -96,6 +102,10 @@ class Undetermined(Exception):
 
 class ConfigError(Exception):
     """wrangler.toml does not describe a usable target."""
+
+
+class HistoryChanged(Exception):
+    """The tag's steps changed after it was introduced; no receipt can prove them."""
 
 
 def steps_digest(migrations: list) -> str:
@@ -283,14 +293,88 @@ def tag_receipt_path(directory: Path, script: str, tag: str) -> Path:
     return directory / f"{script}--{tag}.json"
 
 
+def _env_migrations(text: str, env: str) -> list:
+    doc = tomllib.loads(text)
+    section = doc if env == "production" else (doc.get("env") or {}).get(env)
+    if not isinstance(section, dict):
+        raise ConfigError(f"no [env.{env}] section")
+    migrations = section.get("migrations", doc.get("migrations", []))
+    if not isinstance(migrations, list):
+        raise ConfigError("[[migrations]] is not a list")
+    return migrations
+
+
+def tag_history_proof(repo: Path, ref: str, config: str, env: str, tag: str, digest: str) -> dict:
+    """Proof (a) for a hand-written receipt. A tag is applied only by the first
+    deploy that carries it, so the steps it was applied with are whatever the
+    [[migrations]] list said when that deploy ran. That is known without
+    deployment history only if the list up to and including the tag never
+    changed on the release line after the tag was introduced."""
+    def git(*argv: str) -> str:
+        done = subprocess.run(["git", "-C", str(repo), *argv], capture_output=True, text=True)
+        if done.returncode != 0:
+            raise Undetermined(f"git {' '.join(argv)} failed: {done.stderr.strip()[:200]}")
+        return done.stdout
+    ref_sha = git("rev-parse", "--verify", f"{ref}^{{commit}}").strip()
+    commits = git("rev-list", "--first-parent", "--reverse", ref_sha, "--", config).split()
+    introduced = None
+    prefix_at: dict[str, list] = {}
+    for commit in commits:
+        done = subprocess.run(["git", "-C", str(repo), "show", f"{commit}:{config}"],
+                              capture_output=True, text=True)
+        if done.returncode != 0:
+            if introduced is None:
+                continue
+            raise HistoryChanged(f"{config} is missing at {commit[:12]}, after {tag} was introduced")
+        try:
+            migrations = _env_migrations(done.stdout, env)
+        except (tomllib.TOMLDecodeError, ConfigError) as exc:
+            if introduced is None:
+                continue
+            raise HistoryChanged(f"{config} at {commit[:12]} is unreadable after {tag} was introduced: {exc}")
+        tags = [m.get("tag") if isinstance(m, dict) else None for m in migrations]
+        if tag not in tags:
+            if introduced is not None:
+                raise HistoryChanged(f"{tag} disappears from {config} at {commit[:12]}")
+            continue
+        if introduced is None:
+            introduced = commit
+        prefix_at[commit] = migrations[:tags.index(tag) + 1]
+    if introduced is None:
+        raise HistoryChanged(f"{tag} is not declared in {config} anywhere on {ref}")
+    first = prefix_at[introduced]
+    for commit, prefix in prefix_at.items():
+        if steps_digest(prefix) != steps_digest(first):
+            raise HistoryChanged(
+                f"{tag}'s steps (or an earlier entry) changed at {commit[:12]} after the tag was "
+                f"introduced at {introduced[:12]}; a deploy may have applied the older steps. "
+                "Use a new tag, or prove the applying deploy from staging's deployment history")
+    final = git("show", f"{ref_sha}:{config}")
+    now = _env_migrations(final, env)
+    if not now or not isinstance(now[-1], dict) or now[-1].get("tag") != tag:
+        raise HistoryChanged(f"{tag} is not the newest [[migrations]] entry at {ref}")
+    proven = steps_digest(now)
+    if proven != digest:
+        raise HistoryChanged(f"--digest {digest} is not the digest the history proves ({proven})")
+    return {"ref": ref, "ref_sha": ref_sha, "introduced_in": introduced,
+            "commits_checked": len(prefix_at), "steps_digest": proven}
+
+
 def write_tag_receipt(args: argparse.Namespace) -> dict:
     if not DIGEST_RE.fullmatch(args.digest or "") or not re.fullmatch(r"[0-9a-f]{40}", args.sha or "")             or not UUID_RE.fullmatch(args.version_id or "") or not args.environment:
         raise ConfigError("tag receipt write needs --digest, --sha, --version-id and --environment")
     path = tag_receipt_path(args.dir, args.script, args.tag)
+    proof = None
+    if args.history_repo is not None:
+        proof = tag_history_proof(args.history_repo, args.history_ref, args.history_config,
+                                  args.environment, args.tag, args.digest)
     row = {"schema": TAG_RECEIPT_SCHEMA, "script": args.script, "environment": args.environment,
            "tag": args.tag, "steps_digest": args.digest, "git_sha": args.sha,
            "version_id": args.version_id, "source_ref": "bin/deploy-worker.sh",
            "recorded_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")}
+    if proof is not None:
+        row["source_ref"] = "hand-written: tag-receipt write --history-repo"
+        row["history_proof"] = proof
     args.dir.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
     tmp.write_text(json.dumps(row, sort_keys=True) + "\n", encoding="utf-8")
@@ -341,6 +425,9 @@ def main(argv: list[str] | None = None) -> int:
     t.add_argument("--sha")
     t.add_argument("--version-id")
     t.add_argument("--environment")
+    t.add_argument("--history-repo", type=Path)
+    t.add_argument("--history-ref", default="origin/main")
+    t.add_argument("--history-config", default="mcp-server/wrangler.toml")
     args = parser.parse_args(argv)
 
     try:
@@ -379,6 +466,9 @@ def main(argv: list[str] | None = None) -> int:
                 raise Undetermined(f"the services response is not readable JSON: {exc}") from exc
         print(json.dumps(plan(target, services), sort_keys=True))
         return 0
+    except HistoryChanged as exc:
+        print(f"worker-do-migration: REFUSED: {exc}", file=sys.stderr)
+        return DIFFERS
     except Undetermined as exc:
         print(f"worker-do-migration: APPLIED TAG UNKNOWN: {exc}", file=sys.stderr)
         return UNKNOWN
