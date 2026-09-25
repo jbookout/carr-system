@@ -255,8 +255,13 @@ WRITE_ACTION_EXACT = {
                                   # stage forward (read_legacy..recovery_ready). A durable
                                   # state transition a session could report as done without
                                   # having actually advanced, so it is a write this gate cares
-                                  # about; "advance" has no sibling verb today to justify a
-                                  # blanket prefix.
+                                  # about; "advance" has two siblings now and still no
+                                  # blanket prefix: each advance-* is its own exact entry.
+    "advance-journey-one-clock",  # DoctorCRE V5-M01: appends one Journey 1 clock revision
+                                  # through a server-bound installation. A session could
+                                  # report the clock as started or advanced without it
+                                  # having happened (every deployed Worker refuses it), so
+                                  # it is a write this gate cares about. Exact entry.
     "mark-slice-completion",     # DoctorCRE V5-R02 (Q153): the explicit slice-completion
                                   # marker Joe asked for. "mark" is not generalized into a
                                   # prefix (a future mark-* read must not inherit this class).

@@ -619,7 +619,7 @@ def registry_prefix_coverage():
     # stay False: a prefix that captured either would make every future read named
     # the same way a write.
     reads = ["review-queue", "get-deal", "list-verbs", "catch-me-up", "deal-board", "find",
-             "notification-feed", "read-doc-conversation"]
+             "notification-feed", "read-doc-conversation", "read-journey-one-clock"]
     false_writes = [name for name in reads if mod.is_write_action(name)]
     ok = not missing and not false_writes
     print(f"{'PASS' if ok else 'FAIL'}  live registry write coverage: "

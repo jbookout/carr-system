@@ -62,6 +62,7 @@ import { modelRoleStoreTools } from "./model-role-store.v5.js";
 import { recordSourceAuthorityStoreTools } from "./record-source-authority-store.v5.js";
 import { foundationAssuranceMinimumTools } from
   "./foundation-assurance-minimum-producer.v5.js";
+import { journeyOneClockDoorTools } from "./journey-one-clock-door.v5.js";
 export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
 
 // ---------- envelope helpers ----------
@@ -8175,6 +8176,7 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "model-role-store": "mcp-server/src/model-role-store.v5.js",
   "record-source-authority": "mcp-server/src/record-source-authority-store.v5.js",
   "foundation-assurance": "mcp-server/src/foundation-assurance-minimum-producer.v5.js",
+  "journey-one-clock-door": "mcp-server/src/journey-one-clock-door.v5.js",
 });
 
 function bindToolSource(tool, source) {
@@ -9313,5 +9315,12 @@ registerTools(recordSourceAuthorityStoreTools({ withEnvelope, ToolError }),
 registerTools(foundationAssuranceMinimumTools({
   withEnvelope, ToolError, authenticatedIdentity,
 }), "foundation-assurance");
+// DoctorCRE V5-M01: the live door to the Journey 1 clock runtime. The read verb
+// derives clock_started from the record; the advance verb takes only an
+// idempotency key and is registered WITHOUT an installation resolver, so it
+// refuses journey_one_clock_installation_unavailable before any query here. No
+// Worker can start, advance or pause the Journey 1 clock through it until a
+// verifier for the composed projection is installed by trusted server code.
+registerTools(journeyOneClockDoorTools({ withEnvelope, ToolError }), "journey-one-clock-door");
 
 Object.freeze(TOOLS);
