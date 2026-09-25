@@ -2,7 +2,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { recordHomeSeam, lifecycleSeam, healthSeam } from "../js/capability-seams.js";
 
-test("recordHomeSeam (V5-F01) is unconditionally unavailable — F01 is not built, regardless of what the client implements", async () => {
+test("recordHomeSeam (V5-F01) reports available and returns the real read when the client implements the live record-home read", async () => {
+  const detail = { kind: "current_policy", readback: { policy_digest: "abc123" } };
+  const client = { getRecordHome: async () => detail };
+  const result = await recordHomeSeam(client, "d1");
+  assert.equal(result.available, true);
+  assert.equal(result.capability, "V5-F01");
+  assert.deepEqual(result.detail, detail);
+});
+
+test("recordHomeSeam is honestly unavailable — 'not deployed' — when the client has no live record-home read, regardless of what else it implements", async () => {
   const clientWithGetDeal = { getDeal: async (id) => ({ deal: { id, name: "Acme" } }) };
   for (const client of [{}, clientWithGetDeal, undefined, null]) {
     const result = await recordHomeSeam(client, "d1");
@@ -14,9 +23,19 @@ test("recordHomeSeam (V5-F01) is unconditionally unavailable — F01 is not buil
 
 test("recordHomeSeam never calls client.getDeal — getDeal is a different, already-existing WO-1 read, not F01", async () => {
   let called = false;
-  const client = { getDeal: async () => { called = true; return { deal: { id: "d1" } }; } };
+  const client = {
+    getDeal: async () => { called = true; return { deal: { id: "d1" } }; },
+  };
   await recordHomeSeam(client, "d1");
   assert.equal(called, false);
+});
+
+test("recordHomeSeam refuses honestly — 'unavailable', never a fabricated deployed state — when the live read errors", async () => {
+  const client = { getRecordHome: async () => { throw new Error("unauthorized"); } };
+  const result = await recordHomeSeam(client, "d1");
+  assert.equal(result.available, false);
+  assert.equal(result.capability, "V5-F01");
+  assert.match(result.reason, /unauthorized/);
 });
 
 test("lifecycleSeam (V5-J102) is unavailable today — the client has no typed transition yet", async () => {
