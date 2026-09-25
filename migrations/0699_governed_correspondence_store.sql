@@ -161,6 +161,41 @@ create function ops.correspondence_has_dialable_number(p text)
 returns boolean language sql immutable set search_path = pg_catalog
 as $$ select p is not null and p ~ '(^|[^0-9])\+?[0-9][0-9 ().-]{7,}[0-9]($|[^0-9])' $$;
 
+-- identity.js ALLOW_LIST: the two partner accounts the system knows, as the
+-- digests correspondenceAccountDigest computes (trim, lower-case, sha256). Used
+-- ONLY to refuse one partner naming the OTHER partner's known account. It proves
+-- nothing about an address it does not list: mailbox ownership proof arrives with
+-- the F10 installation binding, where the receipt writer must match the
+-- installation's account against the consent's account_digest.
+-- governed-correspondence-store.v5.test.mjs recomputes both digests from
+-- identity.js and asserts they appear here, so the two cannot drift apart.
+create function ops.correspondence_known_partner_account(p_account_digest text)
+returns text language sql immutable set search_path = pg_catalog
+as $$
+  select case p_account_digest
+    when 'sha256:2da48000d09255c32c966ef96d357cfe1a408fb053689706f35789af27c72963' then 'joe'
+    when 'sha256:7b9d432e5baf34a7ae12cc8128e9a9645645b0c51f7980e1fb7d28e8a7617f69' then 'dell'
+  end
+$$;
+
+-- Thread metadata with the native message and thread identifiers removed. An RFC
+-- 5322 Message-ID is shaped like local@host and names a MESSAGE, not a
+-- destination, so those exact fields are exempt from the address scan; every
+-- other value in the metadata is still scanned.
+create function ops.correspondence_metadata_without_message_ids(p jsonb)
+returns jsonb language sql immutable set search_path = pg_catalog
+as $$
+  select case
+    when jsonb_typeof(p -> 'message_refs') = 'array' then
+      jsonb_set(p, '{message_refs}', coalesce((
+        select jsonb_agg(case when jsonb_typeof(m) = 'object'
+                              then m - 'provider_message_id' - 'provider_thread_id' else m end
+                         order by o)
+          from jsonb_array_elements(p -> 'message_refs') with ordinality as e(m, o)), '[]'::jsonb))
+    else p
+  end
+$$;
+
 create function ops.correspondence_server_instant()
 returns text language sql stable set search_path = pg_catalog
 as $$ select to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') $$;
@@ -250,7 +285,8 @@ create table ops.correspondence_adapter_read_receipt (
   -- snippet or attachment bytes, and no routable address anywhere in it.
   constraint correspondence_receipt_no_content check (
     not (thread_metadata ?| array['subject', 'body', 'preview', 'snippet', 'html', 'raw', 'attachment_bytes', 'message_text'])),
-  constraint correspondence_receipt_no_address check (not ops.correspondence_has_routable_address(thread_metadata::text)),
+  constraint correspondence_receipt_no_address check (
+    not ops.correspondence_has_routable_address(ops.correspondence_metadata_without_message_ids(thread_metadata)::text)),
   constraint correspondence_receipt_digest check (ops.correspondence_is_sha256_ref(metadata_digest))
 );
 
@@ -353,8 +389,16 @@ $$;
 
 -- THE HUMAN STEP. A partner consents for their OWN mailbox: the verified-partner
 -- context the server sets only for a humanOnly act must name the partner whose
--- mailbox this is. A sponsored agent cannot consent on a partner's behalf, and
--- one partner cannot consent for the other's mailbox.
+-- mailbox this is. Under Joe's 2026-08-26 humanOnly ruling that context is set
+-- for the partner AND for an agent the partner sponsors acting on the partner's
+-- quoted words, so such an agent may record the consent (human_quote carries the
+-- words); an agent session WITHOUT that context is refused.
+--
+-- WHAT IS CHECKED ABOUT THE MAILBOX, exactly: the partner is derived, and an
+-- account_digest that identity.js knows as the OTHER partner's account is
+-- refused. Nothing here proves the partner owns an account it does not list;
+-- that proof arrives with the F10 installation binding (see
+-- ops.correspondence_known_partner_account above).
 create function ops.correspondence_record_adapter_consent(
   p_partner_slug text, p_adapter_kind text, p_account_digest text,
   p_read_operations text[], p_human_quote text, p_idempotency_key uuid)
@@ -378,6 +422,11 @@ begin
       raise exception 'correspondence consent idempotency key % was already used for a different consent', p_idempotency_key using errcode = '23505';
     end if;
     return v_existing.id;
+  end if;
+  if ops.correspondence_known_partner_account(p_account_digest) is not null
+     and ops.correspondence_known_partner_account(p_account_digest) <> p_partner_slug then
+    raise exception 'this account belongs to %; % may consent only for their own mailbox',
+      ops.correspondence_known_partner_account(p_account_digest), p_partner_slug using errcode = '42501';
   end if;
   if exists (select 1 from ops.correspondence_adapter_consent c
               where c.partner_slug = p_partner_slug and c.adapter_kind = p_adapter_kind
@@ -427,6 +476,10 @@ $$;
 -- THE ADAPTER'S WRITER. Granted to nobody in this file (see section 6). The
 -- partner, adapter and account come from the consent row, never a parameter, so
 -- a receipt cannot be attributed to a mailbox other than the one consented.
+-- OWED WITH THE F10 INSTALLATION BINDING: before this writer is granted to the
+-- adapter seat, it must also match the installation's own account against the
+-- consent's account_digest, which is what proves the consenting partner owns
+-- the mailbox being read.
 create function ops.correspondence_record_read_receipt(
   p_consent_id uuid, p_source_system text, p_native_id text, p_native_id_epoch integer,
   p_thread_metadata jsonb, p_idempotency_key uuid)
@@ -563,6 +616,7 @@ revoke all on function
   ops.correspondence_is_sha256_ref(text), ops.correspondence_is_ref(text), ops.correspondence_refs_valid(text[]),
   ops.correspondence_has_routable_address(text), ops.correspondence_has_dialable_number(text),
   ops.correspondence_server_instant(), ops.correspondence_digest(jsonb),
+  ops.correspondence_known_partner_account(text), ops.correspondence_metadata_without_message_ids(jsonb),
   ops.correspondence_rows_immutable(), ops.correspondence_consent_in_force(uuid),
   ops.correspondence_record_adapter_consent(text,text,text,text[],text,uuid),
   ops.correspondence_revoke_adapter_consent(uuid,text,uuid),

@@ -223,8 +223,18 @@ function assertInstant(value, path) {
  * a contract violation: the caller has assumed a capability this module does
  * not have, and answering politely would confirm it.
  */
-function sweepRequest(value, path) {
+/**
+ * Native message identifiers are the one place an "@" is legitimate: an RFC 5322
+ * Message-ID is shaped like `local@host` and names a message, not a destination.
+ * Only the VALUE of these exact keys skips the address scan; each still passes
+ * its own identifier validator, and every other value — any prose, any field a
+ * body could hide in — is still scanned.
+ */
+const MESSAGE_ID_KEYS = Object.freeze(["native_id", "provider_message_id", "provider_thread_id"]);
+
+function sweepRequest(value, path, key = null) {
   if (typeof value === "string") {
+    if (key !== null && MESSAGE_ID_KEYS.includes(key)) return;
     if (ROUTABLE_ADDRESS.test(value)) {
       fail("routable_address_refused", `${path} carries a routable destination; nothing in J103 holds one`, { path });
     }
@@ -240,7 +250,7 @@ function sweepRequest(value, path) {
       if (credential) fail("credential_field_refused", `${path}.${key} names a credential ("${credential}")`, { path: `${path}.${key}`, fragment: credential });
       const content = V5_J103_SOURCE_CONTENT_FRAGMENTS.find(f => lower.includes(f));
       if (content) fail("source_content_refused", `${path}.${key} names raw correspondence content ("${content}"); the mailbox stays the truth`, { path: `${path}.${key}`, fragment: content });
-      sweepRequest(entry, `${path}.${key}`);
+      sweepRequest(entry, `${path}.${key}`, key);
     }
   }
 }
@@ -584,8 +594,11 @@ export const V5_J103J_TOUCH_DECISIONS = deepFreeze([
   "propose_scheduled_meeting",
   "reconcile_cancellation",
   "reconcile_correction",
+  "reconcile_reinstatement",
   "refuse_stale_revision",
+  "still_cancelled_no_touch",
   "withhold_in_progress",
+  "withhold_tentative_past",
 ]);
 
 const TOUCH_REQUEST_KEYS = Object.freeze(["event", "prior", "now"]);
@@ -651,7 +664,20 @@ export function classifyCalendarTouch(request) {
         proposal: null, reconciliation: null,
       });
     }
-    if (ev.status === "cancelled" && prior.status !== "cancelled") {
+    // A CANCELLED EVENT NEVER BECOMES A TOUCH, whatever else its new revision
+    // changed. Every cancelled branch returns here, before the correction branch
+    // could build a proposal from it (review blocker 1 on #1266: a cancelled event
+    // whose newer revision only moved its times fell through to a correction and
+    // came back as a past touch).
+    if (ev.status === "cancelled" && prior.status === "cancelled") {
+      return result("calendar_touch", {
+        ...base,
+        decision: sameContent ? "no_change_duplicate_revision" : "still_cancelled_no_touch",
+        reason_id: sameContent ? "j103.c6.new_revision_same_content" : "j103.c6.cancelled_event_moved_still_no_touch",
+        proposal: null, reconciliation: null,
+      });
+    }
+    if (ev.status === "cancelled") {
       return result("calendar_touch", {
         ...base,
         decision: "reconcile_cancellation",
@@ -664,6 +690,29 @@ export function classifyCalendarTouch(request) {
           supersedes_proposal_digest: prior.proposal_digest,
           attendance: "not_asserted",
         },
+      });
+    }
+    // UN-CANCELLED. The source says the meeting is back on. That is a statement
+    // about a plan, never about attendance: a reinstated future meeting may be
+    // proposed as scheduled (not a touch); a reinstated meeting whose time has
+    // already passed proposes nothing and is flagged for a human, because
+    // "cancelled, then un-cancelled after the fact" says nothing about whether
+    // anyone met.
+    if (prior.status === "cancelled") {
+      const proposal = temporality === "scheduled" ? touchProposal(ev, temporality) : null;
+      return result("calendar_touch", {
+        ...base,
+        decision: "reconcile_reinstatement",
+        reason_id: temporality === "scheduled"
+          ? "j103.c6.reinstated_before_it_happened"
+          : "j103.c6.reinstated_after_start_attendance_unknown",
+        proposal,
+        reconciliation: {
+          action: temporality === "scheduled" ? "reinstate_scheduled_meeting" : "flag_reinstated_after_start_for_human",
+          supersedes_proposal_digest: prior.proposal_digest,
+          attendance: "not_asserted",
+        },
+        requires_human_approval: temporality !== "scheduled",
       });
     }
     if (!sameContent) {
@@ -697,6 +746,13 @@ export function classifyCalendarTouch(request) {
       proposal: null, reconciliation: null,
     });
   }
+  // A tentative meeting that has passed was never confirmed; it is not a touch.
+  if (temporality === "past" && ev.status !== "confirmed") {
+    return result("calendar_touch", {
+      ...base, decision: "withhold_tentative_past", reason_id: "j103.c6.tentative_past_is_not_a_touch",
+      proposal: null, reconciliation: null,
+    });
+  }
   return result("calendar_touch", {
     ...base,
     decision: temporality === "scheduled" ? "propose_scheduled_meeting" : "propose_past_calendar_touch",
@@ -706,8 +762,15 @@ export function classifyCalendarTouch(request) {
   });
 }
 
+/**
+ * The ONE place a touch proposal is built, and the one place `counts_as_touch`
+ * can become true: a CONFIRMED event that is wholly in the past. Cancelled and
+ * tentative events, and anything in progress, get no touch here whichever branch
+ * asked — so a future branch cannot reintroduce blocker 1 by forgetting a check.
+ */
 function touchProposal(ev, temporality) {
-  if (temporality === "in_progress") return null;
+  if (temporality === "in_progress" || ev.status === "cancelled") return null;
+  if (temporality === "past" && ev.status !== "confirmed") return null;
   return temporality === "scheduled"
     ? { record: "scheduled_meeting", counts_as_touch: false, starts_at: ev.starts_at, ends_at: ev.ends_at, attendance: "not_asserted" }
     : { record: "calendar_derived_touch", counts_as_touch: true, occurred_at: ev.starts_at, basis: "calendar_event_past", attendance: "not_asserted" };
@@ -774,6 +837,7 @@ export function classifyCorrespondenceCommitments(request) {
   });
 
   const seen = new Map();
+  const seenCompletion = new Map();
   const outcomes = request.items.map((item, i) => {
     const path = `request.items[${i}]`;
     assertClosed(item, ITEM_KEYS, ITEM_KEYS, path);
@@ -808,6 +872,13 @@ export function classifyCorrespondenceCommitments(request) {
       if (completion.evidence.length === 0) {
         return { ...outcome, decision: "completion_refused_no_evidence", reason_id: "j103.c7.completion_needs_evidence", proposal: null };
       }
+      // One obligation completes once. A second claim for the same obligation in
+      // the same batch — the same reply quoted twice, a thread read twice — is a
+      // duplicate, not a second completion.
+      if (seenCompletion.has(key)) {
+        return { ...outcome, decision: "duplicate_within_batch", reason_id: "j103.c7.same_completion_twice", first_index: seenCompletion.get(key), proposal: null };
+      }
+      seenCompletion.set(key, i);
       return {
         ...outcome,
         decision: "propose_evidence_backed_completion",

@@ -119,6 +119,20 @@ const MUTANTS = [
     replace: "      document_state: route === \"route_to_lifecycle_confirmation\" ? \"document_confirmed\" : \"document_pending\",\n      basis: signal.signal_basis,",
     suite: "governed-correspondence-journey.v5.test.mjs",
   },
+  {
+    id: "journey-ceiling-stamped-before-body",
+    file: "governed-correspondence-journey.v5.js",
+    find: "    ...body,\n    ...CEILING,\n",
+    replace: "    ...CEILING,\n    ...body,\n",
+    suite: "governed-correspondence-journey.v5.test.mjs",
+  },
+  {
+    id: "journey-touch-ignores-status",
+    file: "governed-correspondence-journey.v5.js",
+    find: "  if (temporality === \"in_progress\" || ev.status === \"cancelled\") return null;\n  if (temporality === \"past\" && ev.status !== \"confirmed\") return null;",
+    replace: "  if (temporality === \"in_progress\") return null;",
+    suite: "governed-correspondence-journey.v5.test.mjs",
+  },
   // --- the store's verbs ------------------------------------------------------
   {
     id: "store-registers-a-send-verb",
@@ -139,6 +153,13 @@ const MUTANTS = [
     file: "governed-correspondence-store.v5.js",
     find: "          consent_id: { type: \"string\" },\n          human_quote: { type: \"string\" },",
     replace: "          consent_id: { type: \"string\" },\n          recipient: { type: \"string\" },\n          human_quote: { type: \"string\" },",
+    suite: "governed-correspondence-store.v5.test.mjs",
+  },
+  {
+    id: "store-allows-other-partners-mailbox",
+    file: "governed-correspondence-store.v5.js",
+    find: "        if (knownOwner !== null && knownOwner !== partner) {",
+    replace: "        if (false) {",
     suite: "governed-correspondence-store.v5.test.mjs",
   },
   {

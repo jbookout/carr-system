@@ -11,7 +11,10 @@
 --
 -- WHAT IT PROVES, none of which reading the SQL can show:
 --   * consent is read-only by CHECK: send_mail_message and every other F10 write
---     operation is refused, and one partner cannot consent for the other's mailbox
+--     operation is refused; consent needs the mailbox partner's verified context
+--     (the partner, or a sponsored agent the server gives that context); and an
+--     account digest identity.js knows as the OTHER partner's is refused. Proof of
+--     ownership of an unlisted account is owed to the F10 installation binding
 --   * a read receipt carries partner, account and native provenance copied from
 --     the consent, refuses raw content and routable addresses, and admits only
 --     correspondence classified as related
@@ -112,19 +115,54 @@ begin
   end;
 end $$;
 
--- A sponsored agent cannot consent even for its own sponsor.
+-- Sponsored agents, under Joe's 2026-08-26 humanOnly ruling: an agent session
+-- WITHOUT the verified-partner context is refused; a Joe-sponsored agent that the
+-- server gives Joe's verified context for a humanOnly act (acting on his quoted
+-- words) may record the consent, and the row names the agent as author.
 do $$
+declare v uuid;
 begin
   perform set_config('carr.acting_actor_slug', 'automation', true);
   perform set_config('carr.verified_human_actor_slug', '', true);
   begin
     perform ops.correspondence_record_adapter_consent('joe', 'v5_f10_partner_mail_calendar_adapter',
       'sha256:' || repeat('d', 64), array['list_mail_messages'], 'q', '00000000-0000-4000-8000-000000000005');
-    raise exception 'an agent recorded partner consent';
+    raise exception 'an agent without the verified-partner context recorded consent';
+  exception when insufficient_privilege then null;
+  end;
+  perform set_config('carr.verified_human_actor_slug', 'joe', true);
+  v := ops.correspondence_record_adapter_consent('joe', 'v5_f10_partner_mail_calendar_adapter',
+    'sha256:' || repeat('d', 64), array['list_calendar_events'], 'Joe: "yes, read my calendar"',
+    '00000000-0000-4000-8000-000000000006');
+  if (select consented_by_actor_id from ops.correspondence_adapter_consent where id = v)
+     is distinct from (select id from public.actor where slug = 'automation') then
+    raise exception 'a sponsored consent was not attributed to the acting agent';
+  end if;
+  -- Nor can that agent, on Joe's context, name Dell's known account.
+  begin
+    perform ops.correspondence_record_adapter_consent('joe', 'v5_f10_partner_mail_calendar_adapter',
+      'sha256:7b9d432e5baf34a7ae12cc8128e9a9645645b0c51f7980e1fb7d28e8a7617f69',
+      array['list_mail_messages'], 'q', '00000000-0000-4000-8000-000000000007');
+    raise exception 'Joe''s context consented for Dell''s known account';
   exception when insufficient_privilege then null;
   end;
   perform set_config('carr.acting_actor_slug', 'joe', true);
   perform set_config('carr.verified_human_actor_slug', 'joe', true);
+end $$;
+
+-- Joe himself cannot name Dell's known account either; his own known account is accepted.
+do $$
+begin
+  begin
+    perform ops.correspondence_record_adapter_consent('joe', 'v5_f10_partner_mail_calendar_adapter',
+      'sha256:7b9d432e5baf34a7ae12cc8128e9a9645645b0c51f7980e1fb7d28e8a7617f69',
+      array['list_mail_messages'], 'q', '00000000-0000-4000-8000-000000000008');
+    raise exception 'Joe consented for Dell''s known account';
+  exception when insufficient_privilege then null;
+  end;
+  perform ops.correspondence_record_adapter_consent('joe', 'v5_f10_partner_mail_calendar_adapter',
+    'sha256:2da48000d09255c32c966ef96d357cfe1a408fb053689706f35789af27c72963',
+    array['list_mail_messages'], 'q', '00000000-0000-4000-8000-000000000009');
 end $$;
 
 -- Read receipts (as the owner: no runtime role may call this writer).
@@ -169,6 +207,18 @@ begin
     perform ops.correspondence_record_read_receipt(c, 'fixture-mail', 'thread-3', 0,
       '{"relevance_state":"related","note":"someone@example.invalid.test"}'::jsonb, '00000000-0000-4000-8000-000000000012');
     raise exception 'an address crossed';
+  exception when check_violation then null;
+  end;
+  -- An RFC Message-ID in the message refs is a message name, not a destination.
+  perform ops.correspondence_record_read_receipt(c, 'fixture-mail', 'thread-5', 0,
+    '{"relevance_state":"related","message_refs":[{"provider_message_id":"CAF0x1a2b.fixture@mail.example.invalid.test","provider_thread_id":"t5@mail.example.invalid.test","occurred_at":"2026-09-24T10:00:00Z"}]}'::jsonb,
+    '00000000-0000-4000-8000-000000000014');
+  -- ...but the same address shape in any other field of a message ref is refused.
+  begin
+    perform ops.correspondence_record_read_receipt(c, 'fixture-mail', 'thread-6', 0,
+      '{"relevance_state":"related","message_refs":[{"provider_message_id":"m6","note":"joe@example.invalid.test"}]}'::jsonb,
+      '00000000-0000-4000-8000-000000000015');
+    raise exception 'an address rode in beside a message id';
   exception when check_violation then null;
   end;
   begin

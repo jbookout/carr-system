@@ -181,7 +181,7 @@ test("readiness reports consent, receipts and every owed step from the record la
   const r = await TOOLS["correspondence-readiness"].handler(c, actor, {});
   assert.equal(r.mailbox_reads_possible, false);
   assert.equal(r.activation.status, "consent_not_recorded");
-  assert.ok(r.owed.some(s => s.step === "human:partner-connector-consent"));
+  assert.ok(r.owed.some(s => s.step === "human:partner-local-mailbox-consent"));
   assert.ok(r.owed.some(s => s.step === "step:governed-correspondence-internal-update-independent-receipt"));
   assert.ok(r.never_consentable_operations.includes("send_mail_message"));
   assert.ok(!r.consentable_operations.includes("send_mail_message"));
@@ -194,4 +194,35 @@ test("unknown arguments are refused before any query on every verb", async () =>
     await refusedWith(tool.handler(c, actor, { idempotency_key: KEY, send_now: true }), "unregistered_field");
     assert.equal(c.calls.length, 0, `${name} queried before refusing`);
   }
+});
+
+// ---------------------------------------------------------------- review round 1 (#1266)
+
+test("a partner cannot name the other partner's known account, and the database holds the same digests", async () => {
+  const { ALLOW_LIST } = await import("../src/identity.js");
+  const { readFileSync, readdirSync } = await import("node:fs");
+  const dellAccount = Object.keys(ALLOW_LIST).find(a => ALLOW_LIST[a] === "dell");
+  const c = fakeClient([["verified_human_actor_slug", [{ slug: "joe" }]]]);
+  await refusedWith(TOOLS["record-correspondence-adapter-consent"].handler(c, actor, {
+    idempotency_key: KEY, adapter_kind: "v5_f10_partner_mail_calendar_adapter", account: ` ${dellAccount.toUpperCase()} `,
+    read_operations: ["list_mail_messages"], human_quote: "yes",
+  }), "other_partners_mailbox");
+  assert.ok(!c.calls.some(q => q.sql.includes("correspondence_record_adapter_consent")), "the refusal reached the writer");
+  // The record layer refuses the same case from the same two digests.
+  const migration = readdirSync(new URL("../../migrations/", import.meta.url))
+    .find(f => /_governed_correspondence_store\.sql$/.test(f));
+  const sql = readFileSync(new URL(`../../migrations/${migration}`, import.meta.url), "utf8");
+  for (const [account, slug] of Object.entries(ALLOW_LIST)) {
+    assert.ok(sql.includes(`when '${correspondenceAccountDigest(account)}' then '${slug}'`), `${slug}'s digest is not in the migration`);
+  }
+});
+
+test("no owed step or verb description asks a partner for an OAuth grant; activation is local-store access", async () => {
+  const { V5_J103_STORE_OWED_STEPS } = await import("../src/governed-correspondence-store.v5.js");
+  const text = JSON.stringify([Object.values(TOOLS).map(t => t.description), V5_J103_STORE_OWED_STEPS]);
+  assert.ok(!/(grant|grants|scope)[^."]{0,40}oauth|oauth scope|read-only oauth/i.test(text), "an OAuth instruction remains");
+  const human = V5_J103_STORE_OWED_STEPS.find(s => s.step.startsWith("human:"));
+  assert.match(human.what, /HxStore/);
+  assert.match(human.what, /EventKit/);
+  assert.match(human.what, /never asked for an OAuth grant/);
 });

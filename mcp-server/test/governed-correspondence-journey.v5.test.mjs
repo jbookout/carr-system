@@ -334,6 +334,89 @@ test("c8: an open breaker suspends only its own consumer and scope, and capture 
   assert.equal(otherScope.capture_preserved, true);
 });
 
+// --------------------------------------------------------------------------- review round 1 (#1266)
+
+const PAST = { starts_at: "2026-09-24T14:00:00Z", ends_at: "2026-09-24T15:00:00Z" };
+
+test("c6 blocker: a cancelled event whose newer revision only moves its times never becomes a touch", () => {
+  const moved = { starts_at: "2026-09-23T14:00:00Z", ends_at: "2026-09-23T15:00:00Z" };
+  const r = keep(classifyCalendarTouch({ event: event({ revision: 5, status: "cancelled", ...moved }), prior: prior({ status: "cancelled", ...PAST }), now: NOW }));
+  assert.equal(r.decision, "still_cancelled_no_touch");
+  assert.equal(r.proposal, null);
+  const same = keep(classifyCalendarTouch({ event: event({ revision: 5, status: "cancelled", ...PAST }), prior: prior({ status: "cancelled", ...PAST }), now: NOW }));
+  assert.equal(same.proposal, null);
+});
+
+test("c6: a cancelled event in the future whose times move is still not a meeting", () => {
+  const r = keep(classifyCalendarTouch({ event: event({ revision: 5, status: "cancelled", starts_at: "2026-09-29T14:00:00Z", ends_at: "2026-09-29T15:00:00Z" }), prior: prior({ status: "cancelled" }), now: NOW }));
+  assert.equal(r.proposal, null);
+});
+
+test("c6: un-cancelling a past event proposes no touch and asks a human", () => {
+  const r = keep(classifyCalendarTouch({ event: event({ revision: 5, status: "confirmed", ...PAST }), prior: prior({ status: "cancelled", ...PAST }), now: NOW }));
+  assert.equal(r.decision, "reconcile_reinstatement");
+  assert.equal(r.proposal, null);
+  assert.equal(r.requires_human_approval, true);
+  assert.equal(r.reconciliation.attendance, "not_asserted");
+});
+
+test("c6: un-cancelling a future event reinstates it as scheduled, not a touch", () => {
+  const r = keep(classifyCalendarTouch({ event: event({ revision: 5, status: "confirmed" }), prior: prior({ status: "cancelled" }), now: NOW }));
+  assert.equal(r.decision, "reconcile_reinstatement");
+  assert.equal(r.proposal.counts_as_touch, false);
+});
+
+test("c6: a tentative event in the past is not a touch, with or without a prior", () => {
+  const r = keep(classifyCalendarTouch({ event: event({ status: "tentative", ...PAST }), prior: null, now: NOW }));
+  assert.equal(r.decision, "withhold_tentative_past");
+  assert.equal(r.proposal, null);
+  const corrected = keep(classifyCalendarTouch({ event: event({ revision: 5, status: "tentative", ...PAST }), prior: prior({ status: "confirmed", starts_at: "2026-09-24T13:00:00Z", ends_at: "2026-09-24T14:00:00Z" }), now: NOW }));
+  assert.equal(corrected.proposal, null);
+});
+
+test("c6: counts_as_touch is true ONLY for a confirmed, wholly past event, over every status x temporality x prior", () => {
+  const times = { future: {}, past: PAST, now: { starts_at: "2026-09-25T11:30:00Z", ends_at: "2026-09-25T12:30:00Z" } };
+  for (const status of ["confirmed", "tentative", "cancelled"]) {
+    for (const [label, t] of Object.entries(times)) {
+      for (const priorStatus of [null, "confirmed", "tentative", "cancelled"]) {
+        const req = { event: event({ revision: 7, status, ...t }), now: NOW,
+          prior: priorStatus === null ? null : prior({ status: priorStatus, starts_at: "2026-09-20T10:00:00Z", ends_at: "2026-09-20T11:00:00Z" }) };
+        const r = keep(classifyCalendarTouch(req));
+        const touch = r.proposal?.counts_as_touch === true;
+        const allowed = status === "confirmed" && label === "past" && priorStatus !== "cancelled";
+        assert.ok(!touch || allowed, `${status}/${label}/prior=${priorStatus} proposed a touch`);
+      }
+    }
+  }
+});
+
+test("c7: a second completion claim for the same obligation in one batch is a duplicate", () => {
+  const claim = { claimed_by: "model_seam", evidence: [{ evidence_kind: "correspondence_message_ref", evidence_ref: "msg-ref-3", evidence_digest: d("reply") }] };
+  const r = keep(classifyCorrespondenceCommitments({ items: [item({ completion: claim }), item({ completion: claim, source_message: msg(9) })], existing: [] }));
+  assert.equal(r.outcomes[0].decision, "propose_evidence_backed_completion");
+  assert.equal(r.outcomes[1].decision, "duplicate_within_batch");
+  assert.equal(r.outcomes[1].proposal, null);
+});
+
+test("an RFC Message-ID is admitted as a native id, and an address anywhere else is still refused", () => {
+  const rfc = { source_system: "fixture-mail", native_id: "CAF0x1a2b.fixture@mail.example.invalid.test", native_id_epoch: 0 };
+  const r = keep(classifySignedLeaseSignal({ signal: clearSignal({ message: rfc }) }));
+  assert.equal(r.message.native_id, rfc.native_id);
+  expectCode(() => classifySignedLeaseSignal({ signal: clearSignal({ message: { ...rfc, source_system: "joe@example.invalid.test" } }) }), "routable_address_refused");
+  expectCode(() => classifyCorrespondenceCommitments({ items: [item({ source_message: rfc, action_key: "reply-to-joe@example.invalid.test" })], existing: [] }), "routable_address_refused");
+});
+
+test("the ceiling is stamped LAST in result(), so no branch body can override it", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../src/governed-correspondence-journey.v5.js", import.meta.url), "utf8");
+  const fn = src.slice(src.indexOf("function result(kind, body) {"), src.indexOf("// c4 —"));
+  const body = fn.indexOf("...body,");
+  const ceiling = fn.indexOf("...CEILING,");
+  assert.ok(body > 0 && ceiling > 0, "result() no longer spreads body and CEILING");
+  assert.ok(ceiling > body, "CEILING must be spread after body");
+  assert.equal(fn.slice(ceiling).split("\n")[1].trim(), "};", "nothing may follow CEILING in the result object");
+});
+
 // --------------------------------------------------------------------------- dispatch and ceiling
 
 test("no request may carry a dispatch-shaped field, anywhere", () => {
@@ -389,7 +472,10 @@ test("EVERY produced result carries the ceiling and no forbidden state", () => {
       if (typeof v !== "string") return;
       assert.notEqual(v, "document_confirmed", `${path} confirms a document`);
       assert.ok(!/^attended$|^did_attend$/.test(v), `${path} asserts attendance`);
-      assert.ok(!/@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/.test(v), `${path} carries a destination`);
+      // A native message id may be an RFC Message-ID; it names a message, not a destination.
+      if (!/\.(native_id|provider_message_id|provider_thread_id)$/.test(path)) {
+        assert.ok(!/@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/.test(v), `${path} carries a destination`);
+      }
     });
     walk(r, (v, path) => {
       if (path.endsWith(".attendance_asserted")) assert.equal(v, false);

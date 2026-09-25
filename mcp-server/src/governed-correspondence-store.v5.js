@@ -31,6 +31,16 @@
 // server-derived sponsor inside the database. Stored digests are recomputed on
 // read and a mismatch refuses the whole read rather than skipping a row.
 //
+// WHAT CONSENT DOES AND DOES NOT PROVE ABOUT THE MAILBOX. The partner is
+// derived; the ACCOUNT is the partner's statement. Two checks run on it today,
+// here and again in the record layer: an address identity.js maps to the OTHER
+// partner is refused, so neither partner can name the other's known account.
+// That is all that is checked. It does NOT prove the partner owns an address
+// identity.js does not know. Ownership proof arrives with the F10 installation
+// binding: the adapter runs on the partner's own machine against that machine's
+// local store, and the receipt writer must match the installation's account
+// against the consent's account_digest before it records a single receipt.
+//
 // ACTIVATION IS THE HUMAN STEP, AND THIS MODULE CANNOT TAKE IT. Recording consent
 // unlocks no read by itself: reads come from receipts, and the receipt writer is
 // granted to no runtime role until the F10 adapter and its seat land.
@@ -38,6 +48,7 @@
 
 import { createHash } from "node:crypto";
 import { V5_NO_EFFECTS } from "./global-boundaries.v5.js";
+import { slugForEmail } from "./identity.js";
 import {
   V5_J103_ADAPTER_KINDS,
   V5_J103_ADAPTER_READ_RECEIPT_SEAM,
@@ -66,9 +77,9 @@ export const V5_J103_STORE_VERBS = Object.freeze([
 /** The seams this store names as owed. Each is a precondition of a real read. */
 export const V5_J103_STORE_OWED_STEPS = Object.freeze([
   Object.freeze({
-    step: "human:partner-connector-consent",
+    step: "human:partner-local-mailbox-consent",
     owner: "the partner whose mailbox it is",
-    what: "the partner records consent here for their OWN mailbox, naming only F10 read operations, and grants the provider's read-only OAuth scopes in the connector; no send scope is ever requested",
+    what: "the partner records consent here for their OWN mailbox, naming only F10 read operations. The adapter reads that partner's LOCAL Mac stores — New Outlook's HxStore or Apple Mail for mail, Apple Calendar through EventKit — on the partner's own machine; it never reads through a Google or Gmail API, and the partner is never asked for an OAuth grant",
   }),
   Object.freeze({
     step: V5_J103_ADAPTER_READ_RECEIPT_SEAM,
@@ -285,7 +296,7 @@ export function governedCorrespondenceStoreTools({ withEnvelope, writeEvent, Too
 
     "record-correspondence-adapter-consent": {
       write: true, humanOnly: true,
-      description: "HUMAN-ONLY. Record YOUR consent for one authorized adapter to READ your OWN mailbox (V5-J103 activation step). The partner is the verified partner the server establishes for this act, never an argument, and the record layer refuses one partner consenting for the other's mailbox. `account` is your own mailbox address: it is normalized and digested on arrival and only the digest is stored or returned. `read_operations` may name only the adapter's READ operations (list and read mail/calendar metadata); a send, move, delete or any other write operation is refused by the database, so no consent here can ever authorise sending. `human_quote` is your literal words granting it. Consent alone reads nothing: reads need the adapter to write read receipts, and no runtime role can yet. Revoke with revoke-correspondence-adapter-consent.",
+      description: "HUMAN-ONLY. Record YOUR consent for one authorized adapter to READ your OWN mailbox (V5-J103 activation step). The partner is the verified partner the server establishes for this act (you, or an agent you sponsor acting on your quoted words under the 2026-08-26 humanOnly ruling), never an argument. An address known to belong to the other partner is refused here and by the record layer; proof that you own any other address arrives with the F10 installation binding, whose receipt writer must match the installation's account to this consent. `account` is your own mailbox address as your Mac's local mail store holds it: it is normalized and digested on arrival and only the digest is stored or returned. Nothing here asks for an OAuth grant; the adapter reads your local stores (New Outlook HxStore or Apple Mail; Apple Calendar via EventKit). `read_operations` may name only the adapter's READ operations (list and read mail/calendar metadata); a send, move, delete or any other write operation is refused by the database, so no consent here can ever authorise sending. `human_quote` is your literal words granting it. Consent alone reads nothing: reads need the adapter to write read receipts, and no runtime role can yet. Revoke with revoke-correspondence-adapter-consent.",
       inputSchema: {
         type: "object", additionalProperties: false,
         properties: {
@@ -316,6 +327,14 @@ export function governedCorrespondenceStoreTools({ withEnvelope, writeEvent, Too
           return correspondenceAccountDigest(args.account);
         });
         const partner = await verifiedPartner(c);
+        // One partner cannot name the other partner's known account. (The record
+        // layer holds the same two digests and refuses the same case.)
+        const knownOwner = slugForEmail(String(args.account));
+        if (knownOwner !== null && knownOwner !== partner) {
+          toolRefuse("other_partners_mailbox", {
+            message: "this address belongs to the other partner; each partner consents only for their own mailbox",
+          });
+        }
         const consentId = (await c.query(
           "select ops.correspondence_record_adapter_consent($1::text,$2::text,$3::text,$4::text[],$5::text,$6::uuid) as id",
           [partner, args.adapter_kind, account_digest, [...args.read_operations].sort(), args.human_quote, args.idempotency_key],
