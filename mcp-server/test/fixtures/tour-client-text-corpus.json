@@ -195,8 +195,11 @@
     "Keys to 1200 Duval St",
     "Access to 1200 parking spaces",
     "Security dep 2500",
-    "555 0100",
-    "Door open 1200 hours"
+    "Door open 1200 hours",
+    "Office 555 1200 SF",
+    "Office 250 1500 RSF",
+    "Suites 200 1500 SF",
+    "Suites 250, 300, 4500 total"
   ],
   "refused": [
     ["4 per 1000. Owner Bob 251-555-0100","phone"],
@@ -535,17 +538,28 @@
     ["Cell 555 0100","local_phone"],
     ["Office 555 0100","local_phone"],
     ["Mobile 555 0100","local_phone"],
-    ["Gate at 4411","access_code"]
+    ["Gate at 4411","access_code"],
+    ["Contact 555 0100","local_phone"],
+    ["Contact: 555 0100","local_phone"],
+    ["Leasing: 555 0100","local_phone"],
+    ["Questions? 555 0100","local_phone"],
+    ["Call Joe at 555 0100","local_phone"],
+    ["Call 555 0100 hours 8-5","local_phone"],
+    ["Office 555 0100 hours M-F 8-5","local_phone"],
+    ["Call 555 0100 Mo-Fr","local_phone"],
+    ["555 0100","local_phone"],
+    ["555/0100","local_phone"],
+    ["Owner 555 # 0100","local_phone"],
+    ["Owner Bob: two five one 555 0100","local_phone"],
+    ["Two51 555 0100","local_phone"]
   ],
   "_comment_residual": "Documented residuals: contact text the rule deliberately does not catch -- digits spelled out or swapped for look-alike letters, internal notes written in plain English, internal notes written in plain English, internal notes written in plain English, internal notes written in plain English, internal notes written in plain English, and a suite word before a dash pair whose second number has no leading zero. Both engines must still ALLOW each one, so a change to any of them is visible; the human review before a seal is their control. An access code written before its trigger word (\"4411 at the gate\") is a documented residual: the rule reads a trigger word, then the digits.",
   "residual": [
-    "Owner Bob: two five one 555 0100",
     "Call five five five zero one hundred",
     "251-555-O1OO",
     "25l-555-0l00",
     "251-555-0I00",
     "251-555-01OO",
-    "Two51 555 0100",
     "Suite 555-1234",
     "Suite 555 \u2013 1234",
     "Suite 555-1234 / Unit 555-9876",
@@ -553,7 +567,7 @@
     "4411 at the gate",
     "Use 4411 at the door"
   ],
-  "_comment_known_refused": "Accepted false positives: ordinary-looking text the rule refuses, the safe direction (a word tight against @; slash-joined 3-3-4 building, suite or parking numbers; a year range joined to a count; a street name ending in .Me; a name with a dotted initial before a slash; a trigger word before three or more digits that are a door, gate or parking count, a bare year or a PO box; and characters outside the allowlist such as the soft hyphen and the line separator). Both engines must refuse each one under the named reason.",
+  "_comment_known_refused": "Accepted false positives: ordinary-looking text the rule refuses, the safe direction (a word tight against @; slash-joined 3-3-4 building, suite or parking numbers; a year range joined to a count; a street name ending in .Me; a name with a dotted initial before a slash; a trigger word before three or more digits that are a door, gate or parking count, a bare year or a PO box; a time range written like a phone or a code, 800 - 1700 or 0700-1900; and characters outside the allowlist such as the soft hyphen and the line separator). Both engines must refuse each one under the named reason.",
   "known_refused": [
     ["Rates@market","email"],
     ["Bldg 200/300/1400","phone"],
@@ -575,6 +589,8 @@
     ["Access in 2027","access_code"],
     ["Gates 100 Office Park","access_code"],
     ["Box 1200","access_code"],
-    ["Access: 2027","access_code"]
+    ["Access: 2027","access_code"],
+    ["Access 0700-1900 hours","access_code"],
+    ["Office hours 800 - 1700","local_phone"]
   ]
 }

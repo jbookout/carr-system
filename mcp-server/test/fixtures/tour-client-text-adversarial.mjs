@@ -114,11 +114,17 @@ export function adversarialRefused() {
     "Enter at gate 4411 - 60 spaces", "Keypad 4411 door on left", "Code 4411 - units B & C", "Gate 4411, door 5566", "Keypad: 4411 doors unlock 7am",
     "Gate 4411 - 2 doors down", "Gate: 4411 (spaces in back)", "Door 4411 / units 3-4", "Gate at 4411", "Gate at 4411 today");
   for (const place of ["units", "unit", "doors", "door", "docks", "dock"]) out.push(`Gate 4411 ${place}`);
-  // A contact word before a seven-digit number: any short separator.
-  for (const word of ["Call", "Cell", "Text", "Phone", "Tel", "Mobile", "Office", "Fax", "Ph"]) {
-    for (const sep of [" ", "/", " # ", "_", ".", " - ", ""]) out.push(`${word} 555${sep}0100`);
-    out.push(`${word}: 555 0100`);
+  // A seven-digit number, with or without a contact word before it, across
+  // every short separator, and followed by a time or rate word that is not
+  // an area or count unit.
+  const PHONE_CONTEXTS = ["", "Call ", "Cell ", "Text ", "Phone ", "Tel ", "Mobile ", "Office ", "Fax ", "Ph ", "Call: ", "Contact ", "Contact: ",
+    "Leasing: ", "Questions? ", "Call Joe at ", "Owner ", "Joe cell: ", "Info - ", "Showings ", "(", "Pilot "];
+  for (const context of PHONE_CONTEXTS) {
+    for (const sep of [" ", "/", " # ", "_", ".", " - ", "", ", ", " : ", "*", " / "]) out.push(`${context}555${sep}0100`);
+    for (const tail of [" hours 8-5", " hours", " hrs", " Mo-Fr", " mo", " yr", " psf", " ext 12", " (cell)", " rooms"]) out.push(`${context}555 0100${tail}`);
   }
+  out.push("Contact 555 0100", "Contact: 555 0100", "Leasing: 555 0100", "Questions? 555 0100", "Call Joe at 555 0100", "Call 555 0100 hours 8-5",
+    "Office 555 0100 hours M-F 8-5", "Call 555 0100 Mo-Fr", "Suite 200 555 0100", "Suite 20 555 0100", "Near Hotel 250 1500 rooms", "Owner 555 # 0100", "Room 200 555 0100", "Call 100 0100", "Info 155 0100");
   // A code-book name exempts only a bare year, never a code.
   out.push("Building code 4411", "Fire code: 4411", "Zoning code #20145");
   // Phones: every separator between 3-3-4 groups, tight, spaced and doubled.
@@ -167,7 +173,17 @@ export function adversarialAllowed() {
   // A street address after a preposition, or a money word, is not a code.
   out.push("Gate at 2200 Airport Blvd", "Access from 3700 Dauphin St", "Main entrance faces 4400 Bayou Blvd", "Keys to 1200 Duval St",
     "Doors open at 1200 Government St", "Access at 3280 Dauphin Island Pkwy", "Pad sites with access to 1600 E Nine Mile Rd", "Entrance on 1200 block of Dauphin",
-    "Security dep 2500", "Security: first month 2500", "Gate on 1200 Oak Ave", "Access off 900 Hwy 98", "Entrance near 400 Main St", "Access via 2100 Spring Hill Ave", "Key East 300 Water St", "Gate north 250 Royal St", "Entry south 1400 Beach Blvd", "Garage 400 reserved spaces", "Access to 200 surface spaces", "Near Hotel 250 1500 rooms", "Access to 1200 parking spaces", "Key West 1200 Duval St", "Garage 300 covered spaces", "Door open 1200 hours", "Available Q1 2027, keys at 2026 signing", "Office 200 1500 SF", "555 0100");
+    "Security dep 2500", "Security: first month 2500", "Gate on 1200 Oak Ave", "Access off 900 Hwy 98", "Entrance near 400 Main St", "Access via 2100 Spring Hill Ave", "Key East 300 Water St", "Gate north 250 Royal St", "Entry south 1400 Beach Blvd", "Garage 400 reserved spaces", "Access to 200 surface spaces", "Access to 1200 parking spaces", "Key West 1200 Duval St", "Garage 300 covered spaces", "Door open 1200 hours", "Available Q1 2027, keys at 2026 signing", "Office 200 1500 SF");
+  // A seven-digit shape directly followed by an area or count unit, or after
+  // a place word (or a comma list of place numbers), or after a dollar sign,
+  // is a measure, a place or a price.
+  out.push("Office 555 1200 SF", "Office 250 1500 RSF", "Suites 200 1500 SF", "$1500000", "Price $250 1500", "Traffic 250 32000 VPD",
+    "Parcel 1234 5678");
+  for (const unit of ["SF", "RSF", "USF", "sq ft", "sqft", "square feet", "ft", "feet", "foot", "spaces", "space", "stalls", "stall", "acres", "acre", "ac",
+    "seats", "seat", "parking spaces", "covered spaces"]) out.push(`Office 555 1200 ${unit}`, `Call center 555/1200 ${unit}`);
+  for (const place of ["Suite", "Suites", "Ste", "Ste.", "Bldg", "Bldgs", "Building", "Unit", "Units", "Floor", "Floors", "Lot", "Lots", "Hwy", "Exit", "Route"]) {
+    out.push(`${place} 200 1500`, `${place} #200 / 1500`, `${place} 201, 202, 1500`);
+  }
   // Rates, ratios, dates and lists.
   out.push("$18/SF/yr", "Suite 200/210", "Floors 2/3", "3/1000 SF parking ratio", "Available 10/1/2026", "NNN $6.50/SF",
     "$24.00/sq.ft/yr NNN", "$1.25/sq.ft/mo", "Suites 201-204, 1200 SF", "1,000 SF", "120,000 SF", "Rooms 301, 302 (1200 SF)");

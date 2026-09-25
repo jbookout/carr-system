@@ -21,7 +21,7 @@
 // Documented residuals, left to the human review every projection gets before
 // it is sealed (and pinned in the corpus's `residual` list so any change to
 // them is visible): digits spelled out or swapped for look-alike letters
-// ("two five one 555 0100", "251-555-O1OO"), and a suite word before a dash
+// ("two five one five five five zero one zero zero", "251-555-O1OO"), and a suite word before a dash
 // pair whose second number has no leading zero ("Suite 555-1234").
 //
 // Refusal is the only outcome. Nothing here rewrites or redacts a value: a
@@ -83,10 +83,21 @@ const NOT_ALNUM = "[^A-Za-z0-9]";
 // followed by a count, not a count. "parking", "covered", "surface" or
 // "reserved" may sit between ("Access to 1200 parking spaces"). Spelled with
 // explicit case classes because the phone join runs case-sensitively.
-const UNIT_WORDS = "sf|rsf|usf|sq|sqft|square|ft|feet|foot|spaces?|stalls?|acres?|ac|seats?|psf|mo|yr|hours|hrs";
+// Area and count units make a measure of any number; rate and time units
+// (psf, mo, yr, hours, hrs) make a measure of a code-shaped number only, never
+// of a seven-digit local number ("Call 555 0100 hours 8-5" is a phone).
+const AREA_COUNT_UNITS = "sf|rsf|usf|sq|sqft|square|ft|feet|foot|spaces?|stalls?|acres?|ac|seats?";
+const UNIT_WORDS = `${AREA_COUNT_UNITS}|psf|mo|yr|hours|hrs`;
 const caseless = word => word.replace(/[a-z]/g, ch => `[${ch}${ch.toUpperCase()}]`);
 const UNIT_QUALIFIERS = "parking|covered|surface|reserved";
-const FOLLOWED_BY_UNIT = `[ -]?((${UNIT_QUALIFIERS.split("|").map(caseless).join("|")}) )?(${UNIT_WORDS.split("|").map(caseless).join("|")})([^A-Za-z]|$)`;
+const followedBy = units => `[ -]?((${UNIT_QUALIFIERS.split("|").map(caseless).join("|")}) )?(${units.split("|").map(caseless).join("|")})([^A-Za-z]|$)`;
+const FOLLOWED_BY_UNIT = followedBy(UNIT_WORDS);
+const FOLLOWED_BY_AREA_COUNT_UNIT = followedBy(AREA_COUNT_UNITS);
+// A place word before a number makes it a place number, not an exchange:
+// "Suites 200 1500 SF", "Bldg 300 4500", "Suites 250, 300, 4500 total" (a
+// comma list of place numbers may sit between).
+const PHONE_PLACE_WORDS = "suites?|ste|bldgs?|building|units?|floors?|lots?|hwy|exit|route";
+const NOT_AFTER_PHONE_PLACE_WORD = `(?<!(^|[^A-Za-z])(${PHONE_PLACE_WORDS})(${NOT_ALNUM}{1,3}[0-9]{1,4},)*${NOT_ALNUM}{1,3})`;
 
 // Before the phone rules read a value, a number shaped 3-3-4 is joined across
 // any run of up to six characters that are not a letter or a digit, and the
@@ -187,11 +198,12 @@ export const CLIENT_TEXT_RULES = Object.freeze([
   // a North-American phone number, however its ten digits are grouped
   Object.freeze({ rule: "phone", target: "digits", pattern: "(^|[^0-9])1?[2-9][0-9]{9}([^0-9]|$)" }),
   // a seven-digit local number: 555-0100, 555 - 0100 (exchange 2-9, as NANP
-  // requires); after a contact word (call, cell, text, phone, tel, mobile,
-  // office, fax, ph), any separator of up to three non-alphanumerics ("Call
-  // 555 0100", "Cell 555/0100"), unless a measure unit follows. The bare
-  // space form without a contact word stays allowed.
-  Object.freeze({ rule: "local_phone", target: "nosuite", pattern: `(^|[^0-9])[2-9][0-9]{2} ?[.${DASHES}] ?[0-9]{4}([^0-9]|$)|(^|[^A-Za-z])(call|cell|text|phone|tel|mobile|office|fax|ph)${NOT_ALNUM}{0,6}[2-9][0-9]{2}${NOT_ALNUM}{0,3}[0-9]{4}(?![0-9])(?!${FOLLOWED_BY_UNIT})` }),
+  // requires); and ANY three-digit group and four-digit group separated by up
+  // to three non-alphanumerics, spaces included ("Contact 555 0100", "Questions?
+  // 555 0100", "Call 555/0100", "5550100"), unless an area or count unit
+  // directly follows ("Office 555 1200 SF") or a place word comes before
+  // ("Suites 200 1500"). A dollar sign before the digits is a price.
+  Object.freeze({ rule: "local_phone", target: "nosuite", pattern: `(^|[^0-9])[2-9][0-9]{2} ?[.${DASHES}] ?[0-9]{4}([^0-9]|$)|(^|[^0-9$])${NOT_AFTER_PHONE_PLACE_WORD}[0-9]{3}${NOT_ALNUM}{0,3}[0-9]{4}(?![0-9])(?!${FOLLOWED_BY_AREA_COUNT_UNIT})` }),
   // an international number: +44 20 7946 0958, + 44 ..., 011 44 ...
   Object.freeze({ rule: "international_phone", target: "digits", pattern: "[+] ?[0-9]{8,}|(^|[^0-9])(011|00)[1-9][0-9]{6,}([^0-9]|$)" }),
   // access-code wording, as whole words: gate code, door combo, entry PIN,
