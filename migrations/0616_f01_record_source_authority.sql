@@ -25,7 +25,7 @@
 -- backfills no legacy row (public.record_source and public.document are not
 -- referenced). It makes no provider call and activates no connector.
 --
--- TWO ADDITIONS, both after the verbatim sources and neither widening anything.
+-- THREE ADDITIONS, all after the verbatim sources and none widening anything.
 -- Tail 1 restates the carr_reader/carr_writer grants the sources make inside DO
 -- loops as static statements, so the canonical role-bundle plan can see them
 -- (see that section). Tail 2 is the authority group grant. The two sources
@@ -38,9 +38,16 @@
 -- carr_authority, which 0273 grants to both logins whenever they exist, so the
 -- surface follows the membership instead of the moment of install. It grants no
 -- private helper, no guard and no DML, and it reads its own posture back.
+-- Tail 3 then takes back the direct grants the sources made to whichever login
+-- existed at install, so the group is the only holder. That keeps the sealed
+-- SCAC catalog identical in every database: the catalog counts grants to every
+-- carr_* role connected by membership, production has carr_authority_joe, and
+-- a CI database has no login at all, so a direct login grant would make the
+-- measured catalog depend on which logins happen to exist.
 --
--- The paired SCAC registry successor is a separate migration bound at merge
--- time; this file carries no registry change.
+-- The paired SCAC registry successor is 0617 (v75), applied in the same
+-- transaction through tools/migrate.py's atomic group; this file carries no
+-- registry change.
 
 -- ===========================================================================
 -- Preflight: a fresh install or nothing.
@@ -5529,3 +5536,77 @@ BEGIN
   END IF;
 END;
 $f01_authority_group_posture$;
+
+-- ===========================================================================
+-- Tail 3: the group is the only holder of the authority surface.
+--
+-- The sources granted that surface directly to whichever authority login
+-- existed when this file ran. Tail 2 already gave the group the same set, so
+-- the direct grants are redundant for the login and harmful for the seal: the
+-- SCAC catalog measures every grant to a carr_* role connected by membership,
+-- so a direct login grant counts in production (carr_authority_joe exists) and
+-- not in CI (no login exists), and 0617's measured baseline would refuse the
+-- production apply. Revoking them makes the catalog the same in both. Schema
+-- USAGE is left alone: it is not F01's to take back. The readback then proves
+-- each existing login still reaches the authority writers through membership,
+-- which fails the install loudly if a login were ever NOINHERIT.
+-- ===========================================================================
+DO $f01_authority_login_direct_grants$
+DECLARE
+  r text;
+  f record;
+  t record;
+  v_bad text;
+BEGIN
+  FOREACH r IN ARRAY ARRAY['carr_authority_joe', 'carr_authority_dell'] LOOP
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN CONTINUE; END IF;
+    FOR f IN SELECT p.oid::regprocedure AS signature
+      FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE n.nspname = 'ops' AND p.proname LIKE 'f01\_%'
+    LOOP
+      EXECUTE format('REVOKE ALL ON FUNCTION %s FROM %I', f.signature, r);
+    END LOOP;
+    FOR t IN SELECT c.oid::regclass AS relation FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'ops' AND c.relkind = 'r' AND c.relname LIKE 'f01\_%'
+    LOOP
+      EXECUTE format('REVOKE ALL ON TABLE %s FROM %I', t.relation, r);
+    END LOOP;
+  END LOOP;
+
+  SELECT string_agg(DISTINCT g.rolname || ' -> ' || p.oid::regprocedure::text, ', ') INTO v_bad
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+    CROSS JOIN LATERAL aclexplode(p.proacl) a
+    JOIN pg_roles g ON g.oid = a.grantee
+   WHERE n.nspname = 'ops' AND p.proname LIKE 'f01\_%'
+     AND g.rolname IN ('carr_authority_joe', 'carr_authority_dell');
+  IF v_bad IS NOT NULL THEN
+    RAISE EXCEPTION 'f01_grant_posture_violation: an authority login holds a direct F01 function grant: %', v_bad
+      USING ERRCODE = '42501';
+  END IF;
+  SELECT string_agg(DISTINCT g.rolname || ' -> ' || c.oid::regclass::text, ', ') INTO v_bad
+    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    CROSS JOIN LATERAL aclexplode(c.relacl) a
+    JOIN pg_roles g ON g.oid = a.grantee
+   WHERE n.nspname = 'ops' AND c.relkind = 'r' AND c.relname LIKE 'f01\_%'
+     AND g.rolname IN ('carr_authority_joe', 'carr_authority_dell');
+  IF v_bad IS NOT NULL THEN
+    RAISE EXCEPTION 'f01_grant_posture_violation: an authority login holds a direct F01 relation grant: %', v_bad
+      USING ERRCODE = '42501';
+  END IF;
+
+  FOREACH r IN ARRAY ARRAY['carr_authority_joe', 'carr_authority_dell'] LOOP
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN CONTINUE; END IF;
+    IF NOT pg_has_role(r, 'carr_authority', 'MEMBER') THEN
+      RAISE NOTICE 'authority login % is not a carr_authority member, so it reaches no F01 authority writer', r;
+      CONTINUE;
+    END IF;
+    IF NOT has_function_privilege(r, 'ops.f01_install_policy(jsonb,text,text,text)', 'EXECUTE')
+       OR NOT has_function_privilege(r, 'ops.f01_read(text,jsonb)', 'EXECUTE')
+       OR NOT has_table_privilege(r, 'ops.f01_state_transition', 'SELECT') THEN
+      RAISE EXCEPTION 'f01_grant_posture_violation: % is a carr_authority member but does not inherit the F01 authority surface', r
+        USING ERRCODE = '42501';
+    END IF;
+  END LOOP;
+END;
+$f01_authority_login_direct_grants$;

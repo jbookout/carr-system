@@ -362,6 +362,51 @@ test("F01 on real PostgreSQL: migration, SQL fixtures and the registered verbs",
       }
     });
 
+    await t.test("no authority login keeps a direct F01 grant, so the sealed catalog is the same everywhere", async () => {
+      // Production has carr_authority_joe when 0616 runs; this lane has no login
+      // then. The SCAC catalog 0617 seals counts grants to every connected carr_*
+      // role, so a direct login grant would make production measure a catalog CI
+      // never saw. Tail 3 takes those grants back. Reproduce the production
+      // moment on a copy: hand the logins direct grants the way the sources do,
+      // run Tail 3 exactly as the migration spells it, and read the ACLs back.
+      const [file] = readdirSync(resolve(HERE, "../../migrations"))
+        .filter(name => /^\d{4}_f01_record_source_authority\.sql$/.test(name));
+      const text = readFileSync(resolve(HERE, "../../migrations", file), "utf8");
+      const start = text.indexOf("DO $f01_authority_login_direct_grants$");
+      const endMarker = "$f01_authority_login_direct_grants$;";
+      const end = text.indexOf(endMarker, start + 1);
+      assert.ok(start > 0 && end > start, "the migration carries the Tail 3 login-grant block");
+      const tail3 = text.slice(start, end + endMarker.length);
+      const loginDb = await copy("logins");
+      const client = await adminClient(pg, loginDb);
+      const direct = async () => (await client.query(`
+          select g.rolname from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+            cross join lateral aclexplode(p.proacl) a join pg_roles g on g.oid = a.grantee
+           where n.nspname = 'ops' and p.proname like 'f01\\_%'
+             and g.rolname in ('carr_authority_joe', 'carr_authority_dell')
+          union all
+          select g.rolname from pg_class c join pg_namespace n on n.oid = c.relnamespace
+            cross join lateral aclexplode(c.relacl) a join pg_roles g on g.oid = a.grantee
+           where n.nspname = 'ops' and c.relkind = 'r' and c.relname like 'f01\\_%'
+             and g.rolname in ('carr_authority_joe', 'carr_authority_dell')`)).rows.length;
+      try {
+        assert.equal(await direct(), 0, "the applied migration left no direct login grant");
+        await client.query(
+          "grant execute on function ops.f01_install_policy(jsonb,text,text,text) to carr_authority_joe");
+        await client.query("grant select on table ops.f01_state_transition to carr_authority_dell");
+        assert.equal(await direct(), 2);
+        await client.query(tail3);
+        assert.equal(await direct(), 0, "Tail 3 takes every direct login grant back");
+        const can = await client.query(
+          `select r, has_function_privilege(r, 'ops.f01_install_policy(jsonb,text,text,text)', 'EXECUTE') as can
+             from unnest(array['carr_authority_joe','carr_authority_dell']) r`);
+        assert.deepEqual(can.rows.map(row => row.can), [true, true],
+          "each login still reaches the authority writer through carr_authority");
+      } finally {
+        await client.end();
+      }
+    });
+
     await t.test("the nine verbs are exactly the store's operations", () => {
       assert.deepEqual(Object.keys(TOOLS).sort(), [...V5_F01_OPERATIONS].sort());
     });
