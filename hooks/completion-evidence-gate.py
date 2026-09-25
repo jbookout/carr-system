@@ -260,6 +260,11 @@ WRITE_ACTION_EXACT = {
     "mark-slice-completion",     # DoctorCRE V5-R02 (Q153): the explicit slice-completion
                                   # marker Joe asked for. "mark" is not generalized into a
                                   # prefix (a future mark-* read must not inherit this class).
+    "mark-slice-progress",       # DoctorCRE V5-R02 (Q153): the writer-side in_progress/blocked
+                                  # mark beside mark-slice-completion; same exact-entry reasoning.
+    "cancel-workflow-cutover-plan",  # DoctorCRE V5-R02: cancels an active cutover plan so it
+                                  # stops governing enqueue. Exact entry, like
+                                  # cancel-capability-session -- no blanket "cancel" prefix.
     "issue-tour-share-grant",  # creates a confidential Tour share grant; "issue" stays
                                   # exact because issue-style reads may exist elsewhere
     "presence-lease",

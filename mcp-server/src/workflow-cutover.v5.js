@@ -33,6 +33,14 @@
 // census.state='unknown' rather than promoting any cached or inferred
 // figure to "done".
 //
+// ACCESS (PR #1245 re-review). Opening (and superseding), advancing,
+// cancelling and retiring a plan change what ops.enqueue_job admits for a live
+// workflow, so all four verbs are authorityOnly: they run on the partner's
+// authority login, and the SQL doors take the actor from
+// ops.authority_actor_slug(). Registering a slice's criteria and marking it
+// complete are authorityOnly too. A writer login keeps record-workflow-caller
+// and mark-slice-progress (in_progress / blocked only).
+//
 // NOTHING HERE RETIRES A REAL PRODUCTION WORKFLOW. `retire-workflow-cutover-
 // plan` requires concrete already-existing evidence rows; this slice adds no
 // script and no call that manufactures that evidence for any live workflow.
@@ -71,8 +79,8 @@ function readWorkflowTruthCensus() {
 export function workflowCutoverTools({ withEnvelope, ToolError }) {
   return {
     "open-workflow-cutover-plan": {
-      write: true,
-      description: "Q116 step 1: open a workflow-migration plan at stage=read_legacy. Q153 stale-plan supersession: any existing ACTIVE plan for the same (workflow_key, workflow_version) is superseded first, in the same transaction, and the reason is recorded -- never left to coexist with the new plan. recovery_plan (Q116's bounded recovery path) is required up front, not deferred to the retire step. Idempotent on idempotency_key.",
+      write: true, authorityOnly: true,
+      description: "Q116 step 1, partner authority only: open a workflow-migration plan at stage=read_legacy for a registered workflow identity. Q153 stale-plan supersession: any existing ACTIVE plan for the same (workflow_key, workflow_version) is superseded first, in the same transaction, and the reason is recorded -- never left to coexist with the new plan. recovery_plan (Q116's bounded recovery path) is required up front. An open plan does not change what the workflow may enqueue until it reaches single_write_authority. Idempotent on idempotency_key.",
       inputSchema: {
         type: "object", additionalProperties: false,
         properties: {
@@ -84,19 +92,51 @@ export function workflowCutoverTools({ withEnvelope, ToolError }) {
         required: ["idempotency_key", "workflow_key", "workflow_version", "recovery_plan"],
       },
       handler: async (c, actor, args) => withEnvelope(c, actor, "open-workflow-cutover-plan", args, async () => {
-        const row = (await c.query(
-          "select * from ops.open_workflow_cutover_plan($1,$2,$3,$4,$5)",
-          [args.workflow_key, args.workflow_version, args.recovery_plan, args.idempotency_key, actor.slug || null],
-        )).rows[0];
+        let row;
+        try {
+          row = (await c.query(
+            "select * from ops.open_workflow_cutover_plan($1,$2,$3,$4)",
+            [args.workflow_key, args.workflow_version, args.recovery_plan, args.idempotency_key],
+          )).rows[0];
+        } catch (err) {
+          throw new ToolError({ error: "workflow_cutover_plan_open_refused", detail: String(err.message || err) });
+        }
         if (!row) throw new ToolError({ error: "workflow_cutover_plan_open_refused" });
         return { ok: true, plan_id: row.id, workflow_key: row.workflow_key, workflow_version: row.workflow_version,
           stage: row.stage, status: row.status, superseded_by: row.superseded_by };
       }),
     },
 
+    "cancel-workflow-cutover-plan": {
+      write: true, authorityOnly: true,
+      description: "Partner authority only: cancel an active cutover plan at any stage before retirement. The plan stops governing what its workflow may enqueue at once, and the one-active-plan slot frees for a later open. The reason is recorded. Idempotent on idempotency_key.",
+      inputSchema: {
+        type: "object", additionalProperties: false,
+        properties: {
+          idempotency_key: { type: "string" },
+          plan_id: { type: "string" },
+          reason: { type: "string", minLength: 1 },
+        },
+        required: ["idempotency_key", "plan_id", "reason"],
+      },
+      handler: async (c, actor, args) => withEnvelope(c, actor, "cancel-workflow-cutover-plan", args, async () => {
+        let row;
+        try {
+          row = (await c.query(
+            "select * from ops.cancel_workflow_cutover_plan($1,$2,$3)",
+            [args.plan_id, args.reason, args.idempotency_key],
+          )).rows[0];
+        } catch (err) {
+          throw new ToolError({ error: "workflow_cutover_cancel_refused", detail: String(err.message || err) });
+        }
+        if (!row) throw new ToolError({ error: "workflow_cutover_plan_not_found" });
+        return { ok: true, plan_id: row.id, stage: row.stage, status: row.status };
+      }),
+    },
+
     "advance-workflow-cutover-stage": {
-      write: true,
-      description: "Q116: advance an active cutover plan exactly one step forward through read_legacy -> build_projection -> shadow_compare -> single_write_authority -> cutover -> monitor -> recovery_ready. Refuses to skip a stage, refuses a plan that is not active, and refuses shadow_compare/single_write_authority/cutover without an evidence_ref pointing at an already-accepted ops.workflow_acceptance row (the same store accept-workflow writes) for the exact workflow identity -- 'shadow parity and single-writer checks pass' is verified against that row, not asserted. Cannot reach stage=retired; see retire-workflow-cutover-plan.",
+      write: true, authorityOnly: true,
+      description: "Q116, partner authority only: advance an active cutover plan exactly one step forward through read_legacy -> build_projection -> shadow_compare -> single_write_authority -> cutover -> monitor -> recovery_ready. Refuses to skip a stage, refuses a plan that is not active, and refuses shadow_compare/single_write_authority/cutover without an evidence_ref pointing at an already-accepted ops.workflow_acceptance row (the same store accept-workflow writes) for the exact workflow identity -- 'shadow parity and single-writer checks pass' is verified against that row, not asserted. Cannot reach stage=retired; see retire-workflow-cutover-plan.",
       inputSchema: {
         type: "object", additionalProperties: false,
         properties: {
@@ -114,8 +154,8 @@ export function workflowCutoverTools({ withEnvelope, ToolError }) {
         let row;
         try {
           row = (await c.query(
-            "select * from ops.advance_workflow_cutover_stage($1,$2,$3,$4,$5,$6)",
-            [args.plan_id, args.to_stage, args.evidence_ref ?? null, args.reason, args.idempotency_key, actor.slug || null],
+            "select * from ops.advance_workflow_cutover_stage($1,$2,$3,$4,$5)",
+            [args.plan_id, args.to_stage, args.evidence_ref ?? null, args.reason, args.idempotency_key],
           )).rows[0];
         } catch (err) {
           throw new ToolError({ error: "workflow_cutover_stage_advance_refused", detail: String(err.message || err) });
@@ -127,7 +167,7 @@ export function workflowCutoverTools({ withEnvelope, ToolError }) {
 
     "retire-workflow-cutover-plan": {
       write: true, authorityOnly: true,
-      description: "Q116 last step, Joe-only: the ONLY door to stage=retired. Requires the plan already at stage=recovery_ready and an existing ops.legacy_schedule_disable_receipt row (from a prior, already-performed disable-legacy-schedule call) for the same workflow_key. Never performs a native disable itself. Also independently re-reads the V5-F09/A01 workflow-truth census; while that route answers unavailable (its documented state today), this verb still relies only on the disable receipt and accepted-evidence chain already enforced in the store -- the census read is surfaced in the response as an additional, non-authoritative signal, never substituted for the receipt.",
+      description: "Q116 last step, partner authority only: the ONLY door to stage=retired. Requires the plan already at stage=recovery_ready and an existing ops.legacy_schedule_disable_receipt row (from a prior, already-performed disable-legacy-schedule call) for the same workflow identity and every registered legacy surface. Never performs a native disable itself. The store derives the workflow-truth census itself (Q157) and refuses retirement while it is unavailable -- which is every call until the census store lands.",
       inputSchema: {
         type: "object", additionalProperties: false,
         properties: {
@@ -139,31 +179,19 @@ export function workflowCutoverTools({ withEnvelope, ToolError }) {
         required: ["idempotency_key", "plan_id", "disable_receipt_id", "reason"],
       },
       handler: async (c, actor, args) => withEnvelope(c, actor, "retire-workflow-cutover-plan", args, async () => {
-        const census = readWorkflowTruthCensus();
-        // P1 fix (PR #1245 review, item 6 / Q157): the census used to be
-        // surfaced only as a decorative, non-authoritative field on the
-        // response -- retire proceeded on the receipt/evidence chain alone
-        // even when the independent workflow-truth census could not say
-        // whether the legacy and new systems actually agree. The census
-        // read is now passed straight into the store as p_census_available,
-        // which refuses retirement whenever it isn't literally true --
-        // ordered AFTER the store's own stage/receipt checks, so a plan
-        // that's simply in the wrong state, or has the wrong receipt, still
-        // gets that specific error rather than a generic census refusal.
-        // Until the real census store lands (not yet), this refuses every
-        // retire attempt -- the correct, intended state, not a bug.
+        // The census is derived inside ops.retire_workflow_cutover_plan (PR
+        // #1245 re-review P3); nothing this verb passes can satisfy it.
         let row;
         try {
           row = (await c.query(
-            "select * from ops.retire_workflow_cutover_plan($1,$2,$3,$4,$5,$6)",
-            [args.plan_id, args.disable_receipt_id, args.reason, args.idempotency_key, actor.slug || null,
-             census.available === true],
+            "select * from ops.retire_workflow_cutover_plan($1,$2,$3,$4)",
+            [args.plan_id, args.disable_receipt_id, args.reason, args.idempotency_key],
           )).rows[0];
         } catch (err) {
           throw new ToolError({ error: "workflow_cutover_retire_refused", detail: String(err.message || err) });
         }
         if (!row) throw new ToolError({ error: "workflow_cutover_plan_not_found" });
-        return { ok: true, plan_id: row.id, stage: row.stage, status: row.status, census };
+        return { ok: true, plan_id: row.id, stage: row.stage, status: row.status };
       }),
     },
 
@@ -229,44 +257,126 @@ export function workflowCutoverTools({ withEnvelope, ToolError }) {
       },
     },
 
-    "mark-slice-completion": {
-      write: true,
-      description: "Q153: append one explicit completion mark for one slice_id, so a future session reads what's done and what's left without re-deriving it. status='complete' is refused server-side unless every element of criteria_receipt (one per checkable_done criterion: {criterion, evidence, pass}) carries a non-empty criterion, non-empty evidence, and pass=true -- an agent cannot mark a slice complete by asserting it. Idempotent on idempotency_key.",
+    "register-slice-checkable-done": {
+      write: true, authorityOnly: true,
+      description: "Q153, partner authority only: register, once, the checkable_done criteria that define 'done' for a slice_id. Each criterion is bound to one registered workflow identity and one evidence type: evidence_kind='acceptance' with acceptance_mode (an accepted ops.workflow_acceptance row for exactly that workflow and mode), or evidence_kind='transition' with transition_to_stage (a cutover stage transition into exactly that stage on a plan for that workflow). Duplicate criteria and a second registration for the same slice_id are refused. Idempotent on idempotency_key.",
       inputSchema: {
         type: "object", additionalProperties: false,
         properties: {
           idempotency_key: { type: "string" },
           slice_id: { type: "string", minLength: 1 },
-          status: { type: "string", enum: [...SLICE_STATUSES] },
+          criteria: {
+            type: "array", minItems: 1,
+            items: {
+              type: "object", additionalProperties: false,
+              properties: {
+                criterion: { type: "string", minLength: 1 },
+                evidence_kind: { type: "string", enum: ["acceptance", "transition"] },
+                workflow_key: { type: "string", minLength: 1 },
+                workflow_version: { type: "integer", minimum: 1 },
+                acceptance_mode: { type: "string", enum: ["shadow", "canary"] },
+                transition_to_stage: { type: "string", enum: [...CUTOVER_STAGES] },
+              },
+              required: ["criterion", "evidence_kind", "workflow_key", "workflow_version"],
+            },
+          },
+        },
+        required: ["idempotency_key", "slice_id", "criteria"],
+      },
+      handler: async (c, actor, args) => withEnvelope(c, actor, "register-slice-checkable-done", args, async () => {
+        let rows;
+        try {
+          rows = (await c.query(
+            "select * from ops.register_slice_checkable_done($1,$2::jsonb,$3)",
+            [args.slice_id, JSON.stringify(args.criteria), args.idempotency_key],
+          )).rows;
+        } catch (err) {
+          throw new ToolError({ error: "slice_checkable_done_register_refused", detail: String(err.message || err) });
+        }
+        return { ok: true, slice_id: args.slice_id, criteria: rows.map(r => ({
+          criterion: r.criterion, evidence_kind: r.evidence_kind, workflow_key: r.workflow_key,
+          workflow_version: r.workflow_version, acceptance_mode: r.acceptance_mode,
+          transition_to_stage: r.transition_to_stage })) };
+      }),
+    },
+
+    "mark-slice-progress": {
+      write: true,
+      description: "Q153: append an in_progress or blocked mark for a registered slice_id, so a future session reads what's done and what's left. criteria_receipt lists every registered criterion once, each with the evidence_ref proving it (or null while unproven); the server recomputes pass from the criterion's registered workflow and evidence binding. Cannot mark a slice complete -- see mark-slice-completion. blocked needs a reason. Idempotent on idempotency_key.",
+      inputSchema: {
+        type: "object", additionalProperties: false,
+        properties: {
+          idempotency_key: { type: "string" },
+          slice_id: { type: "string", minLength: 1 },
+          status: { type: "string", enum: ["in_progress", "blocked"] },
           criteria_receipt: {
             type: "array", minItems: 1,
             items: {
               type: "object", additionalProperties: false,
               properties: {
                 criterion: { type: "string", minLength: 1 },
-                evidence: { type: "string", minLength: 1 },
-                pass: { type: "boolean" },
+                evidence_ref: { type: ["string", "null"] },
               },
-              required: ["criterion", "evidence", "pass"],
+              required: ["criterion"],
             },
           },
           reason: { type: ["string", "null"] },
         },
         required: ["idempotency_key", "slice_id", "status", "criteria_receipt"],
       },
+      handler: async (c, actor, args) => withEnvelope(c, actor, "mark-slice-progress", args, async () => {
+        let row;
+        try {
+          row = (await c.query(
+            "select * from ops.mark_slice_progress($1,$2,$3::jsonb,$4,$5,$6)",
+            [args.slice_id, args.status, JSON.stringify(args.criteria_receipt), args.reason ?? null,
+             args.idempotency_key, actor.slug || null],
+          )).rows[0];
+        } catch (err) {
+          throw new ToolError({ error: "slice_progress_mark_refused", detail: String(err.message || err) });
+        }
+        if (!row) throw new ToolError({ error: "slice_progress_mark_refused" });
+        return { ok: true, id: row.id, slice_id: row.slice_id, status: row.status,
+          criteria_receipt: row.criteria_receipt, created_at: row.created_at };
+      }),
+    },
+
+    "mark-slice-completion": {
+      write: true, authorityOnly: true,
+      description: "Q153, partner authority only: append status=complete for a registered slice_id. criteria_receipt lists every registered criterion exactly once with the evidence_ref proving it; the server resolves each ref against the criterion's registered workflow and evidence binding and refuses unless every criterion is proven. The caller's own pass claim is never read. Idempotent on idempotency_key.",
+      inputSchema: {
+        type: "object", additionalProperties: false,
+        properties: {
+          idempotency_key: { type: "string" },
+          slice_id: { type: "string", minLength: 1 },
+          criteria_receipt: {
+            type: "array", minItems: 1,
+            items: {
+              type: "object", additionalProperties: false,
+              properties: {
+                criterion: { type: "string", minLength: 1 },
+                evidence_ref: { type: "string", minLength: 1 },
+              },
+              required: ["criterion", "evidence_ref"],
+            },
+          },
+          reason: { type: ["string", "null"] },
+        },
+        required: ["idempotency_key", "slice_id", "criteria_receipt"],
+      },
       handler: async (c, actor, args) => withEnvelope(c, actor, "mark-slice-completion", args, async () => {
         let row;
         try {
           row = (await c.query(
-            "select * from ops.mark_slice_completion($1,$2,$3,$4,$5,$6)",
-            [args.slice_id, args.status, JSON.stringify(args.criteria_receipt), args.reason ?? null,
-             args.idempotency_key, actor.slug || null],
+            "select * from ops.mark_slice_completion($1,$2::jsonb,$3,$4)",
+            [args.slice_id, JSON.stringify(args.criteria_receipt), args.reason ?? null, args.idempotency_key],
           )).rows[0];
         } catch (err) {
           throw new ToolError({ error: "slice_completion_mark_refused", detail: String(err.message || err) });
         }
         if (!row) throw new ToolError({ error: "slice_completion_mark_refused" });
-        return { ok: true, id: row.id, slice_id: row.slice_id, status: row.status, created_at: row.created_at };
+        return { ok: true, id: row.id, slice_id: row.slice_id, status: row.status,
+          criteria_receipt: row.criteria_receipt, created_at: row.created_at };
       }),
     },
 

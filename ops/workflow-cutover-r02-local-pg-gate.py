@@ -1,41 +1,45 @@
 #!/usr/bin/env python3
 # ci: db-gate
 # doctrine: runbook
-"""Rollback-only real-Postgres proof for the DoctorCRE V5-R02 SQL guards
-added or fixed during PR #1245's review (2026-09-24, migrations 0593 and
-0599). Each guard below is exercised BOTH ways -- the fix passes, and the
-exact defect the reviewer found (or a deliberate mutant of the same shape)
-is proven refused -- against a real PostgreSQL, not a fake DB client. This is
-the "3 SQL mutants that survived" gap: node --test's fake query() client
-(mcp-server/test/workflow-cutover.v5.test.mjs) can only prove the JS layer
-calls the SQL doors with the right arguments in the right order; it cannot
-prove the SQL itself enforces anything, because the fake just re-implements
-the guard in JavaScript rather than exercising the real function body.
+"""Rollback-only real-Postgres proof for the DoctorCRE V5-R02 SQL doors
+(migrations 0593 and 0599), run ONLY under production-shaped logins.
 
-Guards covered, one function per PR #1245 review item:
+WHY THE LOGINS MATTER. PR #1245's re-review found three defects this gate had
+been passing over: it asked the doors under grants and routing production
+does not have (a superuser session, `SET ROLE carr_authority` on a login, and
+a test-only `grant carr_writer to carr_authority_joe`). So every door call
+below -- refusal or success -- runs after `SET SESSION AUTHORIZATION` to one
+of three logins holding exactly one runtime bundle each, as production does:
 
-  item 2  ops.advance_workflow_cutover_stage: 'retired' is a terminal stage
-          (array_position returns NULL for it, which plpgsql's IF treats as
-          falsy -- an explicit v_from_idx IS NULL guard is what actually
-          catches this, not the sequential-index comparison alone).
-  item 3  ops.retire_workflow_cutover_plan: workflow_version match (not just
-          workflow_key), approved_at must be at or after the cutover
-          transition, one-use per receipt, a receipt for every registered
-          legacy surface, authority-derived actor.
-  item 4  ops.mark_slice_completion / ops.register_slice_checkable_done: an
-          unregistered slice_id is refused, the submitted criteria set must
-          equal the registered set exactly, pass is recomputed from a
-          resolved evidence row (never the caller's claim), and
-          status=complete is authority-only.
-  item 5  ops.enqueue_job: at single_write_authority or later, live mode
-          requires every legacy surface to carry a disable receipt; at any
-          active stage, canary/live requires a canary acceptance recorded
-          since the plan's most recent stage transition.
-  item 6  ops.retire_workflow_cutover_plan's p_census_available gate (checked
-          last, after every stage/receipt check); ops.record_workflow_caller
-          refuses status=done for an unregistered job_definition and appends
-          to ops.workflow_caller_history on every call, which itself refuses
-          a direct UPDATE/DELETE.
+  carr_authority_joe  member of carr_authority only (0161/0273: the partner's
+                      authority login that authorityOnly verbs connect as);
+  r02gate_writer      member of carr_writer only (the MCP writer login);
+  r02gate_jobs        member of carr_jobs only (the job runner's login).
+
+The gate checks those memberships before it starts and refuses to run if
+carr_authority_joe also holds carr_writer or carr_jobs. The superuser session
+only writes FIXTURE rows the doors read (job definitions, acceptance rows,
+legacy surfaces and disable receipts) and probes the append-only triggers as
+table owner; it never calls a door.
+
+Covered:
+  P1-a  an open plan never stops an already-live workflow: live and canary
+        enqueue keep working at read_legacy..shadow_compare; from
+        single_write_authority only LIVE is gated (fresh canary + disabled
+        legacy surfaces), canary never is; cancel ends the gating at once.
+        open / supersede / advance / cancel / retire are authority-only.
+  P1-b  slice completion is reachable in production: register and complete
+        on the authority login, progress on the writer login; each refused
+        on the other login.
+  P1-c  criteria cannot be beaten: [A, A] never satisfies {A, B}; evidence
+        resolves only against each criterion's registered workflow, evidence
+        type and mode/stage.
+  P3    retire derives the census itself: no caller argument exists for it,
+        and a fully valid plan + receipt is refused for the census, last.
+  and the earlier review items: 'retired' is terminal for advance (the
+  array_position NULL guard), retire's receipt checks (version, predates
+  cutover, one-use, every legacy surface), record_workflow_caller's
+  registered-workflow check and append-only history.
 """
 
 from __future__ import annotations
@@ -43,10 +47,18 @@ from __future__ import annotations
 import os
 import sys
 import uuid
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 import psycopg
+from psycopg import sql
 from psycopg.types.json import Jsonb
-from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connection, set_local_role
+from gate_runtime_role import rollback_only_connection
+
+AUTHORITY = "carr_authority_joe"
+WRITER = "r02gate_writer"
+JOBS = "r02gate_jobs"
+READER = "r02gate_reader"
 
 
 def fail(message: str) -> int:
@@ -54,20 +66,45 @@ def fail(message: str) -> int:
     return 1
 
 
-def expect_refusal(cur, sql: str, params: tuple, label: str, *, match: str | None = None) -> None:
+@contextmanager
+def as_login(cur: Any, login: str) -> Iterator[None]:
+    """Run the block as `login` itself: session_user and current_user both
+    become the login, holding only the privileges its memberships give."""
+    cur.execute(sql.SQL("set session authorization {}").format(sql.Identifier(login)))
+    who = cur.execute("select session_user::text, current_user::text").fetchone()
+    if who != (login, login):
+        raise RuntimeError(f"expected session and current user {login!r}, got {who!r}")
+    try:
+        yield
+    finally:
+        cur.execute("reset session authorization")
+
+
+def expect_refusal(cur: Any, query: str, params: tuple, label: str, *, match: str) -> None:
     cur.execute("savepoint r02_refusal")
     try:
-        cur.execute(sql, params)
+        cur.execute(query, params)
     except psycopg.Error as exc:
         cur.execute("rollback to savepoint r02_refusal")
-        if match is not None and match not in str(exc):
+        if match not in str(exc):
             raise RuntimeError(f"{label} was refused for the wrong reason: {exc}") from exc
         return
     cur.execute("rollback to savepoint r02_refusal")
     raise RuntimeError(f"{label} was accepted")
 
 
-def insert_job_definition(cur, key: str, *, canary_enabled: bool | None = True) -> None:
+class Slots:
+    """Distinct scheduled_for offsets, so no two enqueues share a slot."""
+
+    def __init__(self) -> None:
+        self.n = 0
+
+    def next(self) -> int:
+        self.n += 1
+        return self.n
+
+
+def insert_job_definition(cur: Any, key: str, *, canary_enabled: bool | None = True) -> None:
     contract: dict[str, object] = {"entrypoint": "fixture"}
     if canary_enabled is not None:
         contract["canary"] = {"enabled": canary_enabled}
@@ -85,53 +122,98 @@ def insert_job_definition(cur, key: str, *, canary_enabled: bool | None = True) 
     )
 
 
-def insert_acceptance(cur, key: str, mode: str, ref: str, *, backdate: bool = False) -> str:
-    # `now()` is fixed for the whole life of this gate's one transaction
-    # (rollback_only_connection never commits), so a row inserted "before" a
-    # later advance_workflow_cutover_stage call still gets the SAME
-    # created_at as that transition's occurred_at -- there is no natural
-    # ordering signal to test staleness against inside one transaction.
-    # `backdate=True` sets created_at an hour in the past explicitly, which
-    # IS honored on INSERT (only the append-only tables' UPDATE/DELETE
-    # triggers block a later rewrite), so a genuinely-earlier row exists to
-    # prove ops.enqueue_job's per-stage freshness check against.
-    if backdate:
-        return cur.execute(
-            """insert into ops.workflow_acceptance (workflow_key,workflow_version,mode,status,receipt_ref,accepted_by,created_at)
-               values (%s,1,%s,'accepted',%s,'r02-gate', now() - interval '1 hour') returning id::text""",
-            (key, mode, ref),
-        ).fetchone()[0]
+def insert_acceptance(cur: Any, key: str, mode: str, ref: str, *, backdate: bool = False) -> str:
+    """Fixture: an accepted acceptance row, written as table owner."""
+    created = "now() - interval '1 hour'" if backdate else "now()"
     return cur.execute(
-        """insert into ops.workflow_acceptance (workflow_key,workflow_version,mode,status,receipt_ref,accepted_by)
-           values (%s,1,%s,'accepted',%s,'r02-gate') returning id::text""",
+        f"""insert into ops.workflow_acceptance (workflow_key,workflow_version,mode,status,receipt_ref,accepted_by,created_at)
+            values (%s,1,%s,'accepted',%s,'r02-gate', {created}) returning id::text""",
         (key, mode, ref),
     ).fetchone()[0]
 
 
-def open_plan(cur, key: str) -> str:
+def insert_disable_receipt(cur: Any, key: str, ref: str, *, version: int = 1, surface: str = "no-surface",
+                           locator: str = "no-locator", approved_at: str = "now()") -> str:
     return cur.execute(
-        "select id::text from ops.open_workflow_cutover_plan(%s,1,'fixture recovery plan',%s,'joe')",
-        (key, uuid.uuid4()),
+        f"""insert into ops.legacy_schedule_disable_receipt
+              (receipt_ref,idempotency_key,workflow_key,workflow_version,surface_id,locator,reason,approved_by,approved_at)
+            values (%s,%s,%s,%s,%s,%s,'fixture','joe',{approved_at}) returning id::text""",
+        (ref, f"{ref}-idem", key, version, surface, locator),
     ).fetchone()[0]
 
 
-def advance(cur, plan_id: str, to_stage: str, evidence_ref: str | None, reason: str) -> str:
-    return cur.execute(
-        "select stage from ops.advance_workflow_cutover_stage(%s,%s,%s,%s,%s,'joe')",
-        (plan_id, to_stage, evidence_ref, reason, uuid.uuid4()),
-    ).fetchone()[0]
+def open_plan(cur: Any, key: str) -> str:
+    with as_login(cur, AUTHORITY):
+        return cur.execute(
+            "select id::text from ops.open_workflow_cutover_plan(%s,1,'fixture recovery plan',%s)",
+            (key, uuid.uuid4()),
+        ).fetchone()[0]
 
 
-def walk_to_single_write_authority(cur, key: str, *, backdate_canary: bool = False) -> str:
-    """Open a plan and advance it read_legacy -> single_write_authority with
-    real accepted evidence at each gated transition. Returns the plan id."""
+def advance(cur: Any, plan_id: str, to_stage: str, evidence_ref: str | None, reason: str) -> str:
+    with as_login(cur, AUTHORITY):
+        return cur.execute(
+            "select stage from ops.advance_workflow_cutover_stage(%s,%s,%s,%s,%s)",
+            (plan_id, to_stage, evidence_ref, reason, uuid.uuid4()),
+        ).fetchone()[0]
+
+
+def walk_to(cur: Any, key: str, stage: str, *, backdate_canary: bool = False) -> str:
+    """Open a plan (authority) and advance it to `stage` with real accepted
+    evidence at each gated transition. Returns the plan id."""
+    order = ["build_projection", "shadow_compare", "single_write_authority", "cutover",
+             "monitor", "recovery_ready"]
     plan_id = open_plan(cur, key)
-    advance(cur, plan_id, "build_projection", "ev", "r1")
-    shadow_id = insert_acceptance(cur, key, "shadow", f"{key}-shadow-1")
-    advance(cur, plan_id, "shadow_compare", shadow_id, "r2")
-    canary_id = insert_acceptance(cur, key, "canary", f"{key}-canary-1", backdate=backdate_canary)
-    advance(cur, plan_id, "single_write_authority", canary_id, "r3")
+    for step in order[: order.index(stage) + 1]:
+        evidence = None
+        if step == "shadow_compare":
+            evidence = insert_acceptance(cur, key, "shadow", f"{key}-{step}-{uuid.uuid4().hex[:6]}")
+        elif step in ("single_write_authority", "cutover"):
+            evidence = insert_acceptance(cur, key, "canary", f"{key}-{step}-{uuid.uuid4().hex[:6]}",
+                                         backdate=backdate_canary)
+        advance(cur, plan_id, step, evidence, f"to {step}")
     return plan_id
+
+
+def enqueue(cur: Any, slots: Slots, key: str, mode: str) -> str:
+    with as_login(cur, JOBS):
+        return cur.execute(
+            "select mode from ops.enqueue_job(%s,1,now()+make_interval(hours => %s),'{}'::jsonb,%s,%s)",
+            (key, slots.next(), f"{key}-{uuid.uuid4().hex}", mode),
+        ).fetchone()[0]
+
+
+def expect_enqueue_refused(cur: Any, slots: Slots, key: str, mode: str, label: str, match: str) -> None:
+    with as_login(cur, JOBS):
+        expect_refusal(
+            cur, "select ops.enqueue_job(%s,1,now()+make_interval(hours => %s),'{}'::jsonb,%s,%s)",
+            (key, slots.next(), f"{key}-{uuid.uuid4().hex}", mode), label, match=match,
+        )
+
+
+def provision_logins(cur: Any) -> None:
+    cur.execute(f"""do $$ begin
+      if not exists (select 1 from pg_roles where rolname='{AUTHORITY}') then create role {AUTHORITY} login; end if;
+      if not exists (select 1 from pg_roles where rolname='{WRITER}') then create role {WRITER} login; end if;
+      if not exists (select 1 from pg_roles where rolname='{JOBS}') then create role {JOBS} login; end if;
+      if not exists (select 1 from pg_roles where rolname='{READER}') then create role {READER} login; end if;
+    end $$""")
+    # 0273's production membership for the authority login, and one bundle
+    # each for the other three.
+    cur.execute(f"grant carr_authority to {AUTHORITY}")
+    cur.execute(f"grant carr_writer to {WRITER}")
+    cur.execute(f"grant carr_jobs to {JOBS}")
+    cur.execute(f"grant carr_reader to {READER}")
+    shape = cur.execute(
+        """select pg_has_role(%s,'carr_authority','member'),
+                  pg_has_role(%s,'carr_writer','member'), pg_has_role(%s,'carr_jobs','member'),
+                  pg_has_role(%s,'carr_writer','member'), pg_has_role(%s,'carr_authority','member'),
+                  pg_has_role(%s,'carr_jobs','member'), pg_has_role(%s,'carr_authority','member'),
+                  pg_has_role(%s,'carr_writer','member')""",
+        (AUTHORITY, AUTHORITY, AUTHORITY, WRITER, WRITER, JOBS, JOBS, JOBS),
+    ).fetchone()
+    if shape != (True, False, False, True, False, True, False, False):
+        raise RuntimeError(f"logins are not production-shaped (one bundle each): {shape!r}")
 
 
 def main() -> int:
@@ -140,458 +222,382 @@ def main() -> int:
         return fail("DATABASE_URL is required")
     try:
         with rollback_only_connection(dsn) as conn, conn.cursor() as cur:
-            cur.execute("""do $$ begin
-              if not exists (select 1 from pg_roles where rolname='carr_authority_joe') then create role carr_authority_joe login; end if;
-            end $$""")
-            cur.execute("grant carr_authority to carr_authority_joe")
-            # The authority login reaches mark_slice_completion (EXECUTE to
-            # carr_writer) through SET ROLE; rolled back with the transaction.
-            cur.execute("grant carr_writer to carr_authority_joe with set true")
-            grant_settable_runtime_roles(cur, "carr_authority_joe", "carr_writer", "carr_reader", "carr_jobs")
-
+            provision_logins(cur)
             token = uuid.uuid4().hex[:8]
+            slots = Slots()
 
             # ================================================================
-            # ITEM 2: 'retired' is a terminal stage for advance_*.
+            # ACCESS: which login reaches which door, as production routes it.
             # ================================================================
-            key2 = f"r02gate-{token}-item2"
-            insert_job_definition(cur, key2)
-            plan2 = walk_to_single_write_authority(cur, key2)
-            canary2b = insert_acceptance(cur, key2, "canary", f"{key2}-canary-2")
-            advance(cur, plan2, "cutover", canary2b, "r4")
-            advance(cur, plan2, "monitor", None, "r5")
-            advance(cur, plan2, "recovery_ready", None, "r6")
+            key_a = f"r02gate-{token}-access"
+            insert_job_definition(cur, key_a)
+            plan_a = open_plan(cur, key_a)
+            with as_login(cur, WRITER):
+                for label, query, params in [
+                    ("writer open", "select ops.open_workflow_cutover_plan(%s,1,'r',%s)", (key_a, uuid.uuid4())),
+                    ("writer advance", "select ops.advance_workflow_cutover_stage(%s,'build_projection',null,'r',%s)",
+                     (plan_a, uuid.uuid4())),
+                    ("writer cancel", "select ops.cancel_workflow_cutover_plan(%s,'r',%s)", (plan_a, uuid.uuid4())),
+                    ("writer retire", "select ops.retire_workflow_cutover_plan(%s,gen_random_uuid(),'r',%s)",
+                     (plan_a, uuid.uuid4())),
+                    ("writer register", "select ops.register_slice_checkable_done('s','[]'::jsonb,%s)", (uuid.uuid4(),)),
+                    ("writer complete", "select ops.mark_slice_completion('s','[]'::jsonb,'r',%s)", (uuid.uuid4(),)),
+                ]:
+                    expect_refusal(cur, query, params, label, match="permission denied")
+            with as_login(cur, AUTHORITY):
+                expect_refusal(
+                    cur, "select ops.mark_slice_progress('s','in_progress','[]'::jsonb,'r',%s,'joe')", (uuid.uuid4(),),
+                    "authority login on the writer-only progress door", match="permission denied",
+                )
+            # No census argument exists for a caller to supply (P3).
+            retire_args = cur.execute(
+                """select array_to_string(proargnames, ',') from pg_proc
+                    where oid = 'ops.retire_workflow_cutover_plan'::regproc"""
+            ).fetchone()[0]
+            if "census" in retire_args or "actor" in retire_args:
+                return fail(f"retire still takes a caller-supplied census or actor: {retire_args}")
+
+            # ================================================================
+            # P1-a: an open plan never stops an already-live workflow.
+            # ================================================================
+            key_l = f"r02gate-{token}-live"
+            insert_job_definition(cur, key_l)
+            insert_acceptance(cur, key_l, "shadow", f"{key_l}-shadow-0", backdate=True)
+            insert_acceptance(cur, key_l, "canary", f"{key_l}-canary-0", backdate=True)
+            if enqueue(cur, slots, key_l, "live") != "live":
+                return fail("P1-a fixture: live enqueue failed before any plan existed")
+            plan_l = open_plan(cur, key_l)
+            for step, evidence in [(None, None), ("build_projection", None),
+                                   ("shadow_compare", insert_acceptance(cur, key_l, "shadow", f"{key_l}-shadow-1"))]:
+                if step is not None:
+                    advance(cur, plan_l, step, evidence, f"to {step}")
+                for mode in ("live", "canary"):
+                    if enqueue(cur, slots, key_l, mode) != mode:
+                        return fail(f"P1-a: {mode} enqueue refused with the plan at {step or 'read_legacy'}")
+            # Enter single_write_authority on the older (pre-transition) canary.
+            stale_canary = cur.execute(
+                """select id::text from ops.workflow_acceptance
+                    where workflow_key=%s and mode='canary' and receipt_ref=%s""",
+                (key_l, f"{key_l}-canary-0"),
+            ).fetchone()[0]
+            advance(cur, plan_l, "single_write_authority", stale_canary, "to swa")
+            expect_enqueue_refused(cur, slots, key_l, "live",
+                                   "live enqueue at single_write_authority on a pre-transition canary",
+                                   "no canary acceptance evidence recorded since entering cutover stage")
+            if enqueue(cur, slots, key_l, "canary") != "canary":
+                return fail("P1-a: canary enqueue was gated at single_write_authority; canary must never be")
+            insert_acceptance(cur, key_l, "canary", f"{key_l}-canary-fresh")
+            if enqueue(cur, slots, key_l, "live") != "live":
+                return fail("P1-a: live enqueue still refused after a fresh canary acceptance")
             cur.execute(
-                """insert into ops.legacy_schedule_disable_receipt
-                     (receipt_ref,idempotency_key,workflow_key,workflow_version,surface_id,locator,reason,approved_by)
-                   values (%s,%s,%s,1,'no-surface','no-locator','no legacy surface registered','joe')
-                   returning id::text""",
-                (f"{key2}-disable", f"{key2}-disable-idem", key2),
+                """insert into ops.legacy_schedule_surface_registry (workflow_key,workflow_version,surface_id,locator,scheduler_kind)
+                   values (%s,1,'launchd-live','com.carr.r02gate-live.plist','launchd')""",
+                (key_l,),
             )
-            receipt2 = cur.fetchone()[0]
-            set_local_role(cur, "carr_authority")
-            cur.execute("set session authorization carr_authority_joe")
-            retired2 = cur.execute(
-                "select stage,status from ops.retire_workflow_cutover_plan(%s,%s,'legacy disabled',%s,'joe',true)",
-                (plan2, receipt2, uuid.uuid4()),
+            expect_enqueue_refused(cur, slots, key_l, "live",
+                                   "live enqueue at single_write_authority with an undisabled legacy surface",
+                                   "legacy surface(s) still undisabled")
+            # Cancel is the recovery door: the plan stops governing enqueue.
+            with as_login(cur, AUTHORITY):
+                cancelled = cur.execute(
+                    "select status from ops.cancel_workflow_cutover_plan(%s,'recover the workflow',%s)",
+                    (plan_l, uuid.uuid4()),
+                ).fetchone()
+                expect_refusal(
+                    cur, "select ops.cancel_workflow_cutover_plan(%s,'again',%s)", (plan_l, uuid.uuid4()),
+                    "cancelling a plan that is no longer active", match="workflow_cutover_plan_not_active",
+                )
+                expect_refusal(
+                    cur, "select ops.advance_workflow_cutover_stage(%s,'cutover','x','r',%s)", (plan_l, uuid.uuid4()),
+                    "advancing a cancelled plan", match="workflow_cutover_plan_not_active",
+                )
+            if cancelled != ("cancelled",):
+                return fail(f"P1-a: cancel did not leave the plan cancelled: {cancelled}")
+            if enqueue(cur, slots, key_l, "live") != "live":
+                return fail("P1-a: live enqueue still refused after the plan was cancelled")
+            # The slot is free: a new plan opens without superseding anything.
+            reopened = open_plan(cur, key_l)
+            prior_status = cur.execute(
+                "select status from ops.workflow_cutover_plan where id=%s", (plan_l,)
+            ).fetchone()[0]
+            if prior_status != "cancelled" or not reopened:
+                return fail(f"P1-a: reopen after cancel disturbed the cancelled plan: {prior_status}")
+
+            # A workflow with no plan at all is untouched.
+            key_n = f"r02gate-{token}-noplan"
+            insert_job_definition(cur, key_n, canary_enabled=False)
+            insert_acceptance(cur, key_n, "shadow", f"{key_n}-shadow")
+            if enqueue(cur, slots, key_n, "live") != "live":
+                return fail("a workflow with no cutover plan was gated")
+
+            # ================================================================
+            # Supersession, the retired-stage guard, and open's own checks.
+            # ================================================================
+            key_s = f"r02gate-{token}-supersede"
+            insert_job_definition(cur, key_s)
+            first = open_plan(cur, key_s)
+            second = open_plan(cur, key_s)
+            row = cur.execute(
+                "select status, superseded_by::text from ops.workflow_cutover_plan where id=%s", (first,)
             ).fetchone()
-            if retired2 != ("retired", "retired"):
-                return fail(f"item 2 fixture plan did not reach retired/retired: {retired2}")
-            # A retired plan is refused twice over: status left 'active' is
-            # checked first (workflow_cutover_plan_not_active, since item 2
-            # also moves status to 'retired'), and even if that check were
-            # ever removed, array_position(v_stages, 'retired') is NULL for a
-            # plan at stage='retired' -- the mutant this guards against is
-            # deleting the explicit `if v_from_idx is null` check and relying
-            # on `v_to_idx <> v_from_idx + 1` alone, which plpgsql evaluates
-            # as NULL (falsy) rather than true, silently allowing the
-            # "advance". Both layers are real; this proves the outer one.
-            # The advance door is EXECUTE-granted to carr_writer only (0593),
-            # so the refusal is asked as carr_writer: asked as carr_authority
-            # it would stop at "permission denied" and prove nothing.
-            cur.execute("reset session authorization")
-            set_local_role(cur, "carr_writer")
-            expect_refusal(
-                cur, "select ops.advance_workflow_cutover_stage(%s,'monitor','ev','trying to un-retire',%s,'joe')",
-                (plan2, uuid.uuid4()),
-                "advancing a retired plan",
-                match="workflow_cutover_plan_not_active",
-            )
-            cur.execute("reset role")
-
-            # Directly exercise the array_position-NULL guard itself (the
-            # actual mutant named in the review), independent of the
-            # status<>'active' check above: force stage='retired' while
-            # status stays 'active' (a state ops.retire_workflow_cutover_plan
-            # itself never produces since item 2's fix, but exactly the
-            # "some future write path" case v_from_idx IS NULL guards
-            # against) and confirm the sequential-index comparison alone
-            # would NOT have caught it.
-            cur.execute(
-                "update ops.workflow_cutover_plan set status='active' where id=%s", (plan2,)
-            )
-            set_local_role(cur, "carr_writer")
-            expect_refusal(
-                cur, "select ops.advance_workflow_cutover_stage(%s,'monitor','ev','trying to un-retire again',%s,'joe')",
-                (plan2, uuid.uuid4()),
-                "advancing a plan forced to stage=retired,status=active (the array_position(NULL) mutant)",
-                match="workflow_cutover_plan_stage_not_advanceable",
-            )
-            cur.execute("reset role")
+            if row != ("superseded", second):
+                return fail(f"supersession did not mark the prior plan: {row}")
+            with as_login(cur, AUTHORITY):
+                expect_refusal(
+                    cur, "select ops.open_workflow_cutover_plan(%s,1,'r',%s)", (f"{key_s}-unregistered", uuid.uuid4()),
+                    "opening a plan for an unregistered workflow", match="workflow_cutover_plan_unregistered_workflow",
+                )
+            # Fixture: force stage='retired' under status='active' (a state no
+            # door produces) to reach the array_position(NULL) guard and the
+            # supersede refusal directly.
+            cur.execute("update ops.workflow_cutover_plan set stage='retired' where id=%s", (second,))
+            with as_login(cur, AUTHORITY):
+                expect_refusal(
+                    cur, "select ops.advance_workflow_cutover_stage(%s,'monitor','ev','un-retire',%s)",
+                    (second, uuid.uuid4()),
+                    "advancing a plan at stage=retired", match="workflow_cutover_plan_stage_not_advanceable",
+                )
+                expect_refusal(
+                    cur, "select ops.open_workflow_cutover_plan(%s,1,'r',%s)", (key_s, uuid.uuid4()),
+                    "superseding a plan at stage=retired", match="workflow_cutover_plan_supersede_refused_retired_plan",
+                )
 
             # ================================================================
-            # ITEM 3: retire-receipt binding.
+            # Retire: receipt checks in order, then the derived census (P3).
             # ================================================================
-            key3 = f"r02gate-{token}-item3"
-            insert_job_definition(cur, key3)
-            plan3 = walk_to_single_write_authority(cur, key3)
-            canary3b = insert_acceptance(cur, key3, "canary", f"{key3}-canary-2")
-            advance(cur, plan3, "cutover", canary3b, "r4")
-            advance(cur, plan3, "monitor", None, "r5")
-            advance(cur, plan3, "recovery_ready", None, "r6")
-
-            # 3a: a receipt for a DIFFERENT workflow_version is refused even
-            # though workflow_key matches.
+            key_r = f"r02gate-{token}-retire"
+            insert_job_definition(cur, key_r)
             cur.execute(
                 """insert into ops.job_definition
                      (key,version,enabled,risk,execution_kind,execution_contract,
                       recurrence,retry_policy,deduplication,completion_contract,legacy_schedule)
-                   values (%s,2,false,'green','deterministic','{"entrypoint":"fixture"}'::jsonb,
-                           '{"cron":"* * * * *","timezone":"UTC"}'::jsonb,
-                           '{"max_attempts":2,"base_seconds":1,"cap_seconds":2,"timeout_seconds":30,"backoff":"exponential"}'::jsonb,
-                           '{"key_template":"r02-gate-fixture-v2"}'::jsonb,
-                           '{"predicate":"fixture","receipt_kind":"fixture"}'::jsonb,
-                           '{"status":"enabled"}'::jsonb)""",
-                (key3,),
+                   select key,2,false,risk,execution_kind,execution_contract,recurrence,retry_policy,
+                          '{"key_template":"r02-gate-fixture-v2"}'::jsonb,completion_contract,legacy_schedule
+                     from ops.job_definition where key=%s and version=1""",
+                (key_r,),
             )
-            wrong_version_receipt = cur.execute(
-                """insert into ops.legacy_schedule_disable_receipt
-                     (receipt_ref,idempotency_key,workflow_key,workflow_version,surface_id,locator,reason,approved_by)
-                   values (%s,%s,%s,2,'s','l','wrong version','joe') returning id::text""",
-                (f"{key3}-wrongver", f"{key3}-wrongver-idem", key3),
-            ).fetchone()[0]
-            set_local_role(cur, "carr_authority")
-            cur.execute("set session authorization carr_authority_joe")
-            expect_refusal(
-                cur, "select ops.retire_workflow_cutover_plan(%s,%s,'r',%s,'joe',true)",
-                (plan3, wrong_version_receipt, uuid.uuid4()),
-                "receipt for a different workflow_version",
-                match="legacy_schedule_disable_receipt_workflow_mismatch",
-            )
-            cur.execute("reset session authorization")
-
-            # 3b: a receipt approved BEFORE the cutover transition is refused.
-            cur.execute(
-                """insert into ops.legacy_schedule_disable_receipt
-                     (receipt_ref,idempotency_key,workflow_key,workflow_version,surface_id,locator,reason,approved_by,approved_at)
-                   values (%s,%s,%s,1,'s2','l2','predates cutover','joe', now() - interval '1 year')
-                   returning id::text""",
-                (f"{key3}-stale", f"{key3}-stale-idem", key3),
-            )
-            stale_receipt = cur.fetchone()[0]
-            cur.execute("set session authorization carr_authority_joe")
-            expect_refusal(
-                cur, "select ops.retire_workflow_cutover_plan(%s,%s,'r',%s,'joe',true)",
-                (plan3, stale_receipt, uuid.uuid4()),
-                "receipt approved before the cutover transition",
-                match="legacy_schedule_disable_receipt_predates_cutover_transition",
-            )
-            cur.execute("reset session authorization")
-
-            # 3c: a receipt for a legacy surface that IS registered, but with
-            # no disable receipt yet, is refused.
+            plan_r = walk_to(cur, key_r, "recovery_ready")
+            wrong_version = insert_disable_receipt(cur, key_r, f"{key_r}-v2", version=2)
+            stale = insert_disable_receipt(cur, key_r, f"{key_r}-stale", approved_at="now() - interval '1 year'")
             cur.execute(
                 """insert into ops.legacy_schedule_surface_registry (workflow_key,workflow_version,surface_id,locator,scheduler_kind)
-                   values (%s,1,'launchd-1','com.carr.r02gate.plist','launchd')""",
-                (key3,),
+                   values (%s,1,'launchd-r','com.carr.r02gate-r.plist','launchd')""",
+                (key_r,),
             )
-            good_receipt = cur.execute(
-                """insert into ops.legacy_schedule_disable_receipt
-                     (receipt_ref,idempotency_key,workflow_key,workflow_version,surface_id,locator,reason,approved_by)
-                   values (%s,%s,%s,1,'other-surface','other-locator','wrong surface','joe') returning id::text""",
-                (f"{key3}-wrongsurface", f"{key3}-wrongsurface-idem", key3),
-            ).fetchone()[0]
-            cur.execute("set session authorization carr_authority_joe")
-            expect_refusal(
-                cur, "select ops.retire_workflow_cutover_plan(%s,%s,'r',%s,'joe',true)",
-                (plan3, good_receipt, uuid.uuid4()),
-                "a receipt that does not cover the registered legacy surface",
-                match="legacy_schedule_disable_receipt_missing_for_",
+            # (workflow, version, surface, locator) is unique per receipt, so
+            # the consumed one names its own surface; one-use is checked
+            # before surface coverage, so that does not change what refuses it.
+            consumed = insert_disable_receipt(cur, key_r, f"{key_r}-consumed", surface="consumed-surface",
+                                              locator="consumed-locator", approved_at="now() + interval '1 day'")
+            other_plan = open_plan(cur, f"{key_n}")
+            cur.execute("insert into ops.workflow_cutover_retire_receipt_use (receipt_id, plan_id) values (%s,%s)",
+                        (consumed, other_plan))
+            valid = insert_disable_receipt(cur, key_r, f"{key_r}-valid", surface="launchd-r",
+                                           locator="com.carr.r02gate-r.plist", approved_at="now() + interval '1 day'")
+            with as_login(cur, AUTHORITY):
+                for label, receipt, match in [
+                    ("a receipt that does not exist", "00000000-0000-0000-0000-000000000000",
+                     "legacy_schedule_disable_receipt_not_found"),
+                    ("a receipt for another workflow_version", wrong_version,
+                     "legacy_schedule_disable_receipt_workflow_mismatch"),
+                    ("a receipt approved before the cutover transition", stale,
+                     "legacy_schedule_disable_receipt_predates_cutover_transition"),
+                    ("a receipt already used to retire a plan", consumed, "legacy_schedule_disable_receipt_already_used"),
+                    # Every earlier check passes for this one, so the
+                    # derived census is what refuses it.
+                    ("a fully valid plan and receipt", valid, "workflow_cutover_retire_refused_census_unknown"),
+                ]:
+                    expect_refusal(cur, "select ops.retire_workflow_cutover_plan(%s,%s,'r',%s)",
+                                   (plan_r, receipt, uuid.uuid4()), label, match=match)
+            if cur.execute("select stage, status from ops.workflow_cutover_plan where id=%s",
+                           (plan_r,)).fetchone() != ("recovery_ready", "active"):
+                return fail("a refused retire changed the plan")
+            key_m = f"r02gate-{token}-surface"
+            insert_job_definition(cur, key_m)
+            plan_m = walk_to(cur, key_m, "recovery_ready")
+            cur.execute(
+                """insert into ops.legacy_schedule_surface_registry (workflow_key,workflow_version,surface_id,locator,scheduler_kind)
+                   values (%s,1,'launchd-m','com.carr.r02gate-m.plist','launchd')""",
+                (key_m,),
             )
-            cur.execute("reset session authorization")
-
-            # 3d positive: the real, matching receipt for the registered
-            # surface, approved_at set explicitly one day in the future at
-            # INSERT time (the append-only trigger blocks a later UPDATE, but
-            # not choosing the value up front) -- far enough ahead that it
-            # postdates plan3's cutover AND the second plan's cutover built
-            # below, which is what isolates 3e's one-use refusal from the
-            # already-proven predates-cutover-transition check (3b): reusing
-            # a receipt that genuinely does NOT predate either plan's cutover
-            # must still be refused, specifically for having been consumed.
-            real_receipt = cur.execute(
-                """insert into ops.legacy_schedule_disable_receipt
-                     (receipt_ref,idempotency_key,workflow_key,workflow_version,surface_id,locator,reason,approved_by,approved_at)
-                   values (%s,%s,%s,1,'launchd-1','com.carr.r02gate.plist','disabled for real','joe',now() + interval '1 day')
-                   returning id::text""",
-                (f"{key3}-real", f"{key3}-real-idem", key3),
-            ).fetchone()[0]
-            cur.execute("set session authorization carr_authority_joe")
-            retired3 = cur.execute(
-                "select stage,status from ops.retire_workflow_cutover_plan(%s,%s,'legacy disabled for real',%s,'joe',true)",
-                (plan3, real_receipt, uuid.uuid4()),
-            ).fetchone()
-            if retired3 != ("retired", "retired"):
-                return fail(f"item 3 positive retire did not succeed: {retired3}")
-            cur.execute("reset session authorization")
-
-            # 3e: a fresh SECOND plan for the same identity (a normal open,
-            # not a supersession, since plan3's status left 'active' at
-            # retirement) walked to recovery_ready, then an attempt to reuse
-            # the SAME already-consumed receipt -- still future-dated ahead
-            # of THIS plan's cutover too -- must be refused specifically for
-            # one-use, not for predates-cutover or any other check.
-            plan3_second = open_plan(cur, key3)
-            advance(cur, plan3_second, "build_projection", "ev", "r1b")
-            shadow3b = insert_acceptance(cur, key3, "shadow", f"{key3}-shadow-2")
-            advance(cur, plan3_second, "shadow_compare", shadow3b, "r2b")
-            canary3c = insert_acceptance(cur, key3, "canary", f"{key3}-canary-3")
-            advance(cur, plan3_second, "single_write_authority", canary3c, "r3b")
-            canary3d = insert_acceptance(cur, key3, "canary", f"{key3}-canary-4")
-            advance(cur, plan3_second, "cutover", canary3d, "r4b")
-            advance(cur, plan3_second, "monitor", None, "r5b")
-            advance(cur, plan3_second, "recovery_ready", None, "r6b")
-            cur.execute("set session authorization carr_authority_joe")
-            expect_refusal(
-                cur, "select ops.retire_workflow_cutover_plan(%s,%s,'reuse attempt',%s,'joe',true)",
-                (plan3_second, real_receipt, uuid.uuid4()),
-                "reusing an already-consumed disable receipt against a second, otherwise-valid plan",
-                match="legacy_schedule_disable_receipt_already_used",
-            )
-            cur.execute("reset session authorization")
-
-            # 3f: even a session granted the carr_authority ROLE (so the GRANT
-            # EXECUTE check alone would let it through) is refused, because
-            # ops.authority_actor_slug() checks session_user (the real login
-            # identity), not current_user (what SET ROLE changes) -- the
-            # defense-in-depth re-check the function's own comment names.
-            key3b = f"r02gate-{token}-item3b"
-            insert_job_definition(cur, key3b)
-            plan3b = open_plan(cur, key3b)
-            set_local_role(cur, "carr_writer")
-            expect_refusal(
-                cur, "select ops.retire_workflow_cutover_plan(%s,gen_random_uuid(),'r',%s,'joe',true)",
-                (plan3b, uuid.uuid4()),
-                "a plain carr_writer session (no execute grant at all)",
-                match="permission denied",
-            )
-            cur.execute("reset role")
-            set_local_role(cur, "carr_authority")
-            expect_refusal(
-                cur, "select ops.retire_workflow_cutover_plan(%s,gen_random_uuid(),'r',%s,'joe',true)",
-                (plan3b, uuid.uuid4()),
-                "a session with the carr_authority ROLE but a non-authority session_user",
-                match="authority session user",
-            )
-            cur.execute("reset role")
+            not_covering = insert_disable_receipt(cur, key_m, f"{key_m}-other", approved_at="now() + interval '1 day'")
+            with as_login(cur, AUTHORITY):
+                expect_refusal(cur, "select ops.retire_workflow_cutover_plan(%s,%s,'r',%s)",
+                               (plan_m, not_covering, uuid.uuid4()),
+                               "a receipt that does not cover the registered legacy surface",
+                               match="legacy_schedule_disable_receipt_missing_for_")
 
             # ================================================================
-            # ITEM 4: slice-completion criteria registry and evidence recompute.
+            # P1-b / P1-c: slice criteria and completion.
             # ================================================================
+            wf1 = f"r02gate-{token}-slice-wf1"
+            wf2 = f"r02gate-{token}-slice-wf2"
+            insert_job_definition(cur, wf1)
+            insert_job_definition(cur, wf2)
             slice_id = f"r02gate-slice-{token}"
-            # mark_slice_completion is EXECUTE-granted to carr_writer (0593)
-            # and additionally requires an authority session_user for
-            # status=complete, so it is asked as the authority login acting
-            # through SET ROLE carr_writer; register_slice_checkable_done is
-            # granted to carr_authority and is asked through that role.
-            cur.execute("set session authorization carr_authority_joe")
-            set_local_role(cur, "carr_writer")
-            expect_refusal(
-                cur, "select ops.mark_slice_completion(%s,'complete','[{\"criterion\":\"x\",\"evidence_kind\":\"acceptance\",\"evidence_ref\":\"00000000-0000-0000-0000-000000000000\"}]'::jsonb,'r',%s,'joe')",
-                (f"{slice_id}-unknown", uuid.uuid4()),
-                "marking an unregistered slice_id",
-                match="slice_completion_unknown_slice_id",
-            )
-            set_local_role(cur, "carr_authority")
-            cur.execute(
-                "select ops.register_slice_checkable_done(%s,array['criterion A','criterion B'],%s,'joe')",
-                (slice_id, uuid.uuid4()),
-            )
-            set_local_role(cur, "carr_writer")
-            expect_refusal(
-                cur,
-                "select ops.mark_slice_completion(%s,'complete','[{\"criterion\":\"criterion A\",\"evidence_kind\":\"acceptance\",\"evidence_ref\":\"00000000-0000-0000-0000-000000000000\"}]'::jsonb,'r',%s,'joe')",
-                (slice_id, uuid.uuid4()),
-                "submitting fewer criteria than registered",
-                match="slice_completion_criteria_set_mismatch",
-            )
-            cur.execute("reset session authorization")
-            insert_job_definition(cur, f"{slice_id}-evwf")
-            acc_id = insert_acceptance(cur, f"{slice_id}-evwf", "canary", f"{slice_id}-acc")
-            cur.execute("set session authorization carr_authority_joe")
-            set_local_role(cur, "carr_writer")
-            expect_refusal(
-                cur,
-                "select ops.mark_slice_completion(%s,'complete',jsonb_build_array("
-                "jsonb_build_object('criterion','criterion A','evidence_kind','acceptance','evidence_ref','00000000-0000-0000-0000-000000000000','pass',true),"
-                "jsonb_build_object('criterion','criterion B','evidence_kind','acceptance','evidence_ref',%s::text,'pass',true)"
-                "),'r',%s,'joe')",
-                (slice_id, "00000000-0000-0000-0000-000000000000", uuid.uuid4()),
-                "an unresolvable evidence_ref, even with the caller claiming pass=true",
-                match="slice_completion_complete_requires_every_criterion_proven",
-            )
-            completed = cur.execute(
-                "select status,criteria_receipt from ops.mark_slice_completion(%s,'complete',jsonb_build_array("
-                "jsonb_build_object('criterion','criterion A','evidence_kind','acceptance','evidence_ref',%s::text),"
-                "jsonb_build_object('criterion','criterion B','evidence_kind','acceptance','evidence_ref',%s::text)"
-                "),'r',%s,'joe')",
-                (slice_id, acc_id, acc_id, uuid.uuid4()),
-            ).fetchone()
-            if completed[0] != "complete" or not all(el["pass"] is True for el in completed[1]):
-                return fail(f"item 4 positive completion did not recompute pass=true server-side: {completed}")
-            cur.execute("reset session authorization")
-
-            set_local_role(cur, "carr_writer")
-            expect_refusal(
-                cur, "select ops.register_slice_checkable_done(%s,array['c1'],%s,'joe')",
-                (f"{slice_id}-writer-attempt", uuid.uuid4()),
-                "a plain carr_writer registering a checkable_done set",
-                match="permission denied",
-            )
-            cur.execute("reset role")
-
-            # ================================================================
-            # ITEM 5: dual-write gating on ops.enqueue_job.
-            # ================================================================
-            key5 = f"r02gate-{token}-item5"
-            insert_job_definition(cur, key5)
-            plan5 = walk_to_single_write_authority(cur, key5, backdate_canary=True)
-            set_local_role(cur, "carr_jobs")
-            expect_refusal(
-                cur, "select ops.enqueue_job(%s,1,now()+interval '1 hour','{}'::jsonb,%s,'live')",
-                (key5, f"{key5}-idem-stale"),
-                "live enqueue with only a stale (pre-transition) canary acceptance",
-                match="no canary acceptance evidence recorded since entering cutover stage",
-            )
-            cur.execute("reset role")
-            fresh_canary = insert_acceptance(cur, key5, "canary", f"{key5}-fresh")
-            cur.execute(
-                """insert into ops.legacy_schedule_surface_registry (workflow_key,workflow_version,surface_id,locator,scheduler_kind)
-                   values (%s,1,'launchd-1-item5','com.carr.r02gate5.plist','launchd')""",
-                (key5,),
-            )
-            set_local_role(cur, "carr_jobs")
-            expect_refusal(
-                cur, "select ops.enqueue_job(%s,1,now()+interval '1 hour','{}'::jsonb,%s,'live')",
-                (key5, f"{key5}-idem-undisabled"),
-                "live enqueue at single_write_authority with an undisabled legacy surface",
-                match="legacy surface(s) still undisabled",
-            )
-            cur.execute("reset role")
-            cur.execute(
-                """insert into ops.legacy_schedule_disable_receipt
-                     (receipt_ref,idempotency_key,workflow_key,workflow_version,surface_id,locator,reason,approved_by)
-                   values (%s,%s,%s,1,'launchd-1-item5','com.carr.r02gate5.plist','disabled','joe')""",
-                (f"{key5}-disable", f"{key5}-disable-idem", key5),
-            )
-            set_local_role(cur, "carr_jobs")
-            enqueued = cur.execute(
-                "select mode from ops.enqueue_job(%s,1,now()+interval '1 hour','{}'::jsonb,%s,'live')",
-                (key5, f"{key5}-idem-ok"),
-            ).fetchone()
-            cur.execute("reset role")
-            if enqueued != ("live",):
-                return fail(f"item 5 positive live enqueue did not succeed once gated: {enqueued}")
-
-            # A workflow with no active cutover plan at all must be totally
-            # unaffected by any of the above.
-            key5b = f"r02gate-{token}-item5b"
-            insert_job_definition(cur, key5b, canary_enabled=False)
-            insert_acceptance(cur, key5b, "shadow", f"{key5b}-shadow")
-            set_local_role(cur, "carr_jobs")
-            unaffected = cur.execute(
-                "select mode from ops.enqueue_job(%s,1,now()+interval '1 hour','{}'::jsonb,%s,'live')",
-                (key5b, f"{key5b}-idem"),
-            ).fetchone()
-            cur.execute("reset role")
-            if unaffected != ("live",):
-                return fail(f"item 5: a workflow with no active cutover plan was unexpectedly gated: {unaffected}")
-
-            # ================================================================
-            # ITEM 6: census gate ordering, record_workflow_caller, history.
-            # ================================================================
-            key6 = f"r02gate-{token}-item6"
-            insert_job_definition(cur, key6)
-            plan6 = walk_to_single_write_authority(cur, key6)
-            canary6b = insert_acceptance(cur, key6, "canary", f"{key6}-canary-2")
-            advance(cur, plan6, "cutover", canary6b, "r4")
-            advance(cur, plan6, "monitor", None, "r5")
-            advance(cur, plan6, "recovery_ready", None, "r6")
-            receipt6 = cur.execute(
-                """insert into ops.legacy_schedule_disable_receipt
-                     (receipt_ref,idempotency_key,workflow_key,workflow_version,surface_id,locator,reason,approved_by)
-                   values (%s,%s,%s,1,'no-surface','no-locator','no surfaces','joe') returning id::text""",
-                (f"{key6}-disable", f"{key6}-disable-idem", key6),
-            ).fetchone()[0]
-            set_local_role(cur, "carr_authority")
-            cur.execute("set session authorization carr_authority_joe")
-            # The stage/receipt checks still win over a false census when both
-            # would refuse -- proven by an intentionally-wrong receipt id
-            # (not found) combined with census_available=false: the specific
-            # not-found error must be what's raised, not the generic census one.
-            expect_refusal(
-                cur, "select ops.retire_workflow_cutover_plan(%s,'00000000-0000-0000-0000-000000000000','r',%s,'joe',false)",
-                (plan6, uuid.uuid4()),
-                "a not-found receipt combined with an unavailable census",
-                match="legacy_schedule_disable_receipt_not_found",
-            )
-            expect_refusal(
-                cur, "select ops.retire_workflow_cutover_plan(%s,%s,'r',%s,'joe',false)",
-                (plan6, receipt6, uuid.uuid4()),
-                "a fully valid plan+receipt with an unavailable census",
-                match="workflow_cutover_retire_refused_census_unknown",
-            )
-            retired6 = cur.execute(
-                "select stage from ops.retire_workflow_cutover_plan(%s,%s,'r',%s,'joe',true)",
-                (plan6, receipt6, uuid.uuid4()),
-            ).fetchone()
-            if retired6 != ("retired",):
-                return fail(f"item 6 positive retire with census_available=true did not succeed: {retired6}")
-            cur.execute("reset session authorization")
-
-            set_local_role(cur, "carr_writer")
-            expect_refusal(
-                cur, "select ops.record_workflow_caller(%s,1,%s,'script','done',null,'commit-abc',null)",
-                (f"{key6}-unregistered", "caller.py"),
-                "status=done for a (workflow_key, workflow_version) with no job_definition row",
-                match="caller_done_requires_registered_job_definition",
-            )
-            cur.execute(
-                "select id from ops.record_workflow_caller(%s,1,'caller-hist.py','script','remaining',null,null,'writer')",
-                (key6,),
-            )
-            cur.execute(
-                "select id from ops.record_workflow_caller(%s,1,'caller-hist.py','script','blocked','waiting',null,'writer')",
-                (key6,),
-            )
-            cur.execute(
-                "select id from ops.record_workflow_caller(%s,1,'caller-hist.py','script','done',null,'commit-xyz','writer')",
-                (key6,),
-            )
-            cur.execute("reset role")
-            set_local_role(cur, "carr_reader")
-            history_statuses = [
-                row[0] for row in cur.execute(
-                    """select status from ops.workflow_caller_history
-                       where workflow_key=%s and caller_locator='caller-hist.py' order by recorded_at""",
-                    (key6,),
-                ).fetchall()
+            criteria = [
+                {"criterion": "A", "evidence_kind": "acceptance", "workflow_key": wf1, "workflow_version": 1,
+                 "acceptance_mode": "canary"},
+                {"criterion": "B", "evidence_kind": "transition", "workflow_key": wf1, "workflow_version": 1,
+                 "transition_to_stage": "shadow_compare"},
             ]
-            current_status = cur.execute(
-                "select status from ops.workflow_caller where workflow_key=%s and caller_locator='caller-hist.py'",
-                (key6,),
-            ).fetchone()[0]
-            cur.execute("reset role")
-            if history_statuses != ["remaining", "blocked", "done"]:
-                return fail(f"workflow_caller_history did not preserve all three status changes: {history_statuses}")
-            if current_status != "done":
-                return fail(f"workflow_caller did not hold the latest status: {current_status}")
+            with as_login(cur, AUTHORITY):
+                expect_refusal(
+                    cur, "select ops.register_slice_checkable_done(%s,%s,%s)",
+                    (slice_id, Jsonb([criteria[0], criteria[0]]), uuid.uuid4()),
+                    "registering the same criterion twice", match="criteria_must_be_distinct",
+                )
+                expect_refusal(
+                    cur, "select ops.register_slice_checkable_done(%s,%s,%s)",
+                    (slice_id, Jsonb([{**criteria[0], "workflow_key": f"{wf1}-missing"}]), uuid.uuid4()),
+                    "binding a criterion to an unregistered workflow", match="criterion_workflow_not_registered",
+                )
+                expect_refusal(
+                    cur, "select ops.register_slice_checkable_done(%s,%s,%s)",
+                    (slice_id, Jsonb([{**criteria[0], "acceptance_mode": None}]), uuid.uuid4()),
+                    "an acceptance criterion without a mode", match="slice_checkable_done_registry",
+                )
+                reg_key = uuid.uuid4()
+                registered = cur.execute(
+                    "select count(*) from ops.register_slice_checkable_done(%s,%s,%s)",
+                    (slice_id, Jsonb(criteria), reg_key),
+                ).fetchone()[0]
+                replay = cur.execute(
+                    "select count(*) from ops.register_slice_checkable_done(%s,%s,%s)",
+                    (slice_id, Jsonb(criteria), reg_key),
+                ).fetchone()[0]
+                expect_refusal(
+                    cur, "select ops.register_slice_checkable_done(%s,%s,%s)",
+                    (slice_id, Jsonb(criteria[:1]), uuid.uuid4()),
+                    "re-registering a slice with a looser set", match="slice_checkable_done_already_registered",
+                )
+            if (registered, replay) != (2, 2):
+                return fail(f"registration or its replay returned the wrong rows: {(registered, replay)}")
 
-            # No runtime role is even granted UPDATE on this table (only
-            # carr_reader gets SELECT; every write is meant to happen only
-            # through ops.record_workflow_caller) -- that GRANT-level
-            # refusal is real, but it isn't the guard this proves. Run the
-            # UPDATE as the table owner instead, bypassing the GRANT layer
-            # entirely, to reach and prove the append-only TRIGGER itself.
+            good_a = insert_acceptance(cur, wf1, "canary", f"{wf1}-canary")
+            wrong_mode_a = insert_acceptance(cur, wf1, "shadow", f"{wf1}-shadow")
+            wrong_wf_a = insert_acceptance(cur, wf2, "canary", f"{wf2}-canary")
+            plan_wf1 = walk_to(cur, wf1, "shadow_compare")
+            good_b, wrong_stage_b = cur.execute(
+                """select max(id::text) filter (where to_stage='shadow_compare'),
+                          max(id::text) filter (where to_stage='build_projection')
+                     from ops.workflow_cutover_stage_transition where plan_id=%s""",
+                (plan_wf1,),
+            ).fetchone()
+            plan_wf2 = walk_to(cur, wf2, "shadow_compare")
+            wrong_wf_b = cur.execute(
+                "select id::text from ops.workflow_cutover_stage_transition where plan_id=%s and to_stage='shadow_compare'",
+                (plan_wf2,),
+            ).fetchone()[0]
+
+            def slice_receipt(a: str | None, b: str | None) -> Jsonb:
+                return Jsonb([{"criterion": "A", "evidence_ref": a}, {"criterion": "B", "evidence_ref": b}])
+
+            with as_login(cur, AUTHORITY):
+                complete = "select ops.mark_slice_completion(%s,%s,'r',%s)"
+                expect_refusal(cur, complete, (f"{slice_id}-unknown", slice_receipt(good_a, good_b), uuid.uuid4()),
+                               "completing an unregistered slice", match="slice_completion_unknown_slice_id")
+                expect_refusal(
+                    cur, complete,
+                    (slice_id, Jsonb([{"criterion": "A", "evidence_ref": good_a},
+                                      {"criterion": "A", "evidence_ref": good_a}]), uuid.uuid4()),
+                    "[A, A] against the registered {A, B}", match="slice_completion_duplicate_criterion",
+                )
+                expect_refusal(
+                    cur, complete, (slice_id, Jsonb([{"criterion": "A", "evidence_ref": good_a}]), uuid.uuid4()),
+                    "a subset of the registered criteria", match="slice_completion_criteria_set_mismatch",
+                )
+                expect_refusal(
+                    cur, complete,
+                    (slice_id, Jsonb([{"criterion": "A", "evidence_ref": good_a}, {"criterion": "B", "evidence_ref": good_b},
+                                      {"criterion": "C", "evidence_ref": good_a}]), uuid.uuid4()),
+                    "an invented extra criterion", match="slice_completion_criteria_set_mismatch",
+                )
+                for label, a, b in [
+                    ("A proven by another workflow's accepted canary", wrong_wf_a, good_b),
+                    ("A proven by the right workflow in the wrong mode", wrong_mode_a, good_b),
+                    ("B proven by another workflow's transition", good_a, wrong_wf_b),
+                    ("B proven by a transition into the wrong stage", good_a, wrong_stage_b),
+                    ("B with no evidence at all", good_a, None),
+                ]:
+                    expect_refusal(cur, complete, (slice_id, slice_receipt(a, b), uuid.uuid4()), label,
+                                   match="slice_completion_complete_requires_every_criterion_proven")
+
+            with as_login(cur, WRITER):
+                progress = cur.execute(
+                    "select status, criteria_receipt from ops.mark_slice_progress(%s,'in_progress',%s,'partial',%s,'writer')",
+                    (slice_id, slice_receipt(good_a, None), uuid.uuid4()),
+                ).fetchone()
+                expect_refusal(
+                    cur, "select ops.mark_slice_progress(%s,'complete',%s,'r',%s,'writer')",
+                    (slice_id, slice_receipt(good_a, good_b), uuid.uuid4()),
+                    "the writer door writing complete", match="slice_progress_status_invalid",
+                )
+                expect_refusal(
+                    cur, "select ops.mark_slice_progress(%s,'blocked',%s,null,%s,'writer')",
+                    (slice_id, slice_receipt(good_a, None), uuid.uuid4()),
+                    "blocked without a reason", match="slice_progress_blocked_requires_reason",
+                )
+            if progress[0] != "in_progress" or [el["pass"] for el in progress[1]] != [True, False]:
+                return fail(f"progress mark did not recompute pass per criterion: {progress}")
+
+            with as_login(cur, AUTHORITY):
+                done = cur.execute(
+                    "select id::text, status, marked_by_actor_slug, criteria_receipt from ops.mark_slice_completion(%s,%s,'all proven',%s)",
+                    (slice_id, Jsonb([{"criterion": "B", "evidence_ref": good_b, "pass": False},
+                                      {"criterion": "A", "evidence_ref": good_a}]), uuid.uuid4()),
+                ).fetchone()
+            if done[1:3] != ("complete", "joe") or not all(el["pass"] is True for el in done[3]) \
+                    or {el["workflow_key"] for el in done[3]} != {wf1}:
+                return fail(f"authority completion did not record a proven, workflow-bound mark: {done}")
+            with as_login(cur, READER):
+                current = cur.execute("select id::text, status from ops.read_slice_completion(%s)",
+                                      (slice_id,)).fetchone()
+            if current != (done[0], "complete"):
+                return fail(f"read_slice_completion did not return the completion mark: {current}")
+            expect_refusal(cur, "update ops.slice_completion_mark set status='blocked' where id=%s", (done[0],),
+                           "rewriting a completion mark (as table owner)", match="append-only")
+            expect_refusal(cur, "delete from ops.slice_checkable_done_registry where slice_id=%s", (slice_id,),
+                           "deleting a registered criterion (as table owner)", match="immutable")
+
+            # ================================================================
+            # record_workflow_caller (writer): registered workflow, history.
+            # ================================================================
+            key_c = f"r02gate-{token}-caller"
+            insert_job_definition(cur, key_c)
+            with as_login(cur, WRITER):
+                expect_refusal(
+                    cur, "select ops.record_workflow_caller(%s,1,%s,'script','done',null,'commit-abc',null)",
+                    (f"{key_c}-unregistered", "caller.py"),
+                    "status=done for an unregistered workflow", match="caller_done_requires_registered_job_definition",
+                )
+                for status, blocked, evidence in [("remaining", None, None), ("blocked", "waiting", None),
+                                                  ("done", None, "commit-xyz")]:
+                    cur.execute(
+                        "select id from ops.record_workflow_caller(%s,1,'caller-hist.py','script',%s,%s,%s,'writer')",
+                        (key_c, status, blocked, evidence),
+                    )
+            with as_login(cur, AUTHORITY):
+                expect_refusal(
+                    cur, "select ops.record_workflow_caller(%s,1,'x','script','remaining',null,null,null)", (key_c,),
+                    "the authority login on the writer-only caller door", match="permission denied",
+                )
+            with as_login(cur, READER):
+                history = [r[0] for r in cur.execute(
+                    """select status from ops.workflow_caller_history
+                        where workflow_key=%s and caller_locator='caller-hist.py' order by recorded_at, id""",
+                    (key_c,),
+                ).fetchall()]
+            if sorted(history) != ["blocked", "done", "remaining"] or len(history) != 3:
+                return fail(f"workflow_caller_history did not keep every status change: {history}")
             expect_refusal(
-                cur, "update ops.workflow_caller_history set status='remaining' where workflow_key=%s and caller_locator='caller-hist.py' and status='done'",
-                (key6,),
-                "a direct UPDATE against the append-only workflow_caller_history table (as table owner, past any GRANT)",
-                match="append-only",
+                cur, "update ops.workflow_caller_history set status='remaining' where workflow_key=%s", (key_c,),
+                "rewriting workflow_caller_history (as table owner)", match="append-only",
             )
 
-        print("PASS: V5-R02 PR #1245 review-fix SQL guards (items 2-6) hold against a real PostgreSQL, "
-              "both the positive path and every named refusal")
+        print("PASS: V5-R02 SQL doors hold under production-shaped logins (authority, writer, jobs, reader): "
+              "an open plan never halts a live workflow, cancel recovers it, slice completion is reachable and "
+              "unbeatable, retire derives its census")
         return 0
     except Exception as exc:
         return fail(str(exc))

@@ -391,11 +391,12 @@ test("reviewed MCP inventory is an exact immutable projection of the assembled r
   // read-resource-dashboard and record-resource-observation.
   // The server-side Jev call log (0587) adds one write and two reads:
   // ask-jev, read-jev-call-receipts and read-jev-call-receipt-integrity.
-  // DoctorCRE V5-R02 (0593) adds five writes and two reads: open/advance/
-  // retire-workflow-cutover-plan, record-workflow-caller, mark-slice-
-  // completion, workflow-cutover-board, read-slice-completion.
-  assert.equal(rows.length, 291);
-  assert.equal(rows.filter(row => row.write).length, 205);
+  // DoctorCRE V5-R02 (0593) adds eight writes and two reads: open/advance/
+  // cancel/retire-workflow-cutover-plan, register-slice-checkable-done,
+  // mark-slice-completion, record-workflow-caller, mark-slice-progress,
+  // workflow-cutover-board, read-slice-completion.
+  assert.equal(rows.length, 294);
+  assert.equal(rows.filter(row => row.write).length, 208);
   assert.equal(rows.filter(row => !row.write).length, 86);
   assert.deepEqual(rows.map(row => row.operation), Object.keys(TOOLS).sort());
   assert.equal(Object.isFrozen(TOOLS), true);
@@ -997,8 +998,8 @@ test("the ACTIVE runtime registry is v63, and a stale v19 import fails admission
   // v63 registers answer-work-request-for-joe after v58-v62 registered none.
   // v65 registers the resource-observation pair; v69 registers ask-jev,
   // read-jev-call-receipts and read-jev-call-receipt-integrity after v66-v68
-  // registered none; v70 registered none; v71 registers the seven V5-R02
-  // workflow-cutover verbs.
+  // registered none; v70 registered none; v71 registers the ten V5-R02
+  // workflow-cutover and slice-completion verbs.
   assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V71_VERSION);
   const v71SelectorDigest = generatedV71.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];

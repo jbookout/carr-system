@@ -13,8 +13,7 @@ async function rejected(fn) {
   }
 }
 
-// A minimal fake DB standing in for migrations/0593's five write doors and
-// two read doors, plus the two upstream stores retire-workflow-cutover-plan
+// A minimal fake DB standing in for migrations/0593's write and read doors, plus the two upstream stores retire-workflow-cutover-plan
 // composes: ops.workflow_acceptance (accept-workflow's store) and
 // ops.legacy_schedule_disable_receipt (disable-legacy-schedule's store).
 // Mirrors resource-observation.test.mjs's fake shape (mcp-server/test/
@@ -25,7 +24,7 @@ class WorkflowCutoverFake {
   constructor() {
     this.calls = []; this.toolCalls = new Map();
     this.plans = new Map(); this.transitions = []; this.callers = new Map();
-    this.slices = [];
+    this.slices = []; this.sliceRegistry = new Map();
     this.acceptances = new Map(); // id -> {workflow_key, workflow_version, mode, status}
     this.disableReceipts = new Map(); // id -> {workflow_key}
     this._planSeq = 0; this._callerSeq = 0; this._sliceSeq = 0;
@@ -66,6 +65,17 @@ class WorkflowCutoverFake {
       return { rows: [row] };
     }
 
+    if (sql.includes("ops.cancel_workflow_cutover_plan")) {
+      const [planId, reason, idempotencyKey] = params;
+      const plan = this.plans.get(planId);
+      if (plan && plan.cancel_idempotency_key === idempotencyKey) return { rows: [plan] };
+      if (!reason) throw new Error("reason_required");
+      if (!plan) throw new Error("workflow_cutover_plan_not_found");
+      if (plan.status !== "active") throw new Error("workflow_cutover_plan_not_active");
+      plan.status = "cancelled"; plan.cancel_idempotency_key = idempotencyKey;
+      return { rows: [plan] };
+    }
+
     if (sql.includes("ops.advance_workflow_cutover_stage")) {
       const [planId, toStage, evidenceRef, reason, idempotencyKey] = params;
       const replayed = this.transitions.find(t => t.idempotency_key === idempotencyKey);
@@ -96,7 +106,8 @@ class WorkflowCutoverFake {
     }
 
     if (sql.includes("ops.retire_workflow_cutover_plan")) {
-      const [planId, disableReceiptId, reason, idempotencyKey, , censusAvailable] = params;
+      const [planId, disableReceiptId, reason, idempotencyKey] = params;
+      if (params.length !== 4) throw new Error("retire takes exactly four arguments; the census is derived in SQL");
       const replayed = this.transitions.find(t => t.idempotency_key === idempotencyKey);
       if (replayed) return { rows: [this.plans.get(replayed.plan_id)] };
       if (!reason) throw new Error("reason_required");
@@ -108,11 +119,10 @@ class WorkflowCutoverFake {
       const receipt = this.disableReceipts.get(disableReceiptId);
       if (!receipt) throw new Error("legacy_schedule_disable_receipt_not_found");
       if (receipt.workflow_key !== plan.workflow_key) throw new Error("legacy_schedule_disable_receipt_workflow_mismatch");
-      // P1 fix (PR #1245 review, item 6 / Q157): mirrors the real
-      // ops.retire_workflow_cutover_plan's p_census_available check, ordered
-      // last so the more specific errors above still win when those are
-      // what's actually wrong.
-      if (censusAvailable !== true) throw new Error("workflow_cutover_retire_refused_census_unknown");
+      // Mirrors the real ops.retire_workflow_cutover_plan: the census is
+      // derived in SQL and is unavailable until the census store lands, so
+      // this check always refuses, ordered last.
+      throw new Error("workflow_cutover_retire_refused_census_unknown");
       plan.stage = "retired";
       this.transitions.push({ plan_id: planId, from_stage: "recovery_ready", to_stage: "retired",
         evidence_ref: disableReceiptId, reason, idempotency_key: idempotencyKey });
@@ -155,20 +165,46 @@ class WorkflowCutoverFake {
       return { rows: [{ board }] };
     }
 
-    if (sql.includes("ops.mark_slice_completion")) {
-      const [sliceId, status, criteriaReceiptJson, reason, idempotencyKey] = params;
+    if (sql.includes("ops.register_slice_checkable_done")) {
+      const [sliceId, criteriaJson] = params;
+      const criteria = JSON.parse(criteriaJson);
+      if (this.sliceRegistry.has(sliceId)) throw new Error("slice_checkable_done_already_registered");
+      if (new Set(criteria.map(c => c.criterion)).size !== criteria.length)
+        throw new Error("criteria_must_be_distinct");
+      this.sliceRegistry.set(sliceId, criteria);
+      return { rows: criteria };
+    }
+
+    if (sql.includes("ops.mark_slice_progress") || sql.includes("ops.mark_slice_completion")) {
+      const complete = sql.includes("ops.mark_slice_completion");
+      const [sliceId, statusOrReceipt, receiptOrReason] = params;
+      const status = complete ? "complete" : statusOrReceipt;
+      const criteriaReceiptJson = complete ? statusOrReceipt : receiptOrReason;
+      const idempotencyKey = complete ? params[3] : params[4];
       const existing = this.slices.find(s => s.idempotency_key === idempotencyKey);
       if (existing) return { rows: [existing] };
-      if (!sliceId) throw new Error("slice_id_required");
-      const criteria = JSON.parse(criteriaReceiptJson);
-      if (!Array.isArray(criteria) || criteria.length === 0)
-        throw new Error("criteria_receipt_required_nonempty_array");
-      const allProven = criteria.every(el => el.pass === true && el.criterion && el.evidence);
-      if (status === "complete" && !allProven)
+      if (!complete && !["in_progress", "blocked"].includes(status))
+        throw new Error("slice_progress_status_invalid");
+      const registered = this.sliceRegistry.get(sliceId);
+      if (!registered) throw new Error("slice_completion_unknown_slice_id");
+      const submitted = JSON.parse(criteriaReceiptJson);
+      const names = submitted.map(el => el.criterion);
+      if (new Set(names).size !== names.length) throw new Error("slice_completion_duplicate_criterion");
+      if (names.length !== registered.length || !registered.every(r => names.includes(r.criterion)))
+        throw new Error("slice_completion_criteria_set_mismatch");
+      const computed = submitted.map(el => {
+        const binding = registered.find(r => r.criterion === el.criterion);
+        const acc = el.evidence_ref ? this.acceptances.get(el.evidence_ref) : null;
+        const pass = Boolean(binding.evidence_kind === "acceptance" && acc && acc.status === "accepted" &&
+          acc.workflow_key === binding.workflow_key && acc.workflow_version === binding.workflow_version &&
+          acc.mode === binding.acceptance_mode);
+        return { criterion: el.criterion, evidence_ref: el.evidence_ref ?? null, pass };
+      });
+      if (complete && !computed.every(el => el.pass))
         throw new Error("slice_completion_complete_requires_every_criterion_proven");
       this._sliceSeq += 1;
       const row = { id: `52000000-0000-0000-0000-${String(this._sliceSeq).padStart(12, "0")}`,
-        slice_id: sliceId, status, criteria_receipt: criteria, reason, idempotency_key: idempotencyKey,
+        slice_id: sliceId, status, criteria_receipt: computed, idempotency_key: idempotencyKey,
         created_at: "2026-09-24T12:00:00Z" };
       this.slices.push(row);
       return { rows: [row] };
@@ -279,12 +315,32 @@ test("advance-workflow-cutover-stage can never reach stage=retired -- that door 
   );
 });
 
-test("retire-workflow-cutover-plan is the only workflow-cutover verb declared authority-only", () => {
-  for (const name of ["open-workflow-cutover-plan", "advance-workflow-cutover-stage",
-    "record-workflow-caller", "workflow-cutover-board", "mark-slice-completion", "read-slice-completion"])
+test("every door that can change what a live workflow may enqueue is authority-only; writers keep caller and progress records", () => {
+  for (const name of ["open-workflow-cutover-plan", "advance-workflow-cutover-stage", "cancel-workflow-cutover-plan",
+    "retire-workflow-cutover-plan", "register-slice-checkable-done", "mark-slice-completion"]) {
+    assert.equal(TOOLS[name].authorityOnly, true, `${name} must be authority-only`);
+    assert.equal(TOOLS[name].write, true);
+  }
+  for (const name of ["record-workflow-caller", "mark-slice-progress", "workflow-cutover-board", "read-slice-completion"])
     assert.equal(TOOLS[name].authorityOnly, undefined, `${name} should not be authority-only`);
-  assert.equal(TOOLS["retire-workflow-cutover-plan"].authorityOnly, true);
-  assert.equal(TOOLS["retire-workflow-cutover-plan"].write, true);
+  assert.deepEqual(TOOLS["mark-slice-progress"].inputSchema.properties.status.enum, ["in_progress", "blocked"]);
+  assert.equal("status" in TOOLS["mark-slice-completion"].inputSchema.properties, false);
+});
+
+test("cancel-workflow-cutover-plan leaves the plan cancelled and frees the slot for a new open", async () => {
+  const client = new WorkflowCutoverFake();
+  const opened = await executeRegisteredTool(client, AUTHORITY_AGENT, "open-workflow-cutover-plan", {
+    idempotency_key: "60000000-0000-0000-0000-000000000030",
+    workflow_key: "cancel-fixture", workflow_version: 1, recovery_plan: "revert",
+  });
+  const cancelled = await executeRegisteredTool(client, AUTHORITY_AGENT, "cancel-workflow-cutover-plan", {
+    idempotency_key: "60000000-0000-0000-0000-000000000031", plan_id: opened.plan_id, reason: "wrong workflow",
+  });
+  assert.equal(cancelled.status, "cancelled");
+  const again = await rejected(() => executeRegisteredTool(client, AUTHORITY_AGENT, "cancel-workflow-cutover-plan", {
+    idempotency_key: "60000000-0000-0000-0000-000000000032", plan_id: opened.plan_id, reason: "twice",
+  }));
+  assert.match(again.detail, /workflow_cutover_plan_not_active/);
 });
 
 test("Q116: retire-workflow-cutover-plan refuses before recovery_ready, and refuses without a real disable-legacy-schedule receipt", async () => {
@@ -375,23 +431,44 @@ test("workflow-cutover-board reports caller counts and never claims the census r
   assert.equal(board.census.state, "unknown");
 });
 
-test("Q153: mark-slice-completion refuses status=complete unless every criterion is proven", async () => {
+test("Q153: slice completion resolves each criterion against its registered binding and refuses duplicates", async () => {
   const client = new WorkflowCutoverFake();
-  const refused = await rejected(() => executeRegisteredTool(client, AGENT, "mark-slice-completion", {
-    idempotency_key: "60000000-0000-0000-0000-000000000023",
-    slice_id: "V5-R02", status: "complete",
+  await executeRegisteredTool(client, AUTHORITY_AGENT, "register-slice-checkable-done", {
+    idempotency_key: "60000000-0000-0000-0000-000000000023", slice_id: "V5-R02",
+    criteria: [
+      { criterion: "A", evidence_kind: "acceptance", workflow_key: "wf", workflow_version: 1, acceptance_mode: "canary" },
+      { criterion: "B", evidence_kind: "acceptance", workflow_key: "wf", workflow_version: 1, acceptance_mode: "shadow" },
+    ],
+  });
+  client.seedAcceptance("70000000-0000-0000-0000-000000000011",
+    { workflow_key: "wf", workflow_version: 1, mode: "canary", status: "accepted" });
+  client.seedAcceptance("70000000-0000-0000-0000-000000000012",
+    { workflow_key: "other", workflow_version: 1, mode: "shadow", status: "accepted" });
+  const duplicate = await rejected(() => executeRegisteredTool(client, AUTHORITY_AGENT, "mark-slice-completion", {
+    idempotency_key: "60000000-0000-0000-0000-000000000024", slice_id: "V5-R02",
     criteria_receipt: [
-      { criterion: "shadow parity and single-writer checks pass", evidence: "test suite", pass: true },
-      { criterion: "retirement requires fresh exact PASS and a one-use capability", evidence: "not yet exercised against a real workflow", pass: false },
+      { criterion: "A", evidence_ref: "70000000-0000-0000-0000-000000000011" },
+      { criterion: "A", evidence_ref: "70000000-0000-0000-0000-000000000011" },
     ],
   }));
-  assert.match(refused.detail, /slice_completion_complete_requires_every_criterion_proven/);
-  const inProgress = await executeRegisteredTool(client, AGENT, "mark-slice-completion", {
-    idempotency_key: "60000000-0000-0000-0000-000000000024",
-    slice_id: "V5-R02", status: "in_progress",
-    criteria_receipt: [{ criterion: "readiness machinery built", evidence: "PR", pass: true }],
+  assert.match(duplicate.detail, /slice_completion_duplicate_criterion/);
+  const wrongWorkflow = await rejected(() => executeRegisteredTool(client, AUTHORITY_AGENT, "mark-slice-completion", {
+    idempotency_key: "60000000-0000-0000-0000-000000000025", slice_id: "V5-R02",
+    criteria_receipt: [
+      { criterion: "A", evidence_ref: "70000000-0000-0000-0000-000000000011" },
+      { criterion: "B", evidence_ref: "70000000-0000-0000-0000-000000000012" },
+    ],
+  }));
+  assert.match(wrongWorkflow.detail, /slice_completion_complete_requires_every_criterion_proven/);
+  const progress = await executeRegisteredTool(client, AGENT, "mark-slice-progress", {
+    idempotency_key: "60000000-0000-0000-0000-000000000026", slice_id: "V5-R02", status: "in_progress",
+    criteria_receipt: [
+      { criterion: "A", evidence_ref: "70000000-0000-0000-0000-000000000011" },
+      { criterion: "B", evidence_ref: null },
+    ],
   });
-  assert.equal(inProgress.status, "in_progress");
+  assert.equal(progress.status, "in_progress");
+  assert.deepEqual(progress.criteria_receipt.map(el => el.pass), [true, false]);
   const read = await executeRegisteredTool(client, AGENT, "read-slice-completion", { slice_id: "V5-R02" });
   assert.equal(read.marked, true);
   assert.equal(read.status, "in_progress");

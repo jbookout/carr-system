@@ -6,12 +6,12 @@ import {
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
 // v71 is the runtime selector after DoctorCRE V5-R02 (migration 0593,
 // workflow cutover, caller migration and retirement readiness). Its sealed
-// catalog admits seven new verbs -- open-workflow-cutover-plan,
-// advance-workflow-cutover-stage, retire-workflow-cutover-plan
-// (authority-only), record-workflow-caller, workflow-cutover-board,
-// mark-slice-completion, read-slice-completion -- and preserves earlier
-// versions as history; v66-v68 registered no verb, so the selector stayed
-// on v65 until v69.
+// catalog admits ten new verbs -- open-, advance-, cancel- and
+// retire-workflow-cutover-plan, register-slice-checkable-done and
+// mark-slice-completion (all authorityOnly), record-workflow-caller,
+// mark-slice-progress, workflow-cutover-board, read-slice-completion -- and
+// preserves earlier versions as history; v66-v68 registered no verb, so the
+// selector stayed on v65 until v69.
 //
 // Superseded note (v69): v69 was the runtime selector after the server-side
 // Jev call log (migration 0587, ops.record_jev_call_receipt /

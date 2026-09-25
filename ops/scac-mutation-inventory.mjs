@@ -323,20 +323,18 @@ export const REGISTRY_V69_VERSION = "scac-mutation-registry.v69";
 export const REGISTRY_V70_VERSION = "scac-mutation-registry.v70";
 // v71 admits DoctorCRE V5-R02 (workflow cutover, caller migration and
 // retirement readiness, migration 0593, sealed by 0594), chained from v70
-// (migration 0589): seven new mcp-tool ingresses (open-workflow-cutover-plan,
-// advance-workflow-cutover-stage, retire-workflow-cutover-plan
-// [authority_only], record-workflow-caller, workflow-cutover-board,
-// mark-slice-completion, read-slice-completion) in
-// mcp-server/src/workflow-cutover.v5.js, plus the SECURITY DEFINER EXECUTE
-// grants of 0593's write doors, which move the secdef_execute catalog
-// category. The two read functions (workflow_cutover_board,
-// read_slice_completion) are plain SQL functions over tables already granted
-// SELECT to carr_reader, so they add no SECURITY DEFINER row. v71 also
-// re-digests tools/migrate.py, whose ATOMIC_MIGRATION_GROUPS and
-// STRICT_ATOMIC_MIGRATION_GROUPS gain the (0593, 0594) pair. It carries
-// forward every row v69/v70 sealed (ask-jev, read-jev-call-receipts,
-// read-jev-call-receipt-integrity). The runtime selector
-// (mutation-registry.js) moves to v71.
+// (migration 0589): ten new mcp-tool ingresses in
+// mcp-server/src/workflow-cutover.v5.js -- six authorityOnly writes
+// (open-, advance-, cancel- and retire-workflow-cutover-plan,
+// register-slice-checkable-done, mark-slice-completion), two writer writes
+// (record-workflow-caller, mark-slice-progress) and two reads
+// (workflow-cutover-board, read-slice-completion) -- plus the SECURITY
+// DEFINER EXECUTE grants of 0593's doors, which move the secdef_execute
+// catalog category. v71 also re-digests tools/migrate.py, whose
+// ATOMIC_MIGRATION_GROUPS and STRICT_ATOMIC_MIGRATION_GROUPS gain the
+// (0593, 0594) pair. It carries forward every row v69/v70 sealed (ask-jev,
+// read-jev-call-receipts, read-jev-call-receipt-integrity). The runtime
+// selector (mutation-registry.js) moves to v71.
 export const REGISTRY_V71_VERSION = "scac-mutation-registry.v71";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
@@ -1453,17 +1451,17 @@ export const POST_0588_FORWARD_V70_DB_CATALOG_BASELINE = Object.freeze({
 // Measured by the disposable PostgreSQL 17 migration lane via the
 // drift-exception readback technique (apply, read the refusal's observed
 // count/digest, bind, reapply) over migrations 0001-0594 on top of the merged
-// v70 predecessor (0589). 0593 installs the V5-R02 write doors
-// (open/advance/retire_workflow_cutover_plan, record_workflow_caller,
-// mark_slice_completion, register_slice_checkable_done) as SECURITY DEFINER
-// functions with their EXECUTE grants; 0594 adds
-// ops.scac_mutation_registration_v71 with its runtime EXECUTE grants. No
-// relation_dml or column_dml grant is added (0593 grants only SELECT, to
+// v70 predecessor (0589). 0593 installs the V5-R02 SECURITY DEFINER doors
+// with their EXECUTE grants -- open/advance/cancel/retire_workflow_cutover_plan,
+// register_slice_checkable_done and mark_slice_completion to carr_authority;
+// record_workflow_caller and mark_slice_progress to carr_writer -- and 0594
+// adds ops.scac_mutation_registration_v71 with its runtime EXECUTE grants.
+// No relation_dml or column_dml grant is added (0593 grants only SELECT, to
 // carr_reader, on its new tables).
 export const POST_0593_FORWARD_V71_DB_CATALOG_BASELINE = Object.freeze({
   ...POST_0588_FORWARD_V70_DB_CATALOG_BASELINE,
   projection_version: "scac-db-catalog-projection.v71",
-  secdef_execute: { count: 908, digest: "sha256:dbfa86acb790dc773e0653dabe5b0da7c69e5819f1b1ff8932481040dfa9c775" },
+  secdef_execute: { count: 910, digest: "sha256:837777145d13d5cf1545586fc5e0b0abbb471cd45f5d41fa4392da87831e46cc" },
 });
 
 export const JOB_DEFINITION_BASELINE = Object.freeze({

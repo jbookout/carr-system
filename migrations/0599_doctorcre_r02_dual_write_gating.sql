@@ -21,9 +21,12 @@
 --      (0593, PR #1245 item 3) already uses -- single_write_authority is
 --      exactly the point where that proof starts mattering, not only at
 --      final retirement.
---   2. At any stage while a plan is active, canary and live enqueue both
---      require a canary ops.workflow_acceptance row accepted AFTER the plan
---      most recently transitioned into its current stage. Without this, one
+--   2. At the same stages, live-mode enqueue also requires a canary
+--      ops.workflow_acceptance row accepted AFTER the plan most recently
+--      transitioned into its current stage. Canary mode is never gated
+--      here, and neither is any stage before single_write_authority (PR
+--      #1245 re-review P1-a: gating them let merely opening a plan halt a
+--      live workflow with no way to produce fresh evidence). Without this, one
 --      canary acceptance recorded back at shadow_compare would silently keep
 --      justifying live traffic through single_write_authority, cutover and
 --      monitor -- each stage needs its OWN fresh acceptance evidence, not a
@@ -113,27 +116,29 @@ begin
 
   -- P1 fix (PR #1245 review, item 5): tie enqueue to the V5-R02 cutover
   -- plan's own stage when one is active for this exact workflow identity.
+  -- PR #1245 re-review P1-a: both gates apply only to LIVE mode and only
+  -- once the plan has reached single_write_authority. Before that stage an
+  -- open plan changes nothing about what a live workflow may enqueue, and
+  -- canary jobs are never gated here -- canary is how the fresh acceptance
+  -- evidence below gets produced, so gating it would leave the workflow no
+  -- way to recover.
   select * into v_plan from ops.workflow_cutover_plan
    where workflow_key=p_definition_key and workflow_version=p_definition_version
      and status='active';
-  if found and p_mode in ('canary','live') then
-    v_stage_idx := array_position(v_stages, v_plan.stage);
-    v_swa_idx := array_position(v_stages, 'single_write_authority');
-
-    if p_mode = 'live' and v_stage_idx is not null and v_swa_idx is not null
-       and v_stage_idx >= v_swa_idx then
-      select count(*) into v_missing_surface_count
-        from ops.legacy_schedule_surface_registry s
-       where s.workflow_key = p_definition_key and s.workflow_version = p_definition_version
-         and not exists (
-           select 1 from ops.legacy_schedule_disable_receipt r
-            where r.workflow_key = s.workflow_key and r.workflow_version = s.workflow_version
-              and r.surface_id = s.surface_id and r.locator = s.locator
-         );
-      if v_missing_surface_count > 0 then
-        raise exception 'workflow % cannot enqueue live mode at cutover stage %: % legacy surface(s) still undisabled',
-          p_definition_key, v_plan.stage, v_missing_surface_count;
-      end if;
+  v_stage_idx := array_position(v_stages, v_plan.stage);
+  v_swa_idx := array_position(v_stages, 'single_write_authority');
+  if v_plan.id is not null and p_mode = 'live' and v_stage_idx is not null and v_stage_idx >= v_swa_idx then
+    select count(*) into v_missing_surface_count
+      from ops.legacy_schedule_surface_registry s
+     where s.workflow_key = p_definition_key and s.workflow_version = p_definition_version
+       and not exists (
+         select 1 from ops.legacy_schedule_disable_receipt r
+          where r.workflow_key = s.workflow_key and r.workflow_version = s.workflow_version
+            and r.surface_id = s.surface_id and r.locator = s.locator
+       );
+    if v_missing_surface_count > 0 then
+      raise exception 'workflow % cannot enqueue live mode at cutover stage %: % legacy surface(s) still undisabled',
+        p_definition_key, v_plan.stage, v_missing_surface_count;
     end if;
 
     -- Each stage needs its OWN canary acceptance row, created after the plan
@@ -148,8 +153,8 @@ begin
        where workflow_key = p_definition_key and workflow_version = p_definition_version
          and mode = 'canary' and status = 'accepted' and created_at >= v_stage_entered_at
     ) then
-      raise exception 'workflow % cannot enqueue % mode: no canary acceptance evidence recorded since entering cutover stage % at %',
-        p_definition_key, p_mode, v_plan.stage, v_stage_entered_at;
+      raise exception 'workflow % cannot enqueue live mode: no canary acceptance evidence recorded since entering cutover stage % at %',
+        p_definition_key, v_plan.stage, v_stage_entered_at;
     end if;
   end if;
 
@@ -217,4 +222,4 @@ begin
 end $$;
 
 comment on function ops.enqueue_job(text, integer, timestamptz, jsonb, text, text) is
-  'The only admission path into ops.job. 0334''s enabled-definition gate and shadow/canary/live evidence ladder, 0498''s duplicate_group exclusion, and (0599, PR #1245 item 5) the V5-R02 workflow-cutover gate: when an active ops.workflow_cutover_plan exists for this exact workflow identity, live mode at single_write_authority or later requires a disable receipt for every registered legacy surface, and canary/live both require a canary acceptance row recorded since the plan entered its current stage.';
+  'The only admission path into ops.job. 0334''s enabled-definition gate and shadow/canary/live evidence ladder, 0498''s duplicate_group exclusion, and (0599, PR #1245 item 5) the V5-R02 workflow-cutover gate: when an active ops.workflow_cutover_plan exists for this exact workflow identity, live mode at single_write_authority or later requires a disable receipt for every registered legacy surface and a canary acceptance row recorded since the plan entered its current stage. Earlier stages and canary mode are never gated by a plan.';
