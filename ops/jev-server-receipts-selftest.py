@@ -174,7 +174,12 @@ def run_agent(tr, session, server, prompt, tool_use_id):
     try:
         proc = subprocess.run(
             [sys.executable, ETG], text=True, capture_output=True, timeout=60,
-            env={**os.environ, "CARR_JEV_SERVER_RECEIPTS_FIXTURE": fixture},
+            # The gate's own tier judgment (jev_pick) would otherwise be a live,
+            # paid Jev call that writes a server receipt under the caller's
+            # session. "none" is the documented test seam the other
+            # executor-tier selftests use: no network call, no receipt.
+            env={**os.environ, "CARR_JEV_SERVER_RECEIPTS_FIXTURE": fixture,
+                 "CARR_EXECUTOR_TIER_JEV_STUB": "none"},
             input=json.dumps({"tool_name": "Agent", "session_id": session,
                               "transcript_path": path, "tool_use_id": tool_use_id,
                               "tool_input": {"description": "do the work", "model": "sonnet",
