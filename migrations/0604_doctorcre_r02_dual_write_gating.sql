@@ -1,7 +1,7 @@
--- 0599_doctorcre_r02_dual_write_gating.sql
+-- 0604_doctorcre_r02_dual_write_gating.sql
 --
 -- DoctorCRE V5-R02 / PR #1245 review, item 5: ops.enqueue_job did not know
--- the V5-R02 workflow-cutover state machine (0593) existed at all. A
+-- the V5-R02 workflow-cutover state machine (0602) existed at all. A
 -- workflow mid-cutover -- already at single_write_authority or beyond, where
 -- the NEW system is supposed to be the only writer -- could still have its
 -- legacy schedule surfaces enqueue live jobs with no relationship to the
@@ -18,7 +18,7 @@
 --      ops.legacy_schedule_surface_registry row of the workflow, or no
 --      legacy surface registered at all. This is the same
 --      "every legacy surface" anti-join ops.retire_workflow_cutover_plan
---      (0593, PR #1245 item 3) already uses -- single_write_authority is
+--      (0602, PR #1245 item 3) already uses -- single_write_authority is
 --      exactly the point where that proof starts mattering, not only at
 --      final retirement.
 --   2. At the same stages, live-mode enqueue also requires a canary
@@ -222,4 +222,4 @@ begin
 end $$;
 
 comment on function ops.enqueue_job(text, integer, timestamptz, jsonb, text, text) is
-  'The only admission path into ops.job. 0334''s enabled-definition gate and shadow/canary/live evidence ladder, 0498''s duplicate_group exclusion, and (0599, PR #1245 item 5) the V5-R02 workflow-cutover gate: when an active ops.workflow_cutover_plan exists for this exact workflow identity, live mode at single_write_authority or later requires a disable receipt for every registered legacy surface and a canary acceptance row recorded since the plan entered its current stage. Earlier stages and canary mode are never gated by a plan.';
+  'The only admission path into ops.job. 0334''s enabled-definition gate and shadow/canary/live evidence ladder, 0498''s duplicate_group exclusion, and (0604, PR #1245 item 5) the V5-R02 workflow-cutover gate: when an active ops.workflow_cutover_plan exists for this exact workflow identity, live mode at single_write_authority or later requires a disable receipt for every registered legacy surface and a canary acceptance row recorded since the plan entered its current stage. Earlier stages and canary mode are never gated by a plan.';

@@ -321,21 +321,32 @@ export const REGISTRY_V69_VERSION = "scac-mutation-registry.v69";
 // ingress, verb, or grant; the runtime selector stays on v69 -- only
 // tools/migrate.py's frozen source-inventory row moves.
 export const REGISTRY_V70_VERSION = "scac-mutation-registry.v70";
-// v71 admits DoctorCRE V5-R02 (workflow cutover, caller migration and
-// retirement readiness, migration 0593, sealed by 0594), chained from v70
-// (migration 0589): ten new mcp-tool ingresses in
+// v71 admits exactly one new workflow_entrypoint row:
+// com.carr.nightly-exports-daytime-retry (launchd, PR #1241 review round 4).
+// No installer script (bin/install-nightly-exports-retry.sh was never kept --
+// that filename shape is a bound external-admin ingress and would owe its
+// own SCAC successor for a one-file addition), so physical_authority_refs
+// carries a single
+// ops.service_environment:nightly-exports-daytime-retry:production ref. No
+// new ingress, verb, or grant beyond the launchd row itself; the runtime
+// selector (mutation-registry.js) stays on v69 -- launchd-workflow is an
+// UNSEALED_INGRESS_KINDS member so it never becomes the runtime selector,
+// same as v67/v68 before it.
+export const REGISTRY_V71_VERSION = "scac-mutation-registry.v71";
+// v72 admits DoctorCRE V5-R02 (workflow cutover, caller migration and
+// retirement readiness, migration 0602, sealed by 0603, live-enqueue gating
+// 0604), chained from v71 (migration 0600): ten new mcp-tool ingresses in
 // mcp-server/src/workflow-cutover.v5.js -- six authorityOnly writes
 // (open-, advance-, cancel- and retire-workflow-cutover-plan,
 // register-slice-checkable-done, mark-slice-completion), two writer writes
 // (record-workflow-caller, mark-slice-progress) and two reads
 // (workflow-cutover-board, read-slice-completion) -- plus the SECURITY
-// DEFINER EXECUTE grants of 0593's doors, which move the secdef_execute
-// catalog category. v71 also re-digests tools/migrate.py, whose
+// DEFINER EXECUTE grants of 0602's doors, which move the secdef_execute
+// catalog category. v72 also re-digests tools/migrate.py, whose
 // ATOMIC_MIGRATION_GROUPS and STRICT_ATOMIC_MIGRATION_GROUPS gain the
-// (0593, 0594) pair. It carries forward every row v69/v70 sealed (ask-jev,
-// read-jev-call-receipts, read-jev-call-receipt-integrity). The runtime
-// selector (mutation-registry.js) moves to v71.
-export const REGISTRY_V71_VERSION = "scac-mutation-registry.v71";
+// (0602, 0603) pair. It carries forward every row v69-v71 sealed. The runtime
+// selector (mutation-registry.js) moves to v72.
+export const REGISTRY_V72_VERSION = "scac-mutation-registry.v72";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
   "./config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url);
@@ -1448,20 +1459,31 @@ export const POST_0588_FORWARD_V70_DB_CATALOG_BASELINE = Object.freeze({
   projection_version: "scac-db-catalog-projection.v70",
   secdef_execute: { count: 898, digest: "sha256:b4ffd805f7e626fcff1e683972f32a1ee134f594995c8c182d33f38912cbc4bc" },
 });
-// Measured by the disposable PostgreSQL 17 migration lane via the
-// drift-exception readback technique (apply, read the refusal's observed
-// count/digest, bind, reapply) over migrations 0001-0594 on top of the merged
-// v70 predecessor (0589). 0593 installs the V5-R02 SECURITY DEFINER doors
-// with their EXECUTE grants -- open/advance/cancel/retire_workflow_cutover_plan,
-// register_slice_checkable_done and mark_slice_completion to carr_authority;
-// record_workflow_caller and mark_slice_progress to carr_writer -- and 0594
-// adds ops.scac_mutation_registration_v71 with its runtime EXECUTE grants.
-// No relation_dml or column_dml grant is added (0593 grants only SELECT, to
-// carr_reader, on its new tables).
-export const POST_0593_FORWARD_V71_DB_CATALOG_BASELINE = Object.freeze({
+// PLACEHOLDER -- measured by the disposable PostgreSQL 17 migration lane via
+// the drift-exception readback technique (apply, read the refusal's observed
+// count/digest, bind, reapply). Installs only the v71 registration function
+// with its runtime EXECUTE grants; no other new relation, column, or
+// security-definer function is added by the nightly-exports-daytime-retry
+// launchd row.
+export const POST_0600_FORWARD_V71_DB_CATALOG_BASELINE = Object.freeze({
   ...POST_0588_FORWARD_V70_DB_CATALOG_BASELINE,
   projection_version: "scac-db-catalog-projection.v71",
-  secdef_execute: { count: 910, digest: "sha256:837777145d13d5cf1545586fc5e0b0abbb471cd45f5d41fa4392da87831e46cc" },
+  secdef_execute: { count: 902, digest: "sha256:39f3f5d74ca560b32d60a9d9f4136935b525761665abc77c506155fbcde5cfb1" },
+});
+// Measured by the disposable PostgreSQL 17 migration lane via the
+// drift-exception readback technique (apply, read the refusal's observed
+// count/digest, bind, reapply) over migrations 0001-0604 on top of main's v71
+// predecessor (0600). 0602 installs the V5-R02 SECURITY DEFINER doors with
+// their EXECUTE grants -- open/advance/cancel/retire_workflow_cutover_plan,
+// register_slice_checkable_done and mark_slice_completion to carr_authority;
+// record_workflow_caller and mark_slice_progress to carr_writer -- and 0603
+// adds ops.scac_mutation_registration_v72 with its runtime EXECUTE grants.
+// No relation_dml or column_dml grant is added (0602 grants only SELECT, to
+// carr_reader, on its new tables).
+export const POST_0603_FORWARD_V72_DB_CATALOG_BASELINE = Object.freeze({
+  ...POST_0600_FORWARD_V71_DB_CATALOG_BASELINE,
+  projection_version: "scac-db-catalog-projection.v72",
+  secdef_execute: { count: 914, digest: "sha256:c1a8793486021059830a9370d72f5835446aa4bad8ad06d8811711cd8691a89e" },
 });
 
 export const JOB_DEFINITION_BASELINE = Object.freeze({
@@ -2181,6 +2203,7 @@ const SOURCE_INVENTORY_VERSION_KEYS = Object.freeze({
   [REGISTRY_V69_VERSION]: "v69",
   [REGISTRY_V70_VERSION]: "v70",
   [REGISTRY_V71_VERSION]: "v71",
+  [REGISTRY_V72_VERSION]: "v72",
 });
 
 export function sourceInventoryFixtureDigest(rows) {
@@ -2273,7 +2296,7 @@ export function boundInventoryRows(rows) {
 }
 
 export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
-  version = REGISTRY_V71_VERSION) {
+  version = REGISTRY_V72_VERSION) {
   const current = fullInventory(tools);
   let frozen = frozenInventory(version);
   const review = SOURCE_INVENTORY_FIXTURES.current_source_review;
@@ -2361,7 +2384,7 @@ export function registryDigestFor(version, rows = fullInventory(), dbCatalogBase
     REGISTRY_V44_VERSION, REGISTRY_V45_VERSION, REGISTRY_V46_VERSION,
     REGISTRY_V47_VERSION, REGISTRY_V48_VERSION, REGISTRY_V49_VERSION,
     REGISTRY_V50_VERSION, REGISTRY_V51_VERSION, REGISTRY_V52_VERSION, REGISTRY_V53_VERSION, REGISTRY_V54_VERSION,
-    REGISTRY_V55_VERSION, REGISTRY_V56_VERSION, REGISTRY_V57_VERSION, REGISTRY_V58_VERSION, REGISTRY_V59_VERSION, REGISTRY_V60_VERSION, REGISTRY_V61_VERSION, REGISTRY_V62_VERSION, REGISTRY_V63_VERSION, REGISTRY_V64_VERSION, REGISTRY_V65_VERSION, REGISTRY_V66_VERSION, REGISTRY_V67_VERSION, REGISTRY_V68_VERSION, REGISTRY_V69_VERSION, REGISTRY_V70_VERSION, REGISTRY_V71_VERSION].includes(version))
+    REGISTRY_V55_VERSION, REGISTRY_V56_VERSION, REGISTRY_V57_VERSION, REGISTRY_V58_VERSION, REGISTRY_V59_VERSION, REGISTRY_V60_VERSION, REGISTRY_V61_VERSION, REGISTRY_V62_VERSION, REGISTRY_V63_VERSION, REGISTRY_V64_VERSION, REGISTRY_V65_VERSION, REGISTRY_V66_VERSION, REGISTRY_V67_VERSION, REGISTRY_V68_VERSION, REGISTRY_V69_VERSION, REGISTRY_V70_VERSION, REGISTRY_V71_VERSION, REGISTRY_V72_VERSION].includes(version))
     throw new Error(`unsupported SCAC mutation registry version: ${version}`);
   return sha256({ schema_version: version, rows, db_catalog_baseline: dbCatalogBaseline });
 }
@@ -16034,7 +16057,7 @@ export function renderJevCallReceiptMigratePyResealRegistrySql(rows,
 }
 
 
-export function renderV5R02RegistrySql(rows,
+export function renderNightlyExportsDaytimeRetryRegistrySql(rows,
   predecessorSql = null) {
   const predecessorPath = "migrations/0589_jev_call_receipt_migrate_py_reseal.sql";
   const predecessor = predecessorSql ?? readFileSync(resolve(REPO_ROOT, predecessorPath), "utf8");
@@ -16042,7 +16065,7 @@ export function renderV5R02RegistrySql(rows,
   if (sha256(predecessor) !== predecessorDigest)
     throw new Error("v71 predecessor migration pin drifted");
   const oldCatalogBaseline = POST_0588_FORWARD_V70_DB_CATALOG_BASELINE;
-  const newCatalogBaseline = POST_0593_FORWARD_V71_DB_CATALOG_BASELINE;
+  const newCatalogBaseline = POST_0600_FORWARD_V71_DB_CATALOG_BASELINE;
   const oldSeal = registrySeal(REGISTRY_V70_VERSION,
     frozenInventory(REGISTRY_V70_VERSION), oldCatalogBaseline);
   const newSeal = registrySeal(REGISTRY_V71_VERSION, rows, newCatalogBaseline);
@@ -16056,14 +16079,14 @@ export function renderV5R02RegistrySql(rows,
   const start = predecessor.indexOf("\ndrop trigger scac_mutation_registry_version_sealed");
   if (start < 0) throw new Error("v71 predecessor DDL boundary missing");
   let sql = predecessor.slice(start + 1)
-    .replaceAll("$jev_call_receipt_migrate_py_reseal_v70", "$v5_r02_v71")
+    .replaceAll("$jev_call_receipt_migrate_py_reseal_v70", "$nightly_exports_daytime_retry_v71")
     .replaceAll("scac-mutation-registry.v70", "scac-mutation-registry.v71")
     .replaceAll("scac-db-catalog-projection.v70", "scac-db-catalog-projection.v71")
     .replaceAll("_v70", "_v71")
     .replaceAll("v69_current", "v70_current")
     .replaceAll("v69_live_at_seal", "v70_live_at_seal")
     .replaceAll("snapshot_v69", "snapshot_v70")
-    .replaceAll("Jev call receipt migrate py reseal", "V5 R02")
+    .replaceAll("Jev call receipt migrate py reseal", "Nightly exports daytime retry")
     .replaceAll(oldSeal.digest, newSeal.digest)
     .replaceAll(oldEntrySet, newEntrySet)
     .replaceAll(oldCatalog.replaceAll("v70", "v71"), newCatalog)
@@ -16075,8 +16098,8 @@ export function renderV5R02RegistrySql(rows,
     .replaceAll(`<>${oldSeal.sourceEntryCount}`, `<>${newSeal.sourceEntryCount}`)
     .replaceAll(`,${oldSeal.entryCount},${oldSeal.sourceEntryCount},`,
       `,${newSeal.entryCount},${newSeal.sourceEntryCount},`)
-    .replaceAll("V5 R02 v70 seed or entry-set seal drifted",
-      "V5 R02 v71 seed or entry-set seal drifted");
+    .replaceAll("Nightly exports daytime retry v70 seed or entry-set seal drifted",
+      "Nightly exports daytime retry v71 seed or entry-set seal drifted");
   const versionListMarker =
     "'scac-mutation-registry.v49','scac-mutation-registry.v50','scac-mutation-registry.v51','scac-mutation-registry.v52','scac-mutation-registry.v53','scac-mutation-registry.v54','scac-mutation-registry.v55','scac-mutation-registry.v56','scac-mutation-registry.v57','scac-mutation-registry.v58','scac-mutation-registry.v59','scac-mutation-registry.v60','scac-mutation-registry.v61','scac-mutation-registry.v62','scac-mutation-registry.v63','scac-mutation-registry.v64','scac-mutation-registry.v65','scac-mutation-registry.v66','scac-mutation-registry.v67','scac-mutation-registry.v68','scac-mutation-registry.v69','scac-mutation-registry.v71'";
   if (sql.split(versionListMarker).length - 1 !== 2)
@@ -16097,23 +16120,107 @@ export function renderV5R02RegistrySql(rows,
     ["     or not ops.scac_mutation_registry_v71_seal_available()",
       "     or not ops.scac_mutation_registry_v70_seal_available()\n     or not ops.scac_mutation_registry_v71_seal_available()", "final seal history"],
   ]) sql = replaceExactlyOnce(sql, before, after, `v71 ${label}`);
-  const seedStart = sql.indexOf("$v5_r02_v71_source$[");
-  const seedEnd = sql.indexOf("]$v5_r02_v71_source$", seedStart);
+  const seedStart = sql.indexOf("$nightly_exports_daytime_retry_v71_source$[");
+  const seedEnd = sql.indexOf("]$nightly_exports_daytime_retry_v71_source$", seedStart);
   if (seedStart < 0 || seedEnd < 0) throw new Error("v71 source seed boundary missing");
   const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
-  sql = `${sql.slice(0, seedStart)}$v5_r02_v71_source$${seed}$v5_r02_v71_source$${sql.slice(seedEnd + "]$v5_r02_v71_source$".length)}`;
-  const preflight = `do $v5_r02_v71_preflight$\ndeclare v ops.scac_mutation_registry_version%rowtype; registration jsonb;\nbegin\n` +
+  sql = `${sql.slice(0, seedStart)}$nightly_exports_daytime_retry_v71_source$${seed}$nightly_exports_daytime_retry_v71_source$${sql.slice(seedEnd + "]$nightly_exports_daytime_retry_v71_source$".length)}`;
+  const preflight = `do $nightly_exports_daytime_retry_v71_preflight$\ndeclare v ops.scac_mutation_registry_version%rowtype; registration jsonb;\nbegin\n` +
     `  if not exists(select 1 from public.schema_migrations where filename='${predecessorPath.split("/").at(-1)}' and sha256='${predecessorDigest}') then\n` +
-    `    raise exception 'V5 R02 v71 requires exact applied 0589'; end if;\n` +
+    `    raise exception 'Nightly exports daytime retry v71 requires exact applied 0589'; end if;\n` +
     `  select * into v from ops.scac_mutation_registry_version where registry_version='${REGISTRY_V70_VERSION}';\n` +
     `  if v.registry_digest is distinct from '${oldSeal.digest}' or v.entry_count<>${oldSeal.entryCount}\n` +
     `    or v.source_entry_count<>${oldSeal.sourceEntryCount} or v.entry_set_digest is distinct from '${oldEntrySet}'\n` +
     `    or v.catalog_projection is distinct from '${oldCatalog}'::jsonb then\n` +
-    `    raise exception 'V5 R02 v70 predecessor seal drifted'; end if;\n` +
+    `    raise exception 'Nightly exports daytime retry v70 predecessor seal drifted'; end if;\n` +
     `  registration:=ops.scac_mutation_registration_v70('${oldSeal.digest}','mcp-tool:standing-context');\n` +
     `  if coalesce((registration->>'registered')::boolean,false) is not true then\n` +
-    `    raise exception 'V5 R02 v70 predecessor entry drifted'; end if;\n` +
-    `end $v5_r02_v71_preflight$;\n\n`;
+    `    raise exception 'Nightly exports daytime retry v70 predecessor entry drifted'; end if;\n` +
+    `end $nightly_exports_daytime_retry_v71_preflight$;\n\n`;
+  return `-- GENERATED by ops/scac-mutation-inventory.mjs. Review; never hand-edit.\n` + preflight + sql;
+}
+
+
+export function renderV5R02RegistrySql(rows,
+  predecessorSql = null) {
+  const predecessorPath = "migrations/0600_nightly_exports_daytime_retry_scac_successor.sql";
+  const predecessor = predecessorSql ?? readFileSync(resolve(REPO_ROOT, predecessorPath), "utf8");
+  const predecessorDigest = "40a6fb14d14ef60118c18f1aa3ef18d162fc1e03c10215d87c3cc48ceffa0e32";
+  if (sha256(predecessor) !== predecessorDigest)
+    throw new Error("v72 predecessor migration pin drifted");
+  const oldCatalogBaseline = POST_0600_FORWARD_V71_DB_CATALOG_BASELINE;
+  const newCatalogBaseline = POST_0603_FORWARD_V72_DB_CATALOG_BASELINE;
+  const oldSeal = registrySeal(REGISTRY_V71_VERSION,
+    frozenInventory(REGISTRY_V71_VERSION), oldCatalogBaseline);
+  const newSeal = registrySeal(REGISTRY_V72_VERSION, rows, newCatalogBaseline);
+  const entrySets = JSON.parse(readFileSync(FULL_ENTRY_SET_SEALS_PATH, "utf8"));
+  const oldEntrySet = entrySets[REGISTRY_V71_VERSION];
+  const newEntrySet = entrySets[REGISTRY_V72_VERSION];
+  if (![oldEntrySet, newEntrySet].every(value => /^sha256:[0-9a-f]{64}$/.test(value ?? "")))
+    throw new Error("v72 entry-set fixture malformed");
+  const oldCatalog = JSON.stringify(oldCatalogBaseline);
+  const newCatalog = JSON.stringify(newCatalogBaseline);
+  const start = predecessor.indexOf("\ndrop trigger scac_mutation_registry_version_sealed");
+  if (start < 0) throw new Error("v72 predecessor DDL boundary missing");
+  let sql = predecessor.slice(start + 1)
+    .replaceAll("$nightly_exports_daytime_retry_v71", "$v5_r02_v72")
+    .replaceAll("scac-mutation-registry.v71", "scac-mutation-registry.v72")
+    .replaceAll("scac-db-catalog-projection.v71", "scac-db-catalog-projection.v72")
+    .replaceAll("_v71", "_v72")
+    .replaceAll("v70_current", "v71_current")
+    .replaceAll("v70_live_at_seal", "v71_live_at_seal")
+    .replaceAll("snapshot_v70", "snapshot_v71")
+    .replaceAll("Nightly exports daytime retry", "V5 R02")
+    .replaceAll(oldSeal.digest, newSeal.digest)
+    .replaceAll(oldEntrySet, newEntrySet)
+    .replaceAll(oldCatalog.replaceAll("v71", "v72"), newCatalog)
+    .replaceAll(`observed_count<>${oldCatalogBaseline.secdef_execute.count}`,
+      `observed_count<>${newCatalogBaseline.secdef_execute.count}`)
+    .replaceAll(`observed_digest<>'${oldCatalogBaseline.secdef_execute.digest}'`,
+      `observed_digest<>'${newCatalogBaseline.secdef_execute.digest}'`)
+    .replaceAll(`<>${oldSeal.entryCount}`, `<>${newSeal.entryCount}`)
+    .replaceAll(`<>${oldSeal.sourceEntryCount}`, `<>${newSeal.sourceEntryCount}`)
+    .replaceAll(`,${oldSeal.entryCount},${oldSeal.sourceEntryCount},`,
+      `,${newSeal.entryCount},${newSeal.sourceEntryCount},`)
+    .replaceAll("V5 R02 v71 seed or entry-set seal drifted",
+      "V5 R02 v72 seed or entry-set seal drifted");
+  const versionListMarker =
+    "'scac-mutation-registry.v49','scac-mutation-registry.v50','scac-mutation-registry.v51','scac-mutation-registry.v52','scac-mutation-registry.v53','scac-mutation-registry.v54','scac-mutation-registry.v55','scac-mutation-registry.v56','scac-mutation-registry.v57','scac-mutation-registry.v58','scac-mutation-registry.v59','scac-mutation-registry.v60','scac-mutation-registry.v61','scac-mutation-registry.v62','scac-mutation-registry.v63','scac-mutation-registry.v64','scac-mutation-registry.v65','scac-mutation-registry.v66','scac-mutation-registry.v67','scac-mutation-registry.v68','scac-mutation-registry.v69','scac-mutation-registry.v70','scac-mutation-registry.v72'";
+  if (sql.split(versionListMarker).length - 1 !== 2)
+    throw new Error("v72 version lists changed in predecessor");
+  sql = sql.replaceAll(versionListMarker,
+    "'scac-mutation-registry.v49','scac-mutation-registry.v50','scac-mutation-registry.v51','scac-mutation-registry.v52','scac-mutation-registry.v53','scac-mutation-registry.v54','scac-mutation-registry.v55','scac-mutation-registry.v56','scac-mutation-registry.v57','scac-mutation-registry.v58','scac-mutation-registry.v59','scac-mutation-registry.v60','scac-mutation-registry.v61','scac-mutation-registry.v62','scac-mutation-registry.v63','scac-mutation-registry.v64','scac-mutation-registry.v65','scac-mutation-registry.v66','scac-mutation-registry.v67','scac-mutation-registry.v68','scac-mutation-registry.v69','scac-mutation-registry.v70','scac-mutation-registry.v71','scac-mutation-registry.v72'");
+  for (const [before, after, label] of [
+    [`  (registry_version='scac-mutation-registry.v72' and registry_digest='${newSeal.digest}'));`,
+      `  (registry_version='scac-mutation-registry.v71' and registry_digest='${oldSeal.digest}') or\n  (registry_version='scac-mutation-registry.v72' and registry_digest='${newSeal.digest}'));`, "epoch history"],
+    [`    when 'scac-mutation-registry.v72' then '${newSeal.digest}' end;`,
+      `    when 'scac-mutation-registry.v71' then '${oldSeal.digest}'\n    when 'scac-mutation-registry.v72' then '${newSeal.digest}' end;`, "registry history"],
+    [`    when 'scac-mutation-registry.v72' then '${newCatalog}'::jsonb end;`,
+      `    when 'scac-mutation-registry.v71' then '${oldCatalog}'::jsonb\n    when 'scac-mutation-registry.v72' then '${newCatalog}'::jsonb end;`, "catalog history"],
+    ["ops.scac_mutation_registry_v70_seal_available()) then",
+      "ops.scac_mutation_registry_v70_seal_available() and ops.scac_mutation_registry_v71_seal_available()) then", "policy snapshot history"],
+    [`         or (r.registry_version='scac-mutation-registry.v72' and r.registry_digest='${newSeal.digest}'))`,
+      `         or (r.registry_version='scac-mutation-registry.v71' and r.registry_digest='${oldSeal.digest}')\n         or (r.registry_version='scac-mutation-registry.v72' and r.registry_digest='${newSeal.digest}'))`, "policy epoch history"],
+    ["     or not ops.scac_mutation_registry_v72_seal_available()",
+      "     or not ops.scac_mutation_registry_v71_seal_available()\n     or not ops.scac_mutation_registry_v72_seal_available()", "final seal history"],
+  ]) sql = replaceExactlyOnce(sql, before, after, `v72 ${label}`);
+  const seedStart = sql.indexOf("$v5_r02_v72_source$[");
+  const seedEnd = sql.indexOf("]$v5_r02_v72_source$", seedStart);
+  if (seedStart < 0 || seedEnd < 0) throw new Error("v72 source seed boundary missing");
+  const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
+  sql = `${sql.slice(0, seedStart)}$v5_r02_v72_source$${seed}$v5_r02_v72_source$${sql.slice(seedEnd + "]$v5_r02_v72_source$".length)}`;
+  const preflight = `do $v5_r02_v72_preflight$\ndeclare v ops.scac_mutation_registry_version%rowtype; registration jsonb;\nbegin\n` +
+    `  if not exists(select 1 from public.schema_migrations where filename='${predecessorPath.split("/").at(-1)}' and sha256='${predecessorDigest}') then\n` +
+    `    raise exception 'V5 R02 v72 requires exact applied 0600'; end if;\n` +
+    `  select * into v from ops.scac_mutation_registry_version where registry_version='${REGISTRY_V71_VERSION}';\n` +
+    `  if v.registry_digest is distinct from '${oldSeal.digest}' or v.entry_count<>${oldSeal.entryCount}\n` +
+    `    or v.source_entry_count<>${oldSeal.sourceEntryCount} or v.entry_set_digest is distinct from '${oldEntrySet}'\n` +
+    `    or v.catalog_projection is distinct from '${oldCatalog}'::jsonb then\n` +
+    `    raise exception 'V5 R02 v71 predecessor seal drifted'; end if;\n` +
+    `  registration:=ops.scac_mutation_registration_v71('${oldSeal.digest}','mcp-tool:standing-context');\n` +
+    `  if coalesce((registration->>'registered')::boolean,false) is not true then\n` +
+    `    raise exception 'V5 R02 v71 predecessor entry drifted'; end if;\n` +
+    `end $v5_r02_v72_preflight$;\n\n`;
   return `-- GENERATED by ops/scac-mutation-inventory.mjs. Review; never hand-edit.\n` + preflight + sql;
 }
 
@@ -16891,15 +16998,25 @@ export function renderGeneratedFrontier() {
   artifacts["mcp-server/src/scac-mutation-registry.v71.generated.js"] =
     renderRuntimeProjection(v71Rows, {
       version: REGISTRY_V71_VERSION,
-      dbCatalogBaseline: POST_0593_FORWARD_V71_DB_CATALOG_BASELINE,
+      dbCatalogBaseline: POST_0600_FORWARD_V71_DB_CATALOG_BASELINE,
     });
-  artifacts["migrations/0594_doctorcre_r02_scac_successor.sql"] =
-    renderV5R02RegistrySql(v71Rows,
+  artifacts["migrations/0600_nightly_exports_daytime_retry_scac_successor.sql"] =
+    renderNightlyExportsDaytimeRetryRegistrySql(v71Rows,
       artifacts["migrations/0589_jev_call_receipt_migrate_py_reseal.sql"]);
+
+  const v72Rows = frozenInventory(REGISTRY_V72_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v72.generated.js"] =
+    renderRuntimeProjection(v72Rows, {
+      version: REGISTRY_V72_VERSION,
+      dbCatalogBaseline: POST_0603_FORWARD_V72_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0603_doctorcre_r02_scac_successor.sql"] =
+    renderV5R02RegistrySql(v72Rows,
+      artifacts["migrations/0600_nightly_exports_daytime_retry_scac_successor.sql"]);
 
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
-  if (migrationCount !== 77 || runtimeCount !== 68 || Object.keys(artifacts).length !== 145)
+  if (migrationCount !== 78 || runtimeCount !== 69 || Object.keys(artifacts).length !== 147)
     throw new Error(`generated frontier is incomplete: ${migrationCount} migrations, ${runtimeCount} runtimes`);
   return Object.freeze(artifacts);
 }

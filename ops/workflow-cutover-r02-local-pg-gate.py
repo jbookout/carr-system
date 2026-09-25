@@ -2,7 +2,7 @@
 # ci: db-gate
 # doctrine: runbook
 """Rollback-only real-Postgres proof for the DoctorCRE V5-R02 SQL doors
-(migrations 0593 and 0599), run ONLY under production-shaped logins.
+(migrations 0602 and 0604), run ONLY under production-shaped logins.
 
 WHY THE LOGINS MATTER. PR #1245's re-review found three defects this gate had
 been passing over: it asked the doors under grants and routing production

@@ -4,14 +4,14 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v71 is the runtime selector after DoctorCRE V5-R02 (migration 0593,
+// v72 is the runtime selector after DoctorCRE V5-R02 (migration 0602,
 // workflow cutover, caller migration and retirement readiness). Its sealed
 // catalog admits ten new verbs -- open-, advance-, cancel- and
 // retire-workflow-cutover-plan, register-slice-checkable-done and
 // mark-slice-completion (all authorityOnly), record-workflow-caller,
 // mark-slice-progress, workflow-cutover-board, read-slice-completion -- and
-// preserves earlier versions as history; v66-v68 registered no verb, so the
-// selector stayed on v65 until v69.
+// preserves earlier versions as history; v70 and v71 (the nightly-exports
+// launchd row) registered no verb, so the selector stayed on v69 until v72.
 //
 // Superseded note (v69): v69 was the runtime selector after the server-side
 // Jev call log (migration 0587, ops.record_jev_call_receipt /
@@ -19,7 +19,7 @@ import {
 // append-only ops.jev_call_receipt). Its sealed catalog admits the three new
 // verbs, ask-jev, read-jev-call-receipts and read-jev-call-receipt-integrity,
 // and preserves earlier versions as history. v70 re-digests tools/migrate.py
-// only and registers no verb, so the selector stayed on v69 until v71.
+// only and registers no verb, so the selector stayed on v69 until v72.
 //
 // Superseded note (v65): v65 was the runtime selector after DoctorCRE V5-UX-C02/C06's resource
 // observation store (migration 0579, ops.record_resource_observation --
@@ -76,7 +76,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v71.generated.js";
+} from "./scac-mutation-registry.v72.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 

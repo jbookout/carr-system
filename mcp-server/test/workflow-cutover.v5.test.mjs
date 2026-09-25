@@ -13,7 +13,7 @@ async function rejected(fn) {
   }
 }
 
-// A minimal fake DB standing in for migrations/0593's write and read doors, plus the two upstream stores retire-workflow-cutover-plan
+// A minimal fake DB standing in for migrations/0602's write and read doors, plus the two upstream stores retire-workflow-cutover-plan
 // composes: ops.workflow_acceptance (accept-workflow's store) and
 // ops.legacy_schedule_disable_receipt (disable-legacy-schedule's store).
 // Mirrors resource-observation.test.mjs's fake shape (mcp-server/test/
