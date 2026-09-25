@@ -2204,8 +2204,20 @@ export function engineeringRuntimeTools({ withEnvelope, writeEvent, ToolError })
       write: true,
       description: "Register one typed Engineering Slice Plan as an immutable projection of the exact accepted sourced plan. It does not accept, assign, dispatch, or grant authority.",
       inputSchema: { type: "object", additionalProperties: false, properties: { idempotency_key: { type: "string" }, work_request: { type: "string" }, plan: { type: "object" }, plan_digest: { type: "string" } }, required: ["idempotency_key", "work_request", "plan", "plan_digest"] },
-      handler: async (c, actor, args) => { exactAuthorityFree(args, ToolError); return withEnvelope(c, actor, "register-engineering-slice-plan", args, async () => {
-        uuid(args.idempotency_key, "idempotency_key", ToolError); const plan = requireRegistrablePlanVersion(requirePlan(args.plan, ToolError), ToolError); const work = text(args.work_request, "work_request", ToolError); const planDigest = digest(args.plan_digest, "plan_digest", ToolError);
+      handler: async (c, actor, args) => {
+        exactAuthorityFree(args, ToolError);
+        // Pure checks over args run BEFORE withEnvelope.  The envelope's first
+        // statements are the advisory lock and the tool_call replay read, and a
+        // stored response is returned without reaching the callback: inside it,
+        // a v1 key first registered before migration 0610 would replay as
+        // {replayed:true, ok:true} while the database door refuses the same
+        // request, and a stored malformed plan would replay unvalidated.  Here a
+        // refused registration runs no statement at all, and a valid v2 request
+        // reaches the envelope exactly as before, so its replay is unchanged.
+        uuid(args.idempotency_key, "idempotency_key", ToolError);
+        const plan = requireRegistrablePlanVersion(requirePlan(args.plan, ToolError), ToolError);
+        return withEnvelope(c, actor, "register-engineering-slice-plan", args, async () => {
+        const work = text(args.work_request, "work_request", ToolError); const planDigest = digest(args.plan_digest, "plan_digest", ToolError);
         if (plan.plan_digest !== planDigest) error(ToolError, { error: "engineering_slice_plan_digest_mismatch" });
         const r = await c.query("select * from ops.engineering_register_slice_plan($1::text,$2::jsonb,$3::text,$4::uuid)", [work, JSON.stringify(plan), planDigest, args.idempotency_key]);
         if (!r.rows.length) error(ToolError, { error: "engineering_slice_plan_not_registered" });
