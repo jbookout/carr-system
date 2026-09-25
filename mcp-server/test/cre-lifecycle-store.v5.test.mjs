@@ -318,6 +318,8 @@ class FakeDb {
         caller_reported_reason_id: diagnostics.reason_id,
         caller_reported_reason_id_scope:
           "kernel_result_diagnostic_asserted_by_the_caller_and_not_recomputed_here",
+        concurrent_merges: diagnostics.concurrent_merges ?? [],
+        concurrent_merges_scope: "caller_reported_merge_account_cas_enforced_on_current_row",
         coupled_facts_committed: diagnostics.coupled_facts,
         coupled_facts_committed_source: "derived_from_the_admission_contract",
         decision_refs: diagnostics.decision_refs,
@@ -464,9 +466,15 @@ const recordRef = (evidence_kind, over = {}) => ({
 
 test("the registration description is a description, and it says what the parent still owes", () => {
   const registrations = v5J102ToolRegistrations();
-  assert.equal(registrations.length, V5_J102_OPERATIONS.length);
+  // One verb per operation, plus the authority-routed door to the fact writer.
+  assert.equal(registrations.length, V5_J102_OPERATIONS.length + 1);
+  const partnerFact = registrations.find(e => e.name === "record-partner-lifecycle-fact");
+  assert.equal(partnerFact.store_operation, "record-lifecycle-fact");
+  assert.equal(partnerFact.handler, "recordLifecycleFact");
+  assert.equal(partnerFact.authorityOnly, true);
+  assert.equal(registrations.find(e => e.name === "record-lifecycle-fact").authorityOnly, false);
   for (const entry of registrations) {
-    assert.ok(V5_J102_OPERATIONS.includes(entry.name));
+    assert.ok(V5_J102_OPERATIONS.includes(entry.store_operation));
     assert.ok(entry.role.length > 0, `${entry.name} states its role`);
     assert.ok(entry.handler.length > 0);
     // Four things this module deliberately did NOT do.
@@ -1851,7 +1859,7 @@ test("H1/H3: what remains unwired is two FACTS, not two callers, and each names 
   // than only that one is required.
   const schemas = v5J102StoreOperationSchemas();
   for (const entry of v5J102ToolRegistrations()) {
-    if (!entry.write || schemas[entry.name].transition === null) continue;
+    if (!entry.write || schemas[entry.store_operation].transition === null) continue;
     assert.equal(entry.requires_existing_primary_subject, true,
       `${entry.name} advances a subject that must already exist`);
     assert.ok(V5_J102_OPERATIONS.includes(entry.primary_subject_created_by_operation),

@@ -3871,6 +3871,11 @@ begin
     'caller_reported_reason_id', p_diagnostics ->> 'reason_id',
     'caller_reported_reason_id_scope',
       'kernel_result_diagnostic_asserted_by_the_caller_and_not_recomputed_here',
+    -- Q103's audit trail, STORED with the outcome so a replay and history both
+    -- show a machine merge. The caller's account of what moved; what this writer
+    -- enforced is that every compare-and-swap operand was the CURRENT digest.
+    'concurrent_merges', coalesce(p_diagnostics -> 'concurrent_merges', '[]'::jsonb),
+    'concurrent_merges_scope', 'caller_reported_merge_account_cas_enforced_on_current_row',
     'subject_digests', v_subject_digests,
     'event_digests', v_event_digests,
     'evidence_rechecked_under_lock', true,

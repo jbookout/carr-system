@@ -1326,3 +1326,70 @@ test("Q081 LIVE: the shadow compares old and new side by side, reports every dif
     "delete from ops.j102_migration_shadow_run"), /permission denied|j102_/);
   await owner("delete from public.deal where id = $1::uuid", [matching]);
 });
+
+// ===========================================================================
+// Q103 LIVE, after independent review: the merge is durable, the caller's key
+// survives a conflict, and a stale READ-ONLY subject refuses instead of crashing.
+// ===========================================================================
+
+test("Q103 LIVE: a replay of a merged transition reports the merge the original write made", { skip: SKIP }, async () => {
+  const d = await dealWith("lease", ["lease_exec"]);
+  const base = (await body("joe", "deal", d.deal)).state_digest;
+  await DEAL_STEPS.commission(d);
+  const invoice = await fact("joe", "invoice", "deal", d.deal, { detail: "synthetic" });
+  const payload = { idempotency_key: key(),
+    subject_ref: { subject_kind: "deal", subject_id: d.deal, expected_state_digest: base },
+    evidence_refs: [{ evidence_kind: "invoice_issued", record_id: invoice }],
+    declared: { axis: "invoice_state" } };
+  const first = ok(await as("joe").recordDealAxis(payload), "merged invoice");
+  assert.equal(first.auto_merged, true);
+  const replay = ok(await as("joe").recordDealAxis(payload), "replay");
+  assert.equal(replay.auto_merged, true, "the replay says the write was a machine merge");
+  assert.deepEqual(replay.concurrent_merges, first.concurrent_merges);
+  assert.equal(replay.concurrent_merges_scope,
+    "caller_reported_merge_account_cas_enforced_on_current_row");
+});
+
+test("Q103 LIVE: a conflict does not spend the caller's key; the same key lands on a fresh base", { skip: SKIP }, async () => {
+  const d = await dealWith("lease", ["lease_exec"]);
+  const base = (await body("joe", "deal", d.deal)).state_digest;
+  ok(await axisCall("dell", d.deal, "payment_state", "payment_received", "payment", base,
+    { payment_level: "partially_paid" }), "Dell's partial payment");
+  const payment = await fact("joe", "payment", "deal", d.deal, { detail: "synthetic" });
+  const transitionKey = key();
+  const call = expected => as("joe").recordDealAxis({ idempotency_key: transitionKey,
+    subject_ref: { subject_kind: "deal", subject_id: d.deal, expected_state_digest: expected },
+    evidence_refs: [{ evidence_kind: "payment_received", record_id: payment }],
+    declared: { axis: "payment_state", payment_level: "paid" } });
+  const conflict = await call(base);
+  assert.equal(conflict.decision, "reconcile");
+  // Re-sending the same stale request replays the same item, not a second one.
+  assert.equal((await call(base)).decision, "reconcile");
+  assert.equal((await reconciliationItems("deal", d.deal)).length, 1);
+  // A person looked, re-read, and decided again on the current row: same key.
+  const fresh = (await body("joe", "deal", d.deal)).state_digest;
+  const landed = ok(await call(fresh), "the same key on a fresh base");
+  assert.equal((await body("joe", "deal", d.deal)).state.payment_state, "paid");
+  assert.equal(landed.auto_merged, undefined);
+});
+
+test("Q103 LIVE: an untraceable move of a subject the transition only READS refuses as a stale read", { skip: SKIP }, async () => {
+  const { rel, eng } = await client("joe");
+  const asg = id("asg");
+  ok(await as("joe").initializeAssignment({ idempotency_key: key(),
+    related_refs: { engagement: REF("engagement", eng), relationship: REF("relationship", rel) },
+    declared: { new_subject_id: asg } }), "initialize assignment");
+  const mandate = await fact("joe", "assignment_mandate", "assignment", asg, { detail: "synthetic" });
+  const answer = await as("joe").openCreAssignment({ idempotency_key: key(),
+    subject_ref: REF("assignment", asg),
+    related_refs: {
+      // A base the engagement never held: its row is not one transition past it.
+      engagement: { subject_kind: "engagement", subject_id: eng, expected_state_digest: D("never") },
+      relationship: REF("relationship", rel) },
+    evidence_refs: [{ evidence_kind: "search_initiation", record_id: mandate }],
+    declared: { mandate_scope: "search" } });
+  assert.equal(answer.decision, "refuse", JSON.stringify(answer).slice(0, 500));
+  assert.equal(answer.reason_id, "stale_related_subject_digest");
+  assert.equal(answer.records_written, 0);
+  assert.deepEqual(await reconciliationItems("engagement", eng), [], "nothing to reconcile: nothing of the caller's is lost");
+});

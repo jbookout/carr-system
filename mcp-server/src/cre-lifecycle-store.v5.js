@@ -1152,8 +1152,9 @@ export function v5J102ToolRegistrations() {
     "record-lifecycle-reconciliation": "recordLifecycleReconciliation",
     "run-migration-shadow": "runMigrationShadow",
   };
-  return deepFreeze(V5_J102_OPERATIONS.map(name => ({
+  const entries = V5_J102_OPERATIONS.map(name => ({
     name,
+    store_operation: name,
     write: OPERATION_SCHEMAS[name].write,
     humanOnly: OPERATION_SCHEMAS[name].humanOnly,
     authorityOnly: OPERATION_SCHEMAS[name].authorityOnly,
@@ -1190,8 +1191,28 @@ export function v5J102ToolRegistrations() {
     registered_in_mutation_registry: false,
     migration_bound: false,
     accepted: false,
-  })));
+  }));
+  // THE AUTHORITY-ROUTED DOOR TO THE SAME FACT WRITER. The server routes a verb
+  // over the partner's authority credential only when the VERB is authorityOnly,
+  // and every non-authorityOnly verb runs on the writer credential, where F01
+  // derives a sponsored agent. So a partner can author the four partner-only
+  // fact kinds (closing settlement, deal failure, winning-property commitment,
+  // lifecycle correction) only through a second verb over the same store
+  // operation that IS authorityOnly. It adds no operation and widens nothing: the
+  // store's H5 check and the SQL CHECK still decide on the database's class.
+  const fact = entries.find(e => e.name === "record-lifecycle-fact");
+  entries.push({
+    ...fact,
+    name: V5_J102_PARTNER_FACT_VERB,
+    store_operation: "record-lifecycle-fact",
+    authorityOnly: true,
+    role: "Append one partner-authored first-party business record (closing settlement, deal failure, winning-property commitment or lifecycle correction) on the partner's authority credential, bound to the exact subject it is about; advances no lifecycle state.",
+  });
+  return deepFreeze(entries);
 }
+
+/** The authority-routed verb name for partner-authored facts; see above. */
+export const V5_J102_PARTNER_FACT_VERB = "record-partner-lifecycle-fact";
 
 /**
  * THE SUBJECT AN OPERATION CANNOT CREATE, said per operation.
@@ -1872,6 +1893,13 @@ export function createCreLifecycleStore({ db } = {}) {
         decision_refs_source: outcome.decision_refs_source ?? null,
         caller_reported_reason_id: outcome.caller_reported_reason_id ?? null,
         caller_reported_reason_id_scope: outcome.caller_reported_reason_id_scope ?? null,
+        // Q103: read off the STORED outcome, so a replay reports the merge the
+        // original write made rather than a plain landing.
+        ...(Array.isArray(outcome.concurrent_merges) && outcome.concurrent_merges.length > 0
+          ? { auto_merged: true, concurrent_merges: outcome.concurrent_merges,
+              concurrent_merges_scope: outcome.concurrent_merges_scope ?? null,
+              last_writer_wins: false, silent_overwrite: false }
+          : {}),
         evidence_rechecked_under_lock: outcome.evidence_rechecked_under_lock === true,
         evidence_bound_under_lock: outcome.evidence_bound_under_lock === true,
         // BLOCK-2's receipt half, reported rather than asserted here: WHICH
@@ -2580,13 +2608,6 @@ export function createCreLifecycleStore({ db } = {}) {
         related[key] = loaded.state;
         casDigests[`${ref.subject_kind}:${ref.subject_id}`] = loaded.state_digest;
       }
-      const mergeReport = concurrentMerges.length === 0 ? {} : {
-        auto_merged: true,
-        concurrent_merges: concurrentMerges,
-        last_writer_wins: false,
-        silent_overwrite: false,
-      };
-
       const evidence = [];
       const rechecks = [];
       // THE SUBJECT THE EVIDENCE MUST BE ABOUT is the subject this operation
@@ -2730,9 +2751,12 @@ export function createCreLifecycleStore({ db } = {}) {
          request.idempotency_key, requestDigest(operation, request, principal),
          J({ operation, reason_id: evaluated.reason_id,
              coupled_facts: evaluated.coupled_facts_committed,
-             decision_refs: evaluated.decision_refs })]);
-      const landed = resultFromOutcome(operation, parse(row.outcome), principal);
-      return concurrentMerges.length === 0 ? landed : deepFreeze({ ...landed, ...mergeReport });
+             decision_refs: evaluated.decision_refs,
+             // Q103's audit trail: the merge is recorded WITH the write, in the
+             // stored outcome, so history and a replay both say this transition
+             // was decided against a moved base and merged by machine.
+             concurrent_merges: concurrentMerges })]);
+      return resultFromOutcome(operation, parse(row.outcome), principal);
     });
   }
 
@@ -2753,6 +2777,20 @@ export function createCreLifecycleStore({ db } = {}) {
    */
   async function fileTransitionConflict(client, { operation, request, principal, now,
     transition_id, subject_kind, subject_id, verdict }) {
+    // A SUBJECT THIS TRANSITION ONLY READS has an empty write set, so there is
+    // no incoming edit to put in front of a person: nothing of this caller's
+    // would be lost. The row moved in a way that cannot be traced to one
+    // transition, so the read the decision rested on is stale and the caller
+    // re-reads — the refusal this path always gave before Q103 was wired.
+    if (verdict.incoming_fields.length === 0) {
+      return result(operation, "refuse", "stale_related_subject_digest", {
+        actor_slug: principal.slug, transition_id, subject_kind, subject_id,
+        base_version_digest: verdict.base_version_digest,
+        concurrent_change_characterized: verdict.characterized,
+        why: "a subject this transition reads but does not write moved in a way that cannot be traced to one registered transition; re-read it and decide again",
+        records_written: 0, readback: null,
+      });
+    }
     const stored = await readSubjectVerified(client, subject_kind, subject_id);
     if (stored == null) {
       return result(operation, "refuse", "subject_not_found", {
@@ -2797,7 +2835,9 @@ export function createCreLifecycleStore({ db } = {}) {
     const outcome = await writeReconciliationItem(client, {
       evaluated, subject_kind, subject_id, stored,
       characterized: verdict.characterized,
-      idempotency_key: request.idempotency_key,
+      idempotency_key: `j102-reconcile-${digest({ transition_key: request.idempotency_key,
+        base_version_digest: verdict.base_version_digest, subject_kind, subject_id })
+        .slice("sha256:".length, "sha256:".length + 48)}`,
       request_digest: requestDigest("record-lifecycle-reconciliation", reconciliationRequest, principal),
     });
     return result(operation, "reconcile", verdict.reason_id, {

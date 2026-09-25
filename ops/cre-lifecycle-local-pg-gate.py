@@ -24,6 +24,7 @@ later gate sees the cluster as it found it.
 from __future__ import annotations
 
 import ipaddress
+import secrets
 import os
 import shutil
 import subprocess
@@ -78,49 +79,83 @@ def sibling(base: str) -> Iterator[str]:
     try:
         yield psycopg.conninfo.make_conninfo(base, dbname=name)
     finally:
-        with psycopg.connect(admin, autocommit=True) as con, con.cursor() as cur:
-            cur.execute("select pg_terminate_backend(pid) from pg_stat_activity "
-                        "where datname=%s and pid<>pg_backend_pid()", (name,))
-            cur.execute(sql.SQL("drop database if exists {}").format(sql.Identifier(name)))
+        # A failed drop is reported, never allowed to replace the error that got
+        # us here; with no error in flight it fails the gate like anything else.
+        in_flight = sys.exc_info()[0] is not None
+        try:
+            with psycopg.connect(admin, autocommit=True) as con, con.cursor() as cur:
+                cur.execute("select pg_terminate_backend(pid) from pg_stat_activity "
+                            "where datname=%s and pid<>pg_backend_pid()", (name,))
+                cur.execute(sql.SQL("drop database if exists {}").format(sql.Identifier(name)))
+        except Exception as exc:  # noqa: BLE001
+            print(f"cre-lifecycle-local-pg-gate: could not drop sibling {name}: {exc}", file=sys.stderr)
+            if not in_flight:
+                raise
+
+
+LOGINS = AUTHORITY_LOGINS + ("carr_writer",)
 
 
 @contextmanager
-def principals(base: str) -> Iterator[None]:
-    """Add the two authority logins and carr_writer LOGIN; restore exactly after."""
+def principals(base: str) -> Iterator[str]:
+    """Make the three logins usable for this run; restore the cluster exactly after.
+
+    Yields a per-run password. Hosted CI authenticates TCP logins by password
+    (scram), so each login gets this run's random password, and its previous
+    verifier — read from pg_authid, possibly NULL — is put back afterwards, as are
+    carr_writer's LOGIN flag and every role or grant this gate created. Every step
+    is recorded BEFORE it is taken, so a failure partway through is undone too.
+    """
     admin = psycopg.conninfo.make_conninfo(base, dbname="postgres")
+    password = secrets.token_hex(24)
     created: list[str] = []
     granted: list[tuple[str, str]] = []
-    with psycopg.connect(admin, autocommit=True) as con, con.cursor() as cur:
-        cur.execute("select rolcanlogin from pg_roles where rolname='carr_writer'")
-        row = cur.fetchone()
-        if row is None:
-            raise RuntimeError("carr_writer does not exist; the migrated schema is incomplete")
-        writer_could_login = bool(row[0])
-        for login in AUTHORITY_LOGINS:
-            cur.execute("select 1 from pg_roles where rolname=%s", (login,))
-            if cur.fetchone() is None:
-                cur.execute(sql.SQL("create role {} login").format(sql.Identifier(login)))
-                created.append(login)
-            for bundle in ("carr_authority", "carr_writer"):
-                cur.execute("select pg_has_role(%s, %s, 'member')", (login, bundle))
-                member = cur.fetchone()
-                if member is None or not member[0]:
-                    cur.execute(sql.SQL("grant {} to {}").format(
-                        sql.Identifier(bundle), sql.Identifier(login)))
-                    granted.append((bundle, login))
-        if not writer_could_login:
-            cur.execute("alter role carr_writer login")
+    prior_verifier: dict[str, str | None] = {}
+    writer_could_login: bool | None = None
     try:
-        yield
+        with psycopg.connect(admin, autocommit=True) as con, con.cursor() as cur:
+            cur.execute("select rolcanlogin from pg_roles where rolname='carr_writer'")
+            row = cur.fetchone()
+            if row is None:
+                raise RuntimeError("carr_writer does not exist; the migrated schema is incomplete")
+            writer_could_login = bool(row[0])
+            for login in AUTHORITY_LOGINS:
+                cur.execute("select 1 from pg_roles where rolname=%s", (login,))
+                if cur.fetchone() is None:
+                    created.append(login)
+                    cur.execute(sql.SQL("create role {} login").format(sql.Identifier(login)))
+                for bundle in ("carr_authority", "carr_writer"):
+                    cur.execute("select pg_has_role(%s, %s, 'member')", (login, bundle))
+                    member = cur.fetchone()
+                    if member is None or not member[0]:
+                        granted.append((bundle, login))
+                        cur.execute(sql.SQL("grant {} to {}").format(
+                            sql.Identifier(bundle), sql.Identifier(login)))
+            if not writer_could_login:
+                cur.execute("alter role carr_writer login")
+            for login in LOGINS:
+                if login not in created:
+                    cur.execute("select rolpassword from pg_authid where rolname=%s", (login,))
+                    got = cur.fetchone()
+                    prior_verifier[login] = None if got is None else got[0]
+                cur.execute(sql.SQL("alter role {} password {}").format(
+                    sql.Identifier(login), sql.Literal(password)))
+        yield password
     finally:
         with psycopg.connect(admin, autocommit=True) as con, con.cursor() as cur:
+            for login, verifier in prior_verifier.items():
+                if verifier is None:
+                    cur.execute(sql.SQL("alter role {} password null").format(sql.Identifier(login)))
+                else:
+                    cur.execute(sql.SQL("alter role {} password {}").format(
+                        sql.Identifier(login), sql.Literal(verifier)))
             for bundle, login in granted:
                 if login not in created:
                     cur.execute(sql.SQL("revoke {} from {}").format(
                         sql.Identifier(bundle), sql.Identifier(login)))
             for login in created:
                 cur.execute(sql.SQL("drop role if exists {}").format(sql.Identifier(login)))
-            if not writer_could_login:
+            if writer_could_login is False:
                 cur.execute("alter role carr_writer nologin")
 
 
@@ -132,19 +167,19 @@ def psql(dsn: str, path: Path, *, env: dict | None = None) -> subprocess.Complet
                           env={**os.environ, **(env or {})}, text=True, capture_output=True, timeout=900)
 
 
-def as_login(dsn: str, login: str) -> str:
-    return psycopg.conninfo.make_conninfo(dsn, user=login, password=None)
+def as_login(dsn: str, login: str, password: str) -> str:
+    return psycopg.conninfo.make_conninfo(dsn, user=login, password=password)
 
 
-def url_for(dsn: str, login: str | None = None) -> str:
-    """node-pg reads URLs, not key=value conninfo. No password is ever carried:
-    the disposable loopback cluster authenticates these logins by trust/peer."""
+def url_for(dsn: str, login: str | None = None, login_password: str = "") -> str:
+    """node-pg reads URLs, not key=value conninfo. A login's password is this
+    run's throwaway one, on a loopback sibling that is dropped at the end."""
     from urllib.parse import quote
     parts = psycopg.conninfo.conninfo_to_dict(dsn)
     host = parts.get("hostaddr") or parts.get("host") or "127.0.0.1"
     port = parts.get("port") or "5432"
     user = str(login or parts.get("user") or "")
-    password = "" if login else str(parts.get("password") or "")
+    password = login_password if login else str(parts.get("password") or "")
     auth = quote(user) + (":" + quote(password) if password else "")
     return f"postgresql://{auth}@{host}:{port}/{quote(str(parts['dbname']))}"
 
@@ -154,7 +189,7 @@ def main() -> int:
     if not base:
         return fail("a disposable loopback DATABASE_URL or CARR_LOCAL_PG_DSN is required")
     try:
-        with principals(base), sibling(base) as dsn:
+        with principals(base) as password, sibling(base) as dsn:
             with psycopg.connect(dsn) as con, con.cursor() as cur:
                 cur.execute("select to_regprocedure('ops.f01_principal()') is not null")
                 probe = cur.fetchone()
@@ -179,7 +214,7 @@ def main() -> int:
                 ("dell", "carr_authority_dell", ""),
                 ("agent", "carr_writer", "-c carr.acting_actor_slug=claude-ci"),
             ):
-                run = psql(as_login(dsn, login), FIXTURE,
+                run = psql(as_login(dsn, login, password), FIXTURE,
                            env={"PGOPTIONS": f"--client-min-messages=notice {options}".strip()})
                 out = run.stdout + run.stderr
                 if run.returncode:
@@ -190,9 +225,9 @@ def main() -> int:
 
             env = {
                 **os.environ,
-                "CARR_J102_LIVE_PG_DSN_JOE": url_for(dsn, "carr_authority_joe"),
-                "CARR_J102_LIVE_PG_DSN_DELL": url_for(dsn, "carr_authority_dell"),
-                "CARR_J102_LIVE_PG_DSN_WRITER": url_for(dsn, "carr_writer"),
+                "CARR_J102_LIVE_PG_DSN_JOE": url_for(dsn, "carr_authority_joe", password),
+                "CARR_J102_LIVE_PG_DSN_DELL": url_for(dsn, "carr_authority_dell", password),
+                "CARR_J102_LIVE_PG_DSN_WRITER": url_for(dsn, "carr_writer", password),
                 "CARR_J102_LIVE_PG_DSN_OWNER": url_for(dsn),
             }
             # The shadow test requires an empty legacy table; the copied CI
