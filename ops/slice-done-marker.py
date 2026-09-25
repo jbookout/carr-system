@@ -200,7 +200,7 @@ class Marker:
             if section.get("section_key") == CATALOG_SECTION:
                 body = section.get("body") or {}
                 text = body.get("text") if isinstance(body, dict) else body
-                slices = json.loads(text).get("slices") or []
+                slices = json.loads(str(text)).get("slices") or []
                 if not slices:
                     raise MarkerError("the catalog section names no slices")
                 return slices
@@ -314,9 +314,9 @@ class Marker:
         if not state.get("registered"):
             if self.dry_run:
                 self.out(f"  [dry-run] register-slice-criteria-from-catalog {sid}")
-                criteria = [{"criterion": c, "evidence_kind": "unbound", "binding_source": "registration",
+                pending = [{"criterion": c, "evidence_kind": "unbound", "binding_source": "registration",
                              "automation_bound": False} for c in item.get("checkable_done") or []]
-                state = {"registered": False, "criteria": criteria, "release_members": state.get("release_members", [])}
+                state = {"registered": False, "criteria": pending, "release_members": state.get("release_members", [])}
             else:
                 self.call("register-slice-criteria-from-catalog",
                           {"idempotency_key": ikey("register", sid), "slice_id": sid})
@@ -324,8 +324,8 @@ class Marker:
         if state.get("held_by_partner"):
             latest = state.get("latest_mark") or {}
             return SliceOutcome(sid, latest.get("status") or "?", "held by partner", "skipped")
-        criteria = [c["criterion"] for c in state.get("criteria", [])]
-        kinds = {c["criterion"]: c for c in state.get("criteria", [])}
+        criteria = [row["criterion"] for row in state.get("criteria", [])]
+        kinds = {row["criterion"]: row for row in state.get("criteria", [])}
 
         if sid in PARKED:
             return self._write(sid, state, "blocked", PARKED[sid], {c: None for c in criteria})
@@ -355,7 +355,7 @@ class Marker:
                                "Jev semantic_creation: acceptance created no effects", key=PORTFOLIO_REF)
             if not self.dry_run:
                 state = self.read(sid)
-                kinds = {c["criterion"]: c for c in state.get("criteria", [])}
+                kinds = {row["criterion"]: row for row in state.get("criteria", [])}
 
         members = state.get("release_members") or []
         shipped = [c for c in criteria if kinds[c]["evidence_kind"] in ("shipped_release", "refusal_proof")]
