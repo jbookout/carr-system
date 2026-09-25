@@ -43,7 +43,7 @@ function client({ unavailable = null, accounts = [], renewalState = "ready", ren
         { display_name: "Renewal Safe", city: "Pensacola", est_lease_event: "2027-01-01",
           tier_status: "t1", flag_status: "clear", has_channel: true },
       ] };
-      if (sql.includes("from ops.notification")) return { rows: [] };
+      if (sql.includes("ops.v5_a05_assurance_cadence_batch")) return { rows: [{ batch: [] }] };
       throw new Error(`unexpected query: ${sql}`);
     },
   };

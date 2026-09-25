@@ -1444,24 +1444,31 @@ export const POST_0588_FORWARD_V70_DB_CATALOG_BASELINE = Object.freeze({
   secdef_execute: { count: 898, digest: "sha256:b4ffd805f7e626fcff1e683972f32a1ee134f594995c8c182d33f38912cbc4bc" },
 });
 
-// V5-A05 (migration 0592) adds three SECURITY DEFINER functions
+// V5-A05 (migration 0592) adds four SECURITY DEFINER functions
 // (ops.v5_a05_cadence_status, ops.v5_a05_record_cadence_receipt,
-// ops.notification_quiet_now) and DROP+CREATEs ops.mint_notification with one
-// added parameter -- the DROP+CREATE re-grants the same function name, so it
-// does not change the EXECUTE-grant row count on its own. Migration 0598
-// (this successor) itself creates one more SECURITY DEFINER function,
-// ops.scac_mutation_registration_v71, granted to 4 roles (carr_reader,
-// carr_writer, carr_jobs, carr_authority). This inherits from v70's own
-// live-measured baseline (POST_0588_FORWARD_V70), not v68's -- v71 is now an
-// ADJACENT successor to v70 (#1243 merged; the orchestrator's 2026-09-24
-// no-pre-assigned-versions ruling means this seal takes main's newest+1, and
-// v70 is main's newest), so there is no v69/v70 gap left to skip over.
-// secdef_execute count/digest are placeholders pending live re-measurement
-// via the migration's own self-check readback (drift-exception technique).
+// ops.v5_a05_assurance_cadence_batch, ops.notification_quiet_now),
+// REDEFINES ops.notification_preference_facts to call
+// ops.notification_quiet_now instead of duplicating it (same signature, same
+// grants, no EXECUTE-grant row change), and DROP+CREATEs ops.mint_notification
+// with one added parameter -- the DROP+CREATE re-grants the same function
+// name, so it does not change the EXECUTE-grant row count on its own.
+// Migration 0598 (this successor) itself creates one more SECURITY DEFINER
+// function, ops.scac_mutation_registration_v71, granted to 4 roles
+// (carr_reader, carr_writer, carr_jobs, carr_authority). This inherits from
+// v70's own live-measured baseline (POST_0588_FORWARD_V70), not v68's -- v71
+// is now an ADJACENT successor to v70 (#1243 merged; the orchestrator's
+// 2026-09-24 no-pre-assigned-versions ruling means this seal takes main's
+// newest+1, and v70 is main's newest), so there is no v69/v70 gap left to
+// skip over. secdef_execute count/digest are measured directly on a
+// disposable PostgreSQL 17 via the migration's own self-check readback
+// (drift-exception technique) -- re-measured after PR #1236 round-1 review
+// (Opus adversarial review) added ops.v5_a05_assurance_cadence_batch,
+// redefined ops.notification_preference_facts, and revoked
+// ops.notification_quiet_now's carr_writer/carr_authority grant.
 export const POST_0589_FORWARD_V71_DB_CATALOG_BASELINE = Object.freeze({
   ...POST_0588_FORWARD_V70_DB_CATALOG_BASELINE,
   projection_version: "scac-db-catalog-projection.v71",
-  secdef_execute: { count: 908, digest: "sha256:b578aa7e415643c75ffaae4f9158335f8680d8b7e3043db36a4e86f6b77cae23" },
+  secdef_execute: { count: 907, digest: "sha256:63534c70865123d25b337de9f178131e18fdb476f177efe6d0502ecffb34879c" },
 });
 
 export const JOB_DEFINITION_BASELINE = Object.freeze({

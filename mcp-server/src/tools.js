@@ -2959,19 +2959,16 @@ export const TOOLS = {
       // item is simply an unread notification from this producer, surfaced
       // here AND reachable through notification-feed like any other.
       const assuranceCadence = await section(async () => {
-        const rows = await c.query(
-          `select n.id as notification_id, n.reason, n.severity, n.subject_type, n.subject_ref,
-                  n.deep_link, n.created_at, s.signal_kind as reason_id
-             from ops.notification n
-             join signal_event s on s.id = n.event_ref and n.event_source = 'signal_event'
-             left join ops.notification_read r
-               on r.notification_id = n.id and r.recipient_actor = n.recipient_actor
-            where n.recipient_actor = (select id from actor where slug = $1 and active)
-              and s.producer = 'v5-a05-delivery-cadence'
-              and r.notification_id is null
-            order by n.created_at desc
-            limit 50`, [scope.sponsor]);
-        return { items: rows.rows };
+        // Reads through ops.v5_a05_assurance_cadence_batch (0592), a narrow
+        // SECURITY DEFINER function granted to carr_reader -- morning-brief
+        // runs on the reader connection, and ops.notification/
+        // ops.notification_read themselves carry no carr_reader grant
+        // (tools/test-handler-reads-are-granted.py). Never read those tables
+        // directly from a handler.
+        const result = await c.query(
+          "select ops.v5_a05_assurance_cadence_batch($1) as batch", [scope.sponsor]);
+        const batch = result.rows[0]?.batch;
+        return { items: Array.isArray(batch) ? batch : [] };
       });
       const sections = { today, claim_card: claimCard, deals, loops, renewals, assurance_cadence: assuranceCadence };
       return {

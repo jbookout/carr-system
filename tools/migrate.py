@@ -321,6 +321,20 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0587_jev_call_receipt.sql",
         "0588_jev_call_receipt_scac_successor.sql",
     ),
+    # V5-A05 (delivery cadence, escalation, quiet-hours queue): 0592 installs
+    # ops.v5_a05_cadence_status/ops.v5_a05_record_cadence_receipt/
+    # ops.v5_a05_assurance_cadence_batch/ops.notification_quiet_now (SECURITY
+    # DEFINER, EXECUTE to carr_writer/carr_authority/carr_reader) and
+    # redefines ops.mint_notification; 0598 seals that catalog as v71. Same
+    # deferred-epoch-trigger shape as the 0587/0588 pair immediately above --
+    # 0592 applied alone would be refused at commit ("live SCAC vNN mutation
+    # catalog drifted"), so the pair must be one transaction (review finding
+    # 6, Opus adversarial review of PR #1236, round 1;
+    # migrate-precondition-selftest.py).
+    (
+        "0592_delivery_cadence_a05.sql",
+        "0598_delivery_cadence_a05_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -363,6 +377,10 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0587_jev_call_receipt.sql",
         "0588_jev_call_receipt_scac_successor.sql",
+    ),
+    (
+        "0592_delivery_cadence_a05.sql",
+        "0598_delivery_cadence_a05_scac_successor.sql",
     ),
 )
 

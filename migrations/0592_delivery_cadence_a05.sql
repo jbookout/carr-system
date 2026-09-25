@@ -121,12 +121,27 @@ declare
   v_last ops.v5_a05_cadence_receipt%rowtype;
   v_receipts_in_window integer;
   v_miss_count integer;
+  -- REVIEW FINDING 3 (Opus adversarial review of PR #1236, round 1): a
+  -- subject that has NEVER received a receipt returned no_receipt_on_record
+  -- forever, unconditionally -- the sweep's own comment already says that
+  -- status is never escalated, so a subject nobody ever sends a receipt for
+  -- can never fire the sweep, which is precisely the failure the sweep
+  -- exists to catch. v_activation_anchor is a genuine server-side fact (this
+  -- migration's own applied_at in public.schema_migrations -- never a
+  -- caller-supplied instant, which would reopen the clock-reset hole), used
+  -- ONLY to start the interval for a subject with zero receipt history. Once
+  -- one real receipt exists, v_last.expires_at takes over completely; the
+  -- anchor is never consulted again for that subject.
+  v_activation_anchor timestamptz;
 begin
   if not (pg_has_role(current_user, 'carr_writer', 'member')
        or pg_has_role(current_user, 'carr_authority', 'member')) then
     raise exception using errcode = '42501',
       message = 'reading v5-a05 cadence status requires the writer or authority capability';
   end if;
+
+  select applied_at into v_activation_anchor from public.schema_migrations
+   where filename = '0592_delivery_cadence_a05.sql';
 
   select * into v_last from ops.v5_a05_cadence_receipt
    where organization_tenant_id = v_tenant and subject_type = p_subject_type and subject_ref = p_subject_ref
@@ -144,6 +159,23 @@ begin
   ) gaps where prior_issued_at is not null and issued_at - prior_issued_at > interval '14 days';
 
   if v_last.id is null then
+    -- No receipt has EVER been issued. Until the activation anchor plus one
+    -- interval has passed, that is honestly "nothing to report yet" --
+    -- before v_activation_anchor+14d, a young subject has not had a chance
+    -- to check in. Once that window closes with STILL no receipt, it is a
+    -- real miss (review finding 3): the subject went the whole interval,
+    -- from a real server fact, without ever checking in, and the sweep must
+    -- be able to escalate that.
+    if v_activation_anchor is not null and v_now > v_activation_anchor + interval '14 days' then
+      return jsonb_build_object(
+        'schema_version', 'doctorcre-v5-delivery-cadence.v1', 'tenant', v_tenant,
+        'subject', jsonb_build_object('type', p_subject_type, 'ref', p_subject_ref),
+        'interval_days', 14, 'status', 'missed',
+        'reason_id', 'cadence_interval_exceeded_since_activation', 'requires_replan', true,
+        'last_receipt_issued_at', null, 'expires_at', v_activation_anchor + interval '14 days',
+        'days_since_last_receipt', extract(epoch from (v_now - v_activation_anchor)) / 86400.0,
+        'receipts_in_window', v_receipts_in_window, 'miss_count_in_history', v_miss_count);
+    end if;
     return jsonb_build_object(
       'schema_version', 'doctorcre-v5-delivery-cadence.v1', 'tenant', v_tenant,
       'subject', jsonb_build_object('type', p_subject_type, 'ref', p_subject_ref),
@@ -184,10 +216,42 @@ comment on function ops.v5_a05_cadence_status(text,text) is
 -- (included_scope "replan on miss" is a detection+escalation duty, not an
 -- issuance-time side effect), reading this table through
 -- ops.v5_a05_cadence_status and raising through raise-delivery-cadence-alert.
+--
+-- REVIEW FINDING 2 (Opus adversarial review of PR #1236, round 1): the prior
+-- signature took p_evidence jsonb straight from the caller -- any writer
+-- could mint a fresh receipt with evidence {}, which is exactly the "clock
+-- reset" Q008.D2 forbids (a subject resets its own miss clock by asserting
+-- it, with nothing behind the assertion).
+--
+-- WHAT THE DESIGN ASKS FOR AND WHY IT IS NOT BUILT: the coordinator's
+-- direction was to look up a qualifying row in the Completion Register
+-- (ops.completion_receipt / ops.completion_subject / ops.completion_observation,
+-- migration 0431) and store it as a foreign key, with no caller evidence at
+-- all. THAT SCHEMA EXISTS BUT IS UNPOPULATED IN PRODUCTION: grepping every
+-- migration and every mcp-server handler, the only INSERTs into
+-- ops.completion_subject/ops.completion_receipt/ops.completion_observation
+-- anywhere in this repository are the completion-register-schema-local-pg-
+-- gate.py selftest's own fixture rows. No producer exists that creates a
+-- completion_subject for an engineering_program (or any) subject, so there
+-- is no real row this function could look up for
+-- (engineering_program, doctorcre-v5) or any other V5-A05 subject. Wiring a
+-- fake stable_key/capability_class convention to satisfy the letter of an
+-- FK here would be inventing the very producer the coordinator asked NOT to
+-- invent.
+--
+-- WHAT IS FIXED NOW, bounded to what a producer-less system can honestly do:
+-- caller-supplied evidence is removed from the signature entirely. Evidence
+-- is now assembled server-side only (issuer, tenant, timestamp) and can
+-- never be asserted by the caller, closing the actual clock-reset hole (a
+-- writer can no longer manufacture ANY evidence content, real or fake) even
+-- though it cannot yet cite a verified Completion Register outcome. Wiring
+-- a real Completion Register producer for the V5-A05 subject, and returning
+-- to this function to add the FK the design calls for, is named follow-up
+-- work, not silently assumed done.
 -- ---------------------------------------------------------------------------
 
 create or replace function ops.v5_a05_record_cadence_receipt(
-  p_subject_type text, p_subject_ref text, p_evidence jsonb, p_idempotency_key uuid)
+  p_subject_type text, p_subject_ref text, p_idempotency_key uuid)
 returns jsonb language plpgsql security definer
 set search_path = pg_catalog, ops, public
 as $$
@@ -198,6 +262,7 @@ declare
   v_prior ops.v5_a05_cadence_receipt%rowtype;
   v_replan_of uuid := null;
   v_row ops.v5_a05_cadence_receipt%rowtype;
+  v_evidence jsonb;
 begin
   if not (pg_has_role(current_user, 'carr_writer', 'member')
        or pg_has_role(current_user, 'carr_authority', 'member')) then
@@ -207,6 +272,15 @@ begin
   if btrim(coalesce(p_subject_type, '')) = '' or btrim(coalesce(p_subject_ref, '')) = '' then
     raise exception 'subject_type and subject_ref are required' using errcode = '22023';
   end if;
+
+  -- Server-computed only. No caller-supplied field is ever stored here --
+  -- see the header comment above for why this is not yet a Completion
+  -- Register foreign key.
+  v_evidence := jsonb_build_object(
+    'schema_version', 'v5-a05-cadence-receipt-evidence.v1',
+    'issued_by', v_actor, 'issued_at', v_now,
+    'completion_register_outcome_id', null,
+    'disclosed_gap', 'no Completion Register producer exists yet for this subject; see migrations/0592_delivery_cadence_a05.sql');
 
   select * into v_prior from ops.v5_a05_cadence_receipt
    where organization_tenant_id = v_tenant and subject_type = p_subject_type and subject_ref = p_subject_ref
@@ -219,7 +293,7 @@ begin
     (subject_type, subject_ref, issued_at, expires_at, evidence, replan_of, created_by, idempotency_key)
   values
     (p_subject_type, p_subject_ref, v_now, v_now + interval '14 days',
-     coalesce(p_evidence, '{}'::jsonb), v_replan_of, v_actor, p_idempotency_key)
+     v_evidence, v_replan_of, v_actor, p_idempotency_key)
   on conflict (organization_tenant_id, idempotency_key) do nothing
   returning * into v_row;
 
@@ -235,8 +309,8 @@ begin
 end;
 $$;
 
-comment on function ops.v5_a05_record_cadence_receipt(text,text,jsonb,uuid) is
-  'V5-A05: the one write door onto ops.v5_a05_cadence_receipt. Records that a subject checked in; performs no escalation itself.';
+comment on function ops.v5_a05_record_cadence_receipt(text,text,uuid) is
+  'V5-A05: the one write door onto ops.v5_a05_cadence_receipt. Records that a subject checked in; performs no escalation itself. Evidence is server-computed only -- no caller-supplied evidence field exists (review finding 2); a real Completion Register foreign key is disclosed follow-up work, not yet buildable because no producer populates the Completion Register for this subject.';
 
 -- ---------------------------------------------------------------------------
 -- ops.notification_quiet_now -- extracted verbatim from ops.mint_notification
@@ -265,6 +339,48 @@ $$;
 
 comment on function ops.notification_quiet_now(uuid) is
   'V5-A05: extracted from ops.mint_notification''s own inline quiet-hours boolean (0521). The one quiet-hours computation; nothing duplicates it.';
+
+-- ---------------------------------------------------------------------------
+-- ops.notification_preference_facts, redefined to CALL ops.notification_quiet_now
+-- instead of carrying its own second copy of the same boolean.
+--
+-- Review finding 9 (Opus adversarial review of PR #1236, round 1): this
+-- migration's own header claimed "any future reader compute[s] quiet-hours
+-- from exactly one place", but ops.notification_preference_facts (0527) kept
+-- its own inline copy of the identical computation until now. Same argument
+-- list, same return shape, same zero-argument caller contract -- only the
+-- v_quiet assignment changes, from the inline case expression to a call.
+-- ---------------------------------------------------------------------------
+
+create or replace function ops.notification_preference_facts()
+returns jsonb language plpgsql stable security definer
+set search_path=pg_catalog,ops,public
+as $$
+declare v_actor uuid; v_pref ops.notification_preference%rowtype; v_quiet boolean;
+begin
+  if not (pg_has_role(current_user, 'carr_writer', 'member')
+       or pg_has_role(current_user, 'carr_authority', 'member')) then
+    raise exception using errcode = '42501',
+      message = 'reading notification preferences requires the writer or authority capability';
+  end if;
+  v_actor := ops.portfolio_writer_actor_id();
+
+  select * into v_pref from ops.notification_preference where actor = v_actor;
+  v_quiet := ops.notification_quiet_now(v_actor);
+
+  return jsonb_build_object(
+    'ok', true,
+    'exists', v_pref.actor is not null,
+    'device_opt_in', coalesce(v_pref.device_opt_in, false),
+    'quiet_hours_start', v_pref.quiet_hours_start,
+    'quiet_hours_end', v_pref.quiet_hours_end,
+    'timezone', coalesce(v_pref.timezone, 'UTC'),
+    'version', coalesce(v_pref.version, 1),
+    'quiet_now', v_quiet);
+end $$;
+
+comment on function ops.notification_preference_facts() is
+  'WR-000116/V5-A05: reads the acting actor''s own notification preferences and whether quiet hours cover this instant, via ops.notification_quiet_now (the one quiet-hours computation; this no longer carries its own copy). ZERO arguments: the actor is resolved inside the body.';
 
 -- ---------------------------------------------------------------------------
 -- ops.mint_notification, redefined with one new trailing parameter.
@@ -359,6 +475,50 @@ comment on function ops.mint_notification(text,uuid,text,text,text,text,text,tex
   'WR-000113/V5-A05: the only notification writer. p_bypass_quiet_hours (default false) is the one addition -- see ops.notification_quiet_now.';
 
 -- ---------------------------------------------------------------------------
+-- ops.v5_a05_assurance_cadence_batch -- the morning brief's ONLY door onto
+-- ops.notification/ops.notification_read for the assurance_cadence section.
+-- Review finding (Opus adversarial review of PR #1236, round 1): morning-brief
+-- read these two tables DIRECTLY in mcp-server/src/tools.js, on the reader
+-- connection, with no carr_reader grant at all -- tools/test-handler-reads-
+-- are-granted.py fails, and in production the section reads "unavailable"
+-- every day (42501). A raw table grant to carr_reader would let any reader-
+-- scoped caller read every actor's notifications; this function is scoped
+-- server-side to exactly one recipient (the authenticated actor morning-brief
+-- already resolved), the same shape as v5_a05_cadence_status/
+-- notification_quiet_now above. STABLE, no write, SECURITY DEFINER because
+-- ops.notification/ops.notification_read stay ungranted to carr_reader
+-- directly.
+-- ---------------------------------------------------------------------------
+
+create or replace function ops.v5_a05_assurance_cadence_batch(p_recipient_slug text)
+returns jsonb language plpgsql stable security definer
+set search_path = pg_catalog, ops, public
+as $$
+declare v_result jsonb;
+begin
+  select coalesce(jsonb_agg(row_to_json(batch) order by batch.created_at desc), '[]'::jsonb)
+    into v_result
+  from (
+    select n.id as notification_id, n.reason, n.severity, n.subject_type, n.subject_ref,
+           n.deep_link, n.created_at, s.signal_kind as reason_id
+      from ops.notification n
+      join signal_event s on s.id = n.event_ref and n.event_source = 'signal_event'
+      left join ops.notification_read r
+        on r.notification_id = n.id and r.recipient_actor = n.recipient_actor
+     where n.recipient_actor = (select id from actor where slug = p_recipient_slug and active)
+       and s.producer = 'v5-a05-delivery-cadence'
+       and r.notification_id is null
+     order by n.created_at desc
+     limit 50
+  ) batch;
+  return v_result;
+end;
+$$;
+
+comment on function ops.v5_a05_assurance_cadence_batch(text) is
+  'V5-A05: the morning brief''s only door onto ops.notification/ops.notification_read for the assurance_cadence section; granted to carr_reader so the reader connection never touches those tables directly.';
+
+-- ---------------------------------------------------------------------------
 -- Grants.
 -- ---------------------------------------------------------------------------
 
@@ -371,15 +531,25 @@ revoke all on function ops.v5_a05_cadence_status(text,text)
   from public, carr_reader, carr_writer, carr_jobs, carr_authority;
 grant execute on function ops.v5_a05_cadence_status(text,text) to carr_writer, carr_authority;
 
-revoke all on function ops.v5_a05_record_cadence_receipt(text,text,jsonb,uuid)
+revoke all on function ops.v5_a05_record_cadence_receipt(text,text,uuid)
   from public, carr_reader, carr_writer, carr_jobs, carr_authority;
-grant execute on function ops.v5_a05_record_cadence_receipt(text,text,jsonb,uuid) to carr_writer, carr_authority;
+grant execute on function ops.v5_a05_record_cadence_receipt(text,text,uuid) to carr_writer, carr_authority;
 
+-- Review finding 9 (Opus adversarial review of PR #1236, round 1): nothing
+-- external ever needs to call this directly -- ops.mint_notification and
+-- ops.notification_preference_facts are both themselves SECURITY DEFINER and
+-- call it internally, which Postgres checks against their OWNER's
+-- privileges, not the connecting role's. A carr_writer/carr_authority grant
+-- here was therefore never load-bearing and only widened who could probe
+-- another actor's quiet-hours state directly. Owner-only.
 revoke all on function ops.notification_quiet_now(uuid)
   from public, carr_reader, carr_writer, carr_jobs, carr_authority;
-grant execute on function ops.notification_quiet_now(uuid) to carr_writer, carr_authority;
 
 revoke all on function ops.mint_notification(text,uuid,text,text,text,text,text,text,text,boolean)
   from public, carr_reader, carr_writer, carr_jobs, carr_authority;
 grant execute on function ops.mint_notification(text,uuid,text,text,text,text,text,text,text,boolean)
   to carr_writer, carr_authority;
+
+revoke all on function ops.v5_a05_assurance_cadence_batch(text)
+  from public, carr_reader, carr_writer, carr_jobs, carr_authority;
+grant execute on function ops.v5_a05_assurance_cadence_batch(text) to carr_reader;

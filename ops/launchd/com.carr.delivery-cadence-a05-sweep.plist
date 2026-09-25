@@ -9,7 +9,7 @@
   com.carr.timebomb-audit.plist's own header). Reading cadence-status and,
   only on a detected miss, calling raise-delivery-cadence-alert is a fixed
   predicate pipeline over deterministic record-layer reads and one bounded
-  write -- not a judgement call about what to do next.
+  write, not a judgement call about what to do next.
 
   07:00 local: before the working day starts, so a miss detected overnight is
   already in the morning brief's assurance_cadence section when Joe or Dell

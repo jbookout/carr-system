@@ -69598,7 +69598,7 @@
           "effect_class": "audit_side_effect",
           "source_locator": "mcp-server/src/delivery-cadence-a05-tools.js",
           "schema_digest": "b19fb40dfe8a4872ce504f14f429bb528e7991bbe9b897b7d85a0751ca01c55a",
-          "source_digest": "1cfdb798792ada6cda3d1ec2ceb06869aa3b078e137a85f73bf30e8d93ecfbae",
+          "source_digest": "b726dbdca9959227896857e6cf410544004d7656cebf18cbfe0ce7a0757c522c",
           "write": false,
           "human_only": false,
           "authority_only": false,
@@ -69621,7 +69621,7 @@
           "effect_class": "administrative_mutation",
           "source_locator": "mcp-server/src/delivery-cadence-a05-tools.js",
           "schema_digest": "eae7d9f5b3f67d9a08f2571369236a615a6c572f09c9dd100099a1e0968b367f",
-          "source_digest": "1cfdb798792ada6cda3d1ec2ceb06869aa3b078e137a85f73bf30e8d93ecfbae",
+          "source_digest": "b726dbdca9959227896857e6cf410544004d7656cebf18cbfe0ce7a0757c522c",
           "write": true,
           "human_only": false,
           "authority_only": false,
@@ -69643,8 +69643,8 @@
           "operation": "record-cadence-receipt",
           "effect_class": "administrative_mutation",
           "source_locator": "mcp-server/src/delivery-cadence-a05-tools.js",
-          "schema_digest": "a83720b44af0e398dd09b9adf4a6e9a630e6d40068be69f45dcecb29b6369170",
-          "source_digest": "1cfdb798792ada6cda3d1ec2ceb06869aa3b078e137a85f73bf30e8d93ecfbae",
+          "schema_digest": "29d5a63dbb5c1e1e639426dd6e229889d17a899ceb3f1e6bba98c6c8e619974e",
+          "source_digest": "b726dbdca9959227896857e6cf410544004d7656cebf18cbfe0ce7a0757c522c",
           "write": true,
           "human_only": false,
           "authority_only": false,
@@ -69700,8 +69700,14 @@
           "classification_authorizing": false
         }
       ],
+      "row_replacements": {
+        "external-admin:tools/migrate.py": {
+          "schema_digest": "5155df647729a342f4390eadf9f7b4461146c1455647736b0d94641be7eca949",
+          "handler_digest": "5155df647729a342f4390eadf9f7b4461146c1455647736b0d94641be7eca949"
+        }
+      },
       "expected_count": 904,
-      "expected_sha256": "7c89c0d15cdec813e2e4bc706b5e331019f8e837d54967455196621c604466d2"
+      "expected_sha256": "599f528fd0fdc193fe49c37b435dc37510b34bff67ac1187ae9026ac9a190629"
     }
   ],
   "current_source_review": {

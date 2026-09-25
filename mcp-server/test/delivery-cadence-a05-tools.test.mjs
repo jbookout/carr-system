@@ -73,6 +73,7 @@ async function dispatched(client, fn) {
 }
 
 const PARTNER_ACTOR = id => ({ id, slug: "joe", human: true, via: "oauth-google" });
+const ACTOR = (id, slug) => ({ id, slug, human: true, via: "oauth-google" });
 
 function a05(harnessed) {
   return deliveryCadenceA05Tools({
@@ -186,4 +187,173 @@ test("V5A05-ESCALATION-NO-QUEUE-ENTRY: an ordinary reason with no authority/inte
   assert.equal(result.signal.severity, "info");
   assert.equal(result.notification.minted, false);
   assert.equal(result.notification.reason_id, "severity_not_notifiable");
+});
+
+// Round-1 Opus review of #1236, findings 1, 7 and 9: three mutations the
+// reviewer showed would survive the original test suite untested --
+// bypassing quiet hours, silently downgrading an urgent reason's severity,
+// and dropping the recipient filter on the morning-brief batch read. Each
+// of the following cases fails if that mutation is reintroduced.
+
+async function withForcedQuietHours(client, actorId, fn) {
+  await client.query(
+    `insert into ops.notification_preference(actor, device_opt_in, quiet_hours_start, quiet_hours_end, timezone)
+     values ($1, true, '00:00', '23:59', 'UTC')
+     on conflict (actor) do update set device_opt_in = true,
+       quiet_hours_start = '00:00', quiet_hours_end = '23:59', timezone = 'UTC'`, [actorId]);
+  try {
+    return await fn();
+  } finally {
+    await client.query(
+      `update ops.notification_preference set quiet_hours_start = null, quiet_hours_end = null
+        where actor = $1`, [actorId]);
+  }
+}
+
+test("V5A05-QUIET-HOURS-URGENT-BYPASSES: with quiet hours forced on, an urgent alert still delivers", async t => {
+  const pg = await skipUnlessDatabase(t);
+  if (!pg) return;
+  const client = await connect(pg);
+  t.after(() => client.end().catch(() => {}));
+  const joe = (await client.query(
+    "select id from public.actor where slug='joe' and kind='human' and active")).rows[0];
+  assert.ok(joe);
+
+  const verbs = a05(harness());
+  const result = await withForcedQuietHours(client, joe.id, () => dispatched(client, () =>
+    verbs["raise-delivery-cadence-alert"].handler(wrap(client), PARTNER_ACTOR(joe.id), {
+      idempotency_key: randomUUID(), reason_id: "security_incident",
+      subject_type: "engineering_program", subject_ref: `v5a05-quiet-urgent-${randomUUID()}`,
+    })));
+
+  assert.equal(result.notification.minted, true,
+    "MUTATION SURVIVAL: an urgent V5-A05 alert must still deliver during forced quiet hours");
+  assert.equal(result.notification.bypassed_quiet_hours, true,
+    "MUTATION SURVIVAL: the mint must record that quiet hours were bypassed, not silently ignored");
+});
+
+test("V5A05-QUIET-HOURS-ORDINARY-SUPPRESSED: with quiet hours forced on, an ordinary authority-needing alert is suppressed, not delivered", async t => {
+  const pg = await skipUnlessDatabase(t);
+  if (!pg) return;
+  const client = await connect(pg);
+  t.after(() => client.end().catch(() => {}));
+  const joe = (await client.query(
+    "select id from public.actor where slug='joe' and kind='human' and active")).rows[0];
+  assert.ok(joe);
+
+  const verbs = a05(harness());
+  const result = await withForcedQuietHours(client, joe.id, () => dispatched(client, () =>
+    verbs["raise-delivery-cadence-alert"].handler(wrap(client), PARTNER_ACTOR(joe.id), {
+      idempotency_key: randomUUID(), reason_id: "cadence_miss_replan_required",
+      subject_type: "engineering_program", subject_ref: `v5a05-quiet-ordinary-${randomUUID()}`,
+      requires_joe_authority: true,
+    })));
+
+  assert.equal(result.routing.bypasses_quiet_hours, false,
+    "MUTATION SURVIVAL: an ordinary authority-needing reason must not be classified as a quiet-hours bypass");
+  assert.equal(result.notification.bypassed_quiet_hours ?? false, false,
+    "MUTATION SURVIVAL: quiet hours must actually suppress delivery of an ordinary reason, not just skip the flag");
+});
+
+test("V5A05-SEVERITY-NOT-DOWNGRADED: an urgent reason's signal severity stays critical end to end", async t => {
+  const pg = await skipUnlessDatabase(t);
+  if (!pg) return;
+  const client = await connect(pg);
+  t.after(() => client.end().catch(() => {}));
+  const joe = (await client.query(
+    "select id from public.actor where slug='joe' and kind='human' and active")).rows[0];
+  assert.ok(joe);
+
+  const verbs = a05(harness());
+  const args = {
+    idempotency_key: randomUUID(), reason_id: "data_loss_risk",
+    subject_type: "engineering_program", subject_ref: `v5a05-severity-${randomUUID()}`,
+  };
+  const result = await dispatched(client, () =>
+    verbs["raise-delivery-cadence-alert"].handler(wrap(client), PARTNER_ACTOR(joe.id), args));
+
+  assert.equal(result.signal.severity, "critical",
+    "MUTATION SURVIVAL: an urgent V5-A05 reason must not be silently downgraded below critical");
+  const stored = await client.query(
+    "select severity from ops.notification where id = $1", [result.notification.notification_id]);
+  assert.equal(stored.rows[0]?.severity, "critical",
+    "MUTATION SURVIVAL: the persisted notification row must carry the same severity as the classifier, not a weaker one");
+});
+
+test("V5A05-DURABLE-MISS-RECORD: the signal_event row for a miss survives even when the notification never mints (finding 8)", async t => {
+  const pg = await skipUnlessDatabase(t);
+  if (!pg) return;
+  const client = await connect(pg);
+  t.after(() => client.end().catch(() => {}));
+  const joe = (await client.query(
+    "select id from public.actor where slug='joe' and kind='human' and active")).rows[0];
+  assert.ok(joe);
+
+  const verbs = a05(harness());
+  const args = {
+    idempotency_key: randomUUID(), reason_id: "cadence_miss_replan_required",
+    subject_type: "engineering_program", subject_ref: `v5a05-durable-${randomUUID()}`,
+    requires_joe_authority: true,
+  };
+  const first = await dispatched(client, () =>
+    verbs["raise-delivery-cadence-alert"].handler(wrap(client), PARTNER_ACTOR(joe.id), args));
+  assert.equal(first.duplicate, false);
+
+  // Same idempotency_key and subject again: signal_event upserts on
+  // conflict do nothing, so the second call reports duplicate and mints no
+  // second notification -- but the FIRST miss's row must still be there.
+  const second = await dispatched(client, () =>
+    verbs["raise-delivery-cadence-alert"].handler(wrap(client), PARTNER_ACTOR(joe.id), args));
+  assert.equal(second.duplicate, true);
+  assert.equal(second.notification.minted, false);
+
+  const stored = await client.query(
+    "select signal_kind, severity from signal_event where producer=$1 and signal_key=$2",
+    ["v5-a05-delivery-cadence",
+     `v5-a05:cadence_miss_replan_required:engineering_program:${args.subject_ref}:${args.idempotency_key}`]);
+  assert.equal(stored.rows.length, 1,
+    "MUTATION SURVIVAL / finding 8: the miss's signal_event row must persist regardless of notification outcome");
+  assert.equal(stored.rows[0].signal_kind, "cadence_miss_replan_required");
+});
+
+test("V5A05-MORNING-BRIEF-BATCH: assurance-cadence-batch returns only the named recipient's unread V5-A05 notifications", async t => {
+  const pg = await skipUnlessDatabase(t);
+  if (!pg) return;
+  const client = await connect(pg);
+  t.after(() => client.end().catch(() => {}));
+  const joe = (await client.query(
+    "select id from public.actor where slug='joe' and kind='human' and active")).rows[0];
+  const dell = (await client.query(
+    "select id from public.actor where slug='dell' and kind='human' and active")).rows[0];
+  assert.ok(joe);
+  assert.ok(dell, "this proof needs the dell partner actor row db/schema.sql seeds");
+
+  const verbs = a05(harness());
+  const joeSubject = `v5a05-batch-joe-${randomUUID()}`;
+  const dellSubject = `v5a05-batch-dell-${randomUUID()}`;
+
+  await dispatched(client, () =>
+    verbs["raise-delivery-cadence-alert"].handler(wrap(client), PARTNER_ACTOR(joe.id), {
+      idempotency_key: randomUUID(), reason_id: "security_incident",
+      subject_type: "engineering_program", subject_ref: joeSubject,
+    }));
+  await dispatched(client, () =>
+    verbs["raise-delivery-cadence-alert"].handler(wrap(client), ACTOR(dell.id, "dell"), {
+      idempotency_key: randomUUID(), reason_id: "security_incident",
+      subject_type: "engineering_program", subject_ref: dellSubject,
+    }));
+
+  await client.query("set local role carr_reader");
+  try {
+    const forJoe = await client.query(
+      "select ops.v5_a05_assurance_cadence_batch($1) as batch", ["joe"]);
+    const joeBatch = forJoe.rows[0].batch;
+    assert.ok(Array.isArray(joeBatch));
+    assert.ok(joeBatch.some(row => row.subject_ref === joeSubject),
+      "the recipient's own alert must be present");
+    assert.equal(joeBatch.some(row => row.subject_ref === dellSubject), false,
+      "MUTATION SURVIVAL: dropping the recipient filter would leak dell's alert into joe's batch");
+  } finally {
+    await client.query("reset role");
+  }
 });

@@ -56,7 +56,7 @@ export function deliveryCadenceA05Tools({ withEnvelope, writeEvent, ToolError })
   async function require0592(c) {
     const r = await c.query(
       `select to_regprocedure('ops.v5_a05_cadence_status(text,text)') is not null as status_fn,
-              to_regprocedure('ops.v5_a05_record_cadence_receipt(text,text,jsonb,uuid)') is not null as record_fn,
+              to_regprocedure('ops.v5_a05_record_cadence_receipt(text,text,uuid)') is not null as record_fn,
               to_regprocedure('ops.mint_notification(text,uuid,text,text,text,text,text,text,text,boolean)') is not null as mint_fn`);
     const s = r.rows[0];
     if (s.status_fn && s.record_fn && s.mint_fn) return;
@@ -109,18 +109,17 @@ export function deliveryCadenceA05Tools({ withEnvelope, writeEvent, ToolError })
 
     "record-cadence-receipt": {
       write: true,
-      description: "Record that a subject's V5-A05 assurance cadence checked in. Inserts one append-only row into ops.v5_a05_cadence_receipt, expiring 14 days from now. Performs no escalation -- raise-delivery-cadence-alert and the daily sweep own that.",
+      description: "Record that a subject's V5-A05 assurance cadence checked in. Inserts one append-only row into ops.v5_a05_cadence_receipt, expiring 14 days from now. Performs no escalation -- raise-delivery-cadence-alert and the daily sweep own that. Evidence is computed server-side by ops.v5_a05_record_cadence_receipt itself (Q008.D2: no caller-supplied evidence can reset the clock) -- a caller cannot pass or influence it. Disclosed gap (migration 0592's own header comment): no Completion Register producer exists yet for any V5-A05 subject, so the server-computed evidence records that gap rather than a fabricated outcome-row foreign key.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
         idempotency_key: { type: "string" },
         subject_type: { type: "string" }, subject_ref: { type: "string" },
-        evidence: { type: "object" },
       }, required: ["idempotency_key", "subject_type", "subject_ref"] },
       handler: async (c, actor, args) => withEnvelope(c, actor, "record-cadence-receipt", args, async () => {
         await require0592(c);
         assertSubject(args);
         const r = await c.query(
-          "select ops.v5_a05_record_cadence_receipt($1::text,$2::text,$3::jsonb,$4::uuid) as receipt",
-          [args.subject_type, args.subject_ref, JSON.stringify(args.evidence || {}), args.idempotency_key]);
+          "select ops.v5_a05_record_cadence_receipt($1::text,$2::text,$3::uuid) as receipt",
+          [args.subject_type, args.subject_ref, args.idempotency_key]);
         const receipt = r.rows[0].receipt;
         if (receipt.deduplicated !== true) {
           await writeEvent(c, actor, "record-cadence-receipt", "v5_a05_cadence_receipt", receipt.receipt_id, {
@@ -134,9 +133,26 @@ export function deliveryCadenceA05Tools({ withEnvelope, writeEvent, ToolError })
       }),
     },
 
+    // Review finding 8 (Opus adversarial review of PR #1236, round 1): a miss
+    // must leave a durable miss record, not only notify. The signal_event
+    // insert below is that durable record -- it is written unconditionally,
+    // before the notify branch runs, upserted idempotently (on conflict do
+    // nothing) rather than ever overwritten or deleted, and its signal_kind
+    // carries the exact miss reason_id (cadence_miss_replan_required /
+    // cadence_interval_exceeded_since_activation), so the miss survives
+    // regardless of whether the notification mints, dedupes, or fails.
+    // Disclosed gap: the finding also asked for the miss to "degrade rollout
+    // state." No rollout-state, release-health, or deployment-health concept
+    // or table exists anywhere in this repository today (confirmed by
+    // repo-wide search) for a V5 delivery-program miss to degrade -- this PR
+    // does not invent one. Per the same fallback this PR already used for
+    // finding 2's Completion Register gap: disclosing the missing mechanism
+    // here, rather than fabricating a table/column no other system reads, is
+    // the safer choice until a real rollout-state surface exists to wire
+    // into.
     "raise-delivery-cadence-alert": {
       write: true,
-      description: "Raise a V5-A05 escalation candidate: urgent security/data-loss/outward-harm reasons deliver immediately and bypass quiet hours; an ordinary reason needing Joe's authority or naming unresolved intent batches for the morning brief; anything else is recorded as evidence only and never notifies. Classification is the closed, tested vocabulary in delivery-cadence-a05.v5.js -- reason_id alone never grants urgency, and requires_joe_authority/unresolved_intent are the only other inputs that can (excluded_scope: automatic authority widening).",
+      description: "Raise a V5-A05 escalation candidate: urgent security/data-loss/outward-harm reasons deliver immediately and bypass quiet hours; an ordinary reason needing Joe's authority or naming unresolved intent batches for the morning brief; anything else is recorded as evidence only and never notifies. Classification is the closed, tested vocabulary in delivery-cadence-a05.v5.js -- reason_id alone never grants urgency, and requires_joe_authority/unresolved_intent are the only other inputs that can (excluded_scope: automatic authority widening). A durable signal_event row is written for every call before any notification branch runs -- see the finding-8 comment above this verb.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
         idempotency_key: { type: "string" },
         reason_id: { type: "string", enum: [...V5_A05_URGENT_REASON_IDS, ...V5_A05_ORDINARY_REASON_IDS] },
