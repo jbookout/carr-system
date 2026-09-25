@@ -52,6 +52,10 @@ async function connect(pg, slug = "joe") {
   await client.connect();
   await client.query("select set_config('carr.acting_actor_slug',$1,false)", [slug]);
   await client.query("select set_config('carr.verified_human_actor_slug',$1,false)", [slug]);
+  // ops.v5_a05_cadence_status (migration 0610) reads the completion register's
+  // server-derived tenant; without this the FIRST case (cadence-status with no
+  // receipt yet) throws before ever reaching the assertion under test.
+  await client.query("select set_config('carr.organization_tenant_id',$1,false)", ["carr-internal"]);
   return client;
 }
 
@@ -106,8 +110,13 @@ test("V5A05-CADENCE-RECEIPT: record then read status current, then a backdated p
   assert.equal(recorded.deduplicated, false);
   assert.equal(recorded.replan_of, null);
 
+  // Fresh harness: the in-memory withEnvelope cache is per-request, so
+  // reusing `verbs` here would short-circuit on that cache instead of
+  // exercising ops.v5_a05_record_cadence_receipt's real idempotency check --
+  // exactly as two separate requests carrying the same idempotency_key would
+  // each get their own fresh envelope cache in production.
   const dup = await dispatched(client, () =>
-    verbs["record-cadence-receipt"].handler(wrap(client), PARTNER_ACTOR(joe.id), receiptArgs));
+    a05(harness())["record-cadence-receipt"].handler(wrap(client), PARTNER_ACTOR(joe.id), receiptArgs));
   assert.equal(dup.deduplicated, true, "the same idempotency_key never inserts twice");
   assert.equal(dup.receipt_id, recorded.receipt_id);
 
@@ -118,10 +127,18 @@ test("V5A05-CADENCE-RECEIPT: record then read status current, then a backdated p
   // 3. Backdate the receipt directly (test setup only -- production never
   // does this; the write function always uses clock_timestamp()) to prove
   // cadence-status correctly reports a miss once the 14-day window lapses.
+  // ops.v5_a05_cadence_receipt is append-only (v5_a05_cadence_receipt_immutable,
+  // migration 0610) by design, so this setup-only mutation must disable that
+  // trigger for the single statement and re-enable it immediately after --
+  // the same idiom migration code itself uses for a guarded, temporary bypass.
+  await client.query(
+    "alter table ops.v5_a05_cadence_receipt disable trigger v5_a05_cadence_receipt_immutable");
   await client.query(
     `update ops.v5_a05_cadence_receipt set issued_at = now() - interval '20 days', expires_at = now() - interval '6 days'
       where id = $1`,
     [recorded.receipt_id]);
+  await client.query(
+    "alter table ops.v5_a05_cadence_receipt enable trigger v5_a05_cadence_receipt_immutable");
   const missed = await verbs["cadence-status"].handler(wrap(client), PARTNER_ACTOR(joe.id), subject);
   assert.equal(missed.status, "missed");
   assert.equal(missed.requires_replan, true);
@@ -266,7 +283,7 @@ test("V5A05-SEVERITY-NOT-DOWNGRADED: an urgent reason's signal severity stays cr
 
   const verbs = a05(harness());
   const args = {
-    idempotency_key: randomUUID(), reason_id: "data_loss_risk",
+    idempotency_key: randomUUID(), reason_id: "data_loss",
     subject_type: "engineering_program", subject_ref: `v5a05-severity-${randomUUID()}`,
   };
   const result = await dispatched(client, () =>
@@ -276,8 +293,12 @@ test("V5A05-SEVERITY-NOT-DOWNGRADED: an urgent reason's signal severity stays cr
     "MUTATION SURVIVAL: an urgent V5-A05 reason must not be silently downgraded below critical");
   const stored = await client.query(
     "select severity from ops.notification where id = $1", [result.notification.notification_id]);
-  assert.equal(stored.rows[0]?.severity, "critical",
-    "MUTATION SURVIVAL: the persisted notification row must carry the same severity as the classifier, not a weaker one");
+  // ops.notification's severity vocabulary (action_required|completion|failure,
+  // migration 0521) is NOT signal_event's (info|warning|critical): "critical"
+  // is mapped through MINT_SEVERITY to "failure" at mint time, so the
+  // persisted notification row is expected to carry "failure", not "critical".
+  assert.equal(stored.rows[0]?.severity, "failure",
+    "MUTATION SURVIVAL: the persisted notification row must carry the mapped severity, not a weaker one");
 });
 
 test("V5A05-DURABLE-MISS-RECORD: the signal_event row for a miss survives even when the notification never mints (finding 8)", async t => {
@@ -289,21 +310,25 @@ test("V5A05-DURABLE-MISS-RECORD: the signal_event row for a miss survives even w
     "select id from public.actor where slug='joe' and kind='human' and active")).rows[0];
   assert.ok(joe);
 
-  const verbs = a05(harness());
   const args = {
     idempotency_key: randomUUID(), reason_id: "cadence_miss_replan_required",
     subject_type: "engineering_program", subject_ref: `v5a05-durable-${randomUUID()}`,
     requires_joe_authority: true,
   };
   const first = await dispatched(client, () =>
-    verbs["raise-delivery-cadence-alert"].handler(wrap(client), PARTNER_ACTOR(joe.id), args));
+    a05(harness())["raise-delivery-cadence-alert"].handler(wrap(client), PARTNER_ACTOR(joe.id), args));
   assert.equal(first.duplicate, false);
 
-  // Same idempotency_key and subject again: signal_event upserts on
-  // conflict do nothing, so the second call reports duplicate and mints no
-  // second notification -- but the FIRST miss's row must still be there.
+  // Same idempotency_key and subject again, but through a FRESH harness: the
+  // in-memory withEnvelope cache is per-request (one server process handling
+  // one call), so reusing the first call's `verbs` here would short-circuit
+  // on the harness's own envelope cache instead of exercising signal_event's
+  // real (producer,signal_key) upsert-on-conflict at the SQL layer -- exactly
+  // as two separate requests carrying the same idempotency_key would each get
+  // their own fresh envelope cache in production. The FIRST miss's row must
+  // still be there.
   const second = await dispatched(client, () =>
-    verbs["raise-delivery-cadence-alert"].handler(wrap(client), PARTNER_ACTOR(joe.id), args));
+    a05(harness())["raise-delivery-cadence-alert"].handler(wrap(client), PARTNER_ACTOR(joe.id), args));
   assert.equal(second.duplicate, true);
   assert.equal(second.notification.minted, false);
 

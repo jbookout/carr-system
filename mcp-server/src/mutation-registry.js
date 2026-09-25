@@ -4,12 +4,19 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v73 is the runtime selector after V5-A05 delivery cadence (migration 0610,
+// v74 is the runtime selector after V5-A05 delivery cadence (migration 0610,
 // cadence receipts, escalation routing, quiet-hours queue). Its sealed
 // catalog admits three new verbs -- cadence-status, record-cadence-receipt
 // and raise-delivery-cadence-alert -- and preserves earlier versions as
-// history. First-ready numbering (the orchestrator's 2026-09-24 ruling):
-// this seal took main's newest + 1 at push time (v72, migration 0603).
+// history. First-ready numbering: this seal chains over #1246's v73
+// (migration 0609, a narrow re-digest of bin/deploy-worker.sh's source row,
+// itself chained over v72/migration 0603), taking main's newest + 1 at push
+// time.
+//
+// Superseded note (v73): v73 (migration 0609) was the runtime selector after
+// PR #1246 taught bin/deploy-worker.sh's --upload-version step to apply a
+// pending Durable Object migration -- a source-only re-digest with no new
+// ingress, verb, or grant.
 //
 // Superseded note (v72): v72 was the runtime selector after DoctorCRE V5-R02 (migration 0602,
 // workflow cutover, caller migration and retirement readiness). Its sealed
@@ -84,7 +91,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v73.generated.js";
+} from "./scac-mutation-registry.v74.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 

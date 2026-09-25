@@ -17,6 +17,7 @@ is refused direct SELECT on the two underlying tables.
 """
 from __future__ import annotations
 
+import json
 import os
 import uuid
 
@@ -37,6 +38,7 @@ def main() -> int:
           grant carr_reader to carr_reader_a05_probe;
         end $$""")
 
+        cur.execute("select set_config('carr.organization_tenant_id','carr-internal',true)")
         tenant = cur.execute("select ops.completion_runtime_tenant()").fetchone()[0]
         actor_row = cur.execute(
             "select id from actor where slug='joe' and active limit 1"
@@ -48,21 +50,28 @@ def main() -> int:
         # Seed one signal_event + notification the batch function should return,
         # as carr_writer/carr_authority (the real minting path), before probing
         # as the reader.
+        signal_key = f"v5-a05:cadence_miss_replan_required:engineering_program:doctorcre-v5:{uuid.uuid4()}"
         event_id = cur.execute(
-            """insert into signal_event(subject_type, subject_ref, signal_kind, producer, payload)
+            """insert into signal_event(subject_type, subject_ref, signal_kind, producer, signal_key,
+                 metric_name, observed_value, baseline_value, threshold_value, comparison,
+                 severity, detected_at, evidence_refs, payload, created_by)
                values ('engineering_program','doctorcre-v5','cadence_miss_replan_required',
-                       'v5-a05-delivery-cadence','{}'::jsonb)
-               returning id"""
+                       'v5-a05-delivery-cadence', %s,
+                       'urgent_harm_or_authority_occurrence', 1, null, 1, 'gte',
+                       'warning', now(), %s::jsonb, '{}'::jsonb, %s)
+               returning id""",
+            (signal_key, json.dumps(["v5-a05:reason:cadence_miss_replan_required"]), actor_id),
         ).fetchone()[0]
         notification_id = cur.execute(
             """insert into ops.notification
                  (subject_type, subject_ref, event_ref, event_source, recipient_actor,
                   reason, severity, deep_link, dedupe_key, correlation_id)
                values ('engineering_program','doctorcre-v5', %s, 'signal_event', %s,
-                       'cadence_miss_replan_required', 'urgent', null,
+                       'cadence_miss_replan_required', 'action_required',
+                       '/signals/' || %s,
                        %s, null)
                returning id""",
-            (event_id, actor_id, str(uuid.uuid4())),
+            (event_id, actor_id, str(event_id), str(uuid.uuid4())),
         ).fetchone()[0]
 
         cur.execute("set session authorization carr_reader_a05_probe")
@@ -70,13 +79,19 @@ def main() -> int:
             batch = cur.execute(
                 "select ops.v5_a05_assurance_cadence_batch('joe')"
             ).fetchone()[0]
-            if not isinstance(batch, list) or len(batch) != 1:
+            # The migration class shares one database across every proof in
+            # the sequence, so 'joe' may already carry other unread V5-A05
+            # notifications from earlier proofs -- this gate only needs to
+            # find ITS OWN seeded row among them, not own the whole batch.
+            if not isinstance(batch, list) or not batch:
                 raise RuntimeError(
-                    f"v5-a05 assurance-cadence reader gate: expected one seeded row, got {batch!r}"
+                    f"v5-a05 assurance-cadence reader gate: expected at least one seeded row, got {batch!r}"
                 )
-            if str(batch[0].get("notification_id")) != str(notification_id):
+            seeded = [row for row in batch if str(row.get("notification_id")) == str(notification_id)]
+            if len(seeded) != 1:
                 raise RuntimeError(
-                    "v5-a05 assurance-cadence reader gate: batch did not return the seeded notification"
+                    "v5-a05 assurance-cadence reader gate: batch did not return the seeded notification "
+                    f"exactly once, got {batch!r}"
                 )
 
             # The same reader-scoped role must still be refused DIRECT table
