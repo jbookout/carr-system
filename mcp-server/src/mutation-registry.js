@@ -5,7 +5,7 @@ import {
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
 // v75 is the runtime selector after DoctorCRE V5-F01's record homes, source
-// authority and document identity (migrations 0616/0617). Its sealed catalog
+// authority and document identity (migrations 0623/0624). Its sealed catalog
 // admits nine new verbs -- read-record-source-authority (a read) and the
 // eight record-source-authority writes, two of them humanOnly and
 // authorityOnly -- and preserves earlier versions as history.

@@ -365,13 +365,13 @@ export const REGISTRY_V73_VERSION = "scac-mutation-registry.v73";
 // The runtime selector (mutation-registry.js) moves to v74.
 export const REGISTRY_V74_VERSION = "scac-mutation-registry.v74";
 // v75 admits DoctorCRE V5-F01, chained from v74 (migration 0614): migration
-// 0616 installs the record-source-authority store and the document
+// 0623 installs the record-source-authority store and the document
 // derivative registration doors (SECURITY DEFINER functions with EXECUTE to
 // carr_writer, carr_reader and the carr_authority group), and nine new
 // mcp-tool ingresses in mcp-server/src/record-source-authority-store.v5.js
 // front them: read-record-source-authority (a read) and eight writes, two of
 // them humanOnly and authorityOnly (register-record-source-authority-policy,
-// record-artifact-preservation-hold). tools/migrate.py's (0616, 0617) atomic
+// record-artifact-preservation-hold). tools/migrate.py's (0623, 0624) atomic
 // group re-digests its external-admin row. The runtime selector
 // (mutation-registry.js) moves to v75.
 export const REGISTRY_V75_VERSION = "scac-mutation-registry.v75";
@@ -1531,11 +1531,11 @@ export const POST_0614_FORWARD_V74_DB_CATALOG_BASELINE = Object.freeze({
   secdef_execute: { count: 922, digest: "sha256:cd97cc92711e8734d0a57aaf5513c2edd5efc8e064f04d2215694e597afa66b3" },
 });
 // Measured on the disposable PostgreSQL 17 migration lane by drift readback
-// over migrations 0001-0617 on top of main's v74 predecessor (0614). 0616
+// over migrations 0001-0624 on top of main's v74 predecessor (0614). 0623
 // installs the V5-F01 SECURITY DEFINER doors with EXECUTE to carr_reader,
 // carr_writer and the carr_authority group; with v75's own registration
 // function and its runtime EXECUTE grants they move the catalog.
-export const POST_0617_FORWARD_V75_DB_CATALOG_BASELINE = Object.freeze({
+export const POST_0624_FORWARD_V75_DB_CATALOG_BASELINE = Object.freeze({
   ...POST_0614_FORWARD_V74_DB_CATALOG_BASELINE,
   projection_version: "scac-db-catalog-projection.v75",
   secdef_execute: { count: 948, digest: "sha256:9fc22486476d6c631bfc2676a9aa1b37fce56b807f06a9216379795e946401d8" },
@@ -16459,7 +16459,7 @@ export function renderRecordSourceAuthorityRegistrySql(rows,
   if (sha256(predecessor) !== predecessorDigest)
     throw new Error("v75 predecessor migration pin drifted");
   const oldCatalogBaseline = POST_0614_FORWARD_V74_DB_CATALOG_BASELINE;
-  const newCatalogBaseline = POST_0617_FORWARD_V75_DB_CATALOG_BASELINE;
+  const newCatalogBaseline = POST_0624_FORWARD_V75_DB_CATALOG_BASELINE;
   const oldSeal = registrySeal(REGISTRY_V74_VERSION,
     frozenInventory(REGISTRY_V74_VERSION), oldCatalogBaseline);
   const newSeal = registrySeal(REGISTRY_V75_VERSION, rows, newCatalogBaseline);
@@ -17348,9 +17348,9 @@ export function renderGeneratedFrontier() {
   artifacts["mcp-server/src/scac-mutation-registry.v75.generated.js"] =
     renderRuntimeProjection(v75Rows, {
       version: REGISTRY_V75_VERSION,
-      dbCatalogBaseline: POST_0617_FORWARD_V75_DB_CATALOG_BASELINE,
+      dbCatalogBaseline: POST_0624_FORWARD_V75_DB_CATALOG_BASELINE,
     });
-  artifacts["migrations/0617_f01_record_source_authority_scac_successor.sql"] =
+  artifacts["migrations/0624_f01_record_source_authority_scac_successor.sql"] =
     renderRecordSourceAuthorityRegistrySql(v75Rows,
       artifacts["migrations/0614_journey_one_clock_door_scac_successor.sql"]);
 

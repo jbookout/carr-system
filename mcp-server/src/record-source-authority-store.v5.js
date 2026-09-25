@@ -474,9 +474,9 @@ export function v5F01ToolRegistrations() {
     handler: handlers[name],
     input_keys: [...OPERATION_SCHEMAS[name].keys],
     required_keys: [...OPERATION_SCHEMAS[name].required],
-    // Named rather than implied. Migration 0616 carries domain.sql and the
+    // Named rather than implied. Migration 0623 carries domain.sql and the
     // document-source hunk, recordSourceAuthorityStoreTools below is the door
-    // tools.js registers, and SCAC v75 (0617) seals all nine verbs into the
+    // tools.js registers, and SCAC v75 (0624) seals all nine verbs into the
     // registry the runtime selector reads. Acceptance is a separate, human act.
     registered_in_scac: true,
     registered_in_mutation_registry: true,

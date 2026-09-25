@@ -331,15 +331,15 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0602_doctorcre_r02_workflow_cutover_and_caller_inventory.sql",
         "0603_doctorcre_r02_scac_successor.sql",
     ),
-    # DoctorCRE V5-F01: 0616 installs the record-source-authority store and
+    # DoctorCRE V5-F01: 0623 installs the record-source-authority store and
     # the document derivative registration doors (SECURITY DEFINER, EXECUTE to
-    # carr_writer and the carr_authority group); 0617 seals that catalog as
+    # carr_writer and the carr_authority group); 0624 seals that catalog as
     # v75, chained from main's v74 (0614). Same deferred-epoch-trigger shape as
-    # the pairs above: 0616 applied alone would be refused at commit, so the
+    # the pairs above: 0623 applied alone would be refused at commit, so the
     # pair must be one transaction.
     (
-        "0616_f01_record_source_authority.sql",
-        "0617_f01_record_source_authority_scac_successor.sql",
+        "0623_f01_record_source_authority.sql",
+        "0624_f01_record_source_authority_scac_successor.sql",
     ),
 )
 
@@ -389,8 +389,8 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0603_doctorcre_r02_scac_successor.sql",
     ),
     (
-        "0616_f01_record_source_authority.sql",
-        "0617_f01_record_source_authority_scac_successor.sql",
+        "0623_f01_record_source_authority.sql",
+        "0624_f01_record_source_authority_scac_successor.sql",
     ),
 )
 

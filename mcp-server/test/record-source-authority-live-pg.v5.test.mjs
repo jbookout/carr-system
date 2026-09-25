@@ -363,8 +363,8 @@ test("F01 on real PostgreSQL: migration, SQL fixtures and the registered verbs",
     });
 
     await t.test("no authority login keeps a direct F01 grant, so the sealed catalog is the same everywhere", async () => {
-      // Production has carr_authority_joe when 0616 runs; this lane has no login
-      // then. The SCAC catalog 0617 seals counts grants to every connected carr_*
+      // Production has carr_authority_joe when 0623 runs; this lane has no login
+      // then. The SCAC catalog 0624 seals counts grants to every connected carr_*
       // role, so a direct login grant would make production measure a catalog CI
       // never saw. Tail 3 takes those grants back. Reproduce the production
       // moment on a copy: hand the logins direct grants the way the sources do,

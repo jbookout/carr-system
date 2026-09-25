@@ -941,7 +941,7 @@ if [ "$JOURNEY_ONE_CLOCK_DOOR_REGISTRY_APPLIED" = t ] && [ "$DEPLOY_WORKER_DO_MI
   exit 1
 fi
 F01_RECORD_SOURCE_AUTHORITY_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0617_f01_record_source_authority_scac_successor.sql')" \
+  "select exists (select 1 from schema_migrations where filename='0624_f01_record_source_authority_scac_successor.sql')" \
   2>/dev/null)"
 case "$F01_RECORD_SOURCE_AUTHORITY_REGISTRY_APPLIED" in
   t|f) ;;

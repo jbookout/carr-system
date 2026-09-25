@@ -45,7 +45,7 @@
 -- a CI database has no login at all, so a direct login grant would make the
 -- measured catalog depend on which logins happen to exist.
 --
--- The paired SCAC registry successor is 0617 (v75), applied in the same
+-- The paired SCAC registry successor is 0624 (v75), applied in the same
 -- transaction through tools/migrate.py's atomic group; this file carries no
 -- registry change.
 
@@ -5545,7 +5545,7 @@ $f01_authority_group_posture$;
 -- the direct grants are redundant for the login and harmful for the seal: the
 -- SCAC catalog measures every grant to a carr_* role connected by membership,
 -- so a direct login grant counts in production (carr_authority_joe exists) and
--- not in CI (no login exists), and 0617's measured baseline would refuse the
+-- not in CI (no login exists), and 0624's measured baseline would refuse the
 -- production apply. Revoking them makes the catalog the same in both. Schema
 -- USAGE is left alone: it is not F01's to take back. The readback then proves
 -- each existing login still reaches the authority writers through membership,
