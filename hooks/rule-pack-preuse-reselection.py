@@ -30,8 +30,9 @@ Which pack-layer rules bind that message is decided in
 ops/rule_trigger_delivery.py: the `prompt_regex` rows Jev compiled once per
 rule are matched first; a machine envelope stops there with zero Jev
 requests, and a human prompt then gets one budgeted judgment (a ranking plus
-single-rule binding requests for its top 7, stale rules always included) — at
-most 8 Jev requests per human prompt; code rejects unknown and
+single-rule binding requests for its top 7, stale rules always included; a
+deterministic word-overlap shortlist stands in when the ranking request is
+unavailable) — at most 8 Jev requests per human prompt; code rejects unknown and
 already-loaded layer-zero candidates; the existing authenticated
 standing-context door supplies the authoritative rule text and identity before
 one typed advisory receipt is injected. The content_regex rows no longer run

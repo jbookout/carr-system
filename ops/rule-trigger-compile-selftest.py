@@ -273,12 +273,14 @@ class ChoiceClient(Client):
 
 
 def prop_default_rank(rtc_m, rtd_m):
-    """The REAL default ranker (jev_rule_select.narrow behind a request
-    counter), driven through advise() with only the judge module stubbed:
-    exactly one ranking request, and its top choices are what gets judged.
-    The injected fake ranker elsewhere in this suite hid a NameError here
-    that made every live ranking fail before reaching Jev."""
+    """The REAL default ranker (jev_rule_select's ranking Choice), driven
+    through advise() with only the judge module stubbed: exactly one ranking
+    request, its top choices are what gets judged, and the ranking model is
+    carried on what it returns. The injected fake ranker elsewhere in this
+    suite hid a NameError here that made every live ranking fail before
+    reaching Jev."""
     requests = []
+    model = []
 
     class StubJudge:
         JudgeUnavailable = RuntimeError
@@ -315,12 +317,65 @@ def prop_default_rank(rtc_m, rtd_m):
                          delivered_cache=os.path.join(tmp, "d"), envelope=False,
                          log_path=os.path.join(tmp, "log.jsonl"))
             row = json.loads(Path(tmp, "log.jsonl").read_text().splitlines()[-1])
+        bound, _ = rtd_m.judge_budgeted("git push please", ROSTER[1:], [],
+                                        ask=Asker(0.9), client=ChoiceClient)
+        model.extend({r["ranking_model"] for r in bound.values()})
     except Exception:
         return False
     finally:
         rtd_m._sibling = real_sibling
-    return (requests == [["rank"]] and row["rank_status"] == "ranked"
-            and "ffff0039" in ask.asked() and row["jev_calls"] == 1 + len(ask.calls))
+    return (requests == [["rank"]] * 2 and row["rank_status"] == "ok"
+            and "ffff0039" in ask.asked() and row["jev_calls"] == 1 + len(ask.calls)
+            and model == ["stub-ranker"])
+
+
+def prop_ranking_fails_binding_up(rtc_m, rtd_m):
+    """Ranking unavailable, binding up: the budget still buys fresh
+    single-rule judgments, of the rules a deterministic word-overlap pick
+    chooses (ties by rule id), and the outage is logged as such."""
+    ask, rank = Asker(0.9), Ranker(fail=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        out = run(rtd_m, "an unrelated topic, plainly", tmp, ask=ask, rank=rank)
+        row = json.loads(Path(tmp, "log.jsonl").read_text().splitlines()[-1])
+    expected = [f"ffff{i:04d}" for i in range(rtd_m.BIND_TOP_K)]
+    return (ask.calls == expected and row["rank_status"] == "unavailable_overlap_fallback"
+            and row["jev_calls"] == 1 + rtd_m.BIND_TOP_K
+            and all(r["ranking_model"] is None for r in out) and bool(out))
+
+
+def prop_none_binds_is_ok(rtc_m, rtd_m):
+    """A ranking that answers "no rule binds" is a successful ranking with
+    an empty shortlist: logged ok, one request, nothing judged."""
+    jrs = rtd_m._sibling("jev_rule_select")
+
+    class NoneJudge:
+        @staticmethod
+        def judge(subject, questions, **kwargs):
+            return {"answers": {"rank": {"probabilities": {jrs.NONE_BIND: 0.97}}},
+                    "model": "stub-ranker"}
+
+    real_sibling = rtd_m._sibling
+
+    def sibling(name):
+        module = real_sibling(name)
+        if name == "jev_rule_select":
+            inner = module._sibling
+            module._sibling = lambda n: NoneJudge if n == "jev_judge" else inner(n)
+        return module
+
+    rtd_m._sibling = sibling
+    try:
+        ask = Asker(0.9)
+        with tempfile.TemporaryDirectory() as tmp:
+            rtd_m.advise("an unrelated topic, plainly", session_id=None, now=1.0,
+                         triggers_path=table_for(compiled_doc(), tmp), compiled=compiled_doc(),
+                         rules=ROSTER, ask=ask, client=ChoiceClient, rank=None,
+                         delivered_cache=os.path.join(tmp, "d"), envelope=False,
+                         log_path=os.path.join(tmp, "log.jsonl"))
+            row = json.loads(Path(tmp, "log.jsonl").read_text().splitlines()[-1])
+    finally:
+        rtd_m._sibling = real_sibling
+    return row["rank_status"] == "ok" and row["jev_calls"] == 1 and ask.calls == []
 
 
 def prop_dedupe(rtc_m, rtd_m):
@@ -369,6 +424,8 @@ PROPERTIES = {
     "a machine envelope costs zero Jev requests": prop_envelope_zero_calls,
     "the real default ranker makes one request and its choices are judged":
         prop_default_rank,
+    "ranking unavailable, binding up: rules are still judged fresh": prop_ranking_fails_binding_up,
+    "a none-binds ranking is ok with an empty shortlist": prop_none_binds_is_ok,
     "a rule already delivered this session is not resent inside the window": prop_dedupe,
     "no session id means no dedupe and no shared key": prop_no_session_no_pooling,
     "coverage flags a triggered rule with no trigger": prop_coverage_flags_empty_trigger,
@@ -411,8 +468,17 @@ with tempfile.TemporaryDirectory() as tmp:
     run(rtd, "anything", tmp, ask=ask, rank=rank, doc=stale_doc)
     row = json.loads(Path(tmp, "log.jsonl").read_text().splitlines()[-1])
 check("a failed ranking still judges stale rules and is counted",
-      ask.asked() == {"aaaa0002"} and row["rank_status"] == "unavailable"
-      and row["jev_calls"] == 1 + len(ask.calls), row)
+      "aaaa0002" in ask.asked() and ask.calls[0] == "aaaa0002"
+      and row["rank_status"] == "unavailable_overlap_fallback"
+      and row["jev_calls"] == 1 + len(ask.calls) <= rtd.MAX_JEV_CALLS, row)
+
+pool = [{"id": "bbbb0002", "statement": "Nothing in common."},
+        {"id": "bbbb0001", "statement": "Also nothing."},
+        {"id": "bbbb0003", "statement": "A zebra rule."}]
+check("the overlap fallback reads compiled keywords, then breaks ties by rule id",
+      rtd._overlap_rank("zebra crossing", pool, 7, {"bbbb0002": ["zebra crossing"],
+                                                     "bbbb0001": ["crossing"]})
+      == ["bbbb0002", "bbbb0001", "bbbb0003"])
 
 with tempfile.TemporaryDirectory() as tmp:
     ask, rank = Asker(0.1), Ranker()
@@ -549,9 +615,17 @@ MUTANTS = [
       "human = True")),
     ("a machine envelope costs zero Jev requests", RTD_PATH,
      ('if not human and row.get("source") in HUMAN_ONLY_SOURCES:', "if False:")),
-    # The shadowing bug the 2026-09-25 live replay found, reintroduced.
     ("the real default ranker makes one request and its choices are judged", RTD_PATH,
-     ('JudgeUnavailable = getattr(real_judge,', 'JudgeUnavailable = getattr(judge,')),
+     ('return [rule_id for rule_id, _ in ranked][:limit], 1, answer.get("model") or "jev"',
+      'return [rule_id for rule_id, _ in ranked][:limit], 1, None')),
+    # The e7f4bf80 behaviour: an unavailable ranking judged nothing new.
+    ("ranking unavailable, binding up: rules are still judged fresh", RTD_PATH,
+     ("ranked = _overlap_rank(text, pool, room, keywords or {})", "ranked = []")),
+    # narrow()'s conflation: a none-binds answer treated as an outage.
+    ("a none-binds ranking is ok with an empty shortlist", RTD_PATH,
+     ("    if not isinstance(probabilities, dict) or not probabilities:",
+      "    if not isinstance(probabilities, dict) or not probabilities or "
+      "set(probabilities) <= {jrs.NONE_BIND}:")),
     ("a rule already delivered this session is not resent inside the window", RTD_PATH,
      ("if not (isinstance(recent.get(rule_id), (int, float))",
       "if True or not (isinstance(recent.get(rule_id), (int, float))")),

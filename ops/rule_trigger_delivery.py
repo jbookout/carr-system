@@ -22,8 +22,14 @@ TWO KINDS OF PROMPT, TWO POLICIES (2026-09-25 design ruling on #1276 review):
         human prompt — no once-per-session marker, no skipping a pack that
         already had a hit;
       - every other unmatched rule, residual rules included, is ranked by the
-        existing ranking call (ops/jev_rule_select.narrow: one Choice over the
-        roster) on every human prompt, and the top BIND_TOP_K are judged;
+        existing ranking Choice (ops/jev_rule_select.rank_question: one
+        request over the roster) on every human prompt, and the top
+        BIND_TOP_K are judged. An answer that ranks no rule ("none binds") is
+        a successful, empty shortlist (rank_status "ok"). When the ranking
+        request is unavailable, a deterministic word-overlap pick (prompt
+        words against each rule's statement and compiled keywords, ties by
+        rule id) chooses the shortlist instead, and it is judged the same way
+        (rank_status "unavailable_overlap_fallback");
       - binding is ONE RULE PER REQUEST with the old path's own question.
         Measured 2026-09-25 on the 15 in-capacity misses of the review set:
         batched questions scored them 0.23-0.71, the same rules asked one at a
@@ -157,36 +163,62 @@ def _is_envelope(text):
 
 
 def _default_rank(text, pool, limit, client):
-    """(ranked ids, requests made) from ops/jev_rule_select's ranking Choice."""
+    """(ranked ids, requests made, ranking model) from ONE ranking Choice.
+
+    The same Choice ops/jev_rule_select.narrow asks (rank_question, with its
+    none-binds option), read directly rather than through narrow(): narrow()
+    answers an outage AND a "no rule binds" answer alike with the whole
+    roster, and those are different facts. Here an outage or malformed answer
+    raises (the caller falls back and logs "unavailable"), and an answer that
+    ranks no rule is an ordinary empty shortlist (logged "ok")."""
     jrs = _sibling("jev_rule_select")
-    real_judge = jrs._sibling("jev_judge")
-    made = []
-
-    # NOT named `judge` out here: the class body below defines a method of
-    # that name, which makes `judge` class-local, so a reference to the outer
-    # module from inside the class raised NameError and every ranking failed
-    # before reaching Jev (found by the 2026-09-25 live replay; the fake
-    # ranker in the selftest hid it, so a test now drives this function).
-    class Counting:
-        JudgeUnavailable = getattr(real_judge, "JudgeUnavailable", RuntimeError)
-
-        @staticmethod
-        def judge(*args, **kwargs):
-            made.append(1)
-            return real_judge.judge(*args, **kwargs)
-
-        @staticmethod
-        def record(*args, **kwargs):
-            return real_judge.record(*args, **kwargs)
-
+    ranker = jrs._sibling("jev_judge")
     roster = [{"id": rule["id"], "gist": (rule.get("statement") or "")[:RUBRIC_CHARS]}
               for rule in pool]
-    short = jrs.narrow(text, roster, limit=limit, client=client, judge=Counting)
-    if made and not any("ranking_model" in row for row in short):
-        # narrow() answers an outage with the whole roster; that is not a
-        # ranking, and judging the first `limit` of it would look like one.
-        raise RuntimeError("ranking unavailable")
-    return [row["id"] for row in short][:limit], len(made)
+    try:
+        answer = ranker.judge({"situation": text},
+                              {"rank": jrs.rank_question(roster, client)}, client=client)
+    except Exception as exc:
+        # An outage must leave a row, as narrow() leaves one (2026-09-23
+        # audit). record() never raises; the guard is for a stub without it.
+        try:
+            ranker.record("rule_select", None, None, None, error=exc)
+        except Exception:
+            pass
+        raise
+    probabilities = ((answer.get("answers") or {}).get("rank") or {}).get("probabilities")
+    if not isinstance(probabilities, dict) or not probabilities:
+        raise RuntimeError("ranking answer carried no probabilities")
+    known = {row["id"] for row in roster}
+    ranked = sorted(((rule_id, float(p)) for rule_id, p in probabilities.items()
+                     if rule_id != jrs.NONE_BIND and rule_id in known),
+                    key=lambda item: (-item[1], item[0]))
+    return [rule_id for rule_id, _ in ranked][:limit], 1, answer.get("model") or "jev"
+
+
+_WORD = re.compile(r"[a-z][a-z0-9'-]{2,}")
+
+
+def _overlap_rank(text, pool, limit, keywords):
+    """Deterministic fallback when the ranking request is unavailable: rules
+    ordered by how many distinct words of the prompt appear in the rule's
+    statement or its compiled keywords, ties broken by rule id. Rules with no
+    overlap are not picked. No Jev call; the binding requests it feeds are
+    the same single-rule requests a ranked shortlist gets."""
+    try:
+        stop = set(_sibling("rule_trigger_compile").STOPWORDS)
+    except Exception:
+        stop = set()
+    words = {w for w in _WORD.findall(text.lower()) if w not in stop}
+    scored = []
+    for rule in pool:
+        vocabulary = set(_WORD.findall((rule.get("statement") or "").lower()))
+        for keyword in keywords.get(rule["id"], ()):
+            vocabulary.update(_WORD.findall(keyword.lower()))
+        overlap = len(words & vocabulary)
+        if overlap:
+            scored.append((-overlap, rule["id"]))
+    return [rule_id for _, rule_id in sorted(scored)][:limit]
 
 
 def _binding_question(client):
@@ -210,13 +242,16 @@ def _rule_titles():
         return {}
 
 
-def judge_budgeted(text, rules, always, *, rank=None, ask=None, client=None, titles=None):
+def judge_budgeted(text, rules, always, *, rank=None, ask=None, client=None, titles=None,
+                   keywords=None):
     """Judge `always` (stale rules) plus the best-ranked of `rules`, one
     single-rule request each, within MAX_JEV_CALLS.
 
     Returns (selected rows, report). `always` is judged first, up to
     BIND_TOP_K; the ranking call fills what is left and is skipped when
-    nothing is left or when the pool already fits."""
+    nothing is left or when the pool already fits. When the ranking request
+    is unavailable the binding budget is not wasted: _overlap_rank picks the
+    shortlist deterministically and it is judged exactly as a ranked one."""
     by_id = {rule["id"]: rule for rule in rules}
     report = {"calls": 0, "rank_status": "not_needed", "bind_status": "none",
               "judged": [], "overflow": []}
@@ -233,13 +268,15 @@ def judge_budgeted(text, rules, always, *, rank=None, ask=None, client=None, tit
             ranked = [rule["id"] for rule in pool]
         else:
             try:
-                ranked, made = (rank or _default_rank)(text, pool, room, client)
+                answer = (rank or _default_rank)(text, pool, room, client)
+                ranked, made = answer[0], answer[1]
+                ranking_model = answer[2] if len(answer) > 2 else None
                 report["calls"] += made
-                report["rank_status"] = "ranked" if made else "not_needed"
+                report["rank_status"] = "ok" if made else "not_needed"
             except Exception:
                 report["calls"] += 1
-                report["rank_status"] = "unavailable"
-                ranked = []
+                report["rank_status"] = "unavailable_overlap_fallback"
+                ranked = _overlap_rank(text, pool, room, keywords or {})
             ranked = [rule_id for rule_id in ranked if rule_id in by_id][:room]
     to_judge = always + [rule_id for rule_id in ranked if rule_id not in set(always)]
     report["judged"] = to_judge
@@ -271,7 +308,8 @@ def judge_budgeted(text, rules, always, *, rank=None, ask=None, client=None, tit
             continue
         if value >= BIND_AT:
             selected[rule_id] = {
-                "id": rule_id, "probability": value, "ranking_model": ranking_model,
+                "id": rule_id, "probability": value,
+                "ranking_model": None if rule_id in always else ranking_model,
                 "binding_model": answer.get("model") or "jev",
                 "source": "stale_judged" if rule_id in always else "ranked_judged"}
     report["bind_status"] = ("judged" if not failures else
@@ -335,8 +373,10 @@ def advise(situation, *, session_id=None, now=None, triggers_path=TRIGGERS_PATH,
     if human:
         unmatched = [rule for rule in rules if rule["id"] not in selected]
         always = sorted(rule["id"] for rule in unmatched if rule["id"] in stale)
+        keywords = {rule_id: list(((entry.get("triggers") or {}).get("keywords") or {}))
+                    for rule_id, entry in entries.items() if isinstance(entry, dict)}
         judged, report = judge_budgeted(text, unmatched, always, rank=rank, ask=ask,
-                                        client=client)
+                                        client=client, keywords=keywords)
         for rule_id, row in judged.items():
             selected.setdefault(rule_id, row)
 
