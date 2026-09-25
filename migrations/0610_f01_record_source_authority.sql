@@ -25,7 +25,10 @@
 -- backfills no legacy row (public.record_source and public.document are not
 -- referenced). It makes no provider call and activates no connector.
 --
--- THE ONE ADDITION: THE AUTHORITY GROUP GRANT (tail section). The two sources
+-- TWO ADDITIONS, both after the verbatim sources and neither widening anything.
+-- Tail 1 restates the carr_reader/carr_writer grants the sources make inside DO
+-- loops as static statements, so the canonical role-bundle plan can see them
+-- (see that section). Tail 2 is the authority group grant. The two sources
 -- grant their authority surface to the LOGIN roles carr_authority_joe and
 -- carr_authority_dell, skipping a login that does not exist when the file runs.
 -- Production has no carr_authority_dell login today (the control-plane contract
@@ -5316,7 +5319,133 @@ END;
 $grant_posture$;
 
 -- ===========================================================================
--- Tail: the authority surface follows carr_authority membership.
+-- Tail 1: the runtime grants, restated as static statements.
+--
+-- The two sources grant carr_reader and carr_writer their F01 surface from
+-- inside DO loops, with the role names as string literals. That is correct SQL
+-- and invisible to tools/schema_snapshot_grants.py, which composes the canonical
+-- carr_reader/carr_writer plan from STATIC grant statements in committed
+-- migrations and which the staging bundle-parity gates compare against the
+-- database. Every statement below re-grants exactly what the loops above just
+-- granted (generated from the catalog of a database this file was applied to),
+-- so it changes no privilege and makes the plan and the database agree.
+-- mcp-server/test/record-source-authority-live-pg.v5.test.mjs reads the catalog
+-- back and fails if the loops and this list ever disagree.
+-- ===========================================================================
+grant execute on function ops.f01_apply_observation(text,text,text,text,text,jsonb,jsonb,jsonb,jsonb,jsonb,text,text,jsonb) to carr_writer;
+grant execute on function ops.f01_canonical_json(jsonb) to carr_reader;
+grant execute on function ops.f01_canonical_json(jsonb) to carr_writer;
+grant execute on function ops.f01_context_actor_slug() to carr_reader;
+grant execute on function ops.f01_context_actor_slug() to carr_writer;
+grant execute on function ops.f01_current_field_state(text,text) to carr_reader;
+grant execute on function ops.f01_current_field_state(text,text) to carr_writer;
+grant execute on function ops.f01_current_policy() to carr_reader;
+grant execute on function ops.f01_current_policy() to carr_writer;
+grant execute on function ops.f01_current_policy_digest() to carr_reader;
+grant execute on function ops.f01_current_policy_digest() to carr_writer;
+grant execute on function ops.f01_derivative_coverage(text) to carr_reader;
+grant execute on function ops.f01_derivative_coverage(text) to carr_writer;
+grant execute on function ops.f01_derivative_coverage_digest(text) to carr_reader;
+grant execute on function ops.f01_derivative_coverage_digest(text) to carr_writer;
+grant execute on function ops.f01_derivative_links(text) to carr_reader;
+grant execute on function ops.f01_derivative_links(text) to carr_writer;
+grant execute on function ops.f01_digest_jsonb(jsonb) to carr_reader;
+grant execute on function ops.f01_digest_jsonb(jsonb) to carr_writer;
+grant execute on function ops.f01_docsource_is_external_ident(text,integer) to carr_reader;
+grant execute on function ops.f01_docsource_is_external_ident(text,integer) to carr_writer;
+grant execute on function ops.f01_docsource_is_safe_text(text,integer) to carr_reader;
+grant execute on function ops.f01_docsource_is_safe_text(text,integer) to carr_writer;
+grant execute on function ops.f01_docsource_utf16_length(text) to carr_reader;
+grant execute on function ops.f01_docsource_utf16_length(text) to carr_writer;
+grant execute on function ops.f01_document_source_history(text) to carr_reader;
+grant execute on function ops.f01_document_source_history(text) to carr_writer;
+grant execute on function ops.f01_document_version_source(text,integer) to carr_reader;
+grant execute on function ops.f01_document_version_source(text,integer) to carr_writer;
+grant execute on function ops.f01_hold_inventory(text) to carr_reader;
+grant execute on function ops.f01_hold_inventory(text) to carr_writer;
+grant execute on function ops.f01_hold_inventory_digest(text) to carr_reader;
+grant execute on function ops.f01_hold_inventory_digest(text) to carr_writer;
+grant execute on function ops.f01_instant(text) to carr_reader;
+grant execute on function ops.f01_instant(text) to carr_writer;
+grant execute on function ops.f01_instant_text(p_at timestamp with time zone) to carr_reader;
+grant execute on function ops.f01_instant_text(p_at timestamp with time zone) to carr_writer;
+grant execute on function ops.f01_is_digest_ref(text) to carr_reader;
+grant execute on function ops.f01_is_digest_ref(text) to carr_writer;
+grant execute on function ops.f01_is_instant_text(text) to carr_reader;
+grant execute on function ops.f01_is_instant_text(text) to carr_writer;
+grant execute on function ops.f01_json_number(numeric) to carr_reader;
+grant execute on function ops.f01_json_number(numeric) to carr_writer;
+grant execute on function ops.f01_json_string(text) to carr_reader;
+grant execute on function ops.f01_json_string(text) to carr_writer;
+grant execute on function ops.f01_now_text() to carr_reader;
+grant execute on function ops.f01_now_text() to carr_writer;
+grant execute on function ops.f01_principal() to carr_reader;
+grant execute on function ops.f01_principal() to carr_writer;
+grant execute on function ops.f01_read(text,jsonb) to carr_reader;
+grant execute on function ops.f01_read(text,jsonb) to carr_writer;
+grant execute on function ops.f01_record_artifact(jsonb,text,text) to carr_writer;
+grant execute on function ops.f01_record_deletion_evaluation(jsonb,text,text,text) to carr_writer;
+grant execute on function ops.f01_record_document(jsonb,jsonb,jsonb,text,text,text) to carr_writer;
+grant execute on function ops.f01_record_proposal(jsonb,jsonb,jsonb,text,text) to carr_writer;
+grant execute on function ops.f01_register_derivative_link(jsonb,text,text) to carr_writer;
+grant execute on function ops.f01_replay_outcome(text,text,text) to carr_writer;
+grant execute on function ops.f01_reserved_derivative_kinds() to carr_reader;
+grant execute on function ops.f01_reserved_derivative_kinds() to carr_writer;
+grant execute on function ops.f01_retention_clock(text) to carr_reader;
+grant execute on function ops.f01_retention_clock(text) to carr_writer;
+grant execute on function ops.f01_retention_clock_digest(text) to carr_reader;
+grant execute on function ops.f01_retention_clock_digest(text) to carr_writer;
+grant execute on function ops.f01_stored_artifact(text) to carr_reader;
+grant execute on function ops.f01_stored_artifact(text) to carr_writer;
+grant execute on function ops.f01_stored_artifact_by_identity(text,text,text,text,text) to carr_reader;
+grant execute on function ops.f01_stored_artifact_by_identity(text,text,text,text,text) to carr_writer;
+grant execute on function ops.f01_stored_derivatives(text) to carr_reader;
+grant execute on function ops.f01_stored_derivatives(text) to carr_writer;
+grant execute on function ops.f01_tenant() to carr_reader;
+grant execute on function ops.f01_tenant() to carr_writer;
+grant execute on function ops.f01_utf16_sortkey(text) to carr_reader;
+grant execute on function ops.f01_utf16_sortkey(text) to carr_writer;
+grant execute on function ops.f01_verify_envelope(jsonb,text,text,text) to carr_reader;
+grant execute on function ops.f01_verify_envelope(jsonb,text,text,text) to carr_writer;
+grant select on table ops.f01_corporate_artifact to carr_reader;
+grant select on table ops.f01_corporate_artifact to carr_writer;
+grant select on table ops.f01_deletion_evaluation to carr_reader;
+grant select on table ops.f01_deletion_evaluation to carr_writer;
+grant select on table ops.f01_derivative_link to carr_reader;
+grant select on table ops.f01_derivative_link to carr_writer;
+grant select on table ops.f01_document_current to carr_reader;
+grant select on table ops.f01_document_current to carr_writer;
+grant select on table ops.f01_document_source_provenance to carr_reader;
+grant select on table ops.f01_document_source_provenance to carr_writer;
+grant select on table ops.f01_document_version to carr_reader;
+grant select on table ops.f01_document_version to carr_writer;
+grant select on table ops.f01_field_event to carr_reader;
+grant select on table ops.f01_field_event to carr_writer;
+grant select on table ops.f01_field_state to carr_reader;
+grant select on table ops.f01_field_state to carr_writer;
+grant select on table ops.f01_idempotency to carr_reader;
+grant select on table ops.f01_idempotency to carr_writer;
+grant select on table ops.f01_mutation_receipt to carr_reader;
+grant select on table ops.f01_mutation_receipt to carr_writer;
+grant select on table ops.f01_parsed_proposal to carr_reader;
+grant select on table ops.f01_parsed_proposal to carr_writer;
+grant select on table ops.f01_policy_current to carr_reader;
+grant select on table ops.f01_policy_current to carr_writer;
+grant select on table ops.f01_policy_version to carr_reader;
+grant select on table ops.f01_policy_version to carr_writer;
+grant select on table ops.f01_preservation_hold_current to carr_reader;
+grant select on table ops.f01_preservation_hold_current to carr_writer;
+grant select on table ops.f01_preservation_hold_event to carr_reader;
+grant select on table ops.f01_preservation_hold_event to carr_writer;
+grant select on table ops.f01_proposal_link to carr_reader;
+grant select on table ops.f01_proposal_link to carr_writer;
+grant select on table ops.f01_reconciliation_item to carr_reader;
+grant select on table ops.f01_reconciliation_item to carr_writer;
+grant select on table ops.f01_state_transition to carr_reader;
+grant select on table ops.f01_state_transition to carr_writer;
+
+-- ===========================================================================
+-- Tail 2: the authority surface follows carr_authority membership.
 --
 -- Exactly the set the two sources hand an authority LOGIN: every ops.f01_*
 -- function except the private mutation helpers and the trigger guards, SELECT

@@ -302,6 +302,49 @@ test("F01 on real PostgreSQL: migration, SQL fixtures and the registered verbs",
       }
     });
 
+    await t.test("the static reader/writer grant restatement is exactly what the loops granted", async () => {
+      const [file] = readdirSync(resolve(HERE, "../../migrations"))
+        .filter(name => /^\d{4}_f01_record_source_authority\.sql$/.test(name));
+      const text = readFileSync(resolve(HERE, "../../migrations", file), "utf8");
+      const restated = text.split("\n")
+        .filter(line => /^grant (execute on function|select on table) ops\.f01_\S.* to carr_(reader|writer);$/.test(line))
+        .sort();
+      const client = await adminClient(pg, db);
+      try {
+        const rows = await client.query(`
+          select format('grant execute on function %s to %s;', p.oid::regprocedure::text, g.rolname) as stmt
+            from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+            cross join lateral aclexplode(p.proacl) a join pg_roles g on g.oid = a.grantee
+           where n.nspname = 'ops' and p.proname like 'f01\\_%' and a.privilege_type = 'EXECUTE'
+             and g.rolname in ('carr_reader', 'carr_writer')
+          union all
+          select format('grant select on table %s to %s;', c.oid::regclass::text, g.rolname)
+            from pg_class c join pg_namespace n on n.oid = c.relnamespace
+            cross join lateral aclexplode(c.relacl) a join pg_roles g on g.oid = a.grantee
+           where n.nspname = 'ops' and c.relkind = 'r' and c.relname like 'f01\\_%'
+             and g.rolname in ('carr_reader', 'carr_writer')`);
+        const catalog = rows.rows.map(row => row.stmt).sort();
+        // A restated signature may carry an argument name (the canonical-plan
+        // grammar needs one before a multi-word type); the database resolves it
+        // to the same function, so compare through its own regprocedure text.
+        const normalized = [];
+        for (const line of restated) {
+          const fn = /^grant execute on function (.+) to (carr_reader|carr_writer);$/.exec(line);
+          if (!fn) { normalized.push(line); continue; }
+          // regprocedure input takes types only, so the F01 p_ argument names go.
+          const typesOnly = fn[1].replace(/\b(p_[a-z0-9_]+) (?=[a-z])/g, "");
+          const sig = (await client.query("select $1::regprocedure::text as sig", [typesOnly])).rows[0].sig;
+          normalized.push(`grant execute on function ${sig} to ${fn[2]};`);
+        }
+        restated.splice(0, restated.length, ...normalized.sort());
+        assert.ok(restated.length > 50, "the migration restates the runtime grants statically");
+        assert.deepEqual(catalog, restated,
+          "every reader/writer F01 privilege in the catalog is restated, and nothing else");
+      } finally {
+        await client.end();
+      }
+    });
+
     await t.test("the authority surface follows carr_authority membership, not the install moment", async () => {
       const client = await adminClient(pg, db);
       try {
