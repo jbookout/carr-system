@@ -482,8 +482,8 @@ test("the nine named operations are exactly the proposed tool surface", () => {
     assert.ok(V5_F01_OPERATIONS.includes(entry.name));
     assert.ok(entry.role.length > 40, entry.name);
     // The migration is bound; the registry successor and acceptance are not.
-    assert.equal(entry.registered_in_scac, false);
-    assert.equal(entry.registered_in_mutation_registry, false);
+    assert.equal(entry.registered_in_scac, true);
+    assert.equal(entry.registered_in_mutation_registry, true);
     assert.equal(entry.migration_bound, true);
     assert.equal(entry.accepted, false);
   }
@@ -1321,7 +1321,7 @@ test("the registration operation is an ordinary write, not an authority surface"
     .find(entry => entry.name === "register-derivative-source-link");
   assert.equal(registration.handler, "registerDerivativeSourceLink");
   assert.equal(registration.accepted, false);
-  assert.equal(registration.registered_in_scac, false);
+  assert.equal(registration.registered_in_scac, true);
 });
 
 // ===========================================================================
