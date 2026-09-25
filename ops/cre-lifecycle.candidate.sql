@@ -270,7 +270,7 @@ declare v_context text;
 begin
   get diagnostics v_context = pg_context;
   if regexp_replace(v_context, 'PL/pgSQL function (ops\.)?j102_guard_direct_dml\(\)[^\n]*', '', 'g')
-       !~ 'PL/pgSQL function (ops\.)?j102_(apply_transition|initialize_subject|record_first_party_fact|record_evidence_subject_link|record_salesforce_reference|record_correction|record_reconciliation_item|claim_idempotency|settle_idempotency)\('
+       !~ 'PL/pgSQL function (ops\.)?j102_(apply_transition|initialize_subject|record_first_party_fact|record_evidence_subject_link|record_salesforce_reference|record_correction|record_reconciliation_item|run_migration_shadow|claim_idempotency|settle_idempotency)\('
   then
     raise exception 'j102_direct_dml_refused: %.% is written only through the registered ops.j102_* writers',
       tg_table_schema, tg_table_name using errcode = '42501';
@@ -1034,7 +1034,8 @@ begin
     'record-loi-submission', 'record-loi-acceptance', 'commit-winning-property',
     'record-deal-execution', 'record-diligence-outcome', 'record-deal-closing',
     'cancel-pending-deal', 'record-deal-axis', 'link-salesforce-reference',
-    'record-lifecycle-correction', 'record-lifecycle-reconciliation') then
+    'record-lifecycle-correction', 'record-lifecycle-reconciliation',
+    'run-migration-shadow') then
     raise exception 'j102_unknown_write_operation: %', p_operation using errcode = '22023';
   end if;
   if p_idempotency_key is null or length(p_idempotency_key) not between 1 and 200 then
@@ -5349,31 +5350,240 @@ $$;
 comment on function ops.j102_compatibility_view(text,text) is
   'Q081: the old single-phase shape, PROJECTED from the current records on every read for callers that have not migrated. Not authoritative, not writable, and it retires nobody.';
 
-create or replace function ops.j102_migration_readiness()
-returns jsonb language sql stable
+-- ---------------------------------------------------------------------------
+-- Q081 -- THE MIGRATION SHADOW, RUN FOR REAL.
+--
+-- OLD AND NEW SIDE BY SIDE, AND NEITHER IS TOUCHED. ops.j102_run_migration_shadow
+-- reads every legacy public.deal row, resolves it to the J102 assignment and deal
+-- the EXISTING Salesforce reference links name (public.deal.salesforce_id =
+-- j102_salesforce_reference.opportunity_id, newest link per subject kind), projects
+-- the old single-phase shape through ops.j102_compatibility_view, and compares
+-- phase, closed and outcome field by field -- the same three fields, the same
+-- rule, as the kernel's compareMigrationShadow. It then appends ONE immutable,
+-- digest-bound run record. It repairs nothing: a difference is reported for a
+-- person, never written back to either side, because a shadow that could correct
+-- what it compares could only ever prove itself.
+--
+-- WHAT MAKES A RUN CLEAN, and why an unlinked row spoils it. A run is clean only
+-- when it compared at least one row, found no difference, and left NO legacy row
+-- unlinked. An unlinked row is a row nobody has migrated; excluding it would
+-- report "clean" over exactly the rows that were never tested.
+--
+-- TWO NORMALIZATIONS, both stated. The legacy `closed` fact is `closed_on is not
+-- null` (the legacy table has no flag). A legacy NULL outcome and a projected NULL
+-- outcome are both read as 'open' -- "no outcome recorded yet" -- so a pending
+-- deal is not reported as differing merely because the old column was empty.
+-- The legacy 'paused' outcome has no J102 counterpart and is reported as a
+-- difference whenever it appears, which is correct: it is a real disagreement a
+-- person has to resolve.
+-- ---------------------------------------------------------------------------
+create table if not exists ops.j102_migration_shadow_run (
+  tenant            text not null,
+  run_seq           bigserial primary key,
+  compared_rows     integer not null check (compared_rows >= 0),
+  matching_rows     integer not null check (matching_rows >= 0),
+  differing_rows    integer not null check (differing_rows >= 0),
+  unlinked_rows     integer not null check (unlinked_rows >= 0),
+  clean             boolean not null,
+  envelope          jsonb not null,
+  envelope_digest   text not null,
+  run_digest        text not null,
+  recorded_by       text not null,
+  recorded_at       timestamptz not null,
+  idempotency_key   text not null,
+  constraint j102_shadow_run_tenant check (tenant = ops.f01_tenant()),
+  constraint j102_shadow_run_envelope_digest
+    check (envelope_digest = ops.f01_digest_jsonb(envelope)),
+  constraint j102_shadow_run_digest_bound
+    check (run_digest = ops.f01_digest_jsonb(envelope -> 'record')),
+  constraint j102_shadow_run_counts_add_up
+    check (compared_rows = matching_rows + differing_rows),
+  constraint j102_shadow_run_clean_is_derived
+    check (clean = (compared_rows > 0 and differing_rows = 0 and unlinked_rows = 0)),
+  constraint j102_shadow_run_matches_envelope
+    check ((envelope -> 'record' ->> 'compared_rows')::integer = compared_rows
+       and (envelope -> 'record' ->> 'differing_rows')::integer = differing_rows
+       and (envelope -> 'record' ->> 'unlinked_rows')::integer = unlinked_rows
+       and (envelope -> 'record' ->> 'clean')::boolean = clean
+       and envelope -> 'record' ->> 'recorded_by' = recorded_by)
+);
+
+drop trigger if exists j102_migration_shadow_run_dml_guard on ops.j102_migration_shadow_run;
+create trigger j102_migration_shadow_run_dml_guard before insert or update
+  on ops.j102_migration_shadow_run for each row execute function ops.j102_guard_direct_dml();
+drop trigger if exists j102_migration_shadow_run_no_truncate on ops.j102_migration_shadow_run;
+create trigger j102_migration_shadow_run_no_truncate before truncate
+  on ops.j102_migration_shadow_run execute function ops.j102_guard_no_truncate();
+drop trigger if exists j102_migration_shadow_run_append_only on ops.j102_migration_shadow_run;
+create trigger j102_migration_shadow_run_append_only before update or delete
+  on ops.j102_migration_shadow_run for each row execute function ops.j102_guard_append_only();
+
+create or replace function ops.j102_run_migration_shadow(
+  p_idempotency_key text, p_request_digest text)
+returns jsonb language plpgsql security definer
 set search_path = pg_catalog, ops, public
 as $$
-  select jsonb_build_object(
+declare
+  v_actor text := ops.f01_context_actor_slug();
+  v_txn_now timestamptz := now();
+  v_txn_now_text text := ops.f01_instant_text(now());
+  v_replay jsonb; v_rows jsonb := '[]'::jsonb; v_row jsonb; v_view jsonb;
+  v_legacy record; v_assignment text; v_deal text; v_differences jsonb;
+  v_legacy_closed boolean; v_legacy_outcome text; v_projected_outcome text;
+  v_compared integer := 0; v_matching integer := 0; v_differing integer := 0;
+  v_unlinked integer := 0; v_record jsonb; v_envelope jsonb; v_digest text;
+  v_seq bigint; v_result jsonb; v_clean boolean;
+begin
+  v_replay := ops.j102_claim_idempotency('run-migration-shadow', p_idempotency_key, p_request_digest);
+  if v_replay is not null then return v_replay; end if;
+  for v_legacy in
+    select d.id::text as legacy_row_id, d.salesforce_id, d.phase, d.outcome, d.closed_on
+      from public.deal d
+     order by d.id
+  loop
+    v_assignment := null; v_deal := null;
+    if v_legacy.salesforce_id is not null then
+      select r.linked_subject_id into v_assignment
+        from ops.j102_salesforce_reference r
+       where r.tenant = ops.f01_tenant() and r.opportunity_id = v_legacy.salesforce_id
+         and r.linked_subject_kind = 'assignment'
+         and exists (select 1 from ops.j102_subject_current s
+                      where s.tenant = r.tenant and s.subject_kind = 'assignment'
+                        and s.subject_id = r.linked_subject_id)
+       order by r.reference_seq desc limit 1;
+      select r.linked_subject_id into v_deal
+        from ops.j102_salesforce_reference r
+       where r.tenant = ops.f01_tenant() and r.opportunity_id = v_legacy.salesforce_id
+         and r.linked_subject_kind = 'deal'
+         and exists (select 1 from ops.j102_subject_current s
+                      where s.tenant = r.tenant and s.subject_kind = 'deal'
+                        and s.subject_id = r.linked_subject_id)
+       order by r.reference_seq desc limit 1;
+    end if;
+    if v_assignment is null and v_deal is null then
+      v_unlinked := v_unlinked + 1;
+      v_rows := v_rows || jsonb_build_array(jsonb_build_object(
+        'legacy_row_id', v_legacy.legacy_row_id, 'status', 'unlinked',
+        'why', case when v_legacy.salesforce_id is null
+                 then 'the legacy row carries no Salesforce id, so no reference can link it'
+                 else 'no Salesforce reference links this opportunity to an existing assignment or deal' end));
+      continue;
+    end if;
+    v_view := ops.j102_compatibility_view(v_assignment, v_deal);
+    v_legacy_closed := v_legacy.closed_on is not null;
+    v_legacy_outcome := coalesce(v_legacy.outcome, 'open');
+    v_projected_outcome := coalesce(v_view ->> 'legacy_outcome', 'open');
+    v_differences := '[]'::jsonb;
+    if v_legacy.phase is distinct from (v_view ->> 'legacy_phase') then
+      v_differences := v_differences || jsonb_build_array(jsonb_build_object(
+        'field', 'phase', 'legacy', v_legacy.phase, 'projected', v_view -> 'legacy_phase'));
+    end if;
+    if v_legacy_closed is distinct from (v_view ->> 'legacy_closed')::boolean then
+      v_differences := v_differences || jsonb_build_array(jsonb_build_object(
+        'field', 'closed', 'legacy', v_legacy_closed, 'projected', v_view -> 'legacy_closed'));
+    end if;
+    if v_legacy_outcome is distinct from v_projected_outcome then
+      v_differences := v_differences || jsonb_build_array(jsonb_build_object(
+        'field', 'outcome', 'legacy', v_legacy_outcome, 'projected', v_projected_outcome));
+    end if;
+    v_compared := v_compared + 1;
+    if jsonb_array_length(v_differences) = 0 then
+      v_matching := v_matching + 1;
+    else
+      v_differing := v_differing + 1;
+    end if;
+    v_rows := v_rows || jsonb_build_array(jsonb_build_object(
+      'legacy_row_id', v_legacy.legacy_row_id,
+      'status', case when jsonb_array_length(v_differences) = 0 then 'matching' else 'differing' end,
+      'assignment_id', v_assignment, 'deal_id', v_deal,
+      'differences', v_differences));
+  end loop;
+  v_clean := v_compared > 0 and v_differing = 0 and v_unlinked = 0;
+  v_record := jsonb_build_object(
+    'record_kind', 'stored_migration_shadow_run',
+    'tenant', ops.f01_tenant(),
+    'compared_rows', v_compared, 'matching_rows', v_matching,
+    'differing_rows', v_differing, 'unlinked_rows', v_unlinked,
+    'clean', v_clean,
+    'rows', v_rows,
+    'normalizations', jsonb_build_array(
+      'legacy closed = closed_on is not null',
+      'a null outcome on either side reads as open'),
+    'legacy_rows_modified', 0, 'projection_modified', false,
+    'retires_any_caller', false,
+    'recorded_by', v_actor, 'recorded_at', v_txn_now_text);
+  v_digest := ops.f01_digest_jsonb(v_record);
+  v_envelope := jsonb_build_object(
+    'record_kind', 'stored_migration_shadow_run', 'record', v_record, 'record_digest', v_digest);
+  insert into ops.j102_migration_shadow_run
+    (tenant, compared_rows, matching_rows, differing_rows, unlinked_rows, clean,
+     envelope, envelope_digest, run_digest, recorded_by, recorded_at, idempotency_key)
+  values (ops.f01_tenant(), v_compared, v_matching, v_differing, v_unlinked, v_clean,
+     v_envelope, ops.f01_digest_jsonb(v_envelope), v_digest, v_actor, v_txn_now, p_idempotency_key)
+  returning run_seq into v_seq;
+  v_result := jsonb_build_object(
+    'operation', 'run-migration-shadow', 'decision', 'allow',
+    'reason_id', case when v_clean then 'shadow_run_clean'
+                      when v_compared = 0 and v_unlinked = 0 then 'shadow_run_found_no_legacy_rows'
+                      else 'shadow_run_found_differences_or_unlinked_rows' end,
+    'actor_slug', v_actor, 'run_seq', v_seq, 'run_digest', v_digest,
+    'compared_rows', v_compared, 'matching_rows', v_matching,
+    'differing_rows', v_differing, 'unlinked_rows', v_unlinked, 'clean', v_clean,
+    'committed_at', v_txn_now_text,
+    'legacy_rows_modified', 0, 'retires_any_caller', false, 'external_effects', false);
+  return ops.j102_settle_idempotency('run-migration-shadow', p_idempotency_key, v_result);
+end;
+$$;
+
+comment on function ops.j102_run_migration_shadow(text,text) is
+  'Q081: compare every legacy public.deal row with the J102 projection its Salesforce reference links, and append one immutable digest-bound run record. Modifies neither side and retires nobody; an unlinked row keeps the run from being clean.';
+
+create or replace function ops.j102_migration_readiness()
+returns jsonb language plpgsql stable security definer
+set search_path = pg_catalog, ops, public
+as $$
+declare v_run ops.j102_migration_shadow_run%rowtype; v_latest jsonb; v_missing jsonb;
+begin
+  select * into v_run from ops.j102_migration_shadow_run
+   where tenant = ops.f01_tenant() order by run_seq desc limit 1;
+  if found then
+    perform ops.j102_verify_envelope(v_run.envelope, v_run.envelope_digest, v_run.run_digest,
+                                     'stored_migration_shadow_run');
+    v_latest := jsonb_build_object(
+      'run_seq', v_run.run_seq, 'run_digest', v_run.run_digest,
+      'recorded_at', ops.f01_instant_text(v_run.recorded_at), 'recorded_by', v_run.recorded_by,
+      'compared_rows', v_run.compared_rows, 'matching_rows', v_run.matching_rows,
+      'differing_rows', v_run.differing_rows, 'unlinked_rows', v_run.unlinked_rows,
+      'clean', v_run.clean);
+  end if;
+  v_missing := jsonb_build_array(jsonb_build_object(
+    'fact', 'exact_caller_census',
+    'why', 'Q081 permits retiring the old interface only after migration proof, and no verified enumeration of the callers and projections still reading the legacy shape exists in this record layer.',
+    'produced_by', 'not_produced_by_this_slice'));
+  if v_latest is null or not v_run.clean then
+    v_missing := v_missing || jsonb_build_array(jsonb_build_object(
+      'fact', 'shadow_comparison_clean_run',
+      'why', case when v_latest is null
+               then 'No migration shadow has been run; ops.j102_run_migration_shadow produces one.'
+               else 'The newest migration shadow run is not clean: it found differences or unlinked legacy rows, which a person must resolve before it counts as proof.' end,
+      'produced_by', 'ops.j102_run_migration_shadow'));
+  end if;
+  return jsonb_build_object(
     'decision', 'refuse',
     'reason_id', 'caller_census_absent',
     'may_retire_callers', false,
     'migration_complete', false,
     'caller_census_verified', false,
+    'shadow_comparison_clean_run', coalesce(v_run.clean, false),
+    'latest_shadow_run', v_latest,
     'compatibility_view_available', true,
     'big_bang_rename', false,
-    'missing_facts', jsonb_build_array(
-      jsonb_build_object(
-        'fact', 'exact_caller_census',
-        'why', 'Q081 permits retiring the old interface only after migration proof, and no verified enumeration of the callers and projections still reading the legacy shape exists in this record layer.',
-        'produced_by', 'not_produced_by_this_slice'),
-      jsonb_build_object(
-        'fact', 'shadow_comparison_clean_run',
-        'why', 'A clean shadow comparison over the real rows has not been performed and is not asserted here.',
-        'produced_by', 'not_produced_by_this_slice')))
+    'missing_facts', v_missing);
+end;
 $$;
 
 comment on function ops.j102_migration_readiness() is
-  'Q081: whether the old interface may be retired. It answers no, for every input, because no verified caller census exists here. A reader, and it says no.';
+  'Q081: whether the old interface may be retired. It answers no while no verified caller census exists, whatever the shadow says; it reports the newest verified shadow run and names each fact still missing.';
 
 -- ---------------------------------------------------------------------------
 -- The read door.
@@ -5471,13 +5681,14 @@ comment on function ops.j102_read(text,jsonb) is
 grant select on ops.j102_subject_current, ops.j102_subject_event,
   ops.j102_first_party_record, ops.j102_evidence_subject_link,
   ops.j102_salesforce_reference,
-  ops.j102_correction_receipt, ops.j102_reconciliation_item
+  ops.j102_correction_receipt, ops.j102_reconciliation_item, ops.j102_migration_shadow_run
   to carr_reader, carr_writer, carr_authority;
 
 revoke insert, update, delete, truncate on ops.j102_subject_current,
   ops.j102_subject_event, ops.j102_first_party_record, ops.j102_evidence_subject_link,
   ops.j102_salesforce_reference,
-  ops.j102_correction_receipt, ops.j102_reconciliation_item, ops.j102_idempotency
+  ops.j102_correction_receipt, ops.j102_reconciliation_item, ops.j102_idempotency,
+  ops.j102_migration_shadow_run
   from public, carr_reader, carr_writer, carr_jobs, carr_authority;
 
 revoke all on function ops.j102_verify_envelope(jsonb,text,text,text),
@@ -5530,7 +5741,8 @@ revoke all on function
   ops.j102_record_evidence_subject_link(jsonb,text,text),
   ops.j102_record_salesforce_reference(jsonb,text,text),
   ops.j102_record_correction(jsonb,text,text),
-  ops.j102_record_reconciliation_item(jsonb,jsonb,text,text,jsonb)
+  ops.j102_record_reconciliation_item(jsonb,jsonb,text,text,jsonb),
+  ops.j102_run_migration_shadow(text,text)
   from public, carr_reader, carr_writer, carr_jobs, carr_authority;
 grant execute on function
   ops.j102_replay_outcome(text,text,text),
@@ -5543,7 +5755,10 @@ grant execute on function
   ops.j102_initialize_subject(text,jsonb,jsonb,jsonb,text,text,jsonb),
   ops.j102_record_first_party_fact(jsonb,text,text),
   ops.j102_record_salesforce_reference(jsonb,text,text),
-  ops.j102_record_reconciliation_item(jsonb,jsonb,text,text,jsonb)
+  ops.j102_record_reconciliation_item(jsonb,jsonb,text,text,jsonb),
+  -- The shadow runner reads legacy rows and appends a comparison; it changes no
+  -- business record, so both write bundles may run it.
+  ops.j102_run_migration_shadow(text,text)
   to carr_writer, carr_authority;
 -- Correction and the evidence association reach the authority bundle only, and
 -- each additionally checks the DERIVED PRINCIPAL inside the function: the grant
@@ -5574,6 +5789,7 @@ begin
     'j102_record_salesforce_reference(jsonb,text,text)',
     'j102_record_correction(jsonb,text,text)',
     'j102_record_reconciliation_item(jsonb,jsonb,text,text,jsonb)',
+    'j102_run_migration_shadow(text,text)',
     'j102_claim_idempotency(text,text,text)',
     'j102_settle_idempotency(text,text,jsonb)'
   ] loop

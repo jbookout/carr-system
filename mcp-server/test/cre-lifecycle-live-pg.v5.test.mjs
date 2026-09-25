@@ -17,16 +17,17 @@
 // EVERY RECORD IS SYNTHETIC. Ids carry a per-run nonce so the suite can run
 // twice against the same scratch database without colliding.
 
-import { test, before, after } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID, createHash } from "node:crypto";
 
-import { canonicalJson, digest } from "../src/artifact-trust.js";
+import { digest } from "../src/artifact-trust.js";
 import { ORGANIZATION_TENANT_ID } from "../src/identity.js";
 import {
   V5_J102_TRANSITION_IDS,
   v5J102TransitionTruthTable,
   v5J102TransitionContract,
+  v5J102MigrationReadiness,
 } from "../src/cre-lifecycle.v5.js";
 import { createCreLifecycleStore } from "../src/cre-lifecycle-store.v5.js";
 
@@ -1148,4 +1149,158 @@ test("CREDENTIAL SPLIT LIVE: a partner-only transition over the writer credentia
     e => e.code === "actor_context_mismatch",
     "an authorityOnly act is never adopted down to the writer credential");
   assert.equal((await subject("joe", "deal", d.deal)).readback.body.state_digest, base, "nothing moved");
+});
+
+// ===========================================================================
+// Q081 LIVE: the migration shadow runs OLD and NEW side by side.
+// Legacy public.deal rows are seeded on the owner connection (the legacy
+// writers are not this slice's), linked through the real Salesforce reference
+// door, and compared by the real runner. Nothing on either side is modified, and
+// no caller retires: that needs a verified census nobody has produced.
+// ===========================================================================
+
+const OWNER_DSN = process.env.CARR_J102_LIVE_PG_DSN_OWNER;
+const SHADOW_SKIP = SKIP || (!OWNER_DSN &&
+  "CARR_J102_LIVE_PG_DSN_OWNER is not set; the shadow test seeds legacy rows on the owner connection");
+
+async function owner(text, params = []) {
+  if (!pg) pg = (await import("pg")).default;
+  const c = new pg.Client({ connectionString: OWNER_DSN });
+  await c.connect();
+  try {
+    // Legacy seeding only: the legacy table's own FK and monitor triggers belong
+    // to other slices and are not what this test is about.
+    await c.query("set session_replication_role = replica");
+    return (await c.query(text, params)).rows;
+  } finally {
+    await c.end();
+  }
+}
+
+async function legacyRow({ salesforce_id = null, phase, outcome = null, closed_on = null }) {
+  const [row] = await owner(
+    `insert into public.deal (client_id, name, salesforce_id, deal_type, phase, outcome, closed_on,
+                              created_by, updated_by)
+     values (gen_random_uuid(), $1, $2, 'lease', $3, $4, $5, gen_random_uuid(), gen_random_uuid())
+     returning id::text as id`,
+    [`synthetic legacy ${RUN}`, salesforce_id, phase, outcome, closed_on]);
+  return row.id;
+}
+
+async function linkOpportunity(opportunity_id, kind, subject_id) {
+  ok(await as("joe").linkSalesforceReference({ idempotency_key: key(),
+    opportunity_id, opportunity_name: `synthetic ${opportunity_id}`, opportunity_phase: "Negotiation",
+    observed_at: "2026-09-01T00:00:00Z", linked_subject_kind: kind, linked_subject_id: subject_id }),
+  `link ${opportunity_id}`);
+}
+
+async function readiness() {
+  const answer = await as("joe").readCreLifecycle({ selector: { kind: "migration_shadow" } });
+  assert.equal(answer.decision, "allow", JSON.stringify(answer).slice(0, 400));
+  return answer.readback.body;
+}
+
+/**
+ * KERNEL/SQL PARITY ON THE SAME RUN. The kernel is handed exactly the counts the
+ * database recorded and must reach the same cleanliness and the same missing
+ * facts; a drift between the two readers fails here, on real rows.
+ */
+function assertKernelAgrees(sqlReadiness) {
+  const r = sqlReadiness.latest_shadow_run;
+  const kernel = v5J102MigrationReadiness({ tenant: ORGANIZATION_TENANT_ID,
+    latest_shadow_run: r === null ? null : {
+      run_digest: r.run_digest, compared_rows: r.compared_rows, matching_rows: r.matching_rows,
+      differing_rows: r.differing_rows, unlinked_rows: r.unlinked_rows, clean: r.clean } });
+  assert.equal(kernel.shadow_comparison_clean_run, sqlReadiness.shadow_comparison_clean_run ?? false);
+  assert.equal(kernel.may_retire_callers, sqlReadiness.may_retire_callers);
+  assert.deepEqual(kernel.missing_facts.map(f => [f.fact, f.produced_by]),
+    sqlReadiness.missing_facts.map(f => [f.fact, f.produced_by]));
+}
+
+async function runRecord(run_seq) {
+  const [row] = await sql("joe",
+    "select envelope from ops.j102_migration_shadow_run where run_seq = $1", [run_seq]);
+  return row.envelope.record;
+}
+
+test("Q081 LIVE: the shadow compares old and new side by side, reports every difference and unlinked row, modifies neither, and retires nobody", { skip: SHADOW_SKIP }, async () => {
+  const preexisting = await owner("select count(*)::int as n from public.deal");
+  assert.equal(preexisting[0].n, 0, "the scratch database must start with no legacy rows");
+
+  const before = await readiness();
+  assert.equal(before.may_retire_callers, false);
+  assert.equal(before.latest_shadow_run, null, "no run has happened yet");
+  assert.deepEqual(before.missing_facts.map(f => f.fact),
+    ["exact_caller_census", "shadow_comparison_clean_run"]);
+  assertKernelAgrees(before);
+
+  // One executed, pending lease: projects legacy phase 'legal', not closed, open.
+  const d = await dealWith("lease", ["lease_exec"]);
+  const sfA = `006SYN${RUN}A`, sfB = `006SYN${RUN}B`;
+  await linkOpportunity(sfA, "deal", d.deal);
+  await linkOpportunity(sfB, "deal", d.deal);
+  const matching = await legacyRow({ salesforce_id: sfA, phase: "legal" });
+  const differing = await legacyRow({ salesforce_id: sfB, phase: "closing", outcome: "won",
+    closed_on: "2026-09-20" });
+  const unlinked = await legacyRow({ phase: "research" });
+  const snapshot = async () => owner(
+    "select id::text, phase, outcome, closed_on::text, version, updated_at::text from public.deal order by id");
+  const legacyBefore = await snapshot();
+  const dealBefore = (await subject("joe", "deal", d.deal)).readback.body.state_digest;
+
+  const runKey = key();
+  const run = ok(await as("agent").runMigrationShadow({ idempotency_key: runKey }),
+    "a sponsored agent runs the shadow");
+  assert.equal(run.actor_slug, "codex");
+  assert.deepEqual([run.compared_rows, run.matching_rows, run.differing_rows, run.unlinked_rows, run.clean],
+    [2, 1, 1, 1, false]);
+  assert.equal(run.legacy_rows_modified, 0);
+  assert.equal(run.retires_any_caller, false);
+
+  const record = await runRecord(run.run_seq);
+  const byId = Object.fromEntries(record.rows.map(r => [r.legacy_row_id, r]));
+  assert.equal(byId[matching].status, "matching");
+  assert.deepEqual(byId[matching].differences, []);
+  assert.equal(byId[differing].status, "differing");
+  assert.deepEqual(byId[differing].differences.map(x => [x.field, x.legacy, x.projected]),
+    [["phase", "closing", "legal"], ["closed", true, false], ["outcome", "won", "open"]]);
+  assert.equal(byId[unlinked].status, "unlinked");
+
+  assert.deepEqual(await snapshot(), legacyBefore, "no legacy row was touched");
+  assert.equal((await subject("joe", "deal", d.deal)).readback.body.state_digest, dealBefore,
+    "no lifecycle row was touched");
+
+  // Replay returns the same run; it does not append a second observation.
+  const replay = ok(await as("agent").runMigrationShadow({ idempotency_key: runKey }), "replay");
+  assert.equal(replay.run_seq, run.run_seq);
+  assert.equal((await sql("joe", "select count(*)::int as n from ops.j102_migration_shadow_run"))[0].n, 1);
+
+  const dirty = await readiness();
+  assert.equal(dirty.may_retire_callers, false);
+  assert.equal(dirty.shadow_comparison_clean_run, false);
+  assert.equal(dirty.latest_shadow_run.run_seq, run.run_seq);
+  assert.deepEqual(dirty.missing_facts.map(f => f.fact),
+    ["exact_caller_census", "shadow_comparison_clean_run"]);
+  assertKernelAgrees(dirty);
+
+  // A person resolves the two problem rows (here: the synthetic rows go away),
+  // and the next run is clean — and STILL retires nobody without a census.
+  await owner("delete from public.deal where id = any($1::uuid[])", [[differing, unlinked]]);
+  const clean = ok(await as("joe").runMigrationShadow({ idempotency_key: key() }), "clean run");
+  assert.deepEqual([clean.compared_rows, clean.matching_rows, clean.differing_rows, clean.unlinked_rows, clean.clean],
+    [1, 1, 0, 0, true]);
+  const after = await readiness();
+  assert.equal(after.shadow_comparison_clean_run, true);
+  assert.equal(after.latest_shadow_run.run_seq, clean.run_seq);
+  assert.equal(after.may_retire_callers, false, "a clean shadow is not a caller census");
+  assert.equal(after.migration_complete, false);
+  assert.deepEqual(after.missing_facts.map(f => f.fact), ["exact_caller_census"]);
+  assertKernelAgrees(after);
+
+  // The run history is the runner's alone.
+  await assert.rejects(sql("agent",
+    "insert into ops.j102_migration_shadow_run (tenant) values ('x')"), /permission denied|j102_/);
+  await assert.rejects(sql("joe",
+    "delete from ops.j102_migration_shadow_run"), /permission denied|j102_/);
+  await owner("delete from public.deal where id = $1::uuid", [matching]);
 });

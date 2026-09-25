@@ -3879,7 +3879,10 @@ export function compareMigrationShadow(request) {
   });
 }
 
-const READINESS_KEYS = Object.freeze(["tenant", "caller_census", "shadow_runs"]);
+const READINESS_KEYS = Object.freeze(["tenant", "caller_census", "shadow_runs", "latest_shadow_run"]);
+const SHADOW_RUN_KEYS = Object.freeze([
+  "run_digest", "compared_rows", "matching_rows", "differing_rows", "unlinked_rows", "clean",
+]);
 const CENSUS_KEYS = Object.freeze([
   "census_ref", "enumerated_callers", "migrated_callers", "attested_by", "attested_at",
 ]);
@@ -3923,6 +3926,37 @@ export function v5J102MigrationReadiness(request) {
   }
   const shadow_runs = request.shadow_runs === undefined || request.shadow_runs === null
     ? 0 : assertSafeInteger(request.shadow_runs, "request.shadow_runs", { min: 0, max: 1000000 });
+  // THE NEWEST SHADOW RUN, as ops.j102_run_migration_shadow recorded it. Its
+  // cleanliness is RE-DERIVED from its counts here, never read off its `clean`
+  // flag: a run is clean only when it compared something, found no difference and
+  // left no legacy row unlinked — an unlinked row is an unmigrated, untested row.
+  // A flag that disagrees with its own counts is refused, not believed.
+  let latest = null;
+  if (request.latest_shadow_run !== undefined && request.latest_shadow_run !== null) {
+    const raw = assertObject(request.latest_shadow_run, "request.latest_shadow_run");
+    assertClosedKeys(raw, SHADOW_RUN_KEYS, "request.latest_shadow_run", { allowAsserted: true });
+    assertRequiredKeys(raw, SHADOW_RUN_KEYS, "request.latest_shadow_run");
+    const count = k => assertSafeInteger(raw[k], `request.latest_shadow_run.${k}`,
+      { min: 0, max: 1000000 });
+    latest = {
+      run_digest: assertDigestRef(raw.run_digest, "request.latest_shadow_run.run_digest"),
+      compared_rows: count("compared_rows"), matching_rows: count("matching_rows"),
+      differing_rows: count("differing_rows"), unlinked_rows: count("unlinked_rows"),
+    };
+    if (latest.compared_rows !== latest.matching_rows + latest.differing_rows) {
+      fail("shadow_run_counts_inconsistent",
+        "request.latest_shadow_run.compared_rows must equal matching_rows + differing_rows",
+        { path: "request.latest_shadow_run" });
+    }
+    latest.clean = latest.compared_rows > 0 && latest.differing_rows === 0 &&
+      latest.unlinked_rows === 0;
+    if (assertBoolean(raw.clean, "request.latest_shadow_run.clean") !== latest.clean) {
+      fail("shadow_run_clean_flag_contradicts_counts",
+        "request.latest_shadow_run.clean disagrees with the run's own counts",
+        { path: "request.latest_shadow_run.clean", derived: latest.clean });
+    }
+  }
+  const shadowClean = latest?.clean === true;
   return deepFreeze({
     schema_version: V5_J102_COMPATIBILITY_SCHEMA_VERSION,
     tenant: ORGANIZATION_TENANT_ID,
@@ -3933,6 +3967,8 @@ export function v5J102MigrationReadiness(request) {
     caller_census: census,
     caller_census_verified: false,
     shadow_runs,
+    shadow_comparison_clean_run: shadowClean,
+    latest_shadow_run: latest === null ? null : deepFreeze(latest),
     compatibility_view_available: true,
     big_bang_rename: false,
     missing_facts: deepFreeze([
@@ -3941,11 +3977,13 @@ export function v5J102MigrationReadiness(request) {
         why: "Q081 permits retiring the old interface only after migration proof, and no verified enumeration of the callers and projections still reading the legacy shape exists in this record layer.",
         produced_by: "not_produced_by_this_slice",
       },
-      {
+      ...(shadowClean ? [] : [{
         fact: "shadow_comparison_clean_run",
-        why: "compareMigrationShadow supplies the comparison; a clean run over the real rows has not been performed and is not asserted here.",
-        produced_by: "not_produced_by_this_slice",
-      },
+        why: latest === null
+          ? "No migration shadow has been run; ops.j102_run_migration_shadow produces one."
+          : "The newest migration shadow run is not clean: it found differences or unlinked legacy rows, which a person must resolve before it counts as proof.",
+        produced_by: "ops.j102_run_migration_shadow",
+      }]),
     ]),
     effects: V5_NO_EFFECTS,
   });

@@ -1561,6 +1561,41 @@ test("Q081: migration is never claimed complete, and the missing facts are named
   assert.equal(claimed.migration_complete, false);
 });
 
+test("Q081: a CLEAN shadow run removes only its own missing fact and still retires nobody", () => {
+  const run = over => ({ run_digest: D(7), compared_rows: 3, matching_rows: 3,
+    differing_rows: 0, unlinked_rows: 0, clean: true, ...over });
+  const clean = v5J102MigrationReadiness({ tenant: ORGANIZATION_TENANT_ID, latest_shadow_run: run() });
+  assert.equal(clean.shadow_comparison_clean_run, true);
+  assert.equal(clean.may_retire_callers, false, "a clean shadow is not a caller census");
+  assert.equal(clean.migration_complete, false);
+  assert.deepEqual(clean.missing_facts.map(f => f.fact), ["exact_caller_census"]);
+  assert.equal(clean.latest_shadow_run.run_digest, D(7));
+
+  // Each way a run fails to be proof keeps the shadow fact missing.
+  for (const over of [
+    { matching_rows: 2, differing_rows: 1, clean: false },           // a difference
+    { unlinked_rows: 1, clean: false },                              // an unmigrated row
+    { compared_rows: 0, matching_rows: 0, clean: false },            // compared nothing
+  ]) {
+    const dirty = v5J102MigrationReadiness({ tenant: ORGANIZATION_TENANT_ID, latest_shadow_run: run(over) });
+    assert.equal(dirty.shadow_comparison_clean_run, false, JSON.stringify(over));
+    assert.deepEqual(dirty.missing_facts.map(f => f.fact),
+      ["exact_caller_census", "shadow_comparison_clean_run"]);
+    assert.equal(dirty.missing_facts[1].produced_by, "ops.j102_run_migration_shadow");
+  }
+
+  // Cleanliness is DERIVED from the counts; a flag that disagrees is refused.
+  assert.throws(() => v5J102MigrationReadiness({ tenant: ORGANIZATION_TENANT_ID,
+    latest_shadow_run: run({ unlinked_rows: 4, clean: true }) }),
+  e => e.code === "shadow_run_clean_flag_contradicts_counts");
+  assert.throws(() => v5J102MigrationReadiness({ tenant: ORGANIZATION_TENANT_ID,
+    latest_shadow_run: run({ matching_rows: 1 }) }),
+  e => e.code === "shadow_run_counts_inconsistent");
+  assert.throws(() => v5J102MigrationReadiness({ tenant: ORGANIZATION_TENANT_ID,
+    latest_shadow_run: run({ run_digest: "not-a-digest" }) }),
+  e => e.code === "invalid_digest");
+});
+
 // --- the whole journey, end to end -----------------------------------------
 
 test("Journey 1 end to end: Prospect through Client, Assignment, multiple LOIs, pending Deal and close", () => {

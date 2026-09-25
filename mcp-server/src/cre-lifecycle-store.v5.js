@@ -188,6 +188,9 @@ export const V5_J102_OPERATIONS = Object.freeze([
   // holds, and writes the resulting item where a person can find it. It advances
   // no lifecycle state and resolves nothing.
   "record-lifecycle-reconciliation",
+  // Q081's shadow: compares every legacy row with the J102 projection its
+  // Salesforce reference links and appends one run record. Moves no state.
+  "run-migration-shadow",
 ]);
 
 /**
@@ -1064,6 +1067,12 @@ const OPERATION_SCHEMAS = deepFreeze({
     keys: RECONCILIATION_KEYS,
     required: ["idempotency_key", "subject_ref", "edits"],
   },
+  // A WRITE ONLY IN THE SENSE THAT IT APPENDS ITS OWN OBSERVATION. It changes no
+  // business record on either side, which is why it is not authorityOnly.
+  "run-migration-shadow": {
+    write: true, humanOnly: false, authorityOnly: false, transition: null,
+    keys: ["schema_version", "idempotency_key"], required: ["idempotency_key"],
+  },
 });
 
 /** The closed caller schemas, for the parent's registration and for tests. */
@@ -1118,6 +1127,8 @@ export function v5J102ToolRegistrations() {
       "Append one human, authority-held correction receipt with its reason and evidence; history is preserved and nothing is overwritten silently.",
     "record-lifecycle-reconciliation":
       "Judge one concurrent edit against the version the caller decided against and the version the database holds, and append a VISIBLE unresolved conflict item when they differ; it merges nothing, resolves nothing and moves no lifecycle state.",
+    "run-migration-shadow":
+      "Compare every legacy deal row with the lifecycle projection its Salesforce reference links, side by side, and append one immutable run record of matches, differences and unlinked rows; modifies neither side and retires no caller.",
   };
   const handlers = {
     "read-cre-lifecycle": "readCreLifecycle",
@@ -1139,6 +1150,7 @@ export function v5J102ToolRegistrations() {
     "link-salesforce-reference": "linkSalesforceReference",
     "record-lifecycle-correction": "recordLifecycleCorrection",
     "record-lifecycle-reconciliation": "recordLifecycleReconciliation",
+    "run-migration-shadow": "runMigrationShadow",
   };
   return deepFreeze(V5_J102_OPERATIONS.map(name => ({
     name,
@@ -2001,6 +2013,16 @@ export function createCreLifecycleStore({ db } = {}) {
         corrected_fields: outcome.corrected_fields ?? [],
         append_only: true, prior_state_preserved: true,
         derived_from_assistant_text: false,
+      });
+    } else if (operation === "run-migration-shadow") {
+      Object.assign(extra, {
+        run_seq: outcome.run_seq, run_digest: outcome.run_digest,
+        compared_rows: outcome.compared_rows, matching_rows: outcome.matching_rows,
+        differing_rows: outcome.differing_rows, unlinked_rows: outcome.unlinked_rows,
+        clean: outcome.clean === true,
+        legacy_rows_modified: outcome.legacy_rows_modified,
+        retires_any_caller: false,
+        advances_lifecycle_state: false,
       });
     } else {
       fail("invalid_stored_outcome", "not a replayable write operation", { operation });
@@ -3529,6 +3551,30 @@ export function createCreLifecycleStore({ db } = {}) {
     });
   }
 
+  // -- Q081. run-migration-shadow ------------------------------------------
+
+  /**
+   * Run the migration shadow once. The DATABASE reads both sides and decides the
+   * comparison, because the legacy rows and the projection are both there and a
+   * comparison assembled here would be one more copy of each; this module only
+   * derives the actor, binds the idempotency key and verifies the answer names
+   * the operation and the actor it was asked for.
+   */
+  async function runMigrationShadow(payload, context) {
+    const operation = "run-migration-shadow";
+    let { principal, payload: request } = begin(operation, payload, context);
+    return withTransaction(async client => {
+      const opened = await openOperation(client, operation, principal);
+      principal = opened.principal;
+      const replay = await replayOutcome(client, operation, request, principal);
+      if (replay !== null) return replay;
+      const row = await one(client,
+        "SELECT ops.j102_run_migration_shadow($1::text, $2::text) AS outcome",
+        [request.idempotency_key, requestDigest(operation, request, principal)]);
+      return resultFromOutcome(operation, parse(row.outcome), principal);
+    });
+  }
+
   // -- 15. record-lifecycle-correction --------------------------------------
 
   /**
@@ -3801,6 +3847,7 @@ export function createCreLifecycleStore({ db } = {}) {
   return Object.freeze({
     readCreLifecycle,
     recordLifecycleFact,
+    runMigrationShadow,
     recordEvidenceSubjectLink,
     initializeProspectRelationship,
     initializeAssignment,
