@@ -626,6 +626,43 @@ def main() -> int:
               done.returncode == 4 and "is not declared" in done.stderr and not (tmp / "h4").exists(),
               done.stdout + done.stderr)
 
+    # H5. the proof covers every entry BEFORE the tag too: the digest is over the
+    # whole list, so an earlier entry edited after the tag was introduced means
+    # the deploy that applied the tag ran a different list.
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = Path(raw)
+        git = ["git", "-c", "user.name=selftest", "-c", "user.email=selftest@example.test", "-C", str(tmp / "r")]
+        (tmp / "r" / "mcp-server").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(tmp / "r")], check=True, env=GIT_ENV)
+        cfg = tmp / "r" / "mcp-server" / "wrangler.toml"
+        head = '[env.staging]\nname = "carr-mcp-staging"\n'
+        earlier = "v0-selftest-earlier"
+
+        def commit5(text: str, msg: str) -> str:
+            cfg.write_text(text, encoding="utf-8")
+            subprocess.run([*git, "add", "-A"], check=True, env=GIT_ENV)
+            subprocess.run([*git, "commit", "-q", "-m", msg], check=True, env=GIT_ENV)
+            return subprocess.run([*git, "rev-parse", "HEAD"], check=True, env=GIT_ENV,
+                                  capture_output=True, text=True).stdout.strip()
+
+        def entries(first_classes: str) -> str:
+            return (head + f'\n[[migrations]]\ntag = "{earlier}"\nnew_sqlite_classes = ["{first_classes}"]\n'
+                    + f'\n[[migrations]]\ntag = "{TAG1}"\nnew_sqlite_classes = ["T"]\n')
+
+        commit5(head + f'\n[[migrations]]\ntag = "{earlier}"\nnew_sqlite_classes = ["E"]\n', "earlier tag")
+        commit5(entries("E"), "introduce the tag after the earlier entry")
+        c_edit = commit5(entries("E2"), "edit the EARLIER entry after the tag was introduced")
+        done = subprocess.run(
+            [sys.executable, str(REPO / "ops" / "worker-do-migration.py"), "tag-receipt", "write",
+             "--dir", str(tmp / "h5"), "--script", "carr-mcp-staging", "--tag", TAG1,
+             "--digest", expected_digest(entries("E2")), "--sha", c_edit, "--version-id", VS,
+             "--environment", "staging", "--history-repo", str(tmp / "r"), "--history-ref", c_edit],
+            capture_output=True, text=True, env=GIT_ENV)
+        check("H5. an EARLIER [[migrations]] entry edited after the tag was introduced: refused (exit 4), "
+              "no receipt, although the tag's own entry never changed",
+              done.returncode == 4 and "changed at " + c_edit[:12] in done.stderr
+              and not (tmp / "h5").exists(), done.stdout + done.stderr)
+
     # K. staging already carries the tag
     res = run(source, tags=[TAG1], state={"applied_tag": None, "staging_applied_tag": TAG1})
     check("K1. staging already carries the tag with no durable receipt: refused before staging moves",

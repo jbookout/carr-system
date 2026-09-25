@@ -114,19 +114,35 @@ DIR="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/out/d
 
 **(b) The applying-deploy proof,** used only when (a) refuses because the
 steps were edited. Staging's deployment history must identify the deploy that
-APPLIED the tag, not the one serving now. That deploy is the EARLIEST staging
-deployment whose `GIT_SHA` declares the tag in `wrangler.toml`. Walk
-`npx wrangler deployments list --env staging` from oldest to newest, and read
-each version's `GIT_SHA` var with
-`npx wrangler versions view <version-id> --env staging`. The earlier
-deployments must be complete and readable. If any is missing, or has no
-`GIT_SHA`, the applying deploy is unknown. The applying version's `GIT_SHA`
-must be a real commit on `main`, and the `steps_digest` of
-`wrangler.toml` at that commit (from `target --config` on `git show
-<sha>:mcp-server/wrangler.toml`) must equal the current digest. If both hold,
-write the receipt without `--history-repo`. In the incident record, record the
-applying deployment, its version, its SHA and both digests. `--history-repo`
-would rightly refuse here, because the history did change.
+APPLIED the tag, not the one serving now: the earliest staging deployment
+whose `GIT_SHA` declares the tag in `wrangler.toml`.
+
+**`npx wrangler deployments list --env staging` shows only the 10 most recent
+deployments (wrangler 4.137), and it prints no truncation marker.** After more
+than ten staging deploys, "the earliest one that declares the tag" can
+therefore be only the earliest VISIBLE one, and the real applying deploy may
+have scrolled off the list. So (b) also needs the **boundary**, the deployment
+IMMEDIATELY BEFORE the candidate in the list. The boundary proves nothing
+earlier could have applied the tag. All of these must hold:
+
+1. The boundary is visible in the list. If the candidate is the oldest entry
+   shown, there is no boundary, and (b) FAILS.
+2. The boundary and the candidate each serve a single version at 100%. With a
+   split deployment, which code ran is ambiguous, and (b) fails.
+3. Each one's `GIT_SHA` var is readable
+   (`npx wrangler versions view <version-id> --env staging`), and each is a real
+   commit on `main`.
+4. `wrangler.toml` at the boundary's `GIT_SHA` does NOT declare the tag, and
+   `wrangler.toml` at the candidate's `GIT_SHA` does. Check with
+   `git show <sha>:mcp-server/wrangler.toml`.
+5. The `steps_digest` at the candidate's `GIT_SHA` equals the current digest.
+   Get it by running `target --config` on that file.
+
+If all five hold, write the receipt without `--history-repo`. In the incident
+record, record the boundary and the applying deployment: their ids, versions,
+SHAs, and both digests. `--history-repo` would rightly refuse here, because the
+history did change. **If the boundary is not visible, or any check fails, (b)
+fails and the fix is a new tag.**
 
 Then let the release pipeline retry.
 
@@ -137,7 +153,10 @@ Then let the release pipeline retry.
 - staging was deployed from an uncommitted or unknown tree, so no commit names
   what was applied;
 - you cannot read staging's deployment history, or the applying version has no
-  `GIT_SHA`.
+  `GIT_SHA`;
+- the boundary deployment (the one immediately before the applying deploy)
+  is not among the 10 deployments `wrangler deployments list` shows, or it
+  already declares the tag.
 
 In those cases, never write a receipt to get past the refusal: it would certify
 steps staging never ran. Leave the applied tag's entry exactly as it was
