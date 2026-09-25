@@ -190,8 +190,8 @@ def main() -> int:
           and "re-anchored" not in good["claim"]
           and "not proof that the scheduled writer job wrote it" in good["claim"]
           and "not proof that the observations inside it are true" in good["claim"]
-          and "not proof against a database owner who also replaces the doors that write or "
-              "serve the chain" in good["claim"]
+          and "not proof against a database owner who also replaces the door that serves the "
+              "chain" in good["claim"]
           and "not proof against a coordinated database-owner plus anchor rewrite" in good["claim"]
           and good["claim"].endswith("not proof against a re-anchor of a forged chain under "
                                      "partner authority, which a partner's local agent credential "

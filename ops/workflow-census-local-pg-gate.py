@@ -60,6 +60,13 @@ WHAT IT PROVES, each by a refusal or a verdict on real rows:
      (anchor_pending_missing_refused) and stays where it was, and the reader
      says anchor_gap -- while 10's genuine crash gap still recovers because
      its pending entry exists.
+ 13. R4-C1, A REPLACED WRITE DOOR that stores a forged payload: when it
+     answers with the row it stored, the Worker's own verification (payload
+     digest, row hash, seq, prev_hash, principal, time window) refuses it, so
+     nothing is registered and the anchor does not move; when it lies and
+     answers with the honest row, the anchor takes the honest hash and the
+     reader says tampered. 1b checks the Worker's canonical JSON equals the
+     database's and the reader's over a varied corpus.
  11. The re-anchor door runs only as carr_authority with a verified partner,
      refuses a moved or unneeded head, records a receipt with the rows the
      anchor never vouched for, and once applied the chain attests with the
@@ -90,13 +97,15 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from gate_runtime_role import rollback_only_connection  # noqa: E402
-from lib.workflow_census_attestation import load_config, row_hash, verify_census_chain  # noqa: E402
+from lib.workflow_census_attestation import (  # noqa: E402
+    canonical_json, load_config, row_hash, sha256_hex, verify_census_chain)
 
 WRITER = "workflow-census-gate"
 WRITER_LOGIN = "workflow_census_gate_writer"
 READER_LOGIN = "workflow_census_gate_reader"
 AUTHORITY_LOGIN = "workflow_census_gate_authority"
 ANCHOR_MODULE = REPO / "mcp-server" / "src" / "workflow-census-anchor.js"
+VERB_MODULE = REPO / "mcp-server" / "src" / "workflow-census.js"
 PINNED_GUARD_FUNCTIONS = json.loads(
     (REPO / "ops" / "config" / "workflow-census-attestation.v1.json").read_text(encoding="utf-8")
 )["guard_function_sha256"]
@@ -149,6 +158,48 @@ const out = input.kind === "advance"
     : m.decideAnchorReanchor(input.stored, input.last, input.receipt, now);
 process.stdout.write(JSON.stringify(out));
 """
+
+
+# The Worker's own row verification and canonical JSON (workflow-census.js).
+_VERIFY = """
+const m = await import(process.argv[1]);
+const input = JSON.parse(process.argv[2]);
+const out = input.kind === "verify"
+  ? await m.verifyInsertedCensusRow({ ...input.args, nowMs: Date.now() })
+  : input.kind === "row_hash" ? await m.censusRowHash(input.row)
+  : await Promise.all(input.corpus.map(async c => ({ text: JSON.stringify(c),
+      canonical: m.canonicalCensusJson(c), sha: await m.censusPayloadSha256(c) })));
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def worker_js(payload: dict[str, Any]) -> Any:
+    proc = subprocess.run(["node", "--input-type=module", "-e", _VERIFY, VERB_MODULE.as_uri(),
+                           json.dumps(payload)], capture_output=True, text=True, timeout=60)
+    if proc.returncode != 0:
+        raise RuntimeError(f"the verb module did not run under node: {proc.stderr[-300:]}")
+    return json.loads(proc.stdout)
+
+
+# A varied census corpus for the three-way canonical JSON parity check: key
+# order (case, digits, empty, punctuation), unicode (combining marks, BMP above
+# U+E000, astral, RTL, U+2028/9, DEL, NBSP, BOM), every JSON escape, the safe
+# integer range, nulls, booleans, nesting, empty containers.
+PARITY_CORPUS: list[Any] = [
+    CENSUS,
+    {"b": 1, "a": 2, "B": 3, "A": 4, "_": 5, "~": 6, "10": 7, "9": 8, "": 9, "aa": 10, "a b": 11, "a\tb": 12},
+    {"é": "é", "e\u0301": "combining", "ｚ": "ﬀ", "𝄞": "𝄞🎉", "日本": "語", "עברית": "rtl",
+     "\u2028": "\u2029", "\u007f": "del", "\u00a0": "nbsp", "\ufeff": "bom", "\uffff": "last-bmp"},
+    {"s": "\"\\/\b\f\n\r\t\u0001\u001f", "k\"ey\\": "v"},
+    {"zero": 0, "neg": -1, "max": 9007199254740991, "min": -9007199254740991, "big": 12345678901234,
+     "thousand": 1000},
+    {"n": None, "t": True, "f": False, "arr": [None, [], {}, [[1, [2]]], {"b": {"a": [{"d": 1, "c": 2}]}}],
+     "empty": {}},
+    [3, 1, 2, {"b": [], "a": None}],
+    {"schema_version": "control-plane-workflow-truth.v1", "summary": {"workflows": 50},
+     "rows": [{"workflow_key": f"flow-{i}", "workflow_version": i, "state": "enabled_shadow_only"}
+              for i in range(50)]},
+]
 
 
 class Anchor:
@@ -232,27 +283,49 @@ def become(cur: psycopg.Cursor[Any], login: str | None) -> None:
         raise RuntimeError(f"session identity is {who}, expected {expected}")
 
 
+ACTING: dict[str, str | None] = {"slug": None}
+
+
 def actor(cur: psycopg.Cursor[Any], slug: str | None) -> None:
+    """The Worker sets the acting actor from the server-derived actor; it
+    therefore knows that slug itself (ACTING), without reading it back."""
+    ACTING["slug"] = slug
     cur.execute("select set_config('carr.acting_actor_slug', %s, true)", (slug or "",))
 
 
 def record(cur: psycopg.Cursor[Any], payload: Any = None, key: str | None = None, *,
-           crash: bool = False) -> tuple[Any, ...]:
+           crash: bool = False,
+           door: Callable[[tuple[Any, ...]], tuple[Any, ...]] | None = None) -> tuple[Any, ...]:
     """The Worker's write path: read the anchor, call the door with its head,
     register a FRESH insert as the anchor's pending head under its key (before
     commit; a replay registers nothing), then (unless the Worker "crashes"
     between commit and advance) advance the anchor to the committed row under
-    the same key, and refuse by name if it will not advance."""
+    the same key, and refuse by name if it will not advance. A fresh insert is
+    first VERIFIED by the Worker's own code (verifyInsertedCensusRow) against
+    the census sent, the acting slug, the session principal and the anchored
+    head; `door` lets a scenario stand in for a lying door's answer."""
     anchor_seq, anchor_hash = ANCHOR.head_params()
     key = key or str(uuid.uuid4())
+    census = CENSUS if payload is None else payload
+    session = cur.execute("select session_user::text").fetchone()
     row = cur.execute(
         "select seq, recorded_at, principal, row_hash, prev_hash, payload_sha256, replayed "
         "from ops.record_workflow_census(%s, %s, %s, %s)",
-        (Jsonb(CENSUS if payload is None else payload), key, anchor_seq, anchor_hash),
+        (Jsonb(census), key, anchor_seq, anchor_hash),
     ).fetchone()
     if row is None:
         raise RuntimeError("record_workflow_census returned no row")
+    if door is not None:
+        row = door(row)
     if row[6] is not True:
+        verified = worker_js({"kind": "verify", "args": {
+            "row": {"seq": row[0], "recorded_at": row[1], "principal": row[2], "row_hash": row[3],
+                    "prev_hash": row[4], "payload_sha256": row[5]},
+            "census": census, "principal": ACTING["slug"],
+            "dbSessionPrincipal": session[0] if session else None,
+            "anchored": {"seq": anchor_seq, "row_hash": anchor_hash}}})
+        if verified.get("ok") is not True:
+            raise RuntimeError(f"workflow_census_row_unverified: {verified}")
         pending = ANCHOR.register(row[0], row[3], row[4], key)
         if pending.get("ok") is not True:
             raise RuntimeError(f"workflow_census_anchor_pending_refused: {pending}")
@@ -285,6 +358,13 @@ def self_anchored(answer: dict[str, Any]) -> dict[str, Any]:
     head = answer["chain"][-1] if answer["chain"] else None
     return served(answer, {"state": "present", "seq": head["seq"], "row_hash": head["row_hash"],
                            "anchored_at": head["recorded_at"]} if head else {"state": "absent"})
+
+
+def door_source() -> str:
+    """The migration's own CREATE OR REPLACE for the write door, to restore it."""
+    start = MIGRATION.index("create or replace function ops.record_workflow_census(")
+    end = MIGRATION.index("$$;", MIGRATION.index("as $$", start) + 5) + 3
+    return MIGRATION[start:end]
 
 
 def guard_function_source(name: str) -> str:
@@ -383,8 +463,30 @@ def main() -> int:
                     (vector["seq"], vector["recorded_at"], vector["principal"],
                      vector["db_session_principal"], vector["prev_hash"],
                      vector["payload_sha256"])).fetchone()[0]
-                if got != digest or row_hash(vector) != digest:
-                    raise RuntimeError(f"row-hash vector disagrees: db {got}, pinned {digest}")
+                worker = worker_js({"kind": "row_hash", "row": vector})
+                if got != digest or row_hash(vector) != digest or worker != digest:
+                    raise RuntimeError(f"row-hash vector disagrees: db {got}, worker {worker}, pinned {digest}")
+
+            # 1b. Canonical JSON parity, three ways: the Worker's JavaScript (which
+            # now hashes the census itself, R4-C1), the database's
+            # ops.scac_canonical_json over the text the Worker sends, and the
+            # Python reader's, over a varied corpus.
+            rendered = worker_js({"kind": "parity", "corpus": PARITY_CORPUS})
+            for value, js in zip(PARITY_CORPUS, rendered, strict=True):
+                db_canonical, db_sha = cur.execute(
+                    "select ops.scac_canonical_json(%s::jsonb), "
+                    "encode(public.digest(convert_to(ops.scac_canonical_json(%s::jsonb), 'UTF8'), 'sha256'), 'hex')",
+                    (js["text"], js["text"])).fetchone()
+                py_canonical = canonical_json(value)
+                if not (js["canonical"] == db_canonical == py_canonical
+                        and js["sha"] == db_sha == sha256_hex(py_canonical)):
+                    raise RuntimeError(f"canonical JSON disagrees: js {js['canonical']!r} / db {db_canonical!r} "
+                                       f"/ py {py_canonical!r}")
+                if isinstance(value, dict) and value.get("schema_version"):
+                    door_sha = cur.execute("select ops.workflow_census_payload_sha256(%s::jsonb)",
+                                           (js["text"],)).fetchone()[0]
+                    if door_sha != js["sha"]:
+                        raise RuntimeError(f"the door's payload digest disagrees with the Worker's: {door_sha}")
 
             # 6a. All three guards ENABLE ALWAYS.
             states = dict(cur.execute(
@@ -718,6 +820,54 @@ def main() -> int:
             if (laundered.get("available"), laundered.get("reason")) != (False, "anchor_gap"):
                 raise RuntimeError(f"a replayed forged row did not leave the reader at anchor_gap: {laundered}")
 
+            # 13. R4-C1, A REPLACED WRITE DOOR. The owner replaces
+            # ops.record_workflow_census with a copy that stores a forged payload.
+            forged_literal = "'" + json.dumps(FORGED).replace("'", "''") + "'::jsonb"
+            marker = "  v_found boolean;\nbegin\n"
+            if door_source().count(marker) != 1:
+                raise RuntimeError("the write door's body changed shape; update the replaced-door scenario")
+            substituting = door_source().replace(marker, f"{marker}  p_payload := {forged_literal};\n")
+            saved = ANCHOR.snapshot()
+            cur.execute("savepoint replaced_door")
+            anchored_before = ANCHOR.head_params()
+            db_before = head(cur)
+            cur.execute(substituting)
+            # 13a. The door answers with the row it stored (forged payload): the
+            # Worker's verification refuses it; nothing is registered, the write
+            # rolls back, the anchor does not move.
+            become(cur, WRITER_LOGIN)
+            actor(cur, WRITER)
+            pending_before = copy.deepcopy(ANCHOR.pending)
+            expect_refusal(cur, lambda: record(cur), (RuntimeError,),
+                           "'field': 'payload_sha256'", "replaced_door_forged_answer")
+            become(cur, None)
+            refused_state = (ANCHOR.head_params(), copy.deepcopy(ANCHOR.pending), head(cur))
+            # 13b. The door lies instead: it stores the forged row but answers
+            # with the honest row the Worker expects. The Worker verifies and
+            # anchors the honest hash, which is not the stored row's: the reader
+            # says tampered.
+            def honest(row: tuple[Any, ...]) -> tuple[Any, ...]:
+                sha = sha256_hex(canonical_json(CENSUS))
+                return (row[0], row[1], row[2], row_hash({
+                    "seq": row[0], "recorded_at": row[1], "principal": row[2],
+                    "db_session_principal": WRITER_LOGIN, "prev_hash": row[4], "payload_sha256": sha}),
+                    row[4], sha, False)
+            become(cur, WRITER_LOGIN)
+            actor(cur, WRITER)
+            lied = record(cur, door=honest)
+            become(cur, None)
+            cur.execute(door_source())
+            lying_door = verdict_of(cur)
+            cur.execute("rollback to savepoint replaced_door")
+            ANCHOR.restore(saved)
+            if refused_state != (anchored_before, pending_before, db_before):
+                raise RuntimeError(f"a replaced door's forged answer moved something: {refused_state} vs "
+                                   f"{(anchored_before, pending_before, db_before)}")
+            if lied[3] == head(cur)[1]:
+                raise RuntimeError("scenario 13b did not separate the answered and stored rows")
+            if (lying_door.get("available"), lying_door.get("reason")) != (False, "tampered"):
+                raise RuntimeError(f"a lying door's forged row was not read tampered: {lying_door}")
+
             # 11. RE-ANCHOR: a crash whose key is lost, closed only by partner authority.
             saved = ANCHOR.snapshot()
             cur.execute("savepoint reanchor")
@@ -785,7 +935,9 @@ def main() -> int:
               "trigger on; guards are ENABLE ALWAYS and a flipped guard, a replaced guard body or a "
               "wholesale rewrite reads tampered and stays tampered through the next write; a crash "
               "gap reads anchor_gap until the same-key retry, then attests; a forged linked row replayed "
-              "under its key moves nothing and reads anchor_gap; a re-anchor needs "
+              "under its key moves nothing and reads anchor_gap; a replaced write door's forged row is "
+              "refused by the Worker's verification or read tampered; the Worker's, the database's "
+              "and the reader's canonical JSON agree; a re-anchor needs "
               "carr_authority and a verified partner and leaves a named receipt; freshness and "
               "truncation follow the database")
         return 0

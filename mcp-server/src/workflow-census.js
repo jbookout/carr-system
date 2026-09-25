@@ -50,6 +50,109 @@ function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+// THE WORKER VERIFIES THE ROW THE DOOR SAYS IT INSERTED (round-4 fix, R4-C1).
+// The database owner can replace ops.record_workflow_census itself, store a
+// forged payload, and answer the Worker with the forged row; registering that
+// answer as the pending head would anchor the forgery. So before registering,
+// the Worker recomputes every field it has its own value for, and refuses on
+// any mismatch (nothing is registered, the transaction rolls back):
+//
+//   seq                   = anchored seq + 1 (1 on an empty anchor)
+//   prev_hash             = anchored row_hash (null on an empty anchor)
+//   principal             = the server-derived actor slug
+//   payload_sha256        = sha256(canonical JSON of the census this call sent)
+//   row_hash              = sha256(canonical JSON of {seq, recorded_at,
+//                           principal, db_session_principal, prev_hash,
+//                           payload_sha256}) over the values above, with
+//                           db_session_principal = this connection's
+//                           session_user as the Worker read it back at the
+//                           start of the transaction (trusted_principal)
+//   recorded_at           the one field the door still chooses: it must be the
+//                           database's time format and within
+//                           MAX_RECORDED_AT_SKEW_MS of the Worker's own clock
+//
+// Canonical JSON here must equal ops.scac_canonical_json and the Python
+// reader's json.dumps(sort_keys=True, separators=(",", ":"),
+// ensure_ascii=False): keys in code-point order (the database sorts them
+// COLLATE "C", i.e. by UTF-8 bytes, which is the same order; JavaScript's
+// default sort compares UTF-16 units and is NOT), strings and integers as
+// JSON.stringify renders them. The census may hold only safe integers
+// (fractions and integers past 2^53 render differently across the three).
+// The local PostgreSQL gate checks all three agree over a varied corpus.
+export const MAX_RECORDED_AT_SKEW_MS = 5 * 60 * 1000;
+const RECORDED_AT_FORMAT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/;
+
+function compareCodePoints(a, b) {
+  const x = [...a], y = [...b];
+  for (let i = 0; i < Math.min(x.length, y.length); i += 1) {
+    const d = x[i].codePointAt(0) - y[i].codePointAt(0);
+    if (d !== 0) return d;
+  }
+  return x.length - y.length;
+}
+
+export function canonicalCensusJson(value) {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value)) throw new Error("canonical_json_number_refused");
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalCensusJson).join(",")}]`;
+  if (isPlainObject(value))
+    return `{${Object.keys(value).sort(compareCodePoints)
+      .map(key => `${JSON.stringify(key)}:${canonicalCensusJson(value[key])}`).join(",")}}`;
+  throw new Error("canonical_json_value_refused");
+}
+
+async function sha256Hex(text) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
+export async function censusPayloadSha256(census) {
+  return sha256Hex(canonicalCensusJson(census));
+}
+
+export async function censusRowHash(row) {
+  return sha256Hex(canonicalCensusJson({
+    seq: row.seq, recorded_at: row.recorded_at, principal: row.principal,
+    db_session_principal: row.db_session_principal, prev_hash: row.prev_hash,
+    payload_sha256: row.payload_sha256,
+  }));
+}
+
+// Returns {ok: true} or {ok: false, field} naming the first field that is not
+// what the Worker expected. `anchored` is {seq, row_hash} (both null when the
+// anchor holds no head).
+export async function verifyInsertedCensusRow({ row, census, principal, dbSessionPrincipal, anchored,
+  nowMs }) {
+  const wrong = field => ({ ok: false, field });
+  const seq = Number(row?.seq);
+  const expectedSeq = anchored?.seq === null || anchored?.seq === undefined ? 1 : anchored.seq + 1;
+  const expectedPrev = anchored?.row_hash ?? null;
+  if (!Number.isSafeInteger(seq) || seq !== expectedSeq) return wrong("seq");
+  if ((row.prev_hash ?? null) !== expectedPrev) return wrong("prev_hash");
+  if (typeof principal !== "string" || row.principal !== principal) return wrong("principal");
+  if (typeof dbSessionPrincipal !== "string" || dbSessionPrincipal === "") return wrong("db_session_principal");
+  let payloadSha;
+  try { payloadSha = await censusPayloadSha256(census); } catch { return wrong("payload_sha256"); }
+  if (row.payload_sha256 !== payloadSha) return wrong("payload_sha256");
+  if (typeof row.recorded_at !== "string" || !RECORDED_AT_FORMAT.test(row.recorded_at)
+      || !(Math.abs(Date.parse(row.recorded_at) - nowMs) <= MAX_RECORDED_AT_SKEW_MS))
+    return wrong("recorded_at");
+  const expectedHash = await censusRowHash({ seq: expectedSeq, recorded_at: row.recorded_at, principal,
+    db_session_principal: dbSessionPrincipal, prev_hash: expectedPrev, payload_sha256: payloadSha });
+  if (row.row_hash !== expectedHash) return wrong("row_hash");
+  return { ok: true };
+}
+
+function hasUnsafeInteger(value) {
+  if (typeof value === "number") return Number.isInteger(value) && !Number.isSafeInteger(value);
+  if (Array.isArray(value)) return value.some(hasUnsafeInteger);
+  if (isPlainObject(value)) return Object.values(value).some(hasUnsafeInteger);
+  return false;
+}
+
 function hasFraction(value) {
   if (typeof value === "number") return !Number.isInteger(value);
   if (Array.isArray(value)) return value.some(hasFraction);
@@ -133,6 +236,9 @@ export function workflowCensusTools({ withEnvelope, ToolError }) {
         if (hasFraction(census))
           throw new ToolError({ error: "workflow_census_payload_fraction_refused",
             hint: "the chain hashes canonical JSON; non-integer numbers render differently across languages" });
+        if (hasUnsafeInteger(census))
+          throw new ToolError({ error: "workflow_census_payload_unsafe_integer_refused",
+            hint: "the chain hashes canonical JSON; integers beyond 2^53 render differently across languages" });
         const text = JSON.stringify(census);
         if (text.length > MAX_CENSUS_CHARS)
           throw new ToolError({ error: "workflow_census_payload_too_large", limit: MAX_CENSUS_CHARS, got: text.length });
@@ -160,6 +266,14 @@ export function workflowCensusTools({ withEnvelope, ToolError }) {
           // handed back (one the owner could have written under this key)
           // cannot move the anchor (R3-C1). A refusal here rolls the row back.
           if (row.replayed !== true) {
+            const verified = await verifyInsertedCensusRow({ row, census: JSON.parse(text),
+              principal: actor?.slug, dbSessionPrincipal: actor?.trusted_principal?.session_principal,
+              anchored: head, nowMs: Date.now() });
+            if (!verified.ok)
+              throw new ToolError({ error: "workflow_census_row_unverified", field: verified.field,
+                hint: "the row the write door returned is not the row this call asked it to insert; " +
+                      "nothing was registered with the anchor and the write rolled back. The door " +
+                      "itself may have been replaced: investigate before retrying" });
             const pending = typeof c.workflowCensusPending === "function"
               ? await c.workflowCensusPending(
                 { seq: Number(row.seq), row_hash: row.row_hash, prev_hash: row.prev_hash ?? null },

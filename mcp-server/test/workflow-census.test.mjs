@@ -1,8 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { ToolError, executeRegisteredTool, TOOLS } from "../src/tools.js";
+import { canonicalCensusJson, censusPayloadSha256, censusRowHash, verifyInsertedCensusRow,
+  MAX_RECORDED_AT_SKEW_MS } from "../src/workflow-census.js";
 
-const AGENT = { id: "10000000-0000-0000-0000-000000000041", slug: "joe-local", human: false, via: "test" };
+// trusted_principal is what mcp.js attaches after reading back session_user.
+const AGENT = { id: "10000000-0000-0000-0000-000000000041", slug: "joe-local", human: false, via: "test",
+  trusted_principal: { session_principal: "carr_writer" } };
 const JOE = { id: "10000000-0000-0000-0000-000000000002", slug: "joe", display: "Joe", human: true, via: "oauth-google" };
 
 async function rejected(fn) {
@@ -71,13 +75,16 @@ class CensusFake {
         const { payload, key, ...row } = prior;
         return { rows: [{ ...row, replayed: true }] };
       }
+      // An honest door: the database's own fields, hashed as the database does.
       const seq = this.rows.length + 1;
-      const row = {
-        seq: String(seq), recorded_at: `2026-09-24T09:10:0${seq}.000000Z`, principal: "joe-local",
-        row_hash: String(seq).repeat(64).slice(0, 64), prev_hash: seq === 1 ? null : String(seq - 1).repeat(64).slice(0, 64),
-        payload_sha256: "a".repeat(64), replayed: false,
-      };
-      this.rows.push({ ...row, payload: JSON.parse(params[0]), key: params[1] });
+      const payload = this.substitutePayload ?? JSON.parse(params[0]);
+      const fields = { seq, recorded_at: new Date().toISOString().replace("Z", "000Z"), principal: "joe-local",
+        db_session_principal: "carr_writer", prev_hash: this.rows.at(-1)?.row_hash ?? null,
+        payload_sha256: await censusPayloadSha256(payload) };
+      const row = { ...fields, seq: String(seq), row_hash: await censusRowHash(fields), replayed: false };
+      delete row.db_session_principal;
+      if (this.lie) Object.assign(row, this.lie);
+      this.rows.push({ ...row, payload, key: params[1] });
       return { rows: [row] };
     }
     if (sql.startsWith("select ops.read_workflow_census")) {
@@ -130,7 +137,7 @@ test("record-workflow-census sends the census and the key to the door and return
   await executeRegisteredTool(c, AGENT, "record-workflow-census",
     { idempotency_key: "k-1b", census: structuredClone(CENSUS) });
   const second = c.calls.filter(call => call.sql.includes("ops.record_workflow_census"))[1];
-  assert.deepEqual(second.params.slice(2), [1, "1".repeat(64)], "the anchored head goes to the door");
+  assert.deepEqual(second.params.slice(2), [1, out.row_hash], "the anchored head goes to the door");
   assert.ok(!door.params.includes("joe-local"), "the handler never passes the actor to the door");
 });
 
@@ -331,4 +338,92 @@ test("an anchor that refuses the pending head refuses the write by name, so the 
     { idempotency_key: "k-p3", census: structuredClone(CENSUS) }));
   assert.equal(missing.error, "workflow_census_anchor_pending_refused");
   assert.equal(missing.detail, "anchor_not_bound");
+});
+
+// R4-C1: the Worker verifies the row the door says it inserted.
+
+test("the Worker's row hash is the pinned cross-language rule (the vectors the Python selftest and PG gate pin)", async () => {
+  const row = { seq: 7, recorded_at: "2026-09-24T04:10:00.123456Z", principal: "joe-local",
+    db_session_principal: "carr_writer", prev_hash: "a".repeat(64), payload_sha256: "b".repeat(64) };
+  assert.equal(await censusRowHash(row), "d06373a7bf4840bfbc2fab8bae4caca4e2cd42cf289c116174460af02864186f");
+  assert.equal(await censusRowHash({ ...row, seq: 1, prev_hash: null }),
+    "c557fc0fa00e3c53b091055baa3eb469fc015e72f38e1b36a5e36ffae3f5be9d");
+});
+
+test("canonical JSON sorts keys by code point, not UTF-16 unit, and refuses what would render differently", () => {
+  const value = { "𝄞": 1, "ｚ": 2, "z": null, "10": true, "2": false, "": [], "B": { "b": "é\n\u0001\"\\/" } };
+  assert.equal(canonicalCensusJson(value),
+    '{"":[],"10":true,"2":false,"B":{"b":"é\\n\\u0001\\"\\\\/"},"z":null,"ｚ":2,"𝄞":1}');
+  assert.ok(Object.keys(value).sort().indexOf("𝄞") < Object.keys(value).sort().indexOf("ｚ"),
+    "JavaScript's default sort would have put the astral key first");
+  assert.throws(() => canonicalCensusJson({ n: 2 ** 53 }), /canonical_json_number_refused/);
+  assert.throws(() => canonicalCensusJson({ n: 1.5 }), /canonical_json_number_refused/);
+  assert.throws(() => canonicalCensusJson({ n: undefined }), /canonical_json_value_refused/);
+});
+
+test("a replaced door that stores another payload is refused before anything is registered", async () => {
+  const c = new CensusFake();
+  c.substitutePayload = { ...structuredClone(CENSUS), summary: { workflows: 99, false_operational: 0 } };
+  const refusal = await rejected(() => executeRegisteredTool(c, AGENT, "record-workflow-census",
+    { idempotency_key: "k-sub", census: structuredClone(CENSUS) }));
+  assert.equal(refusal.error, "workflow_census_row_unverified");
+  assert.equal(refusal.field, "payload_sha256");
+  assert.equal(c.registered.length, 0, "the forged row never becomes a pending head");
+});
+
+test("every field the Worker knows is checked: a door lying about any one of them is refused by name", async () => {
+  const H = "c".repeat(64);
+  const skewed = new Date(Date.now() - MAX_RECORDED_AT_SKEW_MS - 60000).toISOString().replace("Z", "000Z");
+  for (const [field, lie] of [
+    ["seq", { seq: "2" }],
+    ["prev_hash", { prev_hash: H }],
+    ["principal", { principal: "someone-else" }],
+    ["payload_sha256", { payload_sha256: H }],
+    ["row_hash", { row_hash: H }],
+    ["recorded_at", { recorded_at: skewed }],
+    ["recorded_at", { recorded_at: "2026-09-24T09:10:01Z" }],
+    // Near the Worker's clock but not the database's microsecond format.
+    ["recorded_at", { recorded_at: new Date().toISOString() }],
+  ]) {
+    const c = new CensusFake();
+    c.lie = lie;
+    const refusal = await rejected(() => executeRegisteredTool(c, AGENT, "record-workflow-census",
+      { idempotency_key: `k-lie-${field}`, census: structuredClone(CENSUS) }));
+    assert.equal(refusal.error, "workflow_census_row_unverified", field);
+    assert.equal(refusal.field, field, JSON.stringify(lie));
+    assert.equal(c.registered.length, 0, field);
+  }
+  // The honest door's row, but the Worker's own session principal differs: the
+  // row hash no longer matches what the Worker computes.
+  const c = new CensusFake();
+  const other = { ...AGENT, trusted_principal: { session_principal: "app_writer" } };
+  assert.equal((await rejected(() => executeRegisteredTool(c, other, "record-workflow-census",
+    { idempotency_key: "k-sess", census: structuredClone(CENSUS) }))).field, "row_hash");
+  const none = { ...AGENT, trusted_principal: undefined };
+  assert.equal((await rejected(() => executeRegisteredTool(new CensusFake(), none, "record-workflow-census",
+    { idempotency_key: "k-none", census: structuredClone(CENSUS) }))).field, "db_session_principal");
+});
+
+test("the verification is exact about the anchored predecessor", async () => {
+  const census = structuredClone(CENSUS);
+  const payload_sha256 = await censusPayloadSha256(census);
+  const recorded_at = new Date().toISOString().replace("Z", "000Z");
+  const base = { seq: 3, recorded_at, principal: "joe-local", db_session_principal: "carr_writer",
+    prev_hash: "d".repeat(64), payload_sha256 };
+  const row = { ...base, row_hash: await censusRowHash(base) };
+  const args = { row, census, principal: "joe-local", dbSessionPrincipal: "carr_writer", nowMs: Date.now() };
+  assert.deepEqual(await verifyInsertedCensusRow({ ...args, anchored: { seq: 2, row_hash: "d".repeat(64) } }), { ok: true });
+  assert.equal((await verifyInsertedCensusRow({ ...args, anchored: { seq: 1, row_hash: "d".repeat(64) } })).field, "seq");
+  assert.equal((await verifyInsertedCensusRow({ ...args, anchored: { seq: 2, row_hash: "e".repeat(64) } })).field,
+    "prev_hash");
+  assert.equal((await verifyInsertedCensusRow({ ...args, anchored: { seq: null, row_hash: null } })).field, "seq");
+});
+
+test("a census holding an integer past 2^53 is refused before the door", async () => {
+  const c = new CensusFake();
+  const census = { ...structuredClone(CENSUS), summary: { workflows: 2 ** 53 + 2 } };
+  const refusal = await rejected(() => executeRegisteredTool(c, AGENT, "record-workflow-census",
+    { idempotency_key: "k-big", census }));
+  assert.equal(refusal.error, "workflow_census_payload_unsafe_integer_refused");
+  assert.ok(!c.calls.some(call => call.sql.includes("ops.record_workflow_census")));
 });

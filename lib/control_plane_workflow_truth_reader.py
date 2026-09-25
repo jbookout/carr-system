@@ -46,7 +46,7 @@ re-anchor receipt, when there is one); not proof that the scheduled writer job
 wrote it (the principal is a bearer token's actor, and the local token on the
 writer's Mac is readable by anything running as that user), not proof that the
 observations inside it are true, not proof against a database owner who also
-replaces the doors that write or serve the chain, not proof against a
+replaces the door that serves the chain, not proof against a
 coordinated database-owner plus anchor rewrite, and not proof against a
 re-anchor of a forged chain under partner authority, which a partner's local
 agent credential also carries (recorded and named in the claim: detected,

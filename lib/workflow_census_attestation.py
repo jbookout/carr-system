@@ -29,10 +29,17 @@ WHAT IT DOES NOT MEAN.
   * It is not proof against a COORDINATED rewrite: someone holding the database
     owner role AND able to deploy Worker code that rewrites the anchor could
     replace both consistently.  Nor against an owner who also replaces the
-    database doors that write or serve the chain: a replaced read door can
-    answer with the anchored chain while the stored rows differ (every check
-    here runs over what that door serves), and a replaced write door can report
-    a forged row as a fresh insert.  Nor against a re-anchor of a forged chain
+    database door that SERVES the chain: a replaced read door can answer with
+    the anchored chain while the stored rows differ (every check here runs over
+    what that door serves; a server_now cross-check against the Worker's clock
+    is a known follow-up).  A replaced WRITE door is detected, not trusted: the
+    Worker recomputes the returned row's seq, prev_hash, principal, payload
+    digest and row hash from values it holds itself and refuses a mismatch
+    before registering it (mcp-server/src/workflow-census.js,
+    verifyInsertedCensusRow), and a door that answers honestly while storing
+    something else leaves a stored head the anchor does not hold (tampered).
+    The one field the door still chooses is recorded_at, which the Worker
+    bounds to within five minutes of its own clock.  Nor against a re-anchor of a forged chain
     by anyone holding partner authority -- which is not only the two partners:
     the server grants it to each partner's sponsored agent credentials too
     (``partner-authority.js``: codex, claude, joe-local, dell-local under a
@@ -360,7 +367,7 @@ def verify_census_chain(answer: Any, config: Mapping[str, Any]) -> dict[str, Any
                   "the external anchor holds, which moves only to the next linked row the Worker "
                   f"itself inserted{reanchor_clause}; not proof that the scheduled writer job wrote "
                   "it, not proof that the observations inside it are true, not proof against a "
-                  "database owner who also replaces the doors that write or serve the chain, not "
+                  "database owner who also replaces the door that serves the chain, not "
                   "proof against a coordinated database-owner plus anchor rewrite, and not proof "
                   "against a re-anchor of a forged chain under partner authority, which a partner's "
                   "local agent credential also carries: a re-anchor is recorded and named here, detected "

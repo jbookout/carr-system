@@ -56,6 +56,14 @@
 // them all. An entry whose transaction then rolled back is harmless: only the
 // exact row it names can ever match it, within the TTL.
 //
+// WHAT GETS REGISTERED IS VERIFIED FIRST (round-4 fix, R4-C1). The owner can
+// also replace the write door so it stores a forged payload and answers with
+// that row. So the verb registers nothing it has not recomputed itself: seq,
+// prev_hash, principal, payload digest and row hash against the census it sent,
+// the anchored head, the server-derived actor and its own session principal
+// (workflow-census.js, verifyInsertedCensusRow). This object therefore only
+// ever anchors a hash over the census the Worker was given.
+//
 // SERIALIZED. Every read-modify-write runs inside ctx.blockConcurrencyWhile,
 // so no second request is delivered to the object until it finishes. The
 // storage input gate alone does not guarantee that across non-storage awaits
