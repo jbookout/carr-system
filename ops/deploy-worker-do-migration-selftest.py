@@ -326,12 +326,12 @@ def main() -> int:
                 and not wrangler_calls(res, "versions")
                 and not any(c[0] == "curl" and any(a == "https://api.doctorcre.com/release" for a in c)
                             for c in res["calls"]))
-    for label, state in (
+    for label, s_state in (
             ("staging deploy fails", {"applied_tag": None, "staging_deploy_mode": "fail"}),
             ("staging tag does not move", {"applied_tag": None, "staging_deploy_mode": "no_tag_move"}),
             ("staging read-back mismatch", {"applied_tag": None, "staging_stale_readback": True}),
             ("staging tag unknown", {"applied_tag": None, "staging_services_mode": "http_error"})):
-        res = run(block, tags=[TAG1], state=state)
+        res = run(block, tags=[TAG1], state=s_state)
         check(f"S. {label}: refused, traffic not changed, Production untouched",
               res["rc"] == 1 and "staging precheck" in res["err"]
               and "Production traffic was not changed" in res["err"] and production_untouched(res),
