@@ -897,7 +897,7 @@ if [ "$JEV_CALL_RECEIPT_MIGRATE_PY_RESEAL_REGISTRY_APPLIED" = t ] && [ "$JEV_CAL
   exit 1
 fi
 DEPLOY_WORKER_DO_MIGRATION_RESEAL_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0598_deploy_worker_do_migration_reseal.sql')" \
+  "select exists (select 1 from schema_migrations where filename='0601_deploy_worker_do_migration_reseal.sql')" \
   2>/dev/null)"
 case "$DEPLOY_WORKER_DO_MIGRATION_RESEAL_REGISTRY_APPLIED" in
   t|f) ;;

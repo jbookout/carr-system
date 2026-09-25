@@ -48,6 +48,7 @@ SCRIPT = REPO / "bin" / "deploy-worker.sh"
 HEAD_SHA = "a" * 40
 V0 = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
 V1 = "0f1e2d3c-4b5a-4968-8776-655443322110"
+VS = "5a5a5a5a-1b1b-4c2c-8d3d-4e4e4e4e4e4e"
 TOKEN = "cf-selftest-token-9f8e7d6c5b4a"
 TAG1 = "v1-workflow-census-anchor"
 TAG2 = "v2-selftest-second-class"
@@ -76,6 +77,19 @@ if argv[:2] == ["auth", "token"]:
     if state.get("auth_fail"):
         print("Not logged in.", file=sys.stderr); sys.exit(1)
     print(json.dumps({"type": "api_token", "token": os.environ["FAKE_TOKEN"]}, indent=2)); sys.exit(0)
+if argv[:1] == ["deploy"] and argv[1:3] == ["--env", "staging"]:
+    mode = state.get("staging_deploy_mode", "ok")
+    sha = next(a.split(":", 1)[1] for a in argv if a.startswith("GIT_SHA:"))
+    if mode == "fail":
+        print("X [ERROR] staging deploy failed"); sys.exit(1)
+    if mode != "no_tag_move":
+        state["staging_applied_tag"] = state["latest_tag"]
+    state["staging_served_sha"] = sha
+    state["staging_served_version"] = os.environ["FAKE_VS"]
+    save()
+    print("Uploaded carr-mcp-staging")
+    print("Current Version ID: " + os.environ["FAKE_VS"])
+    sys.exit(0)
 if argv[:1] == ["deploy"]:
     mode = state.get("deploy_mode", "ok")
     sha = next(a.split(":", 1)[1] for a in argv if a.startswith("GIT_SHA:"))
@@ -110,18 +124,31 @@ out = argv[argv.index("-o") + 1] if "-o" in argv else None
 if "/workers/services/" in url:
     if f"Authorization: Bearer {os.environ['FAKE_TOKEN']}" not in stdin:
         sys.exit(22)
-    mode = state.get("services_mode", "ok")
+    staging = url.endswith("/services/carr-mcp-staging")
+    mode = state.get("staging_services_mode" if staging else "services_mode", "ok")
     if mode == "http_error":
         sys.exit(22)
     if mode == "malformed":
         body = "<html>not json</html>"
     else:
-        script = {"id": state.get("script_id", "carr-mcp"), "etag": "e"}
-        if state.get("applied_tag") is not None:
-            script["migration_tag"] = state["applied_tag"]
+        name = "carr-mcp-staging" if staging else state.get("script_id", "carr-mcp")
+        script = {"id": name, "etag": "e"}
+        applied = state.get("staging_applied_tag") if staging else state.get("applied_tag")
+        if applied is not None:
+            script["migration_tag"] = applied
         body = json.dumps({"success": True, "errors": [], "result": {
-            "id": "carr-mcp", "default_environment": {"environment": "production", "script": script}}})
+            "id": name, "default_environment": {"environment": "production", "script": script}}})
     open(out, "w").write(body)
+    sys.exit(0)
+if url.endswith("/release") and "carr-mcp-staging" in url:
+    if state.get("staging_served_sha") is None:
+        sys.exit(22)
+    print(json.dumps({"ok": True, "env": {"value": "staging"},
+                      "git_sha": {"value": "c" * 40 if state.get("staging_stale_readback") else state["staging_served_sha"]},
+                      "provider": "cloudflare-workers",
+                      "worker_version": {"id": state["staging_served_version"]},
+                      "program6_actions": {"enabled": True, "posture": "enabled", "reason": None},
+                      "schema": {"highest_applied_migration": "0590_selftest.sql", "applied_count": 5}}))
     sys.exit(0)
 if url.endswith("/release"):
     if state.get("served_sha") is None:
@@ -160,6 +187,8 @@ def run(block: str, *, tags: list[str], state: dict) -> dict:
         (tmp / "worker").mkdir()
         (tmp / "repo").mkdir()
         (tmp / "repo" / "ops").symlink_to(REPO / "ops")
+        (tmp / "repo" / "tools").symlink_to(REPO / "tools")
+        (tmp / "repo" / "lib").symlink_to(REPO / "lib")
         (tmp / "worker" / "wrangler.toml").write_text(wrangler_toml(tags), encoding="utf-8")
         for name, body in (("wrangler", FAKE_WRANGLER), ("curl", FAKE_CURL)):
             path = tmp / "bin" / name
@@ -190,7 +219,7 @@ def run(block: str, *, tags: list[str], state: dict) -> dict:
             "EXPECTED_SCHEMA_APPLIED_COUNT": "5",
             "CARR_READBACK_ATTEMPTS": "2", "CARR_READBACK_SLEEP": "0",
             "FAKE_STATE": str(tmp / "state.json"), "FAKE_CALLS": str(calls),
-            "FAKE_TOKEN": TOKEN, "FAKE_V0": V0, "FAKE_V1": V1,
+            "FAKE_TOKEN": TOKEN, "FAKE_V0": V0, "FAKE_V1": V1, "FAKE_VS": VS,
         }
         done = subprocess.run(["sh", str(harness)], env=env, capture_output=True, text=True,
                               timeout=120)
@@ -245,8 +274,8 @@ def main() -> int:
 
     # B. pending (the first release after #1244: nothing applied yet)
     res = run(block, tags=[TAG1], state={"applied_tag": None})
-    deploys = wrangler_calls(res, "deploy")
-    check("B. pending: exactly one deploy, then the ordinary upload succeeds",
+    deploys = [c for c in wrangler_calls(res, "deploy") if c[1:3] != ["--env", "staging"]]
+    check("B. pending: exactly one production deploy, then the ordinary upload succeeds",
           res["rc"] == 0 and len(deploys) == 1 and f"Worker Version ID: {V1}" in res["out"],
           res["all"][-900:])
     check("B. the deploy carries this SHA's stamps and names the tag",
@@ -258,7 +287,17 @@ def main() -> int:
     check("B. order: read, deploy, re-read, read-back, then upload",
           "deploy" in order and "versions" in order
           and order.index("deploy") < order.index("versions")
-          and services_reads(res) == 2, str(order))
+          and services_reads(res) == 4, str(order))
+    staging_at = next((i for i, c in enumerate(res["calls"])
+                       if c[:4] == ["wrangler", "deploy", "--env", "staging"]), None)
+    prod_at = next((i for i, c in enumerate(res["calls"])
+                    if c[:2] == ["wrangler", "deploy"] and c[2:4] != ["--env", "staging"]), None)
+    check("B. staging precheck deploys the same SHA to staging BEFORE the production deploy",
+          staging_at is not None and prod_at is not None and staging_at < prod_at
+          and f"GIT_SHA:{HEAD_SHA}" in res["calls"][staging_at], str(order))
+    check("B. staging /release was read back before production moved",
+          any(c[0] == "curl" and any("carr-mcp-staging" in a and a.endswith("/release") for a in c)
+              for c in res["calls"][:prod_at or 0]))
     check("B. the marker line names tag, prior tag and version",
           f"DO migration applied: tag={TAG1} from=none version={V0}" in res["out"])
     rc = res["receipt"] or {}
@@ -266,6 +305,9 @@ def main() -> int:
           rc.get("state") == "applied_verified" and rc.get("new_tag") == TAG1
           and rc.get("old_tag") is None and rc.get("migration_version_id") == V0
           and rc.get("git_sha") == HEAD_SHA and rc.get("readback") == "identity-ok"
+          and rc.get("staging_precheck", {}).get("state") == "passed"
+          and rc.get("staging_precheck", {}).get("tag_moved") is True
+          and rc.get("staging_precheck", {}).get("version_id") == VS
           and res["receipt_valid"], json.dumps(rc))
     check("B. deployment evidence carries do-migration=<tag>@<version>",
           f"UPLOAD-REACHED evidence=do-migration={TAG1}@{V0}" in res["out"])
@@ -277,6 +319,36 @@ def main() -> int:
           res["rc"] == 0 and f"pending: {TAG2} (applied: {TAG1})" in res["out"]
           and (res["receipt"] or {}).get("pending_tags") == [TAG2]
           and (res["receipt"] or {}).get("old_tag") == TAG1, res["all"][-600:])
+
+    # S. the staging precheck gates Production
+    def production_untouched(res: dict) -> bool:
+        return (not [c for c in wrangler_calls(res, "deploy") if c[1:3] != ["--env", "staging"]]
+                and not wrangler_calls(res, "versions")
+                and not any(c[0] == "curl" and any(a == "https://api.doctorcre.com/release" for a in c)
+                            for c in res["calls"]))
+    for label, state in (
+            ("staging deploy fails", {"applied_tag": None, "staging_deploy_mode": "fail"}),
+            ("staging tag does not move", {"applied_tag": None, "staging_deploy_mode": "no_tag_move"}),
+            ("staging read-back mismatch", {"applied_tag": None, "staging_stale_readback": True}),
+            ("staging tag unknown", {"applied_tag": None, "staging_services_mode": "http_error"})):
+        res = run(block, tags=[TAG1], state=state)
+        check(f"S. {label}: refused, traffic not changed, Production untouched",
+              res["rc"] == 1 and "staging precheck" in res["err"]
+              and "Production traffic was not changed" in res["err"] and production_untouched(res),
+              res["all"][-700:])
+        rc = res["receipt"] or {}
+        check(f"S. {label}: receipt not_applied with the staging reason",
+              rc.get("state") == "not_applied" and rc.get("migration_version_id") is None
+              and rc.get("staging_precheck", {}).get("state") == "failed"
+              and bool(rc.get("staging_precheck", {}).get("reason")) and res["receipt_valid"]
+              and "DO migration applied:" not in res["out"], json.dumps(rc))
+    res = run(block, tags=[TAG1], state={"applied_tag": None, "staging_deploy_mode": "no_tag_move"})
+    check("S. a tag that does not move names the tag it still reports",
+          f"did not move to {TAG1} (it reports none)" in res["err"], res["err"][-400:])
+    res = run(block, tags=[TAG1], state={"applied_tag": None, "staging_applied_tag": TAG1})
+    check("S. staging already migrated by an earlier attempt: precheck passes, recorded as not moved",
+          res["rc"] == 0 and (res["receipt"] or {}).get("staging_precheck", {}).get("tag_moved") is False
+          and (res["receipt"] or {}).get("state") == "applied_verified", res["all"][-600:])
 
     # C. unknown applied tag: every variant refuses before any mutation
     for label, tags, state in (

@@ -16879,7 +16879,7 @@ export function renderGeneratedFrontier() {
       version: REGISTRY_V71_VERSION,
       dbCatalogBaseline: POST_0589_FORWARD_V71_DB_CATALOG_BASELINE,
     });
-  artifacts["migrations/0598_deploy_worker_do_migration_reseal.sql"] =
+  artifacts["migrations/0601_deploy_worker_do_migration_reseal.sql"] =
     renderDeployWorkerDoMigrationResealRegistrySql(v71Rows,
       artifacts["migrations/0589_jev_call_receipt_migrate_py_reseal.sql"]);
 

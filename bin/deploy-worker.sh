@@ -1054,21 +1054,32 @@ deploy_staging_worker() {
 #      (ops/worker-do-migration.py documents the endpoint and the decision).
 #      Unknown is REFUSED before anything is uploaded or deployed.
 #   2. Nothing pending: the ordinary upload runs exactly as before.
-#   3. Pending: apply it the documented way, a `wrangler deploy` of this exact
-#      release SHA with the same GIT_SHA / candidate-manifest stamps the upload
-#      would carry. Then re-read the applied tag (it must now be the newest
-#      declared one), read Production /release back against that exact
-#      provider version, write the receipt, and continue with the ordinary
-#      `versions upload` of the same SHA — which now has nothing pending — and
-#      the unchanged candidate, staging rehearsal, promotion, identity
-#      read-back, golden suite, performance gate and ledger receipts.
+#   3. Pending: STAGING GOES FIRST. The exact release SHA is deployed to the
+#      staging Worker with plain `wrangler deploy --env staging` (after the
+#      same attachment check every staging deploy passes), staging's applied
+#      tag is re-read and must now be the declared latest, and staging /release
+#      must read back the exact SHA, staging version, Program 6 posture and
+#      schema. Any failure REFUSES here, before Production is touched.
+#   4. Staging green: apply it to Production the documented way, a
+#      `wrangler deploy` of this exact release SHA with the same GIT_SHA /
+#      candidate-manifest stamps the upload would carry. Then re-read the
+#      applied tag (it must now be the newest declared one), read Production
+#      /release back against that exact provider version, write the receipt,
+#      and continue with the ordinary `versions upload` of the same SHA — which
+#      now has nothing pending — and the unchanged candidate, staging
+#      rehearsal, promotion, identity read-back, golden suite, performance gate
+#      and ledger receipts.
 #
-# THE COST, said out loud. `wrangler deploy` moves 100% of Production traffic,
-# so a migration-bearing release reaches Production ahead of its staging
-# rehearsal (the pipeline already applies database migrations at that point).
-# It cannot be placed later without a new release model: the staging
-# rehearsal's database writer requires a candidate that names an uploaded
-# provider version, and no version can be uploaded until the migration exists.
+# WHY THE STAGING PRECHECK IS THIS AND NOT MORE. `wrangler deploy` moves 100% of
+# Production traffic, and the typed staging rehearsal cannot run first: its
+# database writer requires a candidate that names an uploaded provider version,
+# and no version can be uploaded until the migration exists. So the precheck is
+# every staging check that needs no uploaded version: the attachment guard, the
+# migration actually applying on a real Worker, and the typed /release identity
+# the staging postflight reads. It deliberately does NOT point the production
+# golden suite at staging: that suite asserts production data fixtures, and the
+# staging database holds invented ones, so it would refuse every migration
+# release for reasons that are not defects.
 #
 # ROLLBACK, also out loud. Cloudflare blocks rollback to any version from before
 # a Durable Object lifecycle change. Once the tag is applied the recovery is
@@ -1104,11 +1115,12 @@ print(token.strip())
         2>/dev/null
 }
 
-# Prints the plan JSON. Exit 0 = determined, 3 = applied tag unknown, other =
-# the config itself is unusable.
+# Prints the plan JSON for environment $1 (production = the top-level Worker).
+# Exit 0 = determined, 3 = applied tag unknown, other = the config is unusable.
 do_migration_plan() {
+  dmp_env="$1"
   dmp_target="$("$PY" "$DO_MIGRATION_HELPER" target \
-    --config "$WORKER_DIR/wrangler.toml" --env "$TARGET_ENV")" || return 2
+    --config "$WORKER_DIR/wrangler.toml" --env "$dmp_env")" || return 2
   dmp_fields="$(printf '%s' "$dmp_target" | "$PY" -c '
 import json, sys
 t = json.load(sys.stdin)
@@ -1118,7 +1130,7 @@ print(t["account_id"], t["script"], len(t["declared_tags"]))')" || return 2
   if [ "$3" = "0" ]; then
     # Nothing declared: nothing can be pending, and no read is needed.
     "$PY" "$DO_MIGRATION_HELPER" plan --config "$WORKER_DIR/wrangler.toml" \
-      --env "$TARGET_ENV" --services-json /dev/null
+      --env "$dmp_env" --services-json /dev/null
     return $?
   fi
   dmp_services="$(mktemp "${TMPDIR:-/tmp}/carr-do-services.XXXXXX")" || return 3
@@ -1130,7 +1142,7 @@ print(t["account_id"], t["script"], len(t["declared_tags"]))')" || return 2
   fi
   set +e
   "$PY" "$DO_MIGRATION_HELPER" plan --config "$WORKER_DIR/wrangler.toml" \
-    --env "$TARGET_ENV" --services-json "$dmp_services"
+    --env "$dmp_env" --services-json "$dmp_services"
   dmp_rc=$?
   set -e
   rm -f "$dmp_services"
@@ -1146,6 +1158,9 @@ print("none" if v is None else (" ".join(v) if isinstance(v, list) else str(v).l
 
 do_migration_write_receipt() {
   mkdir -p "$DO_MIGRATION_RECEIPT_DIR"
+  DO_STAGING_PRECHECK="${DO_STAGING_PRECHECK:-}" DO_STAGING_REASON="${DO_STAGING_REASON:-}" \
+  DO_STAGING_OLD_TAG="${DO_STAGING_OLD_TAG:-}" DO_STAGING_TAG_MOVED="${DO_STAGING_TAG_MOVED:-}" \
+  DO_STAGING_VERSION_ID="${DO_STAGING_VERSION_ID:-}" \
   "$PY" -c '
 import datetime, json, sys
 keys = ("git_sha", "script", "old_tag", "new_tag", "pending_tags", "migration_version_id",
@@ -1158,11 +1173,20 @@ row["deploy_exit"] = int(row["deploy_exit"])
 row["schema"] = "carr-worker-do-migration-receipt.v1"
 row["source_ref"] = "bin/deploy-worker.sh"
 row["applied_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+env = __import__("os").environ
+row["staging_precheck"] = {
+    "state": env.get("DO_STAGING_PRECHECK") or "not-run",
+    "reason": env.get("DO_STAGING_REASON") or None,
+    "old_tag": None if env.get("DO_STAGING_OLD_TAG") in (None, "", "none") else env["DO_STAGING_OLD_TAG"],
+    "tag_moved": env.get("DO_STAGING_TAG_MOVED") == "true",
+    "version_id": env.get("DO_STAGING_VERSION_ID") or None,
+}
 open(sys.argv[1], "w", encoding="utf-8").write(json.dumps(row, sort_keys=True) + "\n")
 ' "$DO_MIGRATION_RECEIPT_DIR/do-migration-$HEAD_SHA.json" "$HEAD_SHA" "$@"
-  echo "  migration receipt: $DO_MIGRATION_RECEIPT_DIR/do-migration-$HEAD_SHA.json ($5)"
+  echo "  migration receipt: $DO_MIGRATION_RECEIPT_DIR/do-migration-$HEAD_SHA.json ($6)"
 }
 
+# do_migration_readback <version> <environment> <release-url>
 do_migration_readback() {
   dmr_attempts="${CARR_READBACK_ATTEMPTS:-12}"
   dmr_sleep="${CARR_READBACK_SLEEP:-5}"
@@ -1170,14 +1194,14 @@ do_migration_readback() {
   while [ "$dmr_n" -lt "$dmr_attempts" ]; do
     dmr_n=$((dmr_n + 1))
     if dmr_body="$(curl --fail --silent --show-error --max-time 30 \
-          "$DO_MIGRATION_RELEASE_URL" 2>/dev/null)" \
+          "$3" 2>/dev/null)" \
        && printf '%s' "$dmr_body" | "$PY" "$REPO/ops/verify-worker-release.py" \
-          --environment "$TARGET_ENV" --sha "$HEAD_SHA" --provider "$PROVIDER" \
+          --environment "$2" --sha "$HEAD_SHA" --provider "$PROVIDER" \
           --provider-version-id "$1" \
           --expected-program6-actions "$EXPECTED_PROGRAM6_ACTIONS" \
           --expected-schema-highest-migration "$EXPECTED_SCHEMA_HIGHEST_MIGRATION" \
           --expected-schema-applied-count "$EXPECTED_SCHEMA_APPLIED_COUNT" >/dev/null 2>&1; then
-      echo "  OK  Production serves $HEAD_SHA / $1 (read-back attempt $dmr_n)"
+      echo "  OK  $2 serves $HEAD_SHA / $1 (read-back attempt $dmr_n)"
       return 0
     fi
     if [ "$dmr_n" -lt "$dmr_attempts" ]; then
@@ -1187,9 +1211,84 @@ do_migration_readback() {
   return 1
 }
 
+# Refuse (before Production is touched) with the precheck's reason recorded.
+do_migration_staging_refuse() {
+  DO_STAGING_PRECHECK="failed"
+  DO_STAGING_REASON="$1"
+  do_migration_write_receipt "$(do_migration_field "$DO_PLAN" script)" "$DO_OLD_TAG" \
+    "$DO_NEW_TAG" "$DO_PENDING_TAGS" "" not_applied 0 not-run
+  fail "the staging precheck for Durable Object migration $DO_NEW_TAG failed: $1.
+  Production was not touched: no production deploy, no upload, no candidate.
+  Production traffic was not changed."
+}
+
+do_migration_staging_precheck() {
+  echo ""
+  echo "== Durable Object migration: staging precheck =="
+  DO_STAGING_PRECHECK="running"
+  dsp_host="$("$PY" "$REPO/tools/ops-record.py" staging-target --field host 2>/dev/null)" \
+    || do_migration_staging_refuse "the checked-in staging target is not exact"
+  dsp_name="$("$PY" "$REPO/tools/ops-record.py" staging-target --field worker_name 2>/dev/null)" \
+    || do_migration_staging_refuse "the checked-in staging target is not exact"
+  dsp_script="$("$PY" "$DO_MIGRATION_HELPER" target --config "$WORKER_DIR/wrangler.toml" --env staging \
+    | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["script"])' 2>/dev/null)" \
+    || do_migration_staging_refuse "wrangler.toml has no usable [env.staging] Worker"
+  [ -n "$dsp_host" ] && [ "$dsp_name" = "$dsp_script" ] \
+    || do_migration_staging_refuse "wrangler.toml's staging Worker ($dsp_script) is not the checked-in staging target ($dsp_name)"
+  # The same guard every staging deploy passes: a staging deploy must never
+  # attach to Production's hostnames (the 2026-08-13 routes incident).
+  "$PY" "$REPO/ops/deploy-attachment-check.py" "$WORKER_DIR/wrangler.toml" staging \
+    || do_migration_staging_refuse "the staging attachment check refused"
+  set +e
+  dsp_before="$(do_migration_plan staging)"
+  dsp_rc=$?
+  set -e
+  [ "$dsp_rc" -eq 0 ] \
+    || do_migration_staging_refuse "staging's applied migration tag could not be determined"
+  [ "$(do_migration_field "$dsp_before" latest_tag)" = "$DO_NEW_TAG" ] \
+    || do_migration_staging_refuse "staging and Production declare different latest migration tags"
+  DO_STAGING_OLD_TAG="$(do_migration_field "$dsp_before" applied_tag)"
+  echo "  staging applied: $DO_STAGING_OLD_TAG; deploying $HEAD_SHA to staging"
+  set +e
+  dsp_output="$("$WRANGLER" deploy --env staging --var "GIT_SHA:$HEAD_SHA" \
+    --var "CANDIDATE_MANIFEST:$CANDIDATE_MANIFEST" \
+    --var "CANDIDATE_MANIFEST_DIGEST:$CANDIDATE_MANIFEST_DIGEST" \
+    --message "carr do-migration staging precheck $DO_NEW_TAG $HEAD_SHA" 2>&1)"
+  dsp_deploy_rc=$?
+  set -e
+  printf '%s\n' "$dsp_output"
+  [ "$dsp_deploy_rc" -eq 0 ] \
+    || do_migration_staging_refuse "the staging deploy exited $dsp_deploy_rc"
+  DO_STAGING_VERSION_ID="$(printf '%s\n' "$dsp_output" \
+    | sed -nE 's/^.*Current Version ID:[[:space:]]*([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}).*$/\1/p' \
+    | tail -n 1 | tr 'A-F' 'a-f')"
+  [ -n "$DO_STAGING_VERSION_ID" ] \
+    || do_migration_staging_refuse "the staging deploy printed no version id"
+  set +e
+  dsp_after="$(do_migration_plan staging)"
+  dsp_rc=$?
+  set -e
+  [ "$dsp_rc" -eq 0 ] \
+    || do_migration_staging_refuse "staging's migration tag could not be re-read after the deploy"
+  dsp_after_tag="$(do_migration_field "$dsp_after" applied_tag)"
+  [ "$dsp_after_tag" = "$DO_NEW_TAG" ] \
+    || do_migration_staging_refuse "staging's migration tag did not move to $DO_NEW_TAG (it reports $dsp_after_tag)"
+  if [ "$DO_STAGING_OLD_TAG" = "$DO_NEW_TAG" ]; then
+    DO_STAGING_TAG_MOVED="false"
+    echo "  staging already carried $DO_NEW_TAG before this deploy (an earlier attempt applied it)"
+  else
+    DO_STAGING_TAG_MOVED="true"
+    echo "  OK  staging's migration tag moved: $DO_STAGING_OLD_TAG -> $DO_NEW_TAG"
+  fi
+  do_migration_readback "$DO_STAGING_VERSION_ID" staging "https://$dsp_host/release" \
+    || do_migration_staging_refuse "staging /release did not read back $HEAD_SHA / $DO_STAGING_VERSION_ID with the expected posture and schema"
+  DO_STAGING_PRECHECK="passed"
+  echo "  OK  staging precheck passed; the Production migration deploy may run"
+}
+
 apply_pending_do_migration() {
   set +e
-  DO_PLAN="$(do_migration_plan)"
+  DO_PLAN="$(do_migration_plan production)"
   do_rc=$?
   set -e
   case "$do_rc" in
@@ -1210,7 +1309,10 @@ apply_pending_do_migration() {
   echo ""
   echo "== Durable Object migration =="
   echo "  pending: $DO_PENDING_TAGS (applied: $DO_OLD_TAG)"
-  echo "  versions upload cannot apply it; applying with a deploy of $HEAD_SHA (100% of traffic)"
+  echo "  versions upload cannot apply it; staging first, then a deploy of $HEAD_SHA (100% of traffic)"
+  do_migration_staging_precheck
+  echo ""
+  echo "== Durable Object migration: Production =="
   set +e
   DO_DEPLOY_OUTPUT="$("$WRANGLER" deploy --var "GIT_SHA:$HEAD_SHA" \
     --var "CANDIDATE_MANIFEST:$CANDIDATE_MANIFEST" \
@@ -1225,7 +1327,7 @@ apply_pending_do_migration() {
 
   # Which side of the rollback line is the Worker on? Read it, do not assume.
   set +e
-  DO_AFTER="$(do_migration_plan)"
+  DO_AFTER="$(do_migration_plan production)"
   do_after_rc=$?
   set -e
   DO_AFTER_TAG="unknown"
@@ -1261,7 +1363,7 @@ apply_pending_do_migration() {
   $DO_NEW_TAG) or wrangler printed no version id. Treat the migration as possibly
   applied. $DO_FORWARD_FIX"
   fi
-  if ! do_migration_readback "$DO_VERSION_ID"; then
+  if ! do_migration_readback "$DO_VERSION_ID" "$TARGET_ENV" "$DO_MIGRATION_RELEASE_URL"; then
     do_migration_write_receipt "$(do_migration_field "$DO_PLAN" script)" "$DO_OLD_TAG" \
       "$DO_NEW_TAG" "$DO_PENDING_TAGS" "$DO_VERSION_ID" applied_unverified 0 mismatch
     fail "the migration $DO_NEW_TAG is applied, but Production /release did not read back

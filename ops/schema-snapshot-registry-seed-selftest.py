@@ -481,7 +481,7 @@ assert "SCAC_CURRENT_NUMBER=71" in GENERATOR
 assert "SCAC_VERSION_COUNT=71" in GENERATOR
 assert "SCAC_FULL_SET_SEAL_COUNT=70" in GENERATOR
 assert "ops.scac_mutation_catalog_v71_current()" in GENERATOR
-assert "0598_deploy_worker_do_migration_reseal.sql" in GENERATOR
+assert "0601_deploy_worker_do_migration_reseal.sql" in GENERATOR
 assert 'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v71"' in RUNTIME_V71
 assert "JEV_PROCESS_REGISTRY_APPLIED" in GENERATOR
 assert "JEV_HOOK_ACTIVATION_REGISTRY_APPLIED" in GENERATOR

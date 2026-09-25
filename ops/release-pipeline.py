@@ -34,8 +34,9 @@ TWO LANES, one tick:
             3 tools/provision-staging-app-writer.py --apply
             4 bin/migrate-prod.sh (dry) and, only when it lists pending, --apply
             5 bin/deploy-worker.sh --upload-version  (verifier bound HERE; a pending
-              Durable Object migration is applied first by a deploy of S, see
-              the do-migration block there; its tag lands in the run record)
+              Durable Object migration is applied first: staging precheck,
+              then a deploy of S, see the do-migration block there; its tag
+              lands in the run record)
             6 bin/deploy-worker.sh --env staging --recovery-step forward_fix
             7 bin/deploy-worker.sh --promote-version <id from step 5>
             8 live /release reads back S, ./run.sh health
@@ -1142,12 +1143,14 @@ class Pipeline:
         key = ("<next free r-%s-NN>" % self.today) if self.dry_run else next_release_key(
             self.today, lambda k: self._release_exists(wt, py, k))
         #    A pending Durable Object migration is applied INSIDE this step
-        #    (bin/deploy-worker.sh: `versions upload` cannot apply one), which
-        #    moves Production traffic; its marker line is carried into the run
-        #    record whether the step then succeeds or fails.
+        #    (bin/deploy-worker.sh: `versions upload` cannot apply one): staging
+        #    first, and Production traffic moves only after staging is green;
+        #    its marker line is carried into the run record whether the step
+        #    then succeeds or fails.
         if self.dry_run:
-            self.out("  [dry-run] the upload step first applies any pending Durable Object migration "
-                     "with a deploy of S (100% traffic), or refuses when the applied tag is unknown")
+            self.out("  [dry-run] the upload step first applies any pending Durable Object migration: "
+                     "S to staging and its checks green, then a deploy of S (100% traffic); it refuses "
+                     "before Production when the applied tag is unknown or the staging precheck fails")
         try:
             up = self.step("upload", ["bin/deploy-worker.sh", "--upload-version", "--release-sha", sha,
                                       "--release-key", key, "--test-evidence", ev["test_evidence"],
