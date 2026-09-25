@@ -40,6 +40,13 @@ import { ORGANIZATION_TENANT_ID } from "../src/identity.js";
 import { V5_J302_PRIVACY_CONFIG } from "../src/tour-heat-map-privacy-config-j302.v5.js";
 import { V5_SETTLED_DECISIONS } from "../src/global-boundaries.v5.js";
 import { V5_F01_SETTLED_DECISIONS } from "../src/record-source-authority.v5.js";
+import {
+  deriveCountyFipsCodes,
+  deriveZip3PopulationTable,
+  V5_J302_CENSUS_SOURCES,
+  V5_J302_COUNTY_HEADER,
+  V5_J302_ZCTA_HEADER,
+} from "../src/tour-heat-map-census-j302.v5.js";
 
 const D = label => `sha256:${createHash("sha256").update(`j302-synthetic:${label}`).digest("hex")}`;
 const NOW = "2026-09-24T12:00:00Z";
@@ -2183,4 +2190,172 @@ test("T0: at the kernel-minimum tolerance, the round-5 case (true group 10, +1 d
   const r = sixView(drifted, a, minimum);
   refuses(r, "suppressed_cell_bounded_across_releases");
   assert.equal(r.exposure, "complementary_suppression_residual_below_floor");
+});
+
+// ===========================================================================
+// CENSUS — the deterministic derivation of the two pinned reference tables
+// (tour-heat-map-census-j302.v5.js). Every fixture is synthetic and shaped like
+// the real Census responses; the real bytes are pinned separately.
+// ===========================================================================
+
+// 30,000 filler ZCTAs under prefixes 100..399 (population 1 each), plus the
+// prefixes the tests reason about. "036" is on HHS's 2000 restricted list.
+function syntheticDhcRows(extra = []) {
+  const rows = [];
+  for (let z = 10000; z < 40000; z++) rows.push(["1", String(z)]);
+  rows.push(["150000", "48001"], ["100000", "48002"]);   // 480 = 250,000
+  rows.push(["20000", "48201"]);                         // 482 = 20,000 (at the floor)
+  rows.push(["20000", "48301"], ["1", "48302"]);         // 483 = 20,001
+  rows.push(["500000", "03601"]);                        // 036 = 500,000 in 2020
+  return [...rows, ...extra];
+}
+const dhcText = (rows, header = V5_J302_ZCTA_HEADER) => JSON.stringify([header, ...rows]);
+const DERIVED = deriveZip3PopulationTable(dhcText(syntheticDhcRows()));
+const censusKernel = () => pinnedKernel(DERIVED.table);
+function censusReceipt(agg, table = DERIVED.table) {
+  const r = safeHarbor(agg, {}, table);
+  r.census_population.source_ref = "census-2020-dhc-p1-001n-zcta-summed-zip3";
+  return r;
+}
+const zip3Cells = (...units) => zip3Aggregate({
+  cells: units.map(u => ({ unit_id: u, period: "2025", patient_count: 30, suppressed: false })) });
+
+test("CENSUS: the ZIP3 table is ZCTA5 population summed by prefix, digested by the kernel's own function", () => {
+  assert.equal(DERIVED.table["480"], 250000);
+  assert.equal(DERIVED.table["482"], 20000);
+  assert.equal(DERIVED.table["483"], 20001);
+  assert.equal(DERIVED.table["100"], 100);
+  assert.equal(DERIVED.table["481"], undefined, "a prefix no ZCTA carries is absent, never zero-filled");
+  assert.equal(DERIVED.zcta_count, 30006);
+  assert.equal(DERIVED.prefix_count, 304);
+  assert.equal(DERIVED.total_population, 30000 + 250000 + 20000 + 20001 + 500000);
+  assert.equal(DERIVED.table_digest, zip3PopulationTableDigest(DERIVED.table));
+  assert.ok(Object.isFrozen(DERIVED.table));
+  // Deterministic: row order does not move the digest.
+  const shuffled = syntheticDhcRows().reverse();
+  assert.equal(deriveZip3PopulationTable(dhcText(shuffled)).table_digest, DERIVED.table_digest);
+  // One person more anywhere moves it.
+  const bumped = syntheticDhcRows(); bumped[0] = ["2", bumped[0][1]];
+  assert.notEqual(deriveZip3PopulationTable(dhcText(bumped)).table_digest, DERIVED.table_digest);
+});
+
+test("CENSUS: the derivation fails closed on anything it cannot read with certainty", () => {
+  const throwsDerive = (text, code) => assert.throws(() => deriveZip3PopulationTable(text),
+    e => e.code === code, `expected ${code}`);
+  throwsDerive(dhcText(syntheticDhcRows(), ["P1_001N", "state"]), "census_header_unexpected");
+  throwsDerive(dhcText(syntheticDhcRows(), ["zip code tabulation area", "P1_001N"]), "census_header_unexpected");
+  throwsDerive(dhcText(syntheticDhcRows([["5", "48001"]])), "census_zcta_duplicated");
+  throwsDerive(dhcText(syntheticDhcRows([["5", "484HH"]])), "census_zcta_not_five_digits");
+  throwsDerive(dhcText(syntheticDhcRows([["5", "4840"]])), "census_zcta_not_five_digits");
+  throwsDerive(dhcText(syntheticDhcRows([["5", 48401]])), "census_zcta_not_five_digits");
+  throwsDerive(dhcText(syntheticDhcRows([["-5", "48401"]])), "census_population_not_integer");
+  throwsDerive(dhcText(syntheticDhcRows([["5.5", "48401"]])), "census_population_not_integer");
+  throwsDerive(dhcText(syntheticDhcRows([["", "48401"]])), "census_population_not_integer");
+  throwsDerive(dhcText(syntheticDhcRows([[null, "48401"]])), "census_population_not_integer");
+  throwsDerive(dhcText(syntheticDhcRows([["05", "48401"]])), "census_population_not_integer");
+  throwsDerive(dhcText(syntheticDhcRows([["99999999999999999", "48401"]])), "census_population_not_integer");
+  throwsDerive(dhcText(syntheticDhcRows([["5", "00001"]])), "census_zcta_prefix_000");
+  throwsDerive(dhcText(syntheticDhcRows([["5", "48401", "01"]])), "census_row_malformed");
+  throwsDerive(dhcText(syntheticDhcRows().slice(0, 29999)), "census_row_count_implausible");
+  throwsDerive(dhcText(syntheticDhcRows(Array.from({ length: 9995 }, (_, i) => ["1", String(50000 + i)]))),
+    "census_row_count_implausible"); // 40,001 rows
+  throwsDerive(dhcText(syntheticDhcRows([[5, "48401"]])), "census_population_not_integer"); // a number, not the API's string
+  throwsDerive("not json", "census_input_not_json");
+  throwsDerive("{}", "census_input_not_rows");
+  throwsDerive(undefined, "census_input_not_text");
+  // Exactly the lower and upper bounds are read.
+  assert.equal(deriveZip3PopulationTable(dhcText(syntheticDhcRows().slice(0, 30000))).zcta_count, 30000);
+  const upper = syntheticDhcRows(Array.from({ length: 9994 }, (_, i) => ["1", String(50000 + i)]));
+  assert.equal(deriveZip3PopulationTable(dhcText(upper)).zcta_count, 40000);
+});
+
+test("CENSUS: a known ZIP3 above 20,000 in both 2000 and 2020 conforms under the derived pin", () => {
+  for (const unit of ["480", "483"]) {
+    assert.ok(!V5_J302_HHS_RESTRICTED_ZIP3.includes(unit));
+    const agg = zip3Cells(unit);
+    const r = conform({ artifact: artifactOf(agg), receipts: [censusReceipt(agg)], kernel: censusKernel() });
+    assert.equal(r.decision, "conforms", `${unit}: ${r.reason_id}`);
+  }
+});
+
+test("CENSUS: a ZIP3 at or below 20,000 in 2020, or absent from the 2020 table, is refused", () => {
+  const at = zip3Cells("482");
+  refuses(conform({ artifact: artifactOf(at), receipts: [censusReceipt(at)], kernel: censusKernel() }),
+    "zip3_population_not_above_floor");
+  const small = zip3Cells("100"); // 100 people across 100 ZCTAs
+  refuses(conform({ artifact: artifactOf(small), receipts: [censusReceipt(small)], kernel: censusKernel() }),
+    "zip3_population_not_above_floor");
+  const absent = zip3Cells("481");
+  refuses(conform({ artifact: artifactOf(absent), receipts: [censusReceipt(absent)], kernel: censusKernel() }),
+    "zip3_population_unknown_denied");
+});
+
+test("CENSUS: an HHS-restricted ZIP3 is still refused even when the 2020 table puts it far above 20,000", () => {
+  assert.ok(V5_J302_HHS_RESTRICTED_ZIP3.includes("036"));
+  assert.equal(DERIVED.table["036"], 500000);
+  const agg = zip3Cells("036");
+  refuses(conform({ artifact: artifactOf(agg), receipts: [censusReceipt(agg)], kernel: censusKernel() }),
+    "restricted_zip3_must_be_000");
+});
+
+test("CENSUS: a tampered table or a tampered digest is refused", () => {
+  const agg = zip3Cells("480");
+  // Edited under its digest.
+  const edited = censusReceipt(agg);
+  edited.census_population.zip3_population["482"] = 900000;
+  refuses(conform({ artifact: artifactOf(agg), receipts: [edited], kernel: censusKernel() }),
+    "census_population_table_digest_mismatch");
+  // Self-consistent, but not the pinned table.
+  const other = { ...DERIVED.table, "482": 900000 };
+  refuses(conform({ artifact: artifactOf(agg), receipts: [censusReceipt(agg, other)], kernel: censusKernel() }),
+    "census_2020_table_not_the_pinned_table");
+  // A config pinning a digest that is not the derived table's.
+  const wrongPin = pinnedKernel(DERIVED.table, { census_2020_zip3_population:
+    { vintage: "2020", status: "pinned", table_digest: D("tampered-pin") } });
+  refuses(conform({ artifact: artifactOf(agg), receipts: [censusReceipt(agg)], kernel: wrongPin }),
+    "census_2020_table_not_the_pinned_table");
+});
+
+// A county file shaped like national_county2020.txt: BOM, pipe-delimited, CRLF.
+function syntheticCountyText(extra = [], header = V5_J302_COUNTY_HEADER) {
+  const rows = [header.join("|")];
+  for (let c = 1; c <= 3000; c += 1) {
+    const state = ["01", "02", "04", "05", "06", "08"][Math.floor((c - 1) / 500)];
+    rows.push(`ZZ|${state}|${String(((c - 1) % 500) + 1).padStart(3, "0")}|00000000|County ${c}|H1|A`);
+  }
+  rows.push("WY|56|001|01605066|Albany County|H1|A", "UM|74|300|01878752|Midway Islands|H4|N", ...extra);
+  return `﻿${rows.join("\r\n")}\r\n`;
+}
+
+test("CENSUS: the county list is STATEFP+COUNTYFP, sorted, and a state the kernel cannot bind is excluded, not pinned", () => {
+  const d = deriveCountyFipsCodes(syntheticCountyText());
+  assert.equal(d.row_count, 3002);
+  assert.equal(d.codes.length, 3001);
+  assert.ok(d.codes.includes("56001") && d.codes.includes("01001") && d.codes.includes("08500"));
+  assert.deepEqual([...d.excluded], ["74300"]);
+  assert.ok(!d.codes.includes("74300"));
+  assert.deepEqual([...d.codes], [...d.codes].sort());
+  assert.match(d.codes_digest, /^sha256:[0-9a-f]{64}$/);
+  // The derived list is accepted by the kernel's config reader as-is.
+  const cfg = readHeatMapPrivacyConfig({ ...V5_J302_PRIVACY_CONFIG,
+    county_fips_codes: { status: "pinned", codes: [...d.codes] } });
+  assert.equal(cfg.county_fips_codes.codes.length, d.codes.length);
+  const throwsCounty = (text, code) => assert.throws(() => deriveCountyFipsCodes(text), e => e.code === code, code);
+  throwsCounty(syntheticCountyText([], ["STATE", "STATEFP"]), "county_header_unexpected");
+  throwsCounty(syntheticCountyText(["WY|56|001|01605066|Albany County|H1|A"]), "county_code_duplicated");
+  throwsCounty(syntheticCountyText(["WY|56|1|01605066|X|H1|A"]), "county_code_malformed");
+  throwsCounty(syntheticCountyText(["WY|5|001|01605066|X|H1|A"]), "county_code_malformed");
+  throwsCounty(syntheticCountyText(["WY|56|002|X|H1"]), "county_row_malformed");
+  throwsCounty(syntheticCountyText().split("\r\n").slice(0, 1000).join("\n"), "county_row_count_implausible");
+  throwsCounty(syntheticCountyText(Array.from({ length: 999 }, (_, i) =>
+    `WI|55|${String(1 + i).padStart(3, "0")}|0|X|H1|A`)), "county_row_count_implausible");
+  throwsCounty(undefined, "county_input_not_text");
+});
+
+test("CENSUS: the only two sources are official Census Bureau endpoints", () => {
+  for (const s of Object.values(V5_J302_CENSUS_SOURCES)) {
+    const host = new URL(s.url).hostname;
+    assert.ok(host === "www2.census.gov" || host === "api.census.gov", host);
+  }
+  assert.equal(Object.keys(V5_J302_CENSUS_SOURCES).length, 2);
 });
