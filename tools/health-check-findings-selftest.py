@@ -264,6 +264,78 @@ def _rc_assignment_violations(func: ast.AST) -> list[str]:
                 and node.target.id == "rc"):
             violations.append(f"{where}:{node.lineno}: walrus assignment to rc "
                               f"is not one of the three allowed forms")
+        # Round 10 of an independent review of PR #1237: the round-9 allowlist
+        # only inspected plain Assign/AugAssign/NamedExpr — every OTHER Python
+        # construct that can bind a name (an annotated assignment, a `for`
+        # loop target, a `with ... as` context-manager target, a `match`
+        # case capture, an `except ... as` handler name, or an `import ... as`
+        # alias) binds `rc` completely unseen by that check, and none of them
+        # go through `_red()`, so a bug hiding behind one of these shapes
+        # would set `rc` red and record nothing. Every one of these forms is
+        # rejected outright if it binds the name `rc` — none of the three
+        # allowed forms can be expressed through them.
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == "rc":
+            violations.append(f"{where}:{node.lineno}: annotated assignment to rc "
+                              f"(`rc: ... = ...`) is not one of the three allowed forms")
+        elif isinstance(node, (ast.For, ast.AsyncFor)) and isinstance(node.target, ast.Name) and node.target.id == "rc":
+            violations.append(f"{where}:{node.lineno}: `for rc in ...:` binds rc as a loop "
+                              f"target — not one of the three allowed forms")
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                if isinstance(item.optional_vars, ast.Name) and item.optional_vars.id == "rc":
+                    violations.append(f"{where}:{node.lineno}: `with ... as rc:` binds rc via "
+                                      f"a context manager — not one of the three allowed forms")
+        elif isinstance(node, ast.ExceptHandler) and node.name == "rc":
+            violations.append(f"{where}:{node.lineno}: `except ... as rc:` binds rc to the "
+                              f"caught exception — not one of the three allowed forms")
+        elif isinstance(node, ast.MatchAs) and node.name == "rc":
+            violations.append(f"{where}:{node.lineno}: a `match`/`case` pattern captures rc "
+                              f"(`case rc:` or `case ... as rc:`) — not one of the three "
+                              f"allowed forms")
+        elif isinstance(node, ast.alias) and node.asname == "rc":
+            violations.append(f"{where}: `import ... as rc` binds rc via an import alias — "
+                              f"not one of the three allowed forms")
+    return violations
+
+
+def _shadow_violations(module: ast.Module | None = None) -> list[str]:
+    """Round 10, item 3: banning every unrecorded way to WRITE `rc` is
+    pointless if `_red` or `_canonical_contradiction_alarm` themselves can be
+    silently redefined to no-ops elsewhere in the module — a `_red = lambda
+    *a, **k: 1` (or any other rebinding of either name) would make every
+    `rc = _red(...)` in `_canonical_health` pass this file's allowlist while
+    recording nothing at runtime. The only binding of either name permitted
+    anywhere in the module is its own `def` statement; every other binding —
+    a plain assignment, an import alias, a `for`/`with`/`except`/`match`
+    target, a walrus, a nested `def`/class redefinition, anything — is
+    rejected."""
+    tree = module if module is not None else TREE
+    guarded = {"_red", "_canonical_contradiction_alarm"}
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in guarded:
+            continue  # the one legitimate binding: the function's own definition
+        name = None
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id in guarded:
+            name = node.id
+        elif isinstance(node, (ast.For, ast.AsyncFor)) and isinstance(node.target, ast.Name) and node.target.id in guarded:
+            name = node.target.id
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                if isinstance(item.optional_vars, ast.Name) and item.optional_vars.id in guarded:
+                    name = item.optional_vars.id
+        elif isinstance(node, ast.ExceptHandler) and node.name in guarded:
+            name = node.name
+        elif isinstance(node, ast.MatchAs) and node.name in guarded:
+            name = node.name
+        elif isinstance(node, ast.alias) and (node.asname in guarded or (node.asname is None and node.name in guarded)):
+            name = node.asname or node.name
+        elif isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name) and node.target.id in guarded:
+            name = node.target.id
+        if name is not None:
+            violations.append(f"{getattr(node, 'lineno', '?')}: {name} is rebound outside its "
+                              f"defining `def` — this would silently defeat every rc = "
+                              f"{name}(...) call that trusts it")
     return violations
 
 
@@ -584,6 +656,56 @@ class RcAssignedOnlyViaRed(unittest.TestCase):
         # ast.NamedExpr — the walrus operator binding `rc` inside an
         # expression statement.
         self._assert_mutation_caught("if True:\n    (rc := 1)\n", "(rc := 1)")
+
+    # ── round 10: binding forms the round-9 allowlist never looked at ──────
+    # Round 9 only inspected plain Assign/AugAssign/NamedExpr. Every OTHER
+    # Python construct that can bind a name — an annotated assignment, a
+    # `for` target, a `with ... as` target, a `match` case capture, an
+    # `except ... as` handler name, or an `import ... as` alias — binds `rc`
+    # completely unseen by that check, and none of them go through `_red()`.
+    # The reviewer confirmed the first of these (`rc: int = 1`) is a real,
+    # currently-unrecorded red that the round-9 gate passed.
+
+    def test_mutation_rc_annotated_assignment_is_caught(self):
+        self._assert_mutation_caught("if True:\n    rc: int = 1\n", "rc: int = 1")
+
+    def test_mutation_rc_for_loop_target_is_caught(self):
+        self._assert_mutation_caught("for rc in (1,):\n    pass\n", "for rc in (1,):")
+
+    def test_mutation_rc_with_statement_target_is_caught(self):
+        self._assert_mutation_caught("with ctx as rc:\n    pass\n", "with ctx as rc:")
+
+    def test_mutation_rc_match_case_capture_is_caught(self):
+        self._assert_mutation_caught("match 1:\n    case rc:\n        pass\n", "case rc:")
+
+    def test_mutation_rc_except_as_is_caught(self):
+        self._assert_mutation_caught(
+            "try:\n    pass\nexcept Exception as rc:\n    pass\n", "except ... as rc:")
+
+    def test_mutation_rc_import_as_is_caught(self):
+        self._assert_mutation_caught("import os as rc\n", "import os as rc")
+
+    def test_shadowing_red_or_alarm_outside_their_def_is_caught(self):
+        # Round 10, item 3: banning every unrecorded WRITE to rc is pointless
+        # if `_red`/`_canonical_contradiction_alarm` can be silently
+        # redefined to a no-op elsewhere in the module.
+        mutated = copy.deepcopy(TREE)
+        mutated.body.append(ast.parse("_red = lambda *a, **k: 1\n").body[0])
+        ast.fix_missing_locations(mutated)
+        violations = _shadow_violations(mutated)
+        self.assertNotEqual(violations, [], "a shadowing `_red = ...` was not caught")
+
+    def test_shadowing_contradiction_alarm_outside_its_def_is_caught(self):
+        mutated = copy.deepcopy(TREE)
+        mutated.body.append(ast.parse(
+            "def _wrap():\n    _canonical_contradiction_alarm = lambda: False\n").body[0])
+        ast.fix_missing_locations(mutated)
+        violations = _shadow_violations(mutated)
+        self.assertNotEqual(violations, [],
+                            "a shadowing `_canonical_contradiction_alarm = ...` was not caught")
+
+    def test_no_shadow_violations_in_the_real_module(self):
+        self.assertEqual(_shadow_violations(), [])
 
     def test_every_structural_or_tamper_detection_key_is_hard_error(self):
         fn = _find_function("_canonical_health")
