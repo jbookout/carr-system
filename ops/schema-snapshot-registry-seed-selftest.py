@@ -194,7 +194,14 @@ assert GENERATOR.count("e.entry_digest is distinct from 'sha256:'||encode(public
 assert GENERATOR.count("ops.scac_mutation_registry_seal_valid(historical.registry_version)") >= 2
 for version in range(1, 9):
     assert GENERATOR.count(f"'scac-mutation-registry.v{version}'") >= 2
-assert set(FULL_SET_SEALS) == {f"scac-mutation-registry.v{version}" for version in range(1, 71)}
+# v71 (V5-A05, PR #1236) is a plain adjacent successor to v70 (Jev
+# server-side call log #1243, merged to main at 1cc94b84 -- main's newest as
+# of this seal; orchestrator's 2026-09-24 no-pre-assigned-versions ruling).
+# The sealed set is therefore fully contiguous v1..v71, with no gap and no
+# PREDECESSOR_OVERRIDE. bin/schema-snapshot.sh's own bootstrap chain is
+# untouched by this PR and still ends at v70; this seal's snapshot-only
+# bootstrap path is unavailable until that script is regenerated too.
+assert set(FULL_SET_SEALS) == {f"scac-mutation-registry.v{version}" for version in range(1, 72)}
 assert all(len(value) == 71 and value.startswith("sha256:") for value in FULL_SET_SEALS.values())
 assert FULL_SET_SEALS["scac-mutation-registry.v10"] != "sha256:" + "0" * 64
 assert FULL_SET_SEALS["scac-mutation-registry.v20"] == (
@@ -653,15 +660,22 @@ loader_end = GENERATOR.index(
     loader_start,
 )
 loader = GENERATOR[loader_start:loader_end]
+# v71 (V5-A05, PR #1236) is a plain adjacent successor to v70, so
+# ops/config/scac-registry-full-entry-set-seals.json's key set is now an
+# EXACT contiguous v1..v71 run and the loader's positive path runs for real
+# (previously skipped while a pre-assigned, out-of-sequence v72 key made no
+# "current" value pass -- see the contiguity assertion above). This still
+# does not cover bin/schema-snapshot.sh's own bootstrap chain, which is
+# untouched by this PR and still ends at v70.
 loaded_sql = subprocess.run(
-    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"), "69", "70"],
+    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"), "70", "71"],
     check=True,
     capture_output=True,
     text=True,
 ).stdout
-assert loaded_sql.count("scac-mutation-registry.v") == 69
-assert loaded_sql.count("sha256:") == 69
-assert FULL_SET_SEALS["scac-mutation-registry.v69"] in loaded_sql, (
+assert loaded_sql.count("scac-mutation-registry.v") == 70
+assert loaded_sql.count("sha256:") == 70
+assert FULL_SET_SEALS["scac-mutation-registry.v70"] in loaded_sql, (
     "the newest sealed history must actually reach the SQL the snapshot embeds"
 )
 

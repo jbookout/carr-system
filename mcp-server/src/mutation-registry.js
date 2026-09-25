@@ -4,14 +4,26 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v69 is the runtime selector after the server-side Jev call log (migration
-// 0587, ops.record_jev_call_receipt / ops.read_jev_call_receipts /
+// v71 is the runtime selector after V5-A05 (delivery cadence, escalation,
+// quiet-hours queue; migration 0592/0598). Its sealed catalog admits the
+// three new verbs -- cadence-status, record-cadence-receipt,
+// raise-delivery-cadence-alert -- and preserves earlier versions as history.
+// Numbering rule (orchestrator ruling, 2026-09-24, superseding the earlier
+// pre-assigned v69-v73 scheme): there is no pre-assigned version any more --
+// each PR seals main's newest + 1 when it is otherwise ready. v69/v70 (Jev
+// server-side call log, #1243) are merged to main at 1cc94b84 and were
+// main's newest, so this seal is a plain adjacent successor to v70; no
+// predecessor-check override is needed. If a different seal lands on v71
+// first, this must be regenerated over whatever main's newest then is.
+//
+// Superseded note (v69/v70): v69 was the runtime selector after the server-side Jev call log
+// (migration 0587, ops.record_jev_call_receipt / ops.read_jev_call_receipts /
 // ops.jev_call_receipt_integrity behind the append-only ops.jev_call_receipt).
-// Its sealed catalog admits the three new verbs, ask-jev,
-// read-jev-call-receipts and read-jev-call-receipt-integrity, and preserves earlier versions as
+// Its sealed catalog admitted the three new verbs, ask-jev,
+// read-jev-call-receipts and read-jev-call-receipt-integrity, and preserved earlier versions as
 // history; v66-v68 registered no verb, so the selector stayed on v65 until
-// now. v70 re-digests tools/migrate.py only and registers no verb, so the
-// selector stays on v69.
+// then. v70 re-digested tools/migrate.py only and registered no verb, so the
+// selector stayed on v69 until v71.
 //
 // Superseded note (v65): v65 was the runtime selector after DoctorCRE V5-UX-C02/C06's resource
 // observation store (migration 0579, ops.record_resource_observation --
@@ -68,7 +80,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v69.generated.js";
+} from "./scac-mutation-registry.v71.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 

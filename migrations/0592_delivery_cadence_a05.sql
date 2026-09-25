@@ -274,6 +274,16 @@ comment on function ops.notification_quiet_now(uuid) is
 -- behaviour for every caller that does not know this parameter exists.
 -- ---------------------------------------------------------------------------
 
+-- The role-bundle full-rebuild composer (tools/schema_snapshot_grants.py)
+-- accumulates GRANT/REVOKE text across every migration; it has no notion of
+-- DROP FUNCTION removing an object's ACL, so the 0521 grant on the old
+-- 9-argument signature must be explicitly revoked here or the composer keeps
+-- expecting a live grant on a function that no longer exists after the drop
+-- below (staging-app-writer-provision-db-gate / staging-database-login-
+-- provision-db-gate: "carr_writer differs from canonical full-rebuild plan").
+revoke all on function ops.mint_notification(text,uuid,text,text,text,text,text,text,text)
+  from public, carr_reader, carr_writer, carr_jobs, carr_authority;
+
 drop function ops.mint_notification(text,uuid,text,text,text,text,text,text,text);
 
 create function ops.mint_notification(
