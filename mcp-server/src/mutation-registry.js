@@ -4,7 +4,18 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v77 is the runtime selector after DoctorCRE V5-F01's record homes, source
+// v78 is the runtime selector after the DoctorCRE v5 slice done-record
+// (migration 0628, sealed by 0629 over v77). Its sealed catalog admits nine
+// new verbs -- register-slice-criteria-from-catalog,
+// bind-slice-criterion-evidence, record-release-slice-members,
+// propose-slice-completion, list-shipped-releases and
+// pending-slice-completion-proposals (writer/reader), and
+// rebind-slice-criterion-evidence, set-slice-mark-hold and
+// confirm-slice-completions (authorityOnly) -- and
+// register-slice-checkable-done's narrowed evidence kinds. Automation
+// proposes; only a partner confirms complete.
+//
+// Superseded note (v77): v77 was the runtime selector after DoctorCRE V5-F01's record homes, source
 // authority and document identity (migrations 0626/0627). Its sealed catalog
 // admits nine new verbs -- read-record-source-authority (a read) and the
 // eight record-source-authority writes, two of them humanOnly and
@@ -102,7 +113,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v77.generated.js";
+} from "./scac-mutation-registry.v78.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 
