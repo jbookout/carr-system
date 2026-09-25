@@ -478,8 +478,8 @@ def main(argv):
     os.makedirs(os.path.dirname(RUNS_LOG), exist_ok=True)
     with open(RUNS_LOG, "a") as fh:
         fh.write(json.dumps(row) + "\n")
-    if a.json:
-        print(json.dumps({k: v for k, v in row.items() if k != "log"}))
+    if a.json:  # the full answer: a long list is the answer, and the log row keeps only its first 3,000 characters
+        print(json.dumps({**{k: v for k, v in row.items() if k != "log"}, "answer": answer or ""}))
     elif reason:
         print(f"HAND OFF ({reason}) to {row['handoff_desk']}" + (f": Flash answered {answer!r}" if answer else ""))
     else:
