@@ -1092,3 +1092,60 @@ test("Q103 LIVE: two partners racing on disjoint axes from the same base both la
       `a losing write must be refused loudly: ${JSON.stringify(x).slice(0, 400)}`);
   }
 });
+
+// ===========================================================================
+// CREDENTIAL SPLIT LIVE: a verified partner on the WRITER credential.
+// mcp.js routes every verb that is not authorityOnly over carr_writer, and F01
+// derives that credential as a sponsored agent. The store adopts that narrower
+// class rather than refusing, and never lets it reach a partner-only act.
+// ===========================================================================
+
+test("CREDENTIAL SPLIT LIVE: Joe on the writer credential records agent-admitted work under the credential's class", { skip: SKIP }, async () => {
+  const rel = id("rel");
+  ok(await as("joe_writer").initializeProspectRelationship({ idempotency_key: key(),
+    declared: { new_subject_id: rel } }), "Joe initializes over the writer credential");
+  assert.equal((await subject("joe", "relationship", rel)).decision, "allow", "the row exists");
+  // An agent-admitted fact written by Joe over the writer credential is stamped
+  // with the CREDENTIAL's class and Joe's name — both facts, neither widened.
+  const onWriter = await fact("joe_writer", "invoice", "relationship", rel, { detail: "synthetic" })
+    .catch(() => null);
+  const asg = (await openedAssignment("joe")).asg;
+  const mandate = await fact("joe_writer", "assignment_mandate", "assignment", asg, { detail: "synthetic" });
+  const onAuthority = await fact("joe", "assignment_mandate", "assignment", asg, { detail: "synthetic" });
+  const rows = await sql("joe",
+    "select record_id, recorded_by, recorded_by_class from ops.j102_first_party_record where record_id = any($1)",
+    [[mandate, onAuthority]]);
+  const by = Object.fromEntries(rows.map(r => [r.record_id, [r.recorded_by, r.recorded_by_class]]));
+  assert.deepEqual(by[mandate], ["joe", "sponsored_agent"], "writer credential: Joe, at the credential's class");
+  assert.deepEqual(by[onAuthority], ["joe", "verified_partner"], "authority credential: Joe, as a partner");
+  assert.equal(onWriter, null, "an invoice cannot bind to a relationship on either credential");
+});
+
+test("CREDENTIAL SPLIT LIVE: a partner-authored fact over the writer credential refuses and names the authority verb", { skip: SKIP }, async () => {
+  const d = await pendingDeal("lease");
+  await assert.rejects(
+    as("joe_writer").recordLifecycleFact({ idempotency_key: key(), fact: {
+      record_kind: "closing_settlement", record_id: id("closing-settlement"),
+      subject_kind: "deal", subject_id: d.deal, closing_date: "2026-09-22T15:00:00Z" } }),
+    e => e.code === "partner_authored_record_kind_refused" &&
+      e.detail?.use_verb === "record-partner-lifecycle-fact" &&
+      e.detail?.credential_split?.handler_authorization_class === "verified_partner",
+    "the writer credential never authors a partner fact");
+  // The same fact on Joe's authority credential lands.
+  await fact("joe", "closing_settlement", "deal", d.deal, { closing_date: "2026-09-22T15:00:00Z" });
+});
+
+test("CREDENTIAL SPLIT LIVE: a partner-only transition over the writer credential is not attributable and refuses", { skip: SKIP }, async () => {
+  const d = await pendingDeal("lease");
+  const failure = await fact("joe", "deal_failure", "deal", d.deal, { reason: "synthetic" });
+  const base = (await subject("joe", "deal", d.deal)).readback.body.state_digest;
+  await assert.rejects(
+    as("joe_writer").cancelPendingDeal({ idempotency_key: key(),
+      subject_ref: REF("deal", d.deal),
+      related_refs: { assignment: REF("assignment", d.asg) },
+      evidence_refs: [{ evidence_kind: "deal_failure_record", record_id: failure }],
+      declared: { return_phase: "search" } }),
+    e => e.code === "actor_context_mismatch",
+    "an authorityOnly act is never adopted down to the writer credential");
+  assert.equal((await subject("joe", "deal", d.deal)).readback.body.state_digest, base, "nothing moved");
+});

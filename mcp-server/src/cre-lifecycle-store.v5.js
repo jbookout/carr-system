@@ -1657,13 +1657,47 @@ export function createCreLifecycleStore({ db } = {}) {
     // business fact rather than a transient one about who is asking.
     if (dbPrincipal.human !== principal.human ||
         dbPrincipal.authorization_class !== principal.authorization_class) {
-      fail("actor_context_mismatch",
-        "the database principal and the handler's disagree about the actor's class or personhood",
-        { operation, actor_slug: principal.slug,
+      // THE ONE DISAGREEMENT THAT IS ADOPTED RATHER THAN REFUSED. A verified
+      // partner calling an operation that is NOT authorityOnly arrives, by the
+      // server's connection routing, on the ordinary writer credential, and F01
+      // derives every writer-credential principal as a sponsored agent. The
+      // record must not claim more authority than the credential that wrote it
+      // carried, so the store ADOPTS the database's narrower class for this
+      // operation and states the split beside the result. It is safe in one
+      // direction only: every partner-only transition is authorityOnly, so the
+      // adopted class can be refused by the kernel but never admitted beyond
+      // what the handler already held. Any other disagreement — a wider
+      // database class, a different person, an authorityOnly operation — still
+      // refuses, because it cannot be attributed.
+      const adoptable = OPERATION_SCHEMAS[operation]?.authorityOnly === false &&
+        principal.authorization_class === "verified_partner" && principal.human === true &&
+        dbPrincipal.authorization_class === "sponsored_agent" && dbPrincipal.human === false;
+      if (!adoptable) {
+        fail("actor_context_mismatch",
+          "the database principal and the handler's disagree about the actor's class or personhood",
+          { operation, actor_slug: principal.slug,
+            handler_authorization_class: principal.authorization_class,
+            database_authorization_class: dbPrincipal.authorization_class ?? null });
+      }
+      return {
+        now: row.server_now,
+        database_principal: dbPrincipal,
+        principal: deepFreeze({
+          slug: principal.slug,
+          human: false,
+          authorization_class: "sponsored_agent",
+          derived_by: "server_established_transaction_context",
+        }),
+        credential_split: deepFreeze({
           handler_authorization_class: principal.authorization_class,
-          database_authorization_class: dbPrincipal.authorization_class ?? null });
+          handler_human: principal.human,
+          credential_authorization_class: dbPrincipal.authorization_class,
+          adopted: "credential_class",
+          why: `${operation} is not authorityOnly, so it ran on the writer credential; the record carries that credential's class, not the handler's wider one`,
+        }),
+      };
     }
-    return { now: row.server_now, database_principal: dbPrincipal };
+    return { now: row.server_now, database_principal: dbPrincipal, principal, credential_split: null };
   }
 
   function requestDigest(operation, payload, principal) {
@@ -2401,7 +2435,7 @@ export function createCreLifecycleStore({ db } = {}) {
    */
   async function runTransition(operation, payload, context, { chooseTransition } = {}) {
     const schema = OPERATION_SCHEMAS[operation];
-    const { principal, payload: request } = begin(operation, payload, context);
+    let { principal, payload: request } = begin(operation, payload, context);
     const subject_ref = assertSubjectRef(request.subject_ref, "payload.subject_ref", schema.subject_kind);
 
     const relatedRefs = {};
@@ -2436,7 +2470,9 @@ export function createCreLifecycleStore({ db } = {}) {
     }
 
     return withTransaction(async client => {
-      const { now } = await openOperation(client, operation, principal);
+      const opened = await openOperation(client, operation, principal);
+      const { now } = opened;
+      principal = opened.principal;
       const replay = await replayOutcome(client, operation, request, principal);
       if (replay !== null) return replay;
 
@@ -2847,7 +2883,7 @@ export function createCreLifecycleStore({ db } = {}) {
   async function runInitialization(operation, payload, context) {
     const schema = OPERATION_SCHEMAS[operation];
     const contract = v5J102InitializationContract(schema.initialization);
-    const { principal, payload: request } = begin(operation, payload, context);
+    let { principal, payload: request } = begin(operation, payload, context);
 
     const rawDeclared = assertClosed(request.declared, INITIALIZATION_DECLARED_KEYS,
       ["new_subject_id"], "payload.declared");
@@ -2890,7 +2926,9 @@ export function createCreLifecycleStore({ db } = {}) {
     }
 
     return withTransaction(async client => {
-      const { now } = await openOperation(client, operation, principal);
+      const opened = await openOperation(client, operation, principal);
+      const { now } = opened;
+      principal = opened.principal;
       const replay = await replayOutcome(client, operation, request, principal);
       if (replay !== null) return replay;
 
@@ -2993,7 +3031,7 @@ export function createCreLifecycleStore({ db } = {}) {
 
   async function readCreLifecycle(payload, context) {
     const operation = "read-cre-lifecycle";
-    const { principal, payload: request } = begin(operation, payload, context);
+    let { principal, payload: request } = begin(operation, payload, context);
     const selector = assertClosed(request.selector, READ_SELECTOR_KEYS, ["kind"], "payload.selector");
     if (!V5_J102_READ_KINDS.includes(selector.kind)) {
       fail("unknown_read_kind", `"${selector.kind}" is not a registered read kind`,
@@ -3005,7 +3043,9 @@ export function createCreLifecycleStore({ db } = {}) {
         { registered: [...V5_J102_SUBJECT_KINDS] });
     }
     return withTransaction(async client => {
-      const { now } = await openOperation(client, operation, principal);
+      const opened = await openOperation(client, operation, principal);
+      const { now } = opened;
+      principal = opened.principal;
       if (V5_J102_COMPOSED_READ_KINDS.includes(selector.kind)) {
         return readOwnershipAndFreshness(client, selector, principal, now);
       }
@@ -3140,7 +3180,7 @@ export function createCreLifecycleStore({ db } = {}) {
 
   async function recordLifecycleFact(payload, context) {
     const operation = "record-lifecycle-fact";
-    const { principal, payload: request } = begin(operation, payload, context);
+    let { principal, payload: request } = begin(operation, payload, context);
     const fact = assertClosed(request.fact, FACT_BODY_KEYS,
       ["record_kind", "record_id", "subject_kind", "subject_id"], "payload.fact");
     // The kind must be one some evidence contract actually consumes. A record
@@ -3217,7 +3257,23 @@ export function createCreLifecycleStore({ db } = {}) {
     }
 
     return withTransaction(async client => {
-      const { now } = await openOperation(client, operation, principal);
+      const opened = await openOperation(client, operation, principal);
+      const { now } = opened;
+      principal = opened.principal;
+      // H5 AGAIN, ON THE CLASS THE CREDENTIAL CARRIES. A partner reaching this
+      // operation over the writer credential has just had the database's
+      // sponsored-agent class adopted; a partner-authored kind must then come
+      // through the authority-routed verb, where the credential is the partner's.
+      if (V5_J102_PARTNER_AUTHORED_RECORD_KINDS.includes(fact.record_kind) &&
+          principal.authorization_class !== "verified_partner") {
+        fail("partner_authored_record_kind_refused",
+          `a ${fact.record_kind} record is authored on a verified partner's authority credential; this call ran on the writer credential as ${principal.authorization_class}`,
+          { record_kind: fact.record_kind, actor_slug: principal.slug,
+            authorization_class: principal.authorization_class,
+            credential_split: opened.credential_split,
+            use_verb: "record-partner-lifecycle-fact",
+            partner_authored_record_kinds: [...V5_J102_PARTNER_AUTHORED_RECORD_KINDS] });
+      }
       const replay = await replayOutcome(client, operation, request, principal);
       if (replay !== null) return replay;
       // The subject a record claims to be about must EXIST. A binding to an id
@@ -3266,7 +3322,7 @@ export function createCreLifecycleStore({ db } = {}) {
    */
   async function recordEvidenceSubjectLink(payload, context) {
     const operation = "record-evidence-subject-link";
-    const { principal, payload: request } = begin(operation, payload, context);
+    let { principal, payload: request } = begin(operation, payload, context);
     const raw = assertClosed(request.link, LINK_BODY_KEYS,
       ["evidence_source", "subject_kind", "subject_id"], "payload.link");
     if (!V5_J102_LINKABLE_EVIDENCE_SOURCES.includes(raw.evidence_source)) {
@@ -3305,7 +3361,9 @@ export function createCreLifecycleStore({ db } = {}) {
     }
 
     return withTransaction(async client => {
-      const { now } = await openOperation(client, operation, principal);
+      const opened = await openOperation(client, operation, principal);
+      const { now } = opened;
+      principal = opened.principal;
       const replay = await replayOutcome(client, operation, request, principal);
       if (replay !== null) return replay;
 
@@ -3426,7 +3484,7 @@ export function createCreLifecycleStore({ db } = {}) {
 
   async function linkSalesforceReference(payload, context) {
     const operation = "link-salesforce-reference";
-    const { principal, payload: request } = begin(operation, payload, context);
+    let { principal, payload: request } = begin(operation, payload, context);
     // The kernel decides the shape and refuses any attempt to map a Salesforce
     // label onto lifecycle state; this module adds nothing to that judgement.
     const projected = projectSalesforceReference({
@@ -3440,7 +3498,9 @@ export function createCreLifecycleStore({ db } = {}) {
     });
 
     return withTransaction(async client => {
-      const { now } = await openOperation(client, operation, principal);
+      const opened = await openOperation(client, operation, principal);
+      const { now } = opened;
+      principal = opened.principal;
       const replay = await replayOutcome(client, operation, request, principal);
       if (replay !== null) return replay;
       // A link target must EXIST. Q083 links the opportunity progressively to a
@@ -3482,7 +3542,7 @@ export function createCreLifecycleStore({ db } = {}) {
    */
   async function recordLifecycleCorrection(payload, context) {
     const operation = "record-lifecycle-correction";
-    const { principal, payload: request } = begin(operation, payload, context);
+    let { principal, payload: request } = begin(operation, payload, context);
     const subject_ref = assertClosed(request.subject_ref, SUBJECT_REF_KEYS,
       ["subject_kind", "subject_id"], "payload.subject_ref");
     if (!V5_J102_SUBJECT_KINDS.includes(subject_ref.subject_kind)) {
@@ -3505,7 +3565,9 @@ export function createCreLifecycleStore({ db } = {}) {
     }
 
     return withTransaction(async client => {
-      const { now } = await openOperation(client, operation, principal);
+      const opened = await openOperation(client, operation, principal);
+      const { now } = opened;
+      principal = opened.principal;
       const replay = await replayOutcome(client, operation, request, principal);
       if (replay !== null) return replay;
       const loaded = await loadSubject(client, subject_ref.subject_kind, subject_ref.subject_id);
@@ -3610,7 +3672,7 @@ export function createCreLifecycleStore({ db } = {}) {
    */
   async function recordLifecycleReconciliation(payload, context) {
     const operation = "record-lifecycle-reconciliation";
-    const { principal, payload: request } = begin(operation, payload, context);
+    let { principal, payload: request } = begin(operation, payload, context);
     const raw = assertClosed(request.subject_ref, SUBJECT_REF_KEYS,
       // THE BASE VERSION IS REQUIRED HERE, unlike everywhere else it is optional:
       // a concurrent-edit question with no version to have decided against is not
@@ -3641,7 +3703,9 @@ export function createCreLifecycleStore({ db } = {}) {
     });
 
     return withTransaction(async client => {
-      const { now } = await openOperation(client, operation, principal);
+      const opened = await openOperation(client, operation, principal);
+      const { now } = opened;
+      principal = opened.principal;
       // REPLAY FIRST, before any state is read, exactly as every other write
       // operation here does. A settled key returns its stored outcome even though
       // the subject has moved since, and a replay taken after the read would
