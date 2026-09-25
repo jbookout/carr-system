@@ -177,12 +177,73 @@ class Watermark(unittest.TestCase):
                          [{"table": "public.extra", "artifact_rows": None, "restored_rows": 0, "content_differs": True}])
 
     def test_verify_restore_refuses_production_or_an_unnamed_branch_before_reading_anything(self):
-        common = dict(repository="o/r", run_id=1, identity=Path("/nonexistent"), dsn="host=/tmp", work_dir=Path("/nonexistent"))
-        with mock.patch.object(rw, "read_copy_record", side_effect=AssertionError("read")):
+        common = dict(repository="o/r", run_id=1, identity=Path("/nonexistent"), database="carr_restore",
+                      work_dir=Path("/nonexistent"))
+        with mock.patch.object(rw, "read_copy_record", side_effect=AssertionError("read")), \
+             mock.patch.object(rw, "production_head_lsn", side_effect=AssertionError("head")):
             with self.assertRaisesRegex(ValueError, "target kind must be"):
-                rw.verify_restore(target_kind="production", **common)
-            with self.assertRaisesRegex(ValueError, "needs --project-id and --branch-id"):
+                rw.verify_restore(target_kind="production", admin_dsn="host=/tmp", **common)
+            with self.assertRaisesRegex(ValueError, "needs --project-id and the branch handed over"):
                 rw.verify_restore(target_kind="disposable_branch", project_id="p", **common)
+            with self.assertRaisesRegex(ValueError, "needs --project-id and the branch handed over"):
+                rw.verify_restore(target_kind="disposable_branch", handoff=lambda: ("b", "d"), **common)
+            with self.assertRaisesRegex(ValueError, "needs its admin DSN"):
+                rw.verify_restore(target_kind="disposable_local_cluster", **common)
+            for bad in ("", "Carr", "carr-restore", "x;drop", "a" * 64):
+                with self.assertRaisesRegex(ValueError, "not a plain lower-case identifier"):
+                    rw.verify_restore(target_kind="disposable_local_cluster", admin_dsn="host=/tmp",
+                                      **{**common, "database": bad})
+
+    def test_the_restore_stream_drops_exactly_the_scripts_statement_classes_and_never_copy_data(self):
+        dump = (b"CREATE SCHEMA public;\nCREATE SCHEMA ops;\nALTER DEFAULT PRIVILEGES FOR ROLE x GRANT ALL;\n"
+                b"GRANT ALL ON TABLE public.t TO x;\nREVOKE ALL ON SCHEMA public FROM PUBLIC;\n"
+                b"ALTER TABLE public.t OWNER TO x;\nCOMMENT ON EXTENSION pgcrypto IS 'x';\n"
+                b"CREATE TABLE public.t (v text);\nCOPY public.t (v) FROM stdin;\nGRANT \\.\nREVOKE me\n\\.\n"
+                b"ALTER TABLE public.t ADD CONSTRAINT c CHECK (true);\n")
+        kept = b"".join(rw.restore_stream(dump.splitlines(keepends=True)))
+        self.assertEqual(kept, b"CREATE SCHEMA ops;\nCREATE TABLE public.t (v text);\nCOPY public.t (v) FROM stdin;\n"
+                               b"GRANT \\.\nREVOKE me\n\\.\nALTER TABLE public.t ADD CONSTRAINT c CHECK (true);\n")
+        # Outside COPY data it drops exactly what the rehearsal's own sed filter drops.
+        statements = [ln for ln in dump.decode().splitlines(keepends=True) if not ln.startswith(("GRANT \\", "REVOKE me", "\\."))
+                      and "FROM stdin" not in ln]
+        sed = subprocess.run(["sed", "-E", _script_block(r"RESTORE_FILTER='([^']*)'")], input="".join(statements),
+                             text=True, capture_output=True, check=True).stdout
+        mine = b"".join(rw.restore_stream("".join(statements).encode().splitlines(keepends=True))).decode()
+        self.assertEqual(mine, sed)
+
+    def test_psql_gets_every_connection_parameter_in_its_environment(self):
+        with mock.patch.dict(os.environ, {"PGPASSWORD": "stale", "PGSERVICE": "x", "KEEP": "1"}):
+            env = rw._pg_env("host=h.example.test port=5433 user=u password=pw dbname=d sslmode=require")
+        self.assertEqual({k: env[k] for k in ("PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGDATABASE", "PGSSLMODE")},
+                         {"PGHOST": "h.example.test", "PGPORT": "5433", "PGUSER": "u", "PGPASSWORD": "pw",
+                          "PGDATABASE": "d", "PGSSLMODE": "require"})
+        self.assertNotIn("PGSERVICE", env)
+        self.assertEqual(env["KEEP"], "1")
+        with self.assertRaisesRegex(ValueError, "unrecognised connection parameter"):
+            rw._pg_env("host=h dbname=d service=s")
+
+    def test_the_load_pipes_the_decrypted_filtered_dump_into_psql_with_nothing_on_its_argv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            (t / "dump.age").write_bytes(b"CREATE SCHEMA public;\nCOPY public.t (v) FROM stdin;\nGRANT x\n\\.\n")
+            (t / "id").write_text("x\n")
+            (t / "age").write_text("#!/bin/sh\ncat \"$4\"\n")
+            (t / "psql").write_text(f"#!/bin/sh\necho \"$*\" > '{t}/argv'\necho \"$PGDATABASE|$PGPASSWORD\" > '{t}/env'\n"
+                                    f"cat > '{t}/stdin'\nexit ${{PSQL_EXIT:-0}}\n")
+            for tool in ("age", "psql"):
+                (t / tool).chmod(0o755)
+            with mock.patch.object(rw, "_trusted_binary", lambda name: str(t / name)):
+                rw.load_artifact(t / "dump.age", t / "id", "host=/tmp dbname=target password=pw", t)
+                self.assertEqual((t / "stdin").read_bytes(), b"COPY public.t (v) FROM stdin;\nGRANT x\n\\.\n")
+                self.assertEqual((t / "argv").read_text().strip(), "-X -q -v ON_ERROR_STOP=1")
+                self.assertEqual((t / "env").read_text().strip(), "target|pw")
+                with mock.patch.dict(os.environ, {"PSQL_EXIT": "3"}):
+                    with self.assertRaisesRegex(ValueError, r"did not decrypt and load \(age 0, psql 3\)"):
+                        rw.load_artifact(t / "dump.age", t / "id", "host=/tmp dbname=target", t)
+                (t / "age").write_text("#!/bin/sh\necho 'no identity matched' >&2\nexit 1\n")
+                with self.assertRaisesRegex(ValueError, r"\(age 1, psql 0\).*no identity matched"):
+                    rw.load_artifact(t / "dump.age", t / "id", "host=/tmp dbname=target", t)
+
 
 
 class Cli(unittest.TestCase):
@@ -546,17 +607,27 @@ class VerifyRestore(unittest.TestCase):
         artifact_seen = {}
 
         def restored_reader(dsn, artifact):
+            self.assertEqual(dsn, "host=/tmp/sock dbname=carr_restore")  # the database it created
             artifact_seen.update(artifact)
             got = rw.strip_columns(artifact) if restored is None else restored
             return json.loads(json.dumps(got))
 
+        admin = "host=/tmp/sock dbname=postgres"
+        target = "host=/tmp/sock dbname=carr_restore"
         with mock.patch.object(rw, "local_target_start", return_value="2026-09-24T10:00:00Z") as start, \
-             mock.patch.object(rw, "server_clock", return_value=self.server_now), \
+             mock.patch.object(rw, "create_target_database", return_value=target) as create, \
+             mock.patch.object(rw, "load_artifact") as load, \
+             mock.patch.object(rw, "server_clock", return_value=self.server_now) as clock, \
              mock.patch.object(rw, "restored_watermark", restored_reader):
             receipt = rw.verify_restore(repository=REPO_SLUG, run_id=RUN_ID, identity=self.identity,
-                                        target_kind="disposable_local_cluster", dsn="host=/tmp/sock dbname=r",
-                                        work_dir=self.tmp / work, now=lambda: self.NOW)
-        start.assert_called_once_with("host=/tmp/sock dbname=r")
+                                        target_kind="disposable_local_cluster", database="carr_restore",
+                                        admin_dsn=admin, work_dir=self.tmp / work, now=lambda: self.NOW)
+        start.assert_called_once_with(admin)
+        # it creates the database, loads the DOWNLOADED dump into it, and reads THAT database back
+        create.assert_called_once_with(admin, "carr_restore")
+        self.assertEqual(load.call_args.args[1:3], (self.identity, target))
+        self.assertTrue(str(load.call_args.args[0]).endswith("carr-20260924.sql.age"))
+        clock.assert_called_once_with(target)
         return receipt, artifact_seen
 
     def evaluate(self, receipt):
@@ -610,9 +681,14 @@ class VerifyRestore(unittest.TestCase):
         for argv in (["verify-receipt", "--repository", REPO_SLUG, str(path)],
                      ["receipt", "--copy-record", str(path)],
                      ["verify-restore", "--repository", REPO_SLUG, "--run-id", str(RUN_ID), "--identity", str(self.identity),
-                      "--target-kind", "disposable_local_cluster", "--work-dir", str(self.tmp), "--receipt", str(path)],
+                      "--target-kind", "disposable_local_cluster", "--database", "x", "--work-dir", str(self.tmp),
+                      "--receipt", str(path)],
                      ["verify-restore", "--repository", REPO_SLUG, "--run-id", str(RUN_ID), "--identity", str(self.identity),
-                      "--target-kind", "disposable_local_cluster", "--work-dir", str(self.tmp), "--artifact", str(path)]):
+                      "--target-kind", "disposable_local_cluster", "--database", "x", "--work-dir", str(self.tmp),
+                      "--artifact", str(path)],
+                     ["verify-restore", "--repository", REPO_SLUG, "--run-id", str(RUN_ID), "--identity", str(self.identity),
+                      "--target-kind", "disposable_branch", "--database", "x", "--work-dir", str(self.tmp),
+                      "--branch-id", "br-1"]):
             with self.assertRaises(SystemExit) as refused, mock.patch("sys.stderr", io.StringIO()):
                 rw.main(argv)
             self.assertEqual(refused.exception.code, 2)
@@ -719,11 +795,40 @@ class VerifyRestore(unittest.TestCase):
         self.assertEqual(json.loads(self.evaluate(receipt).stdout)["reason_id"], "artifact_hash_mismatch")
 
     def test_the_cli_reads_the_dsn_from_the_environment_only(self):
-        with mock.patch.dict(os.environ, {"RESTORE_DSN": ""}), mock.patch("sys.stderr", io.StringIO()) as err:
+        with mock.patch.dict(os.environ, {"RESTORE_ADMIN_DSN": ""}), mock.patch("sys.stderr", io.StringIO()) as err:
             self.assertEqual(rw.main(["verify-restore", "--repository", REPO_SLUG, "--run-id", str(RUN_ID),
                                       "--identity", str(self.identity), "--target-kind", "disposable_local_cluster",
-                                      "--work-dir", str(self.tmp / "w")]), 2)
+                                      "--database", "carr_restore", "--work-dir", str(self.tmp / "w")]), 2)
         self.assertIn("environment only", err.getvalue())
+
+    def test_a_branch_target_is_armed_before_the_branch_exists_and_handed_over_on_stdin(self):
+        order = []
+        branch = ("br-restore", "host=ep.example.test dbname=neondb")
+        with mock.patch.object(rw, "production_head_lsn", side_effect=lambda p: order.append("head") or 0x1000), \
+             mock.patch.object(rw, "branch_target_start",
+                               side_effect=lambda *a: order.append(("target", a)) or "2026-09-24T10:00:00Z"), \
+             mock.patch.object(rw, "create_target_database", return_value="host=ep.example.test dbname=carr_restore"), \
+             mock.patch.object(rw, "load_artifact"), \
+             mock.patch.object(rw, "server_clock", return_value=self.NOW), \
+             mock.patch.object(rw, "restored_watermark", lambda dsn, a: rw.strip_columns(a)):
+            receipt = rw.verify_restore(repository=REPO_SLUG, run_id=RUN_ID, identity=self.identity,
+                                        target_kind="disposable_branch", database="carr_restore", project_id="proj",
+                                        work_dir=self.tmp / "w", armed=lambda: order.append("armed"),
+                                        handoff=lambda: order.append("handoff") or branch, now=lambda: self.NOW)
+        self.assertEqual(order, ["head", "armed", "handoff",
+                                 ("target", ("proj", "br-restore", branch[1], "carr_restore", 0x1000))])
+        self.assertEqual(receipt["target_kind"], "disposable_branch")
+        # on the CLI the handover is two lines of stdin; nothing handed over is refused
+        with mock.patch("sys.stdin", io.StringIO("br-restore\nhost=ep dbname=neondb\n")):
+            self.assertEqual(rw._stdin_handoff(), ("br-restore", "host=ep dbname=neondb"))
+        for text in ("", "br-restore\n"):
+            with mock.patch("sys.stdin", io.StringIO(text)):
+                with self.assertRaisesRegex(ValueError, "no branch was handed over"):
+                    rw._stdin_handoff()
+        signal = self.tmp / "armed"
+        rw._signal_armed(str(signal))()
+        self.assertEqual(signal.read_text(), "armed\n")
+        self.assertIsNone(rw._signal_armed(None))
 
 
 @unittest.skipUnless(importlib.util.find_spec("psycopg") is not None, "psycopg not installed")
@@ -731,13 +836,16 @@ class RestoreTarget(unittest.TestCase):
     """The target and its start instant, read from the provider (branch) or the cluster (local)."""
 
     PROJECT, DEFAULT, BRANCH = "proj", "br-prod", "br-restore"
-    DSN = "host=ep-restore.example.test port=5432 dbname=carr_restore user=u"
+    DSN = "host=ep-restore.example.test port=5432 dbname=neondb user=u"  # the ADMIN connection
+    HEAD = 0x16_B374D848
 
     def setUp(self):
         self.branches = {
             self.DEFAULT: {"id": self.DEFAULT, "default": True},
             self.BRANCH: {"id": self.BRANCH, "default": False, "protected": False, "parent_id": self.DEFAULT,
-                          "created_at": "2026-09-24T09:59:58.700Z"},
+                          "created_at": "2026-09-24T09:59:58.700Z", "parent_lsn": "16/B374D848",
+                          # an idle production: the last WAL was hours before the branch
+                          "parent_timestamp": "2026-09-24T03:05:00Z"},
         }
         self.endpoints = {self.BRANCH: [{"host": "ep-restore.example.test"}]}
         self.parent_databases = [{"name": "neondb"}, {"name": "carr_archive"}]
@@ -755,9 +863,10 @@ class RestoreTarget(unittest.TestCase):
             raise ValueError(f"provider GET {path} answered 404")
         return {"branch": self.branches[bid]}
 
-    def start(self, dsn=None):
+    def start(self, dsn=None, database="restore_rehearse", head="default"):
+        head_lsn = self.HEAD if head == "default" else head
         with mock.patch.object(rw, "_neon", self.neon):
-            return rw.branch_target_start(self.PROJECT, self.BRANCH, dsn or self.DSN)
+            return rw.branch_target_start(self.PROJECT, self.BRANCH, dsn or self.DSN, database, head_lsn)
 
     def test_the_start_is_the_providers_branch_creation_floored(self):
         self.assertEqual(self.start(), "2026-09-24T09:59:58Z")
@@ -781,30 +890,93 @@ class RestoreTarget(unittest.TestCase):
         self.setUp()
         with self.assertRaisesRegex(ValueError, r"is the production \(default\) or a protected branch"):
             with mock.patch.object(rw, "_neon", self.neon):
-                rw.branch_target_start(self.PROJECT, self.DEFAULT, self.DSN)
+                rw.branch_target_start(self.PROJECT, self.DEFAULT, self.DSN, "restore_rehearse", self.HEAD)
 
     def test_k1_an_inherited_database_is_refused_even_when_it_matches_the_artifact(self):
-        # The reviewer's bypass: RESTORE_DSN at the branch's inherited neondb. A
-        # branch taken at dump time holds a neondb equal to the artifact, so the
-        # watermarks would agree with nothing restored. Refused before any read.
-        dsn = self.DSN.replace("dbname=carr_restore", "dbname=neondb")
-        with self.assertRaisesRegex(ValueError, "which the branch inherited"):
-            self.start(dsn)
-        # any other database that also exists on the parent was inherited too
+        # The reviewer's bypass: the branch's inherited neondb. Defence in depth
+        # now that verify-restore creates and loads the database itself.
+        with self.assertRaisesRegex(ValueError, "one the branch inherits"):
+            self.start(database="neondb")
         with self.assertRaisesRegex(ValueError, "also exists on the production branch"):
-            self.start(self.DSN.replace("dbname=carr_restore", "dbname=carr_archive"))
-        with self.assertRaisesRegex(ValueError, "which the branch inherited"):
-            self.start("host=ep-restore.example.test port=5432 user=u")
+            self.start(database="carr_archive")
+        with self.assertRaisesRegex(ValueError, "one the branch inherits"):
+            self.start(database="")
         self.parent_databases = []
         with self.assertRaisesRegex(ValueError, "no databases on the production branch"):
             self.start()
 
-    def test_k1_a_branch_taken_from_an_earlier_point_in_time_is_refused(self):
-        self.branches[self.BRANCH]["parent_timestamp"] = "2026-09-24T03:05:00Z"  # the dump's time
-        with self.assertRaisesRegex(ValueError, "earlier point in time"):
-            self.start()
-        self.branches[self.BRANCH]["parent_timestamp"] = "2026-09-24T09:55:00Z"  # head, within the slack
+    def test_m3_a_head_branch_of_an_idle_production_passes_however_long_it_has_been_quiet(self):
+        # parent_timestamp is hours old (the last WAL); the LSN equals the head read at arming.
         self.assertEqual(self.start(), "2026-09-24T09:59:58Z")
+        # production wrote between arming and the create: the branch is later still
+        self.branches[self.BRANCH]["parent_lsn"] = "16/B374FFFF"
+        self.assertEqual(self.start(), "2026-09-24T09:59:58Z")
+        self.branches[self.BRANCH]["parent_lsn"] = "17/0"
+        self.assertEqual(self.start(), "2026-09-24T09:59:58Z")
+
+    def test_m3_a_point_in_time_child_is_refused(self):
+        for earlier in ("16/B374D847", "15/FFFFFFFF", "0/0"):
+            self.branches[self.BRANCH]["parent_lsn"] = earlier
+            with self.assertRaisesRegex(ValueError, "taken from before production's head at arming"):
+                self.start()
+
+    def test_m3_a_missing_lsn_or_head_reading_fails_closed(self):
+        for bad in (None, "", "zz/1", "16", "1/2/3", 42):
+            self.setUp()
+            self.branches[self.BRANCH]["parent_lsn"] = bad
+            with self.assertRaisesRegex(ValueError, "no parent_lsn"):
+                self.start()
+        self.setUp()
+        del self.branches[self.BRANCH]["parent_lsn"]
+        with self.assertRaisesRegex(ValueError, "no parent_lsn"):
+            self.start()
+        self.setUp()
+        with self.assertRaisesRegex(ValueError, "no production head LSN was read"):
+            self.start(head=None)
+
+    def test_m3_production_head_is_read_on_a_provider_issued_read_only_session(self):
+        seen = {}
+
+        class Conn:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def execute(self, sql):
+                seen["sql"] = sql
+                return mock.Mock(fetchone=lambda: (seen.get("answer", "16/B374D848"),))
+
+        def connect(uri, **kw):
+            seen.update(uri=uri, kw=kw)
+            return Conn()
+
+        def neon(path):
+            if path.endswith("/branches"):
+                return {"branches": list(self.branches.values())}
+            seen["path"] = path
+            return {"uri": "postgresql://neondb_owner@prod.example.test/neondb"}
+
+        with mock.patch.object(rw, "_neon", neon), mock.patch.dict(sys.modules, {"psycopg": mock.Mock(connect=connect)}):
+            self.assertEqual(rw.production_head_lsn(self.PROJECT), self.HEAD)
+            self.assertIn(f"branch_id={self.DEFAULT}", seen["path"])
+            self.assertEqual(seen["kw"]["options"], "-c default_transaction_read_only=on")
+            self.assertIn("pg_current_wal_lsn()", seen["sql"])
+            seen["answer"] = None
+            with self.assertRaisesRegex(ValueError, "no head LSN"):
+                rw.production_head_lsn(self.PROJECT)
+        with mock.patch.object(rw, "_neon", lambda path: {"branches": list(self.branches.values())} if path.endswith("/branches") else {}):
+            with self.assertRaisesRegex(ValueError, "issued no production connection"):
+                rw.production_head_lsn(self.PROJECT)
+
+    def test_parse_lsn(self):
+        self.assertEqual(rw.parse_lsn("0/0"), 0)
+        self.assertEqual(rw.parse_lsn("1/0"), 1 << 32)
+        self.assertEqual(rw.parse_lsn("16/B374D848"), 0x16_B374D848)
+        self.assertEqual(rw.parse_lsn("ffffffff/FFFFFFFF"), (1 << 64) - 1)
+        for bad in (None, "", "g/1", "1/", "/1", "123456789/0", 5):
+            self.assertIsNone(rw.parse_lsn(bad))
 
     def test_a_local_cluster_target_must_be_a_socket_or_loopback(self):
         with self.assertRaisesRegex(ValueError, "socket path or loopback"):
@@ -832,86 +1004,115 @@ class PinnedGh(unittest.TestCase):
                 rw._status_module()
 
 
-class RehearsalReceiptGate(unittest.TestCase):
-    """G4/K3: the rehearsal's own block, run with stubs: the verdict is decided on the PIPED verify-restore output."""
+def _script_function(name: str) -> str:
+    text = REHEARSE.read_text()
+    m = re.search(rf"(^{name}\(\) \{{\n.*?\n\}}\n)", text, re.S | re.M)
+    if m is None:
+        raise AssertionError(f"function {name} not found in bin/restore-rehearse.sh")
+    return m.group(1)
 
-    def run_block(self, fails: int, verify_exit: int = 0, verdict: str = "restore_exercise_exact"):
-        text = REHEARSE.read_text()
-        m = re.search(r'(exercise_reason\(\) \{\n.*?\nif \[ -n "\$BACKUP_RUN_ID" \]; then\n  mkdir -p "\$REPO/out"\n.*?\nfi\n)',
-                      text, re.S)
-        if m is None:
+
+class RehearsalReceiptGate(unittest.TestCase):
+    """Round-4 item 3, M3, K3: the rehearsal's own functions, run with stubs.
+
+    verify-restore is armed before the branch exists, gets the branch over the
+    FIFO (never an argument), performs the load itself, and its stdout goes
+    straight into the evaluator, whose verdict is the authority.
+    """
+
+    def run_flow(self, verify_exit: int = 0, verdict: str = "restore_exercise_exact", arm: bool = True,
+                 fails: int = 0):
+        end = re.search(r'(if \[ -n "\$BACKUP_RUN_ID" \]; then\n  mkdir -p "\$REPO/out"\n.*?\nfi\n)',
+                        REHEARSE.read_text(), re.S)
+        if end is None:
             self.fail("receipt block not found in bin/restore-rehearse.sh")
         with tempfile.TemporaryDirectory() as tmp:
             t = Path(tmp)
             (t / "out").mkdir()
             (t / "out" / "restore-exercise-receipt.json").write_text('{"stale": true}')
-            calls = t / "calls.log"
             stub = t / "stub.sh"
-            # `$PY -c ...` (the script's own helpers) runs the real interpreter; the tool call is stubbed.
-            stub.write_text(f"#!/bin/sh\nif [ \"$1\" = -c ]; then exec '{sys.executable}' \"$@\"; fi\n"
-                            f"echo \"$2\" >> '{calls}'\necho \"$*|$RESTORE_DSN\" >> '{calls}.args'\n"
-                            f"case \"$2\" in verify-restore) [ {verify_exit} -eq 0 ] && echo '{{\"bound\":1}}'; exit {verify_exit};; esac\n")
+            # `$PY -c ...` runs the real interpreter; verify-restore is a stand-in that
+            # signals armed, then reads the branch handover from stdin like the real one.
+            stub.write_text(
+                f"#!/bin/sh\nif [ \"$1\" = -c ]; then exec '{sys.executable}' \"$@\"; fi\n"
+                f"echo \"$*\" >> '{t}/verify.args'\n"
+                "armed=''; prev=''; for a in \"$@\"; do [ \"$prev\" = --armed-file ] && armed=\"$a\"; prev=\"$a\"; done\n"
+                + (f"echo armed > \"$armed\"; echo armed >> '{t}/order'\n" if arm else "exit 1\n")
+                + f"IFS= read -r branch; IFS= read -r admin; echo \"$branch|$admin\" > '{t}/handover'; "
+                f"echo handover >> '{t}/order'\n"
+                f"[ {verify_exit} -eq 0 ] && echo '{{\"bound\":1}}'; exit {verify_exit}\n")
             stub.chmod(0o755)
-            # The evaluator stand-in: records what reached it on stdin, answers like the real one.
             node = (f"node() {{ print -r -- \"$*\" >> '{t}/node.args'; cat > '{t}/node.stdin'; "
                     f"[ -s '{t}/node.stdin' ] || return 2; "
                     f"print -r -- '{{\"reason_id\":\"{verdict}\"}}'; "
                     f"[ '{verdict}' = restore_exercise_exact ]; }}\n")
-            script = ("say() { print -r -- \"$*\"; }\n" + node +
-                      f"REPO='{t}'; WORKDIR='{t}'; COPYDIR='{t}'; PY='{stub}'; FAILS={fails}; BACKUP_RUN_ID=101\n"
-                      "BACKUP_REPOSITORY=o/r; IDENTITY=/k; PROJECT_ID=proj; BRANCH_ID=br-r; RESTORE_URL=dsn-value\n"
-                      "EXERCISE_VERDICT=''\n"
-                      + m.group(1) + "print -r -- \"FAILS=$FAILS\"; print -r -- \"VERDICT=$EXERCISE_VERDICT\"\n")
-            got = subprocess.run(["zsh", "-c", script], capture_output=True, text=True)
+            script = ("say() { print -r -- \"$*\"; }\n"
+                      "die() { print -r -- \"DIE: $*\"; exit 1; }\n" + node +
+                      f"REPO='{t}'; WORKDIR='{t}'; COPYDIR='{t}'; PY='{stub}'; BACKUP_RUN_ID=101\n"
+                      "BACKUP_REPOSITORY=o/r; IDENTITY=/k; PROJECT_ID=proj; RESTORE_DB=restore_rehearse\n"
+                      "EXERCISE_VERDICT=''; VERIFY_PID=''; VERIFY_FIFO=''; VERIFY_ARM_TIMEOUT=5\n"
+                      + _script_function("exercise_reason") + _script_function("arm_verify_restore")
+                      + _script_function("hand_over_to_verify_restore")
+                      + "arm_verify_restore\n"
+                      f"echo branch-created >> '{t}/order'\n"
+                      "BRANCH_ID=br-r; BRANCH_ADMIN_URL=admin-dsn-value\n"
+                      "if hand_over_to_verify_restore; then HANDOVER=0; else HANDOVER=$?; fi\n"
+                      f"FAILS={fails}\n"
+                      + end.group(1) +
+                      "print -r -- \"HANDOVER=$HANDOVER\"; print -r -- \"VERDICT=$EXERCISE_VERDICT\"\n")
+            got = subprocess.run(["zsh", "-c", script], capture_output=True, text=True, timeout=60)
+            read = lambda name: (t / name).read_text() if (t / name).exists() else None  # noqa: E731
+            self.verify_args, self.order, self.handover = read("verify.args") or "", read("order") or "", read("handover")
+            self.node_args, self.node_stdin = read("node.args") or "", read("node.stdin")
             receipt = t / "out" / "restore-exercise-receipt.json"
-            self.args = (t / "calls.log.args").read_text() if (t / "calls.log.args").exists() else ""
-            self.node_args = (t / "node.args").read_text() if (t / "node.args").exists() else ""
-            self.node_stdin = (t / "node.stdin").read_text() if (t / "node.stdin").exists() else None
-            return (got.stdout + got.stderr, calls.read_text().split() if calls.exists() else [],
-                    receipt.read_text() if receipt.exists() else None)
+            return got.stdout + got.stderr, receipt.read_text() if receipt.exists() else None
 
-    def test_a_clean_run_judges_the_piped_output_and_keeps_only_a_copy(self):
-        out, calls, receipt = self.run_block(0)
-        self.assertEqual(calls, ["verify-restore"])
-        # K3: the evaluator read verify-restore's stdout through the pipe ("restore -"), not a file.
+    def test_a_clean_run_arms_first_hands_over_on_the_fifo_and_judges_the_piped_output(self):
+        out, receipt = self.run_flow()
+        # armed (production head read) BEFORE the branch exists; the branch arrives afterwards
+        self.assertEqual(self.order.split(), ["armed", "branch-created", "handover"])
+        self.assertEqual(self.handover.strip(), "br-r|admin-dsn-value")  # over the FIFO ...
+        self.assertNotIn("br-r", self.verify_args)                       # ... never on argv
+        self.assertNotIn("admin-dsn-value", self.verify_args)
+        self.assertIn("--target-kind disposable_branch --project-id proj --database restore_rehearse", self.verify_args)
+        for handed in ("--branch-id", "--artifact", "--restored", "--copy-record", "--started-at", "--finished-at"):
+            self.assertNotIn(handed, self.verify_args)
+        # K3: the evaluator read verify-restore's stdout through the pipe
         self.assertIn("recovery-matrix-evaluate.mjs restore -", self.node_args)
         self.assertEqual(json.loads(self.node_stdin), {"bound": 1})
-        self.assertEqual(json.loads(receipt), {"bound": 1})  # the tee's copy, for the operator
+        self.assertIn("HANDOVER=0", out)
         self.assertIn("VERDICT=restore_exercise_exact", out)
+        self.assertEqual(json.loads(receipt), {"bound": 1})  # the tee's copy, kept only on a clean run
         self.assertIn("not authority", out)
-        # H1: verify-restore is handed the run and the target, never a fact the script computed.
-        self.assertIn("--run-id 101 --identity /k --target-kind disposable_branch --project-id proj --branch-id br-r",
-                      self.args)
-        self.assertTrue(self.args.strip().endswith("|dsn-value"))  # the DSN travels in the environment
-        for handed in ("--artifact", "--restored", "--copy-record", "--observed-digest", "--started-at", "--finished-at"):
-            self.assertNotIn(handed, self.args)
-        self.assertIn("FAILS=0", out)
 
-    def test_a_failed_phase_4_writes_and_verifies_nothing_and_removes_a_stale_receipt(self):
-        out, calls, receipt = self.run_block(1)
-        self.assertEqual(calls, [])
+    def test_a_failed_phase_4_keeps_no_receipt_copy_and_removes_a_stale_one(self):
+        out, receipt = self.run_flow(fails=1)
         self.assertIsNone(receipt)
-        self.assertIsNone(self.node_stdin)
-        self.assertIn("FAILS=1", out)
+        self.assertIn("no restore-exercise receipt copy", out)
 
-    def test_a_refused_verify_leaves_no_receipt_and_counts_a_failure(self):
-        out, calls, receipt = self.run_block(0, verify_exit=1)
-        self.assertEqual(calls, ["verify-restore"])
-        self.assertIsNone(receipt)
-        self.assertIn("FAILS=1", out)
+    def test_a_refused_verify_fails_the_handover(self):
+        out, _ = self.run_flow(verify_exit=1)
+        self.assertNotIn("HANDOVER=0", out)
         self.assertIn("VERDICT=verify_restore_refused", out)
 
-    def test_an_evaluator_failure_on_the_piped_receipt_fails_the_rehearsal(self):
-        out, calls, receipt = self.run_block(0, verdict="watermark_mismatch")
-        self.assertIsNone(receipt)
-        self.assertIn("FAILS=1", out)
+    def test_an_evaluator_failure_on_the_piped_receipt_fails_the_handover(self):
+        out, _ = self.run_flow(verdict="watermark_mismatch")
+        self.assertNotIn("HANDOVER=0", out)
         self.assertIn("VERDICT=watermark_mismatch", out)
 
-    def test_the_recorded_outcome_names_the_piped_verdict_as_authority(self):
+    def test_a_verifier_that_never_arms_stops_the_rehearsal_before_any_branch(self):
+        out, _ = self.run_flow(arm=False)
+        self.assertIn("DIE: verify-restore did not arm", out)
+        self.assertNotIn("branch-created", self.order)
+
+    def test_the_script_no_longer_loads_on_the_backup_path_and_records_the_piped_verdict(self):
         text = REHEARSE.read_text()
-        self.assertIn('detail="$detail; exercise=$EXERCISE_VERDICT (piped verify-restore verdict; receipt file is a copy)"',
-                      text)
-        self.assertNotIn("evaluate: node mcp-server/bin/recovery-matrix-evaluate.mjs restore $RECEIPT_PATH", text)
+        self.assertIn('if [ -n "$BACKUP_RUN_ID" ]; then\n  step "phase 1b: arm verify-restore"', text)
+        self.assertLess(text.index('step "phase 1b: arm verify-restore"'), text.index('step "phase 2: throwaway branch"'))
+        self.assertIn("elif ! PGURL_ADMIN=", text)  # the script's own create/load runs only without --backup-run-id
+        self.assertIn('fi  # the local-dump path; with --backup-run-id verify-restore loaded it above', text)
+        self.assertIn("exercise=$EXERCISE_VERDICT (piped verify-restore verdict; receipt file is a copy; "
+                      "binary check stops PATH shims only, same-OS-user adversary out of scope)", text)
 
 
 class OutboundCensus(unittest.TestCase):
@@ -1064,16 +1265,17 @@ class EndToEndDisposableCluster(unittest.TestCase):
         self.assertEqual(got.returncode, 0, got.stderr)
         out.write_text(got.stdout)
 
-    def verify_and_evaluate(self, fake: "FakeProvider", receipt: Path):
-        """verify-restore in process: the provider and gh are fixtures, the target is the REAL restored database."""
+    def verify_and_evaluate(self, fake: "FakeProvider", receipt: Path, database: str):
+        """verify-restore in process: provider and gh are fixtures; it CREATES and LOADS a real local database."""
         real = rw._status_module()
         real.api = fake.api
         with mock.patch.object(rw, "_status_module", return_value=real):
             bound = rw.verify_restore(repository=REPO_SLUG, run_id=RUN_ID, identity=self.identity,
-                                      target_kind="disposable_local_cluster", dsn=self.dsn("restored"),
-                                      work_dir=self.tmp / "verify")
+                                      target_kind="disposable_local_cluster", database=database,
+                                      admin_dsn=self.dsn("postgres"), work_dir=self.tmp / f"verify-{database}")
         receipt.write_text(json.dumps(bound))
-        return bound, subprocess.run(["node", str(EVALUATOR), "restore", str(receipt)], capture_output=True, text=True)
+        return bound, subprocess.run(["node", str(EVALUATOR), "restore", "-"], input=json.dumps(bound),
+                                     capture_output=True, text=True)
 
     def test_exact_restore_passes_and_a_lost_or_changed_row_fails(self):
         self.psql("postgres", "create database src")
@@ -1120,7 +1322,8 @@ class EndToEndDisposableCluster(unittest.TestCase):
         cmp_ok = run_tool("compare", "--artifact", str(artifact), "--restored", str(restored))
         self.assertEqual(cmp_ok.returncode, 0, cmp_ok.stdout + cmp_ok.stderr)
 
-        # verify-restore: the copy is served through fixtures of the provider, gh and age.
+        # verify-restore: the copy is served through fixtures of the provider, gh and
+        # age; psql and the database are REAL, and verify-restore does the load.
         blob = _zip_of("carr-20260924.sql.age", dump.read_bytes())
         (self.tmp / "artifact.bin").write_bytes(blob)
         bindir = self.tmp / "bin"
@@ -1136,38 +1339,64 @@ class EndToEndDisposableCluster(unittest.TestCase):
         fake.artifact.update(digest=zdigest, size_in_bytes=len(blob))
         fake.summary.update(artifact_digest=zdigest, artifact_bytes=len(blob))
         receipt = self.tmp / "receipt.json"
-        with mock.patch.object(rw, "_trusted_binary", lambda name: str(bindir / name)):
-            bound, verdict = self.verify_and_evaluate(fake, receipt)
+        pinned = {"gh": str(bindir / "gh"), "age": str(bindir / "age"), "psql": self.bins["psql"]}
+        real_stream = rw.restore_stream
+        with mock.patch.object(rw, "_trusted_binary", lambda name: pinned[name]):
+            bound, verdict = self.verify_and_evaluate(fake, receipt, "vr_exact")
             self.assertEqual(verdict.returncode, 0, verdict.stdout + verdict.stderr)
             self.assertEqual(json.loads(verdict.stdout)["reason_id"], "restore_exercise_exact")
             self.assertEqual(bound["artifact_watermark"], rw.strip_columns(json.loads(counted.stdout)))
-            # the real local-cluster start: this cluster's postmaster start, before now
             self.assertLessEqual(bound["started_at"], bound["finished_at"])
+            # the database it created holds what it loaded
+            self.assertEqual(self.psql("vr_exact", "select count(*) from ops.run").strip(), "40")
+            self.assertEqual(self.psql("vr_exact", "select string_agg(extname, ',' order by extname) from pg_extension "
+                                                   "where extname in ('pg_trgm', 'pgcrypto')").strip(), "pg_trgm,pgcrypto")
 
-            # One row lost in the restore: the comparison and the evaluator must both refuse.
-            self.psql("restored", "delete from ops.run where id = 40")
-            self.restored(artifact, restored)
-            cmp_bad = run_tool("compare", "--artifact", str(artifact), "--restored", str(restored))
-            self.assertEqual(cmp_bad.returncode, 1)
-            self.assertIn("MISMATCH ops.run: artifact=40 restored=39", cmp_bad.stdout)
-            _, verdict = self.verify_and_evaluate(fake, receipt)
+            # new by construction: a database that already exists is refused, not reused
+            with self.assertRaises(Exception):
+                self.verify_and_evaluate(fake, receipt, "vr_exact")
+            with self.assertRaises(Exception):
+                self.verify_and_evaluate(fake, receipt, "restored")
+
+            # A restore that LOSES a row: the evaluator refuses on the piped receipt.
+            def lossy(lines):
+                dropped = False
+                for chunk in real_stream(lines):
+                    if chunk == b"40\n" and not dropped:
+                        dropped = True
+                        continue
+                    yield chunk
+
+            with mock.patch.object(rw, "restore_stream", lossy):
+                _, verdict = self.verify_and_evaluate(fake, receipt, "vr_lossy")
             self.assertEqual(verdict.returncode, 1)
             self.assertEqual(json.loads(verdict.stdout)["reason_id"], "watermark_mismatch")
-            self.psql("restored", "insert into ops.run values (40)")
 
-            # One row CHANGED, count intact: a row count alone would pass this; the content digest does not.
-            self.psql("restored", "update public.party set name = 'p7x' where id = 7")
-            self.restored(artifact, restored)
-            cmp_changed = run_tool("compare", "--artifact", str(artifact), "--restored", str(restored))
-            self.assertEqual(cmp_changed.returncode, 1)
-            self.assertIn("MISMATCH public.party: artifact=252 restored=252 content_differs=true", cmp_changed.stdout)
-            self.assertEqual(json.loads(self.verify_and_evaluate(fake, receipt)[1].stdout)["reason_id"], "watermark_mismatch")
-            self.psql("restored", "update public.party set name = 'p7' where id = 7")
+            # A restore that CHANGES a row, count intact: the content digest refuses it.
+            def changing(lines):
+                for chunk in real_stream(lines):
+                    yield chunk.replace(b"7\tp7\t", b"7\tp7x\t", 1) if chunk.startswith(b"7\tp7\t") else chunk
+
+            with mock.patch.object(rw, "restore_stream", changing):
+                _, verdict = self.verify_and_evaluate(fake, receipt, "vr_changed")
+            self.assertEqual(json.loads(verdict.stdout)["reason_id"], "watermark_mismatch")
 
             # A copy whose stored bytes differ from what the producer recorded fails on hash.
             fake.artifact["digest"] = fake.summary["artifact_digest"] = D("0")
-            self.assertEqual(json.loads(self.verify_and_evaluate(fake, receipt)[1].stdout)["reason_id"],
+            self.assertEqual(json.loads(self.verify_and_evaluate(fake, receipt, "vr_hash")[1].stdout)["reason_id"],
                              "artifact_hash_mismatch")
+
+        # The rehearsal's local-dump path still compares with the standalone tools.
+        self.psql("restored", "delete from ops.run where id = 40")
+        self.restored(artifact, restored)
+        cmp_bad = run_tool("compare", "--artifact", str(artifact), "--restored", str(restored))
+        self.assertEqual(cmp_bad.returncode, 1)
+        self.assertIn("MISMATCH ops.run: artifact=40 restored=39", cmp_bad.stdout)
+        self.psql("restored", "insert into ops.run values (40)")
+        self.psql("restored", "update public.party set name = 'p7x' where id = 7")
+        self.restored(artifact, restored)
+        cmp_changed = run_tool("compare", "--artifact", str(artifact), "--restored", str(restored))
+        self.assertIn("MISMATCH public.party: artifact=252 restored=252 content_differs=true", cmp_changed.stdout)
 
     def test_outbound_census_reads_every_device_row_of_the_restored_queue(self):
         self.psql("postgres", "create database outbound")

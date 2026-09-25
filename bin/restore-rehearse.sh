@@ -233,6 +233,8 @@ EXERCISE_VERDICT=""
 
 BRANCH_ID=""
 WORKDIR=""
+VERIFY_PID=""
+VERIFY_FIFO=""
 cleanup() {
   # rc MUST be captured as the very first statement, before any other command —
   # even a bare `[ ]` test — runs and overwrites $?. This is the exit status the
@@ -242,6 +244,14 @@ cleanup() {
   # afterward, so nothing below — including a failure inside record_rehearsal
   # itself — can turn a passing rehearsal red or a failing one green.
   local rc=$?
+
+  # An armed verify-restore (review round-4 item 3) is stopped before anything
+  # it might still write into is removed; closing the handoff ends it too.
+  if [ -n "${VERIFY_FIFO:-}" ]; then exec 4>&-; fi
+  if [ -n "${VERIFY_PID:-}" ]; then
+    kill "$VERIFY_PID" 2>/dev/null
+    wait "$VERIFY_PID" 2>/dev/null
+  fi
 
   # Runs on every exit path, including a failure or a Ctrl-C. Plaintext first:
   # if only one of the two teardowns can happen, it must be the one holding
@@ -349,7 +359,9 @@ record_rehearsal() {                      # record_rehearsal <exit-code>
   fi
   # Review K3: the restore-exercise verdict recorded is the one decided on the
   # PIPED verify-restore output; the receipt file in out/ is only a copy.
-  [ -n "$EXERCISE_VERDICT" ] && detail="$detail; exercise=$EXERCISE_VERDICT (piped verify-restore verdict; receipt file is a copy)"
+  # Review M2: the binary check guards against an accidental PATH shim only; an
+  # adversary running as the same OS user is out of scope.
+  [ -n "$EXERCISE_VERDICT" ] && detail="$detail; exercise=$EXERCISE_VERDICT (piped verify-restore verdict; receipt file is a copy; binary check stops PATH shims only, same-OS-user adversary out of scope)"
   # ops.run's detail column is one redacted line: no secrets, no client
   # content — and nothing here is either, only a filename, a byte count, a
   # percentage and a duration.
@@ -678,6 +690,70 @@ PROD_ROWS=$(awk -F'|' '{s+=$2} END {print s+0}' "$PROD_COUNTS")
 say "  ok    $PROD_TABLES tables, $PROD_ROWS rows in production right now"
 
 # ── PHASE 2: the throwaway branch.
+# ── VERIFY-RESTORE, ARMED BEFORE THE BRANCH EXISTS (--backup-run-id only).
+# Review round 4, item 3 and M3: verify-restore performs the restore itself —
+# it creates $RESTORE_DB on the branch (CREATE DATABASE fails if the name
+# exists, so it is new by construction), decrypts and loads the artifact it
+# downloaded, reads the watermark back and receipts it. It is started HERE,
+# before phase 2, so that it reads production's head LSN before the branch
+# exists; after the branch is created, its id and admin DSN go to it over a
+# private FIFO (never an argument), and it requires the branch's parent_lsn at
+# or after that head. Its stdout goes straight through tee into the evaluator:
+# THAT verdict is the authority (review K3); the tee's file is a copy.
+exercise_reason() {
+  # The evaluator's reason_id, or why there is none (verify-restore refused).
+  "$PY" -c 'import json,sys
+try: print(json.load(open(sys.argv[1]))["reason_id"])
+except Exception: print("verify_restore_refused")' "$WORKDIR/exercise-verdict.json" 2>/dev/null || print -r -- "verify_restore_refused"
+}
+arm_verify_restore() {
+  VERIFY_FIFO="$WORKDIR/verify.handoff"
+  mkfifo -m 600 "$VERIFY_FIFO" || die "could not create the verify-restore handoff"
+  mkdir -p "$COPYDIR/verify"
+  (
+    set -o pipefail
+    "$PY" "$REPO/tools/restore-watermark.py" verify-restore \
+      --repository "$BACKUP_REPOSITORY" --run-id "$BACKUP_RUN_ID" --identity "$IDENTITY" \
+      --target-kind disposable_branch --project-id "$PROJECT_ID" --database "$RESTORE_DB" \
+      --work-dir "$COPYDIR/verify" --armed-file "$WORKDIR/verify.armed" \
+      < "$VERIFY_FIFO" 2>"$WORKDIR/verify.err" \
+      | tee "$WORKDIR/receipt.verified.json" \
+      | node "$REPO/mcp-server/bin/recovery-matrix-evaluate.mjs" restore - > "$WORKDIR/exercise-verdict.json"
+  ) &
+  VERIFY_PID=$!
+  exec 4>"$VERIFY_FIFO"
+  local waited=0
+  # Liveness only: an unarmed verifier reads the head later, which can only
+  # make it refuse (fail closed), never pass a branch it should not.
+  while [ ! -s "$WORKDIR/verify.armed" ] && [ "$waited" -lt "${VERIFY_ARM_TIMEOUT:-180}" ]; do
+    kill -0 "$VERIFY_PID" 2>/dev/null || break
+    sleep 1
+    waited=$((waited + 1))
+  done
+  if [ ! -s "$WORKDIR/verify.armed" ]; then
+    say "$(tail -5 "$WORKDIR/verify.err" 2>/dev/null)" >&2
+    die "verify-restore did not arm (it reads production's head LSN before the branch exists)"
+  fi
+  say "  ok    verify-restore armed: production's head LSN read before the branch exists"
+}
+hand_over_to_verify_restore() {
+  # Returns verify-restore's pipeline status: 0 only on a passing piped verdict.
+  setopt localoptions localtraps
+  trap '' PIPE
+  { print -r -- "$BRANCH_ID"; print -r -- "$BRANCH_ADMIN_URL"; } >&4 2>/dev/null
+  exec 4>&-
+  VERIFY_FIFO=""
+  local rc=0
+  wait "$VERIFY_PID" || rc=$?
+  VERIFY_PID=""
+  EXERCISE_VERDICT="$(exercise_reason)"
+  return $rc
+}
+if [ -n "$BACKUP_RUN_ID" ]; then
+  step "phase 1b: arm verify-restore"
+  arm_verify_restore
+fi
+
 step "phase 2: throwaway branch"
 BRANCH_NAME="restore-rehearse-$(date -u +%Y%m%dT%H%M%SZ)"
 BRANCH_JSON="$("$NEONCTL" branches create --project-id "$PROJECT_ID" --name "$BRANCH_NAME" \
@@ -710,11 +786,27 @@ if [ "$BRANCH_HOST" = "$PROD_HOST" ]; then
 fi
 say "  ok    branch endpoint is a different host from production"
 
-if ! PGURL_ADMIN="$BRANCH_ADMIN_URL" "$PY" "$PGX" PGURL_ADMIN \
+if [ -n "$BACKUP_RUN_ID" ]; then
+  # verify-restore creates $RESTORE_DB, installs the extensions and loads the
+  # artifact itself (see arm_verify_restore above); this script does not load.
+  RESTORE_START_ISO="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  RESTORE_START_EPOCH="$(date +%s)"
+  say "  handing the branch to verify-restore: it creates $RESTORE_DB, decrypts and loads the artifact, reads it back (the slow step) ..."
+  if ! hand_over_to_verify_restore; then
+    say "  --- verify-restore (last 10 lines) ---" >&2
+    tail -10 "$WORKDIR/verify.err" >&2
+    die "verify-restore did not restore and verify the artifact ($EXERCISE_VERDICT). THIS IS THE FINDING."
+  fi
+  say "  ok    verify-restore restored the artifact into $RESTORE_DB and the piped verdict passed: $EXERCISE_VERDICT"
+  RESTORE_URL="$("$NEONCTL" connection-string "$BRANCH_ID" --project-id "$PROJECT_ID" \
+                 --role-name neondb_owner --database-name "$RESTORE_DB" 2>/dev/null)"
+  [ -n "$RESTORE_URL" ] || die "could not obtain the $RESTORE_DB connection string"
+elif ! PGURL_ADMIN="$BRANCH_ADMIN_URL" "$PY" "$PGX" PGURL_ADMIN \
      psql -v ON_ERROR_STOP=1 -q -c "create database $RESTORE_DB" >/dev/null 2>"$WORKDIR/createdb.err"; then
   say "$(cat "$WORKDIR/createdb.err")" >&2
   die "could not create the $RESTORE_DB database on the branch"
 fi
+if [ -z "$BACKUP_RUN_ID" ]; then
 RESTORE_URL="$("$NEONCTL" connection-string "$BRANCH_ID" --project-id "$PROJECT_ID" \
                --role-name neondb_owner --database-name "$RESTORE_DB" 2>/dev/null)"
 [ -n "$RESTORE_URL" ] || die "could not obtain the $RESTORE_DB connection string"
@@ -807,6 +899,7 @@ if ! age --decrypt -i "$IDENTITY" "$DUMP" 2>>"$WORKDIR/restore.err" \
 fi
 set +o pipefail
 say "  ok    dump decrypted and loaded"
+fi  # the local-dump path; with --backup-run-id verify-restore loaded it above
 
 # ── PHASE 4: the assertion. This is the whole point; everything above is setup.
 step "phase 4: row counts, restored vs production"
@@ -993,12 +1086,6 @@ case $? in
      FAILS=$((FAILS + 1)) ;;
   *) die "the exact watermark comparison could not be read" ;;
 esac
-exercise_reason() {
-  # The evaluator's reason_id, or why there is none (verify-restore refused).
-  "$PY" -c 'import json,sys
-try: print(json.load(open(sys.argv[1]))["reason_id"])
-except Exception: print("verify_restore_refused")' "$WORKDIR/exercise-verdict.json" 2>/dev/null || print -r -- "verify_restore_refused"
-}
 if [ -n "$BACKUP_RUN_ID" ]; then
   mkdir -p "$REPO/out"
   RECEIPT_PATH="$REPO/out/restore-exercise-receipt.json"
@@ -1006,36 +1093,14 @@ if [ -n "$BACKUP_RUN_ID" ]; then
   rm -f "$RECEIPT_PATH"
   if [ "$FAILS" -ne 0 ]; then
     # Review G4: a rehearsal that failed phase 4 (the production comparison)
-    # or phase 5 writes and verifies NO receipt; the evaluator never sees one.
-    say "  FAIL  no restore-exercise receipt: $FAILS earlier assertion(s) failed" >&2
-  # Review H1: the receipt is built ENTIRELY by verify-restore, while this
-  # branch still exists (the EXIT trap deletes it later). It looks the Check
-  # up itself, downloads and hashes the artifact itself, decrypts and counts
-  # it itself, reads the restored watermark itself, reads the branch and its
-  # databases from the provider (start = branch creation) and takes the
-  # finish from its own clock. Nothing computed above in this script feeds it.
-  #
-  # Review K3: the AUTHORITY is the evaluator's verdict on verify-restore's
-  # stdout, PIPED straight in — decided here and recorded in this run's ops.run
-  # row. The receipt file the tee leaves in out/ is the operator's copy; a
-  # verdict computed later on that file is not a restore result.
-  elif mkdir -p "$COPYDIR/verify" && (
-         set -o pipefail
-         RESTORE_DSN="$RESTORE_URL" "$PY" "$REPO/tools/restore-watermark.py" verify-restore \
-           --repository "$BACKUP_REPOSITORY" --run-id "$BACKUP_RUN_ID" --identity "$IDENTITY" \
-           --target-kind disposable_branch --project-id "$PROJECT_ID" --branch-id "$BRANCH_ID" \
-           --work-dir "$COPYDIR/verify" \
-           | tee "$WORKDIR/receipt.verified.json" \
-           | node "$REPO/mcp-server/bin/recovery-matrix-evaluate.mjs" restore - > "$WORKDIR/exercise-verdict.json"
-       ); then
-    EXERCISE_VERDICT="$(exercise_reason)"
-    mv "$WORKDIR/receipt.verified.json" "$RECEIPT_PATH"
-    say "  ok    restore exercise PASSED on the piped verify-restore output: $EXERCISE_VERDICT"
-    say "        (copy of the bound receipt, not authority: $RECEIPT_PATH)"
+    # or phase 5 keeps NO receipt copy, whatever verify-restore's verdict was.
+    say "  FAIL  no restore-exercise receipt copy: $FAILS assertion(s) failed" >&2
   else
-    EXERCISE_VERDICT="$(exercise_reason)"
-    say "  FAIL  restore exercise did not pass on the piped verify-restore output: $EXERCISE_VERDICT" >&2
-    FAILS=$((FAILS + 1))
+    # Review K3: the verdict that counted was decided in phase 3 on the piped
+    # output and is recorded in this run's ops.run row; this is only a copy.
+    mv "$WORKDIR/receipt.verified.json" "$RECEIPT_PATH"
+    say "  ok    restore exercise: $EXERCISE_VERDICT (decided on the piped verify-restore output)"
+    say "        (copy of the bound receipt, not authority: $RECEIPT_PATH)"
   fi
 else
   say "  note  no --backup-run-id: exact watermark gated, no receipt written (a local file has no producer record)"

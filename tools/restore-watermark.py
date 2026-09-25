@@ -29,17 +29,18 @@ only thing a restore can be compared EXACTLY against is the artifact itself.
                copy.json and the extracted .sql.age into --out-dir. It feeds
                the RESTORE only; no receipt is ever built from its output.
   verify-restore
-               THE ONLY WAY A RESTORE RECEIPT IS MADE (review H1). It takes no
-               receipt, watermark, digest or instant from anyone. While the
-               restored target still exists it performs every decisive read
-               itself: it looks up the run's Check itself, downloads the
-               artifact itself and hashes those bytes, decrypts them with the
-               identity file and counts the artifact-side watermark, reads the
-               restored watermark over RESTORE_DSN, reads where the target is
-               and when it came into being from the provider (or, for a local
-               cluster, from the server), and takes the finish instant from
-               its own clock. It then builds restore-exercise-receipt.v1 and
-               stamps the verify binding (lib/recovery_evidence.py).
+               THE ONLY WAY A RESTORE RECEIPT IS MADE (reviews H1, round-4
+               item 3). It takes no receipt, watermark, digest or instant from
+               anyone, and it performs the RESTORE ITSELF: it looks up the run's
+               Check, downloads the artifact and hashes those bytes, decrypts
+               and counts it, CREATES the target database (CREATE DATABASE
+               fails if the name exists, so the database is new by
+               construction), loads the decrypted artifact into it through
+               psql, reads the watermark back read-only, and takes the finish
+               instant from its own clock. For a branch target it is ARMED
+               before the branch exists: it reads production's head LSN first,
+               then takes the branch id and admin DSN on stdin, and requires
+               the branch's parent_lsn at or after that head (review M3).
   outbound-census
                every device row of the RESTORED ops.notification_delivery as
                an outbound item, as the bound request evaluateOutboundQueueRelease
@@ -53,17 +54,21 @@ mcp-server/bin/recovery-matrix-evaluate.mjs, as bin/restore-rehearse.sh does
 and records. out/restore-exercise-receipt.json is a copy for the operator; an
 evaluator verdict on that file is not a restore result.
 
-TRUSTED BINARIES (review K2): `age` and `gh` are never taken from PATH. They
-are resolved once from TRUSTED_BIN_DIRS, symlinks followed, and refused when
-the real file sits inside this repository, in a temporary directory, or is
-group- or world-writable. The GitHub reads made through
-ops/backup-workflow-status.py use the same pinned `gh`.
+BINARY RESOLUTION (reviews K2, M2): `age`, `gh` and `psql` are resolved from
+TRUSTED_BIN_DIRS, never from PATH, and a resolved file inside this repository,
+in a temporary directory, or group- or world-writable is refused. THIS STOPS AN
+ACCIDENTAL PATH SHIM ONLY. /opt/homebrew and its Cellar are owned by the same
+OS user that runs this verifier, so that user can repoint any of them; an
+adversary running as that user is OUT OF SCOPE, because they could equally
+edit this file. The GitHub reads made through ops/backup-workflow-status.py
+use the same resolved `gh`.
 
 CLOCK (review K4): the finish instant and the binding stamp are this
 machine's clock; verify-restore compares it with the target server's
 clock_timestamp() and refuses a skew over MAX_CLOCK_SKEW_SECONDS.
 
-Nothing here writes to a database; every session is opened with
+The only writes are verify-restore's own CREATE DATABASE, extensions and load
+into the throwaway target; every read session is opened with
 default_transaction_read_only=on. No credential value is printed: the age
 identity is a file path handed to `age`, the DSN is read from the
 environment, and the provider key is sent only as a header. fetch-copy and
@@ -261,7 +266,10 @@ def file_digest(path: Path) -> str:
 
 # ── the independently held copy, read back from the store ────────────────────
 
-TRUSTED_BIN_DIRS = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin")
+# Where age, gh and psql are looked up (never PATH). A guard against an
+# accidental PATH shim only; see BINARY RESOLUTION in the module docstring.
+TRUSTED_BIN_DIRS = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin",
+                    "/opt/homebrew/opt/libpq/bin", "/usr/local/opt/libpq/bin")
 
 
 def _untrusted_roots() -> tuple[Path, ...]:
@@ -283,7 +291,11 @@ def _untrusted_location(real: Path, roots: Iterable[Path] | None = None) -> str 
 
 
 def _trusted_binary(name: str) -> str:
-    """The absolute path of `name`, from TRUSTED_BIN_DIRS only; PATH is never consulted (review K2)."""
+    """The absolute path of `name`, from TRUSTED_BIN_DIRS only; PATH is never consulted.
+
+    Review M2: this stops an accidental PATH shim. It is not a defence against
+    an adversary running as the same OS user, who owns these directories.
+    """
     for directory in TRUSTED_BIN_DIRS:
         candidate = Path(directory) / name
         if candidate.is_file() and os.access(candidate, os.X_OK):
@@ -553,53 +565,177 @@ def _dsn_dbname(dsn: str) -> str:
 
 
 INHERITED_DATABASE = "neondb"
-POINT_IN_TIME_SLACK_SECONDS = 300
+PRODUCTION_ROLE = "neondb_owner"
+DATABASE_NAME_RE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
+LSN_RE = re.compile(r"^([0-9A-Fa-f]{1,8})/([0-9A-Fa-f]{1,8})$")
 
 
-def branch_target_start(project_id: str, branch_id: str, dsn: str) -> str:
+def parse_lsn(value: Any) -> int | None:
+    m = LSN_RE.fullmatch(value) if isinstance(value, str) else None
+    return (int(m.group(1), 16) << 32) | int(m.group(2), 16) if m else None
+
+
+def _default_branch(project_id: str) -> str:
+    listed = _neon(f"/projects/{project_id}/branches").get("branches") or []
+    defaults = [b.get("id") for b in listed if b.get("default")]
+    if len(defaults) != 1 or not isinstance(defaults[0], str):
+        raise ValueError("the provider did not report exactly one default branch")
+    return defaults[0]
+
+
+def production_head_lsn(project_id: str) -> int:
+    """Production's WAL head, read by THIS process on a provider-issued read-only session (review M3)."""
+    default = _default_branch(project_id)
+    uri = str(_neon(f"/projects/{project_id}/connection_uri?branch_id={default}"
+                    f"&database_name={INHERITED_DATABASE}&role_name={PRODUCTION_ROLE}").get("uri") or "")
+    if not uri:
+        raise ValueError("the provider issued no production connection to read its head LSN")
+    import psycopg
+
+    with psycopg.connect(uri, autocommit=True, options=READ_ONLY_OPTIONS, connect_timeout=30) as conn:
+        got = conn.execute("select pg_current_wal_lsn()::text").fetchone()
+    lsn = parse_lsn(got[0] if got else None)
+    if lsn is None:
+        raise ValueError("production reported no head LSN")
+    return lsn
+
+
+def branch_target_start(project_id: str, branch_id: str, admin_dsn: str, database: str, head_lsn: int | None) -> str:
     """The throwaway branch as the PROVIDER reports it; its creation is the restore's earliest start.
 
     Refused unless the branch exists, is not the default (production) branch or
-    a protected one, is a child of the default branch taken from its HEAD (not
-    a point in time), the DSN's host is one of THIS branch's endpoints, and the
-    DSN's database is one the restore created: review K1 — a child branch
-    already holds production's databases, and one taken at dump time holds a
-    neondb equal to the artifact, so pointing at an inherited database would
-    pass with nothing restored. So neondb, and any database name that also
-    exists on the parent branch, is refused.
+    a protected one, is a child of the default branch, and the admin DSN's host
+    is one of THIS branch's endpoints. Review M3: the branch must come from
+    production's HEAD as it stood when this verifier armed — its parent_lsn at
+    or after `head_lsn`, read before the branch existed. A missing parent_lsn
+    or head reading fails closed. (A point-in-time child, e.g. one taken at
+    dump time, has an earlier parent_lsn and is refused; an idle production
+    leaves the head unchanged, so a genuine head branch passes however long
+    production has been quiet.) Review K1, kept as defence in depth now that
+    the verifier creates the database itself: the target database may not be
+    neondb or any name that also exists on the parent branch.
     """
-    listed = _neon(f"/projects/{project_id}/branches").get("branches") or []
-    defaults = [b.get("id") for b in listed if b.get("default")]
-    if len(defaults) != 1:
-        raise ValueError("the provider did not report exactly one default branch")
+    default = _default_branch(project_id)
     branch = _neon(f"/projects/{project_id}/branches/{branch_id}").get("branch") or {}
     if branch.get("id") != branch_id:
         raise ValueError(f"the provider does not report branch {branch_id}")
-    if branch.get("default") or branch.get("protected") or branch_id == defaults[0]:
+    if branch.get("default") or branch.get("protected") or branch_id == default:
         raise ValueError("the restore target is the production (default) or a protected branch; refusing")
-    if branch.get("parent_id") != defaults[0]:
+    if branch.get("parent_id") != default:
         raise ValueError("the restore target branch is not a child of the production branch")
-    dbname = _dsn_dbname(dsn)
-    if not dbname or dbname == INHERITED_DATABASE:
-        raise ValueError(f"RESTORE_DSN names database {dbname or '(none)'!r}, which the branch inherited; "
-                         "the restore must target a database it created")
-    inherited = {str(d.get("name")) for d in (_neon(f"/projects/{project_id}/branches/{defaults[0]}/databases")
+    if head_lsn is None:
+        raise ValueError("no production head LSN was read before the branch existed; refusing")
+    parent_lsn = parse_lsn(branch.get("parent_lsn"))
+    if parent_lsn is None:
+        raise ValueError("the provider reported no parent_lsn for the restore target branch; refusing")
+    if parent_lsn < head_lsn:
+        raise ValueError("the restore target branch was taken from before production's head at arming "
+                         "(a point-in-time branch); refusing")
+    if not database or database == INHERITED_DATABASE:
+        raise ValueError(f"the target database {database or '(none)'!r} is one the branch inherits; "
+                         "the restore must target a database it creates")
+    inherited = {str(d.get("name")) for d in (_neon(f"/projects/{project_id}/branches/{default}/databases")
                                               .get("databases") or [])}
     if not inherited:
         raise ValueError("the provider reported no databases on the production branch; cannot rule out an inherited target")
-    if dbname in inherited:
-        raise ValueError(f"database {dbname!r} also exists on the production branch; the branch inherited it")
+    if database in inherited:
+        raise ValueError(f"database {database!r} also exists on the production branch; the branch inherited it")
     hosts = {str(e.get("host")) for e in (_neon(f"/projects/{project_id}/branches/{branch_id}/endpoints")
                                           .get("endpoints") or [])}
-    if _dsn_host(dsn) not in hosts:
-        raise ValueError("RESTORE_DSN does not point at an endpoint of the named branch")
+    if _dsn_host(admin_dsn) not in hosts:
+        raise ValueError("the admin DSN does not point at an endpoint of the named branch")
     created = _instant(branch.get("created_at"))
     if created is None:
         raise ValueError("the provider reported no creation instant for the branch")
-    parent_point = _instant(branch.get("parent_timestamp"))
-    if parent_point is not None and (created - parent_point).total_seconds() > POINT_IN_TIME_SLACK_SECONDS:
-        raise ValueError("the restore target branch was taken from an earlier point in time, not production's head")
     return _utc_seconds(created)
+
+
+# The statement classes a scoped plain pg_dump carries that a fresh throwaway
+# database cannot apply (see bin/restore-rehearse.sh, THE PORTABILITY FILTER).
+# Unlike the script's sed, this never touches COPY data lines.
+RESTORE_STATEMENT_FILTER = re.compile(
+    rb"^(CREATE SCHEMA public;|ALTER DEFAULT PRIVILEGES|GRANT |REVOKE |ALTER .* OWNER TO |COMMENT ON EXTENSION )")
+RESTORE_EXTENSIONS = ("pg_trgm", "pgcrypto")
+
+
+def restore_stream(lines: Iterable[bytes]) -> Iterable[bytes]:
+    """The dump with the non-portable statements dropped; COPY blocks pass through untouched."""
+    in_copy = False
+    for raw in lines:
+        line = raw.rstrip(b"\n")
+        if in_copy:
+            yield raw
+            in_copy = line != TERMINATOR
+            continue
+        if COPY_RE.match(line):
+            in_copy = True
+            yield raw
+            continue
+        if RESTORE_STATEMENT_FILTER.match(line):
+            continue
+        yield raw
+
+
+PG_ENV_KEYS = {"host": "PGHOST", "port": "PGPORT", "user": "PGUSER", "password": "PGPASSWORD",
+               "dbname": "PGDATABASE", "sslmode": "PGSSLMODE", "options": "PGOPTIONS",
+               "channel_binding": "PGCHANNELBINDING", "connect_timeout": "PGCONNECT_TIMEOUT",
+               "application_name": "PGAPPNAME", "sslrootcert": "PGSSLROOTCERT"}
+
+
+def _pg_env(dsn: str) -> dict[str, str]:
+    """psql's environment for `dsn`: every parameter as a PG* variable, none on an argument list."""
+    from psycopg.conninfo import conninfo_to_dict
+
+    params = conninfo_to_dict(dsn)
+    unknown = sorted(set(params) - set(PG_ENV_KEYS))
+    if unknown:
+        raise ValueError(f"unrecognised connection parameter(s) {', '.join(unknown)}")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PG")}
+    env.update({PG_ENV_KEYS[k]: str(v) for k, v in params.items() if v is not None})
+    return env
+
+
+def create_target_database(admin_dsn: str, database: str) -> str:
+    """CREATE DATABASE (new by construction: it fails if the name exists), its extensions; returns its DSN."""
+    if not DATABASE_NAME_RE.fullmatch(database or ""):
+        raise ValueError(f"target database name {database!r} is not a plain lower-case identifier")
+    import psycopg
+    from psycopg import sql
+    from psycopg.conninfo import make_conninfo
+
+    with psycopg.connect(admin_dsn, autocommit=True, connect_timeout=30) as conn:
+        conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database)))
+    target = make_conninfo(admin_dsn, dbname=database)
+    with psycopg.connect(target, autocommit=True, connect_timeout=30) as conn:
+        for ext in RESTORE_EXTENSIONS:
+            conn.execute(sql.SQL("CREATE EXTENSION IF NOT EXISTS {}").format(sql.Identifier(ext)))
+    return target
+
+
+def load_artifact(dump: Path, identity: Path, target_dsn: str, work_dir: Path) -> None:
+    """Decrypt the downloaded artifact and load it into the target through psql, in pipes only."""
+    err_path = work_dir / "load.err"
+    with err_path.open("wb") as err, open(os.devnull, "wb") as out:
+        age = subprocess.Popen([_trusted_binary(AGE), "--decrypt", "-i", str(identity), str(dump)],
+                               stdout=subprocess.PIPE, stderr=err)
+        psql = subprocess.Popen([_trusted_binary("psql"), "-X", "-q", "-v", "ON_ERROR_STOP=1"],
+                                stdin=subprocess.PIPE, stdout=out, stderr=err, env=_pg_env(target_dsn))
+        assert age.stdout is not None and psql.stdin is not None
+        try:
+            for chunk in restore_stream(age.stdout):
+                psql.stdin.write(chunk)
+        except BrokenPipeError:
+            pass  # psql stopped on an error; its exit status says so below
+        finally:
+            age.stdout.close()
+            try:
+                psql.stdin.close()
+            except BrokenPipeError:
+                pass
+            age_code, psql_code = age.wait(), psql.wait()
+    if age_code or psql_code:
+        tail = err_path.read_text(errors="replace").strip().splitlines()[-5:]
+        raise ValueError(f"the artifact did not decrypt and load (age {age_code}, psql {psql_code}): {' | '.join(tail)}")
 
 
 def local_target_start(dsn: str) -> str:
@@ -627,18 +763,26 @@ def server_clock(dsn: str) -> datetime:
     return got[0]
 
 
-def verify_restore(*, repository: str, run_id: int, identity: Path, target_kind: str, dsn: str,
-                   work_dir: Path, project_id: str | None = None, branch_id: str | None = None,
+def verify_restore(*, repository: str, run_id: int, identity: Path, target_kind: str, database: str,
+                   work_dir: Path, project_id: str | None = None, admin_dsn: str | None = None,
+                   handoff: Callable[[], tuple[str, str]] | None = None, armed: Callable[[], None] | None = None,
                    now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)) -> dict[str, Any]:
-    """Build and bind restore-exercise-receipt.v1 from this process's own reads (review H1)."""
+    """Restore the artifact into a database this process creates, and receipt it from its own reads."""
+    head_lsn: int | None = None
     if target_kind == "disposable_branch":
-        if not project_id or not branch_id:
-            raise ValueError("a branch target needs --project-id and --branch-id")
-        started_at = branch_target_start(project_id, branch_id, dsn)
+        if not project_id or handoff is None:
+            raise ValueError("a branch target needs --project-id and the branch handed over on stdin")
+        head_lsn = production_head_lsn(project_id)  # BEFORE the branch exists (review M3)
     elif target_kind == "disposable_local_cluster":
-        started_at = local_target_start(dsn)
+        if not admin_dsn:
+            raise ValueError("a local-cluster target needs its admin DSN in the environment")
     else:
         raise ValueError(f"target kind must be disposable_branch or disposable_local_cluster, not {target_kind!r}")
+    if not DATABASE_NAME_RE.fullmatch(database or ""):
+        raise ValueError(f"target database name {database!r} is not a plain lower-case identifier")
+    if armed is not None:
+        armed()
+    work_dir.mkdir(parents=True, exist_ok=True)
     record = read_copy_record(repository, run_id)
     archive, dump = download_copy(repository, record.pop("_artifact_id"), work_dir)
     observed = file_digest(archive)
@@ -646,9 +790,18 @@ def verify_restore(*, repository: str, run_id: int, identity: Path, target_kind:
     missing = [t for t in CORE_TABLES if int(artifact.get(t, {}).get("rows", 0)) <= 0]
     if missing:
         raise ValueError(f"the artifact carries no rows for core table(s) {', '.join(missing)}; not a record-layer dump")
-    restored = restored_watermark(dsn, artifact)
+    if target_kind == "disposable_branch":
+        assert handoff is not None and project_id
+        branch_id, admin_dsn = handoff()
+        started_at = branch_target_start(project_id, branch_id, admin_dsn, database, head_lsn)
+    else:
+        assert admin_dsn
+        started_at = local_target_start(admin_dsn)
+    target = create_target_database(admin_dsn, database)
+    load_artifact(dump, identity, target, work_dir)
+    restored = restored_watermark(target, artifact)
     finished = now()  # this process's own clock, after its last read; it also stamps the binding
-    check_clock_skew(finished, server_clock(dsn), "the restore target server")
+    check_clock_skew(finished, server_clock(target), "the restore target server")
     finished_at = _utc_seconds(finished)
     receipt = {
         "receipt_kind": RECEIPT_KIND,
@@ -662,6 +815,24 @@ def verify_restore(*, repository: str, run_id: int, identity: Path, target_kind:
         "finished_at": finished_at,
     }
     return bind(receipt, "restore_exercise", finished)
+
+
+def _stdin_handoff() -> tuple[str, str]:
+    """The branch id and its admin DSN, one per line, from the rehearsal after it creates the branch."""
+    branch_id = sys.stdin.readline().strip()
+    admin_dsn = sys.stdin.readline().strip()
+    if not branch_id or not admin_dsn:
+        raise ValueError("no branch was handed over on stdin (the rehearsal stopped before creating it)")
+    return branch_id, admin_dsn
+
+
+def _signal_armed(path: str | None) -> Callable[[], None] | None:
+    if not path:
+        return None
+
+    def armed() -> None:
+        Path(path).write_text("armed\n")
+    return armed
 
 
 # ── the outbound census, read from the RESTORED database (review G2, H3) ─────
@@ -770,9 +941,11 @@ def main(argv=None) -> int:
     v.add_argument("--identity", required=True, help="path to the age identity file (read by age, never printed)")
     v.add_argument("--target-kind", required=True, choices=("disposable_branch", "disposable_local_cluster"))
     v.add_argument("--project-id")
-    v.add_argument("--branch-id")
+    v.add_argument("--database", required=True, help="the target database this process creates and loads")
     v.add_argument("--work-dir", required=True)
-    v.add_argument("--dsn-env", default="RESTORE_DSN")
+    v.add_argument("--admin-dsn-env", default="RESTORE_ADMIN_DSN",
+                   help="local-cluster target: the env var holding the admin DSN (a branch's comes on stdin)")
+    v.add_argument("--armed-file", help="written once production's head LSN has been read (liveness only)")
     o = sub.add_parser("outbound-census")
     o.add_argument("--restore-id", required=True)
     o.add_argument("--dsn-env", default="RESTORE_DSN")
@@ -792,9 +965,13 @@ def main(argv=None) -> int:
             print(json.dumps({"archive": str(archive), "dump": str(dump)}))
             return 0
         if a.cmd == "verify-restore":
+            branch = a.target_kind == "disposable_branch"
             receipt = verify_restore(repository=a.repository, run_id=a.run_id, identity=Path(a.identity),
-                                     target_kind=a.target_kind, dsn=_dsn_from(a.dsn_env), work_dir=Path(a.work_dir),
-                                     project_id=a.project_id, branch_id=a.branch_id)
+                                     target_kind=a.target_kind, database=a.database, work_dir=Path(a.work_dir),
+                                     project_id=a.project_id,
+                                     admin_dsn=None if branch else _dsn_from(a.admin_dsn_env),
+                                     handoff=_stdin_handoff if branch else None,
+                                     armed=_signal_armed(a.armed_file))
             print(json.dumps(receipt, sort_keys=True))
             return 0
         if a.cmd == "outbound-census":
