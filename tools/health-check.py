@@ -1072,38 +1072,22 @@ def _write_findings_json(path):
         fh.write("\n")
 
 
-def _section_runtime_guard(name, findings_before, rc_before, rc_now):
-    """The REAL per-section runtime backstop (added round 7 of an independent
-    review of PR #1237, replacing reliance on the whole-run `if rc == 1 and
-    not _FINDINGS:` check at the bottom of `_canonical_health` — see the
-    comment on that check for why it almost never fires: by the time any
-    section of a real run gets there, `_FINDINGS` already holds standing
-    debt from an earlier section, so `not _FINDINGS` is false and the check
-    is silently skipped for the rest of the run, every run).
-
-    This one is scoped to a SINGLE section's own contribution, which is what
-    actually closes that gap: `rc_before` is `rc` as it stood the instant
-    this section started, `rc_now` is `rc` right after the section's own
-    logic finished, and `findings_before` is `len(_FINDINGS)` at that same
-    starting instant. If THIS section is the one that flipped `rc` from 0 to
-    1 (`rc_before` was 0, `rc_now` is 1) but recorded no new finding to
-    explain why (`len(_FINDINGS)` is unchanged from `findings_before`), that
-    is itself an unrecorded failure — record it, hard_error, naming the
-    section, so ops/release-pipeline.py's health gate (which treats any
-    hard_error as an unconditional live failure regardless of the baseline)
-    fails on it rather than silently promoting past a section that quietly
-    went red.
-
-    `rc_before == 0` is deliberate, not `rc_now == 1` alone: a LATER section
-    reached with `rc` already 1 from an EARLIER section's own (already-
-    explained) finding did not itself set anything, so it must not be blamed
-    for a gap it did not create — each section only answers for its own
-    transition.
-    """
-    if rc_now == 1 and rc_before == 0 and len(_FINDINGS) == findings_before:
-        _canonical_finding("unrecorded_failure",
-                           f"section '{name}' set rc=1 without recording a finding",
-                           subject=name, hard_error=True)
+def _red(key, detail, *, subject="", count=1, hard_error=False, time_rolling=False):
+    """Record a CANONICAL_FINDING and return 1, so every `rc = 1` path inside
+    `_canonical_health()` is intrinsically self-recording (round 8 of an
+    independent review of PR #1237, replacing the per-section runtime guard
+    this file used to carry — see the comment on the whole-run backstop near
+    the bottom of `_canonical_health` for why that guard could not be
+    trusted). `tools/health-check-findings-selftest.py` statically walks
+    `_canonical_health`'s AST and asserts `rc` is never assigned a literal 1
+    (or `|=`'d with one) directly — the only way left to set `rc` is through
+    this function, so a code path that would flip the release gate red
+    without saying why fails a mechanical check before it can ever reach a
+    real run, rather than depending on a runtime check to catch it after the
+    fact."""
+    _canonical_finding(key, detail, subject=subject, count=count,
+                        hard_error=hard_error, time_rolling=time_rolling)
+    return 1
 
 
 def _canonical_health():
@@ -1114,7 +1098,7 @@ def _canonical_health():
         snap = _canonical_snapshot()
     except Exception as exc:
         print(f"canonical health: REFUSED ({type(exc).__name__}: {exc})")
-        _canonical_finding("canonical_health_refused", f"{type(exc).__name__}: {exc}", hard_error=True)
+        _red("canonical_health_refused", f"{type(exc).__name__}: {exc}", hard_error=True)
         # The completion marker must still print here (point 3 of the third
         # round of an independent review of PR #1237): this branch already
         # recorded a real, fully-explained hard_error finding — a read that
@@ -1129,18 +1113,14 @@ def _canonical_health():
     print(f"Façade check (rule 28) — {time.strftime('%Y-%m-%d %H:%M')} — canonical receipts, not Drive renders")
     for error in snap.get("errors", []):
         print(f"  ⚠︎ canonical source UNREADABLE — {error}")
-        _canonical_finding("source_unreadable", str(error), hard_error=True)
-        rc = 1
+        rc = _red("source_unreadable", str(error), hard_error=True)
 
     if CANONICAL_SECTION in ("all", "exports"):
-        _section_findings_before = len(_FINDINGS)
-        _section_rc_before = rc
         exports = snap.get("exports")
         print("Export register — canonical export_run receipts")
         if not isinstance(exports, dict):
             print("  ⚠︎ export receipts UNREADABLE")
-            _canonical_finding("export_unreadable", "export receipts UNREADABLE", hard_error=True)
-            rc = 1
+            rc = _red("export_unreadable", "export receipts UNREADABLE", hard_error=True)
         else:
             registered = set(exports.get("registered") or [])
             # A RETIRED TARGET IS NOT A MISSED CHAIN. Subtracted before the loop
@@ -1175,7 +1155,7 @@ def _canonical_health():
                     bad.append((target, f"UNPARSEABLE {target} last_ok={last_ok}", False))
             for target, finding, rolling in bad:
                 print(f"  ⚠︎ {finding}")
-                _canonical_finding("export_receipt", finding, subject=target, time_rolling=rolling)
+                rc = _red("export_receipt", finding, subject=target, time_rolling=rolling)
             # THE RETIRED COUNT RIDES ON THE LINE EITHER WAY. Rule bd4a6d22 asks
             # for a chosen state to stay visible rather than become silence, so
             # the reader is told how many targets are carried and why they have
@@ -1183,24 +1163,19 @@ def _canonical_health():
             _carried = (f", {len(retired)} retired at the 2026-08-19 cutoff and "
                         f"correctly unreceipted" if retired else "")
             if bad:
-                rc = 1
                 if retired:
                     print(f"  -- RETIRED {len(retired)} md render target(s) not counted above")
             else:
                 print(f"  OK {len(registered)} registered target(s), "
                       f"all receipted inside 26h{_carried}")
-        _section_runtime_guard("exports", _section_findings_before, _section_rc_before, rc)
 
     if CANONICAL_SECTION in ("all", "jobs"):
-        _section_findings_before = len(_FINDINGS)
-        _section_rc_before = rc
         print("Schedule drift — durable Control Plane job state")
         jobs = snap.get("jobs")
         definitions = snap.get("job_definitions")
         if not isinstance(jobs, list) or not isinstance(definitions, list):
             print("  ⚠︎ job ledger UNREADABLE")
-            _canonical_finding("job_ledger", "jobs or enabled definitions missing", hard_error=True)
-            rc = 1
+            rc = _red("job_ledger", "jobs or enabled definitions missing", hard_error=True)
         else:
             live_jobs = _live_jobs(snap)
             cutoff = _canonical_now(snap) - timedelta(days=8)
@@ -1215,15 +1190,15 @@ def _canonical_health():
             for job in bad:
                 print(f"  ⚠︎ {job.get('definition_key')} {job.get('state')} "
                       f"attempt {job.get('attempt')}/{job.get('max_attempts')}")
-                _canonical_finding("job_terminal_failure",
-                                   f"{job.get('definition_key')} {job.get('state')}",
-                                   subject=str(job.get("definition_key")))
+                rc = _red("job_terminal_failure",
+                          f"{job.get('definition_key')} {job.get('state')}",
+                          subject=str(job.get("definition_key")))
             for job in unreceipted:
                 detail = (f"{job.get('definition_key')} job={job.get('id')} "
                           f"attempt={job.get('attempt')} succeeded without exact completion receipt")
                 print(f"  ⚠︎ {detail}")
-                _canonical_finding("job_completion_receipt", detail,
-                                   subject=str(job.get("definition_key")))
+                rc = _red("job_completion_receipt", detail,
+                          subject=str(job.get("definition_key")))
             for key, window in missing:
                 # The window is a specific calendar date/time (or a rolling
                 # NON-SUCCESS lookback), so it is reported but never diffed:
@@ -1241,16 +1216,16 @@ def _canonical_health():
                     # must still fail the release gate on its own terms.
                     detail = f"{key} {window}"
                     finding = "job_due_non_success"
-                    _canonical_finding(finding, detail, subject=str(key))
+                    rc = _red(finding, detail, subject=str(key))
                 else:
                     detail = f"{key} MISSING DUE execution for {window}"
                     finding = "job_missing_due"
-                    _canonical_finding(finding, detail, subject=str(key), time_rolling=True)
+                    rc = _red(finding, detail, subject=str(key), time_rolling=True)
                 print(f"  ⚠︎ {detail}")
             for job, why in stuck:
                 detail = f"{job.get('definition_key')} job={job.get('id')} {why}"
                 print(f"  ⚠︎ {detail}")
-                _canonical_finding("job_stuck", detail, subject=str(job.get("definition_key")))
+                rc = _red("job_stuck", detail, subject=str(job.get("definition_key")))
             # THE CARRIED COUNT RIDES ON THE LINE EITHER WAY, same contract the
             # exports section uses for retired targets: a chosen state stays
             # visible rather than becoming silence (rule bd4a6d22).
@@ -1258,9 +1233,7 @@ def _canonical_health():
                 print(f"  -- CARRIED {len(legacy)} definition(s) still on a legacy "
                       f"scheduler, no Control Plane ledger row expected: "
                       f"{', '.join(legacy)}")
-            if bad or unreceipted or missing or stuck:
-                rc = 1
-            else:
+            if not (bad or unreceipted or missing or stuck):
                 print(f"  OK {len(live_jobs)} live job(s), every due window present; "
                       "no terminal failure, stuck state, or unreceipted success")
         # NEITHER OF THE TWO CENSUS SECTIONS CAN TURN THIS PROCESS RED, and
@@ -1274,19 +1247,18 @@ def _canonical_health():
         # itself; a contradiction in the control plane's own rows is the one
         # condition on this slice that still turns health red. It runs on the
         # fixture path too, because a caller must not be able to quiet it by
-        # choosing a door.
+        # choosing a door. It already records its own finding (workflow_truth_
+        # conflict) before returning 1, so folding its result into `rc` with
+        # `or` — rather than a bare `rc = 1` — keeps this call self-recording
+        # too without recording the same finding a second time.
         _canonical_workflow_truth()
-        if _canonical_contradiction_alarm():
-            rc = 1
+        rc = _canonical_contradiction_alarm() or rc
         if CANONICAL_FIXTURE:
             _fixture_assurance_health(snap)
         else:
             _canonical_assurance_health()
-        _section_runtime_guard("jobs", _section_findings_before, _section_rc_before, rc)
 
     if CANONICAL_SECTION in ("all", "registry"):
-        _section_findings_before = len(_FINDINGS)
-        _section_rc_before = rc
         print("Registry integrity — canonical v_export_leads")
         p = subprocess.run(
             [sys.executable, os.path.join(REPO_ROOT, "tools/registry-audit.py")],
@@ -1307,21 +1279,16 @@ def _canonical_health():
             if m:
                 n = int(m.group(1))
                 print(f"  ⚠︎ canonical registry audit found {n} data error(s)")
-                _canonical_finding("registry_integrity", f"{n} data error(s)", count=n)
+                rc = _red("registry_integrity", f"{n} data error(s)", count=n)
             else:
                 print("  ⚠︎ canonical registry audit failed")
-                _canonical_finding("registry_integrity", "canonical registry audit failed", hard_error=True)
-            rc = 1
-        _section_runtime_guard("registry_integrity", _section_findings_before, _section_rc_before, rc)
+                rc = _red("registry_integrity", "canonical registry audit failed", hard_error=True)
     if CANONICAL_SECTION == "all":
-        _section_findings_before = len(_FINDINGS)
-        _section_rc_before = rc
         print("Doctrine and rule controls — canonical database state")
         controls = snap.get("controls")
         if not isinstance(controls, dict):
             print("  ⚠︎ doctrine/rule controls UNREADABLE")
-            _canonical_finding("control_state", "doctrine/rule controls unreadable", hard_error=True)
-            rc = 1
+            rc = _red("control_state", "doctrine/rule controls unreadable", hard_error=True)
         else:
             gate_failures = int(controls.get("doctrine_gate_failures_24h", 0))
             never_reviewed = int(controls.get("doctrine_never_reviewed", 0))
@@ -1360,18 +1327,13 @@ def _canonical_health():
                     (rule_gaps, "rule_enforcement", f"{rule_gaps} active rule gaps", False),
                 ):
                     if _count:
-                        _canonical_finding(_key, _detail, count=_count, time_rolling=_time_rolling)
-                rc = 1
-        _section_runtime_guard("doctrine", _section_findings_before, _section_rc_before, rc)
+                        rc = _red(_key, _detail, count=_count, time_rolling=_time_rolling)
 
-        _section_findings_before = len(_FINDINGS)
-        _section_rc_before = rc
         p = subprocess.run(["git", "status", "--porcelain"], cwd=REPO_ROOT,
                            text=True, capture_output=True, timeout=30)
         if p.returncode:
             print("  ⚠︎ repository worktree status UNREADABLE")
-            _canonical_finding("repo_status", "git status unreadable", hard_error=True)
-            rc = 1
+            rc = _red("repo_status", "git status unreadable", hard_error=True)
         else:
             _loose = _health_sub.classify_loose_status(REPO_ROOT, p.stdout.splitlines())
             _actionable = _loose["actionable_tracked"] + _loose["actionable_untracked"]
@@ -1383,13 +1345,9 @@ def _canonical_health():
                   f" · {len(_loose['expected_patched_submodules'])} expected patched submodule(s)"
                   f" · {len(_loose['managed_artifacts'])} managed artifact(s)")
             if _needs_attention:
-                _canonical_finding("repo_loose_work", f"{len(_actionable)} actionable path(s)", count=len(_actionable))
-                rc = 1
-        _section_runtime_guard("repo_status", _section_findings_before, _section_rc_before, rc)
+                rc = _red("repo_loose_work", f"{len(_actionable)} actionable path(s)", count=len(_actionable))
 
     if CANONICAL_SECTION in ("all", "credentials"):
-        _section_findings_before = len(_FINDINGS)
-        _section_rc_before = rc
         # ── credential health (added 2026-09-24) ────────────────────────────
         # Daily liveness lane for every credential CARR needs to run
         # unattended — wrangler/Cloudflare, Neon, the two MCP machine-bearer
@@ -1479,14 +1437,23 @@ def _canonical_health():
                         # sibling `if`s covering this dict's guaranteed
                         # match are not.
                         #
-                        # `rc = 1` lives HERE, as this for-loop's own direct
-                        # sibling, rather than after the whole `if _m: ...
-                        # else: ...` (point 1 of round 4 of an independent
+                        # `rc = _red(...)` lives HERE, as this for-loop's own
+                        # direct sibling, rather than after the whole `if _m:
+                        # ... else: ...` (point 1 of round 4 of an independent
                         # review of PR #1237): a bare loop is only trusted to
                         # cover a sibling statement that shares its own
                         # accumulator, in the SAME block, not a statement
                         # outside the branch the loop lives in — the same
-                        # reasoning the jobs section below now follows too.
+                        # reasoning the jobs section above follows too. This
+                        # also closes a real gap round 8 of the same review
+                        # found here: the four counts can all legitimately be
+                        # zero (a summary line whose shape matched but whose
+                        # counts don't sum to a reason to be in this branch at
+                        # all), and a bare `rc = 1` placed after this loop
+                        # unconditionally would have gone red with nothing in
+                        # `_FINDINGS` to explain why. Folding the assignment
+                        # into the loop means `rc` only ever flips here
+                        # because a `_red()` call already recorded why.
                         for _count, _subject, _hard in (
                             (_failed, "failed", True),
                             (_expiring, "expiring_soon", False),
@@ -1494,17 +1461,13 @@ def _canonical_health():
                             (_unconfigured, "unconfigured", False),
                         ):
                             if _count:
-                                _canonical_finding("credential_health", _detail, subject=_subject,
-                                                   count=_count, hard_error=_hard)
-                        rc = 1
+                                rc = _red("credential_health", _detail, subject=_subject,
+                                          count=_count, hard_error=_hard)
                     else:
-                        _canonical_finding("credential_health", _detail, hard_error=True)
-                        rc = 1
+                        rc = _red("credential_health", _detail, hard_error=True)
         except Exception as e:
             print(f"  ⚠︎ {'credential health':<18} check failed ({type(e).__name__}: {e})")
-            _canonical_finding("credential_health", f"check failed ({type(e).__name__}: {e})", hard_error=True)
-            rc = 1
-        _section_runtime_guard("credential_health", _section_findings_before, _section_rc_before, rc)
+            rc = _red("credential_health", f"check failed ({type(e).__name__}: {e})", hard_error=True)
 
     if CANONICAL_SECTION == "all":
         # Jev call receipt tamper audit (migrations/0587). The receipt store is
@@ -1530,48 +1493,64 @@ def _canonical_health():
                 elif _p.returncode == 0:
                     print(f"  OK {'jev receipts':<18} {_first.split('— ', 1)[-1]}")
                 else:
-                    print(f"  ⚠︎ {'jev receipts':<18} {_first.split('— ', 1)[-1]}")
-                    _canonical_finding("jev_call_receipt_integrity", _first.split("— ", 1)[-1])
-                    rc = 1
+                    _detail = _first.split("— ", 1)[-1]
+                    print(f"  ⚠︎ {'jev receipts':<18} {_detail}")
+                    # hard_error=True unconditionally (round 8 of an
+                    # independent review of PR #1237, point 4): this is a
+                    # tamper-DETECTION check on the Jev call receipt store,
+                    # which is detectable-not-prevented against its own
+                    # database owner (see the block comment above) — a
+                    # mismatched receipt or a disabled append-only trigger is
+                    # never a business count a baseline comparison should be
+                    # allowed to excuse, the same reasoning `failed` gets in
+                    # the credential-health loop above. `count` is the actual
+                    # number of receipts without a matching ask-jev tool_call
+                    # row when the message says so (not a fixed 1), so a rise
+                    # from one mismatch to five is visible to ops/release-
+                    # pipeline.py's baseline-vs-live regression diff instead
+                    # of two runs reporting the identical count=1.
+                    _rm = re.search(r"(\d+)\s+receipt\(s\)\s+without\s+a\s+matching", _detail)
+                    rc = _red("jev_call_receipt_integrity", _detail,
+                              count=int(_rm.group(1)) if _rm else 1, hard_error=True)
         except Exception as e:
-            print(f"  ⚠︎ {'jev receipts':<18} check failed ({type(e).__name__}: {e})")
-            _canonical_finding("jev_call_receipt_integrity", f"check failed ({type(e).__name__}: {e})")
-            rc = 1
+            _detail = f"check failed ({type(e).__name__}: {e})"
+            print(f"  ⚠︎ {'jev receipts':<18} {_detail}")
+            rc = _red("jev_call_receipt_integrity", _detail, hard_error=True)
 
     # WHOLE-RUN backstop, alongside the static AST proof in tools/health-
-    # check-findings-selftest.py (point 3 of the third round of an
-    # independent review of PR #1237: the static check can only prove what
-    # its own control-flow model understands). THIS IS NOT the real backstop
-    # any more, and the comment used to call it a "hard runtime guard" as
-    # though it were — round 7 of the same review caught that it almost
-    # never fires: `not _FINDINGS` is only true when NO section anywhere in
-    # the run recorded anything at all, and a real run always carries
-    # standing debt (98 rule_enforcement gaps, and similar, are normal) from
-    # sections that ran and reported fine long before whichever LATER
-    # section might silently go red without a finding of its own. Once any
-    # earlier section has recorded one finding, `_FINDINGS` is non-empty for
-    # the rest of the run and this check can no longer see a later section's
-    # own unrecorded failure — which is exactly the gap `_section_runtime_
-    # guard` (called at the end of every section above, each with its own
-    # fresh `len(_FINDINGS)`/`rc` snapshot taken when that section started)
-    # closes for real: it is scoped to one section's own rc-flipping
-    # transition, not to the whole run's accumulated finding count, so it
-    # still fires even when 98 unrelated standing findings already exist
-    # elsewhere. This whole-run check is kept only as an extra, narrower
-    # backstop for the one case the per-section guards cannot cover — `rc`
-    # ending up 1 with `_FINDINGS` still completely empty, which can only
-    # happen if EVERY section that ran passed clean and something set `rc`
-    # outside all of them (or a per-section guard call was itself removed).
-    # It also covers the jev receipts check just above, which (like the
-    # sections it follows) is not wrapped in its own `_section_runtime_
-    # guard` call and so relies on this whole-run check as its backstop.
+    # check-findings-selftest.py (round 8 of an independent review of PR
+    # #1237): every `rc = 1` path inside this function now goes through
+    # `_red()`, which records the finding FIRST and returns 1 — the AST check
+    # statically forbids any OTHER way of assigning `rc` (no bare literal 1,
+    # no `|= 1`), so a future section that flips this run red without a
+    # finding to explain it fails a mechanical check before it can ever reach
+    # a real run. That static proof is the real invariant now. It replaced
+    # this file's earlier `_section_runtime_guard` (round 7), which only
+    # checked a WEAKER runtime proxy — "did this section's own rc and
+    # `_FINDINGS` counters move together" — and real runs exposed two
+    # structural blind spots in that proxy: a section could satisfy "did
+    # findings increase" on a finding an unrelated EARLIER statement in the
+    # same section already recorded (jobs records its standing
+    # `job_missing_due` finding before the section's own terminal rc=1 check
+    # ever runs), rather than on the specific statement that actually flipped
+    # `rc`; and the guard's "did rc flip 0->1 during this section" precondition
+    # never even fired for any section reached with `rc` already 1 from an
+    # earlier one — which, in a real run, is every section after the first one
+    # that reports anything at all (jobs' own standing debt is normal, so by
+    # the time `registry_integrity` and everything after it runs, `rc` is
+    # already 1 and that guard could never have caught an unrecorded failure
+    # there either). `_section_runtime_guard` is removed along with every call
+    # site. This whole-run check below is kept only as a final, cheap defense
+    # — with every path in this function now self-recording via `_red()`, it
+    # should be unreachable in practice, but it still catches the one case a
+    # static AST walk of THIS function cannot: `rc` ending up 1 through some
+    # mechanism the AST check does not model.
     if rc == 1 and not _FINDINGS:
         _canonical_finding("unrecorded_failure",
                            "rc=1 was set but no finding was recorded anywhere to explain it",
                            hard_error=True)
 
     print(_HEALTH_COMPLETION_MARKER)
-    print("Projection freshness/tamper checks are recovery evidence; use --recovery --reason <why>.")
     return rc
 
 

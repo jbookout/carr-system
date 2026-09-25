@@ -761,41 +761,40 @@ class Pipeline:
         # NARROW backstop for point A ("a nonzero health exit with no new
         # finding line now passes... any rc != 0 must fail") and point 3 of
         # the second AND third rounds of review — NOT the "hard runtime
-        # guard" this comment used to call it. Round 7 of the same review
-        # corrected that: this condition is keyed on `not findings` (the
-        # WHOLE parsed findings list being empty), which on a real run is
-        # essentially never true — a real baseline/live read is essentially
-        # always rc=1 with SOME findings present (98 standing rule gaps on a
-        # normal day), so this line almost never fires in production, same
-        # as the whole-run `not _FINDINGS` check it mirrors inside tools/
-        # health-check.py's own `_canonical_health`.
+        # guard" this comment used to call it, and not what actually
+        # guarantees the invariant any more either. This condition is keyed
+        # on `not findings` (the WHOLE parsed findings list being empty),
+        # which on a real run is essentially never true — a real baseline/
+        # live read is essentially always rc=1 with SOME findings present
+        # (98 standing rule gaps on a normal day), so this line almost never
+        # fires in production, same as the whole-run `not _FINDINGS` check
+        # it mirrors inside tools/health-check.py's own `_canonical_health`.
         #
-        # The REAL backstop for a section quietly going red with nothing to
-        # explain it now lives in tools/health-check.py itself:
-        # `_section_runtime_guard`, called at the end of every section of
-        # `_canonical_health` with a snapshot of `len(_FINDINGS)`/`rc` taken
-        # when THAT section started. It catches the case this line cannot —
-        # one later section flipping `rc` to 1 with no finding of its own,
-        # while EARLIER sections' standing debt already makes the overall
-        # `findings` list (and `_FINDINGS`) non-empty — by scoping the check
-        # to one section's own transition instead of the whole run's
-        # accumulated count. When it fires, it records an `unrecorded_
-        # failure` hard_error finding that `health_regression` above already
-        # fails on unconditionally, live or baseline, via its own hard_error
-        # rule — so THIS line only needs to catch what neither guard can
-        # see: the `--findings-json` payload never landing at all (a crash
-        # between the happy path and `_write_findings_json`, or between
-        # `sys.exit` and this reading it) turning `findings` into an empty
-        # list here even though `res.rc` is nonzero — `complete` already
-        # guards the "never landed" case above, so by the time we reach here
-        # `findings` is a genuine reflection of what ran, and an empty list
-        # with a nonzero rc means every section that ran was silent, which
-        # only happens if `_section_runtime_guard` itself was removed from
-        # every section or never wired up for a brand-new one. Kept as a
-        # narrow, last-resort belt-and-suspenders alongside tools/health-
-        # check-findings-selftest.py's static, per-BRANCH proof (point 3 of
-        # the third round: "per branch, not per section") and its mutation
-        # tests, and alongside `_section_runtime_guard`'s own runtime tests.
+        # The REAL guarantee now lives in tools/health-check.py itself, and
+        # it is static rather than runtime: round 8 of the same review
+        # replaced `_canonical_health`'s earlier per-section runtime guard
+        # (`_section_runtime_guard`, round 7 — since removed, along with
+        # every call site) with a `_red()` helper that every `rc = 1` path
+        # inside `_canonical_health` now goes through, recording the finding
+        # FIRST and returning 1 in one call. tools/health-check-findings-
+        # selftest.py statically walks `_canonical_health`'s AST and asserts
+        # `rc` is never assigned a bare literal 1 (or `|=`'d with one)
+        # directly — only via a call — so a section that would flip this run
+        # red without a finding to explain it fails that mechanical check
+        # before it can ever reach a real run, rather than depending on a
+        # runtime guard (per-section or whole-run) to catch it after the
+        # fact. THIS line only needs to catch what a static AST proof over
+        # `_canonical_health` alone cannot: the `--findings-json` payload
+        # never landing at all (a crash between the happy path and `_write_
+        # findings_json`, or between `sys.exit` and this reading it) turning
+        # `findings` into an empty list here even though `res.rc` is
+        # nonzero — `complete` already guards the "never landed" case above,
+        # so by the time we reach here `findings` is a genuine reflection of
+        # what ran, and an empty list with a nonzero rc can now only mean
+        # something outside `_canonical_health`'s own AST-proven contract
+        # went wrong (e.g. `rc` set through a path the static check does not
+        # model). Kept as a narrow, last-resort belt-and-suspenders alongside
+        # that static proof and its mutation tests.
         if not new and res.rc != 0 and not findings:
             new = [f"./run.sh health exited {res.rc} but recorded no finding at all "
                   f"to explain it — treated as unavailable, never a pass"]
