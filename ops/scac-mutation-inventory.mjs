@@ -348,7 +348,7 @@ export const REGISTRY_V71_VERSION = "scac-mutation-registry.v71";
 // selector (mutation-registry.js) moves to v72.
 export const REGISTRY_V72_VERSION = "scac-mutation-registry.v72";
 // v73 is the runtime selector after V5-A05 (delivery cadence, escalation
-// routing, quiet-hours queue -- migration 0606). Its sealed catalog admits
+// routing, quiet-hours queue -- migration 0610). Its sealed catalog admits
 // three new verbs (cadence-status, record-cadence-receipt,
 // raise-delivery-cadence-alert) and re-digests the db_function_acl catalog
 // category for the new/changed SECURITY DEFINER functions
@@ -1496,7 +1496,7 @@ export const POST_0603_FORWARD_V72_DB_CATALOG_BASELINE = Object.freeze({
   projection_version: "scac-db-catalog-projection.v72",
   secdef_execute: { count: 914, digest: "sha256:c1a8793486021059830a9370d72f5835446aa4bad8ad06d8811711cd8691a89e" },
 });
-// V5-A05 (migration 0606) adds four SECURITY DEFINER functions
+// V5-A05 (migration 0610) adds four SECURITY DEFINER functions
 // (ops.v5_a05_cadence_status, ops.v5_a05_record_cadence_receipt,
 // ops.v5_a05_assurance_cadence_batch, ops.notification_quiet_now),
 // REDEFINES ops.notification_preference_facts to call
@@ -1504,7 +1504,7 @@ export const POST_0603_FORWARD_V72_DB_CATALOG_BASELINE = Object.freeze({
 // same grants, no EXECUTE-grant row change), and DROP+CREATEs
 // ops.mint_notification with one added parameter -- the DROP+CREATE
 // re-grants the same function name, so it does not change the
-// EXECUTE-grant row count on its own. Migration 0607 (this successor)
+// EXECUTE-grant row count on its own. Migration 0611 (this successor)
 // itself creates one more SECURITY DEFINER function,
 // ops.scac_mutation_registration_v73, granted to 4 roles (carr_reader,
 // carr_writer, carr_jobs, carr_authority). This inherits from v72's own
@@ -1513,7 +1513,7 @@ export const POST_0603_FORWARD_V72_DB_CATALOG_BASELINE = Object.freeze({
 // secdef_execute count/digest are measured live on a disposable
 // PostgreSQL 17 via the migration's own self-check readback
 // (drift-exception technique).
-export const POST_0607_FORWARD_V73_DB_CATALOG_BASELINE = Object.freeze({
+export const POST_0611_FORWARD_V73_DB_CATALOG_BASELINE = Object.freeze({
   ...POST_0603_FORWARD_V72_DB_CATALOG_BASELINE,
   projection_version: "scac-db-catalog-projection.v73",
   secdef_execute: { count: 0, digest: "sha256:" + "0".repeat(64) },
@@ -16267,7 +16267,7 @@ export function renderDeliveryCadenceA05RegistrySql(rows,
   if (sha256(predecessor) !== predecessorDigest)
     throw new Error("v73 predecessor migration pin drifted");
   const oldCatalogBaseline = POST_0603_FORWARD_V72_DB_CATALOG_BASELINE;
-  const newCatalogBaseline = POST_0607_FORWARD_V73_DB_CATALOG_BASELINE;
+  const newCatalogBaseline = POST_0611_FORWARD_V73_DB_CATALOG_BASELINE;
   const oldSeal = registrySeal(REGISTRY_V72_VERSION,
     frozenInventory(REGISTRY_V72_VERSION), oldCatalogBaseline);
   const newSeal = registrySeal(REGISTRY_V73_VERSION, rows, newCatalogBaseline);
@@ -17136,9 +17136,9 @@ export function renderGeneratedFrontier() {
   artifacts["mcp-server/src/scac-mutation-registry.v73.generated.js"] =
     renderRuntimeProjection(v73Rows, {
       version: REGISTRY_V73_VERSION,
-      dbCatalogBaseline: POST_0607_FORWARD_V73_DB_CATALOG_BASELINE,
+      dbCatalogBaseline: POST_0611_FORWARD_V73_DB_CATALOG_BASELINE,
     });
-  artifacts["migrations/0607_delivery_cadence_a05_scac_successor.sql"] =
+  artifacts["migrations/0611_delivery_cadence_a05_scac_successor.sql"] =
     renderDeliveryCadenceA05RegistrySql(v73Rows,
       artifacts["migrations/0603_doctorcre_r02_scac_successor.sql"]);
 

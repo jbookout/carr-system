@@ -501,7 +501,7 @@ assert "SCAC_CURRENT_NUMBER=73" in GENERATOR
 assert "SCAC_VERSION_COUNT=73" in GENERATOR
 assert "SCAC_FULL_SET_SEAL_COUNT=72" in GENERATOR
 assert "ops.scac_mutation_catalog_v73_current()" in GENERATOR
-assert "0607_delivery_cadence_a05_scac_successor.sql" in GENERATOR
+assert "0611_delivery_cadence_a05_scac_successor.sql" in GENERATOR
 assert 'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v73"' in RUNTIME_V73
 assert "JEV_PROCESS_REGISTRY_APPLIED" in GENERATOR
 assert "JEV_HOOK_ACTIVATION_REGISTRY_APPLIED" in GENERATOR

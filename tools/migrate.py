@@ -331,16 +331,16 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0602_doctorcre_r02_workflow_cutover_and_caller_inventory.sql",
         "0603_doctorcre_r02_scac_successor.sql",
     ),
-    # V5-A05 delivery cadence: 0606 installs ops.v5_a05_cadence_status,
+    # V5-A05 delivery cadence: 0610 installs ops.v5_a05_cadence_status,
     # ops.v5_a05_record_cadence_receipt, ops.v5_a05_assurance_cadence_batch,
     # ops.notification_quiet_now and the extended ops.mint_notification
-    # (SECURITY DEFINER writers/readers); 0607 seals that catalog as v73,
+    # (SECURITY DEFINER writers/readers); 0611 seals that catalog as v73,
     # chained from main's v72 (0603). Same deferred-epoch-trigger shape as
-    # the pairs above: 0606 applied alone would be refused at commit, so the
+    # the pairs above: 0610 applied alone would be refused at commit, so the
     # pair must be one transaction.
     (
-        "0606_delivery_cadence_a05.sql",
-        "0607_delivery_cadence_a05_scac_successor.sql",
+        "0610_delivery_cadence_a05.sql",
+        "0611_delivery_cadence_a05_scac_successor.sql",
     ),
 )
 
@@ -390,8 +390,8 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0603_doctorcre_r02_scac_successor.sql",
     ),
     (
-        "0606_delivery_cadence_a05.sql",
-        "0607_delivery_cadence_a05_scac_successor.sql",
+        "0610_delivery_cadence_a05.sql",
+        "0611_delivery_cadence_a05_scac_successor.sql",
     ),
 )
 

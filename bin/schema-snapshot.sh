@@ -919,7 +919,7 @@ if [ "$V5_R02_REGISTRY_APPLIED" = t ] && [ "$NIGHTLY_EXPORTS_DAYTIME_RETRY_REGIS
   exit 1
 fi
 DELIVERY_CADENCE_A05_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0607_delivery_cadence_a05_scac_successor.sql')" \
+  "select exists (select 1 from schema_migrations where filename='0611_delivery_cadence_a05_scac_successor.sql')" \
   2>/dev/null)"
 case "$DELIVERY_CADENCE_A05_REGISTRY_APPLIED" in
   t|f) ;;

@@ -4,7 +4,7 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v73 is the runtime selector after V5-A05 delivery cadence (migration 0606,
+// v73 is the runtime selector after V5-A05 delivery cadence (migration 0610,
 // cadence receipts, escalation routing, quiet-hours queue). Its sealed
 // catalog admits three new verbs -- cadence-status, record-cadence-receipt
 // and raise-delivery-cadence-alert -- and preserves earlier versions as
