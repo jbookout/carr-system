@@ -29,6 +29,31 @@ that did not itself apply a migration.
 the Worker back under a migrated schema is a different and larger decision;
 stop and treat it as one.
 
+### After a Durable Object migration: forward fix only
+
+A release whose `[[migrations]]` tag was applied (the release pipeline's upload
+step prints `DO migration applied: tag=…` or `DO migration possibly applied:
+tag=…`, the run record carries `do_migration`, and every deployment row of
+that promotion names `do-migration=<tag>@<version>`) **cannot be rolled back
+with this procedure.** Cloudflare blocks rollback to any Worker version from
+before a Durable Object lifecycle change. Promoting the prior version, with
+`--promote-version <previous-version-id>` or with raw `wrangler versions
+deploy`, is refused by Cloudflare, and trying it wastes the incident's first
+minutes.
+
+Recovery is **forward fix only**: fix the code in a PR, keep it working with
+the migrated Durable Object class, and let the next release ship it. Treat
+"possibly applied" exactly like applied: if the tag could not be read back, a
+post-migration version may be serving. To find out which side of the line the
+Worker is on, read the applied tag the way the wrapper does
+(`ops/worker-do-migration.py` names the endpoint and the field) and compare it
+with the newest `[[migrations]]` tag in `mcp-server/wrangler.toml`. The durable
+account of the move is the `worker-do-migration` row in `ops.settings_change`
+(written the moment the deploy returned) and the pipeline's run record; the
+wrapper's own `out/deploy-worker/do-migration-<sha>.json` lives in the release
+worktree, which the pipeline deletes after the run. Neither `wrangler rollback`
+nor a revert of the `[[migrations]]` entry undoes an applied tag.
+
 ## The procedure
 
 ### 1. Find what is serving now, and what preceded it

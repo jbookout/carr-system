@@ -69597,8 +69597,8 @@
           "operation": "bin/deploy-worker.sh",
           "effect_class": "administrative_mutation",
           "source_locator": "bin/deploy-worker.sh",
-          "schema_digest": "ebcb30aac1059ee17526d0a0f6a1be6c4a90357e5637f3550bd7e6e8ea3bf1f7",
-          "handler_digest": "ebcb30aac1059ee17526d0a0f6a1be6c4a90357e5637f3550bd7e6e8ea3bf1f7",
+          "schema_digest": "1647d78ea08b042dac3ce23d649db9ec3aac2697eba6131f6ab9bce68b4a1869",
+          "handler_digest": "1647d78ea08b042dac3ce23d649db9ec3aac2697eba6131f6ab9bce68b4a1869",
           "write": true,
           "human_only": false,
           "authority_only": true,
@@ -69616,7 +69616,7 @@
         }
       ],
       "expected_count": 900,
-      "expected_sha256": "b48f6c9d8dddc943e419b35f66166051ca26a0c6f1f77a31187dafa1d016ad0c"
+      "expected_sha256": "cfc03acb39b4d6afe97824dc35967ae12910df36d59bd6c14757b35b17355e16"
     }
   ],
   "current_source_review": {

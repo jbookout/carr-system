@@ -34,8 +34,10 @@ TWO LANES, one tick:
             3 tools/provision-staging-app-writer.py --apply
             4 bin/migrate-prod.sh (dry) and, only when it lists pending, --apply
             5 bin/deploy-worker.sh --upload-version  (verifier bound HERE; a pending
-              Durable Object migration is applied first: staging precheck,
-              then a deploy of S, see the do-migration block there; its tag
+              Durable Object migration is applied first: Production attachment
+              check, staging precheck, then a deploy of S whose own version
+              becomes the candidate, so Production has moved before steps 6-8
+              for that release only; see the do-migration block there. Its tag
               lands in the run record)
             6 bin/deploy-worker.sh --env staging --recovery-step forward_fix
             7 bin/deploy-worker.sh --promote-version <id from step 5>
@@ -556,8 +558,10 @@ def queue_turn(lane: str, sha: str, step: str, rc: int, log: str, record_path: s
              "must keep the new schema working with the currently deployed Worker.\n"
              if db_ahead_of_worker else "")
     if do_migration:
-        ahead += (f"A DURABLE OBJECT MIGRATION WAS APPLIED in this run (tag {do_migration.get('tag')}): "
-                  f"Production is serving {sha[:12]} through the deploy that applied it. Cloudflare "
+        what = ("WAS APPLIED" if do_migration.get("applied")
+                else "WAS POSSIBLY APPLIED (the deploy's outcome could not be read back)")
+        ahead += (f"A DURABLE OBJECT MIGRATION {what} in this run (tag {do_migration.get('tag')}): "
+                  f"treat Production as serving {sha[:12]} through the deploy that applied it. Cloudflare "
                   "blocks rollback to any version from before that migration, so the fix is forward "
                   "only and must keep working with the migrated Durable Object class.\n")
     body = (f"@queue enqueue target=claude-desktop cap=repo-write priority=P1 runtime=3h "
@@ -1143,14 +1147,19 @@ class Pipeline:
         key = ("<next free r-%s-NN>" % self.today) if self.dry_run else next_release_key(
             self.today, lambda k: self._release_exists(wt, py, k))
         #    A pending Durable Object migration is applied INSIDE this step
-        #    (bin/deploy-worker.sh: `versions upload` cannot apply one): staging
-        #    first, and Production traffic moves only after staging is green;
-        #    its marker line is carried into the run record whether the step
+        #    (bin/deploy-worker.sh: `versions upload` cannot apply one): the
+        #    Production attachment check and the staging precheck first, and
+        #    Production traffic moves only after both are green. The migration
+        #    deploy's own version is then the candidate, so for that release
+        #    steps 6-8 run after Production has moved (their database writers
+        #    need an uploaded Production version, which cannot exist earlier).
+        #    Its marker line is carried into the run record whether the step
         #    then succeeds or fails.
         if self.dry_run:
             self.out("  [dry-run] the upload step first applies any pending Durable Object migration: "
-                     "S to staging and its checks green, then a deploy of S (100% traffic); it refuses "
-                     "before Production when the applied tag is unknown or the staging precheck fails")
+                     "Production attachments unchanged, S to staging and its checks green, then a deploy "
+                     "of S (100% traffic) whose version is the candidate; it refuses before Production "
+                     "when the applied tag is unknown, attachments differ or the staging precheck fails")
         try:
             up = self.step("upload", ["bin/deploy-worker.sh", "--upload-version", "--release-sha", sha,
                                       "--release-key", key, "--test-evidence", ev["test_evidence"],
@@ -1279,19 +1288,22 @@ def parse_json_field(text: str, field: str, step: str) -> str:
 
 
 DO_MIGRATION_RE = re.compile(
-    r"^DO migration applied: tag=(?P<tag>\S+) from=(?P<from_tag>\S+) version=(?P<version>\S+)$",
+    r"^DO migration (?P<kind>applied|possibly applied): tag=(?P<tag>\S+) from=(?P<from_tag>\S+) "
+    r"version=(?P<version>\S+)$",
     re.MULTILINE)
 
 
 def parse_do_migration(text: str) -> dict | None:
-    """The Durable Object migration bin/deploy-worker.sh applied in the upload
-    step, from its one marker line; None when it applied none."""
+    """The Durable Object migration bin/deploy-worker.sh applied (or possibly
+    applied: the deploy's outcome could not be read back) in the upload step,
+    from its one marker line; None when it applied none."""
     hits = list(DO_MIGRATION_RE.finditer(text or ""))
     if not hits:
         return None
     m = hits[-1]
     version = m.group("version")
-    return {"applied": True, "tag": m.group("tag"),
+    applied = m.group("kind") == "applied"
+    return {"applied": applied, "possibly_applied": not applied, "tag": m.group("tag"),
             "from_tag": None if m.group("from_tag") == "none" else m.group("from_tag"),
             "provider_version_id": version if UUID_RE.fullmatch(version) else None}
 

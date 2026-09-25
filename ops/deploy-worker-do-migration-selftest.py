@@ -1,47 +1,52 @@
 #!/usr/bin/env python3
 """deploy-worker-do-migration-selftest.py — a pending Durable Object migration
-ships unattended, and an unknown applied tag ships nothing.
+ships unattended, and every doubt about it ships nothing.
 
 WHAT THIS GUARDS. bin/deploy-worker.sh --upload-version runs `wrangler versions
 upload`, which wrangler 4.137 refuses while the Worker has a pending Durable
 Object migration. The wrapper's do-migration block reads the applied tag,
-applies a pending one with the documented `wrangler deploy`, verifies it, writes
-a receipt, and only then lets the ordinary upload run.
+checks Production's attachments, prechecks staging, applies a pending tag with
+the documented `wrangler deploy`, records the move, verifies it, and makes the
+migration deploy's own version the release candidate.
 
 HOW. The house pattern for this wrapper (ops/deploy-release-wiring-selftest.py):
 the whole script cannot run hermetically (exact origin/main, a database, real
-credentials), so the exact block between its BEGIN/END do-migration markers is
-extracted VERBATIM and executed against a fake `wrangler` and a fake `curl`
-that model the real ones: the fake `versions upload` refuses exactly as
-wrangler 4.137 does while a migration is pending, so a harness that reaches the
-upload proves the ordering, not merely the absence of an error. The real
-ops/worker-do-migration.py and ops/verify-worker-release.py do the judging.
+credentials), so the exact block between its BEGIN/END do-migration markers AND
+the upload branch's own candidate fragment are extracted VERBATIM and executed
+against a fake `wrangler`, a fake `curl` and a fake `tools/ops-record.py` that
+model the real ones: the fake `versions upload` refuses exactly as wrangler
+4.137 does while a migration is pending, so reaching it proves the ordering.
+The real ops/worker-do-migration.py, ops/verify-worker-release.py,
+ops/deploy-attachment-check.py and `ops-record.py staging-target` judge.
 
-Scenarios (the brief's four, plus the edges that make them honest):
-  A  no migration declared            -> no metadata read, no deploy, upload runs
-  A2 declared and already applied     -> read, no deploy, upload runs
-  B  pending                          -> deploy of the exact SHA, re-read,
-                                         identity read-back, receipt, upload runs
-  B2 pending after an earlier tag     -> only the later tag is pending
-  C  applied tag unknown              -> REFUSED before any deploy or upload
-     (metadata HTTP failure, malformed JSON, wrong script, undeclared tag,
-      no credential)
-  D  migration deploy fails           -> REFUSED; not-applied says nothing to
-                                         roll back, applied says forward fix
-                                         only; a failed read-back likewise
-  E  source wiring: the block runs before `versions upload`, the promotion
-     annotates every deployment row, and the token never reaches argv.
+Scenarios:
+  A  no migration declared / A2 declared and applied -> the ordinary upload
+  B  pending -> Production attachments, staging precheck, deploy of the exact
+     SHA, ops.settings_change record, read-back, and the deploy's version is
+     the candidate (no second upload); B2 a later tag; B3 the probe secret
+  S  the staging precheck refuses before Production is touched, in every way
+     it can fail, with correct receipt fields
+  K  staging already carries the tag: only a durable receipt with the same
+     steps digest admits it
+  T  Production attachments a plain deploy would change: refused
+  C  Production's applied tag unknown: refused before anything
+  D  the Production deploy fails, half-succeeds or cannot be read back, and the
+     database record fails
+  E  source wiring
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
+from typing import Any
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "bin" / "deploy-worker.sh"
@@ -52,6 +57,7 @@ VS = "5a5a5a5a-1b1b-4c2c-8d3d-4e4e4e4e4e4e"
 TOKEN = "cf-selftest-token-9f8e7d6c5b4a"
 TAG1 = "v1-workflow-census-anchor"
 TAG2 = "v2-selftest-second-class"
+PROD_RELEASE = "https://api.doctorcre.com/release"
 
 FAILURES: list[str] = []
 
@@ -80,27 +86,34 @@ if argv[:2] == ["auth", "token"]:
 if argv[:1] == ["deploy"] and argv[1:3] == ["--env", "staging"]:
     mode = state.get("staging_deploy_mode", "ok")
     sha = next(a.split(":", 1)[1] for a in argv if a.startswith("GIT_SHA:"))
+    state["staging_deployed"] = True
     if mode == "fail":
-        print("X [ERROR] staging deploy failed"); sys.exit(1)
+        save(); print("X [ERROR] staging deploy failed"); sys.exit(1)
     if mode != "no_tag_move":
         state["staging_applied_tag"] = state["latest_tag"]
     state["staging_served_sha"] = sha
     state["staging_served_version"] = os.environ["FAKE_VS"]
     save()
     print("Uploaded carr-mcp-staging")
-    print("Current Version ID: " + os.environ["FAKE_VS"])
+    if mode != "no_version":
+        print("Current Version ID: " + os.environ["FAKE_VS"])
+    if mode == "fail_after_apply":
+        print("X [ERROR] staging route sync failed"); sys.exit(1)
     sys.exit(0)
 if argv[:1] == ["deploy"]:
     mode = state.get("deploy_mode", "ok")
     sha = next(a.split(":", 1)[1] for a in argv if a.startswith("GIT_SHA:"))
+    state["prod_deployed"] = True
     if mode == "fail_before_apply":
-        print("X [ERROR] A request to the Cloudflare API failed."); sys.exit(1)
-    state["applied_tag"] = state["latest_tag"]
+        save(); print("X [ERROR] A request to the Cloudflare API failed."); sys.exit(1)
+    if mode != "ok_no_tag_move":
+        state["applied_tag"] = state["latest_tag"]
     state["served_sha"] = sha
     state["served_version"] = os.environ["FAKE_V0"]
     save()
     print("Uploaded carr-mcp")
-    print("Current Version ID: " + os.environ["FAKE_V0"])
+    if mode != "no_version":
+        print("Current Version ID: " + os.environ["FAKE_V0"])
     if mode == "fail_after_apply":
         print("X [ERROR] custom domain sync failed"); sys.exit(1)
     sys.exit(0)
@@ -121,12 +134,14 @@ with open(os.environ["FAKE_CALLS"], "a") as fh:
     fh.write(json.dumps(["curl", *argv]) + "\n")
 url = next(a for a in argv if a.startswith("https://"))
 out = argv[argv.index("-o") + 1] if "-o" in argv else None
+authed = f"Authorization: Bearer {os.environ['FAKE_TOKEN']}" in stdin
 if "/workers/services/" in url:
-    if f"Authorization: Bearer {os.environ['FAKE_TOKEN']}" not in stdin:
+    if not authed:
         sys.exit(22)
     staging = url.endswith("/services/carr-mcp-staging")
     mode = state.get("staging_services_mode" if staging else "services_mode", "ok")
-    if mode == "http_error":
+    deployed = state.get("staging_deployed" if staging else "prod_deployed")
+    if mode == "http_error" or (mode == "fail_after_deploy" and deployed):
         sys.exit(22)
     if mode == "malformed":
         body = "<html>not json</html>"
@@ -139,6 +154,22 @@ if "/workers/services/" in url:
         body = json.dumps({"success": True, "errors": [], "result": {
             "id": name, "default_environment": {"environment": "production", "script": script}}})
     open(out, "w").write(body)
+    sys.exit(0)
+if "/workers/domains?service=" in url:
+    if not authed or state.get("domains_mode") == "http_error":
+        sys.exit(22)
+    rows = [{"id": f"d{i}", "hostname": h, "service": state.get("domain_service", "carr-mcp"),
+             "environment": "production", "zone_id": "z", "zone_name": "example.test"}
+            for i, h in enumerate(state["live_domains"])]
+    total = len(rows) + (1 if state.get("domains_mode") == "paginated" else 0)
+    open(out, "w").write(json.dumps({"success": True, "errors": [], "result": rows,
+        "result_info": {"page": 1, "per_page": len(rows), "count": len(rows), "total_count": total}}))
+    sys.exit(0)
+if url.endswith("/workers/scripts/carr-mcp/subdomain"):
+    if not authed:
+        sys.exit(22)
+    open(out, "w").write(json.dumps({"success": True, "errors": [], "result": {
+        "enabled": state.get("live_workers_dev", False), "previews_enabled": False}}))
     sys.exit(0)
 if url.endswith("/release") and "carr-mcp-staging" in url:
     if state.get("staging_served_sha") is None:
@@ -163,6 +194,21 @@ if url.endswith("/release"):
 sys.exit(6)
 '''
 
+FAKE_OPS_RECORD = r'''#!/usr/bin/env python3
+import json, os, sys
+argv = sys.argv[1:]
+with open(os.environ["FAKE_CALLS"], "a") as fh:
+    fh.write(json.dumps(["ops-record", *argv]) + "\n")
+if argv[:1] == ["settings-change"]:
+    state = json.load(open(os.environ["FAKE_STATE"]))
+    if state.get("settings_change_fail"):
+        print("ops-record: could not record the settings change", file=sys.stderr); sys.exit(1)
+    print("00000000-0000-4000-8000-000000000001"); sys.exit(0)
+if argv[:1] == ["staging-target"]:
+    os.execv(sys.executable, [sys.executable, os.environ["REAL_OPS_RECORD"], *argv])
+print("fake ops-record: unexpected " + " ".join(argv), file=sys.stderr); sys.exit(2)
+'''
+
 
 def extract_block(source: str) -> str:
     start = source.index("# ---------- pending Durable Object migration (BEGIN do-migration block)")
@@ -170,31 +216,65 @@ def extract_block(source: str) -> str:
     return source[start:end]
 
 
-def wrangler_toml(tags: list[str]) -> str:
+def extract_upload_fragment(source: str) -> str:
+    start = source.index("  # A pending Durable Object migration would make `versions upload` refuse;")
+    marker = "no parseable immutable version id; traffic was not changed.\"\n  fi\n"
+    return source[start:source.index(marker, start) + len(marker)]
+
+
+def wrangler_toml(tags: list[str], *, classes: str = "C", staging_routes: bool = True,
+                  staging_migrations: list[tuple[str, str]] | None = None) -> str:
     base = (REPO / "mcp-server" / "wrangler.toml").read_text(encoding="utf-8")
     # The fixture starts from the real file, minus any migrations it may carry
     # by the time this runs, and declares exactly the tags each scenario needs.
     base = re.sub(r"(?ms)^\[\[migrations\]\]\n(?:[^\[\n].*\n|\n)*", "", base)
-    extra = "".join(f'\n[[migrations]]\ntag = "{t}"\nnew_sqlite_classes = ["C{i}"]\n'
+    if not staging_routes:
+        assert base.count("\nroutes = []\n") == 1
+        base = base.replace("\nroutes = []\n", "\n")
+    extra = "".join(f'\n[[migrations]]\ntag = "{t}"\nnew_sqlite_classes = ["{classes}{i}"]\n'
                     for i, t in enumerate(tags))
+    for tag, cls in staging_migrations or []:
+        extra += f'\n[[env.staging.migrations]]\ntag = "{tag}"\nnew_sqlite_classes = ["{cls}"]\n'
     return base + extra
 
 
-def run(block: str, *, tags: list[str], state: dict) -> dict:
+def declared_domains(toml_text: str) -> list[str]:
+    return [r["pattern"] for r in tomllib.loads(toml_text).get("routes", [])]
+
+
+def expected_digest(toml_text: str) -> str:
+    migrations = tomllib.loads(toml_text).get("migrations", [])
+    canonical = json.dumps(migrations, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return "sha256:" + hashlib.sha256(canonical.encode("ascii")).hexdigest()
+
+
+def run(source: str, *, tags: list[str], state: dict, toml: str | None = None,
+        state_dir: Path | None = None, locate: str = "override", env_extra: dict | None = None) -> dict:
+    block, fragment = extract_block(source), extract_upload_fragment(source)
+    toml = toml if toml is not None else wrangler_toml(tags)
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
         (tmp / "bin").mkdir()
         (tmp / "worker").mkdir()
-        (tmp / "repo").mkdir()
+        if locate == "worktree":
+            # The pipeline's REPO is a linked release worktree it deletes after
+            # the run; the durable receipts must land beside the MAIN checkout.
+            git = ["git", "-c", "user.name=selftest", "-c", "user.email=selftest@example.test"]
+            subprocess.run([*git, "init", "-q", str(tmp / "main")], check=True)
+            subprocess.run([*git, "-C", str(tmp / "main"), "commit", "-q", "--allow-empty", "-m", "init"],
+                           check=True)
+            subprocess.run([*git, "-C", str(tmp / "main"), "worktree", "add", "-q", "--detach",
+                            str(tmp / "repo")], check=True)
+        (tmp / "repo" / "tools").mkdir(parents=True)
         (tmp / "repo" / "ops").symlink_to(REPO / "ops")
-        (tmp / "repo" / "tools").symlink_to(REPO / "tools")
         (tmp / "repo" / "lib").symlink_to(REPO / "lib")
-        (tmp / "worker" / "wrangler.toml").write_text(wrangler_toml(tags), encoding="utf-8")
-        for name, body in (("wrangler", FAKE_WRANGLER), ("curl", FAKE_CURL)):
-            path = tmp / "bin" / name
+        (tmp / "worker" / "wrangler.toml").write_text(toml, encoding="utf-8")
+        for path, body in ((tmp / "bin" / "wrangler", FAKE_WRANGLER), (tmp / "bin" / "curl", FAKE_CURL),
+                           (tmp / "repo" / "tools" / "ops-record.py", FAKE_OPS_RECORD)):
             path.write_text(body.replace("/usr/bin/env python3", sys.executable, 1), encoding="utf-8")
             path.chmod(0o755)
-        state = {"latest_tag": tags[-1] if tags else None, **state}
+        tag_dir = state_dir if state_dir is not None else tmp / "tag-receipts"
+        state = {"latest_tag": tags[-1] if tags else None, "live_domains": declared_domains(toml), **state}
         (tmp / "state.json").write_text(json.dumps(state), encoding="utf-8")
         calls = tmp / "calls.jsonl"
         calls.write_text("", encoding="utf-8")
@@ -202,10 +282,10 @@ def run(block: str, *, tags: list[str], state: dict) -> dict:
         harness.write_text(
             "#!/bin/sh\nset -eu\n"
             'fail() { echo ""; echo "REFUSED: $1" >&2; echo "" >&2; exit 1; }\n'
-            + block +
-            '\napply_pending_do_migration\n'
-            'UP="$("$WRANGLER" versions upload --var "GIT_SHA:$HEAD_SHA")" || { echo "$UP"; exit 9; }\n'
-            'echo "$UP"\necho "UPLOAD-REACHED evidence=${DO_MIGRATION_EVIDENCE:-}"\n',
+            'PROBE_TOKENS_FILE="${PROBE_TOKENS_FILE:-}"\n'
+            + block + fragment +
+            'echo "  provider version: $PROVIDER_VERSION_ID"\n'
+            'echo "UPLOAD-REACHED evidence=${DO_MIGRATION_EVIDENCE:-}"\n',
             encoding="utf-8")
         env = {
             "PATH": f"{tmp / 'bin'}:{os.environ.get('PATH', '/usr/bin:/bin')}",
@@ -220,9 +300,14 @@ def run(block: str, *, tags: list[str], state: dict) -> dict:
             "CARR_READBACK_ATTEMPTS": "2", "CARR_READBACK_SLEEP": "0",
             "FAKE_STATE": str(tmp / "state.json"), "FAKE_CALLS": str(calls),
             "FAKE_TOKEN": TOKEN, "FAKE_V0": V0, "FAKE_V1": V1, "FAKE_VS": VS,
+            "REAL_OPS_RECORD": str(REPO / "tools" / "ops-record.py"),
+            "GIT_CEILING_DIRECTORIES": str(tmp),
+            **(env_extra or {}),
         }
+        if locate == "override":
+            env["CARR_DO_MIGRATION_STATE_DIR"] = str(tag_dir)
         done = subprocess.run(["sh", str(harness)], env=env, capture_output=True, text=True,
-                              timeout=120)
+                              timeout=180)
         receipt_path = tmp / "repo" / "out" / "deploy-worker" / f"do-migration-{HEAD_SHA}.json"
         receipt = json.loads(receipt_path.read_text()) if receipt_path.exists() else None
         receipt_check = None
@@ -231,176 +316,345 @@ def run(block: str, *, tags: list[str], state: dict) -> dict:
                 [sys.executable, str(REPO / "ops" / "worker-do-migration.py"), "receipt",
                  "--file", str(receipt_path), "--sha", HEAD_SHA],
                 capture_output=True, text=True).returncode
+        tag_receipts = {}
+        for where in (tag_dir, tmp / "repo" / "out" / "deploy-worker" / "do-migration-tags",
+                      tmp / "main" / "out" / "deploy-worker" / "do-migration-tags"):
+            if where.is_dir():
+                for f in where.glob("*.json"):
+                    tag_receipts[str(f.relative_to(tmp)) if f.is_relative_to(tmp) else f.name] = \
+                        json.loads(f.read_text())
         rows = [json.loads(line) for line in calls.read_text().splitlines() if line.strip()]
         return {"rc": done.returncode, "out": done.stdout, "err": done.stderr,
                 "all": done.stdout + done.stderr, "calls": rows, "receipt": receipt,
-                "receipt_valid": receipt_check == 0}
+                "receipt_valid": receipt_check == 0, "tag_receipts": tag_receipts}
 
 
 def wrangler_calls(res: dict, *prefix: str) -> list[list[str]]:
     return [c[1:] for c in res["calls"] if c[0] == "wrangler" and c[1:1 + len(prefix)] == list(prefix)]
 
 
+def prod_deploys(res: dict) -> list[list[str]]:
+    return [c for c in wrangler_calls(res, "deploy") if c[1:3] != ["--env", "staging"]]
+
+
+def staging_deploys(res: dict) -> list[list[str]]:
+    return wrangler_calls(res, "deploy", "--env", "staging")
+
+
 def services_reads(res: dict) -> int:
     return sum(1 for c in res["calls"] if c[0] == "curl" and any("/workers/services/" in a for a in c))
+
+
+def attachment_reads(res: dict) -> int:
+    return sum(1 for c in res["calls"] if c[0] == "curl"
+               and any("/workers/domains?" in a or a.endswith("/subdomain") for a in c))
+
+
+def settings_changes(res: dict) -> list[list[str]]:
+    return [c[2:] for c in res["calls"] if c[0] == "ops-record" and c[1:2] == ["settings-change"]]
+
+
+def arg(argv: list[str], flag: str) -> str | None:
+    return argv[argv.index(flag) + 1] if flag in argv else None
+
+
+def index_of(res: dict, pred) -> int | None:
+    return next((i for i, c in enumerate(res["calls"]) if pred(c)), None)
+
+
+def ordered(positions: list[int | None]) -> bool:
+    present = [p for p in positions if p is not None]
+    return len(present) == len(positions) and present == sorted(present) and len(set(present)) == len(present)
 
 
 def token_in_argv(res: dict) -> bool:
     return any(TOKEN in a for c in res["calls"] for a in c)
 
 
+def production_untouched(res: dict) -> bool:
+    return (not prod_deploys(res) and not wrangler_calls(res, "versions")
+            and not settings_changes(res)
+            and not any(c[0] == "curl" and PROD_RELEASE in c for c in res["calls"])
+            and "provider version:" not in res["out"])
+
+
 def main() -> int:
-    print("deploy-worker-do-migration-selftest: a pending DO migration ships; an unknown tag ships nothing")
+    print("deploy-worker-do-migration-selftest: a pending DO migration ships; every doubt ships nothing")
     source = SCRIPT.read_text(encoding="utf-8")
-    block = extract_block(source)
 
     # A. current main: no [[migrations]] at all
-    res = run(block, tags=[], state={})
-    check("A. no declared migration: upload runs unchanged", res["rc"] == 0
-          and "UPLOAD-REACHED evidence=" in res["out"] and f"Worker Version ID: {V1}" in res["out"],
+    res = run(source, tags=[], state={})
+    check("A. no declared migration: the ordinary upload is the candidate", res["rc"] == 0
+          and f"Worker Version ID: {V1}" in res["out"] and f"provider version: {V1}" in res["out"],
           res["all"][-600:])
-    check("A. no declared migration: no metadata read and no deploy",
-          services_reads(res) == 0 and not wrangler_calls(res, "deploy"))
-    check("A. no receipt is written", res["receipt"] is None)
+    check("A. no declared migration: no metadata or attachment read, no deploy, no record",
+          services_reads(res) == 0 and attachment_reads(res) == 0 and not wrangler_calls(res, "deploy")
+          and not settings_changes(res) and res["receipt"] is None)
 
     # A2. declared and already applied
-    res = run(block, tags=[TAG1], state={"applied_tag": TAG1})
-    check("A2. applied == declared latest: upload runs unchanged",
-          res["rc"] == 0 and "UPLOAD-REACHED evidence=\n" in res["out"] + "\n", res["all"][-600:])
-    check("A2. the applied tag was READ, and nothing was deployed",
-          services_reads(res) == 1 and not wrangler_calls(res, "deploy"))
-    check("A2. no receipt, no migration marker",
-          res["receipt"] is None and "DO migration applied:" not in res["out"])
+    res = run(source, tags=[TAG1], state={"applied_tag": TAG1})
+    check("A2. applied == declared latest: the ordinary upload is the candidate",
+          res["rc"] == 0 and f"provider version: {V1}" in res["out"]
+          and "UPLOAD-REACHED evidence=\n" in res["out"] + "\n", res["all"][-600:])
+    check("A2. the applied tag was READ, and nothing else happened",
+          services_reads(res) == 1 and attachment_reads(res) == 0 and not wrangler_calls(res, "deploy")
+          and res["receipt"] is None and "DO migration" not in res["out"])
 
     # B. pending (the first release after #1244: nothing applied yet)
-    res = run(block, tags=[TAG1], state={"applied_tag": None})
-    deploys = [c for c in wrangler_calls(res, "deploy") if c[1:3] != ["--env", "staging"]]
-    check("B. pending: exactly one production deploy, then the ordinary upload succeeds",
-          res["rc"] == 0 and len(deploys) == 1 and f"Worker Version ID: {V1}" in res["out"],
+    toml = wrangler_toml([TAG1])
+    res = run(source, tags=[TAG1], state={"applied_tag": None}, toml=toml)
+    deploys = prod_deploys(res)
+    check("B. pending: exactly one Production deploy and NO second upload",
+          res["rc"] == 0 and len(deploys) == 1 and not wrangler_calls(res, "versions"),
           res["all"][-900:])
+    check("B. the migration deploy's own version is the release candidate",
+          f"provider version: {V0}" in res["out"] and V1 not in res["out"])
     check("B. the deploy carries this SHA's stamps and names the tag",
           bool(deploys) and f"GIT_SHA:{HEAD_SHA}" in deploys[0]
           and any(a.startswith("CANDIDATE_MANIFEST_DIGEST:") for a in deploys[0])
           and f"carr do-migration {TAG1} {HEAD_SHA}" in deploys[0]
-          and "--env" not in deploys[0])
-    order = [c[1] if c[0] == "wrangler" else "curl" for c in res["calls"]]
-    check("B. order: read, deploy, re-read, read-back, then upload",
-          "deploy" in order and "versions" in order
-          and order.index("deploy") < order.index("versions")
-          and services_reads(res) == 4, str(order))
-    staging_at = next((i for i, c in enumerate(res["calls"])
-                       if c[:4] == ["wrangler", "deploy", "--env", "staging"]), None)
-    prod_at = next((i for i, c in enumerate(res["calls"])
-                    if c[:2] == ["wrangler", "deploy"] and c[2:4] != ["--env", "staging"]), None)
-    check("B. staging precheck deploys the same SHA to staging BEFORE the production deploy",
-          staging_at is not None and prod_at is not None and staging_at < prod_at
-          and f"GIT_SHA:{HEAD_SHA}" in res["calls"][staging_at], str(order))
-    check("B. staging /release was read back before production moved",
-          any(c[0] == "curl" and any("carr-mcp-staging" in a and a.endswith("/release") for a in c)
-              for c in res["calls"][:prod_at or 0]))
+          and "--env" not in deploys[0] and "--secrets-file" not in deploys[0])
+    att_at = index_of(res, lambda c: c[0] == "curl" and any("/workers/domains?" in a for a in c))
+    stg_at = index_of(res, lambda c: c[:4] == ["wrangler", "deploy", "--env", "staging"])
+    stg_rel = index_of(res, lambda c: c[0] == "curl" and any("carr-mcp-staging" in a and a.endswith("/release") for a in c))
+    prod_at = index_of(res, lambda c: c[:2] == ["wrangler", "deploy"] and c[2:4] != ["--env", "staging"])
+    rec_at = index_of(res, lambda c: c[:2] == ["ops-record", "settings-change"])
+    prod_rel = index_of(res, lambda c: c[0] == "curl" and PROD_RELEASE in c)
+    check("B. order: attachments, staging deploy, staging read-back, Production deploy, DB record, read-back",
+          ordered([att_at, stg_at, stg_rel, prod_at, rec_at, prod_rel]) and services_reads(res) == 4,
+          str([att_at, stg_at, stg_rel, prod_at, rec_at, prod_rel, services_reads(res)]))
+    check("B. staging gets the same SHA", stg_at is not None and f"GIT_SHA:{HEAD_SHA}" in res["calls"][stg_at])
     check("B. the marker line names tag, prior tag and version",
           f"DO migration applied: tag={TAG1} from=none version={V0}" in res["out"])
+    changes = settings_changes(res)
+    check("B. the Production move is written to ops.settings_change the moment the deploy returns",
+          len(changes) == 1 and arg(changes[0], "--kind") == "worker-do-migration"
+          and arg(changes[0], "--outcome") == "applied"
+          and arg(changes[0], "--target") == "cloudflare-workers:carr-mcp:production"
+          and arg(changes[0], "--environment") == "production"
+          and TAG1 in (arg(changes[0], "--reason") or "") and V0 in (arg(changes[0], "--reason") or ""),
+          json.dumps(changes))
     rc = res["receipt"] or {}
-    check("B. receipt records the applied, verified migration",
+    sp = rc.get("staging_precheck", {})
+    check("B. receipt records the applied, verified migration and its steps",
           rc.get("state") == "applied_verified" and rc.get("new_tag") == TAG1
           and rc.get("old_tag") is None and rc.get("migration_version_id") == V0
-          and rc.get("git_sha") == HEAD_SHA and rc.get("readback") == "identity-ok"
-          and rc.get("staging_precheck", {}).get("state") == "passed"
-          and rc.get("staging_precheck", {}).get("tag_moved") is True
-          and rc.get("staging_precheck", {}).get("version_id") == VS
-          and res["receipt_valid"], json.dumps(rc))
+          and rc.get("deploy_exit") == 0 and rc.get("readback") == "identity-ok"
+          and rc.get("steps_digest") == expected_digest(toml) and rc.get("db_record") == "recorded"
+          and rc.get("refusal") is None and res["receipt_valid"], json.dumps(rc))
+    check("B. receipt records the staging precheck",
+          sp.get("state") == "passed" and sp.get("tag_moved") is True and sp.get("deploy_exit") == 0
+          and sp.get("version_id") == VS and sp.get("old_tag") is None, json.dumps(sp))
+    tr: dict = next(iter(res["tag_receipts"].values()), {})
+    check("B. a durable staging tag receipt holds the applied steps digest",
+          len(res["tag_receipts"]) == 1 and tr.get("script") == "carr-mcp-staging"
+          and tr.get("tag") == TAG1 and tr.get("steps_digest") == expected_digest(toml)
+          and tr.get("environment") == "staging" and tr.get("version_id") == VS
+          and tr.get("git_sha") == HEAD_SHA, json.dumps(res["tag_receipts"]))
     check("B. deployment evidence carries do-migration=<tag>@<version>",
           f"UPLOAD-REACHED evidence=do-migration={TAG1}@{V0}" in res["out"])
     check("B. the bearer token never reached any argv", not token_in_argv(res))
 
     # B2. two tags, the first already applied
-    res = run(block, tags=[TAG1, TAG2], state={"applied_tag": TAG1})
+    res = run(source, tags=[TAG1, TAG2], state={"applied_tag": TAG1})
     check("B2. only the later tag is pending and applied",
-          res["rc"] == 0 and f"pending: {TAG2} (applied: {TAG1})" in res["out"]
+          res["rc"] == 0 and f"pending: {TAG2} (applied: {TAG1};" in res["out"]
           and (res["receipt"] or {}).get("pending_tags") == [TAG2]
           and (res["receipt"] or {}).get("old_tag") == TAG1, res["all"][-600:])
 
-    # S. the staging precheck gates Production
-    def production_untouched(res: dict) -> bool:
-        return (not [c for c in wrangler_calls(res, "deploy") if c[1:3] != ["--env", "staging"]]
-                and not wrangler_calls(res, "versions")
-                and not any(c[0] == "curl" and any(a == "https://api.doctorcre.com/release" for a in c)
-                            for c in res["calls"]))
-    for label, s_state in (
-            ("staging deploy fails", {"applied_tag": None, "staging_deploy_mode": "fail"}),
-            ("staging tag does not move", {"applied_tag": None, "staging_deploy_mode": "no_tag_move"}),
-            ("staging read-back mismatch", {"applied_tag": None, "staging_stale_readback": True}),
-            ("staging tag unknown", {"applied_tag": None, "staging_services_mode": "http_error"})):
-        res = run(block, tags=[TAG1], state=s_state)
+    # B3. the probe-token secret the upload would carry rides on the migration deploy
+    res = run(source, tags=[TAG1], state={"applied_tag": None},
+              env_extra={"PROBE_TOKENS_FILE": "/private/probe-tokens.json"})
+    deploys = prod_deploys(res)
+    check("B3. --probe-tokens-file reaches the Production migration deploy, not staging",
+          res["rc"] == 0 and len(deploys) == 1
+          and arg(deploys[0], "--secrets-file") == "/private/probe-tokens.json"
+          and all("--secrets-file" not in c for c in staging_deploys(res)), res["all"][-600:])
+
+    # S. the staging precheck refuses before Production is touched
+    staging_cases: list[tuple[str, dict, dict[str, Any], str, bool | None, int | None, bool]] = [
+            ("staging deploy fails", {"staging_deploy_mode": "fail"}, {},
+             "the staging deploy exited 1", None, 1, True),
+            ("staging deploy exits 1 after applying", {"staging_deploy_mode": "fail_after_apply"}, {},
+             "the staging deploy exited 1", None, 1, True),
+            ("staging deploy prints no version", {"staging_deploy_mode": "no_version"}, {},
+             "printed no version id", None, 0, True),
+            ("staging tag does not move", {"staging_deploy_mode": "no_tag_move"}, {},
+             f"did not move to {TAG1} (it reports none)", False, 0, True),
+            ("staging re-read fails after its deploy", {"staging_services_mode": "fail_after_deploy"}, {},
+             "could not be re-read after the deploy", None, 0, True),
+            ("staging tag unknown before its deploy", {"staging_services_mode": "http_error"}, {},
+             "could not be determined", None, None, False),
+            ("staging read-back mismatch", {"staging_stale_readback": True}, {},
+             "did not read back", True, 0, True),
+            ("staging attachment check refuses", {}, {"toml": wrangler_toml([TAG1], staging_routes=False)},
+             "the staging attachment check refused", None, None, False),
+            ("staging declares another latest tag", {},
+             {"toml": wrangler_toml([TAG1], staging_migrations=[(TAG2, "S0")])},
+             "different latest migration tags", None, None, False),
+            ("staging declares other steps for the same tag", {},
+             {"toml": wrangler_toml([TAG1], staging_migrations=[(TAG1, "Other0")])},
+             "different migration steps", None, None, False),
+            ("durable receipt directory unlocatable", {}, {"locate": "none"},
+             "could not be located", None, None, False)]
+    for label, s_state, kwargs, why, moved, s_exit, s_deployed in staging_cases:
+        res = run(source, tags=[TAG1], state={"applied_tag": None, **s_state}, **kwargs)
         check(f"S. {label}: refused, traffic not changed, Production untouched",
-              res["rc"] == 1 and "staging precheck" in res["err"]
-              and "Production traffic was not changed" in res["err"] and production_untouched(res),
-              res["all"][-700:])
+              res["rc"] == 1 and "staging precheck" in res["err"] and why in res["err"]
+              and "Production traffic was not changed" in res["err"] and production_untouched(res)
+              and bool(staging_deploys(res)) == s_deployed, res["all"][-700:])
         rc = res["receipt"] or {}
-        check(f"S. {label}: receipt not_applied with the staging reason",
+        sp = rc.get("staging_precheck", {})
+        check(f"S. {label}: receipt not_applied, no Production exit, exact staging fields",
               rc.get("state") == "not_applied" and rc.get("migration_version_id") is None
-              and rc.get("staging_precheck", {}).get("state") == "failed"
-              and bool(rc.get("staging_precheck", {}).get("reason")) and res["receipt_valid"]
-              and "DO migration applied:" not in res["out"], json.dumps(rc))
-    res = run(block, tags=[TAG1], state={"applied_tag": None, "staging_deploy_mode": "no_tag_move"})
-    check("S. a tag that does not move names the tag it still reports",
-          f"did not move to {TAG1} (it reports none)" in res["err"], res["err"][-400:])
-    res = run(block, tags=[TAG1], state={"applied_tag": None, "staging_applied_tag": TAG1})
-    check("S. staging already migrated by an earlier attempt: precheck passes, recorded as not moved",
-          res["rc"] == 0 and (res["receipt"] or {}).get("staging_precheck", {}).get("tag_moved") is False
-          and (res["receipt"] or {}).get("state") == "applied_verified", res["all"][-600:])
+              and rc.get("deploy_exit") is None and sp.get("state") == "failed"
+              and why in (sp.get("reason") or "") and (rc.get("refusal") or "").startswith("staging precheck:")
+              and sp.get("tag_moved") is moved and sp.get("deploy_exit") == s_exit
+              and res["receipt_valid"] and "DO migration" not in res["out"], json.dumps(rc))
+
+    # K. staging already carries the tag
+    res = run(source, tags=[TAG1], state={"applied_tag": None, "staging_applied_tag": TAG1})
+    check("K1. staging already carries the tag with no durable receipt: refused before staging moves",
+          res["rc"] == 1 and "no durable receipt" in res["err"] and "applied only once" in res["err"]
+          and not staging_deploys(res) and production_untouched(res), res["all"][-700:])
+    with tempfile.TemporaryDirectory() as shared_raw:
+        shared = Path(shared_raw)
+        first = run(source, tags=[TAG1], state={"applied_tag": None, "deploy_mode": "fail_before_apply"},
+                    state_dir=shared)
+        res = run(source, tags=[TAG1], state={"applied_tag": None, "staging_applied_tag": TAG1},
+                  state_dir=shared)
+        check("K2. an earlier attempt's durable receipt with the same steps admits the applied tag",
+              first["rc"] == 1 and res["rc"] == 0
+              and (res["receipt"] or {}).get("staging_precheck", {}).get("tag_moved") is False
+              and (res["receipt"] or {}).get("state") == "applied_verified", res["all"][-700:])
+    with tempfile.TemporaryDirectory() as shared_raw:
+        shared = Path(shared_raw)
+        run(source, tags=[TAG1], state={"applied_tag": None, "deploy_mode": "fail_before_apply"},
+            state_dir=shared, toml=wrangler_toml([TAG1], classes="Old"))
+        res = run(source, tags=[TAG1], state={"applied_tag": None, "staging_applied_tag": TAG1},
+                  state_dir=shared, toml=wrangler_toml([TAG1], classes="New"))
+        check("K3. steps edited after the tag was applied: refused before staging moves",
+              res["rc"] == 1 and "now declares" in res["err"] and not staging_deploys(res)
+              and production_untouched(res)
+              and (res["receipt"] or {}).get("staging_precheck", {}).get("tag_moved") is None,
+              res["all"][-700:])
+    res = run(source, tags=[TAG1], state={"applied_tag": None}, locate="worktree")
+    check("K4. from a linked release worktree the durable receipts land beside the MAIN checkout",
+          res["rc"] == 0 and list(res["tag_receipts"]) ==
+          [f"main/out/deploy-worker/do-migration-tags/carr-mcp-staging--{TAG1}.json"],
+          str(list(res["tag_receipts"])) + res["all"][-400:])
+
+    # T. Production attachments a plain deploy would rewrite
+    declared = declared_domains(wrangler_toml([TAG1]))
+    for label, t_state, why in (
+            ("a declared custom domain Production lacks (today's real state)",
+             {"live_domains": [d for d in declared if d != "reports.doctorcre.com"]},
+             "would ATTACH custom domain(s) Production does not have: reports.doctorcre.com"),
+            ("a custom domain Production has and wrangler.toml lacks",
+             {"live_domains": [*declared, "old.example.test"]}, "would DETACH"),
+            ("workers.dev enabled on Production", {"live_workers_dev": True}, "workers.dev enabled=false"),
+            ("custom domains unreadable", {"domains_mode": "http_error"}, "could not be read"),
+            ("custom domains paginated", {"domains_mode": "paginated"}, "could not be compared"),
+            ("a custom domain bound to another Worker", {"domain_service": "someone-else"},
+             "could not be compared")):
+        res = run(source, tags=[TAG1], state={"applied_tag": None, **t_state})
+        rc = res["receipt"] or {}
+        check(f"T. {label}: refused before staging or Production moves",
+              res["rc"] == 1 and why in res["all"] and "Production traffic was not changed" in res["err"]
+              and not staging_deploys(res) and production_untouched(res)
+              and rc.get("state") == "not_applied" and (rc.get("refusal") or "").startswith("production attachments")
+              and rc.get("staging_precheck", {}).get("state") == "not-run" and res["receipt_valid"],
+              res["all"][-700:])
 
     # C. unknown applied tag: every variant refuses before any mutation
-    for label, tags, state in (
-            ("metadata read fails", [TAG1], {"services_mode": "http_error"}),
-            ("metadata is not JSON", [TAG1], {"services_mode": "malformed"}),
-            ("metadata names another script", [TAG1], {"script_id": "carr-mcp-staging"}),
-            ("applied tag is not declared", [TAG1], {"applied_tag": "v0-someone-else"}),
-            ("no credential", [TAG1], {"auth_fail": True})):
-        res = run(block, tags=tags, state=state)
+    for label, state in (
+            ("metadata read fails", {"services_mode": "http_error"}),
+            ("metadata is not JSON", {"services_mode": "malformed"}),
+            ("metadata names another script", {"script_id": "carr-mcp-staging"}),
+            ("applied tag is not declared", {"applied_tag": "v0-someone-else"}),
+            ("no credential", {"auth_fail": True})):
+        res = run(source, tags=[TAG1], state=state)
         check(f"C. {label}: refused, fail-closed and loud",
               res["rc"] == 1 and "REFUSED:" in res["err"] and "UNKNOWN" in res["err"]
               and "traffic was not changed" in res["err"], res["all"][-600:])
-        check(f"C. {label}: no deploy, no upload, no receipt",
-              not wrangler_calls(res, "deploy") and not wrangler_calls(res, "versions")
-              and res["receipt"] is None)
+        check(f"C. {label}: no attachment read, no deploy, no upload, no receipt",
+              attachment_reads(res) == 0 and not wrangler_calls(res, "deploy")
+              and not wrangler_calls(res, "versions") and res["receipt"] is None)
 
-    # D1. migration deploy fails before anything is applied
-    res = run(block, tags=[TAG1], state={"applied_tag": None, "deploy_mode": "fail_before_apply"})
-    check("D1. failed deploy, tag unchanged: refused, says nothing to roll back",
-          res["rc"] == 1 and "NOT applied" in res["err"]
-          and "Nothing needs rolling back" in res["err"]
-          and not wrangler_calls(res, "versions"), res["all"][-600:])
-    check("D1. receipt says not_applied; no applied marker",
-          (res["receipt"] or {}).get("state") == "not_applied"
-          and "DO migration applied:" not in res["out"])
-
-    # D2. migration deploy reports failure after the tag was applied
-    res = run(block, tags=[TAG1], state={"applied_tag": None, "deploy_mode": "fail_after_apply"})
-    check("D2. failed deploy, tag applied: refused, rollback blocked, forward fix only",
-          res["rc"] == 1 and "WAS applied" in res["err"]
-          and "FORWARD FIX ONLY" in res["err"] and "do not promote a" in res["err"]
-          and not wrangler_calls(res, "versions"), res["all"][-600:])
-    check("D2. receipt applied_unverified and the marker is printed for the pipeline",
-          (res["receipt"] or {}).get("state") == "applied_unverified"
-          and f"DO migration applied: tag={TAG1}" in res["out"] and res["receipt_valid"])
-
-    # D3. deploy returned 0 but Production does not read back the exact identity
-    res = run(block, tags=[TAG1], state={"applied_tag": None, "stale_readback": True})
-    check("D3. applied but read-back mismatch: refused, forward fix, no upload",
-          res["rc"] == 1 and "did not read back" in res["err"]
-          and "FORWARD FIX ONLY" in res["err"] and not wrangler_calls(res, "versions"),
+    # D. the Production migration deploy
+    res = run(source, tags=[TAG1], state={"applied_tag": None, "deploy_mode": "fail_before_apply"})
+    rc = res["receipt"] or {}
+    check("D1. failed deploy, tag unchanged: refused, nothing to roll back, no candidate",
+          res["rc"] == 1 and "NOT applied" in res["err"] and "Nothing needs rolling back" in res["err"]
+          and not wrangler_calls(res, "versions") and "provider version:" not in res["out"],
           res["all"][-600:])
-    check("D3. receipt applied_unverified with mismatch read-back",
+    check("D1. receipt not_applied with the deploy's exit; recorded as a failed change; no marker",
+          rc.get("state") == "not_applied" and rc.get("deploy_exit") == 1
+          and [arg(c, "--outcome") for c in settings_changes(res)] == ["failed"]
+          and "DO migration" not in res["out"], json.dumps(rc))
+
+    res = run(source, tags=[TAG1], state={"applied_tag": None, "deploy_mode": "fail_after_apply"})
+    check("D2. failed deploy, tag applied: refused, rollback blocked, forward fix only",
+          res["rc"] == 1 and "WAS applied" in res["err"] and "FORWARD FIX ONLY" in res["err"]
+          and "do not promote a" in res["err"] and "provider version:" not in res["out"],
+          res["all"][-600:])
+    check("D2. receipt applied_unverified, applied marker, recorded as applied",
           (res["receipt"] or {}).get("state") == "applied_unverified"
-          and (res["receipt"] or {}).get("readback") == "mismatch")
+          and (res["receipt"] or {}).get("deploy_exit") == 1
+          and f"DO migration applied: tag={TAG1}" in res["out"]
+          and [arg(c, "--outcome") for c in settings_changes(res)] == ["applied"] and res["receipt_valid"])
+
+    res = run(source, tags=[TAG1], state={"applied_tag": None, "stale_readback": True})
+    check("D3. applied but read-back mismatch: refused, forward fix, no candidate",
+          res["rc"] == 1 and "did not read back" in res["err"] and "FORWARD FIX ONLY" in res["err"]
+          and not wrangler_calls(res, "versions") and "provider version:" not in res["out"]
+          and (res["receipt"] or {}).get("state") == "applied_unverified"
+          and (res["receipt"] or {}).get("readback") == "mismatch", res["all"][-600:])
+
+    res = run(source, tags=[TAG1], state={"applied_tag": None, "deploy_mode": "ok_no_tag_move"})
+    check("D4. deploy returned 0 but the tag did not move: possibly applied, forward fix",
+          res["rc"] == 1 and "possibly applied" in res["err"] and "FORWARD FIX ONLY" in res["err"]
+          and f"DO migration possibly applied: tag={TAG1} from=none version={V0}" in res["out"]
+          and "DO migration applied:" not in res["out"] and "provider version:" not in res["out"]
+          and (res["receipt"] or {}).get("state") == "unknown"
+          and [arg(c, "--outcome") for c in settings_changes(res)] == ["failed"]
+          and "POSSIBLY APPLIED" in (arg(settings_changes(res)[0], "--reason") or ""), res["all"][-700:])
+
+    res = run(source, tags=[TAG1], state={"applied_tag": None, "deploy_mode": "no_version"})
+    check("D5. deploy returned 0 and moved the tag but printed no version: refused, forward fix",
+          res["rc"] == 1 and "none printed" in res["err"] and "FORWARD FIX ONLY" in res["err"]
+          and f"DO migration applied: tag={TAG1} from=none version=unknown" in res["out"]
+          and (res["receipt"] or {}).get("state") == "applied_unverified"
+          and (res["receipt"] or {}).get("migration_version_id") is None
+          and "provider version:" not in res["out"], res["all"][-700:])
+
+    res = run(source, tags=[TAG1], state={"applied_tag": None, "services_mode": "fail_after_deploy"})
+    check("D6. the tag cannot be re-read after the deploy: possibly applied marker, forward fix",
+          res["rc"] == 1 and "possibly applied" in res["err"]
+          and f"DO migration possibly applied: tag={TAG1}" in res["out"]
+          and (res["receipt"] or {}).get("state") == "unknown"
+          and "provider version:" not in res["out"], res["all"][-700:])
+
+    res = run(source, tags=[TAG1], state={"applied_tag": None, "settings_change_fail": True})
+    check("D7. the database record of the move fails: the release stops before any candidate",
+          res["rc"] == 1 and "could not be recorded in ops.settings_change" in res["err"]
+          and "provider version:" not in res["out"]
+          and (res["receipt"] or {}).get("db_record") == "failed"
+          and (res["receipt"] or {}).get("state") == "applied_verified", res["all"][-700:])
+
+    res = run(source, tags=[TAG1], state={"applied_tag": None},
+              env_extra={"FOUNDATION_ASSURANCE_STAGING_PROVIDER": VS})
+    check("D8. WR95 live acquisition with a pending migration: refused before anything moves",
+          res["rc"] == 1 and "WR95" in res["err"] and "Production traffic was not changed" in res["err"]
+          and attachment_reads(res) == 0 and not wrangler_calls(res, "deploy"), res["all"][-600:])
 
     # E. source wiring
     upload_at = source.index('VERSION_UPLOAD_OUTPUT="$("$WRANGLER" versions upload')
     call_at = source.rfind("\n  apply_pending_do_migration\n", 0, upload_at)
     branch_at = source.index('if [ "$VERSION_MODE" = "upload" ]; then\n  if [ -n "$FOUNDATION_ASSURANCE_STAGING_PROVIDER" ]')
-    check("E1. the upload branch applies/refuses the migration before `versions upload`",
-          branch_at < call_at < upload_at)
+    adopt_at = source.index('  if [ -n "$DO_MIGRATION_VERSION_ID" ]; then\n    PROVIDER_VERSION_ID="$DO_MIGRATION_VERSION_ID"\n  else\n')
+    check("E1. the upload branch applies/refuses the migration, then uploads only when none was applied",
+          branch_at < call_at < adopt_at < upload_at)
     promote_at = source.index('"$WRANGLER" versions deploy "${PROVIDER_VERSION_ID}@100"')
     check("E2. promotion loads the receipt before it moves traffic",
           source.rfind("load_do_migration_receipt\n", 0, promote_at) > source.index("(END do-migration block)"))
@@ -411,6 +665,10 @@ def main() -> int:
     check("E5. staging's deploy path is untouched by the block",
           "apply_pending_do_migration" not in source[source.index("deploy_staging_worker() {"):
                                                     source.index("# ---------- pending Durable Object")])
+    tail = source[upload_at:source.index('echo "The wrapper writes the typed rehearsal evidence required for readiness."')]
+    check("E6. after the candidate exists, no refusal claims traffic was unchanged unconditionally",
+          tail.count("raffic was not changed") == 2 and tail.count("$DO_TRAFFIC_CLAUSE") >= 4,
+          f"{tail.count('raffic was not changed')} / {tail.count('$DO_TRAFFIC_CLAUSE')}")
 
     if FAILURES:
         print(f"\n{len(FAILURES)} check(s) FAILED")

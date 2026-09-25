@@ -419,17 +419,21 @@ class DurableObjectMigration(Base):
     def test_applied_migration_is_recorded_and_the_normal_path_continues(self):
         self.fx.commit({"mcp-server/wrangler.toml": "[[migrations]]\n"})
         live = {"sha": self.fx.base}
+        # The migration deploy's own version is the candidate the wrapper prints.
         runner = FakeRunner(live=live, outputs={
-            "upload": DO_MARKER + f"uploaded only\n  provider version: {VERSION}\n"})
+            "upload": DO_MARKER + f"Durable Object migration release\n  provider version: {DO_V0}\n"})
         self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
         names = runner.names()
         self.assertLess(names.index("upload"), names.index("staging"))
         self.assertLess(names.index("staging"), names.index("promote"))
         self.assertIn("health", names)
+        promote = next(a for n, a in runner.calls if n == "promote")
+        self.assertEqual(promote[promote.index("--promote-version") + 1], DO_V0)
         rec = self.fx.records()[-1]
         self.assertEqual(rec["status"], "shipped")
-        self.assertEqual(rec["provider_version_id"], VERSION)
-        self.assertEqual(rec["do_migration"], {"applied": True, "tag": "v1-workflow-census-anchor",
+        self.assertEqual(rec["provider_version_id"], DO_V0)
+        self.assertEqual(rec["do_migration"], {"applied": True, "possibly_applied": False,
+                                               "tag": "v1-workflow-census-anchor",
                                                "from_tag": None, "provider_version_id": DO_V0})
 
     def test_upload_failure_after_the_migration_dispatches_forward_fix(self):
@@ -447,6 +451,20 @@ class DurableObjectMigration(Base):
         self.assertIn("A DURABLE OBJECT MIGRATION WAS APPLIED", body)
         self.assertIn("forward", body)
 
+    def test_possibly_applied_migration_dispatches_forward_fix(self):
+        self.fx.commit({"mcp-server/wrangler.toml": "[[migrations]]\n"})
+        runner, verbs = FakeRunner(fail_at="upload", outputs={
+            "upload": "DO migration possibly applied: tag=v1-workflow-census-anchor from=none version=unknown\n"
+                      "REFUSED: the migration deploy exited 1 and the Worker reports tag unknown\n"}), []
+        self.assertEqual(self.fx.pipeline(runner, verbs=verbs).tick(["worker"]), 1)
+        rec = self.fx.records()[-1]
+        self.assertEqual(rec["do_migration"]["possibly_applied"], True)
+        self.assertEqual(rec["do_migration"]["applied"], False)
+        body = verbs[0][1]["body"]
+        self.assertIn("A DURABLE OBJECT MIGRATION WAS POSSIBLY APPLIED", body)
+        self.assertIn("forward", body)
+        self.assertIn("blocks rollback", body)
+
     def test_upload_failure_without_the_marker_claims_no_migration(self):
         self.fx.commit({"mcp-server/wrangler.toml": "[[migrations]]\n"})
         runner, verbs = FakeRunner(fail_at="upload", outputs={
@@ -458,8 +476,11 @@ class DurableObjectMigration(Base):
     def test_marker_parser(self):
         self.assertIsNone(rp.parse_do_migration("uploaded only\n"))
         got = rp.parse_do_migration("x\nDO migration applied: tag=v2 from=v1 version=unknown\n")
-        self.assertEqual(got, {"applied": True, "tag": "v2", "from_tag": "v1",
+        self.assertEqual(got, {"applied": True, "possibly_applied": False, "tag": "v2", "from_tag": "v1",
                                "provider_version_id": None})
+        got = rp.parse_do_migration(f"DO migration possibly applied: tag=v2 from=none version={DO_V0}\n")
+        self.assertEqual(got, {"applied": False, "possibly_applied": True, "tag": "v2", "from_tag": None,
+                               "provider_version_id": DO_V0})
 
 
 class KillSwitch(Base):

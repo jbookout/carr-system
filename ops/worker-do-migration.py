@@ -33,19 +33,46 @@ two histories is true. `migration_tag` absent or null on an otherwise exact
 script object is the documented "none applied" state (the Cloudflare API marks
 the field optional), which is also exactly how wrangler reads it.
 
+THE STEPS DIGEST. A tag is applied once and never again, so a Worker can carry
+tag T whose declared steps have since been edited (say `new_classes` became
+`new_sqlite_classes`). Every target and plan therefore carries `steps_digest`,
+the sha256 of the declared [[migrations]] list in canonical JSON, and the
+wrapper keeps a durable per-tag receipt of the digest it applied, so "already
+applied" is accepted only when it was applied with these exact steps.
+
+THE ATTACHMENTS A DEPLOY WOULD REWRITE. Only the migration path runs a plain
+`wrangler deploy` against Production, and that command re-publishes the
+top-level routes: wrangler 4.137 replaces the Worker's custom-domain set
+(`domains/changeset?replace_state=true`, and outside a TTY it forces
+override_existing_origin and override_existing_dns_record) and sets the
+workers.dev subdomain to `workers_dev`, defaulting to false whenever routes are
+declared. `attachments` compares what the deploy would publish with what
+Production has, and refuses on any difference rather than letting a migration
+release quietly change hostnames.
+
 Subcommands (all output is JSON on stdout; nothing here reads a credential):
-  target  --config <wrangler.toml> --env <production|name>
-          account id, script name and declared tags for that environment
-  plan    --config <wrangler.toml> --env <...> --services-json <file>
-          the pending decision against a fetched services response
-  receipt --file <receipt.json> --sha <40-hex>
-          validate a migration receipt this wrapper wrote and print it
+  target      --config <wrangler.toml> --env <production|name>
+              account id, script name, declared tags and steps digest
+  plan        --config <wrangler.toml> --env <...> --services-json <file>
+              the pending decision against a fetched services response
+  receipt     --file <receipt.json> --sha <40-hex>
+              validate a migration receipt this wrapper wrote and print it
+  attachments --config <wrangler.toml> --domains-json <file> --subdomain-json <file>
+              exit 0 = Production's attachments already equal what a deploy
+              publishes, 4 = they differ (the difference is printed), 3 = unknown
+  tag-receipt write|check --dir <dir> --script <name> --tag <tag> --digest <sha256:...>
+              [--sha <40-hex> --version-id <uuid> --environment <env>]
+              the durable per-tag receipt; check exits 4 when it is missing or
+              names other steps
 """
 
 from __future__ import annotations
 
 import argparse
+import datetime
+import hashlib
 import json
+import os
 import re
 import sys
 import tomllib
@@ -54,7 +81,11 @@ from typing import Any
 
 UNKNOWN = 3
 USAGE = 2
+DIFFERS = 4
 RECEIPT_SCHEMA = "carr-worker-do-migration-receipt.v1"
+TAG_RECEIPT_SCHEMA = "carr-worker-do-migration-tag-receipt.v1"
+DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+RECEIPT_STATES = ("applied_verified", "applied_unverified", "not_applied", "unknown")
 TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
@@ -65,6 +96,11 @@ class Undetermined(Exception):
 
 class ConfigError(Exception):
     """wrangler.toml does not describe a usable target."""
+
+
+def steps_digest(migrations: list) -> str:
+    canonical = json.dumps(migrations, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return "sha256:" + hashlib.sha256(canonical.encode("ascii")).hexdigest()
 
 
 def load_target(config: Path, env: str) -> dict:
@@ -107,7 +143,8 @@ def load_target(config: Path, env: str) -> dict:
         # this file only understands the migrations list, so it refuses rather
         # than answering a question wrangler is not asking.
         raise ConfigError("declarative `exports` is configured; this check covers [[migrations]] only")
-    return {"account_id": account, "script": script, "declared_tags": tags}
+    return {"account_id": account, "script": script, "declared_tags": tags,
+            "steps_digest": steps_digest(migrations)}
 
 
 def applied_tag(services: object, script: str) -> str | None:
@@ -138,7 +175,7 @@ def plan(target: dict, services: object) -> dict:
     if not declared:
         return {"script": target["script"], "declared_tags": [], "latest_tag": None,
                 "applied_tag": None, "applied_known": False, "pending": False,
-                "pending_tags": []}
+                "pending_tags": [], "steps_digest": target["steps_digest"]}
     applied = applied_tag(services, target["script"])
     if applied is None:
         pending_tags = list(declared)
@@ -150,7 +187,7 @@ def plan(target: dict, services: object) -> dict:
             "wrangler would re-apply every migration, and which history is true is not guessable")
     return {"script": target["script"], "declared_tags": declared, "latest_tag": declared[-1],
             "applied_tag": applied, "applied_known": True, "pending": bool(pending_tags),
-            "pending_tags": pending_tags}
+            "pending_tags": pending_tags, "steps_digest": target["steps_digest"]}
 
 
 def read_receipt(path: Path, sha: str) -> dict:
@@ -169,9 +206,114 @@ def read_receipt(path: Path, sha: str) -> dict:
     version = receipt["migration_version_id"]
     if version is not None and not (isinstance(version, str) and UUID_RE.fullmatch(version)):
         raise ConfigError("migration receipt has a malformed provider version id")
-    if receipt["state"] not in ("applied_verified", "applied_unverified", "not_applied", "unknown"):
+    if receipt["state"] not in RECEIPT_STATES:
         raise ConfigError("migration receipt has an unknown state")
+    exit_code = receipt.get("deploy_exit")
+    if exit_code is not None and (isinstance(exit_code, bool) or not isinstance(exit_code, int)):
+        raise ConfigError("migration receipt has a malformed deploy exit")
     return receipt
+
+
+def _envelope_result(value: object, what: str) -> object:
+    if not isinstance(value, dict) or value.get("success") is not True or "result" not in value:
+        raise Undetermined(f"the {what} response is not a successful Cloudflare API envelope")
+    return value["result"]
+
+
+def attachments(config: Path, domains: object, subdomain: object) -> dict:
+    """What a Production `wrangler deploy` would publish, against what is live."""
+    try:
+        doc = tomllib.loads(config.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise ConfigError(f"cannot read {config}: {exc}") from exc
+    script = doc.get("name")
+    routes = doc.get("routes", [])
+    if doc.get("route") is not None or not isinstance(routes, list):
+        raise ConfigError("only a top-level `routes` list is understood")
+    declared: list[str] = []
+    for route in routes:
+        if not (isinstance(route, dict) and route.get("custom_domain") is True
+                and isinstance(route.get("pattern"), str)):
+            raise ConfigError(f"route {route!r} is not a custom domain; zone routes are not compared")
+        declared.append(route["pattern"])
+    if (doc.get("triggers") or {}).get("crons"):
+        raise ConfigError("cron triggers are declared; a deploy would re-publish them and they are not compared")
+    want_workers_dev = doc.get("workers_dev", len(routes) == 0)
+    want_previews = doc.get("preview_urls")
+
+    result = _envelope_result(domains, "custom domains")
+    info = domains.get("result_info") if isinstance(domains, dict) else None
+    if not isinstance(result, list):
+        raise Undetermined("the custom domains response has no result list")
+    if isinstance(info, dict) and info.get("total_count") not in (None, len(result)):
+        raise Undetermined("the custom domains response is paginated; not every domain was read")
+    live: list[str] = []
+    for row in result:
+        if not isinstance(row, dict) or not isinstance(row.get("hostname"), str):
+            raise Undetermined("a custom domain row has no hostname")
+        if row.get("service") != script:
+            raise Undetermined(f"a custom domain row names service {row.get('service')!r}, not {script!r}")
+        live.append(row["hostname"])
+    sub = _envelope_result(subdomain, "workers.dev subdomain")
+    if not isinstance(sub, dict) or not isinstance(sub.get("enabled"), bool):
+        raise Undetermined("the workers.dev subdomain response has no boolean `enabled`")
+
+    differences = []
+    added = sorted(set(declared) - set(live))
+    removed = sorted(set(live) - set(declared))
+    if added:
+        differences.append("the deploy would ATTACH custom domain(s) Production does not have: " + ", ".join(added))
+    if removed:
+        differences.append("the deploy would DETACH custom domain(s) Production has: " + ", ".join(removed))
+    if sub["enabled"] != want_workers_dev:
+        differences.append(f"the deploy would set workers.dev enabled={str(want_workers_dev).lower()} "
+                           f"(Production has {str(sub['enabled']).lower()})")
+    if want_previews is not None and sub.get("previews_enabled") != want_previews:
+        differences.append(f"the deploy would set preview URLs enabled={str(want_previews).lower()} "
+                           f"(Production has {sub.get('previews_enabled')!r})")
+    return {"script": script, "declared_custom_domains": sorted(declared),
+            "live_custom_domains": sorted(live),
+            "workers_dev": {"deploy": want_workers_dev, "live": sub["enabled"]},
+            "same": not differences, "differences": differences}
+
+
+def tag_receipt_path(directory: Path, script: str, tag: str) -> Path:
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", script) or not TAG_RE.fullmatch(tag):
+        raise ConfigError("tag receipt needs an exact script name and tag")
+    return directory / f"{script}--{tag}.json"
+
+
+def write_tag_receipt(args: argparse.Namespace) -> dict:
+    if not DIGEST_RE.fullmatch(args.digest or "") or not re.fullmatch(r"[0-9a-f]{40}", args.sha or "")             or not UUID_RE.fullmatch(args.version_id or "") or not args.environment:
+        raise ConfigError("tag receipt write needs --digest, --sha, --version-id and --environment")
+    path = tag_receipt_path(args.dir, args.script, args.tag)
+    row = {"schema": TAG_RECEIPT_SCHEMA, "script": args.script, "environment": args.environment,
+           "tag": args.tag, "steps_digest": args.digest, "git_sha": args.sha,
+           "version_id": args.version_id, "source_ref": "bin/deploy-worker.sh",
+           "recorded_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")}
+    args.dir.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(row, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+    return row
+
+
+def check_tag_receipt(args: argparse.Namespace) -> dict:
+    if not DIGEST_RE.fullmatch(args.digest or ""):
+        raise ConfigError("tag receipt check needs --digest sha256:<64 hex>")
+    path = tag_receipt_path(args.dir, args.script, args.tag)
+    try:
+        row = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"match": False, "reason": f"no durable receipt for {args.script} tag {args.tag} at {path}"}
+    except (OSError, ValueError) as exc:
+        return {"match": False, "reason": f"the durable receipt {path} is unreadable: {exc}"}
+    if not isinstance(row, dict) or row.get("schema") != TAG_RECEIPT_SCHEMA             or row.get("script") != args.script or row.get("tag") != args.tag:
+        return {"match": False, "reason": f"the durable receipt {path} is not a receipt for {args.script} tag {args.tag}"}
+    if row.get("steps_digest") != args.digest:
+        return {"match": False, "reason": f"{args.script} applied tag {args.tag} with steps "
+                f"{row.get('steps_digest')}, but wrangler.toml now declares {args.digest}"}
+    return {"match": True, "receipt": row}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -186,11 +328,44 @@ def main(argv: list[str] | None = None) -> int:
     r = sub.add_parser("receipt")
     r.add_argument("--file", required=True, type=Path)
     r.add_argument("--sha", required=True)
+    a = sub.add_parser("attachments")
+    a.add_argument("--config", required=True, type=Path)
+    a.add_argument("--domains-json", required=True, type=Path)
+    a.add_argument("--subdomain-json", required=True, type=Path)
+    t = sub.add_parser("tag-receipt")
+    t.add_argument("action", choices=["write", "check"])
+    t.add_argument("--dir", required=True, type=Path)
+    t.add_argument("--script", required=True)
+    t.add_argument("--tag", required=True)
+    t.add_argument("--digest", required=True)
+    t.add_argument("--sha")
+    t.add_argument("--version-id")
+    t.add_argument("--environment")
     args = parser.parse_args(argv)
 
     try:
         if args.cmd == "receipt":
             print(json.dumps(read_receipt(args.file, args.sha), sort_keys=True))
+            return 0
+        if args.cmd == "tag-receipt":
+            if args.action == "write":
+                print(json.dumps(write_tag_receipt(args), sort_keys=True))
+                return 0
+            verdict = check_tag_receipt(args)
+            print(json.dumps(verdict, sort_keys=True))
+            return 0 if verdict["match"] else DIFFERS
+        if args.cmd == "attachments":
+            try:
+                domains = json.loads(args.domains_json.read_text(encoding="utf-8"))
+                subdomain = json.loads(args.subdomain_json.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise Undetermined(f"an attachment response is not readable JSON: {exc}") from exc
+            verdict = attachments(args.config, domains, subdomain)
+            print(json.dumps(verdict, sort_keys=True))
+            if not verdict["same"]:
+                for line in verdict["differences"]:
+                    print(f"worker-do-migration: {line}", file=sys.stderr)
+                return DIFFERS
             return 0
         target = load_target(args.config, args.env)
         if args.cmd == "target":
