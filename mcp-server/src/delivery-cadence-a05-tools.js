@@ -1,5 +1,5 @@
 // DoctorCRE v5 slice V5-A05 -- the production door onto
-// delivery-cadence-a05.v5.js's pure classifiers (migration 0592).
+// delivery-cadence-a05.v5.js's pure classifiers (migration 0606).
 //
 // Three verbs:
 //   cadence-status              read-only. ops.v5_a05_cadence_status mirrors
@@ -16,7 +16,7 @@
 //                                pass live. It writes a signal_event (the
 //                                existing WR-000113 evidence mechanism) and
 //                                mints through the existing
-//                                ops.mint_notification door (0592 extends it
+//                                ops.mint_notification door (0606 extends it
 //                                with p_bypass_quiet_hours; it does not
 //                                duplicate it), so an urgent alert reaches the
 //                                same notification queue and the same
@@ -53,7 +53,7 @@ function signalSeverityFor(routing) {
 const MINT_SEVERITY = Object.freeze({ critical: "failure", warning: "action_required" });
 
 export function deliveryCadenceA05Tools({ withEnvelope, writeEvent, ToolError }) {
-  async function require0592(c) {
+  async function require0606(c) {
     const r = await c.query(
       `select to_regprocedure('ops.v5_a05_cadence_status(text,text)') is not null as status_fn,
               to_regprocedure('ops.v5_a05_record_cadence_receipt(text,text,uuid)') is not null as record_fn,
@@ -61,8 +61,8 @@ export function deliveryCadenceA05Tools({ withEnvelope, writeEvent, ToolError })
     const s = r.rows[0];
     if (s.status_fn && s.record_fn && s.mint_fn) return;
     throw new ToolError({ error: "migration_not_applied",
-      migration: "0592_delivery_cadence_a05", present: s,
-      hint: "apply migration 0592 before using V5-A05 verbs; nothing was written" });
+      migration: "0606_delivery_cadence_a05", present: s,
+      hint: "apply migration 0606 before using V5-A05 verbs; nothing was written" });
   }
 
   function assertSubject(args) {
@@ -99,7 +99,7 @@ export function deliveryCadenceA05Tools({ withEnvelope, writeEvent, ToolError })
         subject_type: { type: "string" }, subject_ref: { type: "string" },
       }, required: ["subject_type", "subject_ref"] },
       handler: async (c, _actor, args) => {
-        await require0592(c);
+        await require0606(c);
         assertSubject(args);
         const r = await c.query("select ops.v5_a05_cadence_status($1::text,$2::text) as status",
           [args.subject_type, args.subject_ref]);
@@ -109,13 +109,13 @@ export function deliveryCadenceA05Tools({ withEnvelope, writeEvent, ToolError })
 
     "record-cadence-receipt": {
       write: true,
-      description: "Record that a subject's V5-A05 assurance cadence checked in. Inserts one append-only row into ops.v5_a05_cadence_receipt, expiring 14 days from now. Performs no escalation -- raise-delivery-cadence-alert and the daily sweep own that. Evidence is computed server-side by ops.v5_a05_record_cadence_receipt itself (Q008.D2: no caller-supplied evidence can reset the clock) -- a caller cannot pass or influence it. Disclosed gap (migration 0592's own header comment): no Completion Register producer exists yet for any V5-A05 subject, so the server-computed evidence records that gap rather than a fabricated outcome-row foreign key.",
+      description: "Record that a subject's V5-A05 assurance cadence checked in. Inserts one append-only row into ops.v5_a05_cadence_receipt, expiring 14 days from now. Performs no escalation -- raise-delivery-cadence-alert and the daily sweep own that. Evidence is computed server-side by ops.v5_a05_record_cadence_receipt itself (Q008.D2: no caller-supplied evidence can reset the clock) -- a caller cannot pass or influence it. Disclosed gap (migration 0606's own header comment): no Completion Register producer exists yet for any V5-A05 subject, so the server-computed evidence records that gap rather than a fabricated outcome-row foreign key.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
         idempotency_key: { type: "string" },
         subject_type: { type: "string" }, subject_ref: { type: "string" },
       }, required: ["idempotency_key", "subject_type", "subject_ref"] },
       handler: async (c, actor, args) => withEnvelope(c, actor, "record-cadence-receipt", args, async () => {
-        await require0592(c);
+        await require0606(c);
         assertSubject(args);
         const r = await c.query(
           "select ops.v5_a05_record_cadence_receipt($1::text,$2::text,$3::uuid) as receipt",
@@ -161,7 +161,7 @@ export function deliveryCadenceA05Tools({ withEnvelope, writeEvent, ToolError })
         detail: { type: "string" },
       }, required: ["idempotency_key", "reason_id", "subject_type", "subject_ref"] },
       handler: async (c, actor, args) => withEnvelope(c, actor, "raise-delivery-cadence-alert", args, async () => {
-        await require0592(c);
+        await require0606(c);
         assertSubject(args);
 
         // THE ACTUAL PRODUCTION CALL SITE for the pure V5-A05 classifier.

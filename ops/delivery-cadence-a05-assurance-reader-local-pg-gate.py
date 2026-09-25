@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # ci: db-gate
+# doctrine: doctorcre-v5-design-basis
 """Rollback-only proof that morning-brief's assurance_cadence section is
 actually readable on the carr_reader connection.
 

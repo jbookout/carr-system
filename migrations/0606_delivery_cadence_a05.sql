@@ -1,4 +1,4 @@
--- 0592_delivery_cadence_a05.sql
+-- 0606_delivery_cadence_a05.sql
 -- DoctorCRE v5 slice V5-A05: delivery cadence, escalation and the
 -- decision-ready quiet-hours queue -- the production store and doors behind
 -- mcp-server/src/delivery-cadence-a05.v5.js's pure classifiers.
@@ -45,13 +45,13 @@
 do $v5a05_preflight$
 begin
   if to_regprocedure('ops.mint_notification(text,uuid,text,text,text,text,text,text,text)') is null then
-    raise exception '0592 requires the 0521 ops.mint_notification (nine-argument) door';
+    raise exception '0606 requires the 0521 ops.mint_notification (nine-argument) door';
   end if;
   if to_regprocedure('ops.notification_feed_facts(timestamptz,integer)') is null then
-    raise exception '0592 requires the 0521 notification feed read door';
+    raise exception '0606 requires the 0521 notification feed read door';
   end if;
   if to_regprocedure('ops.scac_reference_monitor_guard()') is null then
-    raise exception '0592 requires the SIEP-18 reference-monitor guard function';
+    raise exception '0606 requires the SIEP-18 reference-monitor guard function';
   end if;
 end $v5a05_preflight$;
 
@@ -141,7 +141,7 @@ begin
   end if;
 
   select applied_at into v_activation_anchor from public.schema_migrations
-   where filename = '0592_delivery_cadence_a05.sql';
+   where filename = '0606_delivery_cadence_a05.sql';
 
   select * into v_last from ops.v5_a05_cadence_receipt
    where organization_tenant_id = v_tenant and subject_type = p_subject_type and subject_ref = p_subject_ref
@@ -280,7 +280,7 @@ begin
     'schema_version', 'v5-a05-cadence-receipt-evidence.v1',
     'issued_by', v_actor, 'issued_at', v_now,
     'completion_register_outcome_id', null,
-    'disclosed_gap', 'no Completion Register producer exists yet for this subject; see migrations/0592_delivery_cadence_a05.sql');
+    'disclosed_gap', 'no Completion Register producer exists yet for this subject; see migrations/0606_delivery_cadence_a05.sql');
 
   select * into v_prior from ops.v5_a05_cadence_receipt
    where organization_tenant_id = v_tenant and subject_type = p_subject_type and subject_ref = p_subject_ref
