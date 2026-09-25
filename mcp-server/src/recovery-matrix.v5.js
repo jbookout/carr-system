@@ -168,9 +168,10 @@ export const V5_PITR_NEGATIVE_MARGIN_SECONDS = 5;
 export const V5_OUTBOUND_SETTLE_WINDOW_SECONDS = 15 * 60;
 
 /**
- * THE VERIFY RE-READ BINDING (review G4). Evidence is accepted only as the
- * output of its verify step, which RE-DERIVES it from provider and database
- * reads and stamps it: verification = { verifier, verified_at, facts_digest },
+ * THE VERIFY RE-READ BINDING (review G4, H1). Evidence is accepted only as the
+ * output of its verify step, which PERFORMS EVERY DECISIVE READ ITSELF — it
+ * takes no receipt, watermark, probe or instant from a caller file — and
+ * stamps it: verification = { verifier, verified_at, facts_digest },
  * facts_digest being the canonical digest of the evidence without that block
  * (lib/recovery_evidence.py writes it). The verifier must be the one registered
  * for the kind, the digest must recompute, and verified_at must be within
@@ -180,8 +181,8 @@ export const V5_OUTBOUND_SETTLE_WINDOW_SECONDS = 15 * 60;
  * recompute a digest. It closes stale, edited and never-re-read evidence.
  */
 export const V5_EVIDENCE_VERIFIERS = Object.freeze({
-  restore_exercise: "tools/restore-watermark.py verify-receipt",
-  record_layer_rpo: "tools/pitr-restore-proof.py verify",
+  restore_exercise: "tools/restore-watermark.py verify-restore",
+  record_layer_rpo: "tools/pitr-restore-proof.py prove",
   outbound_census: "tools/restore-watermark.py outbound-census",
 });
 export const V5_REVERIFY_MAX_AGE_SECONDS = 15 * 60;
@@ -438,7 +439,7 @@ function watermarkDiff(artifact, restored) {
 }
 
 /**
- * @param receiptInput the receipt as `restore-watermark.py verify-receipt` emits it
+ * @param receiptInput the receipt as `restore-watermark.py verify-restore` emits it
  * @param clock        { now_ms } — the binding must be fresh at this instant
  */
 export function evaluateRestoreExercise(receiptInput, clock) {

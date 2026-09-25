@@ -1,7 +1,7 @@
 """The verify re-read binding on V5-F08 recovery evidence (review G4, decided design).
 
-A verify step RE-DERIVES a piece of evidence from provider and database reads,
-then stamps it with
+A verify step PERFORMS EVERY DECISIVE READ ITSELF (review H1: nothing that
+decides a verdict may come from a caller file) and then stamps the result with
 
     verification = {"verifier": <registered id>, "verified_at": <UTC instant>,
                     "facts_digest": "sha256:" + sha256(canonical facts)}
@@ -28,8 +28,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 VERIFIERS = {
-    "restore_exercise": "tools/restore-watermark.py verify-receipt",
-    "record_layer_rpo": "tools/pitr-restore-proof.py verify",
+    "restore_exercise": "tools/restore-watermark.py verify-restore",
+    "record_layer_rpo": "tools/pitr-restore-proof.py prove",
     "outbound_census": "tools/restore-watermark.py outbound-census",
 }
 

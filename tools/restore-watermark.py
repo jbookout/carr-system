@@ -26,26 +26,32 @@ only thing a restore can be compared EXACTLY against is the artifact itself.
                nightly workflow run's provider-authenticated "Backup artifact"
                Check (bin/backup-workflow-status.py writes it), cross-checked
                against the artifact API, then the artifact's own bytes. Writes
-               copy.json and the extracted .sql.age into --out-dir.
-  receipt      the typed restore-exercise-receipt.v1 that
-               mcp-server/src/recovery-matrix.v5.js evaluateRestoreExercise
-               reads, built from fetch-copy's copy.json.
-  verify-receipt
-               re-reads the Check and the artifact named in a receipt from the
-               provider and exits 1 unless the recorded digest, the store's
-               digest and the production instant still say what the receipt
-               says; on a match it prints the receipt with the copy block AS
-               RE-READ, stamped with the verify binding the evaluator requires
-               (lib/recovery_evidence.py). A receipt is never trusted because
-               it exists.
+               copy.json and the extracted .sql.age into --out-dir. It feeds
+               the RESTORE only; no receipt is ever built from its output.
+  verify-restore
+               THE ONLY WAY A RESTORE RECEIPT IS MADE (review H1). It takes no
+               receipt, watermark, digest or instant from anyone. While the
+               restored target still exists it performs every decisive read
+               itself: it looks up the run's Check itself, downloads the
+               artifact itself and hashes those bytes, decrypts them with the
+               identity file and counts the artifact-side watermark, reads the
+               restored watermark over RESTORE_DSN, reads where the target is
+               and when it came into being from the provider (or, for a local
+               cluster, from the server), and takes the finish instant from
+               its own clock. It then builds restore-exercise-receipt.v1 and
+               stamps the verify binding (lib/recovery_evidence.py).
   outbound-census
                every device row of the RESTORED ops.notification_delivery as
-               an outbound item, plus the provider readbacks from --readbacks,
-               as the bound request evaluateOutboundQueueRelease reads. The
-               item list comes from the database, never from a caller.
+               an outbound item, as the bound request evaluateOutboundQueueRelease
+               reads. The items come from the database; readbacks come only
+               from a registered per-channel provider reader that stamps its
+               own read_at (review H3). No channel has one today, so every
+               unsettled item stays quarantined.
 
-Nothing here writes to a database or reads a credential. fetch-copy and
-verify-receipt call the GitHub API through the logged-in `gh`.
+Nothing here writes to a database. No credential value is printed: the age
+identity is a file path handed to `age`, the DSN is read from the
+environment, and the provider key is sent only as a header. fetch-copy and
+verify-restore call the GitHub API through the logged-in `gh`.
 """
 from __future__ import annotations
 
@@ -57,10 +63,12 @@ import os
 import re
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
@@ -73,7 +81,6 @@ COPY_RE = re.compile(
 )
 TERMINATOR = b"\\."
 RECEIPT_KIND = "restore-exercise-receipt.v1"
-TARGET_KINDS = ("disposable_branch", "disposable_local_cluster", "staging")
 COPY_KEYS = ("copy_id", "custody_domain", "primary_domain", "produced_at", "producer_id",
              "recorded_artifact_digest", "recorded_digest_source", "store_readback_digest")
 DUMP_MEMBER_RE = re.compile(r"^carr-[0-9]{8}\.sql\.age$")
@@ -263,15 +270,21 @@ def _check_bound_to_run(bws, repository: str, identity, run: dict[str, Any], ite
 
     A Check a workflow creates with GITHUB_TOKEN does not land in its own run's
     check suite: read live on 2026-09-24, 0 of the last 5 nightly runs had it
-    there; each sat in another github-actions suite on the same head. So the
-    run is bound three ways, all provider-assigned except the envelope: the
-    suite GitHub placed the Check in is a github-actions suite for this head
-    on main; the Check's provider-stamped start and completion fall inside the
-    run's own window; and its external_id (checked by matching_checks) names
-    this run id and attempt. Its own run's suite is accepted as well.
-    RESIDUAL (documented, not closed): a different workflow with checks:write
-    running on the same main commit inside the same window could write an
-    identical envelope; admitting a workflow to main is the control there.
+    there; each sat in the main-canary github-actions suite on the same head.
+    So the run is bound by: the Actions app stamp; the suite GitHub placed the
+    Check in being a github-actions suite for this head on main (or the run's
+    own suite); and its external_id (checked by matching_checks) naming this
+    run id and attempt. Review H2: the Check's started_at/completed_at are set
+    by whoever creates the Check, so they prove nothing and are NOT used.
+
+    RESIDUAL (documented, not closed): the external_id is free text. Any
+    workflow allowed checks:write that runs on the same main commit could
+    write an identical envelope. _backup_run narrows who that can be: the run
+    must be on main, scheduled or dispatched, on a commit in main's history,
+    and its backup workflow file must be byte-identical to main's now, so a
+    manually dispatched run of an EDITED backup-nightly is refused. What
+    remains is another workflow already on main writing a forged Check;
+    admitting workflows to main is the control there.
     """
     check_suite = item.get("check_suite")
     suite_id = check_suite.get("id") if isinstance(check_suite, dict) else None
@@ -287,27 +300,21 @@ def _check_bound_to_run(bws, repository: str, identity, run: dict[str, Any], ite
                 or suite.get("head_branch") != BACKUP_RUN_BRANCH
                 or str(suite.get("head_sha", "")).lower() != identity.head_sha):
             return False
-    started, completed = _instant(item.get("started_at")), _instant(item.get("completed_at"))
-    run_start, run_end = _instant(run.get("run_started_at")), _instant(run.get("updated_at"))
-    if started is None or completed is None or run_start is None or run_end is None:
-        return False
-    return run_start <= started <= completed <= run_end
+    return True
 
 
-def _authentic_backup_check(bws, identity, run: dict[str, Any], check_run_id: int | None = None) -> dict[str, Any]:
-    """The run's ONE "Backup artifact" Check, authenticated by what the provider assigned.
+def _authentic_backup_check(bws, identity, run: dict[str, Any]) -> dict[str, Any]:
+    """The run's ONE "Backup artifact" Check, looked up here and never named by a caller.
 
-    The name and the external_id envelope select; they do not authenticate on
-    their own (both are free text its creator writes). The Actions app stamp,
-    the suite GitHub placed the Check in and the provider's own timestamps do;
-    see _check_bound_to_run. Zero or several candidates fail closed.
+    The name and the external_id envelope select; the Actions app stamp and
+    the suite GitHub placed the Check in authenticate as far as they can; see
+    _check_bound_to_run for what remains. Zero or several candidates fail closed.
     """
     repository = identity.repository
     stamped = [
         item for item in bws.matching_checks(identity)
         if isinstance(item.get("app"), dict)
         and item["app"].get("id") == bws.ACTIONS_APP_ID and item["app"].get("slug") == bws.ACTIONS_APP_SLUG
-        and (check_run_id is None or item.get("id") == check_run_id)
     ]
     candidates = [item for item in stamped if _check_bound_to_run(bws, repository, identity, run, item)]
     if len(candidates) != 1:
@@ -343,15 +350,28 @@ def _backup_run(bws, repository: str, run_id: int):
     cmp = bws.api(f"/repos/{repository}/compare/{head_sha}...{BACKUP_RUN_BRANCH}")
     if not isinstance(cmp, dict) or cmp.get("status") not in ("ahead", "identical") or cmp.get("behind_by") != 0:
         raise ValueError(f"run {run_id}'s commit is not an ancestor of {BACKUP_RUN_BRANCH}")
+    # H2: a manual dispatch runs the workflow file AT the run's commit. It must
+    # be byte-identical (same git blob) to main's backup workflow now, so an
+    # edited backup-nightly cannot produce a copy that counts.
+    at_run = _workflow_blob(bws, repository, bws.BACKUP_WORKFLOW_PATH, head_sha)
+    on_main = _workflow_blob(bws, repository, bws.BACKUP_WORKFLOW_PATH, BACKUP_RUN_BRANCH)
+    if at_run is None or on_main is None or at_run != on_main:
+        raise ValueError(f"run {run_id}'s {bws.BACKUP_WORKFLOW_PATH} is not the one on {BACKUP_RUN_BRANCH} now")
     identity = bws.Identity(repository, int(run["id"]), int(run["run_attempt"]), head_sha)
     return run, identity
 
 
-def read_copy_record(repository: str, run_id: int, check_run_id: int | None = None) -> dict[str, Any]:
+def _workflow_blob(bws, repository: str, path: str, ref: str) -> str | None:
+    got = bws.api(f"/repos/{repository}/contents/{path}", query={"ref": ref})
+    sha = got.get("sha") if isinstance(got, dict) else None
+    return sha if isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}", sha) else None
+
+
+def read_copy_record(repository: str, run_id: int) -> dict[str, Any]:
     """The copy's facts, every one read from the provider: the Check summary and the artifact API."""
     bws = _status_module()
     run, identity = _backup_run(bws, repository, run_id)
-    check = _authentic_backup_check(bws, identity, run, check_run_id)
+    check = _authentic_backup_check(bws, identity, run)
     summary = bws.summary_of(check)
     artifacts = bws.run_artifacts(identity)
     if not bws.summary_matches_artifact(identity, summary, artifacts):
@@ -372,10 +392,8 @@ def read_copy_record(repository: str, run_id: int, check_run_id: int | None = No
     }
 
 
-def fetch_copy(repository: str, run_id: int, out_dir: Path) -> tuple[Path, Path]:
-    """Download the stored artifact, extract its one dump, write copy.json. Returns (zip, dump)."""
-    record = read_copy_record(repository, run_id)
-    artifact_id = record.pop("_artifact_id")
+def download_copy(repository: str, artifact_id: int, out_dir: Path) -> tuple[Path, Path]:
+    """Download one stored artifact ZIP and extract its one dump. Returns (zip, dump)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     archive = out_dir / "artifact.zip"
     with archive.open("wb") as fh:
@@ -389,35 +407,148 @@ def fetch_copy(repository: str, run_id: int, out_dir: Path) -> tuple[Path, Path]
             raise ValueError(f"artifact must hold exactly one carr-YYYYMMDD.sql.age, found {members}")
         dump = out_dir / members[0]
         dump.write_bytes(zf.read(members[0]))
+    return archive, dump
+
+
+def fetch_copy(repository: str, run_id: int, out_dir: Path) -> tuple[Path, Path]:
+    """The copy the rehearsal RESTORES. Writes copy.json for the operator's eyes only; nothing reads it back."""
+    record = read_copy_record(repository, run_id)
+    archive, dump = download_copy(repository, record.pop("_artifact_id"), out_dir)
     (out_dir / "copy.json").write_text(json.dumps(record, sort_keys=True))
     return archive, dump
 
 
-def verify_receipt(receipt: dict[str, Any], repository: str,
-                   now: datetime | None = None) -> tuple[list[str], dict[str, Any] | None]:
-    """Re-derive the receipt's copy block from the provider (review G4).
+# ── verify-restore: every decisive fact is read here, none handed in (H1) ────
 
-    Returns (differences, bound receipt). The bound receipt carries the copy
-    block AS RE-READ, not as the input said it, stamped with the verify
-    binding the evaluator requires; it is None whenever anything differs. A
-    receipt that already carries a binding is refused: re-verify the unbound
-    receipt restore-rehearse wrote, never re-stamp a stamped one.
+AGE = "age"
+NEON_API = "https://console.neon.tech/api/v2"
+ORACLE_ID = "restore-rehearse"
+
+
+def artifact_watermark_from(dump: Path, identity: Path) -> dict[str, dict[str, Any]]:
+    """Decrypt the dump THIS process downloaded and count what it carries. The plaintext is a pipe only."""
+    if not identity.is_file():
+        raise ValueError("the age identity file does not exist")
+    proc = subprocess.Popen([AGE, "--decrypt", "-i", str(identity), str(dump)],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert proc.stdout is not None and proc.stderr is not None
+    parse_error: ValueError | None = None
+    watermark: dict[str, dict[str, Any]] = {}
+    try:
+        watermark = watermark_from_dump(proc.stdout)
+    except ValueError as exc:  # judged after age's exit: a failed decrypt is named as such
+        parse_error = exc
+    finally:
+        proc.stdout.close()
+        err = proc.stderr.read().decode(errors="replace").strip()
+        code = proc.wait()
+    if code:
+        raise ValueError(f"age could not decrypt the downloaded artifact: {err[-200:]}")
+    if parse_error is not None:
+        raise parse_error
+    return watermark
+
+
+def _neon(path: str) -> Any:
+    key = os.environ.get("NEON_API_KEY", "")
+    if not key:
+        raise ValueError("NEON_API_KEY is not loaded; the branch target is read from the provider")
+    req = urllib.request.Request(NEON_API + path, headers={
+        "Authorization": f"Bearer {key}", "Accept": "application/json", "User-Agent": "carr-restore-verify"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read() or b"{}")
+    except urllib.error.HTTPError as exc:
+        raise ValueError(f"provider GET {path} answered {exc.code}") from None
+
+
+def _dsn_host(dsn: str) -> str:
+    from psycopg.conninfo import conninfo_to_dict
+
+    return str(conninfo_to_dict(dsn).get("host") or "")
+
+
+def _utc_seconds(value: datetime) -> str:
+    """Whole seconds, FLOORED: a start read this way is never later than the truth."""
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def branch_target_start(project_id: str, branch_id: str, dsn: str) -> str:
+    """The throwaway branch as the PROVIDER reports it; its creation is the restore's earliest start.
+
+    Refused unless the branch exists, is not the default (production) branch or
+    a protected one, is a child of the default branch, and the DSN's host is
+    one of THIS branch's endpoints (so the watermark read is of this branch).
     """
-    if "verification" in receipt:
-        return (["receipt already carries a verification block"], None)
-    copy = receipt.get("copy", {})
-    source = copy.get("recorded_digest_source", {})
-    if source.get("kind") != DIGEST_SOURCE_KIND:
-        return ([f"recorded digest source is {source.get('kind')!r}, not the producer's Check"], None)
-    fresh = read_copy_record(repository, int(source["workflow_run_id"]), int(source["check_run_id"]))
-    fresh.pop("_artifact_id")
-    differs = [k for k in COPY_KEYS if fresh.get(k) != copy.get(k)]
-    if differs:
-        return (differs, None)
-    return ([], bind({**receipt, "copy": {k: fresh[k] for k in COPY_KEYS}}, "restore_exercise", now))
+    listed = _neon(f"/projects/{project_id}/branches").get("branches") or []
+    defaults = [b.get("id") for b in listed if b.get("default")]
+    if len(defaults) != 1:
+        raise ValueError("the provider did not report exactly one default branch")
+    branch = _neon(f"/projects/{project_id}/branches/{branch_id}").get("branch") or {}
+    if branch.get("id") != branch_id:
+        raise ValueError(f"the provider does not report branch {branch_id}")
+    if branch.get("default") or branch.get("protected") or branch_id == defaults[0]:
+        raise ValueError("the restore target is the production (default) or a protected branch; refusing")
+    if branch.get("parent_id") != defaults[0]:
+        raise ValueError("the restore target branch is not a child of the production branch")
+    hosts = {str(e.get("host")) for e in (_neon(f"/projects/{project_id}/branches/{branch_id}/endpoints")
+                                          .get("endpoints") or [])}
+    if _dsn_host(dsn) not in hosts:
+        raise ValueError("RESTORE_DSN does not point at an endpoint of the named branch")
+    created = _instant(branch.get("created_at"))
+    if created is None:
+        raise ValueError("the provider reported no creation instant for the branch")
+    return _utc_seconds(created)
 
 
-# ── the outbound census, read from the RESTORED database (review G2) ─────────
+def local_target_start(dsn: str) -> str:
+    """A disposable LOCAL cluster: the DSN must be a socket path or loopback; its postmaster start is the earliest start."""
+    host = _dsn_host(dsn)
+    if not (host.startswith("/") or host in ("localhost", "127.0.0.1", "::1")):
+        raise ValueError("a local-cluster target must be reached over a socket path or loopback")
+    import psycopg
+
+    with psycopg.connect(dsn, autocommit=True, options="-c default_transaction_read_only=on") as conn:
+        started = conn.execute("select pg_postmaster_start_time()").fetchone()
+    if not started or not isinstance(started[0], datetime):
+        raise ValueError("the local cluster reported no start instant")
+    return _utc_seconds(started[0])
+
+
+def verify_restore(*, repository: str, run_id: int, identity: Path, target_kind: str, dsn: str,
+                   work_dir: Path, project_id: str | None = None, branch_id: str | None = None,
+                   now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)) -> dict[str, Any]:
+    """Build and bind restore-exercise-receipt.v1 from this process's own reads (review H1)."""
+    if target_kind == "disposable_branch":
+        if not project_id or not branch_id:
+            raise ValueError("a branch target needs --project-id and --branch-id")
+        started_at = branch_target_start(project_id, branch_id, dsn)
+    elif target_kind == "disposable_local_cluster":
+        started_at = local_target_start(dsn)
+    else:
+        raise ValueError(f"target kind must be disposable_branch or disposable_local_cluster, not {target_kind!r}")
+    record = read_copy_record(repository, run_id)
+    archive, dump = download_copy(repository, record.pop("_artifact_id"), work_dir)
+    observed = file_digest(archive)
+    artifact = artifact_watermark_from(dump, identity)
+    restored = restored_watermark(dsn, artifact)
+    finished = now()  # this process's own clock, after its last read; it also stamps the binding
+    finished_at = _utc_seconds(finished)
+    receipt = {
+        "receipt_kind": RECEIPT_KIND,
+        "target_kind": target_kind,
+        "copy": {k: record[k] for k in COPY_KEYS},
+        "oracle_id": ORACLE_ID,
+        "observed_artifact_digest": observed,
+        "artifact_watermark": strip_columns(artifact),
+        "restored_watermark": strip_columns(restored),
+        "started_at": started_at,
+        "finished_at": finished_at,
+    }
+    return bind(receipt, "restore_exercise", finished)
+
+
+# ── the outbound census, read from the RESTORED database (review G2, H3) ─────
 
 OUTBOUND_CENSUS_SOURCE = "ops.notification_delivery:device"
 OUTBOUND_SQL = """
@@ -426,7 +557,14 @@ select id::text, notification_id::text, channel, state, attempted_at
  where channel = 'device'
  order by id
 """
-READBACK_KEYS = ("idempotency_key", "item_id", "read_at", "readback")
+
+# H3: a readback is the PROVIDER's answer about one effect, read by code in
+# this file with its own clock, never JSON an operator typed. A reader takes
+# the items of its channel and returns readbacks shaped
+# {item_id, idempotency_key, read_at, readback}. No device push sender exists
+# in this repository yet, so there is no provider to ask and no reader: every
+# unsettled device item stays quarantined until one is added HERE.
+PROVIDER_READERS: dict[str, Callable[[list[dict[str, Any]]], list[dict[str, Any]]]] = {}
 
 
 def _utc_micros(value: datetime) -> str:
@@ -466,47 +604,33 @@ def restored_outbound_items(dsn: str) -> list[dict[str, Any]]:
             return [outbound_item(*row) for row in cur.fetchall()]
 
 
-def outbound_census(items: list[dict[str, Any]], readbacks: list[dict[str, Any]], restore_id: str,
-                    now: datetime | None = None) -> dict[str, Any]:
-    """The evaluator's request: every restored device row, the readbacks as given, the census, bound."""
-    if not isinstance(readbacks, list):
-        raise ValueError("readbacks must be a JSON array")
-    for i, rb in enumerate(readbacks):
-        if not isinstance(rb, dict) or sorted(rb) != sorted(READBACK_KEYS):
-            raise ValueError(f"readbacks[{i}] must hold exactly {', '.join(READBACK_KEYS)}")
+def provider_readbacks(items: list[dict[str, Any]], channel: str = "device") -> list[dict[str, Any]]:
+    """Ask the channel's registered provider reader about every unsettled item; none registered, none read."""
+    reader = PROVIDER_READERS.get(channel)
+    unsettled = [i for i in items if i["state"] != "settled"]
+    return reader(unsettled) if reader and unsettled else []
+
+
+def outbound_census(items: list[dict[str, Any]], restore_id: str, now: datetime | None = None) -> dict[str, Any]:
+    """The evaluator's request: every restored device row, the provider's own readbacks, the census, bound."""
     request = {
         "restore_id": restore_id,
         "census": {"source": OUTBOUND_CENSUS_SOURCE, "digest": census_digest(items), "item_count": len(items)},
         "items": items,
-        "readbacks": readbacks,
+        "readbacks": provider_readbacks(items),
     }
     return bind(request, "outbound_census", now)
 
 
-def build_receipt(*, copy: dict, target_kind: str, oracle_id: str, observed_digest: str,
-                  artifact: dict[str, dict[str, Any]], restored: dict[str, dict[str, Any]],
-                  started_at: str, finished_at: str) -> dict:
-    missing = [k for k in COPY_KEYS if k not in copy]
-    extra = [k for k in copy if k not in COPY_KEYS]
-    if missing or extra:
-        raise ValueError(f"copy record must hold exactly {', '.join(COPY_KEYS)} (missing {missing}, unknown {extra})")
-    if target_kind not in TARGET_KINDS:
-        raise ValueError(f"target kind must be one of {TARGET_KINDS}; a production restore is never receipted here")
-    return {
-        "receipt_kind": RECEIPT_KIND,
-        "target_kind": target_kind,
-        "copy": {k: copy[k] for k in COPY_KEYS},
-        "oracle_id": oracle_id,
-        "observed_artifact_digest": observed_digest,
-        "artifact_watermark": strip_columns(artifact),
-        "restored_watermark": strip_columns(restored),
-        "started_at": started_at,
-        "finished_at": finished_at,
-    }
-
-
 def _load_json(path: str) -> Any:
     return json.loads(Path(path).read_text())
+
+
+def _dsn_from(env_name: str) -> str:
+    dsn = os.environ.get(env_name, "")
+    if not dsn:
+        raise ValueError(f"${env_name} is empty; the restored database DSN is read from the environment only")
+    return dsn
 
 
 def main(argv=None) -> int:
@@ -525,21 +649,17 @@ def main(argv=None) -> int:
     f.add_argument("--repository", required=True)
     f.add_argument("--run-id", required=True, type=int)
     f.add_argument("--out-dir", required=True)
-    r = sub.add_parser("receipt")
-    r.add_argument("--copy-record", required=True)
-    r.add_argument("--target-kind", required=True)
-    r.add_argument("--oracle-id", required=True)
-    r.add_argument("--observed-digest", required=True)
-    r.add_argument("--artifact", required=True)
-    r.add_argument("--restored", required=True)
-    r.add_argument("--started-at", required=True)
-    r.add_argument("--finished-at", required=True)
-    v = sub.add_parser("verify-receipt")
+    v = sub.add_parser("verify-restore")
     v.add_argument("--repository", required=True)
-    v.add_argument("receipt")
+    v.add_argument("--run-id", required=True, type=int)
+    v.add_argument("--identity", required=True, help="path to the age identity file (read by age, never printed)")
+    v.add_argument("--target-kind", required=True, choices=("disposable_branch", "disposable_local_cluster"))
+    v.add_argument("--project-id")
+    v.add_argument("--branch-id")
+    v.add_argument("--work-dir", required=True)
+    v.add_argument("--dsn-env", default="RESTORE_DSN")
     o = sub.add_parser("outbound-census")
     o.add_argument("--restore-id", required=True)
-    o.add_argument("--readbacks", required=True, help="JSON array of provider readbacks, each with its own read_at")
     o.add_argument("--dsn-env", default="RESTORE_DSN")
     a = p.parse_args(argv)
     try:
@@ -550,44 +670,29 @@ def main(argv=None) -> int:
             print(file_digest(Path(a.path)))
             return 0
         if a.cmd == "restored":
-            dsn = os.environ.get(a.dsn_env, "")
-            if not dsn:
-                raise ValueError(f"${a.dsn_env} is empty; the restored database DSN is read from the environment only")
-            print(json.dumps(restored_watermark(dsn, _load_json(a.artifact)), sort_keys=True))
+            print(json.dumps(restored_watermark(_dsn_from(a.dsn_env), _load_json(a.artifact)), sort_keys=True))
             return 0
         if a.cmd == "fetch-copy":
             archive, dump = fetch_copy(a.repository, a.run_id, Path(a.out_dir))
             print(json.dumps({"archive": str(archive), "dump": str(dump)}))
             return 0
-        if a.cmd == "verify-receipt":
-            differs, bound = verify_receipt(_load_json(a.receipt), a.repository)
-            if differs:
-                print(json.dumps({"receipt_copy_matches_provider": False, "differs": differs}), file=sys.stderr)
-                return 1
-            print(json.dumps(bound, sort_keys=True))
+        if a.cmd == "verify-restore":
+            receipt = verify_restore(repository=a.repository, run_id=a.run_id, identity=Path(a.identity),
+                                     target_kind=a.target_kind, dsn=_dsn_from(a.dsn_env), work_dir=Path(a.work_dir),
+                                     project_id=a.project_id, branch_id=a.branch_id)
+            print(json.dumps(receipt, sort_keys=True))
             return 0
         if a.cmd == "outbound-census":
-            dsn = os.environ.get(a.dsn_env, "")
-            if not dsn:
-                raise ValueError(f"${a.dsn_env} is empty; the restored database DSN is read from the environment only")
-            request = outbound_census(restored_outbound_items(dsn), _load_json(a.readbacks), a.restore_id)
-            print(json.dumps(request, sort_keys=True))
+            print(json.dumps(outbound_census(restored_outbound_items(_dsn_from(a.dsn_env)), a.restore_id), sort_keys=True))
             return 0
         artifact = _load_json(a.artifact)
         restored = _load_json(a.restored)
-        if a.cmd == "compare":
-            diffs = compare(artifact, restored)
-            print(f"WATERMARK tables={len(artifact)} mismatches={len(diffs)}")
-            for d_ in diffs[:40]:
-                print(f"  MISMATCH {d_['table']}: artifact={d_['artifact_rows']} restored={d_['restored_rows']}"
-                      f" content_differs={str(d_['content_differs']).lower()}")
-            return 0 if not diffs else 1
-        receipt = build_receipt(copy=_load_json(a.copy_record), target_kind=a.target_kind,
-                                oracle_id=a.oracle_id, observed_digest=a.observed_digest,
-                                artifact=artifact, restored=restored,
-                                started_at=a.started_at, finished_at=a.finished_at)
-        print(json.dumps(receipt, sort_keys=True))
-        return 0
+        diffs = compare(artifact, restored)
+        print(f"WATERMARK tables={len(artifact)} mismatches={len(diffs)}")
+        for d_ in diffs[:40]:
+            print(f"  MISMATCH {d_['table']}: artifact={d_['artifact_rows']} restored={d_['restored_rows']}"
+                  f" content_differs={str(d_['content_differs']).lower()}")
+        return 0 if not diffs else 1
     except (ValueError, OSError, json.JSONDecodeError, KeyError, zipfile.BadZipFile) as exc:
         print(f"restore-watermark: {exc}", file=sys.stderr)
         return 2

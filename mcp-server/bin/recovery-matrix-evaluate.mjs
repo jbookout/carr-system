@@ -13,8 +13,8 @@
 // is refused (exit 2), so a stale proof cannot be replayed as a fresh one.
 //
 // `rpo` evaluates one RPO evidence block — in production the block
-// `tools/pitr-restore-proof.py verify` recomputes from production and the
-// provider and pipes in on stdin ("-"). `matrix` supplies the repository's
+// `tools/pitr-restore-proof.py prove` reads itself from production, the
+// branch and the provider, binds, and pipes in on stdin ("-"). `matrix` supplies the repository's
 // sealed business calendar (ops/config/business-calendar.us-federal.json) when
 // the evidence does not carry one; the evaluator refuses any calendar but the
 // pinned one.

@@ -23,17 +23,21 @@ measures it, with a positive probe AND a negative control:
   6. through a READ-ONLY session on the branch: the positive probe must be
      present with the same id, nonce and write instant, the negative probe must
      be ABSENT, and the core tables must hold rows;
-  7. delete the branch by id and confirm the provider answers 404 for it.
+  7. re-read both probe rows from production (read-only) and the history
+     retention from the provider;
+  8. delete the branch by id, and confirm its life from the provider's
+     OPERATIONS LOG — a finished create_branch and a finished delete_timeline
+     on that branch id, no older than the proof's start — rather than from a
+     404, which an invented branch id also returns.
 
-`verify` then RECOMPUTES what can still be recomputed rather than trusting the
-file `prove` wrote: it re-reads both probe rows from production (read-only),
-re-reads the default branch id and the history retention from the provider,
-and confirms the branch's life from the provider's OPERATIONS LOG — a finished
-create_branch and a finished delete_timeline on that branch id, no older than
-the proof's start — rather than from a 404, which an invented branch id also
-returns. Its output is the evidence block, stamped with the verify re-read
-binding (lib/recovery_evidence.py) that mcp-server/bin/recovery-matrix-evaluate.mjs
-`rpo -` requires, judged at the real current time.
+ONE PROCESS, NO FILE IN BETWEEN (review H1). Every fact the evaluator decides
+on is read by THIS process in this run, the branch-side ones while the branch
+still exists: the parent point from the provider, the probes and core rows on
+the branch itself. There is no `verify` mode that reads an earlier run's file:
+nothing that decides the verdict comes from a caller. The evidence block is
+printed on stdout, stamped with the binding (lib/recovery_evidence.py) that
+mcp-server/bin/recovery-matrix-evaluate.mjs `rpo -` requires; progress lines go
+to stderr. out/pitr-restore-proof.json is a copy for the operator's eyes only.
 
 WHAT IS WRITTEN. Production business data is never written. The only writes
 are the two probe rows, through the one function migration 0597 made for them,
@@ -49,9 +53,11 @@ NOTHING OUTLIVES THE PROVIDER'S OWN CLEANUP. Every branch this creates carries
 a provider-side expiry one hour out, so a branch leaks for at most an hour
 whatever happens to this process. On top of that: the branch name is recorded
 before the create call, an interrupted create (any BaseException, Ctrl-C
-included) is found by that name and deleted, a delete the provider answers 423
-(an operation still running) is retried with backoff, teardown runs with
-SIGINT and SIGHUP ignored, and the next run sweeps whatever the state file
+included) is found by that name and deleted, SIGINT/SIGTERM/SIGHUP are BLOCKED
+from the create call until the new id is in the teardown list (review H4), a
+delete the provider answers 423 (an operation still running) is retried with
+backoff, teardown runs with SIGINT, SIGTERM and SIGHUP ignored, and the next
+run sweeps whatever the state file
 still names, by id or by name. (Review G3 removed the old stand-in-parent
 rehearsal mode: its parent could not carry an expiry, because the provider
 refuses children of an expiring branch.)
@@ -101,7 +107,8 @@ class ProofError(RuntimeError):
 
 
 def say(message: str) -> None:
-    print(message, flush=True)
+    """Progress for the operator. stdout carries only the evidence block."""
+    print(message, file=sys.stderr, flush=True)
 
 
 # ── the provider API (the key is a header, never an argument) ────────────────
@@ -244,19 +251,42 @@ def admit_metered_branch() -> None:
         raise ProofError(f"neon-disposable-branch metering admission refused: {got.stderr.strip()[-200:]}")
 
 
-def create_branch(name: str, parent_id: str, parent_timestamp: str, never: set[str]) -> dict:
-    """Create one disposable, EXPIRING branch through the API. Admission first; the name is recorded before the call."""
+INTERRUPTS = tuple(s for s in (getattr(signal, "SIGINT", None), getattr(signal, "SIGTERM", None),
+                                getattr(signal, "SIGHUP", None)) if s is not None)
+
+
+class interrupts_blocked:
+    """Hold SIGINT/SIGTERM/SIGHUP pending (not lost) for the duration; they are
+    delivered, and their handlers run, the moment the block ends."""
+
+    def __enter__(self):
+        self.previous = signal.pthread_sigmask(signal.SIG_BLOCK, set(INTERRUPTS))
+        return self
+
+    def __exit__(self, *exc):
+        signal.pthread_sigmask(signal.SIG_SETMASK, self.previous)
+        return False
+
+
+def create_branch(name: str, parent_id: str, parent_timestamp: str, never: set[str], created: list[str]) -> dict:
+    """Create one disposable, EXPIRING branch through the API and put its id in `created`.
+
+    Admission first; the name is recorded before the call. Review H4: from the
+    POST until the new id is in `created` (the list the caller's teardown
+    walks), interrupts are BLOCKED, so no Ctrl-C, SIGTERM or hang-up can land
+    in the window where the branch exists but nothing would delete it.
+    """
     admit_metered_branch()
     save_state([*load_state(), {"name": name, "id": None, "requested_at": iso_now()}])
     spec: dict[str, Any] = {
         "parent_id": parent_id, "name": name, "parent_timestamp": parent_timestamp,
         "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=LIFETIME_MINUTES)).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
-    try:
-        status, payload = api("POST", f"/projects/{PROJECT_ID}/branches",
-                              {"branch": spec, "endpoints": [{"type": "read_write"}]})
-    except BaseException as exc:  # Ctrl-C and SystemExit included: the call may have landed
-        with teardown_signals_deferred():
+    with interrupts_blocked():
+        try:
+            status, payload = api("POST", f"/projects/{PROJECT_ID}/branches",
+                                  {"branch": spec, "endpoints": [{"type": "read_write"}]})
+        except BaseException as exc:  # any failure: the call may have landed, so find it by name
             try:
                 found = [b for b in branches() if b.get("name") == name]
             except Exception:  # noqa: BLE001 — provider unreachable; the state row keeps the name for the sweep
@@ -265,16 +295,18 @@ def create_branch(name: str, parent_id: str, parent_timestamp: str, never: set[s
                 ok = delete_and_confirm(b["id"], never)
                 say(f"  create interrupted; branch {b['id']} named {name}: "
                     f"{'deleted' if ok else 'COULD NOT DELETE (it expires within the hour)'}")
-        if isinstance(exc, Exception):
-            raise ProofError(f"branch create failed: {type(exc).__name__}") from exc
-        raise
-    if status >= 300:
-        raise ProofError(f"branch create answered {status}: {str(payload.get('message', ''))[:200]}")
-    branch = payload.get("branch", {})
-    branch_id = str(branch.get("id", ""))
-    if not branch_id or branch_id in never:
-        raise ProofError("branch create returned no id, or a protected branch's id")
-    save_state([*[r for r in load_state() if r.get("name") != name], {"name": name, "id": branch_id, "requested_at": iso_now()}])
+            if isinstance(exc, Exception):
+                raise ProofError(f"branch create failed: {type(exc).__name__}") from exc
+            raise
+        if status >= 300:
+            raise ProofError(f"branch create answered {status}: {str(payload.get('message', ''))[:200]}")
+        branch = payload.get("branch", {})
+        branch_id = str(branch.get("id", ""))
+        if not branch_id or branch_id in never:
+            raise ProofError("branch create returned no id, or a protected branch's id")
+        created.append(branch_id)
+        save_state([*[r for r in load_state() if r.get("name") != name],
+                    {"name": name, "id": branch_id, "requested_at": iso_now()}])
     return branch
 
 
@@ -292,10 +324,10 @@ def read_back_ready(branch_id: str, attempts: int = 60) -> dict:
 
 
 class teardown_signals_deferred:
-    """Ignore SIGINT and SIGHUP while cleanup runs, so a second Ctrl-C or a
-    closed terminal cannot cut a delete short; restore the handlers after."""
+    """Ignore SIGINT, SIGTERM and SIGHUP while cleanup runs, so a second Ctrl-C,
+    a kill or a closed terminal cannot cut a delete short; restore the handlers after."""
 
-    SIGNALS = tuple(s for s in (getattr(signal, "SIGINT", None), getattr(signal, "SIGHUP", None)) if s is not None)
+    SIGNALS = INTERRUPTS
 
     def __enter__(self):
         self.saved = {s: signal.getsignal(s) for s in self.SIGNALS}
@@ -391,7 +423,8 @@ def utc_exact(raw: str) -> str:
 
 # ── prove ─────────────────────────────────────────────────────────────────────
 
-def prove() -> dict:
+def prove(now: datetime | None = None) -> dict:
+    """The whole proof in one process; returns the bound evidence block (review H1)."""
     proof_started_at = iso_now()
     production_id = default_branch_id()
     never = {production_id}
@@ -411,82 +444,69 @@ def prove() -> dict:
             negative = write_probe(writer, "negative")
             say(f"  ok    T = {t_iso}; negative probe {negative['id']} written {negative['written_at']}")
         name = f"{BRANCH_PREFIX}{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}"
-        branch = create_branch(name, parent_id, t_iso, never)
-        branch_id = branch["id"]
-        created.append(branch_id)
+        branch_id = create_branch(name, parent_id, t_iso, never, created)["id"]
+        # The parent point as the PROVIDER reports it for this branch, read now, while it exists.
         back = read_back_ready(branch_id)
         say(f"  ok    branch {branch_id} read back: parent {back.get('parent_id')} at {back.get('parent_timestamp')}, lsn {back.get('parent_lsn')}")
         branch_uri = connection_uri(branch_id)
         if host_of(branch_uri) == host_of(parent_uri):
             raise ProofError("the proof branch resolves to its parent's host; refusing")
+        # The probes and core rows ON THE BRANCH ITSELF, read now, while it exists.
         with connect(branch_uri, read_only=True) as reader:
             seen = read_probes(reader, [positive["id"], negative["id"]])
             core = {t: int(reader.execute(f"select count(*) from {t}").fetchone()[0]) for t in CORE_TABLES}
-        parent_ts = str(back.get("parent_timestamp", ""))
-        observation = {
-            "proof_started_at": proof_started_at,
-            "project_id": PROJECT_ID,
-            "proof_parent_branch_id": parent_id,
-            "branch_id": branch_id,
-            "requested_parent_timestamp": t_iso,
-            "branch_parent_id": str(back.get("parent_id", "")),
-            "branch_parent_timestamp": utc_exact(parent_ts),
-            "branch_parent_lsn": str(back.get("parent_lsn") or ""),
-            "positive_probe": positive,
-            "negative_probe": negative,
-            "positive_on_branch": seen.get(positive["id"]),
-            "negative_present_on_branch": negative["id"] in seen,
-            "branch_core_table_rows": core,
-        }
-        say(f"  probe: positive on branch {observation['positive_on_branch'] == positive}; negative absent {not observation['negative_present_on_branch']}")
-        return observation
+        say(f"  probe: positive on branch {seen.get(positive['id']) == positive}; negative absent {negative['id'] not in seen}")
+        # Production re-read (read-only, a fresh session): the rows the probes claim to be.
+        with connect(connection_uri(production_id), read_only=True) as conn:
+            rows = read_probes(conn, [positive["id"], negative["id"]])
+        readback = {"positive": rows.get(positive["id"]), "negative": rows.get(negative["id"]), "read_at": iso_now()}
+        retention_seconds, retention_read_at = retention()
     finally:
         with teardown_signals_deferred():
-            for branch_id in reversed(created):
-                ok = delete_and_confirm(branch_id, never)
-                say(f"  teardown: branch {branch_id} {'deleted (provider answers 404)' if ok else 'COULD NOT BE DELETED — it expires within the hour; delete it by hand'}")
-
-
-# ── verify: recompute, then hand the evaluator the evidence block ─────────────
-
-def verify(observation: dict, now: datetime | None = None) -> dict:
-    production_id = default_branch_id()
-    if observation["proof_parent_branch_id"] != production_id:
-        raise ProofError("the recorded proof parent is not the production branch")
-    branch_id = observation["branch_id"]
-    started_at = observation["proof_started_at"]
-    ops = operations_since(started_at, branch_id)
-    status, _ = api("GET", f"/projects/{PROJECT_ID}/branches/{branch_id}")
-    ids = [observation["positive_probe"]["id"], observation["negative_probe"]["id"]]
-    with connect(connection_uri(production_id), read_only=True) as conn:
-        rows = read_probes(conn, ids)
-    readback = {"positive": rows.get(ids[0]), "negative": rows.get(ids[1]), "read_at": iso_now()}
-    retention_seconds, retention_read_at = retention()
+            for created_id in reversed(created):
+                ok = delete_and_confirm(created_id, never)
+                say(f"  teardown: branch {created_id} {'deleted (provider answers 404)' if ok else 'COULD NOT BE DELETED — it expires within the hour; delete it by hand'}")
+    operations = confirm_lifecycle(branch_id, proof_started_at)
     facts = {
         "source": "pitr_branch_proof",
         "proof_target_kind": "disposable_branch",
-        "project_id": observation["project_id"],
+        "project_id": PROJECT_ID,
         "production_branch_id": production_id,
-        "branch_id": observation["branch_id"],
-        "requested_parent_timestamp": observation["requested_parent_timestamp"],
-        "branch_parent_id": observation["branch_parent_id"],
-        "branch_parent_timestamp": observation["branch_parent_timestamp"],
-        "branch_parent_lsn": observation["branch_parent_lsn"],
-        "positive_probe": observation["positive_probe"],
-        "negative_probe": observation["negative_probe"],
-        "positive_on_branch": observation["positive_on_branch"],
-        "negative_present_on_branch": observation["negative_present_on_branch"],
-        "branch_core_table_rows": observation["branch_core_table_rows"],
-        # Create and delete as the provider LOGGED them; a delete also needs the branch gone now.
-        "branch_operations": {
-            "create": confirmed_operation(ops, "create_branch", started_at),
-            "delete": confirmed_operation(ops, "delete_timeline", started_at) if status == 404 else None,
-        },
+        "branch_id": branch_id,
+        "requested_parent_timestamp": t_iso,
+        "branch_parent_id": str(back.get("parent_id", "")),
+        "branch_parent_timestamp": utc_exact(str(back.get("parent_timestamp", ""))),
+        "branch_parent_lsn": str(back.get("parent_lsn") or ""),
+        "positive_probe": positive,
+        "negative_probe": negative,
+        "positive_on_branch": seen.get(positive["id"]),
+        "negative_present_on_branch": negative["id"] in seen,
+        "branch_core_table_rows": core,
+        "branch_operations": operations,
         "history_retention_seconds": retention_seconds,
         "retention_read_at": retention_read_at,
         "production_readback": readback,
     }
     return bind(facts, "record_layer_rpo", now)
+
+
+def confirm_lifecycle(branch_id: str, started_at: str, attempts: int = 15) -> dict[str, str | None]:
+    """Create and delete as the provider LOGGED them; a delete also needs the branch gone now.
+
+    The delete operation can take a moment to finish, so the log is polled.
+    """
+    result: dict[str, str | None] = {"create": None, "delete": None}
+    for _ in range(attempts):
+        ops = operations_since(started_at, branch_id)
+        status, _ = api("GET", f"/projects/{PROJECT_ID}/branches/{branch_id}")
+        result = {
+            "create": confirmed_operation(ops, "create_branch", started_at),
+            "delete": confirmed_operation(ops, "delete_timeline", started_at) if status == 404 else None,
+        }
+        if result["create"] and result["delete"]:
+            return result
+        time.sleep(2)
+    return result
 
 
 def _interrupt(signum, _frame) -> None:
@@ -495,21 +515,19 @@ def _interrupt(signum, _frame) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("mode", choices=("prove", "verify"))
-    a = p.parse_args(argv)
-    for sig in (signal.SIGINT, signal.SIGTERM, getattr(signal, "SIGHUP", None)):
-        if sig is not None:
-            signal.signal(sig, _interrupt)
+    # One mode, no file input: there is nothing a caller can hand this (review H1).
+    p.add_argument("mode", choices=("prove",))
+    p.parse_args(argv)
+    for sig in INTERRUPTS:
+        signal.signal(sig, _interrupt)
     try:
-        if a.mode == "prove":
-            observation = prove()
-            OUT.parent.mkdir(parents=True, exist_ok=True)
-            OUT.write_text(json.dumps(observation, indent=2, sort_keys=True))
-            say(f"  observation: {OUT}")
-            return 0
-        print(json.dumps(verify(json.loads(OUT.read_text())), sort_keys=True))
+        evidence = prove()
+        text = json.dumps(evidence, sort_keys=True)
+        OUT.parent.mkdir(parents=True, exist_ok=True)
+        OUT.write_text(text)  # the operator's copy; nothing reads it back
+        print(text, flush=True)
         return 0
-    except (ProofError, OSError, json.JSONDecodeError, KeyError) as exc:
+    except (ProofError, OSError, KeyError) as exc:
         print(f"PITR PROOF FAILED: {exc}", file=sys.stderr)
         return 1
 

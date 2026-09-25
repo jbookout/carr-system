@@ -2,27 +2,31 @@
 
 Three layers:
   * unit — the COPY-block watermark (rows AND content digest), the exact
-    comparison, the receipt builder and the CLI exit codes, on fixture text;
-  * the copy record — fetch-copy / verify-receipt read the producer's
-    "Backup artifact" Check and the artifact API through the REAL
+    comparison and the CLI exit codes, on fixture text;
+  * the copy record and verify-restore — the producer's "Backup artifact"
+    Check and the artifact API are read through the REAL
     ops/backup-workflow-status.py matching and cross-check code, with only its
-    `api` transport and the `gh` download replaced by fixtures. A run not on
-    main, not scheduled or dispatched, or whose commit is not in main; a Check
-    in a suite not bound to the run or stamped outside its window; a summary
-    that disagrees with the store; or a receipt edited after the fact are all
-    refused. The outbound census is read from a restored queue, not handed in;
+    `api` transport, the `gh` download and the `age` binary replaced by
+    fixtures. A run not on main, not scheduled or dispatched, whose commit is
+    not in main, or whose backup workflow file differs from main's; a Check in
+    a suite not bound to the run; or a summary that disagrees with the store
+    are all refused. Review H1: verify-restore takes NO receipt, watermark or
+    copy file; it looks the Check up, downloads, hashes, decrypts and counts
+    the artifact, reads the restored target and the target's start instant
+    itself. A hand-made receipt has no path in. The outbound census is read
+    from a restored queue and the provider's own readers, never handed in;
   * end to end — a real pg_dump of a throwaway local cluster, restored with the
     rehearsal's OWN restore filter (read out of bin/restore-rehearse.sh, so the
-    script text is what is tested) into a second throwaway database, read back
-    with `restored` over a DSN passed in the environment, compared, receipted,
-    and evaluated by mcp-server/bin/recovery-matrix-evaluate.mjs. Then one
-    restored row is deleted, and separately one restored row is CHANGED with the
-    count intact, and both must fail. Skips (reason printed) only when the
+    script text is what is tested) into a second throwaway database, then
+    verify-restore run in-process against that real database (the real
+    local-cluster start read, the real restored reader), and the bound receipt
+    judged by mcp-server/bin/recovery-matrix-evaluate.mjs. Then one restored
+    row is deleted, and separately one restored row is CHANGED with the count
+    intact, and both must fail. Skips (reason printed) only when the
     PostgreSQL client/server binaries are not installed.
 
-The encrypt/decrypt step is not exercised here: it is the rehearsal's existing,
-unchanged `age --decrypt` pipe, and the digest is taken over whatever bytes are
-stored, so a plain file stands in for the ciphertext.
+The `age` stand-in is a script that prints the stored file: the digest is
+taken over whatever bytes are stored, and the decrypt is age's own.
 
   .venv/bin/python -m unittest tools/test_restore_watermark.py
 """
@@ -162,21 +166,13 @@ class Watermark(unittest.TestCase):
         self.assertEqual(rw.compare(a, {**a, "public.extra": {"rows": 0, "content_digest": D("0")}}),
                          [{"table": "public.extra", "artifact_rows": None, "restored_rows": 0, "content_differs": True}])
 
-    def test_receipt_refuses_production_and_unknown_or_missing_copy_fields_and_drops_column_lists(self):
-        wm = {"public.t": {"rows": 1, "content_digest": D("1"), "copy_columns": "(id)"}}
-        kw = dict(oracle_id="o", observed_digest=D("a"), artifact=wm, restored={"public.t": {"rows": 1, "content_digest": D("1")}},
-                  started_at="2026-09-24T10:00:00Z", finished_at="2026-09-24T10:01:00Z")
-        built = rw.build_receipt(copy=COPY_RECORD, target_kind="disposable_branch", **kw)
-        self.assertEqual(built["receipt_kind"], "restore-exercise-receipt.v1")
-        self.assertEqual(built["artifact_watermark"], {"public.t": {"rows": 1, "content_digest": D("1")}})
-        with self.assertRaises(ValueError):
-            rw.build_receipt(copy=COPY_RECORD, target_kind="production", **kw)
-        with self.assertRaises(ValueError):
-            rw.build_receipt(copy={**COPY_RECORD, "trusted": True}, target_kind="disposable_branch", **kw)
-        partial = dict(COPY_RECORD)
-        del partial["store_readback_digest"]
-        with self.assertRaises(ValueError):
-            rw.build_receipt(copy=partial, target_kind="disposable_branch", **kw)
+    def test_verify_restore_refuses_production_or_an_unnamed_branch_before_reading_anything(self):
+        common = dict(repository="o/r", run_id=1, identity=Path("/nonexistent"), dsn="host=/tmp", work_dir=Path("/nonexistent"))
+        with mock.patch.object(rw, "read_copy_record", side_effect=AssertionError("read")):
+            with self.assertRaisesRegex(ValueError, "target kind must be"):
+                rw.verify_restore(target_kind="production", **common)
+            with self.assertRaisesRegex(ValueError, "needs --project-id and --branch-id"):
+                rw.verify_restore(target_kind="disposable_branch", project_id="p", **common)
 
 
 class Cli(unittest.TestCase):
@@ -320,6 +316,9 @@ class FakeProvider:
                                      "head_branch": "main", "head_sha": HEAD}}
         self.compare = {"status": "ahead", "ahead_by": 3, "behind_by": 0}
         self.extra_checks: list[dict] = []
+        # the backup workflow file's git blob at each ref (contents API)
+        self.blobs: dict[str, object] = {HEAD: "c" * 40, "main": "c" * 40}
+        self.zip = ZIP
 
     def api(self, path, *, method="GET", body=None, query=None):
         self.check["output"]["summary"] = json.dumps(self.summary)
@@ -332,6 +331,9 @@ class FakeProvider:
             return {"artifacts": [self.artifact], "total_count": 1}
         if path == f"/repos/{REPO_SLUG}/compare/{HEAD}...main":
             return self.compare
+        if path == f"/repos/{REPO_SLUG}/contents/.github/workflows/backup-nightly.yml":
+            sha_ = self.blobs.get((query or {}).get("ref"))
+            return {"sha": sha_, "path": ".github/workflows/backup-nightly.yml"} if sha_ is not None else []
         if path.startswith(f"/repos/{REPO_SLUG}/check-suites/"):
             # an unknown suite answers with something that is not a suite object
             return self.suites.get(int(path.rsplit("/", 1)[1]), [])
@@ -377,17 +379,25 @@ class CopyRecordFromProvider(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "found 0"):
             rw.read_copy_record(REPO_SLUG, RUN_ID)
 
-    def test_g1_a_check_stamped_outside_the_runs_own_window_is_not_the_runs(self):
-        for field, value in (("started_at", "2026-09-24T03:00:29Z"), ("completed_at", "2026-09-24T03:07:01Z"),
-                             ("completed_at", None)):
-            original = self.fake.check[field]
-            self.fake.check[field] = value
-            with self.assertRaisesRegex(ValueError, "found 0"):
-                rw.read_copy_record(REPO_SLUG, RUN_ID)
-            self.fake.check[field] = original
-        # exactly at the run's own edges is inside
-        self.fake.check.update(started_at="2026-09-24T03:00:30Z", completed_at="2026-09-24T03:07:00Z")
+    def test_h2_the_checks_creator_set_times_decide_nothing(self):
+        # started_at/completed_at are whatever the Check's creator sent, so they bind nothing.
+        self.fake.check.update(started_at="2020-01-01T00:00:00Z", completed_at=None)
         self.assertEqual(rw.read_copy_record(REPO_SLUG, RUN_ID)["recorded_digest_source"]["check_run_id"], 555)
+
+    def test_h2_a_run_whose_backup_workflow_file_differs_from_mains_is_refused(self):
+        for at_run, on_main in (("d" * 40, "c" * 40), (None, "c" * 40), ("c" * 40, None), ("C" * 40, "C" * 40),
+                                ("short", "short")):
+            self.fake.blobs = {HEAD: at_run, "main": on_main}
+            with self.assertRaisesRegex(ValueError, "is not the one on main now"):
+                rw.read_copy_record(REPO_SLUG, RUN_ID)
+        self.fake.blobs = {HEAD: "e" * 40, "main": "e" * 40}
+        self.assertEqual(rw.read_copy_record(REPO_SLUG, RUN_ID)["copy_id"], self.fake.artifact["name"])
+
+    def test_h2_the_check_is_looked_up_never_named_by_a_caller(self):
+        import inspect
+        self.assertEqual(list(inspect.signature(rw.read_copy_record).parameters), ["repository", "run_id"])
+        self.assertEqual(list(inspect.signature(rw.fetch_copy).parameters), ["repository", "run_id", "out_dir"])
+        self.assertNotIn("check_run_id", inspect.signature(rw.verify_restore).parameters)
 
     def test_g1_only_a_scheduled_or_dispatched_run_on_main_whose_commit_is_in_main_counts(self):
         for field, bad, message in (("head_branch", "pr-branch", "not main"),
@@ -471,50 +481,232 @@ class CopyRecordFromProvider(unittest.TestCase):
             record = json.loads((t / "out" / "copy.json").read_text())
             self.assertEqual(sorted(record), sorted(rw.COPY_KEYS))
 
-    def test_verify_receipt_rereads_the_provider_and_names_every_edited_field(self):
-        rec = rw.read_copy_record(REPO_SLUG, RUN_ID)
-        rec.pop("_artifact_id")
-        receipt = {"copy": rec, "oracle_id": "restore-rehearse"}
-        now = datetime(2026, 9, 24, 10, 30, tzinfo=timezone.utc)
-        differs, bound = rw.verify_receipt(receipt, REPO_SLUG, now)
-        self.assertEqual(differs, [])
-        # G4: the output is the receipt with the RE-READ copy block, bound.
-        self.assertEqual(bound["verification"], {
-            "verifier": "tools/restore-watermark.py verify-receipt", "verified_at": "2026-09-24T10:30:00Z",
-            "facts_digest": recovery_evidence.facts_digest(receipt)})
-        edited = json.loads(json.dumps(receipt))
-        edited["copy"]["recorded_artifact_digest"] = D("c")
-        edited["copy"]["produced_at"] = "2026-09-24T09:00:00Z"
-        self.assertEqual(rw.verify_receipt(edited, REPO_SLUG), (["produced_at", "recorded_artifact_digest"], None))
-        typed_in = json.loads(json.dumps(receipt))
-        typed_in["copy"]["recorded_digest_source"]["kind"] = "operator_supplied"
-        self.assertEqual(rw.verify_receipt(typed_in, REPO_SLUG),
-                         (["recorded digest source is 'operator_supplied', not the producer's Check"], None))
-        # A stamped receipt is never re-stamped.
-        self.assertEqual(rw.verify_receipt(bound, REPO_SLUG), (["receipt already carries a verification block"], None))
-        # The bound copy block is the one RE-READ from the provider, not the input's:
-        # a field the provider does not report does not survive verification.
-        padded = json.loads(json.dumps(receipt))
-        padded["copy"]["note"] = "trust me"
-        _, rebound = rw.verify_receipt(padded, REPO_SLUG, now)
-        self.assertEqual(sorted(rebound["copy"]), sorted(rw.COPY_KEYS))
 
-    def test_verify_receipt_cli_prints_only_a_bound_receipt_and_exits_1_on_any_difference(self):
+
+def _zip_of(member: str, data: bytes) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(member, data)
+    return buf.getvalue()
+
+
+class VerifyRestore(unittest.TestCase):
+    """Review H1: every decisive fact in the receipt is read by verify-restore itself."""
+
+    NOW = datetime(2026, 9, 24, 10, 30, tzinfo=timezone.utc)
+
+    def setUp(self):
+        self.fake = FakeProvider()
+        real = rw._status_module()
+        real.api = self.fake.api
+        patcher = mock.patch.object(rw, "_status_module", return_value=real)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.tmp = Path(tempfile.mkdtemp(prefix="carr-f08-verify-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.serve(DUMP.encode())
+        bindir = self.tmp / "bin"
+        bindir.mkdir()
+        (bindir / "gh").write_text(f"#!/bin/sh\ncat '{self.tmp / 'artifact.bin'}'\n")
+        # The age stand-in prints the stored file: `age --decrypt -i IDENTITY FILE`.
+        (bindir / "age").write_text("#!/bin/sh\n[ \"$1\" = --decrypt ] && [ \"$2\" = -i ] && [ -f \"$3\" ] || exit 1\ncat \"$4\"\n")
+        for tool in ("gh", "age"):
+            (bindir / tool).chmod(0o755)
+        env = mock.patch.dict(os.environ, {"PATH": f"{bindir}:{os.environ['PATH']}"})
+        env.start()
+        self.addCleanup(env.stop)
+        self.identity = self.tmp / "identity.txt"
+        self.identity.write_text("stand-in identity\n")
+
+    def serve(self, plaintext: bytes) -> None:
+        blob = _zip_of("carr-20260924.sql.age", plaintext)
+        (self.tmp / "artifact.bin").write_bytes(blob)
+        digest = "sha256:" + hashlib.sha256(blob).hexdigest()
+        self.fake.artifact.update(digest=digest, size_in_bytes=len(blob))
+        self.fake.summary.update(artifact_digest=digest, artifact_bytes=len(blob))
+        self.digest = digest
+
+    def verify(self, restored=None, work="w"):
+        artifact_seen = {}
+
+        def restored_reader(dsn, artifact):
+            artifact_seen.update(artifact)
+            got = rw.strip_columns(artifact) if restored is None else restored
+            return json.loads(json.dumps(got))
+
+        with mock.patch.object(rw, "local_target_start", return_value="2026-09-24T10:00:00Z") as start, \
+             mock.patch.object(rw, "restored_watermark", restored_reader):
+            receipt = rw.verify_restore(repository=REPO_SLUG, run_id=RUN_ID, identity=self.identity,
+                                        target_kind="disposable_local_cluster", dsn="host=/tmp/sock dbname=r",
+                                        work_dir=self.tmp / work, now=lambda: self.NOW)
+        start.assert_called_once_with("host=/tmp/sock dbname=r")
+        return receipt, artifact_seen
+
+    def evaluate(self, receipt):
+        path = self.tmp / "receipt.json"
+        path.write_text(json.dumps(receipt))
+        return subprocess.run(["node", "--input-type=module", "-e",
+                               f"import {{evaluateRestoreExercise as e}} from '{REPO / 'mcp-server/src/recovery-matrix.v5.js'}';"
+                               "import fs from 'node:fs';"
+                               f"console.log(JSON.stringify(e(JSON.parse(fs.readFileSync('{path}','utf8')),"
+                               f"{{now_ms:Date.parse('2026-09-24T10:31:00Z')}})))"],
+                              capture_output=True, text=True, check=True)
+
+    def test_the_receipt_is_built_from_this_processs_own_reads_and_bound(self):
+        receipt, artifact_seen = self.verify()
+        wm = rw.watermark_from_dump(DUMP.splitlines())
+        self.assertEqual(artifact_seen, wm)  # decrypted and counted from the DOWNLOADED artifact
+        self.assertEqual(receipt["artifact_watermark"], rw.strip_columns(wm))
+        self.assertEqual(receipt["observed_artifact_digest"], self.digest)
+        self.assertEqual(receipt["copy"]["recorded_artifact_digest"], self.digest)
+        self.assertEqual(receipt["copy"]["recorded_digest_source"],
+                         {"kind": "github_actions_backup_check", "check_run_id": 555, "workflow_run_id": RUN_ID})
+        self.assertEqual(sorted(receipt["copy"]), sorted(rw.COPY_KEYS))
+        self.assertEqual((receipt["started_at"], receipt["finished_at"]), ("2026-09-24T10:00:00Z", "2026-09-24T10:30:00Z"))
+        self.assertEqual((receipt["target_kind"], receipt["oracle_id"]), ("disposable_local_cluster", "restore-rehearse"))
+        facts = {k: v for k, v in receipt.items() if k != "verification"}
+        self.assertEqual(receipt["verification"], {"verifier": "tools/restore-watermark.py verify-restore",
+                                                   "verified_at": "2026-09-24T10:30:00Z",
+                                                   "facts_digest": recovery_evidence.facts_digest(facts)})
+        self.assertEqual(json.loads(self.evaluate(receipt).stdout)["reason_id"], "restore_exercise_exact")
+
+    def test_a_restored_target_that_differs_from_the_artifact_fails_the_evaluator(self):
+        wm = rw.strip_columns(rw.watermark_from_dump(DUMP.splitlines()))
+        lost = {**wm, "ops.run": {"rows": 1, "content_digest": sha(["1"])}}
+        receipt, _ = self.verify(restored=lost)
+        self.assertEqual(json.loads(self.evaluate(receipt).stdout)["reason_id"], "watermark_mismatch")
+
+    def test_h1_a_hand_made_receipt_has_no_path_in(self):
+        # The reviewer's reproduction: the REAL run's copy block wrapped around an
+        # invented one-table restore. Round 2's verify-receipt re-read the copy
+        # block, stamped it and passed it; that command is gone, and no command
+        # takes a receipt, a watermark or a copy record from a file.
         rec = rw.read_copy_record(REPO_SLUG, RUN_ID)
         rec.pop("_artifact_id")
-        with tempfile.TemporaryDirectory() as tmp:
-            good, bad = Path(tmp) / "good.json", Path(tmp) / "bad.json"
-            good.write_text(json.dumps({"copy": rec}))
-            bad.write_text(json.dumps({"copy": {**rec, "store_readback_digest": D("c")}}))
-            out = io.StringIO()
-            with mock.patch("sys.stdout", out):
-                self.assertEqual(rw.main(["verify-receipt", "--repository", REPO_SLUG, str(good)]), 0)
-            self.assertIn("verification", json.loads(out.getvalue()))
-            out, err = io.StringIO(), io.StringIO()
-            with mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
-                self.assertEqual(rw.main(["verify-receipt", "--repository", REPO_SLUG, str(bad)]), 1)
-            self.assertEqual(out.getvalue(), "")
-            self.assertEqual(json.loads(err.getvalue())["differs"], ["store_readback_digest"])
+        one = {"public.t": {"rows": 1, "content_digest": D("1")}}
+        forged = {"receipt_kind": rw.RECEIPT_KIND, "target_kind": "disposable_branch", "copy": rec,
+                  "oracle_id": "restore-rehearse", "observed_artifact_digest": rec["recorded_artifact_digest"],
+                  "artifact_watermark": one, "restored_watermark": one,
+                  "started_at": "2026-09-24T10:00:00Z", "finished_at": "2026-09-24T10:01:00Z"}
+        path = self.tmp / "forged.json"
+        path.write_text(json.dumps(forged))
+        for argv in (["verify-receipt", "--repository", REPO_SLUG, str(path)],
+                     ["receipt", "--copy-record", str(path)],
+                     ["verify-restore", "--repository", REPO_SLUG, "--run-id", str(RUN_ID), "--identity", str(self.identity),
+                      "--target-kind", "disposable_local_cluster", "--work-dir", str(self.tmp), "--receipt", str(path)],
+                     ["verify-restore", "--repository", REPO_SLUG, "--run-id", str(RUN_ID), "--identity", str(self.identity),
+                      "--target-kind", "disposable_local_cluster", "--work-dir", str(self.tmp), "--artifact", str(path)]):
+            with self.assertRaises(SystemExit) as refused, mock.patch("sys.stderr", io.StringIO()):
+                rw.main(argv)
+            self.assertEqual(refused.exception.code, 2)
+        self.assertFalse(hasattr(rw, "verify_receipt") or hasattr(rw, "build_receipt"))
+        # Files left in the work directory (fetch-copy's operator copy, a planted
+        # watermark) are overwritten or ignored: the verdict comes from the reads.
+        work = self.tmp / "w"
+        work.mkdir()
+        (work / "copy.json").write_text(json.dumps({**rec, "recorded_artifact_digest": D("f")}))
+        (work / "artifact.json").write_text(json.dumps(one))
+        receipt, _ = self.verify(work="w")
+        self.assertNotEqual(receipt["artifact_watermark"], one)
+        self.assertEqual(receipt["copy"]["recorded_artifact_digest"], self.digest)
+
+    def test_the_artifact_watermark_is_the_downloaded_copys_not_a_claim(self):
+        # A copy whose content is ONE table: the verifier counts one table, and a
+        # target holding the full restore no longer matches it.
+        self.serve(b"COPY public.t (id) FROM stdin;\n1\n\\.\n")
+        full = rw.strip_columns(rw.watermark_from_dump(DUMP.splitlines()))
+        receipt, _ = self.verify(restored=full)
+        self.assertEqual(list(receipt["artifact_watermark"]), ["public.t"])
+        self.assertEqual(json.loads(self.evaluate(receipt).stdout)["reason_id"], "watermark_mismatch")
+
+    def test_a_copy_age_cannot_decrypt_or_an_absent_identity_is_refused(self):
+        (self.tmp / "bin" / "age").write_text("#!/bin/sh\necho 'no identity matched' >&2\nexit 1\n")
+        with self.assertRaisesRegex(ValueError, "age could not decrypt"):
+            self.verify()
+        (self.tmp / "bin" / "age").write_text("#!/bin/sh\ncat \"$4\"\n")
+        self.serve(b"-- decrypted, but not a data dump\n")
+        with self.assertRaisesRegex(ValueError, "no COPY blocks"):
+            self.verify()
+        self.identity.unlink()
+        with self.assertRaisesRegex(ValueError, "identity file does not exist"):
+            self.verify()
+
+    def test_a_stored_copy_whose_bytes_differ_from_the_record_fails_on_hash(self):
+        self.fake.artifact["digest"] = self.fake.summary["artifact_digest"] = D("0")
+        receipt, _ = self.verify()
+        self.assertEqual(receipt["observed_artifact_digest"], self.digest)
+        self.assertEqual(json.loads(self.evaluate(receipt).stdout)["reason_id"], "artifact_hash_mismatch")
+
+    def test_the_cli_reads_the_dsn_from_the_environment_only(self):
+        with mock.patch.dict(os.environ, {"RESTORE_DSN": ""}), mock.patch("sys.stderr", io.StringIO()) as err:
+            self.assertEqual(rw.main(["verify-restore", "--repository", REPO_SLUG, "--run-id", str(RUN_ID),
+                                      "--identity", str(self.identity), "--target-kind", "disposable_local_cluster",
+                                      "--work-dir", str(self.tmp / "w")]), 2)
+        self.assertIn("environment only", err.getvalue())
+
+
+@unittest.skipUnless(importlib.util.find_spec("psycopg") is not None, "psycopg not installed")
+class RestoreTarget(unittest.TestCase):
+    """The target and its start instant, read from the provider (branch) or the cluster (local)."""
+
+    PROJECT, DEFAULT, BRANCH = "proj", "br-prod", "br-restore"
+    DSN = "host=ep-restore.example.test port=5432 dbname=neondb user=u"
+
+    def setUp(self):
+        self.branches = {
+            self.DEFAULT: {"id": self.DEFAULT, "default": True},
+            self.BRANCH: {"id": self.BRANCH, "default": False, "protected": False, "parent_id": self.DEFAULT,
+                          "created_at": "2026-09-24T09:59:58.700Z"},
+        }
+        self.endpoints = {self.BRANCH: [{"host": "ep-restore.example.test"}]}
+
+    def neon(self, path):
+        base = f"/projects/{self.PROJECT}/branches"
+        if path == base:
+            return {"branches": list(self.branches.values())}
+        if path.endswith("/endpoints"):
+            return {"endpoints": self.endpoints.get(path.split("/")[-2], [])}
+        bid = path.rsplit("/", 1)[1]
+        if bid not in self.branches:
+            raise ValueError(f"provider GET {path} answered 404")
+        return {"branch": self.branches[bid]}
+
+    def start(self, dsn=None):
+        with mock.patch.object(rw, "_neon", self.neon):
+            return rw.branch_target_start(self.PROJECT, self.BRANCH, dsn or self.DSN)
+
+    def test_the_start_is_the_providers_branch_creation_floored(self):
+        self.assertEqual(self.start(), "2026-09-24T09:59:58Z")
+
+    def test_production_protected_foreign_or_unreachable_targets_are_refused(self):
+        cases = [
+            (lambda: self.branches[self.BRANCH].update(default=True), "exactly one default"),
+            (lambda: self.branches[self.BRANCH].update(protected=True), "protected"),
+            (lambda: self.branches[self.BRANCH].update(parent_id="br-dev"), "not a child"),
+            (lambda: self.branches[self.BRANCH].update(created_at=None), "no creation instant"),
+            (lambda: self.branches.pop(self.BRANCH), "404"),
+            (lambda: self.branches[self.DEFAULT].update(default=False), "exactly one default"),
+            (lambda: self.branches.setdefault("br-2", {"id": "br-2", "default": True}), "exactly one default"),
+            (lambda: self.endpoints.update({self.BRANCH: [{"host": "ep-other.example.test"}]}), "does not point at"),
+        ]
+        for mutate, message in cases:
+            self.setUp()
+            mutate()
+            with self.assertRaisesRegex(ValueError, message):
+                self.start()
+        self.setUp()
+        with self.assertRaisesRegex(ValueError, r"is the production \(default\) or a protected branch"):
+            with mock.patch.object(rw, "_neon", self.neon):
+                rw.branch_target_start(self.PROJECT, self.DEFAULT, self.DSN)
+
+    def test_a_local_cluster_target_must_be_a_socket_or_loopback(self):
+        with self.assertRaisesRegex(ValueError, "socket path or loopback"):
+            rw.local_target_start("host=db.example.test dbname=r")
+
+    def test_the_provider_credential_is_required_and_never_on_an_argument(self):
+        with mock.patch.dict(os.environ, {"NEON_API_KEY": ""}):
+            with self.assertRaisesRegex(ValueError, "NEON_API_KEY is not loaded"):
+                rw._neon("/projects/p/branches")
 
 
 class RehearsalReceiptGate(unittest.TestCase):
@@ -531,22 +723,29 @@ class RehearsalReceiptGate(unittest.TestCase):
             (t / "out" / "restore-exercise-receipt.json").write_text('{"stale": true}')
             calls = t / "calls.log"
             stub = t / "stub.sh"
-            stub.write_text(f"#!/bin/sh\necho \"$2\" >> '{calls}'\n"
-                            f"case \"$2\" in receipt) echo '{{\"unbound\":1}}';; verify-receipt) echo '{{\"bound\":1}}'; exit {verify_exit};; esac\n")
+            stub.write_text(f"#!/bin/sh\necho \"$2\" >> '{calls}'\necho \"$*|$RESTORE_DSN\" >> '{calls}.args'\n"
+                            f"case \"$2\" in verify-restore) echo '{{\"bound\":1}}'; exit {verify_exit};; esac\n")
             stub.chmod(0o755)
             script = ("say() { print -r -- \"$*\"; }\n"
                       f"REPO='{t}'; WORKDIR='{t}'; COPYDIR='{t}'; PY='{stub}'; FAILS={fails}; BACKUP_RUN_ID=101\n"
-                      "BACKUP_REPOSITORY=o/r; ARTIFACT_DIGEST=x; RESTORE_START_ISO=a; RESTORE_FINISHED_ISO=b\n"
+                      "BACKUP_REPOSITORY=o/r; IDENTITY=/k; PROJECT_ID=proj; BRANCH_ID=br-r; RESTORE_URL=dsn-value\n"
                       + m.group(1) + "print -r -- \"FAILS=$FAILS\"\n")
             got = subprocess.run(["zsh", "-c", script], capture_output=True, text=True)
             receipt = t / "out" / "restore-exercise-receipt.json"
+            self.args = (t / "calls.log.args").read_text() if (t / "calls.log.args").exists() else ""
             return (got.stdout, calls.read_text().split() if calls.exists() else [],
                     receipt.read_text() if receipt.exists() else None)
 
     def test_a_clean_run_writes_the_verified_output_as_the_receipt(self):
         out, calls, receipt = self.run_block(0)
-        self.assertEqual(calls, ["receipt", "verify-receipt"])
+        self.assertEqual(calls, ["verify-restore"])
         self.assertEqual(json.loads(receipt), {"bound": 1})
+        # H1: verify-restore is handed the run and the target, never a fact the script computed.
+        self.assertIn("--run-id 101 --identity /k --target-kind disposable_branch --project-id proj --branch-id br-r",
+                      self.args)
+        self.assertTrue(self.args.strip().endswith("|dsn-value"))  # the DSN travels in the environment
+        for handed in ("--artifact", "--restored", "--copy-record", "--observed-digest", "--started-at", "--finished-at"):
+            self.assertNotIn(handed, self.args)
         self.assertIn("FAILS=0", out)
 
     def test_a_failed_phase_4_writes_and_verifies_nothing_and_removes_a_stale_receipt(self):
@@ -557,13 +756,13 @@ class RehearsalReceiptGate(unittest.TestCase):
 
     def test_a_failed_verify_leaves_no_receipt_and_counts_a_failure(self):
         out, calls, receipt = self.run_block(0, verify_exit=1)
-        self.assertEqual(calls, ["receipt", "verify-receipt"])
+        self.assertEqual(calls, ["verify-restore"])
         self.assertIsNone(receipt)
         self.assertIn("FAILS=1", out)
 
 
 class OutboundCensus(unittest.TestCase):
-    """G2: the item list is read from the restored ops.notification_delivery, never handed in."""
+    """G2/H3: the items are read from the restored queue and the readbacks from the provider, never handed in."""
 
     T = datetime(2026, 9, 24, 11, 0, 0, 123456, tzinfo=timezone.utc)
 
@@ -576,26 +775,50 @@ class OutboundCensus(unittest.TestCase):
         for final in ("delivered", "suppressed_quiet_hours", "failed"):
             self.assertEqual(rw.outbound_item("x", "n-1", "device", final, self.T)["state"], "settled")
 
-    def test_the_census_digest_matches_the_evaluators_and_the_request_is_bound(self):
-        items = [rw.outbound_item(f"0000000{i}-0000-4000-8000-000000000000", f"n-{i}", "device", s, self.T)
-                 for i, s in ((2, "pending"), (1, "delivered"))]
-        rb = [{"item_id": items[0]["item_id"], "idempotency_key": items[0]["envelope_digest"],
-               "read_at": "2026-09-24T11:30:00Z", "readback": "effect_absent"}]
-        req = rw.outbound_census(items, rb, "restore-1", datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc))
-        self.assertEqual(req["census"]["source"], "ops.notification_delivery:device")
-        self.assertEqual(req["census"]["item_count"], 2)
-        self.assertEqual(req["verification"]["verifier"], "tools/restore-watermark.py outbound-census")
+    def judge(self, req):
         node = subprocess.run(["node", "--input-type=module", "-e",
                                "import {evaluateOutboundQueueRelease as e, v5OutboundCensusDigest as d} from "
                                f"'{REPO / 'mcp-server/src/recovery-matrix.v5.js'}';"
                                "let s='';process.stdin.on('data',c=>s+=c).on('end',()=>{const r=JSON.parse(s);"
                                "console.log(JSON.stringify({d:d(r.items),v:e(r,{now_ms:Date.parse('2026-09-24T12:00:00Z')})}))})"],
                               input=json.dumps(req), capture_output=True, text=True, check=True)
-        got = json.loads(node.stdout)
+        return json.loads(node.stdout)
+
+    def items(self):
+        return [rw.outbound_item(f"0000000{i}-0000-4000-8000-000000000000", f"n-{i}", "device", s, self.T)
+                for i, s in ((2, "pending"), (1, "delivered"))]
+
+    def test_with_no_provider_reader_every_unsettled_item_stays_quarantined(self):
+        self.assertEqual(rw.PROVIDER_READERS, {})  # no device push sender exists yet
+        items = self.items()
+        req = rw.outbound_census(items, "restore-1", datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc))
+        self.assertEqual(req["readbacks"], [])
+        self.assertEqual(req["census"], {"source": "ops.notification_delivery:device", "item_count": 2,
+                                         "digest": rw.census_digest(items)})
+        self.assertEqual(req["verification"]["verifier"], "tools/restore-watermark.py outbound-census")
+        got = self.judge(req)
         self.assertEqual(got["d"], req["census"]["digest"])
+        self.assertEqual(got["v"]["reason_id"], "outbound_items_quarantined")
+
+    def test_a_registered_provider_reader_is_asked_about_unsettled_items_only_and_its_answer_carried(self):
+        items = self.items()
+        asked = []
+
+        def reader(unsettled):
+            asked.extend(unsettled)
+            return [{"item_id": i["item_id"], "idempotency_key": i["envelope_digest"],
+                     "read_at": "2026-09-24T11:30:00Z", "readback": "effect_absent"} for i in unsettled]
+
+        with mock.patch.dict(rw.PROVIDER_READERS, {"device": reader}):
+            req = rw.outbound_census(items, "restore-1", datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc))
+        self.assertEqual([i["item_id"] for i in asked], [items[0]["item_id"]])
+        got = self.judge(req)
         self.assertEqual(got["v"]["decision"], "reconciled")
         by = {d["item_id"]: d["disposition"] for d in got["v"]["dispositions"]}
         self.assertEqual(by, {items[0]["item_id"]: "release_for_governed_send", items[1]["item_id"]: "already_settled"})
+        # a reader for another channel is never asked about device items
+        with mock.patch.dict(rw.PROVIDER_READERS, {"email": reader}):
+            self.assertEqual(rw.outbound_census(items, "restore-1")["readbacks"], [])
 
     def test_bind_never_restamps_and_digests_exactly_the_facts(self):
         facts = {"b": [1, "é"], "a": {"z": None, "y": True}}
@@ -608,17 +831,14 @@ class OutboundCensus(unittest.TestCase):
         with self.assertRaises(KeyError):
             recovery_evidence.bind(facts, "made_up_kind")
 
-    def test_readbacks_must_be_exactly_shaped(self):
-        for bad in ({}, [{"item_id": "x", "idempotency_key": D("a"), "readback": "effect_absent"}], ["x"]):
-            with self.assertRaises(ValueError):
-                rw.outbound_census([], bad, "restore-1")
-
-    def test_the_cli_reads_the_dsn_from_the_environment_only(self):
+    def test_the_cli_takes_no_readbacks_and_reads_the_dsn_from_the_environment_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             rb = Path(tmp) / "rb.json"
             rb.write_text("[]")
+            with self.assertRaises(SystemExit), mock.patch("sys.stderr", io.StringIO()):
+                rw.main(["outbound-census", "--restore-id", "r", "--readbacks", str(rb)])
             with mock.patch.dict(os.environ, {"RESTORE_DSN": ""}), mock.patch("sys.stderr", io.StringIO()) as err:
-                self.assertEqual(rw.main(["outbound-census", "--restore-id", "r", "--readbacks", str(rb)]), 2)
+                self.assertEqual(rw.main(["outbound-census", "--restore-id", "r"]), 2)
             self.assertIn("environment only", err.getvalue())
 
 
@@ -654,6 +874,9 @@ def _psycopg_available() -> bool:
 class EndToEndDisposableCluster(unittest.TestCase):
     """A real dump, a real restore into a disposable database, the rehearsal's own filter."""
 
+    tmp: Path
+    identity: Path
+
     @classmethod
     def setUpClass(cls):
         cls.bins = _pg_bins()
@@ -688,14 +911,16 @@ class EndToEndDisposableCluster(unittest.TestCase):
         self.assertEqual(got.returncode, 0, got.stderr)
         out.write_text(got.stdout)
 
-    def evaluate(self, receipt_args, receipt: Path):
-        built = run_tool(*receipt_args)
-        self.assertEqual(built.returncode, 0, built.stderr)
-        # The provider half of verify-receipt is proved in CopyRecordFromProvider;
-        # here the local fixture copy has no provider, so the test stamps the
-        # binding the evaluator requires with the same helper verify-receipt uses.
-        receipt.write_text(json.dumps(recovery_evidence.bind(json.loads(built.stdout), "restore_exercise")))
-        return subprocess.run(["node", str(EVALUATOR), "restore", str(receipt)], capture_output=True, text=True)
+    def verify_and_evaluate(self, fake: "FakeProvider", receipt: Path):
+        """verify-restore in process: the provider and gh are fixtures, the target is the REAL restored database."""
+        real = rw._status_module()
+        real.api = fake.api
+        with mock.patch.object(rw, "_status_module", return_value=real):
+            bound = rw.verify_restore(repository=REPO_SLUG, run_id=RUN_ID, identity=self.identity,
+                                      target_kind="disposable_local_cluster", dsn=self.dsn("restored"),
+                                      work_dir=self.tmp / "verify")
+        receipt.write_text(json.dumps(bound))
+        return bound, subprocess.run(["node", str(EVALUATOR), "restore", str(receipt)], capture_output=True, text=True)
 
     def test_exact_restore_passes_and_a_lost_or_changed_row_fails(self):
         self.psql("postgres", "create database src")
@@ -742,41 +967,54 @@ class EndToEndDisposableCluster(unittest.TestCase):
         cmp_ok = run_tool("compare", "--artifact", str(artifact), "--restored", str(restored))
         self.assertEqual(cmp_ok.returncode, 0, cmp_ok.stdout + cmp_ok.stderr)
 
-        record = self.tmp / "copy.json"
-        record.write_text(json.dumps({**COPY_RECORD, "recorded_artifact_digest": digest, "store_readback_digest": digest}))
-        receipt_args = ["receipt", "--copy-record", str(record), "--target-kind", "disposable_local_cluster",
-                        "--oracle-id", "restore-rehearse", "--observed-digest", digest,
-                        "--artifact", str(artifact), "--restored", str(restored),
-                        "--started-at", "2026-09-24T10:00:00Z", "--finished-at", "2026-09-24T10:02:00Z"]
+        # verify-restore: the copy is served through fixtures of the provider, gh and age.
+        blob = _zip_of("carr-20260924.sql.age", dump.read_bytes())
+        (self.tmp / "artifact.bin").write_bytes(blob)
+        bindir = self.tmp / "bin"
+        bindir.mkdir(exist_ok=True)
+        (bindir / "gh").write_text(f"#!/bin/sh\ncat '{self.tmp / 'artifact.bin'}'\n")
+        (bindir / "age").write_text("#!/bin/sh\ncat \"$4\"\n")
+        for tool in ("gh", "age"):
+            (bindir / tool).chmod(0o755)
+        self.identity = self.tmp / "identity.txt"
+        self.identity.write_text("stand-in\n")
+        fake = FakeProvider()
+        zdigest = "sha256:" + hashlib.sha256(blob).hexdigest()
+        fake.artifact.update(digest=zdigest, size_in_bytes=len(blob))
+        fake.summary.update(artifact_digest=zdigest, artifact_bytes=len(blob))
         receipt = self.tmp / "receipt.json"
-        verdict = self.evaluate(receipt_args, receipt)
-        self.assertEqual(verdict.returncode, 0, verdict.stdout + verdict.stderr)
-        self.assertEqual(json.loads(verdict.stdout)["reason_id"], "restore_exercise_exact")
+        with mock.patch.dict(os.environ, {"PATH": f"{bindir}:{os.environ['PATH']}"}):
+            bound, verdict = self.verify_and_evaluate(fake, receipt)
+            self.assertEqual(verdict.returncode, 0, verdict.stdout + verdict.stderr)
+            self.assertEqual(json.loads(verdict.stdout)["reason_id"], "restore_exercise_exact")
+            self.assertEqual(bound["artifact_watermark"], rw.strip_columns(json.loads(counted.stdout)))
+            # the real local-cluster start: this cluster's postmaster start, before now
+            self.assertLessEqual(bound["started_at"], bound["finished_at"])
 
-        # One row lost in the restore: the comparison and the evaluator must both refuse.
-        self.psql("restored", "delete from ops.run where id = 40")
-        self.restored(artifact, restored)
-        cmp_bad = run_tool("compare", "--artifact", str(artifact), "--restored", str(restored))
-        self.assertEqual(cmp_bad.returncode, 1)
-        self.assertIn("MISMATCH ops.run: artifact=40 restored=39", cmp_bad.stdout)
-        verdict = self.evaluate(receipt_args, receipt)
-        self.assertEqual(verdict.returncode, 1)
-        self.assertEqual(json.loads(verdict.stdout)["reason_id"], "watermark_mismatch")
-        self.psql("restored", "insert into ops.run values (40)")
+            # One row lost in the restore: the comparison and the evaluator must both refuse.
+            self.psql("restored", "delete from ops.run where id = 40")
+            self.restored(artifact, restored)
+            cmp_bad = run_tool("compare", "--artifact", str(artifact), "--restored", str(restored))
+            self.assertEqual(cmp_bad.returncode, 1)
+            self.assertIn("MISMATCH ops.run: artifact=40 restored=39", cmp_bad.stdout)
+            _, verdict = self.verify_and_evaluate(fake, receipt)
+            self.assertEqual(verdict.returncode, 1)
+            self.assertEqual(json.loads(verdict.stdout)["reason_id"], "watermark_mismatch")
+            self.psql("restored", "insert into ops.run values (40)")
 
-        # One row CHANGED, count intact: a row count alone would pass this; the content digest does not.
-        self.psql("restored", "update public.party set name = 'p7x' where id = 7")
-        self.restored(artifact, restored)
-        cmp_changed = run_tool("compare", "--artifact", str(artifact), "--restored", str(restored))
-        self.assertEqual(cmp_changed.returncode, 1)
-        self.assertIn("MISMATCH public.party: artifact=252 restored=252 content_differs=true", cmp_changed.stdout)
-        self.assertEqual(json.loads(self.evaluate(receipt_args, receipt).stdout)["reason_id"], "watermark_mismatch")
-        self.psql("restored", "update public.party set name = 'p7' where id = 7")
+            # One row CHANGED, count intact: a row count alone would pass this; the content digest does not.
+            self.psql("restored", "update public.party set name = 'p7x' where id = 7")
+            self.restored(artifact, restored)
+            cmp_changed = run_tool("compare", "--artifact", str(artifact), "--restored", str(restored))
+            self.assertEqual(cmp_changed.returncode, 1)
+            self.assertIn("MISMATCH public.party: artifact=252 restored=252 content_differs=true", cmp_changed.stdout)
+            self.assertEqual(json.loads(self.verify_and_evaluate(fake, receipt)[1].stdout)["reason_id"], "watermark_mismatch")
+            self.psql("restored", "update public.party set name = 'p7' where id = 7")
 
-        # A copy whose stored bytes differ from what the producer recorded fails on hash.
-        record.write_text(json.dumps({**COPY_RECORD, "recorded_artifact_digest": D("0"), "store_readback_digest": D("0")}))
-        self.restored(artifact, restored)
-        self.assertEqual(json.loads(self.evaluate(receipt_args, receipt).stdout)["reason_id"], "artifact_hash_mismatch")
+            # A copy whose stored bytes differ from what the producer recorded fails on hash.
+            fake.artifact["digest"] = fake.summary["artifact_digest"] = D("0")
+            self.assertEqual(json.loads(self.verify_and_evaluate(fake, receipt)[1].stdout)["reason_id"],
+                             "artifact_hash_mismatch")
 
     def test_outbound_census_reads_every_device_row_of_the_restored_queue(self):
         self.psql("postgres", "create database outbound")
@@ -788,9 +1026,7 @@ class EndToEndDisposableCluster(unittest.TestCase):
             select gen_random_uuid(), c, s, '2026-09-24 11:00:00.5+00'
               from (values ('device','pending'), ('device','delivered'), ('device','failed'), ('in_app','pending')) v(c, s);
         ''')
-        rb = self.tmp / "readbacks.json"
-        rb.write_text("[]")
-        got = run_tool("outbound-census", "--restore-id", "restore-e2e", "--readbacks", str(rb),
+        got = run_tool("outbound-census", "--restore-id", "restore-e2e",
                        env={**os.environ, "RESTORE_DSN": self.dsn("outbound")})
         self.assertEqual(got.returncode, 0, got.stderr)
         req = json.loads(got.stdout)
@@ -799,7 +1035,8 @@ class EndToEndDisposableCluster(unittest.TestCase):
         self.assertEqual({i["last_attempt_at"] for i in req["items"]}, {"2026-09-24T11:00:00.500000Z"})
         verdict = subprocess.run(["node", str(EVALUATOR), "outbound", "-"], input=json.dumps(req),
                                  capture_output=True, text=True)
-        self.assertEqual(verdict.returncode, 1, verdict.stderr)  # the pending row has no readback yet
+        self.assertEqual(req["readbacks"], [])  # no device provider reader exists, so nothing is read
+        self.assertEqual(verdict.returncode, 1, verdict.stderr)  # and the pending row stays quarantined
         self.assertEqual(json.loads(verdict.stdout)["reason_id"], "outbound_items_quarantined")
         # Dropping the pending row from the census the reader emitted holds the whole queue.
         req["items"] = [i for i in req["items"] if i["state"] == "settled"]

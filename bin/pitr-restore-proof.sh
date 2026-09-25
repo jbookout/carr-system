@@ -6,10 +6,11 @@
 # design. In one line: it writes a POSITIVE probe row, then a NEGATIVE one at
 # least 5 s after an instant T, asks the provider API for a disposable branch
 # whose parent is the production branch AT T, and requires the positive probe
-# present and the negative ABSENT on that branch. `verify` then recomputes the
-# evidence from production and the provider and pipes it to the evaluator:
+# present and the negative ABSENT on that branch. Every decisive read happens in
+# that one process, the branch-side ones while the branch exists, and the bound
+# evidence it prints goes straight to the evaluator (no file in between):
 #
-#   tools/pitr-restore-proof.py verify | node mcp-server/bin/recovery-matrix-evaluate.mjs rpo -
+#   tools/pitr-restore-proof.py prove | node mcp-server/bin/recovery-matrix-evaluate.mjs rpo -
 #
 # Production business data is never written: the only writes are the two
 # ops.pitr_probe rows (migration 0597's own function, append-only table).
@@ -44,7 +45,7 @@ if [ "$#" -ne 0 ]; then
   exit 2
 fi
 
-"$PY" "$REPO/tools/pitr-restore-proof.py" prove || exit 1
-"$PY" "$REPO/tools/pitr-restore-proof.py" verify \
+set -o pipefail
+"$PY" "$REPO/tools/pitr-restore-proof.py" prove \
   | node "$REPO/mcp-server/bin/recovery-matrix-evaluate.mjs" rpo -
 exit $?

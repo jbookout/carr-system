@@ -7,7 +7,7 @@
 // fails for the wrong reason fails here. Boundaries are tested on both sides:
 // exactly at a bound passes, one second past it fails.
 //
-// The RPO fixtures are shaped exactly like tools/pitr-restore-proof.py verify's
+// The RPO fixtures are shaped exactly like tools/pitr-restore-proof.py prove's
 // output; the adapter tests read the real ops/config/business-calendar.us-federal.json
 // (its digest must equal the module's pin), so the config file is what is
 // tested; the CLI tests run the real bin with the real clock.
@@ -233,7 +233,7 @@ test("item 4: no caller field can skip a check or assert trust", () => {
   assert.throws(() => R(req), e => e.code === "invalid_digest");
 });
 
-test("item 4 (G4): a receipt counts only as verify-receipt's fresh re-read output", () => {
+test("item 4 (G4): a receipt counts only as verify-restore's fresh output", () => {
   const verified = stamp(receipt(), "restore_exercise", R_NOW);
   assert.equal(evaluateRestoreExercise(verified, R_NOW).decision, "pass");
   // Unbound: a contract violation. A malformed binding likewise.
@@ -281,7 +281,7 @@ const NOW = at("2026-09-24T12:00:00Z");
 const POSITIVE = { id: "0b8f3c7e-1a2b-4c3d-8e9f-0123456789ab", nonce: "a".repeat(32), written_at: "2026-09-24T11:50:00.123456Z" };
 const NEGATIVE = { id: "1c9f4d8f-2b3c-4d4e-9f00-123456789abc", nonce: "b".repeat(32), written_at: "2026-09-24T11:58:05.000000Z" };
 
-// tools/pitr-restore-proof.py verify's evidence: T = 11:58:00; the positive
+// tools/pitr-restore-proof.py prove's evidence: T = 11:58:00; the positive
 // probe written 11:50, the negative 11:58:05; the branch's parent is production
 // at exactly T; production re-read at 11:59.
 function pitrProof() {
@@ -426,7 +426,7 @@ test("item 5 (F6/Q7): the point-in-time proof fails on each broken link, one at 
   assert.ok(future.failures.includes("restorable_point_after_observation"));
 });
 
-test("item 5 (G4): the RPO proof counts only as `pitr-restore-proof.py verify`'s fresh re-read output", () => {
+test("item 5 (G4): the RPO proof counts only as `pitr-restore-proof.py prove`'s fresh output", () => {
   const judge = block => evaluateRecoveryMatrix({ cells: { record_layer_rpo: block } }, NOW).cells.record_layer_rpo;
   const verified = stamp(pitrProof(), "record_layer_rpo", NOW);
   assert.equal(judge(verified).state, "pass");

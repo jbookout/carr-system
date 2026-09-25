@@ -990,21 +990,23 @@ if [ -n "$BACKUP_RUN_ID" ]; then
     # Review G4: a rehearsal that failed phase 4 (the production comparison)
     # or phase 5 writes and verifies NO receipt; the evaluator never sees one.
     say "  FAIL  no restore-exercise receipt: $FAILS earlier assertion(s) failed" >&2
-  elif "$PY" "$REPO/tools/restore-watermark.py" receipt --copy-record "$COPYDIR/copy.json" \
-       --target-kind disposable_branch --oracle-id restore-rehearse \
-       --observed-digest "$ARTIFACT_DIGEST" \
-       --artifact "$WORKDIR/artifact-watermark.json" --restored "$WORKDIR/restored-watermark.json" \
-       --started-at "$RESTORE_START_ISO" --finished-at "$RESTORE_FINISHED_ISO" > "$WORKDIR/receipt.unbound.json" \
-     && "$PY" "$REPO/tools/restore-watermark.py" verify-receipt --repository "$BACKUP_REPOSITORY" \
-          "$WORKDIR/receipt.unbound.json" > "$WORKDIR/receipt.verified.json" \
+  elif mkdir -p "$COPYDIR/verify" \
+     && RESTORE_DSN="$RESTORE_URL" "$PY" "$REPO/tools/restore-watermark.py" verify-restore \
+          --repository "$BACKUP_REPOSITORY" --run-id "$BACKUP_RUN_ID" --identity "$IDENTITY" \
+          --target-kind disposable_branch --project-id "$PROJECT_ID" --branch-id "$BRANCH_ID" \
+          --work-dir "$COPYDIR/verify" > "$WORKDIR/receipt.verified.json" \
      && mv "$WORKDIR/receipt.verified.json" "$RECEIPT_PATH"; then
-    # The receipt on disk is verify-receipt's OUTPUT: the copy block as re-read
-    # from the provider, stamped with the binding the evaluator requires. It is
-    # judged fresh for 15 minutes; re-run verify-receipt to judge it later.
-    say "  ok    restore-exercise receipt (copy facts re-read from the provider, bound): $RECEIPT_PATH"
+    # Review H1: the receipt is built ENTIRELY by verify-restore, while this
+    # branch still exists (the EXIT trap deletes it later). It looks the Check
+    # up itself, downloads and hashes the artifact itself, decrypts and counts
+    # it itself, reads the restored watermark itself, reads the branch from
+    # the provider (start = branch creation) and takes the finish from its own
+    # clock. Nothing computed above in this script feeds the receipt. It is
+    # judged fresh for 15 minutes.
+    say "  ok    restore-exercise receipt (every decisive fact read by verify-restore, bound): $RECEIPT_PATH"
     say "        evaluate: node mcp-server/bin/recovery-matrix-evaluate.mjs restore $RECEIPT_PATH"
   else
-    say "  FAIL  could not build or provider-verify the restore-exercise receipt" >&2
+    say "  FAIL  verify-restore could not produce the restore-exercise receipt" >&2
     FAILS=$((FAILS + 1))
   fi
 else

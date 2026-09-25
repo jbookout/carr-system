@@ -13,11 +13,14 @@ own code runs unchanged. What is held:
   * the sweep deletes prefixed-and-stale branches and state-listed ones, by id
     or, for an interrupted create, by name; never the default or a protected one;
   * teardown runs with SIGINT and SIGHUP ignored and restores them after;
+  * teardown also ignores SIGTERM, and interrupts are BLOCKED from the create
+    POST until the new id is in the teardown list (review H4);
   * prove always tears down the branches it created, on failure too, and asks
     for the branch with parent_id = production and parent_timestamp = T;
-  * verify recomputes the default branch and both probe rows from production,
-    confirms create and delete from the provider's OPERATIONS LOG (not a 404),
-    and stamps the verify re-read binding.
+  * prove performs EVERY decisive read itself in one process (review H1): the
+    probes and the parent point on the branch while it exists, production
+    re-read, create and delete from the provider's OPERATIONS LOG, then binds;
+    there is no verify mode and no file a caller could hand it.
 
   .venv/bin/python -m unittest tools/test_pitr_restore_proof.py
 """
@@ -138,7 +141,7 @@ class Lifecycle(Base):
     def test_admission_refusal_means_no_post(self):
         with self.admission(77):
             with self.assertRaisesRegex(proof.ProofError, "metering admission refused"):
-                proof.create_branch("pitr-proof-x", "br-prod", "2026-09-24T12:00:00Z", {"br-prod"})
+                proof.create_branch("pitr-proof-x", "br-prod", "2026-09-24T12:00:00Z", {"br-prod"}, [])
         self.assertEqual(self.fake.posts(), [])
 
     def test_create_asks_for_production_at_T_with_an_expiry_and_records_the_name_first(self):
@@ -151,7 +154,7 @@ class Lifecycle(Base):
             return real_api(method, path, body, query)
 
         with self.admission(), mock.patch.object(proof, "api", spying):
-            branch = proof.create_branch("pitr-proof-x", "br-prod", "2026-09-24T12:00:00Z", {"br-prod"})
+            branch = proof.create_branch("pitr-proof-x", "br-prod", "2026-09-24T12:00:00Z", {"br-prod"}, [])
         self.assertEqual(seen_state[0][0]["name"], "pitr-proof-x")
         body = self.fake.posts()[0][2]
         self.assertEqual(body["branch"]["parent_id"], "br-prod")
@@ -172,7 +175,7 @@ class Lifecycle(Base):
         self.fake.post_raises = TimeoutError("response lost")
         with self.admission():
             with self.assertRaisesRegex(proof.ProofError, "branch create failed"):
-                proof.create_branch("pitr-proof-lost", "br-prod", "2026-09-24T12:00:00Z", {"br-prod"})
+                proof.create_branch("pitr-proof-lost", "br-prod", "2026-09-24T12:00:00Z", {"br-prod"}, [])
         self.assertEqual([b["name"] for b in self.fake.branches.values()], ["production"])
 
     def test_a_create_interrupted_by_ctrl_c_is_found_by_name_deleted_and_the_interrupt_re_raised(self):
@@ -180,7 +183,7 @@ class Lifecycle(Base):
             self.fake.post_raises = interrupt
             with self.admission():
                 with self.assertRaises(type(interrupt)):
-                    proof.create_branch("pitr-proof-cc", "br-prod", "2026-09-24T12:00:00Z", {"br-prod"})
+                    proof.create_branch("pitr-proof-cc", "br-prod", "2026-09-24T12:00:00Z", {"br-prod"}, [])
             self.assertEqual([b["name"] for b in self.fake.branches.values()], ["production"])
 
     def test_a_create_interrupted_while_the_provider_is_unreachable_leaves_the_name_for_the_sweep(self):
@@ -194,7 +197,7 @@ class Lifecycle(Base):
 
         with self.admission(), mock.patch.object(proof, "api", down_after_post):
             with self.assertRaises(KeyboardInterrupt):
-                proof.create_branch("pitr-proof-orphan", "br-prod", "2026-09-24T12:00:00Z", {"br-prod"})
+                proof.create_branch("pitr-proof-orphan", "br-prod", "2026-09-24T12:00:00Z", {"br-prod"}, [])
         self.assertEqual(json.loads(proof.STATE.read_text()), [
             {"name": "pitr-proof-orphan", "id": None, "requested_at": mock.ANY}])
         # The next run's sweep finds it by that recorded name even though it is young.
@@ -275,6 +278,20 @@ class OperationsLog(Base):
         dup = [*ops, {"id": "op-10", "branch_id": "br-a", "action": "create_branch", "status": "finished", "created_at": ago(seconds=5)}]
         self.assertIsNone(proof.confirmed_operation(dup, "create_branch", start))
 
+    def test_the_lifecycle_confirms_nothing_for_an_invented_id_or_a_branch_that_still_answers(self):
+        start = ago(minutes=1)
+        self.fake.operations = [
+            {"id": "op-2", "branch_id": "br-a", "action": "delete_timeline", "status": "finished", "created_at": ago(seconds=5)},
+            {"id": "op-1", "branch_id": "br-a", "action": "create_branch", "status": "finished", "created_at": ago(seconds=20)},
+        ]
+        # an id the log never saw answers 404 like a deleted branch, but confirms nothing
+        self.assertEqual(proof.confirm_lifecycle("br-invented", start, attempts=1), {"create": None, "delete": None})
+        # a logged delete does not count while the provider still returns the branch
+        self.fake.branches["br-a"] = {"id": "br-a", "name": "back", "default": False, "created_at": ago(seconds=1)}
+        self.assertEqual(proof.confirm_lifecycle("br-a", start, attempts=1), {"create": "op-1", "delete": None})
+        del self.fake.branches["br-a"]
+        self.assertEqual(proof.confirm_lifecycle("br-a", start, attempts=1), {"create": "op-1", "delete": "op-2"})
+
     def test_a_log_that_never_reaches_back_to_the_proof_start_is_refused(self):
         self.fake.operations = [{"id": f"op-{i}", "branch_id": "br-x", "action": "noop", "status": "finished",
                                  "created_at": ago(seconds=1)} for i in range(proof.OPERATIONS_MAX_PAGES * 2 + 2)]
@@ -283,7 +300,7 @@ class OperationsLog(Base):
 
 
 class ProveAndVerify(Base):
-    def fake_db(self, *, branch_rows):
+    def fake_db(self, *, branch_rows, production_rows=None):
         """A connect() whose sessions answer the proof's queries; the probe writes return server-stamped rows."""
         clock = {"t": datetime(2026, 9, 24, 12, 0, 0, tzinfo=timezone.utc).timestamp()}
         written = {}
@@ -312,7 +329,10 @@ class ProveAndVerify(Base):
                     res.fetchone.return_value = row
                 elif "from ops.pitr_probe" in sql:
                     assert inner.read_only
-                    rows = branch_rows(written) if "branch" in inner.uri else list(written.values())
+                    if "branch" in inner.uri:
+                        rows = branch_rows(written)
+                    else:
+                        rows = (production_rows or (lambda w: list(w.values())))(written)
                     res.fetchall.return_value = rows
                 elif "count(*)" in sql:
                     res.fetchone.return_value = (12,)
@@ -320,85 +340,175 @@ class ProveAndVerify(Base):
 
         return lambda uri, read_only, attempts=40: Conn(uri, read_only)
 
-    def run_prove(self, branch_rows):
+    def run_prove(self, branch_rows, now=None, production_rows=None, branch_host="branch-{bid}-host"):
         uris = {"br-prod": "postgresql://u@prod-host/neondb"}
-        self.db = self.fake_db(branch_rows=branch_rows)
+        self.db = self.fake_db(branch_rows=branch_rows, production_rows=production_rows)
         with self.admission(), \
-             mock.patch.object(proof, "connection_uri", lambda bid: uris.get(bid, f"postgresql://u@branch-{bid}-host/neondb")), \
+             mock.patch.object(proof, "connection_uri", lambda bid: uris.get(bid, f"postgresql://u@{branch_host.format(bid=bid)}/neondb?branch")), \
              mock.patch.object(proof, "connect", self.db):
-            return proof.prove()
+            return proof.prove(now)
 
-    def verify(self, obs, now=None):
-        prod = mock.patch.object(proof, "connection_uri", lambda bid: "postgresql://u@prod-host/neondb")
-        with prod, mock.patch.object(proof, "connect", self.db):
-            return proof.verify(obs, now)
-
-    def test_prove_records_T_probes_and_readback_and_tears_the_branch_down(self):
+    def test_prove_reads_everything_itself_and_returns_bound_evidence(self):
         before = int(datetime.now(timezone.utc).timestamp())
-        obs = self.run_prove(lambda w: [w["positive"]])
-        self.assertEqual(obs["branch_parent_id"], "br-prod")
-        self.assertEqual(obs["branch_parent_timestamp"], obs["requested_parent_timestamp"])
-        # The operations-log window starts when THIS proof started, not earlier.
-        self.assertGreaterEqual(proof.epoch_of(obs["proof_started_at"]), before)
-        self.assertLessEqual(proof.epoch_of(obs["proof_started_at"]), datetime.now(timezone.utc).timestamp())
-        pos_epoch = proof.epoch_of(obs["positive_probe"]["written_at"])
-        t_epoch = proof.epoch_of(obs["requested_parent_timestamp"])
-        neg_epoch = proof.epoch_of(obs["negative_probe"]["written_at"])
+        now = datetime(2026, 9, 24, 12, 30, tzinfo=timezone.utc)
+        ev = self.run_prove(lambda w: [w["positive"]], now)
+        facts = {k: v for k, v in ev.items() if k != "verification"}
+        self.assertEqual(ev["verification"], {"verifier": "tools/pitr-restore-proof.py prove",
+                                              "verified_at": "2026-09-24T12:30:00Z",
+                                              "facts_digest": recovery_evidence.facts_digest(facts)})
+        self.assertEqual(ev["production_branch_id"], "br-prod")
+        self.assertEqual(ev["branch_parent_id"], "br-prod")
+        self.assertEqual(ev["branch_parent_timestamp"], ev["requested_parent_timestamp"])
+        self.assertEqual(ev["branch_parent_lsn"], "0/1A2B3C4D")
+        pos_epoch = proof.epoch_of(ev["positive_probe"]["written_at"])
+        t_epoch = proof.epoch_of(ev["requested_parent_timestamp"])
+        neg_epoch = proof.epoch_of(ev["negative_probe"]["written_at"])
         self.assertGreaterEqual(t_epoch - pos_epoch, 60)
         self.assertGreaterEqual(neg_epoch - t_epoch, 5)
-        self.assertEqual(obs["positive_on_branch"], obs["positive_probe"])
-        self.assertFalse(obs["negative_present_on_branch"])
+        # probes and core rows were read ON THE BRANCH, while it existed
+        self.assertEqual(ev["positive_on_branch"], ev["positive_probe"])
+        self.assertFalse(ev["negative_present_on_branch"])
+        self.assertEqual(ev["branch_core_table_rows"], {t: 12 for t in proof.CORE_TABLES})
+        # the lifecycle as the provider LOGGED it, bounded by this proof's start
+        ops = ev["branch_operations"]
+        logged = {o["id"]: (o["branch_id"], o["action"]) for o in self.fake.operations}
+        self.assertEqual(logged[ops["create"]], (ev["branch_id"], "create_branch"))
+        self.assertEqual(logged[ops["delete"]], (ev["branch_id"], "delete_timeline"))
+        self.assertGreaterEqual(proof.epoch_of(self.fake.operations[-1]["created_at"]), before - 1)
+        # production re-read (read-only) and retention
+        self.assertEqual(ev["production_readback"]["positive"], ev["positive_probe"])
+        self.assertEqual(ev["production_readback"]["negative"], ev["negative_probe"])
+        self.assertEqual(ev["history_retention_seconds"], 604800)
         self.assertEqual(list(self.fake.branches), ["br-prod"])  # torn down
         self.assertEqual(json.loads(proof.STATE.read_text()), [])
 
+    def test_a_negative_probe_leaked_onto_the_branch_is_recorded_as_seen(self):
+        ev = self.run_prove(lambda w: list(w.values()))
+        self.assertTrue(ev["negative_present_on_branch"])
+
+    def test_the_parent_point_is_the_providers_readback_not_the_request(self):
+        real_api = self.fake.api
+
+        def drifting(method, path, body=None, query=None):
+            status, payload = real_api(method, path, body, query)
+            if method == "GET" and path.startswith(f"{P}/branches/br-new-") and status == 200:
+                payload = {"branch": {**payload["branch"], "parent_timestamp": "2026-09-24T11:00:00.5Z"}}
+            return status, payload
+
+        with mock.patch.object(proof, "api", drifting):
+            ev = self.run_prove(lambda w: [w["positive"]])
+        self.assertEqual(ev["branch_parent_timestamp"], "2026-09-24T11:00:00.500000Z")
+        self.assertNotEqual(ev["branch_parent_timestamp"], ev["requested_parent_timestamp"])
+
+    def test_the_production_readback_is_a_fresh_read_not_the_written_rows(self):
+        ev = self.run_prove(lambda w: [w["positive"]], production_rows=lambda w: [w["negative"]])
+        self.assertIsNone(ev["production_readback"]["positive"])
+        self.assertEqual(ev["production_readback"]["negative"], ev["negative_probe"])
+
+    def test_a_branch_that_resolves_to_the_parents_host_is_refused_and_torn_down(self):
+        with self.assertRaisesRegex(proof.ProofError, "parent's host"):
+            self.run_prove(lambda w: [w["positive"]], branch_host="prod-host")
+        self.assertEqual(list(self.fake.branches), ["br-prod"])
+
+    def test_a_branch_that_survives_teardown_confirms_no_delete(self):
+        self.fake.delete_sticks = True
+        ev = self.run_prove(lambda w: [w["positive"]])
+        self.assertTrue(ev["branch_operations"]["create"])
+        self.assertIsNone(ev["branch_operations"]["delete"])
+
     def test_prove_tears_down_even_when_a_check_raises(self):
-        with mock.patch.object(proof, "utc_exact", side_effect=proof.ProofError("boom")):
+        with mock.patch.object(proof, "read_back_ready", side_effect=proof.ProofError("boom")):
             with self.assertRaises(proof.ProofError):
                 self.run_prove(lambda w: [w["positive"]])
         self.assertEqual(list(self.fake.branches), ["br-prod"])
 
     def test_prove_tears_down_on_ctrl_c_too(self):
-        with mock.patch.object(proof, "utc_exact", side_effect=KeyboardInterrupt()):
+        with mock.patch.object(proof, "read_probes", side_effect=KeyboardInterrupt()):
             with self.assertRaises(KeyboardInterrupt):
                 self.run_prove(lambda w: [w["positive"]])
         self.assertEqual(list(self.fake.branches), ["br-prod"])
 
-    def test_verify_recomputes_probes_confirms_the_lifecycle_from_the_log_and_binds(self):
-        obs = self.run_prove(lambda w: list(w.values()))  # negative leaked onto the branch
-        self.assertTrue(obs["negative_present_on_branch"])
-        now = datetime(2026, 9, 24, 12, 30, tzinfo=timezone.utc)
-        ev = self.verify(obs, now)
-        self.assertEqual(ev["production_branch_id"], "br-prod")
-        ops = ev["branch_operations"]
-        self.assertTrue(ops["create"] and ops["delete"])
-        logged = {o["id"]: (o["branch_id"], o["action"]) for o in self.fake.operations}
-        self.assertEqual(logged[ops["create"]], (obs["branch_id"], "create_branch"))
-        self.assertEqual(logged[ops["delete"]], (obs["branch_id"], "delete_timeline"))
-        self.assertEqual(ev["history_retention_seconds"], 604800)
-        self.assertNotIn("branch_deleted_confirmed", ev)
-        # re-read from production, not copied from the observation
-        self.assertEqual(ev["production_readback"]["positive"], obs["positive_probe"])
-        self.assertEqual(ev["production_readback"]["negative"], obs["negative_probe"])
-        self.assertTrue(ev["negative_present_on_branch"])
-        # the binding the evaluator requires, over exactly these facts
-        facts = {k: v for k, v in ev.items() if k != "verification"}
-        self.assertEqual(ev["verification"], {"verifier": "tools/pitr-restore-proof.py verify",
-                                              "verified_at": "2026-09-24T12:30:00Z",
-                                              "facts_digest": recovery_evidence.facts_digest(facts)})
-        edited = json.loads(json.dumps(obs))
-        edited["positive_probe"]["nonce"] = "c" * 32
-        self.assertNotEqual(self.verify(edited)["production_readback"]["positive"], edited["positive_probe"])
+    def test_no_caller_file_or_mode_can_feed_the_verdict(self):
+        # There is no verify mode and no file argument (review H1).
+        for argv in (["verify", "obs.json"], ["verify"], ["prove", "obs.json"]):
+            with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
+                proof.main(argv)
+        self.assertFalse(hasattr(proof, "verify"))
+        # A doctored evidence file sitting at OUT has no influence: prove never reads it.
+        out = Path(self.tmp.name) / "pitr-proof.json"
+        doctored = {"source": "pitr_branch_proof", "negative_present_on_branch": False, "doctored": True}
+        out.write_text(json.dumps(doctored))
+        printed = []
+        self.db = self.fake_db(branch_rows=lambda w: list(w.values()))
+        uris = {"br-prod": "postgresql://u@prod-host/neondb"}
+        saved = {s: signal.getsignal(s) for s in proof.INTERRUPTS}
+        self.addCleanup(lambda: [signal.signal(s, h) for s, h in saved.items()])
+        with self.admission(), mock.patch.object(proof, "OUT", out), \
+             mock.patch.object(proof, "connection_uri", lambda bid: uris.get(bid, f"postgresql://u@branch-{bid}-host/neondb")), \
+             mock.patch.object(proof, "connect", self.db), \
+             mock.patch("builtins.print", lambda *a, **k: printed.append(a[0])):
+            self.assertEqual(proof.main(["prove"]), 0)
+        ev = json.loads(printed[0])
+        self.assertNotIn("doctored", ev)
+        self.assertTrue(ev["negative_present_on_branch"])  # the branch's own answer, not the file's
+        self.assertEqual(json.loads(out.read_text()), ev)  # OUT is overwritten, only ever written
 
-    def test_verify_confirms_nothing_for_a_branch_the_log_never_saw_or_that_still_exists(self):
-        obs = self.run_prove(lambda w: [w["positive"]])
-        invented = {**obs, "branch_id": "br-invented"}  # 404s like a deleted branch, but was never logged
-        self.assertEqual(self.verify(invented)["branch_operations"], {"create": None, "delete": None})
-        self.fake.branches[obs["branch_id"]] = {"id": obs["branch_id"], "name": "back", "default": False, "created_at": ago(seconds=1)}
-        self.assertIsNone(self.verify(obs)["branch_operations"]["delete"])
 
-    def test_verify_refuses_an_observation_whose_parent_is_not_production(self):
-        with self.assertRaisesRegex(proof.ProofError, "not the production branch"):
-            proof.verify({"proof_parent_branch_id": "br-other"})
+class InterruptWindows(Base):
+    """Review H4: no signal can land between the branch existing and teardown knowing it."""
+
+    def setUp(self):
+        super().setUp()
+        saved = {s: signal.getsignal(s) for s in proof.INTERRUPTS}
+        self.addCleanup(lambda: [signal.signal(s, h) for s, h in saved.items()])
+        mask = signal.pthread_sigmask(signal.SIG_BLOCK, [])
+        self.addCleanup(lambda: signal.pthread_sigmask(signal.SIG_SETMASK, mask))
+
+    def test_interrupts_are_blocked_during_the_create_and_released_after(self):
+        during = []
+        real_api = self.fake.api
+
+        def spying(method, path, body=None, query=None):
+            if method == "POST":
+                during.append(signal.pthread_sigmask(signal.SIG_BLOCK, []))
+            return real_api(method, path, body, query)
+
+        created: list[str] = []
+        with self.admission(), mock.patch.object(proof, "api", spying):
+            proof.create_branch("pitr-proof-m", "br-prod", "2026-09-24T12:00:00Z", {"br-prod"}, created)
+        self.assertTrue(set(proof.INTERRUPTS) <= during[0])
+        self.assertFalse(set(proof.INTERRUPTS) & signal.pthread_sigmask(signal.SIG_BLOCK, []))
+        self.assertEqual(created, ["br-new-1"])
+
+    def test_a_sigterm_during_the_create_lands_only_after_the_id_is_in_created(self):
+        class Term(BaseException):
+            pass
+
+        def raise_term(_s, _f):
+            raise Term()
+
+        signal.signal(signal.SIGTERM, raise_term)
+        real_api = self.fake.api
+
+        def killed(method, path, body=None, query=None):
+            if method == "POST":
+                os.kill(os.getpid(), signal.SIGTERM)  # pending, not delivered, while blocked
+            return real_api(method, path, body, query)
+
+        created: list[str] = []
+        with self.admission(), mock.patch.object(proof, "api", killed):
+            with self.assertRaises(Term):
+                proof.create_branch("pitr-proof-t", "br-prod", "2026-09-24T12:00:00Z", {"br-prod"}, created)
+        self.assertEqual(created, ["br-new-1"])  # the teardown list already holds it
+        self.assertEqual(json.loads(proof.STATE.read_text())[0]["id"], "br-new-1")
+
+    def test_teardown_ignores_sigterm_too(self):
+        for s in proof.INTERRUPTS:
+            signal.signal(s, proof._interrupt)
+        self.assertIn(signal.SIGTERM, proof.teardown_signals_deferred.SIGNALS)
+        with proof.teardown_signals_deferred():
+            self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_IGN)
+        self.assertIs(signal.getsignal(signal.SIGTERM), proof._interrupt)
 
 
 def _pg_bins():
