@@ -650,8 +650,8 @@ as $$
    order by coalesce(r.ended_at, r.updated_at), r.release_key;
 $$;
 
-revoke all on function ops.list_shipped_releases(timestamptz) from public;
-grant execute on function ops.list_shipped_releases(timestamptz) to carr_reader;
+revoke all on function ops.list_shipped_releases(p_since timestamp with time zone) from public;
+grant execute on function ops.list_shipped_releases(p_since timestamp with time zone) to carr_reader;
 
 -- ===========================================================================
 -- Marks: who marked, and the partner hold
