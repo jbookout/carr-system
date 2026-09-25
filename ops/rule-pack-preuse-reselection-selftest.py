@@ -1075,6 +1075,7 @@ with tempfile.TemporaryDirectory() as fake_repo:
     (Path(fake_repo) / "ops").mkdir()
     (Path(fake_repo) / "ops/rule_trigger_delivery.py").write_text(
         "SEEN = []\n"
+        "DEADLINE_SECONDS = 12.0\n"
         "def advise(situation, **kwargs):\n"
         "    SEEN.append(kwargs)\n"
         "    return [kwargs]\n", encoding="utf-8")
@@ -1086,8 +1087,12 @@ with tempfile.TemporaryDirectory() as fake_repo:
         rail.REPO = _real_repo
 check("the default adviser receives the hook payload's own session id",
       default_adviser_calls == [("hello", "session-prompt")]
-      and forwarded == [{"session_id": "session-prompt"}],
+      and len(forwarded) == 1 and forwarded[0].get("session_id") == "session-prompt",
       (default_adviser_calls, forwarded))
+check("the rule judgment's deadline leaves the selector its reserve of the hook budget",
+      isinstance(forwarded[0].get("deadline"), float)
+      and forwarded[0]["deadline"] <= rail._hook_deadline() - rail.SELECTOR_RESERVE_SECONDS,
+      forwarded)
 
 check("malformed prompt events fail open before either adapter runs",
       rail.process({"hook_event_name": "UserPromptSubmit", "session_id": "x"},
@@ -1203,6 +1208,23 @@ check("a task notification's build receipt carries the skipped advisory and vali
       skip_row["schema"] == contract.BUILD_RECEIPT_SCHEMA
       and skip_row["advisory"] == build_module.skipped()
       and contract.validate_build_receipt(skip_row, repo=REPO))
+
+# One clock for the whole prompt hook: a hook that has already spent 15 s
+# gives the standing-context door only what is left of its 18 s, not 15 s.
+import time as _time  # noqa: E402
+clock_runner = Runner()
+started = rail._HOOK_STARTED
+rail._HOOK_STARTED = _time.monotonic() - 15.0
+try:
+    try:
+        rail._run_generalized_selector(["engineering-git"], ["173119a8"], clock_runner)
+    except Exception:
+        pass
+finally:
+    rail._HOOK_STARTED = started
+given = clock_runner.calls[0][1].get("timeout") if clock_runner.calls else None
+check("the standing-context door gets only what is left of the hook's budget",
+      isinstance(given, float) and given <= rail.HOOK_BUDGET_SECONDS - 15.0 + 0.5, given)
 
 if FAILURES:
     print("rule-pack-preuse-reselection-selftest: FAIL")

@@ -26,12 +26,15 @@ its mutant proves nothing, and the suite fails on it.
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import urllib.error
 from pathlib import Path
+from types import SimpleNamespace
 
 REPO = Path(__file__).resolve().parent.parent
 FAILURES: list[str] = []
@@ -62,6 +65,8 @@ def load(name, path, *, replace=None):
 
 RTC_PATH = REPO / "ops" / "rule_trigger_compile.py"
 RTD_PATH = REPO / "ops" / "rule_trigger_delivery.py"
+TSC_PATH = REPO / "ops" / "typesafe_client.py"
+BUILD_PATH = REPO / "ops" / "jev_build_advisory.py"
 rtc = load("rule_trigger_compile_t", RTC_PATH)
 rtd = load("rule_trigger_delivery_t", RTD_PATH)
 
@@ -435,6 +440,164 @@ def prop_deadline_keeps_matches(rtc_m, rtd_m):
             and row["bind_status"] == "deadline" and len(row["unjudged"]) > 0)
 
 
+# ------------------------------------------------ the transport under a clock
+# The #1281 review: a 429 with retry-after inside typesafe_client.ask escaped
+# every deadline above it (3 retries, unbounded retry-after, each attempt at
+# the full timeout). These drive the REAL client (EXTRA["tsc"], swapped for a
+# mutant below) through a stub opener on a fake clock: nothing reaches the
+# network and nothing really sleeps.
+EXTRA = {"tsc": load("typesafe_client_t", TSC_PATH),
+         "build": load("jev_build_advisory_t", BUILD_PATH)}
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 100.0
+        self.slept = []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+class Transport:
+    """Every attempt takes `took` seconds, then answers 429 with the given
+    retry-after — or, with `hang`, uses its whole timeout and times out.
+    Records (start time, timeout) per attempt."""
+
+    def __init__(self, clock, *, retry_after="1", took=0.5, hang=False):
+        self.clock, self.retry_after, self.took, self.hang = clock, retry_after, took, hang
+        self.attempts = []
+
+    def __call__(self, request, timeout=None):
+        self.attempts.append((self.clock.now, timeout))
+        if self.hang:
+            self.clock.now += timeout
+            raise urllib.error.URLError("timed out")
+        self.clock.now += self.took
+        raise urllib.error.HTTPError("https://jev.test", 429, "Too Many Requests",
+                                     {"retry-after": self.retry_after}, io.BytesIO(b""))
+
+
+class Via:
+    """A client for jev_judge / the build advisory: the real ask(), served by
+    a stub transport."""
+
+    def __init__(self, tsc_m, opener):
+        self.tsc_m, self.opener = tsc_m, opener
+
+    def __getattr__(self, name):
+        return getattr(self.tsc_m, name)
+
+    def ask(self, state, questions, **kwargs):
+        kwargs.pop("api_key", None)
+        return self.tsc_m.ask(state, questions, api_key="k", opener=self.opener,
+                              calls_log=os.devnull, **kwargs)
+
+
+def _on_clock(fn):
+    """Run fn(clock, tsc_m) with the client's time module on a fake clock."""
+    tsc_m, clock = EXTRA["tsc"], FakeClock()
+    real = tsc_m.time
+    tsc_m.time = SimpleNamespace(monotonic=clock.monotonic, sleep=clock.sleep,
+                                 time=clock.monotonic)
+    try:
+        return fn(clock, tsc_m)
+    finally:
+        tsc_m.time = real
+
+
+def _in_time(transport, deadline):
+    return all(start + timeout <= deadline + 1e-9 for start, timeout in transport.attempts)
+
+
+def prop_ask_honours_deadline(rtc_m, rtd_m):
+    """typesafe_client.ask with a deadline: a retry-after past the deadline
+    stops the retries (no sleep); a short one is honoured, but every attempt's
+    timeout and every sleep fits inside the deadline."""
+    def long_wait(clock, tsc_m):
+        t = Transport(clock, retry_after="7")
+        deadline = clock.now + 5
+        try:
+            tsc_m.ask("s", {"q": tsc_m.noul("?")}, api_key="k", opener=t,
+                      calls_log=os.devnull, timeout=20, retries=3, deadline=deadline)
+            return False
+        except tsc_m.TypeSafeError:
+            pass
+        return (len(t.attempts) == 1 and clock.slept == [] and clock.now <= deadline
+                and _in_time(t, deadline))
+
+    def short_wait(clock, tsc_m):
+        t = Transport(clock, retry_after="1")
+        deadline = clock.now + 5
+        try:
+            tsc_m.ask("s", {"q": tsc_m.noul("?")}, api_key="k", opener=t,
+                      calls_log=os.devnull, timeout=20, retries=3, deadline=deadline)
+            return False
+        except tsc_m.TypeSafeError:
+            pass
+        return len(t.attempts) > 1 and clock.now <= deadline and _in_time(t, deadline)
+
+    return _on_clock(long_wait) and _on_clock(short_wait)
+
+
+def _judged_once(call):
+    """A 429 with a 1 s retry-after, 10 s of deadline: exactly one attempt,
+    no sleep, inside the deadline."""
+    def run_it(clock, tsc_m):
+        t = Transport(clock, retry_after="1")
+        deadline = clock.now + 10
+        try:
+            call(Via(tsc_m, t), deadline)
+            return False
+        except Exception:
+            pass
+        return (len(t.attempts) == 1 and clock.slept == [] and clock.now <= deadline
+                and _in_time(t, deadline))
+    return _on_clock(run_it)
+
+
+def prop_bind_429_not_retried(rtc_m, rtd_m):
+    return _judged_once(lambda via, deadline: rtd_m._default_bind(
+        {"situation": "s", "rule_title": "t", "rule": "r", "rule_context": ""},
+        {"binds": via.noul("?")}, via, timeout=10, deadline=deadline))
+
+
+def prop_rank_429_not_retried(rtc_m, rtd_m):
+    return _judged_once(lambda via, deadline: rtd_m._default_rank(
+        "anything", ROSTER, rtd_m.BIND_TOP_K, via, timeout=10, deadline=deadline))
+
+
+def prop_build_advisory_bounded(rtc_m, rtd_m):
+    """The build advisory, as the prompt hook calls it (defaults): a hanging
+    transport costs one attempt of at most 6 s; a 429 is not retried."""
+    build_m = EXTRA["build"]
+
+    def hanging(clock, tsc_m):
+        t = Transport(clock, hang=True)
+        start = clock.now
+        try:
+            build_m.advise("please build the deal room panel", client=Via(tsc_m, t))
+            return False
+        except Exception:
+            pass
+        return len(t.attempts) == 1 and t.attempts[0][1] <= 6.0 and clock.now - start <= 6.0
+
+    def limited(clock, tsc_m):
+        t = Transport(clock, retry_after="1")
+        try:
+            build_m.advise("please build the deal room panel", client=Via(tsc_m, t))
+            return False
+        except Exception:
+            pass
+        return len(t.attempts) == 1 and clock.slept == []
+
+    return _on_clock(hanging) and _on_clock(limited)
+
+
 def prop_dedupe(rtc_m, rtd_m):
     with tempfile.TemporaryDirectory() as tmp:
         first = run(rtd_m, "a vendor intro", tmp)
@@ -485,6 +648,10 @@ PROPERTIES = {
     "a none-binds ranking is ok with an empty shortlist": prop_none_binds_is_ok,
     "binding stops at the deadline and keeps what was judged": prop_deadline,
     "a passed deadline makes no request and still delivers matches": prop_deadline_keeps_matches,
+    "ask() honours an absolute deadline across 429 retries": prop_ask_honours_deadline,
+    "a 429 on a binding request is not retried": prop_bind_429_not_retried,
+    "a 429 on the ranking request is not retried": prop_rank_429_not_retried,
+    "the build advisory is one attempt of at most 6 s": prop_build_advisory_bounded,
     "a rule already delivered this session is not resent inside the window": prop_dedupe,
     "no session id means no dedupe and no shared key": prop_no_session_no_pooling,
     "coverage flags a triggered rule with no trigger": prop_coverage_flags_empty_trigger,
@@ -691,6 +858,21 @@ MUTANTS = [
     # The deadline removed from the ranking request.
     ("a passed deadline makes no request and still delivers matches", RTD_PATH,
      ("        elif deadline - clock() < MIN_CALL_SECONDS:", "        elif False:")),
+    # Retries restored on the binding and the ranking requests.
+    ("a 429 on a binding request is not retried", RTD_PATH,
+     ('extra = {"deadline": deadline, "retries": 0}', 'extra = {"deadline": deadline}')),
+    ("a 429 on the ranking request is not retried", RTD_PATH,
+     ('extra = {"retries": 0, "deadline": deadline}', 'extra = {"deadline": deadline}')),
+    # ask() sleeping past the deadline, and attempts at the full timeout.
+    ("ask() honours an absolute deadline across 429 retries", TSC_PATH,
+     ("if deadline is not None and delay >= deadline - time.monotonic():", "if False:")),
+    ("ask() honours an absolute deadline across 429 retries", TSC_PATH,
+     ("attempt_timeout = min(timeout, remaining)", "attempt_timeout = timeout")),
+    # The build advisory with retries restored, and with the old 20 s cap.
+    ("the build advisory is one attempt of at most 6 s", BUILD_PATH,
+     ("            retries=0,\n", "")),
+    ("the build advisory is one attempt of at most 6 s", BUILD_PATH,
+     ("TIMEOUT_SECONDS = 6.0", "TIMEOUT_SECONDS = 20.0")),
     ("a rule already delivered this session is not resent inside the window", RTD_PATH,
      ("if not (isinstance(recent.get(rule_id), (int, float))",
       "if True or not (isinstance(recent.get(rule_id), (int, float))")),
@@ -710,10 +892,17 @@ for number, (prop_name, path, substitution) in enumerate(MUTANTS):
     mutated = load(f"mutant_{number}", path, replace=substitution)
     rtc_m = mutated if path == RTC_PATH else rtc
     rtd_m = mutated if path == RTD_PATH else rtd
+    saved = dict(EXTRA)
+    if path == TSC_PATH:
+        EXTRA["tsc"] = mutated
+    if path == BUILD_PATH:
+        EXTRA["build"] = mutated
     try:
         survived = PROPERTIES[prop_name](rtc_m, rtd_m)
     except Exception:
         survived = False
+    finally:
+        EXTRA.update(saved)
     check(f"mutant {number} is killed: {prop_name}", not survived)
 
 if FAILURES:

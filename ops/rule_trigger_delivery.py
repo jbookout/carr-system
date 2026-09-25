@@ -175,7 +175,7 @@ def _is_envelope(text):
         return False  # cannot tell: treat as a human prompt, which is judged
 
 
-def _default_rank(text, pool, limit, client, timeout=None):
+def _default_rank(text, pool, limit, client, timeout=None, deadline=None):
     """(ranked ids, requests made, ranking model) from ONE ranking Choice.
 
     The same Choice ops/jev_rule_select.narrow asks (rank_question, with its
@@ -189,7 +189,12 @@ def _default_rank(text, pool, limit, client, timeout=None):
     roster = [{"id": rule["id"], "gist": (rule.get("statement") or "")[:RUBRIC_CHARS]}
               for rule in pool]
     try:
-        extra = {} if timeout is None else {"timeout": timeout}
+        # retries=0: a 429's retry-after is unbounded, and three retries at
+        # the full timeout each escaped the clock (#1281 review: one ranking
+        # request took 15.1 s against the 12 s deadline).
+        extra = {"retries": 0, "deadline": deadline}
+        if timeout is not None:
+            extra["timeout"] = timeout
         answer = ranker.judge({"situation": text},
                               {"rank": jrs.rank_question(roster, client)}, client=client,
                               **extra)
@@ -241,9 +246,12 @@ def _binding_question(client):
     return _sibling("jev_rule_select").binding_question(client)
 
 
-def _default_bind(subject, questions, client, timeout=None):
-    """One single-rule binding request through ops/jev_judge (logged there)."""
-    extra = {} if timeout is None else {"timeout": timeout}
+def _default_bind(subject, questions, client, timeout=None, deadline=None):
+    """One single-rule binding request through ops/jev_judge (logged there),
+    with no rate-limit retries and the caller's deadline passed to the client."""
+    extra = {"deadline": deadline, "retries": 0}
+    if timeout is not None:
+        extra["timeout"] = timeout
     return _sibling("jev_rule_select")._sibling("jev_judge").judge(
         subject, questions, client=client, **extra)
 
@@ -297,7 +305,7 @@ def judge_budgeted(text, rules, always, *, rank=None, ask=None, client=None, tit
             try:
                 answer = (rank(text, pool, room, client) if rank is not None else
                           _default_rank(text, pool, room, client,
-                                        timeout=deadline - clock()))
+                                        timeout=deadline - clock(), deadline=deadline))
                 ranked, made = answer[0], answer[1]
                 ranking_model = answer[2] if len(answer) > 2 else None
                 report["calls"] += made
@@ -336,7 +344,8 @@ def judge_budgeted(text, rules, always, *, rank=None, ask=None, client=None, tit
         report["calls"] += 1
         try:
             answer = (ask(subject, question, rule_id=rule_id) if ask is not None
-                      else _default_bind(subject, question, client, timeout=left))
+                      else _default_bind(subject, question, client, timeout=left,
+                                         deadline=deadline))
             value = float(answer["answers"]["binds"]["noul"])
         except Exception:
             failures += 1
