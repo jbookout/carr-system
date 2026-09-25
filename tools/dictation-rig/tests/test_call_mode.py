@@ -14,6 +14,8 @@ import sys
 import tempfile
 import time
 import unittest
+import urllib.error
+import urllib.request
 from email.message import Message
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -37,6 +39,30 @@ transcribe_session = load_module("transcribe_session_under_test", "transcribe_se
 post_call = load_module("post_call_under_test", "post_call.py")
 capture_bridge = load_module("capture_bridge_under_test", "capture-bridge.py")
 post_call_jev = load_module("post_call_jev_under_test", "post_call_jev.py")
+
+
+_REAL_URLOPEN = urllib.request.urlopen
+_PAID_CALLS_REFUSED: list[str] = []
+
+
+def _refuse_paid_jev(request: object, *args: object, **kwargs: object) -> object:
+    """process_session runs the live Jev checks, and ops/typesafe_client.ask
+    reads the real key on this Mac -- so this offline suite once spent about
+    twenty paid Jev calls per run. Refuse the vendor host; let everything else
+    (the loopback fakes these tests build) through unchanged."""
+    url = str(getattr(request, "full_url", request))
+    if "typesafe.ai" in url:
+        _PAID_CALLS_REFUSED.append(url)
+        raise urllib.error.URLError("paid Jev call refused inside the offline suite")
+    return _REAL_URLOPEN(request, *args, **kwargs)
+
+
+def setUpModule() -> None:
+    urllib.request.urlopen = _refuse_paid_jev  # type: ignore[assignment]
+
+
+def tearDownModule() -> None:
+    urllib.request.urlopen = _REAL_URLOPEN  # type: ignore[assignment]
 
 
 class CallModeTests(unittest.TestCase):
