@@ -380,6 +380,19 @@ test("the client value rule passes ordinary CRE text and refuses contact, access
   // Links: a dotted name followed by a path, ftp://, a bracketed dot.
   for (const value of ["bit.ly/abc", "goo.gl/x", "ftp://files.example", "landlord[.]com"]) assert.equal(clientTextViolation(value), "url", value);
   assert.equal(clientTextViolation("$28.50/SF/yr NNN"), null);
+  // Round 8. Spaced / | : * ~ _ ; + and unspaced ; ! ? & + = ^ $ % \ ` { } < > join a 3-3-4 group.
+  for (const sep of ["/", "|", ":", "*", "~", "_", ";", "+"]) assert.equal(clientTextViolation(`251 ${sep} 555 ${sep} 0100`), "phone", sep);
+  for (const sep of [..."!?&=^$%\\`{}<>;+"]) assert.equal(clientTextViolation(`251${sep}555${sep}0100`), "phone", sep);
+  // Access codes: up to four connector characters, "is" or "no.", and the key/entry/access words.
+  for (const value of ["Gate: #4411", "Gate#: 4411", "Gate - 4411", "gate—4411", "PIN-4411", "Gate is 4411", "Code is 4411", "PIN is 4411",
+    "Gate (4411)", "Gate \"4411\"", "Gate no. 4411", "Key #4411", "Entry 4411", "Access 4411", "Zip code 4411", "ZIP code 4411 at gate", "Gate 2021"])
+    assert.equal(clientTextViolation(value), "access_code", value);
+  // After "code" a year is not a code, "area code" is not one, and "zip code" passes only before a real zip.
+  for (const value of ["Building code 2021", "Area code 251", "Zip code 36602-1234", "Gate 45 lot", "Door 12 entrance", "Key tenants: 3 physicians"])
+    assert.equal(clientTextViolation(value), null, value);
+  // Only a link shortener's ending followed by a path is a link; asking-rent units are not.
+  for (const value of ["$24.00/sq.ft/yr NNN", "$1.25/sq.ft/mo", "Dr.Smith/Jones"]) assert.equal(clientTextViolation(value), null, value);
+  for (const value of ["is.gd/abc", "tiny.cc/abc", "rb.gy/x", "youtu.be/x", "tinyurl.com/abc"]) assert.equal(clientTextViolation(value), "url", value);
   assert.equal(clientTextViolation("Suites 201-204, 1200 SF"), null);
   assert.equal(clientTextViolation("120,000 SF"), null);
   assert.equal(clientTextViolation("Time: 10:30 am tours"), null);

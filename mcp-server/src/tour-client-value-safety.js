@@ -75,19 +75,20 @@ export const CLIENT_TEXT_DISALLOWED_SOURCE =
 const DASHES = "\\u2013\\u2014-";
 
 // Before the phone rules read a value, a number shaped 3-3-4 is joined across
-// separators of up to five characters of space ( ) . x, a dash, and the
-// allowlisted symbols x (U+00D7), bullet, plus-minus, degree, section sign and
-// the straight and curly quotes (251 . . 555 . . 0100, 251 ( 555 ) 0100,
-// 251 x 555 x 0100, 251 \u2022 555 \u2022 0100, 251\u00d7555\u00d70100). They are
-// listed one by one: a blanket non-alphanumeric class would also join
-// "Suites 201-204, 1200 SF". Or it is joined across one of
-// , / _ ~ | : * or the bullet (251/555/0100, 251|555|0100). A country code or
+// separators of up to five characters of space ( ) . x, a dash, / | : * ~ _ ;
+// + and the allowlisted symbols x (U+00D7), bullet, plus-minus, degree,
+// section sign and the straight and curly quotes (251 . . 555 . . 0100,
+// 251 ( 555 ) 0100, 251 / 555 / 0100, 251 \u2022 555 \u2022 0100,
+// 251\u00d7555\u00d70100). They are listed one by one: a blanket
+// non-alphanumeric class would also join "Suites 201-204, 1200 SF". Or it is
+// joined across exactly one of , ! ? & = ^ $ % \ ` { } < > (251,555,0100,
+// 251?555?0100). A country code or
 // leading +1 in front stays outside the join and the ten digits still read as
 // a phone. Only the 3-3-4 shape joins across wide separators, so year and count
 // ranges do not ("Renovated 2021 - 2026 (12 suites)"), and a comma joins only
 // a single-comma 3-3-4 group, so thousands do not (120,000 SF).
 export const CLIENT_TEXT_PHONE_JOIN = Object.freeze({
-  pattern: `(^|[^0-9])([0-9]{3})(?:[ ().xX\\u00d7\\u2022\\u00b1\\u00b0\\u00a7\\u2018\\u2019\\u201c\\u201d"'${DASHES}]{0,5}|[,/_~|:*\\u2022])([0-9]{3})(?:[ ().xX\\u00d7\\u2022\\u00b1\\u00b0\\u00a7\\u2018\\u2019\\u201c\\u201d"'${DASHES}]{0,5}|[,/_~|:*\\u2022])([0-9]{4})(?![0-9])`,
+  pattern: `(^|[^0-9])([0-9]{3})(?:[ ().xX\\u00d7\\u2022\\u00b1\\u00b0\\u00a7\\u2018\\u2019\\u201c\\u201d"'/|:*~_;+${DASHES}]{0,5}|[,!?&=^$%\\\\\`{}<>])([0-9]{3})(?:[ ().xX\\u00d7\\u2022\\u00b1\\u00b0\\u00a7\\u2018\\u2019\\u201c\\u201d"'/|:*~_;+${DASHES}]{0,5}|[,!?&=^$%\\\\\`{}<>])([0-9]{4})(?![0-9])`,
   replacement: "$1$2$3$4",
 });
 // Then any digits separated by one or two of space . and any dash are joined,
@@ -121,9 +122,10 @@ export const CLIENT_TEXT_RULES = Object.freeze([
   // a URL (http, https, ftp), a bare web domain (its name holds a letter:
   // "Hwy 90.US 29" is a road), a spaced .com/.net/.org ("landlord .com"), a
   // spelled-out "dot com" / "[dot] com", a bracketed dot ("landlord[.]com"),
-  // or any dotted name followed by a path, as link shorteners are written
-  // ("bit.ly/abc", "goo.gl/x"; "$28.50/SF" has no letter before the dot)
-  Object.freeze({ rule: "url", target: "raw", pattern: `(https?|ftp)://|www[.]|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]*[.](${DOMAIN_ENDINGS})([^A-Za-z0-9]|$)|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]* ?[.] ?(com|net|org)([^A-Za-z0-9]|$)|(^|[^A-Za-z])[(\\[]? ?dot ?[)\\]]? ?(com|net|org|co)([^A-Za-z]|$)|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]* ?[(\\[] ?[.] ?[)\\]] ?[A-Za-z]{2,}|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]*[.][A-Za-z]{2,}/[A-Za-z0-9]` }),
+  // or a link shortener's name followed by a path ("bit.ly/abc", "goo.gl/x",
+  // "is.gd/x"; "tinyurl.com/abc" is a bare domain already). Only shortener
+  // endings: "$24.00/sq.ft/yr" and "Dr.Smith/Jones" are asking rent and names
+  Object.freeze({ rule: "url", target: "raw", pattern: `(https?|ftp)://|www[.]|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]*[.](${DOMAIN_ENDINGS})([^A-Za-z0-9]|$)|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]* ?[.] ?(com|net|org)([^A-Za-z0-9]|$)|(^|[^A-Za-z])[(\\[]? ?dot ?[)\\]]? ?(com|net|org|co)([^A-Za-z]|$)|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]* ?[(\\[] ?[.] ?[)\\]] ?[A-Za-z]{2,}|[A-Za-z0-9-]*[A-Za-z][A-Za-z0-9-]*[.](ly|gl|gd|cc|gy|be)/[A-Za-z0-9]` }),
   // a North-American phone number, however its ten digits are grouped
   Object.freeze({ rule: "phone", target: "digits", pattern: "(^|[^0-9])1?[2-9][0-9]{9}([^0-9]|$)" }),
   // a seven-digit local number: 555-0100, 555 - 0100 (exchange 2-9, as NANP requires)
@@ -132,12 +134,16 @@ export const CLIENT_TEXT_RULES = Object.freeze([
   Object.freeze({ rule: "international_phone", target: "digits", pattern: "[+] ?[0-9]{8,}|(^|[^0-9])(011|00)[1-9][0-9]{6,}([^0-9]|$)" }),
   // access-code wording, as whole words: gate code, door combo, entry PIN,
   // alarm code, keypad code ("Westgate Pines", "Fire alarm system" pass); or a
-  // gate/door/keypad/alarm/lock/code/combo/PIN/passcode word next to three or
-  // more digits ("Gate #4411", "PIN 4411", "Front gate 4411"). "Door 3",
-  // "Gate 2 parking" and "garage 250 spaces" pass; "zip code 36602" is not a
-  // code (the one place this rule reads backwards: a lookbehind, which
-  // PostgreSQL ARE and JavaScript read alike)
-  Object.freeze({ rule: "access_code", target: "raw", pattern: "(^|[^A-Za-z])(gate|door|key|entry|garage|alarm|keypad|access|lock)[ -]?(codes?|combos?|combination|pins?|passwords?)([^A-Za-z]|$)|(^|[^A-Za-z])(?<!zip )(?<!zip)(gate|door|keypad|alarm|lock|code|combo|pin|passcode) ?[:#]? ?[0-9]{3,}" }),
+  // gate/door/keypad/alarm/lock/combo/PIN/passcode/key/entry/access/code word
+  // before three or more digits, joined by up to four of space : # = * quotes
+  // ( [ and dashes, with an optional "is" or "no." ("Gate: #4411", "PIN-4411",
+  // "Gate is 4411", "Gate (4411)", "Gate no. 4411"). "Door 3", "Gate 2
+  // parking" and "garage 250 spaces" pass. After "code" a year is not a code
+  // ("Building code 2021"), "area code 251" is not one, and "zip code" passes
+  // only before a real zip (five digits, or ZIP+4): "Zip code 36602" passes,
+  // "Zip code 4411" is refused. Lookbehind and lookahead read alike in
+  // PostgreSQL ARE and JavaScript.
+  Object.freeze({ rule: "access_code", target: "raw", pattern: `(^|[^A-Za-z])(gate|door|key|entry|garage|alarm|keypad|access|lock)[ -]?(codes?|combos?|combination|pins?|passwords?)([^A-Za-z]|$)|(^|[^A-Za-z])(gate|door|keypad|alarm|lock|combo|pin|passcode|key|entry|access)[ :#=*\"'(\\[\\u201c\\u201d\\u2018\\u2019${DASHES}]{0,4}((is|no[.]?)[ :#=*\"'(\\[\\u201c\\u201d\\u2018\\u2019${DASHES}]{0,4})?[0-9]{3,}|(^|[^A-Za-z])(?<!zip )(?<!zip)(?<!zip-)(?<!area )(?<!area)(?<!area-)code[ :#=*\"'(\\[\\u201c\\u201d\\u2018\\u2019${DASHES}]{0,4}((is|no[.]?)[ :#=*\"'(\\[\\u201c\\u201d\\u2018\\u2019${DASHES}]{0,4})?(?!(19|20)[0-9]{2}([^0-9]|$))[0-9]{3,}|(^|[^A-Za-z])zip[ -]?code[ :#=*\"'(\\[\\u201c\\u201d\\u2018\\u2019${DASHES}]{0,4}((is|no[.]?)[ :#=*\"'(\\[\\u201c\\u201d\\u2018\\u2019${DASHES}]{0,4})?(?![0-9]{5}(-[0-9]{4})?([^0-9]|$))[0-9]{3,}` }),
   Object.freeze({ rule: "lockbox", target: "raw", pattern: "(^|[^A-Za-z])(lock[ -]?box(es)?|passcodes?)([^A-Za-z]|$)" }),
   // internal-note wording (a free-text note cannot be recognised in general;
   // the length cap bounds the rest)
