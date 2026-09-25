@@ -1,5 +1,5 @@
 // V5-F03: new engineering-slice-plan.v1 registrations are retired at the
-// registration doors only (migration 0610 and the register-engineering-slice-plan
+// registration doors only (migration 0616 and the register-engineering-slice-plan
 // handler).  Stored v1 plans keep the read path requirePlan has always given them.
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -19,7 +19,7 @@ class EngineeringToolError extends Error {
 }
 
 const corpus = JSON.parse(fs.readFileSync(new URL("./fixtures/f03-design-contract-parity.v1.json", import.meta.url), "utf8"));
-const MIGRATION = fs.readFileSync(new URL("../../migrations/0610_f03_retire_legacy_slice_plan_registration.sql", import.meta.url), "utf8");
+const MIGRATION = fs.readFileSync(new URL("../../migrations/0616_f03_retire_legacy_slice_plan_registration.sql", import.meta.url), "utf8");
 const RUNTIME = fs.readFileSync(new URL("../src/engineering-runtime.js", import.meta.url), "utf8");
 
 function sealed(base) {
@@ -36,7 +36,7 @@ function sealed(base) {
 // RecordingClient records every statement and plays a minimal database: the
 // tool_call ledger lives in `ledger`, keyed by idempotency key, exactly as the
 // envelope writes and reads it.  `seedMatchingReplay` models a row stored before
-// the 0610 cutoff: when the envelope reads that key it gets back a row whose
+// the 0616 cutoff: when the envelope reads that key it gets back a row whose
 // request_hash is the hash the envelope itself just computed for this request,
 // captured from crypto.subtle.digest, which is what a pre-cutoff registration of
 // the identical request would have stored.
@@ -184,7 +184,7 @@ test("unknown and missing versions are not registrable either", () => {
     "engineering-slice-plan.v2");
 });
 
-test("0610 re-issues only the register seam, refusing non-v2 before the replay and the insert", () => {
+test("0616 re-issues only the register seam, refusing non-v2 before the replay and the insert", () => {
   const creates = MIGRATION.match(/create or replace function ops\.[a-z_]+/gi) || [];
   assert.deepEqual(creates.map(row => row.toLowerCase()), ["create or replace function ops.engineering_register_slice_plan"]);
   assert.doesNotMatch(MIGRATION, /engineering_slice_plan_refusal\s*\(p_plan jsonb\)\s*returns/i);
@@ -195,14 +195,14 @@ test("0610 re-issues only the register seam, refusing non-v2 before the replay a
   assert.ok(planCheck > 0 && gate > planCheck && insert > gate, "order: whole-plan check, version gate, insert/replay");
 });
 
-test("0610 carries the 0507a register body verbatim except the one marked block", () => {
+test("0616 carries the 0507a register body verbatim except the one marked block", () => {
   const body = sql => {
     const start = sql.indexOf("create or replace function ops.engineering_register_slice_plan(");
     return sql.slice(start, sql.indexOf("end $$;", start));
   };
   const prior = body(fs.readFileSync(new URL("../../migrations/0507a_engineering_slice_plan_validators.sql", import.meta.url), "utf8"));
   const current = body(MIGRATION);
-  const blockStart = current.indexOf("  -- V5-F03 v1 retirement (0610)");
+  const blockStart = current.indexOf("  -- V5-F03 v1 retirement (0616)");
   const blockEnd = current.indexOf("  end if;\n", current.indexOf("is not registrable", blockStart)) + "  end if;\n".length;
   assert.ok(blockStart > 0 && blockEnd > blockStart);
   assert.equal(current.slice(0, blockStart) + current.slice(blockEnd), prior);

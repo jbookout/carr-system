@@ -198,7 +198,7 @@ export async function withTrustedCanonicalOwnershipContext(c, actor, binding, To
 // policy, so it lives only where a plan first enters storage:
 // requireRegistrablePlanVersion below, called from the
 // register-engineering-slice-plan handler, and the database's
-// ops.engineering_register_slice_plan (migrations/0610_f03_retire_legacy_slice_plan_registration.sql),
+// ops.engineering_register_slice_plan (migrations/0616_f03_retire_legacy_slice_plan_registration.sql),
 // which covers a direct carr_writer call.  The two doors refuse the same thing,
 // so nothing is registerable-but-unreadable: a v1 plan either was stored before
 // the cutoff and reads as it always did, or cannot be stored at all.  A
@@ -2209,7 +2209,7 @@ export function engineeringRuntimeTools({ withEnvelope, writeEvent, ToolError })
         // Pure checks over args run BEFORE withEnvelope.  The envelope's first
         // statements are the advisory lock and the tool_call replay read, and a
         // stored response is returned without reaching the callback: inside it,
-        // a v1 key first registered before migration 0610 would replay as
+        // a v1 key first registered before migration 0616 would replay as
         // {replayed:true, ok:true} while the database door refuses the same
         // request, and a stored malformed plan would replay unvalidated.  Here a
         // refused registration runs no statement at all, and a valid v2 request

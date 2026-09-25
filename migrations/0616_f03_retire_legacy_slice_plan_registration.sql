@@ -1,4 +1,4 @@
--- 0610_f03_retire_legacy_slice_plan_registration.sql
+-- 0616_f03_retire_legacy_slice_plan_registration.sql
 --
 -- V5-F03: refuse NEW registrations of engineering-slice-plan.v1.  Forward-only.
 --
@@ -80,7 +80,7 @@ begin
   if plan_refusal is not null then
     raise exception 'engineering slice plan is not a valid typed slice plan: %', plan_refusal;
   end if;
-  -- V5-F03 v1 retirement (0610): a NEW registration must carry the successor
+  -- V5-F03 v1 retirement (0616): a NEW registration must carry the successor
   -- version.  This is the database twin of requireRegistrablePlanVersion in
   -- mcp-server/src/engineering-runtime.js, and like it it lives only at this
   -- registration seam, never in ops.engineering_slice_plan_refusal: that
@@ -115,5 +115,5 @@ comment on function ops.engineering_register_slice_plan(text,jsonb,text,uuid) is
   'accepted sourced plan. Every 0310 binding, idempotency and refusal behavior is '
   'unchanged; the plan is held to the whole-plan contract by '
   'ops.engineering_slice_plan_refusal, which closes the direct carr_writer bypass of the '
-  'caller-side validators, and since 0610 only engineering-slice-plan.v2 may be newly '
+  'caller-side validators, and since 0616 only engineering-slice-plan.v2 may be newly '
   'registered. Stored engineering-slice-plan.v1 rows are not touched and keep their read path.';

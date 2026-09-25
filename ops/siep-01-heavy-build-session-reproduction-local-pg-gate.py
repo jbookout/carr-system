@@ -77,7 +77,7 @@ def rejected(
     refuse(f"expected refusal containing {expected!r}, but the operation succeeded")
 
 
-# Since migration 0610 a NEW registration must be engineering-slice-plan.v2, so
+# Since migration 0616 a NEW registration must be engineering-slice-plan.v2, so
 # this reproduction registers the successor version with a closed V5-F03
 # design_contract on every slice.  The contract's routing and authority describe
 # exactly the server binding issue_envelope() writes below, because the receipt

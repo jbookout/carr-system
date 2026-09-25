@@ -486,7 +486,7 @@ def _as_v2_plan(value: dict) -> dict:
 
 
 def test_compiles_a_registrable_v2_plan_and_still_reads_a_stored_v1_plan():
-    """Since migration 0610 only engineering-slice-plan.v2 registers; stored v1 plans stay readable."""
+    """Since migration 0616 only engineering-slice-plan.v2 registers; stored v1 plans stay readable."""
     import engineering_passport  # noqa: E402
 
     v1 = valid_input()

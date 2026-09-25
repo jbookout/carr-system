@@ -846,7 +846,7 @@ create temporary table f03p_register_case(
 -- the raised message must contain.
 insert into f03p_register_case(name, ordinal, plan_kind, expected)
 values
-  -- 0610 retired NEW v1 registrations at this seam.  A stored v1 row still reads
+  -- 0616 retired NEW v1 registrations at this seam.  A stored v1 row still reads
   -- (C01 below; the receipt fixture's D01) because the refusal lives only here,
   -- never in ops.engineering_slice_plan_refusal (A05 still accepts v1).
   ('B01-refuse-new-v1-registration', 1, 'v1', 'version is not registrable: engineering-slice-plan.v1'),

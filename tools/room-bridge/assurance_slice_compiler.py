@@ -583,7 +583,7 @@ def _compile(value: Any, *, compiler_version: str) -> dict[str, Any]:
         # The compiler CONSUMES a registered plan; it produces none.  It accepts
         # whatever engineering_passport accepts on the read path: a stored v1
         # plan and a v2 plan.  New registrations are v2-only since migration
-        # 0610, so v2 is the plan version a fresh compile normally binds.
+        # 0616, so v2 is the plan version a fresh compile normally binds.
         _refuse("ENGINEERING_SLICE_PLAN_INVALID", "engineering_slice_plan", "valid engineering-slice-plan.v2 (or a stored engineering-slice-plan.v1)", str(exc))
     contract = _validate_contract(row["assurance_slice"])
     rules = _validate_rules(row["applicable_rules"])
