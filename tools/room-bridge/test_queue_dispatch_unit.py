@@ -22,6 +22,9 @@ sys.path.insert(0, str(HERE))
 
 import queue_dispatch  # noqa: E402
 import bridge  # noqa: E402
+import desks  # noqa: E402
+import dispatch  # noqa: E402
+import flash_wire  # noqa: E402
 import kanban_adapter  # noqa: E402
 import state as state_mod  # noqa: E402
 
@@ -542,6 +545,24 @@ class QueueDispatchTests(unittest.TestCase):
         self.assertIn("queue_executor.start", source)
         self.assertLess(source.index("state_mod.pop_next_queued"), source.index("queue_executor.start"))
 
+    def test_bridge_posts_flash_locals_synchronous_completion_to_the_room(self):
+        """flash-local completes inline in queue_executor.start() rather than through
+        the pending/handle_pending path (finding 1): pins that run_once actually posts
+        that completion, gated to flash-local only, instead of leaving it unposted.
+        As of PR #1254 round 2 (finding 3), the post happens INSIDE start(), via the
+        post_completion hook, before Hermes is marked terminal — not after start()
+        returns — so this pins the wiring that makes that possible instead of a
+        post-hoc call."""
+        source = inspect.getsource(bridge.run_once)
+        self.assertIn('entry.get("kind") == "flash-local"', source)
+        self.assertIn("include_reply=is_flash_local", source)
+        self.assertIn("def post_flash_completion(completion: dict) -> None:", source)
+        self.assertIn("completion, add_room_turn=add_room_turn, seat=post_seat)", source)
+        self.assertIn("raise QueueCompletionPostFailed(str(exc)) from exc", source)
+        self.assertIn("post_completion=post_flash_completion if is_flash_local else None", source)
+        self.assertLess(source.index("def post_flash_completion"),
+                        source.index("queue_outcome = queue_executor.start"))
+
     def test_dead_socket_waits_without_claim_dispatch_or_retry_then_blocks_once(self):
         adapter = FakeAdapter([task()])
         dispatched = []
@@ -630,6 +651,788 @@ class QueueDispatchTests(unittest.TestCase):
         self.assertIn("queue_scan_complete = False", source)
         self.assertIn("if name in required_queue_desks", source)
         self.assertIn("and required_queue_desks", source)
+
+
+class FlashReplyReachesTheRoomTests(unittest.TestCase):
+    """PR #1249 review finding 1: flash-local has no MCP tools of its own, so unlike a
+    codex-session or claude-session desk (which post their own reply as part of doing
+    the task) its answer was never posted anywhere — only the bounded completion summary
+    was. These tests drive a realistic Flash reply through dispatch.dispatch (the real
+    flash_wire wire, network faked) and queue_dispatch.parse_terminal_result (the real
+    protocol parser) and assert the answer text itself reaches the typed room callback."""
+
+    FLASH_CATALOG = {
+        "v": 1,
+        "targets": {
+            "flash": {"enabled": True, "adapter": "desk", "assignee": "desk:flash-model",
+                      "desk": "flash-model", "capabilities": ["read"], "effective_model": "flash"},
+        },
+    }
+
+    @staticmethod
+    def _flash_task(task_id: str = "t_queue0001") -> dict:
+        meta = {"v": 1, "target": "flash", "cap": "read", "source_seq": 81,
+                "source_msg_id": "11111111-1111-4111-8111-111111111111", "finish": "done"}
+        return {
+            "id": task_id, "title": "Answer this directly", "status": "ready", "created_at": 2,
+            "assignee": "desk:flash-model",
+            "body": f"[CARR_QUEUE_META {json.dumps(meta, separators=(',', ':'))}]\nWhere is loop 640 blocked?",
+        }
+
+    def test_flash_reply_reaches_the_room_as_the_tasks_result(self):
+        answer = "Loop 640 is blocked on the Dell SSH alias; see decision 79110363 for the routing ruling."
+        protocol_line = "CARR_QUEUE_RESULT " + json.dumps(
+            {"v": 1, "task_id": "t_queue0001", "outcome": "success", "summary": "Answered directly."},
+            separators=(",", ":"),
+        )
+
+        def fake_run_turn(task, **_kwargs):
+            return {"status": "completed", "finish": "stop", "result": f"{answer}\n{protocol_line}"}
+
+        real_run_turn = flash_wire.run_turn
+        flash_wire.run_turn = fake_run_turn
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                registry = desks.Registry(Path(tmp) / "desks.json")
+                registry.register("flash-model", "flash-local")
+
+                def dispatch_call(prompt: str) -> dict:
+                    # The real dispatch.dispatch(): resolves the registry entry, guards
+                    # its named model/effort, and calls flash_wire.run_turn(prompt).
+                    return dispatch.dispatch(
+                        "flash-model", prompt, registry=registry,
+                        results_path=Path(tmp) / "results.jsonl",
+                    )
+
+                adapter = FakeAdapter([self._flash_task()])
+                controller = queue_dispatch.QueueDeskExecutor(catalog=self.FLASH_CATALOG, adapter=adapter)
+                outcome = controller.start(
+                    "flash", dispatch_call=dispatch_call, include_reply=True, retry_protocol_errors=True,
+                )
+        finally:
+            flash_wire.run_turn = real_run_turn
+
+        self.assertEqual(outcome["outcome"], "done")
+        callback = outcome["completion"]["queue_completion"]
+        self.assertEqual(callback["reply"], answer)
+        self.assertEqual(callback["summary"], "Answered directly.")
+        self.assertEqual(sum(call[0] == "complete" for call in adapter.calls), 1)
+
+    def test_reply_over_the_char_bound_is_truncated_with_a_pointer(self):
+        """Fails if queue_dispatch._bounded_reply's 4,000-char truncation is removed
+        (PR #1254 round 2, finding 4). Not redaction: the text is Flash's own prose
+        verbatim up to the bound, with only the trailing protocol line stripped."""
+        long_answer = "x" * 5000
+        protocol_line = "CARR_QUEUE_RESULT " + json.dumps(
+            {"v": 1, "task_id": "t_queue0001", "outcome": "success", "summary": "Long answer."},
+            separators=(",", ":"),
+        )
+        adapter = FakeAdapter([self._flash_task()])
+        controller = queue_dispatch.QueueDeskExecutor(catalog=self.FLASH_CATALOG, adapter=adapter)
+        outcome = controller.start(
+            "flash", dispatch_call=lambda _prompt: {
+                "status": "completed", "result": f"{long_answer}\n{protocol_line}",
+            },
+            include_reply=True,
+        )
+        reply = outcome["completion"]["queue_completion"]["reply"]
+        self.assertLessEqual(len(reply), queue_dispatch.MAX_REPLY_CHARS + 200)
+        self.assertLess(len(reply), len(long_answer))
+        self.assertTrue(reply.startswith("x" * queue_dispatch.MAX_REPLY_CHARS))
+        self.assertIn("truncated", reply)
+        self.assertIn(queue_dispatch.REPLY_TRUNCATION_POINTER, reply)
+        self.assertNotIn("CARR_QUEUE_RESULT", reply)
+
+    def test_reply_under_the_char_bound_is_not_truncated(self):
+        short_answer = "The tenant's option to renew runs through 2028."
+        outcome = queue_dispatch.QueueDeskExecutor(
+            catalog=self.FLASH_CATALOG, adapter=FakeAdapter([self._flash_task()]),
+        ).start(
+            "flash", dispatch_call=lambda _prompt: {
+                "status": "completed",
+                "result": short_answer + "\nCARR_QUEUE_RESULT " + json.dumps(
+                    {"v": 1, "task_id": "t_queue0001", "outcome": "success", "summary": "Answered."},
+                    separators=(",", ":"),
+                ),
+            },
+            include_reply=True,
+        )
+        self.assertEqual(outcome["completion"]["queue_completion"]["reply"], short_answer)
+
+    def test_other_desks_never_get_the_include_reply_treatment(self):
+        """The 'never return model prose' rule is unchanged for a desk with its own MCP
+        tools: without include_reply, no "reply" field is added to the callback."""
+        outcome = queue_dispatch.QueueDeskExecutor(
+            catalog=CATALOG, adapter=FakeAdapter([task()]),
+        ).start("sol", dispatch_call=lambda _prompt: {"status": "completed", "result": result()})
+        self.assertEqual(outcome["outcome"], "done")
+        self.assertNotIn("reply", outcome["completion"]["queue_completion"])
+
+    def test_flash_result_protocol_error_retries_then_blocks_instead_of_blocking_once(self):
+        adapter = FakeAdapter([self._flash_task()])
+        controller = queue_dispatch.QueueDeskExecutor(catalog=self.FLASH_CATALOG, adapter=adapter)
+        outcome = controller.start(
+            "flash", dispatch_call=lambda _prompt: {"status": "completed", "result": "no protocol line here"},
+            retry_protocol_errors=True,
+        )
+        self.assertEqual(outcome["outcome"], "retry_scheduled")
+        self.assertFalse(any(call[0] == "block" for call in adapter.calls))
+        self.assertTrue(any(call[0] == "reclaim" for call in adapter.calls))
+
+    def test_without_the_flag_a_protocol_error_still_blocks_once_unchanged(self):
+        adapter = FakeAdapter([self._flash_task()])
+        controller = queue_dispatch.QueueDeskExecutor(catalog=self.FLASH_CATALOG, adapter=adapter)
+        outcome = controller.start(
+            "flash", dispatch_call=lambda _prompt: {"status": "completed", "result": "no protocol line here"},
+        )
+        self.assertEqual(outcome["outcome"], "result_protocol_error")
+        self.assertEqual(sum(call[0] == "block" for call in adapter.calls), 1)
+
+    def test_no_answer_gets_its_own_diagnosable_code_not_a_generic_one(self):
+        adapter = FakeAdapter([self._flash_task()])
+        controller = queue_dispatch.QueueDeskExecutor(catalog=self.FLASH_CATALOG, adapter=adapter)
+        outcome = controller.start(
+            "flash", dispatch_call=lambda _prompt: {"status": "failed", "detail": "no_answer"},
+        )
+        self.assertEqual(outcome["outcome"], "retry_scheduled")
+        self.assertEqual(outcome["code"], "no_answer")
+        reclaim_reasons = [call[2] if len(call) > 2 else call for call in adapter.calls if call[0] == "reclaim"]
+        self.assertTrue(any("no_answer" in str(reason) for reason in reclaim_reasons))
+
+    def test_dispatch_still_routes_flash_local_desks_to_the_flash_wire(self):
+        """Pins tools/room-bridge/dispatch.py's flash-local branch: a test that fails if
+        it (or its wiring to flash_wire.run_turn) is deleted."""
+        calls: list[str] = []
+
+        def fake_run_turn(task, **_kwargs):
+            calls.append(task)
+            return {"status": "completed", "result": "42"}
+
+        real_run_turn = flash_wire.run_turn
+        flash_wire.run_turn = fake_run_turn
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                registry = desks.Registry(Path(tmp) / "desks.json")
+                registry.register("flash-model", "flash-local")
+                row = dispatch.dispatch(
+                    "flash-model", "What is the answer?", registry=registry,
+                    results_path=Path(tmp) / "results.jsonl",
+                )
+        finally:
+            flash_wire.run_turn = real_run_turn
+        self.assertEqual(calls, ["What is the answer?"])
+        self.assertEqual(row["status"], "completed")
+        self.assertEqual(row["result"], "42")
+        self.assertEqual(row["kind"], "flash-local")
+
+
+class FinalCapabilityRecheckTests(unittest.TestCase):
+    """PR #1249 review finding 3: a test that fails if kanban_adapter.py's handle()
+    deletes its final capability recheck on the routed target=auto alias — covering the
+    disabled-fallback case, where the FALLBACK target itself is also disabled or refuses
+    the capability, and the whole command must be rejected rather than created anyway."""
+
+    def test_auto_route_rejected_when_the_fallback_target_is_also_disabled(self):
+        catalog = {
+            "v": 1,
+            "targets": {
+                "flash": {"enabled": False, "adapter": "desk", "assignee": "desk:flash-model",
+                          "desk": "flash-model", "capabilities": ["read"], "effective_model": "flash",
+                          "unavailable_reason": "down for this test"},
+                "claude-desktop": {"enabled": False, "adapter": "desk", "assignee": "desk:claude-desktop",
+                                   "desk": "claude-desktop", "capabilities": ["read", "repo-write"],
+                                   "effective_model": "opus", "unavailable_reason": "down for this test"},
+            },
+        }
+
+        class FakeRouter:
+            def load_policy(self):
+                return {"queue_targets": {"direct": "flash", "fallback": "claude-desktop"}}
+
+            def decide(self, title, body, *, flash_free=True, policy=None):
+                return {"route": "direct", "model": "flash", "effort": "x", "scores": {},
+                        "overflow": False, "jev_error": None}
+
+        class FakeAdapterRefusesCreate:
+            def create(self, *_args, **_kwargs):
+                raise AssertionError("a rejected auto route must never create a Hermes task")
+
+        service = kanban_adapter.QueueService(
+            catalog=catalog, adapter=FakeAdapterRefusesCreate(), router=FakeRouter(),
+            flash_up=lambda: True,
+        )
+        turn = {"body": "@queue enqueue target=auto cap=read :: Shorten this", "msg_id": "m1",
+                "seat": "claude", "sponsor": "joe", "seq": 1, "origin_channel": "mcp", "origin_actor": "claude"}
+        out = service.handle(turn, room="p")
+        self.assertEqual(out["kind"], "rejected")
+        self.assertEqual(out["receipt"]["queue_rejected"]["code"], "auto_route_unavailable")
+
+    def test_handle_still_contains_its_final_capability_recheck(self):
+        """A narrower pin alongside the behavioural test above: greps the actual guard
+        clause so a refactor that quietly drops the recheck (while leaving some OTHER
+        code accidentally passing the behavioural test) still turns this test red."""
+        source = inspect.getsource(kanban_adapter.QueueService.handle)
+        self.assertIn('not entry.get("enabled")', source)
+        self.assertIn('command["cap"] not in entry.get("capabilities", [])', source)
+        self.assertIn("auto_route_unavailable", source)
+
+
+class SeatlessQueueDeskTests(unittest.TestCase):
+    """PR #1254 round 2, finding 1: a queue-target desk with no room_seat (the
+    Studio's real flash-model entry: {kind: flash-local, model: flash, effort:
+    minimal}, no room_seat) was skipped ENTIRELY by run_once's per-desk loop
+    ("if not seat: continue"), so its ready Hermes tasks were never claimed or
+    dispatched. These drive bridge.run_once end to end with a fake queue
+    executor standing in for QueueDeskExecutor."""
+
+    @staticmethod
+    def _seatless_flash_registry(root: Path):
+        return type("Registry", (), {
+            "entries": lambda self: {
+                "flash-model": {"kind": "flash-local", "model": "flash", "effort": "minimal"},
+            },
+            "path": root / "desks.json",
+        })()
+
+    class FakeQueue:
+        catalog = {"targets": {"flash": {"enabled": True, "adapter": "desk", "desk": "flash-model",
+                                          "capabilities": ["read"]}}}
+
+        def reconcile_disabled_targets(self):
+            return {"scanned": 0, "blocked": [], "diagnostics": []}
+
+    class FakeExecutor:
+        def __init__(self):
+            self.catalog = {"targets": {"flash": {"enabled": True, "adapter": "desk", "desk": "flash-model",
+                                                   "capabilities": ["read"]}}}
+            self.start_calls: list[tuple] = []
+
+        def start(self, target_alias, *, post_completion=None, **_kwargs):
+            self.start_calls.append(target_alias)
+            completion = {"queue_completion": {
+                "v": 1, "task_id": "t_flash0001", "target": target_alias, "outcome": "success",
+                "summary": "Answered directly.", "reply": "42",
+                "source_seq": 5, "source_msg_id": "m-source",
+                "dispatcher_instruction": "Continue the originating workflow autonomously.",
+            }}
+            if post_completion is not None:
+                post_completion(completion)
+            return {"outcome": "done", "task_id": "t_flash0001", "completion": completion}
+
+    def test_seatless_queue_target_desk_is_claimed_run_and_posted(self):
+        """Fails on the pre-fix code: `continue` on a missing room_seat meant
+        executor.start() was never called for this desk at all."""
+        posted: list[dict] = []
+
+        def add_room_turn(**kwargs):
+            posted.append(kwargs)
+            return {"seq": 1}
+
+        saved_is_up = flash_wire.is_up
+        flash_wire.is_up = lambda *_a, **_k: True
+        try:
+            with tempfile.TemporaryDirectory() as root:
+                executor = self.FakeExecutor()
+                summary = bridge.run_once(
+                    state_path=Path(root) / "state.json",
+                    read_room=lambda *_a, **_k: {"turns": []},
+                    add_room_turn=add_room_turn,
+                    registry=self._seatless_flash_registry(Path(root)),
+                    queue_service=self.FakeQueue(),
+                    queue_executor=executor,
+                    queue_projector=lambda **_k: [],
+                    probe_auth=lambda _entry: True,
+                    read_profiles=lambda: [],
+                    log=lambda _msg: None,
+                )
+        finally:
+            flash_wire.is_up = saved_is_up
+
+        self.assertEqual(executor.start_calls, ["flash"], summary)
+        completions = [
+            json.loads(p["body"]) for p in posted
+            if p.get("kind") == "turn" and "queue_completion" in json.loads(p["body"])
+        ]
+        self.assertEqual(len(completions), 1)
+        self.assertEqual(completions[0]["queue_completion"]["reply"], "42")
+        self.assertEqual(completions[0]["queue_completion"]["task_id"], "t_flash0001")
+
+    def test_seatless_desk_never_receives_a_conversational_turn(self):
+        """conversational_desk_seats() is the real gate: it must exclude a desk with
+        no room_seat, or route_turn could queue a human turn onto it."""
+        seats = bridge.conversational_desk_seats({
+            "flash-model": {"kind": "flash-local", "model": "flash", "effort": "minimal"},
+            "joe-desk": {"kind": "claude-session", "socket": "/tmp/x", "room_seat": "claude"},
+        })
+        self.assertNotIn("flash-model", seats)
+        self.assertEqual(seats, {"joe-desk": "claude"})
+
+    def test_a_conversational_turn_reaching_a_seatless_desk_fails_loudly_not_silently(self):
+        """Defense in depth for the invariant above: if route_turn's own guard were
+        ever bypassed and a turn DID land in a seatless desk's queue, run_once must
+        refuse to answer it — never silently deliver a reply to a human turn from a
+        desk that was never given a room identity."""
+        posted: list[dict] = []
+
+        def add_room_turn(**kwargs):
+            posted.append(kwargs)
+            return {"seq": 1}
+
+        with tempfile.TemporaryDirectory() as root:
+            state_path = Path(root) / "state.json"
+            state = state_mod.default_state()
+            state["desks"]["flash-model"] = {
+                "delivered": [], "pending": None,
+                "queue": [{"msg_id": "m1", "seat": "joe", "body": "What's 6 x 7?", "seq": 1}],
+            }
+            state_mod.save_state(state_path, state)
+            summary = bridge.run_once(
+                state_path=state_path,
+                read_room=lambda *_a, **_k: {"turns": []},
+                add_room_turn=add_room_turn,
+                registry=self._seatless_flash_registry(Path(root)),
+                queue_service=self.FakeQueue(),
+                queue_executor=self.FakeExecutor(),
+                queue_projector=lambda **_k: [],
+                probe_auth=lambda _entry: True,
+                read_profiles=lambda: [],
+                log=lambda _msg: None,
+            )
+        self.assertTrue(
+            any(e.get("desk") == "flash-model" for e in summary["errors"]), summary["errors"])
+        self.assertFalse(any(p.get("body") not in (None,) and "42" == str(p.get("body")) for p in posted))
+        self.assertFalse(any("queue_completion" not in str(p.get("body")) and p.get("seat") != "hermes"
+                             for p in posted if p.get("kind") == "turn"))
+
+
+class SynchronousCompletionPostOrderingTests(unittest.TestCase):
+    """PR #1254 round 2, finding 3: on the synchronous flash-local path, the
+    completion post used to happen AFTER finish_pending had already marked the
+    Hermes task done/blocked — so a post failure lost the reply for good and
+    (before this round's RuntimeError handling) aborted the whole bridge cycle."""
+
+    FLASH_CATALOG = FlashReplyReachesTheRoomTests.FLASH_CATALOG
+    _flash_task = staticmethod(FlashReplyReachesTheRoomTests._flash_task)
+
+    def test_post_runs_before_the_hermes_task_is_marked_done(self):
+        adapter = FakeAdapter([self._flash_task()])
+        controller = queue_dispatch.QueueDeskExecutor(catalog=self.FLASH_CATALOG, adapter=adapter)
+        seen_before_complete: list[bool] = []
+
+        def post_completion(_completion: dict) -> None:
+            seen_before_complete.append(
+                not any(call[0] == "complete" for call in adapter.calls))
+
+        outcome = controller.start(
+            "flash", dispatch_call=lambda _prompt: {"status": "completed", "result": result()},
+            include_reply=True, post_completion=post_completion,
+        )
+        self.assertEqual(outcome["outcome"], "done")
+        self.assertEqual(seen_before_complete, [True])
+
+    def test_a_failed_post_never_marks_the_task_done_and_propagates_to_the_caller(self):
+        adapter = FakeAdapter([self._flash_task()])
+        controller = queue_dispatch.QueueDeskExecutor(catalog=self.FLASH_CATALOG, adapter=adapter)
+
+        def failing_post(_completion: dict) -> None:
+            raise RuntimeError("add-room-turn unreachable")
+
+        with self.assertRaises(RuntimeError):
+            controller.start(
+                "flash", dispatch_call=lambda _prompt: {"status": "completed", "result": result()},
+                include_reply=True, post_completion=failing_post,
+            )
+        self.assertFalse(any(call[0] == "complete" for call in adapter.calls))
+        self.assertFalse(any(call[0] == "block" for call in adapter.calls))
+
+    def test_a_failed_flash_post_does_not_abort_the_cycle_for_other_desks(self):
+        """The bridge level of the same fix: run_once must still process a SECOND
+        queue-target desk in the same cycle after the FIRST one's completion post
+        fails. Two flash-shaped desks share one executor and one catalog — the
+        second's start() call proves the exception from the first's post never
+        escaped its own per-desk try block (dict iteration order is deterministic:
+        flash-model is registered, and therefore processed, before flash-model-2)."""
+        posted: list[dict] = []
+
+        class SharedExecutor:
+            def __init__(self):
+                self.catalog = {"targets": {
+                    "flash": {"enabled": True, "adapter": "desk", "desk": "flash-model",
+                             "capabilities": ["read"]},
+                    "flash2": {"enabled": True, "adapter": "desk", "desk": "flash-model-2",
+                              "capabilities": ["read"]},
+                }}
+                self.start_calls: list[str] = []
+
+            def start(self, target_alias, *, post_completion=None, **_kwargs):
+                self.start_calls.append(target_alias)
+                if post_completion is not None:
+                    post_completion({"queue_completion": {
+                        "v": 1, "task_id": f"t_{target_alias}0001", "target": target_alias,
+                        "outcome": "success", "summary": "x", "reply": "x",
+                        "source_seq": 1, "source_msg_id": "m", "dispatcher_instruction": "x",
+                    }})
+                return {"outcome": "idle", "target": target_alias}
+
+        class FakeQueue:
+            catalog = None  # set below, shared with SharedExecutor
+
+            def reconcile_disabled_targets(self):
+                return {"scanned": 0, "blocked": [], "diagnostics": []}
+
+        def failing_add_room_turn(**kwargs):
+            key = kwargs.get("idempotency_key") or ""
+            # Only the FIRST desk's completion post fails; the second's succeeds —
+            # proving the first's RuntimeError was contained to its own desk.
+            if key == "queue-completion:t_flash0001":
+                raise RuntimeError("add-room-turn unreachable")
+            posted.append(kwargs)
+            return {"seq": 1}
+
+        saved_is_up = flash_wire.is_up
+        flash_wire.is_up = lambda *_a, **_k: True
+        try:
+            with tempfile.TemporaryDirectory() as root:
+                registry = type("Registry", (), {
+                    "entries": lambda self: {
+                        "flash-model": {"kind": "flash-local", "model": "flash", "effort": "minimal"},
+                        "flash-model-2": {"kind": "flash-local", "model": "flash", "effort": "minimal"},
+                    },
+                    "path": Path(root) / "desks.json",
+                })()
+                executor = SharedExecutor()
+                queue = FakeQueue()
+                queue.catalog = executor.catalog
+                summary = bridge.run_once(
+                    state_path=Path(root) / "state.json",
+                    read_room=lambda *_a, **_k: {"turns": []},
+                    add_room_turn=failing_add_room_turn,
+                    registry=registry,
+                    queue_service=queue,
+                    queue_executor=executor,
+                    queue_projector=lambda **_k: [],
+                    probe_auth=lambda _entry: True,
+                    read_profiles=lambda: [],
+                    log=lambda _msg: None,
+                )
+        finally:
+            flash_wire.is_up = saved_is_up
+
+        self.assertEqual(executor.start_calls, ["flash", "flash2"], summary)
+        self.assertTrue(
+            any(e.get("desk") == "flash-model" and e.get("error") == "queue_completion_post_failed"
+                for e in summary["errors"]), summary["errors"])
+        # The SECOND desk's own completion post still landed this same cycle.
+        self.assertTrue(any(
+            p.get("idempotency_key") == "queue-completion:t_flash20001" for p in posted), posted)
+
+
+class ReplyWordingTests(unittest.TestCase):
+    """PR #1254 round 2, finding 4: _bounded_reply strips and truncates; it does not
+    redact (no secret/PII scrubbing happens), and its own docstrings must say so."""
+
+    def test_bounded_reply_docstring_does_not_overclaim_redaction(self):
+        source = inspect.getsource(queue_dispatch._bounded_reply)
+        # The old wording ("the desk's own prose, redacted of the protocol line")
+        # claimed redaction as a positive attribute. A bare "not redaction"/"never
+        # redacts" disclaimer is fine — what must never come back is a claim that
+        # this function redacts anything.
+        self.assertNotIn("prose, redacted", source.lower())
+        self.assertNotIn("redacted exception", source.lower())
+        self.assertIn("not redaction", source.lower())
+        self.assertIn("stripped", source.lower())
+        self.assertIn("truncat", source.lower())
+
+    def test_completion_payload_docstring_does_not_overclaim_redaction_either(self):
+        source = inspect.getsource(queue_dispatch.QueueDeskExecutor.completion_payload)
+        self.assertNotIn("bounded, redacted exception", source.lower())
+        self.assertIn("stripped and truncated", source.lower())
+
+
+class KeyReuseRoom:
+    """A fake add_room_turn that ENFORCES the server's idempotency rule
+    (mcp-server/src/tools.js withEnvelope): the same idempotency_key with a
+    different body raises key_reuse (verb_io surfaces that as RuntimeError), and
+    the same key with the same body is a no-op replay. Posts without a key (the
+    heartbeat, receipts) are simply recorded."""
+
+    def __init__(self):
+        self.by_key: dict[str, str] = {}
+        self.turns: list[dict] = []
+        self.replays: list[str] = []
+
+    def __call__(self, **kwargs):
+        key = kwargs.get("idempotency_key")
+        body = kwargs.get("body")
+        if key is not None:
+            if key in self.by_key:
+                if self.by_key[key] != body:
+                    raise RuntimeError(f"add-room-turn failed: key_reuse ({key})")
+                self.replays.append(key)
+                return {"replayed": True}
+            self.by_key[key] = body
+        self.turns.append(kwargs)
+        return {"seq": len(self.turns)}
+
+    def completions(self) -> list[dict]:
+        return [json.loads(t["body"])["queue_completion"] for t in self.turns
+                if str(t.get("idempotency_key") or "").startswith("queue-completion:")]
+
+
+class RetryCountingAdapter(FakeAdapter):
+    """Hermes retry evidence that grows with each reclaim, like the real board."""
+
+    def __init__(self, tasks: list[dict], *, limit: int = 3):
+        super().__init__(tasks)
+        self.limit = limit
+        self.reclaims = 0
+
+    def retry_attempt(self, task_id: str, _prefix: str) -> tuple[int, int]:
+        self.calls.append(("retry_attempt", task_id))
+        return (self.reclaims, self.limit)
+
+    def reclaim(self, task_id: str, reason: str) -> None:
+        super().reclaim(task_id, reason)
+        self.reclaims += 1
+
+
+class FinalCompletionOnlyTests(unittest.TestCase):
+    """PR #1254 round 2 review, finding 1: the flash-local completion used to be
+    posted BEFORE the result line was parsed, so a protocol error that scheduled a
+    retry had already told the room "blocked: result_protocol_error", and the
+    retried attempt's real completion then collided with that post under the one
+    key queue-completion:<task_id> (server key_reuse). Only a FINAL completion may
+    ever be posted, and still before the Hermes terminal mutation."""
+
+    FLASH_CATALOG = FlashReplyReachesTheRoomTests.FLASH_CATALOG
+    _flash_task = staticmethod(FlashReplyReachesTheRoomTests._flash_task)
+
+    @staticmethod
+    def _good(answer: str) -> str:
+        return answer + "\nCARR_QUEUE_RESULT " + json.dumps(
+            {"v": 1, "task_id": "t_queue0001", "outcome": "success", "summary": "Answered."},
+            separators=(",", ":"))
+
+    def _post(self, room: KeyReuseRoom):
+        return lambda completion: bridge._post_completion_payload(
+            completion, add_room_turn=room, seat="hermes")
+
+    def test_protocol_error_retry_then_success_posts_one_final_completion(self):
+        room = KeyReuseRoom()
+        adapter = RetryCountingAdapter([self._flash_task()])
+        controller = queue_dispatch.QueueDeskExecutor(catalog=self.FLASH_CATALOG, adapter=adapter)
+
+        first = controller.start(
+            "flash", dispatch_call=lambda _p: {"status": "completed", "result": "An answer, no result line."},
+            include_reply=True, retry_protocol_errors=True, post_completion=self._post(room),
+        )
+        self.assertEqual(first["outcome"], "retry_scheduled")
+        self.assertEqual(room.completions(), [], "a retry must post nothing to the room")
+
+        second = controller.start(
+            "flash", dispatch_call=lambda _p: {"status": "completed", "result": self._good("The real answer.")},
+            include_reply=True, retry_protocol_errors=True, post_completion=self._post(room),
+        )
+        self.assertEqual(second["outcome"], "done")
+        completions = room.completions()
+        self.assertEqual(len(completions), 1, completions)
+        self.assertEqual(completions[0]["outcome"], "success")
+        self.assertEqual(completions[0]["reply"], "The real answer.")
+        self.assertEqual(sum(call[0] == "complete" for call in adapter.calls), 1)
+        self.assertFalse(any(c.get("outcome") == "blocked" for c in completions))
+
+    def test_retry_exhausted_block_posts_one_final_blocked_completion_before_the_block(self):
+        room = KeyReuseRoom()
+        adapter = RetryCountingAdapter([self._flash_task()], limit=3)
+        controller = queue_dispatch.QueueDeskExecutor(catalog=self.FLASH_CATALOG, adapter=adapter)
+        posted_before_block: list[bool] = []
+        post = self._post(room)
+
+        def recording_post(completion: dict) -> None:
+            posted_before_block.append(not any(call[0] == "block" for call in adapter.calls))
+            post(completion)
+
+        outcomes = []
+        # Flash's prose differs run to run; every attempt fumbles the result line.
+        for attempt in range(3):
+            outcomes.append(controller.start(
+                "flash",
+                dispatch_call=lambda _p, n=attempt: {"status": "completed", "result": f"Attempt {n} prose."},
+                include_reply=True, retry_protocol_errors=True, post_completion=recording_post,
+            ))
+        self.assertEqual([o["outcome"] for o in outcomes],
+                         ["retry_scheduled", "retry_scheduled", "blocked"])
+        self.assertEqual(outcomes[-1]["code"], "result_protocol_error")
+        completions = room.completions()
+        self.assertEqual(len(completions), 1, completions)
+        self.assertEqual(completions[0]["outcome"], "blocked")
+        self.assertEqual(completions[0]["code"], "result_protocol_error")
+        self.assertEqual(completions[0]["reply"], "Attempt 2 prose.")
+        self.assertEqual(posted_before_block, [True])
+        self.assertEqual(sum(call[0] == "block" for call in adapter.calls), 1)
+
+    def test_a_failed_final_post_on_an_exhausted_retry_leaves_hermes_unblocked(self):
+        adapter = RetryCountingAdapter([self._flash_task()], limit=1)
+        controller = queue_dispatch.QueueDeskExecutor(catalog=self.FLASH_CATALOG, adapter=adapter)
+
+        def failing_post(_completion: dict) -> None:
+            raise RuntimeError("add-room-turn unreachable")
+
+        with self.assertRaises(RuntimeError):
+            controller.start(
+                "flash", dispatch_call=lambda _p: {"status": "completed", "result": "no line"},
+                include_reply=True, retry_protocol_errors=True, post_completion=failing_post,
+            )
+        self.assertFalse(any(call[0] in {"block", "complete"} for call in adapter.calls))
+
+    def test_crash_after_post_replays_the_identical_final_body(self):
+        """The post landed but the Hermes transition did not (crash); the same
+        final result re-posts the identical body, which the server replays."""
+        room = KeyReuseRoom()
+        adapter = RetryCountingAdapter([self._flash_task()])
+        controller = queue_dispatch.QueueDeskExecutor(catalog=self.FLASH_CATALOG, adapter=adapter)
+        real_complete = adapter.complete
+        crashes = []
+
+        def crashing_complete(*args):
+            if not crashes:
+                crashes.append(True)
+                raise OSError("bridge killed mid-transition")
+            return real_complete(*args)
+
+        adapter.complete = crashing_complete  # type: ignore[method-assign]
+        run = dict(dispatch_call=lambda _p: {"status": "completed", "result": self._good("Same answer.")},
+                   include_reply=True, retry_protocol_errors=True, post_completion=self._post(room))
+        with self.assertRaises(OSError):
+            controller.start("flash", **run)
+        self.assertEqual(controller.start("flash", **run)["outcome"], "done")
+        self.assertEqual(room.replays, ["queue-completion:t_queue0001"])
+        self.assertEqual(len(room.completions()), 1)
+
+    def test_bridge_cycles_protocol_error_then_success_finish_the_task(self):
+        """The same defect end to end through run_once: a seatless flash-local desk,
+        the real executor, and a room that enforces key_reuse. Two cycles must
+        finish the Hermes task with exactly one success completion and no
+        queue_completion_post_failed error."""
+        room = KeyReuseRoom()
+        adapter = RetryCountingAdapter([self._flash_task()])
+        executor = queue_dispatch.QueueDeskExecutor(catalog=self.FLASH_CATALOG, adapter=adapter)
+        replies = iter(["An answer, no result line.", self._good("The real answer.")])
+
+        class FakeQueue:
+            catalog = self.FLASH_CATALOG
+
+            def handle(self, _turn, *, room):
+                return {"handled": False}
+
+            def reconcile_disabled_targets(self):
+                return {"scanned": 0, "blocked": [], "diagnostics": []}
+
+        def dispatch_fn(name, _prompt, **_kwargs):
+            self.assertEqual(name, "flash-model")
+            return {"status": "completed", "result": next(replies)}
+
+        saved_is_up = flash_wire.is_up
+        flash_wire.is_up = lambda *_a, **_k: True
+        summaries = []
+        try:
+            with tempfile.TemporaryDirectory() as root:
+                registry = desks.Registry(Path(root) / "desks.json")
+                registry.register("flash-model", "flash-local")
+                self.assertFalse(registry.entries()["flash-model"].get("room_seat"))
+                for cycle_now in ["2026-09-24T12:00:00+00:00", "2026-09-24T12:10:00+00:00"]:
+                    summaries.append(bridge.run_once(
+                        state_path=Path(root) / "state.json",
+                        read_room=lambda *_a, **_k: {"turns": []},
+                        add_room_turn=room, registry=registry,
+                        queue_service=FakeQueue(), queue_executor=executor,
+                        queue_projector=lambda **_k: [], dispatch_fn=dispatch_fn,
+                        desk_state_dir=Path(root) / "desk-state",
+                        probe_auth=lambda _entry: True, read_profiles=lambda: [],
+                        now_fn=lambda n=cycle_now: n, log=lambda _msg: None,
+                    ))
+        finally:
+            flash_wire.is_up = saved_is_up
+
+        for summary in summaries:
+            self.assertFalse(any(e.get("error") == "queue_completion_post_failed"
+                                 for e in summary["errors"]), summary["errors"])
+        self.assertEqual(sum(call[0] == "complete" for call in adapter.calls), 1, adapter.calls)
+        completions = room.completions()
+        self.assertEqual([c["outcome"] for c in completions], ["success"])
+        self.assertEqual(completions[0]["reply"], "The real answer.")
+
+
+class ConversationalRuntimeErrorTests(unittest.TestCase):
+    """PR #1254 round 2 review, finding 2: the per-desk handler added for the
+    flash-local completion post must not swallow any OTHER RuntimeError. A
+    conversational reply that cannot be posted must abort the cycle before
+    state is saved, so the dequeued turn is retried rather than lost."""
+
+    def test_conversational_delivery_runtime_error_is_not_swallowed_and_turn_is_retried(self):
+        class FakeQueue:
+            catalog: dict = {"v": 1, "targets": {}}
+
+            def handle(self, _turn, *, room):
+                return {"handled": False}
+
+            def reconcile_disabled_targets(self):
+                return {"scanned": 0, "blocked": [], "diagnostics": []}
+
+        class FakeExecutor:
+            catalog: dict = {"targets": {}}
+
+            def start(self, *_a, **_k):
+                raise AssertionError("no queue target is configured")
+
+        turn = {"seq": 7, "msg_id": "22222222-2222-4222-8222-222222222222",
+                "seat": "joe", "kind": "turn", "body": "What is the renewal date?"}
+        dispatched: list[str] = []
+
+        def dispatch_fn(name, prompt, **_kwargs):
+            dispatched.append(name)
+            return {"status": "completed", "result": "It renews in 2028."}
+
+        replies: list[dict] = []
+        fail = [True]
+
+        def add_room_turn(**kwargs):
+            if kwargs.get("seat") == "sol" and fail[0]:
+                raise RuntimeError("add-room-turn failed: network")
+            replies.append(kwargs)
+            return {"seq": 99}
+
+        with tempfile.TemporaryDirectory() as root:
+            registry = type("Registry", (), {
+                "entries": lambda self: {"codex-desk": {"kind": "codex-session", "room_seat": "sol"}},
+                "path": Path(root) / "desks.json",
+            })()
+            state_path = Path(root) / "state.json"
+
+            def cycle():
+                return bridge.run_once(
+                    state_path=state_path,
+                    read_room=lambda *_a, **_k: {"turns": [turn]},
+                    add_room_turn=add_room_turn, registry=registry,
+                    queue_service=FakeQueue(), queue_executor=FakeExecutor(),
+                    queue_projector=lambda **_k: [], dispatch_fn=dispatch_fn,
+                    desk_state_dir=Path(root) / "desk-state",
+                    probe_auth=lambda _entry: True, read_profiles=lambda: [],
+                    log=lambda _msg: None,
+                )
+
+            with self.assertRaises(RuntimeError):
+                cycle()
+            # Nothing was saved, so the dequeued turn is not recorded as consumed.
+            self.assertFalse(state_path.exists())
+
+            fail[0] = False
+            summary = cycle()
+        self.assertEqual(dispatched, ["codex-desk", "codex-desk"])
+        self.assertTrue(any(r.get("seat") == "sol" and r.get("body") == "It renews in 2028."
+                            for r in replies), replies)
+        self.assertFalse(any(e.get("error") == "queue_completion_post_failed"
+                             for e in summary["errors"]), summary["errors"])
 
 
 def main() -> int:

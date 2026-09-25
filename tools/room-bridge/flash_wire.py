@@ -10,7 +10,12 @@ the queue executor treat it the same way. Code and script work do not come here:
 (flash-run; the script harness).
 
 A reply with no answer comes back as status "failed" with detail "no_answer", so the task is blocked visibly
-rather than completed empty; the route's `then` desk is where it goes next.
+rather than completed empty. ops/config/model-routes.v1.json names the route's `then` desk (Opus, via
+claude-desktop) as where a hand-off would go next, but the queue path (queue_dispatch.py) does not dispatch
+there today: a Hermes queue task's CARR_QUEUE_META.target is fixed in the task body at creation and checked
+against the claiming desk's own alias, so moving a task to a different desk needs a new, linked task rather
+than a reassignment of this one. Until that lands, a no-answer or malformed-protocol reply here only retries
+on the SAME flash-local desk, under its own diagnosable code, and then blocks.
 """
 
 from __future__ import annotations
