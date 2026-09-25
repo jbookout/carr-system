@@ -48,6 +48,11 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from git_env import fixture_env  # noqa: E402
+
+GIT_ENV = fixture_env()  # every git call below targets a throwaway repo
+
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "bin" / "deploy-worker.sh"
 HEAD_SHA = "a" * 40
@@ -260,11 +265,11 @@ def run(source: str, *, tags: list[str], state: dict, toml: str | None = None,
             # The pipeline's REPO is a linked release worktree it deletes after
             # the run; the durable receipts must land beside the MAIN checkout.
             git = ["git", "-c", "user.name=selftest", "-c", "user.email=selftest@example.test"]
-            subprocess.run([*git, "init", "-q", str(tmp / "main")], check=True)
+            subprocess.run([*git, "init", "-q", str(tmp / "main")], check=True, env=GIT_ENV)
             subprocess.run([*git, "-C", str(tmp / "main"), "commit", "-q", "--allow-empty", "-m", "init"],
-                           check=True)
+                           check=True, env=GIT_ENV)
             subprocess.run([*git, "-C", str(tmp / "main"), "worktree", "add", "-q", "--detach",
-                            str(tmp / "repo")], check=True)
+                            str(tmp / "repo")], check=True, env=GIT_ENV)
         (tmp / "repo" / "tools").mkdir(parents=True)
         (tmp / "repo" / "ops").symlink_to(REPO / "ops")
         (tmp / "repo" / "lib").symlink_to(REPO / "lib")
