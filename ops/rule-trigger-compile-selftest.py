@@ -4,19 +4,23 @@ no Jev call: every judgment arrives through an injected fake.
 
   ops/rule_trigger_compile.py   — Jev judges each pack-layer rule once; the
                                   answers become deterministic triggers.
-  ops/rule_trigger_delivery.py  — a partner message is matched against them;
-                                  Jev is asked only about residual rules, once
-                                  per session and pack.
+  ops/rule_trigger_delivery.py  — a message is matched against them. A machine
+                                  envelope stops there (zero Jev requests); a
+                                  human prompt then gets one budgeted judgment
+                                  (1 ranking + at most 3 binding requests),
+                                  with residual and stale rules judged on
+                                  every human prompt.
   ops/rule-trigger-compile.py --check — the committed compile covers every
                                   current pack-layer rule (this suite runs it,
                                   which is how CI enforces it).
 
 THE MUTANTS AT THE END are the point of the suite's shape. Each one edits the
 source of a module in memory to break a single safety property — fail-open,
-negative masking, once-per-session residual, dedupe, coverage, staleness, the
-surfacing floor — and the suite asserts that the property check written for
-it now FAILS. A property check that still passes on its mutant proves
-nothing, and the suite fails on it.
+negative masking, residual/stale judged every human prompt, the request
+budget, zero requests on an envelope, dedupe, no shared session key,
+coverage, staleness, the surfacing floor — and the suite asserts that the
+property check written for it now FAILS. A property check that still passes on
+its mutant proves nothing, and the suite fails on it.
 """
 from __future__ import annotations
 
@@ -92,7 +96,13 @@ def compiled_doc():
               negatives={"push notification": 0.7}),
         entry(RULES[1], keywords={"vendor": 0.7}),
         entry(RULES[2], mode="residual"),
-    ])
+    ] + filler_entries())
+
+
+def filler_entries():
+    """Fillers are compiled (so they are neither stale nor missing) and match
+    only a word no test prompt contains."""
+    return [entry(rule, keywords={f"fillerword{i}": 0.6}) for i, rule in enumerate(FILLERS)]
 
 
 def table_for(doc, tmp, extra=()):
@@ -103,8 +113,24 @@ def table_for(doc, tmp, extra=()):
     return path
 
 
+
+# Fillers make the roster bigger than the binding capacity, so the ranking
+# call decides what is judged and "always judged" is a real claim rather than
+# an accident of a small roster.
+FILLERS = [{"id": f"ffff{i:04d}", "gist": f"filler {i}", "packs": ["filler-pack"],
+            "statement": f"Filler rule number {i} about an unrelated topic."}
+           for i in range(40)]
+FILLERS[0]["packs"] = ["governance-rules"]  # shares the residual rule's pack
+ROSTER = RULES + FILLERS
+NOTIFICATION = ("<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n"
+                "<summary>Agent \"x\" finished with an error, see https://example.com/log"
+                "</summary>\n</task-notification>")
+
+
 class Asker:
-    def __init__(self, value=0.9, fail=False):
+    """A binding request: records each batch of rule ids it was asked about."""
+
+    def __init__(self, value=0.1, fail=False):
         self.calls = []
         self.value = value
         self.fail = fail
@@ -113,20 +139,46 @@ class Asker:
         self.calls.append(sorted(questions))
         if self.fail:
             raise RuntimeError("synthetic outage")
-        return {"model": "jev-residual",
+        return {"model": "jev-binder",
                 "answers": {q: {"type": "noul", "noul": self.value} for q in questions}}
 
+    def asked(self):
+        return {rule_id for batch in self.calls for rule_id in batch}
 
-def run(module, text, tmp, *, session="s1", now=1000.0, doc=None, ask=None,
-        fallback=None, table=None, caches=None):
+
+class Ranker:
+    """The ranking request: fillers first, so a rule it is not told about sinks."""
+
+    def __init__(self, fail=False):
+        self.calls = 0
+        self.fail = fail
+
+    def __call__(self, text, pool, limit, client):
+        self.calls += 1
+        if self.fail:
+            raise RuntimeError("synthetic outage")
+        ids = sorted(rule["id"] for rule in pool)
+        ids.sort(key=lambda rule_id: (not rule_id.startswith("ffff"), rule_id))
+        return ids[:limit], 1
+
+
+def run(module, text, tmp, *, session="s1", now=1000.0, doc=None, ask=None, rank=None,
+        table=None, caches=None, rules=None, envelope=None, compiled="default"):
     doc = compiled_doc() if doc is None else doc
-    residual, delivered = caches or (os.path.join(tmp, "r.json"), os.path.join(tmp, "d.json"))
+    delivered = caches or os.path.join(tmp, "d.json")
     return module.advise(
         text, session_id=session, now=now,
-        triggers_path=table or table_for(doc if doc else compiled_doc(), tmp),
-        compiled=doc, rules=RULES, ask=ask or Asker(0.1), client=Client,
-        fallback=fallback, residual_cache=residual, delivered_cache=delivered,
+        triggers_path=table or table_for(doc, tmp),
+        compiled=doc if compiled == "default" else compiled,
+        rules=ROSTER if rules is None else rules,
+        ask=ask if ask is not None else Asker(), client=Client,
+        rank=rank if rank is not None else Ranker(),
+        delivered_cache=delivered, envelope=envelope,
         log_path=os.path.join(tmp, "log.jsonl"))
+
+
+def ids(rows):
+    return [row["id"] for row in rows]
 
 
 # ---------------------------------------------------------------- properties
@@ -138,39 +190,68 @@ def prop_negative_masks(rtc_m, rtd_m):
         masked = run(rtd_m, "send a push notification to the phone", tmp)
     with tempfile.TemporaryDirectory() as tmp:
         plain = run(rtd_m, "then git push the branch", tmp)
-    return ("aaaa0001" not in [r["id"] for r in masked]
-            and "aaaa0001" in [r["id"] for r in plain])
+    return "aaaa0001" not in ids(masked) and "aaaa0001" in ids(plain)
 
 
 def prop_fail_open(rtc_m, rtd_m):
-    called = []
-
-    def fallback(text):
-        called.append(text)
-        return [{"id": "fallback", "probability": 0.9}]
-
+    """No trigger table: a human prompt is still judged, within budget."""
+    ask, rank = Asker(0.9), Ranker()
     try:
         with tempfile.TemporaryDirectory() as tmp:
-            missing = os.path.join(tmp, "absent.json")
-            out = rtd_m.advise("git push", session_id="s", now=1.0, triggers_path=missing,
-                               compiled=compiled_doc(), rules=RULES, ask=Asker(),
-                               client=Client, fallback=fallback,
-                               residual_cache=os.path.join(tmp, "r"),
-                               delivered_cache=os.path.join(tmp, "d"),
-                               log_path=os.path.join(tmp, "l"))
+            out = run(rtd_m, "git push please", tmp, ask=ask, rank=rank,
+                      table=os.path.join(tmp, "absent.json"))
     except Exception:
         return False
-    return called == ["git push"] and out == [{"id": "fallback", "probability": 0.9}]
+    return (bool(out) and len(ask.calls) >= 1
+            and rank.calls + len(ask.calls) <= rtd_m.MAX_JEV_CALLS)
 
 
-def prop_residual_once_per_session(rtc_m, rtd_m):
-    ask = Asker(0.9)
+def prop_residual_every_human_prompt(rtc_m, rtd_m):
+    """Residual AND stale rules are judged on every human prompt of a session,
+    including one where their pack (or another) already had a trigger hit."""
+    stale_doc = compiled_doc()
+    stale_doc["rules"]["aaaa0002"]["statement_sha256"] = "0" * 64
+    # A reviewed row that puts a hit in the residual rule's own pack.
+    same_pack = {"kind": "prompt_regex", "pattern": r"\bnow\b", "packs": ["governance-rules"],
+                 "rule_ids": ["ffff0000"], "source": "structural_extra"}
+    asks = []
     with tempfile.TemporaryDirectory() as tmp:
-        first = run(rtd_m, "unrelated words", tmp, ask=ask)
-        run(rtd_m, "other unrelated words", tmp, ask=ask, now=1010.0)
-        run(rtd_m, "unrelated words", tmp, ask=ask, session="s2", now=1020.0)
-    return (len(ask.calls) == 2 and ask.calls[0] == ["aaaa0003"]
-            and [r["id"] for r in first] == ["aaaa0003"])
+        table = table_for(stale_doc, tmp, extra=[same_pack])
+        for step, text in enumerate(("unrelated words", "other words",
+                                     "git push to the vendor now")):
+            ask = Asker(0.1)
+            run(rtd_m, text, tmp, ask=ask, now=1000.0 + step, doc=stale_doc, table=table)
+            asks.append(ask.asked())
+    return all({"aaaa0003", "aaaa0002"} <= asked for asked in asks)
+
+
+def prop_budget_cap(rtc_m, rtd_m):
+    """At most MAX_JEV_CALLS requests per human prompt, even with more
+    residual rules than the binding capacity; the excess is reported."""
+    many = [{"id": f"rrrr{i:04d}", "gist": "r", "packs": ["residual-pack"],
+             "statement": f"Residual rule {i}."} for i in range(40)]
+    doc = rtc_m.document([entry(rule, mode="residual") for rule in many] + filler_entries())
+    ask, rank = Asker(0.1), Ranker()
+    with tempfile.TemporaryDirectory() as tmp:
+        run(rtd_m, "anything at all", tmp, ask=ask, rank=rank, doc=doc,
+            rules=many + FILLERS, table=table_for(doc, tmp))
+        log = [json.loads(line) for line in Path(tmp, "log.jsonl").read_text().splitlines()]
+    total = rank.calls + len(ask.calls)
+    capacity = rtd.BIND_CALLS * rtd.BIND_PER_CALL
+    return (total <= 4 and log[-1]["jev_calls"] == total
+            and len(ask.asked()) == capacity and len(log[-1]["overflow"]) == 40 - capacity)
+
+
+def prop_envelope_zero_calls(rtc_m, rtd_m):
+    """A machine envelope: compiled triggers only, zero Jev requests, and the
+    partner-prompt cues do not run on its boilerplate."""
+    cue = {"kind": "prompt_regex", "pattern": r"\berror\b", "packs": ["governance-rules"],
+           "rule_ids": ["aaaa0003"], "source": "prompt_cue"}
+    ask, rank = Asker(0.9), Ranker()
+    with tempfile.TemporaryDirectory() as tmp:
+        table = table_for(compiled_doc(), tmp, extra=[cue])
+        out = run(rtd_m, NOTIFICATION, tmp, ask=ask, rank=rank, table=table)
+    return ask.calls == [] and rank.calls == 0 and "aaaa0003" not in ids(out)
 
 
 def prop_dedupe(rtc_m, rtd_m):
@@ -178,26 +259,17 @@ def prop_dedupe(rtc_m, rtd_m):
         first = run(rtd_m, "a vendor intro", tmp)
         second = run(rtd_m, "a vendor intro", tmp, now=1100.0)
         later = run(rtd_m, "a vendor intro", tmp, now=1000.0 + rtd_m.DEDUPE_TTL_SECONDS + 1)
-    return ([r["id"] for r in first] == ["aaaa0002"] and second == []
-            and [r["id"] for r in later] == ["aaaa0002"])
+    return ids(first) == ["aaaa0002"] and second == [] and ids(later) == ["aaaa0002"]
 
 
 def prop_no_session_no_pooling(rtc_m, rtd_m):
-    """No session id: nothing to be 'once per' and no context to dedupe
-    against, so every message is judged and delivered afresh and no shared
-    default key is ever written."""
-    ask = Asker(0.9)
+    """No session id: nothing to dedupe against, so every message delivers
+    afresh and no shared default key is ever written."""
     with tempfile.TemporaryDirectory() as tmp:
-        first = run(rtd_m, "unrelated words", tmp, ask=ask, session=None)
-        second = run(rtd_m, "unrelated words", tmp, ask=ask, session="  ", now=1010.0)
-        vendor = run(rtd_m, "a vendor intro", tmp, session=None, now=1020.0)
-        vendor_again = run(rtd_m, "a vendor intro", tmp, session=None, now=1030.0)
-        wrote = os.path.exists(os.path.join(tmp, "r.json")) or os.path.exists(
-            os.path.join(tmp, "d.json"))
-    return (len(ask.calls) == 2 and [r["id"] for r in first] == ["aaaa0003"]
-            and [r["id"] for r in second] == ["aaaa0003"]
-            and "aaaa0002" in [r["id"] for r in vendor]
-            and "aaaa0002" in [r["id"] for r in vendor_again] and not wrote)
+        first = run(rtd_m, "a vendor intro", tmp, session=None)
+        again = run(rtd_m, "a vendor intro", tmp, session="  ", now=1010.0)
+        wrote = os.path.exists(os.path.join(tmp, "d.json"))
+    return ids(first) == ["aaaa0002"] and ids(again) == ["aaaa0002"] and not wrote
 
 
 def prop_coverage_flags_empty_trigger(rtc_m, rtd_m):
@@ -222,11 +294,12 @@ def prop_surface_floor(rtc_m, rtd_m):
 
 PROPERTIES = {
     "negative phrases mask their shared word": prop_negative_masks,
-    "a missing trigger table falls back to judging, never to silence": prop_fail_open,
-    "residual rules are judged once per session": prop_residual_once_per_session,
+    "a missing trigger table still judges a human prompt, within budget": prop_fail_open,
+    "residual and stale rules are judged on every human prompt": prop_residual_every_human_prompt,
+    "a human prompt never costs more than MAX_JEV_CALLS requests": prop_budget_cap,
+    "a machine envelope costs zero Jev requests": prop_envelope_zero_calls,
     "a rule already delivered this session is not resent inside the window": prop_dedupe,
-    "no session id means no residual marker, no dedupe, no shared key":
-        prop_no_session_no_pooling,
+    "no session id means no dedupe and no shared key": prop_no_session_no_pooling,
     "coverage flags a triggered rule with no trigger": prop_coverage_flags_empty_trigger,
     "a re-taught rule is detected as stale": prop_stale_detected,
     "the surfacing floor is inclusive at 0.5 and excludes below it": prop_surface_floor,
@@ -236,6 +309,9 @@ for name, prop in PROPERTIES.items():
     check(f"property holds: {name}", prop(rtc, rtd))
 
 # ---------------------------------------------------------------- direct cases
+
+check("the hard budget is one ranking plus BIND_CALLS binding requests, and is 4",
+      rtd.MAX_JEV_CALLS == 1 + rtd.BIND_CALLS == 4)
 
 with tempfile.TemporaryDirectory() as tmp:
     hit = run(rtd, "please git push this", tmp)
@@ -248,51 +324,83 @@ with tempfile.TemporaryDirectory() as tmp:
     stale_doc["rules"]["aaaa0002"]["statement_sha256"] = "0" * 64
     ask = Asker(0.9)
     out = run(rtd, "a vendor intro", tmp, doc=stale_doc, ask=ask)
-check("a stale rule is not matched on old triggers; it is judged as residual instead",
-      ask.calls and "aaaa0002" in ask.calls[0]
+check("a stale rule is not matched on old triggers; it is judged instead",
+      "aaaa0002" in ask.asked()
       and [r for r in out if r["id"] == "aaaa0002"][0]["source"] == "residual_judged", out)
 
 with tempfile.TemporaryDirectory() as tmp:
-    down = Asker(fail=True)
-    out1 = run(rtd, "unrelated", tmp, ask=down)
-    up = Asker(0.9)
-    out2 = run(rtd, "unrelated", tmp, ask=up, now=1001.0)
-check("a failed residual request still returns matched rules and is retried next message",
-      out1 == [] and len(up.calls) == 1 and [r["id"] for r in out2] == ["aaaa0003"])
+    out = run(rtd, "please git push", tmp, ask=Asker(fail=True))
+check("failed binding requests still return what matched",
+      ids(out) == ["aaaa0001"], out)
 
 with tempfile.TemporaryDirectory() as tmp:
-    ask = Asker(0.9)
-    out = run(rtd, "git push to the vendor", tmp, ask=ask)
-check("a pack with a trigger hit is not also judged as residual; others are",
-      {r["id"] for r in out} >= {"aaaa0001", "aaaa0002"} and ask.calls == [["aaaa0003"]], out)
+    ask, rank = Asker(0.1), Ranker(fail=True)
+    run(rtd, "anything", tmp, ask=ask, rank=rank)
+    row = json.loads(Path(tmp, "log.jsonl").read_text().splitlines()[-1])
+check("a failed ranking still judges residual rules and is counted",
+      "aaaa0003" in ask.asked() and row["rank_status"] == "unavailable"
+      and row["jev_calls"] == 1 + len(ask.calls), row)
+
+with tempfile.TemporaryDirectory() as tmp:
+    ask, rank = Asker(0.1), Ranker()
+    run(rtd, "anything", tmp, ask=ask, rank=rank)
+check("the ranking fills the binding capacity with its top choices",
+      rank.calls == 1 and len(ask.calls) == rtd.BIND_CALLS
+      and len(ask.asked()) == rtd.BIND_CALLS * rtd.BIND_PER_CALL
+      and all(len(batch) <= rtd.BIND_PER_CALL for batch in ask.calls), ask.calls)
+
+with tempfile.TemporaryDirectory() as tmp:
+    ask, rank = Asker(0.1), Ranker()
+    run(rtd, "anything", tmp, ask=ask, rank=rank, rules=RULES)
+check("a roster within capacity is judged whole without a ranking request",
+      rank.calls == 0 and ask.asked() == {"aaaa0001", "aaaa0002", "aaaa0003"}, ask.calls)
 
 with tempfile.TemporaryDirectory() as tmp:
     structural = {"kind": "prompt_regex", "pattern": r"^\s*<task-notification>",
                   "packs": ["governance-rules"], "rule_ids": ["aaaa0003"],
                   "source": "structural_extra"}
     table = table_for(compiled_doc(), tmp, extra=[structural])
-    out = run(rtd, "<task-notification><status>completed</status>", tmp, table=table)
-check("a reviewed structural trigger delivers without a model judgment",
+    out = run(rtd, NOTIFICATION, tmp, table=table)
+check("a reviewed structural trigger delivers on an envelope without a model",
       [r for r in out if r["id"] == "aaaa0003"][0]["binding_model"] == "structural-trigger", out)
+
+cue = {"kind": "prompt_regex", "pattern": r"\bhttps?://\S+", "packs": ["vendor-intros"],
+       "rule_ids": ["aaaa0002"], "source": "prompt_cue"}
+with tempfile.TemporaryDirectory() as tmp:
+    human_out = run(rtd, "here is the link https://x.com/a/b", tmp,
+                    table=table_for(compiled_doc(), tmp, extra=[cue]))
+check("a reviewed partner-prompt cue delivers on a human prompt",
+      [r for r in human_out if r["id"] == "aaaa0002"][0]["binding_model"]
+      == "reviewed-prompt-cue", human_out)
 
 with tempfile.TemporaryDirectory() as tmp:
     blocker = os.path.join(tmp, "file")
     Path(blocker).write_text("x", encoding="utf-8")
-    caches = (os.path.join(blocker, "r.json"), os.path.join(blocker, "d.json"))
-    out = run(rtd, "git push now", tmp, caches=caches)
-check("unwritable caches still deliver",
-      [r["id"] for r in out][:1] == ["aaaa0001"], out)
+    out = run(rtd, "git push now", tmp, caches=os.path.join(blocker, "d.json"))
+check("an unwritable cache still delivers", ids(out)[:1] == ["aaaa0001"], out)
 
 many = [dict(RULES[1], id=f"bbbb{i:04d}") for i in range(8)]
 doc_many = rtc.document([entry(r, keywords={"vendor": 0.6 + i / 100})
                          for i, r in enumerate(many)])
 with tempfile.TemporaryDirectory() as tmp:
-    out = rtd.advise("vendor", session_id="s", now=1.0, triggers_path=table_for(doc_many, tmp),
-                     compiled=doc_many, rules=many, ask=Asker(), client=Client,
-                     residual_cache=os.path.join(tmp, "r"), delivered_cache=os.path.join(tmp, "d"),
-                     log_path=os.path.join(tmp, "l"))
+    out = run(rtd, "vendor", tmp, doc=doc_many, rules=many, table=table_for(doc_many, tmp))
 check("at most MAX_SURFACED rules per message, strongest first",
       len(out) == rtd.MAX_SURFACED and out[0]["id"] == "bbbb0007", out)
+
+# The committed table's partner-prompt cues, against the prompts they came from.
+committed_rows = rtd.prompt_rows()
+for prompt, rule_id in (
+        ("Here’s the article link\n\nhttps://x.com/av1dlive/status/2102802621664985241", "6437ae15"),
+        ("Here’s the article link\n\nhttps://x.com/av1dlive/status/2102802621664985241", "57d13061"),
+        ("Just click my Carr.us@gmail account. The password is autofilled", "c66dc739"),
+        ("It appears that flash got stuck on test 6", "d9ce2b08"),
+        ("it didnt ask, it just said no such file", "d9ce2b08"),
+        ("look in my email folder for sapala", "49533583")):
+    check(f"committed cue delivers {rule_id} on its logged prompt",
+          rule_id in rtd.match(prompt, committed_rows or [], human=True), prompt[:40])
+check("committed partner-prompt cues never run on an envelope",
+      not any(source == "prompt_cue" for sources in rtd.match(
+          NOTIFICATION, committed_rows or [], human=False).values() for source in sources))
 
 rows = rtc.trigger_rows(rtc.document([
     dict(entry(RULES[0], keywords={"git push": 0.8}), triggers={
@@ -332,19 +440,33 @@ for rid, item in (committed or {}).get("rules", {}).items():
     if item["mode"] == "triggered" and not any(item["triggers"].values()):
         check(f"{rid} is deliverable", False, "triggered with no trigger")
 
+
 # ---------------------------------------------------------------- mutants
 MUTANTS = [
     ("negative phrases mask their shared word", RTD_PATH,
      ('body = re.sub(row["negative_pattern"], " ", body, flags=re.I)', "body = body")),
-    ("a missing trigger table falls back to judging, never to silence", RTD_PATH,
-     ("if compiled is None or rows is None:", "if False:")),
-    ("residual rules are judged once per session", RTD_PATH,
-     ("cache.put(residual_cache, marker(pack), True",
-      "(lambda *a, **k: None)(residual_cache, marker(pack), True")),
+    ("a missing trigger table still judges a human prompt, within budget", RTD_PATH,
+     ("    if human:\n        unmatched", "    if human and rows is not None:\n        unmatched")),
+    # Residual and stale rules dropped from the always-judged set.
+    ("residual and stale rules are judged on every human prompt", RTD_PATH,
+     ('always = sorted(rule["id"] for rule in unmatched\n',
+      'always = sorted(rule["id"] for rule in []\n')),
+    # The first cut's rule: skip a residual rule whose pack already had a hit.
+    ("residual and stale rules are judged on every human prompt", RTD_PATH,
+     ('always = sorted(rule["id"] for rule in unmatched\n',
+      'always = sorted(rule["id"] for rule in unmatched if not set(rule["packs"]) & '
+      '{p for s in selected for p in by_id[s]["packs"]}\n')),
+    ("a human prompt never costs more than MAX_JEV_CALLS requests", RTD_PATH,
+     ("capacity = BIND_CALLS * BIND_PER_CALL", "capacity = BIND_CALLS * BIND_PER_CALL * 10")),
+    ("a machine envelope costs zero Jev requests", RTD_PATH,
+     ("human = not (_is_envelope(situation) if envelope is None else envelope)",
+      "human = True")),
+    ("a machine envelope costs zero Jev requests", RTD_PATH,
+     ('if not human and row.get("source") in HUMAN_ONLY_SOURCES:', "if False:")),
     ("a rule already delivered this session is not resent inside the window", RTD_PATH,
      ("if not (isinstance(recent.get(rule_id), (int, float))",
       "if True or not (isinstance(recent.get(rule_id), (int, float))")),
-    ("no session id means no residual marker, no dedupe, no shared key", RTD_PATH,
+    ("no session id means no dedupe and no shared key", RTD_PATH,
      ('if isinstance(session_id, str) and session_id.strip() else None',
       'if isinstance(session_id, str) and session_id.strip() else "no-session"')),
     ("coverage flags a triggered rule with no trigger", RTC_PATH,
@@ -356,15 +478,15 @@ MUTANTS = [
      ('if role == "candidate" and prob >= SURFACE_AT:',
       'if role == "candidate" and prob > SURFACE_AT:')),
 ]
-for prop_name, path, substitution in MUTANTS:
-    mutated = load(f"mutant_{abs(hash(prop_name))}", path, replace=substitution)
+for number, (prop_name, path, substitution) in enumerate(MUTANTS):
+    mutated = load(f"mutant_{number}", path, replace=substitution)
     rtc_m = mutated if path == RTC_PATH else rtc
     rtd_m = mutated if path == RTD_PATH else rtd
     try:
         survived = PROPERTIES[prop_name](rtc_m, rtd_m)
     except Exception:
         survived = False
-    check(f"mutant is killed: {prop_name}", not survived)
+    check(f"mutant {number} is killed: {prop_name}", not survived)
 
 if FAILURES:
     print("rule-trigger-compile-selftest: FAIL")

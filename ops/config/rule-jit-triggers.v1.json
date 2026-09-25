@@ -5,7 +5,7 @@
   "seeded_detector_rule_ids": 50,
   "seeded_detector_triggers": 14,
   "structural_extra_triggers": 2,
-  "triggers": 141
+  "triggers": 146
  },
  "generated_from": {
   "jev_triggers_sha256": "fe5a1593d9c602327ecd986158c5f77c31d704f8695f0952e81d15552a20ca9d",
@@ -371,6 +371,43 @@
    ],
    "source": "structural_extra",
    "trigger_id": "5e186a09dcf2"
+  },
+  {
+   "kind": "prompt_regex",
+   "packs": [
+    "joe-comms"
+   ],
+   "pattern": "\\b(?:e-?mails?|inbox|folder)\\b",
+   "rule_ids": [
+    "49533583",
+    "c66dc739"
+   ],
+   "source": "prompt_cue",
+   "trigger_id": "695e75487299"
+  },
+  {
+   "kind": "prompt_regex",
+   "packs": [
+    "joe-comms"
+   ],
+   "pattern": "\\b(?:passwords?|log\\s?-?ins?|autofill(?:ed)?|auto-filled)\\b",
+   "rule_ids": [
+    "c66dc739"
+   ],
+   "source": "prompt_cue",
+   "trigger_id": "622e43d5a88c"
+  },
+  {
+   "kind": "prompt_regex",
+   "packs": [
+    "governance-rules"
+   ],
+   "pattern": "\\b(?:stuck|no such file|errors?|errored|erroring)\\b",
+   "rule_ids": [
+    "d9ce2b08"
+   ],
+   "source": "prompt_cue",
+   "trigger_id": "5370274a056f"
   },
   {
    "kind": "prompt_regex",
@@ -1087,6 +1124,32 @@
    ],
    "source": "jev_compiled",
    "trigger_id": "798c402d09c3"
+  },
+  {
+   "kind": "prompt_regex",
+   "packs": [
+    "joe-comms"
+   ],
+   "pattern": "\\bhttps?://(?:www\\.|mobile\\.)?(?:x|twitter)\\.com/",
+   "rule_ids": [
+    "57d13061"
+   ],
+   "source": "prompt_cue",
+   "trigger_id": "f325ff8512e7"
+  },
+  {
+   "kind": "prompt_regex",
+   "packs": [
+    "source-study"
+   ],
+   "pattern": "\\bhttps?://\\S+",
+   "rule_ids": [
+    "5e896ed6",
+    "6437ae15",
+    "98e74e7c"
+   ],
+   "source": "prompt_cue",
+   "trigger_id": "2e0ee9badc7a"
   },
   {
    "kind": "prompt_regex",

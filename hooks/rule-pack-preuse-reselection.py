@@ -26,10 +26,12 @@ by the new one.
 
 MESSAGE SEMANTICS (loop 620). The same module is also wired once at
 UserPromptSubmit, the earliest seam that carries the partner's actual message.
-Which pack-layer rules bind that message is decided by matching the
-`prompt_regex` rows Jev compiled once per rule (ops/rule_trigger_delivery.py;
-since 2026-09-25 Jev is no longer asked about every message — only about
-residual rules no cue can signal, once per session and pack); code rejects unknown and
+Which pack-layer rules bind that message is decided in
+ops/rule_trigger_delivery.py: the `prompt_regex` rows Jev compiled once per
+rule are matched first; a machine envelope stops there with zero Jev
+requests, and a human prompt then gets one budgeted judgment (a ranking plus
+at most three batched binding requests, residual and stale rules always
+included) — at most 4 Jev requests per human prompt; code rejects unknown and
 already-loaded layer-zero candidates; the existing authenticated
 standing-context door supplies the authoritative rule text and identity before
 one typed advisory receipt is injected. The content_regex rows no longer run
@@ -377,12 +379,10 @@ def _generalized_receipt(payload: dict, response: dict, trigger_ids: list[str],
 
 
 def _semantic_adviser(situation: str, session_id: str | None = None) -> list[dict]:
-    # Compiled-trigger match (ops/rule_trigger_delivery.py): Jev judged each
-    # rule once, at compile time. Jev is asked at run time only for residual
-    # rules, at most once per session and pack, and the module falls back to
-    # ops/jev_rule_select.advise when the compiled files are unusable. The
+    # Compiled-trigger match, then (human prompts only) one budgeted Jev
+    # judgment of at most 4 requests (ops/rule_trigger_delivery.py). The
     # session is the hook payload's own session_id; with none, nothing is
-    # cached or pooled.
+    # deduped or pooled.
     path = REPO / "ops/rule_trigger_delivery.py"
     spec = importlib.util.spec_from_file_location("rule_trigger_delivery_live", path)
     if spec is None or spec.loader is None:

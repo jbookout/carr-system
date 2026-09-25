@@ -1181,8 +1181,8 @@ if len(agent_row["rule_ids"]) > 1:
           not contract.validate_generalized_receipt(reordered, repo=REPO))
 
 # COMPILED-TRIGGER WIRING (2026-09-25). The default message adviser is now the
-# compiled-trigger matcher; that it receives the session (so its residual Jev
-# check runs at most once per session and pack) is checked above.
+# compiled-trigger matcher with its budgeted judgment; that it receives the
+# session (for its per-session dedupe) is checked above.
 prompt_rows = [row for row in TRIGGER_ROWS.values() if row["kind"] == "prompt_regex"]
 check("the compiled table carries prompt_regex rows", bool(prompt_rows))
 leaky = [row["trigger_id"] for row in prompt_rows

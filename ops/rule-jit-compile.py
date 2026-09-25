@@ -80,6 +80,11 @@ OUTPUT SHAPE (ops/config/rule-jit-triggers.v1.json), one row per trigger:
                                          these are NOT derived from a triage
                                          detector field because gate-home
                                          rules are not triaged for one.
+                   "prompt_cue"        — hand-reviewed prompt_regex cues taken
+                                         from real logged partner prompts
+                                         (PROMPT_CUE_TRIGGERS below); matched
+                                         on human prompts only, never on a
+                                         machine envelope.
                    "jev_compiled"      — from ops/config/rule-jev-triggers.v1.json
                                          (ops/rule-trigger-compile.py): Jev's
                                          once-per-rule judgment of which cues
@@ -148,6 +153,50 @@ STRUCTURAL_EXTRA_TRIGGERS: tuple[dict[str, Any], ...] = (
                     r"(?=[\s\S]*<summary>Agent\b)"),
         "packs": ["governance-rules"],
         "rule_ids": ["86647daf"],
+    },
+)
+
+
+# Hand-reviewed cues taken from REAL logged partner prompts, not from the
+# rules' own wording (2026-09-25 review of #1276: Jev's compile-time keywords,
+# drawn from each rule's statement, recovered 3 of 30 human-prompt verdicts,
+# because partners do not talk in the vocabulary rules are written in). Each
+# row cites the logged prompts it came from (out/jev-rule-select.jsonl, where
+# the judged path bound these rules). They fire on HUMAN prompts only — a
+# machine envelope carries URLs and "error" in its own boilerplate — and, like
+# the structural rows, they are a reviewed code change, not a judgment.
+PROMPT_CUE_TRIGGERS: tuple[dict[str, Any], ...] = (
+    # "Here's the article link\n\nhttps://x.com/av1dlive/status/...",
+    # "https://x.com/i/grok/share/... What about this model?"
+    {
+        "pattern": r"\bhttps?://\S+",
+        "packs": ["source-study"],
+        "rule_ids": ["5e896ed6", "6437ae15", "98e74e7c"],
+    },
+    # the same two prompts: an x.com link is an X retrieval (57d13061)
+    {
+        "pattern": r"\bhttps?://(?:www\.|mobile\.)?(?:x|twitter)\.com/",
+        "packs": ["joe-comms"],
+        "rule_ids": ["57d13061"],
+    },
+    # "Just click my Carr.us@gmail account. The password is autofilled..."
+    {
+        "pattern": r"\b(?:passwords?|log\s?-?ins?|autofill(?:ed)?|auto-filled)\b",
+        "packs": ["joe-comms"],
+        "rule_ids": ["c66dc739"],
+    },
+    # "It appears that flash got stuck on test 6",
+    # "it didnt ask, it just said no such file"
+    {
+        "pattern": r"\b(?:stuck|no such file|errors?|errored|erroring)\b",
+        "packs": ["governance-rules"],
+        "rule_ids": ["d9ce2b08"],
+    },
+    # "look in my email folder for sapala"
+    {
+        "pattern": r"\b(?:e-?mails?|inbox|folder)\b",
+        "packs": ["joe-comms"],
+        "rule_ids": ["49533583", "c66dc739"],
     },
 )
 
@@ -270,6 +319,17 @@ def compile_triggers(triage: dict, enforcement_map: dict,
             "packs": list(extra["packs"]),
             "rule_ids": sorted(extra["rule_ids"])[:MAX_RULES_PER_TRIGGER],
             "source": "structural_extra",
+        })
+
+    # 3b. reviewed cues from real partner prompts (human prompts only)
+    for cue in PROMPT_CUE_TRIGGERS:
+        rows.append({
+            "trigger_id": trigger_id("prompt_regex", cue["pattern"]),
+            "kind": "prompt_regex",
+            "pattern": cue["pattern"],
+            "packs": list(cue["packs"]),
+            "rule_ids": sorted(cue["rule_ids"])[:MAX_RULES_PER_TRIGGER],
+            "source": "prompt_cue",
         })
 
     # 4. Jev-compiled triggers (ops/rule-trigger-compile.py): one judgment per
