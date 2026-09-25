@@ -1,6 +1,6 @@
 // DoctorCRE v5 slice V5-A05 -- the production door onto
-// delivery-cadence-a05.v5.js's pure classifiers (migration 0610, sealed as
-// SCAC v74 by migration 0611).
+// delivery-cadence-a05.v5.js's pure classifiers (migration 0617, sealed as
+// SCAC v75 by migration 0618).
 //
 // Three verbs:
 //   cadence-status              read-only, on the WRITER connection in a
@@ -25,7 +25,7 @@
 //                                reason cites, the server-clock cadence status a
 //                                miss cites. Caller booleans are ignored. It writes
 //                                a signal_event (the WR-000113 evidence mechanism)
-//                                and mints through ops.mint_notification (0610
+//                                and mints through ops.mint_notification (0617
 //                                extends it with p_bypass_quiet_hours and
 //                                p_hold_for_morning; it does not duplicate it).
 //
@@ -83,7 +83,7 @@ const MINT_SEVERITY = Object.freeze({ critical: "failure", warning: "action_requ
 const MINT_SIGNATURE = "ops.mint_notification(text,uuid,text,text,text,text,text,text,text,boolean,boolean)";
 
 export function deliveryCadenceA05Tools({ withEnvelope, writeEvent, ToolError }) {
-  async function require0610(c) {
+  async function require0617(c) {
     const r = await c.query(
       `select to_regprocedure('ops.v5_a05_cadence_status(text,text)') is not null as status_fn,
               to_regprocedure('ops.v5_a05_record_cadence_receipt(text,text,uuid)') is not null as record_fn,
@@ -91,8 +91,8 @@ export function deliveryCadenceA05Tools({ withEnvelope, writeEvent, ToolError })
     const s = r.rows[0];
     if (s.status_fn && s.record_fn && s.mint_fn) return;
     throw new ToolError({ error: "migration_not_applied",
-      migration: "0610_delivery_cadence_a05", present: s,
-      hint: "apply migration 0610 before using V5-A05 verbs; nothing was written" });
+      migration: "0617_delivery_cadence_a05", present: s,
+      hint: "apply migration 0617 before using V5-A05 verbs; nothing was written" });
   }
 
   function assertSubject(args) {
@@ -147,7 +147,7 @@ export function deliveryCadenceA05Tools({ withEnvelope, writeEvent, ToolError })
     "cadence-status": {
       write: false,
       // Review round 2, item 1: without this the verb routes to carr_reader,
-      // which 0610 denies EXECUTE on ops.v5_a05_cadence_status -- the daily
+      // which 0617 denies EXECUTE on ops.v5_a05_cadence_status -- the daily
       // sweep's only read could never succeed in production.
       writerConnection: true,
       description: "Read-only V5-A05 cadence status for one subject: current, missed, or no_receipt_on_record, mirroring evaluateCadenceReceipt over ops.v5_a05_cadence_receipt. Runs in a read-only transaction on the writer connection. Takes no `now` argument -- the server clock is the only clock this reads (excluded_scope: clock reset).",
@@ -155,26 +155,26 @@ export function deliveryCadenceA05Tools({ withEnvelope, writeEvent, ToolError })
         subject_type: { type: "string" }, subject_ref: { type: "string" },
       }, required: ["subject_type", "subject_ref"] },
       handler: async (c, _actor, args) => {
-        await require0610(c);
+        await require0617(c);
         assertSubject(args);
         return cadenceStatus(c, args);
       },
     },
 
     // Review round 2, item 4: a receipt is a bare check-in today (no
-    // Completion Register producer exists to cite -- migration 0610's header),
+    // Completion Register producer exists to cite -- migration 0617's header),
     // and a bare check-in resets the 14-day clock. The door is therefore held
     // to the same system/authority seats that may raise urgent alerts: a model
     // agent, bot or reviewer cannot silence a miss by checking in.
     "record-cadence-receipt": {
       write: true,
-      description: "Record that a subject's V5-A05 assurance cadence checked in. Only a verified partner or the partner-sponsored local machine credential may record one; any other seat is refused. Inserts one append-only row into ops.v5_a05_cadence_receipt, expiring 14 days from now. Performs no escalation -- raise-delivery-cadence-alert and the daily sweep own that. Evidence is computed server-side by ops.v5_a05_record_cadence_receipt itself (no caller-supplied evidence can reset the clock). Disclosed gap (migration 0610's header comment): no Completion Register producer exists yet for any V5-A05 subject, so a receipt is a seat-restricted bare check-in and its evidence records that gap rather than a fabricated outcome-row foreign key.",
+      description: "Record that a subject's V5-A05 assurance cadence checked in. Only a verified partner or the partner-sponsored local machine credential may record one; any other seat is refused. Inserts one append-only row into ops.v5_a05_cadence_receipt, expiring 14 days from now. Performs no escalation -- raise-delivery-cadence-alert and the daily sweep own that. Evidence is computed server-side by ops.v5_a05_record_cadence_receipt itself (no caller-supplied evidence can reset the clock). Disclosed gap (migration 0617's header comment): no Completion Register producer exists yet for any V5-A05 subject, so a receipt is a seat-restricted bare check-in and its evidence records that gap rather than a fabricated outcome-row foreign key.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
         idempotency_key: { type: "string" },
         subject_type: { type: "string" }, subject_ref: { type: "string" },
       }, required: ["idempotency_key", "subject_type", "subject_ref"] },
       handler: async (c, actor, args) => withEnvelope(c, actor, "record-cadence-receipt", args, async () => {
-        await require0610(c);
+        await require0617(c);
         assertSubject(args);
         const seat = a05SeatForActor(actor);
         if (seat === "other")
@@ -220,7 +220,7 @@ export function deliveryCadenceA05Tools({ withEnvelope, writeEvent, ToolError })
         detail: { type: "string" },
       }, required: ["idempotency_key", "reason_id", "subject_type", "subject_ref"] },
       handler: async (c, actor, args) => withEnvelope(c, actor, "raise-delivery-cadence-alert", args, async () => {
-        await require0610(c);
+        await require0617(c);
         assertSubject(args);
 
         // Contract check first, so an unknown reason fails as a contract

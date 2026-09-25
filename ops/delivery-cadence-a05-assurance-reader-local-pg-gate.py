@@ -11,7 +11,7 @@ existing unit test for morning-brief runs against a fake client whose stub
 returns `{rows: []}` for any matching query regardless of role -- it cannot
 catch a missing grant, because it never talks to a real Postgres or a real
 role. This gate does: it connects as an unprivileged carr_reader-scoped
-role and calls ops.v5_a05_assurance_cadence_batch (migration 0610) exactly as
+role and calls ops.v5_a05_assurance_cadence_batch (migration 0617) exactly as
 morning-brief's assurance_cadence section does, then asserts the SAME role
 is refused direct SELECT on the two underlying tables.
 """

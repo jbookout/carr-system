@@ -62,6 +62,7 @@ import { benchmarkAcceptanceStoreTools } from "./benchmark-acceptance-store.v5.j
 import { modelRoleStoreTools } from "./model-role-store.v5.js";
 import { foundationAssuranceMinimumTools } from
   "./foundation-assurance-minimum-producer.v5.js";
+import { journeyOneClockDoorTools } from "./journey-one-clock-door.v5.js";
 export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
 
 // ---------- envelope helpers ----------
@@ -2960,8 +2961,8 @@ export const TOOLS = {
       // item is simply an unread notification from this producer, surfaced
       // here AND reachable through notification-feed like any other.
       const assuranceCadence = await section(async () => {
-        // Reads through ops.v5_a05_assurance_cadence_batch (migration 0610,
-        // sealed as SCAC v74 by 0611), a narrow SECURITY DEFINER function
+        // Reads through ops.v5_a05_assurance_cadence_batch (migration 0617,
+        // sealed as SCAC v75 by 0618), a narrow SECURITY DEFINER function
         // granted to carr_reader that refuses any non-partner recipient and
         // hides items still held for the morning window -- morning-brief
         // runs on the reader connection, and ops.notification/
@@ -8196,6 +8197,7 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "benchmark-acceptance": "mcp-server/src/benchmark-acceptance-store.v5.js",
   "model-role-store": "mcp-server/src/model-role-store.v5.js",
   "foundation-assurance": "mcp-server/src/foundation-assurance-minimum-producer.v5.js",
+  "journey-one-clock-door": "mcp-server/src/journey-one-clock-door.v5.js",
 });
 
 function bindToolSource(tool, source) {
@@ -9333,5 +9335,12 @@ registerTools(modelRoleStoreTools({ withEnvelope, writeEvent, ToolError }),
 registerTools(foundationAssuranceMinimumTools({
   withEnvelope, ToolError, authenticatedIdentity,
 }), "foundation-assurance");
+// DoctorCRE V5-M01: the live door to the Journey 1 clock runtime. The read verb
+// derives clock_started from the record; the advance verb takes only an
+// idempotency key and is registered WITHOUT an installation resolver, so it
+// refuses journey_one_clock_installation_unavailable before any query here. No
+// Worker can start, advance or pause the Journey 1 clock through it until a
+// verifier for the composed projection is installed by trusted server code.
+registerTools(journeyOneClockDoorTools({ withEnvelope, ToolError }), "journey-one-clock-door");
 
 Object.freeze(TOOLS);

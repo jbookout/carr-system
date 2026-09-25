@@ -6,7 +6,7 @@ Read-only against the record layer except for the ONE write this job owns:
 raise-delivery-cadence-alert, called only when cadence-status (read) reports
 status "missed". A subject that is "current" is left alone.
 "no_receipt_on_record" is ALSO left alone while young -- but
-ops.v5_a05_cadence_status (migration 0610) now starts the interval from a
+ops.v5_a05_cadence_status (migration 0617) now starts the interval from a
 genuine server-side activation anchor when no receipt has ever been issued,
 so a subject that goes a full 14-day interval with zero receipts is reported
 as "missed" too (review finding 3: "no_receipt_on_record forever" meant this

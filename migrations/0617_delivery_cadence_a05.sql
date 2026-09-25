@@ -1,4 +1,4 @@
--- 0610_delivery_cadence_a05.sql
+-- 0617_delivery_cadence_a05.sql
 -- DoctorCRE v5 slice V5-A05: delivery cadence, escalation and the
 -- decision-ready quiet-hours queue -- the production store and doors behind
 -- mcp-server/src/delivery-cadence-a05.v5.js's pure classifiers.
@@ -41,7 +41,7 @@
 --      the feed and morning-brief batch reads that hide a held item until its
 --      hold ends. See the section comment below.
 --
--- Sealed by 0611 as SCAC v74 over main's v73 (0609); the pair is one atomic
+-- Sealed by 0618 as SCAC v75 over main's v74 (0614); the pair is one atomic
 -- migration group in tools/migrate.py.
 --
 -- WHAT THIS IS NOT: a second quiet-hours computation. ops.notification_preference
@@ -54,13 +54,13 @@
 do $v5a05_preflight$
 begin
   if to_regprocedure('ops.mint_notification(text,uuid,text,text,text,text,text,text,text)') is null then
-    raise exception '0610 requires the 0521 ops.mint_notification (nine-argument) door';
+    raise exception '0617 requires the 0521 ops.mint_notification (nine-argument) door';
   end if;
   if to_regprocedure('ops.notification_feed_facts(timestamptz,integer)') is null then
-    raise exception '0610 requires the 0521 notification feed read door';
+    raise exception '0617 requires the 0521 notification feed read door';
   end if;
   if to_regprocedure('ops.scac_reference_monitor_guard()') is null then
-    raise exception '0610 requires the SIEP-18 reference-monitor guard function';
+    raise exception '0617 requires the SIEP-18 reference-monitor guard function';
   end if;
 end $v5a05_preflight$;
 
@@ -150,7 +150,7 @@ begin
   end if;
 
   select applied_at into v_activation_anchor from public.schema_migrations
-   where filename = '0610_delivery_cadence_a05.sql';
+   where filename = '0617_delivery_cadence_a05.sql';
 
   select * into v_last from ops.v5_a05_cadence_receipt
    where organization_tenant_id = v_tenant and subject_type = p_subject_type and subject_ref = p_subject_ref
@@ -289,7 +289,7 @@ begin
     'schema_version', 'v5-a05-cadence-receipt-evidence.v1',
     'issued_by', v_actor, 'issued_at', v_now,
     'completion_register_outcome_id', null,
-    'disclosed_gap', 'no Completion Register producer exists yet for this subject; see migrations/0610_delivery_cadence_a05.sql');
+    'disclosed_gap', 'no Completion Register producer exists yet for this subject; see migrations/0617_delivery_cadence_a05.sql');
 
   select * into v_prior from ops.v5_a05_cadence_receipt
    where organization_tenant_id = v_tenant and subject_type = p_subject_type and subject_ref = p_subject_ref

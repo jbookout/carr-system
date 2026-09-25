@@ -1,4 +1,4 @@
-// V5-A05 -- production door acceptance proofs (migration 0610, sealed as SCAC v74 by 0611).
+// V5-A05 -- production door acceptance proofs (migration 0617, sealed as SCAC v75 by 0618).
 //
 // EVERY CASE RUNS THROUGH THE REAL VERB HANDLERS, not through SQL directly:
 // the point is to prove the wired path (verb -> SQL function -> signal_event
@@ -155,7 +155,7 @@ async function connect(pg, slug = "joe") {
   await client.connect();
   await client.query("select set_config('carr.acting_actor_slug',$1,false)", [slug]);
   await client.query("select set_config('carr.verified_human_actor_slug',$1,false)", [slug]);
-  // ops.v5_a05_cadence_status (migration 0610) reads the completion register's
+  // ops.v5_a05_cadence_status (migration 0617) reads the completion register's
   // server-derived tenant; without this the FIRST case (cadence-status with no
   // receipt yet) throws before ever reaching the assertion under test.
   await client.query("select set_config('carr.organization_tenant_id',$1,false)", ["carr-internal"]);
@@ -270,7 +270,7 @@ async function deliveryRows(client, notificationId) {
 
 async function backdateOnlyReceipt(client, receiptId) {
   // ops.v5_a05_cadence_receipt is append-only (v5_a05_cadence_receipt_immutable,
-  // migration 0610) by design; this setup-only backdate disables that trigger
+  // migration 0617) by design; this setup-only backdate disables that trigger
   // for one statement and re-enables it immediately. Production never does this.
   await client.query(
     "alter table ops.v5_a05_cadence_receipt disable trigger v5_a05_cadence_receipt_immutable");
