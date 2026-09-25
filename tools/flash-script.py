@@ -1,0 +1,491 @@
+#!/usr/bin/env python3
+"""flash-script.py — Flash answers a question about data too large to read, by writing and running scripts, with
+Jev steering each turn. This is the `flash-script-v3` protocol of the Model Room routing policy
+(ops/config/model-routes.v1.json, route "script").
+
+WHERE IT CAME FROM. Revision 3 of the Jev-steered harness, tested 2026-09-24 on nine data tasks with 15 runs each
+per version: Flash alone 7 of 9 once; with Jev 8, 9, 10 and then 12 of 15 as each fault was found and fixed. Only the
+revision 3 path is kept here; the planning mode (7 of 15) and the one-phrase-per-call labelling (1 of 6) lost.
+
+THE LOOP. Flash sees the question and a preview of the files (sizes, line counts, first lines), never whole files.
+Each turn it replies with ONE python block, which runs in a throwaway working folder holding copies of the files,
+or with FINAL: <answer>. Up to three scripts. Around it:
+  - Jev pre-read: hints for multi-document questions and for labelling by meaning.
+  - After each script, Jev reads its output for warning signs (misparsed records, too few matches, a value far
+    outside the sample range) and picks the next turn's focus: answer now, compute the full answer, or no steer.
+  - Every script-writing turn is capped at COMPUTE_TOKENS. A turn that runs out of room is followed by one with
+    thinking OFF and a short-rules instruction (fault 8: thinking spirals, a cap alone only shortens them).
+  - A counts answer that sums below a printed record total gets one free fix when Jev agrees every record belongs
+    to a category.
+  - FINAL: @file followed by code runs that code before reading the file (fault 9).
+Code, not Jev, decides the hand-off: ops/jev_model_route.handoff_reason() on the answer and the turn log
+(no answer, an answer its scripts never printed, two runaway turns in a row) names why it goes to the route's
+`then` desk.
+
+    flash-script.py "<question>" <file-or-folder> [...] [--json]
+
+Exit codes: 0 answered and grounded, 4 hand off (reason printed), 2 usage or environment problem.
+Every run appends one row to out/flash-script-runs.jsonl.
+"""
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TOOLS = os.path.join(REPO, "tools")
+RUNS_LOG = os.path.join(REPO, "out", "flash-script-runs.jsonl")
+FLASH_URL = os.environ.get("CARR_FLASH_URL", "http://127.0.0.1:8000")
+FLASH_MODEL = os.environ.get("CARR_FLASH_MODEL", "qwen3.8-flash-next")
+
+MAX_RUNS, OUT_CLIP, RUN_TIMEOUT, THINK_TIMEOUT = 3, 2500, 600, 600
+MAX_TURNS = MAX_RUNS + 2
+# Revision 3 capped only compute turns; the uncapped turns that remained ran to 24,576 tokens (428 s once). Every
+# script-writing turn is capped here.
+COMPUTE_TOKENS = 12288
+JEV_TIMEOUT = 60
+
+SYSTEM = """You solve data questions whose files are far too large to read. You never see whole files: you
+write Python 3 that reads them and prints what you need. Working directory is the data folder.
+
+Each reply must be EXACTLY ONE of:
+  (a) one ```python block to run. You will see its stdout and stderr (clipped to 2500 characters).
+  (b) a line starting with FINAL: followed by only the answer, in the format the question asks.
+
+Rules:
+- Explore before you compute: print a few lines, distinct formats, counts of odd rows. Data may be messy.
+- Print small results, never whole files.
+- Check your answer with a second, independent method when you can.
+- For judgments code cannot make (meaning of free text), a script may do `from flashlib import llm` and call
+  llm(prompt) -> str, which asks a capable language model. Batch many items per call (e.g. 50 numbered lines,
+  ask for one label per line) and keep calls under ~100.
+- Standard library only.
+- If the answer is too long to read back in 2500 characters (a long list), have the script write the exact final
+  answer to a file in the working directory, e.g. final_answer.json, and then reply FINAL: @final_answer.json"""
+
+HINTS = {
+    "multi_doc": "Plan hint: do this in two short steps. Script 1 turns every document or record into ONE compact row "
+                 "(only the fields the question needs) saved to a CSV in the working directory, and prints the row "
+                 "count, a few rows, and any record it could not parse. Script 2 answers the question from that CSV. "
+                 "Keep each script short; do not try to solve everything in one script.",
+    "semantic": "Plan hint: the labels depend on the meaning of free text, which fixed keyword lists get wrong. First "
+                "label the lines whose wording settles the label outright, then send ONLY the unclear lines (or each "
+                "distinct phrase once) to flashlib.llm in numbered batches of about 50, one label per line, parsed "
+                "back by line number. Budget: a script is stopped after 10 minutes and each flashlib.llm call takes "
+                "about 20-30 seconds, so keep it to roughly 15 calls and print progress as you go. Print counts and "
+                "a sample of lines per label so you can spot mistakes.",
+}
+HINT_AT = {"multi_doc": 0.5, "semantic": 0.65}
+FLAG_TEXT = {
+    "misparsed": "the output shows records the script failed to parse or misread (for example a value that is plainly "
+                 "present in the printed line but reported missing), so the parsing rule needs fixing",
+    "implausible": "far too few records matched for files this size (see the line counts), which usually means a "
+                   "filter or parsing rule is too strict or wrong; print what the non-matching lines look like",
+    "bad_value": "a printed average, price or rate is far outside the range the sample lines show for that field, "
+                 "which usually means the script read the wrong field or mis-scaled a number; print a few of the "
+                 "values it used next to their source lines",
+}
+# Calibrated 2026-09-24 on recorded outputs (scratchpad check_flags.py / check_value.py / calibrate_focus.py).
+FLAG_AT = {"misparsed": 0.7, "implausible": 0.6, "bad_value": 0.6}
+EXPLORING_AT = 0.8
+ANSWER_READY_AT = 0.45
+COVER_AT = 0.5
+DELEGATE_AT = 0.60
+COVERAGE = (" Also print how many records your rules could not handle (with 3 of them), and for a classification, "
+            "3 example lines for each label.")
+DELEGATE = (" Do not work out labels in your head: send items your rules cannot settle to llm() from the script, "
+            "as distinct phrases in batches.")
+TOTAL_RX = re.compile(r"\b(?:lines|rows|records|entries)\s*[:=]\s*(\d+)", re.I)
+
+
+def _lib(name):
+    spec = importlib.util.spec_from_file_location(name, os.path.join(REPO, "ops", f"{name}.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# ---------- Flash ----------
+
+def chat(messages, *, max_tokens=COMPUTE_TOKENS, think=True, timeout=THINK_TIMEOUT):
+    """One Flash turn -> (visible text, finish_reason, completion tokens, reasoning)."""
+    body = {"model": FLASH_MODEL, "max_tokens": max_tokens, "messages": messages}
+    if not think:
+        body["chat_template_kwargs"] = {"enable_thinking": False}
+    req = urllib.request.Request(f"{FLASH_URL}/v1/chat/completions", data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        reply = json.load(r)
+    choice = reply["choices"][0]
+    msg = choice["message"]
+    content = msg.get("content") or ""
+    for call in msg.get("tool_calls") or []:  # a tool call the server split out of the text
+        args = (call.get("function") or {}).get("arguments", "")
+        try:
+            args = json.loads(args) if isinstance(args, str) else args
+        except ValueError:
+            pass
+        if isinstance(args, dict):
+            args = args.get("code") or next(iter(args.values()), "")
+        content = (content + "\n```python\n" + str(args) + "\n```").strip()
+    return content, choice.get("finish_reason"), (reply.get("usage") or {}).get("completion_tokens"), \
+        msg.get("reasoning_content") or ""
+
+
+def extract_code(reply):
+    """Flash writes code four ways: a ```python fence, an unterminated fence, tool-call markup, or bare code."""
+    if "</think>" in reply:
+        reply = reply.split("</think>")[-1]
+    end = r"(?:</parameter>|</function>|</invoke>|</tool_call>|</python>|\Z)"
+    for pat in (r"```(?:python|py)?\s*\n(.*?)```", r"```(?:python|py)?\s*\n(.*)\Z",
+                r"<function=python>\s*\n?(?:<parameter=[^>]*>\s*\n?)?(.*?)" + end,
+                r"<parameter=[^>]*>\s*\n?(.*?)" + end, r"<python>\s*\n?(.*?)" + end):
+        m = re.search(pat, reply, re.S)
+        if m and m.group(1).strip():
+            return m.group(1).strip()
+    lines = [x for x in reply.strip().splitlines() if x.strip()]
+    if lines and not reply.lstrip().startswith("FINAL") and \
+            sum(bool(re.match(r"\s*(import |from |print\(|for |with |if |def |[A-Za-z_]\w*\s*=)", x)) for x in lines) \
+            >= max(2, len(lines) // 2):
+        return reply.strip()
+    return None
+
+
+# ---------- the working folder ----------
+
+def preview(work, names):
+    out = []
+    for name in names:
+        p = os.path.join(work, name)
+        if os.path.isdir(p):
+            files = sorted(os.listdir(p))
+            if not files:
+                out.append(f"{name}/ (empty folder)")
+                continue
+            out.append(f"{name}/ (folder, {len(files)} files: {files[0]} .. {files[-1]}; first file's first 6 lines:)")
+            with open(os.path.join(p, files[0]), errors="replace") as fh:
+                out.append("".join(fh.readlines()[:6])[:1200])
+        else:
+            with open(p, errors="replace") as fh:
+                n = sum(1 for _ in fh)
+            out.append(f"{name} ({os.path.getsize(p) / 1e6:.2f} MB, {n} lines; first 5 lines:)")
+            with open(p, errors="replace") as fh:
+                out.append("".join(line for _, line in zip(range(5), fh))[:1200])
+    return "\n".join(out)
+
+
+def stage(paths, work):
+    """Copy the inputs into the throwaway folder; the scripts write only there, never beside the originals."""
+    names = []
+    for src in paths:
+        name = os.path.basename(os.path.normpath(src))
+        dest = os.path.join(work, name)
+        if os.path.isdir(src):
+            shutil.copytree(src, dest)
+        else:
+            shutil.copy2(src, dest)
+        names.append(name + ("/" if os.path.isdir(src) else ""))
+    return names
+
+
+def run_code(code, work, n):
+    path = os.path.join(work, f".flash_script_{n}.py")
+    with open(path, "w") as fh:
+        fh.write(code)
+    env = {**os.environ, "PYTHONPATH": TOOLS}
+    t = time.monotonic()
+    try:
+        p = subprocess.run([sys.executable, path], cwd=work, capture_output=True, text=True, timeout=RUN_TIMEOUT,
+                           env=env)
+        out = (p.stdout[-OUT_CLIP:] + ("\n[stderr]\n" + p.stderr[-1200:] if p.stderr.strip() else "")).strip()
+    except subprocess.TimeoutExpired as e:
+        so = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+        out = (so[-OUT_CLIP:] + f"\n[timed out after {RUN_TIMEOUT}s]").strip()
+    return out or "[no output]", round(time.monotonic() - t, 1)
+
+
+def count_gap(answer, outs):
+    """(record total, answer sum) when a dict-of-counts answer sums below a record total a script printed."""
+    try:
+        a = json.loads(answer)
+    except ValueError:
+        return None
+    if not isinstance(a, dict) or len(a) < 2 or not all(isinstance(v, int) for v in a.values()):
+        return None
+    got = sum(a.values())
+    total = max([int(x) for o in outs for x in TOTAL_RX.findall(o) if int(x) > got], default=None)
+    return (total, got) if total else None
+
+
+# ---------- Jev (fails open: no judgment means no steer, never a crash) ----------
+
+class Jev:
+    def __init__(self, judge=None, client=None):
+        self.judge, self.client, self.errors = judge, client, 0
+
+    def _ask(self, subject, questions):
+        try:
+            if self.judge is None:
+                self.judge = _lib("jev_judge")
+            client = self.client or self.judge._client()
+            qs = {k: client.noul(text, true=t, false=f) for k, (text, t, f) in questions.items()}
+            a = self.judge.judge(subject, qs, timeout=JEV_TIMEOUT, client=client)["answers"]
+            return {k: round(float(a[k]["noul"]), 2) for k in questions}
+        except Exception:
+            self.errors += 1
+            return {}
+
+    def pre(self, q, prev):
+        return self._ask({"question": q, "file_preview": prev[:4000]}, {
+            "multi_doc": ("Answering needs facts combined across many separate documents or files, so a plan of "
+                          "several steps is needed before any counting can happen.",
+                          "It needs facts combined across many documents in several steps.",
+                          "A single pass over one table or file answers it."),
+            "semantic": ("The question asks to sort records into categories that are NOT written anywhere in the "
+                         "data as a field value or fixed word; each record's category must be inferred from "
+                         "descriptive prose using world knowledge (for example knowing that an endodontist is a "
+                         "dentist). Messy formatting, varied number formats or fields in different orders do NOT "
+                         "count: those are pattern matching.",
+                         "Categories must be inferred from prose with world knowledge.",
+                         "The needed values are written in the data, even if formatted inconsistently.")})
+
+    def flags(self, q, out, prev):
+        return self._ask({"question": q, "data_files": prev[:3000], "script_output": out[-4000:]}, {
+            "misparsed": ("The output shows records whose printed text plainly contains a value that the script "
+                          "reports as missing, unparsed or wrong, i.e. the parsing rule misses a format.",
+                          "Printed records contradict what the script says it parsed.",
+                          "Nothing printed contradicts the parsing."),
+            "implausible": ("Compared with the size of the data files described in data_files (their line counts), "
+                            "the script reports that zero or only a handful of records matched a filter that the "
+                            "question and the sample lines suggest should match many records.",
+                            "Far too few records matched for a file this size, so a filter or parse is broken.",
+                            "The number of matching records is reasonable for the file size, or no match count is "
+                            "printed."),
+            "bad_value": ("The script printed an average, price, rate or per-unit amount (not a count of records) "
+                          "that is far outside the range the sample lines in data_files show for that field, which "
+                          "means the script read the wrong field or mis-scaled a number. Counts and totals of "
+                          "records do not count here.",
+                          "A printed average, price or rate is far outside the range the sample lines show.",
+                          "No printed average, price or rate is far outside the sample range, or none is printed."),
+            "exploring": ("The output is an exploration step (sample lines, a table of formats or value "
+                          "frequencies, file sizes) rather than a computed answer to the question.",
+                          "This output explores the data rather than answering the question.",
+                          "This output reports a computed answer to the question."),
+            "answer_ready": ("The output prints a final result in the form the question asks for (the number, the "
+                             "set of counts, or the list), not only samples, formats or intermediate figures.",
+                             "A final result in the asked-for form is printed.",
+                             "Only samples, formats or intermediate figures are printed.")})
+
+    def covers_all(self, q, answer, total):
+        return self._ask({"question": q, "answer": answer, "record_total_printed": total}, {
+            "covers_all": ("Every record in the data belongs to exactly one of the answer's categories, so the "
+                           "answer's counts should add up to the number of records.",
+                           "The counts should add up to the record total.",
+                           "Some records legitimately fall outside the categories, or can be in several.")
+        }).get("covers_all", 0.0)
+
+
+# ---------- the loop ----------
+
+def solve(question, work, names, *, chat_fn=chat, jev=None, runner=run_code, say=lambda m: None):
+    """Answer `question` over the staged files in `work`. Returns (answer or None, turn log)."""
+    checks = _lib("flash_answer_checks")
+    jev = jev or Jev()
+    prev = preview(work, names)
+    first = f"Question: {question}\n\nFiles:\n{prev}"
+    log = []
+    pre = jev.pre(question, prev)
+    on = [k for k in HINTS if pre.get(k, 0.0) >= HINT_AT[k]]
+    log.append({"jev_pre": pre, "hints": on})
+    if on:
+        first += "\n\n" + "\n".join(HINTS[k] for k in on)
+    coverage = COVERAGE + (DELEGATE if pre.get("semantic", 0.0) >= DELEGATE_AT else "")
+    msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": first}]
+    seen, outs = set(), []
+    gap_checked, think_next, explores, answer_now, restated = False, True, 0, False, False
+    n = 0
+    while n < MAX_TURNS + (1 if answer_now else 0):
+        n += 1
+        runs = sum(1 for x in log if "run_s" in x)
+        t = time.monotonic()
+        try:
+            reply, finish, used, reasoning = chat_fn(msgs, max_tokens=COMPUTE_TOKENS, think=think_next)
+        except (TimeoutError, OSError, urllib.error.URLError) as exc:
+            reply, finish, used, reasoning = "", f"timeout: {type(exc).__name__}", None, ""
+        think_next = True
+        think = round(time.monotonic() - t, 1)
+        code = extract_code(reply)
+        fin = re.search(r"^FINAL:\s*(.+)", reply.split("</think>")[-1], re.M | re.S)
+        if not reply.strip():
+            # never feed an empty assistant turn back: the next replies come back empty too
+            log.append({"turn": n, "think_s": think, "empty": True, "finish": finish, "tokens": used})
+            say(f"turn {n}: empty reply ({finish})")
+            if finish == "stop" and re.search(r"```|^FINAL:", reasoning, re.M) and not restated:
+                restated = True  # the answer stayed in the hidden reasoning: say so, free of charge
+                n -= 1
+                blocks = re.findall(r"```(?:python|py)?\s*\n(.*?)```", reasoning, re.S)
+                finals = re.findall(r"^FINAL:.*$", reasoning, re.M)
+                last = finals[-1] if finals and (not blocks or reasoning.rfind(finals[-1]) >
+                                                 reasoning.rfind(blocks[-1])) else \
+                    ("```python\n" + blocks[-1].strip() + "\n```" if blocks else "")
+                msgs.append({"role": "user", "content": "Your answer stayed in your hidden reasoning, so nothing "
+                             "reached me. This is the last one you wrote there:\n\n" + last + "\n\nReply with it as "
+                             "your visible reply, or with a corrected version. Do not start over."})
+                continue
+            nudge = "Your reply was empty. Keep planning short and reply now with one short python block or FINAL: <answer>."
+            if finish == "length":  # fault 8: the next turn runs without thinking
+                think_next = False
+                log[-1]["no_think_next"] = True
+                nudge = ("Your thinking ran out before you replied, so nothing reached me. This turn runs without "
+                         "thinking: write the script directly as one python block, with any plan as short code "
+                         "comments. Keep the keyword rules short, a few words per category, and do not list edge "
+                         "cases. Print how many records the rules could not handle."
+                         + (DELEGATE if coverage.endswith(DELEGATE) else ""))
+            msgs.append({"role": "user", "content": nudge})
+            continue
+        msgs.append({"role": "assistant", "content": reply})
+        if code and not fin and answer_now:
+            answer_now = False
+            n -= 1
+            log.append({"turn": n, "focus_enforced": "script refused on an answer turn"})
+            msgs.append({"role": "user", "content": "The output above already prints the answer, so this turn is for "
+                         "answering, not another script. Reply with FINAL: <answer> (or FINAL: @file)."})
+            continue
+        if code and not fin and runs < MAX_RUNS:
+            if code in seen:
+                log.append({"turn": n, "think_s": think, "stuck": "repeated identical script"})
+                return None, log
+            seen.add(code)
+            out, secs = runner(code, work, n)
+            say(f"turn {n}: script ran {secs}s")
+            log.append({"turn": n, "think_s": think, "tokens": used, "run_s": secs, "out": out[:600]})
+            outs.append(out)
+            runs += 1
+            flags = jev.flags(question, out, prev)
+            raised = [k for k in FLAG_AT if flags.get(k, 0.0) >= FLAG_AT[k]]
+            if flags.get("exploring", 0.0) >= EXPLORING_AT or \
+                    not re.search(r"(count|total|match|found|rows?|n\s*=|with rent|:)\s*\d", out, re.I):
+                raised = [k for k in raised if k != "implausible"]
+            log[-1]["jev_flags"] = flags
+            note = ("\n\nReviewer note: " + "; and ".join(FLAG_TEXT[k] for k in raised) +
+                    ". Fix that before giving an answer.") if raised else ""
+            left = MAX_RUNS - runs
+            nxt = ("That was your last script. Reply now with FINAL: <answer>." if left <= 0 else
+                   f"Next: another python block ({left} left), or FINAL: <answer>.")
+            if "[timed out after" in out:
+                note += ("\n\nThat script hit the 600-second limit before finishing. If it calls llm() per record, "
+                         "batch 50 distinct items per call instead, and print progress so partial results survive.")
+            if left > 0:
+                if flags.get("exploring", 0.0) >= EXPLORING_AT:
+                    explores += 1
+                if flags.get("answer_ready", 0.0) >= ANSWER_READY_AT and not raised:
+                    choice, answer_now = "answer", True
+                    nxt = ("The output above already prints the answer. Reply now with FINAL: <answer> (or FINAL: "
+                           "@file for a long answer). Do not run another script.")
+                elif explores >= 1 and left == 1:
+                    choice = "compute_last"
+                    nxt = ("One script left. It must compute the complete answer over every record and print it "
+                           "(write a long answer to a file). No more exploring." + coverage)
+                elif explores >= 1:
+                    choice = "compute"
+                    nxt = (f"You have looked at the data enough. The next script must compute the complete answer "
+                           f"over every record and print it, not sample more. ({left} scripts left.)" + coverage)
+                else:
+                    choice = "abstain"  # Jev does not steer; the ordinary prompt stands and the fallback is logged
+                log[-1]["focus"] = choice
+            msgs.append({"role": "user", "content": f"Output:\n{out}{note}\n\n{nxt}"})
+        elif fin:
+            answer = fin.group(1).strip()
+            m = re.match(r"@([\w.\-]+)\s*$", answer.split("\n")[0])
+            if m and "\n" in answer.strip():  # fault 9: FINAL @file followed by the code that writes it
+                body = extract_code(answer)
+                if body and not os.path.exists(os.path.join(work, m.group(1))):
+                    out2, secs2 = runner(body, work, f"{n}_final")
+                    log.append({"turn": n, "final_script_run": True, "run_s": secs2, "out": out2[:600]})
+                answer = "@" + m.group(1)
+            if m:
+                target = os.path.realpath(os.path.join(work, m.group(1)))
+                try:
+                    if not target.startswith(os.path.realpath(work) + os.sep):
+                        raise OSError("outside the working folder")
+                    with open(target) as fh:
+                        answer = fh.read().strip()
+                    outs.append(answer)  # a script wrote it, so it counts as script output
+                except OSError:
+                    msgs.append({"role": "user", "content": f"There is no file {m.group(1)} in the working "
+                                 "directory. Reply with FINAL: <answer> or FINAL: @<file your script wrote>."})
+                    continue
+            gap = count_gap(answer, outs) if not gap_checked else None
+            if gap:
+                gap_checked = True
+                cov = jev.covers_all(question, answer, gap[0])
+                log.append({"turn": n, "count_gap": gap, "covers_all": cov, "candidate": answer[:500]})
+                if cov >= COVER_AT:
+                    n -= 1
+                    msgs.append({"role": "user", "content": f"Your counts add up to {gap[1]}, but the data has "
+                                 f"{gap[0]} records, so {gap[0] - gap[1]} are unaccounted for. Every record belongs "
+                                 "to one category. Write one script that also labels the records your rules missed "
+                                 "and prints the full counts." + (DELEGATE if coverage.endswith(DELEGATE) else "")})
+                    continue
+            support = checks.answer_support(answer, outs)
+            log.append({"turn": n, "think_s": think, "tokens": used, "final": answer[:3000], "support": support})
+            return answer, log
+        else:
+            log.append({"turn": n, "think_s": think, "bad_reply": reply[-300:], "finish": finish})
+            msgs.append({"role": "user", "content": "Reply with one python block or FINAL: <answer>."})
+    return None, log
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(description="Flash answers a question over large data by writing scripts.")
+    ap.add_argument("question")
+    ap.add_argument("paths", nargs="+", help="data files or folders (copied into a throwaway folder)")
+    ap.add_argument("--json", action="store_true", help="print the result row as JSON")
+    a = ap.parse_args(argv)
+    missing = [p for p in a.paths if not os.path.exists(p)]
+    if missing:
+        print(f"no such file or folder: {', '.join(missing)}", file=sys.stderr)
+        return 2
+    route = _lib("jev_model_route")
+    t = time.monotonic()
+    work = tempfile.mkdtemp(prefix="flash-script-")
+    try:
+        names = stage(a.paths, work)
+        jev = Jev()
+        answer, log = solve(a.question, work, names, jev=jev,
+                            say=(lambda m: None) if a.json else (lambda m: print(m, file=sys.stderr, flush=True)))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    reason = route.handoff_reason(answer, log)
+    policy = route.load_policy()
+    row = {"at": datetime.now(timezone.utc).isoformat(), "question": a.question[:500],
+           "paths": [os.path.abspath(p) for p in a.paths], "answer": (answer or "")[:3000],
+           "support": next((e["support"] for e in reversed(log) if "support" in e), None),
+           "handoff": reason, "handoff_desk": policy["routes"]["script"]["then"]["desk"] if reason else None,
+           "turns": sum(1 for e in log if "turn" in e), "jev_errors": jev.errors,
+           "secs": round(time.monotonic() - t, 1), "log": log}
+    os.makedirs(os.path.dirname(RUNS_LOG), exist_ok=True)
+    with open(RUNS_LOG, "a") as fh:
+        fh.write(json.dumps(row) + "\n")
+    if a.json:
+        print(json.dumps({k: v for k, v in row.items() if k != "log"}))
+    elif reason:
+        print(f"HAND OFF ({reason}) to {row['handoff_desk']}" + (f": Flash answered {answer!r}" if answer else ""))
+    else:
+        print(answer)
+    return 4 if reason else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
