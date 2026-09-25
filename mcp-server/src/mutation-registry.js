@@ -4,12 +4,11 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v77 is the runtime selector after DoctorCRE V5-J103's governed
-// correspondence store (migrations 0700-0701). Its sealed catalog admits four
-// new verbs -- correspondence-readiness and read-correspondence-thread (reads),
-// and the humanOnly record- and revoke-correspondence-adapter-consent pair --
-// and preserves earlier versions as history. None of them sends: there is no
-// send verb, and a draft has no destination. It chains over #1268's v76 (0625).
+// v77 is the runtime selector after DoctorCRE V5-F01's record homes, source
+// authority and document identity (migrations 0626/0627). Its sealed catalog
+// admits nine new verbs -- read-record-source-authority (a read) and the
+// eight record-source-authority writes, two of them humanOnly and
+// authorityOnly -- and preserves earlier versions as history.
 //
 // Superseded note (v76): v76 was the runtime selector after V5-S01's live door (migration 0625).
 // Its sealed catalog admits one new read verb, read-global-boundaries (the

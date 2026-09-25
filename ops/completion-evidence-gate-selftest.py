@@ -585,6 +585,18 @@ def review_portfolio_revision_is_a_write():
     return passed
 
 
+def evaluate_artifact_deletion_is_a_write():
+    """V5-F01's deletion evaluation persists a receipt, so it is a write; the
+    word "evaluate" is not thereby promoted to a prefix (same shape as the
+    cancel-capability-session and review-portfolio-revision pairs above)."""
+    write = mod.is_write_action("evaluate-artifact-deletion")
+    not_a_prefix = not mod.is_write_action("evaluate-something-that-does-not-exist")
+    passed = write and not_a_prefix
+    print(f"{'PASS' if passed else 'FAIL'}  evaluate-artifact-deletion classifies as a write "
+          f"without making 'evaluate' a blanket prefix")
+    return passed
+
+
 def registry_prefix_coverage():
     """Keep the family classifier honest against the local live registry when present."""
     registry = os.path.join(REPO, "mcp-server", "src", "tools.js")
@@ -948,6 +960,7 @@ def main():
     outcomes.append(floor_preserved())
     outcomes.append(cancel_capability_session_is_a_write())
     outcomes.append(review_portfolio_revision_is_a_write())
+    outcomes.append(evaluate_artifact_deletion_is_a_write())
     outcomes.append(registry_prefix_coverage())
     outcomes.append(authority_family_coverage())
     outcomes.append(r03_notification_classification())

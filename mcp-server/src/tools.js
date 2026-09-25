@@ -60,6 +60,7 @@ import {
 import { emitGateZeroOutcome } from "./gate-zero-assurance.v5.js";
 import { benchmarkAcceptanceStoreTools } from "./benchmark-acceptance-store.v5.js";
 import { modelRoleStoreTools } from "./model-role-store.v5.js";
+import { recordSourceAuthorityStoreTools } from "./record-source-authority-store.v5.js";
 import { foundationAssuranceMinimumTools } from
   "./foundation-assurance-minimum-producer.v5.js";
 // V5-S01's live door: the settled global boundaries evaluated at the dispatch
@@ -67,7 +68,6 @@ import { foundationAssuranceMinimumTools } from
 import { V5BoundaryDoorRefusal, globalBoundariesDoorTools, passBoundaryDoor } from
   "./global-boundaries-door.v5.js";
 import { journeyOneClockDoorTools } from "./journey-one-clock-door.v5.js";
-import { governedCorrespondenceStoreTools } from "./governed-correspondence-store.v5.js";
 export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
 
 // ---------- envelope helpers ----------
@@ -8218,10 +8218,10 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "tour-artifacts": "mcp-server/src/tour-artifacts.js",
   "benchmark-acceptance": "mcp-server/src/benchmark-acceptance-store.v5.js",
   "model-role-store": "mcp-server/src/model-role-store.v5.js",
+  "record-source-authority": "mcp-server/src/record-source-authority-store.v5.js",
   "foundation-assurance": "mcp-server/src/foundation-assurance-minimum-producer.v5.js",
   "global-boundaries-door": "mcp-server/src/global-boundaries-door.v5.js",
   "journey-one-clock-door": "mcp-server/src/journey-one-clock-door.v5.js",
-  "governed-correspondence-store": "mcp-server/src/governed-correspondence-store.v5.js",
 });
 
 function bindToolSource(tool, source) {
@@ -9356,6 +9356,8 @@ registerTools(benchmarkAcceptanceStoreTools({
   "benchmark-acceptance");
 registerTools(modelRoleStoreTools({ withEnvelope, writeEvent, ToolError }),
   "model-role-store");
+registerTools(recordSourceAuthorityStoreTools({ withEnvelope, ToolError }),
+  "record-source-authority");
 registerTools(foundationAssuranceMinimumTools({
   withEnvelope, ToolError, authenticatedIdentity,
 }), "foundation-assurance");
@@ -9369,13 +9371,5 @@ registerTools(globalBoundariesDoorTools({ ToolError }), "global-boundaries-door"
 // Worker can start, advance or pause the Journey 1 clock through it until a
 // verifier for the composed projection is installed by trusted server code.
 registerTools(journeyOneClockDoorTools({ withEnvelope, ToolError }), "journey-one-clock-door");
-// DoctorCRE V5-J103: the governed correspondence store. Two reads
-// (correspondence-readiness, read-correspondence-thread) and the humanOnly
-// consent pair, each partner only for their own carr.us mailbox. There is no
-// send verb and no draft verb: a draft can never dispatch, and Joe sends. Reads
-// answer unavailable until the F10 local-store adapter lands with a reviewed
-// grant for the read-receipt writer.
-registerTools(governedCorrespondenceStoreTools({ withEnvelope, writeEvent, ToolError }),
-  "governed-correspondence-store");
 
 Object.freeze(TOOLS);
