@@ -10,8 +10,9 @@ import {
 // retire-workflow-cutover-plan, register-slice-checkable-done and
 // mark-slice-completion (all authorityOnly), record-workflow-caller,
 // mark-slice-progress, workflow-cutover-board, read-slice-completion -- and
-// preserves earlier versions as history; v70 and v71 (the nightly-exports
-// launchd row) registered no verb, so the selector stayed on v69 until v72.
+// preserves earlier versions as history; v70 (the tools/migrate.py
+// re-digest) and v71 (the nightly-exports launchd row) registered no verb,
+// so the selector stayed on v69 until v72.
 //
 // Superseded note (v69): v69 was the runtime selector after the server-side
 // Jev call log (migration 0587, ops.record_jev_call_receipt /

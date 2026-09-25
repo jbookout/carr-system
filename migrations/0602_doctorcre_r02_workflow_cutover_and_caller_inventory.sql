@@ -601,6 +601,7 @@ declare
   v_from_idx integer;
   v_to_idx integer;
   v_existing_transition ops.workflow_cutover_stage_transition%rowtype;
+  v_stage_entered_at timestamptz;
 begin
   -- Authority-only (PR #1245 re-review P1-a): reaching single_write_authority
   -- changes what ops.enqueue_job admits for a live workflow, and every plan
@@ -668,6 +669,26 @@ begin
       ) then
         raise exception 'canary_acceptance_evidence_not_found_or_not_accepted';
       end if;
+      -- Canary freshness is checked ONCE, here, on the two moves that hand
+      -- write authority to the new system (PR #1245 re-review 2, P1-a): the
+      -- canary must have been accepted since the plan entered the stage it
+      -- is leaving, so an acceptance from an earlier stage cannot carry the
+      -- plan into single_write_authority or cutover. ops.enqueue_job does
+      -- not re-check freshness per stage -- after cutover the new system is
+      -- already the only writer, and monitor / recovery_ready must not halt
+      -- a live workflow for want of yet another canary run.
+      select occurred_at into v_stage_entered_at
+        from ops.workflow_cutover_stage_transition
+       where plan_id = v_plan.id and to_stage = v_plan.stage
+       order by occurred_at desc limit 1;
+      v_stage_entered_at := coalesce(v_stage_entered_at, v_plan.created_at);
+      if not exists (
+        select 1 from ops.workflow_acceptance
+         where id::text = p_evidence_ref and created_at >= v_stage_entered_at
+      ) then
+        raise exception 'canary_acceptance_evidence_predates_current_stage: % entered at %',
+          v_plan.stage, v_stage_entered_at;
+      end if;
     end if;
   end if;
 
@@ -685,7 +706,7 @@ end;
 $$;
 
 comment on function ops.advance_workflow_cutover_stage(uuid, text, text, text, uuid) is
-  'DoctorCRE V5-R02 authority write door (Q116): advances a cutover plan exactly one step forward through read_legacy..recovery_ready. Refuses to skip stages, refuses a non-active plan, and requires fresh accepted ops.workflow_acceptance evidence for shadow_compare/single_write_authority/cutover. Never reaches retired -- see ops.retire_workflow_cutover_plan.';
+  'DoctorCRE V5-R02 authority write door (Q116): advances a cutover plan exactly one step forward through read_legacy..recovery_ready. Refuses to skip stages, refuses a non-active plan, and requires accepted ops.workflow_acceptance evidence for shadow_compare/single_write_authority/cutover; the canary evidence for single_write_authority and cutover must have been accepted since the plan entered the stage it is leaving. Never reaches retired -- see ops.retire_workflow_cutover_plan.';
 
 revoke all on function ops.advance_workflow_cutover_stage(uuid, text, text, text, uuid) from public;
 grant execute on function ops.advance_workflow_cutover_stage(uuid, text, text, text, uuid) to carr_authority;

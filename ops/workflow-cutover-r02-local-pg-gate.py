@@ -25,8 +25,11 @@ table owner; it never calls a door.
 Covered:
   P1-a  an open plan never stops an already-live workflow: live and canary
         enqueue keep working at read_legacy..shadow_compare; from
-        single_write_authority only LIVE is gated (fresh canary + disabled
-        legacy surfaces), canary never is; cancel ends the gating at once.
+        single_write_authority only LIVE is gated, and only on disabled legacy
+        surfaces; canary never is. Canary freshness is checked once, by
+        advance into single_write_authority and cutover; monitor and
+        recovery_ready need no new canary and never halt live scheduling.
+        Cancel ends the gating at once.
         open / supersede / advance / cancel / retire are authority-only.
   P1-b  slice completion is reachable in production: register and complete
         on the authority login, progress on the writer login; each refused
@@ -123,9 +126,13 @@ def insert_job_definition(cur: Any, key: str, *, canary_enabled: bool | None = T
     )
 
 
-def insert_acceptance(cur: Any, key: str, mode: str, ref: str, *, backdate: bool = False) -> str:
+def insert_acceptance(cur: Any, key: str, mode: str, ref: str, *, backdate: bool = False,
+                      minutes_ago: int | None = None) -> str:
     """Fixture: an accepted acceptance row, written as table owner."""
-    created = "now() - interval '1 hour'" if backdate else "now()"
+    if minutes_ago is not None:
+        created = f"now() - interval '{int(minutes_ago)} minutes'"
+    else:
+        created = "now() - interval '1 hour'" if backdate else "now()"
     return cur.execute(
         f"""insert into ops.workflow_acceptance (workflow_key,workflow_version,mode,status,receipt_ref,accepted_by,created_at)
             values (%s,1,%s,'accepted',%s,'r02-gate', {created}) returning id::text""",
@@ -141,6 +148,21 @@ def insert_disable_receipt(cur: Any, key: str, ref: str, *, version: int = 1, su
             values (%s,%s,%s,%s,%s,%s,'fixture','joe',{approved_at}) returning id::text""",
         (ref, f"{ref}-idem", key, version, surface, locator),
     ).fetchone()[0]
+
+
+def set_transition_clock(cur: Any, plan_id: str, to_stage: str, minutes_ago: int) -> None:
+    """Fixture clock. The whole gate runs in ONE rollback-only transaction, so
+    now() never moves and every door-written timestamp is identical -- which
+    would make any "recorded since entering the stage" comparison pass
+    vacuously (the reviewer reproduced the re-review-2 P1-a halt with real
+    elapsed time; this gate at first did not). As table owner, place the
+    transition the door just wrote at an explicit point on the timeline."""
+    cur.execute(
+        """update ops.workflow_cutover_stage_transition
+              set occurred_at = now() - make_interval(mins => %s)
+            where plan_id = %s and to_stage = %s""",
+        (minutes_ago, plan_id, to_stage),
+    )
 
 
 def open_plan(cur: Any, key: str) -> str:
@@ -272,31 +294,70 @@ def main() -> int:
                                    ("shadow_compare", insert_acceptance(cur, key_l, "shadow", f"{key_l}-shadow-1"))]:
                 if step is not None:
                     advance(cur, plan_l, step, evidence, f"to {step}")
+                    # Timeline: canary-0 at T-60, shadow_compare entered T-50.
+                    set_transition_clock(cur, plan_l, step, 50)
                 for mode in ("live", "canary"):
                     if enqueue(cur, slots, key_l, mode) != mode:
                         return fail(f"P1-a: {mode} enqueue refused with the plan at {step or 'read_legacy'}")
-            # Enter single_write_authority on the older (pre-transition) canary.
+            # Canary freshness is checked ONCE, by advance, on the moves into
+            # single_write_authority and cutover: a canary accepted before the
+            # plan entered the stage it is leaving cannot carry it forward.
             stale_canary = cur.execute(
                 """select id::text from ops.workflow_acceptance
                     where workflow_key=%s and mode='canary' and receipt_ref=%s""",
                 (key_l, f"{key_l}-canary-0"),
             ).fetchone()[0]
-            advance(cur, plan_l, "single_write_authority", stale_canary, "to swa")
-            expect_enqueue_refused(cur, slots, key_l, "live",
-                                   "live enqueue at single_write_authority on a pre-transition canary",
-                                   "no canary acceptance evidence recorded since entering cutover stage")
-            if enqueue(cur, slots, key_l, "canary") != "canary":
-                return fail("P1-a: canary enqueue was gated at single_write_authority; canary must never be")
-            insert_acceptance(cur, key_l, "canary", f"{key_l}-canary-fresh")
+            with as_login(cur, AUTHORITY):
+                expect_refusal(
+                    cur, "select ops.advance_workflow_cutover_stage(%s,'single_write_authority',%s,'r',%s)",
+                    (plan_l, stale_canary, uuid.uuid4()),
+                    "advancing into single_write_authority on a pre-transition canary",
+                    match="canary_acceptance_evidence_predates_current_stage",
+                )
+            advance(cur, plan_l, "single_write_authority",
+                    insert_acceptance(cur, key_l, "canary", f"{key_l}-canary-swa", minutes_ago=40), "to swa")
+            set_transition_clock(cur, plan_l, "single_write_authority", 30)
+            for mode in ("live", "canary"):
+                if enqueue(cur, slots, key_l, mode) != mode:
+                    return fail(f"P1-a: {mode} enqueue refused at single_write_authority with legacy disabled")
+            with as_login(cur, AUTHORITY):
+                expect_refusal(
+                    cur, "select ops.advance_workflow_cutover_stage(%s,'cutover',%s,'r',%s)",
+                    (plan_l, stale_canary, uuid.uuid4()),
+                    "advancing into cutover on a pre-transition canary",
+                    match="canary_acceptance_evidence_predates_current_stage",
+                )
+            advance(cur, plan_l, "cutover",
+                    insert_acceptance(cur, key_l, "canary", f"{key_l}-canary-cutover", minutes_ago=20), "to cutover")
+            set_transition_clock(cur, plan_l, "cutover", 10)
+            canary_rows_at_cutover = cur.execute(
+                "select count(*) from ops.workflow_acceptance where workflow_key=%s and mode='canary'", (key_l,)
+            ).fetchone()[0]
+            # PR #1245 re-review 2, P1-a: after cutover the new system is the
+            # only writer. monitor and recovery_ready take NO new canary
+            # receipt, and live scheduling must continue at every stage. They
+            # are entered at T (now()), strictly after the newest canary
+            # (T-20), which is exactly the reviewer's reproduction.
             if enqueue(cur, slots, key_l, "live") != "live":
-                return fail("P1-a: live enqueue still refused after a fresh canary acceptance")
+                return fail("P1-a: live enqueue refused at cutover")
+            for step in ("monitor", "recovery_ready"):
+                advance(cur, plan_l, step, None, f"to {step}")
+                for mode in ("live", "canary"):
+                    if enqueue(cur, slots, key_l, mode) != mode:
+                        return fail(f"P1-a: {mode} enqueue refused at {step} with no new canary receipt; "
+                                    "an advance after cutover must never halt the live workflow")
+            canary_rows_now = cur.execute(
+                "select count(*) from ops.workflow_acceptance where workflow_key=%s and mode='canary'", (key_l,)
+            ).fetchone()[0]
+            if canary_rows_now != canary_rows_at_cutover:
+                return fail("P1-a fixture: a canary receipt was added after cutover; the case proves nothing")
             cur.execute(
                 """insert into ops.legacy_schedule_surface_registry (workflow_key,workflow_version,surface_id,locator,scheduler_kind)
                    values (%s,1,'launchd-live','com.carr.r02gate-live.plist','launchd')""",
                 (key_l,),
             )
             expect_enqueue_refused(cur, slots, key_l, "live",
-                                   "live enqueue at single_write_authority with an undisabled legacy surface",
+                                   "live enqueue at recovery_ready with an undisabled legacy surface",
                                    "legacy surface(s) still undisabled")
             # Cancel is the recovery door: the plan stops governing enqueue.
             with as_login(cur, AUTHORITY):
