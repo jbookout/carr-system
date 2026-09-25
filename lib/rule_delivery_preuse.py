@@ -75,6 +75,13 @@ BUILD_GUIDANCE_KEYS = frozenset({
 BUILD_ADVISORY_UNAVAILABLE_KEYS = frozenset({
     "schema", "status", "effect", "instruction",
 })
+# A background-task notification, cross-session message, Stop-hook reopen or
+# other machine envelope is not a partner request, so no build advice is
+# asked for it. Measured 2026-09-25: most prompts in a long orchestration
+# session are such envelopes. The skip is its own schema, never "unavailable",
+# and lib/jev_required_actions.py reads it as requiring nothing.
+BUILD_ADVISORY_SKIPPED_SCHEMA = "jev-build-advisory-skipped/v1"
+BUILD_ADVISORY_SKIPPED_KEYS = frozenset({"schema", "status", "reason", "effect"})
 BUILD_RECEIPT_KEYS = frozenset({
     "schema", "receipt_id", "client", "session_id", "turn_id",
     "prompt_sha256", "adviser_digest", "configuration_digest",
@@ -120,6 +127,10 @@ SELECTOR_SOURCE_PATHS = (
     "ops/jev_build_advisory.py",
     "ops/jev_judge.py",
     "ops/typesafe_client.py",
+    # The verdict cache and envelope test decide what is reused and skipped,
+    # so a change to either must invalidate old receipts too.
+    "ops/jev_verdict_cache.py",
+    "ops/machine_envelope.py",
 )
 
 
@@ -132,6 +143,11 @@ def validate_build_advisory(row: object, *, prompt_sha256: str) -> bool:
                 and row.get("status") == "unavailable"
                 and row.get("effect") == "visible_advisory_abstention"
                 and _nonempty(row.get("instruction")))
+    if row.get("schema") == BUILD_ADVISORY_SKIPPED_SCHEMA:
+        return (set(row) == BUILD_ADVISORY_SKIPPED_KEYS
+                and row.get("status") == "skipped"
+                and row.get("reason") == "machine_envelope"
+                and row.get("effect") == "no_advice_required")
     if set(row) != BUILD_ADVISORY_KEYS or row.get("schema") != BUILD_ADVISORY_SCHEMA:
         return False
     if (row.get("partner_request_sha256") != prompt_sha256

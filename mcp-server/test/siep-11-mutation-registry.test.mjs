@@ -409,12 +409,11 @@ test("reviewed MCP inventory is an exact immutable projection of the assembled r
   // read: advance-journey-one-clock and read-journey-one-clock.
   // V5-A05 delivery cadence (0617) adds three: cadence-status (a read on the
   // writer connection), record-cadence-receipt and raise-delivery-cadence-alert.
-  // DoctorCRE V5-J103's governed correspondence store (0621) adds two humanOnly
-  // writes and two reads: record- and revoke-correspondence-adapter-consent,
-  // correspondence-readiness and read-correspondence-thread. No send verb.
-  assert.equal(rows.length, 303);
-  assert.equal(rows.filter(row => row.write).length, 213);
-  assert.equal(rows.filter(row => !row.write).length, 90);
+  // DoctorCRE V5-S01's global boundaries door (0625) adds one read:
+  // read-global-boundaries.
+  assert.equal(rows.length, 300);
+  assert.equal(rows.filter(row => row.write).length, 211);
+  assert.equal(rows.filter(row => !row.write).length, 89);
   assert.deepEqual(rows.map(row => row.operation), Object.keys(TOOLS).sort());
   assert.equal(Object.isFrozen(TOOLS), true);
   assert.equal(Object.isFrozen(TOOLS["add-loop"]), true);
@@ -1018,8 +1017,8 @@ test("the ACTIVE runtime registry is v63, and a stale v19 import fails admission
   // registered none; v70 and v71 registered none; v72 registers the ten V5-R02
   // workflow-cutover and slice-completion verbs; v73 registered none; v74
   // registers the two V5-M01 Journey 1 clock door verbs; v75 registers the
-  // three V5-A05 delivery-cadence verbs; v76 registers the four V5-J103
-  // governed correspondence verbs.
+  // three V5-A05 delivery-cadence verbs; v76 registers the V5-S01
+  // read-global-boundaries verb.
   assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V76_VERSION);
   const v76SelectorDigest = generatedV76.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
@@ -2865,7 +2864,7 @@ test("the complete source-only frontier is byte-reproducible from frozen inputs"
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
   assert.equal(migrations.length, 82);
   assert.deepEqual(migrations.map(path => path.match(/migrations\/(\d{4})_/)[1]),
-    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545", "0547", "0548", "0549", "0550", "0551", "0552", "0553", "0555", "0557", "0558", "0559", "0560", "0561", "0562", "0563", "0564", "0566", "0567", "0568", "0569", "0570", "0572", "0576", "0578", "0581", "0582", "0584", "0585", "0588", "0589", "0600", "0603", "0609", "0614", "0618", "0622"]);
+    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545", "0547", "0548", "0549", "0550", "0551", "0552", "0553", "0555", "0557", "0558", "0559", "0560", "0561", "0562", "0563", "0564", "0566", "0567", "0568", "0569", "0570", "0572", "0576", "0578", "0581", "0582", "0584", "0585", "0588", "0589", "0600", "0603", "0609", "0614", "0618", "0625"]);
   assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 73);
   assert.equal(paths.length, 155);
   // 0502 IS DELIBERATELY ABSENT FROM THIS LIST. It is a hand-authored domain

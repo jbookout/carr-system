@@ -70,6 +70,7 @@ from datetime import datetime, timezone
 
 BUILD_RECEIPT_SCHEMA = "jev-build-turn-receipt/v1"
 BUILD_ADVISORY_UNAVAILABLE_SCHEMA = "jev-build-advisory-unavailable/v1"
+BUILD_ADVISORY_SKIPPED_SCHEMA = "jev-build-advisory-skipped/v1"
 MESSAGE_DELIVERY_SCHEMA = "rule-jev-message-delivery/v2"
 POSTWRITE_RECEIPT_SCHEMA = "jev-post-write-review/v2"
 
@@ -475,6 +476,11 @@ def required_facets(receipt):
         return None
     if advisory.get("schema") == BUILD_ADVISORY_UNAVAILABLE_SCHEMA:
         return None
+    # A machine envelope (task notification, cross-session message, ...) was
+    # deliberately not advised on. Nothing was asked, so nothing is owed: no
+    # facet is required and no JEV-REFUSED line is ever demanded for it.
+    if advisory.get("schema") == BUILD_ADVISORY_SKIPPED_SCHEMA:
+        return []
     actions = advisory.get("required_actions")
     if not isinstance(actions, list):
         return None

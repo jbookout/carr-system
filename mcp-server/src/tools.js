@@ -62,8 +62,11 @@ import { benchmarkAcceptanceStoreTools } from "./benchmark-acceptance-store.v5.j
 import { modelRoleStoreTools } from "./model-role-store.v5.js";
 import { foundationAssuranceMinimumTools } from
   "./foundation-assurance-minimum-producer.v5.js";
+// V5-S01's live door: the settled global boundaries evaluated at the dispatch
+// seam below (shadow until Joe approves enforcement), and their read projection.
+import { V5BoundaryDoorRefusal, globalBoundariesDoorTools, passBoundaryDoor } from
+  "./global-boundaries-door.v5.js";
 import { journeyOneClockDoorTools } from "./journey-one-clock-door.v5.js";
-import { governedCorrespondenceStoreTools } from "./governed-correspondence-store.v5.js";
 export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
 
 // ---------- envelope helpers ----------
@@ -8116,6 +8119,23 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
   // assertRequiredArgs above: a missing required field used to reach the
   // handler as undefined and come back as a confident empty answer.
   assertRequiredArgs(tool.inputSchema, args);
+  // V5-S01 GLOBAL BOUNDARIES, AT THE ONE SEAM EVERY DOOR PASSES (2026-09-25).
+  // Evaluated here, after coercion and the required-argument check so the
+  // verdict reads the arguments in their final form, and before the handler
+  // so nothing a boundary refuses can reach the database. The door only ever
+  // ADDS a refusal; every gate above and every check inside the handler still
+  // runs. SHADOW until Joe approves enforcement: V5_BOUNDARY_DOOR_MODE in
+  // global-boundaries-door.v5.js is the constant "shadow", passBoundaryDoor
+  // records and logs a refusal verdict and never throws in that mode, and the
+  // catch below is reachable only once that constant is flipped to "enforce".
+  // The door context (connectivity "online") is the server's, never a field a
+  // caller sent.
+  try {
+    passBoundaryDoor({ verb: name, write: tool.write === true, actor, args, now: new Date().toISOString() });
+  } catch (error) {
+    if (error instanceof V5BoundaryDoorRefusal) throw new ToolError(error.payload);
+    throw error;
+  }
   // DEFECT 2, HALF (b): every verb funnels through here — the one choke point
   // where a raw DB error can be translated into a clean ToolError before it
   // ever reaches the transport (mcp.js's callTool/dispatch, or local-verb.mjs),
@@ -8198,8 +8218,8 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "benchmark-acceptance": "mcp-server/src/benchmark-acceptance-store.v5.js",
   "model-role-store": "mcp-server/src/model-role-store.v5.js",
   "foundation-assurance": "mcp-server/src/foundation-assurance-minimum-producer.v5.js",
+  "global-boundaries-door": "mcp-server/src/global-boundaries-door.v5.js",
   "journey-one-clock-door": "mcp-server/src/journey-one-clock-door.v5.js",
-  "governed-correspondence-store": "mcp-server/src/governed-correspondence-store.v5.js",
 });
 
 function bindToolSource(tool, source) {
@@ -9337,6 +9357,9 @@ registerTools(modelRoleStoreTools({ withEnvelope, writeEvent, ToolError }),
 registerTools(foundationAssuranceMinimumTools({
   withEnvelope, ToolError, authenticatedIdentity,
 }), "foundation-assurance");
+// V5-S01: read-only projection of the settled global boundaries and the
+// dispatch door's mode and shadow counters. No database access.
+registerTools(globalBoundariesDoorTools({ ToolError }), "global-boundaries-door");
 // DoctorCRE V5-M01: the live door to the Journey 1 clock runtime. The read verb
 // derives clock_started from the record; the advance verb takes only an
 // idempotency key and is registered WITHOUT an installation resolver, so it
@@ -9344,12 +9367,5 @@ registerTools(foundationAssuranceMinimumTools({
 // Worker can start, advance or pause the Journey 1 clock through it until a
 // verifier for the composed projection is installed by trusted server code.
 registerTools(journeyOneClockDoorTools({ withEnvelope, ToolError }), "journey-one-clock-door");
-// DoctorCRE V5-J103: the governed correspondence store. Two reads
-// (correspondence-readiness, read-correspondence-thread) and the humanOnly
-// consent pair. There is no send verb and no draft verb: a draft can never
-// dispatch, and Joe sends. Reads answer unavailable until the F10 local-store
-// adapter lands with a reviewed grant for the read-receipt writer.
-registerTools(governedCorrespondenceStoreTools({ withEnvelope, writeEvent, ToolError }),
-  "governed-correspondence-store");
 
 Object.freeze(TOOLS);

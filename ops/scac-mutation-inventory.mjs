@@ -373,16 +373,12 @@ export const REGISTRY_V74_VERSION = "scac-mutation-registry.v74";
 // doors and grants the catalog baseline below measures. The runtime selector
 // (mutation-registry.js) moves to v75.
 export const REGISTRY_V75_VERSION = "scac-mutation-registry.v75";
-// v76 admits DoctorCRE V5-J103's governed correspondence store, chained from
-// v75 (migration 0618): four new mcp-tool ingresses in
-// mcp-server/src/governed-correspondence-store.v5.js -- correspondence-readiness
-// and read-correspondence-thread (reads), and the humanOnly pair
-// record-correspondence-adapter-consent / revoke-correspondence-adapter-consent.
-// There is no send verb and no draft path that can dispatch. 0621 adds the
-// store's SECURITY DEFINER writers and readers (the read-receipt writer is
-// granted to nobody), so those and v76's registration function move the
-// catalog; tools/migrate.py's row moves because it pairs (0621, 0622).
-// The runtime selector (mutation-registry.js) moves to v76.
+// v76 registers read-global-boundaries (V5-S01), chained from v75
+// (migration 0618): the read projection of the settled v5 global boundaries
+// and the dispatch door's shadow counters, served from
+// mcp-server/src/global-boundaries-door.v5.js. One new read verb and nothing
+// else: only v76's own registration function and its runtime EXECUTE grants
+// move the catalog. The runtime selector (mutation-registry.js) moves to v76.
 export const REGISTRY_V76_VERSION = "scac-mutation-registry.v76";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
@@ -1551,13 +1547,13 @@ export const POST_0618_FORWARD_V75_DB_CATALOG_BASELINE = Object.freeze({
   secdef_execute: { count: 931, digest: "sha256:e112d6b1a12c78fbc8d7ce05465420509d233a0cd4f647e096216ed8daac4476" },
 });
 // Measured on the disposable PostgreSQL 17 migration lane by drift readback
-// over migrations 0001-0622 on top of main's v75 predecessor (0618). 0621's
-// SECURITY DEFINER writers and readers, their grants, and v76's registration
-// function with its runtime EXECUTE grants are what move the catalog.
-export const POST_0622_FORWARD_V76_DB_CATALOG_BASELINE = Object.freeze({
+// over migrations 0001-0625 on top of main's v75 predecessor (0618). One new
+// READ verb with no database access: only v76's registration function and
+// its runtime EXECUTE grants move the catalog.
+export const POST_0625_FORWARD_V76_DB_CATALOG_BASELINE = Object.freeze({
   ...POST_0618_FORWARD_V75_DB_CATALOG_BASELINE,
   projection_version: "scac-db-catalog-projection.v76",
-  secdef_execute: { count: 944, digest: "sha256:9c1e2a0b5366fe48ca889dd8913bd0b1215cad4bb4c26ff69e3c2f6ea122a180" },
+  secdef_execute: { count: 935, digest: "sha256:0133a043406c1e14dd0cb69e0cedb0edce30478914c2cce934ef28132034ad21" },
 });
 
 export const JOB_DEFINITION_BASELINE = Object.freeze({
@@ -16555,7 +16551,7 @@ export function renderDeliveryCadenceA05RegistrySql(rows,
 }
 
 
-export function renderGovernedCorrespondenceRegistrySql(rows,
+export function renderGlobalBoundariesDoorRegistrySql(rows,
   predecessorSql = null) {
   const predecessorPath = "migrations/0618_delivery_cadence_a05_scac_successor.sql";
   const predecessor = predecessorSql ?? readFileSync(resolve(REPO_ROOT, predecessorPath), "utf8");
@@ -16563,7 +16559,7 @@ export function renderGovernedCorrespondenceRegistrySql(rows,
   if (sha256(predecessor) !== predecessorDigest)
     throw new Error("v76 predecessor migration pin drifted");
   const oldCatalogBaseline = POST_0618_FORWARD_V75_DB_CATALOG_BASELINE;
-  const newCatalogBaseline = POST_0622_FORWARD_V76_DB_CATALOG_BASELINE;
+  const newCatalogBaseline = POST_0625_FORWARD_V76_DB_CATALOG_BASELINE;
   const oldSeal = registrySeal(REGISTRY_V75_VERSION,
     frozenInventory(REGISTRY_V75_VERSION), oldCatalogBaseline);
   const newSeal = registrySeal(REGISTRY_V76_VERSION, rows, newCatalogBaseline);
@@ -16577,14 +16573,14 @@ export function renderGovernedCorrespondenceRegistrySql(rows,
   const start = predecessor.indexOf("\ndrop trigger scac_mutation_registry_version_sealed");
   if (start < 0) throw new Error("v76 predecessor DDL boundary missing");
   let sql = predecessor.slice(start + 1)
-    .replaceAll("$delivery_cadence_a05_v75", "$governed_correspondence_v76")
+    .replaceAll("$delivery_cadence_a05_v75", "$global_boundaries_door_v76")
     .replaceAll("scac-mutation-registry.v75", "scac-mutation-registry.v76")
     .replaceAll("scac-db-catalog-projection.v75", "scac-db-catalog-projection.v76")
     .replaceAll("_v75", "_v76")
     .replaceAll("v74_current", "v75_current")
     .replaceAll("v74_live_at_seal", "v75_live_at_seal")
     .replaceAll("snapshot_v74", "snapshot_v75")
-    .replaceAll("Delivery cadence A05", "Governed correspondence")
+    .replaceAll("Delivery cadence A05", "Global boundaries door")
     .replaceAll(oldSeal.digest, newSeal.digest)
     .replaceAll(oldEntrySet, newEntrySet)
     .replaceAll(oldCatalog.replaceAll("v75", "v76"), newCatalog)
@@ -16596,8 +16592,8 @@ export function renderGovernedCorrespondenceRegistrySql(rows,
     .replaceAll(`<>${oldSeal.sourceEntryCount}`, `<>${newSeal.sourceEntryCount}`)
     .replaceAll(`,${oldSeal.entryCount},${oldSeal.sourceEntryCount},`,
       `,${newSeal.entryCount},${newSeal.sourceEntryCount},`)
-    .replaceAll("Governed correspondence v75 seed or entry-set seal drifted",
-      "Governed correspondence v76 seed or entry-set seal drifted");
+    .replaceAll("Global boundaries door v75 seed or entry-set seal drifted",
+      "Global boundaries door v76 seed or entry-set seal drifted");
   const versionListMarker =
     "'scac-mutation-registry.v49','scac-mutation-registry.v50','scac-mutation-registry.v51','scac-mutation-registry.v52','scac-mutation-registry.v53','scac-mutation-registry.v54','scac-mutation-registry.v55','scac-mutation-registry.v56','scac-mutation-registry.v57','scac-mutation-registry.v58','scac-mutation-registry.v59','scac-mutation-registry.v60','scac-mutation-registry.v61','scac-mutation-registry.v62','scac-mutation-registry.v63','scac-mutation-registry.v64','scac-mutation-registry.v65','scac-mutation-registry.v66','scac-mutation-registry.v67','scac-mutation-registry.v68','scac-mutation-registry.v69','scac-mutation-registry.v70','scac-mutation-registry.v71','scac-mutation-registry.v72','scac-mutation-registry.v73','scac-mutation-registry.v74','scac-mutation-registry.v76'";
   if (sql.split(versionListMarker).length - 1 !== 2)
@@ -16618,23 +16614,23 @@ export function renderGovernedCorrespondenceRegistrySql(rows,
     ["     or not ops.scac_mutation_registry_v76_seal_available()",
       "     or not ops.scac_mutation_registry_v75_seal_available()\n     or not ops.scac_mutation_registry_v76_seal_available()", "final seal history"],
   ]) sql = replaceExactlyOnce(sql, before, after, `v76 ${label}`);
-  const seedStart = sql.indexOf("$governed_correspondence_v76_source$[");
-  const seedEnd = sql.indexOf("]$governed_correspondence_v76_source$", seedStart);
+  const seedStart = sql.indexOf("$global_boundaries_door_v76_source$[");
+  const seedEnd = sql.indexOf("]$global_boundaries_door_v76_source$", seedStart);
   if (seedStart < 0 || seedEnd < 0) throw new Error("v76 source seed boundary missing");
   const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
-  sql = `${sql.slice(0, seedStart)}$governed_correspondence_v76_source$${seed}$governed_correspondence_v76_source$${sql.slice(seedEnd + "]$governed_correspondence_v76_source$".length)}`;
-  const preflight = `do $governed_correspondence_v76_preflight$\ndeclare v ops.scac_mutation_registry_version%rowtype; registration jsonb;\nbegin\n` +
+  sql = `${sql.slice(0, seedStart)}$global_boundaries_door_v76_source$${seed}$global_boundaries_door_v76_source$${sql.slice(seedEnd + "]$global_boundaries_door_v76_source$".length)}`;
+  const preflight = `do $global_boundaries_door_v76_preflight$\ndeclare v ops.scac_mutation_registry_version%rowtype; registration jsonb;\nbegin\n` +
     `  if not exists(select 1 from public.schema_migrations where filename='${predecessorPath.split("/").at(-1)}' and sha256='${predecessorDigest}') then\n` +
-    `    raise exception 'Governed correspondence v76 requires exact applied 0618'; end if;\n` +
+    `    raise exception 'Global boundaries door v76 requires exact applied 0618'; end if;\n` +
     `  select * into v from ops.scac_mutation_registry_version where registry_version='${REGISTRY_V75_VERSION}';\n` +
     `  if v.registry_digest is distinct from '${oldSeal.digest}' or v.entry_count<>${oldSeal.entryCount}\n` +
     `    or v.source_entry_count<>${oldSeal.sourceEntryCount} or v.entry_set_digest is distinct from '${oldEntrySet}'\n` +
     `    or v.catalog_projection is distinct from '${oldCatalog}'::jsonb then\n` +
-    `    raise exception 'Governed correspondence v75 predecessor seal drifted'; end if;\n` +
+    `    raise exception 'Global boundaries door v75 predecessor seal drifted'; end if;\n` +
     `  registration:=ops.scac_mutation_registration_v75('${oldSeal.digest}','mcp-tool:standing-context');\n` +
     `  if coalesce((registration->>'registered')::boolean,false) is not true then\n` +
-    `    raise exception 'Governed correspondence v75 predecessor entry drifted'; end if;\n` +
-    `end $governed_correspondence_v76_preflight$;\n\n`;
+    `    raise exception 'Global boundaries door v75 predecessor entry drifted'; end if;\n` +
+    `end $global_boundaries_door_v76_preflight$;\n\n`;
   return `-- GENERATED by ops/scac-mutation-inventory.mjs. Review; never hand-edit.\n` + preflight + sql;
 }
 
@@ -17462,10 +17458,10 @@ export function renderGeneratedFrontier() {
   artifacts["mcp-server/src/scac-mutation-registry.v76.generated.js"] =
     renderRuntimeProjection(v76Rows, {
       version: REGISTRY_V76_VERSION,
-      dbCatalogBaseline: POST_0622_FORWARD_V76_DB_CATALOG_BASELINE,
+      dbCatalogBaseline: POST_0625_FORWARD_V76_DB_CATALOG_BASELINE,
     });
-  artifacts["migrations/0622_governed_correspondence_scac_successor.sql"] =
-    renderGovernedCorrespondenceRegistrySql(v76Rows,
+  artifacts["migrations/0625_global_boundaries_door_scac_successor.sql"] =
+    renderGlobalBoundariesDoorRegistrySql(v76Rows,
       artifacts["migrations/0618_delivery_cadence_a05_scac_successor.sql"]);
 
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
