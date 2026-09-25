@@ -363,6 +363,37 @@ const RECEIPT_KEYS = Object.freeze([
   "artifact_watermark", "copy", "finished_at", "oracle_id", "observed_artifact_digest",
   "receipt_kind", "restored_watermark", "started_at", "target_kind", "verification",
 ]);
+// Round-5 review: a branch target's receipt records where the branch came
+// from — production's flushed WAL position read before the branch existed,
+// the branch's provider-reported parent_lsn, the gap between them and the
+// settle wait. verify-restore refuses a negative gap before it loads anything;
+// here the block is required for a branch, closed, and must be self-consistent.
+const TARGET_POINT_KEYS = Object.freeze(["gap_bytes", "head_lsn", "parent_lsn", "settle_seconds"]);
+const LSN_TEXT = /^([0-9A-F]{1,8})\/([0-9A-F]{1,8})$/;
+
+function lsnValue(value, path) {
+  const m = typeof value === "string" ? LSN_TEXT.exec(value) : null;
+  if (!m) fail("invalid_shape", `${path} must be an upper-case "X/Y" WAL position`, { path });
+  return (BigInt(`0x${m[1]}`) << 32n) | BigInt(`0x${m[2]}`);
+}
+
+function targetPoint(receipt) {
+  const branch = receipt.target_kind === "disposable_branch";
+  if (!("target_point" in receipt)) {
+    if (branch) fail("missing_field", "receipt.target_point is required for a disposable_branch target", { path: "receipt.target_point" });
+    return null;
+  }
+  const tp = closed(receipt.target_point, TARGET_POINT_KEYS, "receipt.target_point");
+  const head = lsnValue(tp.head_lsn, "receipt.target_point.head_lsn");
+  const parent = lsnValue(tp.parent_lsn, "receipt.target_point.parent_lsn");
+  if (!Number.isSafeInteger(tp.gap_bytes) || tp.gap_bytes < 0 || BigInt(tp.gap_bytes) !== parent - head) {
+    fail("invalid_shape", "receipt.target_point.gap_bytes must equal parent_lsn - head_lsn and be non-negative", { path: "receipt.target_point.gap_bytes" });
+  }
+  if (!Number.isSafeInteger(tp.settle_seconds) || tp.settle_seconds <= 0) {
+    fail("invalid_shape", "receipt.target_point.settle_seconds must be a positive integer", { path: "receipt.target_point.settle_seconds" });
+  }
+  return { head_lsn: tp.head_lsn, parent_lsn: tp.parent_lsn, gap_bytes: tp.gap_bytes, settle_seconds: tp.settle_seconds };
+}
 const VERIFICATION_KEYS = Object.freeze(["facts_digest", "verified_at", "verifier"]);
 
 /**
@@ -394,15 +425,18 @@ function positiveInteger(value, path) {
 }
 
 export function normalizeRestoreExerciseReceipt(receipt) {
-  closed(receipt, RECEIPT_KEYS, "receipt");
+  closed(receipt, [...RECEIPT_KEYS, "target_point"], "receipt", RECEIPT_KEYS);
   if (receipt.receipt_kind !== V5_RESTORE_EXERCISE_RECEIPT_KIND) {
     fail("unknown_state", `receipt.receipt_kind must be "${V5_RESTORE_EXERCISE_RECEIPT_KIND}"`, { path: "receipt.receipt_kind" });
   }
   const copy = closed(receipt.copy, COPY_KEYS, "receipt.copy");
   const source = closed(copy.recorded_digest_source, DIGEST_SOURCE_KEYS, "receipt.copy.recorded_digest_source");
+  const targetKind = enumValue(receipt.target_kind, V5_RESTORE_TARGET_KINDS, "receipt.target_kind");
+  const point = targetPoint(receipt);
   return deepFreeze({
     receipt_kind: V5_RESTORE_EXERCISE_RECEIPT_KIND,
-    target_kind: enumValue(receipt.target_kind, V5_RESTORE_TARGET_KINDS, "receipt.target_kind"),
+    target_kind: targetKind,
+    ...(point ? { target_point: point } : {}),
     copy: {
       copy_id: stableId(copy.copy_id, "receipt.copy.copy_id"),
       custody_domain: stableId(copy.custody_domain, "receipt.copy.custody_domain"),
@@ -481,6 +515,7 @@ export function evaluateRestoreExercise(receiptInput, clock) {
     recorded_digest_source: r.copy.recorded_digest_source,
     artifact_digest: r.observed_artifact_digest,
     tables_compared: Object.keys(r.artifact_watermark).length,
+    target_point: r.target_point ?? null,
     watermark_mismatches: mismatches,
     restore_seconds: Math.round((finishedMs - startedMs) / 1000),
     finished_at: r.finished_at,
@@ -1048,6 +1083,7 @@ export function v5RecoveryMatrixPolicyPreimage() {
     // Bound by reference so a change to the admission half moves this digest too.
     backup_quarantine_policy_digest: v5BackupQuarantinePolicyDigest(),
     restore_exercise_receipt_kind: V5_RESTORE_EXERCISE_RECEIPT_KIND,
+    restore_branch_point_rule: "parent_lsn_at_or_after_production_flush_lsn_read_before_branch_then_bounded_settle",
     rpo_max_seconds: V5_RPO_MAX_SECONDS,
     core_rto_max_seconds: V5_CORE_RTO_MAX_SECONDS,
     adapter_rto_calendar_free_bound_seconds: V5_ADAPTER_RTO_CALENDAR_FREE_BOUND_SECONDS,

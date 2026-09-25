@@ -38,9 +38,12 @@ only thing a restore can be compared EXACTLY against is the artifact itself.
                construction), loads the decrypted artifact into it through
                psql, reads the watermark back read-only, and takes the finish
                instant from its own clock. For a branch target it is ARMED
-               before the branch exists: it reads production's head LSN first,
-               then takes the branch id and admin DSN on stdin, and requires
-               the branch's parent_lsn at or after that head (review M3).
+               before the branch exists: it reads production's FLUSHED WAL
+               position first, waits a bounded settle interval so the
+               provider's storage can ingest it, then takes the branch id and
+               admin DSN on stdin, and requires the branch's parent_lsn at or
+               after that position (reviews M3, round 5). The head, the
+               parent point and the gap are recorded in the receipt.
   outbound-census
                every device row of the RESTORED ops.notification_delivery as
                an outbound item, as the bound request evaluateOutboundQueueRelease
@@ -62,6 +65,18 @@ OS user that runs this verifier, so that user can repoint any of them; an
 adversary running as that user is OUT OF SCOPE, because they could equally
 edit this file. The GitHub reads made through ops/backup-workflow-status.py
 use the same resolved `gh`.
+
+CHILD ENVIRONMENTS (round-5 review): `age` and `psql` run with an
+allow-listed environment (locale, TZ, HOME, TMPDIR and a fixed PATH, plus
+psql's PG* connection variables) and never inherit the provider API key or
+anything else in this process's environment.
+
+ERROR OUTPUT (round-5 review): a failed COPY makes psql print the offending
+row. psql runs with VERBOSITY=terse and SHOW_CONTEXT=never, and whatever it
+still writes is passed through redact_errors (only ERROR/FATAL lines, quoted
+and parenthesised values replaced) before it reaches load.err, an exception
+message, verify.err or a terminal. `redact-errors` exposes the same filter to
+bin/restore-rehearse.sh for every tail it prints.
 
 CLOCK (review K4): the finish instant and the binding stamp are this
 machine's clock; verify-restore compares it with the target server's
@@ -86,6 +101,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -515,7 +531,7 @@ def artifact_watermark_from(dump: Path, identity: Path) -> dict[str, dict[str, A
     if not identity.is_file():
         raise ValueError("the age identity file does not exist")
     proc = subprocess.Popen([_trusted_binary(AGE), "--decrypt", "-i", str(identity), str(dump)],
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=_base_env())
     assert proc.stdout is not None and proc.stderr is not None
     parse_error: ValueError | None = None
     watermark: dict[str, dict[str, Any]] = {}
@@ -583,8 +599,26 @@ def _default_branch(project_id: str) -> str:
     return defaults[0]
 
 
+def format_lsn(value: int) -> str:
+    return f"{value >> 32:X}/{value & 0xFFFFFFFF:X}"
+
+
+# Round-5 review: the branch's parent_lsn is what the provider's STORAGE had
+# ingested when the branch was made; pg_current_wal_flush_lsn() is what the
+# compute had flushed to it. Ordinary ingest lag behind the flush point is
+# well under a second to a few seconds, so the verifier waits this long after
+# reading the flush point before it signals armed (and the rehearsal creates
+# the branch). A point-in-time child taken at or before the artifact's dump,
+# hours earlier, precedes the flush point by every write since and is still
+# refused. The wait is bounded both ways; a lag longer than the wait is not
+# ordinary and is refused with the gap named.
+DEFAULT_SETTLE_SECONDS = 30
+MIN_SETTLE_SECONDS = 5
+MAX_SETTLE_SECONDS = 300
+
+
 def production_head_lsn(project_id: str) -> int:
-    """Production's WAL head, read by THIS process on a provider-issued read-only session (review M3)."""
+    """Production's FLUSHED WAL position, read by THIS process on a provider-issued read-only session."""
     default = _default_branch(project_id)
     uri = str(_neon(f"/projects/{project_id}/connection_uri?branch_id={default}"
                     f"&database_name={INHERITED_DATABASE}&role_name={PRODUCTION_ROLE}").get("uri") or "")
@@ -593,25 +627,29 @@ def production_head_lsn(project_id: str) -> int:
     import psycopg
 
     with psycopg.connect(uri, autocommit=True, options=READ_ONLY_OPTIONS, connect_timeout=30) as conn:
-        got = conn.execute("select pg_current_wal_lsn()::text").fetchone()
+        got = conn.execute("select pg_current_wal_flush_lsn()::text").fetchone()
     lsn = parse_lsn(got[0] if got else None)
     if lsn is None:
         raise ValueError("production reported no head LSN")
     return lsn
 
 
-def branch_target_start(project_id: str, branch_id: str, admin_dsn: str, database: str, head_lsn: int | None) -> str:
+def branch_target_start(project_id: str, branch_id: str, admin_dsn: str, database: str,
+                        head_lsn: int | None) -> tuple[str, dict[str, Any]]:
     """The throwaway branch as the PROVIDER reports it; its creation is the restore's earliest start.
 
     Refused unless the branch exists, is not the default (production) branch or
     a protected one, is a child of the default branch, and the admin DSN's host
     is one of THIS branch's endpoints. Review M3: the branch must come from
     production's HEAD as it stood when this verifier armed — its parent_lsn at
-    or after `head_lsn`, read before the branch existed. A missing parent_lsn
-    or head reading fails closed. (A point-in-time child, e.g. one taken at
-    dump time, has an earlier parent_lsn and is refused; an idle production
-    leaves the head unchanged, so a genuine head branch passes however long
-    production has been quiet.) Review K1, kept as defence in depth now that
+    or after `head_lsn`, production's flushed WAL position read before the
+    branch existed and followed by the settle wait (round-5 review: storage
+    ingest lag). A missing parent_lsn or head reading fails closed. (A
+    point-in-time child, e.g. one taken at dump time, has an earlier
+    parent_lsn and is refused; an idle production leaves the head unchanged,
+    so a genuine head branch passes however long production has been quiet.)
+    Returns the start instant and the recorded point {head_lsn, parent_lsn,
+    gap_bytes}. Review K1, kept as defence in depth now that
     the verifier creates the database itself: the target database may not be
     neondb or any name that also exists on the parent branch.
     """
@@ -629,8 +667,10 @@ def branch_target_start(project_id: str, branch_id: str, admin_dsn: str, databas
     if parent_lsn is None:
         raise ValueError("the provider reported no parent_lsn for the restore target branch; refusing")
     if parent_lsn < head_lsn:
-        raise ValueError("the restore target branch was taken from before production's head at arming "
-                         "(a point-in-time branch); refusing")
+        raise ValueError(f"the restore target branch's parent_lsn {format_lsn(parent_lsn)} is "
+                         f"{head_lsn - parent_lsn} bytes before production's flushed head {format_lsn(head_lsn)} "
+                         "read at arming (a point-in-time branch, or storage lag longer than the settle wait); "
+                         "refusing")
     if not database or database == INHERITED_DATABASE:
         raise ValueError(f"the target database {database or '(none)'!r} is one the branch inherits; "
                          "the restore must target a database it creates")
@@ -647,7 +687,9 @@ def branch_target_start(project_id: str, branch_id: str, admin_dsn: str, databas
     created = _instant(branch.get("created_at"))
     if created is None:
         raise ValueError("the provider reported no creation instant for the branch")
-    return _utc_seconds(created)
+    point = {"head_lsn": format_lsn(head_lsn), "parent_lsn": format_lsn(parent_lsn),
+             "gap_bytes": parent_lsn - head_lsn}
+    return _utc_seconds(created), point
 
 
 # The statement classes a scoped plain pg_dump carries that a fresh throwaway
@@ -676,6 +718,18 @@ def restore_stream(lines: Iterable[bytes]) -> Iterable[bytes]:
         yield raw
 
 
+# Round-5 review: the ONLY variables age and psql inherit. Nothing else in this
+# process's environment (the provider API key above all) reaches a child.
+SAFE_ENV_KEYS = ("HOME", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "TZ", "TMPDIR")
+SAFE_PATH = "/usr/bin:/bin"
+
+
+def _base_env() -> dict[str, str]:
+    env = {k: os.environ[k] for k in SAFE_ENV_KEYS if k in os.environ}
+    env["PATH"] = SAFE_PATH
+    return env
+
+
 PG_ENV_KEYS = {"host": "PGHOST", "port": "PGPORT", "user": "PGUSER", "password": "PGPASSWORD",
                "dbname": "PGDATABASE", "sslmode": "PGSSLMODE", "options": "PGOPTIONS",
                "channel_binding": "PGCHANNELBINDING", "connect_timeout": "PGCONNECT_TIMEOUT",
@@ -690,7 +744,7 @@ def _pg_env(dsn: str) -> dict[str, str]:
     unknown = sorted(set(params) - set(PG_ENV_KEYS))
     if unknown:
         raise ValueError(f"unrecognised connection parameter(s) {', '.join(unknown)}")
-    env = {k: v for k, v in os.environ.items() if not k.startswith("PG")}
+    env = _base_env()
     env.update({PG_ENV_KEYS[k]: str(v) for k, v in params.items() if v is not None})
     return env
 
@@ -712,13 +766,31 @@ def create_target_database(admin_dsn: str, database: str) -> str:
     return target
 
 
+# psql's ERROR/FATAL/PANIC lines, age's own lines, and this tool's refusal line
+# (so a rehearsal's tail still says WHY verify-restore stopped).
+ERROR_LINE_RE = re.compile(r"^(?:psql:[^ ]*: )?(?:ERROR|FATAL|PANIC):|^age: |^restore-watermark: ")
+QUOTED_RE = re.compile(r'"[^"]*"|\'[^\']*\'|\([^()]*\)')
+
+
+def redact_errors(text: str) -> list[str]:
+    """psql/age stderr with no row data: only ERROR/FATAL/PANIC and age lines, every quoted
+    or parenthesised value replaced. CONTEXT, DETAIL, HINT, LINE and bare data lines are dropped."""
+    out = []
+    for line in text.splitlines():
+        line = line.rstrip()
+        if ERROR_LINE_RE.match(line):
+            out.append(QUOTED_RE.sub("<redacted>", line)[:300])
+    return out
+
+
 def load_artifact(dump: Path, identity: Path, target_dsn: str, work_dir: Path) -> None:
     """Decrypt the downloaded artifact and load it into the target through psql, in pipes only."""
     err_path = work_dir / "load.err"
     with err_path.open("wb") as err, open(os.devnull, "wb") as out:
         age = subprocess.Popen([_trusted_binary(AGE), "--decrypt", "-i", str(identity), str(dump)],
-                               stdout=subprocess.PIPE, stderr=err)
-        psql = subprocess.Popen([_trusted_binary("psql"), "-X", "-q", "-v", "ON_ERROR_STOP=1"],
+                               stdout=subprocess.PIPE, stderr=err, env=_base_env())
+        psql = subprocess.Popen([_trusted_binary("psql"), "-X", "-q", "-v", "ON_ERROR_STOP=1",
+                                 "-v", "VERBOSITY=terse", "-v", "SHOW_CONTEXT=never"],
                                 stdin=subprocess.PIPE, stdout=out, stderr=err, env=_pg_env(target_dsn))
         assert age.stdout is not None and psql.stdin is not None
         try:
@@ -733,19 +805,33 @@ def load_artifact(dump: Path, identity: Path, target_dsn: str, work_dir: Path) -
             except BrokenPipeError:
                 pass
             age_code, psql_code = age.wait(), psql.wait()
+    # The raw stderr never survives: it is rewritten redacted before anything reads it.
+    redacted = redact_errors(err_path.read_text(errors="replace"))
+    err_path.write_text("".join(f"{line}\n" for line in redacted))
     if age_code or psql_code:
-        tail = err_path.read_text(errors="replace").strip().splitlines()[-5:]
+        tail = redacted[-5:]
         raise ValueError(f"the artifact did not decrypt and load (age {age_code}, psql {psql_code}): {' | '.join(tail)}")
 
 
+# Round-5 review: loopback is not enough — a tunnel to the hosted production
+# server is also loopback. A server that reports any of the provider's own
+# settings is refused before anything is created or loaded.
+PROVIDER_SETTINGS_SQL = ("select (select count(*) from pg_settings where name like 'neon.%'), "
+                         "current_setting('shared_preload_libraries', true)")
+
+
 def local_target_start(dsn: str) -> str:
-    """A disposable LOCAL cluster: the DSN must be a socket path or loopback; its postmaster start is the earliest start."""
+    """A disposable LOCAL cluster: socket path or loopback, no provider settings; its postmaster start is the earliest start."""
     host = _dsn_host(dsn)
     if not (host.startswith("/") or host in ("localhost", "127.0.0.1", "::1")):
         raise ValueError("a local-cluster target must be reached over a socket path or loopback")
     import psycopg
 
     with psycopg.connect(dsn, autocommit=True, options=READ_ONLY_OPTIONS) as conn:
+        provider = conn.execute(PROVIDER_SETTINGS_SQL).fetchone()
+        if not provider or provider[0] or "neon" in str(provider[1] or "").lower():
+            raise ValueError("the local-cluster target reports provider settings (a tunnel to a hosted "
+                             "server, not a disposable local cluster); refusing before CREATE DATABASE")
         started = conn.execute("select pg_postmaster_start_time()").fetchone()
     if not started or not isinstance(started[0], datetime):
         raise ValueError("the local cluster reported no start instant")
@@ -766,12 +852,16 @@ def server_clock(dsn: str) -> datetime:
 def verify_restore(*, repository: str, run_id: int, identity: Path, target_kind: str, database: str,
                    work_dir: Path, project_id: str | None = None, admin_dsn: str | None = None,
                    handoff: Callable[[], tuple[str, str]] | None = None, armed: Callable[[], None] | None = None,
+                   settle_seconds: int = DEFAULT_SETTLE_SECONDS, sleep: Callable[[float], None] = time.sleep,
                    now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)) -> dict[str, Any]:
     """Restore the artifact into a database this process creates, and receipt it from its own reads."""
     head_lsn: int | None = None
+    point: dict[str, Any] | None = None
     if target_kind == "disposable_branch":
         if not project_id or handoff is None:
             raise ValueError("a branch target needs --project-id and the branch handed over on stdin")
+        if not MIN_SETTLE_SECONDS <= settle_seconds <= MAX_SETTLE_SECONDS:
+            raise ValueError(f"the settle wait must be {MIN_SETTLE_SECONDS}..{MAX_SETTLE_SECONDS} s, not {settle_seconds}")
         head_lsn = production_head_lsn(project_id)  # BEFORE the branch exists (review M3)
     elif target_kind == "disposable_local_cluster":
         if not admin_dsn:
@@ -780,6 +870,9 @@ def verify_restore(*, repository: str, run_id: int, identity: Path, target_kind:
         raise ValueError(f"target kind must be disposable_branch or disposable_local_cluster, not {target_kind!r}")
     if not DATABASE_NAME_RE.fullmatch(database or ""):
         raise ValueError(f"target database name {database!r} is not a plain lower-case identifier")
+    if head_lsn is not None:
+        sleep(settle_seconds)  # storage ingests the flushed head before the branch can exist (round-5 review)
+        point = {"settle_seconds": settle_seconds}
     if armed is not None:
         armed()
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -793,7 +886,9 @@ def verify_restore(*, repository: str, run_id: int, identity: Path, target_kind:
     if target_kind == "disposable_branch":
         assert handoff is not None and project_id
         branch_id, admin_dsn = handoff()
-        started_at = branch_target_start(project_id, branch_id, admin_dsn, database, head_lsn)
+        started_at, read_point = branch_target_start(project_id, branch_id, admin_dsn, database, head_lsn)
+        assert point is not None
+        point.update(read_point)
     else:
         assert admin_dsn
         started_at = local_target_start(admin_dsn)
@@ -814,6 +909,8 @@ def verify_restore(*, repository: str, run_id: int, identity: Path, target_kind:
         "started_at": started_at,
         "finished_at": finished_at,
     }
+    if point is not None:
+        receipt["target_point"] = point
     return bind(receipt, "restore_exercise", finished)
 
 
@@ -946,6 +1043,9 @@ def main(argv=None) -> int:
     v.add_argument("--admin-dsn-env", default="RESTORE_ADMIN_DSN",
                    help="local-cluster target: the env var holding the admin DSN (a branch's comes on stdin)")
     v.add_argument("--armed-file", help="written once production's head LSN has been read (liveness only)")
+    v.add_argument("--settle-seconds", type=int, default=DEFAULT_SETTLE_SECONDS,
+                   help=f"branch target: wait after reading the head, {MIN_SETTLE_SECONDS}..{MAX_SETTLE_SECONDS} s")
+    sub.add_parser("redact-errors", help="stdin psql/age stderr -> stdout with no row data")
     o = sub.add_parser("outbound-census")
     o.add_argument("--restore-id", required=True)
     o.add_argument("--dsn-env", default="RESTORE_DSN")
@@ -953,6 +1053,10 @@ def main(argv=None) -> int:
     try:
         if a.cmd == "count":
             print(json.dumps(watermark_from_dump(sys.stdin.buffer), sort_keys=True))
+            return 0
+        if a.cmd == "redact-errors":
+            for line in redact_errors(sys.stdin.read()):
+                print(line)
             return 0
         if a.cmd == "digest":
             print(file_digest(Path(a.path)))
@@ -971,7 +1075,7 @@ def main(argv=None) -> int:
                                      project_id=a.project_id,
                                      admin_dsn=None if branch else _dsn_from(a.admin_dsn_env),
                                      handoff=_stdin_handoff if branch else None,
-                                     armed=_signal_armed(a.armed_file))
+                                     armed=_signal_armed(a.armed_file), settle_seconds=a.settle_seconds)
             print(json.dumps(receipt, sort_keys=True))
             return 0
         if a.cmd == "outbound-census":

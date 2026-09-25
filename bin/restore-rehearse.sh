@@ -695,11 +695,23 @@ say "  ok    $PROD_TABLES tables, $PROD_ROWS rows in production right now"
 # it creates $RESTORE_DB on the branch (CREATE DATABASE fails if the name
 # exists, so it is new by construction), decrypts and loads the artifact it
 # downloaded, reads the watermark back and receipts it. It is started HERE,
-# before phase 2, so that it reads production's head LSN before the branch
-# exists; after the branch is created, its id and admin DSN go to it over a
-# private FIFO (never an argument), and it requires the branch's parent_lsn at
-# or after that head. Its stdout goes straight through tee into the evaluator:
+# before phase 2, so that it reads production's flushed WAL position before the
+# branch exists and then waits its bounded settle interval (round-5 review: the
+# branch's parent_lsn is what the provider's storage has ingested, which trails
+# the flush point by ordinary lag); after the branch is created, its id and
+# admin DSN go to it over a private FIFO (never an argument), and it requires
+# the branch's parent_lsn at or after that head. The head, the parent point and
+# the gap are in the receipt.
+#
+# ERROR TAILS (round-5 review): a failed COPY makes psql print the offending
+# row. Every tail below that can hold psql output goes through
+# `restore-watermark.py redact-errors` (ERROR/FATAL lines only, values
+# replaced) before it reaches the terminal. Its stdout goes straight through tee into the evaluator:
 # THAT verdict is the authority (review K3); the tee's file is a copy.
+redact_tail() {
+  # redact_tail N FILE: the last N redacted error lines of FILE, on stderr.
+  "$PY" "$REPO/tools/restore-watermark.py" redact-errors < "$2" 2>/dev/null | tail -"$1" >&2
+}
 exercise_reason() {
   # The evaluator's reason_id, or why there is none (verify-restore refused).
   "$PY" -c 'import json,sys
@@ -724,14 +736,15 @@ arm_verify_restore() {
   exec 4>"$VERIFY_FIFO"
   local waited=0
   # Liveness only: an unarmed verifier reads the head later, which can only
-  # make it refuse (fail closed), never pass a branch it should not.
+  # make it refuse (fail closed), never pass a branch it should not. The
+  # timeout must exceed verify-restore's settle wait (30 s by default).
   while [ ! -s "$WORKDIR/verify.armed" ] && [ "$waited" -lt "${VERIFY_ARM_TIMEOUT:-180}" ]; do
     kill -0 "$VERIFY_PID" 2>/dev/null || break
     sleep 1
     waited=$((waited + 1))
   done
   if [ ! -s "$WORKDIR/verify.armed" ]; then
-    say "$(tail -5 "$WORKDIR/verify.err" 2>/dev/null)" >&2
+    redact_tail 5 "$WORKDIR/verify.err"
     die "verify-restore did not arm (it reads production's head LSN before the branch exists)"
   fi
   say "  ok    verify-restore armed: production's head LSN read before the branch exists"
@@ -793,8 +806,8 @@ if [ -n "$BACKUP_RUN_ID" ]; then
   RESTORE_START_EPOCH="$(date +%s)"
   say "  handing the branch to verify-restore: it creates $RESTORE_DB, decrypts and loads the artifact, reads it back (the slow step) ..."
   if ! hand_over_to_verify_restore; then
-    say "  --- verify-restore (last 10 lines) ---" >&2
-    tail -10 "$WORKDIR/verify.err" >&2
+    say "  --- verify-restore (last 10 lines, row data redacted) ---" >&2
+    redact_tail 10 "$WORKDIR/verify.err"
     die "verify-restore did not restore and verify the artifact ($EXERCISE_VERDICT). THIS IS THE FINDING."
   fi
   say "  ok    verify-restore restored the artifact into $RESTORE_DB and the piped verdict passed: $EXERCISE_VERDICT"
@@ -890,11 +903,12 @@ set -o pipefail
 if ! age --decrypt -i "$IDENTITY" "$DUMP" 2>>"$WORKDIR/restore.err" \
      | sed -E "$RESTORE_FILTER" \
      | PGURL_RESTORE="$RESTORE_URL" "$PY" "$PGX" PGURL_RESTORE \
-         psql -v ON_ERROR_STOP=1 -q >"$WORKDIR/restore.out" 2>>"$WORKDIR/restore.err"; then
+         psql -v ON_ERROR_STOP=1 -v VERBOSITY=terse -v SHOW_CONTEXT=never -q \
+         >"$WORKDIR/restore.out" 2>>"$WORKDIR/restore.err"; then
   set +o pipefail
   say ""
-  say "  --- decrypt/restore output (last 40 lines) ---" >&2
-  tail -40 "$WORKDIR/restore.err" >&2
+  say "  --- decrypt/restore errors (last 40, row data redacted) ---" >&2
+  redact_tail 40 "$WORKDIR/restore.err"
   die "the dump did not decrypt and load. THIS IS THE FINDING — a backup that will not restore is not a backup."
 fi
 set +o pipefail

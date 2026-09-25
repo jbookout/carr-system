@@ -96,6 +96,7 @@ function receipt() {
     restored_watermark: { "ops.run": W(9, "f"), "public.party": W(120, "e"), "public.deal": W(40, "d") },
     started_at: "2026-09-24T10:00:00Z",
     finished_at: "2026-09-24T10:20:00Z",
+    target_point: { head_lsn: "16/B374D848", parent_lsn: "16/B374E000", gap_bytes: 0x7B8, settle_seconds: 30 },
   };
 }
 
@@ -231,6 +232,50 @@ test("item 4: no caller field can skip a check or assert trust", () => {
   const req = receipt();
   req.observed_artifact_digest = "sha256:ABC";
   assert.throws(() => R(req), e => e.code === "invalid_digest");
+});
+
+test("item 4 (round-5 review): a branch receipt records its parent point, closed and self-consistent", () => {
+  const r = R(receipt());
+  assert.equal(r.decision, "pass");
+  assert.deepEqual(r.target_point, { head_lsn: "16/B374D848", parent_lsn: "16/B374E000", gap_bytes: 1976, settle_seconds: 30 });
+  // A parent exactly at the head (an idle production) is a zero gap and passes.
+  const idle = receipt();
+  idle.target_point = { head_lsn: "16/B374D848", parent_lsn: "16/B374D848", gap_bytes: 0, settle_seconds: 30 };
+  assert.equal(R(idle).decision, "pass");
+  // Across the 32-bit boundary the gap is still exact.
+  const wrap = receipt();
+  wrap.target_point = { head_lsn: "16/FFFFFFF0", parent_lsn: "17/10", gap_bytes: 32, settle_seconds: 30 };
+  assert.equal(R(wrap).decision, "pass");
+  // A branch receipt without the block is a contract violation; a local-cluster one needs none.
+  const missing = receipt(); delete missing.target_point;
+  assert.throws(() => R(missing), e => e.code === "missing_field");
+  const local = receipt(); delete local.target_point; local.target_kind = "disposable_local_cluster";
+  assert.equal(R(local).decision, "pass");
+  assert.equal(R(local).target_point, null);
+  const bad = [
+    tp => { tp.gap_bytes = 1975; },                               // does not recompute
+    tp => { tp.parent_lsn = "16/B374D000"; tp.gap_bytes = -2120; }, // a parent before the head
+    tp => { tp.head_lsn = "16/b374d848"; },                       // lower case is not what the verifier writes
+    tp => { tp.parent_lsn = "not-an-lsn"; },
+    tp => { tp.head_lsn = "123456789/0"; },
+    tp => { tp.head_lsn = "000000016/B374D848"; },                // same value, but more than 8 digits
+    tp => { tp.head_lsn = "x16/B374D848 "; },                     // same value inside junk
+    tp => { tp.gap_bytes = "1976"; },
+    tp => { tp.settle_seconds = 0; },
+    tp => { tp.settle_seconds = 1.5; },
+  ];
+  for (const edit of bad) {
+    const req = receipt(); edit(req.target_point);
+    assert.throws(() => R(req), e => e instanceof V5BoundaryError && e.code === "invalid_shape");
+  }
+  const extra = receipt(); extra.target_point.trusted = true;
+  assert.throws(() => R(extra), e => e.code === "unknown_field");
+  const absent = receipt(); delete absent.target_point.settle_seconds;
+  assert.throws(() => R(absent), e => e.code === "missing_field");
+  // The block is inside the binding: editing it after verification is not re-verified.
+  const verified = stamp(receipt(), "restore_exercise", R_NOW);
+  verified.target_point = { head_lsn: "0/0", parent_lsn: "0/0", gap_bytes: 0, settle_seconds: 30 };
+  assertRefused(evaluateRestoreExercise(verified, R_NOW), "evidence_not_reverified", "evidence_reverified");
 });
 
 test("item 4 (G4): a receipt counts only as verify-restore's fresh output", () => {

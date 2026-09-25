@@ -36,6 +36,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -212,13 +213,23 @@ class Watermark(unittest.TestCase):
         self.assertEqual(mine, sed)
 
     def test_psql_gets_every_connection_parameter_in_its_environment(self):
-        with mock.patch.dict(os.environ, {"PGPASSWORD": "stale", "PGSERVICE": "x", "KEEP": "1"}):
+        with mock.patch.dict(os.environ, {"PGPASSWORD": "stale", "PGSERVICE": "x", "KEEP": "1",
+                                          "NEON_API_KEY": "provider-key", "GH_TOKEN": "t", "LANG": "en_US.UTF-8",
+                                          "PATH": "/tmp/shim:/usr/bin"}):
             env = rw._pg_env("host=h.example.test port=5433 user=u password=pw dbname=d sslmode=require")
+            base = rw._base_env()
         self.assertEqual({k: env[k] for k in ("PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGDATABASE", "PGSSLMODE")},
                          {"PGHOST": "h.example.test", "PGPORT": "5433", "PGUSER": "u", "PGPASSWORD": "pw",
                           "PGDATABASE": "d", "PGSSLMODE": "require"})
         self.assertNotIn("PGSERVICE", env)
-        self.assertEqual(env["KEEP"], "1")
+        # Round-5 review: an ALLOW-list. The provider key and anything else not named never reach a child.
+        for leaked in ("KEEP", "NEON_API_KEY", "GH_TOKEN"):
+            self.assertNotIn(leaked, env)
+            self.assertNotIn(leaked, base)
+        self.assertEqual(env["LANG"], "en_US.UTF-8")
+        self.assertEqual(env["PATH"], "/usr/bin:/bin")
+        self.assertEqual(base, {k: v for k, v in env.items() if not k.startswith("PG")})
+        self.assertEqual(set(base) - {"PATH"}, set(base) & set(rw.SAFE_ENV_KEYS))
         with self.assertRaisesRegex(ValueError, "unrecognised connection parameter"):
             rw._pg_env("host=h dbname=d service=s")
 
@@ -229,20 +240,72 @@ class Watermark(unittest.TestCase):
             (t / "id").write_text("x\n")
             (t / "age").write_text("#!/bin/sh\ncat \"$4\"\n")
             (t / "psql").write_text(f"#!/bin/sh\necho \"$*\" > '{t}/argv'\necho \"$PGDATABASE|$PGPASSWORD\" > '{t}/env'\n"
-                                    f"cat > '{t}/stdin'\nexit ${{PSQL_EXIT:-0}}\n")
+                                    f"env > '{t}/psql.env'\ncat > '{t}/stdin'\n"
+                                    f"[ -f '{t}/fail' ] && {{ cat '{t}/fail' >&2; exit 3; }}\nexit 0\n")
             for tool in ("age", "psql"):
                 (t / tool).chmod(0o755)
             with mock.patch.object(rw, "_trusted_binary", lambda name: str(t / name)):
                 rw.load_artifact(t / "dump.age", t / "id", "host=/tmp dbname=target password=pw", t)
                 self.assertEqual((t / "stdin").read_bytes(), b"COPY public.t (v) FROM stdin;\nGRANT x\n\\.\n")
-                self.assertEqual((t / "argv").read_text().strip(), "-X -q -v ON_ERROR_STOP=1")
+                self.assertEqual((t / "argv").read_text().strip(),
+                                 "-X -q -v ON_ERROR_STOP=1 -v VERBOSITY=terse -v SHOW_CONTEXT=never")
                 self.assertEqual((t / "env").read_text().strip(), "target|pw")
-                with mock.patch.dict(os.environ, {"PSQL_EXIT": "3"}):
-                    with self.assertRaisesRegex(ValueError, r"did not decrypt and load \(age 0, psql 3\)"):
+                # Round-5 review: a failed COPY's offending row never leaves psql's stderr.
+                (t / "fail").write_text(
+                    'psql:<stdin>:5: ERROR:  invalid input syntax for type uuid: "prod-secret-row"\n'
+                    "CONTEXT:  COPY party, line 7: \"prod-secret-row\tJane Client\t555-0100\"\n"
+                    "DETAIL:  Failing row contains (7, Jane Client, 555-0100).\n"
+                    "7\tJane Client\t555-0100\n")
+                with mock.patch.dict(os.environ, {"NEON_API_KEY": "provider-key", "UNLISTED": "x"}):
+                    with self.assertRaisesRegex(ValueError, r"did not decrypt and load \(age 0, psql 3\)") as raised:
                         rw.load_artifact(t / "dump.age", t / "id", "host=/tmp dbname=target", t)
-                (t / "age").write_text("#!/bin/sh\necho 'no identity matched' >&2\nexit 1\n")
-                with self.assertRaisesRegex(ValueError, r"\(age 1, psql 0\).*no identity matched"):
-                    rw.load_artifact(t / "dump.age", t / "id", "host=/tmp dbname=target", t)
+                message = str(raised.exception)
+                on_disk = (t / "load.err").read_text()
+                for text in (message, on_disk):
+                    self.assertIn("ERROR:  invalid input syntax for type uuid: <redacted>", text)
+                    for leak in ("prod-secret-row", "Jane", "555-0100", "CONTEXT", "DETAIL"):
+                        self.assertNotIn(leak, text)
+                # Round-5 review: psql's environment is the allow-list plus its PG* variables.
+                psql_env = dict(ln.split("=", 1) for ln in (t / "psql.env").read_text().splitlines() if "=" in ln)
+                self.assertNotIn("NEON_API_KEY", psql_env)
+                self.assertNotIn("UNLISTED", psql_env)
+                self.assertEqual(psql_env["PATH"], "/usr/bin:/bin")
+                (t / "fail").unlink()
+                (t / "age").write_text(f"#!/bin/sh\nenv > '{t}/age.env'\necho 'age: error: no identity matched' >&2\nexit 1\n")
+                with mock.patch.dict(os.environ, {"NEON_API_KEY": "provider-key"}):
+                    with self.assertRaisesRegex(ValueError, r"\(age 1, psql 0\).*no identity matched"):
+                        rw.load_artifact(t / "dump.age", t / "id", "host=/tmp dbname=target", t)
+                self.assertNotIn("NEON_API_KEY", (t / "age.env").read_text())
+                # the counting decrypt gets the same allow-listed environment
+                with mock.patch.dict(os.environ, {"NEON_API_KEY": "provider-key"}):
+                    with self.assertRaisesRegex(ValueError, "age could not decrypt"):
+                        rw.artifact_watermark_from(t / "dump.age", t / "id")
+                self.assertNotIn("NEON_API_KEY", (t / "age.env").read_text())
+                self.assertIn("PATH=/usr/bin:/bin", (t / "age.env").read_text())
+
+    def test_redact_errors_keeps_only_error_lines_and_no_values(self):
+        raw = ('psql:<stdin>:12: ERROR:  duplicate key value violates unique constraint "party_pkey"\n'
+               "DETAIL:  Key (id)=(42) already exists.\n"
+               "CONTEXT:  COPY party, line 3\n"
+               "42\tJane\n"
+               "LINE 1: insert into x values ('Jane')\n"
+               "HINT:  something\n"
+               "ERROR:  value too long for type character varying(10)\n"
+               "FATAL:  password authentication failed for user 'neondb_owner'\n"
+               "age: error: no identity matched any of the recipients\n"
+               "random noise\n")
+        self.assertEqual(rw.redact_errors(raw), [
+            "psql:<stdin>:12: ERROR:  duplicate key value violates unique constraint <redacted>",
+            "ERROR:  value too long for type character varying<redacted>",
+            "FATAL:  password authentication failed for user <redacted>",
+            "age: error: no identity matched any of the recipients",
+        ])
+        self.assertEqual(rw.redact_errors(""), [])
+        self.assertEqual(len(rw.redact_errors("ERROR: " + "x" * 1000)[0]), 300)
+        out = run_tool("redact-errors", stdin=raw)
+        self.assertEqual(out.returncode, 0)
+        self.assertNotIn("Jane", out.stdout)
+        self.assertNotIn("42", out.stdout.replace("psql:<stdin>:12", ""))
 
 
 
@@ -804,9 +867,10 @@ class VerifyRestore(unittest.TestCase):
     def test_a_branch_target_is_armed_before_the_branch_exists_and_handed_over_on_stdin(self):
         order = []
         branch = ("br-restore", "host=ep.example.test dbname=neondb")
+        point = {"head_lsn": "0/1000", "parent_lsn": "0/1010", "gap_bytes": 16}
         with mock.patch.object(rw, "production_head_lsn", side_effect=lambda p: order.append("head") or 0x1000), \
              mock.patch.object(rw, "branch_target_start",
-                               side_effect=lambda *a: order.append(("target", a)) or "2026-09-24T10:00:00Z"), \
+                               side_effect=lambda *a: order.append(("target", a)) or ("2026-09-24T10:00:00Z", point)), \
              mock.patch.object(rw, "create_target_database", return_value="host=ep.example.test dbname=carr_restore"), \
              mock.patch.object(rw, "load_artifact"), \
              mock.patch.object(rw, "server_clock", return_value=self.NOW), \
@@ -814,10 +878,21 @@ class VerifyRestore(unittest.TestCase):
             receipt = rw.verify_restore(repository=REPO_SLUG, run_id=RUN_ID, identity=self.identity,
                                         target_kind="disposable_branch", database="carr_restore", project_id="proj",
                                         work_dir=self.tmp / "w", armed=lambda: order.append("armed"),
+                                        sleep=lambda s: order.append(("settle", s)),
                                         handoff=lambda: order.append("handoff") or branch, now=lambda: self.NOW)
-        self.assertEqual(order, ["head", "armed", "handoff",
+        self.assertEqual(order, ["head", ("settle", 30), "armed", "handoff",
                                  ("target", ("proj", "br-restore", branch[1], "carr_restore", 0x1000))])
         self.assertEqual(receipt["target_kind"], "disposable_branch")
+        self.assertEqual(receipt["target_point"], {**point, "settle_seconds": 30})
+        self.assertEqual(json.loads(self.evaluate(receipt).stdout)["target_point"], receipt["target_point"])
+        # the settle wait is bounded both ways, and checked before production is read
+        for bad in (0, 4, 301):
+            with mock.patch.object(rw, "production_head_lsn") as head:
+                with self.assertRaisesRegex(ValueError, r"settle wait must be 5\.\.300 s"):
+                    rw.verify_restore(repository=REPO_SLUG, run_id=RUN_ID, identity=self.identity,
+                                      target_kind="disposable_branch", database="carr_restore", project_id="proj",
+                                      work_dir=self.tmp / "w", handoff=lambda: branch, settle_seconds=bad)
+                head.assert_not_called()
         # on the CLI the handover is two lines of stdin; nothing handed over is refused
         with mock.patch("sys.stdin", io.StringIO("br-restore\nhost=ep dbname=neondb\n")):
             self.assertEqual(rw._stdin_handoff(), ("br-restore", "host=ep dbname=neondb"))
@@ -829,6 +904,76 @@ class VerifyRestore(unittest.TestCase):
         rw._signal_armed(str(signal))()
         self.assertEqual(signal.read_text(), "armed\n")
         self.assertIsNone(rw._signal_armed(None))
+
+
+    # ── round-5 review: storage ingest lag ────────────────────────────────
+    # A model of the provider: production writes every 60 s (the last one 2 s
+    # before arming); the compute's FLUSHED position moves at each write; the
+    # storage layer has ingested what was flushed `lag` seconds ago; a branch
+    # made at time t has parent_lsn = what storage had ingested at t.
+    HEAD = 0x16_B3740000
+
+    def flushed(self, t):
+        return self.HEAD + 500 * int(math.floor((t + 2) / 60))
+
+    def rehearse_on_lagging_storage(self, lag, settle=30, parent_at=None):
+        clock = {"t": 0.0}
+        state = {}
+        provider = RestoreTarget()
+        provider.setUp()
+
+        def sleep(seconds):
+            clock["t"] += seconds
+
+        def handoff():
+            created = clock["t"] if parent_at is None else parent_at
+            lsn = self.flushed(created - lag)
+            state["parent"] = lsn
+            provider.branches[provider.BRANCH]["parent_lsn"] = rw.format_lsn(lsn)
+            return provider.BRANCH, provider.DSN
+
+        with mock.patch.object(rw, "production_head_lsn", side_effect=lambda p: self.flushed(clock["t"])), \
+             mock.patch.object(rw, "_neon", provider.neon), \
+             mock.patch.object(rw, "create_target_database", return_value="host=ep-restore.example.test dbname=carr_restore"), \
+             mock.patch.object(rw, "load_artifact"), \
+             mock.patch.object(rw, "server_clock", return_value=self.NOW), \
+             mock.patch.object(rw, "restored_watermark", lambda dsn, a: rw.strip_columns(a)):
+            receipt = rw.verify_restore(repository=REPO_SLUG, run_id=RUN_ID, identity=self.identity,
+                                        target_kind="disposable_branch", database="carr_restore", project_id="proj",
+                                        work_dir=self.tmp / "w", handoff=handoff, sleep=sleep,
+                                        settle_seconds=settle, now=lambda: self.NOW)
+        return receipt, state
+
+    def test_round5_ordinary_storage_lag_passes_after_the_settle_wait(self):
+        # The reviewer's failure: 8 s of ingest lag behind a write 2 s before arming.
+        # Without the wait, the branch made at arming would be one write short and refused.
+        self.assertLess(self.flushed(0 - 8), self.flushed(0))
+        for lag in (0, 1, 8, 25, 30):
+            receipt, state = self.rehearse_on_lagging_storage(lag)
+            self.assertEqual(receipt["target_point"]["head_lsn"], rw.format_lsn(self.HEAD))
+            self.assertEqual(receipt["target_point"]["parent_lsn"], rw.format_lsn(state["parent"]))
+            self.assertEqual(receipt["target_point"]["gap_bytes"], state["parent"] - self.HEAD)
+            self.assertGreaterEqual(receipt["target_point"]["gap_bytes"], 0)
+            self.assertEqual(receipt["target_point"]["settle_seconds"], 30)
+            self.assertEqual(json.loads(self.evaluate(receipt).stdout)["reason_id"], "restore_exercise_exact")
+        # a longer wait covers a longer lag, and the wait actually used is what is recorded
+        receipt, _ = self.rehearse_on_lagging_storage(100, settle=120)
+        self.assertGreaterEqual(receipt["target_point"]["gap_bytes"], 0)
+        self.assertEqual(receipt["target_point"]["settle_seconds"], 120)
+        # the bounds themselves are admissible
+        for settle in (5, 300):
+            receipt, _ = self.rehearse_on_lagging_storage(0, settle=settle)
+            self.assertEqual(receipt["target_point"]["settle_seconds"], settle)
+
+    def test_round5_a_point_in_time_child_from_dump_time_is_still_refused(self):
+        # the nightly dump ran hours before; a child taken there precedes the flushed head by every write since
+        for hours in (7, 1, 0.1):
+            with self.assertRaisesRegex(ValueError, r"parent_lsn .* bytes before production's flushed head"):
+                self.rehearse_on_lagging_storage(0, parent_at=-hours * 3600)
+
+    def test_round5_lag_longer_than_the_wait_is_refused_with_the_gap_named(self):
+        with self.assertRaisesRegex(ValueError, r"is 500 bytes before production's flushed head 16/B3740000"):
+            self.rehearse_on_lagging_storage(45)
 
 
 @unittest.skipUnless(importlib.util.find_spec("psycopg") is not None, "psycopg not installed")
@@ -869,7 +1014,8 @@ class RestoreTarget(unittest.TestCase):
             return rw.branch_target_start(self.PROJECT, self.BRANCH, dsn or self.DSN, database, head_lsn)
 
     def test_the_start_is_the_providers_branch_creation_floored(self):
-        self.assertEqual(self.start(), "2026-09-24T09:59:58Z")
+        self.assertEqual(self.start(), ("2026-09-24T09:59:58Z",
+                                        {"head_lsn": "16/B374D848", "parent_lsn": "16/B374D848", "gap_bytes": 0}))
 
     def test_production_protected_foreign_or_unreachable_targets_are_refused(self):
         cases = [
@@ -907,17 +1053,20 @@ class RestoreTarget(unittest.TestCase):
 
     def test_m3_a_head_branch_of_an_idle_production_passes_however_long_it_has_been_quiet(self):
         # parent_timestamp is hours old (the last WAL); the LSN equals the head read at arming.
-        self.assertEqual(self.start(), "2026-09-24T09:59:58Z")
+        self.assertEqual(self.start()[1]["gap_bytes"], 0)
         # production wrote between arming and the create: the branch is later still
         self.branches[self.BRANCH]["parent_lsn"] = "16/B374FFFF"
-        self.assertEqual(self.start(), "2026-09-24T09:59:58Z")
+        self.assertEqual(self.start(), ("2026-09-24T09:59:58Z",
+                                        {"head_lsn": "16/B374D848", "parent_lsn": "16/B374FFFF", "gap_bytes": 0x27B7}))
         self.branches[self.BRANCH]["parent_lsn"] = "17/0"
-        self.assertEqual(self.start(), "2026-09-24T09:59:58Z")
+        self.assertEqual(self.start()[1], {"head_lsn": "16/B374D848", "parent_lsn": "17/0",
+                                           "gap_bytes": 0x17_00000000 - self.HEAD})
 
     def test_m3_a_point_in_time_child_is_refused(self):
         for earlier in ("16/B374D847", "15/FFFFFFFF", "0/0"):
             self.branches[self.BRANCH]["parent_lsn"] = earlier
-            with self.assertRaisesRegex(ValueError, "taken from before production's head at arming"):
+            with self.assertRaisesRegex(ValueError, rf"parent_lsn {earlier.upper()} is \d+ bytes before production's "
+                                                    r"flushed head 16/B374D848"):
                 self.start()
 
     def test_m3_a_missing_lsn_or_head_reading_fails_closed(self):
@@ -962,7 +1111,7 @@ class RestoreTarget(unittest.TestCase):
             self.assertEqual(rw.production_head_lsn(self.PROJECT), self.HEAD)
             self.assertIn(f"branch_id={self.DEFAULT}", seen["path"])
             self.assertEqual(seen["kw"]["options"], "-c default_transaction_read_only=on")
-            self.assertIn("pg_current_wal_lsn()", seen["sql"])
+            self.assertIn("pg_current_wal_flush_lsn()", seen["sql"])
             seen["answer"] = None
             with self.assertRaisesRegex(ValueError, "no head LSN"):
                 rw.production_head_lsn(self.PROJECT)
@@ -981,6 +1130,38 @@ class RestoreTarget(unittest.TestCase):
     def test_a_local_cluster_target_must_be_a_socket_or_loopback(self):
         with self.assertRaisesRegex(ValueError, "socket path or loopback"):
             rw.local_target_start("host=db.example.test dbname=r")
+
+    def test_round5_a_loopback_tunnel_to_a_provider_server_is_refused(self):
+        seen = []
+        answers = {}
+
+        class Conn:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def execute(self, sql):
+                seen.append(sql)
+                if sql == rw.PROVIDER_SETTINGS_SQL:
+                    return mock.Mock(fetchone=lambda: answers["provider"])
+                return mock.Mock(fetchone=lambda: (datetime(2026, 9, 24, 9, 0, 0, 900000, tzinfo=timezone.utc),))
+
+        def connect(dsn, **kw):
+            self.assertEqual(kw["options"], "-c default_transaction_read_only=on")
+            return Conn()
+
+        with mock.patch.dict(sys.modules, {"psycopg": mock.Mock(connect=connect)}):
+            answers["provider"] = (0, "")
+            self.assertEqual(rw.local_target_start("host=127.0.0.1 port=5432 dbname=postgres"), "2026-09-24T09:00:00Z")
+            self.assertEqual(seen[0], rw.PROVIDER_SETTINGS_SQL)
+            for provider in ((12, "neon"), (1, ""), (0, "pg_stat_statements,neon"), (0, "NEON_utils"), None):
+                answers["provider"] = provider
+                seen.clear()
+                with self.assertRaisesRegex(ValueError, "reports provider settings"):
+                    rw.local_target_start("host=localhost dbname=postgres")
+                self.assertEqual(seen, [rw.PROVIDER_SETTINGS_SQL])  # nothing read or created after it
 
     def test_the_provider_credential_is_required_and_never_on_an_argument(self):
         with mock.patch.dict(os.environ, {"NEON_API_KEY": ""}):
@@ -1113,6 +1294,31 @@ class RehearsalReceiptGate(unittest.TestCase):
         self.assertIn('fi  # the local-dump path; with --backup-run-id verify-restore loaded it above', text)
         self.assertIn("exercise=$EXERCISE_VERDICT (piped verify-restore verdict; receipt file is a copy; "
                       "binary check stops PATH shims only, same-OS-user adversary out of scope)", text)
+
+
+    def test_round5_every_tail_that_can_hold_psql_output_is_redacted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            (t / "verify.err").write_text(
+                'restore-watermark: the artifact did not decrypt and load (age 0, psql 3): '
+                'psql:<stdin>:5: ERROR:  invalid input syntax for type uuid: "prod-secret-row"\n'
+                "CONTEXT:  COPY party, line 7: \"prod-secret-row\tJane Client\"\n"
+                "7\tJane Client\t555-0100\n"
+                "ERROR:  duplicate key value violates unique constraint \"party_pkey\"\n")
+            script = (f"REPO='{REPO}'; PY='{sys.executable}'\n" + _script_function("redact_tail")
+                      + f"redact_tail 10 '{t}/verify.err'\n")
+            got = subprocess.run(["zsh", "-c", script], capture_output=True, text=True, timeout=60)
+            self.assertEqual(got.stdout, "")
+            self.assertEqual(got.stderr.splitlines(), [
+                "restore-watermark: the artifact did not decrypt and load <redacted>: psql:<stdin>:5: ERROR:  "
+                "invalid input syntax for type uuid: <redacted>",
+                "ERROR:  duplicate key value violates unique constraint <redacted>"])
+        text = REHEARSE.read_text()
+        self.assertIn('redact_tail 5 "$WORKDIR/verify.err"', text)
+        self.assertIn('redact_tail 10 "$WORKDIR/verify.err"', text)
+        self.assertIn('redact_tail 40 "$WORKDIR/restore.err"', text)
+        self.assertNotRegex(text, r"tail -\d+ \"\$WORKDIR/(verify|restore)\.err\"")
+        self.assertIn("psql -v ON_ERROR_STOP=1 -v VERBOSITY=terse -v SHOW_CONTEXT=never -q", text)
 
 
 class OutboundCensus(unittest.TestCase):
