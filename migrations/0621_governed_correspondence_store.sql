@@ -1,7 +1,8 @@
 -- DoctorCRE v5 slice V5-J103: the governed correspondence store.
 --
--- PROVISIONAL NUMBER. The final migration number is taken at merge time, above
--- whatever main then holds, and this file is renamed in the seal commit.
+-- Paired with 0622 (the SCAC v75 successor, chained from main's v74 at 0614) as
+-- one atomic group in tools/migrate.py: this file's SECURITY DEFINER writers move
+-- the live catalog, so it may never commit without its seal.
 --
 -- WHAT THIS INSTALLS, AND THE ONE THING IT DELIBERATELY CANNOT DO.
 --

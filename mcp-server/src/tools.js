@@ -62,6 +62,7 @@ import { modelRoleStoreTools } from "./model-role-store.v5.js";
 import { foundationAssuranceMinimumTools } from
   "./foundation-assurance-minimum-producer.v5.js";
 import { journeyOneClockDoorTools } from "./journey-one-clock-door.v5.js";
+import { governedCorrespondenceStoreTools } from "./governed-correspondence-store.v5.js";
 export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
 
 // ---------- envelope helpers ----------
@@ -8175,6 +8176,7 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "model-role-store": "mcp-server/src/model-role-store.v5.js",
   "foundation-assurance": "mcp-server/src/foundation-assurance-minimum-producer.v5.js",
   "journey-one-clock-door": "mcp-server/src/journey-one-clock-door.v5.js",
+  "governed-correspondence-store": "mcp-server/src/governed-correspondence-store.v5.js",
 });
 
 function bindToolSource(tool, source) {
@@ -9318,5 +9320,11 @@ registerTools(foundationAssuranceMinimumTools({
 // Worker can start, advance or pause the Journey 1 clock through it until a
 // verifier for the composed projection is installed by trusted server code.
 registerTools(journeyOneClockDoorTools({ withEnvelope, ToolError }), "journey-one-clock-door");
+// DoctorCRE V5-J103: governed correspondence readiness, the provenance-preserving
+// thread read, and the partner's own mailbox consent (humanOnly record/revoke).
+// There is no send verb and no draft verb. Reads answer `unavailable` until the
+// F10 adapter writes read receipts, whose writer is granted to no runtime role.
+registerTools(governedCorrespondenceStoreTools({ withEnvelope, writeEvent, ToolError }),
+  "governed-correspondence-store");
 
 Object.freeze(TOOLS);
