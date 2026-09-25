@@ -120,11 +120,14 @@ export function adversarialRefused() {
   const PHONE_CONTEXTS = ["", "Call ", "Cell ", "Text ", "Phone ", "Tel ", "Mobile ", "Office ", "Fax ", "Ph ", "Call: ", "Contact ", "Contact: ",
     "Leasing: ", "Questions? ", "Call Joe at ", "Owner ", "Joe cell: ", "Info - ", "Showings ", "(", "Pilot "];
   for (const context of PHONE_CONTEXTS) {
-    for (const sep of [" ", "/", " # ", "_", ".", " - ", "", ", ", " : ", "*", " / "]) out.push(`${context}555${sep}0100`);
+    for (const sep of [" ", "/", " # ", "_", ".", " - ", "", " : ", "*", " / "]) out.push(`${context}555${sep}0100`);
     for (const tail of [" hours 8-5", " hours", " hrs", " Mo-Fr", " mo", " yr", " psf", " ext 12", " (cell)", " rooms"]) out.push(`${context}555 0100${tail}`);
   }
   out.push("Contact 555 0100", "Contact: 555 0100", "Leasing: 555 0100", "Questions? 555 0100", "Call Joe at 555 0100", "Call 555 0100 hours 8-5",
     "Office 555 0100 hours M-F 8-5", "Call 555 0100 Mo-Fr", "Suite 200 555 0100", "Suite 20 555 0100", "Near Hotel 250 1500 rooms", "Owner 555 # 0100", "Room 200 555 0100", "Call 100 0100", "Info 155 0100");
+  // A comma-ended place number does not make the next group a place number.
+  out.push("Suite 200, 555 0100", "Ste 110, 555 0100", "Unit 4, 555 0100", "Floor 2, 555 0100", "Lot 3, 555 0100", "Hwy 98, 555 0100",
+    "Suites 101, 102, 555 0100", "Bayside Plaza, Suite 200, 555 0100", "Suite 200 - 555 0100", "Bldg 3; 555 0100");
   // A code-book name exempts only a bare year, never a code.
   out.push("Building code 4411", "Fire code: 4411", "Zoning code #20145");
   // Phones: every separator between 3-3-4 groups, tight, spaced and doubled.

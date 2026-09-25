@@ -199,7 +199,8 @@
     "Office 555 1200 SF",
     "Office 250 1500 RSF",
     "Suites 200 1500 SF",
-    "Suites 250, 300, 4500 total"
+    "Suites 250, 300, 4500 total",
+    "Suite 201, 202, 1500"
   ],
   "refused": [
     ["4 per 1000. Owner Bob 251-555-0100","phone"],
@@ -551,9 +552,17 @@
     ["555/0100","local_phone"],
     ["Owner 555 # 0100","local_phone"],
     ["Owner Bob: two five one 555 0100","local_phone"],
-    ["Two51 555 0100","local_phone"]
+    ["Two51 555 0100","local_phone"],
+    ["Suite 200, 555 0100","local_phone"],
+    ["Ste 110, 555 0100","local_phone"],
+    ["Unit 4, 555 0100","local_phone"],
+    ["Floor 2, 555 0100","local_phone"],
+    ["Lot 3, 555 0100","local_phone"],
+    ["Hwy 98, 555 0100","local_phone"],
+    ["Suites 101, 102, 555 0100","local_phone"],
+    ["Bayside Plaza, Suite 200, 555 0100","local_phone"]
   ],
-  "_comment_residual": "Documented residuals: contact text the rule deliberately does not catch -- digits spelled out or swapped for look-alike letters, internal notes written in plain English, internal notes written in plain English, internal notes written in plain English, internal notes written in plain English, internal notes written in plain English, and a suite word before a dash pair whose second number has no leading zero. Both engines must still ALLOW each one, so a change to any of them is visible; the human review before a seal is their control. An access code written before its trigger word (\"4411 at the gate\") is a documented residual: the rule reads a trigger word, then the digits.",
+  "_comment_residual": "Documented residuals: contact text the rule deliberately does not catch -- digits spelled out or swapped for look-alike letters, internal notes written in plain English, internal notes written in plain English, internal notes written in plain English, internal notes written in plain English, internal notes written in plain English, and a suite word before a dash pair whose second number has no leading zero. Both engines must still ALLOW each one, so a change to any of them is visible; the human review before a seal is their control. An access code written before its trigger word (\"4411 at the gate\") is a documented residual: the rule reads a trigger word, then the digits. A seven-digit local number with a comma between its groups (\"555, 0100\"), after a dollar sign (\"$555 0100\"), split 3-2-2 (\"555 01 00\") or followed by an area or count unit (\"Call 555 0100 sf\") is a documented residual: a comma makes a list, a dollar sign a price and a unit a measure.",
   "residual": [
     "Call five five five zero one hundred",
     "251-555-O1OO",
@@ -565,9 +574,15 @@
     "Suite 555-1234 / Unit 555-9876",
     "Tenant is tight on budget this quarter",
     "4411 at the gate",
-    "Use 4411 at the door"
+    "Use 4411 at the door",
+    "$555 0100",
+    "555 01 00",
+    "Call 555 0100 sf",
+    "Call 555 0100 spaces",
+    "555, 0100",
+    "Call 555, 0100"
   ],
-  "_comment_known_refused": "Accepted false positives: ordinary-looking text the rule refuses, the safe direction (a word tight against @; slash-joined 3-3-4 building, suite or parking numbers; a year range joined to a count; a street name ending in .Me; a name with a dotted initial before a slash; a trigger word before three or more digits that are a door, gate or parking count, a bare year or a PO box; a time range written like a phone or a code, 800 - 1700 or 0700-1900; and characters outside the allowlist such as the soft hyphen and the line separator). Both engines must refuse each one under the named reason.",
+  "_comment_known_refused": "Accepted false positives: ordinary-looking text the rule refuses, the safe direction (a word tight against @; slash-joined 3-3-4 building, suite or parking numbers; a year range joined to a count; a street name ending in .Me; a name with a dotted initial before a slash; a trigger word before three or more digits that are a door, gate or parking count, a bare year or a PO box; a time range written like a phone or a code, 800 - 1700 or 0700-1900; a three-digit and four-digit pair after a word that is not a listed place word, Rooms 101 1200, Tower 300 1400, Clinic 110 1800, Hours 800 1700; and characters outside the allowlist such as the soft hyphen and the line separator). Both engines must refuse each one under the named reason.",
   "known_refused": [
     ["Rates@market","email"],
     ["Bldg 200/300/1400","phone"],
@@ -591,6 +606,10 @@
     ["Box 1200","access_code"],
     ["Access: 2027","access_code"],
     ["Access 0700-1900 hours","access_code"],
-    ["Office hours 800 - 1700","local_phone"]
+    ["Office hours 800 - 1700","local_phone"],
+    ["Rooms 101 1200","local_phone"],
+    ["Tower 300 1400","local_phone"],
+    ["Clinic 110 1800","local_phone"],
+    ["Hours 800 1700","local_phone"]
   ]
 }
