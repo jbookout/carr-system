@@ -69,9 +69,16 @@ mkdir -p ~/Library/LaunchAgents \
   && sed "s|{{REPO}}|$(pwd)|g" ops/launchd/com.carr.nightly-exports-daytime-retry.plist > /tmp/com.carr.nightly-exports-daytime-retry.plist \
   && plutil -lint /tmp/com.carr.nightly-exports-daytime-retry.plist \
   && install -m 644 /tmp/com.carr.nightly-exports-daytime-retry.plist ~/Library/LaunchAgents/com.carr.nightly-exports-daytime-retry.plist \
-  && launchctl bootout gui/$(id -u)/com.carr.nightly-exports-daytime-retry 2>/dev/null; \
-  launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.carr.nightly-exports-daytime-retry.plist \
-  && launchctl print gui/$(id -u)/com.carr.nightly-exports-daytime-retry \
-  && ./.venv/bin/python tools/db-tap.py run tools/ops-record.py sync-registry
+  && { launchctl bootout gui/$(id -u)/com.carr.nightly-exports-daytime-retry 2>/dev/null || true; } \
+  && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.carr.nightly-exports-daytime-retry.plist \
+  && launchctl print gui/$(id -u)/com.carr.nightly-exports-daytime-retry
 ```
-(the `bootout` step is deliberately not chained with `&&` — it fails, harmlessly, the first time the job is installed, when nothing is bootstrapped yet to boot out; every other step is chained so the sequence stops at the first real failure. The final `sync-registry` call gives the new service its `ops.service`/`ops.service_environment` row so `tools/ops-record.py health` can read it.)
+(the `bootout` is wrapped in its own `{ ... || true; }` — it fails, harmlessly, the first time the job is installed, when nothing is bootstrapped yet to boot out — but that group is still joined to the rest with `&&`, so a real failure anywhere else in the chain (a bad plist, a failed `install`) stops the sequence before `bootstrap` ever runs. A bare `;` there would let `bootstrap` run even after `plutil -lint` or `install` failed.)
+
+REGISTERING THE NEW SERVICE ROW is a **separate, human, owner-credential step**, not part of the install above and not automatable from this checkout. `tools/ops-record.py sync-registry` needs `DATABASE_URL` (the owner role) and applies `ops/config/services.json` verbatim — including RETIRING every live service missing from whatever checkout it's run from, so it must run from an up-to-date `main` checkout after this PR has merged, never from a branch worktree. It also must NOT be run through `tools/db-tap.py`: db-tap's "READ-ONLY BY DEFAULT" hardening (2026-08-13) puts every ordinary `run`/`sql` invocation behind `default_transaction_read_only=on` unless `CARR_BREAK_GLASS=1` is set with a `--reason` — sync-registry is routine maintenance, not a break-glass event, and a break-glass wrapper here would just be a workaround for the wrong credential, not a fix. This mirrors how `com.carr.calendar-prebrief-joe` was actually registered (commit `0693406d`, authored and run by Joe directly): whoever holds `DATABASE_URL`, from an up-to-date main checkout, runs
+
+```
+.venv/bin/python tools/ops-record.py sync-registry
+```
+
+directly (no `db-tap.py` wrapper). This gives the new service its `ops.service`/`ops.service_environment` row so `tools/ops-record.py health` can read it.

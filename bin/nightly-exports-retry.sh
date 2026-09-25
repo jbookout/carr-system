@@ -30,6 +30,29 @@
 # just once, gated on the night's own recorded outcome, rather than seven
 # other steps around it.
 #
+# TEST HOOKS (selftest only — never set these for a real install or a real
+# manual run). CARR_NOW pins "now" to a fixed epoch-seconds moment so the lock-
+# race guard below is provably correct at exact clock boundaries, rather than
+# only observed on whatever moment a live run happened to catch (a single live
+# 00:24 UTC run is weak evidence for a midnight-rollover edge — see
+# ops/nightly-exports-retry-guard-selftest.py). CARR_NIGHTLY_OUT_DIR redirects
+# the log/archive/marker paths away from the real out/ tree so a test run never
+# writes into, or reads stale state from, this machine's real nightly history.
+# CARR_NIGHTLY_RETRY_DRY_RUN makes record() log instead of writing to the real
+# operational ledger (this machine may have real DB credentials in
+# ~/.config/carr/db.env, and a test must never tag synthetic timestamps onto
+# the real nightly-exports-daytime-retry service history).
+carr_now_epoch() {
+  if [ -n "${CARR_NOW:-}" ]; then
+    print -r -- "$CARR_NOW"
+  else
+    date -u '+%s'
+  fi
+}
+carr_local() {  # carr_local <epoch> <strftime-format>
+  date -j -r "$1" "$2" 2>/dev/null || date -d "@$1" "$2" 2>/dev/null
+}
+
 # Run by hand any time: ./bin/nightly-exports-retry.sh
 set -u
 
@@ -37,11 +60,10 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 export PATH="/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/opt/homebrew/opt/libpq/bin:/usr/local/bin:/usr/bin:/bin"
 cd "$REPO" || { print -ru2 -- "nightly-exports-retry: cannot cd $REPO"; exit 2; }
 
-LOG="$REPO/out/nightly.log"
-mkdir -p "$REPO/out"
+OUT_DIR="${CARR_NIGHTLY_OUT_DIR:-$REPO/out}"
+LOG="$OUT_DIR/nightly.log"
+mkdir -p "$OUT_DIR"
 say() { print -r -- "$(date -u '+%Y-%m-%dT%H:%M:%SZ')  RETRY  $*" >> "$LOG"; }
-
-TODAY_UTC="$(date -u '+%Y%m%d')"
 
 # ── LOAD THE LEDGER CREDENTIAL EARLY, BEFORE ANY SKIP BRANCH ─────────────────
 # CARR_DB_EXPORTER_URL (loaded further down, gating the retry attempt itself)
@@ -73,6 +95,10 @@ record() {
   local state="$1" rc="$2" detail="$3"; shift 3
   local started="$(date -u +%FT%TZ)"
   if [ "${1:-}" = "--started-at" ]; then started="$2"; shift 2; fi
+  if [ -n "${CARR_NIGHTLY_RETRY_DRY_RUN:-}" ]; then
+    say "DRY-RUN record state=$state rc=$rc detail=$detail (no real ops-record write — CARR_NIGHTLY_RETRY_DRY_RUN is set)"
+    return 0
+  fi
   ./.venv/bin/python "$REPO/tools/ops-record.py" run \
       --service nightly-exports-daytime-retry --key nightly.exports-daytime-retry \
       --state "$state" --exit-code "$rc" --started-at "$started" \
@@ -85,7 +111,7 @@ record() {
 # re-deriving the answer: the archive is what "OK", "FAIL", "TIMEOUT",
 # "BLOCKED" and "SKIP" already mean there, and re-deciding it here would be a
 # second place for that judgment to drift from the chain that made it.
-runlog_dir="$REPO/out/nightly-runs"
+runlog_dir="$OUT_DIR/nightly-runs"
 latest=""
 if [ -d "$runlog_dir" ]; then
   # The (N) glob qualifier is NULL_GLOB for this one expansion only: without it
@@ -101,48 +127,82 @@ if [ -z "$latest" ]; then
   exit 0
 fi
 
-# ── KEY "TODAY" ON THE ARCHIVE'S OWN DATE, NOT TODAY_UTC ────────────────────
-# A Mac asleep through the UTC midnight rollover can archive tonight's run
-# under a filename dated either side of "today" by wall-clock UTC. The old
-# TODAY_UTC-only gate skipped a genuine same-night retry whenever that
-# happened (a late wake) — instead, key both the "is this recent enough to be
-# tonight's run" check AND the one-retry-a-day marker off the archive's own
-# embedded date.
-ARCHIVE_DATE="$(basename "$latest" | sed -n 's/^nightly-\([0-9]\{8\}\)T.*/\1/p')"
-if [ -z "$ARCHIVE_DATE" ]; then
-  say "SKIP  latest archive ($latest) has an unrecognized filename — cannot key a marker off its date"
+# ── THE LOCK-RACE GUARD (#1241 review round 5) ───────────────────────────────
+# bin/nightly.sh's per-run archive is written ONLY at chain exit (carr_chain_exit
+# in bin/nightly.sh), never progressively while the chain runs. That means a
+# nightly chain that is CURRENTLY IN PROGRESS -- including one launchd fired
+# moments ago, on the SAME wake as this retry, because the Mac slept through
+# both the 02:05 scheduled fire and this job's own daytime fire -- has written
+# NOTHING to out/nightly-runs/ yet. Reading "latest" and finding it merely
+# dated "today or yesterday" is not proof nightly finished; it could just as
+# easily be last night's leftover while tonight's run is mid-flight right now.
+# Retrying in that window would call carr_take_lock nightly BEFORE bin/nightly.sh
+# gets there, and lock ownership is first-come-first-served (bin/run-lock.sh) --
+# so THIS script could win the lock and make the real nightly chain exit as a
+# "duplicate", skipping the WHOLE night's chain, not just exports. That is a
+# strictly worse outcome than the OneDrive defect this retry exists to fix.
+#
+# THE GUARD: only ever consider retrying when a nightly run has ACTUALLY
+# COMPLETED (successfully or not -- carr_chain_exit runs on both paths) since
+# the most recent SCHEDULED 02:05-local fire. If the latest archive predates
+# that boundary, nightly has not finished this cycle -- it may be starting,
+# mid-flight, or genuinely not yet fired -- and this script skips without ever
+# touching the lock. This is a stronger, TIME-based version of "the archive
+# must be today's": date alone cannot tell "finished before I woke" apart from
+# "still running right now", but the boundary comparison can.
+NOW_EPOCH="$(carr_now_epoch)"
+TODAY_LOCAL="$(carr_local "$NOW_EPOCH" '+%Y-%m-%d')"
+NOW_HHMM_NUM=$((10#$(carr_local "$NOW_EPOCH" '+%H%M')))
+if [ "$NOW_HHMM_NUM" -ge 205 ]; then
+  BOUNDARY_DATE="$TODAY_LOCAL"
+else
+  BOUNDARY_DATE="$(carr_local $((NOW_EPOCH - 86400)) '+%Y-%m-%d')"
+fi
+BOUNDARY_EPOCH="$(date -j -f '%Y-%m-%d %H:%M' "$BOUNDARY_DATE 02:05" '+%s' 2>/dev/null \
+  || date -d "$BOUNDARY_DATE 02:05" '+%s' 2>/dev/null)"
+if [ -z "$BOUNDARY_EPOCH" ]; then
+  say "SKIP  could not compute the last-scheduled-02:05-local boundary — treating conservatively as no proof any nightly run has completed"
+  record skipped 0 "could not compute the nightly boundary"
+  exit 0
+fi
+
+ARCHIVE_TS="$(basename "$latest" | sed -n 's/^nightly-\([0-9]\{8\}T[0-9]\{6\}Z\)[.]log$/\1/p')"
+if [ -z "$ARCHIVE_TS" ]; then
+  say "SKIP  latest archive ($latest) has an unrecognized filename — cannot prove it postdates the last scheduled nightly"
   record skipped 0 "latest archive filename unrecognized"
   exit 0
 fi
-YESTERDAY_UTC="$(date -u -v-1d '+%Y%m%d' 2>/dev/null || date -u -d 'yesterday' '+%Y%m%d')"
-case "$ARCHIVE_DATE" in
-  "$TODAY_UTC"|"$YESTERDAY_UTC") ;;
-  *)
-    say "SKIP  latest archive ($latest, $ARCHIVE_DATE) is neither today ($TODAY_UTC) nor yesterday ($YESTERDAY_UTC) UTC — too stale to be tonight's run"
-    record skipped 0 "latest archive too stale to be tonight's run"
-    exit 0
-    ;;
-esac
-MARKER="$REPO/out/.nightly-exports-retry-$ARCHIVE_DATE.done"
+# Compact -> ISO 8601, the same reformat bin/run-lock.sh's carr_lock_age_seconds
+# uses, so both BSD (this Mac) and GNU (ubuntu-latest, in a fixed-clock
+# selftest) date(1) dialects can parse it.
+ARCHIVE_ISO="${ARCHIVE_TS[1,4]}-${ARCHIVE_TS[5,6]}-${ARCHIVE_TS[7,8]}T${ARCHIVE_TS[10,11]}:${ARCHIVE_TS[12,13]}:${ARCHIVE_TS[14,15]}Z"
+ARCHIVE_EPOCH="$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$ARCHIVE_ISO" '+%s' 2>/dev/null \
+  || date -u -d "$ARCHIVE_ISO" '+%s' 2>/dev/null)"
+if [ -z "$ARCHIVE_EPOCH" ] || [ "$ARCHIVE_EPOCH" -lt "$BOUNDARY_EPOCH" ]; then
+  say "SKIP  no nightly run has completed since the last scheduled 02:05 local ($BOUNDARY_DATE 02:05) — nightly may still be starting or mid-flight; retrying now could win the lock ahead of it and starve the whole chain. Latest archive: ${latest:-<none>}"
+  record skipped 0 "no nightly completion since the last scheduled 02:05 local boundary"
+  exit 0
+fi
+MARKER="$OUT_DIR/.nightly-exports-retry-$(print -r -- "$BOUNDARY_DATE" | tr -d -).done"
 
-# ── ONE RETRY PER ARCHIVED NIGHT, ON PURPOSE ─────────────────────────────────
+# ── ONE RETRY PER SCHEDULED CYCLE, ON PURPOSE ────────────────────────────────
 # The plist fires this at one fixed daytime hour. The marker keeps a second,
-# hand-run invocation the same night's window from spending a second publish
-# for no reason once that night's retry has already run. If that prior
-# attempt FAILED, a plain "skipped" heartbeat here would replace the failed
-# row with something that reads healthier than reality — so a prior failure
-# is logged and left alone (no new record() call), and the earlier failed row
-# stays latest, rather than being papered over.
+# hand-run invocation the same cycle from spending a second publish for no
+# reason once that cycle's retry has already run. If that prior attempt
+# FAILED, a plain "skipped" heartbeat here would replace the failed row with
+# something that reads healthier than reality — so a prior failure is logged
+# and left alone (no new record() call), and the earlier failed row stays
+# latest, rather than being papered over.
 if [ -f "$MARKER" ]; then
   prior="$(cat "$MARKER" 2>/dev/null)"
   case "$prior" in
     failed:*)
-      say "SKIP  already attempted the daytime retry for $ARCHIVE_DATE and it FAILED ($MARKER: $prior) — not overwriting that failure with a skipped heartbeat; the failed row stays latest"
+      say "SKIP  already attempted the daytime retry for the $BOUNDARY_DATE cycle and it FAILED ($MARKER: $prior) — not overwriting that failure with a skipped heartbeat; the failed row stays latest"
       exit 0
       ;;
     *)
-      say "SKIP  already attempted the daytime retry for $ARCHIVE_DATE ($MARKER: ${prior:-<no recorded outcome>})"
-      record skipped 0 "already attempted the $ARCHIVE_DATE retry"
+      say "SKIP  already attempted the daytime retry for the $BOUNDARY_DATE cycle ($MARKER: ${prior:-<no recorded outcome>})"
+      record skipped 0 "already attempted the $BOUNDARY_DATE cycle's retry"
       exit 0
       ;;
   esac

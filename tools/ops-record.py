@@ -61,11 +61,22 @@ CREDENTIALS. unattended run and assess require CARR_DB_JOBS_URL — the
 carr_jobs role, which holds narrow operational grants because a ledger whose
 routine writer can rewrite history is not a ledger. Explicit release,
 deployment and settings operations preserve the deliberate DATABASE_URL path;
-reads prefer the exporter credential. Registry sync needs the owner and is
-meant to be run through tools/db-tap.py.
+reads prefer the exporter credential. Registry sync needs the owner
+(DATABASE_URL) and is a HUMAN, OWNER-CREDENTIAL step, run directly — NOT
+through tools/db-tap.py. db-tap.py's "READ-ONLY BY DEFAULT" phase-1 hardening
+(2026-08-13) puts every ordinary `run` or `sql` invocation, this one included,
+behind `default_transaction_read_only=on` unless CARR_BREAK_GLASS=1 is set
+with a --reason — sync-registry is routine maintenance, not a break-glass
+event, so it is run straight, from an up-to-date main checkout after the
+declaring PR has merged, by whoever holds DATABASE_URL:
+
+  .venv/bin/python tools/ops-record.py sync-registry
+
+(An older revision of this docstring said to route that call through
+tools/db-tap.py; that line predated db-tap's read-only default and would
+silently no-op the write. See PR #1241 round 5.)
 
   bin/nightly.sh                                   (records every step)
-  .venv/bin/python tools/db-tap.py run tools/ops-record.py sync-registry
   .venv/bin/python tools/ops-record.py trace <correlation-id>
   .venv/bin/python tools/ops-record.py health
 """

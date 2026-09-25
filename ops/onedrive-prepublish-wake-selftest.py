@@ -168,10 +168,20 @@ def main() -> int:
     # degraded, which would show this service as degraded every healthy day.
     ok('record succeeded 0 "tonight' in retry_src,
        "the healthy no-op path records succeeded, not skipped")
-    # The archive-date keying (not TODAY_UTC) so a late wake still retries.
-    ok("ARCHIVE_DATE" in retry_src and "YESTERDAY_UTC" in retry_src,
-       "the marker and staleness check key off the archive's own embedded date, "
-       "not TODAY_UTC alone, so a Mac asleep through UTC midnight still retries")
+    # The lock-race guard (#1241 review round 5): only ever consider retrying
+    # when a nightly run has actually COMPLETED since the last scheduled
+    # 02:05-local fire, keyed by boundary epoch rather than calendar date —
+    # see ops/nightly-exports-retry-guard-selftest.py for the fixed-clock
+    # proof that this cannot preempt a currently-running nightly chain.
+    ok("BOUNDARY_EPOCH" in retry_src and "ARCHIVE_EPOCH" in retry_src
+       and "carr_take_lock nightly" in retry_src,
+       "the retry only reaches carr_take_lock after proving a nightly run "
+       "completed since the last scheduled 02:05 boundary, not merely that "
+       "an archive exists dated today or yesterday")
+    ok("CARR_NOW" in retry_src and "carr_now_epoch" in retry_src,
+       "the guard's notion of 'now' is injectable, so its exact boundary "
+       "behavior can be proven by a fixed-clock selftest rather than only "
+       "observed on a live run")
 
     # No standalone bin/install-*.sh script for this job: that filename shape
     # trips ops/scac-mutation-inventory.mjs's external_admin classifier (a
@@ -186,6 +196,45 @@ def main() -> int:
     ok("plutil -lint" in skill_md and "launchctl bootstrap" in skill_md
        and "com.carr.nightly-exports-daytime-retry.plist" in skill_md,
        "the SKILL.md runbook documents the manual install command for the new plist")
+    # #1241 review round 5, item 2: a bare `;` after the bootout attempt let
+    # `bootstrap` run even after a failed `plutil -lint` or `install` — the
+    # bootout must be grouped and `|| true`'d so the REST of the chain still
+    # stops at the first real failure.
+    ok("{ launchctl bootout" in skill_md and "|| true; } \\" in skill_md,
+       "the bootout step is grouped with its own || true and still && to the "
+       "rest of the chain, so a real failure earlier stops bootstrap from running")
+    ok(skill_md.count("launchctl bootstrap gui/$(id -u)/com.carr.nightly-exports-daytime-retry.plist \\\n  && launchctl print") == 1
+       or "launchctl print gui/$(id -u)/com.carr.nightly-exports-daytime-retry\n" in skill_md,
+       "launchctl print uses the bare label, not a .plist path")
+    # #1241 review round 5, item 1: sync-registry needs the owner credential
+    # (DATABASE_URL) and, run through tools/db-tap.py, would silently no-op
+    # under db-tap's read-only-by-default guard. The runbook must say this is
+    # a human, owner-credential step -- never a fabricated break-glass call.
+    ok("db-tap.py" not in skill_md.split("REGISTERING THE NEW SERVICE ROW")[0]
+       if "REGISTERING THE NEW SERVICE ROW" in skill_md else False,
+       "the install command block itself no longer pipes sync-registry through db-tap.py")
+    ok("REGISTERING THE NEW SERVICE ROW" in skill_md
+       and "human, owner-credential" in skill_md
+       and "CARR_BREAK_GLASS=1 " not in skill_md.split(
+           "REGISTERING THE NEW SERVICE ROW")[1].split(".venv/bin/python tools/ops-record.py sync-registry")[0],
+       "sync-registry is documented as a separate human/owner-credential step, "
+       "truthfully, with no invented break-glass call actually prefixing the command")
+    ops_record_src = (REPO / "tools" / "ops-record.py").read_text()
+    ops_record_docstring = ops_record_src.split('"""')[1]
+    ok(".venv/bin/python tools/db-tap.py run tools/ops-record.py sync-registry" not in ops_record_docstring,
+       "tools/ops-record.py's own docstring no longer recommends routing "
+       "sync-registry through db-tap.py as a working command (that "
+       "recommendation predated db-tap's read-only-by-default hardening and "
+       "would silently no-op the write)")
+
+    guard_selftest = REPO / "ops" / "nightly-exports-retry-guard-selftest.py"
+    ok(guard_selftest.exists(),
+       "a dedicated fixed-clock selftest proves the lock-race guard, not just a live run")
+    if guard_selftest.exists():
+        proc = subprocess.run([python, str(guard_selftest)], cwd=str(REPO),
+                               capture_output=True, text=True, timeout=120)
+        ok(proc.returncode == 0,
+           f"nightly-exports-retry-guard-selftest.py passes ({proc.stdout.strip().splitlines()[-1] if proc.stdout else proc.stderr[-200:]})")
 
     print(f"\nonedrive-prepublish-wake-selftest: {checked - failed}/{checked} passed")
     return 0 if failed == 0 else 1
