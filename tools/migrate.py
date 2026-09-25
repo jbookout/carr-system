@@ -342,6 +342,16 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0617_delivery_cadence_a05.sql",
         "0618_delivery_cadence_a05_scac_successor.sql",
     ),
+    # DoctorCRE V5-F01: 0626 installs the record-source-authority store and
+    # the document derivative registration doors (SECURITY DEFINER, EXECUTE to
+    # carr_reader, carr_writer and the carr_authority group); 0627 seals that
+    # catalog as v77, chained from main's v76 (0625). Same deferred-epoch-
+    # trigger shape as the pairs above: 0626 applied alone would be refused at
+    # commit, so the pair must be one transaction.
+    (
+        "0626_f01_record_source_authority.sql",
+        "0627_f01_record_source_authority_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -392,6 +402,10 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0617_delivery_cadence_a05.sql",
         "0618_delivery_cadence_a05_scac_successor.sql",
+    ),
+    (
+        "0626_f01_record_source_authority.sql",
+        "0627_f01_record_source_authority_scac_successor.sql",
     ),
 )
 

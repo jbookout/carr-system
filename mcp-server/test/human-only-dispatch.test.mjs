@@ -88,8 +88,12 @@ test("the registry still carries the humanOnly verbs this gate was built for", (
     "attest-attempt-evaluation",
     "attest-execution-environment-conformance",
     "close-incident",
+    // V5-F01: installing the field-authority/retention policy and appending a
+    // preservation hold are partner acts on the authority connection.
+    "record-artifact-preservation-hold",
     "record-tour-map-promotion-receipt",
     "record-tour-pdf-human-review",
+    "register-record-source-authority-policy",
     "review-and-triage",
     "transition-execution-environment-provider",
   ]);
