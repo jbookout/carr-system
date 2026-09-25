@@ -12,9 +12,11 @@
 -- WHAT IT PROVES, none of which reading the SQL can show:
 --   * consent is read-only by CHECK: send_mail_message and every other F10 write
 --     operation is refused; consent needs the mailbox partner's verified context
---     (the partner, or a sponsored agent the server gives that context); and an
---     account digest identity.js knows as the OTHER partner's is refused. Proof of
---     ownership of an unlisted account is owed to the F10 installation binding
+--     (the partner, or a sponsored agent the server gives that context); and the
+--     account is a POSITIVE allowlist of (partner, digest) pairs: joe only for
+--     joe.bookout@carr.us, dell only for dell.mccraney@carr.us. The other
+--     partner's mailbox, either sign-in address, a shared mailbox and an unknown
+--     one are all refused as account_not_partners_own
 --   * a read receipt carries partner, account and native provenance copied from
 --     the consent, refuses raw content and routable addresses, and admits only
 --     correspondence classified as related
@@ -67,58 +69,66 @@ begin
   end if;
 end $$;
 
--- Consent: Joe for Joe's mailbox, read-only.
+-- Consent. Joe's session; the fixture consent is recorded last, after the
+-- refusals, because one consent per (partner, adapter, account) may be in force.
 select set_config('carr.acting_actor_slug', 'joe', true),
        set_config('carr.verified_human_actor_slug', 'joe', true),
        set_config('carr.sponsoring_human_slug', 'joe', true);
 
 create temp table j103_fixture(k text primary key, v uuid) on commit drop;
 
-insert into j103_fixture values ('consent', ops.correspondence_record_adapter_consent(
-  'joe', 'v5_f10_partner_mail_calendar_adapter',
-  'sha256:' || repeat('a', 64),
-  array['read_mail_message_metadata', 'list_mail_messages'],
-  'fixture quote', '00000000-0000-4000-8000-000000000001'));
-
--- Idempotent replay returns the same row.
-do $$
+-- The allowlist refusal, and ONLY it: the error must name account_not_partners_own.
+create function pg_temp.j103_refused_not_own(p_partner text, p_digest text, p_key uuid, p_label text)
+returns void language plpgsql as $f$
 begin
-  if ops.correspondence_record_adapter_consent('joe', 'v5_f10_partner_mail_calendar_adapter',
-       'sha256:' || repeat('a', 64), array['list_mail_messages', 'read_mail_message_metadata'],
-       'fixture quote', '00000000-0000-4000-8000-000000000001')
-     is distinct from (select v from j103_fixture where k = 'consent') then
-    raise exception 'consent replay returned a different row';
-  end if;
-end $$;
+  begin
+    perform ops.correspondence_record_adapter_consent(p_partner, 'v5_f10_partner_mail_calendar_adapter',
+      p_digest, array['list_mail_messages'], 'q', p_key);
+  exception when insufficient_privilege then
+    if sqlerrm not like 'account_not_partners_own:%' then
+      raise exception '% was refused for the wrong reason: %', p_label, sqlerrm;
+    end if;
+    return;
+  end;
+  raise exception '% was accepted', p_label;
+end $f$;
 
--- A send operation cannot be consented.
+-- A send operation cannot be consented, even for Joe's own mailbox.
 do $$
 begin
   begin
     perform ops.correspondence_record_adapter_consent('joe', 'v5_f10_partner_mail_calendar_adapter',
-      'sha256:' || repeat('b', 64), array['send_mail_message'], 'q', '00000000-0000-4000-8000-000000000002');
+      'sha256:577047ee6425cc34f2e7a23bb904395c2bfa7b1aba3eae2e23f525812197e3f3', array['send_mail_message'], 'q', '00000000-0000-4000-8000-000000000002');
     raise exception 'send_mail_message was consented';
   exception when check_violation then null;
   end;
   begin
     perform ops.correspondence_record_adapter_consent('joe', 'v5_f10_partner_mail_calendar_adapter',
-      'sha256:' || repeat('b', 64), array['read_mail_message_metadata', 'move_mail_message'], 'q', '00000000-0000-4000-8000-000000000003');
+      'sha256:577047ee6425cc34f2e7a23bb904395c2bfa7b1aba3eae2e23f525812197e3f3', array['read_mail_message_metadata', 'move_mail_message'], 'q', '00000000-0000-4000-8000-000000000003');
     raise exception 'a write operation rode in beside a read one';
   exception when check_violation then null;
   end;
-  -- Joe cannot consent for Dell's mailbox.
+  -- Joe's session cannot consent AS Dell.
   begin
     perform ops.correspondence_record_adapter_consent('dell', 'v5_f10_partner_mail_calendar_adapter',
-      'sha256:' || repeat('c', 64), array['list_mail_messages'], 'q', '00000000-0000-4000-8000-000000000004');
-    raise exception 'one partner consented for the other';
+      'sha256:6632cb6fcdf5e605e667c31251acce51db90e088038855d48d7d523ff84f1834', array['list_mail_messages'], 'q', '00000000-0000-4000-8000-000000000004');
+    raise exception 'one partner consented as the other';
   exception when insufficient_privilege then null;
   end;
 end $$;
 
+-- Joe himself: refused Dell's carr.us mailbox, Dell's sign-in address, his own
+-- sign-in address, a shared mailbox and an unknown address.
+select pg_temp.j103_refused_not_own('joe', 'sha256:6632cb6fcdf5e605e667c31251acce51db90e088038855d48d7d523ff84f1834', '00000000-0000-4000-8000-000000000111', 'Joe for dell.mccraney@carr.us');
+select pg_temp.j103_refused_not_own('joe', 'sha256:7b9d432e5baf34a7ae12cc8128e9a9645645b0c51f7980e1fb7d28e8a7617f69', '00000000-0000-4000-8000-000000000112', 'Joe for Dell''s sign-in address');
+select pg_temp.j103_refused_not_own('joe', 'sha256:2da48000d09255c32c966ef96d357cfe1a408fb053689706f35789af27c72963', '00000000-0000-4000-8000-000000000113', 'Joe for his sign-in address');
+select pg_temp.j103_refused_not_own('joe', 'sha256:74dde74495e863411bd14b2e10cb6bb1fd26d5945278a684e9c62c61733673f7', '00000000-0000-4000-8000-000000000114', 'Joe for a shared mailbox');
+select pg_temp.j103_refused_not_own('joe', 'sha256:b2d1ab7eb48cf45f70f8ed1074b4faab8b1e83735c7b8fd897c5ca22cbcc004d', '00000000-0000-4000-8000-000000000115', 'Joe for an unknown address');
+
 -- Sponsored agents, under Joe's 2026-08-26 humanOnly ruling: an agent session
 -- WITHOUT the verified-partner context is refused; a Joe-sponsored agent that the
 -- server gives Joe's verified context for a humanOnly act (acting on his quoted
--- words) may record the consent, and the row names the agent as author.
+-- words) is held to Joe's allowlist exactly, and its consent names the agent.
 do $$
 declare v uuid;
 begin
@@ -126,43 +136,58 @@ begin
   perform set_config('carr.verified_human_actor_slug', '', true);
   begin
     perform ops.correspondence_record_adapter_consent('joe', 'v5_f10_partner_mail_calendar_adapter',
-      'sha256:' || repeat('d', 64), array['list_mail_messages'], 'q', '00000000-0000-4000-8000-000000000005');
+      'sha256:577047ee6425cc34f2e7a23bb904395c2bfa7b1aba3eae2e23f525812197e3f3', array['list_mail_messages'], 'q', '00000000-0000-4000-8000-000000000005');
     raise exception 'an agent without the verified-partner context recorded consent';
   exception when insufficient_privilege then null;
   end;
   perform set_config('carr.verified_human_actor_slug', 'joe', true);
+  perform pg_temp.j103_refused_not_own('joe', 'sha256:6632cb6fcdf5e605e667c31251acce51db90e088038855d48d7d523ff84f1834', '00000000-0000-4000-8000-000000000116', 'a Joe-sponsored agent for dell.mccraney@carr.us');
+  perform pg_temp.j103_refused_not_own('joe', 'sha256:7b9d432e5baf34a7ae12cc8128e9a9645645b0c51f7980e1fb7d28e8a7617f69', '00000000-0000-4000-8000-000000000117', 'a Joe-sponsored agent for Dell''s sign-in address');
+  perform pg_temp.j103_refused_not_own('joe', 'sha256:b2d1ab7eb48cf45f70f8ed1074b4faab8b1e83735c7b8fd897c5ca22cbcc004d', '00000000-0000-4000-8000-000000000118', 'a Joe-sponsored agent for an unknown address');
   v := ops.correspondence_record_adapter_consent('joe', 'v5_f10_partner_mail_calendar_adapter',
-    'sha256:' || repeat('d', 64), array['list_calendar_events'], 'Joe: "yes, read my calendar"',
+    'sha256:577047ee6425cc34f2e7a23bb904395c2bfa7b1aba3eae2e23f525812197e3f3', array['list_calendar_events'], 'Joe: "yes, read my calendar"',
     '00000000-0000-4000-8000-000000000006');
   if (select consented_by_actor_id from ops.correspondence_adapter_consent where id = v)
      is distinct from (select id from public.actor where slug = 'automation') then
     raise exception 'a sponsored consent was not attributed to the acting agent';
   end if;
-  -- Nor can that agent, on Joe's context, name Dell's known account.
-  begin
-    perform ops.correspondence_record_adapter_consent('joe', 'v5_f10_partner_mail_calendar_adapter',
-      'sha256:7b9d432e5baf34a7ae12cc8128e9a9645645b0c51f7980e1fb7d28e8a7617f69',
-      array['list_mail_messages'], 'q', '00000000-0000-4000-8000-000000000007');
-    raise exception 'Joe''s context consented for Dell''s known account';
-  exception when insufficient_privilege then null;
-  end;
+  -- Withdrawn again so the fixture consent below can be the one in force.
+  perform ops.correspondence_revoke_adapter_consent(v, 'fixture: withdraw the sponsored consent',
+    '00000000-0000-4000-8000-000000000119');
+  perform set_config('carr.acting_actor_slug', 'joe', true);
+end $$;
+
+-- Dell: refused Joe's carr.us mailbox, Joe's sign-in address and an unknown
+-- address; accepted for his own carr.us mailbox.
+do $$
+begin
+  perform set_config('carr.acting_actor_slug', 'dell', true);
+  perform set_config('carr.verified_human_actor_slug', 'dell', true);
+  perform pg_temp.j103_refused_not_own('dell', 'sha256:577047ee6425cc34f2e7a23bb904395c2bfa7b1aba3eae2e23f525812197e3f3', '00000000-0000-4000-8000-000000000120', 'Dell for joe.bookout@carr.us');
+  perform pg_temp.j103_refused_not_own('dell', 'sha256:2da48000d09255c32c966ef96d357cfe1a408fb053689706f35789af27c72963', '00000000-0000-4000-8000-000000000121', 'Dell for Joe''s sign-in address');
+  perform pg_temp.j103_refused_not_own('dell', 'sha256:b2d1ab7eb48cf45f70f8ed1074b4faab8b1e83735c7b8fd897c5ca22cbcc004d', '00000000-0000-4000-8000-000000000122', 'Dell for an unknown address');
+  perform ops.correspondence_record_adapter_consent('dell', 'v5_f10_partner_mail_calendar_adapter',
+    'sha256:6632cb6fcdf5e605e667c31251acce51db90e088038855d48d7d523ff84f1834', array['list_mail_messages'], 'Dell: "yes"', '00000000-0000-4000-8000-000000000123');
   perform set_config('carr.acting_actor_slug', 'joe', true);
   perform set_config('carr.verified_human_actor_slug', 'joe', true);
 end $$;
 
--- Joe himself cannot name Dell's known account either; his own known account is accepted.
+-- Joe for his own carr.us mailbox: accepted. This is the fixture consent.
+insert into j103_fixture values ('consent', ops.correspondence_record_adapter_consent(
+  'joe', 'v5_f10_partner_mail_calendar_adapter',
+  'sha256:577047ee6425cc34f2e7a23bb904395c2bfa7b1aba3eae2e23f525812197e3f3',
+  array['read_mail_message_metadata', 'list_mail_messages'],
+  'fixture quote', '00000000-0000-4000-8000-000000000001'));
+
+-- Idempotent replay returns the same row.
 do $$
 begin
-  begin
-    perform ops.correspondence_record_adapter_consent('joe', 'v5_f10_partner_mail_calendar_adapter',
-      'sha256:7b9d432e5baf34a7ae12cc8128e9a9645645b0c51f7980e1fb7d28e8a7617f69',
-      array['list_mail_messages'], 'q', '00000000-0000-4000-8000-000000000008');
-    raise exception 'Joe consented for Dell''s known account';
-  exception when insufficient_privilege then null;
-  end;
-  perform ops.correspondence_record_adapter_consent('joe', 'v5_f10_partner_mail_calendar_adapter',
-    'sha256:2da48000d09255c32c966ef96d357cfe1a408fb053689706f35789af27c72963',
-    array['list_mail_messages'], 'q', '00000000-0000-4000-8000-000000000009');
+  if ops.correspondence_record_adapter_consent('joe', 'v5_f10_partner_mail_calendar_adapter',
+       'sha256:577047ee6425cc34f2e7a23bb904395c2bfa7b1aba3eae2e23f525812197e3f3', array['list_mail_messages', 'read_mail_message_metadata'],
+       'fixture quote', '00000000-0000-4000-8000-000000000001')
+     is distinct from (select v from j103_fixture where k = 'consent') then
+    raise exception 'consent replay returned a different row';
+  end if;
 end $$;
 
 -- Read receipts (as the owner: no runtime role may call this writer).
@@ -178,7 +203,7 @@ declare v jsonb;
 begin
   v := ops.correspondence_thread_readback('fixture-mail', 'thread-1', 0);
   if jsonb_array_length(v) <> 1 then raise exception 'readback returned % rows', jsonb_array_length(v); end if;
-  if v -> 0 ->> 'partner_slug' <> 'joe' or v -> 0 ->> 'account_digest' <> 'sha256:' || repeat('a', 64)
+  if v -> 0 ->> 'partner_slug' <> 'joe' or v -> 0 ->> 'account_digest' <> 'sha256:577047ee6425cc34f2e7a23bb904395c2bfa7b1aba3eae2e23f525812197e3f3'
      or v -> 0 -> 'native_identity' ->> 'native_id' <> 'thread-1'
      or (v -> 0 -> 'native_identity' ->> 'native_id_epoch')::int <> 0 then
     raise exception 'readback lost provenance: %', v;

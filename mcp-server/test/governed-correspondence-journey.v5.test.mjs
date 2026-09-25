@@ -192,6 +192,20 @@ test("c6: a past event is a calendar-derived touch with attendance not asserted"
   assert.equal(r.proposal.attendance, "not_asserted");
 });
 
+test("c6 boundaries: an event ending exactly now is past (end <= now); starting exactly now is not scheduled", () => {
+  const endsNow = keep(classifyCalendarTouch({ event: event({ starts_at: "2026-09-25T11:00:00Z", ends_at: NOW }), prior: null, now: NOW }));
+  assert.equal(endsNow.temporality, "past");
+  assert.equal(endsNow.decision, "propose_past_calendar_touch");
+  assert.equal(endsNow.proposal.counts_as_touch, true);
+  const oneMsLater = keep(classifyCalendarTouch({ event: event({ starts_at: "2026-09-25T11:00:00Z", ends_at: "2026-09-25T12:00:00.001Z" }), prior: null, now: NOW }));
+  assert.equal(oneMsLater.temporality, "in_progress");
+  assert.equal(oneMsLater.proposal, null);
+  const startsNow = keep(classifyCalendarTouch({ event: event({ starts_at: NOW, ends_at: "2026-09-25T13:00:00Z" }), prior: null, now: NOW }));
+  assert.equal(startsNow.temporality, "in_progress");
+  const zeroLengthNow = keep(classifyCalendarTouch({ event: event({ starts_at: NOW, ends_at: NOW }), prior: null, now: NOW }));
+  assert.equal(zeroLengthNow.temporality, "past");
+});
+
 test("c6: an in-progress event is withheld, neither scheduled nor past", () => {
   const r = keep(classifyCalendarTouch({ event: event({ starts_at: "2026-09-25T11:30:00Z", ends_at: "2026-09-25T12:30:00Z" }), prior: null, now: NOW }));
   assert.equal(r.decision, "withhold_in_progress");

@@ -75,7 +75,7 @@ test("consent refuses every provider write operation before touching the databas
     const c = fakeClient([]);
     await refusedWith(TOOLS["record-correspondence-adapter-consent"].handler(c, actor, {
       idempotency_key: KEY, adapter_kind: "v5_f10_partner_mail_calendar_adapter",
-      account: "joe@example.invalid.test", read_operations: ["list_mail_messages", op], human_quote: "yes",
+      account: "joe.bookout@carr.us", read_operations: ["list_mail_messages", op], human_quote: "yes",
     }), "write_operation_refused");
     assert.equal(c.calls.length, 0, `${op} reached the database`);
   }
@@ -83,12 +83,12 @@ test("consent refuses every provider write operation before touching the databas
 
 test("consent takes the partner from the transaction, never from the caller", async () => {
   await refusedWith(TOOLS["record-correspondence-adapter-consent"].handler(fakeClient([]), actor, {
-    idempotency_key: KEY, adapter_kind: "v5_f10_partner_mail_calendar_adapter", account: "joe@example.invalid.test",
+    idempotency_key: KEY, adapter_kind: "v5_f10_partner_mail_calendar_adapter", account: "joe.bookout@carr.us",
     read_operations: ["list_mail_messages"], human_quote: "yes", partner_slug: "dell",
   }), "unregistered_field");
   const noVerified = fakeClient([["verified_human_actor_slug", [{ slug: null }]]]);
   await refusedWith(TOOLS["record-correspondence-adapter-consent"].handler(noVerified, actor, {
-    idempotency_key: KEY, adapter_kind: "v5_f10_partner_mail_calendar_adapter", account: "joe@example.invalid.test",
+    idempotency_key: KEY, adapter_kind: "v5_f10_partner_mail_calendar_adapter", account: "joe.bookout@carr.us",
     read_operations: ["list_mail_messages"], human_quote: "yes",
   }), "verified_partner_required");
 });
@@ -100,10 +100,10 @@ test("consent stores and returns only the account digest", async () => {
     ["correspondence_record_adapter_consent", [{ id: CONSENT }]],
   ]);
   const r = await TOOLS["record-correspondence-adapter-consent"].handler(c, actor, {
-    idempotency_key: KEY, adapter_kind: "v5_f10_partner_mail_calendar_adapter", account: "  Joe@Example.Invalid.Test ",
+    idempotency_key: KEY, adapter_kind: "v5_f10_partner_mail_calendar_adapter", account: "  Joe.Bookout@CARR.us ",
     read_operations: ["read_mail_message_metadata", "list_mail_messages"], human_quote: "I consent to read-only access",
   });
-  const expected = `sha256:${createHash("sha256").update("joe@example.invalid.test").digest("hex")}`;
+  const expected = `sha256:${createHash("sha256").update("joe.bookout@carr.us").digest("hex")}`;
   assert.equal(r.account_digest, expected);
   assert.equal(r.partner_slug, "joe");
   assert.equal(r.reads_enabled, false);
@@ -113,7 +113,7 @@ test("consent stores and returns only the account digest", async () => {
   assert.equal(write.params[2], expected);
   assert.deepEqual(write.params[3], ["list_mail_messages", "read_mail_message_metadata"]);
   const everything = JSON.stringify([r, c.calls, events]);
-  assert.ok(!/@example/i.test(everything), "the raw account leaked");
+  assert.ok(!/@carr\.us/i.test(everything), "the raw account leaked");
 });
 
 test("an account that is not a mailbox address is refused", () => {
@@ -198,31 +198,63 @@ test("unknown arguments are refused before any query on every verb", async () =>
 
 // ---------------------------------------------------------------- review round 1 (#1266)
 
-test("a partner cannot name the other partner's known account, and the database holds the same digests", async () => {
-  const { ALLOW_LIST } = await import("../src/identity.js");
+test("consent is a positive allowlist: each partner only for their own carr.us mailbox, and the database holds the same pairs", async () => {
+  const { V5_J103_PARTNER_MAILBOXES, partnerOwnsMailbox } = await import("../src/governed-correspondence-store.v5.js");
   const { readFileSync, readdirSync } = await import("node:fs");
-  const dellAccount = Object.keys(ALLOW_LIST).find(a => ALLOW_LIST[a] === "dell");
-  const c = fakeClient([["verified_human_actor_slug", [{ slug: "joe" }]]]);
-  await refusedWith(TOOLS["record-correspondence-adapter-consent"].handler(c, actor, {
-    idempotency_key: KEY, adapter_kind: "v5_f10_partner_mail_calendar_adapter", account: ` ${dellAccount.toUpperCase()} `,
-    read_operations: ["list_mail_messages"], human_quote: "yes",
-  }), "other_partners_mailbox");
-  assert.ok(!c.calls.some(q => q.sql.includes("correspondence_record_adapter_consent")), "the refusal reached the writer");
-  // The record layer refuses the same case from the same two digests.
+  assert.deepEqual(JSON.parse(JSON.stringify(V5_J103_PARTNER_MAILBOXES)),
+    { joe: ["joe.bookout@carr.us"], dell: ["dell.mccraney@carr.us"] });
+  const refusedFor = [
+    // [partner, account]: the other partner's mailbox, both partners' Google
+    // sign-in addresses, a delegated or shared mailbox, and an unknown one.
+    ["joe", "dell.mccraney@carr.us"], ["joe", " DELL.McCraney@carr.us "], ["joe", "dell.mccraney.carr.us@gmail.com"],
+    ["joe", "joe.bookout.carr.us@gmail.com"], ["joe", "info@carr.us"], ["joe", "someone@example.invalid.test"],
+    ["dell", "joe.bookout@carr.us"], ["dell", "joe.bookout.carr.us@gmail.com"], ["dell", "dell.mccraney.carr.us@gmail.com"],
+    ["dell", "info@carr.us"], ["dell", "someone@example.invalid.test"],
+  ];
+  for (const [partner, account] of refusedFor) {
+    assert.equal(partnerOwnsMailbox(partner, account), false, `${partner} / ${account}`);
+    const c = fakeClient([["verified_human_actor_slug", [{ slug: partner }]]]);
+    await refusedWith(TOOLS["record-correspondence-adapter-consent"].handler(c, actor, {
+      idempotency_key: KEY, adapter_kind: "v5_f10_partner_mail_calendar_adapter", account,
+      read_operations: ["list_mail_messages"], human_quote: "yes",
+    }), "account_not_partners_own");
+    assert.ok(!c.calls.some(q => q.sql.includes("correspondence_record_adapter_consent")),
+      `${partner} / ${account}: the refusal reached the writer`);
+  }
+  for (const [partner, account] of [["joe", "joe.bookout@carr.us"], ["dell", " Dell.McCraney@CARR.us "]]) {
+    assert.equal(partnerOwnsMailbox(partner, account), true, `${partner} / ${account}`);
+    const c = fakeClient([
+      ["verified_human_actor_slug", [{ slug: partner }]],
+      ["correspondence_record_adapter_consent", [{ id: CONSENT }]],
+    ]);
+    const r = await TOOLS["record-correspondence-adapter-consent"].handler(c, actor, {
+      idempotency_key: KEY, adapter_kind: "v5_f10_partner_mail_calendar_adapter", account,
+      read_operations: ["list_mail_messages"], human_quote: "yes",
+    });
+    assert.equal(r.partner_slug, partner);
+  }
+  assert.equal(partnerOwnsMailbox("automation", "joe.bookout@carr.us"), false);
+  assert.equal(partnerOwnsMailbox("__proto__", "joe.bookout@carr.us"), false);
+  // Digest parity: the record layer holds exactly the same (partner, digest) pairs.
   const migration = readdirSync(new URL("../../migrations/", import.meta.url))
     .find(f => /_governed_correspondence_store\.sql$/.test(f));
   const sql = readFileSync(new URL(`../../migrations/${migration}`, import.meta.url), "utf8");
-  for (const [account, slug] of Object.entries(ALLOW_LIST)) {
-    assert.ok(sql.includes(`when '${correspondenceAccountDigest(account)}' then '${slug}'`), `${slug}'s digest is not in the migration`);
-  }
+  const body = sql.match(/create function ops\.correspondence_partner_owns_account\(p_partner_slug text, p_account_digest text\)[\s\S]*?\$\$([\s\S]*?)\$\$;/)[1];
+  const sqlPairs = [...body.matchAll(/\('(\w+)', '(sha256:[0-9a-f]{64})'\)/g)].map(m => `${m[1]}=${m[2]}`).sort();
+  const jsPairs = Object.entries(V5_J103_PARTNER_MAILBOXES)
+    .flatMap(([slug, list]) => list.map(a => `${slug}=${correspondenceAccountDigest(a)}`)).sort();
+  assert.deepEqual(sqlPairs, jsPairs);
+  assert.match(body, /\(p_partner_slug, p_account_digest\) in \(/, "the record layer no longer checks the pair");
 });
 
-test("no owed step or verb description asks a partner for an OAuth grant; activation is local-store access", async () => {
+test("no owed step or verb description mentions Google, Gmail or OAuth; activation names only the local stores", async () => {
   const { V5_J103_STORE_OWED_STEPS } = await import("../src/governed-correspondence-store.v5.js");
-  const text = JSON.stringify([Object.values(TOOLS).map(t => t.description), V5_J103_STORE_OWED_STEPS]);
-  assert.ok(!/(grant|grants|scope)[^."]{0,40}oauth|oauth scope|read-only oauth/i.test(text), "an OAuth instruction remains");
+  const text = JSON.stringify([Object.values(TOOLS).map(t => [t.description, t.inputSchema]), V5_J103_STORE_OWED_STEPS]);
+  assert.ok(!/google|gmail|oauth/i.test(text), "Google, Gmail or OAuth is still mentioned");
   const human = V5_J103_STORE_OWED_STEPS.find(s => s.step.startsWith("human:"));
-  assert.match(human.what, /HxStore/);
-  assert.match(human.what, /EventKit/);
-  assert.match(human.what, /never asked for an OAuth grant/);
+  for (const want of [/HxStore/, /Apple Mail/, /Apple Calendar through EventKit/, /joe\.bookout@carr\.us/, /dell\.mccraney@carr\.us/])
+    assert.match(human.what, want);
+  const consent = TOOLS["record-correspondence-adapter-consent"].description;
+  for (const want of [/joe\.bookout@carr\.us/, /dell\.mccraney@carr\.us/, /delegated or shared mailbox/, /HxStore/, /EventKit/])
+    assert.match(consent, want);
 });
