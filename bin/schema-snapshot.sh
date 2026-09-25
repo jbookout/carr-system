@@ -940,15 +940,15 @@ if [ "$JOURNEY_ONE_CLOCK_DOOR_REGISTRY_APPLIED" = t ] && [ "$DEPLOY_WORKER_DO_MI
   echo "schema-snapshot: journey-one clock door v74 is applied without v73 predecessor" >&2
   exit 1
 fi
-GOVERNED_CORRESPONDENCE_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0622_governed_correspondence_scac_successor.sql')" \
+DELIVERY_CADENCE_A05_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0618_delivery_cadence_a05_scac_successor.sql')" \
   2>/dev/null)"
-case "$GOVERNED_CORRESPONDENCE_REGISTRY_APPLIED" in
+case "$DELIVERY_CADENCE_A05_REGISTRY_APPLIED" in
   t|f) ;;
-  *) echo "schema-snapshot: could not read governed correspondence v75 registry ledger state" >&2; exit 1 ;;
+  *) echo "schema-snapshot: could not read delivery cadence A05 v75 registry ledger state" >&2; exit 1 ;;
 esac
-if [ "$GOVERNED_CORRESPONDENCE_REGISTRY_APPLIED" = t ] && [ "$JOURNEY_ONE_CLOCK_DOOR_REGISTRY_APPLIED" != t ]; then
-  echo "schema-snapshot: governed correspondence v75 is applied without v74 predecessor" >&2
+if [ "$DELIVERY_CADENCE_A05_REGISTRY_APPLIED" = t ] && [ "$JOURNEY_ONE_CLOCK_DOOR_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: delivery cadence A05 v75 is applied without v74 predecessor" >&2
   exit 1
 fi
 
@@ -2412,7 +2412,7 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                                                                         SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v73'"
                                                                         SCAC_FULL_SET_SEAL_COUNT=73
                                                                         SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v74_current()"
-                                                                        if [ "$GOVERNED_CORRESPONDENCE_REGISTRY_APPLIED" = t ]; then
+                                                                        if [ "$DELIVERY_CADENCE_A05_REGISTRY_APPLIED" = t ]; then
                                                                           SCAC_CURRENT_NUMBER=75
                                                                           SCAC_VERSION_COUNT=75
                                                                           SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v75'")"

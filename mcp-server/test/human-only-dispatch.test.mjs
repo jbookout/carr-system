@@ -88,13 +88,9 @@ test("the registry still carries the humanOnly verbs this gate was built for", (
     "attest-attempt-evaluation",
     "attest-execution-environment-conformance",
     "close-incident",
-    // DoctorCRE V5-J103: a partner's own consent for the local mail and
-    // calendar adapter to READ one mailbox, and its withdrawal.
-    "record-correspondence-adapter-consent",
     "record-tour-map-promotion-receipt",
     "record-tour-pdf-human-review",
     "review-and-triage",
-    "revoke-correspondence-adapter-consent",
     "transition-execution-environment-provider",
   ]);
 });

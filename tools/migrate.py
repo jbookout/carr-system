@@ -331,15 +331,16 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0602_doctorcre_r02_workflow_cutover_and_caller_inventory.sql",
         "0603_doctorcre_r02_scac_successor.sql",
     ),
-    # DoctorCRE V5-J103: 0621 installs the governed correspondence store
-    # (adapter consent, read receipts, drafts with no destination) and its
-    # SECURITY DEFINER writers; 0622 seals that catalog as v75, chained from
-    # main's v74 (0614). Same deferred-epoch-trigger shape as the pairs above:
-    # 0621 applied alone would be refused at commit, so the pair must be one
-    # transaction.
+    # V5-A05 delivery cadence: 0617 installs ops.v5_a05_cadence_status,
+    # ops.v5_a05_record_cadence_receipt, ops.v5_a05_assurance_cadence_batch,
+    # ops.notification_quiet_now and the extended ops.mint_notification
+    # (SECURITY DEFINER writers/readers); 0618 seals that catalog as v75,
+    # chained from main's v74 (0614). Same deferred-epoch-trigger shape as
+    # the pairs above: 0617 applied alone would be refused at commit, so the
+    # pair must be one transaction.
     (
-        "0621_governed_correspondence_store.sql",
-        "0622_governed_correspondence_scac_successor.sql",
+        "0617_delivery_cadence_a05.sql",
+        "0618_delivery_cadence_a05_scac_successor.sql",
     ),
 )
 
@@ -389,8 +390,8 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0603_doctorcre_r02_scac_successor.sql",
     ),
     (
-        "0621_governed_correspondence_store.sql",
-        "0622_governed_correspondence_scac_successor.sql",
+        "0617_delivery_cadence_a05.sql",
+        "0618_delivery_cadence_a05_scac_successor.sql",
     ),
 )
 

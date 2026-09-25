@@ -12,6 +12,7 @@ import { investigationTools } from "./investigation.js";
 import { docConversationTools } from "./doc-conversation.js";
 import { MEETING_MODE_WRITE_VERBS, meetingModeTools } from "./meeting-mode.js";
 import { notificationTools } from "./notifications.js";
+import { deliveryCadenceA05Tools } from "./delivery-cadence-a05-tools.js";
 import { sessionIdentityTools } from "./session-identity.js";
 import { dispatchSpineTools } from "./dispatch-spine.js";
 import { capabilityProgramTools } from "./capability-program.js";
@@ -62,7 +63,6 @@ import { modelRoleStoreTools } from "./model-role-store.v5.js";
 import { foundationAssuranceMinimumTools } from
   "./foundation-assurance-minimum-producer.v5.js";
 import { journeyOneClockDoorTools } from "./journey-one-clock-door.v5.js";
-import { governedCorrespondenceStoreTools } from "./governed-correspondence-store.v5.js";
 export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
 
 // ---------- envelope helpers ----------
@@ -2953,7 +2953,28 @@ export const TOOLS = {
         renewals.reason = "source_unavailable";
         renewals.items = [];
       }
-      const sections = { today, claim_card: claimCard, deals, loops, renewals };
+      // V5-A05's morning approval batch: unread notifications minted by
+      // raise-delivery-cadence-alert (producer 'v5-a05-delivery-cadence'),
+      // for the authenticated sponsor's own actor. This is the "morning
+      // approval batch goes through the existing morning brief and
+      // notification feed" wiring -- no separate queue is built; a batched
+      // item is simply an unread notification from this producer, surfaced
+      // here AND reachable through notification-feed like any other.
+      const assuranceCadence = await section(async () => {
+        // Reads through ops.v5_a05_assurance_cadence_batch (migration 0617,
+        // sealed as SCAC v75 by 0618), a narrow SECURITY DEFINER function
+        // granted to carr_reader that refuses any non-partner recipient and
+        // hides items still held for the morning window -- morning-brief
+        // runs on the reader connection, and ops.notification/
+        // ops.notification_read themselves carry no carr_reader grant
+        // (tools/test-handler-reads-are-granted.py). Never read those tables
+        // directly from a handler.
+        const result = await c.query(
+          "select ops.v5_a05_assurance_cadence_batch($1) as batch", [scope.sponsor]);
+        const batch = result.rows[0]?.batch;
+        return { items: Array.isArray(batch) ? batch : [] };
+      });
+      const sections = { today, claim_card: claimCard, deals, loops, renewals, assurance_cadence: assuranceCadence };
       return {
         state: Object.values(sections).some((value) => value.state === "unavailable")
           ? "unavailable"
@@ -8145,6 +8166,7 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "doc-conversation": "mcp-server/src/doc-conversation.js",
   "meeting-mode": "mcp-server/src/meeting-mode.js",
   "notifications": "mcp-server/src/notifications.js",
+  "delivery-cadence-a05": "mcp-server/src/delivery-cadence-a05-tools.js",
   "session-identity": "mcp-server/src/session-identity.js",
   "dispatch-spine": "mcp-server/src/dispatch-spine.js",
   "doc-outcome-cards": "mcp-server/src/tools.js",
@@ -8176,7 +8198,6 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "model-role-store": "mcp-server/src/model-role-store.v5.js",
   "foundation-assurance": "mcp-server/src/foundation-assurance-minimum-producer.v5.js",
   "journey-one-clock-door": "mcp-server/src/journey-one-clock-door.v5.js",
-  "governed-correspondence-store": "mcp-server/src/governed-correspondence-store.v5.js",
 });
 
 function bindToolSource(tool, source) {
@@ -9192,6 +9213,7 @@ registerTools(meetingModeTools({ withEnvelope, writeEvent, ToolError,
 // acknowledge-notification writes ops.notification_read and nothing else, which
 // is why a session may never report it as having moved a task.
 registerTools(notificationTools({ withEnvelope, writeEvent, ToolError }), "notifications");
+registerTools(deliveryCadenceA05Tools({ withEnvelope, writeEvent, ToolError }), "delivery-cadence-a05");
 
 // WR-000117: the session-identity read pair. Both verbs are READS on the writer
 // connection -- ops.session_identity_facts and ops.session_dispatch_history
@@ -9320,11 +9342,5 @@ registerTools(foundationAssuranceMinimumTools({
 // Worker can start, advance or pause the Journey 1 clock through it until a
 // verifier for the composed projection is installed by trusted server code.
 registerTools(journeyOneClockDoorTools({ withEnvelope, ToolError }), "journey-one-clock-door");
-// DoctorCRE V5-J103: governed correspondence readiness, the provenance-preserving
-// thread read, and the partner's own mailbox consent (humanOnly record/revoke).
-// There is no send verb and no draft verb. Reads answer `unavailable` until the
-// F10 adapter writes read receipts, whose writer is granted to no runtime role.
-registerTools(governedCorrespondenceStoreTools({ withEnvelope, writeEvent, ToolError }),
-  "governed-correspondence-store");
 
 Object.freeze(TOOLS);
