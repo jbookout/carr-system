@@ -182,20 +182,29 @@ export async function withTrustedCanonicalOwnershipContext(c, actor, binding, To
 // are therefore enforced for engineering-slice-plan.v2 only, and a pre-existing
 // v1 plan keeps its exact previous read behavior.
 //
-// THE GATE IS THE DECLARED PLAN VERSION, NOT THE ROW'S AGE, and that is wider
-// than the stored-read argument alone: a plan REGISTERED as v1 today takes the
-// same permissive path as one stored a month ago.  requirePlan is one predicate
-// over one input and cannot tell a fresh registration from a stored row -- the
-// read paths hand it the stored plan and registration hands it the caller's --
-// so refusing these three shapes for new v1 registrations only would make the
-// same plan registerable and then unreadable, or readable and then
-// unregisterable, depending on which side moved.  Narrowing what a v1 producer
-// may newly register is a policy change with its own producers to migrate and
-// is deliberately OUT OF SCOPE here; nothing below implements it.  A producer
-// that wants the stricter boundary registers the successor version, which is
-// what the successor version is for.  These are documented divergences, not
-// parity: the two validators are not interchangeable on legacy v1 duplicate
-// ordinals, cycles or padded identifiers.
+// THE READ GATE IS THE DECLARED PLAN VERSION, NOT THE ROW'S AGE.  requirePlan
+// is one predicate over one input and cannot tell a fresh registration from a
+// stored row -- the read paths hand it the stored plan and registration hands it
+// the caller's -- so refusing these three shapes for v1 inside requirePlan would
+// make the same plan registerable and then unreadable, or readable and then
+// unregisterable, depending on which side moved.  requirePlan therefore keeps
+// accepting v1 exactly as before, and every stored v1 plan keeps its read,
+// admission and receipt behavior.
+//
+// NEW v1 REGISTRATIONS ARE RETIRED AT THE REGISTRATION DOORS, NOT HERE (V5-F03,
+// 2026-09-25).  A v1 plan carries no design_contract, so registering one today
+// would skip the per-slice rationale, code/model allocation and seam decision
+// that V5-F03 requires of every slice.  That narrowing is a registration
+// policy, so it lives only where a plan first enters storage:
+// requireRegistrablePlanVersion below, called from the
+// register-engineering-slice-plan handler, and the database's
+// ops.engineering_register_slice_plan (migrations/0610_f03_retire_legacy_slice_plan_registration.sql),
+// which covers a direct carr_writer call.  The two doors refuse the same thing,
+// so nothing is registerable-but-unreadable: a v1 plan either was stored before
+// the cutoff and reads as it always did, or cannot be stored at all.  A
+// producer registers the successor version.  These remain documented
+// divergences, not parity: the two validators are not interchangeable on
+// legacy v1 duplicate ordinals, cycles or padded identifiers in stored rows.
 //
 // EXACT IDENTIFIERS FOR v2.  A v2 plan admits every identifier exactly as the
 // producer wrote it (exactId).  id() validated text()'s trimmed copy while the
@@ -209,6 +218,23 @@ export const ENGINEERING_SLICE_PLAN_VERSIONS = Object.freeze([
   "engineering-slice-plan.v1", "engineering-slice-plan.v2",
 ]);
 const SLICE_PLAN_V2 = "engineering-slice-plan.v2";
+// Versions a NEW registration may carry.  Stored plans are read under
+// ENGINEERING_SLICE_PLAN_VERSIONS; see the V5-F03 note above.
+export const ENGINEERING_SLICE_PLAN_REGISTRABLE_VERSIONS = Object.freeze([SLICE_PLAN_V2]);
+
+/**
+ * Registration-only version gate.  Never call this from a read path: a stored
+ * v1 plan must keep validating under requirePlan exactly as before.
+ */
+export function requireRegistrablePlanVersion(plan, ToolError) {
+  if (!ENGINEERING_SLICE_PLAN_REGISTRABLE_VERSIONS.includes(plan?.schema_version))
+    error(ToolError, {
+      error: "engineering_slice_plan_version_not_registrable", schema_version: plan?.schema_version ?? null,
+      registrable: [...ENGINEERING_SLICE_PLAN_REGISTRABLE_VERSIONS],
+      resolution: "new plans register as engineering-slice-plan.v2 with a design_contract on every slice; stored v1 plans stay readable",
+    });
+  return plan;
+}
 export const ENGINEERING_DESIGN_CONTRACT_VERSION = "engineering-design-contract.v1";
 
 const CONCURRENCY_POSTURES = new Set(["parallel_safe", "serial_after_dependencies", "exclusive_resource"]);
@@ -2179,7 +2205,7 @@ export function engineeringRuntimeTools({ withEnvelope, writeEvent, ToolError })
       description: "Register one typed Engineering Slice Plan as an immutable projection of the exact accepted sourced plan. It does not accept, assign, dispatch, or grant authority.",
       inputSchema: { type: "object", additionalProperties: false, properties: { idempotency_key: { type: "string" }, work_request: { type: "string" }, plan: { type: "object" }, plan_digest: { type: "string" } }, required: ["idempotency_key", "work_request", "plan", "plan_digest"] },
       handler: async (c, actor, args) => { exactAuthorityFree(args, ToolError); return withEnvelope(c, actor, "register-engineering-slice-plan", args, async () => {
-        uuid(args.idempotency_key, "idempotency_key", ToolError); const plan = requirePlan(args.plan, ToolError); const work = text(args.work_request, "work_request", ToolError); const planDigest = digest(args.plan_digest, "plan_digest", ToolError);
+        uuid(args.idempotency_key, "idempotency_key", ToolError); const plan = requireRegistrablePlanVersion(requirePlan(args.plan, ToolError), ToolError); const work = text(args.work_request, "work_request", ToolError); const planDigest = digest(args.plan_digest, "plan_digest", ToolError);
         if (plan.plan_digest !== planDigest) error(ToolError, { error: "engineering_slice_plan_digest_mismatch" });
         const r = await c.query("select * from ops.engineering_register_slice_plan($1::text,$2::jsonb,$3::text,$4::uuid)", [work, JSON.stringify(plan), planDigest, args.idempotency_key]);
         if (!r.rows.length) error(ToolError, { error: "engineering_slice_plan_not_registered" });

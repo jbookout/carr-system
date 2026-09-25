@@ -473,6 +473,40 @@ def test_every_bound_category_and_compiler_version_changes_manifest_hash():
     assert versioned["ok"] is True and versioned["manifest"]["manifest_hash"] != baseline_hash
 
 
+def _as_v2_plan(value: dict) -> dict:
+    """The fixture's plan re-declared as engineering-slice-plan.v2 with a closed design contract per slice."""
+    sys.path.insert(0, str(BRIDGE))
+    import test_engineering_passport_unit as passport_fixture  # noqa: E402
+
+    plan = value["engineering_slice_plan"]
+    plan["schema_version"] = "engineering-slice-plan.v2"
+    for row in plan["slices"]:
+        row["design_contract"] = passport_fixture.design_contract(row)
+    return seal(value)
+
+
+def test_compiles_a_registrable_v2_plan_and_still_reads_a_stored_v1_plan():
+    """Since migration 0610 only engineering-slice-plan.v2 registers; stored v1 plans stay readable."""
+    import engineering_passport  # noqa: E402
+
+    v1 = valid_input()
+    assert v1["engineering_slice_plan"]["schema_version"] == "engineering-slice-plan.v1"
+    assert compiler.compile_assurance_slice(copy.deepcopy(v1))["ok"] is True
+
+    v2 = _as_v2_plan(copy.deepcopy(v1))
+    assert engineering_passport.validate_engineering_slice_plan(copy.deepcopy(v2["engineering_slice_plan"]))[
+        "schema_version"] == "engineering-slice-plan.v2"
+    result = compiler.compile_assurance_slice(v2)
+    assert result["ok"] is True, result
+    assert result["manifest"]["input_bindings"]["engineering_slice_plan_digest"] == v2["engineering_slice_plan"]["plan_digest"]
+
+    broken = copy.deepcopy(v2)
+    del broken["engineering_slice_plan"]["slices"][0]["design_contract"]
+    seal(broken)
+    detail = refusal(broken, "ENGINEERING_SLICE_PLAN_INVALID", "engineering_slice_plan")
+    assert "engineering-slice-plan.v2" in detail["expected"]
+
+
 def test_module_has_no_provider_network_git_database_model_or_write_imports():
     source = (BRIDGE / "assurance_slice_compiler.py").read_text()
     for forbidden in ("requests", "urllib", "subprocess", "psycopg", "openai", "anthropic", ".write_text(", "open("):

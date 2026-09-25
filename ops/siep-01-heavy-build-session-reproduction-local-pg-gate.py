@@ -77,8 +77,77 @@ def rejected(
     refuse(f"expected refusal containing {expected!r}, but the operation succeeded")
 
 
-def typed_slice(slice_ref: str, ordinal: int) -> dict[str, Any]:
+# Since migration 0610 a NEW registration must be engineering-slice-plan.v2, so
+# this reproduction registers the successor version with a closed V5-F03
+# design_contract on every slice.  The contract's routing and authority describe
+# exactly the server binding issue_envelope() writes below, because the receipt
+# seam refuses a v2 slice whose contract contradicts its envelope.  Each slice
+# declares its own resource: two parallel_safe slices naming one resource are a
+# plan-wide contradiction the v2 validator refuses.
+EXECUTION_ENVIRONMENT = "rehearsal"
+
+
+def design_contract(slice_row: dict[str, Any]) -> dict[str, Any]:
     return {
+        "contract_version": "engineering-design-contract.v1",
+        "rationale": "The reproduction exercises the canonical ledgers end to end.",
+        "dependency_rationale": "No accepted predecessor slice is required.",
+        "code_model_decision": {
+            "rationale": "Every step is enumerable ledger behavior, so deterministic code owns it.",
+            "selection_basis": ["capability_gain", "quality_gain"],
+            "model_judgment_steps": [],
+        },
+        "routing": {
+            "executor_class": "deterministic_code",
+            "adapter_ref": "adapter:codex-desktop",
+            "fresh_session_required": True,
+        },
+        "authority": {
+            "capability_profile": "capability:engineering-repository-write",
+            "read_only": False,
+            "environment": EXECUTION_ENVIRONMENT,
+        },
+        "isolation": {"worktree_required": True, "branch_required": True, "shared_resource_refs": []},
+        "tests": {
+            "planned_check_refs": [check["check_ref"] for check in slice_row["planned_checks"]],
+            "verification_lanes": ["contract"],
+        },
+        "review": {"independent_review_required": True, "reviewer_class": "independent_agent"},
+        "failure": {"failure_modes": [{
+            "failure_ref": "failure:siep01-evidence-drift",
+            "detection": "Canonical evidence does not match the observation.",
+            "compensation": "Refuse closure and keep the Work Request unresolved.",
+        }]},
+        "evidence": {
+            "redaction_class": "metadata_only",
+            "retention": "material_redacted",
+            "evidence_refs": [{"ref": "evidence:siep01:design", "redaction_class": "metadata_only",
+                               "content_digest": sha("d")}],
+        },
+        "deployment": {"release_requirement": "not_required", "rollback_ref": None, "confirmation_required": False},
+        "completion": {
+            "completion_predicate": "Every planned check passes under independent review.",
+            "verified_by": "independent_review",
+        },
+        "seam_decision": {
+            "mode": "reuse",
+            "target_seam_ref": "seam:engineering-passport",
+            "measurement": {"basis": "complexity_reduction", "note": "The existing ledgers already carry this evidence."},
+            "new_module_justification": None,
+            "replaced_seam_refs": [],
+            "residual_authority_refs": [],
+        },
+        "full_design_refs": None,
+        "short_template": {
+            "template_ref": "template:short-governed-v1",
+            "objective_summary": "One bounded parallel-safe reproduction with no dependencies.",
+            "verification_ref": "verification:short-governed-v1",
+        },
+    }
+
+
+def typed_slice(slice_ref: str, ordinal: int) -> dict[str, Any]:
+    row: dict[str, Any] = {
         "baseline_evidence_refs": [
             {
                 "ref": f"evidence:siep01:{ordinal}",
@@ -89,7 +158,7 @@ def typed_slice(slice_ref: str, ordinal: int) -> dict[str, Any]:
         "concurrency_posture": "parallel_safe",
         "declared_component_refs": ["component:engineering-passport"],
         "declared_plan_step_refs": [f"step:siep01:{ordinal}"],
-        "declared_resource_refs": ["resource:canonical-ledgers"],
+        "declared_resource_refs": [f"resource:canonical-ledgers:{ordinal}"],
         "definition_of_done": "The exact canonical execution evidence is read back.",
         "dependency_refs": [],
         "forbidden_change_refs": ["forbidden:production-mutation"],
@@ -108,6 +177,8 @@ def typed_slice(slice_ref: str, ordinal: int) -> dict[str, Any]:
         "scope_boundary": "Disposable source-test evidence only.",
         "slice_ref": slice_ref,
     }
+    row["design_contract"] = design_contract(row)
+    return row
 
 
 def typed_receipt(
@@ -321,7 +392,7 @@ def main() -> int:
                     "revision": int(source["accepted_plan"]["revision"]),
                     "digest": source["accepted_plan"]["digest"],
                 },
-                "schema_version": "engineering-slice-plan.v1",
+                "schema_version": "engineering-slice-plan.v2",
                 "slices": [typed_slice(ref, index + 1) for index, ref in enumerate(slice_refs)],
                 "work_request": {
                     "id": source["work_request"]["id"],
@@ -420,6 +491,7 @@ def main() -> int:
                         "authority": {
                             "read_only": False,
                             "capability_profile": "capability:engineering-repository-write",
+                            "environment": EXECUTION_ENVIRONMENT,
                         },
                         "adapter": {
                             "surface": "codex_desktop",
