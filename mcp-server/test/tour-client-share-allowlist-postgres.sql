@@ -140,13 +140,33 @@ begin
     'Suite 300, 1,500-3,000 SF','Ste 250 5000 SF','Suite 251-5550','251 Government St, Mobile, AL 36602',
     'Available 07.01.2027','Parking 4/1,000; 250 total; 55 covered','2700 Airport Blvd Ste 101','1901 N 12th Ave Ste 100, Pensacola, FL 32503',
     U&'Suites 300, 301 \2013 305 (2,100 \2013 6,450 RSF)','Parking: 1:250','$25/SF full service (FSG)',U&'Suite\00a0210',
-    U&'\00a0Bayside Medical Plaza\00a0',U&'4,200\202fRSF',U&'Suites\2009101\2013104',
+    U&'\00a0Bayside Medical Plaza\00a0',U&'4,200\202fRSF',U&'Suites\2009101\2013104','Renovated 2021 - 2026 (12 suites)',
+    'Available 2026 - 2027 (18 mo)','4 bldgs (1985 - 2019) 120,000 SF','Renovated 2021-2026 (12 suites)','4,200 RSF @ $28.50',
+    'Suites 201-204, 1200 SF','1,250,000 SF campus','Built 2019/2020, 1,200 SF',U&'Suites 101\2010104',
+    U&'\ff22\ff41\ff59\ff53\ff49\ff44\ff45 Medical Plaza',U&'Suite\00ad 210',U&'Available 2026\20112027','Rate @ market',
+    U&'Suites 250\20102500 SF',U&'Bayside\2028Medical Plaza','Available 2026 - 2027 12 mo leases','Sizes 1500 (300) 2000 SF',
     repeat('A',120),U&'\00a0'||repeat('A',120)||U&'\00a0','A'||repeat(U&'\00a0',10)||repeat('A',118)] loop
     if ops.tour_client_text_violation(v_needle) is not null then
       raise exception 'client value rule refused ordinary % (%)', v_needle, ops.tour_client_text_violation(v_needle);
     end if;
     if ops.tour_public_value_safe('parking',to_jsonb(v_needle)) is distinct from true then raise exception 'value-safe refused ordinary %', v_needle; end if;
   end loop;
+  -- The documented residuals (spelled-out contacts, bare domains outside the
+  -- url endings, "Suite 555-1234") are still ALLOWED, exactly as in the
+  -- JavaScript rule; the human review before a seal is their control.
+  foreach v_needle in array array[
+    'Owner Bob: two five one 555 0100','bob(at)landlord.co','landlord.realty','bayside.health','Suite 555-1234',U&'Suite 555 \2013 1234','Suite 555-1234 / Unit 555-9876'] loop
+    if ops.tour_client_text_violation(v_needle) is not null then
+      raise exception 'documented residual % changed (%)', v_needle, ops.tour_client_text_violation(v_needle);
+    end if;
+  end loop;
+  -- Normalization is the text a client reads: NFKC, formatting characters
+  -- removed, space runs collapsed, ends trimmed.
+  if ops.tour_client_text_normalize(U&'\ff22\ff41\ff59\ff53\ff49\ff44\ff45\3000Medical\00a0\00a0Plaza ') <> 'Bayside Medical Plaza'
+     or ops.tour_client_text_normalize(U&'Suite\00ad 2\200d1\20600') <> 'Suite 210'
+     or ops.tour_client_text_normalize(U&'\ff12\ff15\ff11\ff0d555') <> '251-555' then
+    raise exception 'client text normalization drifted';
+  end if;
   -- ... and contact, access and internal-note text is refused under its rule.
   for v_case in select * from (values
     ('4 per 1000. Owner Bob 251-555-0100','phone'),
@@ -196,6 +216,67 @@ begin
     ('Ste #555.0100','local_phone'),
     ('Suite 555-0100, Suite 555-0199','local_phone'),
     ('Ste 555.1234','local_phone'),
+    (U&'Owner 251\00a0555\00a00100','phone'),
+    (U&'251\2009555\20090100','phone'),
+    (U&'251\202f555\202f0100','phone'),
+    (U&'251\2013555\20130100','phone'),
+    (U&'251\2014555\20130100','phone'),
+    (U&'251 \2013 555 \2014 0100','phone'),
+    (U&'251\2011555\20110100','phone'),
+    (U&'251\2012555\20120100','phone'),
+    (U&'251\2212555\22120100','phone'),
+    (U&'251\fe63555\fe630100','phone'),
+    (U&'251\ff0d555\ff0d0100','phone'),
+    (U&'251\200d555\200d0100','phone'),
+    (U&'2\200d5\200d1\200d5\200d5\200d5\200d0\200d1\200d0\200d0','phone'),
+    (U&'251\2060555\20600100','phone'),
+    (U&'251\00ad555\00ad0100','phone'),
+    (U&'251\200c555\200c0100','phone'),
+    (U&'251\180e555\180e0100','phone'),
+    (U&'\ff12\ff15\ff11-\ff15\ff15\ff15-\ff10\ff11\ff10\ff10','phone'),
+    (U&'\ff12\ff15\ff11\ff15\ff15\ff15\ff10\ff11\ff10\ff10','phone'),
+    ('(251)555 0100','phone'),
+    ('(251) 555 0100','phone'),
+    ('(251)555-0100','phone'),
+    ('251/555/0100','phone'),
+    ('251_555_0100','phone'),
+    ('251,555,0100','phone'),
+    ('251 555 0100 ext 12','phone'),
+    ('2 5 1 5 5 5 0 1 0 0','phone'),
+    ('2-5-1-5-5-5-0-1-0-0','phone'),
+    ('25 15 55 01 00','phone'),
+    ('251 . . 555 . . 0100','phone'),
+    ('251 ( 555 ) 0100','phone'),
+    ('[251] 555-0100','local_phone'),
+    ('251.555.0100','phone'),
+    ('1-251-555-0100','phone'),
+    ('+1 251 555 0100','phone'),
+    ('+12515550100','phone'),
+    ('Suite 555-0100','local_phone'),
+    ('Rm 555-1234','local_phone'),
+    ('bob@landlord.co','email'),
+    ('bob @ landlord.co','email'),
+    (U&'bob\00a0@\00a0landlord.co','email'),
+    (U&'bob\ff20landlord.co','email'),
+    ('bob@landlord','email'),
+    ('www.bayside','url'),
+    ('http://x','url'),
+    (U&'251\2010555\20100100','phone'),
+    (U&'251\2015555\20150100','phone'),
+    (U&'251\fe58555\fe580100','phone'),
+    (U&'251\200e555\200f0100','phone'),
+    (U&'251\2061555\20640100','phone'),
+    (U&'251\feff555\feff0100','phone'),
+    (U&'cell 555\20110100','local_phone'),
+    (U&'Suite 555\22120100','local_phone'),
+    (U&'bob\fe6blandlord.co','email'),
+    ('bob@landlord_co','email'),
+    ('Call (251) 555 - 0100','phone'),
+    (U&'251\2028555\20280100','phone'),
+    (U&'251\1680555\16800100','phone'),
+    (U&'cell 555 \200d - \200d 0100','local_phone'),
+    (U&'251\221255\2212501\221200','phone'),
+    (U&'25\201015\201055\201001\201000','phone'),
     (repeat('A',121),'too_long'),
     (E'Available\nnow','control_character'),
     ('   ','empty')) x(value,rule) loop

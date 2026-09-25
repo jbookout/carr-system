@@ -5,7 +5,7 @@
  */
 
 import { CLIENT_TOUR_PACKET_COLUMNS, CLIENT_TOUR_STOP_ENVELOPE_KEYS } from "./tour-operations-contract.js";
-import { CLIENT_TEXT_MAX_CHARS, isClientRouteLabel, isClientSafeText } from "./tour-client-value-safety.js";
+import { CLIENT_TEXT_MAX_CHARS, isClientRouteLabel, isClientSafeText, normalizeClientText } from "./tour-client-value-safety.js";
 
 // 1.3.0 (V5-J303): fields are CLIENT_TOUR_FIELD_KEYS only (no per-property
 // caveat), every value passes the shared client value-safety rule, and the
@@ -57,15 +57,17 @@ function plainText(value, path, maximum = MAX_FIELD_CHARS, contactScreen = true)
 /**
  * A client field value: plain text judged by the shared client value-safety
  * rule alone, so the PDF never refuses a value the list and map show
- * ("36602-1234", "Available 03-15-2027"). It is judged twice: as stored,
- * exactly as the database and the browser share judge it, AND as the exact
- * whitespace-collapsed text this renderer prints, so nothing the PDF prints
- * has escaped the rule.
+ * ("36602-1234", "Available 03-15-2027"). The renderer prints exactly the
+ * text that rule judged -- normalizeClientText(value): NFKC, invisible
+ * formatting characters removed, space runs collapsed -- so nothing the PDF
+ * prints has escaped the rule, and a full-width or zero-width-joined value
+ * cannot print differently from the text the database and the browser share
+ * judged.
  */
 function clientText(value, path) {
-  const text = plainText(value, path, CLIENT_TEXT_MAX_CHARS, false);
-  if (!isClientSafeText(value) || !isClientSafeText(text)) reject("tour_packet_forbidden_contact", { path });
-  return text;
+  plainText(value, path, CLIENT_TEXT_MAX_CHARS, false);
+  if (!isClientSafeText(value)) reject("tour_packet_forbidden_contact", { path });
+  return normalizeClientText(value);
 }
 
 // Accepts the canonical "Z" form unchanged, and the "+HH:MM" form that
