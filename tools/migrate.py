@@ -342,14 +342,14 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0617_delivery_cadence_a05.sql",
         "0618_delivery_cadence_a05_scac_successor.sql",
     ),
-    # DoctorCRE v5 slice done-record: 0619 installs the automated marker's
+    # DoctorCRE v5 slice done-record: 0626 installs the automated marker's
     # SECURITY DEFINER doors (catalog registration, allowlisted binding,
-    # release membership, auto completion, partner hold); 0620 seals that
-    # catalog as v76, chained from main's v75 (0618). One transaction, so
+    # release membership, completion proposal, partner confirm, hold); 0627 seals
+    # that catalog as v77, chained from main's v76 (0625). One transaction, so
     # production is never left between a drifted live catalog and its seal.
     (
-        "0619_doctorcre_slice_done_marker.sql",
-        "0620_doctorcre_slice_done_marker_scac_successor.sql",
+        "0626_doctorcre_slice_done_marker.sql",
+        "0627_doctorcre_slice_done_marker_scac_successor.sql",
     ),
 )
 
@@ -403,8 +403,8 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0618_delivery_cadence_a05_scac_successor.sql",
     ),
     (
-        "0619_doctorcre_slice_done_marker.sql",
-        "0620_doctorcre_slice_done_marker_scac_successor.sql",
+        "0626_doctorcre_slice_done_marker.sql",
+        "0627_doctorcre_slice_done_marker_scac_successor.sql",
     ),
 )
 

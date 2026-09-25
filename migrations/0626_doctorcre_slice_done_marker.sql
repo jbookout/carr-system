@@ -1,4 +1,4 @@
--- 0619_doctorcre_slice_done_marker.sql
+-- 0626_doctorcre_slice_done_marker.sql
 --
 -- DoctorCRE v5 slice done-record: make it fire.
 --

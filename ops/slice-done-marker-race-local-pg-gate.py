@@ -2,7 +2,7 @@
 # ci: db-gate
 # doctrine: runbook
 """Two-connection COMMITTED race proof for the slice done-record's per-slice
-lock (migration 0619): a partner hold is never silently overridden by an
+lock (migration 0626): a partner hold is never silently overridden by an
 automated proposal or by a concurrent confirmation.
 
 One transaction cannot prove this: the loser has to observe the winner's
