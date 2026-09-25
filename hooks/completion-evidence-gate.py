@@ -331,6 +331,11 @@ WRITE_ACTION_EXACT = {
     "transition-evaluation-case",  # human-authority append-only eval lifecycle write
     "transition-execution-environment-provider",  # human-authority provider CAS/rollback lifecycle write
     "record-foundation-assurance-minimum-outcome",
+    "raise-delivery-cadence-alert",  # V5-A05: persists a durable escalation/quiet-hours
+                                       # alert row the sweep job's own state depends on;
+                                       # "raise" stays exact rather than becoming a prefix,
+                                       # since a future raise-* read must not inherit the
+                                       # class -- same reasoning as report-problem/open-incident.
 }
 HUMAN_ONLY_WRITE_ACTION_EXACT = {
     "acknowledge-ready-plan-amendment",  # WR-000126 authenticated human-only notice write.
