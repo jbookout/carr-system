@@ -1,6 +1,6 @@
 -- DoctorCRE v5 slice V5-J103: the governed correspondence store.
 --
--- Paired with 0701 (the SCAC v77 successor, chained from main's v76 at 0625) as
+-- Paired with 0701 (the SCAC v78 successor, chained from main's v77 at 0627) as
 -- one atomic group in tools/migrate.py: this file's SECURITY DEFINER writers move
 -- the live catalog, so it may never commit without its seal.
 --
