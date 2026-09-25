@@ -1263,6 +1263,16 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     return
   fi
 
+  # V5-J103: consent is read-only, drafts can never dispatch, receipts keep
+  # provenance, and no runtime role can write a read receipt yet.
+  if ! run_quiet "$LOGDIR/governed-correspondence-store-postgres.log" \
+       "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+       -f mcp-server/test/governed-correspondence-store-postgres.sql; then
+    tail -30 "$LOGDIR/governed-correspondence-store-postgres.log" >&2
+    bad migration "V5-J103 governed correspondence store PostgreSQL acceptance failed"
+    return
+  fi
+
   # Continuity bindings and append-only records need actual PostgreSQL proof.
   if ! run_quiet "$LOGDIR/codex-continuity-postgres.log" \
        "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
