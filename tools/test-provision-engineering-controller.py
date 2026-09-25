@@ -13,9 +13,10 @@ import types
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location("provision", os.path.join(HERE, "provision-engineering-controller.py"))
+assert spec and spec.loader
 pv = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pv)
-FAILED = []
+FAILED: list[str] = []
 
 
 def check(label, fn):

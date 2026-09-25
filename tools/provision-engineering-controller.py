@@ -134,7 +134,7 @@ def main(argv) -> int:
         print(f"stopped: {exc}", file=sys.stderr)
         return 1
     finally:
-        token = None  # noqa: F841 — drop the only reference as soon as both sides hold it
+        del token  # drop the only reference as soon as both sides hold it
     if a.no_verify:
         return 0
     ok, detail = verify()
