@@ -188,7 +188,15 @@
     "Door-to-door 250 ft",
     "The Pines, 1,200 SF",
     "Florida Keys 1,200 SF",
-    "Suites 250 - 300 - 4500 SF"
+    "Suites 250 - 300 - 4500 SF",
+    "Gate at 2200 Airport Blvd",
+    "Access from 3700 Dauphin St",
+    "Main entrance faces 4400 Bayou Blvd",
+    "Keys to 1200 Duval St",
+    "Access to 1200 parking spaces",
+    "Security dep 2500",
+    "555 0100",
+    "Door open 1200 hours"
   ],
   "refused": [
     ["4 per 1000. Owner Bob 251-555-0100","phone"],
@@ -515,7 +523,19 @@
     ["Gate 247","access_code"],
     ["bit . ly/abc","url"],
     ["joe . realtor","url"],
-    ["Book at joebookout.realtor","url"]
+    ["Book at joebookout.realtor","url"],
+    ["Rear gate 4411; 25 spaces","access_code"],
+    ["Garage gate 4411 - 40 spaces","access_code"],
+    ["Gated lot, gate 4411 - 40 spaces","access_code"],
+    ["Garage: gate 4411 / 300 spaces","access_code"],
+    ["Enter at gate 4411 - 60 spaces","access_code"],
+    ["Keypad 4411 door on left","access_code"],
+    ["Code 4411 - units B & C","access_code"],
+    ["Call 555 0100","local_phone"],
+    ["Cell 555 0100","local_phone"],
+    ["Office 555 0100","local_phone"],
+    ["Mobile 555 0100","local_phone"],
+    ["Gate at 4411","access_code"]
   ],
   "_comment_residual": "Documented residuals: contact text the rule deliberately does not catch -- digits spelled out or swapped for look-alike letters, internal notes written in plain English, internal notes written in plain English, internal notes written in plain English, internal notes written in plain English, internal notes written in plain English, and a suite word before a dash pair whose second number has no leading zero. Both engines must still ALLOW each one, so a change to any of them is visible; the human review before a seal is their control. An access code written before its trigger word (\"4411 at the gate\") is a documented residual: the rule reads a trigger word, then the digits.",
   "residual": [
@@ -552,6 +572,9 @@
     ["PO Box 1234","access_code"],
     ["Bldg 100-200 - 3500 SF","local_phone"],
     ["Entry 2026","access_code"],
-    ["Access in 2027","access_code"]
+    ["Access in 2027","access_code"],
+    ["Gates 100 Office Park","access_code"],
+    ["Box 1200","access_code"],
+    ["Access: 2027","access_code"]
   ]
 }

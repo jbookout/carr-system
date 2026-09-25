@@ -108,6 +108,17 @@ export function adversarialRefused() {
   out.push("Area code 4411", "Area code 44 11", "Area code 441-1", "Zip code 4411", "ZIP code 4411 at gate", "Zip code 3660");
   // A unit word must be a whole word to make a measure.
   out.push("Gate 4411 access road", "Code 4411 sfx", "Door 4411 feeding", "Key 4411 spacer");
+  // A place word or a count after the code does not make it a measure: only a
+  // number directly followed by a measure unit is one.
+  out.push("Rear gate 4411; 25 spaces", "Garage gate 4411 - 40 spaces", "Gated lot, gate 4411 - 40 spaces", "Garage: gate 4411 / 300 spaces",
+    "Enter at gate 4411 - 60 spaces", "Keypad 4411 door on left", "Code 4411 - units B & C", "Gate 4411, door 5566", "Keypad: 4411 doors unlock 7am",
+    "Gate 4411 - 2 doors down", "Gate: 4411 (spaces in back)", "Door 4411 / units 3-4", "Gate at 4411", "Gate at 4411 today");
+  for (const place of ["units", "unit", "doors", "door", "docks", "dock"]) out.push(`Gate 4411 ${place}`);
+  // A contact word before a seven-digit number: any short separator.
+  for (const word of ["Call", "Cell", "Text", "Phone", "Tel", "Mobile", "Office", "Fax", "Ph"]) {
+    for (const sep of [" ", "/", " # ", "_", ".", " - ", ""]) out.push(`${word} 555${sep}0100`);
+    out.push(`${word}: 555 0100`);
+  }
   // A code-book name exempts only a bare year, never a code.
   out.push("Building code 4411", "Fire code: 4411", "Zoning code #20145");
   // Phones: every separator between 3-3-4 groups, tight, spaced and doubled.
@@ -152,7 +163,11 @@ export function adversarialAllowed() {
     "Suites 250, 300, 4500 total", "Suites 250 to 300 of 1200 total", "Garage closes 2200 nightly", "Westgate 2100 Building");
   // Every unit, after a code-shaped number, makes a measure.
   for (const unit of ["SF", "RSF", "USF", "sq ft", "sqft", "square feet", "ft", "feet", "foot", "spaces", "space", "stalls", "stall", "acres", "acre", "ac",
-    "units", "unit", "seats", "seat", "doors", "door", "docks", "dock", "psf", "mo", "yr"]) out.push(`Gate 4411 ${unit}`, `Suites 250 - 300 - 4500 ${unit}`);
+    "seats", "seat", "psf", "mo", "yr", "hours", "hrs"]) out.push(`Gate 4411 ${unit}`, `Gate 4411-${unit}`, `Suites 250 - 300 - 4500 ${unit}`);
+  // A street address after a preposition, or a money word, is not a code.
+  out.push("Gate at 2200 Airport Blvd", "Access from 3700 Dauphin St", "Main entrance faces 4400 Bayou Blvd", "Keys to 1200 Duval St",
+    "Doors open at 1200 Government St", "Access at 3280 Dauphin Island Pkwy", "Pad sites with access to 1600 E Nine Mile Rd", "Entrance on 1200 block of Dauphin",
+    "Security dep 2500", "Security: first month 2500", "Gate on 1200 Oak Ave", "Access off 900 Hwy 98", "Entrance near 400 Main St", "Access via 2100 Spring Hill Ave", "Key East 300 Water St", "Gate north 250 Royal St", "Entry south 1400 Beach Blvd", "Garage 400 reserved spaces", "Access to 200 surface spaces", "Near Hotel 250 1500 rooms", "Access to 1200 parking spaces", "Key West 1200 Duval St", "Garage 300 covered spaces", "Door open 1200 hours", "Available Q1 2027, keys at 2026 signing", "Office 200 1500 SF", "555 0100");
   // Rates, ratios, dates and lists.
   out.push("$18/SF/yr", "Suite 200/210", "Floors 2/3", "3/1000 SF parking ratio", "Available 10/1/2026", "NNN $6.50/SF",
     "$24.00/sq.ft/yr NNN", "$1.25/sq.ft/mo", "Suites 201-204, 1200 SF", "1,000 SF", "120,000 SF", "Rooms 301, 302 (1200 SF)");
