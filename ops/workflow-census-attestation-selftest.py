@@ -186,15 +186,17 @@ def main() -> int:
     check("the attested claim names the principal and the server time and states its limits",
           good.get("claim", "").startswith(f"recorded under principal {WRITER} at server time ")
           and "chain intact as served, and its head is the head the external anchor holds, "
-              "which moves only to the next linked row;" in good["claim"]
+              "which moves only to the next linked row the Worker itself inserted;" in good["claim"]
           and "re-anchored" not in good["claim"]
           and "not proof that the scheduled writer job wrote it" in good["claim"]
           and "not proof that the observations inside it are true" in good["claim"]
-          and "not proof against a database owner who also replaces the door that serves the "
-              "chain" in good["claim"]
+          and "not proof against a database owner who also replaces the doors that write or "
+              "serve the chain" in good["claim"]
           and "not proof against a coordinated database-owner plus anchor rewrite" in good["claim"]
-          and good["claim"].endswith("not proof against a partner-authority re-anchor of a "
-                                     "forged chain"),
+          and good["claim"].endswith("not proof against a re-anchor of a forged chain under "
+                                     "partner authority, which a partner's local agent credential "
+                                     "also carries: a re-anchor is recorded and named here, detected but "
+                                     "not prevented"),
           good.get("claim", ""))
     vocabulary = [good["reason"], good["item_disposition"],
                   good["claim"].replace(WRITER, "").replace(good["attestation"]["recorded_at"], "")]

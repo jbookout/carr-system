@@ -61,7 +61,12 @@
 --      linked row ahead (a write that committed but was never anchored; the
 --      writer's retry of the same idempotency key replays that row and
 --      re-advances the anchor), `workflow_census_tampered` for any other
---      disagreement. The read verb returns the anchor beside the chain and the
+--      disagreement. A replay alone never moves the anchor: the Worker
+--      registers each row this door INSERTS (replayed = false) with the
+--      anchor as the pending head for its key before the transaction commits,
+--      and the anchor advances only to a row equal to that entry. A row the
+--      owner wrote under some key and the door merely replays therefore stays
+--      an anchor gap (mcp-server/src/workflow-census-anchor.js, R3-C1). The read verb returns the anchor beside the chain and the
 --      reader refuses a chain whose head does not match it.
 --   6. RE-ANCHOR ON THE RECORD. When the two legitimately disagree (the key of
 --      an unanchored row was lost; a database restore), the only way forward
@@ -318,7 +323,8 @@ begin
 
   -- THE DATABASE HEAD MUST BE THE ANCHORED HEAD. Checked after the replay
   -- branch above, so the writer's retry of a committed-but-unanchored row
-  -- still replays it (and the Worker then re-advances the anchor).
+  -- still replays it (and the Worker then re-advances the anchor, which
+  -- takes it only because the Worker registered that row when it inserted it).
   if p_anchor_seq is null then
     if v_found then
       raise exception 'workflow_census_tampered' using detail = 'anchor_absent_with_rows';

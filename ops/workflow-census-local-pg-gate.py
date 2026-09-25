@@ -53,6 +53,13 @@ WHAT IT PROVES, each by a refusal or a verdict on real rows:
      reads anchor_gap; the door refuses any other write meanwhile; the writer's
      retry of the SAME key replays the row, advances the anchor and the chain
      attests again, and a later retry of it answers replayed.
+ 12. R3-C1, REPLAY LAUNDERING: the owner forges a row linked to the anchored
+     head under key K (triggers off, then back ENABLE ALWAYS) and the writer
+     calls the door with K; the door replays the forged row, the Worker
+     registers nothing for a replay, the anchor refuses it
+     (anchor_pending_missing_refused) and stays where it was, and the reader
+     says anchor_gap -- while 10's genuine crash gap still recovers because
+     its pending entry exists.
  11. The re-anchor door runs only as carr_authority with a verified partner,
      refuses a moved or unneeded head, records a receipt with the rows the
      anchor never vouched for, and once applied the chain attests with the
@@ -135,8 +142,11 @@ const m = await import(process.argv[1]);
 const input = JSON.parse(process.argv[2]);
 const now = "2026-09-24T00:00:00.000Z";
 const out = input.kind === "advance"
-  ? m.decideAnchorAdvance(input.stored, input.proposed, now, seq => input.history[String(seq)])
-  : m.decideAnchorReanchor(input.stored, input.last, input.receipt, now);
+  ? m.decideAnchorAdvance(input.stored, input.proposed, now, seq => input.history[String(seq)],
+      key => input.pending[key])
+  : input.kind === "pending"
+    ? m.decidePendingRegister(input.stored, input.pending, input.proposed, now)
+    : m.decideAnchorReanchor(input.stored, input.last, input.receipt, now);
 process.stdout.write(JSON.stringify(out));
 """
 
@@ -148,6 +158,7 @@ class Anchor:
         self.stored: dict[str, Any] | None = None
         self.history: dict[str, str] = {}
         self.last: dict[str, Any] | None = None
+        self.pending: dict[str, dict[str, Any]] = {}
 
     def _decide(self, payload: dict[str, Any]) -> dict[str, Any]:
         proc = subprocess.run(["node", "--input-type=module", "-e", _DECIDE, ANCHOR_MODULE.as_uri(),
@@ -156,12 +167,29 @@ class Anchor:
             raise RuntimeError(f"the anchor module did not run under node: {proc.stderr[-300:]}")
         return json.loads(proc.stdout)
 
-    def advance(self, seq: int, row_hash: str, prev_hash: str | None) -> dict[str, Any]:
+    def register(self, seq: int, row_hash: str, prev_hash: str | None, key: str) -> dict[str, Any]:
+        """The Worker's pre-commit step for a FRESH insert (the object's /pending route)."""
+        verdict = self._decide({"kind": "pending", "stored": self.stored, "pending": self.pending,
+                                "proposed": {"seq": seq, "row_hash": row_hash, "prev_hash": prev_hash,
+                                             "idempotency_key": key}})
+        if verdict.get("write"):
+            for dead in verdict["prune"]:
+                self.pending.pop(dead, None)
+            self.pending[verdict["key"]] = verdict["entry"]
+        return verdict["response"]
+
+    def advance(self, seq: int, row_hash: str, prev_hash: str | None,
+                key: str | None = None) -> dict[str, Any]:
+        proposed: dict[str, Any] = {"seq": seq, "row_hash": row_hash, "prev_hash": prev_hash}
+        if key is not None:
+            proposed["idempotency_key"] = key
         verdict = self._decide({"kind": "advance", "stored": self.stored, "history": self.history,
-                                "proposed": {"seq": seq, "row_hash": row_hash, "prev_hash": prev_hash}})
+                                "pending": self.pending, "proposed": proposed})
         if verdict.get("write"):
             self.stored = verdict["head"]
             self.history[str(seq)] = row_hash
+            self.pending = {k: e for k, e in self.pending.items()
+                            if k != verdict["clear"] and e.get("seq", 0) > seq}
         return verdict["response"]
 
     def reanchor(self, receipt: dict[str, Any]) -> dict[str, Any]:
@@ -169,6 +197,7 @@ class Anchor:
                                 "receipt": receipt})
         if verdict.get("write"):
             self.stored, self.last = verdict["head"], verdict["record"]
+            self.pending = {}
             self.history = {} if verdict["head"] is None else {
                 str(verdict["head"]["seq"]): verdict["head"]["row_hash"]}
         return verdict["response"]
@@ -182,10 +211,10 @@ class Anchor:
         return (None, None) if self.stored is None else (self.stored["seq"], self.stored["row_hash"])
 
     def snapshot(self) -> tuple[Any, ...]:
-        return copy.deepcopy((self.stored, self.history, self.last))
+        return copy.deepcopy((self.stored, self.history, self.last, self.pending))
 
     def restore(self, state: tuple[Any, ...]) -> None:
-        self.stored, self.history, self.last = copy.deepcopy(state)
+        self.stored, self.history, self.last, self.pending = copy.deepcopy(state)
 
 
 ANCHOR = Anchor()
@@ -210,18 +239,25 @@ def actor(cur: psycopg.Cursor[Any], slug: str | None) -> None:
 def record(cur: psycopg.Cursor[Any], payload: Any = None, key: str | None = None, *,
            crash: bool = False) -> tuple[Any, ...]:
     """The Worker's write path: read the anchor, call the door with its head,
-    then (unless the Worker "crashes" between commit and advance) advance the
-    anchor to the committed row, and refuse by name if it will not advance."""
+    register a FRESH insert as the anchor's pending head under its key (before
+    commit; a replay registers nothing), then (unless the Worker "crashes"
+    between commit and advance) advance the anchor to the committed row under
+    the same key, and refuse by name if it will not advance."""
     anchor_seq, anchor_hash = ANCHOR.head_params()
+    key = key or str(uuid.uuid4())
     row = cur.execute(
         "select seq, recorded_at, principal, row_hash, prev_hash, payload_sha256, replayed "
         "from ops.record_workflow_census(%s, %s, %s, %s)",
-        (Jsonb(CENSUS if payload is None else payload), key or str(uuid.uuid4()), anchor_seq, anchor_hash),
+        (Jsonb(CENSUS if payload is None else payload), key, anchor_seq, anchor_hash),
     ).fetchone()
     if row is None:
         raise RuntimeError("record_workflow_census returned no row")
+    if row[6] is not True:
+        pending = ANCHOR.register(row[0], row[3], row[4], key)
+        if pending.get("ok") is not True:
+            raise RuntimeError(f"workflow_census_anchor_pending_refused: {pending}")
     if not crash:
-        answer = ANCHOR.advance(row[0], row[3], row[4])
+        answer = ANCHOR.advance(row[0], row[3], row[4], key)
         if answer.get("ok") is not True:
             raise RuntimeError(f"workflow_census_anchor_not_advanced: {answer}")
     return row
@@ -293,7 +329,7 @@ def expect_refusal(cur: psycopg.Cursor[Any], fn: Callable[[], object],
 def owner_insert(cur: psycopg.Cursor[Any], seq: int, prev: str | None, at_sql: str, *,
                  principal: str | None = None, session: str | None = None,
                  payload: Any = None, payload_sha: str | None = None,
-                 forged_row_hash: str | None = None) -> object:
+                 forged_row_hash: str | None = None, key: str | None = None) -> object:
     """An owner-level INSERT that skips the door, hashed genuinely unless told not to.
     principal/session default to the session's own (what the guard demands)."""
     return cur.execute(
@@ -313,7 +349,7 @@ def owner_insert(cur: psycopg.Cursor[Any], seq: int, prev: str | None, at_sql: s
               from v""",
         {"seq": seq, "prev": prev, "p": principal, "s": session,
          "payload": Jsonb(FORGED if payload is None else payload),
-         "ps": payload_sha, "rh": forged_row_hash, "key": str(uuid.uuid4())})
+         "ps": payload_sha, "rh": forged_row_hash, "key": key or str(uuid.uuid4())})
 
 
 def head(cur: psycopg.Cursor[Any]) -> tuple[int, str]:
@@ -647,6 +683,41 @@ def main() -> int:
             if recovered.get("available") is not True or recovered["attestation"]["seq"] != following[0]:
                 raise RuntimeError(f"the chain did not attest after the retry: {recovered}")
 
+            # 12. R3-C1 REPLAY LAUNDERING: a forged row linked to the anchored head,
+            # stored under key K, then the writer's ordinary call with K.
+            saved = ANCHOR.snapshot()
+            cur.execute("savepoint replay_laundering")
+            anchored_before = ANCHOR.head_params()
+            real_head = head(cur)
+            if (real_head[0], real_head[1]) != anchored_before:
+                raise RuntimeError(f"replay laundering must start anchored: {real_head} / {anchored_before}")
+            laundered_key = str(uuid.uuid4())
+            actor(cur, WRITER)
+            cur.execute("alter table ops.workflow_census_record disable trigger user")
+            owner_insert(cur, real_head[0] + 1, real_head[1], "clock_timestamp()", principal=WRITER,
+                         session=WRITER_LOGIN, payload=CENSUS, key=laundered_key)
+            for name in GUARDS:
+                cur.execute(f"alter table ops.workflow_census_record enable always trigger {name}")
+            forged_row = head(cur)
+            become(cur, WRITER_LOGIN)
+            actor(cur, WRITER)
+            door_answer = cur.execute(
+                "select seq, row_hash, replayed from ops.record_workflow_census(%s, %s, %s, %s)",
+                (Jsonb(CENSUS), laundered_key, anchored_before[0], anchored_before[1])).fetchone()
+            expect_refusal(cur, lambda: record(cur, key=laundered_key), (RuntimeError,),
+                           "anchor_pending_missing_refused", "replay_laundering_same_key")
+            become(cur, None)
+            anchored_after = ANCHOR.head_params()
+            laundered = verdict_of(cur)
+            cur.execute("rollback to savepoint replay_laundering")
+            ANCHOR.restore(saved)
+            if door_answer is None or door_answer[2] is not True or door_answer[1] != forged_row[1]:
+                raise RuntimeError(f"the door did not replay the forged row under its key: {door_answer}")
+            if anchored_after != anchored_before:
+                raise RuntimeError(f"a replayed forged row moved the anchor: {anchored_before} -> {anchored_after}")
+            if (laundered.get("available"), laundered.get("reason")) != (False, "anchor_gap"):
+                raise RuntimeError(f"a replayed forged row did not leave the reader at anchor_gap: {laundered}")
+
             # 11. RE-ANCHOR: a crash whose key is lost, closed only by partner authority.
             saved = ANCHOR.snapshot()
             cur.execute("savepoint reanchor")
@@ -713,7 +784,8 @@ def main() -> int:
               "forge identity, splice, back-date, future-date or forge a digest are refused with every "
               "trigger on; guards are ENABLE ALWAYS and a flipped guard, a replaced guard body or a "
               "wholesale rewrite reads tampered and stays tampered through the next write; a crash "
-              "gap reads anchor_gap until the same-key retry, then attests; a re-anchor needs "
+              "gap reads anchor_gap until the same-key retry, then attests; a forged linked row replayed "
+              "under its key moves nothing and reads anchor_gap; a re-anchor needs "
               "carr_authority and a verified partner and leaves a named receipt; freshness and "
               "truncation follow the database")
         return 0

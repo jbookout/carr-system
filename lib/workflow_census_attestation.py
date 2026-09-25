@@ -13,8 +13,11 @@ principal and a listed database login role; the store's three guard triggers
 are ENABLE ALWAYS and each still calls the function source pinned in config;
 and the chain's head equals the head held by the external anchor (a Durable
 Object, ``mcp-server/src/workflow-census-anchor.js``), which only ever moves
-to the next linked row (seq + 1 whose prev_hash is the anchored row_hash) or,
-on the record, by a partner-authority re-anchor receipt.
+to the next linked row (seq + 1 whose prev_hash is the anchored row_hash) that
+the Worker itself inserted -- registered as the pending head for its
+idempotency key before the insert committed, so a row the write door merely
+replays cannot move it -- or, on the record, by a partner-authority re-anchor
+receipt.
 
 WHAT IT DOES NOT MEAN.
   * The census is not proven TRUE: the scheduler observations, acceptance rows
@@ -26,11 +29,17 @@ WHAT IT DOES NOT MEAN.
   * It is not proof against a COORDINATED rewrite: someone holding the database
     owner role AND able to deploy Worker code that rewrites the anchor could
     replace both consistently.  Nor against an owner who also replaces the
-    database door that serves the chain, so it answers with the anchored
-    chain while the stored rows differ: every check here runs over what that
-    door serves.  Nor against a partner who re-anchors a forged chain: that act
-    leaves a receipt and the anchor then names it (``last_reanchor``), but it
-    is not prevented.
+    database doors that write or serve the chain: a replaced read door can
+    answer with the anchored chain while the stored rows differ (every check
+    here runs over what that door serves), and a replaced write door can report
+    a forged row as a fresh insert.  Nor against a re-anchor of a forged chain
+    by anyone holding partner authority -- which is not only the two partners:
+    the server grants it to each partner's sponsored agent credentials too
+    (``partner-authority.js``: codex, claude, joe-local, dell-local under a
+    verified sponsor), so whoever holds a partner's local agent token can
+    re-anchor.  That act leaves a receipt naming the actor and the sponsor, and
+    the anchor then names it (``last_reanchor``) in every later claim: it is
+    detected, not prevented.
 Every output label below is chosen to say "attested record", never a health
 word, and the ``claim`` sentence says the three limits out loud.
 
@@ -348,12 +357,14 @@ def verify_census_chain(answer: Any, config: Mapping[str, Any]) -> dict[str, Any
         "item_disposition": DISPOSITION_ATTESTED,
         "claim": (f"recorded under principal {latest['principal']} at server time "
                   f"{latest['recorded_at']}; chain intact as served, and its head is the head "
-                  "the external anchor holds, which moves only to the next linked row"
-                  f"{reanchor_clause}; not proof that the scheduled writer job wrote it, not "
-                  "proof that the observations inside it are true, not proof against a database "
-                  "owner who also replaces the door that serves the chain, not proof against a "
-                  "coordinated database-owner plus anchor rewrite, and not proof against a "
-                  "partner-authority re-anchor of a forged chain"),
+                  "the external anchor holds, which moves only to the next linked row the Worker "
+                  f"itself inserted{reanchor_clause}; not proof that the scheduled writer job wrote "
+                  "it, not proof that the observations inside it are true, not proof against a "
+                  "database owner who also replaces the doors that write or serve the chain, not "
+                  "proof against a coordinated database-owner plus anchor rewrite, and not proof "
+                  "against a re-anchor of a forged chain under partner authority, which a partner's "
+                  "local agent credential also carries: a re-anchor is recorded and named here, detected "
+                  "but not prevented"),
         "attestation": {
             "principal": latest["principal"],
             "db_session_principal": latest["db_session_principal"],

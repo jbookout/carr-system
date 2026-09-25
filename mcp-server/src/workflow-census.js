@@ -26,8 +26,13 @@
 // c.workflowCensusAnchor for these three verbs only. The record handler reads
 // it before calling the door and passes the anchored head in, and the door
 // refuses to append unless the database head is that head
-// (workflow_census_anchor_gap / workflow_census_tampered); mcp.js advances it
-// after the write commits. The read handler reads it BEFORE the chain. A path
+// (workflow_census_anchor_gap / workflow_census_tampered). A fresh insert then
+// registers its row as the anchor's pending head for its idempotency key,
+// before commit (c.workflowCensusPending, record verb only); mcp.js advances
+// the anchor after the write commits, and the anchor moves only to a row equal
+// to that key's pending entry, so a row the door merely replays -- which the
+// database owner could have written -- never moves it. The read handler reads
+// the anchor BEFORE the chain. A path
 // that attaches nothing (break-glass, a test double) gets
 // {state: "unavailable"}: the write refuses and the reader fails closed.
 //
@@ -77,8 +82,8 @@ const DOOR_REFUSALS = Object.freeze([
 
 const DOOR_HINTS = Object.freeze({
   workflow_census_anchor_gap: "the database holds one committed census row the anchor never took; " +
-    "re-send that write's idempotency_key to replay it and advance the anchor, or have a partner " +
-    "re-anchor with record-workflow-census-reanchor",
+    "re-send that write's idempotency_key to replay it and advance the anchor (it advances only if " +
+    "this Worker inserted that row), or have a partner re-anchor with record-workflow-census-reanchor",
   workflow_census_tampered: "the database head is not the head the external anchor holds; nothing " +
     "was appended. Investigate, then a partner may re-anchor with record-workflow-census-reanchor",
 });
@@ -149,6 +154,23 @@ export function workflowCensusTools({ withEnvelope, ToolError }) {
             throw doorRefusal(ToolError, error) ?? error;
           }
           if (!row?.row_hash) throw new ToolError({ error: "workflow_census_record_refused" });
+          // A FRESH insert registers itself with the anchor as the pending head
+          // for this key, still inside the transaction: the post-commit advance
+          // must equal it. A replay registers nothing, so a row the door merely
+          // handed back (one the owner could have written under this key)
+          // cannot move the anchor (R3-C1). A refusal here rolls the row back.
+          if (row.replayed !== true) {
+            const pending = typeof c.workflowCensusPending === "function"
+              ? await c.workflowCensusPending(
+                { seq: Number(row.seq), row_hash: row.row_hash, prev_hash: row.prev_hash ?? null },
+                args.idempotency_key)
+              : { ok: false, error: "anchor_not_bound" };
+            if (!pending?.ok)
+              throw new ToolError({ error: "workflow_census_anchor_pending_refused",
+                detail: String(pending?.error || "anchor_unreachable"),
+                hint: "the anchor did not take this row as its pending head, so nothing was appended; " +
+                      "re-send the same idempotency_key" });
+          }
           return {
             ok: true,
             seq: Number(row.seq),

@@ -27,9 +27,17 @@ const GUARD_FUNCTIONS = Object.freeze({ workflow_census_record_append_only: "6".
 // come from the server side, and the chain fields are computed there. The
 // fake's anchor follows its own rows, as a Worker whose advances all landed.
 class CensusFake {
-  constructor({ doorError = null, readResult = undefined, anchor = "follow" } = {}) {
+  constructor({ doorError = null, readResult = undefined, anchor = "follow", pending = "accept" } = {}) {
     this.calls = []; this.toolCalls = new Map(); this.rows = []; this.anchorReads = 0;
-    this.doorError = doorError; this.readResult = readResult;
+    this.doorError = doorError; this.readResult = readResult; this.registered = [];
+    // The anchor's pending-head registration (workflow-census-anchor.js /pending).
+    if (pending === "accept")
+      this.workflowCensusPending = async (row, key) => {
+        this.registered.push({ row, key, at: this.calls.length });
+        return { ok: true, state: "pending" };
+      };
+    else if (pending !== null)
+      this.workflowCensusPending = async (row, key) => { this.registered.push({ row, key }); return pending; };
     if (anchor === "follow") {
       this.workflowCensusAnchor = async () => {
         this.anchorReads += 1;
@@ -56,6 +64,13 @@ class CensusFake {
     if (sql.includes("ops.record_workflow_census")) {
       if (this.doorError) throw Object.assign(new Error(this.doorError), this.doorErrorDetail ?? {});
       assert.equal(params.length, 4, "the door takes the census, the key and the anchored head, nothing else");
+      // The door's replay branch: a row already stored under this key comes
+      // back as it is, marked replayed (whoever wrote it).
+      const prior = this.rows.find(r => r.key === params[1]);
+      if (prior) {
+        const { payload, key, ...row } = prior;
+        return { rows: [{ ...row, replayed: true }] };
+      }
       const seq = this.rows.length + 1;
       const row = {
         seq: String(seq), recorded_at: `2026-09-24T09:10:0${seq}.000000Z`, principal: "joe-local",
@@ -279,4 +294,41 @@ test("read-workflow-census refuses a store answer with no guard or guard-functio
     const payload = await rejected(() => executeRegisteredTool(c, AGENT, "read-workflow-census", {}));
     assert.equal(payload.error, "workflow_census_unavailable");
   }
+});
+
+test("a fresh insert registers its own row as the anchor's pending head, under its key, before returning", async () => {
+  const c = new CensusFake();
+  const out = await executeRegisteredTool(c, AGENT, "record-workflow-census",
+    { idempotency_key: "k-p1", census: structuredClone(CENSUS) });
+  assert.equal(c.registered.length, 1);
+  assert.deepEqual(c.registered[0].row, { seq: 1, row_hash: out.row_hash, prev_hash: null });
+  assert.equal(c.registered[0].key, "k-p1");
+  const doorAt = c.calls.findIndex(call => call.sql.includes("ops.record_workflow_census"));
+  assert.ok(c.registered[0].at > doorAt, "registration follows the door's insert, inside the envelope");
+});
+
+test("a row the door REPLAYS (not inserted by this call) registers nothing: it cannot move the anchor", async () => {
+  const c = new CensusFake();
+  // The owner's forged row, stored under key K with no envelope record.
+  c.rows.push({ seq: "1", recorded_at: "2026-09-24T09:10:01.000000Z", principal: "joe-local",
+    row_hash: "f".repeat(64), prev_hash: null, payload_sha256: "a".repeat(64), replayed: false,
+    payload: structuredClone(CENSUS), key: "K" });
+  const out = await executeRegisteredTool(c, AGENT, "record-workflow-census",
+    { idempotency_key: "K", census: structuredClone(CENSUS) });
+  assert.equal(out.replayed, true);
+  assert.equal(out.row_hash, "f".repeat(64));
+  assert.equal(c.registered.length, 0, "a replay registers no pending head");
+});
+
+test("an anchor that refuses the pending head refuses the write by name, so the row rolls back", async () => {
+  const c = new CensusFake({ pending: { ok: false, error: "anchor_pending_unlinked_refused" } });
+  const refusal = await rejected(() => executeRegisteredTool(c, AGENT, "record-workflow-census",
+    { idempotency_key: "k-p2", census: structuredClone(CENSUS) }));
+  assert.equal(refusal.error, "workflow_census_anchor_pending_refused");
+  assert.equal(refusal.detail, "anchor_pending_unlinked_refused");
+  const unbound = new CensusFake({ pending: null });
+  const missing = await rejected(() => executeRegisteredTool(unbound, AGENT, "record-workflow-census",
+    { idempotency_key: "k-p3", census: structuredClone(CENSUS) }));
+  assert.equal(missing.error, "workflow_census_anchor_pending_refused");
+  assert.equal(missing.detail, "anchor_not_bound");
 });

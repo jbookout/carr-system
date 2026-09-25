@@ -41,14 +41,16 @@ WHAT ``available: true`` CLAIMS, AND THE LABELS ARE CHOSEN SO IT CANNOT SAY
 MORE.  Reason ``census_attested``, disposition ``attested_record_only``, and a
 ``claim`` sentence: recorded under principal <X> at server time <T>; chain
 intact as served, and its head is the head the external anchor holds, which
-moves only to the next linked row (plus the last re-anchor receipt, when there
-is one); not proof that the scheduled writer job wrote it (the principal is a
-bearer token's actor, and the local token on the writer's Mac is readable by
-anything running as that user), not proof that the observations inside it are
-true, not proof against a database owner who also replaces the door that
-serves the chain, not proof against a coordinated database-owner plus anchor
-rewrite, and not proof against a partner-authority re-anchor of a forged
-chain.  The A01 label route
+moves only to the next linked row the Worker itself inserted (plus the last
+re-anchor receipt, when there is one); not proof that the scheduled writer job
+wrote it (the principal is a bearer token's actor, and the local token on the
+writer's Mac is readable by anything running as that user), not proof that the
+observations inside it are true, not proof against a database owner who also
+replaces the doors that write or serve the chain, not proof against a
+coordinated database-owner plus anchor rewrite, and not proof against a
+re-anchor of a forged chain under partner authority, which a partner's local
+agent credential also carries (recorded and named in the claim: detected,
+not prevented).  The A01 label route
 (``lib/assurance_health_sources``) still derives no health label from it.
 
 ONE RE-READ, FOR ONE RACE.  The read verb reads the anchor before the chain, so

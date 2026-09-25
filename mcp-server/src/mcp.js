@@ -26,7 +26,8 @@ import { jevAskBinding, prefetchJevAnswer } from "./jev-call-receipt.js";
 import { foundationAssuranceSeatConnection } from
   "./foundation-assurance-seat-connection.v5.js";
 import { stampedGitSha } from "./build-stamp.js";
-import { anchorCommittedCensusWrite, applyCommittedCensusReanchor, readWorkflowCensusAnchor } from "./workflow-census-anchor.js";
+import { anchorCommittedCensusWrite, applyCommittedCensusReanchor, readWorkflowCensusAnchor,
+  registerWorkflowCensusPending } from "./workflow-census-anchor.js";
 import { parksADecision, classifyLoopText, needsDecider, loopRowText,
          ESCALATION_REASON, BLOCKER_DECIDER_REASON } from "./verb-gate-checks.js";
 import { controllerOperationInput, controllerToolList, isEngineeringControllerActor,
@@ -926,6 +927,10 @@ export async function callTool(env, actor, name, args, profile = "full") {
   // before their door, which refuses unless the database head matches it.
   if (name === "record-workflow-census" || name === "record-workflow-census-reanchor")
     client.workflowCensusAnchor = () => readWorkflowCensusAnchor(env);
+  // Before commit, the census write registers the row the door INSERTED as the
+  // anchor's pending head; the post-commit advance must equal it (R3-C1).
+  if (name === "record-workflow-census")
+    client.workflowCensusPending = (row, key) => registerWorkflowCensusPending(env, row, key);
   // The answer prefetched above, outside the transaction; the handler only
   // appends the receipt.
   if (tool.jevProxy === true && jevPrefetched)
@@ -961,7 +966,8 @@ export async function callTool(env, actor, name, args, profile = "full") {
     // advance is reported by name: the row is committed, and re-sending the
     // same idempotency_key replays it and re-advances the anchor.
     if (name === "record-workflow-census")
-      return await anchorCommittedCensusWrite(env, result, payload => new ToolError(payload));
+      return await anchorCommittedCensusWrite(env, result, payload => new ToolError(payload),
+        args?.idempotency_key);
     // The re-anchor receipt is committed first, then applied to the anchor as
     // a compare-and-set on the old head it names.
     if (name === "record-workflow-census-reanchor")
