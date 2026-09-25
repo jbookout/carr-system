@@ -26,7 +26,13 @@ by the new one.
 
 MESSAGE SEMANTICS (loop 620). The same module is also wired once at
 UserPromptSubmit, the earliest seam that carries the partner's actual message.
-Jev judges which pack-layer rules bind that message; code rejects unknown and
+Which pack-layer rules bind that message is decided in
+ops/rule_trigger_delivery.py: the `prompt_regex` rows Jev compiled once per
+rule are matched first; a machine envelope stops there with zero Jev
+requests, and a human prompt then gets one budgeted judgment (a ranking plus
+single-rule binding requests for its top 7, stale rules always included; a
+deterministic word-overlap shortlist stands in when the ranking request is
+unavailable) — at most 8 Jev requests per human prompt; code rejects unknown and
 already-loaded layer-zero candidates; the existing authenticated
 standing-context door supplies the authoritative rule text and identity before
 one typed advisory receipt is injected. The content_regex rows no longer run
@@ -53,6 +59,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Callable, TypeGuard
 
@@ -94,6 +101,22 @@ PATH_INPUT_KEYS = ("file_path", "path", "notebook_path")
 # structure and reject above it rather than judging only a prompt's edges while
 # issuing a receipt that appears to cover the whole message.
 MESSAGE_LIMIT_CHARS = 90_000
+
+# ONE CLOCK FOR THE WHOLE PROMPT HOOK. ops/config/hooks.json kills this hook at
+# 20 s, and a killed hook delivers nothing. The three slow steps run in order
+# — the build advisory (ops/jev_build_advisory.py: one attempt, at most 6 s,
+# no rate-limit retries), the rule judgment (ops/rule_trigger_delivery.py:
+# its own 12 s clock, cut short here so SELECTOR_RESERVE_SECONDS stay for the
+# last step), and the standing-context door — and all of them end by
+# HOOK_BUDGET_SECONDS after the process started, leaving ~2 s for the
+# interpreter and the receipt.
+HOOK_BUDGET_SECONDS = 18.0
+SELECTOR_RESERVE_SECONDS = 4.0
+_HOOK_STARTED = time.monotonic()
+
+
+def _hook_deadline() -> float:
+    return _HOOK_STARTED + HOOK_BUDGET_SECONDS
 
 
 def scheduled_rule_ids() -> list[str]:
@@ -301,8 +324,9 @@ def _generalized_selector_args(packs: list[str], ids: list[str]) -> str:
 def _run_generalized_selector(packs: list[str], ids: list[str], runner: Callable) -> dict:
     command = [str(REPO / "run.sh"), "call", "standing-context",
                _generalized_selector_args(packs, ids)]
+    timeout = max(1.0, min(15.0, _hook_deadline() - time.monotonic()))
     result = runner(command, cwd=str(REPO), capture_output=True, text=True,
-                    timeout=15, check=False, env=_selector_environment())
+                    timeout=timeout, check=False, env=_selector_environment())
     if result.returncode != 0:
         raise RuntimeError("selector returned nonzero")
     try:
@@ -374,15 +398,19 @@ def _generalized_receipt(payload: dict, response: dict, trigger_ids: list[str],
 
 
 def _semantic_adviser(situation: str, session_id: str | None = None) -> list[dict]:
-    # The verdict cache is keyed on the hook payload's own session_id; with
-    # none it is off (ops/jev_rule_select.py _session_id), never pooled.
-    path = REPO / "ops/jev_rule_select.py"
-    spec = importlib.util.spec_from_file_location("jev_rule_select_live", path)
+    # Compiled-trigger match, then (human prompts only) one budgeted Jev
+    # judgment of at most 8 requests (ops/rule_trigger_delivery.py). The
+    # session is the hook payload's own session_id; with none, nothing is
+    # deduped or pooled.
+    path = REPO / "ops/rule_trigger_delivery.py"
+    spec = importlib.util.spec_from_file_location("rule_trigger_delivery_live", path)
     if spec is None or spec.loader is None:
         raise RuntimeError("semantic selector unavailable")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.advise(situation, session_id=session_id)
+    deadline = min(time.monotonic() + module.DEADLINE_SECONDS,
+                   _hook_deadline() - SELECTOR_RESERVE_SECONDS)
+    return module.advise(situation, session_id=session_id, deadline=deadline)
 
 
 def _build_adviser(situation: str) -> dict:
@@ -497,7 +525,7 @@ def _process_prompt(payload: dict, runner: Callable,
     except Exception:
         build = _build_unavailable()
     try:
-        selected = (adviser(prompt) if adviser
+        selected = (adviser(prompt) if adviser is not None
                     else _semantic_adviser(prompt, payload["session_id"]))
         if not isinstance(selected, list):
             raise RuntimeError("semantic selector returned malformed advice")

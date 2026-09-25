@@ -226,6 +226,7 @@ class FakeGitHub:
 class Fixture:
     def __init__(self, tmp: Path):
         self.tmp = tmp
+        self.slice_marks: list[tuple[str, str]] = []
         self.origin = tmp / "origin.git"
         self.repo = tmp / "repo"
         git(tmp, "init", "--bare", "-b", "main", str(self.origin))
@@ -277,16 +278,21 @@ class Fixture:
         cfg.update(over)
         return cfg
 
-    def pipeline(self, runner, *, cfg=None, github=None, live=None, dry_run=False, verbs=None):
+    def pipeline(self, runner, *, cfg=None, github=None, live=None, dry_run=False, verbs=None,
+                 slice_marker=None):
         live = live if live is not None else {"sha": self.base}
         verbs = verbs if verbs is not None else []
+        # Step 10 never spawns the real marker here: every run records the
+        # (release_key, sha) it would have marked in self.slice_marks.
+        if slice_marker is None:
+            slice_marker = lambda key, sha: (self.slice_marks.append((key, sha)) or {"rc": 0})  # noqa: E731
         env = rp.child_env(FIXTURE_ENV)
         env.update({k: FIXTURE_ENV[k] for k in ("GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL")})
         return rp.Pipeline(cfg or self.config(), repo=self.repo, runner=runner,
                            github=lambda _r: github or FakeGitHub(),
                            http=lambda _u: {"git_sha": {"value": live["sha"]}},
                            call_verb=lambda verb, args: (verbs.append((verb, args)) or (True, {"ok": True})),
-                           dry_run=dry_run, env=env, today="2026-09-30", out=lambda _s: None)
+                           slice_marker=slice_marker, dry_run=dry_run, env=env, today="2026-09-30", out=lambda _s: None)
 
     def state(self) -> dict:
         p = self.repo / "out/release-pipeline/state.json"
@@ -396,6 +402,58 @@ class Batching(Base):
         promote = next(a for n, a in runner.calls if n == "promote")
         self.assertIn(VERSION, promote)
         self.assertEqual(runner.names().index("staging") + 1, runner.names().index("promote"))
+
+    def test_a_shipped_release_runs_the_slice_marker_once_with_its_key(self):
+        latest = self.fx.commit({"mcp-server/src/a.js": "1"})
+        live = {"sha": self.fx.base}
+        self.assertEqual(self.fx.pipeline(FakeRunner(live=live), live=live).tick(["worker"]), 0)
+        shipped = [r for r in self.fx.records() if r["status"] == "shipped"]
+        self.assertEqual(self.fx.slice_marks, [(shipped[0]["release_key"], latest)])
+        self.assertEqual(shipped[0]["slice_marker"], {"rc": 0})
+
+    def test_a_failing_slice_marker_never_fails_the_release(self):
+        latest = self.fx.commit({"mcp-server/src/a.js": "1"})
+        live = {"sha": self.fx.base}
+
+        def boom(_key, _sha):
+            raise RuntimeError("marker exploded")
+
+        rc = self.fx.pipeline(FakeRunner(live=live), live=live, slice_marker=boom).tick(["worker"])
+        self.assertEqual(rc, 0)
+        rec = self.fx.records()[-1]
+        self.assertEqual((rec["status"], rec["sha"]), ("shipped", latest))
+        self.assertEqual(self.fx.state()["worker"]["last_released_sha"], latest)
+        self.assertIn("marker exploded", rec["slice_marker"]["error"])
+
+    def test_no_slice_marker_without_a_shipped_release(self):
+        self.fx.commit({"docs/n.md": "1"})                              # doc-only: nothing released
+        self.assertEqual(self.fx.pipeline(FakeRunner()).tick(["worker"]), 0)
+        self.fx.commit({"mcp-server/src/a.js": "1"})                    # a failed release
+        self.assertEqual(self.fx.pipeline(FakeRunner(fail_at="staging-prepare")).tick(["worker"]), 1)
+        self.fx.commit({"mcp-server/src/b.js": "1"})                    # a dry run
+        self.assertEqual(self.fx.pipeline(FakeRunner(), dry_run=True).tick(["worker"]), 0)
+        self.assertEqual(self.fx.slice_marks, [])
+
+    def test_the_real_marker_is_started_detached_and_never_waited_for(self):
+        # Step 10 must not hold the single-run lock: the marker is started in
+        # its own session, its output goes to the run's log, and nothing waits
+        # on it.
+        pipe = self.fx.pipeline(FakeRunner())
+        started = mock.MagicMock(pid=4242)
+        with mock.patch.object(rp.subprocess, "Popen", return_value=started) as popen, \
+                mock.patch.object(rp.subprocess, "run") as run:
+            out = pipe._run_slice_marker("r-2026-09-30-01", "a" * 40)
+        self.assertEqual(out, {"started": True, "pid": 4242, "release_sha": "a" * 40,
+                               "log": str(pipe.run_dir / "slice-marker.log")})
+        args, kwargs = popen.call_args
+        self.assertEqual(args[0][1:], [str(self.fx.repo / "ops" / "slice-done-marker.py"),
+                                       "--release-key", "r-2026-09-30-01"])
+        self.assertIs(kwargs["start_new_session"], True)
+        self.assertIs(kwargs["stdin"], rp.subprocess.DEVNULL)
+        self.assertEqual(set(kwargs["env"]) - {"HOME", "PATH", "LANG"}, set())
+        run.assert_not_called()
+        started.wait.assert_not_called()
+        started.communicate.assert_not_called()
 
     def test_doc_only_batch_advances_without_release(self):
         latest = self.fx.commit({"docs/n.md": "3", "mcp-server/test/x.test.mjs": "t"})
@@ -1651,6 +1709,10 @@ class AppLane(Base):
         self.assertEqual(pipe.tick(["app"]), 0)
         self.assertEqual(runner.names()[:4], ["wrangler-auth", "app-worktree", "app-npm-ci", "app-release"])
         self.assertEqual(self.fx.records()[-1]["status"], "shipped")
+        # The slice marker follows Worker releases only: the app lane records
+        # no ops.release row for membership to attach to.
+        self.assertEqual(self.fx.slice_marks, [])
+        self.assertNotIn("slice_marker", self.fx.records()[-1])
 
 
 class Robustness(Base):

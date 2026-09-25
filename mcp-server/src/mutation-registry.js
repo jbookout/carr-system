@@ -4,12 +4,16 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v78 is the runtime selector after DoctorCRE V5-J103's governed
-// correspondence store (migrations 0700-0701). Its sealed catalog admits four
-// new verbs -- correspondence-readiness and read-correspondence-thread (reads),
-// and the humanOnly record- and revoke-correspondence-adapter-consent pair --
-// and preserves earlier versions as history. None of them sends: there is no
-// send verb, and a draft has no destination. It chains over #1263's v77 (0627).
+// v78 is the runtime selector after the DoctorCRE v5 slice done-record
+// (migration 0628, sealed by 0629 over v77). Its sealed catalog admits nine
+// new verbs -- register-slice-criteria-from-catalog,
+// bind-slice-criterion-evidence, record-release-slice-members,
+// propose-slice-completion, list-shipped-releases and
+// pending-slice-completion-proposals (writer/reader), and
+// rebind-slice-criterion-evidence, set-slice-mark-hold and
+// confirm-slice-completions (authorityOnly) -- and
+// register-slice-checkable-done's narrowed evidence kinds. Automation
+// proposes; only a partner confirms complete.
 //
 // Superseded note (v77): v77 was the runtime selector after DoctorCRE V5-F01's record homes, source
 // authority and document identity (migrations 0626/0627). Its sealed catalog

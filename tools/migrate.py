@@ -352,15 +352,14 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0626_f01_record_source_authority.sql",
         "0627_f01_record_source_authority_scac_successor.sql",
     ),
-    # DoctorCRE V5-J103: 0700 installs the governed correspondence store
-    # (adapter consent, read receipts, drafts with no destination) and its
-    # SECURITY DEFINER writers; 0701 seals that catalog as v78, chained from
-    # main's v77 (0627). Same deferred-epoch-trigger shape as the pairs above:
-    # 0700 applied alone would be refused at commit, so the pair must be one
-    # transaction.
+    # DoctorCRE v5 slice done-record: 0628 installs the automated marker's
+    # SECURITY DEFINER doors (catalog registration, allowlisted binding,
+    # release membership, completion proposal, partner confirm, hold); 0629 seals
+    # that catalog as v78, chained from main's v77 (0627). One transaction, so
+    # production is never left between a drifted live catalog and its seal.
     (
-        "0700_governed_correspondence_store.sql",
-        "0701_governed_correspondence_scac_successor.sql",
+        "0628_doctorcre_slice_done_marker.sql",
+        "0629_doctorcre_slice_done_marker_scac_successor.sql",
     ),
 )
 
@@ -418,8 +417,8 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0627_f01_record_source_authority_scac_successor.sql",
     ),
     (
-        "0700_governed_correspondence_store.sql",
-        "0701_governed_correspondence_scac_successor.sql",
+        "0628_doctorcre_slice_done_marker.sql",
+        "0629_doctorcre_slice_done_marker_scac_successor.sql",
     ),
 )
 

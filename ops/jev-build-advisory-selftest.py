@@ -39,10 +39,11 @@ class FakeClient:
         return {"type": "noul", "instructions": instructions,
                 "criteria": {"true": true, "false": false}}
 
-    def ask(self, state, questions, timeout):
+    def ask(self, state, questions, timeout, **kwargs):
         self.state = state
         self.questions = questions
         self.timeout = timeout
+        self.kwargs = kwargs
         return {
             "model": "jev-test",
             "answers": {
@@ -74,7 +75,7 @@ class AdvisoryTests(unittest.TestCase):
 
     def test_missing_or_invalid_answers_are_unavailable(self):
         class Broken(FakeClient):
-            def ask(self, state, questions, timeout):
+            def ask(self, state, questions, timeout, **kwargs):
                 row = super().ask(state, questions, timeout)
                 row["answers"][advisory.FACETS[0]]["noul"] = 1.2
                 return row
@@ -189,7 +190,7 @@ class MachineEnvelopeTests(unittest.TestCase):
         calls = []
 
         class Counting(FakeClient):
-            def ask(self, state, questions, timeout):
+            def ask(self, state, questions, timeout, **kwargs):
                 calls.append(state)
                 return super().ask(state, questions, timeout)
 
