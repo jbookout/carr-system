@@ -29,6 +29,7 @@ import { incidentTools } from "./incident.js";
 import { evidenceActivationTools } from "./evidence-activation.js";
 import { resourceObservationTools } from "./resource-observation.v5.js";
 import { jevCallReceiptTools } from "./jev-call-receipt.js";
+import { workflowCutoverTools } from "./workflow-cutover.v5.js";
 import { engineeringRuntimeTools } from "./engineering-runtime.js";
 import { tourRightsProjectionTools } from "./tour-rights-projection.js";
 import { tourPropertyJurisdictionTools } from "./tour-property-jurisdiction.js";
@@ -8155,6 +8156,7 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "evidence-activation": "mcp-server/src/evidence-activation.js",
   "resource-observation": "mcp-server/src/resource-observation.v5.js",
   "jev-call-receipt": "mcp-server/src/jev-call-receipt.js",
+  "workflow-cutover": "mcp-server/src/workflow-cutover.v5.js",
   "memory": "mcp-server/src/memory.js",
   "codex-continuity": "mcp-server/src/codex-continuity.js",
   "claude-continuity": "mcp-server/src/claude-continuity.js",
@@ -9250,6 +9252,11 @@ registerTools(resourceObservationTools({ withEnvelope, ToolError }), "resource-o
 // Jev gates credit only rows the gated model could not forge locally. See
 // src/jev-call-receipt.js.
 registerTools(jevCallReceiptTools({ withEnvelope, ToolError }), "jev-call-receipt");
+// DoctorCRE V5-R02: workflow cutover, caller migration and retirement
+// readiness. Composes accept-workflow / disable-legacy-schedule rather than
+// duplicating their evidence; retire-workflow-cutover-plan is authority-only.
+// See src/workflow-cutover.v5.js.
+registerTools(workflowCutoverTools({ withEnvelope, ToolError }), "workflow-cutover");
 // Phase 1 CARR-native learning memory: evidence-backed context with explicit
 // candidate/promotion/correction/forgetting lifecycle. Memory never grants
 // authority; actor and sponsor scope are resolved by the server.
