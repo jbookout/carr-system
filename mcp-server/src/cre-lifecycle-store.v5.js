@@ -117,7 +117,9 @@ import {
   V5_J102_SUBJECT_KINDS,
   V5_J102_TRANSITION_IDS,
   evaluateConcurrentEdit,
+  evaluateConcurrentTransition,
   evaluateLifecycleInitialization,
+  v5J102TransitionWrites,
   evaluateLifecycleTransition,
   projectOwnershipAndFreshness,
   projectSalesforceReference,
@@ -1547,8 +1549,8 @@ export function storedReconciliationItemRecord({
     concurrent_change_evidence: {
       characterized,
       why: characterized
-        ? "the concurrent edit set was supplied and judged"
-        : "this record layer can prove the subject moved and cannot enumerate the other writer's field edits: ops.j102_subject exposes no prior_state_digest to anchor a diff to, so the conflict is reported UNCHARACTERIZED and reconciles visibly rather than merging on an absence",
+        ? "exactly one committed transition lies between the base and the current row (the row's own prior_state_digest is the base), so the concurrent edit set is that transition's declared write set, each value the digest of what the row now holds"
+        : "the current row's prior_state_digest is not the caller's base, or the write that produced it is not a registered transition, so more than one write (or an undeclared one) lies between them; the other writer's field edits cannot be enumerated, and the conflict reconciles visibly rather than merging on an absence",
       current_state,
       current_state_source: "ops.j102_read.subject",
       history_tail,
@@ -1992,13 +1994,20 @@ export function createCreLifecycleStore({ db } = {}) {
     const row = await one(client, "SELECT ops.j102_subject($1::text, $2::text) AS subject",
       [subject_kind, subject_id]);
     const stored = parse(row?.subject);
-    if (stored == null) return { state: null, state_digest: null };
+    if (stored == null) {
+      return { state: null, state_digest: null, prior_state_digest: null,
+        established_by_transition: null };
+    }
     if (stored.state_digest !== digest(stored.state)) {
       fail("corrupt_stored_subject",
         "the stored subject no longer hashes to its recorded digest; it is refused, not repaired",
         { subject_kind, subject_id });
     }
-    return { state: stored.state, state_digest: stored.state_digest };
+    // The two provenance fields Q103's characterization reads. Both come from
+    // inside the verified envelope; neither is a caller input.
+    return { state: stored.state, state_digest: stored.state_digest,
+      prior_state_digest: stored.prior_state_digest ?? null,
+      established_by_transition: stored.established_by_transition ?? null };
   }
 
   /**
@@ -2439,20 +2448,61 @@ export function createCreLifecycleStore({ db } = {}) {
           records_written: 0, readback: null,
         });
       }
-      // THE COMPARE-AND-SWAP IS DECIDED AGAINST THE STORED SUBJECT, not against
-      // the caller's belief about it. The database re-checks the same digest
-      // under its lock; this early check exists so a stale caller learns which
-      // subject moved rather than getting a generic serialization error.
-      if (subject_ref.expected_state_digest !== null &&
-          subject_ref.expected_state_digest !== loadedSubject.state_digest) {
-        return result(operation, "refuse", "stale_subject_digest", {
-          actor_slug: principal.slug,
-          subject_kind: subject_ref.subject_kind, subject_id: subject_ref.subject_id,
-          stored_state_digest: loadedSubject.state_digest,
-          expected_state_digest: subject_ref.expected_state_digest,
-          records_written: 0, readback: null,
+      // WHICH TRANSITION THIS IS, decided as soon as the stored subject is known,
+      // because Q103's merge question below is a question about ITS write set.
+      // The two dispatching operations read only the stored instrument and the
+      // declared axis, neither of which a concurrent transition can move.
+      const transition_id = typeof chooseTransition === "function"
+        ? chooseTransition({ subject: loadedSubject.state, declared })
+        : schema.transition;
+      if (typeof transition_id !== "string" || !V5_J102_TRANSITION_IDS.includes(transition_id)) {
+        return result(operation, "refuse", "transition_not_determined", {
+          actor_slug: principal.slug, records_written: 0, readback: null,
         });
       }
+
+      // THE COMPARE-AND-SWAP IS DECIDED AGAINST THE STORED SUBJECT, not against
+      // the caller's belief about it — and a subject that MOVED since the caller
+      // decided is Q103's question, not an automatic refusal any more.
+      //
+      // One characterized, non-overlapping intervening transition is MERGED: the
+      // transition is judged again, in full, against the current committed row
+      // below, and only that judgement lands. Anything else — an overlap, or a
+      // movement this layer cannot characterize — is filed as a VISIBLE
+      // reconciliation item with both versions preserved, and nothing moves.
+      // The database still re-checks the current digest under its own lock, so a
+      // third write that lands between this read and the write refuses there.
+      const concurrentMerges = [];
+      const judgeMovement = async (kind, id, loaded, expected) => {
+        if (expected === null || expected === loaded.state_digest) return null;
+        const verdict = evaluateConcurrentTransition({
+          tenant: ORGANIZATION_TENANT_ID,
+          transition_id,
+          subject_kind: kind,
+          base_version_digest: expected,
+          current_version_digest: loaded.state_digest,
+          current_prior_state_digest: loaded.prior_state_digest,
+          current_established_by_transition: loaded.established_by_transition,
+        });
+        if (verdict.decision === "allow") {
+          concurrentMerges.push({
+            subject_kind: kind, subject_id: id,
+            base_version_digest: expected, current_version_digest: loaded.state_digest,
+            concurrent_transition_id: verdict.concurrent_transition_id,
+            incoming_fields: verdict.incoming_fields,
+            concurrent_fields: verdict.concurrent_fields,
+            readmitted_against_current_row: true,
+          });
+          return null;
+        }
+        return fileTransitionConflict(client, {
+          operation, request, principal, now, transition_id,
+          subject_kind: kind, subject_id: id, verdict,
+        });
+      };
+      const primaryConflict = await judgeMovement(subject_ref.subject_kind, subject_ref.subject_id,
+        loadedSubject, subject_ref.expected_state_digest);
+      if (primaryConflict !== null) return primaryConflict;
 
       const related = {};
       const casDigests = {
@@ -2466,17 +2516,18 @@ export function createCreLifecycleStore({ db } = {}) {
             records_written: 0, readback: null,
           });
         }
-        if (ref.expected_state_digest !== null && ref.expected_state_digest !== loaded.state_digest) {
-          return result(operation, "refuse", "stale_related_subject_digest", {
-            actor_slug: principal.slug, related_kind: key, related_id: ref.subject_id,
-            stored_state_digest: loaded.state_digest,
-            expected_state_digest: ref.expected_state_digest,
-            records_written: 0, readback: null,
-          });
-        }
+        const relatedConflict = await judgeMovement(ref.subject_kind, ref.subject_id,
+          loaded, ref.expected_state_digest);
+        if (relatedConflict !== null) return relatedConflict;
         related[key] = loaded.state;
         casDigests[`${ref.subject_kind}:${ref.subject_id}`] = loaded.state_digest;
       }
+      const mergeReport = concurrentMerges.length === 0 ? {} : {
+        auto_merged: true,
+        concurrent_merges: concurrentMerges,
+        last_writer_wins: false,
+        silent_overwrite: false,
+      };
 
       const evidence = [];
       const rechecks = [];
@@ -2506,15 +2557,6 @@ export function createCreLifecycleStore({ db } = {}) {
         rechecks.push(loaded.recheck);
       }
 
-      const transition_id = typeof chooseTransition === "function"
-        ? chooseTransition({ subject: loadedSubject.state, declared })
-        : schema.transition;
-      if (typeof transition_id !== "string" || !V5_J102_TRANSITION_IDS.includes(transition_id)) {
-        return result(operation, "refuse", "transition_not_determined", {
-          actor_slug: principal.slug, records_written: 0, readback: null,
-        });
-      }
-
       const evaluated = evaluateLifecycleTransition({
         tenant: ORGANIZATION_TENANT_ID,
         transition_id,
@@ -2533,6 +2575,13 @@ export function createCreLifecycleStore({ db } = {}) {
           transition_id,
           subject_kind: subject_ref.subject_kind, subject_id: subject_ref.subject_id,
           refusal_detail: refusalDetail(evaluated),
+          // A merge candidate that the re-admission refused is NOT merged, and
+          // the caller is told the row moved and what moved it.
+          ...(concurrentMerges.length === 0 ? {} : {
+            auto_merged: false,
+            readmission_refused_after_concurrent_change: true,
+            concurrent_merges: concurrentMerges,
+          }),
           records_written: 0, readback: null,
         });
       }
@@ -2624,8 +2673,123 @@ export function createCreLifecycleStore({ db } = {}) {
          J({ operation, reason_id: evaluated.reason_id,
              coupled_facts: evaluated.coupled_facts_committed,
              decision_refs: evaluated.decision_refs })]);
-      return resultFromOutcome(operation, parse(row.outcome), principal);
+      const landed = resultFromOutcome(operation, parse(row.outcome), principal);
+      return concurrentMerges.length === 0 ? landed : deepFreeze({ ...landed, ...mergeReport });
     });
+  }
+
+  /**
+   * Q103's visible half for a TYPED transition: the subject moved under the
+   * caller, and the movement either overlaps what this transition writes or
+   * cannot be characterized. One reconciliation item is filed — through the
+   * same governed writer record-lifecycle-reconciliation uses, under the
+   * caller's own idempotency key — and no lifecycle state moves.
+   *
+   * THE EDIT SETS IT FILES. The incoming side is the transition's declared
+   * write set on this subject; each value is the transition's INTENT (its id,
+   * the field and the request digest), because the value it would have written
+   * was decided against a row that is no longer current. The concurrent side,
+   * when characterized, is the intervening transition's declared write set,
+   * each value the digest of what the committed row now holds, attributed to
+   * the row's own writer and instant. Both are preserved in full.
+   */
+  async function fileTransitionConflict(client, { operation, request, principal, now,
+    transition_id, subject_kind, subject_id, verdict }) {
+    const stored = await readSubjectVerified(client, subject_kind, subject_id);
+    if (stored == null) {
+      return result(operation, "refuse", "subject_not_found", {
+        actor_slug: principal.slug, subject_kind, subject_id, records_written: 0, readback: null,
+      });
+    }
+    const intent = requestDigest(operation, request, principal);
+    const incoming = verdict.incoming_fields.map(field => ({
+      field,
+      value_digest: digest({ intent: transition_id, field, request_digest: intent }),
+      edited_by: principal.slug,
+      edited_at: now,
+    }));
+    const concurrent = verdict.characterized
+      ? verdict.concurrent_fields.map(field => ({
+        field,
+        value_digest: digest(stored.state[field] ?? null),
+        edited_by: stored.updated_by,
+        edited_at: stored.updated_at,
+      }))
+      : null;
+    const evaluated = evaluateConcurrentEdit({
+      tenant: ORGANIZATION_TENANT_ID,
+      base_version_digest: verdict.base_version_digest,
+      current_version_digest: stored.state_digest,
+      incoming,
+      ...(concurrent === null ? {} : { concurrent }),
+      actor: principal,
+    });
+    if (evaluated.decision !== "reconcile" ||
+        evaluated.reconciliation_item.conflict_kind !== verdict.conflict_kind) {
+      fail("contract_self_check_failed",
+        "the field-level evaluator and the transition-level evaluator disagree about this conflict",
+        { transition_id, subject_kind, subject_id,
+          transition_verdict: verdict.conflict_kind,
+          field_verdict: evaluated.reconciliation_item?.conflict_kind ?? evaluated.reason_id });
+    }
+    const reconciliationRequest = {
+      filed_for_operation: operation, transition_id, request_digest: intent,
+      subject_kind, subject_id,
+    };
+    const outcome = await writeReconciliationItem(client, {
+      evaluated, subject_kind, subject_id, stored,
+      characterized: verdict.characterized,
+      idempotency_key: request.idempotency_key,
+      request_digest: requestDigest("record-lifecycle-reconciliation", reconciliationRequest, principal),
+    });
+    return result(operation, "reconcile", verdict.reason_id, {
+      actor_slug: principal.slug,
+      transition_id,
+      subject_kind, subject_id,
+      base_version_digest: verdict.base_version_digest,
+      current_version_digest: stored.state_digest,
+      concurrent_transition_id: verdict.concurrent_transition_id,
+      overlapping_fields: verdict.overlapping_fields,
+      characterized: verdict.characterized,
+      auto_merged: false,
+      last_writer_wins: false,
+      silent_overwrite: false,
+      resolved_by_machine: false,
+      advances_lifecycle_state: false,
+      reconciliation_item: outcome,
+      records_written: outcome?.records_written ?? null,
+      readback: null,
+    });
+  }
+
+  /** The one place a reconciliation envelope is built and handed to its writer. */
+  async function writeReconciliationItem(client, { evaluated, subject_kind, subject_id, stored,
+    characterized, idempotency_key, request_digest }) {
+    const events = await readSubjectEvents(client, subject_kind, subject_id);
+    const history_tail = events.slice(-5).map(entry => ({
+      transition_id: entry.record.transition_id,
+      event_kind: entry.record.event?.event_kind ?? null,
+      recorded_by: entry.record.recorded_by,
+      recorded_at: entry.record.recorded_at,
+      record_digest: entry.record_digest,
+    }));
+    const record = storedReconciliationItemRecord({
+      item: evaluated.reconciliation_item,
+      subject_kind, subject_id,
+      current_state: stored.state,
+      history_tail,
+      characterized,
+    });
+    const envelope = storeEnvelope("stored_reconciliation_item", record,
+      { append_only: true, visible: true, resolved_by_machine: false });
+    const row = await one(client,
+      `SELECT ops.j102_record_reconciliation_item($1::jsonb, $2::jsonb,
+                                                  $3::text, $4::text, $5::jsonb) AS outcome`,
+      [J(envelope),
+       J({ [`${subject_kind}:${subject_id}`]: stored.state_digest }),
+       idempotency_key, request_digest,
+       J({ operation: "record-lifecycle-reconciliation", reason_id: evaluated.reason_id })]);
+    return parse(row.outcome);
   }
 
   /** The refusal fields worth carrying back, without echoing the whole answer. */
@@ -3493,6 +3657,24 @@ export function createCreLifecycleStore({ db } = {}) {
       }
       const current_version_digest = stored.state_digest;
 
+      // THE CONCURRENT SIDE IS SUPPLIED WHEN, AND ONLY WHEN, IT IS KNOWN. The
+      // stored row names the digest it replaced and the transition that wrote
+      // it; when that digest is the caller's base, exactly one transition lies
+      // between them and its declared write set is the concurrent edit set, each
+      // value the digest of what the row now holds. Otherwise nothing is
+      // supplied and the kernel reconciles on the uncharacterized branch.
+      const characterizedBy = base_version_digest !== current_version_digest &&
+        stored.prior_state_digest === base_version_digest &&
+        V5_J102_TRANSITION_IDS.includes(stored.established_by_transition)
+        ? stored.established_by_transition : null;
+      const concurrent = characterizedBy === null ? []
+        : (v5J102TransitionWrites(characterizedBy)[subject_kind] ?? []).map(field => ({
+          field,
+          value_digest: digest(stored.state[field] ?? null),
+          edited_by: stored.updated_by,
+          edited_at: stored.updated_at,
+        }));
+
       const evaluated = evaluateConcurrentEdit({
         tenant: ORGANIZATION_TENANT_ID,
         base_version_digest,
@@ -3503,7 +3685,7 @@ export function createCreLifecycleStore({ db } = {}) {
         incoming: edits.map(edit => ({
           ...edit, edited_by: principal.slug, edited_at: now,
         })),
-        // `concurrent` is deliberately not supplied. See the note above.
+        ...(concurrent.length === 0 ? {} : { concurrent }),
         actor: principal,
       });
 
@@ -3537,46 +3719,18 @@ export function createCreLifecycleStore({ db } = {}) {
       }
 
       // === RECONCILE: make the conflict visible ==============================
-      const events = await readSubjectEvents(client, subject_kind, subject_id);
-      const history_tail = events.slice(-5).map(entry => ({
-        transition_id: entry.record.transition_id,
-        event_kind: entry.record.event?.event_kind ?? null,
-        recorded_by: entry.record.recorded_by,
-        recorded_at: entry.record.recorded_at,
-        record_digest: entry.record_digest,
-      }));
-      const record = storedReconciliationItemRecord({
-        item: evaluated.reconciliation_item,
-        subject_kind, subject_id,
-        current_state: stored.state,
-        history_tail,
-        characterized: false,
+      // THE WRITER BINDS THE REST: the compare-and-swap operand for the one
+      // subject the conflict is about, the idempotency key and the request
+      // digest, and the kernel's diagnostic labelled as the caller's. A RETRY
+      // collapses under the key; two different proposals against the same two
+      // versions both land, because there is no unique index over the pair.
+      const outcome = await writeReconciliationItem(client, {
+        evaluated, subject_kind, subject_id, stored,
+        characterized: concurrent.length > 0,
+        idempotency_key: request.idempotency_key,
+        request_digest: requestDigest(operation, request, principal),
       });
-
-      // THE WRITER BINDS THE REST, and this call hands it what it needs to: the
-      // compare-and-swap operand for the one subject the conflict is about, the
-      // idempotency key and the request digest, and the kernel's diagnostic
-      // labelled as the caller's.
-      //
-      // THERE IS NO READ-BEFORE-WRITE DUPLICATE CHECK HERE ANY MORE. It could not
-      // be a correctness claim: two callers pass it at the same instant, and it
-      // could not tell a stale reading from a current one at all. Duplication is
-      // now settled where it can be — under the key, inside the writer — and the
-      // property it protects is narrower and true: a RETRY collapses, and two
-      // different proposals against the same two versions do not.
-      const envelope = storeEnvelope("stored_reconciliation_item", record,
-        { append_only: true, visible: true, resolved_by_machine: false });
-      const row = await one(client,
-        `SELECT ops.j102_record_reconciliation_item($1::jsonb, $2::jsonb,
-                                                    $3::text, $4::text, $5::jsonb) AS outcome`,
-        [J(envelope),
-         // The operand names exactly the subject this conflict is about, with the
-         // digest this call read. The writer re-reads it under its own lock and
-         // refuses if the row moved between the two.
-         J({ [`${subject_kind}:${subject_id}`]: current_version_digest }),
-         request.idempotency_key, requestDigest(operation, request, principal),
-         J({ operation, reason_id: evaluated.reason_id })]);
-      return resultFromOutcome(operation, parse(row.outcome), principal);
+      return resultFromOutcome(operation, outcome, principal);
     });
   }
 

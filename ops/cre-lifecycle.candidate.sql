@@ -893,6 +893,11 @@ begin
     'state', v_verified -> 'record' -> 'state',
     'state_digest', ops.f01_digest_jsonb(v_verified -> 'record' -> 'state'),
     'established_by_transition', v_verified -> 'record' ->> 'established_by_transition',
+    -- Q103's characterization anchor. It is inside the hashed envelope and
+    -- CHECK-bound, so it is the stored row's own statement of the digest it
+    -- replaced: when it equals a caller's base, exactly one committed write --
+    -- the one named above -- lies between the two.
+    'prior_state_digest', v_verified -> 'record' ->> 'prior_state_digest',
     'updated_by', v_row.updated_by,
     'updated_at', ops.f01_instant_text(v_row.updated_at),
     'integrity', 'recomputed_from_committed_row');
@@ -5423,11 +5428,17 @@ begin
                and c.subject_kind = p_selector ->> 'subject_kind'
                and c.subject_id = p_selector ->> 'subject_id') s;
   elsif p_kind = 'reconciliation_items' then
-    select coalesce(jsonb_agg(i.envelope -> 'record' order by i.item_seq), '[]'::jsonb) into v_body
-      from ops.j102_reconciliation_item i
-     where i.tenant = ops.f01_tenant()
-       and i.subject_kind = p_selector ->> 'subject_kind'
-       and i.subject_id = p_selector ->> 'subject_id';
+    -- VERIFIED LIKE EVERY OTHER LIST HERE. This arm used to return the raw
+    -- envelope record, the one read kind that recomputed nothing -- found on the
+    -- first live read of a Q103 item (2026-09-25).
+    select coalesce(jsonb_agg(verified order by seq), '[]'::jsonb) into v_body
+      from (select i.item_seq as seq,
+                   ops.j102_verify_envelope(i.envelope, i.envelope_digest, i.item_digest,
+                                            'stored_reconciliation_item') as verified
+              from ops.j102_reconciliation_item i
+             where i.tenant = ops.f01_tenant()
+               and i.subject_kind = p_selector ->> 'subject_kind'
+               and i.subject_id = p_selector ->> 'subject_id') s;
   elsif p_kind = 'compatibility_view' then
     v_body := ops.j102_compatibility_view(
       p_selector ->> 'assignment_id', p_selector ->> 'deal_id');

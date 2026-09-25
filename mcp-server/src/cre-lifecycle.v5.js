@@ -3420,6 +3420,158 @@ function reconciliationItem({ conflict_kind, base_version_digest, current_versio
   });
 }
 
+// ---------------------------------------------------------------------------
+// Q103 for TYPED TRANSITIONS: the automatic merge of a non-overlapping edit.
+//
+// evaluateConcurrentEdit above judges RAW field edits, and it cannot merge a
+// lifecycle, financial or document edit however disjoint, because nothing can
+// re-validate a raw value against the row it lands on. A typed transition is
+// different in exactly that respect: the kernel can re-run the transition's
+// WHOLE admission — prerequisites, instrument, evidence, bindings, related
+// subjects — against the row as it now stands. So a transition decided against
+// a base that has since moved is merged automatically when, and only when:
+//
+//   1. the movement is CHARACTERIZED: the stored row's own prior digest is the
+//      caller's base, so exactly one committed transition moved it, and that
+//      transition's written fields are known from its declared contract;
+//   2. the fields this transition writes on the subject and the fields the
+//      intervening transition wrote on it are DISJOINT; and
+//   3. the transition is RE-ADMITTED against the current committed row — the
+//      caller of this function does that, and a refusal there is an ordinary
+//      refusal of a command that no longer applies, never a merge.
+//
+// Anything else — two or more intervening writes, a correction, an unknown
+// writer, or any shared field — is a visible reconciliation item with both
+// versions preserved. There is still no branch that takes the later write.
+//
+// THE WRITE SETS ARE OVER-APPROXIMATED, deliberately. A transition's written
+// fields on a subject kind are its coupled facts on that kind PLUS every
+// derived counter or mirror of that kind (V5_J102_DERIVED_FIELDS), whether or
+// not this particular call moves it. Over-reporting a write can only turn a
+// merge into a reconciliation; under-reporting one could merge over it.
+// ---------------------------------------------------------------------------
+
+/**
+ * The fields the kernel moves on a subject without naming them as coupled facts.
+ * The SQL admission map carries the same list as `derived_fields`, and the parity
+ * suite holds the two to each other.
+ */
+export const V5_J102_DERIVED_FIELDS = deepFreeze([
+  "relationship.active_engagement_count",
+  "assignment.open_negotiation_count",
+  "assignment.active_lease_draft_target_id",
+]);
+
+/**
+ * Every field a transition may write, by subject kind: the primary subject and
+ * the prefixes of its coupled facts, each carrying its coupled facts plus every
+ * derived field of that kind. A SUPERSET of the SQL map's `writes`, by
+ * construction and by test.
+ */
+export function v5J102TransitionWrites(transition_id) {
+  const t = TRANSITIONS[transition_id];
+  if (t === undefined) {
+    fail("unknown_transition", `"${String(transition_id)}" is not a registered transition`,
+      { registered: [...V5_J102_TRANSITION_IDS] });
+  }
+  const kinds = new Set([t.subject_kind, ...t.coupled_facts.map(f => f.split(".")[0])]);
+  const out = {};
+  for (const kind of [...kinds].sort()) {
+    const fields = new Set();
+    for (const fact of [...t.coupled_facts, ...V5_J102_DERIVED_FIELDS]) {
+      const [k, field] = fact.split(".");
+      if (k === kind) fields.add(field);
+    }
+    out[kind] = [...fields].sort();
+  }
+  return deepFreeze(out);
+}
+
+export const V5_J102_CONCURRENT_TRANSITION_OUTCOMES = deepFreeze([
+  "no_concurrent_movement",
+  "nonoverlapping_transition_merged_on_current_row",
+  "concurrent_change_not_characterized",
+  "overlapping_transition_writes_require_reconciliation",
+]);
+
+const CONCURRENT_TRANSITION_KEYS = Object.freeze([
+  "tenant", "transition_id", "subject_kind", "base_version_digest", "current_version_digest",
+  "current_prior_state_digest", "current_established_by_transition",
+]);
+
+export function evaluateConcurrentTransition(request) {
+  assertObject(request, "request");
+  assertClosedKeys(request, CONCURRENT_TRANSITION_KEYS, "request", { allowAsserted: true });
+  assertRequiredKeys(request, ["tenant", "transition_id", "subject_kind", "base_version_digest",
+    "current_version_digest"], "request");
+  assertTenant(request.tenant, "request.tenant");
+  const transition_id = assertEnum(request.transition_id, V5_J102_TRANSITION_IDS,
+    "request.transition_id", "unknown_transition");
+  const subject_kind = assertEnum(request.subject_kind, V5_J102_SUBJECT_KINDS,
+    "request.subject_kind", "unknown_subject_kind");
+  const base_version_digest = assertDigestRef(request.base_version_digest,
+    "request.base_version_digest");
+  const current_version_digest = assertDigestRef(request.current_version_digest,
+    "request.current_version_digest");
+  const prior = request.current_prior_state_digest === undefined ||
+    request.current_prior_state_digest === null
+    ? null : assertDigestRef(request.current_prior_state_digest, "request.current_prior_state_digest");
+  const established = request.current_established_by_transition ?? null;
+  const incoming_fields = v5J102TransitionWrites(transition_id)[subject_kind] ?? [];
+
+  const base = {
+    schema_version: V5_J102_RECONCILIATION_SCHEMA_VERSION,
+    tenant: ORGANIZATION_TENANT_ID,
+    transition_id, subject_kind, base_version_digest, current_version_digest,
+    incoming_fields: [...incoming_fields],
+    last_writer_wins: false,
+    silent_overwrite: false,
+    resolved_by_machine: false,
+    effects: V5_NO_EFFECTS,
+  };
+
+  if (base_version_digest === current_version_digest) {
+    return deepFreeze({ decision: "allow", reason_id: "no_concurrent_movement", ...base,
+      merged: false, characterized: true, concurrent_transition_id: null,
+      concurrent_fields: [], overlapping_fields: [], readmission_required: false,
+      conflict_kind: null });
+  }
+
+  // ONE STEP, AND ONLY ONE, IS CHARACTERIZED. The stored row names the digest it
+  // replaced; when that is the caller's base, the transition that produced the
+  // row is the only write between them. A correction is not a transition and its
+  // corrected fields are not a declared write set, so it never characterizes.
+  const characterized = prior !== null && prior === base_version_digest &&
+    typeof established === "string" && V5_J102_TRANSITION_IDS.includes(established);
+  if (!characterized) {
+    return deepFreeze({ decision: "reconcile", reason_id: "concurrent_change_not_characterized",
+      ...base, merged: false, characterized: false,
+      concurrent_transition_id: typeof established === "string" ? established : null,
+      concurrent_fields: [], overlapping_fields: [], readmission_required: false,
+      conflict_kind: "uncharacterized_concurrent_change",
+      why: prior === base_version_digest
+        ? "the write that moved this subject is not a registered transition, so its written fields are not declared"
+        : "more than one write, or a write not decided against this base, lies between the base and the current row" });
+  }
+
+  const concurrent_fields = v5J102TransitionWrites(established)[subject_kind] ?? [];
+  const overlapping_fields = incoming_fields.filter(f => concurrent_fields.includes(f)).sort();
+  if (overlapping_fields.length > 0) {
+    return deepFreeze({ decision: "reconcile",
+      reason_id: "overlapping_transition_writes_require_reconciliation", ...base,
+      merged: false, characterized: true, concurrent_transition_id: established,
+      concurrent_fields: [...concurrent_fields], overlapping_fields,
+      readmission_required: false, conflict_kind: "overlapping_field_edit" });
+  }
+  return deepFreeze({ decision: "allow",
+    reason_id: "nonoverlapping_transition_merged_on_current_row", ...base,
+    merged: true, characterized: true, concurrent_transition_id: established,
+    concurrent_fields: [...concurrent_fields], overlapping_fields: [],
+    // The merge is CONDITIONAL on this: the transition is decided again, in
+    // full, against the current committed row, and only its answer lands.
+    readmission_required: true, conflict_kind: null });
+}
+
 /**
  * Q103's second half: ownership, freshness and in-progress automation, PROJECTED
  * from trusted state.

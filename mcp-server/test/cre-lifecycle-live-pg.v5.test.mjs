@@ -915,3 +915,180 @@ test("LIVE TRUTH TABLE (subject_kind, actor_class, instrument_kind, required_evi
   }
   console.log("LIVE guard cells", JSON.stringify(report, null, 1));
 });
+
+// ===========================================================================
+// Q103 LIVE: concurrent edits by two partners against the same base.
+// ===========================================================================
+
+async function body(name, subject_kind, subject_id) {
+  return (await state(name, subject_kind, subject_id)).readback.body;
+}
+
+async function reconciliationItems(subject_kind, subject_id) {
+  const answer = await as("joe").readCreLifecycle({
+    selector: { kind: "reconciliation_items", subject_kind, subject_id } });
+  return answer.readback?.body ?? [];
+}
+
+async function axisCall(who, deal, axis, evidence_kind, record_kind, base, extra = {}) {
+  const r = await fact("joe", record_kind, "deal", deal, { detail: "synthetic" });
+  return as(who).recordDealAxis({ idempotency_key: key(),
+    subject_ref: { subject_kind: "deal", subject_id: deal, expected_state_digest: base },
+    evidence_refs: [{ evidence_kind, record_id: r }],
+    declared: { axis, ...extra } });
+}
+
+test("Q103 LIVE: a non-overlapping concurrent edit MERGES automatically and keeps the other partner's write", { skip: SKIP }, async () => {
+  const d = await dealWith("lease", ["lease_exec"]);
+  const base = (await body("joe", "deal", d.deal)).state_digest;
+
+  // Dell records the commission agreement, decided against `base`.
+  const commission = await f01Document("dell", { document_class: "commission_agreement" });
+  await linkDocument("dell", commission, "deal", d.deal);
+  ok(await as("dell").recordDealAxis({ idempotency_key: key(),
+    subject_ref: { subject_kind: "deal", subject_id: d.deal, expected_state_digest: base },
+    evidence_refs: [{ evidence_kind: "commission_agreement", ...docRef(commission) }],
+    declared: { axis: "commission_agreement_state" } }), "Dell's commission");
+
+  // Joe records the invoice, ALSO decided against `base`, which has moved.
+  const answer = ok(await axisCall("joe", d.deal, "invoice_state", "invoice_issued", "invoice", base),
+    "Joe's invoice on a moved base");
+  assert.equal(answer.auto_merged, true);
+  assert.equal(answer.last_writer_wins, false);
+  assert.equal(answer.concurrent_merges.length, 1);
+  assert.equal(answer.concurrent_merges[0].concurrent_transition_id, "record-commission-agreement");
+  assert.deepEqual(answer.concurrent_merges[0].incoming_fields, ["invoice_state"]);
+  assert.deepEqual(answer.concurrent_merges[0].concurrent_fields, ["commission_agreement_state"]);
+
+  const after = (await body("joe", "deal", d.deal)).state;
+  assert.equal(after.commission_agreement_state, "agreed", "Dell's write survived the merge");
+  assert.equal(after.invoice_state, "invoiced", "Joe's write landed");
+  assert.deepEqual(await reconciliationItems("deal", d.deal), [], "nothing needed a person");
+});
+
+test("Q103 LIVE: an OVERLAPPING concurrent edit reconciles VISIBLY, both versions preserved, nothing moves", { skip: SKIP }, async () => {
+  const d = await dealWith("lease", ["lease_exec"]);
+  const base = (await body("joe", "deal", d.deal)).state_digest;
+
+  ok(await axisCall("dell", d.deal, "payment_state", "payment_received", "payment", base,
+    { payment_level: "partially_paid" }), "Dell's partial payment");
+  const moved = await body("joe", "deal", d.deal);
+
+  const answer = await axisCall("joe", d.deal, "payment_state", "payment_received", "payment",
+    base, { payment_level: "paid" });
+  assert.equal(answer.decision, "reconcile", JSON.stringify(answer).slice(0, 800));
+  assert.equal(answer.reason_id, "overlapping_transition_writes_require_reconciliation");
+  assert.deepEqual(answer.overlapping_fields, ["payment_state"]);
+  assert.equal(answer.concurrent_transition_id, "record-payment");
+  assert.equal(answer.characterized, true);
+  assert.equal(answer.auto_merged, false);
+  assert.equal(answer.last_writer_wins, false);
+  assert.equal(answer.advances_lifecycle_state, false);
+
+  const after = await body("joe", "deal", d.deal);
+  assert.equal(after.state_digest, moved.state_digest, "the reconcile moved nothing");
+  assert.equal(after.state.payment_state, "partially_paid", "Dell's write was not overwritten");
+
+  const items = await reconciliationItems("deal", d.deal);
+  assert.equal(items.length, 1, "exactly one visible item");
+  const item = items[0].record;
+  assert.equal(item.conflict_kind, "overlapping_field_edit");
+  assert.equal(item.visible, true);
+  assert.equal(item.applied, false);
+  assert.equal(item.resolved_by_machine, false);
+  assert.equal(item.base_version_digest, base);
+  assert.equal(item.current_version_digest, moved.state_digest);
+  assert.deepEqual(item.incoming_edits.map(e => [e.field, e.edited_by]), [["payment_state", "joe"]]);
+  assert.deepEqual(item.concurrent_edits.map(e => [e.field, e.edited_by]), [["payment_state", "dell"]]);
+  assert.equal(item.concurrent_change_evidence.characterized, true);
+});
+
+test("Q103 LIVE: two intervening writes are UNCHARACTERIZED and reconcile visibly rather than merging on an absence", { skip: SKIP }, async () => {
+  const d = await dealWith("lease", ["lease_exec"]);
+  const base = (await body("joe", "deal", d.deal)).state_digest;
+  await DEAL_STEPS.commission(d);
+  await DEAL_STEPS.completion(d);
+  const moved = await body("joe", "deal", d.deal);
+
+  const answer = await axisCall("joe", d.deal, "invoice_state", "invoice_issued", "invoice", base);
+  assert.equal(answer.decision, "reconcile");
+  assert.equal(answer.reason_id, "concurrent_change_not_characterized");
+  assert.equal(answer.characterized, false);
+  assert.equal((await body("joe", "deal", d.deal)).state_digest, moved.state_digest);
+  const items = await reconciliationItems("deal", d.deal);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].record.conflict_kind, "uncharacterized_concurrent_change");
+  assert.deepEqual(items[0].record.concurrent_edits, []);
+});
+
+test("Q103 LIVE: a disjoint edit whose transition no longer holds on the CURRENT row is refused, never merged", { skip: SKIP }, async () => {
+  // Joe decides to close against an executed purchase whose diligence is
+  // satisfied; Dell meanwhile records a failed diligence outcome. The fields are
+  // disjoint (diligence_state vs deal/closing state), so the store re-admits the
+  // closing against the current row — and the re-admission refuses.
+  const d = await dealWith("purchase", ["purchase_exec", "diligence:satisfied"]);
+  const base = (await body("joe", "deal", d.deal)).state_digest;
+  // A second diligence outcome is not admissible once resolved, so the
+  // intervening write here is a cancellation's disjoint sibling: completion.
+  await DEAL_STEPS.completion(d);
+  const settlement = await fact("joe", "closing_settlement", "deal", d.deal,
+    { closing_date: "2026-09-22T15:00:00Z" });
+  const answer = ok(await as("joe").recordDealClosing({ idempotency_key: key(),
+    subject_ref: { subject_kind: "deal", subject_id: d.deal, expected_state_digest: base },
+    evidence_refs: [{ evidence_kind: "final_closing_settlement", record_id: settlement }] }),
+  "closing merged over a disjoint completion");
+  assert.equal(answer.auto_merged, true);
+
+  // And the refusal half: a lease execution decided against a pending deal that
+  // Dell has since CANCELLED. The fields are disjoint (execution_state against
+  // deal_state and cancellation_reason), so the store re-admits the execution
+  // against the current row — where the deal is no longer pending — and the
+  // kernel refuses. The stale decision never lands.
+  const d2 = await pendingDeal("lease");
+  const base2 = (await body("joe", "deal", d2.deal)).state_digest;
+  await DEAL_STEPS.cancel(d2);
+  const lease = await f01Document("joe", { document_class: "lease" });
+  await linkDocument("joe", lease, "deal", d2.deal);
+  const r2 = await as("joe").recordDealExecution({ idempotency_key: key(),
+    subject_ref: { subject_kind: "deal", subject_id: d2.deal, expected_state_digest: base2 },
+    evidence_refs: [{ evidence_kind: "executed_lease", ...docRef(lease) }] });
+  assert.equal(r2.decision, "refuse", JSON.stringify(r2).slice(0, 600));
+  assert.equal(r2.reason_id, "prerequisite_not_met");
+  assert.equal(r2.refusal_detail.unmet_axis, "deal_state");
+  assert.equal(r2.readmission_refused_after_concurrent_change, true);
+  assert.equal(r2.auto_merged, false);
+  assert.equal(r2.concurrent_merges[0].concurrent_transition_id, "cancel-pending-deal");
+  const after2 = (await body("joe", "deal", d2.deal)).state;
+  assert.equal(after2.deal_state, "cancelled");
+  assert.equal(after2.execution_state, "unexecuted");
+});
+
+test("Q103 LIVE: two partners racing on disjoint axes from the same base both land, or the loser is told; nothing is lost", { skip: SKIP }, async () => {
+  const d = await dealWith("lease", ["lease_exec"]);
+  const base = (await body("joe", "deal", d.deal)).state_digest;
+  const commission = await f01Document("dell", { document_class: "commission_agreement" });
+  await linkDocument("dell", commission, "deal", d.deal);
+  const invoiceRecord = await fact("joe", "invoice", "deal", d.deal, { detail: "synthetic" });
+  const settle = p => p.then(v => ({ ok: v }), e => ({ error: String(e?.message ?? e) }));
+  const [a, b] = await Promise.all([
+    settle(as("dell").recordDealAxis({ idempotency_key: key(),
+      subject_ref: { subject_kind: "deal", subject_id: d.deal, expected_state_digest: base },
+      evidence_refs: [{ evidence_kind: "commission_agreement", ...docRef(commission) }],
+      declared: { axis: "commission_agreement_state" } })),
+    settle(as("joe").recordDealAxis({ idempotency_key: key(),
+      subject_ref: { subject_kind: "deal", subject_id: d.deal, expected_state_digest: base },
+      evidence_refs: [{ evidence_kind: "invoice_issued", record_id: invoiceRecord }],
+      declared: { axis: "invoice_state" } })),
+  ]);
+  const after = (await body("joe", "deal", d.deal)).state;
+  const landed = x => x.ok?.decision === "allow";
+  assert.ok(landed(a) || landed(b), `at least one write lands: ${JSON.stringify([a, b]).slice(0, 600)}`);
+  assert.equal(after.commission_agreement_state === "agreed", landed(a));
+  assert.equal(after.invoice_state === "invoiced", landed(b));
+  for (const x of [a, b]) {
+    if (landed(x)) continue;
+    // The loser learned it lost: the database's own compare-and-swap refused it.
+    assert.ok(x.error?.includes("j102_") || x.ok?.decision !== "allow",
+      `a losing write must be refused loudly: ${JSON.stringify(x).slice(0, 400)}`);
+  }
+});

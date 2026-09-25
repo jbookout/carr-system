@@ -46,6 +46,9 @@ import {
   V5_J102_UNCLASSIFIED_FIELD_POLICY,
   assertLifecycleSubject,
   evaluateConcurrentEdit,
+  evaluateConcurrentTransition,
+  V5_J102_DERIVED_FIELDS,
+  v5J102TransitionWrites,
   evaluateLifecycleInitialization,
   evaluateLifecycleTransition, v5J102EvidenceContract,
   v5J102InitializationContract, v5J102TransitionContract,
@@ -1300,8 +1303,15 @@ test("a failing creation rolls back, and a replayed one reports what LANDED", as
 
 // --- refusals that never reach a write -------------------------------------
 
-test("a stale subject digest refuses and issues no write", async () => {
-  const db = leaseExecutionDb();
+test("a stale subject digest the store cannot characterize files a VISIBLE reconciliation item and moves nothing", async () => {
+  // Q103. The row names no prior digest equal to the caller's base, so the
+  // movement is uncharacterized: it is not a merge, it is not a silent
+  // refusal either, it is a conflict a person can see.
+  const db = leaseExecutionDb({ read_bodies: {
+    subject: subjectReadback(dealState(), { established_by_transition: "commit-winning-property",
+      prior_state_digest: null }),
+    subject_events: [],
+  } });
   const store = createCreLifecycleStore({ db });
   const answer = await store.recordDealExecution({
     idempotency_key: "j102-fixture-1",
@@ -1309,11 +1319,15 @@ test("a stale subject digest refuses and issues no write", async () => {
       expected_state_digest: D(99) },
     evidence_refs: [documentRef("executed_lease")],
   }, ctx(JOE));
-  assert.equal(answer.decision, "refuse");
-  assert.equal(answer.reason_id, "stale_subject_digest");
-  assert.equal(answer.stored_state_digest, digest(dealState()));
-  assert.equal(answer.expected_state_digest, D(99));
+  assert.equal(answer.decision, "reconcile");
+  assert.equal(answer.reason_id, "concurrent_change_not_characterized");
+  assert.equal(answer.current_version_digest, digest(dealState()));
+  assert.equal(answer.base_version_digest, D(99));
+  assert.equal(answer.auto_merged, false);
+  assert.equal(answer.last_writer_wins, false);
+  assert.equal(answer.advances_lifecycle_state, false);
   assert.equal(db.callsTo("j102_apply_transition").length, 0);
+  assert.equal(db.callsTo("j102_record_reconciliation_item").length, 1);
   assert.equal(db.callsTo("f01_read").length, 0, "evidence is not even loaded");
 });
 
@@ -5137,4 +5151,159 @@ test("SQL parity: the map's context conditions and identified_by ARE the kernel'
       }
     });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Q103 for typed transitions: evaluateConcurrentTransition and its write sets.
+// ---------------------------------------------------------------------------
+
+test("SQL parity: the kernel's transition write sets are a SUPERSET of the admission map's `writes`", () => {
+  // A merge is decided on these sets, so an under-reported write could merge
+  // over another partner's field. Over-reporting only turns a merge into a
+  // visible reconciliation.
+  const policy = admissionPolicy();
+  assert.deepEqual([...V5_J102_DERIVED_FIELDS].sort(), [...policy.derived_fields].sort(),
+    "the kernel and the SQL name the same derived counters and mirrors");
+  for (const id of V5_J102_TRANSITION_IDS) {
+    const kernel = v5J102TransitionWrites(id);
+    assert.deepEqual(Object.keys(kernel).sort(), Object.keys(policy.transitions[id].writes).sort(),
+      `${id} writes the same subject kinds in both`);
+    for (const [kind, fields] of Object.entries(policy.transitions[id].writes)) {
+      for (const field of fields) {
+        assert.ok(kernel[kind].includes(field),
+          `${id} may move ${kind}.${field} in SQL and the kernel's write set omits it`);
+      }
+    }
+  }
+});
+
+const CT = (over = {}) => ({
+  tenant: ORGANIZATION_TENANT_ID, transition_id: "record-invoice-issued", subject_kind: "deal",
+  base_version_digest: D(1), current_version_digest: D(2),
+  current_prior_state_digest: D(1),
+  current_established_by_transition: "record-commission-agreement", ...over,
+});
+
+test("Q103: a characterized, disjoint intervening transition merges — conditionally on re-admission", () => {
+  const v = evaluateConcurrentTransition(CT());
+  assert.equal(v.decision, "allow");
+  assert.equal(v.reason_id, "nonoverlapping_transition_merged_on_current_row");
+  assert.equal(v.merged, true);
+  assert.equal(v.readmission_required, true);
+  assert.deepEqual(v.incoming_fields, ["invoice_state"]);
+  assert.deepEqual(v.concurrent_fields, ["commission_agreement_state"]);
+  assert.equal(v.last_writer_wins, false);
+  assert.equal(v.silent_overwrite, false);
+});
+
+test("Q103: an overlapping intervening transition reconciles, naming the shared fields", () => {
+  const v = evaluateConcurrentTransition(CT({ transition_id: "record-payment",
+    current_established_by_transition: "record-payment" }));
+  assert.equal(v.decision, "reconcile");
+  assert.equal(v.conflict_kind, "overlapping_field_edit");
+  assert.deepEqual(v.overlapping_fields, ["payment_state"]);
+  assert.equal(v.merged, false);
+  // Closing and cancellation both write deal_state.
+  const w = evaluateConcurrentTransition(CT({ transition_id: "record-deal-closing",
+    current_established_by_transition: "cancel-pending-deal" }));
+  assert.equal(w.decision, "reconcile");
+  assert.deepEqual(w.overlapping_fields, ["deal_state"]);
+});
+
+test("Q103: anything not ONE declared transition away is uncharacterized and reconciles", () => {
+  for (const over of [
+    { current_prior_state_digest: D(9) },          // more than one write between
+    { current_prior_state_digest: null },          // a created row / no anchor
+    { current_established_by_transition: "record-lifecycle-correction" }, // not a transition
+    { current_established_by_transition: null },
+  ]) {
+    const v = evaluateConcurrentTransition(CT(over));
+    assert.equal(v.decision, "reconcile", JSON.stringify(over));
+    assert.equal(v.conflict_kind, "uncharacterized_concurrent_change");
+    assert.equal(v.characterized, false);
+    assert.equal(v.merged, false);
+  }
+});
+
+test("Q103: no movement is the ordinary optimistic path, and no merge is claimed", () => {
+  const v = evaluateConcurrentTransition(CT({ current_version_digest: D(1) }));
+  assert.equal(v.decision, "allow");
+  assert.equal(v.reason_id, "no_concurrent_movement");
+  assert.equal(v.merged, false);
+});
+
+test("Q103: the coupled subject is judged on ITS write sets, not the primary's", () => {
+  // An LOI submission writes the assignment's phase and counters; a concurrent
+  // commitment wrote the same assignment fields, so the related assignment
+  // reconciles even though the primary negotiation might not.
+  const v = evaluateConcurrentTransition(CT({ transition_id: "record-loi-submission",
+    subject_kind: "assignment", current_established_by_transition: "commit-winning-property" }));
+  assert.equal(v.decision, "reconcile");
+  assert.ok(v.overlapping_fields.includes("assignment_phase"));
+  // A read-only related subject (the engagement an open-assignment reads) has
+  // no write set, so any characterized change to it merges and is re-admitted.
+  const e = evaluateConcurrentTransition(CT({ transition_id: "open-assignment",
+    subject_kind: "engagement", current_established_by_transition: "establish-client-and-engagement" }));
+  assert.equal(e.decision, "allow");
+  assert.deepEqual(e.incoming_fields, []);
+});
+
+test("Q103: a characterized stale subject on the TRANSITION path merges, is re-judged on the current row, and says so", async () => {
+  const current = dealState({ execution_state: "executed", commission_agreement_state: "agreed" });
+  const db = new FakeDb({
+    subjects: { "deal:deal-synthetic-1": { ...storedSubject(current),
+      established_by_transition: "record-commission-agreement", prior_state_digest: D(42) } },
+    facts: { invoice: storedFact("invoice") },
+  });
+  const store = createCreLifecycleStore({ db });
+  const answer = await store.recordDealAxis({
+    idempotency_key: "j102-fixture-1",
+    subject_ref: { subject_kind: "deal", subject_id: "deal-synthetic-1", expected_state_digest: D(42) },
+    evidence_refs: [recordRef("invoice_issued")],
+    declared: { axis: "invoice_state" },
+  }, ctx(JOE));
+  assert.equal(answer.decision, "allow", JSON.stringify(answer).slice(0, 500));
+  assert.equal(answer.auto_merged, true);
+  assert.equal(answer.concurrent_merges[0].concurrent_transition_id, "record-commission-agreement");
+  // THE WRITE IS DECIDED AGAINST THE CURRENT ROW: its operand is the current
+  // digest, never the caller's stale base.
+  const cas = JSON.parse(db.paramsFor("j102_apply_transition")[1]);
+  assert.equal(cas["deal:deal-synthetic-1"], digest(current));
+  const subjects = JSON.parse(db.paramsFor("j102_apply_transition")[2]);
+  assert.equal(subjects[0].record.state.commission_agreement_state, "agreed",
+    "the other partner's field survives in what is written");
+  assert.equal(subjects[0].record.state.invoice_state, "invoiced");
+});
+
+test("Q103: an overlapping stale subject on the TRANSITION path files ONE visible item and applies nothing", async () => {
+  const current = dealState({ payment_state: "partially_paid" });
+  const db = new FakeDb({
+    subjects: { "deal:deal-synthetic-1": { ...storedSubject(current),
+      established_by_transition: "record-payment", prior_state_digest: D(42) } },
+    facts: { payment: storedFact("payment") },
+    read_bodies: {
+      subject: subjectReadback(current, { established_by_transition: "record-payment",
+        prior_state_digest: D(42), updated_by: "dell" }),
+      subject_events: [],
+    },
+  });
+  const store = createCreLifecycleStore({ db });
+  const answer = await store.recordDealAxis({
+    idempotency_key: "j102-fixture-1",
+    subject_ref: { subject_kind: "deal", subject_id: "deal-synthetic-1", expected_state_digest: D(42) },
+    evidence_refs: [recordRef("payment_received")],
+    declared: { axis: "payment_state", payment_level: "paid" },
+  }, ctx(JOE));
+  assert.equal(answer.decision, "reconcile");
+  assert.deepEqual(answer.overlapping_fields, ["payment_state"]);
+  assert.equal(db.callsTo("j102_apply_transition").length, 0);
+  assert.equal(db.callsTo("j102_record_reconciliation_item").length, 1);
+  const envelope = JSON.parse(db.paramsFor("j102_record_reconciliation_item")[0]);
+  assert.equal(envelope.record.conflict_kind, "overlapping_field_edit");
+  assert.deepEqual(envelope.record.concurrent_edits.map(e => [e.field, e.edited_by]),
+    [["payment_state", "dell"]]);
+  assert.equal(envelope.record.concurrent_change_evidence.characterized, true);
+  const diagnostics = JSON.parse(db.paramsFor("j102_record_reconciliation_item")[4]);
+  assert.equal(diagnostics.operation, "record-lifecycle-reconciliation",
+    "the governed writer is reached under its own operation name");
 });
