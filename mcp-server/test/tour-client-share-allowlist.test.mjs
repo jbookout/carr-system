@@ -25,7 +25,7 @@ import {
 import { renderTourPacket, TourPacketRenderError } from "../src/tour-packet-render.js";
 import { tourRightsProjectionTools } from "../src/tour-rights-projection.js";
 import { projectTourClientMap, projectTourClientPacket, tourSharingBrowserAccess, tourSharingTools } from "../src/tour-sharing.js";
-import { adversarialRefused, adversarialAllowed, ACCESS_TRIGGERS, ASCII_PUNCTUATION, UNICODE_PUNCTUATION } from "./fixtures/tour-client-text-adversarial.mjs";
+import { adversarialRefused, adversarialAllowed, ACCESS_TRIGGERS, ASCII_PUNCTUATION, UNICODE_PUNCTUATION, GULF_FEATURE_LIST, REVIEWER_FEATURE_LIST } from "./fixtures/tour-client-text-adversarial.mjs";
 
 const root = path.resolve(import.meta.dirname, "../..");
 
@@ -474,6 +474,9 @@ test("the generated adversarial corpus is refused (or allowed) by the JavaScript
   assert.ok(refused.length > 2500, `generated refused corpus is ${refused.length} strings`);
   const leaks = refused.filter(value => clientTextViolation(value) === null);
   assert.deepEqual(leaks, [], "generated strings the rule lets through");
+  // Ordinary feature lists must seal: a refusal blocks the whole tour.
+  assert.ok(GULF_FEATURE_LIST.length >= 100, `Gulf Coast feature-list set is ${GULF_FEATURE_LIST.length} strings`);
+  for (const value of [...GULF_FEATURE_LIST, ...REVIEWER_FEATURE_LIST]) assert.ok(allowed.includes(value), `generator lacks ${value}`);
   const refusedAllowed = allowed.filter(value => clientTextViolation(value) !== null);
   assert.deepEqual(refusedAllowed, [], "generated ordinary strings the rule refuses");
   // Every connector class member reached the access-code rule itself, not a neighbour.

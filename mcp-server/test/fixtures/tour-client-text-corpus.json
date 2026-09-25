@@ -182,7 +182,13 @@
     "Lock 1998 renovation",
     "Access 24/7",
     "Security 24/7 on site",
-    "Fire code 2018"
+    "Fire code 2018",
+    "garage 250 spaces",
+    "Covered garage 150 spaces",
+    "Door-to-door 250 ft",
+    "The Pines, 1,200 SF",
+    "Florida Keys 1,200 SF",
+    "Suites 250 - 300 - 4500 SF"
   ],
   "refused": [
     ["4 per 1000. Owner Bob 251-555-0100","phone"],
@@ -501,9 +507,17 @@
     ["linktr.ee/bob","url"],
     ["qr.link","url"],
     ["landlord.xyz","url"],
-    ["landlord.estate","url"]
+    ["landlord.estate","url"],
+    ["Zip code 366021","access_code"],
+    ["Gate is now 4411","access_code"],
+    ["Key pad 4411","access_code"],
+    ["Gate: 44 - 11","access_code"],
+    ["Gate 247","access_code"],
+    ["bit . ly/abc","url"],
+    ["joe . realtor","url"],
+    ["Book at joebookout.realtor","url"]
   ],
-  "_comment_residual": "Documented residuals: contact text the rule deliberately does not catch -- digits spelled out or swapped for look-alike letters, internal notes written in plain English, internal notes written in plain English, internal notes written in plain English, internal notes written in plain English, internal notes written in plain English, and a suite word before a dash pair whose second number has no leading zero. Both engines must still ALLOW each one, so a change to any of them is visible; the human review before a seal is their control.",
+  "_comment_residual": "Documented residuals: contact text the rule deliberately does not catch -- digits spelled out or swapped for look-alike letters, internal notes written in plain English, internal notes written in plain English, internal notes written in plain English, internal notes written in plain English, internal notes written in plain English, and a suite word before a dash pair whose second number has no leading zero. Both engines must still ALLOW each one, so a change to any of them is visible; the human review before a seal is their control. An access code written before its trigger word (\"4411 at the gate\") is a documented residual: the rule reads a trigger word, then the digits.",
   "residual": [
     "Owner Bob: two five one 555 0100",
     "Call five five five zero one hundred",
@@ -515,7 +529,9 @@
     "Suite 555-1234",
     "Suite 555 \u2013 1234",
     "Suite 555-1234 / Unit 555-9876",
-    "Tenant is tight on budget this quarter"
+    "Tenant is tight on budget this quarter",
+    "4411 at the gate",
+    "Use 4411 at the door"
   ],
   "_comment_known_refused": "Accepted false positives: ordinary-looking text the rule refuses, the safe direction (a word tight against @; slash-joined 3-3-4 building, suite or parking numbers; a year range joined to a count; a street name ending in .Me; a name with a dotted initial before a slash; a trigger word before three or more digits that are a door, gate or parking count, a bare year or a PO box; and characters outside the allowlist such as the soft hyphen and the line separator). Both engines must refuse each one under the named reason.",
   "known_refused": [
@@ -525,7 +541,6 @@
     ["Springhill Ave.Me","url"],
     ["Suite\u00ad 210","character:U+00AD at position 6"],
     ["Bayside\u2028Medical Plaza","character:U+2028 at position 8"],
-    ["garage 250 spaces","access_code"],
     ["Dr.Smith/Jones","url"],
     ["Door 101","access_code"],
     ["Door 1204 (Suite 1204)","access_code"],
@@ -534,6 +549,9 @@
     ["Suites 200/210/1200","phone"],
     ["Parking 250/555/1000","phone"],
     ["Access 2027","access_code"],
-    ["PO Box 1234","access_code"]
+    ["PO Box 1234","access_code"],
+    ["Bldg 100-200 - 3500 SF","local_phone"],
+    ["Entry 2026","access_code"],
+    ["Access in 2027","access_code"]
   ]
 }
