@@ -1444,16 +1444,21 @@ def _canonical_health():
                         # cover a sibling statement that shares its own
                         # accumulator, in the SAME block, not a statement
                         # outside the branch the loop lives in — the same
-                        # reasoning the jobs section above follows too. This
-                        # also closes a real gap round 8 of the same review
-                        # found here: the four counts can all legitimately be
-                        # zero (a summary line whose shape matched but whose
-                        # counts don't sum to a reason to be in this branch at
-                        # all), and a bare `rc = 1` placed after this loop
-                        # unconditionally would have gone red with nothing in
-                        # `_FINDINGS` to explain why. Folding the assignment
-                        # into the loop means `rc` only ever flips here
-                        # because a `_red()` call already recorded why.
+                        # reasoning the jobs section above follows too.
+                        # (Round 9 correction: an earlier round of this
+                        # comment additionally claimed this closed "a real
+                        # latent gap" where all four counts could be zero
+                        # here and a bare `rc = 1` after the loop would have
+                        # gone red unrecorded. The coordinator confirmed that
+                        # claim was wrong — ops/credential-health.py's child
+                        # process cannot exit nonzero while reporting
+                        # failed=0 expiring_soon=0 unverifiable=0
+                        # unconfigured=0, so this branch was never reachable
+                        # with all four counts at zero, and no such gap ever
+                        # existed to close. Folding the assignment into the
+                        # loop is kept purely for the same-block-sibling
+                        # reasoning above, not for a gap that was never
+                        # real.)
                         for _count, _subject, _hard in (
                             (_failed, "failed", True),
                             (_expiring, "expiring_soon", False),

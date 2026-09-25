@@ -189,33 +189,131 @@ def _all_finding_call_keys(node: ast.AST) -> set[str]:
     return keys
 
 
+def _allowed_rc_assignment_value(value: ast.AST) -> bool:
+    """True iff `value` is the RHS of one of the exactly three forms an
+    assignment to `rc` inside `_canonical_health` is allowed to take (round 9
+    of an independent review of PR #1237, converting the round-8 DENYLIST —
+    which only forbade a literal `1` and so let anything else through
+    undetected, e.g. `rc = p.returncode` — into an ALLOWLIST that names every
+    legitimate shape and rejects everything else):
+
+      1. `rc = 0`                                   — the initial assignment
+      2. `rc = _red(...)`                            — any arguments
+      3. `rc = _canonical_contradiction_alarm() or rc` — the one self-
+         referential pattern `_canonical_health` actually uses, folding the
+         contradiction alarm's own self-recording return value into `rc`
+         without re-recording its finding a second time.
+    """
+    if isinstance(value, ast.Constant) and value.value == 0:
+        return True
+    if (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+            and value.func.id == "_red"):
+        return True
+    if (isinstance(value, ast.BoolOp) and isinstance(value.op, ast.Or)
+            and len(value.values) == 2
+            and isinstance(value.values[0], ast.Call)
+            and isinstance(value.values[0].func, ast.Name)
+            and value.values[0].func.id == "_canonical_contradiction_alarm"
+            and isinstance(value.values[1], ast.Name) and value.values[1].id == "rc"):
+        return True
+    return False
+
+
 def _rc_assignment_violations(func: ast.AST) -> list[str]:
-    """Every assignment to `rc` inside `func` that sets it via a bare literal
-    1 (or `|=`s one in) — found anywhere in the function, with no block-
-    scoping or control-flow reasoning needed (round 8 of an independent
-    review of PR #1237 made this a purely mechanical, unconditional rule):
-    `rc` may be initialized to 0, folded with a call's boolean result
-    (`rc = _canonical_contradiction_alarm() or rc`), or set via `rc =
-    _red(...)` (which itself always records the finding before returning 1)
-    — but never handed the literal integer 1 directly. This check does not
-    inspect the callee of an assigned Call — it only forbids the literal —
-    so it is a deliberately narrow, mechanical net; the other tests in this
-    file (and code review) still confirm any call used this way is itself
-    trustworthy, the same as any other code review question."""
+    """Every assignment to (or binding of) `rc` inside `func`, checked
+    against an ALLOWLIST rather than a denylist (round 9 of an independent
+    review of PR #1237). The round-8 check here only forbade a bare literal
+    `1` (or `|= 1`) — a denylist by construction, which meant any OTHER
+    unrecorded write to `rc` (`rc = p.returncode`, `rc = max(rc, 1)`,
+    `rc = 1 if cond else rc`, `rc = rc or 1`, `rc = int(True)`, a tuple
+    target `rc, _z = 1, 0`, or a walrus `(rc := 1)`) got through undetected,
+    both here (the static check never looked at it) and at runtime (none of
+    those paths call `_red()`, so none would record a finding). This walks
+    the whole function and flags any binding of the name `rc` that is not
+    exactly one of the three forms `_allowed_rc_assignment_value` names:
+    a single-target `Assign` whose value passes that check. Everything else
+    — `AugAssign` (`rc += 1`, `rc |= 1`, any operator), a `NamedExpr` walrus
+    binding `rc`, a multi/tuple assignment target that includes `rc`, or a
+    single-target `Assign` whose value is any other shape — is rejected."""
     violations = []
     where = getattr(func, "name", None) or "<mutated>"
     for node in ast.walk(func):
-        if (isinstance(node, ast.Assign) and len(node.targets) == 1
-                and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "rc"
-                and isinstance(node.value, ast.Constant) and node.value.value == 1):
-            violations.append(f"{where}:{node.lineno}: rc = 1 (bare literal — "
-                              f"must go through rc = _red(...))")
-        if (isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name)
-                and node.target.id == "rc" and isinstance(node.op, ast.BitOr)
-                and isinstance(node.value, ast.Constant) and node.value.value == 1):
-            violations.append(f"{where}:{node.lineno}: rc |= 1 (bare literal — "
-                              f"must go through rc = _red(...))")
+        if isinstance(node, ast.Assign):
+            single_rc_target = (len(node.targets) == 1
+                                and isinstance(node.targets[0], ast.Name)
+                                and node.targets[0].id == "rc")
+            touches_rc = single_rc_target or any(
+                isinstance(t, (ast.Tuple, ast.List))
+                and any(isinstance(elt, ast.Name) and elt.id == "rc" for elt in t.elts)
+                for t in node.targets
+            )
+            if not touches_rc:
+                continue
+            if not single_rc_target:
+                violations.append(f"{where}:{node.lineno}: rc assigned via a tuple/multiple "
+                                  f"assignment target — not one of the three allowed forms")
+            elif not _allowed_rc_assignment_value(node.value):
+                violations.append(f"{where}:{node.lineno}: rc assignment does not match one "
+                                  f"of the three allowed forms (rc = 0 / rc = _red(...) / "
+                                  f"rc = _canonical_contradiction_alarm() or rc)")
+        elif (isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name)
+                and node.target.id == "rc"):
+            violations.append(f"{where}:{node.lineno}: augmented assignment to rc "
+                              f"({type(node.op).__name__}) is not one of the three allowed forms")
+        elif (isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name)
+                and node.target.id == "rc"):
+            violations.append(f"{where}:{node.lineno}: walrus assignment to rc "
+                              f"is not one of the three allowed forms")
     return violations
+
+
+def _canonical_health_return_violations(func: ast.FunctionDef) -> list[str]:
+    """Every `return` inside `_canonical_health` must be either `return rc`,
+    or a literal `return 1` that is preceded — somewhere earlier in the SAME
+    enclosing statement block — by a call to `_red(...)` (directly, or via
+    `rc = _red(...)`). This matches the function's one actual early return:
+    the `except Exception:` branch at the top (when `_canonical_snapshot()`
+    itself raises) calls `_red("canonical_health_refused", ...)` to record
+    the refusal, prints the completion marker, and only then `return 1`s —
+    with the finding call and the return in the same block but not on
+    adjacent lines (a completion-marker print and explanatory comments sit
+    between them), so this checks "earlier in the block", not "the
+    immediately preceding statement". Every other return shape (a bare
+    `return 0`, a bare `return 2`, or a literal `return 1` with no `_red()`
+    call anywhere earlier in its own block) is rejected."""
+    errors: list[str] = []
+
+    def walk_block(body: list) -> None:
+        seen_red = False
+        for stmt in body:
+            if isinstance(stmt, ast.Return):
+                is_return_rc = isinstance(stmt.value, ast.Name) and stmt.value.id == "rc"
+                is_recorded_return_one = (isinstance(stmt.value, ast.Constant)
+                                          and stmt.value.value == 1 and seen_red)
+                if not (is_return_rc or is_recorded_return_one):
+                    errors.append(f"{func.name}:{stmt.lineno}: return does not match the "
+                                  f"allowed shape (`return rc`, or `return 1` preceded by a "
+                                  f"`_red(...)` call in the same block)")
+            is_red_call = (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)
+                           and isinstance(stmt.value.func, ast.Name)
+                           and stmt.value.func.id == "_red")
+            is_red_assign = (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1
+                             and isinstance(stmt.targets[0], ast.Name)
+                             and stmt.targets[0].id == "rc"
+                             and isinstance(stmt.value, ast.Call)
+                             and isinstance(stmt.value.func, ast.Name)
+                             and stmt.value.func.id == "_red")
+            if is_red_call or is_red_assign:
+                seen_red = True
+            for field in ("body", "orelse", "finalbody"):
+                nested = getattr(stmt, field, None)
+                if isinstance(nested, list) and nested and all(isinstance(x, ast.stmt) for x in nested):
+                    walk_block(nested)
+            for handler in getattr(stmt, "handlers", []) or []:
+                walk_block(handler.body)
+
+    walk_block(func.body)
+    return errors
 
 
 def _returns_one_have_preceding_finding_call(func: ast.FunctionDef) -> list[str]:
@@ -377,14 +475,19 @@ class RedHelper(unittest.TestCase):
 
 
 class RcAssignedOnlyViaRed(unittest.TestCase):
-    """Round 8 of an independent review of PR #1237: `_canonical_health` may
-    never assign `rc` a bare literal 1 (or `|=` one in) — the only way to set
-    it besides its initial `rc = 0` is a call, in practice always `rc =
-    _red(...)`, which records the finding before returning 1. This is the
-    mechanical replacement for the old per-branch/per-loop "does a preceding
-    finding call exist" reasoning (see the module docstring) — a bare
-    `rc = 1` is simply forbidden now, so there is nothing left for that
-    reasoning to reason about."""
+    """Round 9 of an independent review of PR #1237 converts this from a
+    DENYLIST to an ALLOWLIST. Round 8 only forbade a bare literal `rc = 1`
+    (or `rc |= 1`) — which meant any OTHER unrecorded write to `rc` (e.g.
+    `rc = p.returncode`) got through both this static check and, at runtime,
+    without ever calling `_red()` to record a finding. `_canonical_health`
+    may now assign `rc` ONLY via one of three exact forms — `rc = 0`,
+    `rc = _red(...)`, or `rc = _canonical_contradiction_alarm() or rc` — and
+    every other binding of the name `rc` (any other literal, any other call,
+    a conditional expression, a boolean-or that isn't the one allowed
+    contradiction-alarm pattern, an augmented assignment, a tuple/multiple
+    assignment target, or a walrus binding) is rejected. See
+    `_allowed_rc_assignment_value`'s docstring for the exact three forms and
+    `_rc_assignment_violations`'s for what it rejects and why."""
 
     def test_no_bare_rc_literal_assignment_in_canonical_health(self):
         fn = _find_function("_canonical_health")
@@ -419,6 +522,69 @@ class RcAssignedOnlyViaRed(unittest.TestCase):
         violations = _rc_assignment_violations(fn)
         self.assertEqual(violations, [], "\n".join(violations))
 
+    # ── round 9: the nine allowlist-only mutations ──────────────────────
+    # Each plants one statement that a DENYLIST checking only for a bare
+    # literal `1` would have missed, into a deep copy of the real
+    # `_canonical_health` AST, and asserts the new allowlist check now
+    # rejects it. Each needs its own AST node shape — a plain `Call`, a
+    # `Constant`, an `AugAssign`, an `IfExp`, a `BoolOp`, a tuple-target
+    # `Assign`, and a `NamedExpr` walrus — built either by `ast.parse`-ing
+    # the real Python source (simplest and least error-prone) or, for the
+    # walrus, wrapped in a statement context that accepts an expression.
+
+    def _assert_mutation_caught(self, stmt_src: str, label: str) -> None:
+        mutated = copy.deepcopy(_find_function("_canonical_health"))
+        mutated.body.append(ast.parse(stmt_src).body[0])
+        ast.fix_missing_locations(mutated)
+        violations = _rc_assignment_violations(mutated)
+        self.assertNotEqual(violations, [], f"{label} planted into _canonical_health was not caught")
+
+    def test_mutation_rc_equals_p_returncode_is_caught(self):
+        # The motivating gap: a denylist checking only for a literal `1`
+        # never even looks at a `Call`/`Attribute` RHS like this one.
+        self._assert_mutation_caught("if True:\n    rc = p.returncode\n",
+                                     "rc = p.returncode")
+
+    def test_mutation_rc_equals_2_is_caught(self):
+        # A literal RHS that isn't 0 and isn't reached via `_red(...)`.
+        self._assert_mutation_caught("if True:\n    rc = 2\n", "rc = 2")
+
+    def test_mutation_rc_plus_equals_1_is_caught(self):
+        # AugAssign — the round-8 check only forbade `|= 1` specifically;
+        # this allowlist rejects AugAssign to rc unconditionally.
+        self._assert_mutation_caught("if True:\n    rc += 1\n", "rc += 1")
+
+    def test_mutation_rc_equals_max_rc_1_is_caught(self):
+        # A Call whose callee is not `_red` — the allowlist only accepts
+        # `_red(...)` by name, so any other call is rejected.
+        self._assert_mutation_caught("if True:\n    rc = max(rc, 1)\n", "rc = max(rc, 1)")
+
+    def test_mutation_rc_equals_conditional_expression_is_caught(self):
+        # ast.IfExp — a conditional expression RHS, not one of the three
+        # allowed shapes.
+        self._assert_mutation_caught("if True:\n    rc = 1 if cond else rc\n",
+                                     "rc = 1 if cond else rc")
+
+    def test_mutation_rc_equals_rc_or_1_is_caught(self):
+        # ast.BoolOp(Or) — but NOT the one allowed contradiction-alarm
+        # pattern (Call(...) or Name('rc')); here it's Name('rc') or
+        # Constant(1), which must still be rejected.
+        self._assert_mutation_caught("if True:\n    rc = rc or 1\n", "rc = rc or 1")
+
+    def test_mutation_rc_equals_int_true_is_caught(self):
+        # A Call whose callee is the builtin `int`, not `_red`.
+        self._assert_mutation_caught("if True:\n    rc = int(True)\n", "rc = int(True)")
+
+    def test_mutation_rc_tuple_target_assignment_is_caught(self):
+        # ast.Tuple assignment target that includes `rc` — a multi/tuple
+        # target is rejected outright regardless of the values assigned.
+        self._assert_mutation_caught("if True:\n    rc, _z = 1, 0\n", "rc, _z = 1, 0")
+
+    def test_mutation_rc_walrus_assignment_is_caught(self):
+        # ast.NamedExpr — the walrus operator binding `rc` inside an
+        # expression statement.
+        self._assert_mutation_caught("if True:\n    (rc := 1)\n", "(rc := 1)")
+
     def test_every_structural_or_tamper_detection_key_is_hard_error(self):
         fn = _find_function("_canonical_health")
         alarm = _find_function("_canonical_contradiction_alarm")
@@ -442,6 +608,62 @@ class RcAssignedOnlyViaRed(unittest.TestCase):
         overlap = business_keys & hard_error_keys
         self.assertEqual(overlap, set(),
                          f"business-count key(s) wrongly marked hard_error=True: {overlap}")
+
+
+class CanonicalHealthReturnsAreAllowlisted(unittest.TestCase):
+    """Round 9 companion to `RcAssignedOnlyViaRed`: the allowlist on `rc`
+    assignments alone doesn't close the loop if a `return` could still hand
+    back an unrecorded value directly. Every `return` inside
+    `_canonical_health` must be `return rc`, or a literal `return 1`
+    preceded — earlier in the same block — by a call to `_red(...)`. See
+    `_canonical_health_return_violations`'s docstring for the exact real
+    shape this matches."""
+
+    def test_canonical_health_returns_match_the_allowed_shape(self):
+        fn = _find_function("_canonical_health")
+        errors = _canonical_health_return_violations(fn)
+        self.assertEqual(errors, [], "\n".join(errors))
+
+    def test_mutation_unrecorded_return_one_is_caught(self):
+        src = (
+            "def f():\n"
+            "    rc = 0\n"
+            "    if bad:\n"
+            "        return 1\n"
+            "    return rc\n"
+        )
+        fn = ast.parse(src).body[0]
+        errors = _canonical_health_return_violations(fn)
+        self.assertNotEqual(errors, [],
+                            "an unrecorded literal return 1 was not caught")
+
+    def test_mutation_bare_return_zero_is_caught(self):
+        src = (
+            "def f():\n"
+            "    rc = 0\n"
+            "    if early:\n"
+            "        return 0\n"
+            "    return rc\n"
+        )
+        fn = ast.parse(src).body[0]
+        errors = _canonical_health_return_violations(fn)
+        self.assertNotEqual(errors, [], "a bare return 0 (not return rc) was not caught")
+
+    def test_recorded_return_one_after_red_in_same_block_is_not_flagged(self):
+        src = (
+            "def f():\n"
+            "    rc = 0\n"
+            "    try:\n"
+            "        risky()\n"
+            "    except Exception:\n"
+            "        _red('x', 'x', hard_error=True)\n"
+            "        print(MARKER)\n"
+            "        return 1\n"
+            "    return rc\n"
+        )
+        fn = ast.parse(src).body[0]
+        errors = _canonical_health_return_violations(fn)
+        self.assertEqual(errors, [], "\n".join(errors))
 
 
 class ContradictionAlarmSelfRecords(unittest.TestCase):
