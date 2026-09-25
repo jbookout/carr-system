@@ -121,6 +121,27 @@ case("the bare ts.net suffix is still blocked",
 case("a lookalike suffix appending the tailnet name is still blocked",
      bash("curl https://tailc8cc93.ts.net.evil.com/x"), DENY)
 
+# census.gov, added 2026-09-25 on Joe's approval for the J302 Safe Harbor census
+# tables (2020 county reference file, 2020 DHC ZCTA population). Asserted over
+# BASH because curl is the path the builder uses and Bash is allowlist-only, so
+# an ALLOW here can only come from KNOWN_HOSTS. The WebFetch case carries a long
+# query for the same reason as section 2: a short URL would pass the open-read
+# class anyway and prove nothing about the list.
+case("bash curl to www2.census.gov is allowed",
+     bash("curl -sSLO https://www2.census.gov/geo/docs/reference/codes2020/national_county2020.txt"),
+     ALLOW)
+case("bash curl to api.census.gov is allowed",
+     bash("curl -s 'https://api.census.gov/data/2020/dec/dhc?get=P1_001N&for=zip%20code%20tabulation%20area:*'"),
+     ALLOW)
+case("webfetch to api.census.gov with a long query is allowed by the list",
+     fetch("https://api.census.gov/data/2020/dec/dhc?get=" + "x" * 120), ALLOW)
+case("census lookalike appending a foreign domain is still blocked",
+     bash("curl https://census.gov.evil.example/x"), DENY)
+case("census lookalike sharing the suffix without a dot is still blocked",
+     bash("curl https://notcensus.gov/x"), DENY)
+case("an unrelated unknown host is still blocked",
+     bash("curl https://unlisted-data-host.example/x"), DENY)
+
 # ── 2. DERIVED list (the B half): client practice sites, from the record ──────
 # THESE CARRY A LONG QUERY ON PURPOSE. A derived host gets the UNCONDITIONAL
 # pass, so it must be allowed even with a query the open-read class would refuse.
