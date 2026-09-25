@@ -259,6 +259,49 @@ export const V5_DOOR_STRUCTURAL_SIDE_FIELDS = deepFreeze({
   "add-premises": { field: "also_listing_side", depth: "ownership[]", meaning: "records the counterparty listing agent" },
 });
 
+/**
+ * BOUNDED OUTPUT, WHATEVER THE INPUT. A caller controls how many fields match
+ * and how long each key is, so nothing the door records may grow with either:
+ * checks and refusals are merged by their identity with a count, at most
+ * V5_DOOR_MAX_FIELD_PATHS example paths are kept per merged entry, and each
+ * path is cut to V5_DOOR_MAX_FIELD_PATH_CHARS. Review of #1268 round 1 found
+ * 9,000 matching rows producing one 800 KB log line; that is what this bounds.
+ */
+export const V5_DOOR_MAX_FIELD_PATHS = 5;
+export const V5_DOOR_MAX_FIELD_PATH_CHARS = 160;
+
+function boundedPath(path) {
+  const text = String(path);
+  return text.length > V5_DOOR_MAX_FIELD_PATH_CHARS
+    ? `${text.slice(0, V5_DOOR_MAX_FIELD_PATH_CHARS - 1)}\u2026` : text;
+}
+
+/** Merge per-field checks that share an identity into one entry with a count. */
+function mergeChecks(checks) {
+  const merged = new Map();
+  for (const check of checks) {
+    const { field, fields, ...identity } = check;
+    const key = JSON.stringify(identity);
+    let entry = merged.get(key);
+    if (!entry) {
+      entry = { ...identity, count: 0, fields: [], fields_truncated: false };
+      merged.set(key, entry);
+    }
+    const paths = fields ?? (field === undefined ? [] : [field]);
+    entry.count += fields ? fields.length : 1;
+    for (const path of paths) {
+      if (entry.fields.length < V5_DOOR_MAX_FIELD_PATHS) entry.fields.push(boundedPath(path));
+      else entry.fields_truncated = true;
+    }
+  }
+  return [...merged.values()].map(entry => {
+    const out = { ...entry };
+    if (out.fields.length === 0) { delete out.fields; delete out.fields_truncated; }
+    else out.field = out.fields[0];
+    return out;
+  });
+}
+
 /** The bound on the argument walk. Past it the scan is incomplete, and says so. */
 export const V5_DOOR_MAX_SCANNED_NODES = 20000;
 export const V5_DOOR_MAX_SCAN_DEPTH = 24;
@@ -454,9 +497,17 @@ export function evaluateDispatchBoundaries({
     }));
   }
 
-  const refusals = checks
-    .filter(check => check.decision !== "allow")
-    .map(check => ({ boundary: check.boundary, reason_id: check.reason_id }));
+  const mergedChecks = mergeChecks(checks);
+  const refusalCounts = new Map();
+  for (const check of mergedChecks) {
+    if (check.decision === "allow") continue;
+    const key = `${check.boundary}:${check.reason_id}`;
+    const prior = refusalCounts.get(key);
+    refusalCounts.set(key, {
+      boundary: check.boundary, reason_id: check.reason_id, count: (prior?.count ?? 0) + check.count,
+    });
+  }
+  const refusals = [...refusalCounts.values()];
   const boundary_refused = refusals.length > 0;
   return deepFreeze({
     schema_version: V5_BOUNDARY_DOOR_SCHEMA_VERSION,
@@ -467,7 +518,7 @@ export function evaluateDispatchBoundaries({
     verb,
     operation_kind,
     authority_subject: subject,
-    checks,
+    checks: mergedChecks,
     refusals,
     boundary_refused,
     enforced: mode === "enforce" && boundary_refused,

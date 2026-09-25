@@ -101,6 +101,16 @@ const PROBES = {
       return false;
     } catch (error) { return error?.payload?.error === "v5_boundary_refused"; }
   },
+  bounded_output: m => {
+    const verdict = run(m, { args: { rows: Array.from({ length: 2000 }, () => ({ representation_side: "landlord" })) } });
+    return verdict.refusals.length === 1 && JSON.stringify(verdict).length < 8000;
+  },
+  args_untouched: m => {
+    const args = { rows: [{ representation_side: "landlord" }], note: "x" };
+    const before = JSON.stringify(args);
+    run(m, { args });
+    return JSON.stringify(args) === before;
+  },
   grant_fix_valid_redecision_bad_delegation: m => m.policy.evaluateActorAuthority({
     actor: DELL, action: "developer.change_source", tenant: "carr-internal", now: NOW,
     redecision: { redecision_ref: "R", decided_by: "joe", subject: "dell", action: "developer.change_source",
@@ -148,6 +158,14 @@ const MUTANTS = [
     'if (mode === "enforce") throw error;', "throw error;"],
   ["enforce_refuses", "door", "enforce computes the verdict and never refuses",
     'enforced: mode === "enforce" && boundary_refused,', "enforced: false,"],
+  ["bounded_output", "door", "per-field checks are no longer merged (#1268 round-1 blocker)",
+    "const key = JSON.stringify(identity);", "const key = JSON.stringify(identity) + Math.random();"],
+  ["bounded_output", "door", "the stored field-path list is uncapped",
+    "if (entry.fields.length < V5_DOOR_MAX_FIELD_PATHS) entry.fields.push(boundedPath(path));",
+    "if (true) entry.fields.push(path);"],
+  ["args_untouched", "door", "the door marks the caller's arguments",
+    "const scan = scanArguments(args ?? {});",
+    "if (isPlainObject(args)) args.__door_seen = true;\n  const scan = scanArguments(args ?? {});"],
   ["grant_fix_valid_redecision_bad_delegation", "policy", "#929 regression: a valid redecision skips the delegation",
     "if (hasDelegation) {\n      const reason = checkDelegation",
     "if (hasDelegation && !hasRedecision) {\n      const reason = checkDelegation"],

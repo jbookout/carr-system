@@ -398,7 +398,7 @@ test("shadow never blocks: a would-refuse verdict is recorded and returned", () 
   assert.equal(lines.length, 1);
   const line = JSON.parse(lines[0]);
   assert.equal(line.event, "v5_boundary_door");
-  assert.deepEqual(line.refusals, [{ boundary: "actor_authority", reason_id: "system_authority_reserved_to_joe" }]);
+  assert.deepEqual(line.refusals, [{ boundary: "actor_authority", reason_id: "system_authority_reserved_to_joe", count: 1 }]);
   assert.ok(!lines[0].includes("secret-reason-text"), "argument values never reach the log");
   const snapshot = doorObservationSnapshot();
   assert.equal(snapshot.scope, "this_worker_isolate_since_start");
@@ -431,7 +431,7 @@ test("enforce refuses by name before any handler, and fails closed on an unreada
     now: NOW, mode: "enforce", log: () => {} }), error => {
     assert.ok(error instanceof V5BoundaryDoorRefusal);
     assert.equal(error.payload.error, "v5_boundary_refused");
-    assert.deepEqual(error.payload.refusals, [{ boundary: "actor_authority", reason_id: "system_authority_reserved_to_joe" }]);
+    assert.deepEqual(error.payload.refusals, [{ boundary: "actor_authority", reason_id: "system_authority_reserved_to_joe", count: 1 }]);
     return true;
   });
   assert.equal(doorObservationSnapshot().enforced, 1);
@@ -472,4 +472,69 @@ test("read-global-boundaries is a read verb that refuses a stale expected digest
     e => e instanceof ToolError && e.payload.error === "stale_expected_digest");
   await assert.rejects(tool.handler(noDb, JOE, { expected_policy_digest: "nope" }),
     e => e instanceof ToolError && e.payload.error === "invalid_expected_digest");
+});
+
+// ----------------------------------- bounded output (#1268 review, round 1)
+//
+// The reviewer's reproduction: 9,000 rows of {representation_side:"landlord"}
+// produced one 800 KB log line, because every matching field appended its own
+// refusal and the whole list was logged, buffered and served back. Everything
+// the door records must now be bounded whatever the caller sends.
+
+const manyRows = (n, row) => ({ rows: Array.from({ length: n }, (_, i) => row(i)) });
+
+test("a huge matching input yields merged refusals and a bounded verdict and log line", () => {
+  resetDoorObservationForTest();
+  const cases = [
+    manyRows(9000, () => ({ representation_side: "landlord" })),
+    manyRows(6000, () => ({ patient_name: "x", activate_listing_side: true })),
+    manyRows(3000, i => ({ [`${"k".repeat(5000)}${i}`]: { patient_address: "1 Main" } })),
+  ];
+  for (const args of cases) {
+    const lines = [];
+    const verdict = passBoundaryDoor({ verb: "log-activity", write: true, actor: DELL, args, now: NOW,
+      log: l => lines.push(l) });
+    assert.equal(verdict.boundary_refused, true);
+    const keys = verdict.refusals.map(r => `${r.boundary}:${r.reason_id}`);
+    assert.equal(new Set(keys).size, keys.length, "refusals are merged by boundary:reason_id");
+    assert.ok(verdict.refusals.every(r => Number.isInteger(r.count) && r.count >= 1));
+    for (const check of verdict.checks) {
+      if (!check.fields) continue;
+      assert.ok(check.fields.length <= 5);
+      assert.ok(check.fields.every(f => f.length <= 160));
+    }
+    assert.ok(JSON.stringify(verdict).length < 8000, `verdict is ${JSON.stringify(verdict).length} bytes`);
+    assert.equal(lines.length, 1);
+    assert.ok(lines[0].length < 2000, `log line is ${lines[0].length} bytes`);
+  }
+  const landlord = passBoundaryDoor({ verb: "log-activity", write: true, actor: DELL, now: NOW, log: () => {},
+    args: manyRows(9000, () => ({ representation_side: "landlord" })) });
+  assert.deepEqual(landlord.refusals.map(r => ({ ...r })),
+    [{ boundary: "representation_scope", reason_id: "listing_side_exposure_refused", count: 9000 }]);
+  const scope = landlord.checks.filter(c => c.boundary === "representation_scope");
+  assert.equal(scope.length, 1);
+  assert.equal(scope[0].count, 9000);
+  assert.equal(scope[0].fields.length, 5);
+  assert.equal(scope[0].fields_truncated, true);
+  // The isolate buffer and the read projection stay bounded too.
+  for (let i = 0; i < 40; i += 1) {
+    passBoundaryDoor({ verb: "log-activity", write: true, actor: DELL, now: NOW, log: () => {},
+      args: manyRows(3000, () => ({ representation_side: "seller", mrn: 2, activate_listing: 1 })) });
+  }
+  const snapshot = doorObservationSnapshot();
+  assert.ok(snapshot.recent_refused.length <= 20);
+  assert.ok(JSON.stringify(snapshot).length < 20000, `snapshot is ${JSON.stringify(snapshot).length} bytes`);
+  assert.ok(JSON.stringify(v5BoundaryDoorProjection()).length < 60000);
+});
+
+test("the door never changes the caller's arguments", () => {
+  const args = { deal: "C-1", rows: [{ representation_side: "landlord", patient_name: "x" }],
+    activate_listing_side: true, side: "landlord", mode: "canary", ownership: [{ also_listing_side: true }] };
+  const before = JSON.stringify(args);
+  for (const verb of ["log-activity", "record-counter", "add-premises", "approve-rule", "accept-workflow"]) {
+    passBoundaryDoor({ verb, write: true, actor: DELL, args, now: NOW, log: () => {} });
+    evaluateDispatchBoundaries({ verb, write: true, actor: DELL, args, context: cloud });
+  }
+  assert.equal(JSON.stringify(args), before);
+  assert.deepEqual(Object.keys(args), ["deal", "rows", "activate_listing_side", "side", "mode", "ownership"]);
 });
