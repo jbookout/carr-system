@@ -364,9 +364,53 @@ def split_diff_by_file(diff_text):
     return out
 
 
-def triage_review(diff_text, task_text, *, client=None, judge_module=None):
-    """Per-file risk for a diff. verdict "needs_review" if any file is high risk."""
+# The Stop hook re-scores `git diff HEAD` at every Stop, and a diff nobody has
+# touched since the last Stop is the same question with the same answer.
+# Measured 2026-09-25 in out/jev-judge.jsonl: 223 review_triage calls, 219 of
+# them repeats of an earlier subject, one unchanged path asked 220 times. The
+# key is the exact state sent (hunks and task) plus the asking code, so a
+# changed hunk, a different task or a code change always asks again.
+REVIEW_CACHE_PATH = os.path.join(REPO, "out", "jev-review-triage-cache.json")
+REVIEW_CACHE_SOURCES = ("ops/jev_done_checks.py", "ops/jev_judge.py",
+                        "ops/typesafe_client.py", "ops/jev_verdict_cache.py")
+
+
+def _review_answer(jj, state, questions, client, cache_path, now):
+    """The judge's answer for this exact state, cached for identical repeats.
+
+    Returns (answer, fresh). Any cache failure falls through to asking; an
+    answer is stored only when every question came back with a score, so a
+    partial reply is never replayed."""
+    cache = entry_key = None
+    if cache_path:
+        try:
+            cache = _sibling("jev_verdict_cache")
+            entry_key = cache.key({"state": state, "questions": questions,
+                                   "source": cache.source_digest(*REVIEW_CACHE_SOURCES)})
+            cached = cache.get(cache_path, entry_key, now=now)
+            if isinstance(cached, dict) and isinstance(cached.get("answers"), dict):
+                return cached, False
+        except Exception:
+            cache = None
+    answer = jj.judge(state, questions, client=client, timeout=TIMEOUT_SECONDS)
+    answers = answer.get("answers") if isinstance(answer, dict) else None
+    if (cache is not None and isinstance(answers, dict)
+            and all(isinstance((answers.get(qid) or {}).get("score"), (int, float))
+                    for qid in questions)):
+        cache.put(cache_path, entry_key, answer, now=now)
+    return answer, True
+
+
+def triage_review(diff_text, task_text, *, client=None, judge_module=None,
+                  cache_path=None, now=None):
+    """Per-file risk for a diff. verdict "needs_review" if any file is high risk.
+
+    Production callers (no injected judge or client) reuse the answer for a
+    byte-identical diff and task inside the cache window; a test caches only
+    when it names `cache_path`."""
     check_id = "review_triage"
+    if cache_path is None and judge_module is None and client is None:
+        cache_path = REVIEW_CACHE_PATH
     try:
         files = split_diff_by_file(diff_text)
         if not files:
@@ -396,9 +440,12 @@ def triage_review(diff_text, task_text, *, client=None, judge_module=None):
             state = {"files": {keys[path]: chunk for path, chunk in to_judge.items()}}
             if task_text:
                 state["task"] = task_text[:MAX_TASK_TEXT_CHARS]
-            answer = jj.judge(state, questions, client=client, timeout=TIMEOUT_SECONDS)
-            jj.record("supervise.review_triage", "|".join(sorted(to_judge))[:200], answer, None,
-                      note={"file_count": len(to_judge)})
+            answer, fresh = _review_answer(jj, state, questions, client, cache_path, now)
+            if fresh:
+                # out/jev-judge.jsonl is the record of calls Jev answered; a
+                # cache hit made no call and so writes no row.
+                jj.record("supervise.review_triage", "|".join(sorted(to_judge))[:200], answer,
+                          None, note={"file_count": len(to_judge)})
             for path in to_judge:
                 body = (answer.get("answers") or {}).get(keys[path], {})
                 value = body.get("score")

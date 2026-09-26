@@ -8,18 +8,20 @@ import { organizationTenantForActor } from "./identity.js";
 import {
   PUBLIC_TOUR_FIELD_KEYS,
   REQUIRED_PUBLIC_PROPERTY_FIELDS,
+  isClientTourFieldKey,
   requiredTimestamp,
   snapshotCanonicalJsonValue,
   snapshotPublicValue,
 } from "./tour-operations-contract.js";
+import { clientSafeMetric, isClientSafeText } from "./tour-client-value-safety.js";
+
+function clientValueSafe(fieldKey, value) {
+  if (fieldKey === "size" || fieldKey === "asking_economics") return clientSafeMetric(value) !== undefined;
+  return isClientSafeText(value);
+}
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
-const PUBLIC_FIELDS = new Set([
-  "display.name", "display.address", "suite", "property_type", "size",
-  "asking_economics", "availability", "parking", "access", "photos",
-  "floor_plan", "source_attribution", "as_of", "caveat",
-]);
 const AUTHORITY_FIELDS = new Set([
   "tenant", "tenant_id", "organization_tenant_id", "actor", "actor_id",
   "reviewer", "identity", "authorization", "authorization_class", "sponsor",
@@ -184,7 +186,8 @@ function publicProjection(value, ToolError) {
   if (!factRows || factRows.length === 0)
     fail(ToolError, { error: "tour_public_projection_invalid", field: "facts" });
   const seen = new Set();
-  projection.facts = new Array(factRows.length);
+  projection.facts = [];
+  let withheld = 0;
   for (let index = 0; index < factRows.length; index++) {
     const fact = snapshotRecord(factRows[index], [
       "property_id", "field_assertion_id", "display_field_key", "value",
@@ -194,11 +197,25 @@ function publicProjection(value, ToolError) {
     if (!fact)
       fail(ToolError, { error: "tour_public_projection_invalid", field: `facts[${index}]` });
     const displayFieldKey = text(fact.display_field_key, `facts[${index}].display_field_key`, ToolError);
+    // A projection sealed before the client allowlist (V5-J303) may hold a
+    // recognised public-shape fact that is now internal (access, caveat,
+    // photos, ...). It is withheld, never returned; an unrecognised key still
+    // fails the whole read closed below.
+    if (PUBLIC_TOUR_FIELD_KEYS.has(displayFieldKey) && !isClientTourFieldKey(displayFieldKey)) {
+      withheld += 1;
+      continue;
+    }
     let publicValue;
     try { publicValue = snapshotPublicValue(displayFieldKey, fact.value); }
     catch { fail(ToolError, { error: "tour_public_projection_invalid", field: `facts[${index}].display_field_key` }); }
     if (!PUBLIC_TOUR_FIELD_KEYS.has(displayFieldKey))
       fail(ToolError, { error: "tour_public_projection_invalid", field: `facts[${index}].display_field_key` });
+    // The same client value rule the seal, the browser share and the PDF
+    // apply: a legacy fact whose allowed key carries unsafe text is withheld.
+    if (!clientValueSafe(displayFieldKey, publicValue)) {
+      withheld += 1;
+      continue;
+    }
     const effectiveFrom = databaseTimestamp(fact.effective_from, `facts[${index}].effective_from`, ToolError);
     const effectiveTo = databaseTimestamp(fact.effective_to, `facts[${index}].effective_to`, ToolError, true);
     if (effectiveTo && Date.parse(effectiveTo) <= Date.parse(effectiveFrom))
@@ -222,8 +239,11 @@ function publicProjection(value, ToolError) {
     if (seen.has(key))
       fail(ToolError, { error: "tour_public_projection_invalid", field: `facts[${index}]`, reason: "duplicate_property_field" });
     seen.add(key);
-    projection.facts[index] = projected;
+    projection.facts.push(projected);
   }
+  if (projection.facts.length === 0)
+    fail(ToolError, { error: "tour_public_projection_invalid", field: "facts" });
+  if (withheld) projection.withheld_internal_fact_count = withheld;
   const properties = [];
   const propertySet = new Set();
   for (let index = 0; index < projection.facts.length; index++) {
@@ -365,8 +385,10 @@ function validateSelectedFacts(value, ToolError) {
       field_assertion_id: uuid(item.field_assertion_id, `selected_facts[${index}].field_assertion_id`, ToolError),
       display_field_key: text(item.display_field_key, `selected_facts[${index}].display_field_key`, ToolError),
     };
-    if (!PUBLIC_FIELDS.has(fact.display_field_key))
-      fail(ToolError, { error: "tour_selected_facts_invalid", index, field: "display_field_key" });
+    // Default deny: only the client allowlist can be sealed into a projection
+    // a client will see. The database trigger refuses the same set.
+    if (!isClientTourFieldKey(fact.display_field_key))
+      fail(ToolError, { error: "tour_selected_facts_invalid", index, field: "display_field_key", reason: "field_not_client_allowlisted" });
     const key = `${fact.property_id}\u001f${fact.display_field_key}`;
     if (seen.has(key)) fail(ToolError, { error: "tour_selected_facts_invalid", index, reason: "duplicate_property_field" });
     seen.add(key);

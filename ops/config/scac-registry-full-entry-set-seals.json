@@ -68,5 +68,22 @@
   "scac-mutation-registry.v67": "sha256:e8ef4aa613e95f25d5d5fb9b16f651a5a6968c4da0c1fced9f1e08545fad886c",
   "scac-mutation-registry.v68": "sha256:99677ecd42d9c6077707cbdeeed3bd8ebad5c654858df2ea27004fd6483b6439",
   "scac-mutation-registry.v69": "sha256:e0156dfb733461fcc5a2f9438df50c53688e7337329df539b923f2e9905194e2",
-  "scac-mutation-registry.v70": "sha256:ba0c3bb5f0c66d8ae82d270b3556c096ac514bd9e949f4e5d6ad5804690f89d7"
+  "scac-mutation-registry.v70": "sha256:ba0c3bb5f0c66d8ae82d270b3556c096ac514bd9e949f4e5d6ad5804690f89d7",
+  "scac-mutation-registry.v71": "sha256:46066693ed2129432dfbcce6e847ed6c3648ab9ec9eb23332d40e12c3d9abe01",
+  "scac-mutation-registry.v72": "sha256:77c4765d5fb489344ec150e15c679d7934e08af2378dc5d3d561e678ae3eec47",
+  "scac-mutation-registry.v73": "sha256:b0a8e5fc2291603438b4a3ead87a437d6c8cd086ba36b62a00f934af5ed1d3a4",
+  "scac-mutation-registry.v74": "sha256:12cc329530d6a145fcb542400a382c8165e1e4f1d492cb37d3967113ba362519",
+  "scac-mutation-registry.v75": "sha256:638d2e4bbe75f62d3071d96a0dbd19aaf1f8001f16e5ffe01c3741262ef26b61",
+  "scac-mutation-registry.v76": "sha256:28e5758abcf5444bf0d1e1d7b8f4151f259d14b22db9db26ada527507c2ca619",
+  "scac-mutation-registry.v77": "sha256:91685622cb785857f5588f6faf39a4d3147f9eedd7ddaaf013fd00dd0052f01c",
+  "scac-mutation-registry.v78": "sha256:1f3471357cdf04b138f45a5eb73c76d74d21b6263a6a6b2f56fa64bdddc9270a",
+  "scac-mutation-registry.v79": "sha256:32078f51bf557ca3e9452761572225feb7930007da1be1cb97327470abc76ff4",
+  "scac-mutation-registry.v80": "sha256:17872fa6fbd90bc5c209382d420355301d73552667fdb05a8396ce3a4bbf2b1e",
+  "scac-mutation-registry.v81": "sha256:d5c16f1bac9dedc8bbf5fb30673a4c36f7875f81997e2d58c34417dbfc106c34",
+  "scac-mutation-registry.v82": "sha256:fbf723250a406bd2a3cf0102a53e90cc0cd8215e7cc6446e8539c4d3eaf6308b",
+  "scac-mutation-registry.v83": "sha256:e96c0c94266044dc44f98338f8e12c6ab254672cbaa8298072bbfb8361274d0b",
+  "scac-mutation-registry.v84": "sha256:9f904d01ce946291fc59e9ee42fa9a778c90c6115654e8cfcf8b309ecbf2e5eb",
+  "scac-mutation-registry.v85": "sha256:bcaa1f7a3e43f0c6ce9b64315f55dc3866c10ada25671c75a1a1fb9e9bbf79d9",
+  "scac-mutation-registry.v86": "sha256:70908ba5c61fc4bed49c35b013451db0288f215f1ace59517e2220a993e122b3",
+  "scac-mutation-registry.v87": "sha256:9390486817c290fc2098ddb7fc73f1482f70b6fc7a197aadb562b138b616d943"
 }

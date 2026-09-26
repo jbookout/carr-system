@@ -4,14 +4,107 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v69 is the runtime selector after the server-side Jev call log (migration
-// 0587, ops.record_jev_call_receipt / ops.read_jev_call_receipts /
-// ops.jev_call_receipt_integrity behind the append-only ops.jev_call_receipt).
-// Its sealed catalog admits the three new verbs, ask-jev,
-// read-jev-call-receipts and read-jev-call-receipt-integrity, and preserves earlier versions as
-// history; v66-v68 registered no verb, so the selector stayed on v65 until
-// now. v70 re-digests tools/migrate.py only and registers no verb, so the
-// selector stays on v69.
+// v87 (PROVISIONAL) is the runtime selector after DoctorCRE V5-F05's
+// authenticated rule-context runtime. Its sealed catalog admits the read-only
+// read-action-context and the authority-only bind-rule-context-contract write,
+// and preserves v86 and earlier as history. It chains over v86's own seal
+// (0723) with 0724/0725; final numbering is assigned at merge. v86 itself only
+// sealed a launchd row, so the selector moved straight from v85 to v87.
+//
+// Superseded note (v85): v85 (PROVISIONAL) was the runtime selector after DoctorCRE V5-A02: the
+// authoritative rule-enforcement coverage read and the Joe-authority-only
+// fallback receipt write. It chains over v84's own seal (0719/0720); final
+// numbering is assigned at merge.
+//
+// Superseded note (v84): v84 was the runtime selector after DoctorCRE V5-A03, the authoritative
+// complete-set review cycle. It admits six tools backed by the append-only
+// 0719 store and preserves v83 and earlier as history. It chains over v83's
+// own seal (0717/0718).
+//
+// Superseded note (v83): v83 was the runtime selector after DoctorCRE V5-A01, the exact-scope
+// assurance-health evidence store (record-assurance-health-evidence,
+// read-assurance-health). Its sealed catalog admits those two new verbs and
+// preserves v82 and earlier as history. It chains over v82's own seal
+// (0708/0709).
+//
+// Superseded note (v82): v82 was the runtime selector after DoctorCRE V5-D01, the inactive
+// action-specific autonomy successor registry (register-action-class-
+// successor, read-action-class-successors, read-action-class-gate). Its
+// sealed catalog admits those three new verbs and preserves v81 and earlier
+// as history. It chains over v81's own seal (0706/0707).
+//
+// Superseded note (v81): v81 was the runtime selector after amend-closed-loop, the append-only door
+// to correct a CLOSED loop's outcome (defect a2c04ffa, loop c7265238).
+// Its sealed catalog admits one new verb -- amend-closed-loop -- and
+// preserves v80 and earlier as history. It chains over #1270's v80
+// (0704/0705).
+//
+// Superseded note (v80): v80 was the runtime selector after DoctorCRE V5-J102's healthcare CRE
+// lifecycle (migrations 0704/0705). Its sealed catalog admits twenty-one new
+// verbs -- read-cre-lifecycle (a read on the writer connection) and twenty
+// writes, one humanOnly and six authorityOnly in all -- and preserves v79 and
+// earlier as history. It chains over #1266's v79 (0701).
+//
+// Superseded note (v79): v79 was the runtime selector after DoctorCRE V5-J103's governed
+// correspondence store (migrations 0700-0701). Its sealed catalog admits four
+// new verbs -- correspondence-readiness and read-correspondence-thread (reads),
+// and the humanOnly record- and revoke-correspondence-adapter-consent pair --
+// and preserves earlier versions as history. None of them sends: there is no
+// send verb, and a draft has no destination. It chains over #1265's v78 (0629).
+//
+// Superseded note (v78): v78 was the runtime selector after the DoctorCRE v5 slice done-record
+// (migration 0628, sealed by 0629 over v77). Its sealed catalog admits nine
+// new verbs -- register-slice-criteria-from-catalog,
+// bind-slice-criterion-evidence, record-release-slice-members,
+// propose-slice-completion, list-shipped-releases and
+// pending-slice-completion-proposals (writer/reader), and
+// rebind-slice-criterion-evidence, set-slice-mark-hold and
+// confirm-slice-completions (authorityOnly) -- and
+// register-slice-checkable-done's narrowed evidence kinds. Automation
+// proposes; only a partner confirms complete.
+//
+// Superseded note (v77): v77 was the runtime selector after DoctorCRE V5-F01's record homes, source
+// authority and document identity (migrations 0626/0627). Its sealed catalog
+// admits nine new verbs -- read-record-source-authority (a read) and the
+// eight record-source-authority writes, two of them humanOnly and
+// authorityOnly -- and preserves earlier versions as history.
+//
+// Superseded note (v76): v76 was the runtime selector after V5-S01's live door (migration 0625).
+// Its sealed catalog admits one new read verb, read-global-boundaries (the
+// read projection of the settled v5 global boundaries and the dispatch
+// door's shadow counters, mcp-server/src/global-boundaries-door.v5.js), and
+// preserves v75 and earlier as history. It chains over #1236's v75 (0618).
+//
+// Superseded note (v75): v75 was the runtime selector after V5-A05 delivery cadence (migration 0617,
+// cadence receipts, server-derived escalation routing, the held-until-morning
+// queue). Its sealed catalog admits three new verbs -- cadence-status,
+// record-cadence-receipt and raise-delivery-cadence-alert -- and preserves
+// earlier versions as history. It chains over #1262's v74 (migration 0614).
+//
+// Superseded note (v74): v74 was the runtime selector after DoctorCRE V5-M01's live door to the
+// Journey 1 clock runtime (migration 0614). Its sealed catalog admits two new
+// verbs -- read-journey-one-clock (a read) and advance-journey-one-clock (a
+// writer write that refuses before any query in every deployed Worker) -- and
+// preserves earlier versions as history; v73 (the bin/deploy-worker.sh
+// re-digest) registered no verb, so the selector stayed on v72 until v74.
+//
+// Superseded note (v72): v72 was the runtime selector after DoctorCRE V5-R02 (migration 0602,
+// workflow cutover, caller migration and retirement readiness). Its sealed
+// catalog admits ten new verbs -- open-, advance-, cancel- and
+// retire-workflow-cutover-plan, register-slice-checkable-done and
+// mark-slice-completion (all authorityOnly), record-workflow-caller,
+// mark-slice-progress, workflow-cutover-board, read-slice-completion -- and
+// preserves earlier versions as history; v70 (the tools/migrate.py
+// re-digest) and v71 (the nightly-exports launchd row) registered no verb,
+// so the selector stayed on v69 until v72.
+//
+// Superseded note (v69): v69 was the runtime selector after the server-side
+// Jev call log (migration 0587, ops.record_jev_call_receipt /
+// ops.read_jev_call_receipts / ops.jev_call_receipt_integrity behind the
+// append-only ops.jev_call_receipt). Its sealed catalog admits the three new
+// verbs, ask-jev, read-jev-call-receipts and read-jev-call-receipt-integrity,
+// and preserves earlier versions as history. v70 re-digests tools/migrate.py
+// only and registers no verb, so the selector stayed on v69 until v72.
 //
 // Superseded note (v65): v65 was the runtime selector after DoctorCRE V5-UX-C02/C06's resource
 // observation store (migration 0579, ops.record_resource_observation --
@@ -68,7 +161,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v69.generated.js";
+} from "./scac-mutation-registry.v87.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 

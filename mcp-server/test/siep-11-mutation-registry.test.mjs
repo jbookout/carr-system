@@ -102,6 +102,22 @@ import {
   REGISTRY_V66_VERSION,
   REGISTRY_V69_VERSION,
   REGISTRY_V70_VERSION,
+  REGISTRY_V72_VERSION,
+  REGISTRY_V73_VERSION,
+  REGISTRY_V74_VERSION,
+  REGISTRY_V75_VERSION,
+  REGISTRY_V76_VERSION,
+  REGISTRY_V77_VERSION,
+  REGISTRY_V78_VERSION,
+  REGISTRY_V79_VERSION,
+  REGISTRY_V80_VERSION,
+  REGISTRY_V81_VERSION,
+  REGISTRY_V82_VERSION,
+  REGISTRY_V83_VERSION,
+  REGISTRY_V84_VERSION,
+  REGISTRY_V85_VERSION,
+  REGISTRY_V86_VERSION,
+  REGISTRY_V87_VERSION,
   NOTIFICATION_PREFERENCES_FORWARD_DB_CATALOG_BASELINE,
   SESSION_IDENTITY_FORWARD_DB_CATALOG_BASELINE,
   DISPATCH_SPINE_FORWARD_DB_CATALOG_BASELINE,
@@ -354,6 +370,36 @@ const generatedV65 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v65.generated.js", import.meta.url), "utf8");
 const generatedV69 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v69.generated.js", import.meta.url), "utf8");
+const generatedV72 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v72.generated.js", import.meta.url), "utf8");
+const generatedV74 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v74.generated.js", import.meta.url), "utf8");
+const generatedV75 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v75.generated.js", import.meta.url), "utf8");
+const generatedV76 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v76.generated.js", import.meta.url), "utf8");
+const generatedV77 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v77.generated.js", import.meta.url), "utf8");
+const generatedV78 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v78.generated.js", import.meta.url), "utf8");
+const generatedV79 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v79.generated.js", import.meta.url), "utf8");
+const generatedV80 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v80.generated.js", import.meta.url), "utf8");
+const generatedV81 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v81.generated.js", import.meta.url), "utf8");
+const generatedV82 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v82.generated.js", import.meta.url), "utf8");
+const generatedV83 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v83.generated.js", import.meta.url), "utf8");
+const generatedV84 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v84.generated.js", import.meta.url), "utf8");
+const generatedV85 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v85.generated.js", import.meta.url), "utf8");
+const generatedV86 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v86.generated.js", import.meta.url), "utf8");
+const generatedV87 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v87.generated.js", import.meta.url), "utf8");
 const v25Migration = fs.readFileSync(
   new URL("../../migrations/0501_scheduled_job_admission_and_scac_successor.sql",
     import.meta.url), "utf8");
@@ -388,9 +434,42 @@ test("reviewed MCP inventory is an exact immutable projection of the assembled r
   // read-resource-dashboard and record-resource-observation.
   // The server-side Jev call log (0587) adds one write and two reads:
   // ask-jev, read-jev-call-receipts and read-jev-call-receipt-integrity.
-  assert.equal(rows.length, 284);
-  assert.equal(rows.filter(row => row.write).length, 200);
-  assert.equal(rows.filter(row => !row.write).length, 84);
+  // DoctorCRE V5-R02 (0602) adds eight writes and two reads: open/advance/
+  // cancel/retire-workflow-cutover-plan, register-slice-checkable-done,
+  // mark-slice-completion, record-workflow-caller, mark-slice-progress,
+  // workflow-cutover-board, read-slice-completion.
+  // DoctorCRE V5-M01's Journey 1 clock door (0614) adds one write and one
+  // read: advance-journey-one-clock and read-journey-one-clock.
+  // V5-A05 delivery cadence (0617) adds three: cadence-status (a read on the
+  // writer connection), record-cadence-receipt and raise-delivery-cadence-alert.
+  // DoctorCRE V5-S01's global boundaries door (0625) adds one read:
+  // read-global-boundaries.
+  // DoctorCRE V5-F01 (0626) adds eight writes and one read: the
+  // record-source-authority door's nine verbs.
+  // The slice done-record (0628) adds nine: seven writes
+  // (register-slice-criteria-from-catalog, bind/rebind-slice-criterion-evidence,
+  // record-release-slice-members, propose-slice-completion,
+  // confirm-slice-completions, set-slice-mark-hold) and two reads
+  // (list-shipped-releases, pending-slice-completion-proposals).
+  // DoctorCRE V5-J103's governed correspondence store (0700) adds two humanOnly
+  // writes and two reads: record- and revoke-correspondence-adapter-consent,
+  // correspondence-readiness and read-correspondence-thread. No send verb.
+  // DoctorCRE V5-J102 (0704) adds twenty writes and one read: the CRE
+  // lifecycle door's twenty-one verbs.
+  // amend-closed-loop (defect a2c04ffa, loop c7265238) adds one write.
+  // V5-D01 action-class-successor-registry (0708) adds one write
+  // (register-action-class-successor) and two reads
+  // (read-action-class-successors, read-action-class-gate).
+  // V5-A01 assurance-health evidence store (0717) adds one write
+  // (record-assurance-health-evidence) and one read (read-assurance-health).
+  // DoctorCRE V5-A03 (0719) adds five append-only writes and one authoritative
+  // read for the independent complete-set review cycle.
+  // V5-A02 (0721) adds one read and one Joe-authority-only write.
+  // DoctorCRE V5-F05 (0724) adds one actor-scoped read (read-action-context)
+  // and one authority-only typed contract binder (bind-rule-context-contract).
+  assert.equal(rows.length, 359);
+  assert.equal(rows.filter(row => row.write).length, 258);
+  assert.equal(rows.filter(row => !row.write).length, 101);
   assert.deepEqual(rows.map(row => row.operation), Object.keys(TOOLS).sort());
   assert.equal(Object.isFrozen(TOOLS), true);
   assert.equal(Object.isFrozen(TOOLS["add-loop"]), true);
@@ -991,11 +1070,56 @@ test("the ACTIVE runtime registry is v63, and a stale v19 import fails admission
   // v63 registers answer-work-request-for-joe after v58-v62 registered none.
   // v65 registers the resource-observation pair; v69 registers ask-jev,
   // read-jev-call-receipts and read-jev-call-receipt-integrity after v66-v68
-  // registered none.
-  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V69_VERSION);
-  const v69SelectorDigest = generatedV69.match(
+  // registered none; v70 and v71 registered none; v72 registers the ten V5-R02
+  // workflow-cutover and slice-completion verbs; v73 registered none; v74
+  // registers the two V5-M01 Journey 1 clock door verbs; v75 registers the
+  // three V5-A05 delivery-cadence verbs; v76 registers the V5-S01
+  // read-global-boundaries verb; v77 registers the nine V5-F01
+  // record-source-authority verbs; v78 registers the nine slice done-record
+  // verbs; v79 registers the four V5-J103 governed correspondence verbs; v80
+  // registers the twenty-one V5-J102 CRE lifecycle verbs; v81 registers the
+  // one amend-closed-loop verb (defect a2c04ffa, loop c7265238); v82 registers
+  // the three V5-D01 action-class-successor-registry verbs; v83 registers
+  // the two V5-A01 assurance-health evidence-store verbs; v84 registers the
+  // six authoritative V5-A03 independent-review-cycle verbs; v85
+  // (provisional) admits the V5-A02 coverage read and authority-only
+  // fallback receipt writer; v86 sealed only a launchd row, so the selector
+  // stayed on v85; v87 (provisional) admits the V5-F05 read-action-context
+  // read and the authority-only bind-rule-context-contract writer.
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V87_VERSION);
+  const v87SelectorDigest = generatedV87.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
-  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, v69SelectorDigest);
+  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, v87SelectorDigest);
+  assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV86.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
+  assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV85.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
+  assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV84.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
+  assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV83.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
+  assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV82.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
+  assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV81.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
+  assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV80.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
+  assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV79.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
+  assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV78.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
+  assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV77.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
+  assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV76.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
+  assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV75.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
+  assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV74.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
+  assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV72.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
+  assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV69.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
   assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV65.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
   const v57SelectorDigest = generatedV57.match(
@@ -1272,7 +1396,7 @@ test("the v21 frontier re-digested only source, and v63 is what the runtime now 
   // v22 through all three. v26 DOES register a verb, so the selector moves with
   // it — an unregistered operation is refused at the door, so the runtime has
   // to read the registry that knows record-gate-zero-read-only-outcome.
-  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V69_VERSION);
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V87_VERSION);
   const v21GeneratedDigest = generatedV21.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
   const v21GeneratedVersion = generatedV21.match(
@@ -1315,7 +1439,23 @@ test("the v21 frontier re-digested only source, and v63 is what the runtime now 
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
   const v63GeneratedDigest = generatedV63.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
-  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, generatedV69.match(
+  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, generatedV87.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
+  assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV85.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
+  assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV84.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
+  assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV83.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
+  assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV82.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
+  assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV81.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
+  assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV80.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
+  assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV77.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
+  assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV74.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
   assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV65.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
@@ -1411,7 +1551,7 @@ test("the v21 frontier re-digested only source, and v63 is what the runtime now 
   // what assertRegisteredOperation reads, and WR-000109 moved
   // patch-deal-field's schema_digest into v28. A loop still comparing against
   // v27 would assert the superseded contract and fail at the door.
-  const liveRows = frozenInventory(REGISTRY_V69_VERSION);
+  const liveRows = frozenInventory(REGISTRY_V87_VERSION);
   for (const name of Object.keys(TOOLS)) {
     const admitted = await assertRegisteredOperation(name, TOOLS[name], {});
     assert.equal(admitted.ingress_key, `mcp-tool:${name}`);
@@ -1564,12 +1704,12 @@ test("v33 seals the notification preference pair and preserves v32", () => {
   const v33GeneratedDigest = generatedV33.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
   assert.notEqual(`sha256:${v33GeneratedDigest}`, HISTORICAL_REGISTRY_SEALS.v32.digest);
-  // The complete generated frontier now includes the v70 successor;
+  // The complete generated frontier now includes the provisional v87 successor;
   // 0527 remains handwritten and does not move that count.
   assert.equal(Object.keys(renderGeneratedFrontier())
-    .filter(path => path.startsWith("migrations/")).length, 76);
+    .filter(path => path.startsWith("migrations/")).length, 93);
   assert.equal(Object.keys(renderGeneratedFrontier())
-    .filter(path => path.startsWith("mcp-server/src/")).length, 67);
+    .filter(path => path.startsWith("mcp-server/src/")).length, 84);
 });
 
 test("v34 seals the session identity read pair and preserves v33", () => {
@@ -2546,7 +2686,7 @@ test("the v23 frontier re-digested only source, so it did not move the runtime i
   // verb either, so the import stayed on v22 through v23, v24 and v25, and only
   // moved again at v26 when the Gate Zero outcome verb arrived. What this test
   // records is that v23 was NOT the reason it moved.
-  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V69_VERSION);
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V87_VERSION);
   assert.notEqual(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V23_VERSION);
   const v23GeneratedVersion = generatedV23.match(
     /^export const SCAC_MUTATION_REGISTRY_VERSION = "([^"]+)";$/m)[1];
@@ -2822,14 +2962,14 @@ test("the v36 successor preserves the exact v35 seal and measures both catalog p
 });
 
 test("the complete source-only frontier is byte-reproducible from frozen inputs", () => {
-  assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS, REGISTRY_V70_VERSION), true);
+  assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS, REGISTRY_V87_VERSION), true);
   const paths = assertGeneratedFrontierMatchesCommitted();
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
-  assert.equal(migrations.length, 76);
+  assert.equal(migrations.length, 93);
   assert.deepEqual(migrations.map(path => path.match(/migrations\/(\d{4})_/)[1]),
-    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545", "0547", "0548", "0549", "0550", "0551", "0552", "0553", "0555", "0557", "0558", "0559", "0560", "0561", "0562", "0563", "0564", "0566", "0567", "0568", "0569", "0570", "0572", "0576", "0578", "0581", "0582", "0584", "0585", "0588", "0589"]);
-  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 67);
-  assert.equal(paths.length, 143);
+    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545", "0547", "0548", "0549", "0550", "0551", "0552", "0553", "0555", "0557", "0558", "0559", "0560", "0561", "0562", "0563", "0564", "0566", "0567", "0568", "0569", "0570", "0572", "0576", "0578", "0581", "0582", "0584", "0585", "0588", "0589", "0600", "0603", "0609", "0614", "0618", "0625", "0627", "0629", "0701", "0705", "0707", "0709", "0718", "0720", "0722", "0723", "0725"]);
+  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 84);
+  assert.equal(paths.length, 177);
   // 0502 IS DELIBERATELY ABSENT FROM THIS LIST. It is a hand-authored domain
   // migration under its own review, not a generated artifact, so nothing here
   // reproduces it byte for byte and it must not appear among the frontier's
@@ -3107,7 +3247,14 @@ test("job definitions and live DB capabilities have exact reviewed baselines", (
 
 test("GitHub and launchd workflow entrances bind exact triggers, permissions, and delegates", () => {
   const workflows = workflowDefinitionInventory();
-  assert.equal(workflows.length, 38);
+  // 39, not 38: #1241 added com.carr.nightly-exports-daytime-retry.plist (the
+  // OneDrive-wake daytime retry job), a real deployed launchd entrance.
+  // 40, not 39: V5-A05 adds com.carr.delivery-cadence-a05-sweep.plist, the
+  // daily 07:00 cadence sweep, a deployed launchd entrance.
+  // 41, not 40: session-trace-archive adds com.carr.session-trace-archive.plist,
+  // the nightly local archive of CARR-scoped agent session transcripts, a
+  // deployed launchd entrance.
+  assert.equal(workflows.length, 41);
   const github = workflows.filter(row => row.source_locator.startsWith(".github/workflows/"));
   assert.equal(github.length, 7);
   assert.equal(github.every(row => row.ingress_kind === "workflow_entrypoint" &&
@@ -3119,7 +3266,10 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
   const dbAcceptance = workflows.find(row => row.source_locator === ".github/workflows/db-acceptance.yml");
   assert.equal(dbAcceptance.delegates_to.includes("script:ops/local-pg-ci.py"), true);
   const launchd = workflows.filter(row => row.source_locator.startsWith("ops/launchd/"));
-  assert.equal(launchd.length, 31);
+  // 32, not 31 — same #1241 addition as above.
+  // 33, not 32 -- the same V5-A05 sweep plist.
+  // 34, not 33 -- the same session-trace-archive addition as above.
+  assert.equal(launchd.length, 34);
   // Every agent is fully identified and carries SOME physical authority ref;
   // only a DEPLOYED agent's is a service environment. Collapsing those two into
   // one clause is what would let a definition-only agent either slip through
@@ -3132,8 +3282,10 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
   assert.equal(deployedLaunchd.length, launchd.length - 2);
   assert.equal(deployedLaunchd.every(row =>
     row.physical_authority_refs.some(ref => ref.startsWith("ops.service_environment:"))), true);
+  // 31, not 30 — same #1241 addition: one new deployed plist, one new
+  // ops.service_environment: ref (its "production" environment).
   assert.equal(launchd.flatMap(row => row.physical_authority_refs)
-    .filter(ref => ref.startsWith("ops.service_environment:")).length, 30);
+    .filter(ref => ref.startsWith("ops.service_environment:")).length, 33);
   assert.equal(launchd.find(row => row.launchd_label === "com.carr.rules-refresh")
     .physical_authority_refs.includes("ops.service_environment:rules-refresh:production"), true);
   // The definition-only agent carries an explicit non-deployed authority ref in

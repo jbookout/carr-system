@@ -585,6 +585,50 @@ def review_portfolio_revision_is_a_write():
     return passed
 
 
+def evaluate_artifact_deletion_is_a_write():
+    """V5-F01's deletion evaluation persists a receipt, so it is a write; the
+    word "evaluate" is not thereby promoted to a prefix (same shape as the
+    cancel-capability-session and review-portfolio-revision pairs above)."""
+    write = mod.is_write_action("evaluate-artifact-deletion")
+    not_a_prefix = not mod.is_write_action("evaluate-something-that-does-not-exist")
+    passed = write and not_a_prefix
+    print(f"{'PASS' if passed else 'FAIL'}  evaluate-artifact-deletion classifies as a write "
+          f"without making 'evaluate' a blanket prefix")
+    return passed
+
+
+def cre_lifecycle_writes_are_writes():
+    """V5-J102's lifecycle writers whose first word is not a write prefix are
+    exact entries; none of those first words is thereby promoted to a prefix."""
+    names = ("initialize-prospect-relationship", "initialize-assignment",
+             "initialize-property-negotiation", "open-cre-assignment",
+             "commit-winning-property", "cancel-pending-deal", "run-migration-shadow")
+    writes = {name: mod.is_write_action(name) for name in names}
+    reads = {name: mod.is_write_action(name) for name in
+             ("initialize-something-that-does-not-exist", "open-something-else",
+              "commit-something-else", "cancel-something-else", "run-something-else",
+              "read-cre-lifecycle")}
+    passed = all(writes.values()) and not any(reads.values())
+    print(f"{'PASS' if passed else 'FAIL'}  V5-J102 lifecycle writers classify as writes "
+          f"without making initialize/open/commit/cancel/run blanket prefixes"
+          + ("" if passed else f"; writes={writes} reads={reads}"))
+    return passed
+
+
+def f05_rule_contract_binder_is_a_write():
+    """V5-F05's binder is exact; its context read and future bind reads stay reads."""
+    write = mod.is_write_action("bind-rule-context-contract")
+    negatives = {
+        name: mod.is_write_action(name)
+        for name in ("read-action-context", "bind-rule-context-preview")
+    }
+    passed = write and not any(negatives.values())
+    print(f"{'PASS' if passed else 'FAIL'}  V5-F05 rule contract binder classifies as a write "
+          "without making bind a blanket prefix"
+          + ("" if passed else f"; write={write} negatives={negatives}"))
+    return passed
+
+
 def registry_prefix_coverage():
     """Keep the family classifier honest against the local live registry when present."""
     registry = os.path.join(REPO, "mcp-server", "src", "tools.js")
@@ -607,7 +651,7 @@ def registry_prefix_coverage():
     # stay False: a prefix that captured either would make every future read named
     # the same way a write.
     reads = ["review-queue", "get-deal", "list-verbs", "catch-me-up", "deal-board", "find",
-             "notification-feed", "read-doc-conversation"]
+             "notification-feed", "read-doc-conversation", "read-journey-one-clock"]
     false_writes = [name for name in reads if mod.is_write_action(name)]
     ok = not missing and not false_writes
     print(f"{'PASS' if ok else 'FAIL'}  live registry write coverage: "
@@ -948,6 +992,9 @@ def main():
     outcomes.append(floor_preserved())
     outcomes.append(cancel_capability_session_is_a_write())
     outcomes.append(review_portfolio_revision_is_a_write())
+    outcomes.append(evaluate_artifact_deletion_is_a_write())
+    outcomes.append(cre_lifecycle_writes_are_writes())
+    outcomes.append(f05_rule_contract_binder_is_a_write())
     outcomes.append(registry_prefix_coverage())
     outcomes.append(authority_family_coverage())
     outcomes.append(r03_notification_classification())

@@ -131,7 +131,8 @@ def _client():
     return module
 
 
-def judge(subject, questions, *, timeout=20.0, client=None, api_key=None):
+def judge(subject, questions, *, timeout=20.0, client=None, api_key=None,
+          retries=None, deadline=None):
     """Ask every question in `questions` about ONE subject, in one request.
 
     `subject` is a mapping describing the single thing being judged — a diff, a
@@ -145,11 +146,21 @@ def judge(subject, questions, *, timeout=20.0, client=None, api_key=None):
     The timeout is short on purpose. This is meant to be called from hooks and
     gates that sit in someone's way, and a judgment that has not arrived in
     twenty seconds has already cost more than it is worth.
+
+    `retries` and `deadline` pass through to the client's ask() when given
+    (typesafe_client.ask: rate-limit retries, and an absolute monotonic
+    deadline). A caller under a hook timeout passes retries=0: a 429's
+    retry-after is otherwise unbounded.
     """
     started = time.monotonic()
     try:
         tsc = client or _client()
-        answer = tsc.ask(subject, questions, timeout=timeout, api_key=api_key)
+        extra = {}
+        if retries is not None:
+            extra["retries"] = retries
+        if deadline is not None:
+            extra["deadline"] = deadline
+        answer = tsc.ask(subject, questions, timeout=timeout, api_key=api_key, **extra)
     except Exception as exc:  # deliberately broad: see JudgeUnavailable
         raise JudgeUnavailable(f"{type(exc).__name__}: {exc}") from None
     answer["elapsed_ms"] = int((time.monotonic() - started) * 1000)

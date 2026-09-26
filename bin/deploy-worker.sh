@@ -698,6 +698,9 @@ record_deployment() {
   rd_verb_args=""
   [ -n "$SHIPPING" ] && rd_verb_args="--verb-count $SHIPPING"
   rd_evidence_ref="${DEPLOYMENT_EVIDENCE_REF:-bin/smoke-and-record.sh#${rd_corr:-unknown}}"
+  # A release whose upload applied a Durable Object migration says so, with the
+  # tag and the version that applied it, on every deployment row it writes.
+  [ -z "${DO_MIGRATION_EVIDENCE:-}" ] || rd_evidence_ref="$rd_evidence_ref;$DO_MIGRATION_EVIDENCE"
   rd_failure_args=""
   if [ "$rd_state" = "failed" ]; then
     rd_failure_args="--failure-class ${DEPLOYMENT_FAILURE_CLASS:-golden_workflow_failed}"
@@ -1035,6 +1038,532 @@ deploy_staging_worker() {
   fi
 }
 
+# ---------- pending Durable Object migration (BEGIN do-migration block) ----------
+#
+# WHY. Production ships through `wrangler versions upload` + an exact
+# `versions deploy <id>@100`, and wrangler 4.137 REFUSES `versions upload` while
+# the Worker has a Durable Object migration it has not applied. Cloudflare's own
+# documentation: a Durable Object lifecycle change "can only be applied via
+# `wrangler deploy`". The first release whose wrangler.toml adds a [[migrations]]
+# tag (PR #1244, `v1-workflow-census-anchor`) would therefore stop the unattended
+# release pipeline at its upload step, every time, with no retry able to help.
+#
+# WHAT HAPPENS INSTEAD, in --upload-version only (staging already uses plain
+# deploy and is untouched):
+#   1. READ the applied tag from the same Cloudflare metadata wrangler reads
+#      (ops/worker-do-migration.py documents the endpoint and the decision).
+#      Unknown is REFUSED before anything is uploaded or deployed.
+#   2. Nothing pending: the ordinary upload runs exactly as before.
+#   3. Pending, and still before anything moves:
+#      a. PRODUCTION'S ATTACHMENTS. A plain deploy re-publishes the top-level
+#         custom domains (wrangler replaces the whole set and, outside a TTY,
+#         overrides existing origins and DNS records) and the workers.dev
+#         setting. Production's live set is read and must already equal what
+#         the deploy would publish; any difference is REFUSED, never applied.
+#      b. STAGING GOES FIRST. The exact release SHA is deployed to the staging
+#         Worker with plain `wrangler deploy --env staging` (after the same
+#         attachment check every staging deploy passes), staging's applied tag
+#         is re-read and must now be the declared latest, and staging /release
+#         must read back the exact SHA, staging version, Program 6 posture and
+#         schema. A tag is applied once, so a staging that ALREADY carried the
+#         tag is accepted only when a durable per-tag receipt (kept outside the
+#         pipeline's release worktree, which is deleted) proves it was applied
+#         with the migration steps wrangler.toml declares now.
+#   4. Staging green: apply it to Production the documented way, a
+#      `wrangler deploy` of this exact release SHA with the same GIT_SHA /
+#      candidate-manifest stamps (and probe-token secret) the upload would carry.
+#      The moment it returns, the applied tag is re-read and the change is
+#      written to ops.settings_change (the control-plane change log), a marker
+#      line tells the pipeline whether the migration is applied or possibly
+#      applied, and Production /release is read back against that exact
+#      provider version.
+#   5. THE MIGRATION DEPLOY'S VERSION IS THIS RELEASE'S CANDIDATE. No second
+#      version is uploaded: the version now serving is the one the candidate
+#      record names, the typed staging rehearsal rehearses, and promotion
+#      verifies (identity read-back, golden suite, performance gate, ledger).
+#
+# WHAT CANNOT MOVE EARLIER, and why. The typed staging rehearsal's database
+# writer (ops.prepare_staging_forward_fix_rehearsal) requires a Production
+# candidate naming a provider version, and ops.deployment_requires_a_live_approval
+# refuses any Production ops.deployment row before technical readiness, which
+# needs that rehearsal. No Production provider version can exist before the
+# migration deploy moves traffic. So for a migration release the typed rehearsal,
+# the golden suite, the performance gate and the first ops.deployment row all
+# come AFTER Production has moved; the precheck above is every check that needs
+# no uploaded version, and ops.settings_change plus the candidate record are the
+# database's account of the move until promotion writes its rows. The production
+# golden suite is deliberately NOT pointed at staging: it asserts production data
+# fixtures, and the staging database holds invented ones.
+#
+# ROLLBACK, also out loud. Cloudflare blocks rollback to any version from before
+# a Durable Object lifecycle change. Once the tag is applied the recovery is
+# forward fix only (the pipeline lane's recovery_strategy already is); a failure
+# message below says which side of that line the Worker is on.
+DO_MIGRATION_HELPER="$REPO/ops/worker-do-migration.py"
+DO_MIGRATION_RECEIPT_DIR="$REPO/out/deploy-worker"
+DO_MIGRATION_RELEASE_URL="https://api.doctorcre.com/release"
+DO_MIGRATION_EVIDENCE=""
+DO_MIGRATION_ROLLBACK_NOTE=""
+# Set only when the migration deploy's own version became this release's candidate.
+DO_MIGRATION_VERSION_ID=""
+# What every later refusal in the upload branch says about traffic.
+DO_TRAFFIC_CLAUSE="traffic was not changed"
+DO_SCRIPT=""
+DO_STEPS_DIGEST=""
+DO_STATE_DIR=""
+DO_REFUSAL=""
+DO_DB_RECORD=""
+DO_STAGING_PRECHECK=""
+DO_STAGING_REASON=""
+DO_STAGING_OLD_TAG=""
+DO_STAGING_TAG_MOVED=""
+DO_STAGING_VERSION_ID=""
+DO_STAGING_DEPLOY_EXIT=""
+
+# GET https://api.cloudflare.com/client/v4/accounts/<acct>/<path> into <out>.
+# The bearer token is the one wrangler itself resolves (CLOUDFLARE_API_TOKEN or
+# its OAuth login). It travels only through a pipe into curl's --config stdin:
+# never argv, never a file, never a log.
+do_migration_cf_get() {
+  dmf_json="$("$WRANGLER" auth token --json 2>/dev/null)" || return 1
+  dmf_token="$(printf '%s' "$dmf_json" | "$PY" -c '
+import json, sys
+try:
+    value = json.load(sys.stdin)
+except ValueError:
+    raise SystemExit(1)
+if not isinstance(value, dict):
+    raise SystemExit(1)
+token = value.get("token")
+if value.get("type") not in ("api_token", "oauth") or not isinstance(token, str) or not token.strip():
+    raise SystemExit(1)
+print(token.strip())
+')" || return 1
+  printf 'header = "Authorization: Bearer %s"\n' "$dmf_token" \
+    | curl --config - --fail --silent --show-error --max-time 30 --max-filesize 1048576 \
+        -o "$3" "https://api.cloudflare.com/client/v4/accounts/$1/$2" \
+        2>/dev/null
+}
+
+# Prints the plan JSON for environment $1 (production = the top-level Worker).
+# Exit 0 = determined, 3 = applied tag unknown, other = the config is unusable.
+do_migration_plan() {
+  dmp_env="$1"
+  dmp_target="$("$PY" "$DO_MIGRATION_HELPER" target \
+    --config "$WORKER_DIR/wrangler.toml" --env "$dmp_env")" || return 2
+  dmp_fields="$(printf '%s' "$dmp_target" | "$PY" -c '
+import json, sys
+t = json.load(sys.stdin)
+print(t["account_id"], t["script"], len(t["declared_tags"]))')" || return 2
+  set -- $dmp_fields
+  [ "$#" -eq 3 ] || return 2
+  if [ "$3" = "0" ]; then
+    # Nothing declared: nothing can be pending, and no read is needed.
+    "$PY" "$DO_MIGRATION_HELPER" plan --config "$WORKER_DIR/wrangler.toml" \
+      --env "$dmp_env" --services-json /dev/null
+    return $?
+  fi
+  dmp_services="$(mktemp "${TMPDIR:-/tmp}/carr-do-services.XXXXXX")" || return 3
+  chmod 600 "$dmp_services"
+  if ! do_migration_cf_get "$1" "workers/services/$2" "$dmp_services"; then
+    rm -f "$dmp_services"
+    echo "  the Worker's service metadata could not be read with wrangler's credential" >&2
+    return 3
+  fi
+  set +e
+  "$PY" "$DO_MIGRATION_HELPER" plan --config "$WORKER_DIR/wrangler.toml" \
+    --env "$dmp_env" --services-json "$dmp_services"
+  dmp_rc=$?
+  set -e
+  rm -f "$dmp_services"
+  return "$dmp_rc"
+}
+
+do_migration_field() {
+  printf '%s' "$1" | "$PY" -c '
+import json, sys
+v = json.load(sys.stdin).get(sys.argv[1])
+print("none" if v is None else (" ".join(v) if isinstance(v, list) else str(v).lower() if isinstance(v, bool) else v))' "$2"
+}
+
+# The durable per-tag receipts live beside the MAIN checkout, never inside the
+# release worktree the pipeline deletes after every run.
+do_migration_state_dir() {
+  if [ -n "${CARR_DO_MIGRATION_STATE_DIR:-}" ]; then
+    printf '%s\n' "$CARR_DO_MIGRATION_STATE_DIR"
+    return 0
+  fi
+  dsd_common="$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
+  [ -n "$dsd_common" ] || return 1
+  printf '%s\n' "$(dirname "$dsd_common")/out/deploy-worker/do-migration-tags"
+}
+
+# do_migration_write_receipt <old> <new> <pending> <version> <state> <deploy-exit|none> <readback>
+do_migration_write_receipt() {
+  mkdir -p "$DO_MIGRATION_RECEIPT_DIR"
+  DO_STAGING_PRECHECK="$DO_STAGING_PRECHECK" DO_STAGING_REASON="$DO_STAGING_REASON" \
+  DO_STAGING_OLD_TAG="$DO_STAGING_OLD_TAG" DO_STAGING_TAG_MOVED="$DO_STAGING_TAG_MOVED" \
+  DO_STAGING_VERSION_ID="$DO_STAGING_VERSION_ID" DO_STAGING_DEPLOY_EXIT="$DO_STAGING_DEPLOY_EXIT" \
+  DO_STEPS_DIGEST="$DO_STEPS_DIGEST" DO_REFUSAL="$DO_REFUSAL" DO_DB_RECORD="$DO_DB_RECORD" \
+  "$PY" -c '
+import datetime, json, os, sys
+keys = ("git_sha", "script", "old_tag", "new_tag", "pending_tags", "migration_version_id",
+        "state", "deploy_exit", "readback")
+row = dict(zip(keys, sys.argv[2:]))
+row["pending_tags"] = row["pending_tags"].split()
+row["old_tag"] = None if row["old_tag"] == "none" else row["old_tag"]
+row["migration_version_id"] = row["migration_version_id"] or None
+# none = the Production migration deploy never ran.
+row["deploy_exit"] = None if row["deploy_exit"] == "none" else int(row["deploy_exit"])
+row["schema"] = "carr-worker-do-migration-receipt.v1"
+row["source_ref"] = "bin/deploy-worker.sh"
+row["applied_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+env = os.environ
+row["steps_digest"] = env.get("DO_STEPS_DIGEST") or None
+row["refusal"] = env.get("DO_REFUSAL") or None
+row["db_record"] = env.get("DO_DB_RECORD") or "not-run"
+moved = env.get("DO_STAGING_TAG_MOVED")
+staging_exit = env.get("DO_STAGING_DEPLOY_EXIT")
+row["staging_precheck"] = {
+    "state": env.get("DO_STAGING_PRECHECK") or "not-run",
+    "reason": env.get("DO_STAGING_REASON") or None,
+    "old_tag": None if env.get("DO_STAGING_OLD_TAG") in (None, "", "none") else env["DO_STAGING_OLD_TAG"],
+    # null = staging was never re-read after a deploy, so movement is unknown.
+    "tag_moved": True if moved == "true" else False if moved == "false" else None,
+    "deploy_exit": int(staging_exit) if staging_exit else None,
+    "version_id": env.get("DO_STAGING_VERSION_ID") or None,
+}
+open(sys.argv[1], "w", encoding="utf-8").write(json.dumps(row, sort_keys=True) + "\n")
+' "$DO_MIGRATION_RECEIPT_DIR/do-migration-$HEAD_SHA.json" "$HEAD_SHA" "$DO_SCRIPT" "$@"
+  echo "  migration receipt: $DO_MIGRATION_RECEIPT_DIR/do-migration-$HEAD_SHA.json ($5)"
+}
+
+# do_migration_readback <version> <environment> <release-url>
+do_migration_readback() {
+  dmr_attempts="${CARR_READBACK_ATTEMPTS:-12}"
+  dmr_sleep="${CARR_READBACK_SLEEP:-5}"
+  dmr_n=0
+  while [ "$dmr_n" -lt "$dmr_attempts" ]; do
+    dmr_n=$((dmr_n + 1))
+    if dmr_body="$(curl --fail --silent --show-error --max-time 30 \
+          "$3" 2>/dev/null)" \
+       && printf '%s' "$dmr_body" | "$PY" "$REPO/ops/verify-worker-release.py" \
+          --environment "$2" --sha "$HEAD_SHA" --provider "$PROVIDER" \
+          --provider-version-id "$1" \
+          --expected-program6-actions "$EXPECTED_PROGRAM6_ACTIONS" \
+          --expected-schema-highest-migration "$EXPECTED_SCHEMA_HIGHEST_MIGRATION" \
+          --expected-schema-applied-count "$EXPECTED_SCHEMA_APPLIED_COUNT" >/dev/null 2>&1; then
+      echo "  OK  $2 serves $HEAD_SHA / $1 (read-back attempt $dmr_n)"
+      return 0
+    fi
+    if [ "$dmr_n" -lt "$dmr_attempts" ]; then
+      sleep "$dmr_sleep"
+    fi
+  done
+  return 1
+}
+
+# Refuse before Production is touched, with the reason in the receipt.
+do_migration_refuse_untouched() {
+  DO_REFUSAL="$1"
+  do_migration_write_receipt "$DO_OLD_TAG" "$DO_NEW_TAG" "$DO_PENDING_TAGS" "" not_applied none not-run
+  fail "$2
+  Production was not touched: no production deploy, no upload, no candidate.
+  Production traffic was not changed."
+}
+
+do_migration_staging_refuse() {
+  DO_STAGING_PRECHECK="failed"
+  DO_STAGING_REASON="$1"
+  do_migration_refuse_untouched "staging precheck: $1" \
+    "the staging precheck for Durable Object migration $DO_NEW_TAG failed: $1."
+}
+
+# A plain Production deploy re-publishes the top-level custom domains and the
+# workers.dev setting. Refuse unless Production already has exactly those.
+do_migration_attachment_check() {
+  echo ""
+  echo "== Durable Object migration: Production attachments =="
+  dac_account="$(do_migration_field "$DO_TARGET" account_id)"
+  dac_domains="$(mktemp "${TMPDIR:-/tmp}/carr-do-domains.XXXXXX")"
+  dac_subdomain="$(mktemp "${TMPDIR:-/tmp}/carr-do-subdomain.XXXXXX")"
+  if ! do_migration_cf_get "$dac_account" "workers/domains?service=$DO_SCRIPT" "$dac_domains" \
+      || ! do_migration_cf_get "$dac_account" "workers/scripts/$DO_SCRIPT/subdomain" "$dac_subdomain"; then
+    rm -f "$dac_domains" "$dac_subdomain"
+    do_migration_refuse_untouched "production attachments unreadable" \
+      "Production's custom domains and workers.dev setting could not be read, so what the
+  migration deploy would change on them is UNKNOWN."
+  fi
+  set +e
+  "$PY" "$DO_MIGRATION_HELPER" attachments --config "$WORKER_DIR/wrangler.toml" \
+    --domains-json "$dac_domains" --subdomain-json "$dac_subdomain" >/dev/null
+  dac_rc=$?
+  set -e
+  rm -f "$dac_domains" "$dac_subdomain"
+  case "$dac_rc" in
+    0) echo "  OK  Production's custom domains and workers.dev setting already equal what the deploy publishes" ;;
+    4) do_migration_refuse_untouched "production attachments differ" \
+         "a plain wrangler deploy would change Production's hostnames or workers.dev setting
+  (printed above). Reconcile wrangler.toml with Production first; the migration
+  release does not change attachments as a side effect." ;;
+    *) do_migration_refuse_untouched "production attachments not comparable" \
+         "Production's attachments could not be compared with what the deploy publishes
+  (exit $dac_rc; printed above)." ;;
+  esac
+}
+
+do_migration_staging_precheck() {
+  echo ""
+  echo "== Durable Object migration: staging precheck =="
+  DO_STAGING_PRECHECK="running"
+  DO_STATE_DIR="$(do_migration_state_dir)" \
+    || do_migration_staging_refuse "the durable migration receipt directory could not be located"
+  dsp_host="$("$PY" "$REPO/tools/ops-record.py" staging-target --field host 2>/dev/null)" \
+    || do_migration_staging_refuse "the checked-in staging target is not exact"
+  dsp_name="$("$PY" "$REPO/tools/ops-record.py" staging-target --field worker_name 2>/dev/null)" \
+    || do_migration_staging_refuse "the checked-in staging target is not exact"
+  dsp_script="$("$PY" "$DO_MIGRATION_HELPER" target --config "$WORKER_DIR/wrangler.toml" --env staging \
+    | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["script"])' 2>/dev/null)" \
+    || do_migration_staging_refuse "wrangler.toml has no usable [env.staging] Worker"
+  [ -n "$dsp_host" ] && [ "$dsp_name" = "$dsp_script" ] \
+    || do_migration_staging_refuse "wrangler.toml's staging Worker ($dsp_script) is not the checked-in staging target ($dsp_name)"
+  # The same guard every staging deploy passes: a staging deploy must never
+  # attach to Production's hostnames (the 2026-08-13 routes incident).
+  "$PY" "$REPO/ops/deploy-attachment-check.py" "$WORKER_DIR/wrangler.toml" staging \
+    || do_migration_staging_refuse "the staging attachment check refused"
+  set +e
+  dsp_before="$(do_migration_plan staging)"
+  dsp_rc=$?
+  set -e
+  [ "$dsp_rc" -eq 0 ] \
+    || do_migration_staging_refuse "staging's applied migration tag could not be determined"
+  [ "$(do_migration_field "$dsp_before" latest_tag)" = "$DO_NEW_TAG" ] \
+    || do_migration_staging_refuse "staging and Production declare different latest migration tags"
+  [ "$(do_migration_field "$dsp_before" steps_digest)" = "$DO_STEPS_DIGEST" ] \
+    || do_migration_staging_refuse "staging and Production declare different migration steps"
+  DO_STAGING_OLD_TAG="$(do_migration_field "$dsp_before" applied_tag)"
+  if [ "$DO_STAGING_OLD_TAG" = "$DO_NEW_TAG" ]; then
+    # A tag is applied ONCE. Staging carrying it proves nothing about the steps
+    # it was applied with, unless a durable receipt for this tag says so.
+    set +e
+    dsp_check="$("$PY" "$DO_MIGRATION_HELPER" tag-receipt check --dir "$DO_STATE_DIR" \
+      --script "$dsp_script" --tag "$DO_NEW_TAG" --digest "$DO_STEPS_DIGEST")"
+    dsp_check_rc=$?
+    set -e
+    if [ "$dsp_check_rc" -ne 0 ]; then
+      dsp_why="$(do_migration_field "$dsp_check" reason 2>/dev/null || echo "the receipt check failed (exit $dsp_check_rc)")"
+      do_migration_staging_refuse "staging already carries $DO_NEW_TAG, but no durable receipt proves it was applied with the steps wrangler.toml declares now ($dsp_why); a tag is applied only once, so changed steps need a new tag"
+    fi
+    echo "  staging already carries $DO_NEW_TAG, applied with these exact steps (durable receipt)"
+  fi
+  echo "  staging applied: $DO_STAGING_OLD_TAG; deploying $HEAD_SHA to staging"
+  set +e
+  dsp_output="$("$WRANGLER" deploy --env staging --var "GIT_SHA:$HEAD_SHA" \
+    --var "CANDIDATE_MANIFEST:$CANDIDATE_MANIFEST" \
+    --var "CANDIDATE_MANIFEST_DIGEST:$CANDIDATE_MANIFEST_DIGEST" \
+    --message "carr do-migration staging precheck $DO_NEW_TAG $HEAD_SHA" 2>&1)"
+  DO_STAGING_DEPLOY_EXIT=$?
+  set -e
+  printf '%s\n' "$dsp_output"
+  [ "$DO_STAGING_DEPLOY_EXIT" -eq 0 ] \
+    || do_migration_staging_refuse "the staging deploy exited $DO_STAGING_DEPLOY_EXIT"
+  DO_STAGING_VERSION_ID="$(printf '%s\n' "$dsp_output" \
+    | sed -nE 's/^.*Current Version ID:[[:space:]]*([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}).*$/\1/p' \
+    | tail -n 1 | tr 'A-F' 'a-f')"
+  [ -n "$DO_STAGING_VERSION_ID" ] \
+    || do_migration_staging_refuse "the staging deploy printed no version id"
+  set +e
+  dsp_after="$(do_migration_plan staging)"
+  dsp_rc=$?
+  set -e
+  [ "$dsp_rc" -eq 0 ] \
+    || do_migration_staging_refuse "staging's migration tag could not be re-read after the deploy"
+  dsp_after_tag="$(do_migration_field "$dsp_after" applied_tag)"
+  if [ "$dsp_after_tag" != "$DO_NEW_TAG" ]; then
+    DO_STAGING_TAG_MOVED="false"
+    do_migration_staging_refuse "staging's migration tag did not move to $DO_NEW_TAG (it reports $dsp_after_tag)"
+  fi
+  if [ "$DO_STAGING_OLD_TAG" = "$DO_NEW_TAG" ]; then
+    DO_STAGING_TAG_MOVED="false"
+  else
+    DO_STAGING_TAG_MOVED="true"
+    echo "  OK  staging's migration tag moved: $DO_STAGING_OLD_TAG -> $DO_NEW_TAG"
+    "$PY" "$DO_MIGRATION_HELPER" tag-receipt write --dir "$DO_STATE_DIR" --script "$dsp_script" \
+      --tag "$DO_NEW_TAG" --digest "$DO_STEPS_DIGEST" --sha "$HEAD_SHA" \
+      --version-id "$DO_STAGING_VERSION_ID" --environment staging >/dev/null \
+      || do_migration_staging_refuse "staging applied $DO_NEW_TAG, but its durable receipt could not be written to $DO_STATE_DIR"
+  fi
+  do_migration_readback "$DO_STAGING_VERSION_ID" staging "https://$dsp_host/release" \
+    || do_migration_staging_refuse "staging /release did not read back $HEAD_SHA / $DO_STAGING_VERSION_ID with the expected posture and schema"
+  DO_STAGING_PRECHECK="passed"
+  echo "  OK  staging precheck passed; the Production migration deploy may run"
+}
+
+# The database's account of the Production move, written the moment the deploy
+# returns. ops.deployment cannot hold it yet (it refuses a Production row before
+# technical readiness), so it goes to ops.settings_change, the log of changes to
+# control planes this system does not own.
+do_migration_record_change() {
+  set +e
+  "$PY" "$REPO/tools/ops-record.py" settings-change --kind worker-do-migration \
+    --target "cloudflare-workers:$DO_SCRIPT:production" --outcome "$1" --reason "$2" \
+    --session "deploy-worker:$HEAD_SHA" \
+    --command "wrangler deploy --message 'carr do-migration $DO_NEW_TAG $HEAD_SHA'" \
+    --environment production >/dev/null 2>&1
+  dmc_rc=$?
+  set -e
+  if [ "$dmc_rc" -eq 0 ]; then
+    DO_DB_RECORD="recorded"
+    echo "  recorded in ops.settings_change: worker-do-migration $1"
+  else
+    DO_DB_RECORD="failed"
+    echo "  !!  the Production change was NOT recorded in ops.settings_change (exit $dmc_rc)" >&2
+  fi
+}
+
+apply_pending_do_migration() {
+  set +e
+  DO_PLAN="$(do_migration_plan production)"
+  do_rc=$?
+  set -e
+  case "$do_rc" in
+    0) ;;
+    3) fail "the target Worker's applied Durable Object migration tag could not be determined,
+  so whether a migration is pending is UNKNOWN. Refusing before any upload or
+  deploy; Production traffic was not changed. The reason is printed above." ;;
+    *) fail "wrangler.toml does not describe a usable Durable Object migration target (exit $do_rc); traffic was not changed." ;;
+  esac
+  DO_PENDING="$(do_migration_field "$DO_PLAN" pending)"
+  DO_OLD_TAG="$(do_migration_field "$DO_PLAN" applied_tag)"
+  DO_NEW_TAG="$(do_migration_field "$DO_PLAN" latest_tag)"
+  DO_PENDING_TAGS="$(do_migration_field "$DO_PLAN" pending_tags)"
+  if [ "$DO_PENDING" != "true" ]; then
+    echo "  OK  no pending Durable Object migration (applied: $DO_OLD_TAG, declared latest: $DO_NEW_TAG)"
+    return 0
+  fi
+  DO_SCRIPT="$(do_migration_field "$DO_PLAN" script)"
+  DO_STEPS_DIGEST="$(do_migration_field "$DO_PLAN" steps_digest)"
+  DO_TARGET="$("$PY" "$DO_MIGRATION_HELPER" target --config "$WORKER_DIR/wrangler.toml" --env production)"
+  echo ""
+  echo "== Durable Object migration =="
+  echo "  pending: $DO_PENDING_TAGS (applied: $DO_OLD_TAG; steps $DO_STEPS_DIGEST)"
+  echo "  versions upload cannot apply it; staging first, then a deploy of $HEAD_SHA (100% of traffic)"
+  # WR95 live acquisition binds evidence to the staging version it names; the
+  # staging precheck would replace that version under it.
+  [ -z "${FOUNDATION_ASSURANCE_STAGING_PROVIDER:-}" ] \
+    || do_migration_refuse_untouched "wr95 with a pending migration" \
+      "WR95 live acquisition binds the named staging version, which the Durable Object
+  migration's staging precheck would replace. Ship the migration in an ordinary
+  release first, then run WR95 against the migrated staging Worker."
+  do_migration_attachment_check
+  do_migration_staging_precheck
+  echo ""
+  echo "== Durable Object migration: Production =="
+  if [ -n "${PROBE_TOKENS_FILE:-}" ]; then
+    set -- --secrets-file "$PROBE_TOKENS_FILE"
+  else
+    set --
+  fi
+  set +e
+  DO_DEPLOY_OUTPUT="$("$WRANGLER" deploy "$@" --var "GIT_SHA:$HEAD_SHA" \
+    --var "CANDIDATE_MANIFEST:$CANDIDATE_MANIFEST" \
+    --var "CANDIDATE_MANIFEST_DIGEST:$CANDIDATE_MANIFEST_DIGEST" \
+    --message "carr do-migration $DO_NEW_TAG $HEAD_SHA" 2>&1)"
+  DO_DEPLOY_RC=$?
+  set -e
+  printf '%s\n' "$DO_DEPLOY_OUTPUT"
+  DO_VERSION_ID="$(printf '%s\n' "$DO_DEPLOY_OUTPUT" \
+    | sed -nE 's/^.*Current Version ID:[[:space:]]*([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}).*$/\1/p' \
+    | tail -n 1 | tr 'A-F' 'a-f')"
+
+  # Which side of the rollback line is the Worker on? Read it, do not assume.
+  set +e
+  DO_AFTER="$(do_migration_plan production)"
+  do_after_rc=$?
+  set -e
+  DO_AFTER_TAG="unknown"
+  [ "$do_after_rc" -ne 0 ] || DO_AFTER_TAG="$(do_migration_field "$DO_AFTER" applied_tag)"
+  if [ "$DO_AFTER_TAG" = "$DO_NEW_TAG" ]; then
+    DO_OUTCOME="applied"
+  elif [ "$DO_DEPLOY_RC" -ne 0 ] && [ "$DO_AFTER_TAG" = "$DO_OLD_TAG" ]; then
+    DO_OUTCOME="not_applied"
+  else
+    # Unreadable, or a deploy that returned 0 without moving the tag: the new
+    # code may be serving either way.
+    DO_OUTCOME="unknown"
+  fi
+  DO_FORWARD_FIX="Cloudflare blocks rollback to any version from before a Durable Object
+  lifecycle change, so recovery is FORWARD FIX ONLY: do not promote a
+  pre-migration version; fix forward through a PR and let the next release ship it."
+  # The pipeline reads exactly one of these into its run record and its
+  # fix-forward dispatch.
+  case "$DO_OUTCOME" in
+    applied) echo "DO migration applied: tag=$DO_NEW_TAG from=$DO_OLD_TAG version=${DO_VERSION_ID:-unknown}"
+      do_migration_record_change applied "Durable Object migration $DO_NEW_TAG applied to Production by the release deploy of $HEAD_SHA (version ${DO_VERSION_ID:-unknown}, previous tag $DO_OLD_TAG); 100% of traffic moved; recovery is forward fix only" ;;
+    unknown) echo "DO migration possibly applied: tag=$DO_NEW_TAG from=$DO_OLD_TAG version=${DO_VERSION_ID:-unknown}"
+      do_migration_record_change failed "Durable Object migration $DO_NEW_TAG deploy of $HEAD_SHA exited $DO_DEPLOY_RC and the applied tag reads $DO_AFTER_TAG: POSSIBLY APPLIED, treat as moved; recovery is forward fix only" ;;
+    not_applied)
+      do_migration_record_change failed "Durable Object migration $DO_NEW_TAG deploy of $HEAD_SHA exited $DO_DEPLOY_RC; the tag is still $DO_OLD_TAG, so the previous version is still serving" ;;
+  esac
+
+  if [ "$DO_OUTCOME" = "not_applied" ]; then
+    do_migration_write_receipt "$DO_OLD_TAG" "$DO_NEW_TAG" "$DO_PENDING_TAGS" "$DO_VERSION_ID" \
+      not_applied "$DO_DEPLOY_RC" not-run
+    fail "the migration deploy exited $DO_DEPLOY_RC and the Worker still reports tag $DO_OLD_TAG:
+  the migration was NOT applied and the previous version is still serving.
+  Nothing needs rolling back; no version was uploaded and no candidate was filed."
+  fi
+  if [ "$DO_OUTCOME" = "unknown" ]; then
+    do_migration_write_receipt "$DO_OLD_TAG" "$DO_NEW_TAG" "$DO_PENDING_TAGS" "$DO_VERSION_ID" \
+      unknown "$DO_DEPLOY_RC" not-run
+    fail "the migration deploy exited $DO_DEPLOY_RC and the Worker reports tag $DO_AFTER_TAG
+  (wanted $DO_NEW_TAG). Treat the migration as possibly applied. $DO_FORWARD_FIX"
+  fi
+  if [ "$DO_DEPLOY_RC" -ne 0 ] || [ -z "$DO_VERSION_ID" ]; then
+    do_migration_write_receipt "$DO_OLD_TAG" "$DO_NEW_TAG" "$DO_PENDING_TAGS" "$DO_VERSION_ID" \
+      applied_unverified "$DO_DEPLOY_RC" not-run
+    fail "the migration deploy exited $DO_DEPLOY_RC (version id: ${DO_VERSION_ID:-none printed}),
+  but the Worker now reports tag $DO_NEW_TAG: the migration WAS applied and
+  $HEAD_SHA may be serving. $DO_FORWARD_FIX"
+  fi
+  if ! do_migration_readback "$DO_VERSION_ID" "$TARGET_ENV" "$DO_MIGRATION_RELEASE_URL"; then
+    do_migration_write_receipt "$DO_OLD_TAG" "$DO_NEW_TAG" "$DO_PENDING_TAGS" "$DO_VERSION_ID" \
+      applied_unverified 0 mismatch
+    fail "the migration $DO_NEW_TAG is applied, but Production /release did not read back
+  $HEAD_SHA / $DO_VERSION_ID. $DO_FORWARD_FIX"
+  fi
+  do_migration_write_receipt "$DO_OLD_TAG" "$DO_NEW_TAG" "$DO_PENDING_TAGS" "$DO_VERSION_ID" \
+    applied_verified 0 identity-ok
+  [ "$DO_DB_RECORD" = "recorded" ] \
+    || fail "Production serves $HEAD_SHA / $DO_VERSION_ID with migration $DO_NEW_TAG applied, but the
+  change could not be recorded in ops.settings_change. The release stops here rather
+  than continue unrecorded; record it with tools/ops-record.py settings-change
+  --kind worker-do-migration --outcome applied. $DO_FORWARD_FIX"
+  DO_MIGRATION_EVIDENCE="do-migration=$DO_NEW_TAG@$DO_VERSION_ID"
+  DO_MIGRATION_VERSION_ID="$DO_VERSION_ID"
+  DO_TRAFFIC_CLAUSE="Production ALREADY serves $DO_VERSION_ID after the Durable Object migration deploy; recovery is forward fix only"
+  echo "  the migration deploy's version $DO_VERSION_ID is this release's candidate; no second version is uploaded"
+}
+
+# Promotion: annotate this release's deployment receipts with the migration its
+# upload applied, from the receipt that upload wrote for the same SHA.
+load_do_migration_receipt() {
+  dml_file="$DO_MIGRATION_RECEIPT_DIR/do-migration-$HEAD_SHA.json"
+  [ -f "$dml_file" ] || return 0
+  if ! dml_json="$("$PY" "$DO_MIGRATION_HELPER" receipt --file "$dml_file" --sha "$HEAD_SHA")"; then
+    echo "  !!  a Durable Object migration receipt exists for $HEAD_SHA but is invalid;" >&2
+    echo "      this promotion's receipts will not name the migration: $dml_file" >&2
+    return 0
+  fi
+  dml_state="$(do_migration_field "$dml_json" state)"
+  [ "$dml_state" != "not_applied" ] || return 0
+  DO_MIGRATION_EVIDENCE="do-migration=$(do_migration_field "$dml_json" new_tag)@$(do_migration_field "$dml_json" migration_version_id)"
+  DO_MIGRATION_ROLLBACK_NOTE="  This release applied Durable Object migration $(do_migration_field "$dml_json" new_tag):
+  Cloudflare blocks promoting any version from before it, so recovery is forward fix."
+  echo "  Durable Object migration applied by this release's upload: $DO_MIGRATION_EVIDENCE ($dml_state)"
+}
+# ---------- (END do-migration block) ----------
+
 # ---------- deploy ----------
 echo ""
 echo "== deploy =="
@@ -1067,24 +1596,32 @@ if (live.get("git_sha") or {}).get("value")!=sha or (live.get("worker_version") 
     rm -f "$WR95_STAGING_VERSION_JSON" "$WR95_STAGING_RELEASE_JSON"
     echo "  verified exact staging provider $FOUNDATION_ASSURANCE_STAGING_PROVIDER"
   fi
-  set +e
-  if [ -n "$PROBE_TOKENS_FILE" ]; then
-    set -- --secrets-file "$PROBE_TOKENS_FILE"
+  # A pending Durable Object migration would make `versions upload` refuse;
+  # apply it (or refuse when the applied tag is unknown) before the upload.
+  # When it applies one, the migration deploy's own version IS the candidate.
+  apply_pending_do_migration
+  if [ -n "$DO_MIGRATION_VERSION_ID" ]; then
+    PROVIDER_VERSION_ID="$DO_MIGRATION_VERSION_ID"
   else
-    set --
+    set +e
+    if [ -n "$PROBE_TOKENS_FILE" ]; then
+      set -- --secrets-file "$PROBE_TOKENS_FILE"
+    else
+      set --
+    fi
+    VERSION_UPLOAD_OUTPUT="$("$WRANGLER" versions upload "$@" --var "GIT_SHA:$HEAD_SHA" \
+      --var "CANDIDATE_MANIFEST:$CANDIDATE_MANIFEST" \
+      --var "CANDIDATE_MANIFEST_DIGEST:$CANDIDATE_MANIFEST_DIGEST" 2>&1)"
+    VERSION_UPLOAD_RC=$?
+    set -e
+    printf '%s\n' "$VERSION_UPLOAD_OUTPUT"
+    [ "$VERSION_UPLOAD_RC" -eq 0 ] || fail "Cloudflare version upload failed."
+    PROVIDER_VERSION_ID="$(printf '%s\n' "$VERSION_UPLOAD_OUTPUT" \
+      | sed -nE 's/^.*Worker Version ID:[[:space:]]*([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}).*$/\1/p' \
+      | tail -n 1 | tr 'A-F' 'a-f')"
+    [ -n "$PROVIDER_VERSION_ID" ] \
+      || fail "Cloudflare uploaded a version but returned no parseable immutable version id; traffic was not changed."
   fi
-  VERSION_UPLOAD_OUTPUT="$("$WRANGLER" versions upload "$@" --var "GIT_SHA:$HEAD_SHA" \
-    --var "CANDIDATE_MANIFEST:$CANDIDATE_MANIFEST" \
-    --var "CANDIDATE_MANIFEST_DIGEST:$CANDIDATE_MANIFEST_DIGEST" 2>&1)"
-  VERSION_UPLOAD_RC=$?
-  set -e
-  printf '%s\n' "$VERSION_UPLOAD_OUTPUT"
-  [ "$VERSION_UPLOAD_RC" -eq 0 ] || fail "Cloudflare version upload failed."
-  PROVIDER_VERSION_ID="$(printf '%s\n' "$VERSION_UPLOAD_OUTPUT" \
-    | sed -nE 's/^.*Worker Version ID:[[:space:]]*([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}).*$/\1/p' \
-    | tail -n 1 | tr 'A-F' 'a-f')"
-  [ -n "$PROVIDER_VERSION_ID" ] \
-    || fail "Cloudflare uploaded a version but returned no parseable immutable version id; traffic was not changed."
   if [ -n "$FOUNDATION_ASSURANCE_STAGING_PROVIDER" ]; then
     WR95_FINAL_VERSION_JSON="$(mktemp "${TMPDIR:-/tmp}/wr95-final-version.XXXXXX")"
     "$WRANGLER" versions view "$PROVIDER_VERSION_ID" --json \
@@ -1109,15 +1646,21 @@ if not bound(value): raise SystemExit("required secret binding is absent")' \
   if ! "$PY" "$REPO/tools/release-manifest.py" bind-provider \
       --manifest "$RELEASE_MANIFEST" --provider "$PROVIDER" \
       --provider-version-id "$PROVIDER_VERSION_ID" > "$BOUND_RELEASE_MANIFEST"; then
-    fail "the uploaded version could not be bound into its release manifest; traffic was not changed."
+    fail "the uploaded version could not be bound into its release manifest; $DO_TRAFFIC_CLAUSE."
   fi
   RELEASE_MANIFEST="$BOUND_RELEASE_MANIFEST"
   RELEASE_PLAN_HASH="$("$PY" "$REPO/tools/release-manifest.py" plan-hash \
     --manifest "$RELEASE_MANIFEST")"
   [ -n "$RELEASE_PLAN_HASH" ] \
-    || fail "the provider-bound release manifest has no plan hash; traffic was not changed."
+    || fail "the provider-bound release manifest has no plan hash; $DO_TRAFFIC_CLAUSE."
   echo ""
-  echo "uploaded only — Production traffic was not changed"
+  if [ -n "$DO_MIGRATION_VERSION_ID" ]; then
+    echo "Durable Object migration release — Production ALREADY serves this version"
+    echo "  (the migration deploy moved 100% of traffic; the candidate, typed staging"
+    echo "  rehearsal and promotion below all name this same version)"
+  else
+    echo "uploaded only — Production traffic was not changed"
+  fi
   echo "  provider: $PROVIDER"
   echo "  provider version: $PROVIDER_VERSION_ID"
   echo "  git SHA: $HEAD_SHA"
@@ -1169,7 +1712,7 @@ if not bound(value): raise SystemExit("required secret binding is absent")' \
       --staging-replacement-receipt-id "$FOUNDATION_ASSURANCE_STAGING_REPLACEMENT_RECEIPT" \
       --staging-replacement-source-sha "$FOUNDATION_ASSURANCE_STAGING_REPLACEMENT_SOURCE" \
       --idempotency-key "$WR95_EVIDENCE_IDEMPOTENCY" > "$WR95_SEAL_OUTPUT"; then
-      fail "the WR95 candidate was filed, but live evidence acquisition/storage failed; traffic was not changed and readiness remains impossible."
+      fail "the WR95 candidate was filed, but live evidence acquisition/storage failed; $DO_TRAFFIC_CLAUSE, and readiness remains impossible."
     fi
     RELEASE_TEST_EVIDENCE="$($PY -c 'import json,sys; x=json.load(open(sys.argv[1])); print(x["evidence_ref"])' "$WR95_SEAL_OUTPUT")" \
       || fail "the WR95 evidence store returned no sealed evidence reference."
@@ -1185,7 +1728,7 @@ if not bound(value): raise SystemExit("required secret binding is absent")' \
       ${RELEASE_VERIFIER:+--verifier "$RELEASE_VERIFIER"} \
       ${RELEASE_VERIFIER_EVIDENCE:+--verifier-evidence "$RELEASE_VERIFIER_EVIDENCE"} \
       >/dev/null \
-      || fail "the uploaded version could not be filed as a release candidate. Traffic was not changed and no readiness can name $PROVIDER_VERSION_ID until the record exists."
+      || fail "the uploaded version could not be filed as a release candidate ($DO_TRAFFIC_CLAUSE). No readiness can name $PROVIDER_VERSION_ID until the record exists."
   fi
   echo "  filed release candidate $RELEASE_KEY for $HEAD_SHA"
   echo "  test evidence: $RELEASE_TEST_EVIDENCE"
@@ -1200,6 +1743,7 @@ fi
 
 # -- provider-version promotion --
 if [ "$VERSION_MODE" = "promote" ]; then
+  load_do_migration_receipt
   "$WRANGLER" versions deploy "${PROVIDER_VERSION_ID}@100" --yes
 else
 # -- ordinary source deploy --
@@ -1773,6 +2317,7 @@ if [ "$TARGET_ENV" = "production" ] && [ -x "$REPO/bin/smoke-and-record.sh" ]; t
       echo "      .venv/bin/python tools/ops-record.py trace $CARR_CORRELATION_ID"
       echo "  Roll back by approving the prior immutable version, then running"
       echo "  bin/deploy-worker.sh --promote-version <approved-prior-version-id>."
+      [ -z "$DO_MIGRATION_ROLLBACK_NOTE" ] || echo "$DO_MIGRATION_ROLLBACK_NOTE"
       record_deployment failed "$CARR_CORRELATION_ID"
       exit 1
     fi
