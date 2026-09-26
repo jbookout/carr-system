@@ -127,6 +127,77 @@ class Routing(unittest.TestCase):
         self.assertEqual(route.desk_for("judgment", POLICY), "claude-desktop")
 
 
+def dispatch(scores=None, error=None, **kw):
+    return route.dispatch("a task", "ctx", policy=POLICY, judge=FakeJudge(scores, error), rng=lambda: 0.99,
+                          log_path=None, **kw)
+
+
+class Dispatch(unittest.TestCase):
+    """What an orchestrator gets back for one spawn: the route, or the pin that overrode it and why."""
+
+    def test_every_queue_target_and_pin_resolves(self):
+        targets = {v for k, v in POLICY["queue_targets"].items() if not k.startswith("_")}
+        pinned = {v["target"] for k, v in POLICY["pins"].items() if not k.startswith("_")}
+        for t in targets | pinned:
+            self.assertIn(t, POLICY["dispatch_targets"], t)
+            self.assertIn(t, route.load_catalog()["targets"], t)
+
+    def test_direct_task_spawns_on_the_flash_stand_in(self):
+        out = dispatch({"direct": 0.9})
+        self.assertEqual((out["route"], out["target"], out["desk"]), ("direct", "flash", "flash-model"))
+        self.assertEqual(out["subagent_model"], "haiku")
+        self.assertIsNone(out["pin"])
+
+    def test_judgment_task_spawns_on_opus(self):
+        out = dispatch({"beyond": 0.9})
+        self.assertEqual((out["route"], out["target"], out["subagent_model"]), ("escalate", "claude-desktop", "opus"))
+
+    def test_pin_overrides_the_route_and_says_why(self):
+        out = dispatch({"direct": 0.9}, pin="merge_review")
+        self.assertEqual((out["target"], out["subagent_model"], out["pin"]), ("claude-desktop", "opus", "merge_review"))
+        self.assertIn("merge", out["pin_reason"])
+        self.assertEqual(out["routed"], {"route": "direct", "target": "flash", "subagent_model": "haiku"})
+
+    def test_sol_pin_is_a_desk_only(self):
+        out = dispatch({"beyond": 0.9}, pin="sol_allowance")
+        self.assertEqual((out["target"], out["desk"], out["subagent_model"]), ("sol", "codex-desk", None))
+
+    def test_unknown_pin_is_refused_never_routed(self):
+        with self.assertRaises(ValueError):
+            dispatch({"direct": 0.9}, pin="just_because")
+
+    def test_jev_down_still_honours_a_pin(self):
+        out = dispatch(error=TimeoutError("down"), pin="gate_authority_code")
+        self.assertEqual((out["target"], out["subagent_model"]), ("claude-desktop", "opus"))
+        self.assertIn("TimeoutError", out["jev_error"])
+
+    def test_flash_busy_spawns_on_overflow_and_queues_to_fallback(self):
+        out = dispatch({"direct": 0.9}, flash_free=False)
+        self.assertEqual((out["target"], out["subagent_model"]), (POLICY["queue_targets"]["fallback"], "haiku"))
+        self.assertTrue(out["overflow"])
+        self.assertEqual(out["effort"], POLICY["overflow"]["effort"])
+
+    def test_flash_busy_never_lowers_a_code_task_off_opus(self):
+        # Code and script queue to the Opus desk; Flash being busy has nothing to do with them.
+        out = dispatch({"code": 0.9}, flash_free=False)
+        self.assertEqual((out["target"], out["subagent_model"], out["effort"]), ("claude-desktop", "opus", "high"))
+        self.assertFalse(out["overflow"])
+
+    def test_flash_busy_with_jev_down_stays_on_opus(self):
+        out = dispatch(error=TimeoutError("down"), flash_free=False)
+        self.assertEqual((out["route"], out["subagent_model"]), (POLICY["abstain_route"], "opus"))
+        self.assertFalse(out["overflow"])
+
+    def test_one_dispatch_logs_one_row_with_the_pin(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "routes.jsonl")
+            route.dispatch("t", policy=POLICY, judge=FakeJudge({"direct": 0.9}), pin="merge_review", log_path=path)
+            rows = [json.loads(line) for line in open(path)]
+            self.assertEqual(len(rows), 1)
+            self.assertEqual((rows[0]["kind"], rows[0]["pin"], rows[0]["routed"]["route"]),
+                             ("dispatch", "merge_review", "direct"))
+
+
 class Handoff(unittest.TestCase):
     def test_no_answer(self):
         self.assertEqual(route.handoff_reason("", []), "no_answer")
