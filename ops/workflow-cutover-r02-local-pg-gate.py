@@ -586,6 +586,9 @@ def main() -> int:
                                    match="slice_completion_complete_requires_every_criterion_proven")
 
             with as_login(cur, WRITER):
+                # 0619: a progress mark records only the server-derived actor,
+                # which the Worker sets for every writer call.
+                cur.execute("select set_config('carr.acting_actor_slug','claude',true)")
                 progress = cur.execute(
                     "select status, criteria_receipt from ops.mark_slice_progress(%s,'in_progress',%s,'partial',%s,'writer')",
                     (slice_id, slice_receipt(good_a, None), uuid.uuid4()),

@@ -21,7 +21,7 @@ from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connec
 
 REPO = Path(__file__).resolve().parents[1]
 
-# 0627 installs v77 as the live frontier and demotes v76 to sealed history.
+# 0725 installs v87 as the live frontier and demotes v86 to sealed history.
 # Both are pinned: an unreviewed frontier, or a v40 row the successor rewrote
 # instead of sealing, has to fail this gate closed.
 #
@@ -29,19 +29,19 @@ REPO = Path(__file__).resolve().parents[1]
 # rather than spelled out again. Every prior advance of this gate had to hand-
 # edit a dozen scattered `v20`/`v21` literals, and a literal missed there is a
 # check that silently keeps interrogating the superseded frontier.
-LIVE_REGISTRY_VERSION = "scac-mutation-registry.v77"
-LIVE_REGISTRY_ORDINAL = 77
-SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v76"
+LIVE_REGISTRY_VERSION = "scac-mutation-registry.v87"
+LIVE_REGISTRY_ORDINAL = 87
+SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v86"
 SEALED_PREDECESSOR_ORDINAL = LIVE_REGISTRY_ORDINAL - 1
 SEALED_PREDECESSOR_DIGEST = (
-    "sha256:c47462b051f1a9cba4ccd6513ef59ecab72e050e4f62e4f14c2adf68ba54900a"
+    "sha256:dea3507901ea6e346f7d60e85cd287477bfcbf10ac5e756dfaa5d9ee59e5dbdc"
 )
-SEALED_PREDECESSOR_ENTRY_COUNTS = (2166, 919)
+SEALED_PREDECESSOR_ENTRY_COUNTS = (2380, 977)
 SEALED_PREDECESSOR_MIGRATION = (
-    "migrations/0625_global_boundaries_door_scac_successor.sql"
+    "migrations/0723_session_trace_archive_scac_successor.sql"
 )
 LIVE_REGISTRY_MIGRATION = (
-    "migrations/0627_f01_record_source_authority_scac_successor.sql"
+    "migrations/0725_f05_live_rule_context_scac_successor.sql"
 )
 
 LIVE_CATALOG_CURRENT_FN = f"ops.scac_mutation_catalog_v{LIVE_REGISTRY_ORDINAL}_current()"

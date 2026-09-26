@@ -253,7 +253,7 @@ def _append_call_receipt(questions, facets, result, log_path):
 
 def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
         api_key=None, retries=RATE_LIMIT_RETRIES, endpoint=ENDPOINT, opener=None,
-        facets=None, calls_log=JEV_CALLS_LOG):
+        facets=None, calls_log=JEV_CALLS_LOG, deadline=None):
     """Evaluate `state` against a map of questions in ONE request.
 
     `state` is a string, or a mapping when the context has several parts —
@@ -274,6 +274,12 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
     production. On a successful response this also appends one best-effort
     receipt row to `calls_log` (default out/jev-calls.jsonl) — see
     JEV_CALLS_LOG's module-level note for what it carries and why.
+
+    `deadline` is optional: an absolute time.monotonic() value. With one,
+    each attempt's timeout and each rate-limit sleep is capped at the time
+    remaining, and no attempt or retry starts once it has passed — a caller
+    under a hook timeout gets a TypeSafeError instead of a killed hook.
+    `retries=0` turns rate-limit retries off entirely.
     """
     if not isinstance(questions, dict) or not questions:
         raise TypeSafeError("ask needs a non-empty map of questions")
@@ -304,8 +310,14 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
     send = opener or urllib.request.urlopen
     attempt = 0
     while True:
+        attempt_timeout = timeout
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TypeSafeError("deadline passed before the request could be sent")
+            attempt_timeout = min(timeout, remaining)
         try:
-            with send(request, timeout=timeout) as response:
+            with send(request, timeout=attempt_timeout) as response:
                 result = json.load(response)
             # Round-2 fix: only a REAL production call (no opener) writes a
             # receipt. `opener` is the offline selftest/mock path (see the
@@ -325,6 +337,11 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
                     delay = float(wait)
                 except (TypeError, ValueError):
                     delay = 2.0 * (attempt + 1)
+                if deadline is not None and delay >= deadline - time.monotonic():
+                    # Sleeping as asked would leave no time for the retry.
+                    raise TypeSafeError(
+                        "TypeSafe returned HTTP 429 and its retry-after runs past "
+                        "the caller's deadline") from None
                 time.sleep(delay)
                 attempt += 1
                 continue

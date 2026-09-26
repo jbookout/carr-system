@@ -352,6 +352,90 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0626_f01_record_source_authority.sql",
         "0627_f01_record_source_authority_scac_successor.sql",
     ),
+    # DoctorCRE v5 slice done-record: 0628 installs the automated marker's
+    # SECURITY DEFINER doors (catalog registration, allowlisted binding,
+    # release membership, completion proposal, partner confirm, hold); 0629 seals
+    # that catalog as v78, chained from main's v77 (0627). One transaction, so
+    # production is never left between a drifted live catalog and its seal.
+    (
+        "0628_doctorcre_slice_done_marker.sql",
+        "0629_doctorcre_slice_done_marker_scac_successor.sql",
+    ),
+    # DoctorCRE V5-J103: 0700 installs the governed correspondence store
+    # (adapter consent, read receipts, drafts with no destination) and its
+    # SECURITY DEFINER writers; 0701 seals that catalog as v79, chained from
+    # main's v78 (0629). Same deferred-epoch-trigger shape as the pairs above:
+    # 0700 applied alone would be refused at commit, so the pair must be one
+    # transaction.
+    (
+        "0700_governed_correspondence_store.sql",
+        "0701_governed_correspondence_scac_successor.sql",
+    ),
+    # DoctorCRE V5-J102: 0704 installs the healthcare CRE lifecycle store
+    # (SECURITY DEFINER, EXECUTE to carr_reader, carr_writer and the
+    # carr_authority group); 0705 seals that catalog as v80, chained from v79
+    # (0701). Same deferred-epoch-trigger shape: the pair is one transaction.
+    (
+        "0704_cre_lifecycle.sql",
+        "0705_cre_lifecycle_scac_successor.sql",
+    ),
+    # amend-closed-loop (defect a2c04ffa, loop c7265238): 0706 installs the
+    # append-only loop_amendment table, its carr_writer INSERT/SELECT grant,
+    # its own immutability trigger and its loop_amendment_history(uuid)
+    # SECURITY DEFINER read door (EXECUTE to carr_reader, carr_writer only --
+    # PUBLIC explicitly revoked first); 0707 seals that catalog as v81,
+    # chained from v80 (0705). Same deferred-epoch-trigger shape as the pairs
+    # above: 0706 applied alone would be refused at commit, so the pair must
+    # be one transaction.
+    (
+        "0706_amend_closed_loop.sql",
+        "0707_amend_closed_loop_scac_successor.sql",
+    ),
+    # DoctorCRE V5-D01: 0708 installs the append-only action_class_successor
+    # registry (status CHECK-locked to 'inactive', its own immutability
+    # trigger, the read_action_class_successors and
+    # action_class_successor_gate SECURITY DEFINER doors -- EXECUTE to
+    # carr_reader, carr_writer only, PUBLIC explicitly revoked first); 0709
+    # seals that catalog as v82, chained from v81 (0707). Same
+    # deferred-epoch-trigger shape as the pairs above: 0708 applied alone
+    # would be refused at commit, so the pair must be one transaction.
+    (
+        "0708_action_class_successor_registry.sql",
+        "0709_action_class_successor_registry_scac_successor.sql",
+    ),
+    # V5-A01: 0717 installs the append-only six-layer assurance-health
+    # evidence store plus its SECURITY DEFINER record/read doors; 0718 seals
+    # those grants and the two registered MCP verbs as SCAC v83, chained
+    # from v82 (0709).
+    (
+        "0717_assurance_health_evidence_store.sql",
+        "0718_assurance_health_evidence_store_scac_successor.sql",
+    ),
+    # DoctorCRE V5-A03: 0719 installs the append-only complete-set review
+    # cycle and its SECURITY DEFINER writer/read doors; 0720 seals the exact
+    # source and catalog as SCAC v84, chained from v83 (0718). The deferred
+    # policy-epoch trigger must see both or neither.
+    (
+        "0719_doctorcre_a03_review_store.sql",
+        "0720_doctorcre_a03_review_scac_successor.sql",
+    ),
+    # DoctorCRE V5-A02: 0721 installs the append-only Joe-authority fallback
+    # receipt, its authority-only writer, and the universal read-only active
+    # rule coverage function; 0722 seals that catalog as provisional v85,
+    # chained from v84 (0720). The deferred SCAC epoch trigger means the pair
+    # must commit atomically.
+    (
+        "0721_a02_rule_enforcement_coverage.sql",
+        "0722_a02_rule_enforcement_coverage_scac_successor.sql",
+    ),
+    # DoctorCRE V5-F05: 0724 installs the authority-bound typed rule-contract
+    # store and its actor-scoped universe reader; 0725 seals the resulting
+    # source and database capability frontier as provisional v87, chained from
+    # v86 (0723). The deferred policy-epoch trigger must observe both or neither.
+    (
+        "0724_f05_live_rule_context.sql",
+        "0725_f05_live_rule_context_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -406,6 +490,42 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0626_f01_record_source_authority.sql",
         "0627_f01_record_source_authority_scac_successor.sql",
+    ),
+    (
+        "0628_doctorcre_slice_done_marker.sql",
+        "0629_doctorcre_slice_done_marker_scac_successor.sql",
+    ),
+    (
+        "0700_governed_correspondence_store.sql",
+        "0701_governed_correspondence_scac_successor.sql",
+    ),
+    (
+        "0704_cre_lifecycle.sql",
+        "0705_cre_lifecycle_scac_successor.sql",
+    ),
+    (
+        "0706_amend_closed_loop.sql",
+        "0707_amend_closed_loop_scac_successor.sql",
+    ),
+    (
+        "0708_action_class_successor_registry.sql",
+        "0709_action_class_successor_registry_scac_successor.sql",
+    ),
+    (
+        "0717_assurance_health_evidence_store.sql",
+        "0718_assurance_health_evidence_store_scac_successor.sql",
+    ),
+    (
+        "0719_doctorcre_a03_review_store.sql",
+        "0720_doctorcre_a03_review_scac_successor.sql",
+    ),
+    (
+        "0721_a02_rule_enforcement_coverage.sql",
+        "0722_a02_rule_enforcement_coverage_scac_successor.sql",
+    ),
+    (
+        "0724_f05_live_rule_context.sql",
+        "0725_f05_live_rule_context_scac_successor.sql",
     ),
 )
 

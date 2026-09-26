@@ -39,6 +39,7 @@ import subprocess
 import sys
 import pathlib
 import unittest
+import uuid
 
 OPS = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(OPS)
@@ -87,7 +88,10 @@ class MessageBoundaryJevTests(unittest.TestCase):
         payload = {
             "hook_event_name": "UserPromptSubmit",
             "cwd": REPO,
-            "session_id": "jev-operational-selftest",
+            # A fresh session per run: the compiled-trigger matcher does not
+            # resend a rule a session already has in context, so a fixed id
+            # would see the rule deduped on the second run inside the window.
+            "session_id": f"jev-operational-selftest-{uuid.uuid4().hex}",
             "turn_id": turn,
             "prompt": prompt,
         }
