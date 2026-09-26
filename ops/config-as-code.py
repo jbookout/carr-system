@@ -265,6 +265,22 @@ PRIMARY_ONLY = {
     "com.carr.local-briefs.plist",
     "com.carr.partner-ping.plist",
     "com.carr.cutover-watch.plist",
+    # Joe 2026-09-26: the Mac Studio is the hub and the MacBook is a thin client
+    # into it, so work that acts on shared state runs on the primary alone.
+    # room-bridge: both Macs carried the same Model Room desks and raced for
+    # each turn; it also wakes the engineering controller, whose one Worker
+    # token lives on the primary.  release-pipeline and control-plane-tick
+    # would release and enqueue twice.  The cadence sweep would escalate twice.
+    # nightly-exports-daytime-retry is the safety net for nightly-record-layer,
+    # which is already primary-only.  timebomb-audit scans the same tracked
+    # source on every Mac.  Device-bound jobs (dictation, call mode, capture,
+    # keymap, local servers, spool flush, fleet sync) stay on every machine.
+    "com.carr.room-bridge.plist",
+    "com.carr.release-pipeline.plist",
+    "com.carr.control-plane-tick.plist",
+    "com.carr.delivery-cadence-a05-sweep.plist",
+    "com.carr.nightly-exports-daytime-retry.plist",
+    "com.carr.timebomb-audit.plist",
 }
 
 
