@@ -20,6 +20,8 @@ What is pinned, one test class each:
                    refused as verifier
   blockers         a missing credential files one loop, once, and runs nothing
   dry run          prints commands, executes none, writes no state
+  schema supersede a new schema-snapshot PR closes the older open ones (close
+                   only), leaves every other PR alone, and never fails on it
 """
 from __future__ import annotations
 
@@ -2075,6 +2077,178 @@ class DryRun(Base):
                        f"bin/deploy-worker.sh --upload-version --release-sha {sha}",
                        "--env staging --recovery-step forward_fix", "--promote-version", "./run.sh health"):
             self.assertIn(needle, text)
+
+
+class SchemaSnapshotGhRunner(FakeRunner):
+    """FakeRunner with a stubbed `gh pr list` / `gh pr close`: an in-memory
+    set of open PRs, and chosen PR numbers whose close exits nonzero or
+    raises."""
+
+    def __init__(self, open_prs: dict[int, str], new_pr: int, *, close_rc: dict | None = None,
+                 close_raises: set | None = None, list_rc: int = 0, forks: set | None = None,
+                 pr_create_out: str | None = None, no_fork_flag: set | None = None):
+        super().__init__()
+        self.no_fork_flag = no_fork_flag or set()   # rows listed WITHOUT isCrossRepository
+        self.forks = forks or set()          # PR numbers whose head lives in a fork
+        self.pr_create_out = pr_create_out   # override what `gh pr create` prints
+        self.open_prs, self.new_pr = dict(open_prs), new_pr
+        self.close_rc, self.close_raises = close_rc or {}, close_raises or set()
+        self.list_rc = list_rc
+        self.closed: list[tuple[int, str]] = []
+
+    def run(self, argv, *, cwd, log, env, timeout=3600):
+        if argv[:3] == ["gh", "pr", "list"]:
+            self.calls.append(("gh-pr-list", list(argv)))
+            assert "isCrossRepository" in argv[argv.index("--json") + 1], "fork flag not requested"
+            rows = [{"number": n, "headRefName": h, "isCrossRepository": n in self.forks}
+                    for n, h in self.open_prs.items()]
+            for row in rows:
+                if row["number"] in self.no_fork_flag:
+                    del row["isCrossRepository"]
+            return rp.Result(self.list_rc, json.dumps(rows) if self.list_rc == 0 else "boom")
+        if argv[:3] == ["gh", "pr", "close"]:
+            self.calls.append(("gh-pr-close", list(argv)))
+            num = int(argv[3])
+            if num in self.close_raises:
+                raise OSError("gh vanished")
+            rc = self.close_rc.get(num, 0)
+            if rc == 0:
+                self.closed.append((num, argv[argv.index("--comment") + 1]))
+                self.open_prs.pop(num, None)
+            return rp.Result(rc, "")
+        res = super().run(argv, cwd=cwd, log=log, env=env, timeout=timeout)
+        if log.stem.endswith("schema-pr") and res.rc == 0:
+            self.open_prs[self.new_pr] = argv[argv.index("--head") + 1]
+            if self.pr_create_out is not None:
+                return rp.Result(0, self.pr_create_out)
+            return rp.Result(0, f"https://example.invalid/o/r/pull/{self.new_pr}\n")
+        return res
+
+
+class SchemaSnapshotSupersede(Base):
+    """Every production release that applied migrations opens a cumulative
+    `release/schema-snapshot-*` PR. Nothing merges them automatically, so the
+    newest must close every older open one (close only: never merge, never
+    label, never delete a branch), and a close failure must never fail the
+    already-shipped release."""
+
+    SHA = "abcdef0123456789abcdef0123456789abcdef01"
+    NEW = 120
+    OLDER = {101: "release/schema-snapshot-11111111", 108: "release/schema-snapshot-22222222"}
+    OTHER = {110: "feature/unrelated", 111: "release/other-thing", 112: "schema-snapshot-lookalike"}
+
+    def _followup(self, runner):
+        pipe = self.fx.pipeline(runner)
+        wt = self.fx.tmp / "release-wt"
+        (wt / "db").mkdir(parents=True)
+        (wt / "db" / "schema.sql").write_text("-- snapshot\n")
+        (pipe.store.root / "worktrees" / f"schema-{self.SHA[:12]}" / "db").mkdir(parents=True)
+        return pipe, pipe.schema_followup(wt, self.SHA)
+
+    def test_older_snapshots_close_new_stays_open_others_untouched(self):
+        runner = SchemaSnapshotGhRunner({**self.OLDER, **self.OTHER}, self.NEW)
+        pipe, url = self._followup(runner)
+        self.assertTrue(url.endswith(f"/pull/{self.NEW}"))
+        self.assertEqual(sorted(n for n, _ in runner.closed), [101, 108])
+        self.assertEqual(pipe.schema_superseded_closed, [101, 108])
+        for _, comment in runner.closed:
+            self.assertEqual(comment, f"Superseded by #{self.NEW}, which carries the cumulative "
+                                      "production schema snapshot.")
+        # the new PR stays open and every non-snapshot PR is never touched
+        self.assertIn(self.NEW, runner.open_prs)
+        closes = [a for n, a in runner.calls if n == "gh-pr-close"]
+        touched = {int(a[3]) for a in closes}
+        self.assertNotIn(self.NEW, touched)
+        self.assertFalse(touched & set(self.OTHER))
+        # close only: no merge, no label, no branch deletion, and only after
+        # the new PR was created
+        flat = [" ".join(a) for _, a in runner.calls]
+        for banned in ("pr merge", "--add-label", "carr-automerge-pilot", "--delete-branch",
+                       "push origin --delete", "branch -D"):
+            self.assertFalse(any(banned in c for c in flat), banned)
+        names = runner.names()
+        self.assertLess(names.index("schema-pr"), names.index("gh-pr-list"))
+        self.assertLess(max(i for i, n in enumerate(names) if n == "gh-pr-close"),
+                        names.index("schema-worktree-remove"))
+
+    def test_a_close_failure_is_logged_and_the_step_still_succeeds(self):
+        runner = SchemaSnapshotGhRunner({**self.OLDER, 105: "release/schema-snapshot-33333333"}, self.NEW,
+                                        close_rc={101: 1}, close_raises={105})
+        pipe, url = self._followup(runner)   # must not raise
+        self.assertTrue(url.endswith(f"/pull/{self.NEW}"))
+        self.assertEqual(pipe.schema_superseded_closed, [108])
+        self.assertIn("schema-worktree-remove", runner.names())
+
+    def test_a_failed_listing_closes_nothing_and_does_not_fail(self):
+        runner = SchemaSnapshotGhRunner(self.OLDER, self.NEW, list_rc=1)
+        pipe, _ = self._followup(runner)
+        self.assertEqual(pipe.schema_superseded_closed, [])
+        self.assertNotIn("gh-pr-close", runner.names())
+
+    def test_a_fork_pr_with_the_snapshot_branch_name_stays_open(self):
+        # The repo is public: a fork may name its head release/schema-snapshot-*.
+        runner = SchemaSnapshotGhRunner({**self.OLDER, 130: "release/schema-snapshot-99999999"}, self.NEW,
+                                        forks={130})
+        pipe, _ = self._followup(runner)
+        self.assertEqual(pipe.schema_superseded_closed, [101, 108])
+        self.assertIn(130, runner.open_prs)
+        self.assertNotIn(130, {int(a[3]) for n, a in runner.calls if n == "gh-pr-close"})
+
+    def test_a_snapshot_pr_without_a_readable_fork_flag_stays_open(self):
+        # Fail closed: only an explicit isCrossRepository=false is closeable.
+        runner = SchemaSnapshotGhRunner({**self.OLDER, 131: "release/schema-snapshot-88888888"}, self.NEW,
+                                        no_fork_flag={131})
+        pipe, _ = self._followup(runner)
+        self.assertEqual(pipe.schema_superseded_closed, [101, 108])
+        self.assertIn(131, runner.open_prs)
+
+    def test_unreadable_pr_create_output_closes_nothing(self):
+        for out in ("", "created, but no URL here\n", "https://example.invalid/o/r/pull/abc\n"):
+            with self.subTest(out=out):
+                runner = SchemaSnapshotGhRunner(self.OLDER, self.NEW, pr_create_out=out)
+                pipe = self.fx.pipeline(runner)
+                wt = self.fx.tmp / f"release-wt-{abs(hash(out))}"
+                (wt / "db").mkdir(parents=True)
+                (wt / "db" / "schema.sql").write_text("-- snapshot\n")
+                fwt = pipe.store.root / "worktrees" / f"schema-{self.SHA[:12]}"
+                (fwt / "db").mkdir(parents=True, exist_ok=True)
+                pipe.schema_followup(wt, self.SHA)   # must not raise
+                self.assertEqual(pipe.schema_superseded_closed, [])
+                self.assertNotIn("gh-pr-close", runner.names())
+                self.assertEqual(set(runner.open_prs), set(self.OLDER) | {self.NEW})
+
+    def _direct(self, open_prs):
+        """close_superseded_schema_prs on its own, with a fixed PR list, so a
+        row can share ONE identity field with the new PR but not the other."""
+        runner = SchemaSnapshotGhRunner(open_prs, self.NEW)
+        pipe = self.fx.pipeline(runner)
+        new_branch = f"{rp.SCHEMA_SNAPSHOT_PREFIX}{self.SHA[:8]}"
+        closed = pipe.close_superseded_schema_prs(self.fx.tmp, f"https://example.invalid/o/r/pull/{self.NEW}",
+                                                  new_branch)
+        return runner, closed, new_branch
+
+    def test_the_branch_exclusion_alone_protects_the_new_pr(self):
+        # Kills the mutant that drops only `headRefName != new_branch`: a row
+        # on the new branch under a DIFFERENT number must stay open.
+        new_branch = f"{rp.SCHEMA_SNAPSHOT_PREFIX}{self.SHA[:8]}"
+        runner, closed, _ = self._direct({**self.OLDER, self.NEW + 1: new_branch})
+        self.assertEqual(closed, [101, 108])
+        self.assertIn(self.NEW + 1, runner.open_prs)
+
+    def test_the_number_exclusion_alone_protects_the_new_pr(self):
+        # Kills the mutant that drops only `number != new_num`: the new PR's
+        # NUMBER under a different snapshot branch name must stay open.
+        runner, closed, _ = self._direct({**self.OLDER, self.NEW: "release/schema-snapshot-deadbeef"})
+        self.assertEqual(closed, [101, 108])
+        self.assertIn(self.NEW, runner.open_prs)
+
+    def test_a_failed_pr_create_closes_nothing(self):
+        runner = SchemaSnapshotGhRunner(self.OLDER, self.NEW)
+        runner.fail_at = "schema-pr"
+        with self.assertRaises(rp.StepFailed):
+            self._followup(runner)
+        self.assertNotIn("gh-pr-list", runner.names())
+        self.assertEqual(runner.closed, [])
 
 
 class Report(Base):
