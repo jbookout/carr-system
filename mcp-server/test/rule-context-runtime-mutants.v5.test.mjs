@@ -1,4 +1,11 @@
-// V5-F05 planted-bug mutants for every guard introduced by the live adapter.
+// V5-F05 planted-bug mutants for the guards the live adapter introduces.
+//
+// Each mutant is KILLED here the honest way: the same behavioural expectation
+// the main suite (rule-context-runtime.v5.test.mjs) holds the real module to
+// is run against the mutated module, and it has to FAIL there while it passes
+// on the real module. A mutant that merely "behaves differently" is not a
+// kill; an expectation the real module also fails is not a kill either.
+//
 // Source anchors are exact and unique: a refactor that makes a mutant a no-op
 // fails here instead of reporting a meaningless green mutation run.
 
@@ -8,6 +15,8 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+
+import * as real from "../src/rule-context-runtime.v5.js";
 
 const SOURCE = new URL("../src/rule-context-runtime.v5.js", import.meta.url);
 const SOURCE_DIR = fileURLToPath(new URL("../src/", import.meta.url));
@@ -56,23 +65,57 @@ function client(overrides = {}) {
   } }] }) };
 }
 
-test("mutant killed: trusting store completeness lets an unprojected rule disappear", async () => {
-  const mutant = await mutate("trust-completeness",
+// A behavioural expectation, stated once, run against real and mutant alike.
+// It resolves when the module under test behaves correctly and rejects when
+// it does not.
+const EXPECTATIONS = {
+  // Main suite: "a missing possible binding rule makes the universe partial and blocks the write".
+  async missingRuleBlocksWrite(module) {
+    const result = await module.readActionContext(client({
+      active_rule_count: 2, projected_rule_count: 1, missing_rule_ids: ["r2"],
+    }), ACTOR, { facts: FACTS });
+    assert.equal(result.consequential_action_permitted, false);
+  },
+  // Main suite: "a census whose counts, projected rules and missing list disagree is refused".
+  async inconsistentCensusRefuses(module) {
+    await assert.rejects(
+      () => module.readActionContext(client({
+        active_rule_count: 2, projected_rule_count: 1, missing_rule_ids: [],
+      }), ACTOR, { facts: FACTS }),
+      error => error?.code === "runtime_census_mismatch");
+  },
+  // Main suite: "server-derived identity, time, completeness ... cannot be supplied by the caller".
+  async callerTimeRefuses(module) {
+    await assert.rejects(
+      () => module.readActionContext(client(), ACTOR,
+        { facts: FACTS, now: "1999-01-01T00:00:00.000Z" }),
+      error => error?.code === "runtime_authority_injection");
+  },
+};
+
+async function assertKilled(mutant, expectation) {
+  await EXPECTATIONS[expectation](real);
+  await assert.rejects(() => EXPECTATIONS[expectation](mutant),
+    `expectation ${expectation} must fail on the mutant, or the mutant survives`);
+}
+
+test("M1a killed: trusting the store's completeness lets an unprojected rule disappear", async () => {
+  const mutant = await mutate("M1a-trust-completeness",
     "const completeness = censusComplete",
     "const completeness = true");
-  const result = await mutant.readActionContext(client({
-    active_rule_count: 2, projected_rule_count: 1, missing_rule_ids: ["r2"],
-  }), ACTOR, { facts: FACTS });
-  assert.equal(result.consequential_action_permitted, true,
-    "the planted bug must open the write gate; the behavioral suite kills it");
+  await assertKilled(mutant, "missingRuleBlocksWrite");
 });
 
-test("mutant killed: accepting derived caller fields bypasses the closed request guard", async () => {
-  const mutant = await mutate("drop-authority-guard",
+test("M1b killed: dropping the census consistency check reads a lying census as partial", async () => {
+  const mutant = await mutate("M1b-drop-census-check",
+    "      missingRuleIds.length !== active - projected) {",
+    "      missingRuleIds.length !== active - projected && false) {");
+  await assertKilled(mutant, "inconsistentCensusRefuses");
+});
+
+test("M2 killed: dropping the authority-injection guard accepts a caller-supplied clock", async () => {
+  const mutant = await mutate("M2-drop-authority-guard",
     "assertNoRuntimeAuthorityInjection(request);",
     "// mutant: caller authority fields are not rejected");
-  const result = await mutant.readActionContext(client(), ACTOR,
-    { facts: FACTS, now: "1999-01-01T00:00:00.000Z" });
-  assert.equal(result.observed_at, "2026-09-26T06:30:00.000Z",
-    "the planted bug must survive this probe; the behavioral suite rejects the call");
+  await assertKilled(mutant, "callerTimeRefuses");
 });

@@ -185,6 +185,35 @@ test("an unresolved binding conflict refuses and cannot be called permission", a
   );
 });
 
+test("a census whose counts, projected rules and missing list disagree is refused, never read as partial", async () => {
+  // Each snapshot is internally inconsistent in exactly one way. Reading any
+  // of them as merely "partial" would let a store that under-reports its
+  // missing rules (or over-reports its projections) shape coverage.
+  const inconsistent = {
+    "missing list shorter than the gap": snapshot({
+      active_rule_count: 2, projected_rule_count: 1, missing_rule_ids: [] }),
+    "missing list longer than the gap": snapshot({
+      active_rule_count: 1, projected_rule_count: 1, missing_rule_ids: ["rule-hidden"] }),
+    "projected count disagrees with the policy rules": snapshot({
+      active_rule_count: 2, projected_rule_count: 2, missing_rule_ids: [] }),
+    "more projected than active": snapshot({
+      active_rule_count: 0, projected_rule_count: 1, missing_rule_ids: [] }),
+  };
+  for (const [label, bad] of Object.entries(inconsistent)) {
+    await assert.rejects(
+      () => readActionContext(new FakeClient(bad), ACTOR, { facts: facts() }),
+      error => error?.code === "runtime_census_mismatch",
+      `${label} must refuse as a census mismatch`,
+    );
+  }
+  // The consistent partial census still reads, and still blocks.
+  const partial = await readActionContext(new FakeClient(snapshot({
+    active_rule_count: 2, projected_rule_count: 1, missing_rule_ids: ["rule-missing"],
+  })), ACTOR, { facts: facts() });
+  assert.equal(partial.consequential_action_permitted, false);
+  assert.deepEqual([...partial.source.missing_rule_ids], ["rule-missing"]);
+});
+
 test("server-derived identity, time, completeness, and model advice cannot be supplied by the caller", async () => {
   for (const forbidden of [
     "actor", "tenant", "now", "universe", "completeness",

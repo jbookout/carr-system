@@ -49,10 +49,21 @@ declare
   v_full jsonb;
   v_hash text;
   v_unknown text[];
+  v_login text;
 begin
-  if nullif(current_setting('carr.acting_actor_slug',true),'') is distinct from 'joe'
-     or nullif(current_setting('carr.verified_human_actor_slug',true),'') is distinct from 'joe' then
-    raise exception 'bind_f05_rule_contract requires Joe acting as the verified human authority';
+  -- Authority comes from the LOGIN, as in 0161/0482/0542: ops.authority_actor_slug()
+  -- reads session_user and raises for anything but an admitted partner
+  -- authority principal. The carr.* session values are caller-settable, so they
+  -- can only narrow (they must agree with the login), never establish, Joe.
+  v_login := ops.authority_actor_slug();
+  if v_login is distinct from 'joe' then
+    raise exception 'bind_f05_rule_contract requires the Joe authority login; this authority session is %', v_login
+      using errcode = '42501';
+  end if;
+  if nullif(current_setting('carr.acting_actor_slug',true),'') is distinct from v_login
+     or nullif(current_setting('carr.verified_human_actor_slug',true),'') is distinct from v_login then
+    raise exception 'bind_f05_rule_contract session actor context disagrees with the authority login'
+      using errcode = '42501';
   end if;
   select * into v_bound_by from public.actor where slug='joe' and kind='human' and active;
   if v_bound_by.id is null then raise exception 'Joe authority actor is unavailable'; end if;
