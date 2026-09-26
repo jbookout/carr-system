@@ -419,6 +419,15 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0719_doctorcre_a03_review_store.sql",
         "0720_doctorcre_a03_review_scac_successor.sql",
     ),
+    # DoctorCRE V5-A02: 0721 installs the append-only Joe-authority fallback
+    # receipt, its authority-only writer, and the universal read-only active
+    # rule coverage function; 0722 seals that catalog as provisional v85,
+    # chained from v84 (0720). The deferred SCAC epoch trigger means the pair
+    # must commit atomically.
+    (
+        "0721_a02_rule_enforcement_coverage.sql",
+        "0722_a02_rule_enforcement_coverage_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -501,6 +510,10 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0719_doctorcre_a03_review_store.sql",
         "0720_doctorcre_a03_review_scac_successor.sql",
+    ),
+    (
+        "0721_a02_rule_enforcement_coverage.sql",
+        "0722_a02_rule_enforcement_coverage_scac_successor.sql",
     ),
 )
 

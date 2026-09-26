@@ -985,8 +985,13 @@ test("POLICY: the preimage carries the slice's decision ids and the seam state",
   assert.equal(preimage.schema_version, V5_A02_LIFECYCLE_SCHEMA_VERSION);
   assert.equal(preimage.policy_version, V5_A02_LIFECYCLE_POLICY_VERSION);
   assert.equal(preimage.rule_activation_controller_bound, false);
-  assert.equal(preimage.authoritative_readers_bound, false);
-  assert.equal(preimage.public_surface_answers, "unavailable");
+  assert.deepEqual(preimage.authoritative_readers_bound, {
+    rule_enforcement_coverage: true,
+    rule_lifecycle_transition: false,
+    workflow_lifecycle: false,
+  });
+  assert.equal(preimage.public_surface_answers,
+    "rule_enforcement_coverage_record_or_unavailable;other_reads_unavailable");
   assert.deepEqual(preimage.owed_seams, [...V5_A02_LIFECYCLE_OWED_SEAMS]);
   assert.deepEqual(preimage.workflow_lifecycle_states_in_precedence_order,
     [...V5_A02_WORKFLOW_LIFECYCLE_STATES]);

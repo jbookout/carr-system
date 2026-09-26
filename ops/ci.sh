@@ -1398,7 +1398,11 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
   # V5-A03 joins it: complete eleven-dimension submissions, non-shrinking
   # regression evidence, role/session separation, the two-round ceiling and
   # stronger adjudication are all transactional claims over append-only rows.
-  for proof in cost-ledger-projection.v5 doc-conversation notifications session-identity dispatch-spine meeting-mode delivery-cadence-a05-tools amend-closed-loop-postgres action-class-successor-registry-postgres independent-review-cycle-postgres; do
+  # V5-A02 rule-enforcement coverage joins it: its first review found every
+  # SQL logic mutant surviving a FakeDb suite, so the coverage function, the
+  # Joe-authority fallback writer and their append-only guards are proved here
+  # on real rows as the real principals, and a skip is a failure.
+  for proof in cost-ledger-projection.v5 doc-conversation notifications session-identity dispatch-spine meeting-mode delivery-cadence-a05-tools amend-closed-loop-postgres action-class-successor-registry-postgres independent-review-cycle-postgres a02-rule-enforcement-postgres; do
     if [ -f "mcp-server/test/$proof.test.mjs" ]; then
       if ! DATABASE_URL="$dsn" CARR_COST_LEDGER_DB_REQUIRED=1 \
            CARR_DOC_CONVERSATION_DB_REQUIRED=1 CARR_R03_DB_REQUIRED=1 \
@@ -1406,6 +1410,7 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
            CARR_MEETING_MODE_DB_REQUIRED=1 CARR_AMEND_CLOSED_LOOP_DB_REQUIRED=1 \
            CARR_ACTION_CLASS_SUCCESSOR_DB_REQUIRED=1 \
            CARR_V5_A03_DB_REQUIRED=1 \
+           CARR_A02_RULE_COVERAGE_DB_REQUIRED=1 \
            run_quiet "$LOGDIR/$proof-db.log" \
            node --test "mcp-server/test/$proof.test.mjs"; then
         tail -30 "$LOGDIR/$proof-db.log" >&2
