@@ -183,9 +183,13 @@ class Result:
 
 
 class StepFailed(Exception):
-    def __init__(self, step: str, rc: int, log: str, detail: str = ""):
+    """`capability` names a credential no fix-forward PR can supply; the lane
+    then also files one CARR loop naming it (once per name), like Blocked."""
+
+    def __init__(self, step: str, rc: int, log: str, detail: str = "", capability: str | None = None):
         super().__init__(f"{step} exited {rc}")
         self.step, self.rc, self.log, self.detail = step, rc, log, detail
+        self.capability = capability
 
 
 class Blocked(Exception):
@@ -598,13 +602,25 @@ def queue_turn(lane: str, sha: str, step: str, rc: int, log: str, record_path: s
             "msg_id": str(uuid.uuid5(ROOM_NAMESPACE, f"{lane}:{sha}:{step}:{run_id}"))}
 
 
+CLOUDFLARE_TOKEN_REMEDY = (
+    "To fix: mint a scoped Cloudflare API token in the dashboard (Workers Scripts:Edit + "
+    "Account Settings:Read, CARR account only), put it in ~/.config/carr/tokens.env as "
+    "CLOUDFLARE_API_TOKEN=<value>, and chmod 600 the file "
+    "(ops/config/credential-inventory.v1.json carries the same plan).")
+
+
 def blocker_loop(capability: str, detail: str) -> dict:
+    """The decider is named in blocker_detail: every capability this pipeline
+    can lack is a credential only Joe holds, so the row is a request in his
+    queue, not a limit (the add-loop blocker-decider gate, rule 88e9b5eb)."""
+    remedy = f" {CLOUDFLARE_TOKEN_REMEDY}" if capability.startswith(CLOUDFLARE_TOKEN_NAME) else ""
     return {"idempotency_key": str(uuid.uuid5(ROOM_NAMESPACE, "release-pipeline-blocker:" + capability)),
             "kind": "open_loop", "owner": "Joe", "domain": "system", "marker": "none",
-            "blocker": "capability", "blocker_detail": detail,
+            "blocker": "capability",
+            "blocker_detail": f"{detail} — only Joe holds this credential; Joe grants it",
             "body": (f"The scripted release pipeline (ops/release-pipeline.py) cannot run "
                      f"unattended: {detail}. It stops at that step every tick until this "
-                     f"exists; nothing is released meanwhile."),
+                     f"exists; nothing is released meanwhile.{remedy}"),
             "unblocks": "unattended Worker/app release on every merge to main"}
 
 
@@ -1230,7 +1246,7 @@ class Pipeline:
                 self.out(f"  [dry-run] a real run would FAIL here: {detail}")
                 return dict(self.env)
             self.out(f"  !! {detail}")
-            raise StepFailed("credential-missing", 1, "", detail)
+            raise StepFailed("credential-missing", 1, "", detail, capability=CLOUDFLARE_TOKEN_NAME)
         env = dict(self.env)
         env[CLOUDFLARE_TOKEN_NAME] = token
         return env
@@ -1243,7 +1259,8 @@ class Pipeline:
                         env=self.deploy_env())
         if not self.dry_run and "not authenticated" in who.out.lower():
             raise StepFailed("credential-missing", 1, who.log,
-                             f"credential rejected: wrangler whoami does not accept {CLOUDFLARE_TOKEN_NAME}")
+                             f"credential rejected: wrangler whoami does not accept {CLOUDFLARE_TOKEN_NAME}",
+                             capability=f"{CLOUDFLARE_TOKEN_NAME}:rejected")
 
     def add_worktree(self, name: str, repo_dir: Path, wt: Path, sha: str, *, mark_mutated: bool = True) -> None:
         """`mark_mutated=False` is for the worker lane's health baseline: the
@@ -1417,19 +1434,17 @@ class Pipeline:
             row: dict[str, Any] = {"lane": lane, "sha": sha, "from_sha": base, "status": "blocked",
                    "reason": b.reason, "detail": b.detail, "run_id": self.run_id}
             if b.capability:
-                filed = state.setdefault("filed_blockers", {})
-                if b.capability not in filed:
-                    ok, res = self.call_verb("add-loop", blocker_loop(b.capability, b.detail))
-                    row["loop_filed"] = ok
-                    if ok:
-                        filed[b.capability] = self.today
-                    else:
-                        self.out(f"release-pipeline[{lane}]: could not file the loop: {res}")
-                self.store.save(state)
+                self.file_blocker(state, lane, b.capability, b.detail, row)
             self.store.record(row)
             return 3 if b.capability else 0
         except StepFailed as f:
-            return self.fail(lane, state, sha, base, f.step, f.rc, f.log, f.detail)
+            # A missing deploy credential burns the SHA and dispatches like any
+            # failure, but no fix-forward PR can supply it: it also names the
+            # credential to Joe in one loop, as the header promises.
+            extra: dict[str, Any] = {}
+            if f.capability and not self.dry_run:
+                self.file_blocker(state, lane, f.capability, f.detail, extra)
+            return self.fail(lane, state, sha, base, f.step, f.rc, f.log, f.detail, extra=extra)
         except Exception as exc:  # noqa: BLE001 — an unexpected error is recorded and dispatched, never lost
             detail = f"{type(exc).__name__}: {str(exc)[:300]}"
             self.out(f"release-pipeline[{lane}]: UNEXPECTED {detail}")
@@ -1449,6 +1464,19 @@ class Pipeline:
                 return 1
             return self.fail(lane, state, sha, base, "unexpected", 1, "-", detail)
 
+    def file_blocker(self, state: dict, lane: str, capability: str, detail: str, row: dict) -> None:
+        """One CARR loop per capability name, ever (state.filed_blockers);
+        `row["loop_filed"]` is set only when this call tried to file."""
+        filed = state.setdefault("filed_blockers", {})
+        if capability not in filed:
+            ok, res = self.call_verb("add-loop", blocker_loop(capability, detail))
+            row["loop_filed"] = ok
+            if ok:
+                filed[capability] = self.today
+            else:
+                self.out(f"release-pipeline[{lane}]: could not file the loop: {res}")
+        self.store.save(state)
+
     def dispatch(self, state: dict, lane: str, sha: str, turn: dict, *, allow_dedup: bool = False
                  ) -> tuple[bool, Any]:
         """Post the fix-session turn. A `deduplicated: true` answer means the
@@ -1465,7 +1493,7 @@ class Pipeline:
         return ok, res
 
     def fail(self, lane: str, state: dict, sha: str, base: str, step: str, rc: int, log: str,
-             detail: str) -> int:
+             detail: str, *, extra: dict | None = None) -> int:
         self.out(f"release-pipeline[{lane}]: FAILED at {step} (exit {rc}); log {log or '-'}")
         if self.dry_run:
             return 1
@@ -1484,7 +1512,7 @@ class Pipeline:
                            "db_ahead_of_worker": self.db_ahead_of_worker,
                            "do_migration": self.do_migration,
                            "run_dir": str(self.run_dir), "executed": list(self.executed),
-                           "dispatched": ok, "run_id": self.run_id})
+                           "dispatched": ok, "run_id": self.run_id, **(extra or {})})
         if not ok:
             self.out(f"release-pipeline[{lane}]: diagnosis dispatch FAILED: {res}")
         return 1
