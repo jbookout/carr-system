@@ -316,4 +316,11 @@ test("V5-A01 planted projection mutants are each killed by a guard", () => {
     error => error.payload?.error === "assurance_health_projection_invalid", "recovery omits a non-passing layer");
   degraded.recovery.required_evidence = ["activation_readback"];
   assert.equal(validateAssuranceHealthProjection(degraded, SCOPE, ToolError).state, "degraded");
+  // Distinctness is enforced on every projection, not only a healthy one: two
+  // passing layers sharing one receipt identity are refused even when degraded.
+  const shared = structuredClone(degraded);
+  shared.evidence.execution_assessment.evidence_ref = shared.evidence.artifact_assessment.evidence_ref;
+  shared.evidence.execution_assessment.evidence_digest = shared.evidence.artifact_assessment.evidence_digest;
+  assert.throws(() => validateAssuranceHealthProjection(shared, SCOPE, ToolError),
+    error => error.payload?.error === "assurance_health_projection_invalid", "reused identity while degraded");
 });

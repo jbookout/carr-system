@@ -200,13 +200,14 @@ begin
     '23505', 'assurance_health_idempotency_conflict');
 
   -- ---- S4 / P14: instants after the read clock are conflicting ---------------------------
+  -- artifact_assessment carries no readback_at, so only observed_at can make it conflicting.
   perform pg_temp.a01_six('{"workflow_key":"a01.s4","workflow_version":1,"work_request_id":"WR-4"}', 's4',
-    array['controller_assessment']);
+    array['artifact_assessment']);
   perform ops.record_assurance_health_evidence('{"workflow_key":"a01.s4","workflow_version":1,"work_request_id":"WR-4"}',
-    pg_temp.a01_evidence('controller_assessment', 'pass', 's4:future', interval '2 minutes'), gen_random_uuid());
+    pg_temp.a01_evidence('artifact_assessment', 'pass', 's4:future', interval '2 minutes'), gen_random_uuid());
   p := pg_temp.a01_label('a01.s4', 1, 'WR-4', 'operational');
   perform pg_temp.a01_expect('S4 a future observed_at inside the skew window reads conflicting, not passing',
-    p#>>'{evidence,controller_assessment,state}' = 'conflicting' and (p->>'green')::boolean is false, p);
+    p#>>'{evidence,artifact_assessment,state}' = 'conflicting' and (p->>'green')::boolean is false, p);
   perform pg_temp.a01_refused('S4 an observed_at beyond the skew window is refused at ingress',
     format('select ops.record_assurance_health_evidence(%L::jsonb,%L::jsonb,%L::uuid)',
       '{"workflow_key":"a01.s4","workflow_version":2}',
