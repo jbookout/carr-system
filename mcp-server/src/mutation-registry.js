@@ -4,7 +4,12 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v83 is the runtime selector after DoctorCRE V5-A01, the exact-scope
+// v84 is the runtime selector after DoctorCRE V5-A03, the authoritative
+// complete-set review cycle. It admits six tools backed by the append-only
+// 0719 store and preserves v83 and earlier as history. It chains over v83's
+// own seal (0717/0718).
+//
+// Superseded note (v83): v83 was the runtime selector after DoctorCRE V5-A01, the exact-scope
 // assurance-health evidence store (record-assurance-health-evidence,
 // read-assurance-health). Its sealed catalog admits those two new verbs and
 // preserves v82 and earlier as history. It chains over v82's own seal
@@ -144,7 +149,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v83.generated.js";
+} from "./scac-mutation-registry.v84.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 
