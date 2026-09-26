@@ -11,10 +11,11 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location("flash_script", os.path.join(HERE, "flash-script.py"))
+assert spec and spec.loader
 fs = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fs)
 
-FAILURES = []
+FAILURES: list[str] = []
 
 
 def check(label, fn):
