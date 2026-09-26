@@ -259,6 +259,176 @@ def test_real_catalog_and_policy_agree():
     assert catalog["targets"]["flash"]["desk"] == "flash-model"
 
 
+# ── script tasks: a queued task that names its data runs Flash's script protocol (tools/flash-script.py) ──────────
+import os  # noqa: E402
+import queue_dispatch  # noqa: E402
+
+SCRIPT_POLICY = {**POLICY, "queue_targets": {**POLICY["queue_targets"], "script": "flash"}}
+
+
+def data_root():
+    root = tempfile.mkdtemp(prefix="flash-inputs-")
+    with open(os.path.join(root, "sales.csv"), "w") as fh:
+        fh.write("a,b\n1,2\n")
+    os.mkdir(os.path.join(root, "leases"))
+    with open(os.path.join(root, "leases", "one.txt"), "w") as fh:
+        fh.write("rent 10\n")
+    return os.path.realpath(root)
+
+
+def test_script_inputs_takes_named_data_under_an_allowed_root():
+    root = data_root()
+    text = f"Total column b\ndata: {root}/sales.csv\ndata: {root}/leases\nper month"
+    paths, question, err = flash_wire.script_inputs(text, roots=[root])
+    assert err is None and paths == [f"{root}/sales.csv", f"{root}/leases"], (paths, err)
+    assert "data:" not in question and "Total column b" in question and "per month" in question, question
+
+
+def test_script_inputs_refuses_data_outside_the_roots_or_through_a_link():
+    root = data_root()
+    outside = tempfile.mkdtemp(prefix="flash-outside-")
+    for text in (f"q\ndata: {outside}", f"q\ndata: {root}/../{os.path.basename(outside)}",
+                 f"q\ndata: {root}/missing.csv", f"q\ndata: {root}"):
+        paths, _, err = flash_wire.script_inputs(text, roots=[root])
+        assert paths is None and err, (text, paths, err)
+    os.symlink(outside, os.path.join(root, "leases", "escape"))
+    paths, _, err = flash_wire.script_inputs(f"q\ndata: {root}/leases", roots=[root])
+    assert paths is None and "link" in err, (paths, err)
+    os.symlink(os.path.join(outside), os.path.join(root, "alias"))
+    paths, _, err = flash_wire.script_inputs(f"q\ndata: {root}/alias", roots=[root])
+    assert paths is None and err, (paths, err)
+
+
+def test_script_inputs_with_no_data_lines_is_not_a_script_task():
+    assert flash_wire.script_inputs("just a question", roots=["/nowhere"]) == (None, "just a question", None)
+
+
+def script_service(body_root, *, flash_up=True):
+    adapter = FakeAdapter()
+    router = FakeRouter("script")
+    router.load_policy = lambda: {**SCRIPT_POLICY, "script_data_roots": [body_root]}
+    svc = kanban_adapter.QueueService(catalog=CATALOG, adapter=adapter, router=router, flash_up=lambda: flash_up)
+    return svc, adapter
+
+
+def test_auto_script_task_with_allowed_data_goes_to_flash():
+    root = data_root()
+    svc, adapter = script_service(root)
+    out = svc.handle(turn(f"@queue enqueue target=auto cap=read :: Total column b\ndata: {root}/sales.csv"),
+                     room="p")
+    accepted = out["receipt"]["queue_accepted"]
+    assert accepted["target"] == "flash" and accepted["route"]["fallback_reason"] is None, accepted
+
+
+def test_auto_script_task_without_usable_data_goes_to_the_fallback():
+    root = data_root()
+    svc, _ = script_service(root)
+    out = svc.handle(turn("@queue enqueue target=auto cap=read :: Total column b"), room="p")
+    accepted = out["receipt"]["queue_accepted"]
+    assert accepted["target"] == "claude-desktop" and accepted["route"]["fallback_reason"] == "script_needs_data"
+    out = svc.handle(turn("@queue enqueue target=auto cap=read key=k2 :: Total b\ndata: /etc/hosts"), room="p")
+    accepted = out["receipt"]["queue_accepted"]
+    assert accepted["target"] == "claude-desktop" and accepted["route"]["fallback_reason"] == "script_data_refused"
+
+
+def test_auto_script_task_falls_back_when_jev_abstained():
+    root = data_root()
+    svc, _ = script_service(root)
+    decide = svc._router.decide
+    svc._router.decide = lambda *a, **k: {**decide(*a, **k), "jev_error": "JudgeUnavailable: down"}
+    out = svc.handle(turn(f"@queue enqueue target=auto cap=read :: Total column b\ndata: {root}/sales.csv"),
+                     room="p")
+    accepted = out["receipt"]["queue_accepted"]
+    assert accepted["target"] == "claude-desktop" and accepted["route"]["fallback_reason"] == "jev_abstained"
+
+
+def test_auto_script_task_falls_back_when_no_score_cleared_its_cutoff():
+    # Review of #1319: Jev can abstain by answering with nothing over its cutoff, not only by being unreachable.
+    root = data_root()
+    svc, _ = script_service(root)
+    decide = svc._router.decide
+    svc._router.decide = lambda *a, **k: {**decide(*a, **k), "fallback": True}
+    out = svc.handle(turn(f"@queue enqueue target=auto cap=read :: Look at this\ndata: {root}/sales.csv"),
+                     room="p")
+    assert out["receipt"]["queue_accepted"]["route"]["fallback_reason"] == "jev_abstained"
+
+
+def test_a_data_line_in_the_title_counts_on_neither_side():
+    root = data_root()
+    svc, _ = script_service(root)
+    out = svc.handle(turn(f"@queue enqueue target=auto cap=read :: data: {root}/sales.csv\nTotal column b"),
+                     room="p")
+    assert out["receipt"]["queue_accepted"]["route"]["fallback_reason"] == "script_needs_data"
+    prompt = queue_dispatch.QueueDeskExecutor._prompt({
+        "task_id": "t_script001", "title": f"data: {root}/sales.csv", "instructions": "Total column b",
+        "meta": {"source_seq": 5, "source_msg_id": "m", "cap": "read"}})
+    assert flash_wire.task_parts(prompt)[2] == "Total column b"
+    paths, _, err = flash_wire.script_inputs(flash_wire.task_parts(prompt)[2], roots=[root])
+    assert paths is None and err is None
+
+
+def test_a_copied_protocol_sentence_in_the_body_does_not_hide_its_data():
+    root = data_root()
+    seen = []
+    body = f"{flash_wire.PROTOCOL_MARK} (quoted)\ndata: {root}/sales.csv"
+    out = flash_wire.run_task(queued_prompt(body), roots=[root],
+                              runner=lambda q, p: seen.append(p) or (0, {"answer": "3"}))
+    assert out["status"] == "completed" and seen == [[f"{root}/sales.csv"]], (out, seen)
+
+
+def test_a_script_run_ends_before_the_queue_claim_expires():
+    assert flash_wire.SCRIPT_TIMEOUT_S < 900 and flash_wire.SCRIPT_TIMEOUT_S <= flash_wire.TIMEOUT_S
+
+
+def queued_prompt(body):
+    return queue_dispatch.QueueDeskExecutor._prompt({
+        "task_id": "t_script001", "title": "Total column b", "instructions": body,
+        "meta": {"source_seq": 5, "source_msg_id": "m", "cap": "read"}})
+
+
+def test_flash_desk_runs_a_data_task_through_the_script_runner_and_closes_the_queue_line():
+    root = data_root()
+    calls = []
+
+    def runner(question, paths):
+        calls.append((question, paths))
+        return 0, {"answer": "3", "handoff": None, "handoff_desk": None, "support": "grounded"}
+    out = flash_wire.run_task(queued_prompt(f"Sum it.\ndata: {root}/sales.csv"), roots=[root], runner=runner)
+    assert out["status"] == "completed", out
+    question, paths = calls[0]
+    assert paths == [f"{root}/sales.csv"] and "Total column b" in question and "Sum it." in question
+    assert "CARR_QUEUE_RESULT" not in question and "Hermes queue" not in question, question
+    result = queue_dispatch.parse_terminal_result(out["result"], "t_script001")
+    assert result["outcome"] == "success" and out["result"].startswith("3"), out
+
+
+def test_flash_desk_blocks_a_handed_off_script_answer_with_flashs_answer_shown():
+    root = data_root()
+    out = flash_wire.run_task(queued_prompt(f"Sum it.\ndata: {root}/sales.csv"), roots=[root],
+                              runner=lambda q, p: (4, {"answer": "maybe 3", "handoff": "ungrounded",
+                                                       "handoff_desk": "claude-desktop"}))
+    result = queue_dispatch.parse_terminal_result(out["result"], "t_script001")
+    assert out["status"] == "completed" and result["outcome"] == "blocked", out
+    assert "ungrounded" in result["summary"] and "maybe 3" in out["result"], out
+
+
+def test_flash_desk_rechecks_the_data_and_fails_a_refused_path():
+    root = data_root()
+    out = flash_wire.run_task(queued_prompt("Sum it.\ndata: /etc/hosts"), roots=[root],
+                              runner=lambda q, p: (_ for _ in ()).throw(AssertionError("runner must not run")))
+    assert out["status"] == "failed" and "outside" in out["detail"], out
+
+
+def test_flash_desk_without_data_keeps_the_direct_protocol():
+    opener = opener_returning({"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]})
+    out = flash_wire.run_task("6 x 7?", roots=["/nowhere"], opener=opener)
+    assert out["status"] == "completed" and opener.sent["messages"][0]["content"] == "6 x 7?", out
+
+
+def test_the_queue_prompt_still_carries_the_protocol_mark():
+    assert flash_wire.PROTOCOL_MARK in queued_prompt("x")
+
+
 def main() -> int:
     check("wire answers with thinking off", test_wire_answers_with_thinking_off)
     check("wire empty reply is no_answer", test_wire_empty_reply_is_no_answer_not_completed)
@@ -274,6 +444,9 @@ def main() -> int:
     check("retried auto command reports the existing task's actual target",
           test_retried_auto_command_reports_the_existing_tasks_actual_target)
     check("real catalog and policy agree", test_real_catalog_and_policy_agree)
+    for name, fn in list(globals().items()):
+        if name.startswith("test_") and ("script" in name or "flash_desk" in name or "protocol_mark" in name):
+            check(name[5:].replace("_", " "), fn)
     if FAILURES:
         print(f"{len(FAILURES)} flash desk test(s) failed", file=sys.stderr)
         return 1
