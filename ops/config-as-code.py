@@ -36,6 +36,7 @@ exactly as they bind Joe, with zero mechanical enforcement on his side today.
     ops/config-as-code.py check      # drift report; exit 1 if any. THE DEFAULT.
     ops/config-as-code.py pull       # machine -> repo (capture what is live)
     ops/config-as-code.py install    # repo -> machine (deploy; needs --apply)
+    ops/config-as-code.py reinstall-launchd-calendar [--apply] [--kickstart]
     ops/config-as-code.py install-codex-continuity --apply
     ops/config-as-code.py verify-codex-continuity
     ops/config-as-code.py install-codex-continuity-mcp --apply
@@ -62,6 +63,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lib.machine_prerequisites import machine_prerequisites, prerequisite_failure_report
 from lib import claude_continuity_config as continuity_config
 from lib import machine_role
+from lib import launchd_calendar
 
 HOME = os.path.expanduser("~")
 # THE CHECKOUT THIS FILE SITS IN — the source of the tracked copies to compare.
@@ -1454,6 +1456,45 @@ def definition_only_installed_plists():
     return [f for f in carr_plists() if f in DEFINITION_ONLY]
 
 
+# STARTINTERVAL IS REFUSED IN EVERY CARR LAUNCHAGENT TEMPLATE (2026-09-26).
+# On the Mac Studio, macOS 27.0, launchd never fires an agent scheduled with
+# StartInterval: `launchctl print` shows `runs = 0` and `pended nondemand spawn
+# = speculative|interval`, RunAtLoad does not fire either, and only a manual
+# kickstart runs it. StartCalendarInterval agents on the same machine fire on
+# time. Fourteen CARR jobs were silently dead there while this check reported
+# "repo matches machine", because a dead schedule installed from the repo's own
+# bytes is not drift. So the template itself is judged: a live StartInterval is
+# refused (check reports it, install will not render it), and a converted
+# template must still hold exactly what lib/launchd_calendar.py renders for the
+# interval its marker names. Convert with
+# `python3 -m lib.launchd_calendar rewrite <template>`.
+def refused_launchd_templates(repo=None):
+    """(repo-relative path, problem) for every CARR template the converter refuses.
+
+    Judges the checkout this file sits in (REPO_HERE), not the canonical one the
+    machine installs from: a template's soundness is a property of the source
+    under review, so a worktree carrying the fix must not be failed by the main
+    checkout it has not reached yet. In the main checkout the two are the same
+    tree, and install separately refuses the exact source it would render."""
+    root = repo or REPO_HERE
+    out = []
+    for path in launchd_calendar.carr_templates(root):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            out.append((os.path.relpath(path, root), f"unreadable: {exc}"))
+            continue
+        for problem in launchd_calendar.audit_template(text):
+            out.append((os.path.relpath(path, root), problem))
+    return out
+
+
+def launchd_template_refusal(source_text):
+    """The first reason install must not render this template, or None."""
+    problems = launchd_calendar.audit_template(source_text or "")
+    return problems[0] if problems else None
+
+
 def cmd_check():
     # THE OBSERVATION TRAILS THE VERDICT. _cmd_check returns this command's
     # whole judgement; the core.hooksPath line is appended after it because it
@@ -1526,7 +1567,13 @@ def _cmd_check():
          f"installed in {LAUNCHD_SRC}; {DEFINITION_ONLY[name]}")
         for name in definition_only_installed_plists()
     ]
-    drift = missing + untracked + different + disallowed
+    # A template launchd would load and then never fire. Reported whatever the
+    # machine holds, because the machine matching it is exactly the failure.
+    refused = [
+        (f"launchd template {rel} (SCHEDULE REFUSED)", problem)
+        for rel, problem in refused_launchd_templates()
+    ]
+    drift = missing + untracked + different + disallowed + refused
     if not drift and not unversioned:
         prerequisite_report = prerequisite_failure_report(PREREQUISITE_CHECK(REPO))
         if prerequisite_report:
@@ -1554,7 +1601,7 @@ def _cmd_check():
     # intentionally omitted from normal pairs() on a secondary.  Otherwise
     # "16 of 4" could claim to have checked only four items while reporting
     # sixteen violations, which is operationally misleading.
-    checked_items = len(configured_pairs) + len(disallowed)
+    checked_items = len(configured_pairs) + len(disallowed) + len(refused)
     headline = f"config-as-code: DRIFT — {len(drift)} of {checked_items} items"
     if missing:
         headline += f" — {len(missing)} MISSING FROM MACHINE: " + ", ".join(
@@ -1574,6 +1621,11 @@ def _cmd_check():
         print("\n  A secondary machine must not run CARR's primary-only scheduled-task "
               "catalogue. `install --apply` can quarantine an exact tracked render; "
               "a modified tracked task needs review and is never overwritten.")
+    if refused:
+        print("\n  A REFUSED template would load and never fire on macOS 27. Convert it in\n"
+              "  the repo, then re-render the installed agents:\n"
+              "      python3 -m lib.launchd_calendar rewrite <template>\n"
+              "      python3 ops/config-as-code.py reinstall-launchd-calendar --apply")
     # Reported even when settings drift is also present: the two have different
     # remedies (a pull versus a commit), so folding them together would hide one.
     if unversioned:
@@ -1964,6 +2016,14 @@ def cmd_install(apply):
         if source is None:
             print(f"  ERROR  cannot render {f} because its tracked source is missing")
             return 1
+        refusal = launchd_template_refusal(source)
+        if refusal:
+            # Never install a schedule launchd will load and then never fire:
+            # the job would look installed and be dead (see the block above
+            # refused_launchd_templates). The installed copy is left as it is.
+            print(f"  REFUSED  {f}: {refusal}")
+            launchd_activation_failures.append(f)
+            continue
         body = concrete(source)
         body_matches = launchd_texts_match(read(dest), source)
         if body_matches and not apply:
@@ -2160,6 +2220,139 @@ def config_selftest():
     return 0 if all(ok for _, ok in cases) else 1
 
 
+# REINSTALL-LAUNCHD-CALENDAR: the one-off repair for agents installed before
+# their templates moved from StartInterval to StartCalendarInterval (see
+# refused_launchd_templates). An installed agent keeps its dead StartInterval
+# body until it is rewritten AND bootstrapped again, and `install --apply` does
+# far more than that (hooks, tasks, every other agent). This mode touches only
+# an INSTALLED agent whose template carries the converter's marker and whose
+# installed body differs from the rendered template:
+#
+#   * an agent that already matches is not rewritten and not reloaded;
+#   * an agent that is not installed is not installed here (install owns
+#     machine scope and first installs);
+#   * definition-only, primary-only-on-a-secondary and not-built agents are
+#     skipped by the same rules install applies;
+#   * the label in CARR_CONFIG_AS_CODE_ACTIVE_LAUNCHD_LABEL is refused, since
+#     reloading the job running this would kill it mid-write.
+#
+# NOTHING IS KICKSTARTED unless --kickstart is given; a re-bootstrapped agent
+# with RunAtLoad true runs once at bootstrap because that is what RunAtLoad
+# means. DRY RUN unless --apply. A failed bootstrap restores the previous body
+# and bootstraps it again, and the exit status is 1.
+#
+#     ops/config-as-code.py reinstall-launchd-calendar            # plan only
+#     ops/config-as-code.py reinstall-launchd-calendar --apply
+#     ops/config-as-code.py reinstall-launchd-calendar --apply --kickstart
+#
+# --templates, --launch-agents and --launchctl exist for the hermetic selftest
+# (ops/reinstall-launchd-calendar-selftest.py).
+def launchd_calendar_reinstall_plan(templates_dir, agents_dir):
+    """One row per CARR template: what reinstall-launchd-calendar does with it and why."""
+    rows = []
+    active = os.environ.get(ACTIVE_LAUNCHD_LABEL_ENV, "").strip()
+    for name in sorted(os.listdir(templates_dir)) if os.path.isdir(templates_dir) else []:
+        if not (name.startswith("com.carr.") and name.endswith(".plist")):
+            continue
+        source = read(LAUNCHD_ALT_REPO.get(name, os.path.join(templates_dir, name))) or ""
+        dest = os.path.join(agents_dir, name)
+        row = {"name": name, "dest": dest, "action": "skip", "why": ""}
+        rows.append(row)
+        if launchd_calendar.MARKER not in source:
+            row["why"] = "not a converted interval schedule"
+            continue
+        refusal = launchd_template_refusal(source)
+        if refusal:
+            row.update(action="fail", why=f"template refused: {refusal}")
+            continue
+        if name in DEFINITION_ONLY:
+            row["why"] = "definition only"
+            continue
+        if name in PRIMARY_ONLY and not IS_PRIMARY:
+            row["why"] = "primary-only job on a secondary (install retires it)"
+            continue
+        installed = read(dest)
+        if installed is None:
+            row["why"] = "not installed here (install owns first installs)"
+            continue
+        if launchd_texts_match(installed, source):
+            row["why"] = "installed plist already matches"
+            continue
+        body = concrete(source)
+        gone = missing_targets(body)
+        if gone:
+            row["why"] = f"not built on this machine: {gone[0]}"
+            continue
+        label = launchd_calendar.plist_label(source)
+        if active and label == active:
+            row.update(action="fail", why=f"{label} is the job running this; run it from outside")
+            continue
+        row.update(action="reinstall", why="installed body differs from the calendar template",
+                   label=label, body=body, previous=installed)
+    return rows
+
+
+def _launchctl(launchctl, *args):
+    return subprocess.run([launchctl, *args], capture_output=True, text=True, check=False)
+
+
+def reinstall_calendar_agent(row, launchctl, domain, kickstart):
+    """bootout, rewrite, bootstrap, verify; restore the previous body on failure."""
+    dest, label = row["dest"], row["label"]
+    _launchctl(launchctl, "bootout", f"{domain}/{label}")   # fails when not loaded; fine
+    with open(dest, "w", encoding="utf-8") as fh:
+        fh.write(row["body"])
+    booted = _launchctl(launchctl, "bootstrap", domain, dest)
+    if booted.returncode == 0 and _launchctl(launchctl, "print", f"{domain}/{label}").returncode == 0:
+        if kickstart:
+            kicked = _launchctl(launchctl, "kickstart", f"{domain}/{label}")
+            if kicked.returncode != 0:
+                print(f"      kickstart failed: {(kicked.stderr or kicked.stdout).strip()[:120]}")
+                return False
+        return True
+    print(f"      BOOTSTRAP FAILED: {(booted.stderr or booted.stdout).strip()[:120]}"
+          " — restoring the previous body")
+    with open(dest, "w", encoding="utf-8") as fh:
+        fh.write(row["previous"])
+    _launchctl(launchctl, "bootstrap", domain, dest)
+    return False
+
+
+def _option(argv, flag, default):
+    if flag in argv:
+        index = argv.index(flag)
+        if index + 1 < len(argv):
+            return argv[index + 1]
+    return default
+
+
+def cmd_reinstall_launchd_calendar(argv):
+    apply = "--apply" in argv
+    kickstart = "--kickstart" in argv
+    templates_dir = _option(argv, "--templates", LAUNCHD_REPO)
+    agents_dir = _option(argv, "--launch-agents", LAUNCHD_SRC)
+    launchctl = _option(argv, "--launchctl", "/bin/launchctl")
+    domain = f"gui/{os.getuid()}"
+
+    rows = launchd_calendar_reinstall_plan(templates_dir, agents_dir)
+    failures = [r for r in rows if r["action"] == "fail"]
+    todo = [r for r in rows if r["action"] == "reinstall"]
+    for row in rows:
+        if row["action"] == "skip":
+            print(f"  ok    {row['name']}: {row['why']}")
+        elif row["action"] == "fail":
+            print(f"  FAIL  {row['name']}: {row['why']}")
+    for row in todo:
+        print(f"  {'REINSTALL' if apply else 'would reinstall'}  {row['name']}: {row['why']}")
+        if apply and not reinstall_calendar_agent(row, launchctl, domain, kickstart):
+            failures.append(row)
+    left_alone = sum(1 for r in rows if r["action"] == "skip")
+    verb = "reinstalled" if apply else "to reinstall (dry run; --apply to act)"
+    print(f"reinstall-launchd-calendar: {len(todo)} {verb}, {left_alone} left alone, "
+          f"{len(failures)} failed; kickstart {'on' if kickstart else 'off'}")
+    return 1 if failures else 0
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "check"
     apply = "--apply" in sys.argv
@@ -2181,6 +2374,8 @@ def main():
         return cmd_verify_codex_continuity()
     if mode == "install":
         return cmd_install(apply)
+    if mode == "reinstall-launchd-calendar":
+        return cmd_reinstall_launchd_calendar(sys.argv[2:])
     if mode == "set-role":
         # Writes ~/.config/carr/machine-role.json, then installs in a fresh
         # process: IS_PRIMARY is fixed at import, so this one would still

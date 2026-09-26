@@ -36,6 +36,8 @@ SELF_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 # directory is ops/, so this reaches the one scrub definition directly.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from git_env import fixture_env  # noqa: E402
+sys.path.insert(0, SELF_REPO)
+from lib import launchd_calendar  # noqa: E402
 
 
 def fixture_git_env():
@@ -64,6 +66,7 @@ COPIES = [
     "hooks/machine-converge.py",
     "lib/claude_continuity_config.py",
     "lib/machine_prerequisites.py",
+    "lib/launchd_calendar.py",
     "lib/machine_role.py",
     "mcp-server/continuity-stdio-proxy.mjs",
     "ops/claude-continuity-hook.py",
@@ -232,7 +235,8 @@ def installed_plist(home):
 
 def wrapper_intact(home):
     """The four deliberate wrapper lines of commit 4fb58a8a, in order, plus
-    the still-recording StartInterval PR #328 carried into the template."""
+    the still-recording five-minute tick PR #328 carried into the template
+    (a StartCalendarInterval since macOS 27 stopped firing StartInterval)."""
     try:
         d = installed_plist(home)
     except FileNotFoundError:
@@ -244,7 +248,8 @@ def wrapper_intact(home):
             and args[2] == "dictation-consent"
             and args[3] == "launchd.run"
             and args[4].endswith("/tools/dictation-rig/bin/consent-watch.sh")
-            and d.get("StartInterval") == 300)
+            and "StartInterval" not in d
+            and launchd_calendar.cadence_seconds(d) == 300)
 
 
 def case_secondary_converges(tmp):
