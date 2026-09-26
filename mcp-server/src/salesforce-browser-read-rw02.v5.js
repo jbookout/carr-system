@@ -38,9 +38,15 @@
 // sign-in, so every code prompt it sees is unprompted. attemptCodeAutofill() is
 // the bounded code step for a LATER slice's system-started sign-in (Joe's
 // refinement: click the field, click the From-Messages suggestion if shown,
-// check filled; at most 3 attempts, then stop). It is reachable only with a
-// sign-in the system itself started and the driver reports filled/not-filled,
+// check filled; at most 3 attempts PER SIGN-IN, then stop). It runs only on a
+// module-private, single-use, time-limited ticket minted by beginSystemSignIn;
+// a caller-built object is not a ticket. The driver reports filled/not-filled,
 // never a value.
+//
+// REPEAT RUNS ARE REPLAYS. Every finding is keyed on org + opportunity (or
+// deal + reason) and carries no run-specific or renamable text, so a repeat
+// run sends byte-identical arguments and the verb envelope replays instead of
+// refusing key_reuse or filing a duplicate.
 
 import { digest } from "./artifact-trust.js";
 import { V5_NO_EFFECTS } from "./global-boundaries.v5.js";
@@ -82,6 +88,8 @@ export const V5_RW02_SIGN_IN_STOP_REASONS = Object.freeze([
   "password_prompt_without_autofill",
   "security_challenge",
   "sign_in_state_unobservable",
+  "sign_in_ticket_spent",
+  "sign_in_ticket_stale",
   "unprompted_code_prompt",
 ]);
 
@@ -248,19 +256,50 @@ export function classifySignIn(signIn, { systemStartedSignIn = false } = {}) {
   return signInStop("partner_sign_in_required", { permitted_later_by: "9ea10e5b" });
 }
 
+/** How long after a system-started sign-in the code step may still run. */
+export const V5_RW02_SIGN_IN_TICKET_TTL_MS = 120_000;
+
+// Module-private ledger of sign-in tickets. A ticket is an opaque frozen object;
+// its state (mint time, attempts used, spent) lives here, where no caller can
+// reach it, so a copied or hand-built object is not a ticket.
+const SIGN_IN_TICKETS = new WeakMap();
+
+/**
+ * Mint the ticket for ONE sign-in the system itself starts. Minting a ticket IS
+ * starting a sign-in: the later slice that presses Log in (ruling 9ea10e5b) is
+ * the only caller this is for. The read run in this slice never calls it.
+ */
+export function beginSystemSignIn({ nowMs } = {}) {
+  if (!Number.isSafeInteger(nowMs) || nowMs < 0) fail("invalid_clock", "nowMs must be an integer millisecond time");
+  const ticket = Object.freeze(Object.create(null));
+  SIGN_IN_TICKETS.set(ticket, { minted_at_ms: nowMs, attempts_used: 0, spent: false });
+  return ticket;
+}
+
 /**
  * The bounded code step (decision 4e1efae4 plus Joe's refinement). The driver
  * reports only booleans; there is no method that returns a code.
  *
  *   clickCodeField(); if autofillSuggestionVisible() then clickAutofillSuggestion();
- *   codeFieldFilled() === true -> filled. At most 3 attempts, then stop.
+ *   codeFieldFilled() === true -> filled.
+ *
+ * At most 3 attempts PER SIGN-IN: the count lives in the ticket's private state
+ * and the ticket is spent by its first use, so a second call clicks nothing.
+ * A forged, reused or stale ticket is an unprompted code prompt: a stop.
  */
-export async function attemptCodeAutofill({ driver, signIn } = {}) {
-  if (!plain(signIn) || signIn.started_by_system !== true) return signInStop("unprompted_code_prompt");
+export async function attemptCodeAutofill({ driver, ticket, nowMs } = {}) {
+  const state = ticket !== null && typeof ticket === "object" ? SIGN_IN_TICKETS.get(ticket) : undefined;
+  if (!state) return signInStop("unprompted_code_prompt");
+  if (state.spent) return signInStop("sign_in_ticket_spent", { attempts: state.attempts_used });
+  state.spent = true;
+  if (!Number.isSafeInteger(nowMs) || nowMs < state.minted_at_ms ||
+      nowMs - state.minted_at_ms > V5_RW02_SIGN_IN_TICKET_TTL_MS)
+    return signInStop("sign_in_ticket_stale");
   if (!driver) fail("code_driver_unavailable", "a code-step driver is required");
   for (const name of ["clickCodeField", "autofillSuggestionVisible", "clickAutofillSuggestion", "codeFieldFilled"])
     if (typeof driver[name] !== "function") fail("code_driver_incomplete", `the driver has no ${name}()`);
-  for (let attempt = 1; attempt <= V5_RW02_CODE_AUTOFILL_MAX_ATTEMPTS; attempt++) {
+  while (state.attempts_used < V5_RW02_CODE_AUTOFILL_MAX_ATTEMPTS) {
+    const attempt = ++state.attempts_used;
     await driver.clickCodeField();
     const suggestion = await driver.autofillSuggestionVisible();
     if (suggestion === true) await driver.clickAutofillSuggestion();
@@ -270,7 +309,7 @@ export async function attemptCodeAutofill({ driver, signIn } = {}) {
       reason_id: "os_autofill_filled", attempts: attempt, credential_entry_performed: false, effects: EFFECTS });
     if (filled !== false) return signInStop("code_fill_state_unobservable", { attempts: attempt });
   }
-  return signInStop("code_autofill_not_filled", { attempts: V5_RW02_CODE_AUTOFILL_MAX_ATTEMPTS });
+  return signInStop("code_autofill_not_filled", { attempts: state.attempts_used });
 }
 
 // ---------------------------------------------------------------------------
@@ -278,26 +317,31 @@ export async function attemptCodeAutofill({ driver, signIn } = {}) {
 // ---------------------------------------------------------------------------
 
 function normalizeOpportunity(value, path) {
+  // Callers hand in a structuredClone, so every field below is plain data read
+  // exactly once into a local and validated as that local (no getter can swap
+  // a value between the check and the use).
   const raw = closed(value, ["opportunity_id", "name", "owner_ref", "team_member_refs"], path);
-  if (typeof raw.opportunity_id !== "string" || !OPPORTUNITY_ID.test(raw.opportunity_id))
+  const { opportunity_id, name, owner_ref, team_member_refs } = raw;
+  if (typeof opportunity_id !== "string" || !OPPORTUNITY_ID.test(opportunity_id))
     fail("invalid_opportunity_id", `${path}.opportunity_id is not an opportunity id`, { path });
-  if (!Array.isArray(raw.team_member_refs) || raw.team_member_refs.length > 64)
+  if (!Array.isArray(team_member_refs) || team_member_refs.length > 64)
     fail("invalid_shape", `${path}.team_member_refs must be a list`, { path });
+  const team = [...team_member_refs];
   return {
-    opportunity_id: raw.opportunity_id,
-    name: safeText(raw.name, `${path}.name`),
-    owner_ref: stableId(raw.owner_ref, `${path}.owner_ref`),
-    team_member_refs: raw.team_member_refs.map((r, i) => stableId(r, `${path}.team_member_refs[${i}]`)).sort(),
+    opportunity_id,
+    name: safeText(name, `${path}.name`),
+    owner_ref: stableId(owner_ref, `${path}.owner_ref`),
+    team_member_refs: team.map((r, i) => stableId(r, `${path}.team_member_refs[${i}]`)).sort(),
   };
 }
 
 function normalizeCarrDeal(value, path) {
-  const raw = closed(value, ["deal_id", "name", "salesforce_id"], path);
-  if (typeof raw.deal_id !== "string" || !UUID.test(raw.deal_id)) fail("invalid_deal_id", `${path}.deal_id`, { path });
-  const sf = raw.salesforce_id ?? null;
+  const { deal_id, name, salesforce_id } = closed(value, ["deal_id", "name", "salesforce_id"], path);
+  if (typeof deal_id !== "string" || !UUID.test(deal_id)) fail("invalid_deal_id", `${path}.deal_id`, { path });
+  const sf = salesforce_id ?? null;
   if (sf !== null && (typeof sf !== "string" || !OPPORTUNITY_ID.test(sf)))
     fail("invalid_opportunity_id", `${path}.salesforce_id`, { path });
-  return { deal_id: raw.deal_id, name: safeText(raw.name, `${path}.name`), salesforce_id: sf };
+  return { deal_id, name: safeText(name, `${path}.name`), salesforce_id: sf };
 }
 
 /**
@@ -310,15 +354,20 @@ export function reconcileSalesforceDeals({ salesforce, carr, joeUserRef, complet
   stableId(joeUserRef, "joeUserRef");
   if (typeof complete !== "boolean") fail("invalid_shape", "complete must be a boolean");
   if (!Array.isArray(salesforce) || !Array.isArray(carr)) fail("invalid_shape", "salesforce and carr are lists");
+  // ONE read of every input: structuredClone evaluates each getter once and
+  // yields plain data, so what is validated is exactly what is used.
+  let sfCopy, carrCopy;
+  try { sfCopy = structuredClone(salesforce); carrCopy = structuredClone(carr); }
+  catch { fail("invalid_shape", "reconciliation inputs must be plain data"); }
   const seen = new Map();
-  salesforce.forEach((value, i) => {
+  sfCopy.forEach((value, i) => {
     const o = normalizeOpportunity(value, `salesforce[${i}]`);
     const prior = seen.get(o.opportunity_id);
     if (prior && digest(prior) !== digest(o)) fail("inconsistent_result",
       "one opportunity was read twice with different facts", { opportunity_id: o.opportunity_id });
     seen.set(o.opportunity_id, o);
   });
-  const deals = carr.map((d, i) => normalizeCarrDeal(d, `carr[${i}]`));
+  const deals = carrCopy.map((d, i) => normalizeCarrDeal(d, `carr[${i}]`));
   const bySf = new Map(deals.filter(d => d.salesforce_id).map(d => [d.salesforce_id, d]));
   const opportunities = [...seen.values()].sort((a, b) => a.opportunity_id.localeCompare(b.opportunity_id));
 
@@ -328,14 +377,18 @@ export function reconcileSalesforceDeals({ salesforce, carr, joeUserRef, complet
       carr_deal_id: bySf.get(o.opportunity_id)?.deal_id ?? null, action: "get_joe_added_to_deal" }));
   const unknown_to_carr = opportunities.filter(o => !bySf.has(o.opportunity_id))
     .map(o => ({ opportunity_id: o.opportunity_id, name: o.name }));
-  const absent_from_salesforce = !complete ? [] : deals
+  // A read that reached the end but saw NO opportunity is inconclusive (an
+  // empty list view, a filter, a render failure): it proves nothing absent.
+  const concluded = complete && opportunities.length > 0;
+  const absent_from_salesforce = !concluded ? [] : deals
     .filter(d => !d.salesforce_id || !seen.has(d.salesforce_id))
     .map(d => ({ deal_id: d.deal_id, name: d.name, salesforce_id: d.salesforce_id,
       reason_id: d.salesforce_id ? "salesforce_id_not_seen" : "no_salesforce_link" }));
 
   return freeze({ schema_version: V5_RW02_BROWSER_READ_SCHEMA_VERSION, answer_kind: "rw02-reconciliation.v1",
     opportunities_read: opportunities.length, carr_deals_compared: deals.length,
-    missing_joe, unknown_to_carr, absent_from_salesforce, absence_concluded: complete,
+    missing_joe, unknown_to_carr, absent_from_salesforce, absence_concluded: concluded,
+    absence_scope: "open_deals_only_no_invoiced_marker_exposed",
     field_sync: "not_performed_presence_and_membership_only", effects: EFFECTS });
 }
 
@@ -440,7 +493,12 @@ export async function runSalesforceBrowserReadReconciliation(options = {}) {
   for (let index = 0; ; index++) {
     if (index >= V5_RW02_READ_PAGE_CAP) return freeze({ ...refused("page_cap_reached"),
       decision: "stopped", run_ref, pages_read: index });
-    const snapshot = object(await reader.observe(), "observe()");
+    // ONE read of the page: a plain-data copy, so no getter can answer the
+    // validation differently from the use.
+    let snapshot;
+    try { snapshot = structuredClone(await reader.observe()); }
+    catch { fail("invalid_shape", "observe() must return plain data"); }
+    object(snapshot, "observe()");
     closed(snapshot, ["sign_in", "page", "opportunities", "has_next"], "observe()");
     const signIn = classifySignIn(snapshot.sign_in, { systemStartedSignIn: false });
     const challenge = signIn.decision === "continue" ? null
@@ -459,40 +517,52 @@ export async function runSalesforceBrowserReadReconciliation(options = {}) {
     if (!Array.isArray(snapshot.opportunities)) fail("invalid_shape", "observe().opportunities must be a list");
     opportunities.push(...snapshot.opportunities);
     pages.push({ page_index: index, evidence_digest: digest(verdict), opportunities: snapshot.opportunities.length });
-    if (snapshot.has_next === false) break;
-    if (snapshot.has_next !== true) fail("invalid_shape", "observe().has_next must be a boolean");
+    const hasNext = snapshot.has_next;
+    if (hasNext !== true && hasNext !== false) fail("invalid_shape", "observe().has_next must be a boolean");
+    if (hasNext === false) break;
     await reader.nextPage();
   }
 
   const result = reconcileSalesforceDeals({ salesforce: opportunities, carr: await carrDeals(),
     joeUserRef: binding.joe_user_ref, complete: true });
-  const source = `V5-RW02 attended browser read of Dell's Salesforce, run ${run_ref} at ${started_at}`;
+  // EVERY argument below is identical on a repeat run for the same finding:
+  // withEnvelope hashes the arguments and refuses a known key that arrives
+  // with different ones (key_reuse). So nothing run-specific (run_ref, time)
+  // and nothing volatile (the opportunity NAME, which partners rename) goes
+  // into a key, a title, a body or a source. Keys bind the org and the id.
+  const org_id = binding.org.org_id;
+  const key = (kind, id, extra = null) =>
+    `rw02-${kind}:${digest({ kind, org_id, id, extra }).slice(7, 39)}`;
+  const source_note = "V5-RW02 attended browser read of Dell's Salesforce (decisions c04ac197, c0014a37)";
   let findings_recorded = 0;
   for (const f of result.missing_joe) {
     await recorder.record("add-loop", {
-      idempotency_key: `rw02-missing-joe:${digest({ o: f.opportunity_id, n: f.name }).slice(7, 39)}`,
+      idempotency_key: key("missing-joe", f.opportunity_id),
       kind: "team_loop", owner: "Dell", domain: "deals",
-      title: `Add Joe to the Salesforce opportunity "${f.name}"`,
+      title: `Add Joe to Salesforce opportunity ${f.opportunity_id}`,
       body: `Joe is not the owner or a team member on opportunity ${f.opportunity_id} in Dell's Salesforce.`,
       unblocks: "Salesforce reconciliation (decision c04ac197): Joe on every deal",
-      source_note: source });
+      source_note });
     findings_recorded++;
   }
   for (const f of result.unknown_to_carr) {
     await recorder.record("add-loop", {
-      idempotency_key: `rw02-unknown-to-carr:${digest({ o: f.opportunity_id, n: f.name }).slice(7, 39)}`,
+      idempotency_key: key("unknown-to-carr", f.opportunity_id),
       kind: "open_loop", owner: "Joe", domain: "deals",
-      body: `Salesforce opportunity "${f.name}" (${f.opportunity_id}) has no CARR deal.`,
+      body: `Salesforce opportunity ${f.opportunity_id} in Dell's org has no CARR deal.`,
       blocker: "human_only",
       blocker_detail: `Joe or Dell decides whether ${f.opportunity_id} becomes a CARR deal; creating a deal is humanOnly`,
-      source_note: source });
+      source_note });
     findings_recorded++;
   }
   for (const f of result.absent_from_salesforce) {
+    // record-finding keeps no value when found is false, so the reason rides
+    // in `kind` and `source`, both of which the row keeps. Keyed per deal and
+    // reason: a repeat run replays the first row instead of adding one.
     await recorder.record("record-finding", {
-      idempotency_key: `rw02-absent:${run_ref}:${f.deal_id}`, subject: f.deal_id,
-      kind: "salesforce_presence", found: false, internal: true, epistemic_status: "observed",
-      source, observed_at: started_at });
+      idempotency_key: key("absent", f.deal_id, f.reason_id), subject: f.deal_id,
+      kind: `salesforce_presence:${f.reason_id}`, found: false, internal: true, epistemic_status: "observed",
+      source: `${source_note}; reason ${f.reason_id}` });
     findings_recorded++;
   }
   return freeze({ schema_version: V5_RW02_BROWSER_READ_SCHEMA_VERSION, decision: "reconciled", run_ref,

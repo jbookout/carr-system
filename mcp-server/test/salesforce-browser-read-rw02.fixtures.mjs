@@ -4,6 +4,7 @@
 // Synthetic data only: no real org, seat, deal or person identifier.
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 
 const UI = `sha256:${"1".repeat(64)}`;
 export const ORG = Object.freeze({ origin: "https://synthetic-dell.invalid",
@@ -40,9 +41,15 @@ export function bindingSource(patch = {}) {
  * test can prove the runner never reaches them.
  */
 export class FakeReaderDriver {
-  constructor(pages) { this.pages = pages; this.index = 0; this.readCalls = []; this.writeCalls = 0; }
-  async observe() { this.readCalls.push("observe"); return structuredClone(this.pages[this.index]); }
-  async nextPage() { this.readCalls.push("nextPage"); this.index++; }
+  constructor(pages) {
+    this.pages = pages; this.index = 0; this.readCalls = []; this.writeCalls = 0; this.argCounts = [];
+  }
+  async observe(...args) {
+    this.readCalls.push("observe"); this.argCounts.push(args.length);
+    const p = this.pages[this.index];
+    return typeof p === "function" ? p() : structuredClone(p);
+  }
+  async nextPage(...args) { this.readCalls.push("nextPage"); this.argCounts.push(args.length); this.index++; }
   async saveOpportunity() { this.writeCalls++; }
   async addTeamMember() { this.writeCalls++; }
   async clickLogIn() { this.writeCalls++; }
@@ -76,9 +83,25 @@ export class FakeCodeDriver {
   }
 }
 
+/**
+ * Mirrors withEnvelope (tools.js): the request hash covers the verb and every
+ * argument except the key; a known key arriving with a different hash is
+ * refused as key_reuse, and a matching one replays without a second write.
+ */
 export class SpyRecorder {
-  constructor() { this.calls = []; }
-  async record(verb, args) { this.calls.push({ verb, args: structuredClone(args) }); return { ok: true }; }
+  constructor() { this.calls = []; this.hashes = new Map(); this.writes = 0; }
+  async record(verb, args) {
+    this.calls.push({ verb, args: structuredClone(args) });
+    const hash = createHash("sha256").update(JSON.stringify({ verb,
+      args: { ...args, idempotency_key: undefined } })).digest("hex");
+    const prior = this.hashes.get(args.idempotency_key);
+    if (prior !== undefined) {
+      if (prior !== hash) { const e = new Error("key_reuse"); e.error = "key_reuse"; throw e; }
+      return { replayed: true };
+    }
+    this.hashes.set(args.idempotency_key, hash); this.writes++;
+    return { ok: true };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -126,15 +149,21 @@ export async function checkCounterResets(mod) {
 
 export async function checkCodeRetryBound(mod) {
   const driver = new FakeCodeDriver({ suggestionOn: [2], fillAfterSuggestion: false });
-  const a = await mod.attemptCodeAutofill({ driver, signIn: { started_by_system: true } });
+  const ticket = mod.beginSystemSignIn({ nowMs: 1_000 });
+  const a = await mod.attemptCodeAutofill({ driver, ticket, nowMs: 1_000 });
   assert.equal(a.decision, "stop");
   assert.equal(a.reason_id, "code_autofill_not_filled");
   assert.equal(a.attempts, 3);
   assert.equal(driver.log.filter(x => x === "clickCodeField").length, 3);
   assert.equal(a.resolution_owner, "partner_at_the_browser");
+  // The bound is PER SIGN-IN: calling again with the same ticket clicks nothing.
+  const again = await mod.attemptCodeAutofill({ driver, ticket, nowMs: 1_500 });
+  assert.equal(again.decision, "stop");
+  assert.equal(driver.log.filter(x => x === "clickCodeField").length, 3, "3 clicks per sign-in, not per call");
   // And a fill on the third attempt is still a fill.
   const late = new FakeCodeDriver({ fillOn: [3] });
-  assert.equal((await mod.attemptCodeAutofill({ driver: late, signIn: { started_by_system: true } })).attempts, 3);
+  assert.equal((await mod.attemptCodeAutofill({ driver: late, ticket: mod.beginSystemSignIn({ nowMs: 0 }),
+    nowMs: 0 })).attempts, 3);
 }
 
 export async function checkAbsenceNeedsCompleteRead(mod) {
@@ -148,9 +177,12 @@ export async function checkAbsenceNeedsCompleteRead(mod) {
 }
 
 export async function checkCodeStepNeedsSystemStart(mod) {
-  for (const signIn of [{ started_by_system: false }, {}, { started_by_system: "yes" }]) {
+  const real = mod.beginSystemSignIn({ nowMs: 0 });
+  const forged = [undefined, null, { started_by_system: true }, Object.freeze(Object.create(null)),
+    { ...real }, Object.create(real)];
+  for (const ticket of forged) {
     const driver = new FakeCodeDriver({ fillOn: [1] });
-    const a = await mod.attemptCodeAutofill({ driver, signIn });
+    const a = await mod.attemptCodeAutofill({ driver, ticket, nowMs: 0 });
     assert.equal(a.decision, "stop");
     assert.equal(a.reason_id, "unprompted_code_prompt");
     assert.deepEqual(driver.log, [], "nothing is clicked for a sign-in the system did not start");
@@ -167,4 +199,130 @@ export async function checkNoFindingsAfterStop(mod) {
   assert.equal(out.decision, "stopped");
   assert.deepEqual(recorder.calls.map(c => c.verb), ["record-salesforce-page-stop"]);
   assert.equal(out.findings_recorded, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Checks added for the independent review of PR #1320.
+// ---------------------------------------------------------------------------
+
+const run = (mod, pages, { recorder = new SpyRecorder(), carrDeals = [], clock } = {}) =>
+  mod.runSalesforceBrowserReadReconciliation({ reader: new FakeReaderDriver(pages),
+    bindingSource: bindingSource(), carrDeals: async () => carrDeals, recorder,
+    ...(clock ? { clock } : {}) });
+
+/** Reviewer M1: a non-boolean has_next is a malformed page, never the end of the list. */
+export async function checkHasNextStrict(mod) {
+  for (const bad of [undefined, "no", 0, null]) {
+    const recorder = new SpyRecorder();
+    const pages = [{ ...page({ opportunities: [opp("A")] }), has_next: bad }];
+    if (bad === undefined) delete pages[0].has_next;
+    await assert.rejects(run(mod, pages, { recorder, carrDeals: [carr("A"), carr("Q")] }),
+      e => e.code === "invalid_shape", String(bad));
+    assert.equal(recorder.calls.length, 0, "nothing is concluded from a malformed page");
+  }
+}
+
+/** Reviewer M4: two opportunities with the same name are two findings with two keys. */
+export async function checkKeysDistinctPerOpportunity(mod) {
+  const recorder = new SpyRecorder();
+  await run(mod, [page({ opportunities: [opp("A", { name: "Same Name" }), opp("B", { name: "Same Name" })] })],
+    { recorder, carrDeals: [carr("A"), carr("B")] });
+  const keys = recorder.calls.filter(c => c.verb === "add-loop").map(c => c.args.idempotency_key);
+  assert.equal(keys.length, 2);
+  assert.equal(new Set(keys).size, 2);
+  assert.equal(recorder.writes, 2);
+}
+
+/** Reviewer M5: a credential-shaped name is refused, not recorded. */
+export async function checkCredentialTextRefused(mod) {
+  for (const name of ["password=hunter2", "Bearer abcdefghijklmnop", "sk-abcdefghijklmnopqrstu"]) {
+    assert.throws(() => mod.reconcileSalesforceDeals({ joeUserRef: "joe-sf", complete: true,
+      salesforce: [opp("A", { name })], carr: [] }), e => e.code === "credential_shaped_value", name);
+  }
+}
+
+/** Reviewer M8: the cap is exact. CAP pages ending the list reconcile; more stops after CAP reads. */
+export async function checkPageCapExact(mod) {
+  const cap = mod.V5_RW02_READ_PAGE_CAP;
+  const exact = Array.from({ length: cap }, (_, i) => page({ has_next: i < cap - 1,
+    opportunities: i === 0 ? [opp("A", { team: ["joe-sf"] })] : [] }));
+  const ok = await run(mod, exact, { carrDeals: [carr("A")] });
+  assert.equal(ok.decision, "reconciled");
+  assert.equal(ok.pages_read, cap);
+  const driver = new FakeReaderDriver(Array.from({ length: cap + 2 }, () => page({ has_next: true })));
+  const over = await mod.runSalesforceBrowserReadReconciliation({ reader: driver,
+    bindingSource: bindingSource(), carrDeals: async () => [], recorder: new SpyRecorder() });
+  assert.equal(over.reason_id, "page_cap_reached");
+  assert.equal(driver.readCalls.filter(x => x === "observe").length, cap);
+}
+
+/** Reviewer M9: the facade hands the driver no arguments. */
+export async function checkFacadeForwardsNoArgs(mod) {
+  const driver = new FakeReaderDriver([page()]);
+  const facade = mod.readOnlyReader(driver);
+  await facade.observe({ command: "saveOpportunity" }, "x");
+  await facade.nextPage("click:Save");
+  assert.deepEqual(driver.argCounts, [0, 0]);
+}
+
+/** Reviewer M10: credential-named keys are refused BY NAME, not as a generic unknown field. */
+export async function checkCredentialKeyRefusedByName(mod) {
+  for (const key of ["password", "code", "otp", "username", "value", "sms_code", "passcode"]) {
+    assert.throws(() => mod.classifySignIn({ state: "code_prompt", [key]: "x" }, { systemStartedSignIn: false }),
+      e => e.code === "credential_field_refused", key);
+  }
+}
+
+/**
+ * Reviewer M11 and finding 1: a repeat run (another time, renamed opportunities)
+ * sends BYTE-IDENTICAL arguments for the same findings, so withEnvelope
+ * replays rather than refusing key_reuse, and nothing is filed twice.
+ */
+export async function checkRepeatRunArgsIdentical(mod) {
+  const recorder = new SpyRecorder();
+  const carrDeals = [carr("A"), carr("Q"),
+    { deal_id: "00000000-0000-4000-8000-00000000000f", name: "Unlinked", salesforce_id: null }];
+  const first = await run(mod, [page({ opportunities: [opp("A"), opp("N", { name: "Old name" })] })],
+    { recorder, carrDeals, clock: () => "2026-09-26T12:00:00.000Z" });
+  const firstArgs = recorder.calls.map(c => JSON.stringify(c));
+  const second = await run(mod, [page({ opportunities: [opp("A", { name: "Renamed A" }),
+    opp("N", { name: "New name" })] })], { recorder, carrDeals, clock: () => "2026-09-27T08:30:00.000Z" });
+  assert.notEqual(first.run_ref, second.run_ref);
+  const secondArgs = recorder.calls.slice(firstArgs.length).map(c => JSON.stringify(c));
+  assert.equal(firstArgs.length, 5);
+  assert.deepEqual(secondArgs, firstArgs, "repeat-run arguments must be byte-identical");
+  assert.equal(recorder.writes, 5, "the repeat run filed nothing new");
+}
+
+/** Finding 5: an empty complete read concludes no absence. */
+export async function checkEmptyReadInconclusive(mod) {
+  const recorder = new SpyRecorder();
+  const out = await run(mod, [page({ opportunities: [], has_next: false })],
+    { recorder, carrDeals: [carr("A"), carr("Q")] });
+  assert.equal(out.decision, "reconciled");
+  assert.equal(out.counts.absent_from_salesforce, 0);
+  assert.equal(out.reconciliation.absence_concluded, false);
+  assert.equal(recorder.calls.length, 0);
+}
+
+/** Finding 3: a getter that answers differently on a second read cannot smuggle a value. */
+export async function checkGetterSwapHarmless(mod) {
+  const evil = "006‮evil\npassword=hunter2";
+  const swapping = () => {
+    let reads = 0; let teamReads = 0;
+    const o = { name: "Deal S", owner_ref: "dell-sf" };
+    Object.defineProperty(o, "opportunity_id", { enumerable: true,
+      get: () => (reads++ === 0 ? oppId("S") : evil) });
+    Object.defineProperty(o, "team_member_refs", { enumerable: true,
+      get: () => (teamReads++ === 0 ? [] : ["bad ref\npassword=hunter2"]) });
+    return o;
+  };
+  const r = mod.reconcileSalesforceDeals({ joeUserRef: "joe-sf", complete: true,
+    salesforce: [swapping()], carr: [] });
+  assert.deepEqual(r.missing_joe.map(f => f.opportunity_id), [oppId("S")]);
+  const recorder = new SpyRecorder();
+  await run(mod, [() => ({ ...page(), opportunities: [swapping()] })], { recorder });
+  const text = JSON.stringify(recorder.calls);
+  assert.ok(!text.includes("hunter2") && !text.includes("evil"), "the swapped value never reaches a record");
+  assert.ok(text.includes(oppId("S")));
 }
