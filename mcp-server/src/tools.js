@@ -73,6 +73,7 @@ import { V5BoundaryDoorRefusal, globalBoundariesDoorTools, passBoundaryDoor } fr
   "./global-boundaries-door.v5.js";
 import { journeyOneClockDoorTools } from "./journey-one-clock-door.v5.js";
 import { governedCorrespondenceStoreTools } from "./governed-correspondence-store.v5.js";
+import { completeSetReviewA03StoreTools } from "./independent-review-cycle-store.v5.js";
 export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
 
 // ---------- envelope helpers ----------
@@ -8372,6 +8373,7 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "global-boundaries-door": "mcp-server/src/global-boundaries-door.v5.js",
   "journey-one-clock-door": "mcp-server/src/journey-one-clock-door.v5.js",
   "governed-correspondence-store": "mcp-server/src/governed-correspondence-store.v5.js",
+  "complete-set-review-a03-store": "mcp-server/src/independent-review-cycle-store.v5.js",
 });
 
 function bindToolSource(tool, source) {
@@ -9530,5 +9532,11 @@ registerTools(journeyOneClockDoorTools({ withEnvelope, ToolError }), "journey-on
 // grant for the read-receipt writer.
 registerTools(governedCorrespondenceStoreTools({ withEnvelope, writeEvent, ToolError }),
   "governed-correspondence-store");
+// DoctorCRE V5-A03: append-only independent complete-set review. Every
+// participant registers only its authenticated actor/session duty; all eleven
+// dimensions precede one batch repair; regression checks cannot shrink; and a
+// stronger adjudicator is the only transition after two unresolved rounds.
+registerTools(completeSetReviewA03StoreTools({ withEnvelope, writeEvent, ToolError }),
+  "complete-set-review-a03-store");
 
 Object.freeze(TOOLS);

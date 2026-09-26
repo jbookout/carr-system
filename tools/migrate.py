@@ -391,6 +391,14 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0706_amend_closed_loop.sql",
         "0707_amend_closed_loop_scac_successor.sql",
     ),
+    # DoctorCRE V5-A03: 0711 installs the append-only complete-set review
+    # cycle and its SECURITY DEFINER writer/read doors; 0712 seals the exact
+    # source and catalog as provisional SCAC v82. The deferred policy-epoch
+    # trigger must see both or neither.
+    (
+        "0711_doctorcre_a03_review_store.sql",
+        "0712_doctorcre_a03_review_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -461,6 +469,10 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0706_amend_closed_loop.sql",
         "0707_amend_closed_loop_scac_successor.sql",
+    ),
+    (
+        "0711_doctorcre_a03_review_store.sql",
+        "0712_doctorcre_a03_review_scac_successor.sql",
     ),
 )
 
