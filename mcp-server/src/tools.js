@@ -74,6 +74,7 @@ import { V5BoundaryDoorRefusal, globalBoundariesDoorTools, passBoundaryDoor } fr
   "./global-boundaries-door.v5.js";
 import { journeyOneClockDoorTools } from "./journey-one-clock-door.v5.js";
 import { governedCorrespondenceStoreTools } from "./governed-correspondence-store.v5.js";
+import { assuranceHealthStoreTools } from "./assurance-health-store.v5.js";
 export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
 
 // ---------- envelope helpers ----------
@@ -8373,6 +8374,7 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "global-boundaries-door": "mcp-server/src/global-boundaries-door.v5.js",
   "journey-one-clock-door": "mcp-server/src/journey-one-clock-door.v5.js",
   "governed-correspondence-store": "mcp-server/src/governed-correspondence-store.v5.js",
+  "assurance-health-store": "mcp-server/src/assurance-health-store.v5.js",
   "action-class-successor-registry": "mcp-server/src/action-class-successor-registry.v5.js",
 });
 
@@ -9532,6 +9534,7 @@ registerTools(journeyOneClockDoorTools({ withEnvelope, ToolError }), "journey-on
 // grant for the read-receipt writer.
 registerTools(governedCorrespondenceStoreTools({ withEnvelope, writeEvent, ToolError }),
   "governed-correspondence-store");
+registerTools(assuranceHealthStoreTools({ withEnvelope, ToolError }), "assurance-health-store");
 // DoctorCRE V5-D01: inactive action-specific autonomy successors. Three verbs
 // over migration 0708's append-only registry -- register-, read- and the
 // deterministic read-action-class-gate, which as shipped always denies (no
