@@ -403,6 +403,14 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0708_action_class_successor_registry.sql",
         "0709_action_class_successor_registry_scac_successor.sql",
     ),
+    # V5-A01: 0717 installs the append-only six-layer assurance-health
+    # evidence store plus its SECURITY DEFINER record/read doors; 0718 seals
+    # those grants and the two registered MCP verbs as SCAC v83, chained
+    # from v82 (0709).
+    (
+        "0717_assurance_health_evidence_store.sql",
+        "0718_assurance_health_evidence_store_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -477,6 +485,10 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0708_action_class_successor_registry.sql",
         "0709_action_class_successor_registry_scac_successor.sql",
+    ),
+    (
+        "0717_assurance_health_evidence_store.sql",
+        "0718_assurance_health_evidence_store_scac_successor.sql",
     ),
 )
 
