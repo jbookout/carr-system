@@ -72055,8 +72055,8 @@
           "operation": "tools/provision-engineering-controller.py",
           "effect_class": "administrative_mutation",
           "source_locator": "tools/provision-engineering-controller.py",
-          "schema_digest": "6583043abe62207a1739bbcc7bc157a3462687823f0a576f0f33d2f5358534a7",
-          "handler_digest": "6583043abe62207a1739bbcc7bc157a3462687823f0a576f0f33d2f5358534a7",
+          "schema_digest": "3d10ddec5a4a7083ffe01a08acaa99fa2b1bff9f98f2aad48493cda351543eee",
+          "handler_digest": "3d10ddec5a4a7083ffe01a08acaa99fa2b1bff9f98f2aad48493cda351543eee",
           "write": true,
           "human_only": false,
           "authority_only": true,
@@ -72074,7 +72074,7 @@
         }
       ],
       "expected_count": 984,
-      "expected_sha256": "f4337941ae40193aa5f636ef2f09db557548bb79de444432ac8d699f7b603bf5"
+      "expected_sha256": "20b32f68fc05092b520b70061032b51181db9740025ce420c945124e7e6b6cf3"
     }
   ],
   "current_source_review": {
