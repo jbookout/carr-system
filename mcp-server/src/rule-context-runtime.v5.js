@@ -19,6 +19,7 @@ import {
   V5_F05_UNIVERSE_SCHEMA_VERSION,
   V5_F05_UNKNOWN_FACT,
   compileRuleUniverse,
+  coverageDecision,
   deriveRuleApplicability,
   ruleUniversePreimage,
   verifyCoverageReceipt,
@@ -181,6 +182,7 @@ export const V5_F05_EMPTY_PROJECTION_COVERAGE_SCHEMA_VERSION =
 const EMPTY_PROJECTION_COMPLETENESS = PARTIAL;
 const EMPTY_PROJECTION_COVERAGE_COMPLETE = false;
 const EMPTY_PROJECTION_WRITE_PERMITTED = false;
+const EMPTY_PROJECTION_READ_PERMITTED = true;
 
 const G = V5_F05_GUARDS;
 const UNIVERSE_KEYS = Object.freeze([
@@ -279,6 +281,11 @@ function emptyProjectionCoverage(snapshot, facts) {
     removal_order: [],
     rules: [],
   }));
+  // The kernel's rule, not a copied literal, so this receipt and the kernel's
+  // partial receipt agree: a blocked write reads read_only, never allow.
+  const decision = coverageDecision({
+    read_only_exploration_permitted: EMPTY_PROJECTION_READ_PERMITTED,
+    consequential_action_permitted: EMPTY_PROJECTION_WRITE_PERMITTED });
   const blocking_reasons = ["universe_coverage_unknown"];
   if (unknown.length > 0) blocking_reasons.push("typed_facts_unknown");
   blocking_reasons.push("no_rule_contract_projected");
@@ -290,7 +297,7 @@ function emptyProjectionCoverage(snapshot, facts) {
     universe_digest,
     universe_completeness: EMPTY_PROJECTION_COMPLETENESS,
     now: snapshot.observed_at,
-    decision: "allow",
+    decision,
     reason_id: "coverage_incomplete_read_only",
     facts: { ...known },
     unknown_facts: unknown,
@@ -308,7 +315,7 @@ function emptyProjectionCoverage(snapshot, facts) {
     model_resolves_conflicts: false,
     coverage_complete: EMPTY_PROJECTION_COVERAGE_COMPLETE,
     consequential_action_permitted: EMPTY_PROJECTION_WRITE_PERMITTED,
-    read_only_exploration_permitted: true,
+    read_only_exploration_permitted: EMPTY_PROJECTION_READ_PERMITTED,
     write_gate_field: "consequential_action_permitted",
     blocking_reasons,
   };

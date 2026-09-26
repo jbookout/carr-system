@@ -145,6 +145,9 @@ test("a missing possible binding rule makes the universe partial and blocks the 
   assert.equal(result.coverage_receipt.universe_completeness, "partial_unknown_coverage");
   assert.equal(result.coverage_receipt.coverage_complete, false);
   assert.equal(result.consequential_action_permitted, false);
+  // Blocked, so the decision must not read as permission to a caller that
+  // tests `decision === "allow"` instead of the write gate.
+  assert.equal(result.coverage_receipt.decision, "read_only");
   assert.deepEqual(result.coverage_receipt.blocking_reasons, ["universe_coverage_unknown"]);
   assert.deepEqual(result.source.missing_rule_ids, ["rule-not-typed"]);
 });
@@ -170,6 +173,8 @@ test("coverage receipt partitions and enumerates every rule from the store", asy
   assert.deepEqual(result.coverage_receipt.effective.map(x => x.rule_id), ["rule-worktree"]);
   assert.deepEqual(result.coverage_receipt.not_applicable.map(x => x.rule_id), ["rule-client-send"]);
   assert.equal(result.coverage_receipt.coverage_complete, true);
+  assert.equal(result.coverage_receipt.decision, "allow");
+  assert.equal(result.consequential_action_permitted, true);
 });
 
 test("an unresolved binding conflict refuses and cannot be called permission", async () => {
@@ -327,6 +332,10 @@ test("no bound contracts: the read returns a partial, blocked, digest-bound rece
   assert.equal(receipt.coverage_complete, false);
   assert.equal(receipt.universe_completeness, "partial_unknown_coverage");
   assert.equal(receipt.read_only_exploration_permitted, true);
+  // The zero-rules receipt and the kernel's partial receipt agree: blocked
+  // reads read_only, never allow.
+  assert.equal(receipt.decision, "read_only");
+  assert.equal(receipt.reason_id, "coverage_incomplete_read_only");
   assert.equal(receipt.write_gate_field, "consequential_action_permitted");
   assert.ok(receipt.blocking_reasons.includes("universe_coverage_unknown"));
   assert.ok(receipt.blocking_reasons.includes("no_rule_contract_projected"));
@@ -377,6 +386,7 @@ test("zero active and zero projected rules still never read as complete or permi
   assert.equal(result.consequential_action_permitted, false);
   assert.equal(result.coverage_receipt.coverage_complete, false);
   assert.equal(result.coverage_receipt.universe_completeness, "partial_unknown_coverage");
+  assert.equal(result.coverage_receipt.decision, "read_only");
   assert.ok(result.coverage_receipt.blocking_reasons.includes("no_rule_contract_projected"));
 });
 
