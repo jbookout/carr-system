@@ -73,6 +73,7 @@ import { V5BoundaryDoorRefusal, globalBoundariesDoorTools, passBoundaryDoor } fr
   "./global-boundaries-door.v5.js";
 import { journeyOneClockDoorTools } from "./journey-one-clock-door.v5.js";
 import { governedCorrespondenceStoreTools } from "./governed-correspondence-store.v5.js";
+import { assuranceHealthStoreTools } from "./assurance-health-store.v5.js";
 export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
 
 // ---------- envelope helpers ----------
@@ -8372,6 +8373,7 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "global-boundaries-door": "mcp-server/src/global-boundaries-door.v5.js",
   "journey-one-clock-door": "mcp-server/src/journey-one-clock-door.v5.js",
   "governed-correspondence-store": "mcp-server/src/governed-correspondence-store.v5.js",
+  "assurance-health-store": "mcp-server/src/assurance-health-store.v5.js",
 });
 
 function bindToolSource(tool, source) {
@@ -9530,5 +9532,6 @@ registerTools(journeyOneClockDoorTools({ withEnvelope, ToolError }), "journey-on
 // grant for the read-receipt writer.
 registerTools(governedCorrespondenceStoreTools({ withEnvelope, writeEvent, ToolError }),
   "governed-correspondence-store");
+registerTools(assuranceHealthStoreTools({ withEnvelope, ToolError }), "assurance-health-store");
 
 Object.freeze(TOOLS);

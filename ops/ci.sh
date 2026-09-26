@@ -1244,6 +1244,7 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     mcp-server/test/tour-domain-route-cheat-sheet-postgres.sql \
     mcp-server/test/tour-delivery-data-plane-postgres.sql \
     mcp-server/test/tour-client-share-allowlist-postgres.sql \
+    mcp-server/test/assurance-health-store-postgres.sql \
     mcp-server/test/work-portfolio-postgres.sql; do
     [ -f "$tour_pg_proof" ] || continue
     tour_pg_log="$LOGDIR/$(basename "$tour_pg_proof" .sql).log"
