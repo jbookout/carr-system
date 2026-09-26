@@ -4,7 +4,13 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v80 is the runtime selector after DoctorCRE V5-J102's healthcare CRE
+// v81 is the runtime selector after amend-closed-loop, the append-only door
+// to correct a CLOSED loop's outcome (defect a2c04ffa, loop c7265238).
+// Its sealed catalog admits one new verb -- amend-closed-loop -- and
+// preserves v80 and earlier as history. It chains over #1270's v80
+// (0704/0705).
+//
+// Superseded note (v80): v80 was the runtime selector after DoctorCRE V5-J102's healthcare CRE
 // lifecycle (migrations 0704/0705). Its sealed catalog admits twenty-one new
 // verbs -- read-cre-lifecycle (a read on the writer connection) and twenty
 // writes, one humanOnly and six authorityOnly in all -- and preserves v79 and
@@ -126,7 +132,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v80.generated.js";
+} from "./scac-mutation-registry.v81.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 

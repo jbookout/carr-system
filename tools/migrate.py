@@ -379,6 +379,18 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0704_cre_lifecycle.sql",
         "0705_cre_lifecycle_scac_successor.sql",
     ),
+    # amend-closed-loop (defect a2c04ffa, loop c7265238): 0706 installs the
+    # append-only loop_amendment table, its carr_writer INSERT/SELECT grant,
+    # its own immutability trigger and its loop_amendment_history(uuid)
+    # SECURITY DEFINER read door (EXECUTE to carr_reader, carr_writer only --
+    # PUBLIC explicitly revoked first); 0707 seals that catalog as v81,
+    # chained from v80 (0705). Same deferred-epoch-trigger shape as the pairs
+    # above: 0706 applied alone would be refused at commit, so the pair must
+    # be one transaction.
+    (
+        "0706_amend_closed_loop.sql",
+        "0707_amend_closed_loop_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -445,6 +457,10 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0704_cre_lifecycle.sql",
         "0705_cre_lifecycle_scac_successor.sql",
+    ),
+    (
+        "0706_amend_closed_loop.sql",
+        "0707_amend_closed_loop_scac_successor.sql",
     ),
 )
 
