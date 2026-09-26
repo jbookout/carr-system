@@ -13,9 +13,9 @@ THE RULE. A Claude Code project directory (the path-encoded name Claude Code
 derives from a session's launch directory: every character that is not a
 letter or digit becomes "-") is CARR's when, and only when, it is one of:
 
-  * a vault project: the name contains "CARR-AI" (the vault is reachable as
-    ~/My Drive/CARR AI and under ~/Library/CloudStorage/GoogleDrive-*/...,
-    and each spelling yields its own directory) and is not a scratchpad;
+  * a vault project: the name contains "CARR-AI" (the vault is reachable by
+    two spellings, lib/carr_paths.my_drive_vault() and carr_paths.vault(),
+    and each yields its own directory) and is not a scratchpad;
   * the repo project: exactly the encoded canonical checkout, which is
     "-Users-booko-carr-system" on the primary machine;
   * a repo worktree: that name followed by "-" (".claude/worktrees/<x>"

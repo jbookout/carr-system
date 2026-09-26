@@ -59,6 +59,7 @@ import {
 // three ruled stores. There is no other import that could supply one and no
 // argument that could carry one.
 import { emitGateZeroOutcome } from "./gate-zero-assurance.v5.js";
+import { readRuleEnforcementCoverage } from "./lifecycle-assurance.v5.js";
 import { benchmarkAcceptanceStoreTools } from "./benchmark-acceptance-store.v5.js";
 import { modelRoleStoreTools } from "./model-role-store.v5.js";
 import { recordSourceAuthorityStoreTools } from "./record-source-authority-store.v5.js";
@@ -1845,6 +1846,19 @@ async function buildRecordBag(c, dealId, clientId) {
 // AMBIGUITY IS REPORTED, NEVER GUESSED. A prefix that matches two rules returns
 // the candidates rather than picking one, because silently activating or
 // retiring the wrong binding rule is worse than any error message.
+// V5-A02: the named refusals ops.record_rule_enforcement_fallback raises
+// (migration 0721). Each is mapped to a ToolError of the same name.
+const RULE_ENFORCEMENT_FALLBACK_REFUSALS = Object.freeze(new Set([
+  "rule_enforcement_fallback_requires_joe_authority",
+  "rule_enforcement_fallback_kind_unknown",
+  "rule_enforcement_fallback_fields_required",
+  "rule_enforcement_fallback_rule_not_found",
+  "rule_enforcement_fallback_actor_unregistered",
+  "rule_enforcement_fallback_idempotency_conflict",
+  "rule_enforcement_fallback_already_recorded",
+  "rule_enforcement_fallback_receipts_append_only",
+]));
+
 async function resolveRuleId(c, value, field = "rule_id") {
   const raw = String(value || "").trim();
   if (!raw) throw new ToolError({ error: "rule_id_required", field });
@@ -2247,6 +2261,13 @@ function findCatchUpCandidates(found) {
 export const TOOLS = {
 
   // ===== reads (carr_reader connection) =====
+
+  "read-v5-a02-rule-enforcement-coverage": {
+    write: false,
+    description: "Read DoctorCRE V5-A02's server-derived coverage of every active rule. The record layer enumerates active rules and checks that every control its current exact approval names is installed and bound, with test verification that is not future-dated and still equals the value the approval captured, and an immutable fallback receipt written on Joe's authority database connection (the receipt proves which authority connection recorded it, not that a human chose it). Empty input only: caller evidence cannot make coverage green. Each uncovered rule is a named gap (amended after approval, control unmapped, an approved control not installed, tests missing, test evidence future-dated or changed since approval, fallback absent); zero active rules reads coverage_state `empty`, never complete; an unreadable or inconsistent record is a fail-closed unavailable result.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {} },
+    handler: async (c) => readRuleEnforcementCoverage(c),
+  },
 
   "find": {
     write: false,
@@ -3361,6 +3382,51 @@ export const TOOLS = {
   },
 
   // ===== writes (carr_writer connection, envelope enforced) =====
+
+  "record-rule-enforcement-fallback": {
+    write: true,
+    authorityOnly: true,
+    description: "Joe-authority-only V5-A02 fallback receipt for one rule. Records what the system must do when that rule's installed control is unavailable; it never guesses from enforcement class and never rewrites an earlier receipt. The current rule version and statement hash, the authority connection's actor, procedure reference, reason and idempotency key are bound by the database. Refusals are named: rule_enforcement_fallback_requires_joe_authority (Dell's authority connection), rule_enforcement_fallback_already_recorded (this rule version already has a receipt), rule_enforcement_fallback_idempotency_conflict (key reused for a different request). A later rule version needs a new receipt.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {
+      idempotency_key: { type: "string" },
+      rule_id: { type: "string", description: "Full UUID or current short rule id." },
+      fallback_kind: { type: "string", enum: [
+        "degraded_read_only", "documented_manual_procedure",
+        "escalate_to_verified_partner", "refuse_closed",
+      ] },
+      procedure_ref: { type: "string" },
+      reason: { type: "string" },
+    }, required: ["idempotency_key", "rule_id", "fallback_kind", "procedure_ref", "reason"] },
+    handler: async (c, actor, args) => withEnvelope(
+      c, actor, "record-rule-enforcement-fallback", args, async () => {
+        const ruleId = await resolveRuleId(c, args.rule_id);
+        let recorded;
+        try {
+          recorded = await c.query(
+            "select ops.record_rule_enforcement_fallback($1,$2,$3,$4,$5) as result",
+            [ruleId, args.fallback_kind, args.procedure_ref,
+             args.idempotency_key, args.reason]);
+        } catch (e) {
+          // The database names every refusal; surface that name, never a
+          // raw driver error.
+          if (RULE_ENFORCEMENT_FALLBACK_REFUSALS.has(e?.message))
+            throw new ToolError({ error: e.message, rule_id: ruleId,
+              ...(typeof e.detail === "string" ? { detail: e.detail } : {}) });
+          throw e;
+        }
+        const result = recorded.rows[0]?.result;
+        if (!result?.receipt_id)
+          throw new ToolError({ error: "rule_enforcement_fallback_not_recorded", rule_id: ruleId });
+        await writeEvent(c, actor, "record-rule-enforcement-fallback", "rule", ruleId, {
+          new: { fallback_kind: result.fallback_kind,
+            fallback_receipt_id: result.receipt_id,
+            rule_version: result.rule_version },
+          agent_rationale: args.reason,
+          idempotency_key: args.idempotency_key,
+        });
+        return result;
+      }),
+  },
 
   "log-activity": {
     write: true,
