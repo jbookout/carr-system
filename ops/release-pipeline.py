@@ -42,7 +42,9 @@ TWO LANES, one tick:
             6 bin/deploy-worker.sh --env staging --recovery-step forward_fix
             7 bin/deploy-worker.sh --promote-version <id from step 5>
             8 live /release reads back S, ./run.sh health
-            9 a db/schema.sql follow-up PR when step 4 applied anything
+            9 a db/schema.sql follow-up PR when step 4 applied anything; once
+              it exists, every older open release/schema-snapshot-* PR is
+              closed as superseded (close only, best-effort, never merged)
            10 after SHIPPED, best-effort: ops/slice-done-marker.py --release-key K
               marks the DoctorCRE v5 slices this release shipped (register from
               the catalog, bind, gather server-resolved evidence, mark progress and
@@ -228,6 +230,11 @@ def read_env_value(path: Path, name: str) -> str | None:
             v = v[1:-1]
         value = v or None
     return value
+
+
+# Head-branch prefix of the PRs schema_followup opens; the newest one carries
+# the cumulative snapshot and supersedes every older open one.
+SCHEMA_SNAPSHOT_PREFIX = "release/schema-snapshot-"
 
 
 class Runner:
@@ -628,6 +635,7 @@ class Pipeline:
         self.db_ahead_of_worker = False
         self.do_migration: dict | None = None   # a Durable Object migration the upload step applied
         self.mutated = False   # set when the first worktree is created; nothing before it writes
+        self.schema_superseded_closed: list[int] = []   # older snapshot PRs closed this run
 
     # -- plumbing ---------------------------------------------------------
     def _call_verb(self, verb: str, args: dict) -> tuple[bool, Any]:
@@ -1633,7 +1641,8 @@ class Pipeline:
         schema_pr = None
         if self.dry_run:
             self.out("  [dry-run] when migrate-apply ran and db/schema.sql changed: branch from origin/main, "
-                     "commit db/schema.sql, push, gh pr create (the merge pipeline merges it)")
+                     "commit db/schema.sql, push, gh pr create, then gh pr close every older open "
+                     "release/schema-snapshot-* PR as superseded (close only, never merge)")
         elif pending and self.git("status", "--porcelain", "db/schema.sql", cwd=wt):
             schema_pr = self.schema_followup(wt, sha)
         if not self.dry_run:
@@ -1645,7 +1654,8 @@ class Pipeline:
                 "pr_head_sha": ev.get("pr_head_sha"), "verifier": ev["verifier"],
                 "verifier_evidence": ev["verifier_evidence"], "test_evidence": ev["test_evidence"],
                 "health_time_rolling_not_attributed": health_excused,
-                "schema_pr": schema_pr, "run_dir": str(self.run_dir)}
+                "schema_pr": schema_pr, "schema_prs_superseded_closed": self.schema_superseded_closed,
+                "run_dir": str(self.run_dir)}
 
     def _release_exists(self, wt: Path, py: str, key: str) -> bool:
         res = self.runner.run([py, "tools/ops-record.py", "release", "show", "--key", key], cwd=wt,
@@ -1657,7 +1667,7 @@ class Pipeline:
         raise StepFailed("release-key", res.rc, str(self.run_dir / "release-key.log"))
 
     def schema_followup(self, wt: Path, sha: str) -> str:
-        branch = f"release/schema-snapshot-{sha[:8]}"
+        branch = f"{SCHEMA_SNAPSHOT_PREFIX}{sha[:8]}"
         fwt = self.store.root / "worktrees" / f"schema-{sha[:12]}"
         self.step("schema-worktree", ["git", "-C", str(self.repo), "worktree", "add", "-b", branch, str(fwt),
                                       "origin/main"], self.repo)
@@ -1672,8 +1682,56 @@ class Pipeline:
                                       "--body", "Opened by ops/release-pipeline.py: the release applied "
                                       "production migrations and bin/migrate-prod.sh regenerated the snapshot."],
                         fwt)
+        new_pr = res.out.strip().splitlines()[-1] if res.out.strip() else branch
+        self.schema_superseded_closed = self.close_superseded_schema_prs(fwt, new_pr, branch)
         self.step("schema-worktree-remove", ["git", "-C", str(self.repo), "worktree", "remove", str(fwt)], self.repo)
-        return res.out.strip().splitlines()[-1] if res.out.strip() else branch
+        return new_pr
+
+    def close_superseded_schema_prs(self, cwd: Path, new_pr: str, new_branch: str) -> list[int]:
+        """Close every OTHER open schema-snapshot PR once the new one exists.
+
+        Each snapshot is the whole production schema, so the newest supersedes
+        every older one; nothing merges them automatically, and before this
+        they piled up. Close only: no merge, no label, no branch deletion.
+        Best-effort and never raised, because the release has already
+        shipped: a failed list or close is logged to the run directory and the
+        step goes on. Returns the PR numbers actually closed."""
+        closed: list[int] = []
+        log = self.run_dir / "schema-supersede.log"
+        m = re.search(r"/pull/(\d+)\s*$", new_pr)
+        if not m:
+            self.out(f"  -> schema-supersede: new PR number not readable from {new_pr!r}; nothing closed")
+            return closed
+        new_num = int(m.group(1))
+        try:
+            listed = self.runner.run(["gh", "pr", "list", "--state", "open", "--limit", "200",
+                                      "--json", "number,headRefName"], cwd=cwd, log=log, env=self.env,
+                                     timeout=300)
+            if listed.rc != 0:
+                self.out(f"  -> schema-supersede: gh pr list exited {listed.rc}; nothing closed (log {log})")
+                return closed
+            rows = json.loads(listed.out or "[]")
+            stale = sorted(int(r["number"]) for r in rows
+                           if isinstance(r, dict)
+                           and str(r.get("headRefName", "")).startswith(SCHEMA_SNAPSHOT_PREFIX)
+                           and r.get("headRefName") != new_branch and int(r.get("number", 0)) != new_num)
+        except Exception as exc:  # noqa: BLE001 — a supersede failure is logged, never raised
+            self.out(f"  -> schema-supersede: could not list open PRs: {type(exc).__name__}: {exc}")
+            return closed
+        for num in stale:
+            try:
+                res = self.runner.run(["gh", "pr", "close", str(num), "--comment",
+                                       f"Superseded by #{new_num}, which carries the cumulative production "
+                                       "schema snapshot."], cwd=cwd, log=log, env=self.env, timeout=300)
+            except Exception as exc:  # noqa: BLE001 — a supersede failure is logged, never raised
+                self.out(f"  -> schema-supersede: closing #{num} failed: {type(exc).__name__}: {exc}")
+                continue
+            if res.rc == 0:
+                closed.append(num)
+            else:
+                self.out(f"  -> schema-supersede: closing #{num} exited {res.rc}; left open (log {log})")
+        self.out(f"  -> schema-supersede: closed {closed} as superseded by #{new_num}")
+        return closed
 
     def release_app(self, lane_cfg: dict, repo_dir: Path, base: str, sha: str) -> dict:
         """Same review evidence as the Worker lane; the named required checks
