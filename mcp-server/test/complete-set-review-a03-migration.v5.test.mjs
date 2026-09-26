@@ -4,12 +4,14 @@ import test from "node:test";
 
 const MIGRATION_URL = new URL("../../migrations/0711_doctorcre_a03_review_store.sql", import.meta.url);
 
-test("0711 installs five append-only authorities behind SECURITY DEFINER functions", async () => {
+const TABLES = ["review_case", "review_participant", "finding_set", "review_round", "adjudication", "case_outcome"];
+
+test("0711 installs six append-only authorities behind SECURITY DEFINER functions", async () => {
   const sql = await readFile(MIGRATION_URL, "utf8");
-  for (const table of ["review_case", "review_participant", "finding_set", "review_round", "adjudication"])
+  for (const table of TABLES)
     assert.match(sql, new RegExp(`create table ops\\.v5_a03_${table} \\(`));
   assert.match(sql, /create function ops\.v5_a03_rows_immutable\(\)/);
-  for (const table of ["review_case", "review_participant", "finding_set", "review_round", "adjudication"]) {
+  for (const table of TABLES) {
     assert.match(sql, new RegExp(`create trigger v5_a03_${table}_immutable`));
     assert.match(sql, new RegExp(`create trigger v5_a03_${table}_truncate_immutable`));
   }
@@ -33,13 +35,31 @@ test("finding seal proves all dimensions, whole-set scope, one batch and non-wea
   const sql = await readFile(MIGRATION_URL, "utf8");
   assert.match(sql, /v5_a03_review_dimensions\(\)/);
   assert.match(sql, /v_dimension_count<>cardinality\(ops\.v5_a03_review_dimensions\(\)\)/);
-  assert.match(sql, /reviewed_set_digest is distinct from v_case\.delivered_set_digest/);
+  assert.match(sql, /p_reviewed_set_digest is distinct from v_case\.delivered_set_digest/);
+  assert.match(sql, /v5_a03_review_not_bound_to_repaired_artifact/);
   assert.match(sql, /v_repaired is distinct from p_repaired_finding_refs/);
   assert.match(sql, /v_prior_checks <@ p_checks_executed/);
   assert.match(sql, /v5_a03_test_weakening/);
-  assert.match(sql, /v5_a03_repeated_finding/);
-  assert.match(sql, /v5_a03_circular_reversion/);
-  assert.match(sql, /v5_a03_reviewer_instability/);
+});
+
+test("round-2 drift is recorded on the round and routes to adjudication; every path records an outcome", async () => {
+  const sql = await readFile(MIGRATION_URL, "utf8");
+  assert.match(sql, /array\['circular_reversion','repeated_finding','reviewer_instability'\]/);
+  for (const detection of ["repeated_finding", "circular_reversion", "reviewer_instability"])
+    assert.match(sql, new RegExp(`v_detections:=v_detections\\|\\|'${detection}'::text`));
+  assert.doesNotMatch(sql, /raise exception 'v5_a03_(repeated_finding|circular_reversion|reviewer_instability)'/);
+  assert.match(sql, /prior_set\.reviewed_set_digest=current_set\.reviewed_set_digest/);
+  assert.match(sql, /'pass','clean_round'/);
+  assert.match(sql, /'stronger_adjudication',null,made/);
+});
+
+test("the two-round bound is per change: one case per change_ref and per delivered set", async () => {
+  const sql = await readFile(MIGRATION_URL, "utf8");
+  assert.match(sql, /constraint v5_a03_review_case_one_per_change unique\(tenant,change_ref\)/);
+  assert.match(sql, /constraint v5_a03_review_case_one_per_delivered_set unique\(tenant,delivered_set_digest\)/);
+  assert.match(sql, /v5_a03_change_already_under_review/);
+  assert.match(sql, /v5_a03_delivered_set_already_under_review/);
+  assert.match(sql, /v5_a03_artifact_bound_to_other_case/);
 });
 
 test("round and adjudication guards make a third loop structurally impossible", async () => {

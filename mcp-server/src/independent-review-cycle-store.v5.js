@@ -7,8 +7,6 @@
 import { V5_NO_EFFECTS } from "./global-boundaries.v5.js";
 import {
   V5_CONTEXT_BINDINGS,
-  V5_MAX_REVIEW_ROUNDS,
-  V5_OPPOSING_ROLE_PAIRS,
   V5_REVIEW_DIMENSIONS,
   V5_REVIEW_ROLES,
   V5_REVIEW_STATES,
@@ -23,102 +21,17 @@ const REF = /^[a-z][a-z0-9-]*:[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/;
 const SESSION_REF = /^session:[A-Za-z0-9][A-Za-z0-9._:-]{1,119}$/;
 const ADJUDICATION_OUTCOMES = Object.freeze(["fail", "pass", "quarantine"]);
 
-class V5A03StoreError extends Error {
-  constructor(code, detail = {}) {
-    super(code);
-    this.code = code;
-    this.detail = detail;
-  }
-}
-
-function storeFail(code, detail) { throw new V5A03StoreError(code, detail); }
-
 function sortedUnique(values) {
   return Array.isArray(values) && values.every(value => typeof value === "string" && value.length > 0)
     && values.every((value, index) => index === 0 || values[index - 1] < value);
 }
 
-function sameStrings(left, right) {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
-}
-
-/** Pure mirror of the database's identity-separation guard. */
-export function assertReviewParticipantSeparation(participants) {
-  if (!Array.isArray(participants)) storeFail("participant_registry_unreadable");
-  for (const row of participants) {
-    if (!row || !V5_REVIEW_ROLES.includes(row.role) || !REF.test(row.actor_ref ?? "") ||
-        !SESSION_REF.test(row.session_ref ?? "")) storeFail("participant_registry_unreadable");
-    if (row.role === "reviewer" && row.context_binding !== "fresh")
-      storeFail("review_context_not_fresh", { dimension: row.dimension ?? null });
-  }
-
-  for (const [leftRole, rightRole] of V5_OPPOSING_ROLE_PAIRS) {
-    for (const left of participants.filter(row => row.role === leftRole)) {
-      for (const right of participants.filter(row => row.role === rightRole)) {
-        const actorCollision = left.actor_ref === right.actor_ref;
-        const sessionCollision = left.session_ref === right.session_ref;
-        if (/* MUTANT identity */ actorCollision || sessionCollision) {
-          if (sessionCollision && (leftRole === "reviewer" || rightRole === "reviewer"))
-            storeFail("review_session_not_fresh", { roles: [leftRole, rightRole] });
-          storeFail(leftRole === "reviewer" || rightRole === "reviewer"
-            ? "reviewer_not_role_separated" : "duties_not_role_separated",
-          { roles: [leftRole, rightRole] });
-        }
-      }
-    }
-  }
-}
-
-/** Pure mirror of the complete finding-set and non-weakening database guard. */
-export function assertCompleteFindingBatch(value) {
-  if (!value || !SHA256_REF.test(value.delivered_set_digest ?? "") || !Array.isArray(value.submissions))
-    storeFail("finding_set_unreadable");
-  const dimensions = value.submissions.map(row => row?.dimension).sort();
-  if (!sameStrings(dimensions, [...V5_REVIEW_DIMENSIONS].sort()))
-    storeFail("finding_set_dimension_absent", { required: [...V5_REVIEW_DIMENSIONS], received: dimensions });
-  if (value.submissions.some(row => !V5_SUBMISSION_STATES.includes(row.state) || row.state !== "submitted"))
-    storeFail("finding_set_dimension_absent");
-  const narrowed = value.submissions.filter(row => row.reviewed_set_digest !== value.delivered_set_digest);
-  if (/* MUTANT scope */ narrowed.length > 0)
-    storeFail("review_scope_narrower_than_delivered_set", { dimensions: narrowed.map(row => row.dimension).sort() });
-  const late = value.submissions.filter(row => row.enumerated_before_repair !== true);
-  if (late.length) storeFail("finding_set_enumerated_after_repair", { dimensions: late.map(row => row.dimension).sort() });
-  if (value.submissions.some(row => !sortedUnique(row.finding_refs))) storeFail("finding_set_unreadable");
-
-  const repair = value.repair;
-  if (!repair || !SHA256_REF.test(repair.batch_repair_digest ?? "") ||
-      !REF.test(repair.regression_suite_ref ?? "") || !sortedUnique(repair.repaired_finding_refs) ||
-      !sortedUnique(repair.checks_executed) || !sortedUnique(repair.prior_checks_executed ?? []))
-    storeFail("regression_evidence_unreadable");
-  const findings = [...new Set(value.submissions.flatMap(row => row.finding_refs))].sort();
-  if (!sameStrings(findings, repair.repaired_finding_refs))
-    storeFail("batch_repair_not_complete", { findings, repaired: repair.repaired_finding_refs });
-  if (repair.checks_executed.length === 0) storeFail("regression_evidence_empty");
-  const weakened = repair.prior_checks_executed.filter(check => !repair.checks_executed.includes(check));
-  if (weakened.length) storeFail("test_weakening", { missing_checks: weakened });
-}
-
-/** Pure mirror of the two-round and stronger-adjudication database guard. */
-export function assertReviewRoundTransition(value) {
-  const recorded = value?.recorded_rounds;
-  const requested = value?.requested_round_ordinal;
-  const adjudication = value?.adjudication ?? null;
-  if (!Number.isInteger(recorded) || recorded < 0 || recorded > V5_MAX_REVIEW_ROUNDS)
-    storeFail("review_round_ledger_unreadable");
-  if (requested !== null && requested !== undefined) {
-    if (!Number.isInteger(requested) || requested < 1) storeFail("review_round_ledger_unreadable");
-    if (adjudication) storeFail("review_round_reopened_after_adjudication");
-    if (/* MUTANT round-limit */ requested > V5_MAX_REVIEW_ROUNDS)
-      storeFail("review_round_limit_exhausted", { round_limit: V5_MAX_REVIEW_ROUNDS });
-    if (requested !== recorded + 1) storeFail("review_round_out_of_sequence");
-    return;
-  }
-  if (!adjudication || !ADJUDICATION_OUTCOMES.includes(adjudication.outcome))
-    storeFail("adjudication_unreadable");
-  if (recorded < V5_MAX_REVIEW_ROUNDS) storeFail("adjudication_before_round_limit");
-  if (adjudication.party_actor_refs?.includes(adjudication.adjudicator_actor_ref))
-    storeFail("adjudicator_is_a_party_to_the_dispute");
-}
+// Identity separation, complete finding batches, the two-round bound and the
+// adjudicator's non-party status are decided ONLY by the SECURITY DEFINER
+// functions in migration 0711, against append-only rows. An earlier revision
+// carried pure JavaScript "mirrors" of those guards that no handler called;
+// they were deleted rather than wired in, because a second copy of a gate
+// that reads caller-shaped objects is a second authority, not a check.
 
 function exactArgs(args, allowed, ToolError) {
   if (!args || typeof args !== "object" || Array.isArray(args)) throw new ToolError({ error: "invalid_arguments" });
@@ -142,12 +55,6 @@ function requireStringList(value, name, ToolError, { allowEmpty = true } = {}) {
   return value;
 }
 
-function translate(error, ToolError) {
-  if (error instanceof V5A03StoreError)
-    throw new ToolError({ error: error.code, ...error.detail });
-  throw error;
-}
-
 function resultRow(result, ToolError, error) {
   const row = result.rows[0];
   if (!row) throw new ToolError({ error });
@@ -161,7 +68,7 @@ export function completeSetReviewA03StoreTools({ withEnvelope, writeEvent, ToolE
   return {
     "open-complete-set-review": {
       write: true,
-      description: "Open one V5-A03 review case over an immutable delivered-set digest. The maker actor is server-derived; the caller supplies only its canonical session reference.",
+      description: "Open one V5-A03 review case over an immutable delivered-set digest. The maker actor is server-derived; the caller supplies only its canonical session reference. A change_ref that already has a case, or a digest any case has already delivered or produced, is refused: the two-round bound is per change.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
         idempotency_key: { type: "string" }, change_ref: { type: "string" },
         delivered_set_digest: { type: "string" }, maker_session_ref: { type: "string" },
@@ -214,7 +121,7 @@ export function completeSetReviewA03StoreTools({ withEnvelope, writeEvent, ToolE
 
     "record-complete-set-finding-set": {
       write: true,
-      description: "Append one review dimension's entire finding set for a numbered round, bound to the case's delivered-set digest and the authenticated reviewer participant.",
+      description: "Append one review dimension's entire finding set for a numbered round, bound to the authenticated reviewer participant and to the artifact that round reviews: the delivered-set digest in round 1, round 1's post-repair artifact digest in round 2.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
         idempotency_key: { type: "string" }, case_id: { type: "string" }, round_ordinal: { type: "integer" },
         dimension: { type: "string", enum: [...V5_REVIEW_DIMENSIONS] }, reviewer_session_ref: { type: "string" },
@@ -245,7 +152,7 @@ export function completeSetReviewA03StoreTools({ withEnvelope, writeEvent, ToolE
 
     "seal-complete-set-review-round": {
       write: true,
-      description: "Seal one complete eleven-dimension round after one batch repair and a non-weakened regression. The record layer derives prior checks and refuses gaps, drift, third rounds, or caller-supplied counts.",
+      description: "Seal one complete eleven-dimension round after one batch repair and a non-weakened regression. The record layer derives prior checks and refuses gaps, weakened checks, third rounds, or caller-supplied counts; round-2 drift (repeated finding, circular reversion, reviewer instability) is recorded and routes the case to stronger adjudication, and a clean drift-free round records pass.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
         idempotency_key: { type: "string" }, case_id: { type: "string" }, round_ordinal: { type: "integer" },
         batch_repair_digest: { type: "string" }, repaired_finding_refs: { type: "array", uniqueItems: true, items: { type: "string" } },
@@ -277,7 +184,7 @@ export function completeSetReviewA03StoreTools({ withEnvelope, writeEvent, ToolE
 
     "record-complete-set-adjudication": {
       write: true,
-      description: "After exactly two sealed rounds, append the authenticated stronger adjudicator's pass, fail, or quarantine disposition. The database refuses every party to the review and records a content digest.",
+      description: "After exactly two sealed rounds that ended unresolved or with recorded drift, append the authenticated stronger adjudicator's pass, fail, or quarantine disposition as the case outcome. The database refuses any identity holding another duty on the case, including the sealing program controller, and records a content digest.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
         idempotency_key: { type: "string" }, case_id: { type: "string" }, adjudicator_session_ref: { type: "string" },
         outcome: { type: "string", enum: [...ADJUDICATION_OUTCOMES] },

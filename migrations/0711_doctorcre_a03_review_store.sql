@@ -6,6 +6,17 @@
 -- only their own authenticated actor; review dimensions are closed; every round
 -- freezes all eleven submissions before one batch repair; regression checks may
 -- grow but never shrink; and a third round is structurally impossible.
+--
+-- THE BOUND IS PER CHANGE, NOT PER CASE. One case per change_ref and one case
+-- per delivered-set digest, ever: a new case is refused for a change that
+-- already has one, and for a digest any case has already seen as its delivered
+-- set or as a post-repair artifact. Repairs continue inside the one case;
+-- there is no supersession path, so no second two-round allowance exists.
+--
+-- EVERY PATH ENDS IN A RECORDED OUTCOME. A clean round records `pass`. Round-2
+-- drift (repeated finding, circular reversion, reviewer instability) is
+-- recorded on the round as detected and routes the case to the stronger,
+-- non-party adjudicator, whose pass/fail/quarantine is recorded as the outcome.
 
 do $preconditions$
 declare missing text[] := array[]::text[]; name text;
@@ -32,7 +43,7 @@ declare found text[] := array[]::text[]; name text;
 begin
   foreach name in array array[
     'ops.v5_a03_review_case','ops.v5_a03_review_participant','ops.v5_a03_finding_set',
-    'ops.v5_a03_review_round','ops.v5_a03_adjudication'
+    'ops.v5_a03_review_round','ops.v5_a03_adjudication','ops.v5_a03_case_outcome'
   ] loop
     if to_regclass(name) is not null then found := found || name; end if;
   end loop;
@@ -56,6 +67,17 @@ create function ops.v5_a03_review_roles()
 returns text[] language sql immutable set search_path=pg_catalog
 as $$ select array['adjudicator','architect','builder','deployment_controller',
   'integration_controller','program_controller','reviewer']::text[] $$;
+
+create function ops.v5_a03_round_detections()
+returns text[] language sql immutable set search_path=pg_catalog
+as $$ select array['circular_reversion','repeated_finding','reviewer_instability']::text[] $$;
+
+create function ops.v5_a03_detections_valid(value text[])
+returns boolean language sql immutable set search_path=pg_catalog,ops
+as $$
+  select value is not null and value <@ ops.v5_a03_round_detections()
+    and value=coalesce((select array_agg(distinct item order by item) from unnest(value) item),array[]::text[])
+$$;
 
 create function ops.v5_a03_is_sha256_ref(value text)
 returns boolean language sql immutable set search_path=pg_catalog
@@ -86,11 +108,16 @@ as $$
     and value=coalesce((select array_agg(distinct item order by item) from unnest(value) item),array[]::text[])
 $$;
 
+-- The adjudicator opposes EVERY other duty: the stronger judge is a non-party
+-- to the case, so no maker, reviewer, architect, controller or releaser
+-- identity (actor or session) may also hold the adjudicator seat.
 create function ops.v5_a03_roles_oppose(left_role text, right_role text)
 returns boolean language sql immutable set search_path=pg_catalog
 as $$
   select least(left_role,right_role)||'|'||greatest(left_role,right_role)=any(array[
-    'adjudicator|builder','adjudicator|reviewer','architect|reviewer',
+    'adjudicator|architect','adjudicator|builder','adjudicator|deployment_controller',
+    'adjudicator|integration_controller','adjudicator|program_controller','adjudicator|reviewer',
+    'architect|reviewer',
     'builder|deployment_controller','builder|integration_controller','builder|program_controller',
     'builder|reviewer','deployment_controller|reviewer','program_controller|reviewer'
   ]::text[])
@@ -107,7 +134,11 @@ create table ops.v5_a03_review_case (
   created_at timestamptz not null default now(),
   constraint v5_a03_review_case_pk primary key(id),
   constraint v5_a03_review_case_idem unique(idempotency_key),
-  constraint v5_a03_review_case_identity unique(tenant,change_ref,delivered_set_digest),
+  -- One case per change and one case per delivered set, ever: a change_ref
+  -- rename cannot buy a fresh two-round allowance for the same artifact, and
+  -- a fresh digest cannot buy one for the same change.
+  constraint v5_a03_review_case_one_per_change unique(tenant,change_ref),
+  constraint v5_a03_review_case_one_per_delivered_set unique(tenant,delivered_set_digest),
   constraint v5_a03_review_case_actor_fk foreign key(maker_actor_id) references public.actor(id),
   constraint v5_a03_review_case_tenant check(tenant=ops.v5_a03_tenant()),
   constraint v5_a03_review_case_change check(ops.v5_a03_is_ref(change_ref)),
@@ -177,6 +208,7 @@ create table ops.v5_a03_review_round (
   checks_executed text[] not null,
   post_repair_artifact_digest text not null,
   state text not null,
+  detections text[] not null,
   sealed_by_actor_id uuid not null,
   idempotency_key uuid not null,
   created_at timestamptz not null default now(),
@@ -191,7 +223,9 @@ create table ops.v5_a03_review_round (
   constraint v5_a03_review_round_suite check(ops.v5_a03_is_ref(regression_suite_ref)),
   constraint v5_a03_review_round_checks check(ops.v5_a03_checks_sorted_unique(checks_executed)),
   constraint v5_a03_review_round_artifact check(ops.v5_a03_is_sha256_ref(post_repair_artifact_digest)),
-  constraint v5_a03_review_round_state check(state in ('changes_required','no_changes_required'))
+  constraint v5_a03_review_round_state check(state in ('changes_required','no_changes_required')),
+  constraint v5_a03_review_round_detections check(
+    ops.v5_a03_detections_valid(detections) and (round_ordinal=2 or cardinality(detections)=0))
 );
 
 create table ops.v5_a03_adjudication (
@@ -213,16 +247,37 @@ create table ops.v5_a03_adjudication (
   constraint v5_a03_adjudication_digest check(ops.v5_a03_is_sha256_ref(receipt_digest))
 );
 
+create table ops.v5_a03_case_outcome (
+  id uuid not null default gen_random_uuid(),
+  case_id uuid not null,
+  outcome text not null,
+  decided_by text not null,
+  round_id uuid,
+  adjudication_id uuid,
+  created_at timestamptz not null default now(),
+  constraint v5_a03_case_outcome_pk primary key(id),
+  constraint v5_a03_case_outcome_one unique(case_id),
+  constraint v5_a03_case_outcome_case_fk foreign key(case_id) references ops.v5_a03_review_case(id),
+  constraint v5_a03_case_outcome_round_fk foreign key(round_id) references ops.v5_a03_review_round(id),
+  constraint v5_a03_case_outcome_adjudication_fk foreign key(adjudication_id) references ops.v5_a03_adjudication(id),
+  constraint v5_a03_case_outcome_value check(outcome in ('pass','fail','quarantine')),
+  constraint v5_a03_case_outcome_source check(
+    (decided_by='clean_round' and outcome='pass' and round_id is not null and adjudication_id is null)
+    or (decided_by='stronger_adjudication' and adjudication_id is not null and round_id is null))
+);
+
 comment on table ops.v5_a03_review_case is
-  'One immutable delivered-set review identity. The maker actor is server-derived; current status is projected from append-only rounds and adjudication.';
+  'One immutable delivered-set review identity, at most one per change and one per delivered set. The maker actor is server-derived; current status is projected from append-only rounds and the recorded outcome.';
 comment on table ops.v5_a03_review_participant is
-  'Authenticated actors register only their own duty/session. Opposing role/session reuse is refused by the writer.';
+  'Authenticated actors register only their own duty/session. Opposing role/session reuse is refused by the writer; the adjudicator opposes every other duty.';
 comment on table ops.v5_a03_finding_set is
-  'One complete dimension submission before repair, bound to the immutable delivered-set digest.';
+  'One complete dimension submission before repair: round 1 bound to the delivered-set digest, round 2 bound to round 1''s post-repair artifact digest.';
 comment on table ops.v5_a03_review_round is
-  'One sealed eleven-dimension round with the full repaired finding set and non-weakened regression evidence; maximum two.';
+  'One sealed eleven-dimension round with the full repaired finding set, non-weakened regression evidence, and any round-2 drift recorded as detected; maximum two.';
 comment on table ops.v5_a03_adjudication is
-  'The one stronger-adjudicator disposition after two unresolved rounds, stored with content digest.';
+  'The one non-party stronger-adjudicator disposition after two unresolved rounds, stored with content digest.';
+comment on table ops.v5_a03_case_outcome is
+  'The one recorded end of a case: pass from a clean drift-free round, or the stronger adjudicator''s pass/fail/quarantine.';
 
 create function ops.v5_a03_rows_immutable()
 returns trigger language plpgsql set search_path=pg_catalog
@@ -248,6 +303,48 @@ create trigger v5_a03_adjudication_immutable before update or delete on ops.v5_a
 for each row execute function ops.v5_a03_rows_immutable();
 create trigger v5_a03_adjudication_truncate_immutable before truncate on ops.v5_a03_adjudication
 for each statement execute function ops.v5_a03_rows_immutable();
+create trigger v5_a03_case_outcome_immutable before update or delete on ops.v5_a03_case_outcome
+for each row execute function ops.v5_a03_rows_immutable();
+create trigger v5_a03_case_outcome_truncate_immutable before truncate on ops.v5_a03_case_outcome
+for each statement execute function ops.v5_a03_rows_immutable();
+
+create function ops.v5_a03_case_status(p_case_id uuid)
+returns text language sql stable set search_path=pg_catalog,ops
+as $$
+  select case
+    when exists(select 1 from ops.v5_a03_case_outcome o where o.case_id=p_case_id) then 'concluded'
+    when exists(select 1 from ops.v5_a03_review_round r where r.case_id=p_case_id and r.round_ordinal=2)
+      then 'awaiting_stronger_adjudication'
+    else 'open' end
+$$;
+
+-- A concluded case accepts no further participant, submission, round or
+-- adjudication. Adjudicated cases keep their historical reason code.
+create function ops.v5_a03_assert_case_open(p_case_id uuid)
+returns void language plpgsql stable set search_path=pg_catalog,ops
+as $$
+begin
+  if exists(select 1 from ops.v5_a03_adjudication a where a.case_id=p_case_id) then
+    raise exception 'v5_a03_review_round_reopened_after_adjudication';
+  end if;
+  if exists(select 1 from ops.v5_a03_case_outcome o where o.case_id=p_case_id) then
+    raise exception 'v5_a03_case_concluded';
+  end if;
+end
+$$;
+
+-- The artifact a round reviews: round 1 reviews the delivered set; round 2
+-- reviews what round 1's batch repair produced.
+create function ops.v5_a03_round_subject_digest(p_case_id uuid, p_round_ordinal integer)
+returns text language sql stable set search_path=pg_catalog,ops
+as $$
+  select case when p_round_ordinal=1 then
+      (select c.delivered_set_digest from ops.v5_a03_review_case c where c.id=p_case_id)
+    else
+      (select r.post_repair_artifact_digest from ops.v5_a03_review_round r
+        where r.case_id=p_case_id and r.round_ordinal=p_round_ordinal-1)
+    end
+$$;
 
 create function ops.v5_a03_open_review_case(
   p_change_ref text,p_delivered_set_digest text,p_maker_session_ref text,
@@ -255,7 +352,7 @@ create function ops.v5_a03_open_review_case(
 returns table(case_id uuid,status text)
 language plpgsql security definer set search_path=pg_catalog,ops,public
 as $$
-declare made uuid;
+declare made uuid; existing ops.v5_a03_review_case%rowtype;
 begin
   if not ops.v5_a03_is_ref(p_change_ref) or not ops.v5_a03_is_sha256_ref(p_delivered_set_digest)
      or not ops.v5_a03_is_session_ref(p_maker_session_ref) then
@@ -263,17 +360,37 @@ begin
   end if;
   perform 1 from public.actor where id=p_actor_id and active for key share;
   if not found then raise exception 'v5_a03_maker_actor_current'; end if;
+  -- One lock for every case-binding decision (open here, post-repair digests in
+  -- seal), so two writers cannot both see a change or digest as unbound.
+  perform pg_advisory_xact_lock(hashtextextended('v5-a03-case-binding',0));
+  select * into existing from ops.v5_a03_review_case c where c.idempotency_key=p_idempotency_key;
+  if found then
+    if existing.change_ref is distinct from p_change_ref
+       or existing.delivered_set_digest is distinct from p_delivered_set_digest
+       or existing.maker_session_ref is distinct from p_maker_session_ref
+       or existing.maker_actor_id is distinct from p_actor_id then
+      raise exception 'v5_a03_idempotency_key_reused';
+    end if;
+    return query select existing.id,ops.v5_a03_case_status(existing.id);
+    return;
+  end if;
+  if exists(select 1 from ops.v5_a03_review_case c
+     where c.tenant=ops.v5_a03_tenant() and c.change_ref=p_change_ref) then
+    raise exception 'v5_a03_change_already_under_review';
+  end if;
+  if exists(select 1 from ops.v5_a03_review_case c
+       where c.tenant=ops.v5_a03_tenant() and c.delivered_set_digest=p_delivered_set_digest)
+     or exists(select 1 from ops.v5_a03_review_round r
+       where r.post_repair_artifact_digest=p_delivered_set_digest) then
+    raise exception 'v5_a03_delivered_set_already_under_review';
+  end if;
   insert into ops.v5_a03_review_case
     (tenant,change_ref,delivered_set_digest,maker_actor_id,maker_session_ref,idempotency_key)
   values(ops.v5_a03_tenant(),p_change_ref,p_delivered_set_digest,p_actor_id,p_maker_session_ref,p_idempotency_key)
-  on conflict(idempotency_key) do nothing returning id into made;
-  if made is null then
-    select id into made from ops.v5_a03_review_case where idempotency_key=p_idempotency_key;
-  end if;
+  returning id into made;
   insert into ops.v5_a03_review_participant
     (case_id,role,dimension,actor_id,session_ref,context_binding,idempotency_key)
-  values(made,'builder',null,p_actor_id,p_maker_session_ref,null,p_idempotency_key)
-  on conflict(idempotency_key) do nothing;
+  values(made,'builder',null,p_actor_id,p_maker_session_ref,null,p_idempotency_key);
   return query select made,'open'::text;
 end
 $$;
@@ -289,9 +406,7 @@ begin
   perform pg_advisory_xact_lock(hashtextextended('v5-a03-case:'||p_case_id::text,0));
   select * into v_case from ops.v5_a03_review_case where id=p_case_id for key share;
   if not found then raise exception 'v5_a03_case_not_found'; end if;
-  if exists(select 1 from ops.v5_a03_adjudication where case_id=p_case_id) then
-    raise exception 'v5_a03_review_round_reopened_after_adjudication';
-  end if;
+  perform ops.v5_a03_assert_case_open(p_case_id);
   perform 1 from public.actor where id=p_actor_id and active for key share;
   if not found then raise exception 'v5_a03_participant_actor_current'; end if;
   if p_role is null or not (p_role=any(ops.v5_a03_review_roles())) or p_role='builder'
@@ -334,15 +449,17 @@ begin
   perform pg_advisory_xact_lock(hashtextextended('v5-a03-case:'||p_case_id::text,0));
   select * into v_case from ops.v5_a03_review_case where id=p_case_id for key share;
   if not found then raise exception 'v5_a03_case_not_found'; end if;
-  if exists(select 1 from ops.v5_a03_adjudication where case_id=p_case_id) then
-    raise exception 'v5_a03_review_round_reopened_after_adjudication';
-  end if;
+  perform ops.v5_a03_assert_case_open(p_case_id);
   select count(*) into v_round_count from ops.v5_a03_review_round where case_id=p_case_id;
   if p_round_ordinal>2 or p_round_ordinal<>v_round_count+1 then
     raise exception 'v5_a03_review_round_limit_exhausted';
   end if;
-  if p_reviewed_set_digest is distinct from v_case.delivered_set_digest then
+  if p_round_ordinal=1 and p_reviewed_set_digest is distinct from v_case.delivered_set_digest then
     raise exception 'v5_a03_review_scope_narrower_than_delivered_set';
+  end if;
+  if p_round_ordinal=2
+     and p_reviewed_set_digest is distinct from ops.v5_a03_round_subject_digest(p_case_id,2) then
+    raise exception 'v5_a03_review_not_bound_to_repaired_artifact';
   end if;
   if p_state is distinct from 'submitted' or p_enumerated_before_repair is distinct from true
      or not ops.v5_a03_refs_sorted_unique(p_finding_refs,true) then
@@ -368,19 +485,18 @@ create function ops.v5_a03_seal_review_round(
   p_case_id uuid,p_round_ordinal integer,p_batch_repair_digest text,p_repaired_finding_refs text[],
   p_regression_suite_ref text,p_checks_executed text[],p_post_repair_artifact_digest text,
   p_state text,p_idempotency_key uuid,p_actor_id uuid)
-returns table(round_id uuid,round_ordinal integer,state text)
+returns table(round_id uuid,round_ordinal integer,state text,detections text[],case_status text)
 language plpgsql security definer set search_path=pg_catalog,ops,public
 as $$
 declare v_case ops.v5_a03_review_case%rowtype; v_round_count integer; v_dimension_count integer;
-        v_repaired text[]; v_prior_checks text[]; v_expected_state text; made uuid;
+        v_subject text; v_repaired text[]; v_prior_checks text[]; v_expected_state text;
+        v_rejected text[]; v_detections text[]:=array[]::text[]; made uuid;
 begin
   perform pg_advisory_xact_lock(hashtextextended('v5-a03-case:'||p_case_id::text,0));
   select * into v_case from ops.v5_a03_review_case where id=p_case_id for key share;
   if not found then raise exception 'v5_a03_case_not_found'; end if;
-  if exists(select 1 from ops.v5_a03_adjudication where case_id=p_case_id) then
-    raise exception 'v5_a03_review_round_reopened_after_adjudication';
-  end if;
-  select count(*) into v_round_count from ops.v5_a03_review_round where case_id=p_case_id;
+  perform ops.v5_a03_assert_case_open(p_case_id);
+  select count(*) into v_round_count from ops.v5_a03_review_round rr where rr.case_id=p_case_id;
   if p_round_ordinal>2 or p_round_ordinal<>v_round_count+1 then
     raise exception 'v5_a03_review_round_limit_exhausted';
   end if;
@@ -392,10 +508,12 @@ begin
   if v_dimension_count<>cardinality(ops.v5_a03_review_dimensions()) then
     raise exception 'v5_a03_finding_set_dimension_absent';
   end if;
+  v_subject:=ops.v5_a03_round_subject_digest(p_case_id,p_round_ordinal);
   if exists(select 1 from ops.v5_a03_finding_set fs
      where fs.case_id=p_case_id and fs.round_ordinal=p_round_ordinal
-       and fs.reviewed_set_digest is distinct from v_case.delivered_set_digest) then
-    raise exception 'v5_a03_review_scope_narrower_than_delivered_set';
+       and fs.reviewed_set_digest is distinct from v_subject) then
+    if p_round_ordinal=1 then raise exception 'v5_a03_review_scope_narrower_than_delivered_set'; end if;
+    raise exception 'v5_a03_review_not_bound_to_repaired_artifact';
   end if;
   select coalesce(array_agg(distinct finding order by finding),array[]::text[]) into v_repaired
     from ops.v5_a03_finding_set submission
@@ -410,43 +528,70 @@ begin
      or not ops.v5_a03_is_sha256_ref(p_post_repair_artifact_digest) then
     raise exception 'v5_a03_regression_invalid';
   end if;
+  v_expected_state:=case when cardinality(v_repaired)>0 then 'changes_required' else 'no_changes_required' end;
+  if p_state is distinct from v_expected_state then raise exception 'v5_a03_round_state_mismatch'; end if;
+  -- A post-repair artifact belongs to this case alone: another case may not
+  -- have delivered it or produced it, or a rename could inherit a clean slate.
+  perform pg_advisory_xact_lock(hashtextextended('v5-a03-case-binding',0));
+  if exists(select 1 from ops.v5_a03_review_case other
+       where other.id<>p_case_id and other.delivered_set_digest=p_post_repair_artifact_digest)
+     or exists(select 1 from ops.v5_a03_review_round other
+       where other.case_id<>p_case_id and other.post_repair_artifact_digest=p_post_repair_artifact_digest) then
+    raise exception 'v5_a03_artifact_bound_to_other_case';
+  end if;
   if p_round_ordinal>1 then
-    select checks_executed into v_prior_checks from ops.v5_a03_review_round rr
+    -- Test weakening stays a refusal: the sealer can always re-run the
+    -- superset, so refusing it never strands the case.
+    select rr.checks_executed into v_prior_checks from ops.v5_a03_review_round rr
      where rr.case_id=p_case_id and rr.round_ordinal=p_round_ordinal-1 for key share;
     if not coalesce(v_prior_checks <@ p_checks_executed,false) then
       raise exception 'v5_a03_test_weakening';
     end if;
+    -- The three drifts below are DETECTED AND RECORDED, never refused: a
+    -- refusal here would leave the case open forever. They route the case to
+    -- the stronger adjudicator instead.
     if exists(
       select 1 from ops.v5_a03_review_round prior
       where prior.case_id=p_case_id and prior.round_ordinal<p_round_ordinal
-        and exists(select 1 from unnest(prior.repaired_finding_refs) old_ref where old_ref=any(v_repaired))
-    ) then raise exception 'v5_a03_repeated_finding'; end if;
-    if exists(select 1 from ops.v5_a03_review_round prior
-      where prior.case_id=p_case_id and prior.post_repair_artifact_digest=p_post_repair_artifact_digest) then
-      raise exception 'v5_a03_circular_reversion';
+        and prior.repaired_finding_refs && v_repaired
+    ) then v_detections:=v_detections||'repeated_finding'::text; end if;
+    -- A digest is rejected once a round reviewed it and required changes.
+    select coalesce(array_agg(ops.v5_a03_round_subject_digest(p_case_id,prior.round_ordinal)),array[]::text[])
+      into v_rejected
+      from ops.v5_a03_review_round prior
+     where prior.case_id=p_case_id and prior.round_ordinal<p_round_ordinal and prior.state='changes_required';
+    if v_expected_state='changes_required' then v_rejected:=v_rejected||v_subject; end if;
+    if p_post_repair_artifact_digest=any(v_rejected) then
+      v_detections:=v_detections||'circular_reversion'::text;
     end if;
+    -- Instability is one reviewer giving both answers for one dimension on
+    -- the SAME artifact. A reviewer who found F1, saw it repaired, and then
+    -- found nothing on the repaired artifact is the honest path, not this.
     if exists(
       select 1
         from ops.v5_a03_finding_set current_set
         join ops.v5_a03_review_participant current_reviewer on current_reviewer.id=current_set.reviewer_participant_id
         join ops.v5_a03_finding_set prior_set on prior_set.case_id=current_set.case_id
           and prior_set.dimension=current_set.dimension and prior_set.round_ordinal<current_set.round_ordinal
+          and prior_set.reviewed_set_digest=current_set.reviewed_set_digest
         join ops.v5_a03_review_participant prior_reviewer on prior_reviewer.id=prior_set.reviewer_participant_id
        where current_set.case_id=p_case_id and current_set.round_ordinal=p_round_ordinal
          and current_reviewer.actor_id=prior_reviewer.actor_id
          and (cardinality(current_set.finding_refs)>0)<>(cardinality(prior_set.finding_refs)>0)
-    ) then raise exception 'v5_a03_reviewer_instability'; end if;
+    ) then v_detections:=v_detections||'reviewer_instability'::text; end if;
+    v_detections:=coalesce((select array_agg(item order by item) from unnest(v_detections) item),array[]::text[]);
   end if;
-  v_expected_state:=case when cardinality(v_repaired)>0 then 'changes_required' else 'no_changes_required' end;
-  if p_state is distinct from v_expected_state then raise exception 'v5_a03_round_state_mismatch'; end if;
   insert into ops.v5_a03_review_round
     (case_id,round_ordinal,batch_repair_digest,repaired_finding_refs,regression_suite_ref,
-     checks_executed,post_repair_artifact_digest,state,sealed_by_actor_id,idempotency_key)
+     checks_executed,post_repair_artifact_digest,state,detections,sealed_by_actor_id,idempotency_key)
   values(p_case_id,p_round_ordinal,p_batch_repair_digest,p_repaired_finding_refs,p_regression_suite_ref,
-    p_checks_executed,p_post_repair_artifact_digest,p_state,p_actor_id,p_idempotency_key)
-  on conflict(idempotency_key) do nothing returning id into made;
-  if made is null then select id into made from ops.v5_a03_review_round where idempotency_key=p_idempotency_key; end if;
-  return query select made,p_round_ordinal,p_state;
+    p_checks_executed,p_post_repair_artifact_digest,p_state,v_detections,p_actor_id,p_idempotency_key)
+  returning id into made;
+  if p_state='no_changes_required' and cardinality(v_detections)=0 then
+    insert into ops.v5_a03_case_outcome(case_id,outcome,decided_by,round_id,adjudication_id)
+    values(p_case_id,'pass','clean_round',made,null);
+  end if;
+  return query select made,p_round_ordinal,p_state,v_detections,ops.v5_a03_case_status(p_case_id);
 end
 $$;
 
@@ -457,6 +602,7 @@ returns table(adjudication_id uuid,receipt_digest text,outcome text)
 language plpgsql security definer set search_path=pg_catalog,ops,public
 as $$
 declare v_case ops.v5_a03_review_case%rowtype; v_participant uuid; v_round_count integer;
+        v_round_two ops.v5_a03_review_round%rowtype;
         v_receipt jsonb; v_digest text; v_outcome text; made uuid;
 begin
   perform pg_advisory_xact_lock(hashtextextended('v5-a03-case:'||p_case_id::text,0));
@@ -464,22 +610,24 @@ begin
   if not found then raise exception 'v5_a03_case_not_found'; end if;
   select count(*) into v_round_count from ops.v5_a03_review_round where case_id=p_case_id;
   if v_round_count<>2 then raise exception 'v5_a03_adjudication_before_round_limit'; end if;
-  if not exists(select 1 from ops.v5_a03_review_round where case_id=p_case_id and round_ordinal=2 and state='changes_required') then
+  select * into v_round_two from ops.v5_a03_review_round rr where rr.case_id=p_case_id and rr.round_ordinal=2;
+  if v_round_two.state<>'changes_required' and cardinality(v_round_two.detections)=0 then
     raise exception 'v5_a03_adjudication_without_dispute';
   end if;
   if p_outcome not in ('pass','fail','quarantine')
      or not ops.v5_a03_refs_sorted_unique(p_disputed_finding_refs,false) then
     raise exception 'v5_a03_adjudication_invalid';
   end if;
-  if exists(select 1 from ops.v5_a03_adjudication where case_id=p_case_id) then
-    raise exception 'v5_a03_review_round_reopened_after_adjudication';
-  end if;
+  perform ops.v5_a03_assert_case_open(p_case_id);
   select id into v_participant from ops.v5_a03_review_participant
    where case_id=p_case_id and role='adjudicator' and actor_id=p_actor_id
      and session_ref=p_adjudicator_session_ref for key share;
   if v_participant is null then raise exception 'v5_a03_adjudicator_not_registered'; end if;
+  -- Non-party: no identity holding ANY other duty on this case, including the
+  -- program controller who sealed the rounds (a seal requires that duty's
+  -- participant row), may adjudicate it.
   if exists(select 1 from ops.v5_a03_review_participant party
-    where party.case_id=p_case_id and party.role in ('builder','reviewer','deployment_controller')
+    where party.case_id=p_case_id and party.role<>'adjudicator'
       and (party.actor_id=p_actor_id or party.session_ref=p_adjudicator_session_ref)) then
     raise exception 'v5_a03_adjudicator_is_a_party';
   end if;
@@ -491,6 +639,7 @@ begin
   v_receipt:=jsonb_build_object(
     'kind','adjudication','case_id',p_case_id,'change_ref',v_case.change_ref,
     'delivered_set_digest',v_case.delivered_set_digest,'rounds_completed',2,
+    'round_two_state',v_round_two.state,'round_two_detections',to_jsonb(v_round_two.detections),
     'adjudicator_actor_id',p_actor_id,'adjudicator_session_ref',p_adjudicator_session_ref,
     'outcome',p_outcome,'disputed_finding_refs',to_jsonb(p_disputed_finding_refs));
   v_digest:='sha256:'||encode(public.digest(convert_to(ops.portfolio_canonical_json(v_receipt),'UTF8'),'sha256'),'hex');
@@ -498,11 +647,9 @@ begin
   insert into ops.v5_a03_adjudication
     (case_id,adjudicator_participant_id,outcome,disputed_finding_refs,receipt_digest,idempotency_key)
   values(p_case_id,v_participant,p_outcome,p_disputed_finding_refs,v_digest,p_idempotency_key)
-  on conflict(idempotency_key) do nothing returning id into made;
-  if made is null then
-    select a.id,a.receipt_digest,a.outcome into made,v_digest,v_outcome
-      from ops.v5_a03_adjudication a where idempotency_key=p_idempotency_key;
-  end if;
+  returning id into made;
+  insert into ops.v5_a03_case_outcome(case_id,outcome,decided_by,round_id,adjudication_id)
+  values(p_case_id,p_outcome,'stronger_adjudication',null,made);
   return query select made,v_digest,v_outcome;
 end
 $$;
@@ -514,11 +661,9 @@ as $$
     'case_id',c.id,'tenant',c.tenant,'change_ref',c.change_ref,
     'delivered_set_digest',c.delivered_set_digest,
     'maker',jsonb_build_object('actor_ref','actor:'||maker.slug,'session_ref',c.maker_session_ref),
-    'status',case
-      when adjudication.id is not null then 'adjudicated'
-      when last_round.round_ordinal=2 and last_round.state='no_changes_required' then 'reviewed_no_changes_required'
-      when last_round.round_ordinal=2 then 'awaiting_stronger_adjudication'
-      else 'open' end,
+    'status',ops.v5_a03_case_status(c.id),
+    'outcome',case when outcome.id is null then null else jsonb_build_object(
+      'outcome',outcome.outcome,'decided_by',outcome.decided_by,'created_at',outcome.created_at) end,
     'participants',coalesce((select jsonb_agg(jsonb_build_object(
       'participant_id',p.id,'role',p.role,'dimension',p.dimension,'actor_ref','actor:'||a.slug,
       'session_ref',p.session_ref,'context_binding',p.context_binding,'created_at',p.created_at) order by p.role,p.dimension,p.created_at,p.id)
@@ -533,7 +678,7 @@ as $$
       'round_id',r.id,'round_ordinal',r.round_ordinal,'batch_repair_digest',r.batch_repair_digest,
       'repaired_finding_refs',to_jsonb(r.repaired_finding_refs),'regression_suite_ref',r.regression_suite_ref,
       'checks_executed',to_jsonb(r.checks_executed),'post_repair_artifact_digest',r.post_repair_artifact_digest,
-      'state',r.state,'created_at',r.created_at) order by r.round_ordinal)
+      'state',r.state,'detections',to_jsonb(r.detections),'created_at',r.created_at) order by r.round_ordinal)
       from ops.v5_a03_review_round r where r.case_id=c.id),'[]'::jsonb),
     'adjudication',case when adjudication.id is null then null else jsonb_build_object(
       'adjudication_id',adjudication.id,'outcome',adjudication.outcome,
@@ -543,20 +688,23 @@ as $$
   )
   from ops.v5_a03_review_case c
   join public.actor maker on maker.id=c.maker_actor_id
-  left join lateral(select * from ops.v5_a03_review_round r where r.case_id=c.id order by r.round_ordinal desc limit 1) last_round on true
   left join ops.v5_a03_adjudication adjudication on adjudication.case_id=c.id
+  left join ops.v5_a03_case_outcome outcome on outcome.case_id=c.id
   where c.id=p_case_id
 $$;
 
 revoke all on table ops.v5_a03_review_case,ops.v5_a03_review_participant,
-  ops.v5_a03_finding_set,ops.v5_a03_review_round,ops.v5_a03_adjudication
+  ops.v5_a03_finding_set,ops.v5_a03_review_round,ops.v5_a03_adjudication,ops.v5_a03_case_outcome
   from public,carr_reader,carr_writer,carr_authority;
 
 revoke all on function
   ops.v5_a03_tenant(),ops.v5_a03_review_dimensions(),ops.v5_a03_review_roles(),
+  ops.v5_a03_round_detections(),ops.v5_a03_detections_valid(text[]),
   ops.v5_a03_is_sha256_ref(text),ops.v5_a03_is_ref(text),ops.v5_a03_is_session_ref(text),
   ops.v5_a03_refs_sorted_unique(text[],boolean),ops.v5_a03_checks_sorted_unique(text[]),
   ops.v5_a03_roles_oppose(text,text),ops.v5_a03_rows_immutable(),
+  ops.v5_a03_case_status(uuid),ops.v5_a03_assert_case_open(uuid),
+  ops.v5_a03_round_subject_digest(uuid,integer),
   ops.v5_a03_open_review_case(text,text,text,uuid,uuid),
   ops.v5_a03_record_participant(uuid,text,text,text,text,uuid,uuid),
   ops.v5_a03_record_finding_set(uuid,integer,text,text,text,text,text[],boolean,uuid,uuid),
