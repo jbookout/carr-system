@@ -116,6 +116,7 @@ import {
   REGISTRY_V83_VERSION,
   REGISTRY_V84_VERSION,
   REGISTRY_V85_VERSION,
+  REGISTRY_V86_VERSION,
   NOTIFICATION_PREFERENCES_FORWARD_DB_CATALOG_BASELINE,
   SESSION_IDENTITY_FORWARD_DB_CATALOG_BASELINE,
   DISPATCH_SPINE_FORWARD_DB_CATALOG_BASELINE,
@@ -1691,9 +1692,9 @@ test("v33 seals the notification preference pair and preserves v32", () => {
   // The complete generated frontier now includes the provisional v85 successor;
   // 0527 remains handwritten and does not move that count.
   assert.equal(Object.keys(renderGeneratedFrontier())
-    .filter(path => path.startsWith("migrations/")).length, 91);
+    .filter(path => path.startsWith("migrations/")).length, 92);
   assert.equal(Object.keys(renderGeneratedFrontier())
-    .filter(path => path.startsWith("mcp-server/src/")).length, 82);
+    .filter(path => path.startsWith("mcp-server/src/")).length, 83);
 });
 
 test("v34 seals the session identity read pair and preserves v33", () => {
@@ -2946,14 +2947,14 @@ test("the v36 successor preserves the exact v35 seal and measures both catalog p
 });
 
 test("the complete source-only frontier is byte-reproducible from frozen inputs", () => {
-  assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS, REGISTRY_V85_VERSION), true);
+  assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS, REGISTRY_V86_VERSION), true);
   const paths = assertGeneratedFrontierMatchesCommitted();
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
-  assert.equal(migrations.length, 91);
+  assert.equal(migrations.length, 92);
   assert.deepEqual(migrations.map(path => path.match(/migrations\/(\d{4})_/)[1]),
-    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545", "0547", "0548", "0549", "0550", "0551", "0552", "0553", "0555", "0557", "0558", "0559", "0560", "0561", "0562", "0563", "0564", "0566", "0567", "0568", "0569", "0570", "0572", "0576", "0578", "0581", "0582", "0584", "0585", "0588", "0589", "0600", "0603", "0609", "0614", "0618", "0625", "0627", "0629", "0701", "0705", "0707", "0709", "0718", "0720", "0722"]);
-  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 82);
-  assert.equal(paths.length, 173);
+    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545", "0547", "0548", "0549", "0550", "0551", "0552", "0553", "0555", "0557", "0558", "0559", "0560", "0561", "0562", "0563", "0564", "0566", "0567", "0568", "0569", "0570", "0572", "0576", "0578", "0581", "0582", "0584", "0585", "0588", "0589", "0600", "0603", "0609", "0614", "0618", "0625", "0627", "0629", "0701", "0705", "0707", "0709", "0718", "0720", "0722", "0723"]);
+  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 83);
+  assert.equal(paths.length, 175);
   // 0502 IS DELIBERATELY ABSENT FROM THIS LIST. It is a hand-authored domain
   // migration under its own review, not a generated artifact, so nothing here
   // reproduces it byte for byte and it must not appear among the frontier's
@@ -3235,7 +3236,10 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
   // OneDrive-wake daytime retry job), a real deployed launchd entrance.
   // 40, not 39: V5-A05 adds com.carr.delivery-cadence-a05-sweep.plist, the
   // daily 07:00 cadence sweep, a deployed launchd entrance.
-  assert.equal(workflows.length, 40);
+  // 41, not 40: session-trace-archive adds com.carr.session-trace-archive.plist,
+  // the nightly local archive of CARR-scoped agent session transcripts, a
+  // deployed launchd entrance.
+  assert.equal(workflows.length, 41);
   const github = workflows.filter(row => row.source_locator.startsWith(".github/workflows/"));
   assert.equal(github.length, 7);
   assert.equal(github.every(row => row.ingress_kind === "workflow_entrypoint" &&
@@ -3249,7 +3253,8 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
   const launchd = workflows.filter(row => row.source_locator.startsWith("ops/launchd/"));
   // 32, not 31 — same #1241 addition as above.
   // 33, not 32 -- the same V5-A05 sweep plist.
-  assert.equal(launchd.length, 33);
+  // 34, not 33 -- the same session-trace-archive addition as above.
+  assert.equal(launchd.length, 34);
   // Every agent is fully identified and carries SOME physical authority ref;
   // only a DEPLOYED agent's is a service environment. Collapsing those two into
   // one clause is what would let a definition-only agent either slip through
@@ -3265,7 +3270,7 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
   // 31, not 30 — same #1241 addition: one new deployed plist, one new
   // ops.service_environment: ref (its "production" environment).
   assert.equal(launchd.flatMap(row => row.physical_authority_refs)
-    .filter(ref => ref.startsWith("ops.service_environment:")).length, 32);
+    .filter(ref => ref.startsWith("ops.service_environment:")).length, 33);
   assert.equal(launchd.find(row => row.launchd_label === "com.carr.rules-refresh")
     .physical_authority_refs.includes("ops.service_environment:rules-refresh:production"), true);
   // The definition-only agent carries an explicit non-deployed authority ref in
