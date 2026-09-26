@@ -71,6 +71,64 @@ test("V5-A04 acceptance: 150% warning and 200%/qualification-failure replan fire
   assert.deepEqual(directive(1, "qualification_failed").triggers, ["qualification_failure"]);
 });
 
+test("V5-A04 acceptance: qualification failure alone forces replan at negligible spend", () => {
+  const directive = evaluateReplan({
+    assessment: assessVariance({ expected_total_cost_units: 100, incurred_units: 1 }),
+    qualification_state: "qualification_failed",
+  });
+
+  // A route that lost its qualification replans at one percent of budget just
+  // as it does at two hundred: the trigger list alone does not pin this down,
+  // because a directive computed some other way could still land on "replan"
+  // by coincidence at this ratio. The directive itself is the acceptance
+  // clause, so it is what this test asserts.
+  assert.equal(directive.directive, "replan");
+});
+
+test("V5-A04 acceptance: qualification failure outranks a merely-warning cost ratio", () => {
+  const directive = evaluateReplan({
+    assessment: assessVariance({ expected_total_cost_units: 100, incurred_units: 150 }),
+    qualification_state: "qualification_failed",
+  });
+
+  // At exactly 150 percent the cost ratio alone would only warn. Qualification
+  // failure must still win outright and replan, not settle for whichever of
+  // the two triggers looks the more severe by cost band.
+  assert.equal(directive.directive, "replan");
+});
+
+test("V5-A04 acceptance: the 150/200 floor boundaries hold at a non-round estimate", () => {
+  const directive = (incurred) => evaluateReplan({
+    assessment: assessVariance({ expected_total_cost_units: 10001, incurred_units: incurred }),
+    qualification_state: "qualified",
+  });
+
+  // 20001 / 10001 is 199.99...%: short of 200 percent, so it must warn, not
+  // replan. 15001 / 10001 is 149.99...%: short of 150 percent, so it must
+  // continue, not warn. A ratio computed with Math.ceil instead of Math.floor
+  // rounds both of these up into the next band; this is the boundary that
+  // catches it where round numbers (100/149, 100/150) cannot.
+  assert.equal(directive(20001).directive, "warn");
+  assert.equal(directive(15001).directive, "continue");
+});
+
+test("V5-A04 acceptance: a node exactly at its ceiling is not overdrawn", () => {
+  const atCeiling = reserve(fresh(), reservation("at-ceiling", SLICE, 300));
+  assert.equal(atCeiling.outcome.accepted, true);
+
+  const projection = projectLedger(atCeiling.ledger);
+  assert.equal(projection.by_node[SLICE].breaches_own_ceiling, false);
+  assert.equal(projection.by_node[SLICE].overdrawn, false);
+  assert.equal(projection.by_node[CHILD].overdrawn, false);
+  assert.equal(projection.by_node[ROOT].overdrawn, false);
+
+  // Sitting exactly at the ceiling must not poison a sibling's reservations:
+  // if it did, that would mean "at" was silently treated as "past".
+  const siblingReserve = reserve(atCeiling.ledger, reservation("sibling-at-ceiling", SIBLING, 1));
+  assert.equal(siblingReserve.outcome.accepted, true);
+  assertLedgerConservation(siblingReserve.ledger);
+});
+
 test("V5-A04 acceptance: overdrawn ancestors deny new reservation", () => {
   const charged = postActual(fresh(), {
     operation_id: "op:late",
