@@ -1708,17 +1708,26 @@ def retire_primary_only_plist(filename, live, apply):
 # "RESTORE FAILED" with the manual command. Nothing is kickstarted.
 SELF_RELOAD_HANDOFF_DIR = os.path.join(HOME, ".config", "carr", "launchd-handoff")
 SELF_RELOAD_WAIT_SECONDS = 3600
+SELF_RELOAD_SHELL = "/bin/bash"
+LAUNCHCTL_BIN = "/bin/launchctl"
+SMOKE_LABEL_PREFIX = "com.carr.handoff-smoke-"
 SELF_RELOAD_SCRIPT = r"""
 pg="$1"; launchctl="$2"; domain="$3"; label="$4"; staged="$5"; dest="$6"; log="$7"; wait_max="$8"
 expected="$9"
 exec >>"$log" 2>&1
 installed_sha() {
-  if [ -e "$dest" ]; then /usr/bin/shasum -a 256 "$dest" | cut -d' ' -f1; else echo absent; fi
+  if [ ! -e "$dest" ]; then echo absent
+  elif [ -x /usr/bin/shasum ]; then /usr/bin/shasum -a 256 "$dest" | cut -d' ' -f1
+  else /usr/bin/sha256sum "$dest" | cut -d' ' -f1; fi
 }
 # Wait on the WHOLE process group (-pg), not just its leader: a wrapper that
-# has exited can leave children still running under launchd's job.
+# has exited can leave children still running under launchd's job. Spelled
+# `kill -0 -"$pg"`, never `kill -0 -- "-$pg"`: dash's builtin kill rejects
+# `--` (rc 2), which read as "the group is gone" and reloaded mid-run on the
+# Ubuntu CI runner. The helper is also started with /bin/bash explicitly, and
+# ops/config-as-code-launchd-selftest.py runs this script under bash and dash.
 waited=0
-while kill -0 -- "-$pg" 2>/dev/null; do
+while kill -0 -"$pg" 2>/dev/null; do
   waited=$((waited + 1))
   if [ "$waited" -ge "$wait_max" ]; then
     echo "self-reload $label: GAVE UP waiting for process group $pg; staged body left at $staged"
@@ -1771,7 +1780,7 @@ def installed_sha256(path):
         return "absent"
 
 
-def hand_off_self_reload(filename, dest, body, label, launchctl="/bin/launchctl"):
+def hand_off_self_reload(filename, dest, body, label, launchctl=LAUNCHCTL_BIN):
     """Stage ``body`` and start the detached one-shot; ``deferred`` or ``failed``."""
     try:
         expected = installed_sha256(dest)
@@ -1781,7 +1790,7 @@ def hand_off_self_reload(filename, dest, body, label, launchctl="/bin/launchctl"
             fh.write(body)
         log = os.path.join(SELF_RELOAD_HANDOFF_DIR, filename + ".log")
         subprocess.Popen(
-            ["/bin/sh", "-c", SELF_RELOAD_SCRIPT, "carr-self-reload",
+            [SELF_RELOAD_SHELL, "-c", SELF_RELOAD_SCRIPT, "carr-self-reload",
              str(os.getpgrp()), launchctl, f"gui/{os.getuid()}", label, staged, dest,
              log, str(SELF_RELOAD_WAIT_SECONDS), expected],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -2571,7 +2580,7 @@ def _smoke_plist(label, arguments, out_path):
 
 
 def cmd_launchd_handoff_smoke(argv):
-    label = f"com.carr.handoff-smoke-{secrets.token_hex(4)}"
+    label = f"{SMOKE_LABEL_PREFIX}{secrets.token_hex(4)}"
     domain = f"gui/{os.getuid()}"
     work = os.path.join(SELF_RELOAD_HANDOFF_DIR, label)
     dest = os.path.join(work, f"{label}.plist")
@@ -2593,7 +2602,7 @@ def cmd_launchd_handoff_smoke(argv):
             fh.write(v1)
         with open(v2_path, "w", encoding="utf-8") as fh:
             fh.write(v2)
-        boot = subprocess.run(["launchctl", "bootstrap", domain, dest],
+        boot = subprocess.run([LAUNCHCTL_BIN, "bootstrap", domain, dest],
                               capture_output=True, text=True, check=False)
         if boot.returncode != 0:
             why = f"bootstrap of the throwaway label failed: {_launchctl_detail(boot)}"
@@ -2605,7 +2614,7 @@ def cmd_launchd_handoff_smoke(argv):
             why = "the job never staged its hand-off"
             return 1
         print("  job is running and has handed off its reload; booting it out")
-        subprocess.run(["launchctl", "bootout", f"{domain}/{label}"],
+        subprocess.run([LAUNCHCTL_BIN, "bootout", f"{domain}/{label}"],
                        capture_output=True, check=False)
         deadline = time.monotonic() + 90
         while time.monotonic() < deadline:
@@ -2614,7 +2623,7 @@ def cmd_launchd_handoff_smoke(argv):
                 break
             time.sleep(1)
         logged = read(log) or ""
-        shown = subprocess.run(["launchctl", "print", f"{domain}/{label}"],
+        shown = subprocess.run([LAUNCHCTL_BIN, "print", f"{domain}/{label}"],
                                capture_output=True, text=True, check=False)
         if ("loaded the new definition" in logged and read(dest) == v2
                 and shown.returncode == 0 and "/bin/sleep" in shown.stdout):
@@ -2624,7 +2633,7 @@ def cmd_launchd_handoff_smoke(argv):
                    f"print rc {shown.returncode}")
         return verdict
     finally:
-        subprocess.run(["launchctl", "bootout", f"{domain}/{label}"],
+        subprocess.run([LAUNCHCTL_BIN, "bootout", f"{domain}/{label}"],
                        capture_output=True, check=False)
         for path in (dest, v2_path, job_out, staged, staged + ".previous", log):
             if os.path.exists(path):
@@ -2635,10 +2644,38 @@ def cmd_launchd_handoff_smoke(argv):
               f"{label} booted out and its files removed")
 
 
+def smoke_job_refusal(label, dest, v2_path, work, handoff_root=None):
+    """Why the smoke job must not act on these arguments, or None.
+
+    The job reloads a label through launchctl, so it is held to exactly the
+    throwaway it was built for: a com.carr.handoff-smoke-* label whose files
+    all sit in its own directory directly under the hand-off root."""
+    root = os.path.realpath(handoff_root or SELF_RELOAD_HANDOFF_DIR)
+    if not (isinstance(label, str) and label.startswith(SMOKE_LABEL_PREFIX)
+            and re.fullmatch(r"[A-Za-z0-9.-]+", label)
+            and len(label) > len(SMOKE_LABEL_PREFIX)):
+        return f"label {label!r} is not a {SMOKE_LABEL_PREFIX}* throwaway"
+    own = os.path.join(root, label)
+    if os.path.realpath(work) != own:
+        return f"work directory {work!r} is not {own}"
+    if os.path.realpath(dest) != os.path.join(own, f"{label}.plist"):
+        return f"plist {dest!r} is not {label}.plist inside {own}"
+    if os.path.dirname(os.path.realpath(v2_path)) != own:
+        return f"replacement body {v2_path!r} is outside {own}"
+    return None
+
+
 def cmd_launchd_handoff_smoke_job(argv):
     """Runs AS the throwaway launchd job: hand off its own reload, then keep running."""
     global SELF_RELOAD_HANDOFF_DIR
+    if len(argv) < 4:
+        print("launchd-handoff-smoke-job: REFUSED — expects label dest v2 work")
+        return 64
     label, dest, v2_path, work = argv[:4]
+    refusal = smoke_job_refusal(label, dest, v2_path, work)
+    if refusal:
+        print(f"launchd-handoff-smoke-job: REFUSED — {refusal}")
+        return 64
     SELF_RELOAD_HANDOFF_DIR = work
     outcome = hand_off_self_reload(os.path.basename(dest), dest, read(v2_path) or "", label)
     if outcome != "deferred":

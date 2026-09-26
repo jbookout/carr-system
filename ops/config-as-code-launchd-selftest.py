@@ -40,13 +40,19 @@ def check(label: str, condition: bool, detail: object = "") -> bool:
     return condition
 
 
-def _fake_launchctl(root: Path, fail_bootstrap_times: int) -> tuple[Path, Path]:
-    """A stub launchctl that records calls and fails its first N bootstraps."""
+def _fake_launchctl(root: Path, fail_bootstrap_times: int,
+                    rewrite_on_bootout: str = "") -> tuple[Path, Path]:
+    """A stub launchctl that records calls and fails its first N bootstraps.
+
+    With ``rewrite_on_bootout`` it also rewrites the installed plist during
+    bootout, the way a concurrent install landing in that gap would."""
     log, counter = root / "launchctl.log", root / "bootstrap.count"
     fake = root / "launchctl"
+    rewrite = (f"[ \"$1\" = bootout ] && printf '%s' '{rewrite_on_bootout}' > "
+               f"'{root / 'agent.plist'}'\n") if rewrite_on_bootout else ""
     fake.write_text(
         "#!/bin/sh\n"
-        f"echo \"$*\" >> '{log}'\n"
+        f"echo \"$*\" >> '{log}'\n" + rewrite +
         "if [ \"$1\" = bootstrap ]; then\n"
         f"  n=$(cat '{counter}' 2>/dev/null || echo 0); n=$((n + 1)); echo $n > '{counter}'\n"
         f"  [ $n -le {fail_bootstrap_times} ] && exit 5\n"
@@ -59,14 +65,20 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _start_helper(root: Path, pg: str, fails: int = 0, wait_max: str = "30"):
+# The helper is started with /bin/bash; it must also stay correct if a
+# platform's sh is dash, so every case below runs under each shell present.
+SHELLS = [sh for sh in ("/bin/bash", "/bin/dash") if os.path.exists(sh)]
+
+
+def _start_helper(root: Path, pg: str, fails: int = 0, wait_max: str = "30",
+                  shell: str = "/bin/bash", rewrite_on_bootout: str = ""):
     """Stage NEW over an installed OLD and start the real one-shot against it."""
-    fake, calls_log = _fake_launchctl(root, fails)
+    fake, calls_log = _fake_launchctl(root, fails, rewrite_on_bootout)
     dest, staged, log = root / "agent.plist", root / "agent.plist.staged", root / "x.log"
     dest.write_text("OLD", encoding="utf-8")
     staged.write_text("NEW", encoding="utf-8")
     helper = subprocess.Popen(
-        ["/bin/sh", "-c", mod.SELF_RELOAD_SCRIPT, "carr-self-reload", pg,
+        [shell, "-c", mod.SELF_RELOAD_SCRIPT, "carr-self-reload", pg,
          str(fake), "gui/501", "com.carr.fleet-sync", str(staged), str(dest),
          str(log), wait_max, _sha("OLD")])
     return helper, dest, log, calls_log
@@ -83,97 +95,117 @@ def _log(log: Path) -> str:
 def handoff_script_cases() -> list[bool]:
     """Run the real detached one-shot script against a stub launchctl."""
     out: list[bool] = []
+    out.append(check("the helper runs under /bin/bash and at least one shell is tested",
+                     mod.SELF_RELOAD_SHELL == "/bin/bash" and "/bin/bash" in SHELLS, SHELLS))
     finished = subprocess.Popen(["/usr/bin/true"])
     finished.wait()
     dead_pid = str(finished.pid)          # a process group that has already exited
-    for fails, expect_body, expect_log in (
-        (0, "NEW", "loaded the new definition"),
-        (1, "OLD", "restored the previous definition"),
-        (2, "OLD", "RESTORE FAILED, com.carr.fleet-sync is unloaded"),
-    ):
+    for shell in SHELLS:
+        for fails, expect_body, expect_log in (
+            (0, "NEW", "loaded the new definition"),
+            (1, "OLD", "restored the previous definition"),
+            (2, "OLD", "RESTORE FAILED, com.carr.fleet-sync is unloaded"),
+        ):
+            with tempfile.TemporaryDirectory(prefix="carr-self-reload-") as tmp:
+                helper, dest, log, calls_log = _start_helper(Path(tmp), dead_pid, fails, "5", shell=shell)
+                rc = helper.wait(timeout=60)
+                calls, text = _calls(calls_log), _log(log)
+                out.append(check(
+                    f"[{shell}] self-reload one-shot with {fails} failed bootstrap(s): body {expect_body}, "
+                    f"'{expect_log}'",
+                    dest.read_text() == expect_body and expect_log in text
+                    and (rc == 0) == (fails == 0)
+                    and calls[:2] == ["bootout gui/501/com.carr.fleet-sync",
+                                      f"bootstrap gui/501 {dest}"]
+                    and not any(c.startswith("kickstart") for c in calls)
+                    and (fails < 2 or "launchctl bootstrap gui/501" in text),
+                    (rc, dest.read_text(), text, calls),
+                ))
+
+        # THE WAIT. A live leader holds the one-shot back; its exit releases it.
         with tempfile.TemporaryDirectory(prefix="carr-self-reload-") as tmp:
-            helper, dest, log, calls_log = _start_helper(Path(tmp), dead_pid, fails, "5")
-            rc = helper.wait(timeout=60)
-            calls, text = _calls(calls_log), _log(log)
+            leader = subprocess.Popen(["/bin/sleep", "60"], start_new_session=True)
+            try:
+                helper, dest, log, calls_log = _start_helper(Path(tmp), str(leader.pid), shell=shell)
+                time.sleep(2.5)
+                held = (helper.poll() is None and _calls(calls_log) == []
+                        and dest.read_text() == "OLD")
+                leader.kill()
+                leader.wait()
+                rc = helper.wait(timeout=30)
+            finally:
+                if leader.poll() is None:
+                    leader.kill()
             out.append(check(
-                f"self-reload one-shot with {fails} failed bootstrap(s): body {expect_body}, "
-                f"'{expect_log}'",
-                dest.read_text() == expect_body and expect_log in text
-                and (rc == 0) == (fails == 0)
-                and calls[:2] == ["bootout gui/501/com.carr.fleet-sync",
-                                  f"bootstrap gui/501 {dest}"]
-                and not any(c.startswith("kickstart") for c in calls)
-                and (fails < 2 or "launchctl bootstrap gui/501" in text),
-                (rc, dest.read_text(), text, calls),
+                f"[{shell}] the one-shot does nothing while the job's leader lives, and reloads after it exits",
+                held and rc == 0 and dest.read_text() == "NEW"
+                and "loaded the new definition" in _log(log),
+                (held, _calls(calls_log), _log(log)),
             ))
 
-    # THE WAIT. A live leader holds the one-shot back; its exit releases it.
-    with tempfile.TemporaryDirectory(prefix="carr-self-reload-") as tmp:
-        leader = subprocess.Popen(["/bin/sleep", "60"], start_new_session=True)
-        try:
-            helper, dest, log, calls_log = _start_helper(Path(tmp), str(leader.pid))
-            time.sleep(2.5)
-            held = (helper.poll() is None and _calls(calls_log) == []
-                    and dest.read_text() == "OLD")
-            leader.kill()
-            leader.wait()
-            rc = helper.wait(timeout=30)
-        finally:
-            if leader.poll() is None:
-                leader.kill()
-        out.append(check(
-            "the one-shot does nothing while the job's leader lives, and reloads after it exits",
-            held and rc == 0 and dest.read_text() == "NEW"
-            and "loaded the new definition" in _log(log),
-            (held, _calls(calls_log), _log(log)),
-        ))
-
-    # THE GROUP. The leader is gone but a member of its process group is not.
-    with tempfile.TemporaryDirectory(prefix="carr-self-reload-") as tmp:
-        group = subprocess.Popen(["/bin/sh", "-c", "/bin/sleep 60 & exit 0"],
-                                 start_new_session=True)
-        group.wait()                       # leader exited; its sleep child remains
-        pgid = group.pid
-        try:
-            member_alive = subprocess.run(["/bin/kill", "-0", "--", f"-{pgid}"],
-                                          check=False).returncode == 0
-            helper, dest, log, calls_log = _start_helper(Path(tmp), str(pgid))
-            time.sleep(2.5)
-            held = (helper.poll() is None and _calls(calls_log) == []
-                    and dest.read_text() == "OLD")
-            os.killpg(pgid, signal.SIGKILL)
-            rc = helper.wait(timeout=30)
-        finally:
+        # THE GROUP. The leader is gone but a member of its process group is not.
+        with tempfile.TemporaryDirectory(prefix="carr-self-reload-") as tmp:
+            group = subprocess.Popen(["/bin/sh", "-c", "/bin/sleep 60 & exit 0"],
+                                     start_new_session=True)
+            group.wait()                       # leader exited; its sleep child remains
+            pgid = group.pid
             try:
+                member_alive = subprocess.run(["/bin/kill", "-0", "--", f"-{pgid}"],
+                                              check=False).returncode == 0
+                helper, dest, log, calls_log = _start_helper(Path(tmp), str(pgid), shell=shell)
+                time.sleep(2.5)
+                held = (helper.poll() is None and _calls(calls_log) == []
+                        and dest.read_text() == "OLD")
                 os.killpg(pgid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        out.append(check(
-            "with the leader gone, a surviving group member still holds the one-shot back",
-            member_alive and held and rc == 0 and dest.read_text() == "NEW",
-            (member_alive, held, _calls(calls_log), _log(log)),
-        ))
+                rc = helper.wait(timeout=30)
+            finally:
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            out.append(check(
+                f"[{shell}] with the leader gone, a surviving group member still holds the one-shot back",
+                member_alive and held and rc == 0 and dest.read_text() == "NEW",
+                (member_alive, held, _calls(calls_log), _log(log)),
+            ))
 
-    # A NEWER INSTALL WINS. The plist changes while the one-shot waits.
-    with tempfile.TemporaryDirectory(prefix="carr-self-reload-") as tmp:
-        leader = subprocess.Popen(["/bin/sleep", "60"], start_new_session=True)
-        try:
-            helper, dest, log, calls_log = _start_helper(Path(tmp), str(leader.pid))
-            time.sleep(1)
-            dest.write_text("NEWER", encoding="utf-8")
-            leader.kill()
-            leader.wait()
-            rc = helper.wait(timeout=30)
-        finally:
-            if leader.poll() is None:
+        # A NEWER INSTALL WINS. The plist changes while the one-shot waits.
+        with tempfile.TemporaryDirectory(prefix="carr-self-reload-") as tmp:
+            leader = subprocess.Popen(["/bin/sleep", "60"], start_new_session=True)
+            try:
+                helper, dest, log, calls_log = _start_helper(Path(tmp), str(leader.pid), shell=shell)
+                time.sleep(1)
+                dest.write_text("NEWER", encoding="utf-8")
                 leader.kill()
-        out.append(check(
-            "a plist changed after staging is never overwritten by the older staged body",
-            rc == 1 and dest.read_text() == "NEWER" and _calls(calls_log) == []
-            and "changed since staging" in _log(log)
-            and "loaded the new definition" not in _log(log),
-            (rc, dest.read_text(), _calls(calls_log), _log(log)),
-        ))
+                leader.wait()
+                rc = helper.wait(timeout=30)
+            finally:
+                if leader.poll() is None:
+                    leader.kill()
+            out.append(check(
+                f"[{shell}] a plist changed after staging is never overwritten by the older staged body",
+                rc == 1 and dest.read_text() == "NEWER" and _calls(calls_log) == []
+                and "changed since staging" in _log(log)
+                and "loaded the new definition" not in _log(log),
+                (rc, dest.read_text(), _calls(calls_log), _log(log)),
+            ))
+
+        # THE SECOND CHECK: an install that lands during bootout also wins.
+        with tempfile.TemporaryDirectory(prefix="carr-self-reload-") as tmp:
+            helper, dest, log, calls_log = _start_helper(
+                Path(tmp), dead_pid, shell=shell, rewrite_on_bootout="NEWEST")
+            rc = helper.wait(timeout=30)
+            calls = _calls(calls_log)
+            out.append(check(
+                f"[{shell}] a plist rewritten during bootout is loaded as installed, "
+                "not replaced by the staged body",
+                rc == 1 and dest.read_text() == "NEWEST"
+                and calls == ["bootout gui/501/com.carr.fleet-sync",
+                              f"bootstrap gui/501 {dest}"]
+                and "changed during bootout" in _log(log)
+                and "loaded the new definition" not in _log(log),
+                (rc, dest.read_text(), calls, _log(log)),
+            ))
     return out
 
 
@@ -263,6 +295,48 @@ def check_and_install_cases() -> list[bool]:
     return out
 
 
+def smoke_job_refusal_cases() -> list[bool]:
+    """The smoke job acts only on its own throwaway label and directory."""
+    out: list[bool] = []
+    root = "/tmp/carr-handoff-root"
+    label = "com.carr.handoff-smoke-0a1b2c3d"
+    own = f"{root}/{label}"
+    good = (label, f"{own}/{label}.plist", f"{own}/v2.plist", own)
+    out.append(check("the smoke job accepts its own throwaway label and directory",
+                     mod.smoke_job_refusal(*good, handoff_root=root) is None,
+                     mod.smoke_job_refusal(*good, handoff_root=root)))
+    for why, args in (
+        # Paths below are self-consistent with the bad label, so ONLY the
+        # label check can refuse them.
+        ("a real CARR label", ("com.carr.fleet-sync",
+                               f"{root}/com.carr.fleet-sync/com.carr.fleet-sync.plist",
+                               f"{root}/com.carr.fleet-sync/v2.plist",
+                               f"{root}/com.carr.fleet-sync")),
+        ("the bare prefix", ("com.carr.handoff-smoke-",
+                             f"{root}/com.carr.handoff-smoke-/com.carr.handoff-smoke-.plist",
+                             f"{root}/com.carr.handoff-smoke-/v2.plist",
+                             f"{root}/com.carr.handoff-smoke-")),
+        ("a label with a space", ("com.carr.handoff-smoke-a b",
+                                  f"{root}/com.carr.handoff-smoke-a b/com.carr.handoff-smoke-a b.plist",
+                                  f"{root}/com.carr.handoff-smoke-a b/v2.plist",
+                                  f"{root}/com.carr.handoff-smoke-a b")),
+        ("a label with a path in it", (label + "/../x", f"{own}/{label}.plist", f"{own}/v2.plist", own)),
+        ("a plist in LaunchAgents", (label, f"{os.path.expanduser('~')}/Library/LaunchAgents/{label}.plist",
+                                     f"{own}/v2.plist", own)),
+        ("a work dir outside the hand-off root", (label, f"{own}/{label}.plist", f"{own}/v2.plist", "/tmp")),
+        ("a traversal out of its directory", (label, f"{own}/../{label}.plist", f"{own}/v2.plist", own)),
+        ("a replacement body elsewhere", (label, f"{own}/{label}.plist", "/tmp/v2.plist", own)),
+    ):
+        out.append(check(f"the smoke job refuses {why}",
+                         mod.smoke_job_refusal(*args, handoff_root=root) is not None))
+    with contextlib.redirect_stdout(io.StringIO()) as refused_out:
+        rc = mod.cmd_launchd_handoff_smoke_job(
+            ["com.carr.fleet-sync", "/tmp/x.plist", "/tmp/v2.plist", "/tmp"])
+    out.append(check("cmd_launchd_handoff_smoke_job exits 64 on a refused label, before any hand-off",
+                     rc == 64 and "REFUSED" in refused_out.getvalue(), refused_out.getvalue()))
+    return out
+
+
 def main() -> int:
     original_run = mod.subprocess.run
     original_active = os.environ.get(mod.ACTIVE_LAUNCHD_LABEL_ENV)
@@ -322,6 +396,7 @@ def main() -> int:
                 and fleet_dest.read_text(encoding="utf-8") == old_fleet
                 and staged.read_text(encoding="utf-8") == desired_fleet
                 and len(spawned) == 1 and spawned[0][1].get("start_new_session") is True
+                and argv[0] == "/bin/bash" and argv[5] == "/bin/launchctl"
                 and argv[4] == str(os.getpgrp()) and argv[7] == fleet_label
                 and argv[8] == str(staged) and argv[9] == str(fleet_dest)
                 and argv[-1] == _sha(old_fleet)
@@ -455,6 +530,7 @@ def main() -> int:
             and plistlib.loads(converted.encode())["RunAtLoad"] is True,
             mod.refused_launchd_templates(str(repo)),
         ))
+    cases.extend(smoke_job_refusal_cases())
     cases.extend(handoff_script_cases())
     cases.extend(check_and_install_cases())
     cases.append(check(
