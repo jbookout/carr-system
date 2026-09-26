@@ -175,6 +175,18 @@ class Dispatch(unittest.TestCase):
         out = dispatch({"direct": 0.9}, flash_free=False)
         self.assertEqual((out["target"], out["subagent_model"]), (POLICY["queue_targets"]["fallback"], "haiku"))
         self.assertTrue(out["overflow"])
+        self.assertEqual(out["effort"], POLICY["overflow"]["effort"])
+
+    def test_flash_busy_never_lowers_a_code_task_off_opus(self):
+        # Code and script queue to the Opus desk; Flash being busy has nothing to do with them.
+        out = dispatch({"code": 0.9}, flash_free=False)
+        self.assertEqual((out["target"], out["subagent_model"], out["effort"]), ("claude-desktop", "opus", "high"))
+        self.assertFalse(out["overflow"])
+
+    def test_flash_busy_with_jev_down_stays_on_opus(self):
+        out = dispatch(error=TimeoutError("down"), flash_free=False)
+        self.assertEqual((out["route"], out["subagent_model"]), (POLICY["abstain_route"], "opus"))
+        self.assertFalse(out["overflow"])
 
     def test_one_dispatch_logs_one_row_with_the_pin(self):
         with tempfile.TemporaryDirectory() as d:

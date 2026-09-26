@@ -128,21 +128,27 @@ def dispatch(task, context="", *, pin=None, flash_free=True, policy=None, catalo
         raise ValueError(f"unknown pin {pin!r}; known: {', '.join(sorted(pins))}")
     row = decide(task, context, flash_free=flash_free, policy=policy, judge=judge, client=client, rng=rng,
                  log_path=None)
+    # decide() flags overflow for any route whose model is Flash, but only a route that actually queues to the Flash
+    # target is affected by Flash being busy; code and script already go to the Opus desk and keep their tier.
     routed_target = policy["queue_targets"][row["route"]]
-    if row["overflow"] and routed_target == "flash":
+    overflow = row["overflow"] and routed_target == "flash"
+    if overflow:
         routed_target = policy["queue_targets"]["fallback"]
-    routed_model = policy["overflow"]["model"] if row["overflow"] else \
-        policy["dispatch_targets"][routed_target]["subagent_model"]
+        routed_model, routed_effort = policy["overflow"]["model"], policy["overflow"]["effort"]
+    else:
+        routed_model = policy["dispatch_targets"][routed_target]["subagent_model"]
+        routed_effort = policy["dispatch_targets"][routed_target]["effort"]
     routed = {"route": row["route"], "target": routed_target, "subagent_model": routed_model}
     if pin is None:
-        target, subagent_model, reason = routed_target, routed_model, None
+        target, subagent_model, effort, reason = routed_target, routed_model, routed_effort, None
     else:
         target, reason = pins[pin]["target"], pins[pin]["reason"]
         subagent_model = policy["dispatch_targets"][target]["subagent_model"]
+        effort = policy["dispatch_targets"][target]["effort"]
     out = {"route": row["route"], "target": target, "desk": catalog["targets"][target].get("desk"),
-           "subagent_model": subagent_model, "effort": policy["dispatch_targets"][target]["effort"],
+           "subagent_model": subagent_model, "effort": effort,
            "pin": pin, "pin_reason": reason, "routed": routed, "scores": row["scores"], "fallback": row["fallback"],
-           "overflow": row["overflow"], "audit": row["audit"], "jev_error": row["jev_error"]}
+           "overflow": overflow, "audit": row["audit"], "jev_error": row["jev_error"]}
     if log_path:
         try:
             os.makedirs(os.path.dirname(log_path), exist_ok=True)

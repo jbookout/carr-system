@@ -114,6 +114,9 @@ def test_no_target_means_auto_and_a_named_target_is_kept():
     assert routed.kind == "enqueue" and routed.value["target"] == queue_grammar.AUTO_TARGET, routed
     pinned = queue_grammar.parse(turn("@queue enqueue target=sol cap=read :: Attest PR 514"), CATALOG)
     assert pinned.value["target"] == "sol", pinned
+    # Routing never widens authority: a human-only capability is refused before any target is picked.
+    human = queue_grammar.parse(turn("@queue enqueue cap=merge-approve :: Approve the merge"), CATALOG)
+    assert human.kind == "rejected", human
 
 
 def test_targets_and_status_parse_without_model():
