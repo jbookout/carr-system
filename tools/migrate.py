@@ -391,6 +391,13 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0706_amend_closed_loop.sql",
         "0707_amend_closed_loop_scac_successor.sql",
     ),
+    # V5-A01: 0709 installs the append-only six-layer assurance-health
+    # evidence store plus its SECURITY DEFINER record/read doors; 0710 seals
+    # those grants and the two registered MCP verbs as provisional SCAC v82.
+    (
+        "0709_assurance_health_evidence_store.sql",
+        "0710_assurance_health_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -461,6 +468,10 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0706_amend_closed_loop.sql",
         "0707_amend_closed_loop_scac_successor.sql",
+    ),
+    (
+        "0709_assurance_health_evidence_store.sql",
+        "0710_assurance_health_scac_successor.sql",
     ),
 )
 
