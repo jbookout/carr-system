@@ -183,6 +183,12 @@ class Dispatch(unittest.TestCase):
         self.assertEqual((out["target"], out["subagent_model"], out["effort"]), ("claude-desktop", "opus", "high"))
         self.assertFalse(out["overflow"])
 
+    def test_a_script_spawn_stays_on_opus_though_script_queues_to_flash(self):
+        # Flash runs script tasks only from the queue, with named data; a spawn has none to give it.
+        self.assertEqual(POLICY["queue_targets"]["script"], "flash")
+        out = dispatch({"script": 0.9}, flash_free=True)
+        self.assertEqual((out["target"], out["subagent_model"]), ("claude-desktop", "opus"))
+
     def test_flash_busy_with_jev_down_stays_on_opus(self):
         out = dispatch(error=TimeoutError("down"), flash_free=False)
         self.assertEqual((out["route"], out["subagent_model"]), (POLICY["abstain_route"], "opus"))
