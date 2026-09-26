@@ -37,6 +37,10 @@ function healthyProjection(scope = SCOPE) {
     green: true,
     capability_stage: "act",
     owner: { kind: "record_layer", ref: "ops.assurance_health_evidence" },
+    workflow_truth: {
+      available: true, source: "V5-F09 workflow census", state: "operational",
+      enabled: true, admissible_modes: ["shadow", "canary", "live"],
+    },
     evidence: Object.fromEntries(LAYERS.map((layer, index) => [layer, {
       layer,
       state: "passing",
@@ -70,7 +74,7 @@ test("V5-A01: the live read returns a current evidence-traceable projection for 
   assert.deepEqual(answer, projection);
   assert.equal(calls.length, 1);
   assert.match(calls[0].sql, /ops\.read_assurance_health/);
-  assert.deepEqual(calls[0].params.slice(0, 3), [SCOPE.workflow_key, SCOPE.workflow_version, SCOPE.work_request_id]);
+  assert.deepEqual(calls[0].params, [SCOPE.workflow_key, SCOPE.workflow_version, SCOPE.work_request_id]);
   assert.deepEqual(new Set(Object.values(answer.evidence).map(row => row.evidence_ref)).size, LAYERS.length);
 });
 
@@ -189,7 +193,127 @@ test("V5-A01: evidence ingress derives attribution and cannot accept a label, gr
   assert.deepEqual(await tool.handler(client, actor, args), { id: "evidence-row-1", replayed: false });
   assert.equal(envelopes[0].actor, actor);
   assert.equal(envelopes[0].verb, "record-assurance-health-evidence");
-  assert.match(calls[0].sql, /carr\.acting_actor_slug/);
-  assert.match(calls[1].sql, /ops\.record_assurance_health_evidence/);
+  assert.equal(calls.length, 2);
+  assert.match(calls[0].sql, /set_config\('carr\.acting_actor_slug',\$1::text,true\)/);
+  assert.match(calls[1].sql, /ops\.record_assurance_health_evidence\(\$1::jsonb,\$2::jsonb,\$3::uuid\)/);
+  // The acting slug is the authenticated actor's, bound as a parameter -- never
+  // anything the caller put in args (subject_ref here is deliberately different).
+  assert.deepEqual(calls[0].params, [actor.slug]);
+  assert.notEqual(calls[0].params[0], evidence.subject_ref);
   assert.deepEqual(calls[1].params, [JSON.stringify(SCOPE), JSON.stringify(evidence), args.idempotency_key]);
+});
+
+test("V5-A01 M8: the evaluator slug is actor.slug for every actor, never a field of args", async () => {
+  for (const slug of ["reviewer-a01", "dell", "sol-model-room"]) {
+    const calls = [];
+    const client = { query: async (sql, params = []) => {
+      calls.push({ sql, params });
+      return { rows: [{ receipt: { id: "row", replayed: false } }] };
+    } };
+    const tool = assuranceHealthStoreTools({ ToolError, withEnvelope: async (_c, _a, _v, _args, fn) => fn() })[
+      "record-assurance-health-evidence"];
+    const evidence = {
+      layer: "execution_assessment", basis: "attempt_receipt_execution_evidence", status: "pass",
+      subject_ref: "attempt:subject", evidence_ref: `exec:${slug}`, evidence_digest: `sha256:${"c".repeat(64)}`,
+      observed_at: "2026-09-25T20:00:00.000Z", expires_at: "2026-09-26T20:00:00.000Z",
+      detail: { attempt_id: "attempt:1", envelope_digest: "e", plan_hash: "p" },
+      incident_refs: [], recovery_refs: [],
+    };
+    await tool.handler(client, { slug }, {
+      scope: { workflow_key: "doctorcre.release", workflow_version: 7 },
+      evidence, idempotency_key: "11111111-2222-4333-8444-555555555555",
+    });
+    assert.equal(calls.length, 2);
+    assert.deepEqual(calls[0].params, [slug]);
+  }
+});
+
+test("V5-A01: an actor without a slug cannot record evidence, and no query is issued", async () => {
+  const calls = [];
+  const client = { query: async (sql, params) => { calls.push({ sql, params }); return { rows: [] }; } };
+  const tool = assuranceHealthStoreTools({ ToolError, withEnvelope: async (_c, _a, _v, _args, fn) => fn() })[
+    "record-assurance-health-evidence"];
+  for (const actor of [null, {}, { slug: "" }, { slug: 7 }]) {
+    await assert.rejects(tool.handler(client, actor, {
+      scope: { workflow_key: "doctorcre.release", workflow_version: 7 },
+      evidence: { layer: "artifact_assessment", basis: "independent_artifact_review", subject_ref: "joe" },
+      idempotency_key: "11111111-2222-4333-8444-555555555555",
+    }), error => error.payload?.error === "assurance_health_actor_required");
+  }
+  assert.equal(calls.length, 0);
+});
+
+test("V5-A01: the read binds a scope without a Work Request as an explicit null parameter", async () => {
+  const scope = { workflow_key: "doctorcre.release", workflow_version: 7 };
+  const projection = unavailableTruthProjection(scope);
+  const { calls, client, handler } = toolsWith(projection);
+  await handler(client, { slug: "dell" }, { scope });
+  assert.deepEqual(calls[0].params, ["doctorcre.release", 7, null]);
+});
+
+function unavailableTruthProjection(scope = SCOPE) {
+  const projection = healthyProjection(scope);
+  projection.state = "unknown";
+  projection.green = false;
+  projection.capability_stage = "unavailable";
+  projection.workflow_truth = { available: false, source: "V5-F09 workflow census", reason: "unreadable" };
+  projection.impact.withdrawn_stages = ["act", "draft", "read"];
+  return projection;
+}
+
+test("V5-A01 B1: without workflow truth, six passing layers are accepted only as unknown / unavailable / not green", () => {
+  const projection = unavailableTruthProjection();
+  assert.equal(validateAssuranceHealthProjection(projection, SCOPE, ToolError).state, "unknown");
+  for (const [field, value] of [["state", "healthy"], ["green", true], ["capability_stage", "act"],
+    ["capability_stage", "read"], ["state", "not-yet-operational"], ["state", "degraded"]]) {
+    const mutant = structuredClone(projection);
+    mutant[field] = value;
+    if (field === "state" && value === "healthy") mutant.green = true;
+    assert.throws(() => validateAssuranceHealthProjection(mutant, SCOPE, ToolError),
+      error => error.payload?.error === "assurance_health_projection_invalid", `${field}=${value}`);
+  }
+});
+
+test("V5-A01 planted projection mutants are each killed by a guard", () => {
+  const mutants = {
+    schema_version: p => { p.schema_version = "assurance-health.v0"; },
+    workflow_truth_missing: p => { delete p.workflow_truth; },
+    workflow_truth_not_boolean: p => { p.workflow_truth.available = "yes"; },
+    green_without_healthy: p => { p.state = "degraded"; },
+    healthy_without_green: p => { p.green = false; },
+    act_without_live: p => { p.workflow_truth.admissible_modes = ["shadow"]; },
+    disabled_without_truth: p => { p.state = "disabled"; p.green = false; },
+    owner_missing: p => { delete p.owner; },
+    stage_outside_vocabulary: p => { p.capability_stage = "admin"; },
+    evidence_state_outside_vocabulary: p => { p.evidence.artifact_assessment.state = "fine"; },
+    passing_without_pass_status: p => { p.evidence.artifact_assessment.status = "fail"; },
+    passing_with_bad_digest: p => { p.evidence.artifact_assessment.evidence_digest = "sha256:xyz"; },
+    passing_without_expiry: p => { delete p.evidence.artifact_assessment.expires_at; },
+    reused_identity: p => {
+      p.evidence.execution_assessment.evidence_ref = p.evidence.artifact_assessment.evidence_ref;
+      p.evidence.execution_assessment.evidence_digest = p.evidence.artifact_assessment.evidence_digest;
+    },
+    layer_label_swapped: p => { p.evidence.artifact_assessment.layer = "execution_assessment"; },
+    extra_layer: p => { p.evidence.telemetry = { layer: "telemetry", state: "passing", scope: { ...SCOPE } }; },
+    act_with_nonpassing_layer: p => { p.evidence.controller_assessment.state = "stale"; },
+    impact_escapes_scope: p => { p.impact.scope_limited_to = { ...OTHER_SCOPE }; },
+    impact_not_array: p => { p.impact.withdrawn_stages = "none"; },
+    recovery_unknown_layer: p => { p.recovery.required_evidence = ["telemetry"]; },
+    projection_scope_mismatch: p => { p.scope = { ...OTHER_SCOPE }; },
+  };
+  for (const [name, plant] of Object.entries(mutants)) {
+    const mutant = healthyProjection();
+    plant(mutant);
+    assert.throws(() => validateAssuranceHealthProjection(mutant, SCOPE, ToolError),
+      error => error.payload?.error === "assurance_health_projection_invalid", name);
+  }
+  const degraded = healthyProjection();
+  degraded.state = "degraded"; degraded.green = false; degraded.capability_stage = "draft";
+  degraded.evidence.activation_readback.state = "failed";
+  degraded.evidence.activation_readback.status = "fail";
+  degraded.impact.withdrawn_stages = ["act"];
+  assert.throws(() => validateAssuranceHealthProjection(degraded, SCOPE, ToolError),
+    error => error.payload?.error === "assurance_health_projection_invalid", "recovery omits a non-passing layer");
+  degraded.recovery.required_evidence = ["activation_readback"];
+  assert.equal(validateAssuranceHealthProjection(degraded, SCOPE, ToolError).state, "degraded");
 });

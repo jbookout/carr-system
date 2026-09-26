@@ -70,6 +70,19 @@ export function validateAssuranceHealthProjection(projection, requestedScope, Er
     refuse(ErrorType, "closed_state_or_stage");
   if (!projection.owner || projection.owner.kind !== "record_layer" || typeof projection.owner.ref !== "string")
     refuse(ErrorType, "owner_missing");
+  // WORKFLOW TRUTH (V5-F09) IS A PRECONDITION OF EVERY STAGE. Until the census
+  // store is readable here the record layer reports it unavailable, and an
+  // unavailable truth admits exactly one answer: unknown, unavailable, not green.
+  const truth = projection.workflow_truth;
+  if (!truth || typeof truth !== "object" || Array.isArray(truth) || typeof truth.available !== "boolean")
+    refuse(ErrorType, "workflow_truth_missing");
+  if (!truth.available && (projection.state !== "unknown" || projection.capability_stage !== "unavailable" || projection.green))
+    refuse(ErrorType, "workflow_truth_unavailable_claimed_state");
+  if (truth.available && projection.state === "disabled" && truth.state !== "declared_disabled")
+    refuse(ErrorType, "disabled_without_workflow_truth");
+  if (truth.available && (projection.green || projection.capability_stage === "act")
+      && (!Array.isArray(truth.admissible_modes) || !truth.admissible_modes.includes("live")))
+    refuse(ErrorType, "act_without_live_admission");
   if (!projection.evidence || typeof projection.evidence !== "object" || Array.isArray(projection.evidence)
       || JSON.stringify(Object.keys(projection.evidence).sort()) !== JSON.stringify([...ASSURANCE_HEALTH_LAYERS].sort()))
     refuse(ErrorType, "evidence_layers");
@@ -180,6 +193,10 @@ export function assuranceHealthStoreTools({ ToolError, withEnvelope }) {
       },
       handler: async (c, actor, args) => {
         if (typeof withEnvelope !== "function") throw new ToolError({ error: "assurance_health_writer_unavailable" });
+        // The evaluator is the authenticated actor and nothing else: no field of
+        // args can name it, and an actor without a slug cannot record evidence.
+        if (typeof actor?.slug !== "string" || actor.slug.length === 0)
+          throw new ToolError({ error: "assurance_health_actor_required" });
         if (!validScope(args?.scope) || !args?.evidence || typeof args.evidence !== "object"
             || BASIS[args.evidence.layer] !== args.evidence.basis || !UUID.test(args.idempotency_key ?? ""))
           throw new ToolError({ error: "assurance_health_evidence_invalid" });

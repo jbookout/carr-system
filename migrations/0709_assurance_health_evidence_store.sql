@@ -60,6 +60,21 @@ as $$ select jsonb_typeof(p_value)='array'
                  where jsonb_typeof(x)<>'string' or length(x#>>'{}') not between 1 and 255)
   and jsonb_array_length(p_value)=(select count(distinct x#>>'{}') from jsonb_array_elements(p_value) x) $$;
 
+-- An ISO-8601 instant with an explicit offset, or NULL. The offset is required
+-- so the parsed instant never depends on the session TimeZone.
+create function ops.assurance_health_instant(p_value text)
+returns timestamptz language plpgsql stable set search_path=pg_catalog
+as $$
+begin
+  if p_value is null
+     or p_value!~'^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?(Z|[+-][0-9]{2}:[0-9]{2})$' then
+    return null;
+  end if;
+  return p_value::timestamptz;
+exception when others then
+  return null;
+end $$;
+
 create table ops.assurance_health_evidence (
   id uuid not null default gen_random_uuid(),
   record_sequence bigint generated always as identity,
@@ -116,6 +131,11 @@ begin raise exception 'assurance health evidence is append-only' using errcode='
 create trigger assurance_health_evidence_immutable
   before update or delete on ops.assurance_health_evidence
   for each row execute function ops.assurance_health_evidence_immutable();
+-- TRUNCATE fires no row trigger, so the owner could otherwise erase the whole
+-- evidence history in one statement (the 0700/0704/0706 no_truncate idiom).
+create trigger assurance_health_evidence_no_truncate
+  before truncate on ops.assurance_health_evidence
+  for each statement execute function ops.assurance_health_evidence_immutable();
 
 create function ops.record_assurance_health_evidence(p_scope jsonb,p_evidence jsonb,p_idempotency_key uuid)
 returns jsonb language plpgsql volatile security definer
@@ -167,9 +187,16 @@ begin
   if v_layer='actual_business_outcome' and not(p_scope?'work_request_id') then
     raise exception 'assurance_health_outcome_requires_work_request' using errcode='22023';
   end if;
-  begin v_observed:=(p_evidence->>'observed_at')::timestamptz; v_expires:=(p_evidence->>'expires_at')::timestamptz;
-  exception when others then raise exception 'assurance_health_instant_invalid' using errcode='22023'; end;
-  if v_observed>=v_expires or v_observed>now()+interval '5 minutes' then
+  v_observed:=ops.assurance_health_instant(p_evidence->>'observed_at');
+  v_expires:=ops.assurance_health_instant(p_evidence->>'expires_at');
+  if v_observed is null or v_expires is null
+     or (v_detail?'readback_at' and ops.assurance_health_instant(v_detail->>'readback_at') is null) then
+    raise exception 'assurance_health_instant_invalid' using errcode='22023';
+  end if;
+  -- Five minutes of clock skew is admitted at ingress; the read still reports
+  -- any instant after its own clock as conflicting, never as passing.
+  if v_observed>=v_expires or v_observed>now()+interval '5 minutes'
+     or (v_detail?'readback_at' and ops.assurance_health_instant(v_detail->>'readback_at')>now()+interval '5 minutes') then
     raise exception 'assurance_health_evidence_time_invalid' using errcode='22023';
   end if;
   select coalesce(array_agg(x#>>'{}' order by o),array[]::text[]) into v_incident
@@ -192,20 +219,81 @@ begin
     'evaluator',v_row.evaluator_slug,'recorded_at',to_char(v_row.recorded_at at time zone 'utc','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),'replayed',false);
 end $fn$;
 
-create function ops.read_assurance_health(p_workflow_key text,p_workflow_version integer,p_work_request_id text default null)
-returns jsonb language plpgsql stable security definer
+-- THE STAGE LADDER, as the fixed table lib/assurance_health.py:306-312 names it.
+-- p_granted is every requirement that is proven; the first stage whose every
+-- requirement is present is the stage the scope holds. Workflow truth is part
+-- of every rung: without it no stage above unavailable is reachable.
+create function ops.assurance_health_stage(p_granted text[])
+returns text language sql immutable set search_path=pg_catalog
+as $$ select case
+  when p_granted @> array['workflow_readable','workflow_coherent','workflow_live_admissible',
+    'artifact_assessment','execution_assessment','controller_assessment',
+    'candidate_outcome_oracle','activation_readback','actual_business_outcome']::text[] then 'act'
+  when p_granted @> array['workflow_readable','workflow_coherent','workflow_enabled',
+    'artifact_assessment','execution_assessment','controller_assessment']::text[] then 'draft'
+  when p_granted @> array['workflow_readable','workflow_coherent','artifact_assessment']::text[] then 'read'
+  else 'unavailable' end $$;
+
+-- THE LABEL PREDICATE. Not granted to any runtime role and not reachable from a
+-- verb: it takes workflow truth as an argument, and a caller that could supply
+-- that argument would be authoring a label rather than reading one (the same
+-- reason lib/assurance_health.py keeps its predicate module-private). The only
+-- runtime caller is ops.read_assurance_health, which passes NULL -- workflow
+-- truth unreadable -- until the V5-F09 census store (PR #1244) is on main and
+-- its verified read can be passed here instead.
+--
+-- p_workflow_truth, when present, is one F09-projected row:
+--   {"workflow_key","workflow_version","state","enabled","admissible_modes"}.
+create function ops.assurance_health_label(p_workflow_key text,p_workflow_version integer,
+  p_work_request_id text,p_workflow_truth jsonb)
+returns jsonb language plpgsql stable
 set search_path=pg_catalog,public,ops as $fn$
 declare
+  v_now timestamptz:=now();
   v_scope jsonb; v_evidence jsonb:='{}'; v_layer text; r ops.assurance_health_evidence%rowtype;
-  v_state text; v_row jsonb; v_nonpassing text[]:=array[]::text[]; v_passes integer:=0;
-  v_artifact boolean:=false; v_execution boolean:=false; v_controller boolean:=false; v_activation boolean:=false;
-  v_stage text; v_health text; v_indeterminate boolean:=false; v_determinate boolean:=false; v_duplicate integer;
+  v_state text; v_row jsonb; v_duplicate integer; v_readback timestamptz; v_reasons text[]:=array[]::text[];
+  v_truth_state text; v_readable boolean:=false; v_coherent boolean:=false; v_enabled boolean:=false;
+  v_live boolean:=false; v_truth_indeterminate boolean:=true; v_not_enabled boolean:=false;
+  v_granted text[]:=array[]::text[]; v_nonpassing text[]:=array[]::text[]; v_indeterminate text[]:=array[]::text[];
+  v_determinate text[]:=array[]::text[]; v_missing text[]:=array[]::text[]; v_unbindable text[]:=array[]::text[];
+  v_passing_slots integer:=0; v_stage text; v_attributable text; v_health text; v_reason text; v_truth_out jsonb;
 begin
-  if nullif(btrim(p_workflow_key),'') is null or p_workflow_version<1
+  if nullif(btrim(p_workflow_key),'') is null or p_workflow_version is null or p_workflow_version<1
      or (p_work_request_id is not null and p_work_request_id!~'^WR-[0-9]{1,12}$') then
     raise exception 'assurance_health_scope_invalid' using errcode='22023';
   end if;
   v_scope:=jsonb_strip_nulls(jsonb_build_object('workflow_key',p_workflow_key,'workflow_version',p_workflow_version,'work_request_id',p_work_request_id));
+
+  -- Workflow truth (V5-F09). Absent means UNREADABLE, never "fine".
+  if p_workflow_truth is null then
+    v_truth_out:=jsonb_build_object('available',false,'source','V5-F09 workflow census',
+      'reason','workflow truth is not readable by this store; no stage above unavailable and no green state can be claimed');
+  else
+    v_truth_state:=p_workflow_truth->>'state';
+    if jsonb_typeof(p_workflow_truth)<>'object'
+       or p_workflow_truth->>'workflow_key' is distinct from p_workflow_key
+       or jsonb_typeof(p_workflow_truth->'workflow_version')<>'number'
+       or (p_workflow_truth->>'workflow_version') is distinct from p_workflow_version::text
+       or v_truth_state is null or not(v_truth_state=any(array['unknown','conflict','undeclared','unregistered',
+         'declared_disabled','enabled_shadow_only','enabled_canary_eligible','enabled_live_eligible','operational']))
+       or jsonb_typeof(p_workflow_truth->'enabled') is distinct from 'boolean'
+       or jsonb_typeof(p_workflow_truth->'admissible_modes') is distinct from 'array' then
+      raise exception 'assurance_health_workflow_truth_invalid' using errcode='22023';
+    end if;
+    v_truth_indeterminate:=v_truth_state in('unknown','conflict','undeclared');
+    v_not_enabled:=v_truth_state='declared_disabled';
+    v_readable:=v_truth_state<>'unknown';
+    v_coherent:=v_truth_state not in('conflict','undeclared');
+    v_enabled:=(p_workflow_truth->>'enabled')::boolean;
+    v_live:=p_workflow_truth->'admissible_modes' ? 'live';
+    v_truth_out:=jsonb_build_object('available',true,'source','V5-F09 workflow census','state',v_truth_state,
+      'enabled',v_enabled,'admissible_modes',p_workflow_truth->'admissible_modes');
+  end if;
+  if v_readable then v_granted:=v_granted||'workflow_readable'::text; end if;
+  if v_coherent then v_granted:=v_granted||'workflow_coherent'::text; end if;
+  if v_enabled then v_granted:=v_granted||'workflow_enabled'::text; end if;
+  if v_live then v_granted:=v_granted||'workflow_live_admissible'::text; end if;
+
   foreach v_layer in array ops.assurance_health_layers() loop
     r:=null;
     select * into r from ops.assurance_health_evidence
@@ -223,49 +311,108 @@ begin
          order by layer,observed_at desc,record_sequence desc)
       select count(*) into v_duplicate from latest
        where evidence_ref=r.evidence_ref or evidence_digest=r.evidence_digest;
+      v_readback:=case when r.detail?'readback_at' then ops.assurance_health_instant(r.detail->>'readback_at') end;
+      -- Most conservative first, in lib/assurance_health.py _EVIDENCE_STATES order.
       v_state:=case
-        when v_duplicate>1 then 'indistinct'
-        when r.observed_at>now() then 'conflicting'
-        when r.expires_at<=now() then 'stale'
-        when r.status='pass' then 'passing'
+        when v_layer='actual_business_outcome' and p_work_request_id is null then 'unbindable'
+        when r.observed_at>v_now or r.status='conflicting'
+          or (r.detail?'readback_at' and (v_readback is null or v_readback>v_now)) then 'conflicting'
+        when r.basis is distinct from ops.assurance_health_basis(v_layer) then 'refused_substitute'
         when r.status='fail' then 'failed'
-        else r.status end;
-      if v_layer='actual_business_outcome' and v_state='passing' and not v_activation then v_state:='unbindable'; end if;
+        when r.status in('error','skipped','untested') then r.status
+        when r.subject_ref=r.evaluator_slug then 'self_attested'
+        when v_duplicate>1 then 'indistinct'
+        when v_now>r.expires_at then 'stale'
+        when r.status='pass' then 'passing'
+        else 'conflicting' end;
       v_row:=jsonb_build_object('layer',v_layer,'state',v_state,'present',true,'status',r.status,'basis',r.basis,
         'scope',v_scope,'subject_ref',r.subject_ref,'evaluator_ref',r.evaluator_slug,'evidence_ref',r.evidence_ref,
         'evidence_digest',r.evidence_digest,'observed_at',to_char(r.observed_at at time zone 'utc','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
         'expires_at',to_char(r.expires_at at time zone 'utc','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
         'incident_refs',to_jsonb(r.incident_refs),'recovery_refs',to_jsonb(r.recovery_refs))||r.detail;
     end if;
-    if v_state='passing' then
-      v_passes:=v_passes+1;
-      if v_layer='artifact_assessment' then v_artifact:=true;
-      elsif v_layer='execution_assessment' then v_execution:=true;
-      elsif v_layer='controller_assessment' then v_controller:=true;
-      elsif v_layer='activation_readback' then v_activation:=true; end if;
-    else
-      v_nonpassing:=v_nonpassing||v_layer;
-      if v_state in('conflicting','indistinct','mismatched','unreadable') then v_indeterminate:=true; end if;
-      if v_state in('failed','error','skipped','untested','self_attested','stale','refused_substitute') then v_determinate:=true; end if;
-    end if;
     v_evidence:=v_evidence||jsonb_build_object(v_layer,v_row);
   end loop;
-  v_stage:=case when v_passes=6 then 'act' when v_artifact and v_execution and v_controller then 'draft'
-                when v_artifact then 'read' else 'unavailable' end;
-  v_health:=case when v_stage='act' then 'healthy' when v_indeterminate then 'unknown'
-                 when v_determinate and v_stage='unavailable' then 'failed'
-                 when v_determinate then 'degraded' else 'not-yet-operational' end;
+
+  -- ORDERING COHERENCE (lib/assurance_health.py): an accepted business outcome for
+  -- a scope with no current passing activation readback cannot have happened the
+  -- way it claims, so it is conflicting -- never passing, never merely unbindable.
+  if v_evidence#>>'{actual_business_outcome,state}'='passing'
+     and v_evidence#>>'{activation_readback,state}'<>'passing' then
+    v_evidence:=jsonb_set(v_evidence,'{actual_business_outcome,state}','"conflicting"');
+    v_reasons:=v_reasons||'actual_business_outcome: an accepted business outcome is claimed for a scope with no current passing activation readback'::text;
+  end if;
+
+  foreach v_layer in array ops.assurance_health_layers() loop
+    v_state:=v_evidence#>>array[v_layer,'state'];
+    if v_state='passing' then
+      v_granted:=v_granted||v_layer; v_passing_slots:=v_passing_slots+1;
+    else
+      v_nonpassing:=v_nonpassing||v_layer;
+      if v_state in('unreadable','mismatched','conflicting','indistinct') then v_indeterminate:=v_indeterminate||v_layer; end if;
+      if v_state in('refused_substitute','failed','error','skipped','untested','self_attested','stale') then v_determinate:=v_determinate||v_layer; end if;
+      if v_state='missing' then v_missing:=v_missing||v_layer; end if;
+      if v_state='unbindable' then v_unbindable:=v_unbindable||v_layer; end if;
+    end if;
+  end loop;
+
+  v_stage:=ops.assurance_health_stage(v_granted);
+  -- Capability lost only to an indeterminate layer is unproven, not withdrawn:
+  -- the failure is attributed only what survives granting those layers.
+  v_attributable:=ops.assurance_health_stage(v_granted||v_indeterminate);
+
+  if v_truth_indeterminate then
+    v_health:='unknown';
+    v_reason:=case when p_workflow_truth is null
+      then 'authoritative workflow truth (V5-F09) is unreadable; nothing is claimed about this scope'
+      else format('authoritative workflow truth is indeterminate (F09 state %s); nothing is claimed about this scope',v_truth_state) end;
+  elsif v_not_enabled then
+    v_health:='disabled'; v_reason:='F09 authoritative workflow truth reports the definition is not enabled';
+  elsif cardinality(v_determinate)>0 and v_attributable='unavailable' then
+    v_health:='failed'; v_reason:=format('a current exactly bound non-pass in %s withdrew every capability of this scope',v_determinate);
+  elsif cardinality(v_determinate)>0 then
+    v_health:='degraded'; v_reason:=format('a current exactly bound non-pass in %s withdrew capability; %s is what the failure itself leaves standing',v_determinate,v_attributable);
+  elsif cardinality(v_indeterminate)=0 and (not v_live
+      or v_evidence#>>'{activation_readback,state}' in('missing','unbindable')
+      or v_evidence#>>'{actual_business_outcome,state}' in('missing','unbindable')) then
+    v_health:='not-yet-operational'; v_reason:='nothing failed and nothing is operational yet';
+  elsif v_stage='act' then
+    v_health:='healthy'; v_reason:='six distinct, current, independently evaluated, exactly bound passing facts and F09 live admission';
+  else
+    v_health:='unknown'; v_reason:=format('evidence is incomplete or indeterminate (indeterminate=%s, missing=%s); no state is claimed',v_indeterminate,v_missing);
+  end if;
+  if (v_health='healthy') is distinct from (v_stage='act') or (v_health='healthy' and (v_passing_slots<>6 or not v_live)) then
+    raise exception 'assurance_health_label_invariant: % at stage %',v_health,v_stage using errcode='XX000';
+  end if;
+
   return jsonb_build_object('schema_version','assurance-health.v1','scope',v_scope,'state',v_health,'green',v_health='healthy',
-    'capability_stage',v_stage,'owner',jsonb_build_object('kind','record_layer','ref','ops.assurance_health_evidence'),
-    'evidence',v_evidence,'impact',jsonb_build_object('scope_limited_to',v_scope,'withdrawn_stages',case v_stage
+    'state_reason',v_reason,'capability_stage',v_stage,'capability_stage_attributable_to_findings',v_attributable,
+    'workflow_truth',v_truth_out,
+    'owner',jsonb_build_object('kind','record_layer','ref','ops.assurance_health_evidence'),
+    'evidence',v_evidence,'failing_layers',to_jsonb(v_determinate),'indeterminate_layers',to_jsonb(v_indeterminate),
+    'missing_layers',to_jsonb(v_missing),'unbindable_layers',to_jsonb(v_unbindable),'reasons',to_jsonb(v_reasons),
+    'impact',jsonb_build_object('scope_limited_to',v_scope,'withdrawn_stages',case v_stage
       when 'act' then '[]'::jsonb when 'draft' then '["act"]'::jsonb when 'read' then '["act","draft"]'::jsonb
       else '["act","draft","read"]'::jsonb end),
     'recovery',jsonb_build_object('required_evidence',to_jsonb(v_nonpassing)));
 end $fn$;
 
+-- THE READ DOOR. Workflow truth is passed as NULL (unreadable): the V5-F09
+-- census store is not on main, and this store will not grow a second workflow
+-- registry to stand in for it. Every scope therefore reads `unknown`, stage
+-- `unavailable`, green false -- an unregistered workflow can never read green --
+-- while the six evidence dispositions stay fully visible.
+create function ops.read_assurance_health(p_workflow_key text,p_workflow_version integer,p_work_request_id text default null)
+returns jsonb language plpgsql stable security definer
+set search_path=pg_catalog,public,ops as $fn$
+begin
+  return ops.assurance_health_label(p_workflow_key,p_workflow_version,p_work_request_id,null);
+end $fn$;
+
 revoke all on ops.assurance_health_evidence from public,carr_writer,carr_authority;
 revoke all on function ops.assurance_health_layers(),ops.assurance_health_basis(text),ops.assurance_health_exact_keys(jsonb,text[]),
-  ops.assurance_health_refs_valid(jsonb),ops.assurance_health_evidence_immutable(),
+  ops.assurance_health_refs_valid(jsonb),ops.assurance_health_instant(text),ops.assurance_health_stage(text[]),
+  ops.assurance_health_evidence_immutable(),ops.assurance_health_label(text,integer,text,jsonb),
   ops.record_assurance_health_evidence(jsonb,jsonb,uuid),ops.read_assurance_health(text,integer,text) from public;
 grant execute on function ops.record_assurance_health_evidence(jsonb,jsonb,uuid),ops.read_assurance_health(text,integer,text)
   to carr_writer,carr_authority;

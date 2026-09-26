@@ -55,8 +55,11 @@ EXPECTED_A3A_FUNCTIONS = sorted([
     "ops.assurance_health_basis(text)",
     "ops.assurance_health_evidence_immutable()",
     "ops.assurance_health_exact_keys(jsonb,text[])",
+    "ops.assurance_health_instant(text)",
+    "ops.assurance_health_label(text,integer,text,jsonb)",
     "ops.assurance_health_layers()",
     "ops.assurance_health_refs_valid(jsonb)",
+    "ops.assurance_health_stage(text[])",
     "ops.assurance_identifier_valid(text)",
     "ops.assurance_lease_lineage_current(uuid,timestamp with time zone)",
     "ops.assurance_append_lineage_current(uuid,uuid,timestamp with time zone,uuid,bigint)",
@@ -88,6 +91,9 @@ EXPECTED_A3A_FUNCTION_POSTURE = {
     "ops.assurance_health_exact_keys(jsonb,text[])": (False, "i", "search_path=pg_catalog"),
     "ops.assurance_health_layers()": (False, "i", "search_path=pg_catalog"),
     "ops.assurance_health_refs_valid(jsonb)": (False, "i", "search_path=pg_catalog"),
+    "ops.assurance_health_instant(text)": (False, "s", "search_path=pg_catalog"),
+    "ops.assurance_health_label(text,integer,text,jsonb)": (False, "s", "search_path=pg_catalog, public, ops"),
+    "ops.assurance_health_stage(text[])": (False, "i", "search_path=pg_catalog"),
     "ops.assurance_identifier_valid(text)": (False, "i", "search_path=pg_catalog"),
     "ops.assurance_lease_lineage_current(uuid,timestamp with time zone)":
         (True, "v", "search_path=pg_catalog, ops, public"),
@@ -2228,7 +2234,7 @@ def main() -> int:
                 signature: (security_definer, volatility, config)
                 for signature, security_definer, volatility, config in posture_rows
             }
-            check("exact assurance posture is pinned for all 29 functions",
+            check("exact assurance posture is pinned for all 32 functions",
                   actual_function_posture == EXPECTED_A3A_FUNCTION_POSTURE,
                   f"actual={safe(actual_function_posture)}")
             check("A3a schema fingerprint is invariant across all tests",
