@@ -30,10 +30,10 @@ def main() -> int:
         return 1
     with psycopg.connect(dsn) as con, con.cursor() as cur:
         cur.execute("select exists (select 1 from schema_migrations where filename=%s)",
-                    ("0713_salesforce_reconciliation_rw02_store.sql",))
+                    ("0726_salesforce_reconciliation_rw02_store.sql",))
         migration = cur.fetchone()
         if migration is None or not migration[0]:
-            print("salesforce-reconciliation-rw02-local-pg-gate: migration 0713 missing",
+            print("salesforce-reconciliation-rw02-local-pg-gate: migration 0726 missing",
                   file=sys.stderr)
             return 1
     proc = subprocess.run(["psql", "-X", dsn, "-v", "ON_ERROR_STOP=1", "-f", str(FIXTURE)],
