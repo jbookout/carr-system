@@ -128,24 +128,63 @@ export function createSalesforceReconciliationStore({ db, evaluators = {} } = {}
     return row.server_now;
   }
 
+  // ONE projection for the first call and every replay, read off the row the
+  // record layer stored, so a replay answers exactly what the first call did.
+  // Only `replayed` and the write count differ, because a replay writes nothing.
+  function recorded(stored, replayed) {
+    if (!plain(stored) || !plain(stored.evaluation) || typeof stored.record_digest !== "string")
+      fail("database_contract_violation", "stored RW02 outcome is malformed");
+    return freeze({ schema_version: V5_RW02_STORE_SCHEMA_VERSION, operation: stored.operation,
+      decision: "recorded", reason_id: "runtime_observation_recorded",
+      actor_slug: stored.actor_slug, recorded_at: stored.recorded_at,
+      record_digest: stored.record_digest, action_kind: stored.action_kind ?? null,
+      step_key: stored.step_key ?? null, evaluation: stored.evaluation,
+      replayed, effects: effects(!replayed) });
+  }
+
+  // A refusal the record layer raises by name becomes the same typed store
+  // error a handler refusal would be, never a raw database exception.
+  const SQL_REFUSALS = Object.freeze({
+    rw02_idempotency_conflict: "idempotency_conflict",
+    rw02_evidence_binding_mismatch: "evidence_binding_mismatch",
+    rw02_evidence_invalid: "evidence_invalid",
+    rw02_evidence_counted_twice: "evidence_counted_twice",
+    rw02_runtime_record_evidence_once: "evidence_counted_twice",
+    rw02_runtime_record_success_effect_once: "evidence_counted_twice",
+    rw02_duplicate_binding_invalid: "duplicate_binding_invalid",
+  });
+  function typedSqlRefusal(error) {
+    const text = `${error?.message ?? ""} ${error?.constraint ?? ""}`;
+    for (const [marker, code] of Object.entries(SQL_REFUSALS))
+      if (text.includes(marker)) return new V5RW02StoreError(code,
+        "the record layer refused this RW02 write", { sql_refusal: marker });
+    return null;
+  }
+
   async function persist(operation, payload, actor, evaluation, action_kind = null, step_key = null) {
     const request_digest = requestDigest(operation, actor.slug, payload);
-    return transaction(async client => {
-      const recorded_at = await open(client, actor);
-      const replay = one(await client.query(
-        "SELECT ops.rw02_replay($1::text,$2::text,$3::text) AS outcome",
-        [operation, payload.idempotency_key, request_digest]), "rw02 replay").outcome;
-      if (replay) return freeze({ ...replay, replayed: true, effects: effects(false) });
-      const stored = one(await client.query(
-        "SELECT ops.rw02_record($1::text,$2::text,$3::text,$4::text,$5::text,$6::jsonb) AS outcome",
-        [operation, payload.idempotency_key, request_digest, action_kind, step_key,
-          JSON.stringify({ schema_version: V5_RW02_STORE_SCHEMA_VERSION, operation,
-            tenant: ORGANIZATION_TENANT_ID, actor_slug: actor.slug, recorded_at, evaluation })]),
-      "rw02 record").outcome;
-      return freeze({ schema_version: V5_RW02_STORE_SCHEMA_VERSION, operation,
-        decision: "recorded", reason_id: "runtime_observation_recorded", actor_slug: actor.slug,
-        record_digest: stored.record_digest ?? null, evaluation, replayed: false, effects: effects(true) });
-    });
+    try {
+      return await transaction(async client => {
+        const recorded_at = await open(client, actor);
+        const replay = one(await client.query(
+          "SELECT ops.rw02_replay($1::text,$2::text,$3::text) AS outcome",
+          [operation, payload.idempotency_key, request_digest]), "rw02 replay").outcome;
+        if (replay?.conflict === true) fail("idempotency_conflict",
+          "this idempotency_key was already used for a different RW02 request",
+          { path: "payload.idempotency_key" });
+        if (replay) return recorded(replay, true);
+        const stored = one(await client.query(
+          "SELECT ops.rw02_record($1::text,$2::text,$3::text,$4::text,$5::text,$6::jsonb) AS outcome",
+          [operation, payload.idempotency_key, request_digest, action_kind, step_key,
+            JSON.stringify({ schema_version: V5_RW02_STORE_SCHEMA_VERSION, operation,
+              tenant: ORGANIZATION_TENANT_ID, actor_slug: actor.slug, recorded_at, evaluation })]),
+        "rw02 record").outcome;
+        return recorded(stored, false);
+      });
+    } catch (error) {
+      if (error instanceof V5RW02StoreError) throw error;
+      throw typedSqlRefusal(error) ?? error;
+    }
   }
 
   async function recordPageStop(input, context) {

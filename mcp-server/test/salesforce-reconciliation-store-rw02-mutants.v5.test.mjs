@@ -35,7 +35,8 @@ class Db {
     if (text.includes("ops.rw02_replay(")) return { rows: [{ outcome: null }] };
     if (text.includes("ops.rw02_action_evidence(")) return { rows: this.evidence.map(record => ({ record })) };
     if (text.includes("ops.rw02_record(")) { this.writes++; this.digests.push(params[2]);
-      return { rows: [{ outcome: { operation: params[0], actor_slug: "joe", outcome: JSON.parse(params[5]) } }] }; }
+      return { rows: [{ outcome: { ...JSON.parse(params[5]), operation: params[0], actor_slug: "joe",
+        record_digest: `sha256:${"a".repeat(64)}`, action_kind: params[3], step_key: params[4] } }] }; }
     throw new Error(text);
   }
 }

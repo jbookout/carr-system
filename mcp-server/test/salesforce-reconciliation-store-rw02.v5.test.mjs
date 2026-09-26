@@ -5,6 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { ORGANIZATION_TENANT_ID } from "../src/identity.js";
+import { digest } from "../src/artifact-trust.js";
 import {
   V5_RW02_STORE_OPERATIONS,
   V5RW02StoreError,
@@ -38,8 +39,9 @@ const page = (over = {}) => ({
 const kase = Object.freeze({ workflow_ref: "rw02-case-synthetic-1", deal_ref: "deal-synthetic-1" });
 
 class FakeDb {
-  constructor({ evidence = [] } = {}) {
+  constructor({ evidence = [], principal = "joe" } = {}) {
     this.evidence = evidence;
+    this.principal = principal;
     this.calls = [];
     this.rows = [];
   }
@@ -47,7 +49,7 @@ class FakeDb {
     this.calls.push({ text, params });
     if (["BEGIN", "COMMIT", "ROLLBACK"].includes(text)) return { rows: [] };
     if (text.includes("ops.f01_principal()")) return { rows: [{
-      principal: { actor_slug: "joe", human: true, authorization_class: "verified_partner" },
+      principal: { actor_slug: this.principal, human: true, authorization_class: "verified_partner" },
       server_now: "2026-09-26T05:00:00.000Z",
     }] };
     if (text.includes("ops.rw02_replay(")) return { rows: [{ outcome: null }] };
@@ -58,7 +60,11 @@ class FakeDb {
         action_kind: params[3], step_key: params[4], outcome,
         record_digest: D(this.rows.length + 10), recorded_at: "2026-09-26T05:00:00.000Z" };
       this.rows.push(row);
-      return { rows: [{ outcome: row }] };
+      // The shape ops.rw02_record returns: the stored outcome plus its digest
+      // and binding columns.
+      return { rows: [{ outcome: { ...outcome, operation: params[0], actor_slug: "joe",
+        recorded_at: row.recorded_at, record_digest: row.record_digest,
+        action_kind: row.action_kind, step_key: row.step_key } }] };
     }
     throw new Error(`unexpected SQL: ${text}`);
   }
@@ -199,4 +205,42 @@ test("caller-derived tenant, actor, decision, digest, and evidence are refused b
     );
   }
   assert.equal(db.rows.length, 0);
+});
+
+test("the handler actor must be the database principal, or nothing is recorded", async () => {
+  const db = new FakeDb({ principal: "dell" });
+  const store = createSalesforceReconciliationStore({ db });
+  await assert.rejects(
+    store.recordPageStop({ idempotency_key: "rw02-actor-mismatch", page: page({ challenge: "mfa_challenge" }) }, ctx),
+    e => e instanceof V5RW02StoreError && e.code === "actor_context_mismatch",
+  );
+  assert.equal(db.rows.length, 0);
+  assert.equal(db.calls.some(call => call.text.includes("ops.rw02_record(")), false);
+  await assert.rejects(
+    store.readActionEvidence({ action_kind: "opportunity_create" }, ctx),
+    e => e instanceof V5RW02StoreError && e.code === "actor_context_mismatch",
+  );
+});
+
+test("the evidence read asks the REAL window evaluator for per-action scope only", async () => {
+  const fields = { schema_version: "doctorcre-v5-rw02-action-evidence.v1", tenant: T,
+    action_kind: "opportunity_create", step_key: "rw02-step-synthetic-1", preview_digest: D(2),
+    envelope_digest: D(3), evidence_class: "fixture", observed_at: "2026-09-26T04:59:00Z",
+    outcome: "exact_match", readback_digest: D(4) };
+  const sealed = { ...fields, evidence_digest: digest({ kind: "rw02-evidence.v1", ...fields }) };
+  let seenScope;
+  const spyDb = new FakeDb({ evidence: [sealed] });
+  await createSalesforceReconciliationStore({ db: spyDb, evaluators: {
+    evaluateActionTrustWindow: request => { seenScope = request.trust_scope;
+      return { decision: "window_read" }; },
+  } }).readActionEvidence({ action_kind: "opportunity_create" }, ctx);
+  assert.equal(seenScope, "per_action");
+
+  const answer = await createSalesforceReconciliationStore({ db: new FakeDb({ evidence: [sealed] }) })
+    .readActionEvidence({ action_kind: "opportunity_create" }, ctx);
+  assert.equal(answer.decision, "window_read");
+  assert.equal(answer.reason_id, "per_action_window_read");
+  assert.equal(answer.trust_scope, "per_action");
+  assert.deepEqual(answer.inherits_from, []);
+  assert.equal(answer.evidence_total, 1);
 });

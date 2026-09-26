@@ -1402,7 +1402,10 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
   # SQL logic mutant surviving a FakeDb suite, so the coverage function, the
   # Joe-authority fallback writer and their append-only guards are proved here
   # on real rows as the real principals, and a skip is a failure.
-  for proof in cost-ledger-projection.v5 doc-conversation notifications session-identity dispatch-spine meeting-mode delivery-cadence-a05-tools amend-closed-loop-postgres action-class-successor-registry-postgres independent-review-cycle-postgres a02-rule-enforcement-postgres; do
+  # V5-RW02 joins it: the evidence store's replay projection, its typed
+  # conflict and its write-time refusal of malformed or double-counted
+  # readback evidence only exist on real rows as carr_writer.
+  for proof in cost-ledger-projection.v5 doc-conversation notifications session-identity dispatch-spine meeting-mode delivery-cadence-a05-tools amend-closed-loop-postgres action-class-successor-registry-postgres independent-review-cycle-postgres a02-rule-enforcement-postgres salesforce-reconciliation-rw02-postgres; do
     if [ -f "mcp-server/test/$proof.test.mjs" ]; then
       if ! DATABASE_URL="$dsn" CARR_COST_LEDGER_DB_REQUIRED=1 \
            CARR_DOC_CONVERSATION_DB_REQUIRED=1 CARR_R03_DB_REQUIRED=1 \
@@ -1411,6 +1414,7 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
            CARR_ACTION_CLASS_SUCCESSOR_DB_REQUIRED=1 \
            CARR_V5_A03_DB_REQUIRED=1 \
            CARR_A02_RULE_COVERAGE_DB_REQUIRED=1 \
+           CARR_RW02_DB_REQUIRED=1 \
            run_quiet "$LOGDIR/$proof-db.log" \
            node --test "mcp-server/test/$proof.test.mjs"; then
         tail -30 "$LOGDIR/$proof-db.log" >&2
