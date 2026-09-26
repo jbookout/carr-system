@@ -1244,6 +1244,7 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     mcp-server/test/tour-domain-route-cheat-sheet-postgres.sql \
     mcp-server/test/tour-delivery-data-plane-postgres.sql \
     mcp-server/test/tour-client-share-allowlist-postgres.sql \
+    mcp-server/test/assurance-health-store-postgres.sql \
     mcp-server/test/work-portfolio-postgres.sql; do
     [ -f "$tour_pg_proof" ] || continue
     tour_pg_log="$LOGDIR/$(basename "$tour_pg_proof" .sql).log"
@@ -1405,12 +1406,26 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
   # amend-closed-loop joins it: the append-only correction trail (loop_amendment,
   # migration 0702) and trg_touch_row's version bump are claims about rows a
   # fake client cannot make honestly.
-  for proof in cost-ledger-projection.v5 doc-conversation notifications session-identity dispatch-spine meeting-mode delivery-cadence-a05-tools amend-closed-loop-postgres; do
+  # V5-D01 action-class-successor-registry joins it: the status CHECK
+  # constraint, the append-only immutability trigger and the unconditional
+  # gate function are claims about real rows and real constraints a fake
+  # client cannot make honestly.
+  # V5-A03 joins it: complete eleven-dimension submissions, non-shrinking
+  # regression evidence, role/session separation, the two-round ceiling and
+  # stronger adjudication are all transactional claims over append-only rows.
+  # V5-A02 rule-enforcement coverage joins it: its first review found every
+  # SQL logic mutant surviving a FakeDb suite, so the coverage function, the
+  # Joe-authority fallback writer and their append-only guards are proved here
+  # on real rows as the real principals, and a skip is a failure.
+  for proof in cost-ledger-projection.v5 doc-conversation notifications session-identity dispatch-spine meeting-mode delivery-cadence-a05-tools amend-closed-loop-postgres action-class-successor-registry-postgres independent-review-cycle-postgres a02-rule-enforcement-postgres; do
     if [ -f "mcp-server/test/$proof.test.mjs" ]; then
       if ! DATABASE_URL="$dsn" CARR_COST_LEDGER_DB_REQUIRED=1 \
            CARR_DOC_CONVERSATION_DB_REQUIRED=1 CARR_R03_DB_REQUIRED=1 \
            CARR_SESSION_IDENTITY_DB_REQUIRED=1 CARR_DISPATCH_SPINE_DB_REQUIRED=1 \
            CARR_MEETING_MODE_DB_REQUIRED=1 CARR_AMEND_CLOSED_LOOP_DB_REQUIRED=1 \
+           CARR_ACTION_CLASS_SUCCESSOR_DB_REQUIRED=1 \
+           CARR_V5_A03_DB_REQUIRED=1 \
+           CARR_A02_RULE_COVERAGE_DB_REQUIRED=1 \
            run_quiet "$LOGDIR/$proof-db.log" \
            node --test "mcp-server/test/$proof.test.mjs"; then
         tail -30 "$LOGDIR/$proof-db.log" >&2

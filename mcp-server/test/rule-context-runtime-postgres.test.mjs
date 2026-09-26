@@ -41,7 +41,7 @@ test("typed contracts are append-only, actor-scoped, and missing rules stay expl
     await client.query(
       `insert into ops.enforcement_control_catalog
          (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at)
-       values ($1,'migrations/0715_f05_live_rule_context.sql',
+       values ($1,'migrations/0724_f05_live_rule_context.sql',
          'mcp-server/test/rule-context-runtime-postgres.test.mjs',
          'transactional_schema',true,now())`, [controlKey]);
     await client.query(

@@ -193,10 +193,19 @@ RUNTIME_V79 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v79.generat
 RUNTIME_V80 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v80.generated.js").read_text(
     encoding="utf-8"
 )
-RUNTIME_V81 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v81.generated.js").read_text(
+RUNTIME_V82 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v82.generated.js").read_text(
     encoding="utf-8"
 )
-RUNTIME_V82 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v82.generated.js").read_text(
+RUNTIME_V84 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v84.generated.js").read_text(
+    encoding="utf-8"
+)
+RUNTIME_V85 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v85.generated.js").read_text(
+    encoding="utf-8"
+)
+RUNTIME_V86 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v86.generated.js").read_text(
+    encoding="utf-8"
+)
+RUNTIME_V87 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v87.generated.js").read_text(
     encoding="utf-8"
 )
 RUNTIME_V22 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v22.generated.js").read_text(
@@ -230,7 +239,7 @@ assert GENERATOR.count("e.entry_digest is distinct from 'sha256:'||encode(public
 assert GENERATOR.count("ops.scac_mutation_registry_seal_valid(historical.registry_version)") >= 2
 for version in range(1, 9):
     assert GENERATOR.count(f"'scac-mutation-registry.v{version}'") >= 2
-assert set(FULL_SET_SEALS) == {f"scac-mutation-registry.v{version}" for version in range(1, 83)}
+assert set(FULL_SET_SEALS) == {f"scac-mutation-registry.v{version}" for version in range(1, 88)}
 assert all(len(value) == 71 and value.startswith("sha256:") for value in FULL_SET_SEALS.values())
 assert FULL_SET_SEALS["scac-mutation-registry.v10"] != "sha256:" + "0" * 64
 assert FULL_SET_SEALS["scac-mutation-registry.v20"] == (
@@ -580,19 +589,35 @@ assert "ops.scac_mutation_catalog_v80_current()" in GENERATOR
 assert "0705_cre_lifecycle_scac_successor.sql" in GENERATOR
 assert 'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v80"' in RUNTIME_V80
 assert "AMEND_CLOSED_LOOP_REGISTRY_APPLIED" in GENERATOR
-assert "SCAC_CURRENT_NUMBER=81" in GENERATOR
-assert "SCAC_VERSION_COUNT=81" in GENERATOR
-assert "SCAC_FULL_SET_SEAL_COUNT=80" in GENERATOR
-assert "ops.scac_mutation_catalog_v81_current()" in GENERATOR
-assert "0707_amend_closed_loop_scac_successor.sql" in GENERATOR
-assert 'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v81"' in RUNTIME_V81
-assert "F05_RULE_CONTEXT_REGISTRY_APPLIED" in GENERATOR
+assert "ACTION_CLASS_SUCCESSOR_REGISTRY_APPLIED" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=82" in GENERATOR
 assert "SCAC_VERSION_COUNT=82" in GENERATOR
 assert "SCAC_FULL_SET_SEAL_COUNT=81" in GENERATOR
 assert "ops.scac_mutation_catalog_v82_current()" in GENERATOR
-assert "0716_f05_live_rule_context_scac_successor.sql" in GENERATOR
+assert "0709_action_class_successor_registry_scac_successor.sql" in GENERATOR
 assert 'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v82"' in RUNTIME_V82
+assert 'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v84"' in RUNTIME_V84
+assert "V5_A02_RULE_ENFORCEMENT_REGISTRY_APPLIED" in GENERATOR
+assert "SCAC_CURRENT_NUMBER=85" in GENERATOR
+assert "SCAC_VERSION_COUNT=85" in GENERATOR
+assert "SCAC_FULL_SET_SEAL_COUNT=84" in GENERATOR
+assert "ops.scac_mutation_catalog_v85_current()" in GENERATOR
+assert "0722_a02_rule_enforcement_coverage_scac_successor.sql" in GENERATOR
+assert 'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v85"' in RUNTIME_V85
+assert 'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v86"' in RUNTIME_V86
+assert "0723_session_trace_archive_scac_successor.sql" in GENERATOR
+assert "SESSION_TRACE_ARCHIVE_REGISTRY_APPLIED" in GENERATOR
+assert "SCAC_CURRENT_NUMBER=86" in GENERATOR
+assert "SCAC_FULL_SET_SEAL_COUNT=85" in GENERATOR
+assert "ops.scac_mutation_catalog_v86_current()" in GENERATOR
+assert 'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v87"' in RUNTIME_V87
+assert "0725_f05_live_rule_context_scac_successor.sql" in GENERATOR
+assert "F05_RULE_CONTEXT_REGISTRY_APPLIED" in GENERATOR
+assert "SCAC_CURRENT_NUMBER=87" in GENERATOR
+assert "SCAC_FULL_SET_SEAL_COUNT=86" in GENERATOR
+assert "ops.scac_mutation_catalog_v87_current()" in GENERATOR
+assert "0720_doctorcre_a03_review_scac_successor.sql" in GENERATOR
+assert "V5_A03_REVIEW_REGISTRY_APPLIED" in GENERATOR
 assert "JEV_PROCESS_REGISTRY_APPLIED" in GENERATOR
 assert "JEV_HOOK_ACTIVATION_REGISTRY_APPLIED" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=43" in GENERATOR
@@ -774,14 +799,14 @@ loader_end = GENERATOR.index(
 )
 loader = GENERATOR[loader_start:loader_end]
 loaded_sql = subprocess.run(
-    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"), "81", "82"],
+    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"), "86", "87"],
     check=True,
     capture_output=True,
     text=True,
 ).stdout
-assert loaded_sql.count("scac-mutation-registry.v") == 81
-assert loaded_sql.count("sha256:") == 81
-assert FULL_SET_SEALS["scac-mutation-registry.v81"] in loaded_sql, (
+assert loaded_sql.count("scac-mutation-registry.v") == 86
+assert loaded_sql.count("sha256:") == 86
+assert FULL_SET_SEALS["scac-mutation-registry.v86"] in loaded_sql, (
     "the newest sealed history must actually reach the SQL the snapshot embeds"
 )
 

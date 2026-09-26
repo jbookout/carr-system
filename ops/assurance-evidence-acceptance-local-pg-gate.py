@@ -44,6 +44,7 @@ A3A_ISSUER: IssuerConfig = {}
 EXPECTED_A3A_TABLES = [
     "ops.assurance_evidence_extension",
     "ops.assurance_execution_manifest",
+    "ops.assurance_health_evidence",
     "ops.assurance_owner_acceptance_fact",
     "ops.assurance_review_extension",
 ]
@@ -51,6 +52,14 @@ EXPECTED_A3A_FUNCTIONS = sorted([
     "ops.assurance_all_tokens_absent(jsonb)",
     "ops.assurance_digest(jsonb)",
     "ops.assurance_exact_object(jsonb,text[])",
+    "ops.assurance_health_basis(text)",
+    "ops.assurance_health_evidence_immutable()",
+    "ops.assurance_health_exact_keys(jsonb,text[])",
+    "ops.assurance_health_instant(text)",
+    "ops.assurance_health_label(text,integer,text,jsonb)",
+    "ops.assurance_health_layers()",
+    "ops.assurance_health_refs_valid(jsonb)",
+    "ops.assurance_health_stage(text[])",
     "ops.assurance_identifier_valid(text)",
     "ops.assurance_lease_lineage_current(uuid,timestamp with time zone)",
     "ops.assurance_append_lineage_current(uuid,uuid,timestamp with time zone,uuid,bigint)",
@@ -77,6 +86,14 @@ EXPECTED_A3A_FUNCTION_POSTURE = {
     "ops.assurance_all_tokens_absent(jsonb)": (True, "s", "search_path=pg_catalog, ops"),
     "ops.assurance_digest(jsonb)": (False, "i", "search_path=pg_catalog, ops, public"),
     "ops.assurance_exact_object(jsonb,text[])": (False, "i", "search_path=pg_catalog"),
+    "ops.assurance_health_basis(text)": (False, "i", "search_path=pg_catalog"),
+    "ops.assurance_health_evidence_immutable()": (False, "v", "search_path=pg_catalog"),
+    "ops.assurance_health_exact_keys(jsonb,text[])": (False, "i", "search_path=pg_catalog"),
+    "ops.assurance_health_layers()": (False, "i", "search_path=pg_catalog"),
+    "ops.assurance_health_refs_valid(jsonb)": (False, "i", "search_path=pg_catalog"),
+    "ops.assurance_health_instant(text)": (False, "s", "search_path=pg_catalog"),
+    "ops.assurance_health_label(text,integer,text,jsonb)": (False, "s", "search_path=pg_catalog, public, ops"),
+    "ops.assurance_health_stage(text[])": (False, "i", "search_path=pg_catalog"),
     "ops.assurance_identifier_valid(text)": (False, "i", "search_path=pg_catalog"),
     "ops.assurance_lease_lineage_current(uuid,timestamp with time zone)":
         (True, "v", "search_path=pg_catalog, ops, public"),
@@ -784,12 +801,7 @@ def main() -> int:
                     "ops/a3a-rename-source.sql",
                 ])
         conn.commit()
-        with conn.cursor() as cur:
-            cur.execute("""update ops.job set next_attempt_at=now()+interval '1 day'
-              where definition_key='engineering-slice' and state='queued' and id<>%s""",
-              (dependency[0],))
-        conn.commit()
-        dependency_claim = cc.claim_one(conn, dependency[0], "a3a-dependency", [dependency[0]])
+        dependency_claim = cc.claim_one(conn, dependency[0], "a3a-dependency")
         with conn.cursor() as cur:
             cc.set_jobs(cur)
             dependency_receipt_id = cc.receipt(cur, dependency, dependency_claim, "claimed_complete")
@@ -815,12 +827,7 @@ def main() -> int:
             contract_evidence_requirements = multi_evidence_requirements()
         conn.commit()
 
-        with conn.cursor() as cur:
-            cur.execute("""update ops.job set next_attempt_at=now()+interval '1 day'
-              where definition_key='engineering-slice' and state='queued' and id<>%s""",
-              (fixture[0],))
-        conn.commit()
-        claim = cc.claim_one(conn, fixture[0], "a3a-controller", [fixture[0]])
+        claim = cc.claim_one(conn, fixture[0], "a3a-controller")
         with conn.cursor() as cur:
             expires_at = one(cur, """select least(j.leased_until,
               s.lease_expires_at,e.expires_at)-interval '5 seconds'
@@ -2217,7 +2224,7 @@ def main() -> int:
                 signature: (security_definer, volatility, config)
                 for signature, security_definer, volatility, config in posture_rows
             }
-            check("exact A3a posture is pinned for all 24 functions",
+            check("exact assurance posture is pinned for all 32 functions",
                   actual_function_posture == EXPECTED_A3A_FUNCTION_POSTURE,
                   f"actual={safe(actual_function_posture)}")
             check("A3a schema fingerprint is invariant across all tests",
