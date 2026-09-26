@@ -342,6 +342,44 @@ def test_auto_script_task_falls_back_when_jev_abstained():
     assert accepted["target"] == "claude-desktop" and accepted["route"]["fallback_reason"] == "jev_abstained"
 
 
+def test_auto_script_task_falls_back_when_no_score_cleared_its_cutoff():
+    # Review of #1319: Jev can abstain by answering with nothing over its cutoff, not only by being unreachable.
+    root = data_root()
+    svc, _ = script_service(root)
+    decide = svc._router.decide
+    svc._router.decide = lambda *a, **k: {**decide(*a, **k), "fallback": True}
+    out = svc.handle(turn(f"@queue enqueue target=auto cap=read :: Look at this\ndata: {root}/sales.csv"),
+                     room="p")
+    assert out["receipt"]["queue_accepted"]["route"]["fallback_reason"] == "jev_abstained"
+
+
+def test_a_data_line_in_the_title_counts_on_neither_side():
+    root = data_root()
+    svc, _ = script_service(root)
+    out = svc.handle(turn(f"@queue enqueue target=auto cap=read :: data: {root}/sales.csv\nTotal column b"),
+                     room="p")
+    assert out["receipt"]["queue_accepted"]["route"]["fallback_reason"] == "script_needs_data"
+    prompt = queue_dispatch.QueueDeskExecutor._prompt({
+        "task_id": "t_script001", "title": f"data: {root}/sales.csv", "instructions": "Total column b",
+        "meta": {"source_seq": 5, "source_msg_id": "m", "cap": "read"}})
+    assert flash_wire.task_parts(prompt)[2] == "Total column b"
+    paths, _, err = flash_wire.script_inputs(flash_wire.task_parts(prompt)[2], roots=[root])
+    assert paths is None and err is None
+
+
+def test_a_copied_protocol_sentence_in_the_body_does_not_hide_its_data():
+    root = data_root()
+    seen = []
+    body = f"{flash_wire.PROTOCOL_MARK} (quoted)\ndata: {root}/sales.csv"
+    out = flash_wire.run_task(queued_prompt(body), roots=[root],
+                              runner=lambda q, p: seen.append(p) or (0, {"answer": "3"}))
+    assert out["status"] == "completed" and seen == [[f"{root}/sales.csv"]], (out, seen)
+
+
+def test_a_script_run_ends_before_the_queue_claim_expires():
+    assert flash_wire.SCRIPT_TIMEOUT_S < 900 and flash_wire.SCRIPT_TIMEOUT_S <= flash_wire.TIMEOUT_S
+
+
 def queued_prompt(body):
     return queue_dispatch.QueueDeskExecutor._prompt({
         "task_id": "t_script001", "title": "Total column b", "instructions": body,

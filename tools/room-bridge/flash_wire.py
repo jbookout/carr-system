@@ -37,12 +37,15 @@ FLASH_MODEL = os.environ.get("CARR_FLASH_MODEL", "qwen3.8-flash-next")
 MAX_TOKENS = 4096
 TIMEOUT_S = 600.0
 HEALTH_TIMEOUT_S = 2.0
-SCRIPT_TIMEOUT_S = 1800.0
+# Under the queue's 900 s claim, so a running script task is never handed out a second time, and no longer than a
+# direct turn holds the bridge (TIMEOUT_S).
+SCRIPT_TIMEOUT_S = 600.0
 REPO = Path(__file__).resolve().parents[2]
 POLICY_PATH = REPO / "ops" / "config" / "model-routes.v1.json"
 FLASH_SCRIPT = REPO / "tools" / "flash-script.py"
 DATA_LINE = re.compile(r"^\s*data:\s*(\S.*?)\s*$", re.I | re.M)
-TASK_LINE = re.compile(r"^\[Hermes queue (t_[A-Za-z0-9_-]+)\] ?")
+TASK_LINE = re.compile(r"^\[Hermes queue (t_[A-Za-z0-9_-]+)\] ?(.*)$")
+SOURCE_LINE = "[Model Room source"
 # queue_dispatch.QueueDeskExecutor._prompt appends the queue's result protocol after this sentence; the script
 # question is what comes before it, and this desk writes the result line itself.
 PROTOCOL_MARK = "Your final non-empty line must be exactly one JSON object prefixed with CARR_QUEUE_RESULT"
@@ -129,16 +132,36 @@ def script_inputs(text: str, *, roots: list[str] | None = None):
 
 
 def _run_flash_script(question: str, paths: list[str]):
-    """tools/flash-script.py --json: (exit code, its result row, or {"detail": stderr} when it printed none)."""
+    """tools/flash-script.py --json: (exit code, its result row, or {"detail": stderr} when it printed none). A timeout
+    kills the runner's whole process group, not only the runner."""
+    proc = subprocess.Popen([sys.executable, str(FLASH_SCRIPT), "--json", "--", question, *paths],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
     try:
-        proc = subprocess.run([sys.executable, str(FLASH_SCRIPT), "--json", question, *paths],
-                              capture_output=True, text=True, timeout=SCRIPT_TIMEOUT_S)
+        out, err = proc.communicate(timeout=SCRIPT_TIMEOUT_S)
     except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, 9)
+        except OSError:
+            pass
+        proc.communicate()
         return None, {"detail": f"no answer in {SCRIPT_TIMEOUT_S:.0f}s"}
     try:
-        return proc.returncode, json.loads(proc.stdout.strip().splitlines()[-1])
+        return proc.returncode, json.loads(out.strip().splitlines()[-1])
     except (IndexError, ValueError):
-        return proc.returncode, {"detail": (proc.stderr.strip().splitlines() or ["no output"])[-1][:300]}
+        return proc.returncode, {"detail": (err.strip().splitlines() or ["no output"])[-1][:300]}
+
+
+def task_parts(prompt: str):
+    """(task_id, title, body) of a queue prompt (queue_dispatch.QueueDeskExecutor._prompt): the header line, the
+    source line and the trailing result protocol removed. The protocol is cut at its LAST occurrence, since the queue
+    appends it after the body. Not a queue prompt: (None, "", prompt)."""
+    head = prompt.rsplit(PROTOCOL_MARK, 1)[0] if PROTOCOL_MARK in prompt else prompt
+    lines = head.splitlines()
+    m = TASK_LINE.match(lines[0]) if lines else None
+    if not m:
+        return None, "", prompt
+    body = [line for line in lines[1:] if not line.startswith(SOURCE_LINE)]
+    return m.group(1), m.group(2).strip(), "\n".join(body).strip()
 
 
 def _result_line(task_id: str, outcome: str, summary: str) -> str:
@@ -147,18 +170,16 @@ def _result_line(task_id: str, outcome: str, summary: str) -> str:
 
 
 def run_task(prompt: str, *, roots: list[str] | None = None, runner=None, **turn_kwargs) -> dict:
-    """The flash-local desk's entry: a queued task naming data runs the script protocol, anything else one direct
-    reply (run_turn). The data is checked again here, whatever routed the task."""
-    head = prompt.split(PROTOCOL_MARK, 1)[0]
-    paths, question, refusal = script_inputs(head, roots=roots)
+    """The flash-local desk's entry: a queued task whose BODY names data runs the script protocol, anything else one
+    direct reply (run_turn). Data lines count in the body only, as route_auto reads them; the data is checked again
+    here, whatever routed the task."""
+    task_id, title, body = task_parts(prompt)
+    paths, question, refusal = script_inputs(body, roots=roots)
     if refusal:
         return {"status": "failed", "detail": f"script data refused: {refusal}"}
     if paths is None:
         return run_turn(prompt, **turn_kwargs)
-    m = TASK_LINE.match(question)
-    task_id = m.group(1) if m else None
-    question = "\n".join(line for line in TASK_LINE.sub("", question).splitlines()
-                          if not line.startswith("[Model Room source")).strip()
+    question = f"{title}\n{question}".strip()
     code, row = (runner or _run_flash_script)(question, paths)
     answer = (row.get("answer") or "").strip()
     if code not in (0, 4) or (code == 0 and not answer):
