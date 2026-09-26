@@ -419,7 +419,7 @@ test("one stored artifact projects into one F05 record F05 itself accepts", asyn
 
   // The assembler accepts it, unchanged, through the real freeze/assemble path.
   const assembled = assembleContextFromSource({ projection, template: template() });
-  assert.equal(assembled.decision, "allow");
+  assert.equal(assembled.decision, "read_only");
   assert.equal(verifyContextManifest(assembled.manifest), true);
   assert.deepEqual(assembled.manifest.records.map(r => r.record_id), [MAIL_DIGEST]);
   const projected = assembled.manifest.records[0];
@@ -449,7 +449,7 @@ test("the unknown upstream survives into the manifest and blocks its own write",
   assert.equal(manifest.taint_lineage[0].upstream_lineage_known, false);
 
   // Qualified exploration still runs, which is the whole point of not refusing.
-  assert.equal(manifest.decision, "allow");
+  assert.equal(manifest.decision, "read_only");
   assert.equal(manifest.reason_id, "read_only_exploration_under_uncertainty");
   assert.equal(manifest.read_only_exploration_permitted, true);
 
