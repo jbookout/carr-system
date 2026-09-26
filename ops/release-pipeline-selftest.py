@@ -1991,9 +1991,20 @@ class DeployCredential(unittest.TestCase):
         for i in range(2):
             self.fx.commit({"mcp-server/src/a.js": str(i)})
             self.assertEqual(self.pipeline(FakeRunner(), verbs=verbs).tick(["worker"]), 1)
-        self.assertEqual([v for v, _ in verbs], ["add-loop", "add-room-turn", "add-room-turn"])
-        self.assertNotIn("loop_filed", self.fx.records()[-1])
+        # The second SHA fails the same way but dispatches no second fix
+        # session: the loop already names the credential to Joe.
+        self.assertEqual([v for v, _ in verbs], ["add-loop", "add-room-turn"])
+        first, last = self.fx.records()[-2:]
+        self.assertTrue(first["dispatched"])
+        self.assertNotIn("dispatch_skipped", first)
+        self.assertNotIn("loop_filed", last)
+        self.assertEqual((last["status"], last["step"]), ("failed", "credential-missing"))
+        self.assertFalse(last["dispatched"])
+        self.assertEqual(last["dispatch_skipped"], "capability_loop_already_filed")
+        self.assertEqual(self.fx.state()["worker"]["failed_sha"], last["sha"])
         self.assertIn("CLOUDFLARE_API_TOKEN", self.fx.state()["filed_blockers"])
+        self.assertTrue(any("no fix session dispatched" in line for line in self.lines))
+        self.assertFalse(any("dispatch FAILED" in line for line in self.lines))
 
     def test_dry_run_reports_the_missing_token_and_records_nothing(self):
         self.fx.commit({"mcp-server/src/a.js": "1"})
