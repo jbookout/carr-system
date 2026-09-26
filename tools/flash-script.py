@@ -228,8 +228,11 @@ def sandbox_profile(work):
     reads = sorted({work, interp, *(os.path.realpath(p) for p in (sys.prefix, sys.base_prefix))})
     execs = sorted({sys.executable, os.path.realpath(sys.executable)})
     # Homebrew's var/etc hold the local Postgres cluster (data files, pg_hba.conf) and service configs.
-    private = [home, "/private/tmp", "/private/var/folders", "/Users/Shared", "/opt/homebrew/var", "/opt/homebrew/etc",
-               "/usr/local/var", "/usr/local/etc", "/etc/ssh", "/Library/Keychains"]
+    # The sandbox matches resolved paths, so each is resolved first: /etc is a link to /private/etc on macOS, and an
+    # unresolved "/etc/ssh" rule matched nothing.
+    private = sorted({os.path.realpath(p) for p in (
+        home, "/private/tmp", "/private/var/folders", "/Users/Shared", "/opt/homebrew/var", "/opt/homebrew/etc",
+        "/usr/local/var", "/usr/local/etc", "/etc/ssh", "/Library/Keychains")})
     if any('"' in p or "\\" in p for p in [*private, *reads, *execs]):
         raise ValueError("path not expressible in a sandbox profile")
     port = flash_port()
