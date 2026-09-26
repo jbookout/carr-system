@@ -79,6 +79,7 @@ import { journeyOneClockDoorTools } from "./journey-one-clock-door.v5.js";
 import { governedCorrespondenceStoreTools } from "./governed-correspondence-store.v5.js";
 import { assuranceHealthStoreTools } from "./assurance-health-store.v5.js";
 import { completeSetReviewA03StoreTools } from "./independent-review-cycle-store.v5.js";
+import { ruleContextRuntimeTools } from "./rule-context-runtime.v5.js";
 export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
 
 // ---------- envelope helpers ----------
@@ -8447,6 +8448,7 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "assurance-health-store": "mcp-server/src/assurance-health-store.v5.js",
   "action-class-successor-registry": "mcp-server/src/action-class-successor-registry.v5.js",
   "complete-set-review-a03-store": "mcp-server/src/independent-review-cycle-store.v5.js",
+  "rule-context-runtime": "mcp-server/src/rule-context-runtime.v5.js",
 });
 
 function bindToolSource(tool, source) {
@@ -9621,5 +9623,10 @@ registerTools(actionClassSuccessorRegistryTools({ withEnvelope, writeEvent, Tool
 // stronger adjudicator is the only transition after two unresolved rounds.
 registerTools(completeSetReviewA03StoreTools({ withEnvelope, writeEvent, ToolError }),
   "complete-set-review-a03-store");
+// DoctorCRE V5-F05: authenticated, actor-scoped rule-universe read plus the
+// Joe-authority typed-contract binder. The read uses the writer connection only
+// to receive server-established actor/sponsor transaction settings; its tool
+// contract remains read-only and the SQL function is stable.
+registerTools(ruleContextRuntimeTools({ withEnvelope, ToolError }), "rule-context-runtime");
 
 Object.freeze(TOOLS);

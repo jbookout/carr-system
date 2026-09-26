@@ -4,11 +4,18 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v87 (PROVISIONAL) is the runtime selector for DoctorCRE V5-RW02's attended
+// v88 (PROVISIONAL) is the runtime selector for DoctorCRE V5-RW02's attended
 // Salesforce reconciliation record layer. It registers three observation /
 // readback writers and one per-action evidence reader, while the store and
-// registry both preserve zero provider-effect authority. It chains over v86's
-// own seal (0723); final numbering is assigned at merge.
+// registry both preserve zero provider-effect authority. It chains over v87's
+// own seal (0725); final numbering is assigned at merge.
+//
+// Superseded note (v87): v87 (PROVISIONAL) was the runtime selector after DoctorCRE V5-F05's
+// authenticated rule-context runtime. Its sealed catalog admits the read-only
+// read-action-context and the authority-only bind-rule-context-contract write,
+// and preserves v86 and earlier as history. It chains over v86's own seal
+// (0723) with 0724/0725; final numbering is assigned at merge. v86 itself only
+// sealed a launchd row, so the selector moved straight from v85 to v87.
 //
 // Superseded note (v85): v85 (PROVISIONAL) was the runtime selector after DoctorCRE V5-A02: the
 // authoritative rule-enforcement coverage read and the Joe-authority-only
@@ -160,7 +167,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v87.generated.js";
+} from "./scac-mutation-registry.v88.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 

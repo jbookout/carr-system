@@ -428,10 +428,18 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0721_a02_rule_enforcement_coverage.sql",
         "0722_a02_rule_enforcement_coverage_scac_successor.sql",
     ),
+    # DoctorCRE V5-F05: 0724 installs the authority-bound typed rule-contract
+    # store and its actor-scoped universe reader; 0725 seals the resulting
+    # source and database capability frontier as provisional v87, chained from
+    # v86 (0723). The deferred policy-epoch trigger must observe both or neither.
+    (
+        "0724_f05_live_rule_context.sql",
+        "0725_f05_live_rule_context_scac_successor.sql",
+    ),
     # DoctorCRE V5-RW02: 0726 installs the append-only attended Salesforce
     # reconciliation evidence store and its SECURITY DEFINER doors; 0727 seals
-    # those exact ingresses and catalog grants as provisional v87, chained
-    # from v86 (0723). The domain migration cannot commit without its
+    # those exact ingresses and catalog grants as provisional v88, chained
+    # from v87 (0725). The domain migration cannot commit without its
     # matching successor.
     (
         "0726_salesforce_reconciliation_rw02_store.sql",
@@ -523,6 +531,10 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0721_a02_rule_enforcement_coverage.sql",
         "0722_a02_rule_enforcement_coverage_scac_successor.sql",
+    ),
+    (
+        "0724_f05_live_rule_context.sql",
+        "0725_f05_live_rule_context_scac_successor.sql",
     ),
     (
         "0726_salesforce_reconciliation_rw02_store.sql",
