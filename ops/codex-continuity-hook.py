@@ -569,8 +569,50 @@ def rejection_context(highwater, error):
 
 
 def read_recovery(meta, deadline=None, remaining_calls=1):
-    return call_verb("codex-read-recovery", _base_identity(meta),
-                     deadline=deadline, remaining_calls=remaining_calls)
+    result = call_verb("codex-read-recovery", _base_identity(meta),
+                       deadline=deadline, remaining_calls=remaining_calls)
+    if (result["status"] != "rejected"
+            or result.get("error") != "codex_recovery_binding_conflict"):
+        return result
+    legacy_project = _legacy_desktop_project(meta)
+    if legacy_project is None:
+        return result
+    candidate = dict(meta)
+    candidate["project_id"] = legacy_project
+    recovered = call_verb("codex-read-recovery", _base_identity(candidate),
+                          deadline=deadline, remaining_calls=remaining_calls)
+    # Only a pre-existing checkpoint proves the old project binding. A local
+    # desktop preference alone is never authority to create a new one.
+    if (recovered["status"] == "ok"
+            and recovered["response"].get("found") is True):
+        meta["project_id"] = legacy_project
+        return recovered
+    return result
+
+
+def _legacy_desktop_project(meta):
+    """Find a desktop project for a legacy checkpoint, subject to store proof."""
+    home = pathlib.Path(os.environ.get("CODEX_HOME") or pathlib.Path.home() / ".codex")
+    try:
+        state = json.loads((home / ".codex-global-state.json").read_text(encoding="utf-8"))
+        assignment = state["thread-project-assignments"][meta["native_task_id"]]
+        if assignment.get("projectKind") != "local":
+            return None
+        project_id = assignment["projectId"]
+        if not isinstance(project_id, str) or not re.fullmatch(
+                r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", project_id):
+            return None
+        project = state["local-projects"][project_id]
+        if project.get("id") != project_id:
+            return None
+        cwd = pathlib.Path(meta["cwd"]).resolve()
+        if not any(cwd.is_relative_to(pathlib.Path(root).resolve())
+                   for root in project.get("rootPaths", [])
+                   if isinstance(root, str) and pathlib.Path(root).is_absolute()):
+            return None
+        return project_id
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return None
 
 
 def checkpoint_marker(recovery):
@@ -1017,6 +1059,15 @@ def main():
         record_event("pre_compact", payload, meta, highwater,
                      checkpoint_marker(recovery), deadline=deadline)
     elif event == "PostCompact":
+        # Validate the native chain before any record-store call. A malformed
+        # compaction must not produce even a recovery read or event receipt.
+        try:
+            HISTORY.compaction_occurrence(meta, "post", deadline=deadline)
+        except HISTORY.HistoryFailure as exc:
+            code = exc.args[0] if exc.args else exc.__class__.__name__
+            _warning(f"unverified native hook ignored ({code})")
+            return 0
+        read_recovery(meta, deadline=deadline, remaining_calls=2)
         record_event("post_compact", payload, meta, highwater,
                      deadline=deadline)
     return 0

@@ -1022,6 +1022,45 @@ class CodexHookTests(AdapterCase):
         self.assertIn("was rejected by the record store (codex_event_key_conflict)", context)
         self.assertNotIn("receipt could not be stored because the record store is unavailable", context)
 
+    def test_legacy_desktop_project_recovers_only_verified_existing_checkpoint(self):
+        hook = load_hook_module()
+        project_id = "93df6a68-6a0c-4ed2-8021-1a2787acf6f7"
+        state = {
+            "thread-project-assignments": {self.session_id: {
+                "projectKind": "local", "projectId": project_id}},
+            "local-projects": {project_id: {
+                "id": project_id, "rootPaths": [str(self.project)]}},
+        }
+        (self.codex_home / ".codex-global-state.json").write_text(json.dumps(state))
+        meta = {"runtime": "codex", "native_task_id": self.session_id,
+                "project_id": "git:canonical", "cwd": str(self.project)}
+        calls = []
+
+        def record_call(_verb, args, **_kwargs):
+            calls.append(args["project_id"])
+            if args["project_id"] == "git:canonical":
+                return {"status": "rejected", "error": "codex_recovery_binding_conflict"}
+            return {"status": "ok", "response": {"ok": True, "found": True,
+                                               "checkpoint": {"checkpoint_version": 2}}}
+
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(self.codex_home)}), \
+             mock.patch.object(hook, "call_verb", side_effect=record_call):
+            result = hook.read_recovery(meta)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(meta["project_id"], project_id)
+        self.assertEqual(calls, ["git:canonical", project_id])
+
+        meta["project_id"] = "git:canonical"
+        def missing_call(_verb, args, **_kwargs):
+            if args["project_id"] == "git:canonical":
+                return {"status": "rejected", "error": "codex_recovery_binding_conflict"}
+            return {"status": "ok", "response": {"ok": True, "found": False}}
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(self.codex_home)}), \
+             mock.patch.object(hook, "call_verb", side_effect=missing_call):
+            result = hook.read_recovery(meta)
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(meta["project_id"], "git:canonical")
+
     def test_sanctioned_tool_error_rejection_is_not_reported_as_outage(self):
         self.native_rollout(compacted_row(1, "window-initial", "window-current"))
         response = {"error": "codex_recovery_binding_conflict"}
