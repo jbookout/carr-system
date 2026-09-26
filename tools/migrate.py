@@ -391,12 +391,25 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0706_amend_closed_loop.sql",
         "0707_amend_closed_loop_scac_successor.sql",
     ),
-    # V5-A01: 0709 installs the append-only six-layer assurance-health
-    # evidence store plus its SECURITY DEFINER record/read doors; 0710 seals
-    # those grants and the two registered MCP verbs as provisional SCAC v82.
+    # DoctorCRE V5-D01: 0708 installs the append-only action_class_successor
+    # registry (status CHECK-locked to 'inactive', its own immutability
+    # trigger, the read_action_class_successors and
+    # action_class_successor_gate SECURITY DEFINER doors -- EXECUTE to
+    # carr_reader, carr_writer only, PUBLIC explicitly revoked first); 0709
+    # seals that catalog as v82, chained from v81 (0707). Same
+    # deferred-epoch-trigger shape as the pairs above: 0708 applied alone
+    # would be refused at commit, so the pair must be one transaction.
     (
-        "0709_assurance_health_evidence_store.sql",
-        "0710_assurance_health_scac_successor.sql",
+        "0708_action_class_successor_registry.sql",
+        "0709_action_class_successor_registry_scac_successor.sql",
+    ),
+    # V5-A01: 0717 installs the append-only six-layer assurance-health
+    # evidence store plus its SECURITY DEFINER record/read doors; 0718 seals
+    # those grants and the two registered MCP verbs as SCAC v83, chained
+    # from v82 (0709).
+    (
+        "0717_assurance_health_evidence_store.sql",
+        "0718_assurance_health_evidence_store_scac_successor.sql",
     ),
 )
 
@@ -470,8 +483,12 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0707_amend_closed_loop_scac_successor.sql",
     ),
     (
-        "0709_assurance_health_evidence_store.sql",
-        "0710_assurance_health_scac_successor.sql",
+        "0708_action_class_successor_registry.sql",
+        "0709_action_class_successor_registry_scac_successor.sql",
+    ),
+    (
+        "0717_assurance_health_evidence_store.sql",
+        "0718_assurance_health_evidence_store_scac_successor.sql",
     ),
 )
 

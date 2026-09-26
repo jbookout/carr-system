@@ -1,5 +1,5 @@
 -- DoctorCRE v5 V5-A01: durable, exact-scope assurance-health evidence.
--- Paired atomically with 0710, the provisional SCAC v82 successor.
+-- Paired atomically with 0718, the SCAC v83 successor.
 -- This migration changes no production state by itself; release applies it.
 
 do $preconditions$

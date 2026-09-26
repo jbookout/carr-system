@@ -801,12 +801,7 @@ def main() -> int:
                     "ops/a3a-rename-source.sql",
                 ])
         conn.commit()
-        with conn.cursor() as cur:
-            cur.execute("""update ops.job set next_attempt_at=now()+interval '1 day'
-              where definition_key='engineering-slice' and state='queued' and id<>%s""",
-              (dependency[0],))
-        conn.commit()
-        dependency_claim = cc.claim_one(conn, dependency[0], "a3a-dependency", [dependency[0]])
+        dependency_claim = cc.claim_one(conn, dependency[0], "a3a-dependency")
         with conn.cursor() as cur:
             cc.set_jobs(cur)
             dependency_receipt_id = cc.receipt(cur, dependency, dependency_claim, "claimed_complete")
@@ -832,12 +827,7 @@ def main() -> int:
             contract_evidence_requirements = multi_evidence_requirements()
         conn.commit()
 
-        with conn.cursor() as cur:
-            cur.execute("""update ops.job set next_attempt_at=now()+interval '1 day'
-              where definition_key='engineering-slice' and state='queued' and id<>%s""",
-              (fixture[0],))
-        conn.commit()
-        claim = cc.claim_one(conn, fixture[0], "a3a-controller", [fixture[0]])
+        claim = cc.claim_one(conn, fixture[0], "a3a-controller")
         with conn.cursor() as cur:
             expires_at = one(cur, """select least(j.leased_until,
               s.lease_expires_at,e.expires_at)-interval '5 seconds'
