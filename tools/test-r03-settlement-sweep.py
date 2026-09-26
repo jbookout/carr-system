@@ -29,6 +29,14 @@ RUNNER = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = RUNNER
 SPEC.loader.exec_module(RUNNER)
 
+RESTORE_PATH = ROOT / "tools" / "r03_settlement_restore_set.py"
+RESTORE_SPEC = importlib.util.spec_from_file_location("r03_settlement_restore_set", RESTORE_PATH)
+if RESTORE_SPEC is None or RESTORE_SPEC.loader is None:
+    raise RuntimeError("could not load R03 restore-set module")
+RESTORE = importlib.util.module_from_spec(RESTORE_SPEC)
+sys.modules[RESTORE_SPEC.name] = RESTORE
+RESTORE_SPEC.loader.exec_module(RESTORE)
+
 
 def checked(argv: list[str], cwd: Path) -> str:
     result = subprocess.run(argv, cwd=str(cwd), env=ENV, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -236,6 +244,110 @@ def test_branch_law_retains_unmerged_and_unbacked_squash(root: Path) -> None:
     print("PASS branch_law_retains_unmerged_and_unbacked_squash")
 
 
+
+# ── RESTORE-SET DERIVATION ───────────────────────────────────────────────────
+# These live here rather than in their own tools/test-*.py on purpose. Any
+# tracked .py carrying an `if __name__ == "__main__":` block is discovered by
+# ops/scac-mutation-inventory.mjs as a script entrypoint, so a NEW test file
+# would move the sealed non-MCP source count (531 -> 532) and oblige a
+# regeneration of reviewed registry seals. This file is already inventoried, so
+# adding cases to it costs nothing.
+
+
+def restore_repo(root: Path, name: str) -> Path:
+    """A throwaway repository with one nested tracked file and one top-level."""
+    repository = root / name
+    repository.mkdir(parents=True)
+    git(repository, "init", "-b", "main")
+    git(repository, "config", "user.email", "fixture@example.test")
+    git(repository, "config", "user.name", "R03 fixture")
+    (repository / "hooks").mkdir()
+    (repository / "hooks" / "worktree-self-plumb.py").write_text("original\n", encoding="utf-8")
+    (repository / "keep.txt").write_text("keep\n", encoding="utf-8")
+    git(repository, "add", "-A")
+    git(repository, "commit", "-m", "restore fixture base")
+    return repository
+
+
+def pin_of(repository: Path) -> str:
+    return git(repository, "rev-parse", "HEAD").strip()
+
+
+def test_restore_clean_tree_yields_empty_set(root: Path) -> None:
+    repository = restore_repo(root, "restore-clean")
+    assert RESTORE.build_restore_set(repository, pin_of(repository), []) == []
+
+
+def test_restore_unapproved_dirty_path_refuses_and_names_it(root: Path) -> None:
+    repository = restore_repo(root, "restore-refuse")
+    (repository / "hooks" / "worktree-self-plumb.py").write_text("someone else's work\n", encoding="utf-8")
+    try:
+        result = RESTORE.build_restore_set(repository, pin_of(repository), [])
+    except RESTORE.RestoreSetRefusal as refusal:
+        assert "hooks/worktree-self-plumb.py" in str(refusal), str(refusal)
+        return
+    raise AssertionError(f"unapproved dirty path was enrolled instead of refused: {result}")
+
+
+def test_restore_approved_dirty_path_carries_its_pinned_blob(root: Path) -> None:
+    repository = restore_repo(root, "restore-approved")
+    path = "hooks/worktree-self-plumb.py"
+    pin = pin_of(repository)
+    expected = git(repository, "rev-parse", f"{pin}:{path}").strip()
+    (repository / path).write_text("changed\n", encoding="utf-8")
+    assert RESTORE.build_restore_set(repository, pin, [path]) == [{"path": path, "blob_oid": expected}]
+
+
+def test_restore_first_dirty_path_is_not_truncated(root: Path) -> None:
+    """Regression for the shipped "ooks/worktree-self-plumb.py".
+
+    Exactly ONE dirty file, so it is the FIRST porcelain line -- the only line
+    a whole-output .strip() corrupts, by eating its leading status space.
+    """
+    repository = restore_repo(root, "restore-truncation")
+    (repository / "hooks" / "worktree-self-plumb.py").write_text("changed\n", encoding="utf-8")
+    found = RESTORE.dirty_paths(repository)
+    assert found == ["hooks/worktree-self-plumb.py"], found
+    for path in found:
+        assert (repository / path).exists(), f"derived path {path!r} does not exist -- it was truncated"
+
+
+def test_restore_path_containing_a_space_survives(root: Path) -> None:
+    repository = restore_repo(root, "restore-spaced")
+    noisy = "hooks/two words.py"
+    (repository / noisy).write_text("x\n", encoding="utf-8")
+    git(repository, "add", "-A")
+    git(repository, "commit", "-m", "add spaced path")
+    pin = pin_of(repository)
+    (repository / noisy).write_text("y\n", encoding="utf-8")
+    assert noisy in RESTORE.dirty_paths(repository)
+    assert RESTORE.build_restore_set(repository, pin, [noisy])[0]["path"] == noisy
+
+
+def test_restore_untracked_file_neither_refuses_nor_enrols(root: Path) -> None:
+    repository = restore_repo(root, "restore-untracked")
+    (repository / "scratch.tmp").write_text("junk\n", encoding="utf-8")
+    assert RESTORE.build_restore_set(repository, pin_of(repository), []) == []
+
+
+def test_restore_staged_deletion_refuses(root: Path) -> None:
+    repository = restore_repo(root, "restore-deletion")
+    pin = pin_of(repository)
+    git(repository, "rm", "-q", "keep.txt")
+    try:
+        RESTORE.build_restore_set(repository, pin, [])
+    except RESTORE.RestoreSetRefusal as refusal:
+        assert "keep.txt" in str(refusal), str(refusal)
+        return
+    raise AssertionError("staged deletion did not refuse")
+
+
+def test_restore_stale_allowlist_invents_nothing(root: Path) -> None:
+    repository = restore_repo(root, "restore-stale-allow")
+    assert RESTORE.build_restore_set(
+        repository, pin_of(repository), ["hooks/worktree-self-plumb.py"]) == []
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="r03-settlement-sweep-") as temporary:
         root = Path(temporary)
@@ -243,6 +355,14 @@ def main() -> int:
         test_never_cleanable_candidate_aborts(root)
         test_midrun_tree_change_aborts(root)
         test_branch_law_retains_unmerged_and_unbacked_squash(root)
+        test_restore_clean_tree_yields_empty_set(root)
+        test_restore_unapproved_dirty_path_refuses_and_names_it(root)
+        test_restore_approved_dirty_path_carries_its_pinned_blob(root)
+        test_restore_first_dirty_path_is_not_truncated(root)
+        test_restore_path_containing_a_space_survives(root)
+        test_restore_untracked_file_neither_refuses_nor_enrols(root)
+        test_restore_staged_deletion_refuses(root)
+        test_restore_stale_allowlist_invents_nothing(root)
     print("r03-settlement-sweep-selftest: PASS")
     return 0
 
