@@ -266,32 +266,55 @@ if "--tasks" in sys.argv:
 
 
 def _canonical_workflow_truth():
-    """Print the F09 workflow-census section, WHICH IS UNAVAILABLE, and print
-    nothing else.
+    """Print the F09 workflow-census section from the server-attested store.
 
-    WHAT THIS SECTION USED TO DO, AND THE DEFECT THAT ENDED IT.  It performed the
-    V5-F09 control-plane read through ``lib/control_plane_workflow_truth_reader``
-    and printed the census it got back -- how many workflows are declared, how
-    many are evidence-backed, which ones conflict.  The reader resolved its own
-    module-level snapshot function at call time, so a caller sharing the process
-    rebound that name and this section printed the caller's census as the control
-    plane's own answer, under ``run.sh health``.  A reviewer did exactly that and
-    got a summary line of its own choosing out of this surface.
+    WHAT THIS SECTION PRINTS NOW.  Until migration 0708 the census route had no
+    owner outside the caller's own process -- a reviewer rebound the old reader's
+    snapshot function and this section printed a caller's census as the control
+    plane's answer -- so the route was deleted and this section printed one
+    frozen unavailable line.  The owner exists now: ``ops.workflow_census_record``,
+    an append-only, database-hash-chained store written only through
+    ``record-workflow-census``.  ``lib.control_plane_workflow_truth_reader``
+    fetches the chain from the deployed Worker, recomputes every hash on this
+    side, and checks the writer list and the freshness window from
+    config-as-code.  This section prints what it concluded and nothing else.
 
-    SO THE ROUTE WAS DELETED RATHER THAN HARDENED.  The reader mints nothing and
-    renders nothing any more; it exports one frozen unavailable answer built from
-    string literals at import time, and this section prints it.  There is no
-    branch here, no input, and no state to print: the same three-part line, every
-    run, whatever anybody has done to any module in this process.
+    WHAT IT SAYS WHEN THE ROUTE ANSWERS.  An ATTESTED line carrying the route's
+    own claim sentence -- who recorded the census and when, unedited since, and
+    that the observations inside it are not proven true -- and one line of chain
+    facts (seq, age against the window, how many workflow rows were recorded).
+    No state count and no per-workflow label: a label is the A01 route's job,
+    and that route still derives none.
 
-    WHY THE WHOLE SECTION RATHER THAN THE LABEL ONLY.  The A01 label route is what
-    converts a census into a state, and it reported not-proven one round earlier.
-    But this section DISPLAYS a census, and a displayed census is read as a report
-    of the control plane by anybody looking at ``run.sh health`` -- which is the
-    same authority, one surface out.  Both routes on this slice say the same
-    thing now: nothing here can be proven.
+    WHAT IT SAYS OTHERWISE.  One UNAVAILABLE line with the reason
+    (handle_integrity_unprovable, tampered, chain_break, unknown_writer or stale),
+    its short detail, and the not_proven disposition.
+
+    THE ONE CASE THAT IS A FINDING, AND TURNS HEALTH RED.  ``tampered``: the
+    store's guard triggers are not ENABLE ALWAYS (someone disabled them, or
+    re-enabled them as ordinary triggers), a guard's function source no longer
+    matches its pinned digest (the body was replaced), or the chain's head does
+    not match the external anchor the Worker recorded at commit.  An
+    ``anchor_gap`` (one committed row the anchor has not taken yet) is not a
+    finding: the writer's retry clears it, and a run that could not is already
+    a failed scheduled run.  Either is a fault in the
+    store, not a standing fact about the repository, so it prints the
+    CANONICAL_FINDING line and returns the ``(key, detail)`` pair naming the
+    guards or the two heads. Every other reason stays a plain UNAVAILABLE
+    line and returns ``None``.
+
+    THIS FUNCTION DOES NOT ITSELF TOUCH ``rc``. It returns data, never a
+    bare truthy/falsy flag: `tools/health-check-findings-selftest.py`
+    statically allowlists exactly the shapes an assignment to `rc` inside
+    `_canonical_health` may take, and none of them is "call some other
+    function and fold its bool result in" (that allowance is reserved, by
+    name, for `_canonical_contradiction_alarm`). The caller unpacks this
+    return into `_red(*pair)` -- itself an allowed shape -- so the finding is
+    recorded and `rc` is set from the exact same call the rest of this file
+    already uses everywhere else, rather than growing a second, parallel
+    self-recording convention for one more caller.
     """
-    print("Workflow truth — census route deleted; this surface derives nothing")
+    print("Workflow truth — census route: server-attested store, chain recomputed on this side")
     try:
         sys.path.insert(0, REPO_ROOT)
         from lib.control_plane_workflow_truth_reader import workflow_truth_census
@@ -299,10 +322,30 @@ def _canonical_workflow_truth():
         # Deliberately no exception text: this line is swept for privileged words
         # by ops/assurance-health-selftest.py, and a traceback is caller content.
         print("  -- workflow census   UNAVAILABLE — the census route module is absent")
-        return
+        return None
     census = workflow_truth_census()
-    print(f"  -- workflow census   UNAVAILABLE — {census['reason']}; item carried as "
-          f"{census['item_disposition']}; owed seam {census['owed_seam']}")
+    if census["available"] is True:
+        facts = census["attestation"]
+        print(f"  -- workflow census   ATTESTED — {census['claim']}")
+        print(f"  -- chain seq {facts['seq']}; age {facts['age_seconds']}s of a "
+              f"{facts['freshness_window_seconds']}s window; "
+              f"{len(census['census']['rows'])} workflow row(s) recorded")
+        return None
+    print(f"  -- workflow census   UNAVAILABLE — {census['reason']} ({census['detail']}); "
+          f"item carried as {census['item_disposition']}")
+    if census["reason"] != "tampered":
+        return None
+    if census["detail"] == "guard_not_enforced":
+        return ("workflow_census_guards",
+                "store trigger(s) not ENABLE ALWAYS: "
+                + ", ".join(census.get("guards") or ()))
+    if census["detail"] == "guard_function_replaced":
+        return ("workflow_census_guards",
+                "store guard function(s) replaced: "
+                + ", ".join(census.get("guards") or ()))
+    return ("workflow_census_anchor",
+            f"{census['detail']}: chain head seq {census.get('chain_seq')}, "
+            f"external anchor seq {census.get('anchored_seq')}")
 
 
 def _canonical_assurance_health():
@@ -753,12 +796,11 @@ print(json.dumps({"registered": sorted(TARGETS), "rows": rows, "retired": retire
                     })
             snapshot["job_definitions"] = definitions
             snapshot["jobs"] = rows
-        # NO F09 READING IS PERFORMED HERE ANY MORE. This run used to carry one
-        # reading and hand it to two sections; the route that produced it is
-        # deleted (see _canonical_workflow_truth), so the canonical snapshot holds
-        # no census at all and both sections print their invariant unavailable
-        # line. A --fixture file still supplies "workflows" for the fixture door,
-        # which is a test door and says so on its first line.
+        # NO F09 CENSUS IS PUT INTO THIS SNAPSHOT. The census section fetches the
+        # server-attested census itself, through the reader's no-argument route
+        # (see _canonical_workflow_truth), and the A01 section still derives
+        # nothing. A --fixture file still supplies "workflows" for the fixture
+        # door, which is a test door and says so on its first line.
     if CANONICAL_SECTION == "all":
         # Built from the named constants rather than spelled inline, so the
         # acceptance and the query can never drift apart. Both values are fixed
@@ -1236,11 +1278,17 @@ def _canonical_health():
             if not (bad or unreceipted or missing or stuck):
                 print(f"  OK {len(live_jobs)} live job(s), every due window present; "
                       "no terminal failure, stuck state, or unreceipted success")
-        # NEITHER OF THE TWO CENSUS SECTIONS CAN TURN THIS PROCESS RED, and
-        # neither returns a code: both report that their route cannot be proven,
-        # which is a standing fact about this repository rather than a fault of
-        # today's run. The fixture door is the one caller-fed path and it is
-        # labelled as a test door.
+        # THE CENSUS SECTIONS DO NOT TURN THIS PROCESS RED FOR "CANNOT BE PROVEN",
+        # which is a standing fact rather than a fault of today's run. The one
+        # exception is a TAMPERED census store (guards off, or chain and external
+        # anchor disagree): _canonical_workflow_truth prints that section and
+        # returns the (key, detail) pair for it, never a bare flag -- `rc` may
+        # only ever be set from `_red(...)` or `_canonical_contradiction_alarm()
+        # or rc` (tools/health-check-findings-selftest.py enforces this by name),
+        # so the finding is recorded and `rc` set through that same `_red` call,
+        # not a second self-recording convention invented for this one caller.
+        # The fixture door is the one caller-fed path and it is labelled as a
+        # test door.
         #
         # THE ALARM BELOW IS THE EXCEPTION AND IT IS NOT FED BY ANY OF THAT. It
         # takes no argument, ignores the fixture entirely, and reads the store
@@ -1251,7 +1299,9 @@ def _canonical_health():
         # conflict) before returning 1, so folding its result into `rc` with
         # `or` — rather than a bare `rc = 1` — keeps this call self-recording
         # too without recording the same finding a second time.
-        _canonical_workflow_truth()
+        _workflow_finding = _canonical_workflow_truth()
+        if _workflow_finding is not None:
+            rc = _red(*_workflow_finding)
         rc = _canonical_contradiction_alarm() or rc
         if CANONICAL_FIXTURE:
             _fixture_assurance_health(snap)

@@ -99,6 +99,9 @@ test("the registry still carries the humanOnly verbs this gate was built for", (
     "record-lifecycle-correction",
     "record-tour-map-promotion-receipt",
     "record-tour-pdf-human-review",
+    // V5-F09 census (0708): moving the census anchor to the database head is
+    // a partner-authority act, on a receipt.
+    "record-workflow-census-reanchor",
     "register-record-source-authority-policy",
     "review-and-triage",
     "revoke-correspondence-adapter-consent",

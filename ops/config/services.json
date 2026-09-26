@@ -321,6 +321,25 @@
       ]
     },
     {
+      "key": "workflow-census-writer",
+      "name": "V5-F09 workflow census writer",
+      "purpose": "Reads the control plane's rows through the read-only tap, runs the F09 workflow classifier, and records the census through record-workflow-census into the append-only, hash-chained ops.workflow_census_record (migration 0708); the census reader accepts only a latest row younger than 26 hours. Daily 04:10. See ops/workflow-census-writer.py.",
+      "family": "Local Mac edge",
+      "criticality": "medium",
+      "owner_actor": "joe",
+      "repo_path": "ops/workflow-census-writer.py",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.workflow-census-writer.plist",
+          "expected_cadence_seconds": 86400,
+          "cadence_grace_seconds": 7200,
+          "notes": "Daily, 04:10 local, StartCalendarInterval. Grace matches the reader's freshness window (26 hours = cadence + 2 hours): past it the census route already reports stale, so the service is late by the same measure."
+        }
+      ]
+    },
+    {
       "key": "calendar-prebrief-joe",
       "name": "Joe calendar prebrief projection",
       "purpose": "Runs the sponsor-bound local EventKit prebrief adapter. Its launchd tick may schedule and claim only the existing Joe live jobs lease; activation remains receipt-backed and explicit.",

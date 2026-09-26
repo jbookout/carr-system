@@ -247,7 +247,13 @@ def wrangler_toml(tags: list[str], *, classes: str = "C", staging_routes: bool =
     base = (REPO / "mcp-server" / "wrangler.toml").read_text(encoding="utf-8")
     # The fixture starts from the real file, minus any migrations it may carry
     # by the time this runs, and declares exactly the tags each scenario needs.
-    base = re.sub(r"(?ms)^\[\[migrations\]\]\n(?:[^\[\n].*\n|\n)*", "", base)
+    # (?m) only: keep `.` scoped to a single line. Under (?ms) `.` also matches
+    # newlines, so this greedily backtracks across subsequent `[...]` headers
+    # (e.g. `[env.staging]`) whenever the real wrangler.toml carries a live
+    # `[[migrations]]` block, silently deleting far more than that one section
+    # (observed: it ate through `routes = []`, which is load-bearing -- see
+    # the comment on that line).
+    base = re.sub(r"(?m)^\[\[migrations\]\]\n(?:[^\[\n].*\n|\n)*", "", base)
     if not staging_routes:
         assert base.count("\nroutes = []\n") == 1
         base = base.replace("\nroutes = []\n", "\n")

@@ -391,6 +391,18 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0706_amend_closed_loop.sql",
         "0707_amend_closed_loop_scac_successor.sql",
     ),
+    # V5-F09 workflow census store: 0708 installs ops.record_workflow_census
+    # (EXECUTE to carr_writer), ops.read_workflow_census (EXECUTE to
+    # carr_reader and carr_writer) and ops.reanchor_workflow_census (EXECUTE
+    # to carr_authority only) behind the append-only, database-hash-chained
+    # ops.workflow_census_record; 0709 seals that catalog as v82, chained
+    # from v81 (0707). Same deferred-epoch-trigger shape as the pairs above --
+    # 0708 applied alone would be refused at commit, so the pair must be one
+    # transaction.
+    (
+        "0708_workflow_census_store.sql",
+        "0709_workflow_census_store_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -461,6 +473,10 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0706_amend_closed_loop.sql",
         "0707_amend_closed_loop_scac_successor.sql",
+    ),
+    (
+        "0708_workflow_census_store.sql",
+        "0709_workflow_census_store_scac_successor.sql",
     ),
 )
 
