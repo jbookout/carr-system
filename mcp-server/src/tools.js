@@ -1843,6 +1843,19 @@ async function buildRecordBag(c, dealId, clientId) {
 // AMBIGUITY IS REPORTED, NEVER GUESSED. A prefix that matches two rules returns
 // the candidates rather than picking one, because silently activating or
 // retiring the wrong binding rule is worse than any error message.
+// V5-A02: the named refusals ops.record_rule_enforcement_fallback raises
+// (migration 0712). Each is mapped to a ToolError of the same name.
+const RULE_ENFORCEMENT_FALLBACK_REFUSALS = Object.freeze(new Set([
+  "rule_enforcement_fallback_requires_joe_authority",
+  "rule_enforcement_fallback_kind_unknown",
+  "rule_enforcement_fallback_fields_required",
+  "rule_enforcement_fallback_rule_not_found",
+  "rule_enforcement_fallback_actor_unregistered",
+  "rule_enforcement_fallback_idempotency_conflict",
+  "rule_enforcement_fallback_already_recorded",
+  "rule_enforcement_fallback_receipts_append_only",
+]));
+
 async function resolveRuleId(c, value, field = "rule_id") {
   const raw = String(value || "").trim();
   if (!raw) throw new ToolError({ error: "rule_id_required", field });
@@ -2248,7 +2261,7 @@ export const TOOLS = {
 
   "read-v5-a02-rule-enforcement-coverage": {
     write: false,
-    description: "Read DoctorCRE V5-A02's server-derived coverage of every active rule. The record layer enumerates active rules and checks their exact approval-bound installed control, current test verification, and immutable human-selected fallback receipt. Empty input only: caller evidence cannot make coverage green. Missing or inconsistent evidence is returned as a named gap or a fail-closed unavailable result.",
+    description: "Read DoctorCRE V5-A02's server-derived coverage of every active rule. The record layer enumerates active rules and checks each one's exact approval-bound installed control, test verification dated between that approval and the read, and an immutable fallback receipt written on Joe's authority database connection (the receipt proves which authority connection recorded it, not that a human chose it). Empty input only: caller evidence cannot make coverage green. Each uncovered rule is a named gap (amended after approval, control unmapped, tests missing, test evidence future-dated or older than the approval, fallback absent); zero active rules reads coverage_state `empty`, never complete; an unreadable or inconsistent record is a fail-closed unavailable result.",
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
     handler: async (c) => readRuleEnforcementCoverage(c),
   },
@@ -3370,7 +3383,7 @@ export const TOOLS = {
   "record-rule-enforcement-fallback": {
     write: true,
     authorityOnly: true,
-    description: "Joe-authority-only V5-A02 fallback receipt for one rule. Records what the system must do when that rule's installed control is unavailable; it never guesses from enforcement class and never rewrites an earlier receipt. The current rule version and statement hash, authenticated authority actor, procedure reference, reason and idempotency key are bound by the database. A later rule version needs a new receipt.",
+    description: "Joe-authority-only V5-A02 fallback receipt for one rule. Records what the system must do when that rule's installed control is unavailable; it never guesses from enforcement class and never rewrites an earlier receipt. The current rule version and statement hash, the authority connection's actor, procedure reference, reason and idempotency key are bound by the database. Refusals are named: rule_enforcement_fallback_requires_joe_authority (Dell's authority connection), rule_enforcement_fallback_already_recorded (this rule version already has a receipt), rule_enforcement_fallback_idempotency_conflict (key reused for a different request). A later rule version needs a new receipt.",
     inputSchema: { type: "object", additionalProperties: false, properties: {
       idempotency_key: { type: "string" },
       rule_id: { type: "string", description: "Full UUID or current short rule id." },
@@ -3384,10 +3397,20 @@ export const TOOLS = {
     handler: async (c, actor, args) => withEnvelope(
       c, actor, "record-rule-enforcement-fallback", args, async () => {
         const ruleId = await resolveRuleId(c, args.rule_id);
-        const recorded = await c.query(
-          "select ops.record_rule_enforcement_fallback($1,$2,$3,$4,$5) as result",
-          [ruleId, args.fallback_kind, args.procedure_ref,
-           args.idempotency_key, args.reason]);
+        let recorded;
+        try {
+          recorded = await c.query(
+            "select ops.record_rule_enforcement_fallback($1,$2,$3,$4,$5) as result",
+            [ruleId, args.fallback_kind, args.procedure_ref,
+             args.idempotency_key, args.reason]);
+        } catch (e) {
+          // The database names every refusal; surface that name, never a
+          // raw driver error.
+          if (RULE_ENFORCEMENT_FALLBACK_REFUSALS.has(e?.message))
+            throw new ToolError({ error: e.message, rule_id: ruleId,
+              ...(typeof e.detail === "string" ? { detail: e.detail } : {}) });
+          throw e;
+        }
         const result = recorded.rows[0]?.result;
         if (!result?.receipt_id)
           throw new ToolError({ error: "rule_enforcement_fallback_not_recorded", rule_id: ruleId });

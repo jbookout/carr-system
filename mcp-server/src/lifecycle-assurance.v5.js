@@ -515,12 +515,20 @@ function unavailableRuleEnforcementCoverage(
 }
 
 const V5_A02_COVERAGE_SCHEMA_VERSION =
-  "doctorcre-v5-a02-rule-enforcement-coverage.v1";
+  "doctorcre-v5-a02-rule-enforcement-coverage.v2";
 const V5_A02_COVERAGE_GAP_REASONS = Object.freeze(new Set([
+  "active_rule_amended_needs_reapproval",
   "active_rule_control_unmapped",
   "active_rule_fallback_absent",
+  "rule_test_evidence_future_dated",
+  "rule_test_evidence_predates_approval",
   "rule_tests_not_passing",
 ]));
+const V5_A02_COVERAGE_STATES = Object.freeze(new Set(["complete", "empty", "gaps"]));
+const V5_A02_COVERAGE_RECORD_KEYS = Object.freeze([
+  "active_rule_count", "coverage_complete", "coverage_state", "covered_rule_count",
+  "evidence_digest", "gap_count", "gaps", "observed_at", "schema_version",
+].sort().join(","));
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SHA256_RE = /^sha256:[0-9a-f]{64}$/;
 
@@ -532,28 +540,36 @@ function validCoverageGap(gap) {
     && typeof gap.detail === "string" && gap.detail.trim().length > 0;
 }
 
+/** The state the counts imply. Zero active rules is `empty`, never
+ * `complete`: an empty registry proves nothing is enforced. */
+function coverageStateFor(record) {
+  if (record.active_rule_count === 0) return "empty";
+  return record.gap_count > 0 ? "gaps" : "complete";
+}
+
+// Each invariant below is its own check, and each is killed by its own
+// planted-inconsistency test in a02-rule-enforcement-reader-mutants.test.mjs.
 function validCoverageRecord(record) {
   if (!isPlainObject(record)) return false;
-  const keys = [
-    "active_rule_count", "coverage_complete", "covered_rule_count",
-    "evidence_digest", "gap_count", "gaps", "observed_at", "schema_version",
-  ];
-  if (Object.keys(record).sort().join(",") !== keys.sort().join(",")) return false;
-  if (record.schema_version !== V5_A02_COVERAGE_SCHEMA_VERSION
-      || typeof record.observed_at !== "string"
+  if (Object.keys(record).sort().join(",") !== V5_A02_COVERAGE_RECORD_KEYS) return false;
+  if (record.schema_version !== V5_A02_COVERAGE_SCHEMA_VERSION) return false;
+  if (typeof record.observed_at !== "string"
       || !Number.isFinite(Date.parse(record.observed_at))
       || !Number.isInteger(record.active_rule_count) || record.active_rule_count < 0
       || !Number.isInteger(record.covered_rule_count) || record.covered_rule_count < 0
       || !Number.isInteger(record.gap_count) || record.gap_count < 0
       || typeof record.coverage_complete !== "boolean"
+      || !V5_A02_COVERAGE_STATES.has(record.coverage_state)
       || !Array.isArray(record.gaps)
       || !SHA256_RE.test(record.evidence_digest)) return false;
-  if (record.gap_count !== record.gaps.length
-      || record.covered_rule_count + record.gap_count !== record.active_rule_count
-      || record.coverage_complete !== (record.gap_count === 0)) return false;
+  if (record.gap_count !== record.gaps.length) return false;
+  if (record.covered_rule_count + record.gap_count !== record.active_rule_count) return false;
+  if (record.coverage_state !== coverageStateFor(record)) return false;
+  if (record.coverage_complete !== (record.coverage_state === "complete")) return false;
   const seen = new Set();
   for (const gap of record.gaps) {
-    if (!validCoverageGap(gap) || seen.has(gap.rule_id)) return false;
+    if (!validCoverageGap(gap)) return false;
+    if (seen.has(gap.rule_id)) return false;
     seen.add(gap.rule_id);
   }
   return true;
@@ -583,6 +599,7 @@ async function readRuleEnforcementCoverageFromRecords(database) {
     active_rule_count: record.active_rule_count,
     covered_rule_count: record.covered_rule_count,
     gap_count: record.gap_count,
+    coverage_state: record.coverage_state,
     coverage_complete: record.coverage_complete,
     gaps: record.gaps,
     evidence_digest: record.evidence_digest,
