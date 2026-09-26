@@ -53,6 +53,30 @@ test("live client derives Dell identity, normalizes conflict shape, and creates 
   assert.equal(lead.arguments.deal, "d2");
 });
 
+test("V5-A01 live client reads assurance health through the registered record-layer verb", async () => {
+  const expected = {
+    schema_version: "assurance-health.v1",
+    scope: { workflow_key: "doctorcre.release", workflow_version: 7, work_request_id: "WR-700" },
+    state: "not-yet-operational",
+    green: false,
+    capability_stage: "draft",
+    evidence: {},
+  };
+  const calls = [];
+  const client = createLiveClient({ fetchImpl: async (path, init) => {
+    assert.equal(path, "/mcp");
+    const request = JSON.parse(init.body);
+    calls.push(request.params);
+    return rpcResponse(expected);
+  } });
+
+  assert.deepEqual(await client.getHealth(expected.scope), expected);
+  assert.deepEqual(calls, [{
+    name: "read-assurance-health",
+    arguments: { scope: expected.scope },
+  }]);
+});
+
 test("release 1–5 verbs are registered with human gates on structural creation", () => {
   for (const name of ["start-deal-review","review-deal","end-deal-review",
     "set-market-agent","set-national-account-owner","create-national-account",
