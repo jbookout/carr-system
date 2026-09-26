@@ -2086,8 +2086,9 @@ class SchemaSnapshotGhRunner(FakeRunner):
 
     def __init__(self, open_prs: dict[int, str], new_pr: int, *, close_rc: dict | None = None,
                  close_raises: set | None = None, list_rc: int = 0, forks: set | None = None,
-                 pr_create_out: str | None = None):
+                 pr_create_out: str | None = None, no_fork_flag: set | None = None):
         super().__init__()
+        self.no_fork_flag = no_fork_flag or set()   # rows listed WITHOUT isCrossRepository
         self.forks = forks or set()          # PR numbers whose head lives in a fork
         self.pr_create_out = pr_create_out   # override what `gh pr create` prints
         self.open_prs, self.new_pr = dict(open_prs), new_pr
@@ -2101,6 +2102,9 @@ class SchemaSnapshotGhRunner(FakeRunner):
             assert "isCrossRepository" in argv[argv.index("--json") + 1], "fork flag not requested"
             rows = [{"number": n, "headRefName": h, "isCrossRepository": n in self.forks}
                     for n, h in self.open_prs.items()]
+            for row in rows:
+                if row["number"] in self.no_fork_flag:
+                    del row["isCrossRepository"]
             return rp.Result(self.list_rc, json.dumps(rows) if self.list_rc == 0 else "boom")
         if argv[:3] == ["gh", "pr", "close"]:
             self.calls.append(("gh-pr-close", list(argv)))
@@ -2189,6 +2193,14 @@ class SchemaSnapshotSupersede(Base):
         self.assertEqual(pipe.schema_superseded_closed, [101, 108])
         self.assertIn(130, runner.open_prs)
         self.assertNotIn(130, {int(a[3]) for n, a in runner.calls if n == "gh-pr-close"})
+
+    def test_a_snapshot_pr_without_a_readable_fork_flag_stays_open(self):
+        # Fail closed: only an explicit isCrossRepository=false is closeable.
+        runner = SchemaSnapshotGhRunner({**self.OLDER, 131: "release/schema-snapshot-88888888"}, self.NEW,
+                                        no_fork_flag={131})
+        pipe, _ = self._followup(runner)
+        self.assertEqual(pipe.schema_superseded_closed, [101, 108])
+        self.assertIn(131, runner.open_prs)
 
     def test_unreadable_pr_create_output_closes_nothing(self):
         for out in ("", "created, but no URL here\n", "https://example.invalid/o/r/pull/abc\n"):
