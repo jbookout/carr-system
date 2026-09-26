@@ -65,6 +65,16 @@ function client(overrides = {}) {
   } }] }) };
 }
 
+// The production state after #1305: active rules, no bound contract, so the
+// census projects an empty policy.
+const UNBOUND = {
+  active_rule_count: 2, projected_rule_count: 0, missing_rule_ids: ["r1", "r2"],
+  policy: { schema_version: "doctorcre-v5-f05-rule-universe.v1", universe_version: 82,
+    tenant: "carr-internal", completeness: "partial_unknown_coverage",
+    declared_actions: ["repo.commit"], declared_resource_classes: ["repository"],
+    rules: [] },
+};
+
 // A behavioural expectation, stated once, run against real and mutant alike.
 // It resolves when the module under test behaves correctly and rejects when
 // it does not.
@@ -82,6 +92,31 @@ const EXPECTATIONS = {
       () => module.readActionContext(client({
         active_rule_count: 2, projected_rule_count: 1, missing_rule_ids: [],
       }), ACTOR, { facts: FACTS }),
+      error => error?.code === "runtime_census_mismatch");
+  },
+  // Main suite: "no bound contracts: the read returns a partial, blocked, digest-bound receipt".
+  async zeroRulesBlockedWithReceipt(module) {
+    const result = await module.readActionContext(client(UNBOUND), ACTOR, { facts: FACTS });
+    assert.equal(result.consequential_action_permitted, false);
+    assert.equal(result.coverage_receipt.consequential_action_permitted, false);
+    assert.equal(result.coverage_receipt.coverage_complete, false);
+    assert.equal(result.coverage_receipt.universe_completeness, "partial_unknown_coverage");
+    assert.deepEqual([...result.coverage_receipt.missing_rule_ids], ["r1", "r2"]);
+  },
+  // Main suite: "zero active and zero projected rules still never read as complete or permitted".
+  async zeroActiveZeroProjectedBlocked(module) {
+    const result = await module.readActionContext(client({
+      ...UNBOUND, active_rule_count: 0, missing_rule_ids: [],
+    }), ACTOR, { facts: FACTS });
+    assert.equal(result.consequential_action_permitted, false);
+    assert.equal(result.coverage_receipt.coverage_complete, false);
+    assert.equal(result.coverage_receipt.universe_completeness, "partial_unknown_coverage");
+  },
+  // Main suite: "a zero-projection census still has to add up".
+  async zeroCensusInconsistentRefuses(module) {
+    await assert.rejects(
+      () => module.readActionContext(client({ ...UNBOUND, missing_rule_ids: ["r1"] }),
+        ACTOR, { facts: FACTS }),
       error => error?.code === "runtime_census_mismatch");
   },
   // Main suite: "server-derived identity, time, completeness ... cannot be supplied by the caller".
@@ -118,4 +153,46 @@ test("M2 killed: dropping the authority-injection guard accepts a caller-supplie
     "assertNoRuntimeAuthorityInjection(request);",
     "// mutant: caller authority fields are not rejected");
   await assertKilled(mutant, "callerTimeRefuses");
+});
+
+test("M1c killed: dropping the census consistency check also lets a lying zero-projection census through", async () => {
+  const mutant = await mutate("M1c-drop-census-check-empty",
+    "      missingRuleIds.length !== active - projected) {",
+    "      missingRuleIds.length !== active - projected && false) {");
+  await assertKilled(mutant, "zeroCensusInconsistentRefuses");
+});
+
+test("M3a killed: an empty projection that reads as write-permitted", async () => {
+  const mutant = await mutate("M3a-empty-permits",
+    "const EMPTY_PROJECTION_WRITE_PERMITTED = false;",
+    "const EMPTY_PROJECTION_WRITE_PERMITTED = true;");
+  await assertKilled(mutant, "zeroRulesBlockedWithReceipt");
+});
+
+test("M3b killed: an empty projection that reads as complete coverage", async () => {
+  const mutant = await mutate("M3b-empty-coverage-complete",
+    "const EMPTY_PROJECTION_COVERAGE_COMPLETE = false;",
+    "const EMPTY_PROJECTION_COVERAGE_COMPLETE = true;");
+  await assertKilled(mutant, "zeroRulesBlockedWithReceipt");
+});
+
+test("M3c killed: an empty projection that claims an authoritative universe", async () => {
+  const mutant = await mutate("M3c-empty-universe-complete",
+    "const EMPTY_PROJECTION_COMPLETENESS = PARTIAL;",
+    "const EMPTY_PROJECTION_COMPLETENESS = COMPLETE;");
+  await assertKilled(mutant, "zeroRulesBlockedWithReceipt");
+});
+
+test("M3d killed: deriving the empty gate from the census reads zero-of-zero as permitted", async () => {
+  const mutant = await mutate("M3d-empty-gate-from-census",
+    "consequential_action_permitted: EMPTY_PROJECTION_WRITE_PERMITTED,",
+    "consequential_action_permitted: snapshot.active_rule_count === snapshot.projected_rule_count,");
+  await assertKilled(mutant, "zeroActiveZeroProjectedBlocked");
+});
+
+test("M3e killed: removing the zero-projection branch brings back the thrown invalid_shape", async () => {
+  const mutant = await mutate("M3e-drop-empty-branch",
+    "if (snapshot.projected_rule_count === 0) {",
+    "if (false) {");
+  await assertKilled(mutant, "zeroRulesBlockedWithReceipt");
 });
