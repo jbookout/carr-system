@@ -101,9 +101,12 @@ def _parse_enqueue(turn: dict, head: str, body: str, catalog: dict) -> ParseResu
     if rejected:
         return rejected
     assert fields is not None
-    missing = [name for name in ("target", "cap") if name not in fields]
+    missing = [name for name in ("cap",) if name not in fields]
     if missing:
         return _reject("field_required", f"required field(s) missing: {', '.join(missing)}")
+    # No target named: the Model Room routes it (Joe 2026-09-26, agreed with the Orchestrator session). A named
+    # target is never rewritten, so a pinned dispatch stays exactly where its sender put it.
+    fields.setdefault("target", AUTO_TARGET)
     # target=auto: the Model Room routes the task (ops/jev_model_route.py via QueueService) after parsing, so the
     # grammar checks everything except the target here and the service checks the target it picks.
     auto = fields["target"] == AUTO_TARGET
