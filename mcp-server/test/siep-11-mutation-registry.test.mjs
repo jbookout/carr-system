@@ -3215,7 +3215,10 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
   // OneDrive-wake daytime retry job), a real deployed launchd entrance.
   // 40, not 39: V5-A05 adds com.carr.delivery-cadence-a05-sweep.plist, the
   // daily 07:00 cadence sweep, a deployed launchd entrance.
-  assert.equal(workflows.length, 40);
+  // 41, not 40: session-trace-archive adds com.carr.session-trace-archive.plist,
+  // the nightly local archive of Claude Code / Codex session transcripts, a
+  // deployed launchd entrance.
+  assert.equal(workflows.length, 41);
   const github = workflows.filter(row => row.source_locator.startsWith(".github/workflows/"));
   assert.equal(github.length, 7);
   assert.equal(github.every(row => row.ingress_kind === "workflow_entrypoint" &&
@@ -3229,7 +3232,8 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
   const launchd = workflows.filter(row => row.source_locator.startsWith("ops/launchd/"));
   // 32, not 31 — same #1241 addition as above.
   // 33, not 32 -- the same V5-A05 sweep plist.
-  assert.equal(launchd.length, 33);
+  // 34, not 33 -- the same session-trace-archive addition as above.
+  assert.equal(launchd.length, 34);
   // Every agent is fully identified and carries SOME physical authority ref;
   // only a DEPLOYED agent's is a service environment. Collapsing those two into
   // one clause is what would let a definition-only agent either slip through
@@ -3244,8 +3248,10 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
     row.physical_authority_refs.some(ref => ref.startsWith("ops.service_environment:"))), true);
   // 31, not 30 — same #1241 addition: one new deployed plist, one new
   // ops.service_environment: ref (its "production" environment).
+  // 33, not 32 — same session-trace-archive addition: one new deployed
+  // plist, one new ops.service_environment: ref (its "production" environment).
   assert.equal(launchd.flatMap(row => row.physical_authority_refs)
-    .filter(ref => ref.startsWith("ops.service_environment:")).length, 32);
+    .filter(ref => ref.startsWith("ops.service_environment:")).length, 33);
   assert.equal(launchd.find(row => row.launchd_label === "com.carr.rules-refresh")
     .physical_authority_refs.includes("ops.service_environment:rules-refresh:production"), true);
   // The definition-only agent carries an explicit non-deployed authority ref in
