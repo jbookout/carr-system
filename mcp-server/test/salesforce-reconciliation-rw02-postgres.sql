@@ -54,6 +54,34 @@ select ops.rw02_record(
   )
 );
 
+-- A duplicate check for the SAME action kind is durable too, but it is not
+-- readback evidence: the per-action evidence read must not count it.
+select ops.rw02_record(
+  'record-salesforce-duplicate-check',
+  'rw02-postgres-fixture-0002',
+  'sha256:1111111111111111111111111111111111111111111111111111111111111111',
+  'opportunity_create',
+  'rw02-step-postgres-dup-1',
+  jsonb_build_object('evaluation', jsonb_build_object('decision', 'link',
+    'action_kind', 'opportunity_create', 'step_key', 'rw02-step-postgres-dup-1'))
+);
+
+-- Readback evidence sealed for one action cannot be filed under another.
+do $$
+begin
+  perform ops.rw02_record(
+    'record-salesforce-write-readback',
+    'rw02-postgres-fixture-0003',
+    'sha256:2222222222222222222222222222222222222222222222222222222222222222',
+    'opportunity_phase_update',
+    'rw02-step-postgres-1',
+    jsonb_build_object('evaluation', jsonb_build_object('evidence', jsonb_build_object(
+      'action_kind', 'opportunity_create', 'step_key', 'rw02-step-postgres-1'))));
+  raise exception 'rw02 fixture: cross-action readback was accepted';
+exception when others then
+  if position('rw02_evidence_binding_mismatch' in sqlerrm) = 0 then raise; end if;
+end $$;
+
 do $$
 declare v_replay jsonb; v_count integer; v_evidence jsonb;
 begin
@@ -78,7 +106,9 @@ begin
   perform ops.rw02_replay(
     'record-salesforce-write-readback', 'rw02-postgres-fixture-0001',
     'sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff');
-  raise exception 'expected idempotency_key_reused';
+  -- The sentinel must NOT contain the expected error text, or the handler
+  -- below would accept this raise as the refusal it is looking for.
+  raise exception 'rw02 fixture: replay accepted a changed request digest';
 exception when others then
   if position('idempotency_key_reused' in sqlerrm) = 0 then raise; end if;
 end $$;

@@ -137,6 +137,28 @@ test("CD2/CD3: write readback persists only the evaluator's sealed per-action ev
   assert.equal(db.rows[0].step_key, evidence.step_key);
 });
 
+test("CD3: readback evidence sealed for another action or step is refused before SQL", async () => {
+  for (const [label, evidence] of [
+    ["action", readbackEvidence("opportunity_phase_update", "rw02-step-synthetic-1")],
+    ["step", readbackEvidence("opportunity_create", "rw02-step-other")],
+  ]) {
+    const db = new FakeDb();
+    const store = createSalesforceReconciliationStore({
+      db,
+      evaluators: { evaluateWriteReadback: () => ({ decision: "confirmed", reason_id: "exact_readback",
+        action_kind: "opportunity_create", step_key: "rw02-step-synthetic-1", evidence,
+        outward_effect_granted: false, autonomy_active: false }) },
+    });
+    await assert.rejects(
+      store.recordWriteReadback({ idempotency_key: `rw02-readback-foreign-${label}`,
+        observation: { synthetic: "closed evaluator input" } }, ctx),
+      e => e instanceof V5RW02StoreError && e.code === "evidence_binding_mismatch",
+      label,
+    );
+    assert.equal(db.rows.length, 0, label);
+  }
+});
+
 test("CD3: evidence read is per action, rejects a foreign row before trust evaluation, and never activates", async () => {
   const own = readbackEvidence("opportunity_create", "rw02-step-a");
   const db = new FakeDb({ evidence: [own, readbackEvidence("opportunity_phase_update", "rw02-step-b")] });
