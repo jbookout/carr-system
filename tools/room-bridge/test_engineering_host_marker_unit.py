@@ -34,13 +34,14 @@ def check(label, fn):
 def launch(marker: Path, env_file: Path):
     env = {**os.environ, "CARR_ENGINEERING_CONTROLLER_NOT_HOST_MARKER": str(marker),
            "CARR_ENGINEERING_CONTROLLER_ENV_FILE": str(env_file)}
+    assert ZSH is not None
     return subprocess.run([ZSH, str(LAUNCHER)], env=env, capture_output=True, text=True, timeout=60)
 
 
 def test_marked_mac_without_credential_answers_no_claim():
     with tempfile.TemporaryDirectory() as d:
         marker = Path(d) / "marker"
-        marker.write_text("controller runs on Joe's MacBook\n")
+        marker.write_text("controller runs on the Mac Studio\n")
         p = launch(marker, Path(d) / "absent.env")
         assert p.returncode == 0, p.stderr
         assert '"host":"not_controller_host"' in p.stdout and '"claimed":0' in p.stdout, p.stdout
