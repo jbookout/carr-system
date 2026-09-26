@@ -102,6 +102,8 @@ const EXPECTATIONS = {
     assert.equal(result.coverage_receipt.coverage_complete, false);
     assert.equal(result.coverage_receipt.universe_completeness, "partial_unknown_coverage");
     assert.deepEqual([...result.coverage_receipt.missing_rule_ids], ["r1", "r2"]);
+    // Blocked, so it must not read as permission to a `decision === "allow"` caller.
+    assert.equal(result.coverage_receipt.decision, "read_only");
   },
   // Main suite: "zero active and zero projected rules still never read as complete or permitted".
   async zeroActiveZeroProjectedBlocked(module) {
@@ -194,5 +196,12 @@ test("M3e killed: removing the zero-projection branch brings back the thrown inv
   const mutant = await mutate("M3e-drop-empty-branch",
     "if (snapshot.projected_rule_count === 0) {",
     "if (false) {");
+  await assertKilled(mutant, "zeroRulesBlockedWithReceipt");
+});
+
+test("M3f killed: the zero-rules receipt copies a literal allow onto a blocked write", async () => {
+  const mutant = await mutate("M3f-empty-decision-allow",
+    "    decision,\n    reason_id: \"coverage_incomplete_read_only\",",
+    "    decision: \"allow\",\n    reason_id: \"coverage_incomplete_read_only\",");
   await assertKilled(mutant, "zeroRulesBlockedWithReceipt");
 });

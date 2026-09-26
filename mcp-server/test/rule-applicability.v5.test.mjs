@@ -15,6 +15,7 @@ import {
   V5F05Error,
   V5_F05_UNIVERSE_SCHEMA_VERSION,
   V5_F05_COVERAGE_SCHEMA_VERSION,
+  V5_F05_COVERAGE_DECISIONS,
   V5_F05_SETTLED_DECISIONS,
   V5_F05_SETTLED_DECISION_IDS,
   V5_F05_FACT_DIMENSIONS,
@@ -1366,17 +1367,91 @@ test("the kernel projection is closed, hashed and states what it does not do", (
   assert.equal(preimage.write_gate_field, "consequential_action_permitted");
 });
 
-test("Q065 `decision` is not the write gate, and the receipt names the field that is", () => {
+test("Q065 a blocked receipt reads read_only, never allow, and still names the write gate", () => {
   const facts = commitFacts();
   delete facts.action;
   const receipt = derive(basePolicy(), facts);
-  // Nothing hard-refused, so the decision reads allow...
-  assert.equal(receipt.decision, "allow");
+  // Nothing hard-refused, but the write is blocked: the decision says so
+  // itself, so a caller testing `decision === "allow"` is not handed a yes.
+  assert.equal(receipt.decision, "read_only");
+  assert.equal(receipt.reason_id, "coverage_incomplete_read_only");
   assert.equal(receipt.read_only_exploration_permitted, true);
-  // ...while the field an admission call site must actually read says no.
   assert.equal(receipt.consequential_action_permitted, false);
   assert.equal(receipt.write_gate_field, "consequential_action_permitted");
   assert.equal(receipt[receipt.write_gate_field], false);
+});
+
+// The receipts every decision value can come from, each built the way a real
+// caller reaches it. rule-applicability-decision-mutants.v5.test.mjs holds
+// planted-bug mutants of this same invariant.
+function receiptsForEveryDecision() {
+  const unknownFacts = commitFacts();
+  delete unknownFacts.action;
+  const partial = basePolicy();
+  partial.completeness = "partial_unknown_coverage";
+  const conflict = basePolicy();
+  conflict.rules.push({
+    rule_id: "send-freeze",
+    version: 1, rule_class: "workflow", scope: "shared", owner: "joe", mandatory: true,
+    trigger: { risk_tier: ["consequential"] },
+    control_effect: { control_key: "client_send", effect: "forbid" },
+    binding_text: "Client sends are frozen during the migration window.",
+    tests: ["check:send-freeze"],
+    retirement: { behavior: "permanent_until_superseded" },
+    provenance: prov("r-rule-send-freeze", "7"),
+  });
+  const undeliverable = swapNoPhi(basePolicy(),
+    { verified_at: FRESH_EVIDENCE, control_version: "7" }, { binding_text: null });
+  return {
+    complete: derive(basePolicy(), commitFacts()),
+    typed_facts_unknown: derive(basePolicy(), unknownFacts),
+    universe_partial: derive(partial, commitFacts()),
+    binding_conflict: derive(conflict, sendFacts()),
+    delivery_refused: derive(undeliverable, commitFacts()),
+  };
+}
+
+test("`decision` agrees with the write gate on every receipt: allow only when the write is permitted", () => {
+  assert.deepEqual([...V5_F05_COVERAGE_DECISIONS], ["allow", "read_only", "refuse"]);
+  const receipts = receiptsForEveryDecision();
+  const expected = {
+    complete: ["allow", true],
+    typed_facts_unknown: ["read_only", false],
+    universe_partial: ["read_only", false],
+    binding_conflict: ["refuse", false],
+    delivery_refused: ["refuse", false],
+  };
+  for (const [label, receipt] of Object.entries(receipts)) {
+    const [decision, permitted] = expected[label];
+    assert.equal(receipt.decision, decision, label);
+    assert.equal(receipt.consequential_action_permitted, permitted, label);
+    // The invariant itself, stated independently of the table above.
+    assert.equal(receipt.decision === "allow", receipt.consequential_action_permitted === true, label);
+    assert.equal(receipt.decision === "refuse", receipt.read_only_exploration_permitted === false, label);
+    assert.ok(V5_F05_COVERAGE_DECISIONS.includes(receipt.decision), label);
+    assert.equal(verifyCoverageReceipt(receipt), true, label);
+  }
+});
+
+test("a re-digested receipt whose `decision` contradicts its write gate is refused", () => {
+  // The digest proves the bytes were not edited; it cannot prove the bytes
+  // were right. A forger who recomputes the digest must still not be able to
+  // hand a caller `decision: "allow"` on a blocked receipt.
+  const redigest = receipt => {
+    const { receipt_digest, effects, ...rest } = receipt;
+    return { ...rest, receipt_digest: digest(rest), effects };
+  };
+  const { complete, typed_facts_unknown, binding_conflict } = receiptsForEveryDecision();
+  for (const [base, decision] of [
+    [typed_facts_unknown, "allow"], [binding_conflict, "allow"], [binding_conflict, "read_only"],
+    [complete, "read_only"], [complete, "refuse"], [typed_facts_unknown, "refuse"],
+  ]) {
+    const forged = redigest({ ...base, decision });
+    assert.equal(code(() => verifyCoverageReceipt(forged)), "coverage_receipt_decision_inconsistent",
+      `${base.decision} -> ${decision}`);
+  }
+  const unknownValue = redigest({ ...complete, decision: "permit" });
+  assert.equal(code(() => verifyCoverageReceipt(unknownValue)), "coverage_receipt_decision_inconsistent");
 });
 
 test("the unbuilt runtime seams are named and fail closed", () => {
