@@ -391,6 +391,14 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0706_amend_closed_loop.sql",
         "0707_amend_closed_loop_scac_successor.sql",
     ),
+    # DoctorCRE V5-F05: 0715 installs the authority-bound typed rule-contract
+    # store and its actor-scoped universe reader; 0716 seals the resulting
+    # source and database capability frontier as provisional v82. The deferred
+    # policy-epoch trigger must observe both or neither.
+    (
+        "0715_f05_live_rule_context.sql",
+        "0716_f05_live_rule_context_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -461,6 +469,10 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0706_amend_closed_loop.sql",
         "0707_amend_closed_loop_scac_successor.sql",
+    ),
+    (
+        "0715_f05_live_rule_context.sql",
+        "0716_f05_live_rule_context_scac_successor.sql",
     ),
 )
 

@@ -233,6 +233,9 @@ WRITE_ACTION_EXACT = {
                               # reason as adjudicate above — it would cover exactly one
                               # verb today, and a generic "cancel" prefix would silently
                               # capture any future read named cancel-something.
+    "bind-rule-context-contract",  # V5-F05: appends an authority-only typed rule
+                                    # projection. EXACT: read-action-context is a
+                                    # read, and "bind" is not a blanket write prefix.
     "dry-run-doctrine-gates",
     "edit-loop-header",      # updates loop_block.prose_md, like presence-lease/review-deal:
                               # a one-off verb whose first word ("edit") is not a generic

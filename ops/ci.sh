@@ -1288,6 +1288,21 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     fi
   fi
 
+  # V5-F05: the typed contract binder and actor-scoped universe census need a
+  # real database. The unit class exercises the runtime adapter with a fake
+  # client; this lane proves append-only persistence, idempotent replay,
+  # server-derived rule identity/provenance, and explicit missing-rule census
+  # against the migrated schema.
+  if [ -f mcp-server/test/rule-context-runtime-postgres.test.mjs ]; then
+    if ! DATABASE_URL="$dsn" CARR_F05_DB_REQUIRED=1 \
+         run_quiet "$LOGDIR/rule-context-runtime-postgres.log" \
+         node --test mcp-server/test/rule-context-runtime-postgres.test.mjs; then
+      tail -40 "$LOGDIR/rule-context-runtime-postgres.log" >&2
+      bad migration "V5-F05 rule-context PostgreSQL acceptance failed"
+      return
+    fi
+  fi
+
   # Continuity bindings and append-only records need actual PostgreSQL proof.
   if ! run_quiet "$LOGDIR/codex-continuity-postgres.log" \
        "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
