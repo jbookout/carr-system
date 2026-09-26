@@ -132,6 +132,25 @@
       ]
     },
     {
+      "key": "nightly-exports-daytime-retry",
+      "name": "Nightly exports daytime retry",
+      "purpose": "Safety net for nightly-record-layer's exports step (defect: failed 9/22-9/24, the OneDrive File Provider idling overnight — see doctrine 'nightly-exports-onedrive-wake'). Re-runs `./run.sh export` once, only if tonight's own archived nightly log did not report the exports step OK.",
+      "family": "Local Mac edge",
+      "criticality": "medium",
+      "owner_actor": "joe",
+      "repo_path": "bin/nightly-exports-retry.sh",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.nightly-exports-daytime-retry.plist",
+          "expected_cadence_seconds": 86400,
+          "cadence_grace_seconds": 7200,
+          "notes": "Daily at 11:00 local (StartCalendarInterval Hour/Minute are local time, not UTC), one fixed calendar fire. A no-op most days (exits immediately once tonight's own nightly-record-layer run already landed exports OK), so absence of a RETRY line in out/nightly.log is the expected common case, not an anomaly — same posture as migrate-prod above."
+        }
+      ]
+    },
+    {
       "key": "rules-refresh",
       "name": "Taught-rule refresh",
       "purpose": "Re-renders the compiled rule files Dell's sessions boot from.",
@@ -283,9 +302,28 @@
       ]
     },
     {
+      "key": "delivery-cadence-a05-sweep",
+      "name": "V5-A05 delivery-cadence sweep",
+      "purpose": "Reads cadence-status for the bounded v1 subject (engineering_program/doctorcre-v5) and, only on a detected 14-day miss, raises the replan-on-miss escalation through raise-delivery-cadence-alert. Daily 07:00. See ops/delivery-cadence-a05-sweep.py.",
+      "family": "Local Mac edge",
+      "criticality": "low",
+      "owner_actor": "joe",
+      "repo_path": "ops/delivery-cadence-a05-sweep.py",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.delivery-cadence-a05-sweep.plist",
+          "expected_cadence_seconds": 86400,
+          "cadence_grace_seconds": 172800,
+          "notes": "Daily, 07:00 local, before the working day. Grace spans a missed day plus buffer to the following run, matching timebomb-audit's own weekend-spanning reasoning."
+        }
+      ]
+    },
+    {
       "key": "workflow-census-writer",
       "name": "V5-F09 workflow census writer",
-      "purpose": "Reads the control plane's rows through the read-only tap, runs the F09 workflow classifier, and records the census through record-workflow-census into the append-only, hash-chained ops.workflow_census_record (migration 0595); the census reader accepts only a latest row younger than 26 hours. Daily 04:10. See ops/workflow-census-writer.py.",
+      "purpose": "Reads the control plane's rows through the read-only tap, runs the F09 workflow classifier, and records the census through record-workflow-census into the append-only, hash-chained ops.workflow_census_record (migration 0708); the census reader accepts only a latest row younger than 26 hours. Daily 04:10. See ops/workflow-census-writer.py.",
       "family": "Local Mac edge",
       "criticality": "medium",
       "owner_actor": "joe",

@@ -1,4 +1,4 @@
--- 0595_workflow_census_store.sql
+-- 0708_workflow_census_store.sql
 --
 -- The durable, server-attested store for the V5-F09 workflow census: the owner
 -- lib/control_plane_workflow_truth_reader.py has reported owed since PR #984
@@ -92,11 +92,11 @@
 -- re-anchors a forged chain is recorded, not prevented. Those limits are the reason the reader's
 -- output is labelled as an attestation, never as a health verdict.
 --
--- ATOMIC WITH 0596. The three new SECURITY DEFINER doors carry EXECUTE grants to
+-- ATOMIC WITH 0709. The three new SECURITY DEFINER doors carry EXECUTE grants to
 -- runtime roles, which moves the live SCAC mutation catalog; applied alone this
--- migration is refused at commit by the deferred epoch trigger. 0596 seals the
+-- migration is refused at commit by the deferred epoch trigger. 0709 seals the
 -- catalog as the next registry version, and tools/migrate.py declares
--- (0595, 0596) one atomic group.
+-- (0708, 0709) one atomic group.
 --
 -- No explicit transaction control: tools/migrate.py runs each migration inside
 -- its own single transaction.

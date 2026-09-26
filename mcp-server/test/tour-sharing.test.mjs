@@ -22,7 +22,7 @@ const packetFixture = {
   tour_name: "Tour", summary: "Two stops", provider: "private", allow_comments: true,
   stops: [{ name: "Medical Plaza", address: "100 Clinic Way", suite: "Suite 200", property_ref: propertyRef,
     route_sequence: 1, route_label: "A", access_notes: "private", latest_reaction: "interested",
-    size: { value: 1200, unit: "sf", verifier: "no" },
+    size: { value: 1200, unit: "sf" },
     photos: [{ asset_ref: "asset:public:abcdefghijklmnop", alt: "Front", source: "provider" }] }],
 };
 const mapFixture = { as_of: "2026-08-27T00:00:00Z", points: [{ latitude: 30.1, longitude: -87.2,
@@ -104,6 +104,10 @@ test("public and internal projections strip secrets and unsupported scopes", asy
   assert.equal(packet.stops[0].access_notes, undefined);
   assert.equal(packet.stops[0].suite, "Suite 200");
   assert.deepEqual(packet.stops[0].size, { value: 1200, unit: "sf" });
+  // A metric carrying any key outside the client metric shape is refused (the
+  // database value-safety rule refuses the same object), never trimmed, and
+  // the refusal takes the whole packet, as the database and the PDF do.
+  assert.equal(projectTourClientPacket({ ...packetFixture, stops: [{ ...packetFixture.stops[0], size: { value: 1200, unit: "sf", verifier: "no" } }] }), null);
   assert.equal(packet.stops[0].latest_reaction, undefined);
   assert.deepEqual(projectTourPublicAsset({ media_type: "image/jpeg", provider: "private" }, "asset:public:abcdefghijklmnop"),
     { asset_ref: "asset:public:abcdefghijklmnop", media_type: "image/jpeg" });
@@ -115,6 +119,9 @@ test("public and internal projections strip secrets and unsupported scopes", asy
 
 test("public projections require bounded opaque property identity and valid map coordinates", () => {
   assert.equal(projectTourClientPacket(packetFixture).stops.length, 1);
-  assert.equal(projectTourClientPacket({ ...packetFixture, stops: [{ ...packetFixture.stops[0], route_sequence: 0 }] }).stops.length, 0);
-  assert.equal(projectTourClientMap({ ...mapFixture, points: [{ ...mapFixture.points[0], latitude: 91 }, mapFixture.points[0]] }).points.length, 1);
+  // One bad stop or point refuses the whole share: the list and the map never
+  // show a client a different set of stops.
+  assert.equal(projectTourClientPacket({ ...packetFixture, stops: [{ ...packetFixture.stops[0], route_sequence: 0 }] }), null);
+  assert.equal(projectTourClientMap({ ...mapFixture, points: [{ ...mapFixture.points[0], latitude: 91 }, mapFixture.points[0]] }), null);
+  assert.equal(projectTourClientMap(mapFixture).points.length, 1);
 });

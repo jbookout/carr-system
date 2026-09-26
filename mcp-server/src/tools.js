@@ -12,6 +12,7 @@ import { investigationTools } from "./investigation.js";
 import { docConversationTools } from "./doc-conversation.js";
 import { MEETING_MODE_WRITE_VERBS, meetingModeTools } from "./meeting-mode.js";
 import { notificationTools } from "./notifications.js";
+import { deliveryCadenceA05Tools } from "./delivery-cadence-a05-tools.js";
 import { sessionIdentityTools } from "./session-identity.js";
 import { dispatchSpineTools } from "./dispatch-spine.js";
 import { capabilityProgramTools } from "./capability-program.js";
@@ -29,6 +30,7 @@ import { incidentTools } from "./incident.js";
 import { evidenceActivationTools } from "./evidence-activation.js";
 import { resourceObservationTools } from "./resource-observation.v5.js";
 import { jevCallReceiptTools } from "./jev-call-receipt.js";
+import { workflowCutoverTools } from "./workflow-cutover.v5.js";
 import { workflowCensusTools } from "./workflow-census.js";
 import { engineeringRuntimeTools } from "./engineering-runtime.js";
 import { tourRightsProjectionTools } from "./tour-rights-projection.js";
@@ -59,8 +61,19 @@ import {
 import { emitGateZeroOutcome } from "./gate-zero-assurance.v5.js";
 import { benchmarkAcceptanceStoreTools } from "./benchmark-acceptance-store.v5.js";
 import { modelRoleStoreTools } from "./model-role-store.v5.js";
+import { recordSourceAuthorityStoreTools } from "./record-source-authority-store.v5.js";
+// V5-J102's healthcare CRE lifecycle door: every verb on the writer connection
+// through mcp.js's setWriterActorContext, which sets the actor and the
+// server-verified sponsor the store and SQL writers derive attribution from.
+import { creLifecycleStoreTools } from "./cre-lifecycle-store.v5.js";
 import { foundationAssuranceMinimumTools } from
   "./foundation-assurance-minimum-producer.v5.js";
+// V5-S01's live door: the settled global boundaries evaluated at the dispatch
+// seam below (shadow until Joe approves enforcement), and their read projection.
+import { V5BoundaryDoorRefusal, globalBoundariesDoorTools, passBoundaryDoor } from
+  "./global-boundaries-door.v5.js";
+import { journeyOneClockDoorTools } from "./journey-one-clock-door.v5.js";
+import { governedCorrespondenceStoreTools } from "./governed-correspondence-store.v5.js";
 export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
 
 // ---------- envelope helpers ----------
@@ -1037,7 +1050,14 @@ async function resolveSubject(client, ref) {
 // identifies, and an ambiguous number REFUSES with the candidates listed —
 // ORDER 1's needs_disambiguation behaviour, applied to a surface that is
 // genuinely ambiguous rather than occasionally so.
-async function resolveLoop(client, args) {
+// opts.anyStatus (default false, unchanged behaviour for every existing
+// caller) lets amend-closed-loop resolve a CLOSED row by number too: the
+// default number-lookup is scoped to status='open' because 0112 only
+// guarantees uniqueness there, and every caller before amend-closed-loop only
+// ever needed an open row anyway. amend-closed-loop needs the opposite row —
+// closed — so it opts in rather than the default widening for everyone.
+async function resolveLoop(client, args, opts = {}) {
+  const anyStatus = opts.anyStatus === true;
   if (args.loop_id) {
     const r = await client.query(
       `select li.id, li.kind, li.number, li.status, li.marker, li.due_on,
@@ -1054,11 +1074,12 @@ async function resolveLoop(client, args) {
     `select li.id, li.kind, li.number, li.status, li.marker, li.due_on,
             li.close_outcome, lb.block_key as section, lb.rel_path
        from loop_item li join loop_block lb on lb.id = li.block_id
-      where li.number = $1 and li.status = 'open'
+      where li.number = $1 and (${anyStatus ? "true" : "li.status = 'open'"})
         and ($2::text is null or li.kind = $2)`, [args.number, args.kind || null]);
   if (!r.rows.length)
     throw new ToolError({ error: "loop_not_found", number: args.number, kind: args.kind || null,
-      hint: "only OPEN loops resolve by number; a closed one needs its loop_id" });
+      hint: anyStatus ? "no row, open or closed, carries this number — pass loop_id"
+                       : "only OPEN loops resolve by number; a closed one needs its loop_id" });
   if (r.rows.length > 1)
     throw new ToolError({ error: "needs_disambiguation", number: args.number,
       candidates: r.rows.map(x => ({ loop_id: x.id, kind: x.kind, section: x.section,
@@ -1067,6 +1088,19 @@ async function resolveLoop(client, args) {
             "fix the collision itself with update-loop's `number` (plus renumber_reason). " +
             "Migration 0112 makes a new one impossible; anything left is pre-0112 history." });
   return r.rows[0];
+}
+
+// read-loop's amendment attachment. loop_amendment_history() (migration 0702)
+// is a SECURITY DEFINER function so carr_reader can call it without a
+// base-table grant on loop_amendment — read-loop runs on the reader
+// connection like every other write:false verb, and the append-only table's
+// grant stays exactly select+insert to carr_writer, nothing wider.
+async function withAmendmentHistory(client, loop) {
+  const r = await client.query(
+    `select id, prior_outcome, new_outcome, prior_resolution, new_resolution,
+            reason, actor, to_jsonb(created_at)#>>'{}' as created_at
+       from loop_amendment_history($1)`, [loop.loop_id]);
+  return { loop, amended: r.rows.length > 0, amendments: r.rows };
 }
 
 // Next visible ref for a kind. Numeric part only, because that is the part the
@@ -2951,7 +2985,28 @@ export const TOOLS = {
         renewals.reason = "source_unavailable";
         renewals.items = [];
       }
-      const sections = { today, claim_card: claimCard, deals, loops, renewals };
+      // V5-A05's morning approval batch: unread notifications minted by
+      // raise-delivery-cadence-alert (producer 'v5-a05-delivery-cadence'),
+      // for the authenticated sponsor's own actor. This is the "morning
+      // approval batch goes through the existing morning brief and
+      // notification feed" wiring -- no separate queue is built; a batched
+      // item is simply an unread notification from this producer, surfaced
+      // here AND reachable through notification-feed like any other.
+      const assuranceCadence = await section(async () => {
+        // Reads through ops.v5_a05_assurance_cadence_batch (migration 0617,
+        // sealed as SCAC v75 by 0618), a narrow SECURITY DEFINER function
+        // granted to carr_reader that refuses any non-partner recipient and
+        // hides items still held for the morning window -- morning-brief
+        // runs on the reader connection, and ops.notification/
+        // ops.notification_read themselves carry no carr_reader grant
+        // (tools/test-handler-reads-are-granted.py). Never read those tables
+        // directly from a handler.
+        const result = await c.query(
+          "select ops.v5_a05_assurance_cadence_batch($1) as batch", [scope.sponsor]);
+        const batch = result.rows[0]?.batch;
+        return { items: Array.isArray(batch) ? batch : [] };
+      });
+      const sections = { today, claim_card: claimCard, deals, loops, renewals, assurance_cadence: assuranceCadence };
       return {
         state: Object.values(sections).some((value) => value.state === "unavailable")
           ? "unavailable"
@@ -3171,7 +3226,7 @@ export const TOOLS = {
 
   "read-loop": {
     write: false,
-    description: "Read ONE loop and its current version. THE GAP THIS CLOSES: update-loop and close-loop both refuse without base_version and tell the caller to 'read the record first' — and until this verb existed, nothing could perform that read. The only way to learn a loop's version was to guess, take a version_conflict, and lift the number out of the error message. Pass `number` (the '#142' a human says, with or without the hash) or `loop_id`. A number can repeat across kinds, so an ambiguous number returns the candidates rather than picking one for you.",
+    description: "Read ONE loop and its current version. THE GAP THIS CLOSES: update-loop and close-loop both refuse without base_version and tell the caller to 'read the record first' — and until this verb existed, nothing could perform that read. The only way to learn a loop's version was to guess, take a version_conflict, and lift the number out of the error message. Pass `number` (the '#142' a human says, with or without the hash) or `loop_id`. A number can repeat across kinds, so an ambiguous number returns the candidates rather than picking one for you. Also returns `amended` (true once amend-closed-loop has ever corrected this loop's outcome) and `amendments`, the full correction trail oldest first — each with prior_outcome, new_outcome, prior_resolution, new_resolution, reason, actor and created_at.",
     inputSchema: { type: "object", properties: {
       number: { type: "string", description: "the loop number as a human writes it, with or without the leading #" },
       loop_id: { type: "string", description: "exact uuid; wins over number" },
@@ -3187,7 +3242,7 @@ export const TOOLS = {
       if (args.loop_id) {
         const r = await c.query(`select ${cols} from loop_item where id=$1`, [args.loop_id]);
         if (!r.rows.length) return { error: "not_found", hint: "no loop carries that id" };
-        return { loop: r.rows[0] };
+        return await withAmendmentHistory(c, r.rows[0]);
       }
       const num = String(args.number || "").replace(/^#/, "").trim();
       if (!num) return { error: "need_number_or_id", hint: "pass number (e.g. '142') or loop_id" };
@@ -3203,7 +3258,7 @@ export const TOOLS = {
           hint: "same number in more than one kind — pass kind to narrow",
         };
       }
-      return { loop: r.rows[0] };
+      return await withAmendmentHistory(c, r.rows[0]);
     },
   },
 
@@ -7040,6 +7095,128 @@ export const TOOLS = {
     }),
   },
 
+  "amend-closed-loop": {
+    write: true,
+    description: "Correct a CLOSED loop's outcome, append-only — never rewrite history. THE GAP THIS CLOSES: close-loop refuses with loop_not_open on anything already closed, by design (a closed loop is history; open a new one rather than editing the record of what happened) — but that rule has no answer for the outcome text itself being WRONG. Loop c7265238-effe-4166-bc9a-eccc5f389763 was closed with outcome \"x\" by mistake and nothing could fix it (defect a2c04ffa-92d0-4428-b175-32fa3cfb0802): the only paths were a raw table UPDATE, exactly what the record layer exists to prevent, or living with a nonsense outcome forever. This verb is the third path. It NEVER reopens the loop and never rewrites the prior outcome in place — it appends a loop_amendment row (prior outcome, new outcome, reason, server-derived actor) and only then updates loop_item's current projection to match, so the loop's current outcome reads the latest amendment while every prior one stays on the record. Refused on a still-OPEN loop (use update-loop to change it, or close-loop to close it) and on a stale base_version (version_conflict — re-read and re-decide, never auto-retried).",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" },
+      loop_id: { type: "string" },
+      number: { type: "string", description: "alternative to loop_id; refuses when ambiguous. Unlike every other loop verb's `number`, this resolves CLOSED rows too, because that is the only kind this verb ever acts on." },
+      kind: { type: "string", enum: LOOP_KINDS, description: "narrows an ambiguous number" },
+      base_version: { type: "integer" },
+      outcome: { type: "string", description: "REQUIRED: the CORRECTED outcome, in your words. Refused under ~10 characters — a placeholder correction ('x', 'n/a', 'fixed') is not a correction, and is exactly the failure mode this verb exists to repair." },
+      reason: { type: "string", description: "REQUIRED: why the recorded outcome is being corrected. Never inferred, never defaulted — the reason is as much a part of the record as the new text." },
+      resolution: { type: "string", enum: ["done", "dropped"], description: "Corrects the loop's resolution alongside its outcome. Omit to leave the resolution exactly as it was closed. Passing 'dropped' with a bookkeeping outcome (opens with RENUMBERED/SUPERSEDED, or names a successor) is held to the same successor rules close-loop enforces: successor_loop is required and must name a different, currently OPEN loop." },
+      successor_loop: { type: "string", description: "Same field, same rule as close-loop's: the open row that now carries the work forward, required whenever the corrected outcome reads as a bookkeeping close. Pass the number as a human would say it ('#213' or '213') or a loop_id." } },
+      required: ["idempotency_key", "outcome", "reason"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "amend-closed-loop", args, async () => {
+      // Refusals are unconditional and first, exactly like close-loop's own
+      // outcome_required check: a caller who cannot yet say the corrected text
+      // and why should not be able to half-amend the record.
+      const newOutcome = (args.outcome || "").trim();
+      if (!newOutcome)
+        throw new ToolError({ error: "outcome_required",
+          hint: "say what actually came of it — the corrected text, not that it needs correcting" });
+      // "x" is the literal outcome that caused defect a2c04ffa-92d0-4428-b175-32fa3cfb0802.
+      // A length floor cannot judge PROSE, but it can catch a placeholder, and a
+      // placeholder is exactly what got this verb built.
+      if (newOutcome.length < 10)
+        throw new ToolError({ error: "outcome_too_short", got: newOutcome.length, min: 10,
+          hint: "a meaningful correction reads as one — say what actually came of it, at least 10 characters" });
+      const reason = (args.reason || "").trim();
+      if (!reason)
+        throw new ToolError({ error: "reason_required",
+          hint: "say why the recorded outcome is being corrected — required, never inferred" });
+
+      // anyStatus:true is the whole reason this verb needed to extend the seam
+      // rather than call resolveLoop as every other loop verb does: it is the
+      // one verb whose entire purpose is acting on a row every other number
+      // lookup would refuse to find.
+      const cur = await resolveLoop(c, args, { anyStatus: true });
+      await versionGuard(c, "loop_item", cur.id, args.base_version);
+      if (cur.status === "open")
+        throw new ToolError({ error: "loop_open", loop_id: cur.id, status: cur.status,
+          hint: "amend-closed-loop only corrects a CLOSED loop's outcome — this one is still open. " +
+                "Use update-loop to change it, or close-loop to close it." });
+
+      const resolution = args.resolution !== undefined ? args.resolution : cur.status;
+
+      // Identical bookkeeping-close detection to close-loop's own, applied to
+      // the CORRECTED outcome: a correction that turns an outcome into a
+      // renumber/supersede/merge/split declaration is making the same kind of
+      // claim close-loop guards, and deserves the same guard. See close-loop's
+      // own comment for the full history of why this is exact-prefix-or-named-
+      // successor rather than an anywhere-in-prose match.
+      const bookkeeping =
+        /^\s*(renumbered|superseded)\b/i.test(newOutcome) ||
+        /\b(?:superseded\s+by|renumbered\s+(?:to|as)|merged\s+(?:into|with)|split\s+into)\s+(?:open\s+)?(?:loop\s*)?#?\d+/i.test(newOutcome) ||
+        Boolean(args.successor_loop);
+      let successor = null;
+      if (bookkeeping) {
+        if (resolution !== "dropped")
+          throw new ToolError({ error: "bookkeeping_close_is_dropped",
+            hint: "continuing work is not done; correct the resolution to 'dropped' with the successor named" });
+        if (!/^(renumbered|superseded)/i.test(newOutcome))
+          throw new ToolError({ error: "bookkeeping_outcome_prefix",
+            hint: "open a bookkeeping close with RENUMBERED or SUPERSEDED, not an abandonment claim" });
+        if (!args.successor_loop)
+          throw new ToolError({ error: "successor_loop_required",
+            hint: "name the open loop that now carries this work; a bookkeeping close cannot read as abandonment" });
+        const successorRef = String(args.successor_loop).trim();
+        successor = UUID_RE.test(successorRef)
+          ? await resolveLoop(c, { loop_id: successorRef })
+          : await resolveLoop(c, { number: successorRef.replace(/^#/, "") });
+        if (successor.id === cur.id || successor.status !== "open")
+          throw new ToolError({ error: "successor_loop_not_open", successor_loop: args.successor_loop,
+            hint: "the successor must be a different open loop" });
+      }
+
+      // The prior outcome, read from resolveLoop's row — BEFORE versionGuard's
+      // `for update` lock, not from it. That read is still safe: it is the
+      // version check right above, not the lock itself, that makes it so — a
+      // concurrent amend that changed the row between this read and the lock
+      // moves the version, versionGuard throws version_conflict on the stale
+      // base_version, and this priorOutcome is never written. Not from the
+      // args, not reconstructed either way — the actual current text this
+      // amendment is correcting.
+      const priorOutcome = cur.close_outcome || "";
+      const priorResolution = cur.status;
+
+      // APPEND FIRST. The amendment row is the history; the loop_item update
+      // right after it is only the current projection catching up to what the
+      // history now says. Reversing this order would let a crash between the
+      // two leave a projection change with no corresponding record of why.
+      await c.query(
+        `insert into loop_amendment (loop_id, prior_outcome, new_outcome, prior_resolution,
+           new_resolution, reason, actor_id, idempotency_key)
+         values ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [cur.id, priorOutcome, newOutcome, priorResolution, resolution, reason, actor.id,
+         args.idempotency_key]);
+
+      // The loop's current outcome reads the latest amendment: close_outcome
+      // and outcome (the pair close-loop itself always keeps in sync) are set
+      // to the corrected text, and the row's own version increments via
+      // trg_touch_row exactly as any other loop_item update does. closed_at
+      // and closed_by are deliberately UNTOUCHED — this is a correction to
+      // what was said, not a re-closing of the loop, and the original closer
+      // and closing time stay accurate.
+      await c.query(
+        `update loop_item set close_outcome=$1, outcome=$1, status=$2, updated_by=$3 where id=$4`,
+        [newOutcome, resolution, actor.id, cur.id]);
+
+      await writeEvent(c, actor, "amend-closed-loop", "loop", cur.id,
+        { field: "close_outcome",
+          old: { outcome: priorOutcome, resolution: priorResolution },
+          new: { outcome: newOutcome, resolution, reason,
+                 ...(successor ? { successor_loop: { id: successor.id, number: successor.number } } : {}) },
+          idempotency_key: args.idempotency_key });
+
+      return { ok: true, loop_id: cur.id, number: cur.number, status: resolution,
+               prior_outcome: priorOutcome, outcome: newOutcome,
+               ...(successor ? { successor_loop: { id: successor.id, number: successor.number } } : {}) };
+    }),
+  },
+
   // ═══════════════════════════════════════════════════════════════════════════
   // MARKETING (0066) — the four verbs that give the lane an intent and an answer
   //
@@ -8092,6 +8269,23 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
   // assertRequiredArgs above: a missing required field used to reach the
   // handler as undefined and come back as a confident empty answer.
   assertRequiredArgs(tool.inputSchema, args);
+  // V5-S01 GLOBAL BOUNDARIES, AT THE ONE SEAM EVERY DOOR PASSES (2026-09-25).
+  // Evaluated here, after coercion and the required-argument check so the
+  // verdict reads the arguments in their final form, and before the handler
+  // so nothing a boundary refuses can reach the database. The door only ever
+  // ADDS a refusal; every gate above and every check inside the handler still
+  // runs. SHADOW until Joe approves enforcement: V5_BOUNDARY_DOOR_MODE in
+  // global-boundaries-door.v5.js is the constant "shadow", passBoundaryDoor
+  // records and logs a refusal verdict and never throws in that mode, and the
+  // catch below is reachable only once that constant is flipped to "enforce".
+  // The door context (connectivity "online") is the server's, never a field a
+  // caller sent.
+  try {
+    passBoundaryDoor({ verb: name, write: tool.write === true, actor, args, now: new Date().toISOString() });
+  } catch (error) {
+    if (error instanceof V5BoundaryDoorRefusal) throw new ToolError(error.payload);
+    throw error;
+  }
   // DEFECT 2, HALF (b): every verb funnels through here — the one choke point
   // where a raw DB error can be translated into a clean ToolError before it
   // ever reaches the transport (mcp.js's callTool/dispatch, or local-verb.mjs),
@@ -8143,6 +8337,7 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "doc-conversation": "mcp-server/src/doc-conversation.js",
   "meeting-mode": "mcp-server/src/meeting-mode.js",
   "notifications": "mcp-server/src/notifications.js",
+  "delivery-cadence-a05": "mcp-server/src/delivery-cadence-a05-tools.js",
   "session-identity": "mcp-server/src/session-identity.js",
   "dispatch-spine": "mcp-server/src/dispatch-spine.js",
   "doc-outcome-cards": "mcp-server/src/tools.js",
@@ -8156,6 +8351,7 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "evidence-activation": "mcp-server/src/evidence-activation.js",
   "resource-observation": "mcp-server/src/resource-observation.v5.js",
   "jev-call-receipt": "mcp-server/src/jev-call-receipt.js",
+  "workflow-cutover": "mcp-server/src/workflow-cutover.v5.js",
   "workflow-census": "mcp-server/src/workflow-census.js",
   "memory": "mcp-server/src/memory.js",
   "codex-continuity": "mcp-server/src/codex-continuity.js",
@@ -8172,7 +8368,12 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "tour-artifacts": "mcp-server/src/tour-artifacts.js",
   "benchmark-acceptance": "mcp-server/src/benchmark-acceptance-store.v5.js",
   "model-role-store": "mcp-server/src/model-role-store.v5.js",
+  "record-source-authority": "mcp-server/src/record-source-authority-store.v5.js",
+  "cre-lifecycle": "mcp-server/src/cre-lifecycle-store.v5.js",
   "foundation-assurance": "mcp-server/src/foundation-assurance-minimum-producer.v5.js",
+  "global-boundaries-door": "mcp-server/src/global-boundaries-door.v5.js",
+  "journey-one-clock-door": "mcp-server/src/journey-one-clock-door.v5.js",
+  "governed-correspondence-store": "mcp-server/src/governed-correspondence-store.v5.js",
 });
 
 function bindToolSource(tool, source) {
@@ -9188,6 +9389,7 @@ registerTools(meetingModeTools({ withEnvelope, writeEvent, ToolError,
 // acknowledge-notification writes ops.notification_read and nothing else, which
 // is why a session may never report it as having moved a task.
 registerTools(notificationTools({ withEnvelope, writeEvent, ToolError }), "notifications");
+registerTools(deliveryCadenceA05Tools({ withEnvelope, writeEvent, ToolError }), "delivery-cadence-a05");
 
 // WR-000117: the session-identity read pair. Both verbs are READS on the writer
 // connection -- ops.session_identity_facts and ops.session_dispatch_history
@@ -9252,8 +9454,13 @@ registerTools(resourceObservationTools({ withEnvelope, ToolError }), "resource-o
 // Jev gates credit only rows the gated model could not forge locally. See
 // src/jev-call-receipt.js.
 registerTools(jevCallReceiptTools({ withEnvelope, ToolError }), "jev-call-receipt");
+// DoctorCRE V5-R02: workflow cutover, caller migration and retirement
+// readiness. Composes accept-workflow / disable-legacy-schedule rather than
+// duplicating their evidence; retire-workflow-cutover-plan is authority-only.
+// See src/workflow-cutover.v5.js.
+registerTools(workflowCutoverTools({ withEnvelope, ToolError }), "workflow-cutover");
 // V5-F09 workflow census store: one write door that appends a census snapshot
-// to the database-hash-chained ops.workflow_census_record (migration 0595),
+// to the database-hash-chained ops.workflow_census_record (migration 0708),
 // principal and time stamped server-side, and one read door the census reader
 // verifies against. See src/workflow-census.js.
 registerTools(workflowCensusTools({ withEnvelope, ToolError }), "workflow-census");
@@ -9306,8 +9513,29 @@ registerTools(benchmarkAcceptanceStoreTools({
   "benchmark-acceptance");
 registerTools(modelRoleStoreTools({ withEnvelope, writeEvent, ToolError }),
   "model-role-store");
+registerTools(creLifecycleStoreTools({ withEnvelope, ToolError }), "cre-lifecycle");
+registerTools(recordSourceAuthorityStoreTools({ withEnvelope, ToolError }),
+  "record-source-authority");
 registerTools(foundationAssuranceMinimumTools({
   withEnvelope, ToolError, authenticatedIdentity,
 }), "foundation-assurance");
+// V5-S01: read-only projection of the settled global boundaries and the
+// dispatch door's mode and shadow counters. No database access.
+registerTools(globalBoundariesDoorTools({ ToolError }), "global-boundaries-door");
+// DoctorCRE V5-M01: the live door to the Journey 1 clock runtime. The read verb
+// derives clock_started from the record; the advance verb takes only an
+// idempotency key and is registered WITHOUT an installation resolver, so it
+// refuses journey_one_clock_installation_unavailable before any query here. No
+// Worker can start, advance or pause the Journey 1 clock through it until a
+// verifier for the composed projection is installed by trusted server code.
+registerTools(journeyOneClockDoorTools({ withEnvelope, ToolError }), "journey-one-clock-door");
+// DoctorCRE V5-J103: the governed correspondence store. Two reads
+// (correspondence-readiness, read-correspondence-thread) and the humanOnly
+// consent pair, each partner only for their own carr.us mailbox. There is no
+// send verb and no draft verb: a draft can never dispatch, and Joe sends. Reads
+// answer unavailable until the F10 local-store adapter lands with a reviewed
+// grant for the read-receipt writer.
+registerTools(governedCorrespondenceStoreTools({ withEnvelope, writeEvent, ToolError }),
+  "governed-correspondence-store");
 
 Object.freeze(TOOLS);

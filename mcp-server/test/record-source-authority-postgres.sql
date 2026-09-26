@@ -1864,7 +1864,7 @@ SELECT pg_temp.f01_expect_refusal(
           'synthetic_test_producer', 'syn-pg-deriv-forged-0001',
           'synthetic-evidence-0041', 'sha256:' || repeat('67', 32))
           || '{"establishes_coverage":true,"is_exhaustive_inventory":true,'
-             '"permits_deletion":true}'::jsonb),
+             '"permits_deletion":true}'::jsonb,
         '{"establishes_coverage":false,"is_exhaustive_inventory":false,'
         '"permits_deletion":false,"deletes_nothing":true}'::jsonb),
       'syn-pg-deriv-forged-0001', ops.f01_digest_jsonb('{"k":"df"}'::jsonb))$$,
@@ -3466,9 +3466,14 @@ BEGIN
   ALTER TABLE ops.f01_field_state DROP CONSTRAINT f01_state_envelope_digest;
   ALTER TABLE ops.f01_field_state DISABLE TRIGGER f01_field_state_dml_guard;
 
+  -- The value_digest COLUMN moves with the envelope. f01_state_binding ties the
+  -- two together, and it is not one of the digest constraints this section
+  -- lifts: tampering only the envelope would be refused by the binding CHECK
+  -- before the readback under test ever saw the row.
   UPDATE ops.f01_field_state
      SET envelope = jsonb_set(envelope, '{record,value_digest}',
-                              to_jsonb('sha256:' || repeat('ee', 32)))
+                              to_jsonb('sha256:' || repeat('ee', 32))),
+         value_digest = 'sha256:' || repeat('ee', 32)
    WHERE entity = 'deal' AND field = 'commission_amount';
 
   -- The verification helper is not principal-bound, so this half is provable
@@ -3505,7 +3510,8 @@ BEGIN
   -- Restore the row and the guards so the rest of the fixture is honest.
   UPDATE ops.f01_field_state
      SET envelope = jsonb_set(envelope, '{record,value_digest}',
-                              to_jsonb('sha256:' || repeat('02', 32)))
+                              to_jsonb('sha256:' || repeat('02', 32))),
+         value_digest = 'sha256:' || repeat('02', 32)
    WHERE entity = 'deal' AND field = 'commission_amount';
   ALTER TABLE ops.f01_field_state ENABLE TRIGGER f01_field_state_dml_guard;
   ALTER TABLE ops.f01_field_state

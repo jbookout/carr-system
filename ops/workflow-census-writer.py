@@ -12,7 +12,7 @@ WHAT IT DOES, in order, once per run:
   3. Records the result through ``./run.sh call record-workflow-census`` -- the
      one write door, reached through the deployed Worker, which stamps the
      principal and the server time, extends the database hash chain
-     (migration 0595) and then advances the external anchor to the new head.
+     (migration 0708) and then advances the external anchor to the new head.
      This script supplies neither the principal nor the time.
 
 WHAT IT DOES NOT CLAIM.  The Completion Register (ops.completion_projection)

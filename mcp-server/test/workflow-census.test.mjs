@@ -26,7 +26,7 @@ const GUARD_FUNCTIONS = Object.freeze({ workflow_census_record_append_only: "6".
   workflow_census_record_chain_guard: "7".repeat(64), workflow_census_record_no_truncate: "6".repeat(64) });
 
 // Mirrors ops.record_workflow_census / ops.read_workflow_census /
-// ops.reanchor_workflow_census (migrations/0595): the write door takes the
+// ops.reanchor_workflow_census (migrations/0708): the write door takes the
 // census, the key and the anchored head the Worker read; principal and time
 // come from the server side, and the chain fields are computed there. The
 // fake's anchor follows its own rows, as a Worker whose advances all landed.

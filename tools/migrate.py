@@ -321,16 +321,87 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0587_jev_call_receipt.sql",
         "0588_jev_call_receipt_scac_successor.sql",
     ),
-    # V5-F09 workflow census store: 0595 installs ops.record_workflow_census
-    # (EXECUTE to carr_writer) and ops.read_workflow_census (EXECUTE to
-    # carr_reader and carr_writer) behind the append-only, hash-chained
-    # ops.workflow_census_record (plus the carr_authority-only re-anchor door);
-    # 0596 seals that catalog as v71. Same deferred-epoch-
-    # trigger shape as the pair above -- 0595 applied alone would be refused at
+    # DoctorCRE V5-R02: 0602 installs the workflow cutover state machine
+    # (Q116), the caller inventory, and the explicit slice-completion marker
+    # (Q153) with their SECURITY DEFINER writers; 0603 seals that catalog as
+    # v72, chained from main's v71 (0600). Same deferred-epoch-trigger shape as the
+    # pairs above: 0602 applied alone would be refused at commit, so the pair
+    # must be one transaction.
+    (
+        "0602_doctorcre_r02_workflow_cutover_and_caller_inventory.sql",
+        "0603_doctorcre_r02_scac_successor.sql",
+    ),
+    # V5-A05 delivery cadence: 0617 installs ops.v5_a05_cadence_status,
+    # ops.v5_a05_record_cadence_receipt, ops.v5_a05_assurance_cadence_batch,
+    # ops.notification_quiet_now and the extended ops.mint_notification
+    # (SECURITY DEFINER writers/readers); 0618 seals that catalog as v75,
+    # chained from main's v74 (0614). Same deferred-epoch-trigger shape as
+    # the pairs above: 0617 applied alone would be refused at commit, so the
+    # pair must be one transaction.
+    (
+        "0617_delivery_cadence_a05.sql",
+        "0618_delivery_cadence_a05_scac_successor.sql",
+    ),
+    # DoctorCRE V5-F01: 0626 installs the record-source-authority store and
+    # the document derivative registration doors (SECURITY DEFINER, EXECUTE to
+    # carr_reader, carr_writer and the carr_authority group); 0627 seals that
+    # catalog as v77, chained from main's v76 (0625). Same deferred-epoch-
+    # trigger shape as the pairs above: 0626 applied alone would be refused at
     # commit, so the pair must be one transaction.
     (
-        "0595_workflow_census_store.sql",
-        "0596_workflow_census_store_scac_successor.sql",
+        "0626_f01_record_source_authority.sql",
+        "0627_f01_record_source_authority_scac_successor.sql",
+    ),
+    # DoctorCRE v5 slice done-record: 0628 installs the automated marker's
+    # SECURITY DEFINER doors (catalog registration, allowlisted binding,
+    # release membership, completion proposal, partner confirm, hold); 0629 seals
+    # that catalog as v78, chained from main's v77 (0627). One transaction, so
+    # production is never left between a drifted live catalog and its seal.
+    (
+        "0628_doctorcre_slice_done_marker.sql",
+        "0629_doctorcre_slice_done_marker_scac_successor.sql",
+    ),
+    # DoctorCRE V5-J103: 0700 installs the governed correspondence store
+    # (adapter consent, read receipts, drafts with no destination) and its
+    # SECURITY DEFINER writers; 0701 seals that catalog as v79, chained from
+    # main's v78 (0629). Same deferred-epoch-trigger shape as the pairs above:
+    # 0700 applied alone would be refused at commit, so the pair must be one
+    # transaction.
+    (
+        "0700_governed_correspondence_store.sql",
+        "0701_governed_correspondence_scac_successor.sql",
+    ),
+    # DoctorCRE V5-J102: 0704 installs the healthcare CRE lifecycle store
+    # (SECURITY DEFINER, EXECUTE to carr_reader, carr_writer and the
+    # carr_authority group); 0705 seals that catalog as v80, chained from v79
+    # (0701). Same deferred-epoch-trigger shape: the pair is one transaction.
+    (
+        "0704_cre_lifecycle.sql",
+        "0705_cre_lifecycle_scac_successor.sql",
+    ),
+    # amend-closed-loop (defect a2c04ffa, loop c7265238): 0706 installs the
+    # append-only loop_amendment table, its carr_writer INSERT/SELECT grant,
+    # its own immutability trigger and its loop_amendment_history(uuid)
+    # SECURITY DEFINER read door (EXECUTE to carr_reader, carr_writer only --
+    # PUBLIC explicitly revoked first); 0707 seals that catalog as v81,
+    # chained from v80 (0705). Same deferred-epoch-trigger shape as the pairs
+    # above: 0706 applied alone would be refused at commit, so the pair must
+    # be one transaction.
+    (
+        "0706_amend_closed_loop.sql",
+        "0707_amend_closed_loop_scac_successor.sql",
+    ),
+    # V5-F09 workflow census store: 0708 installs ops.record_workflow_census
+    # (EXECUTE to carr_writer), ops.read_workflow_census (EXECUTE to
+    # carr_reader and carr_writer) and ops.reanchor_workflow_census (EXECUTE
+    # to carr_authority only) behind the append-only, database-hash-chained
+    # ops.workflow_census_record; 0709 seals that catalog as v82, chained
+    # from v81 (0707). Same deferred-epoch-trigger shape as the pairs above --
+    # 0708 applied alone would be refused at commit, so the pair must be one
+    # transaction.
+    (
+        "0708_workflow_census_store.sql",
+        "0709_workflow_census_store_scac_successor.sql",
     ),
 )
 
@@ -376,8 +447,36 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0588_jev_call_receipt_scac_successor.sql",
     ),
     (
-        "0595_workflow_census_store.sql",
-        "0596_workflow_census_store_scac_successor.sql",
+        "0602_doctorcre_r02_workflow_cutover_and_caller_inventory.sql",
+        "0603_doctorcre_r02_scac_successor.sql",
+    ),
+    (
+        "0617_delivery_cadence_a05.sql",
+        "0618_delivery_cadence_a05_scac_successor.sql",
+    ),
+    (
+        "0626_f01_record_source_authority.sql",
+        "0627_f01_record_source_authority_scac_successor.sql",
+    ),
+    (
+        "0628_doctorcre_slice_done_marker.sql",
+        "0629_doctorcre_slice_done_marker_scac_successor.sql",
+    ),
+    (
+        "0700_governed_correspondence_store.sql",
+        "0701_governed_correspondence_scac_successor.sql",
+    ),
+    (
+        "0704_cre_lifecycle.sql",
+        "0705_cre_lifecycle_scac_successor.sql",
+    ),
+    (
+        "0706_amend_closed_loop.sql",
+        "0707_amend_closed_loop_scac_successor.sql",
+    ),
+    (
+        "0708_workflow_census_store.sql",
+        "0709_workflow_census_store_scac_successor.sql",
     ),
 )
 

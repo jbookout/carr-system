@@ -4,7 +4,7 @@
   doctrine: doctorcre-v5-astra-integration-review
 
   com.carr.workflow-census-writer: the single writer of the V5-F09 workflow
-  census store (migration 0595, ops.workflow_census_record).
+  census store (migration 0708, ops.workflow_census_record).
 
   Once a day it reads the control plane's rows through the read-only tap, runs
   the F09 classifier, and records the census through record-workflow-census,

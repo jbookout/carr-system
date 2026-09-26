@@ -7,7 +7,7 @@ and ``lib/control_plane_workflow_truth_reader`` through its module-private
 ``_bind_census_route`` with a forged server transport -- the same no-argument
 route production binds to the Worker, over answers this suite writes.  Nothing
 here touches a network or a database: every chain is built in Python with the
-same hash rule migration 0595 uses (ops/workflow-census-local-pg-gate.py proves
+same hash rule migration 0708 uses (ops/workflow-census-local-pg-gate.py proves
 the two agree byte for byte on a real PostgreSQL).
 
 WHAT MUST HOLD, one check each:
@@ -139,7 +139,7 @@ def rechain(answer: dict[str, Any]) -> dict[str, Any]:
 def chain(times: list[datetime], *, principal: str = WRITER, session: str = SESSION,
           now: datetime = NOW, principals: list[str] | None = None,
           latest_payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    """A genuine server answer: rows hashed exactly as migration 0595 hashes them,
+    """A genuine server answer: rows hashed exactly as migration 0708 hashes them,
     all three guards ENABLE ALWAYS, and the anchor at the chain's head."""
     rows: list[dict[str, Any]] = []
     payloads = [census(f"c{i}") for i in range(len(times))]
@@ -608,11 +608,11 @@ def main() -> int:
         check(f"a config with {label} is refused", not accepted)
 
     # The pins are the digest of each guard function's source exactly as
-    # migration 0595 writes it: "<schema>.<name>" + newline + the text between
+    # migration 0708 writes it: "<schema>.<name>" + newline + the text between
     # the dollar quotes (pg_proc.prosrc). The local Postgres gate checks the
     # same pins against a real database's read door.
     import re as _re
-    migration = (REPO / "migrations" / "0595_workflow_census_store.sql").read_text(encoding="utf-8")
+    migration = (REPO / "migrations" / "0708_workflow_census_store.sql").read_text(encoding="utf-8")
     trigger_functions = dict(_re.findall(
         r"create trigger (workflow_census_record_\w+)\n[^;]*?execute function ops\.(\w+)\(\);",
         migration))

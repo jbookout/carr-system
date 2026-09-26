@@ -2,7 +2,7 @@
 // (lib/control_plane_workflow_truth_reader.py) was owed as
 // durable_signed_census_store_seam.
 //
-// THREE VERBS, ONE STORE (migrations/0595_workflow_census_store.sql):
+// THREE VERBS, ONE STORE (migrations/0708_workflow_census_store.sql):
 //   record-workflow-census    write: append one census snapshot to the chain,
 //                                    only when the database head is the
 //                                    anchored head

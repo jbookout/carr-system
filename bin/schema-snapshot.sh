@@ -896,15 +896,138 @@ if [ "$JEV_CALL_RECEIPT_MIGRATE_PY_RESEAL_REGISTRY_APPLIED" = t ] && [ "$JEV_CAL
   echo "schema-snapshot: jev call receipt migrate.py reseal v70 is applied without v69 predecessor" >&2
   exit 1
 fi
+
+NIGHTLY_EXPORTS_DAYTIME_RETRY_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0600_nightly_exports_daytime_retry_scac_successor.sql')" \
+  2>/dev/null)"
+case "$NIGHTLY_EXPORTS_DAYTIME_RETRY_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read nightly exports daytime retry v71 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$NIGHTLY_EXPORTS_DAYTIME_RETRY_REGISTRY_APPLIED" = t ] && [ "$JEV_CALL_RECEIPT_MIGRATE_PY_RESEAL_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: nightly exports daytime retry v71 is applied without v70 predecessor" >&2
+  exit 1
+fi
+V5_R02_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0603_doctorcre_r02_scac_successor.sql')" \
+  2>/dev/null)"
+case "$V5_R02_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read V5-R02 v72 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$V5_R02_REGISTRY_APPLIED" = t ] && [ "$NIGHTLY_EXPORTS_DAYTIME_RETRY_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: V5-R02 v72 is applied without v71 predecessor" >&2
+  exit 1
+fi
+DEPLOY_WORKER_DO_MIGRATION_RESEAL_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0609_deploy_worker_do_migration_reseal.sql')" \
+  2>/dev/null)"
+case "$DEPLOY_WORKER_DO_MIGRATION_RESEAL_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read deploy-worker DO migration reseal v73 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$DEPLOY_WORKER_DO_MIGRATION_RESEAL_REGISTRY_APPLIED" = t ] && [ "$V5_R02_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: deploy-worker DO migration reseal v73 is applied without v72 predecessor" >&2
+  exit 1
+fi
+JOURNEY_ONE_CLOCK_DOOR_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0614_journey_one_clock_door_scac_successor.sql')" \
+  2>/dev/null)"
+case "$JOURNEY_ONE_CLOCK_DOOR_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read journey-one clock door v74 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$JOURNEY_ONE_CLOCK_DOOR_REGISTRY_APPLIED" = t ] && [ "$DEPLOY_WORKER_DO_MIGRATION_RESEAL_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: journey-one clock door v74 is applied without v73 predecessor" >&2
+  exit 1
+fi
+DELIVERY_CADENCE_A05_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0618_delivery_cadence_a05_scac_successor.sql')" \
+  2>/dev/null)"
+case "$DELIVERY_CADENCE_A05_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read delivery cadence A05 v75 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$DELIVERY_CADENCE_A05_REGISTRY_APPLIED" = t ] && [ "$JOURNEY_ONE_CLOCK_DOOR_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: delivery cadence A05 v75 is applied without v74 predecessor" >&2
+  exit 1
+fi
+GLOBAL_BOUNDARIES_DOOR_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0625_global_boundaries_door_scac_successor.sql')" \
+  2>/dev/null)"
+case "$GLOBAL_BOUNDARIES_DOOR_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read global boundaries door v76 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$GLOBAL_BOUNDARIES_DOOR_REGISTRY_APPLIED" = t ] && [ "$DELIVERY_CADENCE_A05_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: global boundaries door v76 is applied without v75 predecessor" >&2
+  exit 1
+fi
+F01_RECORD_SOURCE_AUTHORITY_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0627_f01_record_source_authority_scac_successor.sql')" \
+  2>/dev/null)"
+case "$F01_RECORD_SOURCE_AUTHORITY_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read F01 record source authority v77 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$F01_RECORD_SOURCE_AUTHORITY_REGISTRY_APPLIED" = t ] && [ "$GLOBAL_BOUNDARIES_DOOR_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: F01 record source authority v77 is applied without v76 predecessor" >&2
+  exit 1
+fi
+V5_SLICE_DONE_MARKER_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0629_doctorcre_slice_done_marker_scac_successor.sql')" \
+  2>/dev/null)"
+case "$V5_SLICE_DONE_MARKER_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read V5 slice done marker v78 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$V5_SLICE_DONE_MARKER_REGISTRY_APPLIED" = t ] && [ "$F01_RECORD_SOURCE_AUTHORITY_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: V5 slice done marker v78 is applied without v77 predecessor" >&2
+  exit 1
+fi
+GOVERNED_CORRESPONDENCE_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0701_governed_correspondence_scac_successor.sql')" \
+  2>/dev/null)"
+case "$GOVERNED_CORRESPONDENCE_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read governed correspondence v79 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$GOVERNED_CORRESPONDENCE_REGISTRY_APPLIED" = t ] && [ "$V5_SLICE_DONE_MARKER_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: governed correspondence v79 is applied without v78 predecessor" >&2
+  exit 1
+fi
+CRE_LIFECYCLE_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0705_cre_lifecycle_scac_successor.sql')" \
+  2>/dev/null)"
+case "$CRE_LIFECYCLE_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read J102 CRE lifecycle v80 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$CRE_LIFECYCLE_REGISTRY_APPLIED" = t ] && [ "$GOVERNED_CORRESPONDENCE_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: J102 CRE lifecycle v80 is applied without v79 predecessor" >&2
+  exit 1
+fi
+AMEND_CLOSED_LOOP_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0707_amend_closed_loop_scac_successor.sql')" \
+  2>/dev/null)"
+case "$AMEND_CLOSED_LOOP_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read amend-closed-loop v81 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$AMEND_CLOSED_LOOP_REGISTRY_APPLIED" = t ] && [ "$CRE_LIFECYCLE_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: amend-closed-loop v81 is applied without v80 predecessor" >&2
+  exit 1
+fi
 WORKFLOW_CENSUS_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0596_workflow_census_store_scac_successor.sql')" \
+  "select exists (select 1 from schema_migrations where filename='0709_workflow_census_store_scac_successor.sql')" \
   2>/dev/null)"
 case "$WORKFLOW_CENSUS_REGISTRY_APPLIED" in
   t|f) ;;
-  *) echo "schema-snapshot: could not read workflow census v71 registry ledger state" >&2; exit 1 ;;
+  *) echo "schema-snapshot: could not read workflow census v82 registry ledger state" >&2; exit 1 ;;
 esac
-if [ "$WORKFLOW_CENSUS_REGISTRY_APPLIED" = t ] && [ "$JEV_CALL_RECEIPT_MIGRATE_PY_RESEAL_REGISTRY_APPLIED" != t ]; then
-  echo "schema-snapshot: workflow census v71 is applied without v70 predecessor" >&2
+if [ "$WORKFLOW_CENSUS_REGISTRY_APPLIED" = t ] && [ "$AMEND_CLOSED_LOOP_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: workflow census v82 is applied without v81 predecessor" >&2
+
   exit 1
 fi
 
@@ -1467,7 +1590,7 @@ participant_role party_link_kind vendor_category vendor_disposition \
 vendor_relationship_level diagnostic_route submarket_condition doctrine_edge_type \
 doctrine_review_policy actor retrieval_proposal retrieval_ranking_policy \
 ops.guidance_registry ops.rule_delivery_policy \
-ops.rule_delivery_activation_target"
+ops.rule_delivery_activation_target ops.slice_marker_seat"
 
 VOCAB_ARGS=""
 for t in $VOCAB_TABLES; do
@@ -2328,7 +2451,7 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                                                                 SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v69'"
                                                                 SCAC_FULL_SET_SEAL_COUNT=69
                                                                 SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v70_current()"
-                                                                if [ "$WORKFLOW_CENSUS_REGISTRY_APPLIED" = t ]; then
+                                                                if [ "$NIGHTLY_EXPORTS_DAYTIME_RETRY_REGISTRY_APPLIED" = t ]; then
                                                                   SCAC_CURRENT_NUMBER=71
                                                                   SCAC_VERSION_COUNT=71
                                                                   SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v71'")"
@@ -2338,6 +2461,127 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                                                                   SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v70'"
                                                                   SCAC_FULL_SET_SEAL_COUNT=70
                                                                   SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v71_current()"
+                                                                  if [ "$V5_R02_REGISTRY_APPLIED" = t ]; then
+                                                                    SCAC_CURRENT_NUMBER=72
+                                                                    SCAC_VERSION_COUNT=72
+                                                                    SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v72'")"
+                                                                    SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v72'")"
+                                                                    SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v72.generated.js"
+                                                                    SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v72'"
+                                                                    SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v71'"
+                                                                    SCAC_FULL_SET_SEAL_COUNT=71
+                                                                    SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v72_current()"
+                                                                    if [ "$DEPLOY_WORKER_DO_MIGRATION_RESEAL_REGISTRY_APPLIED" = t ]; then
+                                                                      SCAC_CURRENT_NUMBER=73
+                                                                      SCAC_VERSION_COUNT=73
+                                                                      SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v73'")"
+                                                                      SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v73'")"
+                                                                      SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v73.generated.js"
+                                                                      SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v73'"
+                                                                      SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v72'"
+                                                                      SCAC_FULL_SET_SEAL_COUNT=72
+                                                                      SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v73_current()"
+                                                                      if [ "$JOURNEY_ONE_CLOCK_DOOR_REGISTRY_APPLIED" = t ]; then
+                                                                        SCAC_CURRENT_NUMBER=74
+                                                                        SCAC_VERSION_COUNT=74
+                                                                        SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v74'")"
+                                                                        SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v74'")"
+                                                                        SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v74.generated.js"
+                                                                        SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v74'"
+                                                                        SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v73'"
+                                                                        SCAC_FULL_SET_SEAL_COUNT=73
+                                                                        SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v74_current()"
+                                                                        if [ "$DELIVERY_CADENCE_A05_REGISTRY_APPLIED" = t ]; then
+                                                                          SCAC_CURRENT_NUMBER=75
+                                                                          SCAC_VERSION_COUNT=75
+                                                                          SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v75'")"
+                                                                          SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v75'")"
+                                                                          SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v75.generated.js"
+                                                                          SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v75'"
+                                                                          SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v74'"
+                                                                          SCAC_FULL_SET_SEAL_COUNT=74
+                                                                          SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v75_current()"
+                                                                          if [ "$GLOBAL_BOUNDARIES_DOOR_REGISTRY_APPLIED" = t ]; then
+                                                                            SCAC_CURRENT_NUMBER=76
+                                                                            SCAC_VERSION_COUNT=76
+                                                                            SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v76'")"
+                                                                            SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v76'")"
+                                                                            SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v76.generated.js"
+                                                                            SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v76'"
+                                                                            SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v75'"
+                                                                            SCAC_FULL_SET_SEAL_COUNT=75
+                                                                            SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v76_current()"
+                                                                            if [ "$F01_RECORD_SOURCE_AUTHORITY_REGISTRY_APPLIED" = t ]; then
+                                                                              SCAC_CURRENT_NUMBER=77
+                                                                              SCAC_VERSION_COUNT=77
+                                                                              SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v77'")"
+                                                                              SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v77'")"
+                                                                              SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v77.generated.js"
+                                                                              SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v77'"
+                                                                              SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v76'"
+                                                                              SCAC_FULL_SET_SEAL_COUNT=76
+                                                                              SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v77_current()"
+                                                                              if [ "$V5_SLICE_DONE_MARKER_REGISTRY_APPLIED" = t ]; then
+                                                                                SCAC_CURRENT_NUMBER=78
+                                                                                SCAC_VERSION_COUNT=78
+                                                                                SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v78'")"
+                                                                                SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v78'")"
+                                                                                SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v78.generated.js"
+                                                                                SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v78'"
+                                                                                SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v77'"
+                                                                                SCAC_FULL_SET_SEAL_COUNT=77
+                                                                                SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v78_current()"
+                                                                                if [ "$GOVERNED_CORRESPONDENCE_REGISTRY_APPLIED" = t ]; then
+                                                                                  SCAC_CURRENT_NUMBER=79
+                                                                                  SCAC_VERSION_COUNT=79
+                                                                                  SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v79'")"
+                                                                                  SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v79'")"
+                                                                                  SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v79.generated.js"
+                                                                                  SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v79'"
+                                                                                  SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v78'"
+                                                                                  SCAC_FULL_SET_SEAL_COUNT=78
+                                                                                  SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v79_current()"
+                                                                                  if [ "$CRE_LIFECYCLE_REGISTRY_APPLIED" = t ]; then
+                                                                                    SCAC_CURRENT_NUMBER=80
+                                                                                    SCAC_VERSION_COUNT=80
+                                                                                    SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v80'")"
+                                                                                    SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v80'")"
+                                                                                    SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v80.generated.js"
+                                                                                    SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v80'"
+                                                                                    SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v79'"
+                                                                                    SCAC_FULL_SET_SEAL_COUNT=79
+                                                                                    SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v80_current()"
+                                                                                    if [ "$AMEND_CLOSED_LOOP_REGISTRY_APPLIED" = t ]; then
+                                                                                      SCAC_CURRENT_NUMBER=81
+                                                                                      SCAC_VERSION_COUNT=81
+                                                                                      SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v81'")"
+                                                                                      SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v81'")"
+                                                                                      SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v81.generated.js"
+                                                                                      SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v81'"
+                                                                                      SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v80'"
+                                                                                      SCAC_FULL_SET_SEAL_COUNT=80
+                                                                                      SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v81_current()"
+                                                                                      if [ "$WORKFLOW_CENSUS_REGISTRY_APPLIED" = t ]; then
+                                                                                        SCAC_CURRENT_NUMBER=82
+                                                                                        SCAC_VERSION_COUNT=82
+                                                                                        SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v82'")"
+                                                                                        SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v82'")"
+                                                                                        SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v82.generated.js"
+                                                                                        SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v82'"
+                                                                                        SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v81'"
+                                                                                        SCAC_FULL_SET_SEAL_COUNT=81
+                                                                                        SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v82_current()"
+                                                                                      fi
+                                                                                    fi
+                                                                                  fi
+                                                                                fi
+                                                                              fi
+                                                                            fi
+                                                                          fi
+                                                                        fi
+                                                                      fi
+                                                                    fi
+                                                                  fi
                                                                 fi
                                                               fi
                                                             fi

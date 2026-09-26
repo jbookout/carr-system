@@ -42,6 +42,8 @@ RETRYABLE_DISPATCH_STATUSES = {
     "failed": "provider_unavailable",
 }
 DESK_UNAVAILABLE_WAIT_S = 60.0
+MAX_REPLY_CHARS = 4000
+REPLY_TRUNCATION_POINTER = "~/.config/carr/hermes-dispatch-results.jsonl"
 
 
 class QueueDispatchError(ValueError):
@@ -178,6 +180,34 @@ def parse_terminal_result(raw: str, task_id: str, cap: str = "read") -> dict:
     return value
 
 
+def _bounded_reply(raw_result: str) -> str:
+    """The desk's own prose: its trailing CARR_QUEUE_RESULT protocol line stripped,
+    the rest truncated at MAX_REPLY_CHARS. Not redaction — nothing here scans for or
+    removes secrets/PII from the model's own text; it is the desk's reply verbatim,
+    just with the protocol line removed and a length bound applied.
+
+    Used only for the flash-local desk (see completion_payload's include_reply):
+    flash has no MCP tools of its own, so unlike a codex-session or claude-session
+    desk it cannot post its own answer into the room while doing the task. This is
+    the one place that answer can still reach the room.
+    """
+    if not isinstance(raw_result, str):
+        return "(empty reply)"
+    lines = raw_result.rstrip().splitlines()
+    if lines and lines[-1].strip().startswith(RESULT_PREFIX):
+        lines = lines[:-1]
+    text = "\n".join(lines).strip()
+    if not text:
+        return "(empty reply)"
+    if len(text) > MAX_REPLY_CHARS:
+        omitted = len(text) - MAX_REPLY_CHARS
+        text = (
+            text[:MAX_REPLY_CHARS]
+            + f"\n... [truncated {omitted} chars; full reply in {REPLY_TRUNCATION_POINTER}]"
+        )
+    return text
+
+
 def _task_status(payload: object) -> str | None:
     if isinstance(payload, dict):
         task = payload.get("task")
@@ -226,23 +256,36 @@ class QueueDeskExecutor:
             "or in your reply above that line, not in extra JSON fields."
         )
 
-    def _retry_or_block(self, task_id: str, code: str, *, now: str | None) -> dict:
-        """Use only Hermes evidence for the finite recovery bound."""
+    def _retry_or_block(self, task_id: str, code: str, *, now: str | None,
+                        before_block: Callable[[], None] | None = None) -> dict:
+        """Use only Hermes evidence for the finite recovery bound.
+
+        ``before_block`` runs immediately before any permanent block, and never
+        before a retry. The synchronous flash-local path passes its FINAL room
+        completion post here, so a retry posts nothing (the retried attempt owns
+        the one completion key) and a post failure raises before Hermes is
+        marked blocked, leaving the claim for Hermes' own stale-claim recovery.
+        """
+        def block(reason: str) -> None:
+            if before_block is not None:
+                before_block()
+            self.adapter.block(task_id, reason, kind="transient")
+
         try:
             attempts, limit = self.adapter.retry_attempt(task_id, QUEUE_TRANSIENT_PREFIX)
             if (not isinstance(attempts, int) or isinstance(attempts, bool) or attempts < 0
                     or not isinstance(limit, int) or isinstance(limit, bool) or limit < 1):
                 raise QueueDispatchError("canonical retry evidence is invalid")
         except Exception:
-            self.adapter.block(task_id, "queue_unavailable", kind="transient")
+            block("queue_unavailable")
             return {"outcome": "blocked", "task_id": task_id, "code": "queue_unavailable"}
         if attempts + 1 >= limit:
-            self.adapter.block(task_id, code, kind="transient")
+            block(code)
             return {"outcome": "blocked", "task_id": task_id, "code": code}
         try:
             self.adapter.reclaim(task_id, f"{QUEUE_TRANSIENT_PREFIX}{code}")
         except Exception:
-            self.adapter.block(task_id, "queue_unavailable", kind="transient")
+            block("queue_unavailable")
             return {"outcome": "blocked", "task_id": task_id, "code": "queue_unavailable"}
         return {"outcome": "retry_scheduled", "task_id": task_id, "code": code,
                 "retry_at": _retry_at(attempt=attempts + 1, now=now)}
@@ -251,7 +294,9 @@ class QueueDeskExecutor:
               desk_busy: bool = False, retry_at: dict[str, str] | None = None,
               now: str | None = None, desk_live: bool = True,
               unavailable_since: dict[str, str] | str | None = None,
-              unavailable_wait_s: float = DESK_UNAVAILABLE_WAIT_S) -> dict:
+              unavailable_wait_s: float = DESK_UNAVAILABLE_WAIT_S,
+              include_reply: bool = False, retry_protocol_errors: bool = False,
+              post_completion=None) -> dict:
         target = self._target(target_alias)
         self.last_ready_task_ids = set()
         self.last_ready_scan_complete = False
@@ -366,18 +411,45 @@ class QueueDeskExecutor:
                 },
             }
         if status != "completed":
-            return self._retry_or_block(task_id, _dispatch_failure_code(status), now=now)
+            # A no-answer reply is a distinct, honestly-labeled failure, not a
+            # generic provider outage: flash_wire is the only dispatch_call
+            # that ever sets detail="no_answer" (an empty Flash reply), so
+            # this stays desk-agnostic and only ever fires for that case. The
+            # route's `then` desk in ops/config/model-routes.v1.json is NOT
+            # dispatched to here — see finish_pending's retry_protocol_errors
+            # for why a real cross-desk hand-off is out of this module's
+            # bounded scope today; this still only retries then blocks, under
+            # its own diagnosable code instead of a misleading one.
+            detail = row.get("detail") if isinstance(row, dict) else None
+            code = "no_answer" if detail == "no_answer" else _dispatch_failure_code(status)
+            return self._retry_or_block(task_id, code, now=now)
         raw_result = row.get("result")
+        pending = {"kanban_task_id": task_id, "target": target_alias, "finish": parsed["meta"]["finish"],
+                   "cap": parsed["meta"]["cap"], "source_seq": parsed["meta"]["source_seq"],
+                   "source_msg_id": parsed["meta"]["source_msg_id"]}
+        clean_result = raw_result if isinstance(raw_result, str) else ""
+        if post_completion is not None:
+            return self.finish_pending_posted(
+                pending, clean_result, post_completion=post_completion,
+                include_reply=include_reply, retry_protocol_errors=retry_protocol_errors, now=now,
+            )
         return self.finish_pending(
-            {"kanban_task_id": task_id, "target": target_alias, "finish": parsed["meta"]["finish"],
-             "cap": parsed["meta"]["cap"], "source_seq": parsed["meta"]["source_seq"],
-             "source_msg_id": parsed["meta"]["source_msg_id"]},
-            raw_result if isinstance(raw_result, str) else "",
+            pending, clean_result,
+            include_reply=include_reply, retry_protocol_errors=retry_protocol_errors, now=now,
         )
 
     @staticmethod
-    def completion_payload(pending: dict, raw_result: str) -> dict:
-        """Return the bounded callback contract; never return model prose."""
+    def completion_payload(pending: dict, raw_result: str, *, include_reply: bool = False) -> dict:
+        """Return the bounded callback contract.
+
+        Never return model prose — EXCEPT when ``include_reply`` is set, which only the
+        flash-local desk path sets (see start()/finish_pending()). A codex-session or
+        claude-session desk has its own MCP tools and posts its own reply into the room
+        as part of doing the task, so the "never return model prose" rule holds for it
+        unchanged; flash-local has no tools, so its reply would otherwise be lost, and
+        ``include_reply`` is the one bounded exception carrying it back — its
+        protocol result line stripped and truncated (_bounded_reply), not redacted.
+        """
         task_id = pending.get("kanban_task_id")
         if not isinstance(task_id, str) or not task_id.startswith("t_"):
             raise QueueDispatchError("pending queue task identity is invalid")
@@ -413,13 +485,70 @@ class QueueDeskExecutor:
             callback["record_write"] = {
                 field: terminal[field] for field in RECORD_WRITE_EVIDENCE_FIELDS
             }
+        if include_reply:
+            callback["reply"] = _bounded_reply(raw_result)
         return {"queue_completion": callback}
 
-    def finish_pending(self, pending: dict, raw_result: str) -> dict:
+    def finish_pending(self, pending: dict, raw_result: str, *, include_reply: bool = False,
+                       retry_protocol_errors: bool = False, now: str | None = None) -> dict:
+        return self._finish(
+            pending, raw_result, include_reply=include_reply,
+            retry_protocol_errors=retry_protocol_errors, now=now, post_completion=None,
+        )
+
+    def finish_pending_posted(self, pending: dict, raw_result: str, *, post_completion,
+                              include_reply: bool = False, retry_protocol_errors: bool = False,
+                              now: str | None = None) -> dict:
+        """Like finish_pending, but posts the room completion callback BEFORE any Hermes
+        terminal transition, never after.
+
+        Only the synchronous flash-local path (start()) needs this. An async desk's
+        completion carries persisted "pending" state (state.py) across bridge cycles,
+        so if posting failed there after Hermes was already marked terminal, the next
+        cycle's handle_pending() would call finish_pending() again and retry the SAME
+        post under the SAME idempotency key. The synchronous path has no such
+        persisted state — Hermes IS the only durable record of it — so posting after
+        the terminal mutation (finish_pending's order) would lose the reply for good
+        on a post failure, with nothing left to retry it.
+
+        Posting first instead means a failed post (post_completion raises, and the
+        exception propagates to the caller UNCHANGED) leaves the Hermes claim in
+        place — never marked done/blocked/review — so the task stays "running" until
+        Hermes' own release_stale_claims puts it back in the retry phase on its own
+        schedule. That is the SAME recovery authority every other transient dispatch
+        failure in this module already relies on (see the module docstring), not a
+        second local retry ledger.
+
+        Only a FINAL completion is ever posted: after the result line parses, or
+        when the task is being permanently blocked (a non-retryable failure, or a
+        retryable protocol error whose Hermes retry budget is spent). A protocol
+        error that schedules a retry posts nothing. The room callback has exactly
+        one idempotency key per task (queue-completion:<task_id>) and the server
+        rejects that key with a different body (key_reuse), so posting an interim
+        "blocked" before a retry would both show the room a false result and make
+        the retried attempt's real completion unpostable forever (PR #1254 round
+        2 review, finding 1). A crash between a successful post and the Hermes
+        transition re-posts the identical final body, which the server replays.
+        """
+        return self._finish(
+            pending, raw_result, include_reply=include_reply,
+            retry_protocol_errors=retry_protocol_errors, now=now, post_completion=post_completion,
+        )
+
+    def _finish(self, pending: dict, raw_result: str, *, include_reply: bool,
+               retry_protocol_errors: bool, now: str | None, post_completion) -> dict:
         task_id = pending.get("kanban_task_id")
         if not isinstance(task_id, str) or not task_id.startswith("t_"):
             raise QueueDispatchError("pending queue task identity is invalid")
-        completion = self.completion_payload(pending, raw_result)
+        completion = self.completion_payload(pending, raw_result, include_reply=include_reply)
+
+        def post_final() -> None:
+            # The ONE room post for this task, made only once the outcome is
+            # final and always before the Hermes terminal mutation that follows
+            # it. A raise propagates unchanged, so Hermes is never marked
+            # terminal for a completion the room did not receive.
+            if post_completion is not None:
+                post_completion(completion)
 
         def result(outcome: str) -> dict:
             return {"outcome": outcome, "task_id": task_id, "completion": completion}
@@ -432,12 +561,32 @@ class QueueDeskExecutor:
         except RecordWriteEvidenceMissing:
             metadata = {"queue_protocol": "carr-queue-result.v1", "target": pending.get("target"),
                         "outcome": "unverified", "verification": "record_write_evidence_missing"}
+            post_final()
             if pending.get("finish") == "review":
                 self.adapter.request_review(task_id, "record_write_evidence_missing", metadata)
                 return result("review")
             self.adapter.block(task_id, "record_write_evidence_missing", kind="needs_input")
             return result("record_write_evidence_missing")
         except QueueDispatchError:
+            # A desk with no MCP tools of its own (flash-local) is far more likely
+            # to fumble the exact trailing-line protocol than a codex-session or
+            # claude-session desk, which write it themselves as one more tool
+            # call. retry_protocol_errors (set only for flash-local, see start())
+            # gives it the same bounded retry-then-block every other transient
+            # failure gets here, instead of a permanent block on the first miss.
+            # A scheduled retry posts NOTHING to the room; only the exhausted,
+            # permanent block posts the final completion (see
+            # finish_pending_posted). This is NOT the cross-desk hand-off to the
+            # route's `then` desk that flash_wire.py's docstring and
+            # ops/config/model-routes.v1.json describe: Hermes'
+            # CARR_QUEUE_META.target is fixed in the task body at creation and
+            # validated against the claiming desk's own alias (parse_queue_task),
+            # so handing a task to a different desk would need a new, linked task
+            # rather than a reassignment of this one — tracked as loop #649.
+            if retry_protocol_errors:
+                return self._retry_or_block(
+                    task_id, "result_protocol_error", now=now, before_block=post_final)
+            post_final()
             self.adapter.block(task_id, "result_protocol_error")
             return result("result_protocol_error")
 
@@ -449,6 +598,7 @@ class QueueDeskExecutor:
         }
         if pending.get("cap") == "record-write":
             metadata["record_write"] = {key: terminal[key] for key in RECORD_WRITE_EVIDENCE_FIELDS}
+        post_final()
         if terminal["outcome"] == "blocked":
             self.adapter.block(task_id, terminal.get("code") or summary, kind="needs_input")
             return result("blocked")

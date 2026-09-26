@@ -1,6 +1,6 @@
 // V5-F09 workflow census: the anchor OUTSIDE the database.
 //
-// WHY IT EXISTS. The census chain (migration 0595, ops.workflow_census_record)
+// WHY IT EXISTS. The census chain (migration 0708, ops.workflow_census_record)
 // is hash-chained and guarded inside Postgres, but whoever holds the database
 // owner role can disable or replace the guards, delete the history and insert
 // a new, internally consistent chain. Nothing inside the database can detect

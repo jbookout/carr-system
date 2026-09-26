@@ -136,9 +136,8 @@ export async function renderTourPacketPdf(input, fonts, proof = {}) {
     page.drawRectangle({ x: 42, y: 119, width: 528, height: 130, color: PAPER, borderColor: ORANGE, borderWidth: 1.5 });
     page.drawText("FACTS-ONLY CLIENT NOTE", { x: 58, y: 224, size: 8.5, font: bold, color: NAVY });
     drawLines(page, wrap(`As of ${formatAsOf(property.as_of)}`, regular, 9.5, 494, 1), { x: 58, y: 204, size: 9.5, lineHeight: 13, font: regular, color: INK });
-    // caveat is optional client-facing content, not a boilerplate default:
-    // print the line only when this property genuinely carries one.
-    if (property.caveat) drawLines(page, wrap(property.caveat, regular, 9.5, 494, 5), { x: 58, y: 184, size: 9.5, lineHeight: 13, font: regular, color: MUTED });
+    // No caveat line: renderTourPacket (1.3.0) admits only the client field
+    // allowlist, so a property never carries one (V5-J303).
 
     const marker = packet.markers[index];
     const packetRefLine = measuredSingleLine(`Packet ref: ${property.property_ref}`, regular, 6.5, 528);

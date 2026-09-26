@@ -3178,7 +3178,7 @@ def census_route_invariance_checks() -> None:
     own answer.
 
     WHAT REPLACED IT.  The reader mints and renders nothing in the caller's
-    process: since migration 0595 it asks the deployed Worker for the
+    process: since migration 0708 it asks the deployed Worker for the
     hash-chained census and recomputes it, and with no server answer it fails
     closed.  This check drives the real script in a subprocess with all three old
     names rebound -- the snapshot read, the render, and the old frozen census

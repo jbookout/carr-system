@@ -643,7 +643,14 @@ export const V5_J102_DEAL_AXES = deepFreeze([
   "commission_agreement_state", "invoice_state", "payment_state", "completion_state",
 ]);
 
+// `party_id` (owner ruling 2026-09-25, party link): an OPTIONAL declared
+// reference from a prospect relationship to the CARR party record. Optional, so
+// a relationship with no known party is still a relationship; the SQL writer
+// holds a supplied value to an existing public.party row.
 const RELATIONSHIP_KEYS = Object.freeze([
+  "subject_kind", "subject_id", "relationship_state", "active_engagement_count", "party_id",
+]);
+const RELATIONSHIP_REQUIRED = Object.freeze([
   "subject_kind", "subject_id", "relationship_state", "active_engagement_count",
 ]);
 const ENGAGEMENT_KEYS = Object.freeze([
@@ -666,7 +673,7 @@ const DEAL_KEYS = Object.freeze([
 ]);
 
 const SUBJECT_SHAPES = deepFreeze({
-  relationship: { keys: RELATIONSHIP_KEYS, required: RELATIONSHIP_KEYS },
+  relationship: { keys: RELATIONSHIP_KEYS, required: RELATIONSHIP_REQUIRED },
   // `effective_from` is NOT required, and that is a finding rather than an
   // oversight. F01's document identity carries preparation, delivery, signature,
   // validity and version states; it carries no dated effective window. An
@@ -716,7 +723,7 @@ const SUBJECT_ENUMS = deepFreeze({
 const IDENT_FIELDS = deepFreeze([
   "subject_id", "relationship_id", "engagement_id", "assignment_id", "property_id",
   "pending_deal_id", "selected_property_id", "active_lease_draft_target_id",
-  "multi_target_exception_ref",
+  "multi_target_exception_ref", "party_id",
 ]);
 const INSTANT_FIELDS = deepFreeze(["effective_from", "effective_to", "closing_date"]);
 const COUNT_FIELDS = deepFreeze(["open_negotiation_count", "active_engagement_count"]);
@@ -2550,6 +2557,7 @@ const INITIALIZATIONS = deepFreeze({
     parent: null,
     required_context: [],
     declared_identifiers: [],
+    optional_declared_identifiers: ["party_id"],
     initial_state: { relationship_state: "prospect", active_engagement_count: 0 },
     event_kind: "relationship_initialized",
     event_detail_fields: ["relationship_state"],
@@ -2617,6 +2625,7 @@ const INITIALIZATIONS = deepFreeze({
       },
     ],
     declared_identifiers: [],
+    optional_declared_identifiers: [],
     initial_state: {
       assignment_phase: "research", open_negotiation_count: 0,
       selected_property_id: null, active_lease_draft_target_id: null,
@@ -2656,6 +2665,12 @@ const INITIALIZATIONS = deepFreeze({
       },
     ],
     declared_identifiers: ["property_id"],
+    optional_declared_identifiers: [],
+    // Owner ruling 2026-09-25: at most ONE ACTIVE negotiation per (tenant,
+    // assignment, property). The store supplies the live siblings it loaded; the
+    // SQL writer re-checks under its own transaction and a partial unique index
+    // is the structural backstop.
+    unique_active_per_property: true,
     initial_state: { negotiation_state: "loi_drafted" },
     event_kind: "property_negotiation_initialized",
     event_detail_fields: ["assignment_id", "property_id", "negotiation_state"],
@@ -2664,6 +2679,15 @@ const INITIALIZATIONS = deepFreeze({
 });
 
 export const V5_J102_INITIALIZATION_IDS = deepFreeze(Object.keys(INITIALIZATIONS).sort());
+
+/**
+ * The negotiation states that count as ACTIVE for the one-per-property rule.
+ * A dead negotiation (rejected, withdrawn, superseded) does not block a new one,
+ * and neither does `selected_winner`: it has become a Deal, and while that Deal
+ * is pending the assignment is `committed`, which already refuses a new draft;
+ * once a cancellation reopens the assignment, the property may be pursued again.
+ */
+export const V5_J102_ACTIVE_NEGOTIATION_STATES = deepFreeze(["loi_drafted", "loi_submitted", "loi_countered", "loi_accepted"]);
 
 /** Which initialization creates each subject kind, or null for the coupled ones. */
 export const V5_J102_INITIALIZED_SUBJECT_KINDS = deepFreeze(
@@ -2683,6 +2707,8 @@ export function v5J102InitializationContract(initialization_id) {
     parent_subject_kind: c.parent === null ? null : c.parent.kind,
     parent_reference_field: c.parent === null ? null : c.parent.field,
     declared_identifiers: [...c.declared_identifiers],
+    optional_declared_identifiers: [...c.optional_declared_identifiers],
+    unique_active_per_property: c.unique_active_per_property === true,
     required_context: c.required_context.map(rule => ({
       subject: rule.subject,
       chained_from: rule.chained_from === undefined ? null : { ...rule.chained_from },
@@ -2705,12 +2731,16 @@ export function v5J102InitializationContract(initialization_id) {
 
 const INITIALIZATION_REQUEST_KEYS = Object.freeze([
   "tenant", "initialization_id", "related", "declared", "actor", "now",
+  // The ids of the ACTIVE negotiations the store loaded for the same assignment
+  // and property. Required (fail closed) for a property negotiation, refused for
+  // anything else.
+  "active_negotiations_for_property",
 ]);
 // `new_subject_id` names the row being created; `property_id` is the one further
 // identifier a negotiation needs and nothing can derive. THERE IS NO EVIDENCE KEY
 // AND NO STATE KEY: a request naming one is an unknown field, and a request
 // naming a phase, a state or an approval is refused by the two guards before that.
-const INITIALIZATION_DECLARED_KEYS = Object.freeze(["new_subject_id", "property_id"]);
+const INITIALIZATION_DECLARED_KEYS = Object.freeze(["new_subject_id", "property_id", "party_id"]);
 
 function initializationResult(fields) {
   return deepFreeze({
@@ -2817,9 +2847,16 @@ export function evaluateLifecycleInitialization(request) {
   // identifier nothing would read. It refuses rather than being dropped in
   // silence, because a caller that named a property on a relationship has
   // misunderstood which row it is creating.
+  for (const field of c.optional_declared_identifiers) {
+    if (declared[field] === undefined) continue;
+    if (typeof declared[field] !== "string") {
+      return refuseInit("declared_identifier_malformed", { malformed_declared_identifier: field });
+    }
+    assertExternalIdent(declared[field], `request.declared.${field}`, { maxLength: 128 });
+  }
   for (const field of INITIALIZATION_DECLARED_KEYS) {
     if (field === "new_subject_id" || declared[field] === undefined) continue;
-    if (!c.declared_identifiers.includes(field)) {
+    if (!c.declared_identifiers.includes(field) && !c.optional_declared_identifiers.includes(field)) {
       return refuseInit("declared_identifier_not_used", { unexpected_declared_identifier: field });
     }
   }
@@ -2867,8 +2904,33 @@ export function evaluateLifecycleInitialization(request) {
     subject_id,
     ...(c.parent === null ? {} : { [c.parent.field]: parent.subject_id }),
     ...Object.fromEntries(c.declared_identifiers.map(field => [field, declared[field]])),
+    ...Object.fromEntries(c.optional_declared_identifiers.map(field => [field, declared[field] ?? null])),
     ...c.initial_state,
   }, "created_state");
+
+  // ONE ACTIVE NEGOTIATION PER PROPERTY (owner ruling 2026-09-25). Checked after
+  // the parent chain, so the refusal is about THIS assignment and property.
+  if (c.unique_active_per_property === true) {
+    const siblings = request.active_negotiations_for_property;
+    if (!Array.isArray(siblings)) {
+      return refuseInit("active_negotiation_census_absent", {
+        why: "the store did not say which negotiations are already active for this assignment and property, so one-per-property cannot be judged",
+      });
+    }
+    siblings.forEach((id, i) => assertExternalIdent(id,
+      `request.active_negotiations_for_property[${i}]`, { maxLength: 128 }));
+    if (siblings.length > 0) {
+      return refuseInit("active_negotiation_exists_for_property", {
+        assignment_id: parent.subject_id, property_id: declared.property_id,
+        active_negotiation_ids: [...siblings].sort(),
+        active_negotiation_states: [...V5_J102_ACTIVE_NEGOTIATION_STATES],
+      });
+    }
+  } else if (request.active_negotiations_for_property !== undefined) {
+    fail("unknown_field",
+      "request.active_negotiations_for_property is read only for a property negotiation",
+      { path: "request.active_negotiations_for_property" });
+  }
 
   const detail = {};
   for (const field of c.event_detail_fields) {
@@ -3208,6 +3270,7 @@ export const V5_J102_FIELD_CLASS_REGISTRY = deepFreeze({
   property_id: "lifecycle",
   // Q069 / Q077 — the client and the engagement.
   relationship_state: "lifecycle", active_engagement_count: "lifecycle",
+  party_id: "lifecycle",
   engagement_state: "lifecycle", representation_basis: "lifecycle",
   effective_from: "lifecycle", effective_to: "lifecycle",
   // Q080 / Q095 — the assignment and its negotiations.
@@ -3418,6 +3481,158 @@ function reconciliationItem({ conflict_kind, base_version_digest, current_versio
     applied: false,
     resolved_by_machine: false,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Q103 for TYPED TRANSITIONS: the automatic merge of a non-overlapping edit.
+//
+// evaluateConcurrentEdit above judges RAW field edits, and it cannot merge a
+// lifecycle, financial or document edit however disjoint, because nothing can
+// re-validate a raw value against the row it lands on. A typed transition is
+// different in exactly that respect: the kernel can re-run the transition's
+// WHOLE admission — prerequisites, instrument, evidence, bindings, related
+// subjects — against the row as it now stands. So a transition decided against
+// a base that has since moved is merged automatically when, and only when:
+//
+//   1. the movement is CHARACTERIZED: the stored row's own prior digest is the
+//      caller's base, so exactly one committed transition moved it, and that
+//      transition's written fields are known from its declared contract;
+//   2. the fields this transition writes on the subject and the fields the
+//      intervening transition wrote on it are DISJOINT; and
+//   3. the transition is RE-ADMITTED against the current committed row — the
+//      caller of this function does that, and a refusal there is an ordinary
+//      refusal of a command that no longer applies, never a merge.
+//
+// Anything else — two or more intervening writes, a correction, an unknown
+// writer, or any shared field — is a visible reconciliation item with both
+// versions preserved. There is still no branch that takes the later write.
+//
+// THE WRITE SETS ARE OVER-APPROXIMATED, deliberately. A transition's written
+// fields on a subject kind are its coupled facts on that kind PLUS every
+// derived counter or mirror of that kind (V5_J102_DERIVED_FIELDS), whether or
+// not this particular call moves it. Over-reporting a write can only turn a
+// merge into a reconciliation; under-reporting one could merge over it.
+// ---------------------------------------------------------------------------
+
+/**
+ * The fields the kernel moves on a subject without naming them as coupled facts.
+ * The SQL admission map carries the same list as `derived_fields`, and the parity
+ * suite holds the two to each other.
+ */
+export const V5_J102_DERIVED_FIELDS = deepFreeze([
+  "relationship.active_engagement_count",
+  "assignment.open_negotiation_count",
+  "assignment.active_lease_draft_target_id",
+]);
+
+/**
+ * Every field a transition may write, by subject kind: the primary subject and
+ * the prefixes of its coupled facts, each carrying its coupled facts plus every
+ * derived field of that kind. A SUPERSET of the SQL map's `writes`, by
+ * construction and by test.
+ */
+export function v5J102TransitionWrites(transition_id) {
+  const t = TRANSITIONS[transition_id];
+  if (t === undefined) {
+    fail("unknown_transition", `"${String(transition_id)}" is not a registered transition`,
+      { registered: [...V5_J102_TRANSITION_IDS] });
+  }
+  const kinds = new Set([t.subject_kind, ...t.coupled_facts.map(f => f.split(".")[0])]);
+  const out = {};
+  for (const kind of [...kinds].sort()) {
+    const fields = new Set();
+    for (const fact of [...t.coupled_facts, ...V5_J102_DERIVED_FIELDS]) {
+      const [k, field] = fact.split(".");
+      if (k === kind) fields.add(field);
+    }
+    out[kind] = [...fields].sort();
+  }
+  return deepFreeze(out);
+}
+
+export const V5_J102_CONCURRENT_TRANSITION_OUTCOMES = deepFreeze([
+  "no_concurrent_movement",
+  "nonoverlapping_transition_merged_on_current_row",
+  "concurrent_change_not_characterized",
+  "overlapping_transition_writes_require_reconciliation",
+]);
+
+const CONCURRENT_TRANSITION_KEYS = Object.freeze([
+  "tenant", "transition_id", "subject_kind", "base_version_digest", "current_version_digest",
+  "current_prior_state_digest", "current_established_by_transition",
+]);
+
+export function evaluateConcurrentTransition(request) {
+  assertObject(request, "request");
+  assertClosedKeys(request, CONCURRENT_TRANSITION_KEYS, "request", { allowAsserted: true });
+  assertRequiredKeys(request, ["tenant", "transition_id", "subject_kind", "base_version_digest",
+    "current_version_digest"], "request");
+  assertTenant(request.tenant, "request.tenant");
+  const transition_id = assertEnum(request.transition_id, V5_J102_TRANSITION_IDS,
+    "request.transition_id", "unknown_transition");
+  const subject_kind = assertEnum(request.subject_kind, V5_J102_SUBJECT_KINDS,
+    "request.subject_kind", "unknown_subject_kind");
+  const base_version_digest = assertDigestRef(request.base_version_digest,
+    "request.base_version_digest");
+  const current_version_digest = assertDigestRef(request.current_version_digest,
+    "request.current_version_digest");
+  const prior = request.current_prior_state_digest === undefined ||
+    request.current_prior_state_digest === null
+    ? null : assertDigestRef(request.current_prior_state_digest, "request.current_prior_state_digest");
+  const established = request.current_established_by_transition ?? null;
+  const incoming_fields = v5J102TransitionWrites(transition_id)[subject_kind] ?? [];
+
+  const base = {
+    schema_version: V5_J102_RECONCILIATION_SCHEMA_VERSION,
+    tenant: ORGANIZATION_TENANT_ID,
+    transition_id, subject_kind, base_version_digest, current_version_digest,
+    incoming_fields: [...incoming_fields],
+    last_writer_wins: false,
+    silent_overwrite: false,
+    resolved_by_machine: false,
+    effects: V5_NO_EFFECTS,
+  };
+
+  if (base_version_digest === current_version_digest) {
+    return deepFreeze({ decision: "allow", reason_id: "no_concurrent_movement", ...base,
+      merged: false, characterized: true, concurrent_transition_id: null,
+      concurrent_fields: [], overlapping_fields: [], readmission_required: false,
+      conflict_kind: null });
+  }
+
+  // ONE STEP, AND ONLY ONE, IS CHARACTERIZED. The stored row names the digest it
+  // replaced; when that is the caller's base, the transition that produced the
+  // row is the only write between them. A correction is not a transition and its
+  // corrected fields are not a declared write set, so it never characterizes.
+  const characterized = prior !== null && prior === base_version_digest &&
+    typeof established === "string" && V5_J102_TRANSITION_IDS.includes(established);
+  if (!characterized) {
+    return deepFreeze({ decision: "reconcile", reason_id: "concurrent_change_not_characterized",
+      ...base, merged: false, characterized: false,
+      concurrent_transition_id: typeof established === "string" ? established : null,
+      concurrent_fields: [], overlapping_fields: [], readmission_required: false,
+      conflict_kind: "uncharacterized_concurrent_change",
+      why: prior === base_version_digest
+        ? "the write that moved this subject is not a registered transition, so its written fields are not declared"
+        : "more than one write, or a write not decided against this base, lies between the base and the current row" });
+  }
+
+  const concurrent_fields = v5J102TransitionWrites(established)[subject_kind] ?? [];
+  const overlapping_fields = incoming_fields.filter(f => concurrent_fields.includes(f)).sort();
+  if (overlapping_fields.length > 0) {
+    return deepFreeze({ decision: "reconcile",
+      reason_id: "overlapping_transition_writes_require_reconciliation", ...base,
+      merged: false, characterized: true, concurrent_transition_id: established,
+      concurrent_fields: [...concurrent_fields], overlapping_fields,
+      readmission_required: false, conflict_kind: "overlapping_field_edit" });
+  }
+  return deepFreeze({ decision: "allow",
+    reason_id: "nonoverlapping_transition_merged_on_current_row", ...base,
+    merged: true, characterized: true, concurrent_transition_id: established,
+    concurrent_fields: [...concurrent_fields], overlapping_fields: [],
+    // The merge is CONDITIONAL on this: the transition is decided again, in
+    // full, against the current committed row, and only its answer lands.
+    readmission_required: true, conflict_kind: null });
 }
 
 /**
@@ -3727,7 +3942,11 @@ export function compareMigrationShadow(request) {
   });
 }
 
-const READINESS_KEYS = Object.freeze(["tenant", "caller_census", "shadow_runs"]);
+const READINESS_KEYS = Object.freeze(["tenant", "caller_census", "shadow_runs", "latest_shadow_run"]);
+const SHADOW_RUN_KEYS = Object.freeze([
+  "run_digest", "compared_rows", "matching_rows", "differing_rows", "unlinked_rows",
+  "many_to_one_subjects", "subjects_without_legacy_row", "snapshot_current", "clean",
+]);
 const CENSUS_KEYS = Object.freeze([
   "census_ref", "enumerated_callers", "migrated_callers", "attested_by", "attested_at",
 ]);
@@ -3771,6 +3990,44 @@ export function v5J102MigrationReadiness(request) {
   }
   const shadow_runs = request.shadow_runs === undefined || request.shadow_runs === null
     ? 0 : assertSafeInteger(request.shadow_runs, "request.shadow_runs", { min: 0, max: 1000000 });
+  // THE NEWEST SHADOW RUN, as ops.j102_run_migration_shadow recorded it. Its
+  // cleanliness is RE-DERIVED from its counts here, never read off its `clean`
+  // flag: a run is clean only when it compared something, found no difference,
+  // left no legacy row unlinked, mapped no two legacy rows onto one subject, and
+  // left no Salesforce-referenced subject without a legacy row (owner ruling (f)).
+  // A flag that disagrees with its own counts is refused, not believed. And a
+  // clean run is PROOF only while `snapshot_current` holds: the reader recomputes
+  // both input digests, and a run over a snapshot that has moved is stale.
+  let latest = null;
+  if (request.latest_shadow_run !== undefined && request.latest_shadow_run !== null) {
+    const raw = assertObject(request.latest_shadow_run, "request.latest_shadow_run");
+    assertClosedKeys(raw, SHADOW_RUN_KEYS, "request.latest_shadow_run", { allowAsserted: true });
+    assertRequiredKeys(raw, SHADOW_RUN_KEYS, "request.latest_shadow_run");
+    const count = k => assertSafeInteger(raw[k], `request.latest_shadow_run.${k}`,
+      { min: 0, max: 1000000 });
+    latest = {
+      run_digest: assertDigestRef(raw.run_digest, "request.latest_shadow_run.run_digest"),
+      compared_rows: count("compared_rows"), matching_rows: count("matching_rows"),
+      differing_rows: count("differing_rows"), unlinked_rows: count("unlinked_rows"),
+      many_to_one_subjects: count("many_to_one_subjects"),
+      subjects_without_legacy_row: count("subjects_without_legacy_row"),
+      snapshot_current: assertBoolean(raw.snapshot_current, "request.latest_shadow_run.snapshot_current"),
+    };
+    if (latest.compared_rows !== latest.matching_rows + latest.differing_rows) {
+      fail("shadow_run_counts_inconsistent",
+        "request.latest_shadow_run.compared_rows must equal matching_rows + differing_rows",
+        { path: "request.latest_shadow_run" });
+    }
+    latest.clean = latest.compared_rows > 0 && latest.differing_rows === 0 &&
+      latest.unlinked_rows === 0 && latest.many_to_one_subjects === 0 &&
+      latest.subjects_without_legacy_row === 0;
+    if (assertBoolean(raw.clean, "request.latest_shadow_run.clean") !== latest.clean) {
+      fail("shadow_run_clean_flag_contradicts_counts",
+        "request.latest_shadow_run.clean disagrees with the run's own counts",
+        { path: "request.latest_shadow_run.clean", derived: latest.clean });
+    }
+  }
+  const shadowClean = latest?.clean === true && latest.snapshot_current === true;
   return deepFreeze({
     schema_version: V5_J102_COMPATIBILITY_SCHEMA_VERSION,
     tenant: ORGANIZATION_TENANT_ID,
@@ -3781,6 +4038,8 @@ export function v5J102MigrationReadiness(request) {
     caller_census: census,
     caller_census_verified: false,
     shadow_runs,
+    shadow_comparison_clean_run: shadowClean,
+    latest_shadow_run: latest === null ? null : deepFreeze(latest),
     compatibility_view_available: true,
     big_bang_rename: false,
     missing_facts: deepFreeze([
@@ -3789,11 +4048,15 @@ export function v5J102MigrationReadiness(request) {
         why: "Q081 permits retiring the old interface only after migration proof, and no verified enumeration of the callers and projections still reading the legacy shape exists in this record layer.",
         produced_by: "not_produced_by_this_slice",
       },
-      {
+      ...(shadowClean ? [] : [{
         fact: "shadow_comparison_clean_run",
-        why: "compareMigrationShadow supplies the comparison; a clean run over the real rows has not been performed and is not asserted here.",
-        produced_by: "not_produced_by_this_slice",
-      },
+        why: latest === null
+          ? "No migration shadow has been run; ops.j102_run_migration_shadow produces one."
+          : !latest.clean
+            ? "The newest migration shadow run is not clean: it found differences, unlinked legacy rows, many-to-one mappings or referenced subjects with no legacy row, which a person must resolve before it counts as proof."
+            : "The newest migration shadow run was clean over a snapshot that has since moved; run it again.",
+        produced_by: "ops.j102_run_migration_shadow",
+      }]),
     ]),
     effects: V5_NO_EFFECTS,
   });

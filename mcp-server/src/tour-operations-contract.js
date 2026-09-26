@@ -8,6 +8,36 @@ export const PUBLIC_TOUR_FIELD_KEYS = new Set([
   "floor_plan", "source_attribution", "as_of", "caveat",
 ]);
 export const REQUIRED_PUBLIC_PROPERTY_FIELDS = Object.freeze(["display.name", "display.address"]);
+
+// The CLIENT allowlist (V5-J303). PUBLIC_TOUR_FIELD_KEYS above is the set of
+// fact shapes the record can hold safely; it is NOT what a client may see.
+// Joe's ruling (decision 4ab3933e, 2026-09-24): a client sees exactly what is
+// on today's Tour PDF -- property name, address, suite, space type, size,
+// asking economics, availability and parking. Notes, owner contacts, access
+// notes and every other field stay internal.
+//
+// Default deny: a field is internal until it is added HERE and to
+// ops.tour_client_field_keys() in the same change. The database copy is the
+// authority (it guards the fact insert inside the seal and names the only
+// columns the share reads select); this copy refuses a bad seal before the
+// database is touched and is the last filter on every client response.
+// test/tour-client-share-allowlist.test.mjs binds the two lists together.
+export const CLIENT_TOUR_FIELD_KEYS = Object.freeze([
+  "display.name", "display.address", "suite", "property_type", "size",
+  "asking_economics", "availability", "parking",
+]);
+export function isClientTourFieldKey(key) {
+  return typeof key === "string" && CLIENT_TOUR_FIELD_KEYS.includes(key);
+}
+// Column name each allowlisted field takes in a client packet row.
+export const CLIENT_TOUR_PACKET_COLUMNS = Object.freeze({
+  "display.name": "name", "display.address": "address", suite: "suite",
+  property_type: "property_type", size: "size", asking_economics: "asking_economics",
+  availability: "availability", parking: "parking",
+});
+// Structural keys a client stop carries besides its fields: an opaque
+// per-projection property reference and the stop's order and label.
+export const CLIENT_TOUR_STOP_ENVELOPE_KEYS = Object.freeze(["property_ref", "route_sequence", "route_label"]);
 export const PUBLIC_ASSET_REFERENCE_RE = /^asset:public:[A-Za-z0-9_-]{16,256}$/;
 
 const metricValue = value =>

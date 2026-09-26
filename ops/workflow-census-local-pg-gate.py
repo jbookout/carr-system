@@ -2,7 +2,7 @@
 # ci: db-gate
 # doctrine: runbook
 """Rollback-only real-PostgreSQL acceptance for the V5-F09 workflow census store
-(migration 0595: ops.workflow_census_record, its write door
+(migration 0708: ops.workflow_census_record, its write door
 ops.record_workflow_census and its read door ops.read_workflow_census).
 
 WHY THIS EXISTS. The node suite (mcp-server/test/workflow-census.test.mjs)
@@ -109,7 +109,7 @@ VERB_MODULE = REPO / "mcp-server" / "src" / "workflow-census.js"
 PINNED_GUARD_FUNCTIONS = json.loads(
     (REPO / "ops" / "config" / "workflow-census-attestation.v1.json").read_text(encoding="utf-8")
 )["guard_function_sha256"]
-MIGRATION = (REPO / "migrations" / "0595_workflow_census_store.sql").read_text(encoding="utf-8")
+MIGRATION = (REPO / "migrations" / "0708_workflow_census_store.sql").read_text(encoding="utf-8")
 # Escapes, a BMP character above U+E000 and an astral one, keys whose code-point
 # order differs from their UTF-16 order: every place the two canonical
 # renderings could disagree, so the cross-language check below means something.

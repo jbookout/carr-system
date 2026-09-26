@@ -45,6 +45,14 @@
                "then": {"model": "opus", "effort": "high", "desk": "claude-desktop"}}
   },
   "handoff_reasons": ["no_answer", "invented", "runaway"],
+  "queue_targets": {
+    "_about": "Where a Model Room task queued with target=auto goes, per route (tools/room-bridge/kanban_adapter.py). Code and script tasks go to the Opus desk until their Flash protocols take queue tasks: flash-run needs a project folder and a test command, and the script harness is not ported yet. A route whose target is down, disabled or refuses the task's capability falls back to `fallback`.",
+    "direct": "flash",
+    "escalate": "claude-desktop",
+    "code": "claude-desktop",
+    "script": "claude-desktop",
+    "fallback": "claude-desktop"
+  },
   "overflow": {"_about": "Flash runs one job at a time on the Mac. When it is busy or offline, a Flash route runs on this model instead of queueing (Joe 2026-09-24: we don't want to wait in line for Flash).",
                "model": "haiku", "effort": "low"},
   "models": {

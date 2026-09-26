@@ -195,12 +195,20 @@ async function ingest(request, env) {
 const defaultHandler = {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    // /healthz is deliberately NOT /health: it touches no secret, no env
+    // binding and no database, so it answers even when the Worker's boot
+    // itself is what is in question (a module-scope throw during import --
+    // e.g. a Node-only API called at load time -- kills every route
+    // including /health before any handler runs). CI's Worker-boot check
+    // (bin/worker-boot-check.sh) asks this route specifically so a defect
+    // like that fails CI instead of only surfacing on the next real deploy.
+    if (url.pathname === "/healthz") return json({ ok: true });
     if (url.pathname === "/health") return health(env);
     if (url.pathname === "/release") return release(env);
     if (url.pathname === "/ingest" && request.method === "POST") return ingest(request, env);
     if (url.pathname === "/authorize") return handleAuthorize(request, env);
     if (url.pathname === "/callback") return handleCallback(request, env);
-    return json({ service: "carr-mcp", surfaces: ["/health", "/release", "/ingest", "/mcp", "/pipeline/changes", "/authorize", "/callback"] }, 404);
+    return json({ service: "carr-mcp", surfaces: ["/healthz", "/health", "/release", "/ingest", "/mcp", "/pipeline/changes", "/authorize", "/callback"] }, 404);
   },
 };
 
