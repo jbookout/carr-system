@@ -1,4 +1,4 @@
--- 0712_a02_rule_enforcement_coverage.sql
+-- 0721_a02_rule_enforcement_coverage.sql
 --
 -- V5-A02's live rule-coverage guard.  Coverage is derived from current active
 -- rule, approval, installed-control, binding, verification and fallback rows.
@@ -390,12 +390,12 @@ grant execute on function ops.record_rule_enforcement_fallback(uuid,text,text,te
   to carr_authority;
 grant execute on function ops.v5_a02_rule_enforcement_coverage() to carr_reader;
 
-do $v5_a02_0712$
+do $v5_a02_0721$
 begin
   if to_regclass('ops.rule_enforcement_fallback_receipt') is null
      or to_regprocedure('ops.record_rule_enforcement_fallback(uuid,text,text,text,text)') is null
      or to_regprocedure('ops.v5_a02_rule_enforcement_coverage()') is null then
-    raise exception '0712 FAILED: V5-A02 rule coverage contract is incomplete';
+    raise exception '0721 FAILED: V5-A02 rule coverage contract is incomplete';
   end if;
   if has_function_privilege('carr_writer',
        'ops.record_rule_enforcement_fallback(uuid,text,text,text,text)'::regprocedure,
@@ -405,14 +405,14 @@ begin
        'execute')
      or not has_function_privilege('carr_reader',
        'ops.v5_a02_rule_enforcement_coverage()'::regprocedure, 'execute') then
-    raise exception '0712 FAILED: V5-A02 grants are not closed';
+    raise exception '0721 FAILED: V5-A02 grants are not closed';
   end if;
   if (select count(*) from pg_trigger
        where tgrelid = 'ops.rule_enforcement_fallback_receipt'::regclass
          and tgname in ('rule_enforcement_fallback_receipt_append_only',
                         'rule_enforcement_fallback_receipt_no_truncate')
          and not tgisinternal) <> 2 then
-    raise exception '0712 FAILED: fallback receipt append-only or truncate guard missing';
+    raise exception '0721 FAILED: fallback receipt append-only or truncate guard missing';
   end if;
 end
-$v5_a02_0712$;
+$v5_a02_0721$;

@@ -75,6 +75,8 @@ import { V5BoundaryDoorRefusal, globalBoundariesDoorTools, passBoundaryDoor } fr
   "./global-boundaries-door.v5.js";
 import { journeyOneClockDoorTools } from "./journey-one-clock-door.v5.js";
 import { governedCorrespondenceStoreTools } from "./governed-correspondence-store.v5.js";
+import { assuranceHealthStoreTools } from "./assurance-health-store.v5.js";
+import { completeSetReviewA03StoreTools } from "./independent-review-cycle-store.v5.js";
 export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
 
 // ---------- envelope helpers ----------
@@ -1845,7 +1847,7 @@ async function buildRecordBag(c, dealId, clientId) {
 // the candidates rather than picking one, because silently activating or
 // retiring the wrong binding rule is worse than any error message.
 // V5-A02: the named refusals ops.record_rule_enforcement_fallback raises
-// (migration 0712). Each is mapped to a ToolError of the same name.
+// (migration 0721). Each is mapped to a ToolError of the same name.
 const RULE_ENFORCEMENT_FALLBACK_REFUSALS = Object.freeze(new Set([
   "rule_enforcement_fallback_requires_joe_authority",
   "rule_enforcement_fallback_kind_unknown",
@@ -8439,7 +8441,9 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "global-boundaries-door": "mcp-server/src/global-boundaries-door.v5.js",
   "journey-one-clock-door": "mcp-server/src/journey-one-clock-door.v5.js",
   "governed-correspondence-store": "mcp-server/src/governed-correspondence-store.v5.js",
+  "assurance-health-store": "mcp-server/src/assurance-health-store.v5.js",
   "action-class-successor-registry": "mcp-server/src/action-class-successor-registry.v5.js",
+  "complete-set-review-a03-store": "mcp-server/src/independent-review-cycle-store.v5.js",
 });
 
 function bindToolSource(tool, source) {
@@ -9598,6 +9602,7 @@ registerTools(journeyOneClockDoorTools({ withEnvelope, ToolError }), "journey-on
 // grant for the read-receipt writer.
 registerTools(governedCorrespondenceStoreTools({ withEnvelope, writeEvent, ToolError }),
   "governed-correspondence-store");
+registerTools(assuranceHealthStoreTools({ withEnvelope, ToolError }), "assurance-health-store");
 // DoctorCRE V5-D01: inactive action-specific autonomy successors. Three verbs
 // over migration 0708's append-only registry -- register-, read- and the
 // deterministic read-action-class-gate, which as shipped always denies (no
@@ -9605,5 +9610,11 @@ registerTools(governedCorrespondenceStoreTools({ withEnvelope, writeEvent, ToolE
 // can ever produce a row this gate reads as allowed.
 registerTools(actionClassSuccessorRegistryTools({ withEnvelope, writeEvent, ToolError }),
   "action-class-successor-registry");
+// DoctorCRE V5-A03: append-only independent complete-set review. Every
+// participant registers only its authenticated actor/session duty; all eleven
+// dimensions precede one batch repair; regression checks cannot shrink; and a
+// stronger adjudicator is the only transition after two unresolved rounds.
+registerTools(completeSetReviewA03StoreTools({ withEnvelope, writeEvent, ToolError }),
+  "complete-set-review-a03-store");
 
 Object.freeze(TOOLS);

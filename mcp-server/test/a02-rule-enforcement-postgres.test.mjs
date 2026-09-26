@@ -225,8 +225,8 @@ test("V5-A02 coverage and fallback writer on real PostgreSQL", async t => {
     db = await clientFor(pg, copy);
 
     const applied = await db.query(
-      "select 1 from public.schema_migrations where filename = '0712_a02_rule_enforcement_coverage.sql'");
-    assert.equal(applied.rows.length, 1, "migration 0712 is applied as the numbered file");
+      "select 1 from public.schema_migrations where filename = '0721_a02_rule_enforcement_coverage.sql'");
+    assert.equal(applied.rows.length, 1, "migration 0721 is applied as the numbered file");
 
     // Isolation: whatever active rules the snapshot carries are retired in
     // this copy, so every count below is exact.

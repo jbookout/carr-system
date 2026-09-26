@@ -403,14 +403,30 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0708_action_class_successor_registry.sql",
         "0709_action_class_successor_registry_scac_successor.sql",
     ),
-    # DoctorCRE V5-A02: 0712 installs the append-only Joe-authority fallback
+    # V5-A01: 0717 installs the append-only six-layer assurance-health
+    # evidence store plus its SECURITY DEFINER record/read doors; 0718 seals
+    # those grants and the two registered MCP verbs as SCAC v83, chained
+    # from v82 (0709).
+    (
+        "0717_assurance_health_evidence_store.sql",
+        "0718_assurance_health_evidence_store_scac_successor.sql",
+    ),
+    # DoctorCRE V5-A03: 0719 installs the append-only complete-set review
+    # cycle and its SECURITY DEFINER writer/read doors; 0720 seals the exact
+    # source and catalog as SCAC v84, chained from v83 (0718). The deferred
+    # policy-epoch trigger must see both or neither.
+    (
+        "0719_doctorcre_a03_review_store.sql",
+        "0720_doctorcre_a03_review_scac_successor.sql",
+    ),
+    # DoctorCRE V5-A02: 0721 installs the append-only Joe-authority fallback
     # receipt, its authority-only writer, and the universal read-only active
-    # rule coverage function; 0713 seals that catalog as provisional v83,
-    # chained from v82 (0709). The deferred SCAC epoch trigger means the pair
+    # rule coverage function; 0722 seals that catalog as provisional v85,
+    # chained from v84 (0720). The deferred SCAC epoch trigger means the pair
     # must commit atomically.
     (
-        "0712_a02_rule_enforcement_coverage.sql",
-        "0713_a02_rule_enforcement_coverage_scac_successor.sql",
+        "0721_a02_rule_enforcement_coverage.sql",
+        "0722_a02_rule_enforcement_coverage_scac_successor.sql",
     ),
 )
 
@@ -488,8 +504,16 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0709_action_class_successor_registry_scac_successor.sql",
     ),
     (
-        "0712_a02_rule_enforcement_coverage.sql",
-        "0713_a02_rule_enforcement_coverage_scac_successor.sql",
+        "0717_assurance_health_evidence_store.sql",
+        "0718_assurance_health_evidence_store_scac_successor.sql",
+    ),
+    (
+        "0719_doctorcre_a03_review_store.sql",
+        "0720_doctorcre_a03_review_scac_successor.sql",
+    ),
+    (
+        "0721_a02_rule_enforcement_coverage.sql",
+        "0722_a02_rule_enforcement_coverage_scac_successor.sql",
     ),
 )
 
