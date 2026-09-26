@@ -284,6 +284,29 @@ def test_script_cannot_read_the_shared_temp_folders():
     assert "listed" not in out and out.count("refused") == 2, out
 
 
+@sandboxed
+def test_script_cannot_signal_other_processes():
+    import subprocess
+    decoy = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        out, _ = run(f"import os, signal\ntry:\n    os.kill({decoy.pid}, signal.SIGTERM); print('signalled')\n"
+                     "except OSError as e:\n    print('refused', type(e).__name__)")
+        time.sleep(0.3)
+        assert "refused" in out and decoy.poll() is None, (out, decoy.poll())
+    finally:
+        decoy.kill()
+        decoy.wait()
+
+
+@sandboxed
+def test_script_cannot_read_homebrew_state():
+    probe = ("import os\nfor d in ('/opt/homebrew/var', '/opt/homebrew/etc'):\n"
+             "    if not os.path.isdir(d):\n        print(d, 'absent'); continue\n    try:\n"
+             "        os.listdir(d); print(d, 'listed')\n    except OSError:\n        print(d, 'refused')")
+    out, _ = run(probe)
+    assert "listed" not in out, out
+
+
 def test_no_sandbox_means_refusal_not_an_unsandboxed_run():
     saved = fs.SANDBOX_EXEC
     fs.SANDBOX_EXEC = "/nonexistent/sandbox-exec"

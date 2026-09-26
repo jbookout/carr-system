@@ -227,7 +227,9 @@ def sandbox_profile(work):
     interp = os.path.dirname(os.path.dirname(os.path.realpath(sys.executable)))
     reads = sorted({work, interp, *(os.path.realpath(p) for p in (sys.prefix, sys.base_prefix))})
     execs = sorted({sys.executable, os.path.realpath(sys.executable)})
-    private = [home, "/private/tmp", "/private/var/folders", "/Users/Shared"]
+    # Homebrew's var/etc hold the local Postgres cluster (data files, pg_hba.conf) and service configs.
+    private = [home, "/private/tmp", "/private/var/folders", "/Users/Shared", "/opt/homebrew/var", "/opt/homebrew/etc",
+               "/usr/local/var", "/usr/local/etc", "/etc/ssh", "/Library/Keychains"]
     if any('"' in p or "\\" in p for p in [*private, *reads, *execs]):
         raise ValueError("path not expressible in a sandbox profile")
     port = flash_port()
@@ -243,7 +245,9 @@ def sandbox_profile(work):
             "(deny process-exec*)"
             "(allow process-exec " + " ".join(f'(literal "{p}")' for p in execs) + ")"
             "(deny mach-lookup)"
-            "(deny appleevent-send)")
+            "(deny appleevent-send)"
+            # a script may signal only itself and its own children, never Flash, Postgres, hub jobs or sessions
+            "(deny signal (target others))")
 
 
 def _limits():  # runs in the child before exec: bound file size (so output) and CPU time
