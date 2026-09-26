@@ -187,6 +187,54 @@ test("typed contracts are append-only, actor-scoped, and missing rules stay expl
   });
 });
 
+test("with active rules and zero bound contracts the live read returns a partial receipt, not invalid_shape", async t => {
+  // The production state right after #1305 shipped: every active rule is
+  // unprojected, so the census projects an empty policy. This read used to
+  // throw the kernel's policy.rules min-1 error.
+  const { readActionContext } = await import("../src/rule-context-runtime.v5.js");
+  const { verifyCoverageReceipt } = await import("../src/rule-applicability.v5.js");
+  await withFixtureTransaction(t, async client => {
+    const joe = (await client.query("select id from public.actor where slug='joe' and active")).rows[0];
+    const { ruleId } = await activeRule(client,
+      { statement: `F05 zero-bound fixture ${randomUUID()}`, taughtBy: joe.id });
+    const census = await universe(client);
+    assert.equal(census.projected_rule_count, 0,
+      "precondition: the disposable database has no bound typed contract");
+    assert.deepEqual(census.policy.rules, []);
+    assert.ok(census.active_rule_count >= 1);
+
+    const actor = { id: joe.id, slug: "joe", human: true };
+    const facts = { action: "fixture.act", audience: "client", environment: "production",
+      lifecycle_transition: "send", resource_class: "fixture-resource", risk_tier: "consequential" };
+    const result = await readActionContext(client, actor, { facts });
+    const receipt = result.coverage_receipt;
+    assert.equal(result.consequential_action_permitted, false);
+    assert.equal(receipt.consequential_action_permitted, false);
+    assert.equal(receipt.coverage_complete, false);
+    assert.equal(receipt.universe_completeness, "partial_unknown_coverage");
+    assert.ok(receipt.blocking_reasons.includes("no_rule_contract_projected"));
+    assert.deepEqual([...receipt.universe_rule_ids], []);
+    assert.ok(receipt.missing_rule_ids.includes(ruleId), "the unbound active rule is named");
+    assert.equal(receipt.missing_rule_ids.length, census.active_rule_count,
+      "every active rule is listed as missing");
+    assert.equal(receipt.missing_rule_ids.length,
+      result.source.active_rule_count - result.source.projected_rule_count,
+      "census consistency: missing = active - projected");
+    assert.equal(verifyCoverageReceipt(receipt), true);
+
+    // The first bind moves the read onto the kernel path; still fail-closed
+    // while any other active rule stays unprojected.
+    await bindAsJoe(client, ruleId);
+    const after = await readActionContext(client, actor, { facts });
+    assert.ok(after.coverage_receipt.universe_rule_ids.includes(ruleId));
+    assert.equal(after.source.projected_rule_count, 1);
+    assert.equal(after.source.missing_rule_ids.includes(ruleId), false);
+    if (after.source.missing_rule_ids.length > 0) {
+      assert.equal(after.consequential_action_permitted, false);
+    }
+  });
+});
+
 test("the binder's Joe authority comes from the login, never from settable session values", async t => {
   await withFixtureTransaction(t, async client => {
     const joe = (await client.query("select id from public.actor where slug='joe' and active")).rows[0];

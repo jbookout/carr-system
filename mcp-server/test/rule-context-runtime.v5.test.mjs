@@ -14,7 +14,10 @@ import {
   readActionContext,
   ruleContextRuntimeTools,
 } from "../src/rule-context-runtime.v5.js";
-import { V5_F05_UNIVERSE_SCHEMA_VERSION } from "../src/rule-applicability.v5.js";
+import {
+  V5_F05_UNIVERSE_SCHEMA_VERSION,
+  verifyCoverageReceipt,
+} from "../src/rule-applicability.v5.js";
 
 const NOW = "2026-09-26T06:30:00.000Z";
 const ACTOR = Object.freeze({
@@ -276,4 +279,141 @@ test("the only contract writer is authority-only and validates the DB-derived fu
   assert.equal(result.ok, true);
   assert.match(calls[0].sql, /ops\.bind_f05_rule_contract/);
   assert.deepEqual(calls[0].params, [input.rule_id, input.contract, input.idempotency_key]);
+});
+
+// ---------------------------------------------------------------------------
+// Zero projected rules: the production state after V5-F05 shipped. The store
+// holds active rules and no typed contract has been bound yet, so the SQL
+// census projects an EMPTY policy. The kernel correctly refuses to compile an
+// empty universe; the runtime must still answer with a partial receipt that
+// names every missing rule, and must never read "no rules" as permission.
+// ---------------------------------------------------------------------------
+
+const PROD_FACTS = Object.freeze({
+  action: "send-email", audience: "client", environment: "production",
+  lifecycle_transition: "send", resource_class: "deal", risk_tier: "consequential",
+});
+
+const MISSING = Object.freeze([
+  "00000000-0000-4000-8000-0000000000a1",
+  "00000000-0000-4000-8000-0000000000b2",
+  "00000000-0000-4000-8000-0000000000c3",
+]);
+
+// Exactly what ops.f05_rule_universe returns when nothing is bound: the
+// caller's action and resource class are still declared, rules is [].
+const unbound = (overrides = {}) => snapshot({
+  policy: policy([], {
+    completeness: "partial_unknown_coverage",
+    declared_actions: ["send-email"],
+    declared_resource_classes: ["deal"],
+  }),
+  active_rule_count: MISSING.length,
+  projected_rule_count: 0,
+  missing_rule_ids: [...MISSING],
+  ...overrides,
+});
+
+test("no bound contracts: the read returns a partial, blocked, digest-bound receipt naming every active rule", async () => {
+  // PLANTED BUG WITNESS (prod, after #1305): this read threw
+  // invalid_shape policy.rules "must name at least 1 item(s)" from the kernel,
+  // hiding the missing-rule list and making the verb unusable before a bind.
+  const result = await readActionContext(new FakeClient(unbound()), ACTOR, { facts: { ...PROD_FACTS } });
+  const receipt = result.coverage_receipt;
+
+  assert.equal(result.schema_version, V5_F05_RUNTIME_SCHEMA_VERSION);
+  assert.equal(result.consequential_action_permitted, false);
+  assert.equal(receipt.consequential_action_permitted, false);
+  assert.equal(receipt.coverage_complete, false);
+  assert.equal(receipt.universe_completeness, "partial_unknown_coverage");
+  assert.equal(receipt.read_only_exploration_permitted, true);
+  assert.equal(receipt.write_gate_field, "consequential_action_permitted");
+  assert.ok(receipt.blocking_reasons.includes("universe_coverage_unknown"));
+  assert.ok(receipt.blocking_reasons.includes("no_rule_contract_projected"));
+  assert.deepEqual([...receipt.universe_rule_ids], []);
+  assert.deepEqual([...receipt.missing_rule_ids], [...MISSING]);
+  assert.equal(receipt.active_rule_count, MISSING.length);
+  assert.equal(receipt.projected_rule_count, 0);
+  assert.deepEqual([...result.source.missing_rule_ids], [...MISSING]);
+  assert.equal(result.source.active_rule_count, MISSING.length);
+  assert.equal(result.source.projected_rule_count, 0);
+  assert.equal(receipt.facts.actor_class, "sponsored_agent");
+  assert.equal(receipt.facts.action, "send-email");
+  assert.equal(result.universe_digest, receipt.universe_digest);
+  assert.match(result.universe_digest, /^sha256:[0-9a-f]{64}$/);
+  assert.match(receipt.receipt_digest, /^sha256:[0-9a-f]{64}$/);
+  assert.equal(verifyCoverageReceipt(receipt), true);
+
+  // Digest-bound: a copy that flips the gate, or drops a missing rule, no
+  // longer hashes to its own digest.
+  const forged = structuredClone(receipt);
+  forged.consequential_action_permitted = true;
+  assert.throws(() => verifyCoverageReceipt(forged),
+    error => error?.code === "coverage_receipt_digest_mismatch");
+  const shortened = structuredClone(receipt);
+  shortened.missing_rule_ids = shortened.missing_rule_ids.slice(1);
+  assert.throws(() => verifyCoverageReceipt(shortened),
+    error => error?.code === "coverage_receipt_digest_mismatch");
+
+  // Deterministic, and bound to the missing list and the census.
+  const again = await readActionContext(new FakeClient(unbound()), ACTOR, { facts: { ...PROD_FACTS } });
+  assert.equal(again.coverage_receipt.receipt_digest, receipt.receipt_digest);
+  assert.equal(again.universe_digest, result.universe_digest);
+  const fewer = await readActionContext(new FakeClient(unbound({
+    active_rule_count: 2, missing_rule_ids: MISSING.slice(0, 2),
+  })), ACTOR, { facts: { ...PROD_FACTS } });
+  assert.notEqual(fewer.coverage_receipt.receipt_digest, receipt.receipt_digest);
+});
+
+test("zero active and zero projected rules still never read as complete or permitted", async () => {
+  const result = await readActionContext(new FakeClient(unbound({
+    policy: policy([], {
+      completeness: "complete_authoritative_universe",
+      declared_actions: ["send-email"],
+      declared_resource_classes: ["deal"],
+    }),
+    active_rule_count: 0, missing_rule_ids: [],
+  })), ACTOR, { facts: { ...PROD_FACTS } });
+  assert.equal(result.consequential_action_permitted, false);
+  assert.equal(result.coverage_receipt.coverage_complete, false);
+  assert.equal(result.coverage_receipt.universe_completeness, "partial_unknown_coverage");
+  assert.ok(result.coverage_receipt.blocking_reasons.includes("no_rule_contract_projected"));
+});
+
+test("a zero-projection census still has to add up, and its policy and facts are still validated", async () => {
+  const refusals = {
+    "missing list shorter than the gap": [unbound({ missing_rule_ids: MISSING.slice(1) }),
+      "runtime_census_mismatch"],
+    "missing list longer than the gap": [unbound({ active_rule_count: 2 }), "runtime_census_mismatch"],
+    "unsorted missing list": [unbound({ missing_rule_ids: [...MISSING].reverse() }),
+      "runtime_census_mismatch"],
+    "foreign tenant": [unbound({ policy: { ...unbound().policy, tenant: "someone-else" } }),
+      "tenant_mismatch"],
+    "unknown policy schema": [unbound({ policy: { ...unbound().policy, schema_version: "v0" } }),
+      "unknown_schema_version"],
+    "extra policy key": [unbound({ policy: { ...unbound().policy, permitted: true } }),
+      "unknown_field"],
+  };
+  for (const [label, [bad, code]] of Object.entries(refusals)) {
+    await assert.rejects(
+      () => readActionContext(new FakeClient(bad), ACTOR, { facts: { ...PROD_FACTS } }),
+      error => error?.code === code,
+      `${label} must refuse with ${code}`,
+    );
+  }
+  await assert.rejects(
+    () => readActionContext(new FakeClient(unbound()), ACTOR,
+      { facts: { ...PROD_FACTS, risk_tier: "whatever" } }),
+    error => error?.code === "unknown_risk_tier",
+    "an out-of-vocabulary fact is refused on the empty path too",
+  );
+});
+
+test("the kernel's non-empty validation is unchanged: a malformed projected rule still refuses", async () => {
+  const { binding_text: _dropped, ...noText } = rule();
+  await assert.rejects(
+    () => readActionContext(new FakeClient(snapshot({ policy: policy([noText]) })), ACTOR,
+      { facts: facts() }),
+    error => error?.code === "missing_binding_text",
+  );
 });
