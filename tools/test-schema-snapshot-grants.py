@@ -31,6 +31,7 @@ And the guard that matters as much as any anchor: the section must never widen
 beyond the app roles. A grantee outside the closed set means production ACLs
 for some other principal were swept into a tracked file.
 """
+import hashlib
 import os
 import re
 import sys
@@ -39,9 +40,12 @@ from schema_snapshot_grants import (
     SECTION_MARKER,
     SnapshotGrantError,
     _snapshot_function_identity,
+    acl_facts,
     carr_grants_section_lines,
+    compose_grants_to_role,
     grants_to_role,
     match_generated_grant,
+    render_acl_facts,
 )
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -172,6 +176,82 @@ def main(argv):
           _snapshot_function_identity(out_only["schema"], out_only["object"],
                                        out_only["function_args"])
           == "ops.meeting_mode_actor()")
+
+    # NAMELESS MULTI-WORD ARGUMENT TYPES (2026-09-26, PR #1297). An argument
+    # identity with no name is textually "name type" when its type has a space
+    # in it, and render_acl_facts() writes identities WITHOUT names. The old
+    # parser read its own rendered `ops.f01_instant_text(timestamp with time
+    # zone)` back as `(with time zone)`, so the login gate failed a correct
+    # database the first time a refreshed snapshot carried that grant. Every
+    # case below must survive render -> parse unchanged, named or not.
+    multiword_cases = {
+        # identity (as the catalog's oidvectortypes spells it): generated form
+        "ops.f01_instant_text(timestamp with time zone)":
+            "ops.f01_instant_text(p_at timestamp with time zone)",
+        "ops.list_shipped_releases(timestamp with time zone)":
+            "ops.list_shipped_releases(p_since timestamp with time zone)",
+        "ops.mw_one(character varying)": "ops.mw_one(p_label character varying)",
+        "ops.mw_one(double precision)": "ops.mw_one(p_score double precision)",
+        "ops.mw_one(time without time zone)": "ops.mw_one(p_at time without time zone)",
+        "ops.mw_one(bit varying[])": "ops.mw_one(p_bits bit varying[])",
+        "ops.mw_many(timestamp with time zone, character varying, double precision)":
+            "ops.mw_many(p_at timestamp with time zone, p_label character varying, "
+            "p_score double precision)",
+        "ops.mw_mixed(text, timestamp without time zone, uuid)":
+            "ops.mw_mixed(p_key text, p_at timestamp without time zone, p_id uuid)",
+        "ops.mw_variadic(time with time zone[])":
+            "ops.mw_variadic(VARIADIC p_times time with time zone[])",
+    }
+    roundtrip_bad = []
+    for identity, named in multiword_cases.items():
+        expected = {("function", identity, "execute", False)}
+        rendered = render_acl_facts(expected, "carr_reader")
+        named_line = f"grant execute on function {named} to carr_reader;"
+        if set(acl_facts(rendered)) != expected:
+            roundtrip_bad.append(("nameless", identity, acl_facts(rendered)))
+        if set(acl_facts([named_line])) != expected:
+            roundtrip_bad.append(("named", named, acl_facts([named_line])))
+    check("nameless and named multi-word argument types survive render -> parse",
+          not roundtrip_bad, repr(roundtrip_bad[:3]))
+
+    # The exact PR #1297 shape, end to end: a snapshot that already carries the
+    # named grant composes to a plan whose facts are the catalog's identity.
+    ledger_sql = "begin; commit;\n"
+    composed_schema = (
+        "COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;\n"
+        f"0001_base.sql\t{hashlib.sha256(ledger_sql.encode()).hexdigest()}"
+        "\t2026-09-26 00:00:00+00\n\\.\n"
+        f"{SECTION_MARKER}\n"
+        "grant execute on function ops.f01_instant_text(p_at timestamp with time zone) "
+        "to carr_reader;\n"
+        "grant execute on function ops.mw_many(p_at timestamp with time zone, "
+        "p_label character varying) to carr_reader;\n"
+        "-- PostgreSQL database dump\n"
+    )
+    composed_facts = set(acl_facts(compose_grants_to_role(
+        composed_schema, (("0001_base.sql", ledger_sql),), "carr_reader")))
+    catalog_facts = {
+        ("function", "ops.f01_instant_text(timestamp with time zone)", "execute", False),
+        ("function", "ops.mw_many(timestamp with time zone, character varying)",
+         "execute", False),
+    }
+    check("a composed plan's multi-word function facts equal the catalog's",
+          composed_facts == catalog_facts, repr(sorted(composed_facts)))
+    # The comparison the login gate makes stays exact in both directions: a
+    # catalog missing a planned grant, or holding one more, is not equal.
+    dropped = ("function", "ops.f01_instant_text(timestamp with time zone)",
+               "execute", False)
+    planted = ("function", "ops.mw_one(double precision)", "execute", False)
+    check("a missing multi-word function grant still breaks exactness",
+          composed_facts - (catalog_facts - {dropped}) == {dropped})
+    check("an extra multi-word function grant still breaks exactness",
+          (catalog_facts | {planted}) - composed_facts == {planted})
+    # The parser did not get looser: a name followed by a one-word type is still
+    # read as name + type, even when the name happens to be a type word.
+    check("a named argument whose type is one word keeps its name split off",
+          set(acl_facts([
+              "grant execute on function ops.mw_one(timestamp text) to carr_reader;"
+          ])) == {("function", "ops.mw_one(text)", "execute", False)})
 
     applied_migrations = {
         migration for migration in ROLE_GRANT_MIGRATIONS.values()
