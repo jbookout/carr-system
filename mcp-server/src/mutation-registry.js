@@ -4,7 +4,12 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v81 is the runtime selector after amend-closed-loop, the append-only door
+// v82 is the provisional runtime selector for DoctorCRE V5-RW02's attended
+// Salesforce reconciliation record layer. It registers three observation /
+// readback writers and one per-action evidence reader, while the store and
+// registry both preserve zero provider-effect authority.
+//
+// Superseded note (v81): v81 was the runtime selector after amend-closed-loop, the append-only door
 // to correct a CLOSED loop's outcome (defect a2c04ffa, loop c7265238).
 // Its sealed catalog admits one new verb -- amend-closed-loop -- and
 // preserves v80 and earlier as history. It chains over #1270's v80
@@ -132,7 +137,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v81.generated.js";
+} from "./scac-mutation-registry.v82.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 
