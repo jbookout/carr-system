@@ -71,6 +71,9 @@ any step ran is recorded and dispatched without burning the SHA; after a step
 ran it is a failure like any other. A failure after migrate-apply records
 db_ahead_of_worker: true and says so to the fix session. A missing credential or capability files one
 CARR loop naming it exactly (once per name), because no retry can supply it.
+A failed deploy credential dispatches a fix session only the first time; once
+its loop is filed, later SHAs failing on it are recorded (dispatch_skipped)
+without dispatching another session that could only rediscover it.
 
 REVIEW EVIDENCE. Both repositories are public, so any comment is untrusted until
 proven otherwise. For EVERY commit in the batch: it came from a merged PR; the
@@ -1388,13 +1391,20 @@ class Pipeline:
             self.store.record(row)
             return 3 if b.capability else 0
         except StepFailed as f:
-            # A missing deploy credential burns the SHA and dispatches like any
-            # failure, but no fix-forward PR can supply it: it also names the
-            # credential to Joe in one loop, as the header promises.
+            # A missing deploy credential burns the SHA like any failure, but no
+            # fix-forward PR can supply it: it also names the credential to Joe
+            # in one loop, as the header promises. Only the first failure for
+            # that name dispatches a fix session (to rule out a code cause);
+            # once its loop is filed, later SHAs failing the same way are
+            # recorded without dispatching another session that can only
+            # rediscover the same missing credential.
             extra: dict[str, Any] = {}
+            known = False
             if f.capability and not self.dry_run:
+                known = f.capability in state.get("filed_blockers", {})
                 self.file_blocker(state, lane, f.capability, f.detail, extra)
-            return self.fail(lane, state, sha, base, f.step, f.rc, f.log, f.detail, extra=extra)
+            return self.fail(lane, state, sha, base, f.step, f.rc, f.log, f.detail, extra=extra,
+                             dispatch=not known)
         except Exception as exc:  # noqa: BLE001 — an unexpected error is recorded and dispatched, never lost
             detail = f"{type(exc).__name__}: {str(exc)[:300]}"
             self.out(f"release-pipeline[{lane}]: UNEXPECTED {detail}")
@@ -1443,7 +1453,7 @@ class Pipeline:
         return ok, res
 
     def fail(self, lane: str, state: dict, sha: str, base: str, step: str, rc: int, log: str,
-             detail: str, *, extra: dict | None = None) -> int:
+             detail: str, *, extra: dict | None = None, dispatch: bool = True) -> int:
         self.out(f"release-pipeline[{lane}]: FAILED at {step} (exit {rc}); log {log or '-'}")
         if self.dry_run:
             return 1
@@ -1451,19 +1461,26 @@ class Pipeline:
             "failed_sha": sha, "failed_step": step,
             "failed_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")})
         self.store.save(state)
-        attempt = int((state[lane].get("dispatches") or {}).get(sha, 0)) + 1
-        ok, res = (False, "no SHA") if not sha else self.dispatch(
-            state, lane, sha, queue_turn(lane, sha, step, rc, log, str(self.store.records_path),
-                                         db_ahead_of_worker=self.db_ahead_of_worker,
-                                         do_migration=self.do_migration,
-                                         run_id=self.run_id, attempt=attempt))
+        extra = dict(extra or {})
+        if not dispatch:
+            ok, res = False, None
+            extra["dispatch_skipped"] = "capability_loop_already_filed"
+            self.out(f"release-pipeline[{lane}]: no fix session dispatched; the credential's loop "
+                     "is already filed and only Joe can supply it")
+        else:
+            attempt = int((state[lane].get("dispatches") or {}).get(sha, 0)) + 1
+            ok, res = (False, "no SHA") if not sha else self.dispatch(
+                state, lane, sha, queue_turn(lane, sha, step, rc, log, str(self.store.records_path),
+                                             db_ahead_of_worker=self.db_ahead_of_worker,
+                                             do_migration=self.do_migration,
+                                             run_id=self.run_id, attempt=attempt))
         self.store.record({"lane": lane, "sha": sha, "from_sha": base, "status": "failed",
                            "step": step, "rc": rc, "log": log, "detail": detail,
                            "db_ahead_of_worker": self.db_ahead_of_worker,
                            "do_migration": self.do_migration,
                            "run_dir": str(self.run_dir), "executed": list(self.executed),
-                           "dispatched": ok, "run_id": self.run_id, **(extra or {})})
-        if not ok:
+                           "dispatched": ok, "run_id": self.run_id, **extra})
+        if dispatch and not ok:
             self.out(f"release-pipeline[{lane}]: diagnosis dispatch FAILED: {res}")
         return 1
 
