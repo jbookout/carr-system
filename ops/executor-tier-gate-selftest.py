@@ -103,6 +103,27 @@ check("a dearer pick never pushes a spawn upward", r is None, r)
 r = run({**brief, "subagent_type": "fork"}, "haiku:0.99")
 check("forks stay exempt", r is None, r)
 
+# The routing policy (ops/jev_model_route.py dispatch) already chose this tier: a pinned or routed spawn states it
+# in its executor line, and this hook must not give the opposite advice on the same launch (Orchestrator session,
+# 2026-09-26: "Jev puts 0.82-0.84 on sonnet" on spawns the merge_review and gate_authority_code pins set to opus).
+pinned = {**brief, "model": "opus", "prompt": "executor: opus per routing pin merge_review\nReview PR 1 adversarially."}
+r = run(pinned, "sonnet:0.84")
+check("a spawn carrying a known routing pin gets no cheaper-tier advice", r is None, r)
+
+routed = {**brief, "model": "opus", "prompt": "executor: opus per routing dispatch\nChange the parser."}
+r = run(routed, "sonnet:0.84")
+check("a spawn the routing dispatch chose gets no cheaper-tier advice", r is None, r)
+
+made_up = {**brief, "model": "opus", "prompt": "executor: opus per routing pin because_i_said_so\nSweep grants."}
+r = run(made_up, "sonnet:0.84")
+check("an unknown pin name does not silence the advice",
+      r and "EXECUTOR ADVICE" in r.get("additionalContext", ""), r)
+
+mismatch = {**brief, "model": "opus", "prompt": "executor: haiku per routing dispatch\nSweep grants."}
+r = run(mismatch, "sonnet:0.84")
+check("a dispatch line naming a different model than the call does not silence the advice",
+      r and "EXECUTOR ADVICE" in r.get("additionalContext", ""), r)
+
 # A fixture run with no stub makes no live judgment, so its output is stable.
 env = {k: v for k, v in os.environ.items() if k != "CARR_EXECUTOR_TIER_JEV_STUB"}
 env["CARR_HOOK_FIXTURE"] = "1"
