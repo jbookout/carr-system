@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # ci: db-gate
+# doctrine: doctorcre-v5-astra-integration-review
 """Exercise V5-RW02's durable evidence SQL on the disposable CI database."""
 
 from __future__ import annotations
