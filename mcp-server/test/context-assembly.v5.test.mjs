@@ -24,6 +24,7 @@ import {
   V5_F05_EXTERNAL_ORIGINS,
   V5_F05_MAX_CORRECTION_NOTE_CHARS,
   V5_F05_PROJECTION_KINDS,
+  V5_F05_MANIFEST_DECISIONS,
   V5_NO_EFFECTS,
   freezeAssemblyInput,
   assembleContextManifest,
@@ -442,7 +443,7 @@ test("a verified partner missing a capability blocks the write and still may exp
   assert.equal(write.consequential_action_permitted, false);
 
   const explore = assemble({ ...overrides, mode: "read_only_exploration" });
-  assert.equal(explore.decision, "allow");
+  assert.equal(explore.decision, "read_only");
   assert.equal(explore.reason_id, "read_only_exploration_under_uncertainty");
   assert.equal(explore.read_only_exploration_permitted, true);
   assert.equal(explore.consequential_action_permitted, false);
@@ -456,7 +457,7 @@ test("Q065 read-only exploration is permitted under uncertainty and is marked as
   delete uncertain.task.facts.audience;
   const manifest = assemble(uncertain);
 
-  assert.equal(manifest.decision, "allow");
+  assert.equal(manifest.decision, "read_only");
   assert.equal(manifest.reason_id, "read_only_exploration_under_uncertainty");
   assert.equal(manifest.uncertainty.marker, true);
   assert.equal(manifest.uncertainty.unknown_fact_count, 1);
@@ -483,6 +484,79 @@ test("Q065 the same uncertainty refuses a consequential proposal instead of assu
   assert.equal(manifest.consequential_action_permitted, false);
 });
 
+// The manifest's `decision` is three-valued, like the coverage receipt's: a
+// consumer testing `decision === "allow"` — the idiom used elsewhere in this
+// codebase — must never read read-only exploration as permission to write.
+const uncertainExplore = () => {
+  const uncertain = { task: task(facts()), mode: "read_only_exploration" };
+  delete uncertain.task.facts.audience;
+  return assemble(uncertain);
+};
+
+const reDigest = (manifest, changes) => {
+  const { manifest_digest, effects, ...rest } = manifest;
+  const body = { ...rest, ...changes };
+  return { ...body, manifest_digest: digest(body), effects };
+};
+
+test("manifest `decision` agrees with the write gate on every manifest", () => {
+  assert.deepEqual([...V5_F05_MANIFEST_DECISIONS], ["allow", "read_only", "refuse"]);
+  const cases = [
+    ["consequential, permitted", assemble(), "allow"],
+    ["read-only, permitted", assemble({ mode: "read_only_exploration" }), "allow"],
+    ["read-only, uncertain", uncertainExplore(), "read_only"],
+    ["read-only, partial universe", assemble({ mode: "read_only_exploration",
+      universe: compileRuleUniverse(universePolicy({ completeness: "partial_unknown_coverage" })) }),
+    "read_only"],
+    ["consequential, uncertain", (() => {
+      const uncertain = { task: task(facts()) };
+      delete uncertain.task.facts.audience;
+      return assemble(uncertain);
+    })(), "refuse"],
+    ["consequential, actor refused", assemble({ actor: SPONSORED_AGENT }), "refuse"],
+    ["read-only, actor refused",
+      assemble({ actor: SPONSORED_AGENT, mode: "read_only_exploration" }), "refuse"],
+  ];
+  for (const [label, manifest, expected] of cases) {
+    assert.equal(manifest.decision, expected, label);
+    assert.equal(manifest.decision === "allow", manifest.consequential_action_permitted === true,
+      label);
+    assert.equal(manifest.decision === "refuse",
+      manifest.read_only_exploration_permitted !== true ||
+      (manifest.mode === "consequential_action_proposal" &&
+        manifest.consequential_action_permitted !== true), label);
+    assert.equal(verifyContextManifest(manifest), true, label);
+  }
+  // The refuse path is unchanged: same decision, same first reason.
+  assert.equal(assemble({ actor: SPONSORED_AGENT }).reason_id, "actor_not_verified_partner");
+  assert.equal(uncertainExplore().reason_id, "read_only_exploration_under_uncertainty");
+});
+
+test("a re-digested manifest whose `decision` contradicts its gates is refused", () => {
+  const readOnly = uncertainExplore();
+  const permitted = assemble();
+  const refused = assemble({ actor: SPONSORED_AGENT });
+  const blockedWrite = (() => {
+    const uncertain = { task: task(facts()) };
+    delete uncertain.task.facts.audience;
+    return assemble(uncertain);
+  })();
+  const forgeries = [
+    reDigest(readOnly, { decision: "allow" }),
+    reDigest(readOnly, { decision: "refuse" }),
+    reDigest(permitted, { decision: "read_only" }),
+    reDigest(permitted, { decision: "refuse" }),
+    reDigest(refused, { decision: "allow" }),
+    reDigest(refused, { decision: "read_only" }),
+    reDigest(blockedWrite, { decision: "read_only" }),
+    reDigest(blockedWrite, { decision: "allow" }),
+  ];
+  for (const forged of forgeries) {
+    assert.equal(code(() => verifyContextManifest(forged)), "manifest_decision_inconsistent",
+      `${forged.mode}/${forged.decision}`);
+  }
+});
+
 test("Q065 an unknown rule universe blocks the write rather than reading as empty", () => {
   const partial = compileRuleUniverse(universePolicy({ completeness: "partial_unknown_coverage" }));
   const write = assemble({ universe: partial });
@@ -491,7 +565,7 @@ test("Q065 an unknown rule universe blocks the write rather than reading as empt
   assert.equal(write.uncertainty.universe_coverage_known, false);
 
   const explore = assemble({ universe: partial, mode: "read_only_exploration" });
-  assert.equal(explore.decision, "allow");
+  assert.equal(explore.decision, "read_only");
   assert.equal(explore.read_only_exploration_permitted, true);
 });
 
@@ -879,7 +953,7 @@ test("Q068 an unestablished upstream blocks the write and survives into the mani
   unknown[1].derived_kind = "unknown_upstream";
 
   const explore = assemble({ records: unknown, mode: "read_only_exploration" });
-  assert.equal(explore.decision, "allow");
+  assert.equal(explore.decision, "read_only");
   assert.equal(explore.reason_id, "read_only_exploration_under_uncertainty");
   assert.equal(explore.read_only_exploration_permitted, true);
   // The manifest's OWN write gate, not a wrapper's opinion of it.
@@ -1095,7 +1169,7 @@ test("Q068 a rule's text is bound to a first-party record this manifest carries"
   assert.deepEqual(unbound.rule_provenance.filter(e => e.state === "unresolved")
     .map(e => e.rule_id), ["tone-guidance"]);
   assert.equal(assembleRaw({ records: guidanceOnly, mode: "read_only_exploration" }).decision,
-    "allow");
+    "read_only");
 
   // 4. DRIFTED SOURCE ON A MANDATORY RULE. The record moved on; the rule is
   //    bound to text that is no longer what that record says, and it is a
@@ -1232,7 +1306,7 @@ test("Q068 retrieved guidance is covered by the same provenance evaluation as a 
     semantic_candidates: [...RETRIEVED_TOUR],
     mode: "read_only_exploration",
   });
-  assert.equal(explore.decision, "allow");
+  assert.equal(explore.decision, "read_only");
   assert.equal(explore.reason_id, "read_only_exploration_under_uncertainty");
   assert.equal(explore.uncertainty.marker, true);
   // Still withheld in the mode that is allowed to see uncertainty: uncertainty
@@ -1327,7 +1401,7 @@ test("Q065 an untainted non-mandatory rule's drifted source is uncertainty, not 
   // and the drift stated on it.
   assert.equal(write.read_only_exploration_permitted, true);
   const explore = assembleRaw({ records: driftedGuidance, mode: "read_only_exploration" });
-  assert.equal(explore.decision, "allow");
+  assert.equal(explore.decision, "read_only");
   assert.equal(explore.reason_id, "read_only_exploration_under_uncertainty");
   assert.equal(explore.uncertainty.marker, true);
   const tone = explore.delivered_rules.find(r => r.rule_id === "tone-guidance");
