@@ -9,6 +9,24 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 NODE="/opt/homebrew/opt/node@22/bin/node"
 PYTHON="$REPO/.venv/bin/python"
 CONTROLLER_ENV_FILE="${CARR_ENGINEERING_CONTROLLER_ENV_FILE:-$HOME/.config/carr/engineering-controller.env}"
+NOT_HOST_MARKER="${CARR_ENGINEERING_CONTROLLER_NOT_HOST_MARKER:-$HOME/.config/carr/engineering-controller.not-this-host}"
+
+# One Mac holds the controller bearer: the Worker's ENGINEERING_CONTROLLER_TOKENS
+# map accepts exactly one token.  Every Mac's room bridge still wakes this
+# command, so a Mac that is deliberately NOT the controller host says so with
+# this marker (its contents name where the controller runs) and answers with an
+# explicit no-claim readback instead of failing every cycle.  Without the
+# marker, a missing credential still fails loudly; with both, the machine
+# contradicts itself and is refused.  Checked before anything else because it
+# touches no credential.
+if [[ -e "$NOT_HOST_MARKER" ]]; then
+  if [[ -e "$CONTROLLER_ENV_FILE" ]]; then
+    print -ru2 -- "engineering-dispatch: this Mac holds the controller credential and is marked not-this-host; remove one"
+    exit 78
+  fi
+  print -r -- '{"ok":true,"claimed":0,"completed":0,"results":[],"host":"not_controller_host"}'
+  exit 0
+fi
 
 # The controller bearer is a separate, Worker-only credential.  Read it as a
 # literal from its own 0600 file when launchd did not provide it; never source

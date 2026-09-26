@@ -119,8 +119,12 @@ def run_engineering_dispatch(*, command: Path = ENGINEERING_DISPATCH,
         raise RuntimeError("engineering controller returned invalid readback") from exc
     if not isinstance(value, dict) or value.get("ok") is not True or not isinstance(value.get("claimed"), int):
         raise RuntimeError("engineering controller returned unsupported readback")
-    return {"claimed": value["claimed"], "completed": value.get("completed", 0),
-            "results": value.get("results", [])}
+    readback = {"claimed": value["claimed"], "completed": value.get("completed", 0),
+                "results": value.get("results", [])}
+    if value.get("host") == "not_controller_host":
+        # the launcher's explicit per-Mac acceptance (not-this-host marker): keep it visible
+        readback["host"] = "not_controller_host"
+    return readback
 
 
 def _validated_reconciliation(value: object) -> kanban_adapter.ReconciliationResult | None:
