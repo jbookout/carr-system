@@ -218,24 +218,32 @@ def flash_port():
 def sandbox_profile(work):
     """macOS sandbox for a model-written script (independent review of PR #1250): the data it reads is untrusted, so
     a planted line can steer Flash into a script that reaches for secrets. Writes only inside the throwaway folder;
-    nothing under the user's home is readable except the folder and the interpreter; the network is closed except
-    the local Flash port that flashlib.llm uses."""
+    nothing under the user's home, the shared temp folders or /Users/Shared is readable except the folder and the
+    interpreter; the network is closed except the local Flash port that flashlib.llm uses; the only program it may
+    start is the interpreter; and it can reach no system service and send no Apple Event, because `open`, the
+    keychain and launchd are exits around the network block (second review of PR #1250)."""
     work = os.path.realpath(work)
     home = os.path.realpath(os.path.expanduser("~"))
     interp = os.path.dirname(os.path.dirname(os.path.realpath(sys.executable)))
     reads = sorted({work, interp, *(os.path.realpath(p) for p in (sys.prefix, sys.base_prefix))})
-    if any('"' in p or "\\" in p for p in [home, *reads]):
+    execs = sorted({sys.executable, os.path.realpath(sys.executable)})
+    private = [home, "/private/tmp", "/private/var/folders", "/Users/Shared"]
+    if any('"' in p or "\\" in p for p in [*private, *reads, *execs]):
         raise ValueError("path not expressible in a sandbox profile")
     port = flash_port()
     net = f'(allow network-outbound (remote ip "localhost:{port}"))' if port else ""
     return ("(version 1)(allow default)"
             f"(deny network*){net}"
-            f'(deny file-read* (subpath "{home}"))'
+            "(deny file-read* " + " ".join(f'(subpath "{p}")' for p in private) + ")"
             "(allow file-read* " + " ".join(f'(subpath "{p}")' for p in reads) + ")"
             # path lookups (stat) must work to start the interpreter; contents and listings stay denied
             "(allow file-read-metadata)"
             "(deny file-write*)"
-            f'(allow file-write* (subpath "{work}") (literal "/dev/null"))')
+            f'(allow file-write* (subpath "{work}") (literal "/dev/null"))'
+            "(deny process-exec*)"
+            "(allow process-exec " + " ".join(f'(literal "{p}")' for p in execs) + ")"
+            "(deny mach-lookup)"
+            "(deny appleevent-send)")
 
 
 def _limits():  # runs in the child before exec: bound file size (so output) and CPU time

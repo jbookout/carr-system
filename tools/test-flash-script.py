@@ -241,8 +241,8 @@ def test_timeout_kills_the_scripts_children_too():
     saved = fs.RUN_TIMEOUT
     fs.RUN_TIMEOUT = 2
     try:
-        out, work = run("import subprocess, time\n"
-                        "p = subprocess.Popen(['/bin/sleep', '60'])\n"
+        out, work = run("import subprocess, sys, time\n"
+                        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
                         "open('child.pid', 'w').write(str(p.pid))\ntime.sleep(60)")
     finally:
         fs.RUN_TIMEOUT = saved
@@ -255,6 +255,33 @@ def test_timeout_kills_the_scripts_children_too():
     except ProcessLookupError:
         alive = False
     assert not alive, f"child {pid} outlived the timeout"
+
+
+@sandboxed
+def test_script_can_start_no_program_but_the_interpreter():
+    # `open` hands a URL to the unsandboxed browser, `security` reaches the keychain, `osascript` sends Apple Events:
+    # each is an exit around the network and file rules, so none may start.
+    out, _ = run("import subprocess\n"
+                 "for argv in (['/usr/bin/open', '-g', '-a', 'Finder', '.'], ['/usr/bin/security', 'list-keychains'],\n"
+                 "             ['/usr/bin/osascript', '-e', 'return 1'], ['/bin/launchctl', 'list']):\n"
+                 "    try:\n"
+                 "        rc = subprocess.run(argv, capture_output=True, timeout=20).returncode\n"
+                 "        print(argv[0], 'ran' if rc == 0 else 'failed', rc)\n"
+                 "    except OSError as e:\n"
+                 "        print(argv[0], 'refused', type(e).__name__)\n"
+                 "import sys\n"
+                 "print('python child', subprocess.run([sys.executable, '-c', 'print(7)'], capture_output=True,\n"
+                 "      text=True).stdout.strip())")
+    assert " ran " not in out + " " and "python child 7" in out, out
+    for tool in ("/usr/bin/open", "/usr/bin/security", "/usr/bin/osascript", "/bin/launchctl"):
+        assert f"{tool} refused" in out or f"{tool} failed" in out, out
+
+
+@sandboxed
+def test_script_cannot_read_the_shared_temp_folders():
+    out, _ = run("import os\nfor d in ('/private/tmp', '/Users/Shared'):\n    try:\n"
+                 "        os.listdir(d); print(d, 'listed')\n    except OSError:\n        print(d, 'refused')")
+    assert "listed" not in out and out.count("refused") == 2, out
 
 
 def test_no_sandbox_means_refusal_not_an_unsandboxed_run():
