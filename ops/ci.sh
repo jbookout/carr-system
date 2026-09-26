@@ -1395,13 +1395,17 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
   # constraint, the append-only immutability trigger and the unconditional
   # gate function are claims about real rows and real constraints a fake
   # client cannot make honestly.
-  for proof in cost-ledger-projection.v5 doc-conversation notifications session-identity dispatch-spine meeting-mode delivery-cadence-a05-tools amend-closed-loop-postgres action-class-successor-registry-postgres; do
+  # V5-A03 joins it: complete eleven-dimension submissions, non-shrinking
+  # regression evidence, role/session separation, the two-round ceiling and
+  # stronger adjudication are all transactional claims over append-only rows.
+  for proof in cost-ledger-projection.v5 doc-conversation notifications session-identity dispatch-spine meeting-mode delivery-cadence-a05-tools amend-closed-loop-postgres action-class-successor-registry-postgres independent-review-cycle-postgres; do
     if [ -f "mcp-server/test/$proof.test.mjs" ]; then
       if ! DATABASE_URL="$dsn" CARR_COST_LEDGER_DB_REQUIRED=1 \
            CARR_DOC_CONVERSATION_DB_REQUIRED=1 CARR_R03_DB_REQUIRED=1 \
            CARR_SESSION_IDENTITY_DB_REQUIRED=1 CARR_DISPATCH_SPINE_DB_REQUIRED=1 \
            CARR_MEETING_MODE_DB_REQUIRED=1 CARR_AMEND_CLOSED_LOOP_DB_REQUIRED=1 \
            CARR_ACTION_CLASS_SUCCESSOR_DB_REQUIRED=1 \
+           CARR_V5_A03_DB_REQUIRED=1 \
            run_quiet "$LOGDIR/$proof-db.log" \
            node --test "mcp-server/test/$proof.test.mjs"; then
         tail -30 "$LOGDIR/$proof-db.log" >&2
