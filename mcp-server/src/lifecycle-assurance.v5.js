@@ -518,10 +518,11 @@ const V5_A02_COVERAGE_SCHEMA_VERSION =
   "doctorcre-v5-a02-rule-enforcement-coverage.v2";
 const V5_A02_COVERAGE_GAP_REASONS = Object.freeze(new Set([
   "active_rule_amended_needs_reapproval",
+  "active_rule_approved_control_not_installed",
   "active_rule_control_unmapped",
   "active_rule_fallback_absent",
+  "rule_test_evidence_changed_since_approval",
   "rule_test_evidence_future_dated",
-  "rule_test_evidence_predates_approval",
   "rule_tests_not_passing",
 ]));
 const V5_A02_COVERAGE_STATES = Object.freeze(new Set(["complete", "empty", "gaps"]));

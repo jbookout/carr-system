@@ -72,9 +72,10 @@ test("the authoritative record is reported with exact counts, state and digest",
 for (const reason_id of [
   "active_rule_amended_needs_reapproval",
   "active_rule_control_unmapped",
+  "active_rule_approved_control_not_installed",
   "rule_tests_not_passing",
   "rule_test_evidence_future_dated",
-  "rule_test_evidence_predates_approval",
+  "rule_test_evidence_changed_since_approval",
   "active_rule_fallback_absent",
 ]) {
   test(`a ${reason_id} gap is passed through and is never complete`, async () => {

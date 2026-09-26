@@ -39,12 +39,13 @@ const R = Object.freeze({
   amendedStatement:   "a0200005-0000-4000-8000-000000000000", // ruling 5a
   testsMissing:       "a0200006-0000-4000-8000-000000000000", // S5
   futureDated:        "a0200007-0000-4000-8000-000000000000", // item 3
-  predatesApproval:   "a0200008-0000-4000-8000-000000000000", // item 3
+  changedSinceApproval: "a0200008-0000-4000-8000-000000000000", // correction 1
   fallbackAbsent:     "a0200009-0000-4000-8000-000000000000", // S10
   fallbackOldVersion: "a020000a-0000-4000-8000-000000000000", // S2
   fallbackOldHash:    "a020000b-0000-4000-8000-000000000000", // S3
   proposed:           "a020000c-0000-4000-8000-000000000000", // S6
   writerTarget:       "a020000d-0000-4000-8000-000000000000", // S1, S8, writer paths
+  oneOfTwoInstalled:  "a020000e-0000-4000-8000-000000000000", // probe E, S20
 });
 
 const EXPECTED_GAPS = Object.freeze({
@@ -54,7 +55,8 @@ const EXPECTED_GAPS = Object.freeze({
   [R.amendedStatement]: "active_rule_amended_needs_reapproval",
   [R.testsMissing]: "rule_tests_not_passing",
   [R.futureDated]: "rule_test_evidence_future_dated",
-  [R.predatesApproval]: "rule_test_evidence_predates_approval",
+  [R.changedSinceApproval]: "rule_test_evidence_changed_since_approval",
+  [R.oneOfTwoInstalled]: "active_rule_approved_control_not_installed",
   [R.fallbackAbsent]: "active_rule_fallback_absent",
   [R.fallbackOldVersion]: "active_rule_fallback_absent",
   [R.fallbackOldHash]: "active_rule_fallback_absent",
@@ -94,8 +96,26 @@ async function seedRule(db, ctx, id, spec) {
   await db.query(
     `insert into ops.enforcement_control_catalog
        (control_key, implementation_ref, test_ref, enforcement_class, installed, verified_at)
-     values ($1, 'synthetic/impl', 'synthetic/test', 'deny_gate', true, ${verified})`,
+     values ($1, 'synthetic/impl', 'synthetic/test', 'deny_gate', true,
+             ${spec.catalogVerifiedAt ?? verified})`,
     [control]);
+  const controls = [control];
+  if (spec.secondControlUninstalled) {
+    // Probe E: the approval names a second control that is not installed.
+    const second = `${control}_b`;
+    controls.push(second);
+    await db.query(
+      `insert into ops.enforcement_control_catalog
+         (control_key, implementation_ref, test_ref, enforcement_class, installed, verified_at)
+       values ($1, 'synthetic/impl', 'synthetic/test', 'deny_gate', false, null)`, [second]);
+    await db.query(
+      `insert into ops.rule_enforcement_point
+         (rule_id, control_key, implementation_ref, test_ref, enforcement_class, installed, verified_at)
+       values ($1, $2, 'synthetic/impl', 'synthetic/test', 'deny_gate', false, null)`, [id, second]);
+    await db.query(
+      `insert into ops.rule_control_binding (rule_id, control_key, statement_hash, binding_contract)
+       values ($1, $2, $3, '{}'::jsonb)`, [id, second, sha(statement)]);
+  }
   await db.query(
     `insert into ops.rule_enforcement_point
        (rule_id, control_key, implementation_ref, test_ref, enforcement_class, installed, verified_at)
@@ -111,11 +131,11 @@ async function seedRule(db, ctx, id, spec) {
        (idempotency_key, rule_id, rule_version, statement_hash, actor_id, policy_kind,
         enforcement_status, requested_control_keys, installed_control_keys, reason,
         normalized_contract, contract_hash, evidence_refs, created_at)
-     values ($1, $2, $3, $4, $5, 'machine_enforceable', 'hard_enforced', array[$6], array[$6],
+     values ($1, $2, $3, $4, $5, 'machine_enforceable', 'hard_enforced', $6::text[], $6::text[],
              'synthetic approval', '{}'::jsonb,
              encode(public.digest('{}'::jsonb::text, 'sha256'), 'hex'), array['synthetic'],
              now() - interval '2 hours')`,
-    [`a02-pg-approval-${id}`, id, approvedVersion, sha(approvedStatement), ctx.joeId, control]);
+    [`a02-pg-approval-${id}`, id, approvedVersion, sha(approvedStatement), ctx.joeId, controls]);
   if (spec.fallback === false) return;
   const fallbackStatement = spec.fallbackStatement ?? statement;
   await db.query(
@@ -228,7 +248,9 @@ test("V5-A02 coverage and fallback writer on real PostgreSQL", async t => {
 
     await db.query("begin");
     await db.query("set local session_replication_role = replica");
-    await seedRule(db, ctx, R.covered, {});
+    // Correction 1: evidence verified long BEFORE the approval (what 0228's
+    // copy of the catalog value produces) is current, not a gap.
+    await seedRule(db, ctx, R.covered, { verifiedAt: "now() - interval '3 days'" });
     await seedRule(db, ctx, R.unmapped, { approval: false });
     await seedRule(db, ctx, R.bindingStale, { staleBinding: true });
     await seedRule(db, ctx, R.amendedVersion, { version: 2, approvedVersion: 1 });
@@ -237,7 +259,11 @@ test("V5-A02 coverage and fallback writer on real PostgreSQL", async t => {
       approvedStatement: "a02 original statement A" });
     await seedRule(db, ctx, R.testsMissing, { pointVerifiedNull: true });
     await seedRule(db, ctx, R.futureDated, { verifiedAt: "now() + interval '1 day'" });
-    await seedRule(db, ctx, R.predatesApproval, { verifiedAt: "now() - interval '3 days'" });
+    // The approval captured one verified_at on the enforcement point; the
+    // catalog control now carries a different one.
+    await seedRule(db, ctx, R.changedSinceApproval, {
+      verifiedAt: "now() - interval '3 days'", catalogVerifiedAt: "now() - interval '1 hour'" });
+    await seedRule(db, ctx, R.oneOfTwoInstalled, { secondControlUninstalled: true });
     await seedRule(db, ctx, R.fallbackAbsent, { fallback: false });
     await seedRule(db, ctx, R.fallbackOldVersion, { version: 2, fallbackVersion: 1 });
     await seedRule(db, ctx, R.fallbackOldHash, {
@@ -246,14 +272,14 @@ test("V5-A02 coverage and fallback writer on real PostgreSQL", async t => {
     await seedRule(db, ctx, R.writerTarget, { fallback: false });
     await db.query("commit");
 
-    await t.test("every leg of the guard reports its exact named gap (S2 S3 S4 S5 S6 S9 S10, rulings 5a, item 3)", async () => {
+    await t.test("every leg of the guard reports its exact named gap (S2 S3 S4 S5 S6 S9 S10 S20, rulings 5a, corrections 1-2)", async () => {
       const record = await coverage(db);
       assert.equal(record.schema_version, "doctorcre-v5-a02-rule-enforcement-coverage.v2");
       assert.deepEqual(gapsByRule(record), EXPECTED_GAPS);
       // S6: the proposed rule is never counted, covered or not.
-      assert.equal(record.active_rule_count, 12);
+      assert.equal(record.active_rule_count, 13);
       assert.equal(record.covered_rule_count, 1);
-      assert.equal(record.gap_count, 11);
+      assert.equal(record.gap_count, 12);
       assert.equal(record.coverage_state, "gaps");
       assert.equal(record.coverage_complete, false);
       for (const gap of record.gaps) assert.ok(gap.detail.trim().length > 0);
@@ -265,7 +291,7 @@ test("V5-A02 coverage and fallback writer on real PostgreSQL", async t => {
         const read = await readRuleEnforcementCoverage(reader);
         assert.equal(read.status, "available", JSON.stringify(read));
         assert.equal(read.coverage_state, "gaps");
-        assert.equal(read.gap_count, 11);
+        assert.equal(read.gap_count, 12);
         assert.deepEqual(Object.fromEntries(read.gaps.map(g => [g.rule_id, g.reason_id])), EXPECTED_GAPS);
       } finally {
         await reader.end();

@@ -173,15 +173,30 @@ comment on function ops.record_rule_enforcement_fallback(uuid,text,text,text,tex
   'version is rule_enforcement_fallback_already_recorded.';
 
 -- One reason per active rule, first failing leg wins, in this order:
---   active_rule_amended_needs_reapproval   an approval exists, but only for an
---                                          earlier version or statement
---   active_rule_control_unmapped           no current exact approval-bound
---                                          installed control with a current binding
---   rule_tests_not_passing                 that control has no recorded test evidence
---   rule_test_evidence_future_dated        its verified_at is after this read
---   rule_test_evidence_predates_approval   its verified_at is before the approval
---   active_rule_fallback_absent            no exact fallback receipt
+--   active_rule_amended_needs_reapproval       an approval exists, but only for an
+--                                              earlier version or statement
+--   active_rule_control_unmapped               no current exact approval has any
+--                                              installed, currently bound control
+--   active_rule_approved_control_not_installed the current exact approval names a
+--                                              control that is not installed and
+--                                              bound; EVERY approved control counts
+--   rule_tests_not_passing                     an approved control has no recorded
+--                                              verified test evidence
+--   rule_test_evidence_future_dated            an approved control's verified_at is
+--                                              after this read
+--   rule_test_evidence_changed_since_approval  the catalog control's verified_at is
+--                                              not the value the approval captured
+--   active_rule_fallback_absent                no exact fallback receipt
 -- Zero active rules is coverage_state 'empty', never 'complete'.
+--
+-- WHAT "THE VALUE THE APPROVAL CAPTURED" IS. ops.rule_approval_receipt does not
+-- record verified_at. The approval writer (0228 ops.approve_rule) copies
+-- the catalog control's verified_at into ops.rule_enforcement_point in the same
+-- transaction that inserts the receipt, and approved_rule_enforcement_point_
+-- immutable (0228) freezes that row once any approval exists for the rule. So
+-- rule_enforcement_point.verified_at is the recorded binding closest to the
+-- approval, and evidence is current only while the catalog still carries that
+-- exact value. Evidence older than the approval is normal and is NOT a gap.
 create or replace function ops.v5_a02_rule_enforcement_coverage()
 returns jsonb
 language plpgsql stable security definer set search_path=ops,public,pg_temp
@@ -202,61 +217,63 @@ begin
            encode(public.digest(r.statement, 'sha256'), 'hex') as statement_hash
       from public.rule r
      where r.status = 'active'
-  ), candidate as (
-    -- Every current exact approval-bound installed control with a current
-    -- binding, carrying its test evidence and the approval it must follow.
-    select a.rule_id,
-           ar.created_at as approved_at,
-           ep.verified_at as point_verified_at,
-           c.verified_at as catalog_verified_at,
-           btrim(ep.test_ref) <> '' and btrim(c.test_ref) <> '' as test_named
+  ), approved_control as (
+    -- One row per control named by each current exact approval, whether or
+    -- not that control is installed: a missing control must be visible.
+    select a.rule_id, ar.id as approval_id,
+           coalesce(ep.installed and c.installed
+                    and b.statement_hash = a.statement_hash, false) as mapped,
+           coalesce(ep.installed and c.installed
+                    and b.statement_hash = a.statement_hash
+                    and ep.verified_at is not null
+                    and c.verified_at is not null
+                    and btrim(ep.test_ref) <> '' and btrim(c.test_ref) <> '', false) as recorded,
+           coalesce(ep.verified_at > v_observed_at
+                    or c.verified_at > v_observed_at, false) as future_dated,
+           c.verified_at is distinct from ep.verified_at as changed_since_approval
       from active_rule a
       join ops.rule_approval_receipt ar
         on ar.rule_id = a.rule_id
        and ar.rule_version = a.version
        and ar.statement_hash = a.statement_hash
       join lateral unnest(ar.installed_control_keys) approved(control_key) on true
-      join ops.rule_enforcement_point ep
+      left join ops.rule_enforcement_point ep
         on ep.rule_id = ar.rule_id and ep.control_key = approved.control_key
-      join ops.enforcement_control_catalog c
-        on c.control_key = ep.control_key
-      join ops.rule_control_binding b
-        on b.rule_id = ep.rule_id and b.control_key = ep.control_key
-     where ep.installed and c.installed
-       and b.statement_hash = a.statement_hash
-  ), evidence as (
-    select cd.*,
-           cd.point_verified_at is not null
-             and cd.catalog_verified_at is not null
-             and cd.test_named as tests_recorded,
-           cd.point_verified_at > v_observed_at
-             or cd.catalog_verified_at > v_observed_at as future_dated,
-           cd.point_verified_at < cd.approved_at
-             or cd.catalog_verified_at < cd.approved_at as predates_approval
-      from candidate cd
+      left join ops.enforcement_control_catalog c
+        on c.control_key = approved.control_key
+      left join ops.rule_control_binding b
+        on b.rule_id = ar.rule_id and b.control_key = approved.control_key
+  ), approval as (
+    -- Per approval, ALL of its controls must hold, never just one.
+    select rule_id, approval_id,
+           bool_or(mapped) as any_mapped,
+           bool_and(mapped) as all_mapped,
+           bool_and(recorded) as all_recorded,
+           bool_or(recorded and future_dated) as any_future_dated,
+           bool_and(recorded and not future_dated and not changed_since_approval) as all_passing
+      from approved_control
+     group by rule_id, approval_id
   ), facts as (
     select a.rule_id,
-           exists (select 1 from evidence e where e.rule_id = a.rule_id) as control_mapped,
+           exists (select 1 from approval p
+                    where p.rule_id = a.rule_id and p.any_mapped) as control_mapped,
+           exists (select 1 from approval p
+                    where p.rule_id = a.rule_id and p.all_mapped) as all_controls_mapped,
            exists (
              select 1 from ops.rule_approval_receipt ar
               where ar.rule_id = a.rule_id
                 and (ar.rule_version <> a.version
                      or ar.statement_hash <> a.statement_hash)
            ) as approved_earlier_version,
-           exists (
-             select 1 from evidence e
-              where e.rule_id = a.rule_id and e.tests_recorded
-           ) as tests_recorded,
-           exists (
-             select 1 from evidence e
-              where e.rule_id = a.rule_id and e.tests_recorded
-                and e.future_dated is false and e.predates_approval is false
-           ) as tests_passing,
-           exists (
-             select 1 from evidence e
-              where e.rule_id = a.rule_id and e.tests_recorded
-                and e.future_dated is true
-           ) as tests_future_dated,
+           exists (select 1 from approval p
+                    where p.rule_id = a.rule_id and p.all_mapped
+                      and p.all_recorded) as tests_recorded,
+           exists (select 1 from approval p
+                    where p.rule_id = a.rule_id and p.all_mapped
+                      and p.all_passing) as tests_passing,
+           exists (select 1 from approval p
+                    where p.rule_id = a.rule_id and p.all_mapped
+                      and p.all_recorded and p.any_future_dated) as tests_future_dated,
            exists (
              select 1
                from ops.rule_enforcement_fallback_receipt fr
@@ -271,10 +288,12 @@ begin
              when not control_mapped and approved_earlier_version
                then 'active_rule_amended_needs_reapproval'
              when not control_mapped then 'active_rule_control_unmapped'
+             when not all_controls_mapped
+               then 'active_rule_approved_control_not_installed'
              when not tests_recorded then 'rule_tests_not_passing'
              when not tests_passing and tests_future_dated
                then 'rule_test_evidence_future_dated'
-             when not tests_passing then 'rule_test_evidence_predates_approval'
+             when not tests_passing then 'rule_test_evidence_changed_since_approval'
              when not fallback_recorded then 'active_rule_fallback_absent'
              else null
            end as reason_id
@@ -286,12 +305,14 @@ begin
                'the rule was amended after its control was approved; approve the current version and statement again'
              when 'active_rule_control_unmapped' then
                'no current approval-bound installed control matches this rule version and statement'
+             when 'active_rule_approved_control_not_installed' then
+               'the current approval names a control that is not installed and bound to this statement; every approved control must hold'
              when 'rule_tests_not_passing' then
-               'the current installed control has no recorded verified test evidence'
+               'an approved control has no recorded verified test evidence'
              when 'rule_test_evidence_future_dated' then
-               'the control''s test evidence is dated after this read, so it cannot be current evidence'
-             when 'rule_test_evidence_predates_approval' then
-               'the control''s test evidence is older than the approval that installed it for this rule'
+               'an approved control''s test evidence is dated after this read, so it cannot be current evidence'
+             when 'rule_test_evidence_changed_since_approval' then
+               'the control''s current verified_at is not the value its approval captured on the enforcement point'
              when 'active_rule_fallback_absent' then
                'no Joe-authority fallback receipt matches this rule version and statement'
              else null
@@ -306,6 +327,7 @@ begin
            order by rule_id) filter (where reason_id is not null), '[]'::jsonb),
          coalesce(jsonb_agg(jsonb_build_object(
            'rule_id', rule_id, 'control_mapped', control_mapped,
+           'all_controls_mapped', all_controls_mapped,
            'approved_earlier_version', approved_earlier_version,
            'tests_recorded', tests_recorded, 'tests_passing', tests_passing,
            'fallback_recorded', fallback_recorded)
@@ -351,11 +373,12 @@ end
 $fn$;
 
 comment on function ops.v5_a02_rule_enforcement_coverage() is
-  'Universal V5-A02 read: every active rule must have one current exact '
-  'approval-bound installed control, verified test evidence dated between that '
-  'approval and this read, and an exact Joe-authority-connection fallback '
-  'receipt. Missing evidence is a named gap, and zero active rules is '
-  'coverage_state empty, never complete.';
+  'Universal V5-A02 read: every active rule must have a current exact approval '
+  'whose EVERY named control is installed and bound, with recorded test evidence '
+  'that is not future-dated and whose catalog verified_at still equals the value '
+  'the approval captured on the enforcement point, plus an exact '
+  'Joe-authority-connection fallback receipt. Missing evidence is a named gap, '
+  'and zero active rules is coverage_state empty, never complete.';
 
 revoke all on table ops.rule_enforcement_fallback_receipt
   from public, carr_reader, carr_writer, carr_jobs, carr_authority;
