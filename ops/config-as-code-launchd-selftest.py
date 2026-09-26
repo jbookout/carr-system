@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import os
 import plistlib
+import signal
 import stat
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -52,6 +55,31 @@ def _fake_launchctl(root: Path, fail_bootstrap_times: int) -> tuple[Path, Path]:
     return fake, log
 
 
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _start_helper(root: Path, pg: str, fails: int = 0, wait_max: str = "30"):
+    """Stage NEW over an installed OLD and start the real one-shot against it."""
+    fake, calls_log = _fake_launchctl(root, fails)
+    dest, staged, log = root / "agent.plist", root / "agent.plist.staged", root / "x.log"
+    dest.write_text("OLD", encoding="utf-8")
+    staged.write_text("NEW", encoding="utf-8")
+    helper = subprocess.Popen(
+        ["/bin/sh", "-c", mod.SELF_RELOAD_SCRIPT, "carr-self-reload", pg,
+         str(fake), "gui/501", "com.carr.fleet-sync", str(staged), str(dest),
+         str(log), wait_max, _sha("OLD")])
+    return helper, dest, log, calls_log
+
+
+def _calls(calls_log: Path) -> list[str]:
+    return calls_log.read_text().splitlines() if calls_log.exists() else []
+
+
+def _log(log: Path) -> str:
+    return log.read_text() if log.exists() else ""
+
+
 def handoff_script_cases() -> list[bool]:
     """Run the real detached one-shot script against a stub launchctl."""
     out: list[bool] = []
@@ -64,17 +92,9 @@ def handoff_script_cases() -> list[bool]:
         (2, "OLD", "RESTORE FAILED, com.carr.fleet-sync is unloaded"),
     ):
         with tempfile.TemporaryDirectory(prefix="carr-self-reload-") as tmp:
-            root = Path(tmp)
-            fake, calls_log = _fake_launchctl(root, fails)
-            dest, staged, log = root / "agent.plist", root / "agent.plist.staged", root / "x.log"
-            dest.write_text("OLD", encoding="utf-8")
-            staged.write_text("NEW", encoding="utf-8")
-            rc = subprocess.run(
-                ["/bin/sh", "-c", mod.SELF_RELOAD_SCRIPT, "carr-self-reload", dead_pid,
-                 str(fake), "gui/501", "com.carr.fleet-sync", str(staged), str(dest),
-                 str(log), "5"], check=False, timeout=60).returncode
-            calls = calls_log.read_text().splitlines() if calls_log.exists() else []
-            text = log.read_text() if log.exists() else ""
+            helper, dest, log, calls_log = _start_helper(Path(tmp), dead_pid, fails, "5")
+            rc = helper.wait(timeout=60)
+            calls, text = _calls(calls_log), _log(log)
             out.append(check(
                 f"self-reload one-shot with {fails} failed bootstrap(s): body {expect_body}, "
                 f"'{expect_log}'",
@@ -86,6 +106,74 @@ def handoff_script_cases() -> list[bool]:
                 and (fails < 2 or "launchctl bootstrap gui/501" in text),
                 (rc, dest.read_text(), text, calls),
             ))
+
+    # THE WAIT. A live leader holds the one-shot back; its exit releases it.
+    with tempfile.TemporaryDirectory(prefix="carr-self-reload-") as tmp:
+        leader = subprocess.Popen(["/bin/sleep", "60"], start_new_session=True)
+        try:
+            helper, dest, log, calls_log = _start_helper(Path(tmp), str(leader.pid))
+            time.sleep(2.5)
+            held = (helper.poll() is None and _calls(calls_log) == []
+                    and dest.read_text() == "OLD")
+            leader.kill()
+            leader.wait()
+            rc = helper.wait(timeout=30)
+        finally:
+            if leader.poll() is None:
+                leader.kill()
+        out.append(check(
+            "the one-shot does nothing while the job's leader lives, and reloads after it exits",
+            held and rc == 0 and dest.read_text() == "NEW"
+            and "loaded the new definition" in _log(log),
+            (held, _calls(calls_log), _log(log)),
+        ))
+
+    # THE GROUP. The leader is gone but a member of its process group is not.
+    with tempfile.TemporaryDirectory(prefix="carr-self-reload-") as tmp:
+        group = subprocess.Popen(["/bin/sh", "-c", "/bin/sleep 60 & exit 0"],
+                                 start_new_session=True)
+        group.wait()                       # leader exited; its sleep child remains
+        pgid = group.pid
+        try:
+            member_alive = subprocess.run(["/bin/kill", "-0", "--", f"-{pgid}"],
+                                          check=False).returncode == 0
+            helper, dest, log, calls_log = _start_helper(Path(tmp), str(pgid))
+            time.sleep(2.5)
+            held = (helper.poll() is None and _calls(calls_log) == []
+                    and dest.read_text() == "OLD")
+            os.killpg(pgid, signal.SIGKILL)
+            rc = helper.wait(timeout=30)
+        finally:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        out.append(check(
+            "with the leader gone, a surviving group member still holds the one-shot back",
+            member_alive and held and rc == 0 and dest.read_text() == "NEW",
+            (member_alive, held, _calls(calls_log), _log(log)),
+        ))
+
+    # A NEWER INSTALL WINS. The plist changes while the one-shot waits.
+    with tempfile.TemporaryDirectory(prefix="carr-self-reload-") as tmp:
+        leader = subprocess.Popen(["/bin/sleep", "60"], start_new_session=True)
+        try:
+            helper, dest, log, calls_log = _start_helper(Path(tmp), str(leader.pid))
+            time.sleep(1)
+            dest.write_text("NEWER", encoding="utf-8")
+            leader.kill()
+            leader.wait()
+            rc = helper.wait(timeout=30)
+        finally:
+            if leader.poll() is None:
+                leader.kill()
+        out.append(check(
+            "a plist changed after staging is never overwritten by the older staged body",
+            rc == 1 and dest.read_text() == "NEWER" and _calls(calls_log) == []
+            and "changed since staging" in _log(log)
+            and "loaded the new definition" not in _log(log),
+            (rc, dest.read_text(), _calls(calls_log), _log(log)),
+        ))
     return out
 
 
@@ -236,6 +324,7 @@ def main() -> int:
                 and len(spawned) == 1 and spawned[0][1].get("start_new_session") is True
                 and argv[4] == str(os.getpgrp()) and argv[7] == fleet_label
                 and argv[8] == str(staged) and argv[9] == str(fleet_dest)
+                and argv[-1] == _sha(old_fleet)
                 and "self-reload deferred" in changed_out.getvalue(),
                 (changed, calls, spawned, changed_out.getvalue()),
             ))

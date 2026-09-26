@@ -284,5 +284,24 @@ with tempfile.TemporaryDirectory(prefix="carr-reinstall-cal-") as tmp:
           and "1 reinstalled" in out, (rc, out, calls(log)))
     (agents / A).chmod(0o644)
 
+with tempfile.TemporaryDirectory(prefix="carr-reinstall-cal-") as tmp:
+    templates, agents, log, fake = build(Path(tmp))
+    for extra_name in ("g", "h"):
+        converted, _ = launchd_calendar.rewrite_template(
+            interval_plist(f"com.carr.fixture-{extra_name}", 900))
+        (templates / f"com.carr.fixture-{extra_name}.plist").write_text(converted, encoding="utf-8")
+        (agents / f"com.carr.fixture-{extra_name}.plist").write_text(
+            interval_plist(f"com.carr.fixture-{extra_name}", 900), encoding="utf-8")
+    before = snapshot(agents)
+    rc, out = run_inproc(templates, agents, fake, env={"FAKE_FAIL_BOOTSTRAP": "1"})
+    touched = {c.split()[-1].split("/")[-1].replace(".plist", "") for c in calls(log)}
+    check("a failed restore stops the run: later agents are not booted out, and are listed "
+          "as not attempted",
+          rc == 1 and snapshot(agents) == before
+          and touched == {"com.carr.fixture-a"}
+          and "STOPPING: com.carr.fixture-a.plist is unloaded" in out
+          and "NOT ATTEMPTED: com.carr.fixture-g.plist, com.carr.fixture-h.plist" in out,
+          (rc, out, calls(log)))
+
 print(f"reinstall-launchd-calendar-selftest: {sum(RESULTS)}/{len(RESULTS)} passed")
 sys.exit(0 if all(RESULTS) else 1)

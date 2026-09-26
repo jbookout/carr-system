@@ -58,6 +58,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import hashlib
+import secrets
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lib.machine_prerequisites import machine_prerequisites, prerequisite_failure_report
@@ -1698,17 +1700,25 @@ def retire_primary_only_plist(filename, live, apply):
 # every Mac, until someone ran install by hand. Instead the new body is staged
 # outside LaunchAgents and a detached one-shot (its own session, so launchd's
 # process-group cleanup of the finished job does not take it down) waits for
-# this job's process group to be gone, then boots the old definition out,
-# moves the staged body into place, and bootstraps it. A failed bootstrap puts
+# this job's whole process group to be gone, refuses if the installed plist
+# changed since staging (a newer install must never be overwritten by an
+# older staged body), then boots the old definition out, moves the staged
+# body into place, and bootstraps it. A failed bootstrap puts
 # the previous body back and loads that; if even that fails the log says
 # "RESTORE FAILED" with the manual command. Nothing is kickstarted.
 SELF_RELOAD_HANDOFF_DIR = os.path.join(HOME, ".config", "carr", "launchd-handoff")
 SELF_RELOAD_WAIT_SECONDS = 3600
 SELF_RELOAD_SCRIPT = r"""
 pg="$1"; launchctl="$2"; domain="$3"; label="$4"; staged="$5"; dest="$6"; log="$7"; wait_max="$8"
+expected="$9"
 exec >>"$log" 2>&1
+installed_sha() {
+  if [ -e "$dest" ]; then /usr/bin/shasum -a 256 "$dest" | cut -d' ' -f1; else echo absent; fi
+}
+# Wait on the WHOLE process group (-pg), not just its leader: a wrapper that
+# has exited can leave children still running under launchd's job.
 waited=0
-while kill -0 "$pg" 2>/dev/null; do
+while kill -0 -- "-$pg" 2>/dev/null; do
   waited=$((waited + 1))
   if [ "$waited" -ge "$wait_max" ]; then
     echo "self-reload $label: GAVE UP waiting for process group $pg; staged body left at $staged"
@@ -1716,8 +1726,22 @@ while kill -0 "$pg" 2>/dev/null; do
   fi
   sleep 1
 done
+# The installed plist must still be the one this body was staged against.
+# Anything newer (a later install, a hand edit) wins; the staged body is stale.
+found=$(installed_sha)
+if [ "$found" != "$expected" ]; then
+  echo "self-reload $label: REFUSED, $dest changed since staging (expected $expected, found $found); nothing booted out or loaded; stale staged body left at $staged"
+  exit 1
+fi
 cp -p "$dest" "$staged.previous" || { echo "self-reload $label: cannot back up $dest"; exit 1; }
 "$launchctl" bootout "$domain/$label" >/dev/null 2>&1
+found=$(installed_sha)
+if [ "$found" != "$expected" ]; then
+  echo "self-reload $label: REFUSED, $dest changed during bootout (expected $expected, found $found); loading what is installed, not the stale staged body"
+  if "$launchctl" bootstrap "$domain" "$dest"; then exit 1; fi
+  echo "self-reload $label: RESTORE FAILED, $label is unloaded; fix by hand: launchctl bootstrap $domain $dest"
+  exit 1
+fi
 mv -f "$staged" "$dest" || {
   echo "self-reload $label: cannot move the staged body into place"
   "$launchctl" bootstrap "$domain" "$dest" || echo "self-reload $label: RESTORE FAILED, $label is unloaded; fix by hand: launchctl bootstrap $domain $dest"
@@ -1738,9 +1762,19 @@ exit 1
 """
 
 
+def installed_sha256(path):
+    """sha256 of the installed file, or ``absent`` (the one-shot compares the same way)."""
+    try:
+        with open(path, "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()
+    except FileNotFoundError:
+        return "absent"
+
+
 def hand_off_self_reload(filename, dest, body, label, launchctl="/bin/launchctl"):
     """Stage ``body`` and start the detached one-shot; ``deferred`` or ``failed``."""
     try:
+        expected = installed_sha256(dest)
         os.makedirs(SELF_RELOAD_HANDOFF_DIR, exist_ok=True)
         staged = os.path.join(SELF_RELOAD_HANDOFF_DIR, filename + ".staged")
         with open(staged, "w", encoding="utf-8") as fh:
@@ -1749,7 +1783,7 @@ def hand_off_self_reload(filename, dest, body, label, launchctl="/bin/launchctl"
         subprocess.Popen(
             ["/bin/sh", "-c", SELF_RELOAD_SCRIPT, "carr-self-reload",
              str(os.getpgrp()), launchctl, f"gui/{os.getuid()}", label, staged, dest,
-             log, str(SELF_RELOAD_WAIT_SECONDS)],
+             log, str(SELF_RELOAD_WAIT_SECONDS), expected],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True, close_fds=True)
     except OSError as exc:
@@ -2394,6 +2428,10 @@ def _launchctl_detail(result):
     return (result.stderr or result.stdout or "").strip()[:120]
 
 
+class AgentLeftUnloaded(RuntimeError):
+    """A restore failed: the agent is not loaded and needs a human."""
+
+
 def _restore_calendar_agent(row, launchctl, domain):
     """Put the previous body back and load it. True only when it is loaded again."""
     dest, label = row["dest"], row["label"]
@@ -2426,7 +2464,8 @@ def reinstall_calendar_agent(row, launchctl, domain, kickstart):
     booted = _launchctl(launchctl, "bootstrap", domain, dest)
     if booted.returncode != 0:
         print(f"      BOOTSTRAP FAILED: {_launchctl_detail(booted)} — restoring the previous body")
-        _restore_calendar_agent(row, launchctl, domain)
+        if not _restore_calendar_agent(row, launchctl, domain):
+            raise AgentLeftUnloaded(label)
         return False
     shown = _launchctl(launchctl, "print", target)
     if shown.returncode != 0:
@@ -2435,7 +2474,8 @@ def reinstall_calendar_agent(row, launchctl, domain, kickstart):
         print(f"      PRINT FAILED after a successful bootstrap: {_launchctl_detail(shown)}"
               " — booting the new definition out and restoring the previous body")
         _launchctl(launchctl, "bootout", target)
-        _restore_calendar_agent(row, launchctl, domain)
+        if not _restore_calendar_agent(row, launchctl, domain):
+            raise AgentLeftUnloaded(label)
         return False
     if kickstart:
         kicked = _launchctl(launchctl, "kickstart", target)
@@ -2470,13 +2510,24 @@ def cmd_reinstall_launchd_calendar(argv):
         elif row["action"] == "fail":
             print(f"  FAIL  {row['name']}: {row['why']}")
     done = 0
-    for row in todo:
+    not_attempted = []
+    for index, row in enumerate(todo):
         print(f"  {'REINSTALL' if apply else 'would reinstall'}  {row['name']}: {row['why']}")
         if not apply:
             continue
-        # One agent's failure never skips the rest; every one is reported.
+        # An ordinary failure is reported and the run moves on: the job was
+        # restored and is loaded as before. A FAILED RESTORE is different --
+        # that agent is now unloaded, and whatever broke it (launchd refusing
+        # every bootstrap, say) would do the same to every agent after it. So
+        # the run stops there and names what it did not touch.
         try:
             ok = reinstall_calendar_agent(row, launchctl, domain, kickstart)
+        except AgentLeftUnloaded:
+            failures.append(row)
+            not_attempted = todo[index + 1:]
+            print(f"  STOPPING: {row['name']} is unloaded after a failed restore; "
+                  "not touching any other agent")
+            break
         except Exception as exc:  # noqa: BLE001 - reported per job, run continues
             print(f"      FAILED before launchd was touched: {exc}")
             ok = False
@@ -2484,6 +2535,8 @@ def cmd_reinstall_launchd_calendar(argv):
             done += 1
         else:
             failures.append(row)
+    for row in not_attempted:
+        print(f"  not attempted  {row['name']}")
     left_alone = sum(1 for r in rows if r["action"] == "skip")
     if apply:
         head = f"{done} reinstalled"
@@ -2493,7 +2546,105 @@ def cmd_reinstall_launchd_calendar(argv):
           f"{len(failures)} failed; kickstart {'on' if kickstart else 'off'}")
     if failures:
         print("  FAILED: " + ", ".join(r["name"] for r in failures))
-    return 1 if failures else 0
+    if not_attempted:
+        print("  NOT ATTEMPTED: " + ", ".join(r["name"] for r in not_attempted))
+    return 1 if failures or not_attempted else 0
+
+
+# LAUNCHD-HANDOFF-SMOKE: an opt-in proof, on a real Mac, of the one thing the
+# hermetic tests cannot show -- that the detached one-shot survives launchd
+# booting out the job that started it, and then reloads that job. It uses a
+# throwaway label (com.carr.handoff-smoke-<random>) whose plist lives in its own
+# directory under the hand-off dir, never in ~/Library/LaunchAgents, and it
+# touches no other label. Version 1 of the plist runs this file's
+# `launchd-handoff-smoke-job`, which hands its own reload off exactly as
+# fleet-sync does and then sleeps; version 2 runs /bin/sleep. The smoke boots
+# the label out while the job is running (killing the job's process group), then
+# waits for the one-shot to load version 2. It always cleans up: bootout of the
+# throwaway label, then unlink of every file it created. Without --run it only
+# prints what it would do.
+def _smoke_plist(label, arguments, out_path):
+    return plistlib.dumps({
+        "Label": label, "ProgramArguments": arguments, "RunAtLoad": True,
+        "StandardOutPath": out_path, "StandardErrorPath": out_path,
+    }).decode("utf-8")
+
+
+def cmd_launchd_handoff_smoke(argv):
+    label = f"com.carr.handoff-smoke-{secrets.token_hex(4)}"
+    domain = f"gui/{os.getuid()}"
+    work = os.path.join(SELF_RELOAD_HANDOFF_DIR, label)
+    dest = os.path.join(work, f"{label}.plist")
+    v2_path = os.path.join(work, "v2.plist")
+    job_out = os.path.join(work, "job.out")
+    staged = os.path.join(work, f"{label}.plist.staged")
+    log = os.path.join(work, f"{label}.plist.log")
+    print(f"launchd-handoff-smoke: throwaway label {label}; files under {work}")
+    if "--run" not in argv:
+        print("  dry run: pass --run to bootstrap the throwaway label for real")
+        return 0
+    v1 = _smoke_plist(label, [sys.executable, os.path.abspath(__file__),
+                              "launchd-handoff-smoke-job", label, dest, v2_path, work], job_out)
+    v2 = _smoke_plist(label, ["/bin/sleep", "600"], job_out)
+    verdict, why = 1, "did not finish"
+    try:
+        os.makedirs(work, exist_ok=False)
+        with open(dest, "w", encoding="utf-8") as fh:
+            fh.write(v1)
+        with open(v2_path, "w", encoding="utf-8") as fh:
+            fh.write(v2)
+        boot = subprocess.run(["launchctl", "bootstrap", domain, dest],
+                              capture_output=True, text=True, check=False)
+        if boot.returncode != 0:
+            why = f"bootstrap of the throwaway label failed: {_launchctl_detail(boot)}"
+            return 1
+        deadline = time.monotonic() + 60
+        while not os.path.exists(staged) and time.monotonic() < deadline:
+            time.sleep(0.5)
+        if not os.path.exists(staged):
+            why = "the job never staged its hand-off"
+            return 1
+        print("  job is running and has handed off its reload; booting it out")
+        subprocess.run(["launchctl", "bootout", f"{domain}/{label}"],
+                       capture_output=True, check=False)
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            logged = read(log) or ""
+            if "self-reload" in logged:
+                break
+            time.sleep(1)
+        logged = read(log) or ""
+        shown = subprocess.run(["launchctl", "print", f"{domain}/{label}"],
+                               capture_output=True, text=True, check=False)
+        if ("loaded the new definition" in logged and read(dest) == v2
+                and shown.returncode == 0 and "/bin/sleep" in shown.stdout):
+            verdict, why = 0, "the one-shot outlived the bootout and loaded version 2"
+        else:
+            why = (f"helper log {logged.strip()!r}; installed is v2: {read(dest) == v2}; "
+                   f"print rc {shown.returncode}")
+        return verdict
+    finally:
+        subprocess.run(["launchctl", "bootout", f"{domain}/{label}"],
+                       capture_output=True, check=False)
+        for path in (dest, v2_path, job_out, staged, staged + ".previous", log):
+            if os.path.exists(path):
+                os.unlink(path)
+        if os.path.isdir(work):
+            os.rmdir(work)
+        print(f"launchd-handoff-smoke: {'PASS' if verdict == 0 else 'FAIL'} — {why}; "
+              f"{label} booted out and its files removed")
+
+
+def cmd_launchd_handoff_smoke_job(argv):
+    """Runs AS the throwaway launchd job: hand off its own reload, then keep running."""
+    global SELF_RELOAD_HANDOFF_DIR
+    label, dest, v2_path, work = argv[:4]
+    SELF_RELOAD_HANDOFF_DIR = work
+    outcome = hand_off_self_reload(os.path.basename(dest), dest, read(v2_path) or "", label)
+    if outcome != "deferred":
+        return 1
+    time.sleep(300)      # still running when the smoke boots the label out
+    return 0
 
 
 def main():
@@ -2519,6 +2670,10 @@ def main():
         return cmd_install(apply)
     if mode == "reinstall-launchd-calendar":
         return cmd_reinstall_launchd_calendar(sys.argv[2:])
+    if mode == "launchd-handoff-smoke":
+        return cmd_launchd_handoff_smoke(sys.argv[2:])
+    if mode == "launchd-handoff-smoke-job":
+        return cmd_launchd_handoff_smoke_job(sys.argv[2:])
     if mode == "set-role":
         # Writes ~/.config/carr/machine-role.json, then installs in a fresh
         # process: IS_PRIMARY is fixed at import, so this one would still
