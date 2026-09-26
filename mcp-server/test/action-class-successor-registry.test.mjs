@@ -9,7 +9,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { TOOLS, ToolError } from "../src/tools.js";
+import { TOOLS, ToolError, executeRegisteredTool } from "../src/tools.js";
+import { authorizationClassForActor } from "../src/identity.js";
 
 const joe = { id: "10000000-0000-0000-0000-000000000002", slug: "joe",
   display: "Joe", human: true, via: "mcp", client_id: "claude" };
@@ -61,6 +62,67 @@ test("all three verbs are registered with the documented write flags", () => {
   assert.equal(TOOLS["register-action-class-successor"].write, true);
   assert.equal(TOOLS["read-action-class-successors"].write, false);
   assert.equal(TOOLS["read-action-class-gate"].write, false);
+});
+
+// REGISTRATION IS A PARTNER ACT (independent review of PR #1290). A row is
+// unique, append-only and immutable, and it fixes the accountable owner and
+// the activation_predicate for good -- so the first caller must not be just
+// any authenticated agent. These go through executeRegisteredTool, the
+// deployed dispatch path, not the bare handler, because the humanOnly gate
+// lives in the dispatcher.
+test("register-action-class-successor is humanOnly; the two reads are not", () => {
+  assert.equal(TOOLS["register-action-class-successor"].humanOnly, true);
+  assert.notEqual(TOOLS["read-action-class-successors"].humanOnly, true);
+  assert.notEqual(TOOLS["read-action-class-gate"].humanOnly, true);
+});
+
+const noDatabase = {
+  query: async (text) => {
+    throw new Error(`the partner-only gate let a call reach the database: ${String(text).slice(0, 80)}`);
+  },
+};
+
+// Sponsored by joe, but the server has not verified it as a native agent bound
+// to joe's authority connection -- an ordinary sponsored agent principal.
+const sponsored = { id: "10000000-0000-0000-0000-000000000011", slug: "claude", display: "Claude",
+  human: false, sponsoring_human_slug: "joe", native_agent_verified: false,
+  via: "oauth-agent", client_id: "claude-client" };
+
+test("register: a sponsored agent without server-verified partner authority is refused before any query", async () => {
+  assert.equal(authorizationClassForActor(sponsored), "sponsored_agent");
+  const error = await executeRegisteredTool(noDatabase, sponsored, "register-action-class-successor",
+    { ...GOOD, idempotency_key: "22222222-2222-4222-8222-222222222222" }).then(() => null, (e) => e);
+  assert.ok(error instanceof ToolError, `expected a ToolError, got ${error}`);
+  assert.equal(error.payload.error, "human_only_verb_requires_verified_partner");
+  assert.equal(error.payload.verb, "register-action-class-successor");
+  assert.equal(error.payload.actor_class, "sponsored_agent");
+});
+
+test("register: an unsponsored agent token is refused too", async () => {
+  const stranger = { id: "10000000-0000-0000-0000-000000000014", slug: "grok", display: "Grok",
+    human: false, via: "agent-token" };
+  const error = await executeRegisteredTool(noDatabase, stranger, "register-action-class-successor",
+    { ...GOOD, idempotency_key: "33333333-3333-4333-8333-333333333333" }).then(() => null, (e) => e);
+  assert.equal(error?.payload?.error, "human_only_verb_requires_verified_partner");
+  assert.equal(error?.payload?.actor_class, "unsponsored_agent");
+});
+
+test("register: the verified human partner still registers through the dispatch path", async () => {
+  const fake = new Fake();
+  const out = await executeRegisteredTool(fake, { ...joe, via: "oauth" }, "register-action-class-successor",
+    { ...GOOD, idempotency_key: "44444444-4444-4444-8444-444444444444" });
+  assert.equal(out.ok, true);
+  assert.equal(out.status, "inactive");
+  assert.equal(out.capability_issued, false);
+  const insert = fake.writes.find((w) => w.sql.startsWith("insert into action_class_successor"));
+  assert.ok(insert, "the partner's call must reach the insert, not stop at the gate");
+  assert.equal(insert.params[8], joe.id);
+});
+
+test("reads stay open to a sponsored agent: the gate grants nothing either way", async () => {
+  const out = await executeRegisteredTool(new Fake(), sponsored, "read-action-class-gate",
+    { action_class: "email_unattended_send" });
+  assert.equal(out.allowed, false);
 });
 
 test("register: a well-formed entry is inserted with server-derived actor and returns capability_issued:false", async () => {

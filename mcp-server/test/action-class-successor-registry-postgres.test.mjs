@@ -152,53 +152,76 @@ test("DB: a gate denial for one action_class has no effect on another action_cla
   } finally { await admin.end(); }
 });
 
-test("DB MUTANT: without the status CHECK constraint, an 'active' row could be inserted -- proving the real constraint is load-bearing", async (t) => {
+// THE MUTANTS RUN AGAINST 0708'S OWN OBJECTS, never a look-alike table. Each
+// one opens a transaction, removes exactly one real guard from the real
+// public.action_class_successor (DROP CONSTRAINT / DISABLE TRIGGER are
+// transactional in PostgreSQL), shows the forbidden write now lands, and rolls
+// back. The afterwards-check proves the rollback restored the guard, so the
+// proofs above are the ones that read the load-bearing object.
+async function inMutantTransaction(admin, mutate, body) {
+  await admin.query("begin");
+  try {
+    await admin.query(mutate);
+    await body();
+  } finally {
+    await admin.query("rollback");
+  }
+}
+
+test("DB MUTANT: dropping 0708's real status CHECK lets an 'active' row in -- the constraint is load-bearing", async (t) => {
   const pg = await database(t); if (!pg) return;
   const admin = await connect(pg);
   try {
     const actor = await mintActor(admin, `d01-mutant-check-${randomUUID().slice(0, 8)}`);
-    // A scratch table carrying the SAME insert shape but WITHOUT the status
-    // CHECK constraint migration 0708 installs on action_class_successor --
-    // the mutant. If this insert is refused too, the real proof above is not
-    // actually exercising the constraint.
-    await admin.query(`create temporary table action_class_successor_mutant_no_check (
-      id uuid primary key default gen_random_uuid(), action_class text not null,
-      title text not null, goal text not null, owner text not null,
-      policy_requirements jsonb not null default '{}'::jsonb,
-      data_requirements jsonb not null default '{}'::jsonb,
-      model_requirements jsonb not null default '{}'::jsonb,
-      activation_predicate jsonb not null, status text not null default 'inactive',
-      actor_id uuid not null, idempotency_key text,
-      created_at timestamptz not null default now()
-    )`);
-    const cls = actionClass("mutant_class");
-    await admin.query(
-      `insert into action_class_successor_mutant_no_check
+    const insertActive = (cls) => admin.query(
+      `insert into action_class_successor
          (action_class, title, goal, owner, activation_predicate, status, actor_id)
-       values ($1,'t','g','o','{}'::jsonb,'active',$2)`,
+       values ($1,'t','g','o','{}'::jsonb,'active',$2) returning status`,
       [cls, actor.id]);
-    const row = (await admin.query(
-      "select status from action_class_successor_mutant_no_check where action_class=$1", [cls])).rows[0];
-    assert.equal(row.status, "active",
-      "MUTANT DETECTED CORRECTLY: without the CHECK constraint, an 'active' row is accepted -- " +
-      "confirming the real migration's constraint (proved above) is what refuses it");
+
+    await inMutantTransaction(admin,
+      "alter table public.action_class_successor drop constraint action_class_successor_status_inactive_only",
+      async () => {
+        const row = (await insertActive(actionClass("mutant_check"))).rows[0];
+        assert.equal(row.status, "active",
+          "MUTANT: with the real CHECK removed from the real table, an 'active' row is accepted");
+      });
+
+    const restored = (await admin.query(
+      `select 1 from pg_constraint
+        where conrelid = 'public.action_class_successor'::regclass
+          and conname = 'action_class_successor_status_inactive_only'`)).rows;
+    assert.equal(restored.length, 1, "the rollback must restore 0708's CHECK constraint");
+    await assert.rejects(insertActive(actionClass("mutant_check_after")),
+      /action_class_successor_status_inactive_only/,
+      "with the constraint back, the same insert is refused again");
   } finally { await admin.end(); }
 });
 
-test("DB MUTANT: without the immutability trigger, an UPDATE would succeed -- proving the real trigger is load-bearing", async (t) => {
+test("DB MUTANT: disabling 0708's real immutability trigger lets an UPDATE through -- the trigger is load-bearing", async (t) => {
   const pg = await database(t); if (!pg) return;
   const admin = await connect(pg);
   try {
-    await admin.query(`create temporary table action_class_successor_mutant_no_trigger (
-      id uuid primary key default gen_random_uuid(), title text not null
-    )`);
-    const id = (await admin.query(
-      "insert into action_class_successor_mutant_no_trigger (title) values ('original') returning id")).rows[0].id;
-    await admin.query("update action_class_successor_mutant_no_trigger set title='edited' where id=$1", [id]);
+    const actor = await mintActor(admin, `d01-mutant-trigger-${randomUUID().slice(0, 8)}`);
+    const cls = actionClass("mutant_trigger");
+    await TOOLS["register-action-class-successor"].handler(admin, actor, {
+      idempotency_key: randomUUID(), action_class: cls, title: "original", goal: "g", owner: "joe",
+      activation_predicate: {} });
+    const edit = () => admin.query(
+      "update action_class_successor set title='edited' where action_class=$1 returning title", [cls]);
+
+    await inMutantTransaction(admin,
+      "alter table public.action_class_successor disable trigger action_class_successor_immutable",
+      async () => {
+        const row = (await edit()).rows[0];
+        assert.equal(row?.title, "edited",
+          "MUTANT: with the real append-only trigger disabled, UPDATE rewrites the row");
+      });
+
+    await assert.rejects(edit(), /append-only/,
+      "with the trigger re-enabled by the rollback, the same UPDATE is refused again");
     const row = (await admin.query(
-      "select title from action_class_successor_mutant_no_trigger where id=$1", [id])).rows[0];
-    assert.equal(row.title, "edited",
-      "MUTANT DETECTED CORRECTLY: without the append-only trigger, UPDATE succeeds -- " +
-      "confirming the real migration's trigger (proved above) is what refuses it");
+      "select title from action_class_successor where action_class=$1", [cls])).rows[0];
+    assert.equal(row.title, "original", "the mutant's edit did not survive the rollback");
   } finally { await admin.end(); }
 });

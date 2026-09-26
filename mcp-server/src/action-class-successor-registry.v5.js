@@ -7,6 +7,7 @@
 //
 // THREE VERBS, AND NO OTHERS:
 //   register-action-class-successor   write   append one typed, inactive entry
+//                                              (humanOnly: a partner act)
 //   read-action-class-successors      read    list registered entries
 //   read-action-class-gate            read    the deterministic activation gate
 //
@@ -34,9 +35,20 @@ function assertPlainObject(ToolError, value, path) {
 
 export function actionClassSuccessorRegistryTools({ withEnvelope, writeEvent, ToolError }) {
   return {
+    // HUMAN-ONLY (partner authority), fixed after independent review of PR
+    // #1290. A registration is unique, append-only and immutable, and it
+    // fixes the accountable owner and the activation_predicate every later
+    // activation door would have to meet -- forever. Letting any
+    // authenticated agent make that first, permanent choice would hand the
+    // bar for future unattended action to whoever called first. So it is a
+    // partner act: the dispatcher's humanOnly gate (tools.js) admits only the
+    // verified partner or a server-verified native agent bound to that
+    // partner's sponsor-scoped authority connection, and refuses every other
+    // principal before schema validation or database access. The two reads
+    // stay open: reading the registry or the (always-deny) gate grants nothing.
     "register-action-class-successor": {
-      write: true,
-      description: "Append ONE typed, inactive successor entry for a future unattended action class (e.g. salesforce_unattended_write, email_unattended_send): its owner, policy/data/model requirements and the activation predicate a later, separate human-gated door would have to satisfy. Grants no authority and activates nothing -- the stored row's status is permanently 'inactive' (the migration's CHECK constraint admits no other value) and no provider data or credential is accepted here. Refused if the action_class is already registered; this door never edits or reactivates an existing entry.",
+      write: true, humanOnly: true,
+      description: "HUMAN-ONLY (partner authority). Append ONE typed, inactive successor entry for a future unattended action class (e.g. salesforce_unattended_write, email_unattended_send): its owner, policy/data/model requirements and the activation predicate a later, separate human-gated door would have to satisfy. Grants no authority and activates nothing -- the stored row's status is permanently 'inactive' (the migration's CHECK constraint admits no other value) and no provider data or credential is accepted here. Refused if the action_class is already registered; this door never edits or reactivates an existing entry.",
       inputSchema: {
         type: "object", additionalProperties: false,
         properties: {
