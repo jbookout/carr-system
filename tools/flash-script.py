@@ -35,11 +35,13 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
@@ -50,6 +52,8 @@ FLASH_URL = os.environ.get("CARR_FLASH_URL", "http://127.0.0.1:8000")
 FLASH_MODEL = os.environ.get("CARR_FLASH_MODEL", "qwen3.8-flash-next")
 
 MAX_RUNS, OUT_CLIP, RUN_TIMEOUT, THINK_TIMEOUT = 3, 2500, 600, 600
+SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+FILE_LIMIT = 512 * 1024 * 1024  # largest file (and so largest output) a script may write
 MAX_TURNS = MAX_RUNS + 2
 # Revision 3 capped only compute turns; the uncapped turns that remained ran to 24,576 tokens (428 s once). Every
 # script-writing turn is capped here.
@@ -173,9 +177,12 @@ def preview(work, names):
             if not files:
                 out.append(f"{name}/ (empty folder)")
                 continue
-            out.append(f"{name}/ (folder, {len(files)} files: {files[0]} .. {files[-1]}; first file's first 6 lines:)")
-            with open(os.path.join(p, files[0]), errors="replace") as fh:
-                out.append("".join(fh.readlines()[:6])[:1200])
+            first = next((f for f in files if os.path.isfile(os.path.join(p, f))), None)
+            out.append(f"{name}/ (folder, {len(files)} entries: {files[0]} .. {files[-1]}"
+                       + (f"; first file {first}, first 6 lines:)" if first else "; no plain files at the top)"))
+            if first:
+                with open(os.path.join(p, first), errors="replace") as fh:
+                    out.append("".join(line for _, line in zip(range(6), fh))[:1200])
         else:
             with open(p, errors="replace") as fh:
                 n = sum(1 for _ in fh)
@@ -190,29 +197,103 @@ def stage(paths, work):
     names = []
     for src in paths:
         name = os.path.basename(os.path.normpath(src))
+        if name in names or name + "/" in names or name == "flashlib.py" or name.startswith(".flash_"):
+            raise ValueError(f"two inputs, or an input and the harness, share the name {name!r}")
         dest = os.path.join(work, name)
         if os.path.isdir(src):
             shutil.copytree(src, dest)
         else:
             shutil.copy2(src, dest)
         names.append(name + ("/" if os.path.isdir(src) else ""))
+    shutil.copy2(os.path.join(TOOLS, "flashlib.py"), os.path.join(work, "flashlib.py"))  # scripts cannot read tools/
     return names
 
 
-def run_code(code, work, n):
+def flash_port():
+    """The Flash server's port, or None when FLASH_URL is not a loopback address (then no script may call it)."""
+    u = urllib.parse.urlparse(FLASH_URL)
+    return (u.port or 80) if u.hostname in ("127.0.0.1", "localhost") else None
+
+
+def sandbox_profile(work):
+    """macOS sandbox for a model-written script (independent review of PR #1250): the data it reads is untrusted, so
+    a planted line can steer Flash into a script that reaches for secrets. Writes only inside the throwaway folder;
+    nothing under the user's home is readable except the folder and the interpreter; the network is closed except
+    the local Flash port that flashlib.llm uses."""
+    work = os.path.realpath(work)
+    home = os.path.realpath(os.path.expanduser("~"))
+    interp = os.path.dirname(os.path.dirname(os.path.realpath(sys.executable)))
+    reads = sorted({work, interp, *(os.path.realpath(p) for p in (sys.prefix, sys.base_prefix))})
+    if any('"' in p or "\\" in p for p in [home, *reads]):
+        raise ValueError("path not expressible in a sandbox profile")
+    port = flash_port()
+    net = f'(allow network-outbound (remote ip "localhost:{port}"))' if port else ""
+    return ("(version 1)(allow default)"
+            f"(deny network*){net}"
+            f'(deny file-read* (subpath "{home}"))'
+            "(allow file-read* " + " ".join(f'(subpath "{p}")' for p in reads) + ")"
+            # path lookups (stat) must work to start the interpreter; contents and listings stay denied
+            "(allow file-read-metadata)"
+            "(deny file-write*)"
+            f'(allow file-write* (subpath "{work}") (literal "/dev/null"))')
+
+
+def _limits():  # runs in the child before exec: bound file size (so output) and CPU time
+    import resource
+    resource.setrlimit(resource.RLIMIT_FSIZE, (FILE_LIMIT, FILE_LIMIT))
+    resource.setrlimit(resource.RLIMIT_CPU, (RUN_TIMEOUT + 30, RUN_TIMEOUT + 30))
+
+
+def run_code(code, work, n, *, sandbox=True):
+    """Run one model-written script in `work`. Fails closed: with sandbox=True (the only value the CLI can reach) a
+    machine without the macOS sandbox gets a refusal instead of an unsandboxed run. The environment is an allowlist
+    (no credential can be inherited), output goes to files bounded by RLIMIT_FSIZE, and a timeout kills the whole
+    process group, not just the script."""
     path = os.path.join(work, f".flash_script_{n}.py")
     with open(path, "w") as fh:
         fh.write(code)
-    env = {**os.environ, "PYTHONPATH": TOOLS}
+    argv = [sys.executable, path]
+    if sandbox:
+        if not os.path.exists(SANDBOX_EXEC):
+            return "[refused: no script sandbox on this machine; model-written code does not run unsandboxed]", 0.0
+        argv = [SANDBOX_EXEC, "-p", sandbox_profile(work), *argv]
+    env = {"PATH": "/usr/bin:/bin", "HOME": work, "TMPDIR": work, "PYTHONPATH": work, "LANG": "C.UTF-8",
+           "PYTHONDONTWRITEBYTECODE": "1", "CARR_FLASH_URL": FLASH_URL, "CARR_FLASH_MODEL": FLASH_MODEL}
+    out_path, err_path = os.path.join(work, f".flash_out_{n}"), os.path.join(work, f".flash_err_{n}")
     t = time.monotonic()
-    try:
-        p = subprocess.run([sys.executable, path], cwd=work, capture_output=True, text=True, timeout=RUN_TIMEOUT,
-                           env=env)
-        out = (p.stdout[-OUT_CLIP:] + ("\n[stderr]\n" + p.stderr[-1200:] if p.stderr.strip() else "")).strip()
-    except subprocess.TimeoutExpired as e:
-        so = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-        out = (so[-OUT_CLIP:] + f"\n[timed out after {RUN_TIMEOUT}s]").strip()
+    with open(out_path, "wb") as so, open(err_path, "wb") as se:
+        p = subprocess.Popen(argv, cwd=work, stdout=so, stderr=se, stdin=subprocess.DEVNULL, env=env,
+                             start_new_session=True, preexec_fn=_limits)
+        try:
+            p.wait(timeout=RUN_TIMEOUT)
+            timed_out = False
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            p.wait()
+    stdout, stderr = _tail(out_path, OUT_CLIP), _tail(err_path, 1200)
+    out = (stdout + ("\n[stderr]\n" + stderr if stderr.strip() else "")).strip()
+    if timed_out:
+        out = (stdout + f"\n[timed out after {RUN_TIMEOUT}s]").strip()
     return out or "[no output]", round(time.monotonic() - t, 1)
+
+
+def _tail(path, limit):
+    with open(path, "rb") as fh:
+        fh.seek(max(0, os.path.getsize(path) - limit * 4))
+        return fh.read().decode(errors="replace")[-limit:]
+
+
+NUMBER_RX = re.compile(r"(?<![\w.])\d+(?:\.\d+)?(?![\w.])")
+
+
+def literal_numbers(text):
+    """Numbers of three or more significant characters written out in `text` (small ones like 0, 1, 10 are
+    everywhere in code and prove nothing)."""
+    return {m for m in NUMBER_RX.findall(text or "") if len(m.replace(".", "")) >= 3}
 
 
 def count_gap(answer, outs):
@@ -312,7 +393,7 @@ def solve(question, work, names, *, chat_fn=chat, jev=None, runner=run_code, say
         first += "\n\n" + "\n".join(HINTS[k] for k in on)
     coverage = COVERAGE + (DELEGATE if pre.get("semantic", 0.0) >= DELEGATE_AT else "")
     msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": first}]
-    seen, outs = set(), []
+    seen, outs, scripts = set(), [], []
     gap_checked, think_next, explores, answer_now, restated = False, True, 0, False, False
     n = 0
     while n < MAX_TURNS + (1 if answer_now else 0):
@@ -323,6 +404,8 @@ def solve(question, work, names, *, chat_fn=chat, jev=None, runner=run_code, say
             reply, finish, used, reasoning = chat_fn(msgs, max_tokens=COMPUTE_TOKENS, think=think_next)
         except (TimeoutError, OSError, urllib.error.URLError) as exc:
             reply, finish, used, reasoning = "", f"timeout: {type(exc).__name__}", None, ""
+        except (KeyError, IndexError, TypeError, ValueError) as exc:  # a reply that is not the expected shape
+            reply, finish, used, reasoning = "", f"malformed: {type(exc).__name__}", None, ""
         think_next = True
         think = round(time.monotonic() - t, 1)
         code = extract_code(reply)
@@ -367,6 +450,7 @@ def solve(question, work, names, *, chat_fn=chat, jev=None, runner=run_code, say
                 log.append({"turn": n, "think_s": think, "stuck": "repeated identical script"})
                 return None, log
             seen.add(code)
+            scripts.append(code)
             out, secs = runner(code, work, n)
             say(f"turn {n}: script ran {secs}s")
             log.append({"turn": n, "think_s": think, "tokens": used, "run_s": secs, "out": out[:600]})
@@ -411,6 +495,7 @@ def solve(question, work, names, *, chat_fn=chat, jev=None, runner=run_code, say
             if m and "\n" in answer.strip():  # fault 9: FINAL @file followed by the code that writes it
                 body = extract_code(answer)
                 if body and not os.path.exists(os.path.join(work, m.group(1))):
+                    scripts.append(body)
                     out2, secs2 = runner(body, work, f"{n}_final")
                     log.append({"turn": n, "final_script_run": True, "run_s": secs2, "out": out2[:600]})
                 answer = "@" + m.group(1)
@@ -421,7 +506,11 @@ def solve(question, work, names, *, chat_fn=chat, jev=None, runner=run_code, say
                         raise OSError("outside the working folder")
                     with open(target) as fh:
                         answer = fh.read().strip()
-                    outs.append(answer)  # a script wrote it, so it counts as script output
+                    # A script wrote the file, but that alone does not ground it: a script can write constants the
+                    # model made up. It counts as script output only when none of its numbers is a literal in any
+                    # script this run executed; otherwise the answer checks judge it against printed output alone.
+                    if not literal_numbers(answer) & set().union(*(literal_numbers(c) for c in scripts)):
+                        outs.append(answer)
                 except OSError:
                     msgs.append({"role": "user", "content": f"There is no file {m.group(1)} in the working "
                                  "directory. Reply with FINAL: <answer> or FINAL: @<file your script wrote>."})
@@ -457,11 +546,22 @@ def main(argv):
     if missing:
         print(f"no such file or folder: {', '.join(missing)}", file=sys.stderr)
         return 2
+    if not os.path.exists(SANDBOX_EXEC):
+        print("flash-script: no script sandbox on this machine (macOS sandbox-exec); refusing to run model code",
+              file=sys.stderr)
+        return 2
+    if flash_port() is None:
+        print(f"flash-script: CARR_FLASH_URL must be a loopback address, not {FLASH_URL}", file=sys.stderr)
+        return 2
     route = _lib("jev_model_route")
     t = time.monotonic()
     work = tempfile.mkdtemp(prefix="flash-script-")
     try:
-        names = stage(a.paths, work)
+        try:
+            names = stage(a.paths, work)
+        except ValueError as exc:
+            print(f"flash-script: {exc}", file=sys.stderr)
+            return 2
         jev = Jev()
         answer, log = solve(a.question, work, names, jev=jev,
                             say=(lambda m: None) if a.json else (lambda m: print(m, file=sys.stderr, flush=True)))
