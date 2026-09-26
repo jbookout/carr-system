@@ -38,6 +38,7 @@ import { tourDomainTools } from "./tour-domain.js";
 import { tourPropertySearchTools } from "./tour-property-search.js";
 import { tourSharingTools } from "./tour-sharing.js";
 import { tourMapPromotionTools } from "./tour-map-promotion.js";
+import { actionClassSuccessorRegistryTools } from "./action-class-successor-registry.v5.js";
 import { tourArtifactTools } from "./tour-artifacts.js";
 import { stripDealPlaceholders } from "./dealroom.js";
 import { authenticatedIdentity, authorizationClassForActor, organizationTenantForActor,
@@ -73,6 +74,7 @@ import { V5BoundaryDoorRefusal, globalBoundariesDoorTools, passBoundaryDoor } fr
   "./global-boundaries-door.v5.js";
 import { journeyOneClockDoorTools } from "./journey-one-clock-door.v5.js";
 import { governedCorrespondenceStoreTools } from "./governed-correspondence-store.v5.js";
+import { assuranceHealthStoreTools } from "./assurance-health-store.v5.js";
 import { completeSetReviewA03StoreTools } from "./independent-review-cycle-store.v5.js";
 export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
 
@@ -8373,6 +8375,8 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "global-boundaries-door": "mcp-server/src/global-boundaries-door.v5.js",
   "journey-one-clock-door": "mcp-server/src/journey-one-clock-door.v5.js",
   "governed-correspondence-store": "mcp-server/src/governed-correspondence-store.v5.js",
+  "assurance-health-store": "mcp-server/src/assurance-health-store.v5.js",
+  "action-class-successor-registry": "mcp-server/src/action-class-successor-registry.v5.js",
   "complete-set-review-a03-store": "mcp-server/src/independent-review-cycle-store.v5.js",
 });
 
@@ -9532,6 +9536,14 @@ registerTools(journeyOneClockDoorTools({ withEnvelope, ToolError }), "journey-on
 // grant for the read-receipt writer.
 registerTools(governedCorrespondenceStoreTools({ withEnvelope, writeEvent, ToolError }),
   "governed-correspondence-store");
+registerTools(assuranceHealthStoreTools({ withEnvelope, ToolError }), "assurance-health-store");
+// DoctorCRE V5-D01: inactive action-specific autonomy successors. Three verbs
+// over migration 0708's append-only registry -- register-, read- and the
+// deterministic read-action-class-gate, which as shipped always denies (no
+// activation door exists). Registration grants no authority and no verb here
+// can ever produce a row this gate reads as allowed.
+registerTools(actionClassSuccessorRegistryTools({ withEnvelope, writeEvent, ToolError }),
+  "action-class-successor-registry");
 // DoctorCRE V5-A03: append-only independent complete-set review. Every
 // participant registers only its authenticated actor/session duty; all eleven
 // dimensions precede one batch repair; regression checks cannot shrink; and a

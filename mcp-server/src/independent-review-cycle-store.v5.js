@@ -28,7 +28,7 @@ function sortedUnique(values) {
 
 // Identity separation, complete finding batches, the two-round bound and the
 // adjudicator's non-party status are decided ONLY by the SECURITY DEFINER
-// functions in migration 0711, against append-only rows. An earlier revision
+// functions in migration 0719, against append-only rows. An earlier revision
 // carried pure JavaScript "mirrors" of those guards that no handler called;
 // they were deleted rather than wired in, because a second copy of a gate
 // that reads caller-shaped objects is a second authority, not a check.

@@ -1,5 +1,5 @@
 -- DoctorCRE v5 slice V5-A03: authoritative complete-set review and bounded
--- adjudication. Paired atomically with 0712, the provisional SCAC successor.
+-- adjudication. Paired atomically with 0720, the SCAC v84 successor.
 --
 -- PR #987 shipped the deterministic policy and deliberately left four seams
 -- unbound. This migration binds them to append-only state. Participants record

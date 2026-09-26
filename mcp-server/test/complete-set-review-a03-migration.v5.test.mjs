@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const MIGRATION_URL = new URL("../../migrations/0711_doctorcre_a03_review_store.sql", import.meta.url);
+const MIGRATION_URL = new URL("../../migrations/0719_doctorcre_a03_review_store.sql", import.meta.url);
 
 const TABLES = ["review_case", "review_participant", "finding_set", "review_round", "adjudication", "case_outcome"];
 
-test("0711 installs six append-only authorities behind SECURITY DEFINER functions", async () => {
+test("0719 installs six append-only authorities behind SECURITY DEFINER functions", async () => {
   const sql = await readFile(MIGRATION_URL, "utf8");
   for (const table of TABLES)
     assert.match(sql, new RegExp(`create table ops\\.v5_a03_${table} \\(`));
