@@ -983,6 +983,26 @@
           "notes": "Externally scheduled by GitHub Actions daily at 02:35 UTC. GitHub native failure email reports a failed run; it does not detect a missed or skipped schedule. GitHub runs are not continuously ingested into ops.run, so expected_cadence_seconds is omitted and CARR service-environment health remains unknown. Missed-run freshness is evaluated separately when the Mac-local nightly-record-layer invokes ops/recovery-point.py on its host-local daily 02:05 schedule. recovery-point.py applies RPO_HOURS=24 to the newest qualified artifact; provider/API unreadability remains unknown. nightly-record-layer's cadence_grace_seconds=7200 is service-health grace, not a guaranteed consumer observation or alert-delivery bound. Observation delay depends on host availability and the timestamp of the last qualified artifact. This is consumer observation, not service cadence ingestion."
         }
       ]
+    },
+
+    {
+      "key": "session-trace-archive",
+      "name": "Session trace archive",
+      "purpose": "Nightly local archive of CARR-scoped Claude Code and Codex session transcripts (lib/carr_session_scope.py decides scope; nothing else is archived) as gzip .jsonl.gz into ~/carr-local/session-trace-archive/, so old sessions the clients prune are not lost. Streams bytes only; reads no transcript content beyond a Codex session's cwd metadata line.",
+      "family": "Local Mac edge",
+      "criticality": "medium",
+      "owner_actor": "joe",
+      "repo_path": "ops/session-trace-archive.py",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.session-trace-archive.plist",
+          "expected_cadence_seconds": 86400,
+          "cadence_grace_seconds": 7200,
+          "notes": "Daily at 03:10 local, plus RunAtLoad. Per-machine by design (both the source transcripts and the destination archive are local to whichever Mac runs it), so it is neither PRIMARY_ONLY nor SECONDARY_ONLY in ops/config-as-code.py, and it depends on nothing in the record layer — no dependencies entry below."
+        }
+      ]
     }
   ],
 

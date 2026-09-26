@@ -38,6 +38,13 @@ function fixtureClient(overrides = {}) {
   };
 }
 
+function commandParityGuard([uiPayload, docPayload]) {
+  if (!uiPayload || !docPayload) return ["missing_entry_point"];
+  return ["deal", "text", "next_date"]
+    .filter((field) => uiPayload[field] !== docPayload[field])
+    .map((field) => `${field}_diverged`);
+}
+
 test("listCommands names the two governed commands", () => {
   const names = listCommands().map((c) => c.name).sort();
   assert.deepEqual(names, ["add_note", "set_next_step"]);
@@ -199,6 +206,13 @@ test("the UI form (explicit next_date) and the Doc composer (no override) issue 
   assert.equal(sentPayloads[1].next_date, "2026-10-15");
   assert.equal(sentPayloads[0].text, sentPayloads[1].text);
   assert.equal(sentPayloads[0].deal, sentPayloads[1].deal);
+  assert.deepEqual(commandParityGuard(sentPayloads), []);
+});
+
+test("the UI/Doc parity guard kills a planted Doc-clears-next-date mutant", () => {
+  const uiPayload = { deal: "d7", text: "send the LOI", next_date: "2026-10-15" };
+  const mutantDocPayload = { ...uiPayload, next_date: null };
+  assert.deepEqual(commandParityGuard([uiPayload, mutantDocPayload]), ["next_date_diverged"]);
 });
 
 test("the Doc composer preserves an existing next_date across a set_next_step that only changes the text", async () => {
