@@ -287,7 +287,7 @@ def dispatch(
     elif entry["kind"] == "claude-desktop":
         outcome = _to_claude_desktop(entry, task)
     elif entry["kind"] == "flash-local":
-        outcome = flash_wire.run_turn(task)
+        outcome = flash_wire.run_task(task)
     elif entry["kind"] == "codex-live":
         outcome = codex_wire.run_turn(
             entry["socket"], task,

@@ -427,6 +427,17 @@ class QueueService:
             reason = "capability_target_refused"
         elif row.get("overflow"):
             reason = "flash_busy_or_down"
+        elif row.get("jev_error") and alias == "flash":
+            reason = "jev_abstained"   # an abstaining judge's default route never lands on the cheapest desk
+        elif row["route"] == "script" and alias == "flash":
+            # Flash's script protocol needs the data named, in the policy's data folders (flash_wire.script_inputs)
+            import flash_wire
+            text = f"{command['title']}\n{command.get('body') or ''}"
+            paths, _, refusal = flash_wire.script_inputs(text, roots=policy.get("script_data_roots") or [])
+            if refusal:
+                reason = "script_data_refused"
+            elif paths is None:
+                reason = "script_needs_data"
         if reason:
             alias = targets.get("fallback")
         return {"target": alias, "route": row["route"], "model": row.get("model"), "effort": row.get("effort"),
