@@ -77,6 +77,78 @@ def test_verify_reads_the_controller_readback():
     assert not ok and "exit 78" in detail
 
 
+class FakeWrangler:
+    """Records every wrangler/launcher call; `put_fails` makes `secret put` fail."""
+    def __init__(self, put_fails=False):
+        self.calls, self.put_fails, self.inputs = [], put_fails, []
+
+    def __call__(self, argv, **kw):
+        self.calls.append(argv)
+        if "list" in argv:
+            return done(0, out='[{"name": "ENGINEERING_CONTROLLER_TOKENS"}]')
+        if "put" in argv:
+            self.inputs.append(kw.get("input", ""))
+            return done(1, err="Authentication error") if self.put_fails else done()
+        return done(0, out='{"ok": true, "claimed": 0}')
+
+
+def run_main(argv, fake, d, marker=False):
+    import contextlib
+    import io
+    env_file, marker_file = os.path.join(d, "controller.env"), os.path.join(d, "not-this-host")
+    if marker:
+        open(marker_file, "w").write("controller runs on the Mac Studio\n")
+    saved = (pv.ENV_FILE, pv.NOT_HOST_MARKER, pv.RUN)
+    pv.ENV_FILE, pv.NOT_HOST_MARKER, pv.RUN = env_file, marker_file, fake
+    out, err = io.StringIO(), io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = pv.main(argv)
+    finally:
+        pv.ENV_FILE, pv.NOT_HOST_MARKER, pv.RUN = saved
+    return code, out.getvalue() + err.getvalue(), env_file
+
+
+def test_a_mac_marked_not_the_host_refuses_before_touching_the_worker():
+    with tempfile.TemporaryDirectory() as d:
+        fake = FakeWrangler()
+        code, text, env_file = run_main([], fake, d, marker=True)
+        assert code == 1 and "not-this-host" in text, (code, text)
+        assert not any("put" in c for c in fake.calls), fake.calls
+        assert not os.path.exists(env_file)
+
+
+def test_check_reports_the_host_marker():
+    with tempfile.TemporaryDirectory() as d:
+        code, text, _ = run_main(["--check"], FakeWrangler(), d, marker=True)
+        assert code == 0 and "marked not-this-host" in text, text
+
+
+def test_failed_put_leaves_no_file_and_says_the_worker_is_unchanged():
+    with tempfile.TemporaryDirectory() as d:
+        code, text, env_file = run_main(["--no-verify"], FakeWrangler(put_fails=True), d)
+        assert code == 1 and "unchanged" in text, text
+        assert not os.path.exists(env_file) and os.listdir(d) == [], os.listdir(d)
+
+
+def test_a_full_run_never_prints_the_token():
+    with tempfile.TemporaryDirectory() as d:
+        fake = FakeWrangler()
+        code, text, env_file = run_main([], fake, d)
+        token = json.loads(fake.inputs[0])["codex"]
+        assert code == 0 and token not in text, text
+        assert f"CARR_ENGINEERING_CONTROLLER_TOKEN={token}" in open(env_file).read()
+        assert stat.S_IMODE(os.stat(env_file).st_mode) == 0o600
+
+
+def test_missing_wrangler_is_a_clean_stop_not_a_traceback():
+    def missing(argv, **kw):
+        raise FileNotFoundError(argv[0])
+    with tempfile.TemporaryDirectory() as d:
+        code, text, _ = run_main(["--check"], missing, d)
+        assert code == 1 and "Traceback" not in text, text
+
+
 def test_tokens_are_long_and_fresh():
     a, b = pv.new_token(), pv.new_token()
     assert len(a) >= 40 and a != b
