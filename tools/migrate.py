@@ -428,6 +428,14 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0721_a02_rule_enforcement_coverage.sql",
         "0722_a02_rule_enforcement_coverage_scac_successor.sql",
     ),
+    # DoctorCRE V5-F05: 0724 installs the authority-bound typed rule-contract
+    # store and its actor-scoped universe reader; 0725 seals the resulting
+    # source and database capability frontier as provisional v87, chained from
+    # v86 (0723). The deferred policy-epoch trigger must observe both or neither.
+    (
+        "0724_f05_live_rule_context.sql",
+        "0725_f05_live_rule_context_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -514,6 +522,10 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0721_a02_rule_enforcement_coverage.sql",
         "0722_a02_rule_enforcement_coverage_scac_successor.sql",
+    ),
+    (
+        "0724_f05_live_rule_context.sql",
+        "0725_f05_live_rule_context_scac_successor.sql",
     ),
 )
 
