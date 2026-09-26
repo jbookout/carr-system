@@ -111,7 +111,9 @@ async function launchBrowser(t) {
   const child = spawn(chrome, [
     "--headless=new", "--no-first-run", "--disable-gpu", "--no-sandbox",
     "--allow-file-access-from-files", "--remote-debugging-port=0", `--user-data-dir=${profile}`, "about:blank",
-  ], { stdio: "ignore" });
+  ], { stdio: ["ignore", "ignore", "pipe"] });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
   t.after(async () => {
     child.kill("SIGTERM");
     await Promise.race([new Promise((resolve) => child.once("exit", resolve)), wait(3000)]);
@@ -129,14 +131,18 @@ async function launchBrowser(t) {
     }
   });
   const portFile = path.join(profile, "DevToolsActivePort");
-  for (let attempt = 0; attempt < 60 && !existsSync(portFile); attempt += 1) {
+  // 20s, not 3s: a cold first-ever headless launch on a shared CI runner can
+  // take meaningfully longer to write this file than it does on a warm local
+  // machine, and 3s (60 x 50ms) was observed to time out in hosted CI even
+  // though Chrome was present and did eventually come up.
+  for (let attempt = 0; attempt < 200 && !existsSync(portFile); attempt += 1) {
     if (child.exitCode !== null) {
-      return { unavailableReason: `Chrome exited before DevTools started (${child.exitCode}); real V5-J101 browser evidence was not run` };
+      return { unavailableReason: `Chrome exited before DevTools started (${child.exitCode}): ${stderr.slice(-2000)}` };
     }
-    await wait(50);
+    await wait(100);
   }
   if (!existsSync(portFile)) {
-    return { unavailableReason: "Chrome did not publish a DevTools endpoint; real V5-J101 browser evidence was not run" };
+    return { unavailableReason: `Chrome did not publish a DevTools endpoint within 20s: ${stderr.slice(-2000)}` };
   }
   const [port] = String(await readFile(portFile)).split(/\r?\n/);
   const targets = await fetch(`http://127.0.0.1:${port}/json/list`).then((response) => response.json());
