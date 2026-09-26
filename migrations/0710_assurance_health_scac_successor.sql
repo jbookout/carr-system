@@ -225,8 +225,8 @@ begin
   if (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v82')<>2332
     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v82' and ingress_kind not in ('db_function_acl','db_relation_acl','db_column_acl'))<>965
     or bad_hash or v.registry_digest is distinct from 'sha256:67e68a6af990d282053daf2a3613004cc9f0cb7e0bf40ccf4bf244f8ae736533'
-    or v.entry_set_digest is distinct from 'sha256:aca10f7802d6ae8731a7741769e8cf110d2f1b2cc7a3114ea145f4ff448c2363' then
-    raise exception 'Assurance health v82 seed or entry-set seal drifted: actual % expected %', v.entry_set_digest, 'sha256:aca10f7802d6ae8731a7741769e8cf110d2f1b2cc7a3114ea145f4ff448c2363';
+    or v.entry_set_digest is distinct from 'sha256:d55907eba27713ec0f660affc078ec26fe4bdce2049f705a9eb16092babd103f' then
+    raise exception 'Assurance health v82 seed or entry-set seal drifted: actual % expected %', v.entry_set_digest, 'sha256:d55907eba27713ec0f660affc078ec26fe4bdce2049f705a9eb16092babd103f';
   end if;
 end $assurance_health_v82_seed$;
 
