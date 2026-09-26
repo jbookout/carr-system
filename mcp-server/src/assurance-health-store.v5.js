@@ -2,6 +2,12 @@
 // assurance-health contract in lib/assurance_health.py. The database owns the
 // evidence and computes the projection; this module refuses any projection
 // that could make a label outrun its exact, current evidence.
+//
+// WORKFLOW TRUTH. The contract makes V5-F09 workflow truth a requirement of
+// every capability stage. The F09 census store (PR #1244) is not on main, so
+// ops.read_assurance_health reports workflow_truth.available=false and every
+// scope reads unknown / unavailable / not green -- an unregistered workflow can
+// never read healthy. The guard below refuses any other answer in that state.
 
 export const ASSURANCE_HEALTH_SCHEMA_VERSION = "assurance-health.v1";
 
