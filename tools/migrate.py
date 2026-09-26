@@ -391,6 +391,15 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0706_amend_closed_loop.sql",
         "0707_amend_closed_loop_scac_successor.sql",
     ),
+    # DoctorCRE V5-A02: 0712 installs the append-only Joe-authority fallback
+    # receipt, its authority-only writer, and the universal read-only active
+    # rule coverage function; 0713 seals that catalog as provisional v82,
+    # chained from v81 (0707). The deferred SCAC epoch trigger means the pair
+    # must commit atomically.
+    (
+        "0712_a02_rule_enforcement_coverage.sql",
+        "0713_a02_rule_enforcement_coverage_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -461,6 +470,10 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0706_amend_closed_loop.sql",
         "0707_amend_closed_loop_scac_successor.sql",
+    ),
+    (
+        "0712_a02_rule_enforcement_coverage.sql",
+        "0713_a02_rule_enforcement_coverage_scac_successor.sql",
     ),
 )
 

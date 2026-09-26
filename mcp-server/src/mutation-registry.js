@@ -132,7 +132,10 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v81.generated.js";
+// v82 provisionally admits V5-A02's authoritative rule-coverage read and the
+// Joe-authority-only fallback receipt write. Independent review and final
+// merge-time re-chaining remain required.
+} from "./scac-mutation-registry.v82.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 

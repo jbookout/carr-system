@@ -58,6 +58,7 @@ import {
 // three ruled stores. There is no other import that could supply one and no
 // argument that could carry one.
 import { emitGateZeroOutcome } from "./gate-zero-assurance.v5.js";
+import { readRuleEnforcementCoverage } from "./lifecycle-assurance.v5.js";
 import { benchmarkAcceptanceStoreTools } from "./benchmark-acceptance-store.v5.js";
 import { modelRoleStoreTools } from "./model-role-store.v5.js";
 import { recordSourceAuthorityStoreTools } from "./record-source-authority-store.v5.js";
@@ -2245,6 +2246,13 @@ export const TOOLS = {
 
   // ===== reads (carr_reader connection) =====
 
+  "read-v5-a02-rule-enforcement-coverage": {
+    write: false,
+    description: "Read DoctorCRE V5-A02's server-derived coverage of every active rule. The record layer enumerates active rules and checks their exact approval-bound installed control, current test verification, and immutable human-selected fallback receipt. Empty input only: caller evidence cannot make coverage green. Missing or inconsistent evidence is returned as a named gap or a fail-closed unavailable result.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {} },
+    handler: async (c) => readRuleEnforcementCoverage(c),
+  },
+
   "find": {
     write: false,
     description: "Search people, practices, buildings, deals, leads, vendors by name (fuzzy). Use FIRST when you only have a name; returns refs (L-/C-/V-) the write verbs take. Matches party.name / deal.name / client.roster_ref. Survivors come first and are counted separately from retired aliases: `refs`/`live_rows` are what you may write to, `retired_refs`/`retired_aliases` are tombstones of completed merges, kept navigable but never a target. Also returns the intro-graph edges touching the match (who can introduce whom), newest first. FOLLOWS THE LEAD ↔ CLIENT LINK SINCE 0102: `lead_client_links` pairs a matched lead with the client it became (or sits under), by exact key and never by name, and `deals_via_link` carries the deals filed under that client — which is how a search for a doctor's name finally surfaces the deal filed under their practice's name. `deals` remains the name-match list and the two are never blended. NOT the verb for a ref you already hold (catch-me-up takes that), and NOT the referral-path verb (who-do-we-know walks the graph). Read-only.",
@@ -3358,6 +3366,41 @@ export const TOOLS = {
   },
 
   // ===== writes (carr_writer connection, envelope enforced) =====
+
+  "record-rule-enforcement-fallback": {
+    write: true,
+    authorityOnly: true,
+    description: "Joe-authority-only V5-A02 fallback receipt for one rule. Records what the system must do when that rule's installed control is unavailable; it never guesses from enforcement class and never rewrites an earlier receipt. The current rule version and statement hash, authenticated authority actor, procedure reference, reason and idempotency key are bound by the database. A later rule version needs a new receipt.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {
+      idempotency_key: { type: "string" },
+      rule_id: { type: "string", description: "Full UUID or current short rule id." },
+      fallback_kind: { type: "string", enum: [
+        "degraded_read_only", "documented_manual_procedure",
+        "escalate_to_verified_partner", "refuse_closed",
+      ] },
+      procedure_ref: { type: "string" },
+      reason: { type: "string" },
+    }, required: ["idempotency_key", "rule_id", "fallback_kind", "procedure_ref", "reason"] },
+    handler: async (c, actor, args) => withEnvelope(
+      c, actor, "record-rule-enforcement-fallback", args, async () => {
+        const ruleId = await resolveRuleId(c, args.rule_id);
+        const recorded = await c.query(
+          "select ops.record_rule_enforcement_fallback($1,$2,$3,$4,$5) as result",
+          [ruleId, args.fallback_kind, args.procedure_ref,
+           args.idempotency_key, args.reason]);
+        const result = recorded.rows[0]?.result;
+        if (!result?.receipt_id)
+          throw new ToolError({ error: "rule_enforcement_fallback_not_recorded", rule_id: ruleId });
+        await writeEvent(c, actor, "record-rule-enforcement-fallback", "rule", ruleId, {
+          new: { fallback_kind: result.fallback_kind,
+            fallback_receipt_id: result.receipt_id,
+            rule_version: result.rule_version },
+          agent_rationale: args.reason,
+          idempotency_key: args.idempotency_key,
+        });
+        return result;
+      }),
+  },
 
   "log-activity": {
     write: true,
