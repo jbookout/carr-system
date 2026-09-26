@@ -321,6 +321,21 @@ KNOWN_HOSTS = (
     # SSH between his own Macs. Deliberately scoped to this one tailnet, not
     # the broad `ts.net` suffix: someone else's tailnet must stay blocked.
     "tailc8cc93.ts.net",
+    # census.gov: the U.S. Census Bureau's own federal domain. Added 2026-09-25
+    # on Joe's explicit in-chat approval to download two public files for the
+    # J302 Safe Harbor census tables behind the heat-map privacy builder: the
+    # 2020 county reference file and the 2020 DHC ZCTA population. The guard
+    # was refusing both www2.census.gov and api.census.gov.
+    #
+    # SCOPE, stated because an allowlist entry is a standing permission: this is
+    # read-only public statistical data from one federal owner, the same trust
+    # class as download.cms.gov and alabama.gov above. It is the whole domain
+    # rather than the two hosts because the job needs two subdomains of the same
+    # owner and the Bureau spreads one dataset across several of them. The
+    # anchored suffix match covers census.gov and *.census.gov only: lookalikes
+    # such as census.gov.<other> and notcensus.gov stay blocked, and
+    # ops/guard-selftest.py asserts both.
+    "census.gov",
 )
 
 # ── render-write protection over Bash (2026-08-06, Joe: "Fix both now") ──────

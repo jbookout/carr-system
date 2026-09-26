@@ -1244,6 +1244,7 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     mcp-server/test/tour-domain-route-cheat-sheet-postgres.sql \
     mcp-server/test/tour-delivery-data-plane-postgres.sql \
     mcp-server/test/tour-client-share-allowlist-postgres.sql \
+    mcp-server/test/assurance-health-store-postgres.sql \
     mcp-server/test/work-portfolio-postgres.sql; do
     [ -f "$tour_pg_proof" ] || continue
     tour_pg_log="$LOGDIR/$(basename "$tour_pg_proof" .sql).log"
@@ -1261,6 +1262,31 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     tail -30 "$LOGDIR/model-role-store-postgres.log" >&2
     bad migration "Model Room role-store PostgreSQL acceptance failed"
     return
+  fi
+
+  # V5-J103: consent is read-only and limited to each partner's own carr.us
+  # mailbox, drafts can never dispatch, receipts keep provenance, and no runtime
+  # role can write a read receipt yet.
+  if ! run_quiet "$LOGDIR/governed-correspondence-store-postgres.log" \
+       "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+       -f mcp-server/test/governed-correspondence-store-postgres.sql; then
+    tail -30 "$LOGDIR/governed-correspondence-store-postgres.log" >&2
+    bad migration "V5-J103 governed correspondence store PostgreSQL acceptance failed"
+    return
+  fi
+
+  # V5-F01 record homes, source authority and document identity: both SQL
+  # fixtures (each on its own template copy of this database) and the nine
+  # registered verbs end to end as carr_writer and the authority login. It
+  # commits only into the copies it creates and drops them on the way out.
+  if [ -f mcp-server/test/record-source-authority-live-pg.v5.test.mjs ]; then
+    if ! DATABASE_URL="$dsn" CARR_F01_DB_REQUIRED=1 PSQL="$psql_bin" \
+         run_quiet "$LOGDIR/record-source-authority-live-pg.log" \
+         node --test mcp-server/test/record-source-authority-live-pg.v5.test.mjs; then
+      tail -40 "$LOGDIR/record-source-authority-live-pg.log" >&2
+      bad migration "V5-F01 record-source-authority PostgreSQL acceptance failed"
+      return
+    fi
   fi
 
   # Continuity bindings and append-only records need actual PostgreSQL proof.
@@ -1359,12 +1385,32 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
   # is a claim about rows and not about a shaper.
   # V5-UX-B11 Meeting Mode joins it: two devices, one row, one acceptance and
   # one processing owner are claims about real locks on separate connections.
-  for proof in cost-ledger-projection.v5 doc-conversation notifications session-identity dispatch-spine meeting-mode; do
+  # V5-A05 delivery-cadence joins it: the review that shipped it required a
+  # real-DB proof rather than the unit-stub coverage that let the
+  # morning-brief grant gap and the caller-evidence gap both through once.
+  # amend-closed-loop joins it: the append-only correction trail (loop_amendment,
+  # migration 0702) and trg_touch_row's version bump are claims about rows a
+  # fake client cannot make honestly.
+  # V5-D01 action-class-successor-registry joins it: the status CHECK
+  # constraint, the append-only immutability trigger and the unconditional
+  # gate function are claims about real rows and real constraints a fake
+  # client cannot make honestly.
+  # V5-A03 joins it: complete eleven-dimension submissions, non-shrinking
+  # regression evidence, role/session separation, the two-round ceiling and
+  # stronger adjudication are all transactional claims over append-only rows.
+  # V5-A02 rule-enforcement coverage joins it: its first review found every
+  # SQL logic mutant surviving a FakeDb suite, so the coverage function, the
+  # Joe-authority fallback writer and their append-only guards are proved here
+  # on real rows as the real principals, and a skip is a failure.
+  for proof in cost-ledger-projection.v5 doc-conversation notifications session-identity dispatch-spine meeting-mode delivery-cadence-a05-tools amend-closed-loop-postgres action-class-successor-registry-postgres independent-review-cycle-postgres a02-rule-enforcement-postgres; do
     if [ -f "mcp-server/test/$proof.test.mjs" ]; then
       if ! DATABASE_URL="$dsn" CARR_COST_LEDGER_DB_REQUIRED=1 \
            CARR_DOC_CONVERSATION_DB_REQUIRED=1 CARR_R03_DB_REQUIRED=1 \
            CARR_SESSION_IDENTITY_DB_REQUIRED=1 CARR_DISPATCH_SPINE_DB_REQUIRED=1 \
-           CARR_MEETING_MODE_DB_REQUIRED=1 \
+           CARR_MEETING_MODE_DB_REQUIRED=1 CARR_AMEND_CLOSED_LOOP_DB_REQUIRED=1 \
+           CARR_ACTION_CLASS_SUCCESSOR_DB_REQUIRED=1 \
+           CARR_V5_A03_DB_REQUIRED=1 \
+           CARR_A02_RULE_COVERAGE_DB_REQUIRED=1 \
            run_quiet "$LOGDIR/$proof-db.log" \
            node --test "mcp-server/test/$proof.test.mjs"; then
         tail -30 "$LOGDIR/$proof-db.log" >&2
@@ -1671,6 +1717,12 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
           db_gate_failures="$db_gate_failures $(basename "$g")"
           tail -20 "$LOGDIR/db-gate-$(basename "$g").log" >&2
         fi
+        # A gate may print a `db-gate-proof:` line saying what it actually
+        # exercised (for example how many race scenarios ran). run_quiet keeps
+        # a passing gate's output in its log file, so surface just that line:
+        # a gate that returned 0 without running anything must not be
+        # indistinguishable from one that passed.
+        grep -h '^db-gate-proof:' "$LOGDIR/db-gate-$(basename "$g").log" 2>/dev/null || true
         db_gate_timings="$db_gate_timings $(basename "$g" .py)=$(( $(date +%s) - _gt0 ))s"
       elif grep -qE "$dsn_read" "$g"; then
         # A gate that reads a DSN and carries no marker really is unrun, and

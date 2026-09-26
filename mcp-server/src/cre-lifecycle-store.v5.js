@@ -83,24 +83,22 @@
 // names each with the exact minimal change that would produce it. Neither is
 // stubbed, defaulted, or answered from a caller.
 //
-// WIRED AT SOURCE IS NOT REGISTERED AT RUNTIME, and this module makes only the
-// first claim. It touches no tools.js, no mutation registry and no generated
-// catalog; v5J102ToolRegistrations() is a DESCRIPTION and every entry still
-// carries its four false flags. Nothing here claims an executed end-to-end run:
-// the Node suite exercises these paths against a scripted handle, and the SQL
-// fixture remains unexecuted.
+// REGISTERED. v5J102ToolRegistrations() is the description tools.js registers
+// from through creLifecycleStoreTools() at the end of this file: every verb on
+// the writer connection, so mcp.js's setWriterActorContext sets the actor and the
+// server-verified sponsor for each call. The twenty-one verbs are sealed in SCAC
+// v80 (migration 0705) over the store SQL numbered as migration 0704. What stays
+// false is `accepted`: registration is not a partner's acceptance.
 //
-// WHAT THIS MODULE IS NOT. It registers nothing: v5J102ToolRegistrations() below
-// is a DESCRIPTION the parent may register from, and this file does not touch
-// tools.js, mcp.js, the mutation registry or any generated catalog. It performs
-// no provider call, calls no Salesforce API, sends nothing, and completes no
-// acceptance.
+// WHAT THIS MODULE IS NOT. It performs no provider call, calls no Salesforce API,
+// sends nothing, and completes no acceptance.
 
 import { canonicalJson, digest } from "./artifact-trust.js";
 import {
   ORGANIZATION_TENANT_ID,
   isKnownActor,
   authorizationClassForActor,
+  personalScopeForActor,
 } from "./identity.js";
 import { V5_NO_EFFECTS } from "./global-boundaries.v5.js";
 import {
@@ -117,7 +115,10 @@ import {
   V5_J102_SUBJECT_KINDS,
   V5_J102_TRANSITION_IDS,
   evaluateConcurrentEdit,
+  evaluateConcurrentTransition,
   evaluateLifecycleInitialization,
+  V5_J102_ACTIVE_NEGOTIATION_STATES,
+  v5J102TransitionWrites,
   evaluateLifecycleTransition,
   projectOwnershipAndFreshness,
   projectSalesforceReference,
@@ -186,6 +187,9 @@ export const V5_J102_OPERATIONS = Object.freeze([
   // holds, and writes the resulting item where a person can find it. It advances
   // no lifecycle state and resolves nothing.
   "record-lifecycle-reconciliation",
+  // Q081's shadow: compares every legacy row with the J102 projection its
+  // Salesforce reference links and appends one run record. Moves no state.
+  "run-migration-shadow",
 ]);
 
 /**
@@ -379,29 +383,56 @@ export const V5_J102_OPEN_OWNER_QUESTIONS = Object.freeze([
     narrow_change_if_the_answer_is_yes: "drop `research` from initialize-property-negotiation's admitted parent phases in the kernel contract and in the SQL admission map. It would also stop a research-scope assignment from ever holding a draft, which is a real cost and part of the decision.",
     encoded_without_a_ruling: false,
   }),
+  // THE OWNER'S RULINGS OF 2026-09-25, kept beside the open question so the
+  // registry shows what was decided, when, and exactly what encodes it.
   Object.freeze({
     question: "what links a J102 relationship to a CARR party or contact record?",
-    status: "unsettled_pending_owner_ruling",
-    today: "Nothing. The relationship shape is closed at subject_kind / subject_id / relationship_state / active_engagement_count, `initialize-prospect-relationship` declares no identifiers beyond the id, and the `relationship_initialized` event carries only the state. The relationship id is therefore the de facto party key, and nothing in the rail detects two prospect rows for one medical group.",
-    why_unsettled: "Q083.D1 settles Salesforce opportunities as external corporate references and is implemented. No accepted decision settles a party or contact key on the subject itself.",
-    narrow_change_if_the_answer_is_yes: "a declared party reference on the relationship shape, which widens a closed subject schema and moves the policy digest — not a change to make without the ruling.",
+    status: "ruled_by_owner",
+    ruling: "(a) an OPTIONAL declared reference from a prospect relationship to the CARR party record.",
+    ruled_on: "2026-09-25",
+    today: "`initialize-prospect-relationship` accepts an optional `party_id`; the relationship row carries it (null when none is named); the SQL writer refuses an id no `public.party` row holds (`j102_party_not_found`). The link makes two prospects for one party DETECTABLE; it does not forbid them.",
+    why_unsettled: "It is not: Q083.D1 left it open and the owner ruled.",
+    encoded_by: ["kernel optional_declared_identifiers", "SQL creation_shape optional_declared_identifier", "writer party existence check"],
     encoded_without_a_ruling: false,
   }),
   Object.freeze({
     question: "may one assignment hold two property negotiations against the SAME property?",
-    status: "unsettled_pending_owner_ruling",
-    today: "Yes, unconstrained. Q095's single-target constraint binds `selected_property_id` and `active_lease_draft_target_id`, which duplicate drafts do not disturb, and no index or check forbids them.",
-    why_unsettled: "Q095.D1 settles concurrent LOIs and the single winning property. It is silent on two negotiations against one property.",
-    narrow_change_if_the_answer_is_yes: "a unique index on (tenant, assignment, property) for property_negotiation rows, plus a kernel refusal so the answer is not only structural.",
+    status: "ruled_by_owner",
+    ruling: "(b) at most one ACTIVE negotiation per (tenant, assignment, property); a dead or closed one does not block a new one.",
+    ruled_on: "2026-09-25",
+    today: "ACTIVE is loi_drafted, loi_submitted, loi_countered and loi_accepted. The store loads the live siblings and the kernel refuses `active_negotiation_exists_for_property`; the SQL writer re-checks committed rows (`j102_active_negotiation_exists`); the partial unique index `ops.j102_one_active_negotiation_per_property` backstops a true race. `selected_winner` is NOT active: a pending deal already holds the assignment at committed, and after a cancelled deal the old winner must not block the property.",
+    why_unsettled: "It is not: Q095.D1 was silent and the owner ruled.",
+    encoded_by: ["kernel refusal", "SQL writer check", "partial unique index"],
     encoded_without_a_ruling: false,
   }),
   Object.freeze({
     question: "may a SPONSORED AGENT create a prospect, an assignment shell or an LOI draft?",
-    status: "implementation_assumption_live_and_unratified",
-    today: "Yes. All three initializations admit verified_partner and sponsored_agent, derived from the rule that the class which may ADVANCE a subject may create it: establish-client-and-engagement, open-assignment and record-loi-submission all admit both. The partner-only acts — commitment, closing, cancellation, correction, and the evidence to subject association — are untouched.",
-    why_unsettled: "No accepted decision names an actor class at all; the verified_partner / sponsored_agent vocabulary is this rail's. Q082.D1 settles only that transitions declare their permitted actors.",
+    status: "ruled_by_owner",
+    ruling: "(c) yes, like a partner, recorded as sponsored_agent under the sponsoring partner.",
+    ruled_on: "2026-09-25",
+    today: "DONE. All three initializations admit verified_partner and sponsored_agent. Every lifecycle subject row and event row now carries `sponsoring_partner`: the partner's own slug on a partner's session, the server-verified sponsor on an agent's or a writer-credential session. The store takes it from the authenticated grant (identity.js personalScopeForActor), the database derives it independently (ops.j102_sponsoring_partner(), from f01_principal and the server-set carr.sponsoring_human_slug), the store refuses when the two disagree, the SQL writers refuse an envelope naming any other value (j102_sponsor_mismatch), and a CHECK binds the column to the hashed envelope. A caller-supplied `sponsoring_partner` is refused as a derived-only field.",
+    encoded_by: ["store principal.sponsoring_partner", "ops.j102_sponsoring_partner()", "writer j102_sponsor_mismatch", "column CHECKs on subject and event"],
+    why_unsettled: "It is not: the owner ratified the parity.",
     residual_to_weigh: "`initialize-prospect-relationship` has no parent, no evidence and no rate bound, so an authenticated sponsored agent can create prospect rows limited only by id uniqueness.",
-    encoded_without_a_ruling: true,
+    encoded_without_a_ruling: false,
+  }),
+  Object.freeze({
+    question: "may a concurrent write that no longer matches the current row be re-admitted against it (rebase and re-admit)?",
+    status: "ruled_by_owner",
+    ruling: "(d) ratified.",
+    ruled_on: "2026-09-25",
+    today: "Q103: a disjoint write over exactly one characterized intervening write is re-admitted against the CURRENT row and merged; overlapping or uncharacterized writes file one visible reconciliation item; nothing is overwritten.",
+    why_unsettled: "It is not: the owner ratified it.",
+    encoded_without_a_ruling: false,
+  }),
+  Object.freeze({
+    question: "how is a verified partner recorded when an operation runs on the writer credential?",
+    status: "ruled_by_owner",
+    ruling: "(e) as sponsored_agent under the partner's own slug.",
+    ruled_on: "2026-09-25",
+    today: "A non-authorityOnly, non-humanOnly operation called by a verified partner adopts the credential's sponsored_agent class under the partner's slug and reports the split beside the result; every other disagreement refuses.",
+    why_unsettled: "It is not: the owner ratified it.",
+    encoded_without_a_ruling: false,
   }),
 ]);
 
@@ -455,7 +486,7 @@ function deepFreeze(value) {
 
 export const V5_J102_DERIVED_ONLY_FIELDS = deepFreeze([
   "tenant", "now", "server_time", "recorded_at", "evaluated_at", "updated_at",
-  "recorded_by", "updated_by", "sponsor", "sponsoring_human_slug",
+  "recorded_by", "updated_by", "sponsor", "sponsoring_human_slug", "sponsoring_partner",
   "authenticated_identity", "human", "via", "client_id",
   "subject", "subjects", "related", "current_state", "prior_state",
   "evidence", "evidence_record", "document", "artifact", "record", "approval",
@@ -803,7 +834,7 @@ const TRANSITION_PAYLOAD_KEYS = Object.freeze([
 const INITIALIZATION_PAYLOAD_KEYS = Object.freeze([
   "schema_version", "idempotency_key", "related_refs", "declared",
 ]);
-const INITIALIZATION_DECLARED_KEYS = Object.freeze(["new_subject_id", "property_id"]);
+const INITIALIZATION_DECLARED_KEYS = Object.freeze(["new_subject_id", "property_id", "party_id"]);
 const RELATED_REF_KEYS = Object.freeze([
   "relationship", "engagement", "assignment", "property_negotiation", "deal",
 ]);
@@ -1062,6 +1093,12 @@ const OPERATION_SCHEMAS = deepFreeze({
     keys: RECONCILIATION_KEYS,
     required: ["idempotency_key", "subject_ref", "edits"],
   },
+  // A WRITE ONLY IN THE SENSE THAT IT APPENDS ITS OWN OBSERVATION. It changes no
+  // business record on either side, which is why it is not authorityOnly.
+  "run-migration-shadow": {
+    write: true, humanOnly: false, authorityOnly: false, transition: null,
+    keys: ["schema_version", "idempotency_key"], required: ["idempotency_key"],
+  },
 });
 
 /** The closed caller schemas, for the parent's registration and for tests. */
@@ -1116,6 +1153,8 @@ export function v5J102ToolRegistrations() {
       "Append one human, authority-held correction receipt with its reason and evidence; history is preserved and nothing is overwritten silently.",
     "record-lifecycle-reconciliation":
       "Judge one concurrent edit against the version the caller decided against and the version the database holds, and append a VISIBLE unresolved conflict item when they differ; it merges nothing, resolves nothing and moves no lifecycle state.",
+    "run-migration-shadow":
+      "Compare every legacy deal row with the lifecycle projection its Salesforce reference links, side by side, and append one immutable run record of matches, differences and unlinked rows; modifies neither side and retires no caller.",
   };
   const handlers = {
     "read-cre-lifecycle": "readCreLifecycle",
@@ -1137,9 +1176,11 @@ export function v5J102ToolRegistrations() {
     "link-salesforce-reference": "linkSalesforceReference",
     "record-lifecycle-correction": "recordLifecycleCorrection",
     "record-lifecycle-reconciliation": "recordLifecycleReconciliation",
+    "run-migration-shadow": "runMigrationShadow",
   };
-  return deepFreeze(V5_J102_OPERATIONS.map(name => ({
+  const entries = V5_J102_OPERATIONS.map(name => ({
     name,
+    store_operation: name,
     write: OPERATION_SCHEMAS[name].write,
     humanOnly: OPERATION_SCHEMAS[name].humanOnly,
     authorityOnly: OPERATION_SCHEMAS[name].authorityOnly,
@@ -1170,14 +1211,34 @@ export function v5J102ToolRegistrations() {
     // requirement that is not the operative one.
     ...associationPrerequisite(name),
     ...primarySubjectPrerequisite(name),
-    // The parent still owes all four of these; naming them keeps the seam honest
-    // rather than implying this module closed them.
-    registered_in_scac: false,
-    registered_in_mutation_registry: false,
-    migration_bound: false,
+    // Registered in tools.js, sealed in SCAC v80 (0705) and bound to migration
+    // 0704. Acceptance is a partner's act and is never claimed here.
+    registered_in_scac: true,
+    registered_in_mutation_registry: true,
+    migration_bound: true,
     accepted: false,
-  })));
+  }));
+  // THE AUTHORITY-ROUTED DOOR TO THE SAME FACT WRITER. The server routes a verb
+  // over the partner's authority credential only when the VERB is authorityOnly,
+  // and every non-authorityOnly verb runs on the writer credential, where F01
+  // derives a sponsored agent. So a partner can author the four partner-only
+  // fact kinds (closing settlement, deal failure, winning-property commitment,
+  // lifecycle correction) only through a second verb over the same store
+  // operation that IS authorityOnly. It adds no operation and widens nothing: the
+  // store's H5 check and the SQL CHECK still decide on the database's class.
+  const fact = entries.find(e => e.name === "record-lifecycle-fact");
+  entries.push({
+    ...fact,
+    name: V5_J102_PARTNER_FACT_VERB,
+    store_operation: "record-lifecycle-fact",
+    authorityOnly: true,
+    role: "Append one partner-authored first-party business record (closing settlement, deal failure, winning-property commitment or lifecycle correction) on the partner's authority credential, bound to the exact subject it is about; advances no lifecycle state.",
+  });
+  return deepFreeze(entries);
 }
+
+/** The authority-routed verb name for partner-authored facts; see above. */
+export const V5_J102_PARTNER_FACT_VERB = "record-partner-lifecycle-fact";
 
 /**
  * THE SUBJECT AN OPERATION CANNOT CREATE, said per operation.
@@ -1341,12 +1402,33 @@ function assertAuthenticatedContext(context) {
       { actor_slug: actor.slug, authorization_class,
         admitted: [...V5_J102_ACTOR_CLASSES] });
   }
+  // OWNER RULING (c), 2026-09-25: EVERY WRITE IS RECORDED UNDER THE SPONSORING
+  // PARTNER. The same server-derived sponsor mcp.js hands the database as
+  // carr.sponsoring_human_slug: a partner's own session is its own sponsor, an
+  // agent's is the sponsor its authenticated grant carries. Never a payload field.
+  const scope = personalScopeForActor(actor);
+  if (scope?.status !== "personal" || !["joe", "dell"].includes(scope.sponsor)) {
+    fail("sponsoring_partner_unavailable",
+      `${actor.slug} carries no verified sponsoring partner, so no lifecycle write can be recorded under one`,
+      { actor_slug: actor.slug, scope_status: scope?.status ?? null });
+  }
   return deepFreeze({
     slug: actor.slug,
     human: actor.human === true,
     authorization_class,
+    sponsoring_partner: scope.sponsor,
     derived_by: "authenticated_handler_context",
   });
+}
+
+/**
+ * The kernel's actor is WHO decides; the sponsor is under whom the write is
+ * RECORDED, which only the store and the SQL writer stamp. The kernel's actor
+ * shape stays closed at its four keys.
+ */
+function kernelActor(principal) {
+  const { sponsoring_partner: _recordedUnder, ...actor } = principal;
+  return actor;
 }
 
 function assertOperationAuthority(operation, principal) {
@@ -1399,7 +1481,8 @@ export function v5J102StoreEnvelope(record_kind, record, extra = {}) {
   return storeEnvelope(record_kind, record, extra);
 }
 
-export function storedSubjectRecord({ subject, transition_id, prior_state_digest, updated_by, updated_at }) {
+export function storedSubjectRecord({ subject, transition_id, prior_state_digest, updated_by,
+  sponsoring_partner, updated_at }) {
   return {
     schema_version: V5_J102_STORED_SUBJECT_SCHEMA_VERSION,
     tenant: ORGANIZATION_TENANT_ID,
@@ -1409,11 +1492,13 @@ export function storedSubjectRecord({ subject, transition_id, prior_state_digest
     established_by_transition: transition_id,
     prior_state_digest: prior_state_digest ?? null,
     updated_by,
+    sponsoring_partner,
     updated_at,
   };
 }
 
-export function storedEventRecord({ event, transition_id, evidence_references, recorded_by, recorded_at }) {
+export function storedEventRecord({ event, transition_id, evidence_references, recorded_by,
+  sponsoring_partner, recorded_at }) {
   return {
     schema_version: V5_J102_STORED_EVENT_SCHEMA_VERSION,
     tenant: ORGANIZATION_TENANT_ID,
@@ -1431,6 +1516,7 @@ export function storedEventRecord({ event, transition_id, evidence_references, r
     // database enforces both, separately.
     evidence_references: [...evidence_references],
     recorded_by,
+    sponsoring_partner,
     recorded_at,
   };
 }
@@ -1547,8 +1633,8 @@ export function storedReconciliationItemRecord({
     concurrent_change_evidence: {
       characterized,
       why: characterized
-        ? "the concurrent edit set was supplied and judged"
-        : "this record layer can prove the subject moved and cannot enumerate the other writer's field edits: ops.j102_subject exposes no prior_state_digest to anchor a diff to, so the conflict is reported UNCHARACTERIZED and reconciles visibly rather than merging on an absence",
+        ? "exactly one committed transition lies between the base and the current row (the row's own prior_state_digest is the base), so the concurrent edit set is that transition's declared write set, each value the digest of what the row now holds"
+        : "the current row's prior_state_digest is not the caller's base, or the write that produced it is not a registered transition, so more than one write (or an undeclared one) lies between them; the other writer's field edits cannot be enumerated, and the conflict reconciles visibly rather than merging on an absence",
       current_state,
       current_state_source: "ops.j102_read.subject",
       history_tail,
@@ -1635,7 +1721,8 @@ export function createCreLifecycleStore({ db } = {}) {
    */
   async function openOperation(client, operation, principal) {
     const row = await one(client,
-      "SELECT ops.f01_principal() AS principal, ops.f01_now_text() AS server_now");
+      "SELECT ops.f01_principal() AS principal, ops.f01_now_text() AS server_now, " +
+      "ops.j102_sponsoring_partner() AS sponsoring_partner");
     if (!row) {
       fail("transaction_context_unavailable",
         "the database did not return a principal; the transaction context was never established",
@@ -1647,6 +1734,14 @@ export function createCreLifecycleStore({ db } = {}) {
         "the database-derived actor is not the handler's authenticated actor; the write cannot be attributed",
         { operation, handler_actor: principal.slug, database_actor: dbPrincipal?.actor_slug ?? null });
     }
+    // The database derives the sponsor from the login on its own side; the
+    // handler's and the database's must agree, or the write is not attributable.
+    if (row.sponsoring_partner !== principal.sponsoring_partner) {
+      fail("sponsor_context_mismatch",
+        "the database-derived sponsoring partner is not the handler's; the write cannot be recorded under either",
+        { operation, handler_sponsoring_partner: principal.sponsoring_partner,
+          database_sponsoring_partner: row.sponsoring_partner ?? null });
+    }
     // THE CLASS IS COMPARED ON EVERY OPERATION, not only the authorityOnly ones.
     // It used to be checked only where authority was required, which left the
     // ordinary writes attributing an author class the database might not agree
@@ -1655,13 +1750,53 @@ export function createCreLifecycleStore({ db } = {}) {
     // business fact rather than a transient one about who is asking.
     if (dbPrincipal.human !== principal.human ||
         dbPrincipal.authorization_class !== principal.authorization_class) {
-      fail("actor_context_mismatch",
-        "the database principal and the handler's disagree about the actor's class or personhood",
-        { operation, actor_slug: principal.slug,
+      // THE ONE DISAGREEMENT THAT IS ADOPTED RATHER THAN REFUSED. A verified
+      // partner calling an operation that is NOT authorityOnly arrives, by the
+      // server's connection routing, on the ordinary writer credential, and F01
+      // derives every writer-credential principal as a sponsored agent. The
+      // record must not claim more authority than the credential that wrote it
+      // carried, so the store ADOPTS the database's narrower class for this
+      // operation and states the split beside the result. It is safe in one
+      // direction only: every partner-only transition is authorityOnly, so the
+      // adopted class can be refused by the kernel but never admitted beyond
+      // what the handler already held. Any other disagreement — a wider
+      // database class, a different person, an authorityOnly operation — still
+      // refuses, because it cannot be attributed.
+      // humanOnly is excluded as well as authorityOnly: an act reserved to a human
+      // must never proceed under a class the database says is not one.
+      const adoptable = OPERATION_SCHEMAS[operation]?.authorityOnly === false &&
+        OPERATION_SCHEMAS[operation]?.humanOnly === false &&
+        principal.authorization_class === "verified_partner" && principal.human === true &&
+        dbPrincipal.authorization_class === "sponsored_agent" && dbPrincipal.human === false;
+      if (!adoptable) {
+        fail("actor_context_mismatch",
+          "the database principal and the handler's disagree about the actor's class or personhood",
+          { operation, actor_slug: principal.slug,
+            handler_authorization_class: principal.authorization_class,
+            database_authorization_class: dbPrincipal.authorization_class ?? null });
+      }
+      return {
+        now: row.server_now,
+        database_principal: dbPrincipal,
+        principal: deepFreeze({
+          slug: principal.slug,
+          human: false,
+          authorization_class: "sponsored_agent",
+          // Ruling (e): under the partner's own slug; ruling (c): under the
+          // partner as sponsor. The same partner, both checked above.
+          sponsoring_partner: principal.sponsoring_partner,
+          derived_by: "server_established_transaction_context",
+        }),
+        credential_split: deepFreeze({
           handler_authorization_class: principal.authorization_class,
-          database_authorization_class: dbPrincipal.authorization_class ?? null });
+          handler_human: principal.human,
+          credential_authorization_class: dbPrincipal.authorization_class,
+          adopted: "credential_class",
+          why: `${operation} is not authorityOnly, so it ran on the writer credential; the record carries that credential's class, not the handler's wider one`,
+        }),
+      };
     }
-    return { now: row.server_now, database_principal: dbPrincipal };
+    return { now: row.server_now, database_principal: dbPrincipal, principal, credential_split: null };
   }
 
   function requestDigest(operation, payload, principal) {
@@ -1824,6 +1959,13 @@ export function createCreLifecycleStore({ db } = {}) {
         decision_refs_source: outcome.decision_refs_source ?? null,
         caller_reported_reason_id: outcome.caller_reported_reason_id ?? null,
         caller_reported_reason_id_scope: outcome.caller_reported_reason_id_scope ?? null,
+        // Q103: read off the STORED outcome, so a replay reports the merge the
+        // original write made rather than a plain landing.
+        ...(Array.isArray(outcome.concurrent_merges) && outcome.concurrent_merges.length > 0
+          ? { auto_merged: true, concurrent_merges: outcome.concurrent_merges,
+              concurrent_merges_scope: outcome.concurrent_merges_scope ?? null,
+              last_writer_wins: false, silent_overwrite: false }
+          : {}),
         evidence_rechecked_under_lock: outcome.evidence_rechecked_under_lock === true,
         evidence_bound_under_lock: outcome.evidence_bound_under_lock === true,
         // BLOCK-2's receipt half, reported rather than asserted here: WHICH
@@ -1966,6 +2108,20 @@ export function createCreLifecycleStore({ db } = {}) {
         append_only: true, prior_state_preserved: true,
         derived_from_assistant_text: false,
       });
+    } else if (operation === "run-migration-shadow") {
+      Object.assign(extra, {
+        run_seq: outcome.run_seq, run_digest: outcome.run_digest,
+        compared_rows: outcome.compared_rows, matching_rows: outcome.matching_rows,
+        differing_rows: outcome.differing_rows, unlinked_rows: outcome.unlinked_rows,
+        many_to_one_subjects: outcome.many_to_one_subjects,
+        subjects_without_legacy_row: outcome.subjects_without_legacy_row,
+        legacy_snapshot_digest: outcome.legacy_snapshot_digest,
+        projection_snapshot_digest: outcome.projection_snapshot_digest,
+        clean: outcome.clean === true,
+        legacy_rows_modified: outcome.legacy_rows_modified,
+        retires_any_caller: false,
+        advances_lifecycle_state: false,
+      });
     } else {
       fail("invalid_stored_outcome", "not a replayable write operation", { operation });
     }
@@ -1992,13 +2148,20 @@ export function createCreLifecycleStore({ db } = {}) {
     const row = await one(client, "SELECT ops.j102_subject($1::text, $2::text) AS subject",
       [subject_kind, subject_id]);
     const stored = parse(row?.subject);
-    if (stored == null) return { state: null, state_digest: null };
+    if (stored == null) {
+      return { state: null, state_digest: null, prior_state_digest: null,
+        established_by_transition: null };
+    }
     if (stored.state_digest !== digest(stored.state)) {
       fail("corrupt_stored_subject",
         "the stored subject no longer hashes to its recorded digest; it is refused, not repaired",
         { subject_kind, subject_id });
     }
-    return { state: stored.state, state_digest: stored.state_digest };
+    // The two provenance fields Q103's characterization reads. Both come from
+    // inside the verified envelope; neither is a caller input.
+    return { state: stored.state, state_digest: stored.state_digest,
+      prior_state_digest: stored.prior_state_digest ?? null,
+      established_by_transition: stored.established_by_transition ?? null };
   }
 
   /**
@@ -2392,7 +2555,7 @@ export function createCreLifecycleStore({ db } = {}) {
    */
   async function runTransition(operation, payload, context, { chooseTransition } = {}) {
     const schema = OPERATION_SCHEMAS[operation];
-    const { principal, payload: request } = begin(operation, payload, context);
+    let { principal, payload: request } = begin(operation, payload, context);
     const subject_ref = assertSubjectRef(request.subject_ref, "payload.subject_ref", schema.subject_kind);
 
     const relatedRefs = {};
@@ -2427,7 +2590,9 @@ export function createCreLifecycleStore({ db } = {}) {
     }
 
     return withTransaction(async client => {
-      const { now } = await openOperation(client, operation, principal);
+      const opened = await openOperation(client, operation, principal);
+      const { now } = opened;
+      principal = opened.principal;
       const replay = await replayOutcome(client, operation, request, principal);
       if (replay !== null) return replay;
 
@@ -2439,20 +2604,61 @@ export function createCreLifecycleStore({ db } = {}) {
           records_written: 0, readback: null,
         });
       }
-      // THE COMPARE-AND-SWAP IS DECIDED AGAINST THE STORED SUBJECT, not against
-      // the caller's belief about it. The database re-checks the same digest
-      // under its lock; this early check exists so a stale caller learns which
-      // subject moved rather than getting a generic serialization error.
-      if (subject_ref.expected_state_digest !== null &&
-          subject_ref.expected_state_digest !== loadedSubject.state_digest) {
-        return result(operation, "refuse", "stale_subject_digest", {
-          actor_slug: principal.slug,
-          subject_kind: subject_ref.subject_kind, subject_id: subject_ref.subject_id,
-          stored_state_digest: loadedSubject.state_digest,
-          expected_state_digest: subject_ref.expected_state_digest,
-          records_written: 0, readback: null,
+      // WHICH TRANSITION THIS IS, decided as soon as the stored subject is known,
+      // because Q103's merge question below is a question about ITS write set.
+      // The two dispatching operations read only the stored instrument and the
+      // declared axis, neither of which a concurrent transition can move.
+      const transition_id = typeof chooseTransition === "function"
+        ? chooseTransition({ subject: loadedSubject.state, declared })
+        : schema.transition;
+      if (typeof transition_id !== "string" || !V5_J102_TRANSITION_IDS.includes(transition_id)) {
+        return result(operation, "refuse", "transition_not_determined", {
+          actor_slug: principal.slug, records_written: 0, readback: null,
         });
       }
+
+      // THE COMPARE-AND-SWAP IS DECIDED AGAINST THE STORED SUBJECT, not against
+      // the caller's belief about it — and a subject that MOVED since the caller
+      // decided is Q103's question, not an automatic refusal any more.
+      //
+      // One characterized, non-overlapping intervening transition is MERGED: the
+      // transition is judged again, in full, against the current committed row
+      // below, and only that judgement lands. Anything else — an overlap, or a
+      // movement this layer cannot characterize — is filed as a VISIBLE
+      // reconciliation item with both versions preserved, and nothing moves.
+      // The database still re-checks the current digest under its own lock, so a
+      // third write that lands between this read and the write refuses there.
+      const concurrentMerges = [];
+      const judgeMovement = async (kind, id, loaded, expected) => {
+        if (expected === null || expected === loaded.state_digest) return null;
+        const verdict = evaluateConcurrentTransition({
+          tenant: ORGANIZATION_TENANT_ID,
+          transition_id,
+          subject_kind: kind,
+          base_version_digest: expected,
+          current_version_digest: loaded.state_digest,
+          current_prior_state_digest: loaded.prior_state_digest,
+          current_established_by_transition: loaded.established_by_transition,
+        });
+        if (verdict.decision === "allow") {
+          concurrentMerges.push({
+            subject_kind: kind, subject_id: id,
+            base_version_digest: expected, current_version_digest: loaded.state_digest,
+            concurrent_transition_id: verdict.concurrent_transition_id,
+            incoming_fields: verdict.incoming_fields,
+            concurrent_fields: verdict.concurrent_fields,
+            readmitted_against_current_row: true,
+          });
+          return null;
+        }
+        return fileTransitionConflict(client, {
+          operation, request, principal, now, transition_id,
+          subject_kind: kind, subject_id: id, verdict,
+        });
+      };
+      const primaryConflict = await judgeMovement(subject_ref.subject_kind, subject_ref.subject_id,
+        loadedSubject, subject_ref.expected_state_digest);
+      if (primaryConflict !== null) return primaryConflict;
 
       const related = {};
       const casDigests = {
@@ -2466,18 +2672,12 @@ export function createCreLifecycleStore({ db } = {}) {
             records_written: 0, readback: null,
           });
         }
-        if (ref.expected_state_digest !== null && ref.expected_state_digest !== loaded.state_digest) {
-          return result(operation, "refuse", "stale_related_subject_digest", {
-            actor_slug: principal.slug, related_kind: key, related_id: ref.subject_id,
-            stored_state_digest: loaded.state_digest,
-            expected_state_digest: ref.expected_state_digest,
-            records_written: 0, readback: null,
-          });
-        }
+        const relatedConflict = await judgeMovement(ref.subject_kind, ref.subject_id,
+          loaded, ref.expected_state_digest);
+        if (relatedConflict !== null) return relatedConflict;
         related[key] = loaded.state;
         casDigests[`${ref.subject_kind}:${ref.subject_id}`] = loaded.state_digest;
       }
-
       const evidence = [];
       const rechecks = [];
       // THE SUBJECT THE EVIDENCE MUST BE ABOUT is the subject this operation
@@ -2506,22 +2706,13 @@ export function createCreLifecycleStore({ db } = {}) {
         rechecks.push(loaded.recheck);
       }
 
-      const transition_id = typeof chooseTransition === "function"
-        ? chooseTransition({ subject: loadedSubject.state, declared })
-        : schema.transition;
-      if (typeof transition_id !== "string" || !V5_J102_TRANSITION_IDS.includes(transition_id)) {
-        return result(operation, "refuse", "transition_not_determined", {
-          actor_slug: principal.slug, records_written: 0, readback: null,
-        });
-      }
-
       const evaluated = evaluateLifecycleTransition({
         tenant: ORGANIZATION_TENANT_ID,
         transition_id,
         subject: loadedSubject.state,
         related,
         evidence,
-        actor: principal,
+        actor: kernelActor(principal),
         // The selector chose the transition above and stops here; only the
         // kernel's own declared vocabulary crosses into the judgement.
         declared: domainDeclared,
@@ -2533,6 +2724,13 @@ export function createCreLifecycleStore({ db } = {}) {
           transition_id,
           subject_kind: subject_ref.subject_kind, subject_id: subject_ref.subject_id,
           refusal_detail: refusalDetail(evaluated),
+          // A merge candidate that the re-admission refused is NOT merged, and
+          // the caller is told the row moved and what moved it.
+          ...(concurrentMerges.length === 0 ? {} : {
+            auto_merged: false,
+            readmission_refused_after_concurrent_change: true,
+            concurrent_merges: concurrentMerges,
+          }),
           records_written: 0, readback: null,
         });
       }
@@ -2608,12 +2806,14 @@ export function createCreLifecycleStore({ db } = {}) {
           // the pair if they ever do.
           prior_state_digest: expectedStateDigests[`${kind}:${state.subject_id}`],
           updated_by: principal.slug,
+          sponsoring_partner: principal.sponsoring_partner,
           updated_at: now,
         }), { alone_sufficient: false }));
       const eventEnvelopes = evaluated.events.map(event =>
         storeEnvelope("stored_lifecycle_event", storedEventRecord({
           event, transition_id, evidence_references,
-          recorded_by: principal.slug, recorded_at: now,
+          recorded_by: principal.slug, sponsoring_partner: principal.sponsoring_partner,
+          recorded_at: now,
         }), { append_only: true }));
 
       const row = await one(client,
@@ -2623,9 +2823,162 @@ export function createCreLifecycleStore({ db } = {}) {
          request.idempotency_key, requestDigest(operation, request, principal),
          J({ operation, reason_id: evaluated.reason_id,
              coupled_facts: evaluated.coupled_facts_committed,
-             decision_refs: evaluated.decision_refs })]);
+             decision_refs: evaluated.decision_refs,
+             // Q103's audit trail: the merge is recorded WITH the write, in the
+             // stored outcome, so history and a replay both say this transition
+             // was decided against a moved base and merged by machine.
+             concurrent_merges: concurrentMerges })]);
       return resultFromOutcome(operation, parse(row.outcome), principal);
     });
+  }
+
+  /**
+   * Q103's visible half for a TYPED transition: the subject moved under the
+   * caller, and the movement either overlaps what this transition writes or
+   * cannot be characterized. One reconciliation item is filed — through the
+   * same governed writer record-lifecycle-reconciliation uses, under the
+   * caller's own idempotency key — and no lifecycle state moves.
+   *
+   * THE EDIT SETS IT FILES. The incoming side is the transition's declared
+   * write set on this subject; each value is the transition's INTENT (its id,
+   * the field and the request digest), because the value it would have written
+   * was decided against a row that is no longer current. The concurrent side,
+   * when characterized, is the intervening transition's declared write set,
+   * each value the digest of what the committed row now holds, attributed to
+   * the row's own writer and instant. Both are preserved in full.
+   */
+  async function fileTransitionConflict(client, { operation, request, principal, now,
+    transition_id, subject_kind, subject_id, verdict }) {
+    // A SUBJECT THIS TRANSITION ONLY READS has an empty write set, so there is
+    // no incoming edit to put in front of a person: nothing of this caller's
+    // would be lost. The row moved in a way that cannot be traced to one
+    // transition, so the read the decision rested on is stale and the caller
+    // re-reads — the refusal this path always gave before Q103 was wired.
+    if (verdict.incoming_fields.length === 0) {
+      return result(operation, "refuse", "stale_related_subject_digest", {
+        actor_slug: principal.slug, transition_id, subject_kind, subject_id,
+        base_version_digest: verdict.base_version_digest,
+        concurrent_change_characterized: verdict.characterized,
+        why: "a subject this transition reads but does not write moved in a way that cannot be traced to one registered transition; re-read it and decide again",
+        records_written: 0, readback: null,
+      });
+    }
+    // THE SECOND READ MUST BE THE ROW THE VERDICT JUDGED. The characterization
+    // (which transition moved the row, which fields it wrote) came from the
+    // first read; if the row moved AGAIN in between, labelling the newer row with
+    // the older characterization would file a false account. So the digests form
+    // a chain, each link checked: first read == verdict (by construction), this
+    // read == verdict (below; otherwise a retryable refusal, nothing filed), and
+    // ops.j102_record_reconciliation_item re-binds the item's current digest to
+    // the committed row UNDER ITS OWN LOCK. No row lock is taken here: these
+    // roles hold no UPDATE privilege on the table, deliberately, and the writer's
+    // lock is the one that decides.
+    const stored = await readSubjectVerified(client, subject_kind, subject_id);
+    if (stored == null) {
+      return result(operation, "refuse", "subject_not_found", {
+        actor_slug: principal.slug, subject_kind, subject_id, records_written: 0, readback: null,
+      });
+    }
+    if (stored.state_digest !== verdict.current_version_digest) {
+      return result(operation, "refuse", "subject_moved_again_during_reconciliation", {
+        actor_slug: principal.slug, transition_id, subject_kind, subject_id,
+        judged_version_digest: verdict.current_version_digest,
+        current_version_digest: stored.state_digest,
+        why: "the row moved again between the concurrency judgement and filing its reconciliation item; nothing was filed and nothing moved — re-read and decide again",
+        records_written: 0, readback: null,
+      });
+    }
+    const intent = requestDigest(operation, request, principal);
+    const incoming = verdict.incoming_fields.map(field => ({
+      field,
+      value_digest: digest({ intent: transition_id, field, request_digest: intent }),
+      edited_by: principal.slug,
+      edited_at: now,
+    }));
+    const concurrent = verdict.characterized
+      ? verdict.concurrent_fields.map(field => ({
+        field,
+        value_digest: digest(stored.state[field] ?? null),
+        edited_by: stored.updated_by,
+        edited_at: stored.updated_at,
+      }))
+      : null;
+    const evaluated = evaluateConcurrentEdit({
+      tenant: ORGANIZATION_TENANT_ID,
+      base_version_digest: verdict.base_version_digest,
+      current_version_digest: stored.state_digest,
+      incoming,
+      ...(concurrent === null ? {} : { concurrent }),
+      actor: kernelActor(principal),
+    });
+    if (evaluated.decision !== "reconcile" ||
+        evaluated.reconciliation_item.conflict_kind !== verdict.conflict_kind) {
+      fail("contract_self_check_failed",
+        "the field-level evaluator and the transition-level evaluator disagree about this conflict",
+        { transition_id, subject_kind, subject_id,
+          transition_verdict: verdict.conflict_kind,
+          field_verdict: evaluated.reconciliation_item?.conflict_kind ?? evaluated.reason_id });
+    }
+    const reconciliationRequest = {
+      filed_for_operation: operation, transition_id, request_digest: intent,
+      subject_kind, subject_id,
+    };
+    const outcome = await writeReconciliationItem(client, {
+      evaluated, subject_kind, subject_id, stored,
+      characterized: verdict.characterized,
+      idempotency_key: `j102-reconcile-${digest({ transition_key: request.idempotency_key,
+        base_version_digest: verdict.base_version_digest, subject_kind, subject_id })
+        .slice("sha256:".length, "sha256:".length + 48)}`,
+      request_digest: requestDigest("record-lifecycle-reconciliation", reconciliationRequest, principal),
+    });
+    return result(operation, "reconcile", verdict.reason_id, {
+      actor_slug: principal.slug,
+      transition_id,
+      subject_kind, subject_id,
+      base_version_digest: verdict.base_version_digest,
+      current_version_digest: stored.state_digest,
+      concurrent_transition_id: verdict.concurrent_transition_id,
+      overlapping_fields: verdict.overlapping_fields,
+      characterized: verdict.characterized,
+      auto_merged: false,
+      last_writer_wins: false,
+      silent_overwrite: false,
+      resolved_by_machine: false,
+      advances_lifecycle_state: false,
+      reconciliation_item: outcome,
+      records_written: outcome?.records_written ?? null,
+      readback: null,
+    });
+  }
+
+  /** The one place a reconciliation envelope is built and handed to its writer. */
+  async function writeReconciliationItem(client, { evaluated, subject_kind, subject_id, stored,
+    characterized, idempotency_key, request_digest }) {
+    const events = await readSubjectEvents(client, subject_kind, subject_id);
+    const history_tail = events.slice(-5).map(entry => ({
+      transition_id: entry.record.transition_id,
+      event_kind: entry.record.event?.event_kind ?? null,
+      recorded_by: entry.record.recorded_by,
+      recorded_at: entry.record.recorded_at,
+      record_digest: entry.record_digest,
+    }));
+    const record = storedReconciliationItemRecord({
+      item: evaluated.reconciliation_item,
+      subject_kind, subject_id,
+      current_state: stored.state,
+      history_tail,
+      characterized,
+    });
+    const envelope = storeEnvelope("stored_reconciliation_item", record,
+      { append_only: true, visible: true, resolved_by_machine: false });
+    const row = await one(client,
+      `SELECT ops.j102_record_reconciliation_item($1::jsonb, $2::jsonb,
+                                                  $3::text, $4::text, $5::jsonb) AS outcome`,
+      [J(envelope),
+       J({ [`${subject_kind}:${subject_id}`]: stored.state_digest }),
+       idempotency_key, request_digest,
+       J({ operation: "record-lifecycle-reconciliation", reason_id: evaluated.reason_id })]);
+    return parse(row.outcome);
   }
 
   /** The refusal fields worth carrying back, without echoing the whole answer. */
@@ -2645,6 +2998,7 @@ export function createCreLifecycleStore({ db } = {}) {
       // The initialization refusals name the condition that failed, the context
       // link that did not hold, and the identifier that was missing or unread.
       "unmet_field", "missing_declared_identifier", "unexpected_declared_identifier",
+      "active_negotiation_ids",
       "expected_id", "loaded_id"]) {
       if (evaluated[key] !== undefined) detail[key] = evaluated[key];
     }
@@ -2683,7 +3037,7 @@ export function createCreLifecycleStore({ db } = {}) {
   async function runInitialization(operation, payload, context) {
     const schema = OPERATION_SCHEMAS[operation];
     const contract = v5J102InitializationContract(schema.initialization);
-    const { principal, payload: request } = begin(operation, payload, context);
+    let { principal, payload: request } = begin(operation, payload, context);
 
     const rawDeclared = assertClosed(request.declared, INITIALIZATION_DECLARED_KEYS,
       ["new_subject_id"], "payload.declared");
@@ -2726,7 +3080,9 @@ export function createCreLifecycleStore({ db } = {}) {
     }
 
     return withTransaction(async client => {
-      const { now } = await openOperation(client, operation, principal);
+      const opened = await openOperation(client, operation, principal);
+      const { now } = opened;
+      principal = opened.principal;
       const replay = await replayOutcome(client, operation, request, principal);
       if (replay !== null) return replay;
 
@@ -2767,13 +3123,30 @@ export function createCreLifecycleStore({ db } = {}) {
         });
       }
 
+      // ONE ACTIVE NEGOTIATION PER PROPERTY (owner ruling 2026-09-25): the live
+      // siblings are LOADED here and handed to the kernel, which refuses by
+      // name; the SQL writer re-checks and a partial unique index backstops.
+      let activeSiblings;
+      if (contract.unique_active_per_property === true) {
+        const assignmentId = related.assignment?.subject_id ?? null;
+        activeSiblings = assignmentId === null || typeof declared.property_id !== "string" ? [] :
+          (await client.query(
+            `SELECT subject_id FROM ops.j102_subject_current
+              WHERE tenant = ops.f01_tenant() AND subject_kind = 'property_negotiation'
+                AND parent_id = $1 AND envelope -> 'record' -> 'state' ->> 'property_id' = $2
+                AND envelope -> 'record' -> 'state' ->> 'negotiation_state' = ANY($3::text[])
+              ORDER BY subject_id`,
+            [assignmentId, declared.property_id, [...V5_J102_ACTIVE_NEGOTIATION_STATES]]))
+            .rows.map(r => r.subject_id);
+      }
       const evaluated = evaluateLifecycleInitialization({
         tenant: ORGANIZATION_TENANT_ID,
         initialization_id: schema.initialization,
         related,
         declared,
-        actor: principal,
+        actor: kernelActor(principal),
         now,
+        ...(activeSiblings === undefined ? {} : { active_negotiations_for_property: activeSiblings }),
       });
       if (evaluated.decision !== "allow") {
         return result(operation, evaluated.decision, evaluated.reason_id, {
@@ -2799,6 +3172,7 @@ export function createCreLifecycleStore({ db } = {}) {
         transition_id: schema.initialization,
         prior_state_digest: null,
         updated_by: principal.slug,
+        sponsoring_partner: principal.sponsoring_partner,
         updated_at: now,
       }), { alone_sufficient: false });
       // AN EMPTY EVIDENCE CITATION, and it is a positive statement rather than an
@@ -2811,6 +3185,7 @@ export function createCreLifecycleStore({ db } = {}) {
         transition_id: schema.initialization,
         evidence_references: [],
         recorded_by: principal.slug,
+        sponsoring_partner: principal.sponsoring_partner,
         recorded_at: now,
       }), { append_only: true });
 
@@ -2829,7 +3204,7 @@ export function createCreLifecycleStore({ db } = {}) {
 
   async function readCreLifecycle(payload, context) {
     const operation = "read-cre-lifecycle";
-    const { principal, payload: request } = begin(operation, payload, context);
+    let { principal, payload: request } = begin(operation, payload, context);
     const selector = assertClosed(request.selector, READ_SELECTOR_KEYS, ["kind"], "payload.selector");
     if (!V5_J102_READ_KINDS.includes(selector.kind)) {
       fail("unknown_read_kind", `"${selector.kind}" is not a registered read kind`,
@@ -2841,7 +3216,9 @@ export function createCreLifecycleStore({ db } = {}) {
         { registered: [...V5_J102_SUBJECT_KINDS] });
     }
     return withTransaction(async client => {
-      const { now } = await openOperation(client, operation, principal);
+      const opened = await openOperation(client, operation, principal);
+      const { now } = opened;
+      principal = opened.principal;
       if (V5_J102_COMPOSED_READ_KINDS.includes(selector.kind)) {
         return readOwnershipAndFreshness(client, selector, principal, now);
       }
@@ -2976,7 +3353,7 @@ export function createCreLifecycleStore({ db } = {}) {
 
   async function recordLifecycleFact(payload, context) {
     const operation = "record-lifecycle-fact";
-    const { principal, payload: request } = begin(operation, payload, context);
+    let { principal, payload: request } = begin(operation, payload, context);
     const fact = assertClosed(request.fact, FACT_BODY_KEYS,
       ["record_kind", "record_id", "subject_kind", "subject_id"], "payload.fact");
     // The kind must be one some evidence contract actually consumes. A record
@@ -3053,7 +3430,23 @@ export function createCreLifecycleStore({ db } = {}) {
     }
 
     return withTransaction(async client => {
-      const { now } = await openOperation(client, operation, principal);
+      const opened = await openOperation(client, operation, principal);
+      const { now } = opened;
+      principal = opened.principal;
+      // H5 AGAIN, ON THE CLASS THE CREDENTIAL CARRIES. A partner reaching this
+      // operation over the writer credential has just had the database's
+      // sponsored-agent class adopted; a partner-authored kind must then come
+      // through the authority-routed verb, where the credential is the partner's.
+      if (V5_J102_PARTNER_AUTHORED_RECORD_KINDS.includes(fact.record_kind) &&
+          principal.authorization_class !== "verified_partner") {
+        fail("partner_authored_record_kind_refused",
+          `a ${fact.record_kind} record is authored on a verified partner's authority credential; this call ran on the writer credential as ${principal.authorization_class}`,
+          { record_kind: fact.record_kind, actor_slug: principal.slug,
+            authorization_class: principal.authorization_class,
+            credential_split: opened.credential_split,
+            use_verb: "record-partner-lifecycle-fact",
+            partner_authored_record_kinds: [...V5_J102_PARTNER_AUTHORED_RECORD_KINDS] });
+      }
       const replay = await replayOutcome(client, operation, request, principal);
       if (replay !== null) return replay;
       // The subject a record claims to be about must EXIST. A binding to an id
@@ -3102,7 +3495,7 @@ export function createCreLifecycleStore({ db } = {}) {
    */
   async function recordEvidenceSubjectLink(payload, context) {
     const operation = "record-evidence-subject-link";
-    const { principal, payload: request } = begin(operation, payload, context);
+    let { principal, payload: request } = begin(operation, payload, context);
     const raw = assertClosed(request.link, LINK_BODY_KEYS,
       ["evidence_source", "subject_kind", "subject_id"], "payload.link");
     if (!V5_J102_LINKABLE_EVIDENCE_SOURCES.includes(raw.evidence_source)) {
@@ -3141,7 +3534,9 @@ export function createCreLifecycleStore({ db } = {}) {
     }
 
     return withTransaction(async client => {
-      const { now } = await openOperation(client, operation, principal);
+      const opened = await openOperation(client, operation, principal);
+      const { now } = opened;
+      principal = opened.principal;
       const replay = await replayOutcome(client, operation, request, principal);
       if (replay !== null) return replay;
 
@@ -3262,7 +3657,7 @@ export function createCreLifecycleStore({ db } = {}) {
 
   async function linkSalesforceReference(payload, context) {
     const operation = "link-salesforce-reference";
-    const { principal, payload: request } = begin(operation, payload, context);
+    let { principal, payload: request } = begin(operation, payload, context);
     // The kernel decides the shape and refuses any attempt to map a Salesforce
     // label onto lifecycle state; this module adds nothing to that judgement.
     const projected = projectSalesforceReference({
@@ -3276,7 +3671,9 @@ export function createCreLifecycleStore({ db } = {}) {
     });
 
     return withTransaction(async client => {
-      const { now } = await openOperation(client, operation, principal);
+      const opened = await openOperation(client, operation, principal);
+      const { now } = opened;
+      principal = opened.principal;
       const replay = await replayOutcome(client, operation, request, principal);
       if (replay !== null) return replay;
       // A link target must EXIST. Q083 links the opportunity progressively to a
@@ -3305,6 +3702,30 @@ export function createCreLifecycleStore({ db } = {}) {
     });
   }
 
+  // -- Q081. run-migration-shadow ------------------------------------------
+
+  /**
+   * Run the migration shadow once. The DATABASE reads both sides and decides the
+   * comparison, because the legacy rows and the projection are both there and a
+   * comparison assembled here would be one more copy of each; this module only
+   * derives the actor, binds the idempotency key and verifies the answer names
+   * the operation and the actor it was asked for.
+   */
+  async function runMigrationShadow(payload, context) {
+    const operation = "run-migration-shadow";
+    let { principal, payload: request } = begin(operation, payload, context);
+    return withTransaction(async client => {
+      const opened = await openOperation(client, operation, principal);
+      principal = opened.principal;
+      const replay = await replayOutcome(client, operation, request, principal);
+      if (replay !== null) return replay;
+      const row = await one(client,
+        "SELECT ops.j102_run_migration_shadow($1::text, $2::text) AS outcome",
+        [request.idempotency_key, requestDigest(operation, request, principal)]);
+      return resultFromOutcome(operation, parse(row.outcome), principal);
+    });
+  }
+
   // -- 15. record-lifecycle-correction --------------------------------------
 
   /**
@@ -3318,7 +3739,7 @@ export function createCreLifecycleStore({ db } = {}) {
    */
   async function recordLifecycleCorrection(payload, context) {
     const operation = "record-lifecycle-correction";
-    const { principal, payload: request } = begin(operation, payload, context);
+    let { principal, payload: request } = begin(operation, payload, context);
     const subject_ref = assertClosed(request.subject_ref, SUBJECT_REF_KEYS,
       ["subject_kind", "subject_id"], "payload.subject_ref");
     if (!V5_J102_SUBJECT_KINDS.includes(subject_ref.subject_kind)) {
@@ -3341,7 +3762,9 @@ export function createCreLifecycleStore({ db } = {}) {
     }
 
     return withTransaction(async client => {
-      const { now } = await openOperation(client, operation, principal);
+      const opened = await openOperation(client, operation, principal);
+      const { now } = opened;
+      principal = opened.principal;
       const replay = await replayOutcome(client, operation, request, principal);
       if (replay !== null) return replay;
       const loaded = await loadSubject(client, subject_ref.subject_kind, subject_ref.subject_id);
@@ -3446,7 +3869,7 @@ export function createCreLifecycleStore({ db } = {}) {
    */
   async function recordLifecycleReconciliation(payload, context) {
     const operation = "record-lifecycle-reconciliation";
-    const { principal, payload: request } = begin(operation, payload, context);
+    let { principal, payload: request } = begin(operation, payload, context);
     const raw = assertClosed(request.subject_ref, SUBJECT_REF_KEYS,
       // THE BASE VERSION IS REQUIRED HERE, unlike everywhere else it is optional:
       // a concurrent-edit question with no version to have decided against is not
@@ -3477,7 +3900,9 @@ export function createCreLifecycleStore({ db } = {}) {
     });
 
     return withTransaction(async client => {
-      const { now } = await openOperation(client, operation, principal);
+      const opened = await openOperation(client, operation, principal);
+      const { now } = opened;
+      principal = opened.principal;
       // REPLAY FIRST, before any state is read, exactly as every other write
       // operation here does. A settled key returns its stored outcome even though
       // the subject has moved since, and a replay taken after the read would
@@ -3493,6 +3918,24 @@ export function createCreLifecycleStore({ db } = {}) {
       }
       const current_version_digest = stored.state_digest;
 
+      // THE CONCURRENT SIDE IS SUPPLIED WHEN, AND ONLY WHEN, IT IS KNOWN. The
+      // stored row names the digest it replaced and the transition that wrote
+      // it; when that digest is the caller's base, exactly one transition lies
+      // between them and its declared write set is the concurrent edit set, each
+      // value the digest of what the row now holds. Otherwise nothing is
+      // supplied and the kernel reconciles on the uncharacterized branch.
+      const characterizedBy = base_version_digest !== current_version_digest &&
+        stored.prior_state_digest === base_version_digest &&
+        V5_J102_TRANSITION_IDS.includes(stored.established_by_transition)
+        ? stored.established_by_transition : null;
+      const concurrent = characterizedBy === null ? []
+        : (v5J102TransitionWrites(characterizedBy)[subject_kind] ?? []).map(field => ({
+          field,
+          value_digest: digest(stored.state[field] ?? null),
+          edited_by: stored.updated_by,
+          edited_at: stored.updated_at,
+        }));
+
       const evaluated = evaluateConcurrentEdit({
         tenant: ORGANIZATION_TENANT_ID,
         base_version_digest,
@@ -3503,8 +3946,8 @@ export function createCreLifecycleStore({ db } = {}) {
         incoming: edits.map(edit => ({
           ...edit, edited_by: principal.slug, edited_at: now,
         })),
-        // `concurrent` is deliberately not supplied. See the note above.
-        actor: principal,
+        ...(concurrent.length === 0 ? {} : { concurrent }),
+        actor: kernelActor(principal),
       });
 
       const base = {
@@ -3537,52 +3980,25 @@ export function createCreLifecycleStore({ db } = {}) {
       }
 
       // === RECONCILE: make the conflict visible ==============================
-      const events = await readSubjectEvents(client, subject_kind, subject_id);
-      const history_tail = events.slice(-5).map(entry => ({
-        transition_id: entry.record.transition_id,
-        event_kind: entry.record.event?.event_kind ?? null,
-        recorded_by: entry.record.recorded_by,
-        recorded_at: entry.record.recorded_at,
-        record_digest: entry.record_digest,
-      }));
-      const record = storedReconciliationItemRecord({
-        item: evaluated.reconciliation_item,
-        subject_kind, subject_id,
-        current_state: stored.state,
-        history_tail,
-        characterized: false,
+      // THE WRITER BINDS THE REST: the compare-and-swap operand for the one
+      // subject the conflict is about, the idempotency key and the request
+      // digest, and the kernel's diagnostic labelled as the caller's. A RETRY
+      // collapses under the key; two different proposals against the same two
+      // versions both land, because there is no unique index over the pair.
+      const outcome = await writeReconciliationItem(client, {
+        evaluated, subject_kind, subject_id, stored,
+        characterized: concurrent.length > 0,
+        idempotency_key: request.idempotency_key,
+        request_digest: requestDigest(operation, request, principal),
       });
-
-      // THE WRITER BINDS THE REST, and this call hands it what it needs to: the
-      // compare-and-swap operand for the one subject the conflict is about, the
-      // idempotency key and the request digest, and the kernel's diagnostic
-      // labelled as the caller's.
-      //
-      // THERE IS NO READ-BEFORE-WRITE DUPLICATE CHECK HERE ANY MORE. It could not
-      // be a correctness claim: two callers pass it at the same instant, and it
-      // could not tell a stale reading from a current one at all. Duplication is
-      // now settled where it can be — under the key, inside the writer — and the
-      // property it protects is narrower and true: a RETRY collapses, and two
-      // different proposals against the same two versions do not.
-      const envelope = storeEnvelope("stored_reconciliation_item", record,
-        { append_only: true, visible: true, resolved_by_machine: false });
-      const row = await one(client,
-        `SELECT ops.j102_record_reconciliation_item($1::jsonb, $2::jsonb,
-                                                    $3::text, $4::text, $5::jsonb) AS outcome`,
-        [J(envelope),
-         // The operand names exactly the subject this conflict is about, with the
-         // digest this call read. The writer re-reads it under its own lock and
-         // refuses if the row moved between the two.
-         J({ [`${subject_kind}:${subject_id}`]: current_version_digest }),
-         request.idempotency_key, requestDigest(operation, request, principal),
-         J({ operation, reason_id: evaluated.reason_id })]);
-      return resultFromOutcome(operation, parse(row.outcome), principal);
+      return resultFromOutcome(operation, outcome, principal);
     });
   }
 
   return Object.freeze({
     readCreLifecycle,
     recordLifecycleFact,
+    runMigrationShadow,
     recordEvidenceSubjectLink,
     initializeProspectRelationship,
     initializeAssignment,
@@ -3698,6 +4114,11 @@ for (const entry of V5_J102_OPEN_OWNER_QUESTIONS) {
       `"${entry.question}" is encoded and is not labelled an unratified assumption; ` +
       "an unsettled question that has been encoded is a policy invented on somebody's reading");
   }
+  if (entry.status === "ruled_by_owner" &&
+      (typeof entry.ruling !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(entry.ruled_on ?? ""))) {
+    throw new V5J102StoreError("contract_self_check_failed",
+      `"${entry.question}" claims an owner ruling without quoting it and dating it`);
+  }
 }
 
 // The unwired-capability registry has to stay a list of FACTS rather than a list
@@ -3756,3 +4177,138 @@ for (const [kind, entry] of Object.entries(V5_J102_ABSENT_EVIDENCE_READERS)) {
       `the absent-reader registry names "${kind}", which is not established from a typed approval`);
   }
 }
+
+// ---------------------------------------------------------------------------
+// THE DOOR: the J102 verbs, ready for tools.js's registerTools.
+//
+// Every verb, the one read included, runs on the WRITER connection. mcp.js
+// opens that transaction, sets the authenticated actor and the server-verified
+// sponsor with setWriterActorContext (carr.acting_actor_slug,
+// carr.verified_human_actor_slug, carr.sponsoring_human_slug), and routes an
+// authorityOnly verb over the partner's authority credential. The store then
+// derives the principal and the sponsoring partner from THAT transaction
+// (ops.f01_principal, ops.j102_sponsoring_partner) and refuses when they
+// disagree with the handler. The read declares writerConnection without write,
+// so mcp.js opens it `begin read only`: the reader connection carries no actor
+// context, and a lifecycle read derives its principal like every other call.
+// ---------------------------------------------------------------------------
+
+const J102_TOOL_KEY_SCHEMAS = deepFreeze({
+  schema_version: { type: "string" },
+  idempotency_key: { type: "string" },
+  selector: { type: "object" },
+  fact: { type: "object" },
+  link: { type: "object" },
+  related_refs: { type: "object" },
+  declared: { type: "object" },
+  subject_ref: { type: "object" },
+  evidence_refs: { type: "array" },
+  opportunity_id: { type: "string" },
+  opportunity_name: { type: "string" },
+  opportunity_phase: { type: "string" },
+  observed_at: { type: "string" },
+  linked_subject_kind: { type: "string" },
+  linked_subject_id: { type: "string" },
+  correction_record_id: { type: "string" },
+  corrected_fields: { type: "array" },
+  reason: { type: "string" },
+  edits: { type: "array" },
+});
+
+const J102_DATABASE_REFUSAL = /^((?:j102|f01)_[a-z0-9_]+)/;
+const J102_ERROR_NAMES = Object.freeze(["V5J102StoreError", "V5J102Error"]);
+
+/** The closed JSON schema for one verb, built from the store's own key list. */
+export function v5J102ToolInputSchema(operation) {
+  const schema = OPERATION_SCHEMAS[operation];
+  if (!schema) {
+    throw new V5J102StoreError("unknown_operation", `"${operation}" is not a J102 operation`, { operation });
+  }
+  const properties = {};
+  for (const key of schema.keys) {
+    if (!J102_TOOL_KEY_SCHEMAS[key]) {
+      throw new V5J102StoreError("tool_key_without_schema",
+        `${operation} accepts "${key}" but the door declares no JSON type for it`, { operation, key });
+    }
+    properties[key] = { ...J102_TOOL_KEY_SCHEMAS[key] };
+  }
+  return { type: "object", additionalProperties: false, properties, required: [...schema.required] };
+}
+
+/**
+ * A handle over ONE already-open client whose transaction() runs the body on
+ * that same client. mcp.js owns BEGIN/COMMIT for every verb; a store that
+ * issued its own would commit half a verb, or warn and nest.
+ */
+export function v5J102TransactionScopedHandle(client) {
+  if (!client || typeof client.query !== "function") {
+    throw new V5J102StoreError("database_handle_required", "the verb has no open database client");
+  }
+  const handle = {
+    query: (text, params) => client.query(text, params),
+    transaction: fn => fn(handle),
+  };
+  return handle;
+}
+
+/** Translate a J102 refusal into the tool surface's refusal, keeping its code. */
+export function v5J102ToolRefusal(error, ToolError) {
+  if (error && J102_ERROR_NAMES.includes(error.name) && typeof error.code === "string") {
+    return new ToolError({
+      error: error.code, message: error.message,
+      ...(error.detail !== undefined ? { detail: error.detail } : {}),
+    });
+  }
+  const match = typeof error?.message === "string" ? J102_DATABASE_REFUSAL.exec(error.message) : null;
+  if (match && typeof error?.code === "string") {
+    return new ToolError({ error: match[1], message: error.message, sqlstate: error.code });
+  }
+  return null;
+}
+
+/**
+ * The J102 verbs for tools.js. `createStore` is injectable for the offline
+ * suite; production uses the store above.
+ */
+export function creLifecycleStoreTools({
+  withEnvelope, ToolError, createStore = createCreLifecycleStore,
+} = {}) {
+  if (typeof withEnvelope !== "function" || typeof ToolError !== "function") {
+    throw new V5J102StoreError("tool_wiring_incomplete",
+      "creLifecycleStoreTools needs the shared withEnvelope and ToolError");
+  }
+  const tools = {};
+  for (const registration of v5J102ToolRegistrations()) {
+    const { name, store_operation, write, humanOnly, authorityOnly, handler: method, role } = registration;
+    const run = async (client, actor, args) => {
+      const store = createStore({ db: v5J102TransactionScopedHandle(client) });
+      try {
+        const answer = await store[method](args ?? {}, { actor: { ...(actor ?? {}) } });
+        return {
+          ok: answer.decision !== "refuse",
+          ...answer,
+          effects: { ...answer.effects, database_writes: write ? "j102_record_layer_rows_only" : 0 },
+        };
+      } catch (error) {
+        const refusal = v5J102ToolRefusal(error, ToolError);
+        if (refusal) throw refusal;
+        throw error;
+      }
+    };
+    tools[name] = {
+      write,
+      writerConnection: true,
+      ...(humanOnly ? { humanOnly: true } : {}),
+      ...(authorityOnly ? { authorityOnly: true } : {}),
+      description: `DoctorCRE v5 J102 CRE lifecycle. ${role}`,
+      inputSchema: v5J102ToolInputSchema(store_operation),
+      handler: write
+        ? async (c, actor, args) => withEnvelope(c, actor, name, args, () => run(c, actor, args))
+        : async (c, actor, args) => run(c, actor, args),
+    };
+  }
+  return tools;
+}
+
+// The door must cover exactly the operations the store serves.
+for (const operation of V5_J102_OPERATIONS) v5J102ToolInputSchema(operation);
