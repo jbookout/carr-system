@@ -6,9 +6,11 @@
   <!-- Nightly local archive of agent session transcripts, so old sessions
        are no longer lost. Claude Code and Codex both prune old transcripts
        on this Mac; only 8 survived for this project before this job existed.
-       ops/session-trace-archive.py copies *.jsonl session files byte for
-       byte into ~/carr-local/session-trace-archive/, outside the repo; it
-       never reads, parses or prints transcript content.
+       ops/session-trace-archive.py gzips CARR-scoped *.jsonl session files
+       (lib/carr_session_scope.py: vault, repo and worktree projects; Codex
+       sessions by their metadata cwd; nothing else) into
+       ~/carr-local/session-trace-archive/, outside the repo; beyond a Codex
+       session's cwd metadata line it never reads or prints content.
 
        PER-MACHINE BY DESIGN, unlike the shared-state jobs listed in
        ops/config-as-code.py's PRIMARY_ONLY: both the source transcripts and

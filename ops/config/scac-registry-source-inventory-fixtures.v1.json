@@ -71720,6 +71720,53 @@
       ],
       "expected_count": 974,
       "expected_sha256": "848252c202a804b4461ab765909d8ff25b93cef577ce248341e2e59423a4fbdf"
+    },
+    {
+      "version": "v85",
+      "remove": [],
+      "upsert": [
+        {
+          "ingress_key": "launchd-workflow:com.carr.session-trace-archive",
+          "ingress_kind": "workflow_entrypoint",
+          "operation": "ops/launchd/com.carr.session-trace-archive.plist",
+          "effect_class": "administrative_mutation",
+          "source_locator": "ops/launchd/com.carr.session-trace-archive.plist",
+          "schema_digest": "a38cb94d28499260b10fd095c8f4a973243d1fbf7b5d1a24bd48e9fc1037c072",
+          "handler_digest": "a38cb94d28499260b10fd095c8f4a973243d1fbf7b5d1a24bd48e9fc1037c072",
+          "launchd_label": "com.carr.session-trace-archive",
+          "trigger_contract_digest": "c21ae692b0c1b87e2dc929d92f1013836aa7ac327d70e49c445599cff0dac7d1",
+          "environment_contract_digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "program_arguments_digest": "3fa879a0980c0bdc1a14978d529dce4254d769879c788e2e2f4c2b982fb45c84",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "launchd_user_session_and_declared_environment",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [
+            "argument:{{REPO}}/.venv/bin/python",
+            "executable:/bin/zsh",
+            "script:bin/run-scheduled.sh",
+            "script:ops/session-trace-archive.py"
+          ],
+          "request_shape": "launchd_trigger_arguments_environment_source_bound",
+          "idempotency_mode": "delegated_entrypoint_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "physical_authority_refs": [
+            "ops.service_environment:session-trace-archive:production"
+          ],
+          "physical_authority_catalog_digests": {
+            "services": "sha256:7511271382227b5d3db2283fdcd66e7e6ca47a536ce6c94fe449f74a5970683c",
+            "legacy_schedule_launchd": "sha256:4c35c823ba16ec7a31fc1afd96f6a2c2e19a59fa7cde0399756db736074c84a8"
+          },
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        }
+      ],
+      "expected_count": 975,
+      "expected_sha256": "08e92cafa04de0c9b6ae6ef666d5ca45332834ebf84a5f888a4b34957478a8e3"
     }
   ],
   "current_source_review": {

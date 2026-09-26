@@ -988,7 +988,7 @@
     {
       "key": "session-trace-archive",
       "name": "Session trace archive",
-      "purpose": "Nightly local archive of Claude Code and Codex session transcripts (*.jsonl) into ~/carr-local/session-trace-archive/, so old sessions the clients prune are not lost. Byte-for-byte copy only; never reads or prints transcript content.",
+      "purpose": "Nightly local archive of CARR-scoped Claude Code and Codex session transcripts (lib/carr_session_scope.py decides scope; nothing else is archived) as gzip .jsonl.gz into ~/carr-local/session-trace-archive/, so old sessions the clients prune are not lost. Streams bytes only; reads no transcript content beyond a Codex session's cwd metadata line.",
       "family": "Local Mac edge",
       "criticality": "medium",
       "owner_actor": "joe",

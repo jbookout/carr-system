@@ -1050,6 +1050,17 @@ if [ "$V5_A03_REVIEW_REGISTRY_APPLIED" = t ] && [ "$ASSURANCE_HEALTH_REGISTRY_AP
   echo "schema-snapshot: V5-A03 review v84 is applied without v83 predecessor" >&2
   exit 1
 fi
+SESSION_TRACE_ARCHIVE_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0723_session_trace_archive_scac_successor.sql')" \
+  2>/dev/null)"
+case "$SESSION_TRACE_ARCHIVE_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read session trace archive v85 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$SESSION_TRACE_ARCHIVE_REGISTRY_APPLIED" = t ] && [ "$V5_A03_REVIEW_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: session trace archive v85 is applied without v84 predecessor" >&2
+  exit 1
+fi
 
 # WR-000117. 0530 is the registry successor half of the atomic (0529,0530)
 # group, so probing the SUCCESSOR and not the domain migration is what says the
@@ -2611,6 +2622,17 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                                                                                             SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v83'"
                                                                                             SCAC_FULL_SET_SEAL_COUNT=83
                                                                                             SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v84_current()"
+                                                                                            if [ "$SESSION_TRACE_ARCHIVE_REGISTRY_APPLIED" = t ]; then
+                                                                                              SCAC_CURRENT_NUMBER=85
+                                                                                              SCAC_VERSION_COUNT=85
+                                                                                              SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v85'")"
+                                                                                              SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v85'")"
+                                                                                              SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v85.generated.js"
+                                                                                              SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v85'"
+                                                                                              SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v84'"
+                                                                                              SCAC_FULL_SET_SEAL_COUNT=84
+                                                                                              SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v85_current()"
+                                                                                            fi
                                                                                           fi
                                                                                         fi
                                                                                       fi
