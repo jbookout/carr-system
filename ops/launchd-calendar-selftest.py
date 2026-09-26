@@ -21,6 +21,7 @@ things that fix depends on:
 from __future__ import annotations
 
 import plistlib
+import re
 import sys
 from pathlib import Path
 
@@ -51,6 +52,7 @@ def plist_text(label: str, schedule_xml: str) -> str:
         '  <key>ProgramArguments</key>\n  <array>\n'
         '    <string>/usr/bin/true</string>\n  </array>\n'
         '  <!-- prose may say StartInterval; launchd never reads a comment -->\n'
+        '  <!-- retired: <key>StartInterval</key><integer>60</integer> -->\n'
         f'{schedule_xml}'
         '  <key>RunAtLoad</key><true/>\n'
         '</dict>\n</plist>\n'
@@ -144,7 +146,8 @@ check("StartInterval named only in a comment is not a finding",
 
 rewritten, changes = lc.rewrite_template(planted)
 check("rewrite converts the planted key and reports it",
-      changes == [(300, None)] and "<key>StartInterval</key>" not in rewritten, changes)
+      changes == [(300, None)]
+      and "<key>StartInterval</key>" not in re.sub(r"<!--.*?-->", "", rewritten, flags=re.S), changes)
 parsed = plistlib.loads(rewritten.encode("utf-8"))
 check("the rewritten template is a valid plist with the 300s calendar and RunAtLoad kept",
       "StartInterval" not in parsed and parsed.get("RunAtLoad") is True
@@ -166,6 +169,17 @@ tampered = rewritten.replace("<integer>55</integer>", "<integer>54</integer>", 1
 check("a hand-edited minute in a rendered array is caught as drift from the converter",
       any("does not match" in p for p in lc.audit_template(tampered)),
       lc.audit_template(tampered))
+
+check("a key-shaped StartInterval inside a comment survives rewrite untouched",
+      "<!-- retired: <key>StartInterval</key><integer>60</integer> -->" in rewritten
+      and rewritten.count("<key>StartCalendarInterval</key>") == 1)
+check("a commented-out StartInterval key alone is not refused",
+      lc.audit_template(plist_text("com.carr.commented", "")) == [])
+doubled = rewritten.replace(
+    "  <key>RunAtLoad</key>",
+    f"  <!-- {lc.MARKER}: 300 | a second, stray marker -->\n  <key>RunAtLoad</key>", 1)
+check("two interval markers in one template are refused",
+      any("markers" in p for p in lc.audit_template(doubled)), lc.audit_template(doubled))
 
 # --------------------------------------------------------------------------
 # 3. The real tree.

@@ -7,16 +7,19 @@ import importlib.util
 import io
 import os
 import plistlib
+import stat
+import subprocess
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 REPO = Path(__file__).resolve().parent.parent
 spec = importlib.util.spec_from_file_location(
     "config_as_code_launchd", REPO / "ops" / "config-as-code.py"
 )
 assert spec and spec.loader
-mod = importlib.util.module_from_spec(spec)
+mod: Any = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
 
@@ -32,6 +35,144 @@ def check(label: str, condition: bool, detail: object = "") -> bool:
     print(f"{'PASS' if condition else 'FAIL'}  {label}"
           + ("" if condition or not detail else f": {detail}"))
     return condition
+
+
+def _fake_launchctl(root: Path, fail_bootstrap_times: int) -> tuple[Path, Path]:
+    """A stub launchctl that records calls and fails its first N bootstraps."""
+    log, counter = root / "launchctl.log", root / "bootstrap.count"
+    fake = root / "launchctl"
+    fake.write_text(
+        "#!/bin/sh\n"
+        f"echo \"$*\" >> '{log}'\n"
+        "if [ \"$1\" = bootstrap ]; then\n"
+        f"  n=$(cat '{counter}' 2>/dev/null || echo 0); n=$((n + 1)); echo $n > '{counter}'\n"
+        f"  [ $n -le {fail_bootstrap_times} ] && exit 5\n"
+        "fi\nexit 0\n", encoding="utf-8")
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    return fake, log
+
+
+def handoff_script_cases() -> list[bool]:
+    """Run the real detached one-shot script against a stub launchctl."""
+    out: list[bool] = []
+    finished = subprocess.Popen(["/usr/bin/true"])
+    finished.wait()
+    dead_pid = str(finished.pid)          # a process group that has already exited
+    for fails, expect_body, expect_log in (
+        (0, "NEW", "loaded the new definition"),
+        (1, "OLD", "restored the previous definition"),
+        (2, "OLD", "RESTORE FAILED, com.carr.fleet-sync is unloaded"),
+    ):
+        with tempfile.TemporaryDirectory(prefix="carr-self-reload-") as tmp:
+            root = Path(tmp)
+            fake, calls_log = _fake_launchctl(root, fails)
+            dest, staged, log = root / "agent.plist", root / "agent.plist.staged", root / "x.log"
+            dest.write_text("OLD", encoding="utf-8")
+            staged.write_text("NEW", encoding="utf-8")
+            rc = subprocess.run(
+                ["/bin/sh", "-c", mod.SELF_RELOAD_SCRIPT, "carr-self-reload", dead_pid,
+                 str(fake), "gui/501", "com.carr.fleet-sync", str(staged), str(dest),
+                 str(log), "5"], check=False, timeout=60).returncode
+            calls = calls_log.read_text().splitlines() if calls_log.exists() else []
+            text = log.read_text() if log.exists() else ""
+            out.append(check(
+                f"self-reload one-shot with {fails} failed bootstrap(s): body {expect_body}, "
+                f"'{expect_log}'",
+                dest.read_text() == expect_body and expect_log in text
+                and (rc == 0) == (fails == 0)
+                and calls[:2] == ["bootout gui/501/com.carr.fleet-sync",
+                                  f"bootstrap gui/501 {dest}"]
+                and not any(c.startswith("kickstart") for c in calls)
+                and (fails < 2 or "launchctl bootstrap gui/501" in text),
+                (rc, dest.read_text(), text, calls),
+            ))
+    return out
+
+
+def check_and_install_cases() -> list[bool]:
+    """Drive the refusal through cmd_check and cmd_install, not only the helpers."""
+    out: list[bool] = []
+    saved = {name: getattr(mod, name) for name in (
+        "REPO", "REPO_HERE", "SETTINGS", "CLAUDE_CONTINUITY_MODE_FILE", "CLAUDE_MCP_CONFIG",
+        "TASKS_SRC", "TASKS_REPO", "TASKS_QUARANTINE", "LAUNCHD_SRC", "LAUNCHD_REPO",
+        "LAUNCHD_ALT_REPO", "HOOKS_REPO", "CODEX_HOOKS_SRC", "CODEX_CONFIG",
+        "PREREQUISITE_CHECK")}
+    real_run = mod.subprocess.run
+    launchctl_calls: list[list[str]] = []
+
+    def stub_run(args, *a, **k):
+        if args and os.path.basename(str(args[0])) == "launchctl":
+            launchctl_calls.append(list(args))
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return real_run(args, *a, **k)
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="carr-cac-refusal-") as tmp:
+            home = Path(tmp)
+            repo = home / "carr-system"
+            launchd = repo / "ops" / "launchd"
+            launchd.mkdir(parents=True)
+            (repo / "ops" / "scheduled-tasks").mkdir(parents=True)
+            (repo / "ops" / "config").mkdir(parents=True, exist_ok=True)
+            for relative in ("ops/config/claude-continuity-hooks.json",
+                             "ops/claude-continuity-hook.py",
+                             "mcp-server/continuity-stdio-proxy.mjs"):
+                target = repo / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes((REPO / relative).read_bytes())
+            (repo / "ops" / "config" / "hooks.json").write_text(
+                '{\n  "PreToolUse": []\n}\n', encoding="utf-8")
+            planted = plistlib.dumps({"Label": "com.carr.planted",
+                                      "ProgramArguments": ["/usr/bin/true"],
+                                      "StartInterval": 300}).decode()
+            good, _ = mod.launchd_calendar.rewrite_template(plistlib.dumps({
+                "Label": "com.carr.good", "ProgramArguments": ["/usr/bin/true"],
+                "StartInterval": 600}).decode())
+            (launchd / "com.carr.planted.plist").write_text(planted, encoding="utf-8")
+            (launchd / "com.carr.good.plist").write_text(good, encoding="utf-8")
+            mod.REPO = mod.REPO_HERE = str(repo)
+            mod.SETTINGS = str(home / ".claude" / "settings.json")
+            mod.CLAUDE_CONTINUITY_MODE_FILE = str(home / ".config/carr/claude-continuity-mode.json")
+            mod.CLAUDE_MCP_CONFIG = str(home / ".claude.json")
+            mod.TASKS_SRC = str(home / ".claude" / "scheduled-tasks")
+            mod.TASKS_REPO = str(repo / "ops" / "scheduled-tasks")
+            mod.TASKS_QUARANTINE = str(home / ".claude" / "scheduled-tasks-quarantine")
+            mod.LAUNCHD_SRC = str(home / "Library" / "LaunchAgents")
+            mod.LAUNCHD_REPO = str(launchd)
+            mod.LAUNCHD_ALT_REPO = {}
+            mod.HOOKS_REPO = str(repo / "ops" / "config" / "hooks.json")
+            mod.CODEX_HOOKS_SRC = str(home / ".codex" / "hooks.json")
+            mod.CODEX_CONFIG = str(home / ".codex" / "config.toml")
+            mod.PREREQUISITE_CHECK = lambda _repo: []
+            mod.subprocess.run = stub_run
+            with contextlib.redirect_stdout(io.StringIO()) as install_out:
+                install_rc = mod.cmd_install(True)
+            agents = Path(mod.LAUNCHD_SRC)
+            out.append(check(
+                "cmd_install refuses the planted StartInterval template, installs the good one, "
+                "and exits nonzero",
+                install_rc != 0 and not (agents / "com.carr.planted.plist").exists()
+                and (agents / "com.carr.good.plist").exists()
+                and "REFUSED  com.carr.planted.plist" in install_out.getvalue()
+                and not any(str(agents / "com.carr.planted.plist") in " ".join(c)
+                            for c in launchctl_calls),
+                (install_rc, install_out.getvalue()[-800:]),
+            ))
+            with contextlib.redirect_stdout(io.StringIO()) as check_out:
+                check_rc = mod.cmd_check()
+            text = check_out.getvalue()
+            out.append(check(
+                "cmd_check reports the planted template as SCHEDULE REFUSED and exits 1",
+                check_rc == 1 and text.startswith("config-as-code: DRIFT")
+                and "launchd template ops/launchd/com.carr.planted.plist (SCHEDULE REFUSED)" in text
+                and "com.carr.good.plist (SCHEDULE REFUSED)" not in text,
+                (check_rc, text[:800]),
+            ))
+    finally:
+        mod.subprocess.run = real_run
+        for name, value in saved.items():
+            setattr(mod, name, value)
+    return out
 
 
 def main() -> int:
@@ -72,17 +213,50 @@ def main() -> int:
 
             fleet_dest.write_text(old_fleet, encoding="utf-8")
             calls.clear()
-            with contextlib.redirect_stdout(io.StringIO()) as changed_out:
-                changed = mod.install_launchd_plist(
-                    fleet_dest.name, str(fleet_dest), desired_fleet, False
-                )
+            spawned: list[tuple[list[str], dict]] = []
+            original_popen = mod.subprocess.Popen
+            original_handoff = mod.SELF_RELOAD_HANDOFF_DIR
+            mod.SELF_RELOAD_HANDOFF_DIR = str(root / "handoff")
+            mod.subprocess.Popen = lambda args, **kw: spawned.append((list(args), kw))
+            try:
+                with contextlib.redirect_stdout(io.StringIO()) as changed_out:
+                    changed = mod.install_launchd_plist(
+                        fleet_dest.name, str(fleet_dest), desired_fleet, False
+                    )
+            finally:
+                mod.subprocess.Popen = original_popen
+            staged = root / "handoff" / f"{fleet_label}.plist.staged"
+            argv = spawned[0][0] if spawned else []
             cases.append(check(
-                "changed active fleet plist stays untouched and fails closed",
-                changed == "failed" and calls == []
+                "changed active fleet plist is left untouched and its reload handed "
+                "to a detached one-shot (no hourly exit 1)",
+                changed == "deferred" and calls == []
                 and fleet_dest.read_text(encoding="utf-8") == old_fleet
-                and "SELF-RELOAD REFUSED" in changed_out.getvalue()
-                and "config-as-code.py install --apply" in changed_out.getvalue(),
-                (changed, calls, changed_out.getvalue()),
+                and staged.read_text(encoding="utf-8") == desired_fleet
+                and len(spawned) == 1 and spawned[0][1].get("start_new_session") is True
+                and argv[4] == str(os.getpgrp()) and argv[7] == fleet_label
+                and argv[8] == str(staged) and argv[9] == str(fleet_dest)
+                and "self-reload deferred" in changed_out.getvalue(),
+                (changed, calls, spawned, changed_out.getvalue()),
+            ))
+
+            def broken_popen(*_a, **_k):
+                raise OSError("synthetic spawn failure")
+            mod.subprocess.Popen = broken_popen
+            try:
+                with contextlib.redirect_stdout(io.StringIO()) as broken_out:
+                    broken = mod.install_launchd_plist(
+                        fleet_dest.name, str(fleet_dest), desired_fleet, False
+                    )
+            finally:
+                mod.subprocess.Popen = original_popen
+                mod.SELF_RELOAD_HANDOFF_DIR = original_handoff
+            cases.append(check(
+                "a hand-off that cannot start fails closed with the external remedy",
+                broken == "failed" and calls == []
+                and fleet_dest.read_text(encoding="utf-8") == old_fleet
+                and "config-as-code.py install --apply" in broken_out.getvalue(),
+                (broken, broken_out.getvalue()),
             ))
 
             other_dest.write_text(desired_other, encoding="utf-8")
@@ -192,6 +366,8 @@ def main() -> int:
             and plistlib.loads(converted.encode())["RunAtLoad"] is True,
             mod.refused_launchd_templates(str(repo)),
         ))
+    cases.extend(handoff_script_cases())
+    cases.extend(check_and_install_cases())
     cases.append(check(
         "no tracked CARR template is refused",
         mod.refused_launchd_templates(str(REPO)) == [],

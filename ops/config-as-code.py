@@ -1691,13 +1691,86 @@ def retire_primary_only_plist(filename, live, apply):
     return "retired"
 
 
+# SELF-RELOAD HAND-OFF (2026-09-26). Hourly fleet-sync runs `install --apply`
+# from inside its own LaunchAgent. When fleet-sync's OWN plist changes (as it
+# does when the calendar conversion lands), reloading it here would kill the
+# wrapper mid-receipt, so this used to refuse and exit 1 -- every hour, on
+# every Mac, until someone ran install by hand. Instead the new body is staged
+# outside LaunchAgents and a detached one-shot (its own session, so launchd's
+# process-group cleanup of the finished job does not take it down) waits for
+# this job's process group to be gone, then boots the old definition out,
+# moves the staged body into place, and bootstraps it. A failed bootstrap puts
+# the previous body back and loads that; if even that fails the log says
+# "RESTORE FAILED" with the manual command. Nothing is kickstarted.
+SELF_RELOAD_HANDOFF_DIR = os.path.join(HOME, ".config", "carr", "launchd-handoff")
+SELF_RELOAD_WAIT_SECONDS = 3600
+SELF_RELOAD_SCRIPT = r"""
+pg="$1"; launchctl="$2"; domain="$3"; label="$4"; staged="$5"; dest="$6"; log="$7"; wait_max="$8"
+exec >>"$log" 2>&1
+waited=0
+while kill -0 "$pg" 2>/dev/null; do
+  waited=$((waited + 1))
+  if [ "$waited" -ge "$wait_max" ]; then
+    echo "self-reload $label: GAVE UP waiting for process group $pg; staged body left at $staged"
+    exit 1
+  fi
+  sleep 1
+done
+cp -p "$dest" "$staged.previous" || { echo "self-reload $label: cannot back up $dest"; exit 1; }
+"$launchctl" bootout "$domain/$label" >/dev/null 2>&1
+mv -f "$staged" "$dest" || {
+  echo "self-reload $label: cannot move the staged body into place"
+  "$launchctl" bootstrap "$domain" "$dest" || echo "self-reload $label: RESTORE FAILED, $label is unloaded; fix by hand: launchctl bootstrap $domain $dest"
+  exit 1
+}
+if "$launchctl" bootstrap "$domain" "$dest"; then
+  echo "self-reload $label: loaded the new definition"
+  exit 0
+fi
+echo "self-reload $label: BOOTSTRAP FAILED; restoring the previous body"
+mv -f "$staged.previous" "$dest"
+if "$launchctl" bootstrap "$domain" "$dest"; then
+  echo "self-reload $label: restored the previous definition"
+else
+  echo "self-reload $label: RESTORE FAILED, $label is unloaded; fix by hand: launchctl bootstrap $domain $dest"
+fi
+exit 1
+"""
+
+
+def hand_off_self_reload(filename, dest, body, label, launchctl="/bin/launchctl"):
+    """Stage ``body`` and start the detached one-shot; ``deferred`` or ``failed``."""
+    try:
+        os.makedirs(SELF_RELOAD_HANDOFF_DIR, exist_ok=True)
+        staged = os.path.join(SELF_RELOAD_HANDOFF_DIR, filename + ".staged")
+        with open(staged, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        log = os.path.join(SELF_RELOAD_HANDOFF_DIR, filename + ".log")
+        subprocess.Popen(
+            ["/bin/sh", "-c", SELF_RELOAD_SCRIPT, "carr-self-reload",
+             str(os.getpgrp()), launchctl, f"gui/{os.getuid()}", label, staged, dest,
+             log, str(SELF_RELOAD_WAIT_SECONDS)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True, close_fds=True)
+    except OSError as exc:
+        print(f"      SELF-RELOAD HAND-OFF FAILED ({filename}: {exc}); destination left unchanged")
+        print("      remedy: run `python3 ops/config-as-code.py install --apply` "
+              "from an external process")
+        return "failed"
+    print(f"      self-reload deferred ({filename}: active installer job {label}; a detached "
+          f"one-shot reloads it after this run exits; log {log})")
+    return "deferred"
+
+
 def install_launchd_plist(filename, dest, body, body_matches):
     """Render and load one plist without letting an active job unload itself.
 
-    Returns ``loaded``, ``kept``, or ``failed``.  A changed active plist cannot
-    be rendered honestly without also reloading it, and reloading it here kills
-    the receipt wrapper.  That case therefore leaves the destination untouched
-    and fails with the exact external-install remedy.
+    Returns ``loaded``, ``kept``, ``deferred`` or ``failed``.  A changed active
+    plist cannot be rendered honestly without also reloading it, and reloading
+    it here kills the receipt wrapper.  That case leaves the destination
+    untouched and hands the reload to a detached one-shot that runs only after
+    this job has exited (hand_off_self_reload); if the hand-off cannot be
+    started it fails with the exact external-install remedy.
     """
     try:
         label = plistlib.loads(body.encode("utf-8")).get("Label", "")
@@ -1710,11 +1783,7 @@ def install_launchd_plist(filename, dest, body, body_matches):
         if body_matches:
             print(f"      kept loaded (active installer job {label}; body unchanged)")
             return "kept"
-        print(f"      SELF-RELOAD REFUSED ({filename}: active installer job {label}; "
-              "destination left unchanged so loaded and installed state cannot diverge)")
-        print("      remedy: run `python3 ops/config-as-code.py install --apply` "
-              "from an external process")
-        return "failed"
+        return hand_off_self_reload(filename, dest, body, label)
 
     if not body_matches:
         with open(dest, "w", encoding="utf-8") as fh:
@@ -2271,6 +2340,9 @@ def launchd_calendar_reinstall_plan(templates_dir, agents_dir):
         if name in PRIMARY_ONLY and not IS_PRIMARY:
             row["why"] = "primary-only job on a secondary (install retires it)"
             continue
+        if name in SECONDARY_ONLY and IS_PRIMARY:
+            row["why"] = "secondary-only job on the primary (install skips it)"
+            continue
         installed = read(dest)
         if installed is None:
             row["why"] = "not installed here (install owns first installs)"
@@ -2296,26 +2368,81 @@ def _launchctl(launchctl, *args):
     return subprocess.run([launchctl, *args], capture_output=True, text=True, check=False)
 
 
-def reinstall_calendar_agent(row, launchctl, domain, kickstart):
-    """bootout, rewrite, bootstrap, verify; restore the previous body on failure."""
+def _atomic_write(path, text):
+    """Write ``text`` to ``path`` by rename, so a failure leaves the old file whole.
+
+    Refuses a read-only destination rather than replacing it: a plist someone
+    made read-only was protected on purpose, and os.replace would silently
+    defeat that. Raises OSError; nothing has been changed when it does."""
+    if os.path.exists(path) and not os.access(path, os.W_OK):
+        raise PermissionError(f"{path} is read-only; left as it is")
+    folder = os.path.dirname(path) or "."
+    fd, staged = tempfile.mkstemp(prefix=".carr-staged-", suffix=".tmp", dir=folder)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        if os.path.exists(path):
+            shutil.copymode(path, staged)
+        os.replace(staged, path)
+    except BaseException:
+        if os.path.exists(staged):
+            os.unlink(staged)
+        raise
+
+
+def _launchctl_detail(result):
+    return (result.stderr or result.stdout or "").strip()[:120]
+
+
+def _restore_calendar_agent(row, launchctl, domain):
+    """Put the previous body back and load it. True only when it is loaded again."""
     dest, label = row["dest"], row["label"]
-    _launchctl(launchctl, "bootout", f"{domain}/{label}")   # fails when not loaded; fine
-    with open(dest, "w", encoding="utf-8") as fh:
-        fh.write(row["body"])
+    try:
+        _atomic_write(dest, row["previous"])
+    except OSError as exc:
+        print(f"      RESTORE FAILED, {label} is unloaded: could not rewrite {dest}: {exc}")
+        print(f"      fix by hand: put the previous body back, then "
+              f"`launchctl bootstrap {domain} {dest}`")
+        return False
+    back = _launchctl(launchctl, "bootstrap", domain, dest)
+    if back.returncode != 0:
+        print(f"      RESTORE FAILED, {label} is unloaded ({_launchctl_detail(back)})")
+        print(f"      fix by hand: `launchctl bootstrap {domain} {dest}`")
+        return False
+    print(f"      restored the previous body; {label} is loaded as it was")
+    return True
+
+
+def reinstall_calendar_agent(row, launchctl, domain, kickstart):
+    """Stage the new body, then bootout, bootstrap and verify; restore on failure.
+
+    The write happens FIRST and atomically: a write that cannot happen (a
+    read-only plist, a full disk) raises before launchd is touched, so the job
+    stays loaded exactly as it was. Only then is the old job booted out."""
+    dest, label = row["dest"], row["label"]
+    target = f"{domain}/{label}"
+    _atomic_write(dest, row["body"])
+    _launchctl(launchctl, "bootout", target)   # fails when not loaded; fine
     booted = _launchctl(launchctl, "bootstrap", domain, dest)
-    if booted.returncode == 0 and _launchctl(launchctl, "print", f"{domain}/{label}").returncode == 0:
-        if kickstart:
-            kicked = _launchctl(launchctl, "kickstart", f"{domain}/{label}")
-            if kicked.returncode != 0:
-                print(f"      kickstart failed: {(kicked.stderr or kicked.stdout).strip()[:120]}")
-                return False
-        return True
-    print(f"      BOOTSTRAP FAILED: {(booted.stderr or booted.stdout).strip()[:120]}"
-          " — restoring the previous body")
-    with open(dest, "w", encoding="utf-8") as fh:
-        fh.write(row["previous"])
-    _launchctl(launchctl, "bootstrap", domain, dest)
-    return False
+    if booted.returncode != 0:
+        print(f"      BOOTSTRAP FAILED: {_launchctl_detail(booted)} — restoring the previous body")
+        _restore_calendar_agent(row, launchctl, domain)
+        return False
+    shown = _launchctl(launchctl, "print", target)
+    if shown.returncode != 0:
+        # launchd accepted the NEW definition; it must be booted out before the
+        # old file goes back, or launchd keeps running what the disk no longer says.
+        print(f"      PRINT FAILED after a successful bootstrap: {_launchctl_detail(shown)}"
+              " — booting the new definition out and restoring the previous body")
+        _launchctl(launchctl, "bootout", target)
+        _restore_calendar_agent(row, launchctl, domain)
+        return False
+    if kickstart:
+        kicked = _launchctl(launchctl, "kickstart", target)
+        if kicked.returncode != 0:
+            print(f"      kickstart failed: {_launchctl_detail(kicked)}")
+            return False
+    return True
 
 
 def _option(argv, flag, default):
@@ -2342,14 +2469,30 @@ def cmd_reinstall_launchd_calendar(argv):
             print(f"  ok    {row['name']}: {row['why']}")
         elif row["action"] == "fail":
             print(f"  FAIL  {row['name']}: {row['why']}")
+    done = 0
     for row in todo:
         print(f"  {'REINSTALL' if apply else 'would reinstall'}  {row['name']}: {row['why']}")
-        if apply and not reinstall_calendar_agent(row, launchctl, domain, kickstart):
+        if not apply:
+            continue
+        # One agent's failure never skips the rest; every one is reported.
+        try:
+            ok = reinstall_calendar_agent(row, launchctl, domain, kickstart)
+        except Exception as exc:  # noqa: BLE001 - reported per job, run continues
+            print(f"      FAILED before launchd was touched: {exc}")
+            ok = False
+        if ok:
+            done += 1
+        else:
             failures.append(row)
     left_alone = sum(1 for r in rows if r["action"] == "skip")
-    verb = "reinstalled" if apply else "to reinstall (dry run; --apply to act)"
-    print(f"reinstall-launchd-calendar: {len(todo)} {verb}, {left_alone} left alone, "
+    if apply:
+        head = f"{done} reinstalled"
+    else:
+        head = f"{len(todo)} to reinstall (dry run; --apply to act)"
+    print(f"reinstall-launchd-calendar: {head}, {left_alone} left alone, "
           f"{len(failures)} failed; kickstart {'on' if kickstart else 'off'}")
+    if failures:
+        print("  FAILED: " + ", ".join(r["name"] for r in failures))
     return 1 if failures else 0
 
 
