@@ -46,6 +46,8 @@ const R = Object.freeze({
   proposed:           "a020000c-0000-4000-8000-000000000000", // S6
   writerTarget:       "a020000d-0000-4000-8000-000000000000", // S1, S8, writer paths
   oneOfTwoInstalled:  "a020000e-0000-4000-8000-000000000000", // probe E, S20
+  oneOfTwoUnverified: "a020000f-0000-4000-8000-000000000000", // N7
+  oneOfTwoChanged:    "a0200010-0000-4000-8000-000000000000", // N8
 });
 
 const EXPECTED_GAPS = Object.freeze({
@@ -57,6 +59,8 @@ const EXPECTED_GAPS = Object.freeze({
   [R.futureDated]: "rule_test_evidence_future_dated",
   [R.changedSinceApproval]: "rule_test_evidence_changed_since_approval",
   [R.oneOfTwoInstalled]: "active_rule_approved_control_not_installed",
+  [R.oneOfTwoUnverified]: "rule_tests_not_passing",
+  [R.oneOfTwoChanged]: "rule_test_evidence_changed_since_approval",
   [R.fallbackAbsent]: "active_rule_fallback_absent",
   [R.fallbackOldVersion]: "active_rule_fallback_absent",
   [R.fallbackOldHash]: "active_rule_fallback_absent",
@@ -100,18 +104,24 @@ async function seedRule(db, ctx, id, spec) {
              ${spec.catalogVerifiedAt ?? verified})`,
     [control]);
   const controls = [control];
-  if (spec.secondControlUninstalled) {
-    // Probe E: the approval names a second control that is not installed.
+  if (spec.second) {
+    // Two approved controls; the first is fully good, the second carries the
+    // one defect the scenario names, so only an "every control" check sees it.
+    // uninstalled: probe E. pointVerifiedNull: installed but unverified (N7).
+    // catalogVerifiedAt: installed and verified, but changed since approval (N8).
     const second = `${control}_b`;
+    const installed = !spec.second.uninstalled;
     controls.push(second);
     await db.query(
       `insert into ops.enforcement_control_catalog
          (control_key, implementation_ref, test_ref, enforcement_class, installed, verified_at)
-       values ($1, 'synthetic/impl', 'synthetic/test', 'deny_gate', false, null)`, [second]);
+       values ($1, 'synthetic/impl', 'synthetic/test', 'deny_gate', $2,
+               ${installed ? (spec.second.catalogVerifiedAt ?? verified) : "null"})`, [second, installed]);
     await db.query(
       `insert into ops.rule_enforcement_point
          (rule_id, control_key, implementation_ref, test_ref, enforcement_class, installed, verified_at)
-       values ($1, $2, 'synthetic/impl', 'synthetic/test', 'deny_gate', false, null)`, [id, second]);
+       values ($1, $2, 'synthetic/impl', 'synthetic/test', 'deny_gate', $3,
+               ${installed && !spec.second.pointVerifiedNull ? verified : "null"})`, [id, second, installed]);
     await db.query(
       `insert into ops.rule_control_binding (rule_id, control_key, statement_hash, binding_contract)
        values ($1, $2, $3, '{}'::jsonb)`, [id, second, sha(statement)]);
@@ -263,7 +273,10 @@ test("V5-A02 coverage and fallback writer on real PostgreSQL", async t => {
     // catalog control now carries a different one.
     await seedRule(db, ctx, R.changedSinceApproval, {
       verifiedAt: "now() - interval '3 days'", catalogVerifiedAt: "now() - interval '1 hour'" });
-    await seedRule(db, ctx, R.oneOfTwoInstalled, { secondControlUninstalled: true });
+    await seedRule(db, ctx, R.oneOfTwoInstalled, { second: { uninstalled: true } });
+    await seedRule(db, ctx, R.oneOfTwoUnverified, { second: { pointVerifiedNull: true } });
+    await seedRule(db, ctx, R.oneOfTwoChanged, {
+      second: { catalogVerifiedAt: "now() - interval '10 minutes'" } });
     await seedRule(db, ctx, R.fallbackAbsent, { fallback: false });
     await seedRule(db, ctx, R.fallbackOldVersion, { version: 2, fallbackVersion: 1 });
     await seedRule(db, ctx, R.fallbackOldHash, {
@@ -272,14 +285,14 @@ test("V5-A02 coverage and fallback writer on real PostgreSQL", async t => {
     await seedRule(db, ctx, R.writerTarget, { fallback: false });
     await db.query("commit");
 
-    await t.test("every leg of the guard reports its exact named gap (S2 S3 S4 S5 S6 S9 S10 S20, rulings 5a, corrections 1-2)", async () => {
+    await t.test("every leg of the guard reports its exact named gap (S2 S3 S4 S5 S6 S9 S10 S20 N7 N8, rulings 5a, corrections 1-2)", async () => {
       const record = await coverage(db);
       assert.equal(record.schema_version, "doctorcre-v5-a02-rule-enforcement-coverage.v2");
       assert.deepEqual(gapsByRule(record), EXPECTED_GAPS);
       // S6: the proposed rule is never counted, covered or not.
-      assert.equal(record.active_rule_count, 13);
+      assert.equal(record.active_rule_count, 15);
       assert.equal(record.covered_rule_count, 1);
-      assert.equal(record.gap_count, 12);
+      assert.equal(record.gap_count, 14);
       assert.equal(record.coverage_state, "gaps");
       assert.equal(record.coverage_complete, false);
       for (const gap of record.gaps) assert.ok(gap.detail.trim().length > 0);
@@ -291,7 +304,7 @@ test("V5-A02 coverage and fallback writer on real PostgreSQL", async t => {
         const read = await readRuleEnforcementCoverage(reader);
         assert.equal(read.status, "available", JSON.stringify(read));
         assert.equal(read.coverage_state, "gaps");
-        assert.equal(read.gap_count, 12);
+        assert.equal(read.gap_count, 14);
         assert.deepEqual(Object.fromEntries(read.gaps.map(g => [g.rule_id, g.reason_id])), EXPECTED_GAPS);
       } finally {
         await reader.end();
