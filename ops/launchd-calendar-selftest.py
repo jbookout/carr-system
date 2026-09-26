@@ -123,7 +123,7 @@ check("5h does not divide the day; rounds to 4h with a note",
       len(entries) == 6 and note is not None, (entries, note))
 for bad in (0, -60, 1.5, "60", True):
     try:
-        lc.calendar_for_interval(bad, "com.carr.example")
+        lc.calendar_for_interval(bad, "com.carr.example")  # type: ignore[arg-type]
         check(f"{bad!r} is refused", False)
     except ValueError:
         check(f"{bad!r} is refused", True)

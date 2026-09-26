@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Hermetic proof for bin/reinstall-launchd-calendar.py.
+"""Hermetic proof for `ops/config-as-code.py reinstall-launchd-calendar`.
 
-It runs the real script against a throwaway templates directory, a throwaway
+It runs the real command against a throwaway templates directory, a throwaway
 LaunchAgents directory and a stub launchctl that only records its arguments,
 so nothing here can reach the machine's own agents. What it proves:
 
@@ -12,7 +12,7 @@ so nothing here can reach the machine's own agents. What it proves:
     and one whose template is not a converted interval are all left alone;
   * nothing is kickstarted unless --kickstart is given;
   * a failed bootstrap restores the previous body and exits 1;
-  * the label of the job running the script is refused, not reloaded.
+  * the label of the job running the command is refused, not reloaded.
 """
 from __future__ import annotations
 
@@ -26,14 +26,14 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-SCRIPT = REPO / "bin" / "reinstall-launchd-calendar.py"
+SCRIPT = REPO / "ops" / "config-as-code.py"
 sys.path.insert(0, str(REPO))
 from lib import launchd_calendar  # noqa: E402
 
 spec = importlib.util.spec_from_file_location("cac_for_reinstall_test",
                                               REPO / "ops" / "config-as-code.py")
+assert spec and spec.loader
 cac = importlib.util.module_from_spec(spec)
-assert spec.loader
 spec.loader.exec_module(cac)
 
 RESULTS: list[bool] = []
@@ -83,7 +83,7 @@ def run(templates, agents, fake, *extra, env_extra=None):
     env = {k: v for k, v in os.environ.items() if k != cac.ACTIVE_LAUNCHD_LABEL_ENV}
     env.update(env_extra or {})
     return subprocess.run(
-        [sys.executable, str(SCRIPT), "--templates", str(templates),
+        [sys.executable, str(SCRIPT), "reinstall-launchd-calendar", "--templates", str(templates),
          "--launch-agents", str(agents), "--launchctl", str(fake), *extra],
         capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL, timeout=60)
 
@@ -154,7 +154,7 @@ with tempfile.TemporaryDirectory(prefix="carr-reinstall-cal-") as tmp:
     before = snapshot(agents)
     self_run = run(templates, agents, fake, "--apply",
                    env_extra={cac.ACTIVE_LAUNCHD_LABEL_ENV: "com.carr.fixture-a"})
-    check("the job running the script is refused, not reloaded",
+    check("the job running the command is refused, not reloaded",
           self_run.returncode == 1 and snapshot(agents) == before and calls(log) == [],
           (self_run.stdout, calls(log)))
 
