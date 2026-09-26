@@ -72044,6 +72044,37 @@
       ],
       "expected_count": 983,
       "expected_sha256": "b86eb0593414687507b0d02b65267c3a5c4630c1773dcde78d5f4f5105db94d6"
+    },
+    {
+      "version": "v89",
+      "remove": [],
+      "upsert": [
+        {
+          "ingress_key": "external-admin:tools/provision-engineering-controller.py",
+          "ingress_kind": "external_admin",
+          "operation": "tools/provision-engineering-controller.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "tools/provision-engineering-controller.py",
+          "schema_digest": "3d10ddec5a4a7083ffe01a08acaa99fa2b1bff9f98f2aad48493cda351543eee",
+          "handler_digest": "3d10ddec5a4a7083ffe01a08acaa99fa2b1bff9f98f2aad48493cda351543eee",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        }
+      ],
+      "expected_count": 984,
+      "expected_sha256": "20b32f68fc05092b520b70061032b51181db9740025ce420c945124e7e6b6cf3"
     }
   ],
   "current_source_review": {
