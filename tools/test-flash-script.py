@@ -307,6 +307,15 @@ def test_script_cannot_read_homebrew_state():
     assert "listed" not in out, out
 
 
+@sandboxed
+def test_script_cannot_read_the_ssh_config_by_either_name():  # /etc is a link to /private/etc on macOS
+    probe = ("import os\nfor d in ('/etc/ssh', '/private/etc/ssh'):\n"
+             "    if not os.path.isdir(d):\n        print(d, 'absent'); continue\n    try:\n"
+             "        os.listdir(d); print(d, 'listed')\n    except OSError:\n        print(d, 'refused')")
+    out, _ = run(probe)
+    assert "listed" not in out, out
+
+
 def test_no_sandbox_means_refusal_not_an_unsandboxed_run():
     saved = fs.SANDBOX_EXEC
     fs.SANDBOX_EXEC = "/nonexistent/sandbox-exec"
