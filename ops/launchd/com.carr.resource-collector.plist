@@ -16,12 +16,12 @@
     override. See tools/resource-collector.py's own header for why.
 
     DEFINITION-ONLY, deliberately. This ships with no trigger key
-    (StartInterval/RunAtLoad/etc): ops/scac-mutation-inventory.mjs's launchd
+    (StartCalendarInterval/RunAtLoad/etc): ops/scac-mutation-inventory.mjs's launchd
     inventory (isDefinitionOnlyLaunchd) requires a registered
     ops/config/services.json entry for any launchd row that WOULD fire if
     loaded, and this change does not register one — registering the
     recurring cadence and its ops.service mapping is a separate, later
-    decision, not this slice's to make. Adding StartInterval here without
+    decision, not this slice's to make. Adding a schedule here without
     that mapping would fail the live inventory build.
   -->
   <key>Label</key><string>com.carr.resource-collector</string>

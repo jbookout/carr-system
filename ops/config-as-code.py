@@ -62,6 +62,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lib.machine_prerequisites import machine_prerequisites, prerequisite_failure_report
 from lib import claude_continuity_config as continuity_config
 from lib import machine_role
+from lib import launchd_calendar
 
 HOME = os.path.expanduser("~")
 # THE CHECKOUT THIS FILE SITS IN — the source of the tracked copies to compare.
@@ -1454,6 +1455,39 @@ def definition_only_installed_plists():
     return [f for f in carr_plists() if f in DEFINITION_ONLY]
 
 
+# STARTINTERVAL IS REFUSED IN EVERY CARR LAUNCHAGENT TEMPLATE (2026-09-26).
+# On the Mac Studio, macOS 27.0, launchd never fires an agent scheduled with
+# StartInterval: `launchctl print` shows `runs = 0` and `pended nondemand spawn
+# = speculative|interval`, RunAtLoad does not fire either, and only a manual
+# kickstart runs it. StartCalendarInterval agents on the same machine fire on
+# time. Fourteen CARR jobs were silently dead there while this check reported
+# "repo matches machine", because a dead schedule installed from the repo's own
+# bytes is not drift. So the template itself is judged: a live StartInterval is
+# refused (check reports it, install will not render it), and a converted
+# template must still hold exactly what lib/launchd_calendar.py renders for the
+# interval its marker names. Convert with
+# `python3 -m lib.launchd_calendar rewrite <template>`.
+def refused_launchd_templates(repo=None):
+    """(repo-relative path, problem) for every CARR template the converter refuses."""
+    root = repo or REPO
+    out = []
+    for path in launchd_calendar.carr_templates(root):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            out.append((os.path.relpath(path, root), f"unreadable: {exc}"))
+            continue
+        for problem in launchd_calendar.audit_template(text):
+            out.append((os.path.relpath(path, root), problem))
+    return out
+
+
+def launchd_template_refusal(source_text):
+    """The first reason install must not render this template, or None."""
+    problems = launchd_calendar.audit_template(source_text or "")
+    return problems[0] if problems else None
+
+
 def cmd_check():
     # THE OBSERVATION TRAILS THE VERDICT. _cmd_check returns this command's
     # whole judgement; the core.hooksPath line is appended after it because it
@@ -1526,7 +1560,13 @@ def _cmd_check():
          f"installed in {LAUNCHD_SRC}; {DEFINITION_ONLY[name]}")
         for name in definition_only_installed_plists()
     ]
-    drift = missing + untracked + different + disallowed
+    # A template launchd would load and then never fire. Reported whatever the
+    # machine holds, because the machine matching it is exactly the failure.
+    refused = [
+        (f"launchd template {rel} (SCHEDULE REFUSED)", problem)
+        for rel, problem in refused_launchd_templates()
+    ]
+    drift = missing + untracked + different + disallowed + refused
     if not drift and not unversioned:
         prerequisite_report = prerequisite_failure_report(PREREQUISITE_CHECK(REPO))
         if prerequisite_report:
@@ -1554,7 +1594,7 @@ def _cmd_check():
     # intentionally omitted from normal pairs() on a secondary.  Otherwise
     # "16 of 4" could claim to have checked only four items while reporting
     # sixteen violations, which is operationally misleading.
-    checked_items = len(configured_pairs) + len(disallowed)
+    checked_items = len(configured_pairs) + len(disallowed) + len(refused)
     headline = f"config-as-code: DRIFT — {len(drift)} of {checked_items} items"
     if missing:
         headline += f" — {len(missing)} MISSING FROM MACHINE: " + ", ".join(
@@ -1574,6 +1614,11 @@ def _cmd_check():
         print("\n  A secondary machine must not run CARR's primary-only scheduled-task "
               "catalogue. `install --apply` can quarantine an exact tracked render; "
               "a modified tracked task needs review and is never overwritten.")
+    if refused:
+        print("\n  A REFUSED template would load and never fire on macOS 27. Convert it in\n"
+              "  the repo, then re-render the installed agents:\n"
+              "      python3 -m lib.launchd_calendar rewrite <template>\n"
+              "      bin/reinstall-launchd-calendar.py --apply")
     # Reported even when settings drift is also present: the two have different
     # remedies (a pull versus a commit), so folding them together would hide one.
     if unversioned:
@@ -1964,6 +2009,14 @@ def cmd_install(apply):
         if source is None:
             print(f"  ERROR  cannot render {f} because its tracked source is missing")
             return 1
+        refusal = launchd_template_refusal(source)
+        if refusal:
+            # Never install a schedule launchd will load and then never fire:
+            # the job would look installed and be dead (see the block above
+            # refused_launchd_templates). The installed copy is left as it is.
+            print(f"  REFUSED  {f}: {refusal}")
+            launchd_activation_failures.append(f)
+            continue
         body = concrete(source)
         body_matches = launchd_texts_match(read(dest), source)
         if body_matches and not apply:

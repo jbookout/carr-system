@@ -157,6 +157,47 @@ def main() -> int:
         else:
             os.environ[mod.ACTIVE_LAUNCHD_LABEL_ENV] = original_active
 
+    # STARTINTERVAL IS REFUSED (macOS 27 never fires it). A planted template in
+    # a throwaway repo is reported by check and refused by install's gate, a
+    # converted one is not, and the real tree carries no refusal at all.
+    with tempfile.TemporaryDirectory(prefix="carr-launchd-refuse-") as tmp:
+        repo = Path(tmp)
+        (repo / "ops" / "launchd").mkdir(parents=True)
+        planted = plistlib.dumps({
+            "Label": "com.carr.planted",
+            "ProgramArguments": ["/usr/bin/true"],
+            "StartInterval": 300,
+            "RunAtLoad": True,
+        }).decode("utf-8")
+        (repo / "ops" / "launchd" / "com.carr.planted.plist").write_text(
+            planted, encoding="utf-8")
+        found = mod.refused_launchd_templates(str(repo))
+        cases.append(check(
+            "check reports a planted StartInterval template as refused",
+            len(found) == 1 and found[0][0] == "ops/launchd/com.carr.planted.plist"
+            and "StartInterval" in found[0][1],
+            found,
+        ))
+        cases.append(check(
+            "install refuses to render a planted StartInterval template",
+            bool(mod.launchd_template_refusal(planted)),
+        ))
+        converted, _ = mod.launchd_calendar.rewrite_template(planted)
+        (repo / "ops" / "launchd" / "com.carr.planted.plist").write_text(
+            converted, encoding="utf-8")
+        cases.append(check(
+            "the converted template is accepted by both",
+            mod.refused_launchd_templates(str(repo)) == []
+            and mod.launchd_template_refusal(converted) is None
+            and plistlib.loads(converted.encode())["RunAtLoad"] is True,
+            mod.refused_launchd_templates(str(repo)),
+        ))
+    cases.append(check(
+        "no tracked CARR template is refused",
+        mod.refused_launchd_templates(str(REPO)) == [],
+        mod.refused_launchd_templates(str(REPO)),
+    ))
+
     print(f"config-as-code-launchd-selftest: {sum(cases)}/{len(cases)} passed")
     return 0 if all(cases) else 1
 
