@@ -2085,8 +2085,11 @@ class SchemaSnapshotGhRunner(FakeRunner):
     raises."""
 
     def __init__(self, open_prs: dict[int, str], new_pr: int, *, close_rc: dict | None = None,
-                 close_raises: set | None = None, list_rc: int = 0):
+                 close_raises: set | None = None, list_rc: int = 0, forks: set | None = None,
+                 pr_create_out: str | None = None):
         super().__init__()
+        self.forks = forks or set()          # PR numbers whose head lives in a fork
+        self.pr_create_out = pr_create_out   # override what `gh pr create` prints
         self.open_prs, self.new_pr = dict(open_prs), new_pr
         self.close_rc, self.close_raises = close_rc or {}, close_raises or set()
         self.list_rc = list_rc
@@ -2095,7 +2098,9 @@ class SchemaSnapshotGhRunner(FakeRunner):
     def run(self, argv, *, cwd, log, env, timeout=3600):
         if argv[:3] == ["gh", "pr", "list"]:
             self.calls.append(("gh-pr-list", list(argv)))
-            rows = [{"number": n, "headRefName": h} for n, h in self.open_prs.items()]
+            assert "isCrossRepository" in argv[argv.index("--json") + 1], "fork flag not requested"
+            rows = [{"number": n, "headRefName": h, "isCrossRepository": n in self.forks}
+                    for n, h in self.open_prs.items()]
             return rp.Result(self.list_rc, json.dumps(rows) if self.list_rc == 0 else "boom")
         if argv[:3] == ["gh", "pr", "close"]:
             self.calls.append(("gh-pr-close", list(argv)))
@@ -2110,6 +2115,8 @@ class SchemaSnapshotGhRunner(FakeRunner):
         res = super().run(argv, cwd=cwd, log=log, env=env, timeout=timeout)
         if log.stem.endswith("schema-pr") and res.rc == 0:
             self.open_prs[self.new_pr] = argv[argv.index("--head") + 1]
+            if self.pr_create_out is not None:
+                return rp.Result(0, self.pr_create_out)
             return rp.Result(0, f"https://example.invalid/o/r/pull/{self.new_pr}\n")
         return res
 
@@ -2173,6 +2180,55 @@ class SchemaSnapshotSupersede(Base):
         pipe, _ = self._followup(runner)
         self.assertEqual(pipe.schema_superseded_closed, [])
         self.assertNotIn("gh-pr-close", runner.names())
+
+    def test_a_fork_pr_with_the_snapshot_branch_name_stays_open(self):
+        # The repo is public: a fork may name its head release/schema-snapshot-*.
+        runner = SchemaSnapshotGhRunner({**self.OLDER, 130: "release/schema-snapshot-99999999"}, self.NEW,
+                                        forks={130})
+        pipe, _ = self._followup(runner)
+        self.assertEqual(pipe.schema_superseded_closed, [101, 108])
+        self.assertIn(130, runner.open_prs)
+        self.assertNotIn(130, {int(a[3]) for n, a in runner.calls if n == "gh-pr-close"})
+
+    def test_unreadable_pr_create_output_closes_nothing(self):
+        for out in ("", "created, but no URL here\n", "https://example.invalid/o/r/pull/abc\n"):
+            with self.subTest(out=out):
+                runner = SchemaSnapshotGhRunner(self.OLDER, self.NEW, pr_create_out=out)
+                pipe = self.fx.pipeline(runner)
+                wt = self.fx.tmp / f"release-wt-{abs(hash(out))}"
+                (wt / "db").mkdir(parents=True)
+                (wt / "db" / "schema.sql").write_text("-- snapshot\n")
+                fwt = pipe.store.root / "worktrees" / f"schema-{self.SHA[:12]}"
+                (fwt / "db").mkdir(parents=True, exist_ok=True)
+                pipe.schema_followup(wt, self.SHA)   # must not raise
+                self.assertEqual(pipe.schema_superseded_closed, [])
+                self.assertNotIn("gh-pr-close", runner.names())
+                self.assertEqual(set(runner.open_prs), set(self.OLDER) | {self.NEW})
+
+    def _direct(self, open_prs):
+        """close_superseded_schema_prs on its own, with a fixed PR list, so a
+        row can share ONE identity field with the new PR but not the other."""
+        runner = SchemaSnapshotGhRunner(open_prs, self.NEW)
+        pipe = self.fx.pipeline(runner)
+        new_branch = f"{rp.SCHEMA_SNAPSHOT_PREFIX}{self.SHA[:8]}"
+        closed = pipe.close_superseded_schema_prs(self.fx.tmp, f"https://example.invalid/o/r/pull/{self.NEW}",
+                                                  new_branch)
+        return runner, closed, new_branch
+
+    def test_the_branch_exclusion_alone_protects_the_new_pr(self):
+        # Kills the mutant that drops only `headRefName != new_branch`: a row
+        # on the new branch under a DIFFERENT number must stay open.
+        new_branch = f"{rp.SCHEMA_SNAPSHOT_PREFIX}{self.SHA[:8]}"
+        runner, closed, _ = self._direct({**self.OLDER, self.NEW + 1: new_branch})
+        self.assertEqual(closed, [101, 108])
+        self.assertIn(self.NEW + 1, runner.open_prs)
+
+    def test_the_number_exclusion_alone_protects_the_new_pr(self):
+        # Kills the mutant that drops only `number != new_num`: the new PR's
+        # NUMBER under a different snapshot branch name must stay open.
+        runner, closed, _ = self._direct({**self.OLDER, self.NEW: "release/schema-snapshot-deadbeef"})
+        self.assertEqual(closed, [101, 108])
+        self.assertIn(self.NEW, runner.open_prs)
 
     def test_a_failed_pr_create_closes_nothing(self):
         runner = SchemaSnapshotGhRunner(self.OLDER, self.NEW)

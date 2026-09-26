@@ -1705,14 +1705,19 @@ class Pipeline:
         new_num = int(m.group(1))
         try:
             listed = self.runner.run(["gh", "pr", "list", "--state", "open", "--limit", "200",
-                                      "--json", "number,headRefName"], cwd=cwd, log=log, env=self.env,
-                                     timeout=300)
+                                      "--json", "number,headRefName,isCrossRepository"], cwd=cwd, log=log,
+                                     env=self.env, timeout=300)
             if listed.rc != 0:
                 self.out(f"  -> schema-supersede: gh pr list exited {listed.rc}; nothing closed (log {log})")
                 return closed
             rows = json.loads(listed.out or "[]")
+            # The repo is public: a fork can open a PR whose head branch is
+            # also named release/schema-snapshot-*. Only a same-repository
+            # PR (isCrossRepository explicitly false) is ever closed; a
+            # missing or true value is left alone.
             stale = sorted(int(r["number"]) for r in rows
                            if isinstance(r, dict)
+                           and r.get("isCrossRepository") is False
                            and str(r.get("headRefName", "")).startswith(SCHEMA_SNAPSHOT_PREFIX)
                            and r.get("headRefName") != new_branch and int(r.get("number", 0)) != new_num)
         except Exception as exc:  # noqa: BLE001 — a supersede failure is logged, never raised
