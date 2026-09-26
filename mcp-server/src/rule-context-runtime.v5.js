@@ -8,10 +8,22 @@
 // candidates, and the consequential-action gate are all server-derived.
 
 import {
+  V5_F05_AUDIENCES,
+  V5_F05_ENVIRONMENTS,
+  V5_F05_FACT_DIMENSIONS,
+  V5_F05_GUARDS,
+  V5_F05_LIFECYCLE_TRANSITIONS,
+  V5_F05_POLICY_VERSION,
+  V5_F05_RISK_TIERS,
+  V5_F05_ACTOR_CLASSES,
+  V5_F05_UNIVERSE_SCHEMA_VERSION,
+  V5_F05_UNKNOWN_FACT,
   compileRuleUniverse,
   deriveRuleApplicability,
+  ruleUniversePreimage,
   verifyCoverageReceipt,
 } from "./rule-applicability.v5.js";
+import { digest } from "./artifact-trust.js";
 import {
   ORGANIZATION_TENANT_ID,
   authorizationClassForActor,
@@ -146,6 +158,163 @@ function actorScope(actor) {
   return { actorClass, sponsor: scope.status === "personal" ? scope.sponsor : null };
 }
 
+// ---------------------------------------------------------------------------
+// Zero projected rules.
+//
+// Until Joe binds the first typed contract, the census projects an EMPTY
+// policy while the store still holds active rules. The kernel refuses to
+// compile an empty universe (policy.rules min 1) and that refusal is right for
+// a universe that claims to be a rule set; it is not relaxed here. Instead the
+// runtime answers the question the kernel cannot be asked: no rule is typed,
+// so nothing can be classified, every active rule is named as missing, and the
+// consequential write is blocked. The receipt is digest-bound with the
+// kernel's own convention (sha256 over the receipt minus receipt_digest and
+// effects), so verifyCoverageReceipt checks it unchanged.
+//
+// ZERO RULES IS NEVER COMPLETE. Not even when the census also counts zero
+// active rules: an empty projection is the absence of evidence, and the
+// completeness and the gate below are constants, not derived from the census.
+// ---------------------------------------------------------------------------
+
+export const V5_F05_EMPTY_PROJECTION_COVERAGE_SCHEMA_VERSION =
+  "doctorcre-v5-f05-empty-projection-coverage.v1";
+const EMPTY_PROJECTION_COMPLETENESS = PARTIAL;
+const EMPTY_PROJECTION_COVERAGE_COMPLETE = false;
+const EMPTY_PROJECTION_WRITE_PERMITTED = false;
+
+const G = V5_F05_GUARDS;
+const UNIVERSE_KEYS = Object.freeze([
+  "schema_version", "universe_version", "tenant", "completeness",
+  "declared_actions", "declared_resource_classes", "rules",
+]);
+const CLOSED_FACT_VALUES = Object.freeze({
+  actor_class: V5_F05_ACTOR_CLASSES,
+  audience: V5_F05_AUDIENCES,
+  environment: V5_F05_ENVIRONMENTS,
+  lifecycle_transition: V5_F05_LIFECYCLE_TRANSITIONS,
+  risk_tier: V5_F05_RISK_TIERS,
+});
+
+function readDeclaredList(raw, path) {
+  G.assertArray(raw, path, { min: 1, max: 256 });
+  const seen = new Set();
+  return raw.map((value, index) => {
+    const item = G.assertExternalIdent(value, `${path}[${index}]`, { maxLength: 128 });
+    if (seen.has(item)) G.fail("duplicate_declared_value", `${path} repeats "${item}"`, { path, value: item });
+    seen.add(item);
+    return item;
+  }).sort();
+}
+
+// The same header checks compileRuleUniverse runs, minus the rule list that is
+// empty by definition here. The store's own completeness claim is read for
+// vocabulary only and never trusted.
+function readEmptyProjectedPolicy(policy) {
+  G.assertObject(policy, "policy");
+  G.assertClosedKeys(policy, UNIVERSE_KEYS, "policy");
+  G.assertRequiredKeys(policy, UNIVERSE_KEYS, "policy");
+  if (policy.schema_version !== V5_F05_UNIVERSE_SCHEMA_VERSION) {
+    G.fail("unknown_schema_version", `policy.schema_version must be "${V5_F05_UNIVERSE_SCHEMA_VERSION}"`,
+      { expected: V5_F05_UNIVERSE_SCHEMA_VERSION });
+  }
+  G.assertTenant(policy.tenant, "policy.tenant");
+  G.assertSafeInteger(policy.universe_version, "policy.universe_version", { min: 1 });
+  G.assertEnum(policy.completeness, [COMPLETE, PARTIAL], "policy.completeness", "unknown_completeness");
+  G.assertArray(policy.rules, "policy.rules", { min: 0, max: 0 });
+  return {
+    universe_version: policy.universe_version,
+    declared_actions: readDeclaredList(policy.declared_actions, "policy.declared_actions"),
+    declared_resource_classes: readDeclaredList(policy.declared_resource_classes,
+      "policy.declared_resource_classes"),
+  };
+}
+
+// Mirrors the kernel's fact reading: closed dimensions, registered vocabulary,
+// and an action or resource class outside the declared vocabulary is UNKNOWN,
+// never a mismatch.
+function readEmptyProjectionFacts(raw, declared) {
+  G.assertObject(raw, "request.facts");
+  G.assertClosedKeys(raw, V5_F05_FACT_DIMENSIONS, "request.facts");
+  const known = {};
+  const unknown = [];
+  for (const dimension of V5_F05_FACT_DIMENSIONS) {
+    const path = `request.facts.${dimension}`;
+    const value = raw[dimension];
+    if (value === undefined || value === null) {
+      unknown.push({ dimension, reason_id: "fact_absent" });
+      continue;
+    }
+    G.assertSafeText(value, path, { maxLength: 128 });
+    if (value === V5_F05_UNKNOWN_FACT) {
+      unknown.push({ dimension, reason_id: "fact_declared_unknown" });
+      continue;
+    }
+    if (CLOSED_FACT_VALUES[dimension] !== undefined) {
+      G.assertEnum(value, CLOSED_FACT_VALUES[dimension], path, `unknown_${dimension}`);
+      known[dimension] = value;
+      continue;
+    }
+    G.assertExternalIdent(value, path, { maxLength: 128 });
+    if (!declared[dimension].includes(value)) {
+      unknown.push({ dimension, reason_id: "fact_outside_declared_vocabulary", value });
+      continue;
+    }
+    known[dimension] = value;
+  }
+  return { known, unknown: unknown.sort((a, b) => (a.dimension < b.dimension ? -1 : 1)) };
+}
+
+function emptyProjectionCoverage(snapshot, facts) {
+  const header = readEmptyProjectedPolicy(snapshot.policy);
+  G.assertInstant(snapshot.observed_at, "snapshot.observed_at");
+  const { known, unknown } = readEmptyProjectionFacts(facts, {
+    action: header.declared_actions, resource_class: header.declared_resource_classes,
+  });
+  const universe_digest = digest(ruleUniversePreimage({
+    universe_version: header.universe_version,
+    tenant: ORGANIZATION_TENANT_ID,
+    completeness: EMPTY_PROJECTION_COMPLETENESS,
+    declared_actions: header.declared_actions,
+    declared_resource_classes: header.declared_resource_classes,
+    removal_order: [],
+    rules: [],
+  }));
+  const blocking_reasons = ["universe_coverage_unknown"];
+  if (unknown.length > 0) blocking_reasons.push("typed_facts_unknown");
+  blocking_reasons.push("no_rule_contract_projected");
+  const receipt = {
+    schema_version: V5_F05_EMPTY_PROJECTION_COVERAGE_SCHEMA_VERSION,
+    policy_version: V5_F05_POLICY_VERSION,
+    tenant: ORGANIZATION_TENANT_ID,
+    universe_version: header.universe_version,
+    universe_digest,
+    universe_completeness: EMPTY_PROJECTION_COMPLETENESS,
+    now: snapshot.observed_at,
+    decision: "allow",
+    reason_id: "coverage_incomplete_read_only",
+    facts: { ...known },
+    unknown_facts: unknown,
+    // No rule is typed, so none can be classified: every bucket is empty and
+    // every active rule the census counted is named here instead.
+    universe_rule_ids: [],
+    active_rule_count: snapshot.active_rule_count,
+    projected_rule_count: snapshot.projected_rule_count,
+    missing_rule_ids: [...snapshot.missing_rule_ids],
+    effective: [], possibly_binding: [], not_applicable: [], retired: [],
+    superseded: [], overridden: [], suppressed_by_exception: [], pending_relations: [],
+    skipped_relations: [], binding_conflicts: [], delivery: [], delivery_refusals: [],
+    semantic_reinforcements: [], semantic_additions: [],
+    semantic_may_remove_controls: false,
+    model_resolves_conflicts: false,
+    coverage_complete: EMPTY_PROJECTION_COVERAGE_COMPLETE,
+    consequential_action_permitted: EMPTY_PROJECTION_WRITE_PERMITTED,
+    read_only_exploration_permitted: true,
+    write_gate_field: "consequential_action_permitted",
+    blocking_reasons,
+  };
+  return G.deepFreeze({ ...receipt, receipt_digest: digest(receipt), effects: V5_NO_EFFECTS });
+}
+
 export async function readActionContext(client, actor, request) {
   assertNoRuntimeAuthorityInjection(request);
   const scope = actorScope(actor);
@@ -154,6 +323,12 @@ export async function readActionContext(client, actor, request) {
     [request.facts.action, request.facts.resource_class],
   );
   const snapshot = readSnapshot(response.rows[0]?.result);
+  if (snapshot.projected_rule_count === 0) {
+    const coverage = emptyProjectionCoverage(snapshot,
+      { ...request.facts, actor_class: scope.actorClass });
+    verifyCoverageReceipt(coverage);
+    return runtimeResult(snapshot, scope, coverage.universe_digest, coverage);
+  }
   const censusComplete = snapshot.active_rule_count === snapshot.projected_rule_count &&
     snapshot.missing_rule_ids.length === 0;
   const completeness = censusComplete
@@ -168,10 +343,14 @@ export async function readActionContext(client, actor, request) {
     semantic_candidates: [],
   });
   verifyCoverageReceipt(coverage);
+  return runtimeResult(snapshot, scope, universe.universe_digest, coverage);
+}
+
+function runtimeResult(snapshot, scope, universeDigest, coverage) {
   return Object.freeze({
     schema_version: V5_F05_RUNTIME_SCHEMA_VERSION,
     observed_at: snapshot.observed_at,
-    universe_digest: universe.universe_digest,
+    universe_digest: universeDigest,
     coverage_receipt: coverage,
     consequential_action_permitted: coverage.consequential_action_permitted,
     source: Object.freeze({
