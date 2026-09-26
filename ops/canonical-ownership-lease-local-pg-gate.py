@@ -518,7 +518,7 @@ def seed_lineage(conn, tenant: str, label: str, *, reviewed: bool = True):
             slice_dependencies={subject_ref: [dependency_ref]},
         )
     conn.commit()
-    claim = cc.claim_one(conn, dependency[0], f"ownership-{label}", [dependency[0]])
+    claim = cc.claim_one(conn, dependency[0], f"ownership-{label}")
     with conn.cursor() as cur:
         cc.set_jobs(cur)
         receipt_id = cc.receipt(cur, dependency, claim, "claimed_complete")
@@ -1995,7 +1995,7 @@ def main() -> int:
     with psycopg.connect(dsn) as setup:
         receipt_fixture = seed_single(setup, receipt_tenant, "receipt-race")
         receipt_claim = cc.claim_one(
-            setup, receipt_fixture[0], "ownership-receipt-race", [receipt_fixture[0]]
+            setup, receipt_fixture[0], "ownership-receipt-race"
         )
         receipt_bound = binding(setup.cursor(), receipt_fixture[1])
 
@@ -2033,7 +2033,7 @@ def main() -> int:
     with psycopg.connect(dsn) as setup:
         review_fixture = seed_single(setup, review_tenant, "review-race")
         review_claim = cc.claim_one(
-            setup, review_fixture[0], "ownership-review-race", [review_fixture[0]]
+            setup, review_fixture[0], "ownership-review-race"
         )
         with setup.cursor() as cur:
             cc.set_jobs(cur)
@@ -2079,7 +2079,6 @@ def main() -> int:
             setup,
             successor_fixture[0],
             "ownership-successor-race",
-            [successor_fixture[0]],
         )
         with setup.cursor() as cur:
             cc.set_jobs(cur)
@@ -2717,7 +2716,7 @@ def authenticated_main(dsn: str) -> int:
         row = fixture(cur, slice_refs=[f"slice:authenticated:{uuid.uuid4().hex}"],
                       source_merge_paths=["mcp-server/src/authenticated-fixture.js"])
         admin.commit()
-        claimed = cc.claim_one(admin, row[0], "ownership-authenticated-gate", [row[0]])
+        claimed = cc.claim_one(admin, row[0], "ownership-authenticated-gate")
         seed = one(cur, """select e.work_request_id,e.accepted_plan_id,e.id,
           'session:'||e.agent_session_id::text,w.organization_tenant_id,
           least(j.leased_until,s.lease_expires_at,e.expires_at)-interval '5 seconds'
@@ -2939,7 +2938,7 @@ def authenticated_merge_proof(dsn: str) -> int:
         row = fixture(cur, slice_refs=[f"slice:merge:{uuid.uuid4().hex}"],
                       source_merge_paths=["mcp-server/src/merge-fixture.js"])
         admin.commit()
-        claimed = cc.claim_one(admin, row[0], "ownership-merge-gate", [row[0]])
+        claimed = cc.claim_one(admin, row[0], "ownership-merge-gate")
         seed = one(cur, """select e.work_request_id,e.accepted_plan_id,w.ref,w.organization_tenant_id,
           'session:'||e.agent_session_id::text,
           least(e.expires_at,s.lease_expires_at,j.leased_until)-interval '5 seconds'

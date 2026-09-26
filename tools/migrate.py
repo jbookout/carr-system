@@ -391,10 +391,22 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0706_amend_closed_loop.sql",
         "0707_amend_closed_loop_scac_successor.sql",
     ),
+    # DoctorCRE V5-D01: 0708 installs the append-only action_class_successor
+    # registry (status CHECK-locked to 'inactive', its own immutability
+    # trigger, the read_action_class_successors and
+    # action_class_successor_gate SECURITY DEFINER doors -- EXECUTE to
+    # carr_reader, carr_writer only, PUBLIC explicitly revoked first); 0709
+    # seals that catalog as v82, chained from v81 (0707). Same
+    # deferred-epoch-trigger shape as the pairs above: 0708 applied alone
+    # would be refused at commit, so the pair must be one transaction.
+    (
+        "0708_action_class_successor_registry.sql",
+        "0709_action_class_successor_registry_scac_successor.sql",
+    ),
     # DoctorCRE V5-A02: 0712 installs the append-only Joe-authority fallback
     # receipt, its authority-only writer, and the universal read-only active
-    # rule coverage function; 0713 seals that catalog as provisional v82,
-    # chained from v81 (0707). The deferred SCAC epoch trigger means the pair
+    # rule coverage function; 0713 seals that catalog as provisional v83,
+    # chained from v82 (0709). The deferred SCAC epoch trigger means the pair
     # must commit atomically.
     (
         "0712_a02_rule_enforcement_coverage.sql",
@@ -470,6 +482,10 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0706_amend_closed_loop.sql",
         "0707_amend_closed_loop_scac_successor.sql",
+    ),
+    (
+        "0708_action_class_successor_registry.sql",
+        "0709_action_class_successor_registry_scac_successor.sql",
     ),
     (
         "0712_a02_rule_enforcement_coverage.sql",
