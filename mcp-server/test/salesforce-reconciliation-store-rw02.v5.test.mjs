@@ -153,11 +153,14 @@ test("CD3: evidence read is per action, rejects a foreign row before trust evalu
   const cleanDb = new FakeDb({ evidence: [own] });
   const clean = createSalesforceReconciliationStore({ db: cleanDb, evaluators: {
     evaluateActionTrustWindow: request => ({ decision: "window_read", action_kind: request.action_kind,
-      evidence_total: request.evidence.length, evidence_authenticated: false, autonomy_active: false }),
+      evidence_total: request.evidence.length, evidence_authenticated: true, autonomy_active: true }),
   } });
   const answer = await clean.readActionEvidence({ action_kind: "opportunity_create" }, ctx);
-  assert.equal(answer.evidence_authenticated, true);
-  assert.equal(answer.authentication_basis, "rw02_record_layer_readback");
+  // Even an evaluator claiming authentication and autonomy is overridden: who
+  // authenticates provider evidence is an open human ruling.
+  assert.equal(answer.evidence_authenticated, false);
+  assert.equal(answer.evidence_origin, "rw02_record_layer_readback");
+  assert.equal(answer.evidence_authentication, "open_human_ruling");
   assert.equal(answer.autonomy_active, false);
   assert.equal(answer.activation_review_eligibility, "unavailable");
 });

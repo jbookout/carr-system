@@ -203,8 +203,12 @@ export function createSalesforceReconciliationStore({ db, evaluators = {} } = {}
       });
       const reading = judge.evaluateActionTrustWindow({ tenant: ORGANIZATION_TENANT_ID,
         action_kind, evidence, trust_scope: "per_action" });
-      return freeze({ ...reading, evidence_authenticated: true,
-        authentication_basis: "rw02_record_layer_readback", autonomy_active: false,
+      // The rows are durable and attributed to an authenticated recorder, but
+      // WHO may authenticate provider evidence is an open human ruling, so
+      // this read stays fail-closed: evidence_authenticated is never true here.
+      return freeze({ ...reading, evidence_authenticated: false,
+        evidence_origin: "rw02_record_layer_readback",
+        evidence_authentication: "open_human_ruling", autonomy_active: false,
         activation_review_eligibility: "unavailable", effects: effects(false) });
     });
   }
