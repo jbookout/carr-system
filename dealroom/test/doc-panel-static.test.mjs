@@ -126,6 +126,28 @@ test("round 3: the 'Working on' label is refreshed whenever a host page's open d
   assert.match(appJs, /refreshDocContext/, "a host page must actually call refreshDocContext when its open deal changes");
 });
 
+test("round 3 follow-up: a host switch that leaves focus outside Doc's own panel is caught regardless of WHERE it landed, not only literal document.body", async () => {
+  const js = await readFile(`${ROOT}/js/doc-panel.js`, "utf8");
+  // The round-3 version only checked `document.activeElement === document.body`
+  // (plus a detached-element case) — but a native dialog's close() restores
+  // focus to whatever was focused before showModal() opened it, which is
+  // frequently something else entirely (a list row, since removed by a
+  // re-render) and only SOMETIMES resolves to <body>. The real question was
+  // always simpler: is focus still inside Doc right now.
+  assert.doesNotMatch(js, /document\.activeElement === document\.body/, "must not special-case literal document.body — any focus outside Doc's own panel counts as stranded");
+  assert.match(js, /!panel\.contains\(document\.activeElement\)/, "must check whether focus is inside Doc's own panel, wherever it actually landed");
+});
+
+test("round 3 follow-up: closing Doc while another modal (the record panel) is covering the page sends focus into that modal, never to the now-inert toggle", async () => {
+  const js = await readFile(`${ROOT}/js/doc-panel.js`, "utf8");
+  assert.match(js, /function otherActiveModalFocusTarget/);
+  assert.match(js, /querySelector\('\[aria-modal="true"\]'\)/);
+  const closeBody = js.slice(js.indexOf("function close("), js.indexOf("function togglePin("));
+  assert.match(closeBody, /if \(toggle\.inert\)/, "close() must check whether the toggle is currently reachable before focusing it");
+  assert.match(closeBody, /focusWithoutScrolling\(otherActiveModalFocusTarget\(\) \|\| document\.body\)/);
+  assert.match(closeBody, /else focusWithoutScrolling\(toggle\)/);
+});
+
 test("Doc panel styling respects reduced motion and does not hardcode a single theme's colors", async () => {
   const css = await readFile(`${ROOT}/css/doc-panel.css`, "utf8");
   assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)/);

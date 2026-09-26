@@ -260,15 +260,18 @@ function mount() {
         const priorHost = toggle.parentNode;
         relocate();
         applyModality();
-        // A native dialog's own close() frequently resets focus to <body>
-        // rather than restoring it. If that just happened while Doc is
-        // still open (pinned), bring focus back inside Doc instead of
-        // leaving it stranded on <body> — Tab from there would walk into
-        // whatever the closing host left behind, not into Doc.
-        if (state.open && toggle.parentNode !== priorHost) {
-          const strandedOnBody = document.activeElement === document.body
-            || !document.body.contains(document.activeElement);
-          if (strandedOnBody) focusWithoutScrolling(dom.title);
+        // A native dialog's own close() restores focus to whatever was
+        // focused before showModal() — often NOT document.body, e.g. the
+        // list row that opened the dialog, or (once the underlying board has
+        // re-rendered since) nothing at all, which the browser then quietly
+        // resolves to <body>. Checking specifically for "is it exactly
+        // document.body" missed every other place focus could land outside
+        // Doc; the only question that actually matters is whether focus is
+        // still somewhere INSIDE Doc's own panel now that Doc has just
+        // changed hosts while staying open (pinned) — if not, it is
+        // stranded, wherever it ended up, and belongs back in Doc.
+        if (state.open && toggle.parentNode !== priorHost && !panel.contains(document.activeElement)) {
+          focusWithoutScrolling(dom.title);
         }
       })
     : null;
@@ -310,12 +313,27 @@ function mount() {
     renderContext();
   }
 
+  // When another modal (the record panel on business.html) is covering the
+  // page, applyModality() makes the Doc toggle itself inert — correctly, a
+  // true modal must not leave it reachable — but that means focusing the
+  // toggle on close is a no-op and focus falls through to <body> instead.
+  // The record panel's own heading (a tabindex="-1" element, the same
+  // pattern Doc's own title uses) is the sane place for focus to land
+  // instead: whatever modal is now actually in front of the reader.
+  function otherActiveModalFocusTarget() {
+    const other = document.querySelector('[aria-modal="true"]');
+    if (!other || other === panel) return null;
+    return other.querySelector('[tabindex="-1"]') || other;
+  }
+
   function close({ returnFocus = true } = {}) {
     state.open = false;
     panel.hidden = true;
     toggle.setAttribute('aria-expanded', 'false');
     applyModality();
-    if (returnFocus) focusWithoutScrolling(toggle);
+    if (!returnFocus) return;
+    if (toggle.inert) focusWithoutScrolling(otherActiveModalFocusTarget() || document.body);
+    else focusWithoutScrolling(toggle);
   }
 
   function togglePin() {
