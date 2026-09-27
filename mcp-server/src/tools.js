@@ -69,6 +69,9 @@ import { recordSourceAuthorityStoreTools } from "./record-source-authority-store
 import { creLifecycleStoreTools } from "./cre-lifecycle-store.v5.js";
 import { salesforceReconciliationStoreTools } from
   "./salesforce-reconciliation-store-rw02.v5.js";
+// V5-RW02 safe stops: the server-side run-outcome ledger behind the
+// 5-consecutive-clean counter, and the humanOnly consent revocation.
+import { salesforceReadRunStoreTools } from "./salesforce-read-run-store-rw02.v5.js";
 import { foundationAssuranceMinimumTools } from
   "./foundation-assurance-minimum-producer.v5.js";
 // V5-S01's live door: the settled global boundaries evaluated at the dispatch
@@ -3754,11 +3757,11 @@ export const TOOLS = {
 
   "update-deal": {
     write: true,
-    description: "Field-level change to a deal (deal_type, phase, segment, outcome, notes_path, salesforce_id, city, lane). deal_type uses the closed deal_type_ref vocabulary. Requires base_version from a fresh read; a same-field conflict means someone else wrote the same column — ask the human, never retry blind. A version bump from a DIFFERENT field (someone else's disjoint edit) is rebased automatically and reported back as `rebased`/`rebase_receipt`; nothing about this call's own fields is ever silently changed. To move a deal to a DIFFERENT CLIENT, use reassign-deal: client_id is deliberately not settable here.",
+    description: "Field-level change to a deal (deal_type, phase, segment, outcome, notes_path, salesforce_id, city, lane, invoiced_on). invoiced_on (YYYY-MM-DD) marks the deal invoiced, which takes it out of the Salesforce reconciliation absence scope (V5-RW02). deal_type uses the closed deal_type_ref vocabulary. Requires base_version from a fresh read; a same-field conflict means someone else wrote the same column — ask the human, never retry blind. A version bump from a DIFFERENT field (someone else's disjoint edit) is rebased automatically and reported back as `rebased`/`rebase_receipt`; nothing about this call's own fields is ever silently changed. To move a deal to a DIFFERENT CLIENT, use reassign-deal: client_id is deliberately not settable here.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, deal: { type: "string" },
       base_version: { type: "integer" },
-      fields: { type: "object", description: "subset of: deal_type, phase, segment, outcome, closed_on, won_value, notes_path, salesforce_id, city, lane" } },
+      fields: { type: "object", description: "subset of: deal_type, phase, segment, outcome, closed_on, won_value, notes_path, salesforce_id, city, lane, invoiced_on" } },
       required: ["idempotency_key","deal","base_version","fields"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "update-deal", args, async () => {
       const s = await resolveSubject(c, args.deal);
@@ -3766,12 +3769,23 @@ export const TOOLS = {
       // city and lane joined the list in 0074, when they stopped being source_row
       // passthrough and became real columns. Before that they were unsettable,
       // which is why salesforce-diff could only ever REPORT a city move.
+      // invoiced_on joined in 0733 (V5-RW02): a won deal stays in the Salesforce
+      // reconciliation absence scope until it is marked invoiced.
       const allowed = ["deal_type","phase","segment","outcome","closed_on","won_value","notes_path",
-                       "salesforce_id","city","lane"];
+                       "salesforce_id","city","lane","invoiced_on"];
       if ("client_id" in args.fields) throw new ToolError({ error: "use_reassign_deal",
         hint: "moving a deal between clients is structural, not a field edit — use reassign-deal" });
       const keys = Object.keys(args.fields).filter(k => allowed.includes(k));
       if (!keys.length) throw new ToolError({ error: "no_updatable_fields", allowed });
+      // A real calendar date: the pattern, then a round trip, so 2026-13-45 or
+      // 2026-02-30 is refused here instead of failing later as a raw cast error.
+      const isCalendarDate = value => typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) &&
+        !Number.isNaN(Date.parse(`${value}T00:00:00Z`)) &&
+        new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value;
+      if (keys.includes("invoiced_on") && args.fields.invoiced_on !== null &&
+          !isCalendarDate(args.fields.invoiced_on))
+        throw new ToolError({ error: "invalid_invoiced_on",
+          hint: "invoiced_on is a calendar date YYYY-MM-DD, or null to clear it" });
       // Legacy phase edits share the Deal Room event stream. Acquire its lock
       // before versionGuard can lock the deal row, matching Deal Room lock order.
       if (keys.includes("phase")) await lockDealField(c, s.id, "phase");
@@ -8441,6 +8455,7 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "record-source-authority": "mcp-server/src/record-source-authority-store.v5.js",
   "cre-lifecycle": "mcp-server/src/cre-lifecycle-store.v5.js",
   "salesforce-reconciliation-rw02": "mcp-server/src/salesforce-reconciliation-store-rw02.v5.js",
+  "salesforce-read-run-rw02": "mcp-server/src/salesforce-read-run-store-rw02.v5.js",
   "foundation-assurance": "mcp-server/src/foundation-assurance-minimum-producer.v5.js",
   "global-boundaries-door": "mcp-server/src/global-boundaries-door.v5.js",
   "journey-one-clock-door": "mcp-server/src/journey-one-clock-door.v5.js",
@@ -9586,6 +9601,7 @@ registerTools(modelRoleStoreTools({ withEnvelope, writeEvent, ToolError }),
 registerTools(creLifecycleStoreTools({ withEnvelope, ToolError }), "cre-lifecycle");
 registerTools(salesforceReconciliationStoreTools({ withEnvelope, ToolError }),
   "salesforce-reconciliation-rw02");
+registerTools(salesforceReadRunStoreTools({ withEnvelope, ToolError }), "salesforce-read-run-rw02");
 registerTools(recordSourceAuthorityStoreTools({ withEnvelope, ToolError }),
   "record-source-authority");
 registerTools(foundationAssuranceMinimumTools({
