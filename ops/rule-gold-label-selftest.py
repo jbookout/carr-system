@@ -319,6 +319,19 @@ def test_fixture(gl, ev):
           and all(current[(cid, "f47a8fe9")]["gold"] is False for cid in
                   ("v2-chat-001", "v2-chat-006", "v2-notif-027", "v2-rel-024",
                    "v2-tour-021")))
+    review_followup = repair["independent_review_followup"]
+    check("repair: independent f47 follow-up keeps three case-bound decisions",
+          review_followup["source_head"] == "cd0b3ff628e1920cee28f7e7e75ccd69c0ead7d5"
+          and {r["case"] for r in review_followup["rows"]}
+              == {"v2-tour-020", "v2-deal-026", "v2-deal-021"}
+          and all(r["before"]["case_binding"] == r["after"]["case_binding"]
+                  and current[(r["case"], "f47a8fe9")] == r["after"]
+                  and r["after"]["reason"].startswith(r["case"] + ":")
+                  for r in review_followup["rows"]))
+    check("repair: completed claim adopted in verdict or record write, bare notice excluded",
+          all(current[(cid, "f47a8fe9")]["gold"] is True for cid in
+              ("v2-tour-020", "v2-deal-020", "v2-deal-026"))
+          and current[("v2-deal-021", "f47a8fe9")]["gold"] is False)
     check("repair: readiness claims bind with and without recorded verification",
           all(current[(cid, "f47a8fe9")]["gold"] is True for cid in
               ("v2-chat-005", "v2-chat-012", "v2-chat-019", "v2-chat-027"))
