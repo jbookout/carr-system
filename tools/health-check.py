@@ -1133,6 +1133,46 @@ def _calendar_prebrief_standing(snap):
     return findings
 
 
+CALENDAR_PREBRIEF_LAST_RUN = os.path.join(REPO_ROOT, "out", "calendar-prebrief-joe-last-run.json")
+CALENDAR_PREBRIEF_UNKNOWN_BREACH = (
+    "on breach: attendee intake (rule d7c69aa6) — search mail, research, then create the "
+    "record for each skipped attendee; owner joe-desk session; verify with the next "
+    "prebrief's count; clears at 0")
+
+
+def _calendar_prebrief_unknowns(now, path=CALENDAR_PREBRIEF_LAST_RUN):
+    """Skipped unknown attendees in the latest completed Joe prebrief (migration 0735).
+
+    Since 0735 an outside attendee the record does not know no longer refuses the
+    snapshot; it is skipped and counted. The count is intake debt, not a failure,
+    so it is surfaced here (the runtime's addressless last-run summary is the only
+    place it lives) and cleared by intake. A summary older than four days is
+    ignored: a stale run is the missed-run finding's business, not this one's.
+    The summary is written under the checkout the runtime runs from, so a
+    health run from any other checkout finds no file and stays silent.
+    Returns (finding_key, detail) pairs; never an address.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            body = json.load(fh)
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError):
+        return [("calendar_prebrief_unknowns_unreadable",
+                 f"{CALENDAR_PREBRIEF_KEY} last-run summary unreadable · {CALENDAR_PREBRIEF_UNKNOWN_BREACH}")]
+    report = body.get("unknown_attendees") if isinstance(body, dict) else None
+    when = _iso(body.get("scheduled_for")) if isinstance(body, dict) else None
+    if (not isinstance(report, dict) or type(report.get("count")) is not int
+            or report["count"] < 0 or when is None):
+        return [("calendar_prebrief_unknowns_unreadable",
+                 f"{CALENDAR_PREBRIEF_KEY} last-run summary malformed · {CALENDAR_PREBRIEF_UNKNOWN_BREACH}")]
+    if now - when > timedelta(days=4) or report["count"] == 0:
+        return []
+    return [("calendar_prebrief_unknown_attendees",
+             f"{CALENDAR_PREBRIEF_KEY} skipped {report['count']} unknown outside attendee(s) "
+             f"on its {when.date()} run · {CALENDAR_PREBRIEF_UNKNOWN_BREACH}")]
+
+
 def _canonical_finding(key, detail, *, subject="", count=1, hard_error=False, time_rolling=False):
     print(f"  CANONICAL_FINDING {key} — {detail}")
     for row in _FINDINGS:
@@ -1333,12 +1373,21 @@ def _canonical_health():
                 print(f"  ⚠︎ {detail}")
                 rc = _red("job_stuck", detail, subject=str(job.get("definition_key")))
             prebrief = _calendar_prebrief_standing(snap)
+            if not CANONICAL_FIXTURE:
+                prebrief += _calendar_prebrief_unknowns(_canonical_now(snap))
             for key, detail in prebrief:
                 print(f"  ⚠︎ {detail}")
                 # A missed slot is a specific calendar instant, reported like
                 # job_missing_due; zero events is a state, not a clock crossing.
+                # Skipped-attendee counts are intake debt that moves daily. The
+                # key is time_rolling but NOT on the release pipeline's
+                # first-appearance allowlist, so the release gate still diffs it
+                # like doctrine_gate: a first appearance between baseline and
+                # live read fails that release. The finding carries count 1,
+                # so N rising day to day does not.
                 rc = _red(key, detail, subject=CALENDAR_PREBRIEF_KEY,
-                          time_rolling=(key == "calendar_prebrief_missed_run"))
+                          time_rolling=(key in ("calendar_prebrief_missed_run",
+                                                "calendar_prebrief_unknown_attendees")))
             # THE CARRIED COUNT RIDES ON THE LINE EITHER WAY, same contract the
             # exports section uses for retired targets: a chosen state stays
             # visible rather than becoming silence (rule bd4a6d22).
