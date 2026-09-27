@@ -106,6 +106,12 @@ def problems(repo: Path, doc: dict, *, corpus_ids=None, classes=None, verbs=None
                 out.append(f"{rid}: unknown route kind {kind!r}")
                 continue
             if kind == "trigger":
+                shapes = [key for key in rule_routes.TRIGGER_KEYS
+                          if not isinstance(route.get(key) or [], list)
+                          or not all(isinstance(x, str) and x for x in route.get(key) or ())]
+                if shapes:
+                    out.append(f"{rid}: trigger {shapes} must be lists of non-empty strings")
+                    continue
                 names = [x for key in rule_routes.TRIGGER_KEYS for x in route.get(key) or ()]
                 if not names:
                     out.append(f"{rid}: trigger route names no tool, verb or bash pattern")
@@ -129,7 +135,8 @@ def problems(repo: Path, doc: dict, *, corpus_ids=None, classes=None, verbs=None
                     out.append(f"{rid}: bash pattern trigger but the hook never sees Bash")
             elif kind == "path_rule":
                 globs = route.get("path_globs") or []
-                if not globs or not all(isinstance(g, str) and g for g in globs):
+                if (not isinstance(globs, list) or not globs
+                        or not all(isinstance(g, str) and g for g in globs)):
                     out.append(f"{rid}: path_rule names no glob")
             elif kind == "gate":
                 gate = route.get("gate")
@@ -157,6 +164,26 @@ def problems(repo: Path, doc: dict, *, corpus_ids=None, classes=None, verbs=None
     return out
 
 
+def boot_only_outside_layer0(doc: dict, load_layers: dict | None = None) -> list[str]:
+    """Boot-only rules the session-start set may not carry: a `boot` route is
+    only as good as the boot layer that loads it, and today that is layer0 (a
+    pack-layer rule reaches a session only when its pack is declared). REPORTED,
+    not failed: the boot layer itself (lib/rule_boot.py) lands separately, and
+    this list is what it must cover or what must gain a trigger."""
+    if load_layers is None:
+        try:
+            load_layers = json.loads((REPO / "ops/config/rule-enforcement-map.json").read_text(
+                encoding="utf-8")).get("rule_load_layers") or {}
+        except (OSError, ValueError):
+            load_layers = {}
+    out = []
+    for rid, entry in sorted((doc.get("rules") or {}).items()):
+        kinds = {r.get("kind") for r in entry.get("routes") or () if isinstance(r, dict)}
+        if kinds == {"boot"} and (load_layers.get(rid) or {}).get("load_layer") != "layer0":
+            out.append(rid)
+    return out
+
+
 def counts(doc: dict) -> dict:
     out: dict[str, int] = {}
     for entry in (doc.get("rules") or {}).values():
@@ -178,7 +205,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     found = problems(REPO, doc)
     if args.json:
-        print(json.dumps({"ok": not found, "problems": found, "counts": counts(doc)},
+        print(json.dumps({"ok": not found, "problems": found, "counts": counts(doc),
+                          "boot_only_outside_layer0": boot_only_outside_layer0(doc)},
                          indent=2, sort_keys=True))
         return 1 if found else 0
     if found:
@@ -189,6 +217,11 @@ def main(argv: list[str] | None = None) -> int:
     rules = doc.get("rules") or {}
     print(f"rule-route-coverage: OK — {len(rules)} rules routed; routes by kind "
           + ", ".join(f"{k} {v}" for k, v in sorted(counts(doc).items())))
+    outside = boot_only_outside_layer0(doc)
+    if outside:
+        print(f"rule-route-coverage: NOTE — {len(outside)} boot-only rule(s) are not layer0, so "
+              "they reach a session only when their pack is declared or the boot layer "
+              "carries them: " + ", ".join(outside))
     return 0
 
 

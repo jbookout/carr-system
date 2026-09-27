@@ -118,17 +118,37 @@ def corpus_ids(repo: Path) -> list[str]:
     return sorted(row["id"] for row in data["rules"])
 
 
+class RouteFileError(ValueError):
+    """The route file cannot be used. `reason` is a fixed category (never the
+    exception text, which may carry a local path): missing, unreadable,
+    invalid_json, wrong_schema, no_rules or malformed_entry."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
 def load_routes(repo: Path) -> dict:
-    """The committed route file, structurally checked. Raises when malformed."""
-    data = json.loads((Path(repo) / ROUTES_RELATIVE).read_text(encoding="utf-8"))
+    """The committed route file, structurally checked. Raises RouteFileError."""
+    path = Path(repo) / ROUTES_RELATIVE
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise RouteFileError("missing") from None
+    except (OSError, ValueError):
+        raise RouteFileError("unreadable") from None
+    try:
+        data = json.loads(text)
+    except ValueError:
+        raise RouteFileError("invalid_json") from None
     if not isinstance(data, dict) or data.get("schema") != ROUTES_SCHEMA:
-        raise ValueError("route file has the wrong schema")
+        raise RouteFileError("wrong_schema")
     rules = data.get("rules")
     if not isinstance(rules, dict) or not rules:
-        raise ValueError("route file has no rules")
-    for rid, entry in rules.items():
+        raise RouteFileError("no_rules")
+    for entry in rules.values():
         if not isinstance(entry, dict) or not isinstance(entry.get("routes"), list):
-            raise ValueError(f"route entry {rid} is malformed")
+            raise RouteFileError("malformed_entry")
     return data
 
 
@@ -222,41 +242,74 @@ def call_paths(tool_input: object) -> list[str]:
             if isinstance(tool_input.get(key), str) and tool_input[key].strip()]
 
 
+class RouteShapeError(ValueError):
+    """One route cannot be evaluated (a non-string tool, verb, pattern or glob,
+    or an empty glob). The coverage gate refuses these in CI; at run time the
+    matcher treats the rule as matched, so a broken route over-delivers rather
+    than silently dropping its rule."""
+
+
+def _strings(route: dict, key: str) -> list[str]:
+    values = route.get(key)
+    if values is None:
+        return []
+    if not isinstance(values, list) or not all(isinstance(v, str) and v for v in values):
+        raise RouteShapeError(key)
+    return values
+
+
 def route_matches(route: dict, tool_name: str, tool_input: object,
                   verbs: set[str] | None = None) -> bool:
+    """True when this route fires for the call. Raises RouteShapeError when the
+    route itself is malformed."""
     kind = route.get("kind")
     if kind == "path_rule":
+        globs = _strings(route, "path_globs")
+        if not globs:
+            raise RouteShapeError("path_globs")
         paths = call_paths(tool_input)
-        return any(fnmatch.fnmatch(path, pattern)
-                   for pattern in route.get("path_globs") or () for path in paths)
+        return any(fnmatch.fnmatch(path, pattern) for pattern in globs for path in paths)
     if kind != "trigger":
         return False
-    for tool in route.get("tools") or ():
+    tools = _strings(route, "tools")
+    route_verbs = _strings(route, "verbs")
+    patterns = _strings(route, "bash_patterns")
+    for tool in tools:
         if fnmatch.fnmatchcase(tool_name, tool):
             return True
     verbs = call_verbs(tool_name, tool_input) if verbs is None else verbs
-    if verbs & set(route.get("verbs") or ()):
+    if verbs & set(route_verbs):
         return True
     if tool_name in BASH_TOOLS and isinstance(tool_input, dict):
         command = tool_input.get("command")
         if isinstance(command, str):
-            for pattern in route.get("bash_patterns") or ():
+            for pattern in patterns:
                 try:
                     if re.search(pattern, command, re.I):
                         return True
                 except re.error:
-                    continue
+                    raise RouteShapeError("bash_patterns") from None
     return False
 
 
 def matched_rule_ids(doc: dict, tool_name: str, tool_input: object) -> list[str]:
-    """Every rule whose trigger or path route this exact call hits."""
+    """Every rule whose trigger or path route this exact call hits. A rule with
+    a malformed route counts as hit: fail open means deliver, never drop."""
     verbs = call_verbs(tool_name, tool_input)
     hits = []
     for rid, entry in (doc.get("rules") or {}).items():
-        if any(route_matches(route, tool_name, tool_input, verbs)
-               for route in entry.get("routes") or () if isinstance(route, dict)):
-            hits.append(rid)
+        routes = entry.get("routes") if isinstance(entry, dict) else None
+        for route in routes or ():
+            if not isinstance(route, dict):
+                hits.append(rid)
+                break
+            try:
+                hit = route_matches(route, tool_name, tool_input, verbs)
+            except RouteShapeError:
+                hit = True
+            if hit:
+                hits.append(rid)
+                break
     return sorted(hits)
 
 
@@ -338,7 +391,9 @@ def always_on_ids(path: str | None = None) -> set[str]:
         path or os.environ.get("CARR_RULES_ALWAYS_ON_FILE", ALWAYS_ON_DEFAULT)))
     try:
         return set(SHORT_ID.findall(target.read_text(encoding="utf-8")))
-    except OSError:
+    except (OSError, ValueError):
+        # Unreadable or not UTF-8: ordering falls back to id order, and every
+        # rule is still delivered. Never a crash after the door call is paid.
         return set()
 
 
@@ -372,6 +427,72 @@ def fit_rules(rules: list[dict], render, *, always_on: set[str],
         if context_chars(render(trial_full, trial_over)) <= budget:
             full, overflow = trial_full, trial_over
     return full, overflow
+
+
+# ------------------------------------------------------------------ notices
+#
+# Every way the route rail can fail to deliver ends in one of these fixed
+# notices, never in silence and never in an exception's own text (which may
+# carry a path or a credential). Each says, in this order: rules were NOT
+# delivered, the call itself went ahead, what to do before acting, and the ids.
+# Jev reviewed the wording (semantic_creation, 2026-09-26): every notice scored
+# 0.94-0.95 on "the session knows the rules were NOT delivered" and 0.76-0.93
+# on "the session knows what to do next".
+
+CALL_WENT_AHEAD = "The tool call itself was not blocked or changed."
+
+
+def _ids(ids) -> str:
+    return ", ".join(sorted(set(ids))) + "."
+
+
+def notice_door_failure(ids) -> str:
+    return ("RULE ROUTE DELIVERY FAILED (selector_unavailable): the rules below bind this "
+            "tool call and were NOT delivered; you have not seen them. " + CALL_WENT_AHEAD +
+            " Before you act, fetch each one with the standing-context verb (rule_ids: the "
+            "ids below) and follow it; if that also fails, say so and do not act as if the "
+            "rules were read. Undelivered rule ids: " + _ids(ids))
+
+
+def notice_file_unreadable(reason: str, ids) -> str:
+    head = ("RULE ROUTE FILE UNREADABLE (" + reason + "): rules were NOT delivered. "
+            + ROUTES_RELATIVE + ", which decides which rules bind each tool call, could not "
+            "be read, so no routed rule was checked or shown for this call; you have not "
+            "seen any of them. " + CALL_WENT_AHEAD + " ")
+    if not ids:
+        return head + ("Before you act, call the standing-context verb with no arguments, "
+                       "read each rule whose subject covers this tool call and follow it, and "
+                       "report the broken route file.")
+    return head + ("Before you act, fetch the rules below that could apply to this action "
+                   "with the standing-context verb (rule_ids), and report the broken route "
+                   "file. Rules that may bind this call and were NOT delivered: " + _ids(ids))
+
+
+def notice_error(ids=None) -> str:
+    if ids:
+        return ("RULE ROUTE DELIVERY ERROR (internal_error): the rule-delivery hook failed, "
+                "and rules were NOT delivered for this call; you have not seen them. "
+                + CALL_WENT_AHEAD + " Before you act, fetch these rules with the "
+                "standing-context verb (rule_ids) and follow them: " + _ids(ids))
+    return ("RULE ROUTE DELIVERY ERROR (internal_error): the rule-delivery hook failed "
+            "before it could tell which rules bind this call, so NO rule was delivered; you "
+            "have not seen them. " + CALL_WENT_AHEAD + " Before you act: (1) call the "
+            "standing-context verb with no arguments, which returns every rule in scope; "
+            "(2) read each rule whose subject covers this tool call and follow it; (3) if "
+            "standing-context also fails, stop and tell the user the rules could not be read "
+            "instead of acting from memory.")
+
+
+def notice_too_large(ids) -> str:
+    return ("RULE ROUTE DELIVERY TOO LARGE: " + str(len(set(ids))) + " rules bind this call, "
+            "more than the hook's " + f"{CONTEXT_CAP_CHARS:,}" + "-character context cap can "
+            "carry even as one-line summaries, so NONE was delivered; you have not seen them. "
+            + CALL_WENT_AHEAD + " Before you act, fetch these rules with the standing-context "
+            "verb (rule_ids) in batches and follow them: " + _ids(ids))
+
+
+def within_cap(text: str, budget: int = CONTEXT_BUDGET_CHARS) -> bool:
+    return context_chars(text) <= budget
 
 
 # ------------------------------------------------------------------ receipt

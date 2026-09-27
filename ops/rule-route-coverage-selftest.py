@@ -161,6 +161,23 @@ mutant("route file carrying rule text",
        lambda d: d["rules"]["aaaa0002"].__setitem__("statement", "the whole rule"),
        "aaaa0002: route entry carries keys outside")
 
+mutant("non-string tool entry (would crash a naive matcher)",
+       lambda d: d["rules"]["aaaa0002"]["routes"][0]["tools"].append(7),
+       "aaaa0002: trigger ['tools'] must be lists of non-empty strings")
+mutant("null path glob",
+       lambda d: d["rules"]["aaaa0003"]["routes"][1]["path_globs"].append(None),
+       "aaaa0003: path_rule names no glob")
+mutant("empty path glob",
+       lambda d: d["rules"]["aaaa0003"]["routes"][1].__setitem__("path_globs", [""]),
+       "aaaa0003: path_rule names no glob")
+
+# Boot-only rules outside layer0 are reported (not failed) for the boot layer.
+check("boot-only rules outside layer0 are reported",
+      coverage.boot_only_outside_layer0(CLEAN, {"aaaa0001": {"load_layer": "pack"}})
+      == ["aaaa0001"])
+check("a layer0 boot-only rule is not reported",
+      coverage.boot_only_outside_layer0(CLEAN, {"aaaa0001": {"load_layer": "layer0"}}) == [])
+
 # An exemption must be explicit and reasoned, never a silent pass.
 exempt = copy.deepcopy(CLEAN)
 exempt["rules"]["aaaa0004"]["routes"] = [exempt["rules"]["aaaa0004"]["routes"][0]]

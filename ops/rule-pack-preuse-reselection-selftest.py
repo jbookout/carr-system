@@ -2,12 +2,15 @@
 """Behavioral contract for the shadow-compatible pre-use reselection rail."""
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import re
+import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -34,7 +37,7 @@ drift = load("rule_pack_drift_preuse_test", REPO / "hooks/rule-pack-drift-gate.p
 # Every earlier section pins behaviour that existed before the route file, so
 # the route file is switched off for them and switched back on for its own.
 _ROUTE_DOC_LOADER = rail.load_route_doc
-rail.load_route_doc = lambda: None
+rail.load_route_doc = lambda: {"schema": rail.rule_routes.ROUTES_SCHEMA, "rules": {}}
 
 
 FAILURES: list[str] = []
@@ -1417,7 +1420,8 @@ with tempfile.TemporaryDirectory() as route_tmp:
                                 session="fail-session", tool_use_id="fail-1")
         fail_text = context(rail.process(fail_call, runner=Runner(returncode=1)))
         check("a door failure is visible and names every routed rule it could not deliver",
-              fail_text.startswith("RULE ROUTE TRIGGER DELIVERY FAILED")
+              fail_text.startswith("RULE ROUTE DELIVERY FAILED")
+              and "NOT delivered" in fail_text
               and all(rid in fail_text for rid in union), fail_text[:200])
         check("a door failure records nothing as delivered",
               routes_lib.fresh_ids("fail-session", "Agent", union) == union)
@@ -1429,6 +1433,166 @@ with tempfile.TemporaryDirectory() as route_tmp:
               json.loads(context(rail.process(payload(client="codex"),
                                               runner=Runner())))["schema"]
               == rail.RECEIPT_SCHEMA)
+
+        # ------------------------------------------------------------------
+        # FAIL OPEN, VISIBLY. Order is Jev's verification_selection ranking
+        # (2026-09-26, the chance the failure happens AND silently costs
+        # delivery): door failure 0.52 (above), route file missing 0.51,
+        # top-level exception 0.46, wrong schema 0.46, 209-rule worst case
+        # 0.45, invalid JSON 0.42, empty/null path glob 0.39, non-UTF-8
+        # always-on file 0.37, non-string tool entry 0.26.
+        fo_tmp = Path(route_tmp) / "fail-open"
+        (fo_tmp / "ops/config").mkdir(parents=True)
+        fo_file = fo_tmp / routes_lib.ROUTES_RELATIVE
+        candidates = rail._unroutable_candidates()
+
+        def unreadable_text(label: str) -> str:
+            rail.load_route_doc = lambda: routes_lib.load_routes(fo_tmp)
+            try:
+                call = gen_payload(tool="Agent", tool_input={"description": label, "prompt": "p"},
+                                   session=f"fo-{label}", tool_use_id=f"fo-{label}")
+                table = contract.merge_trigger_delivery(rail.matched_triggers(call))
+                out = rail.process(call, runner=Runner(gen_selector_result(
+                    packs=table[1], ids=table[2])))
+                return context(out)
+            finally:
+                rail.load_route_doc = _ROUTE_DOC_LOADER
+
+        text = unreadable_text("missing")
+        check("a missing route file announces loudly instead of falling through silently",
+              text.startswith("RULE ROUTE FILE UNREADABLE (missing)")
+              and "NOT delivered" in text, text[:160])
+        check("the unreadable-file notice names every rule that may bind",
+              bool(candidates) and all(rid in text for rid in candidates), len(candidates))
+        check("the unreadable-file notice keeps the table rail's delivery after it",
+              "\n\n{" in text and text.index("\n\n{") > 0, text[-120:])
+        check("the unreadable-file output stays under the cap",
+              routes_lib.within_cap(text), routes_lib.context_chars(text))
+
+        # Top-level: any exception in process() is a fixed notice and exit 0.
+        real_process = rail.process
+        rail.process = lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("secret /path"))
+        stdout, saved_stdin = io.StringIO(), sys.stdin
+        sys.stdin = io.StringIO(json.dumps(gen_payload(tool="Agent", tool_input={})))
+        try:
+            with contextlib.redirect_stdout(stdout):
+                rc = rail.main()
+        finally:
+            rail.process, sys.stdin = real_process, saved_stdin
+        top = json.loads(stdout.getvalue() or "{}")
+        check("a crash anywhere in process() exits 0 with a visible notice",
+              rc == 0 and context(top) == rail.HOOK_ERROR_CONTEXT
+              and top["hookSpecificOutput"]["hookEventName"] == "PreToolUse", stdout.getvalue())
+        check("the crash notice never echoes the exception text",
+              "secret" not in stdout.getvalue())
+
+        real_routed = rail.routed_rule_ids
+        rail.routed_rule_ids = lambda _p: (_ for _ in ()).throw(RuntimeError("boom"))
+        try:
+            err = context(rail.process(gen_payload(tool="Agent", tool_input={},
+                                                   session="fo-err", tool_use_id="fo-err"),
+                                       runner=Runner()))
+        finally:
+            rail.routed_rule_ids = real_routed
+        check("an exception while matching routes is a fixed notice, not a crash",
+              err == routes_lib.notice_error(), err[:120])
+
+        real_fit = routes_lib.fit_rules
+        routes_lib.fit_rules = lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom"))
+        try:
+            err = context(rail.process(
+                gen_payload(tool="Agent", tool_input={"description": "spawn", "prompt": "p"},
+                            session="fo-fit", tool_use_id="fo-fit"),
+                runner=Runner(route_result(union))))
+        finally:
+            routes_lib.fit_rules = real_fit
+        check("an exception after the door call names every undelivered id",
+              err.startswith("RULE ROUTE DELIVERY ERROR") and all(r in err for r in agent_ids),
+              err[:160])
+
+        fo_file.write_text(json.dumps({"schema": "rule-routes/v0", "rules": {}}))
+        text = unreadable_text("schema")
+        check("a route file with the wrong schema announces loudly",
+              text.startswith("RULE ROUTE FILE UNREADABLE (wrong_schema)"), text[:80])
+
+        # Worst case: every one of the 209 rules routes to one call.
+        every = routes_lib.corpus_ids(REPO)
+        all_doc = {"schema": routes_lib.ROUTES_SCHEMA, "rules": {
+            rid: {"moment": "x", "routes": [{"kind": "trigger", "tools": ["Agent"]}]}
+            for rid in every}}
+        rail.load_route_doc = lambda: all_doc
+        try:
+            for label, statement in (("long", long_text),
+                                     ("short", lambda rid: f"binding routed rule {rid}")):
+                worst = context(rail.process(
+                    gen_payload(tool="Agent", tool_input={"description": label, "prompt": "p"},
+                                session=f"worst-{label}", tool_use_id=f"worst-{label}"),
+                    runner=Runner(route_result(every, statement=statement))))
+                check(f"209-rule worst case ({label} statements) fits the cap by construction",
+                      routes_lib.context_chars(worst) <= routes_lib.CONTEXT_CAP_CHARS,
+                      routes_lib.context_chars(worst))
+                check(f"209-rule worst case ({label} statements) still names every rule",
+                      len(every) >= 200 and all(rid in worst for rid in every))
+                check(f"209-rule worst case ({label} statements) is a valid receipt or the "
+                      "compact not-delivered notice",
+                      bool((worst.startswith("RULE ROUTE DELIVERY TOO LARGE")
+                            and "NONE was delivered" in worst)
+                           or routes_lib.validate_route_receipt(json.loads(worst), repo=REPO)),
+                      worst[:120])
+            check("the compact notice records nothing as delivered",
+                  routes_lib.fresh_ids("worst-long", "Agent", every) == sorted(every))
+        finally:
+            rail.load_route_doc = _ROUTE_DOC_LOADER
+
+        fo_file.write_text("{not json")
+        text = unreadable_text("json")
+        check("an invalid-JSON route file announces loudly",
+              text.startswith("RULE ROUTE FILE UNREADABLE (invalid_json)")
+              and all(rid in text for rid in candidates), text[:80])
+
+        # A malformed single route over-delivers its rule instead of crashing.
+        bad_doc = copy.deepcopy(ROUTES)
+        bad_doc["rules"]["e65efc68"]["routes"] = [{"kind": "path_rule", "path_globs": [None]}]
+        bad_doc["rules"]["bd4a6d22"]["routes"] = [{"kind": "path_rule", "path_globs": [""]}]
+        bad_doc["rules"]["86647daf"]["routes"] = [{"kind": "trigger", "tools": [7]}]
+        rail.load_route_doc = lambda: bad_doc
+        try:
+            bad_ids = routed_for("Write", {"file_path": str(REPO / "README.md"), "content": ""})
+            bad_out = rail.process(gen_payload(tool="Write", tool_input={
+                "file_path": str(REPO / "README.md"), "content": ""},
+                session="fo-bad", tool_use_id="fo-bad"), runner=Runner(route_result(bad_ids)))
+        finally:
+            rail.load_route_doc = _ROUTE_DOC_LOADER
+        check("a null or empty path glob does not crash and its rule is still delivered",
+              {"e65efc68", "bd4a6d22"} <= set(bad_ids), bad_ids)
+        check("a non-string tool entry does not crash and its rule is still delivered",
+              "86647daf" in bad_ids, bad_ids)
+        check("a malformed route's rule arrives in a valid receipt",
+              {"e65efc68", "bd4a6d22", "86647daf"}
+              <= {r["id"] for r in json.loads(context(bad_out))["rules"]})
+
+        # A non-UTF-8 always-on file (outside the repo, unguarded by CI).
+        Path(os.environ["CARR_RULES_ALWAYS_ON_FILE"]).write_bytes(b"\xff\xfe\x00\xc3(bad")
+        try:
+            utf = rail.process(gen_payload(tool="Agent", tool_input={"description": "spawn", "prompt": "p"},
+                                           session="fo-utf", tool_use_id="fo-utf"),
+                               runner=Runner(route_result(union)))
+        finally:
+            Path(os.environ["CARR_RULES_ALWAYS_ON_FILE"]).unlink()
+        check("a non-UTF-8 always-on file still delivers every rule in a valid receipt",
+              routes_lib.validate_route_receipt(json.loads(context(utf)), repo=REPO)
+              and [r["id"] for r in json.loads(context(utf))["rules"]] == union)
+
+        # A non-string tool NAME in the payload itself.
+        odd = gen_payload(tool="Agent", tool_input={}, session="fo-odd", tool_use_id="fo-odd")
+        odd["tool_name"] = 7
+        try:
+            odd_out = rail.process(odd, runner=Runner())
+            odd_ok = odd_out is None or "RULE" in context(odd_out)
+        except Exception as exc:  # noqa: BLE001 — the test is that nothing escapes
+            odd_ok = False
+            odd_out = repr(exc)
+        check("a non-string tool name in the payload never raises", odd_ok, odd_out)
 
         # Tamper: a receipt whose partition does not add up fails validation.
         forged = copy.deepcopy(row)
