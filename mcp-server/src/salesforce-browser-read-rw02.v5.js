@@ -97,8 +97,8 @@ export const V5_RW02_CODE_AUTOFILL_MAX_ATTEMPTS = 3;
 export const V5_RW02_READ_PAGE_CAP = 50;
 
 /**
- * The decision record that carries Dell's consent (logged 2026-09-27, Joe
- * relaying Dell's OK). Pinned by review; the record itself is re-read on every
+ * The decision record that carries Dell's consent (logged by Joe, relaying
+ * Dell's OK). Pinned by review; the record itself is re-read on every
  * run, so revoking it stops the next run without a code change.
  */
 export const V5_RW02_DELL_CONSENT_DECISION_ID = "bf194d7d-4b33-4683-a320-6b5a8c05766d";
@@ -615,7 +615,7 @@ export function evaluateDellConsent(reading) {
   return freeze({ answer_kind: "rw02-consent.v1", decision: "allowed", reason_id: "consent_record_in_force",
     decision_ref: V5_RW02_DELL_CONSENT_DECISION_ID, recorded_by_partner: record.sponsoring_human_slug,
     // Dell's own record, or Joe's record attesting Dell's consent. Both are
-    // allowed (Joe, 2026-09-27); the basis is carried so no surface can present
+    // allowed (Joe's ruling); the basis is carried so no surface can present
     // Joe's attestation as Dell's own words.
     consent_basis: record.sponsoring_human_slug === "dell" ? "dell_own_record" : "partner_attestation" });
 }
@@ -1111,7 +1111,15 @@ export async function runSalesforceBrowserReadReconciliation(options = {}) {
         // count, and the run is recorded unclean (a failure to record that is
         // an error, never swallowed). Every finding is idempotently keyed, so
         // the next run replays what landed and files the rest.
-        await recordOutcome("failed");
+        try { await recordOutcome("failed"); }
+        catch (recordError) {
+          // Keep the partial-write count: this is the one case where some
+          // findings landed AND the run's unclean outcome is missing.
+          throw new V5RW02BrowserReadError("run_outcome_unrecorded",
+            "findings were partly written and the run's unclean outcome could not be recorded; do not count this run",
+            { run_ref, findings_recorded, findings_planned: plan.length, cause: "finding_write_interrupted",
+              record_cause: recordError?.error ?? recordError?.code ?? "unknown" });
+        }
         return interrupted({ run_ref, consent: consent_ref, findings_recorded, findings_planned: plan.length,
           cause: typeof error?.error === "string" ? error.error
             : typeof error?.code === "string" ? error.code : "unknown" });
@@ -1129,7 +1137,7 @@ export async function runSalesforceBrowserReadReconciliation(options = {}) {
 
   try { return await readAndReconcile(); }
   catch (error) {
-    if (outcomeRecorded) throw error;
+    if (outcomeRecorded || error?.code === "run_outcome_unrecorded") throw error;
     // An unclean run whose outcome cannot be recorded must not pass silently:
     // the counter would then skip a reset. Both failures are surfaced.
     try { await recordOutcome("failed"); }

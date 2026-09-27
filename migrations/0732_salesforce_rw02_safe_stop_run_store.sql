@@ -225,7 +225,9 @@ begin
   end if;
   begin
     v_actor_id := ops.portfolio_writer_actor_id();
-  exception when others then
+  -- Only the identity refusals it raises (P0001) mean "no verified partner";
+  -- a connection, serialization or any other error propagates as itself.
+  exception when raise_exception then
     raise exception 'rw02_verified_partner_required';
   end;
   select * into v_row from ops.rw02_consent_revocation where idempotency_key = p_idempotency_key;

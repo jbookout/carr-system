@@ -294,7 +294,7 @@ test("MUTANT S29 invoiced: the absence scope ignores the invoiced marker", () =>
 
 test("MUTANT S30 counter: an unexpected failure is not recorded as an unclean run", () => killed(
   checkFailureRecordsUnclean,
-  ["    if (outcomeRecorded) throw error;\n", "    throw error;\n"]));
+  ["    if (outcomeRecorded || error?.code === \"run_outcome_unrecorded\") throw error;\n", "    throw error;\n"]));
 
 test("MUTANT S31 run ref: the run reference is fixed, so two runs share one outcome key", () => killed(
   checkRepeatRunArgsIdentical,

@@ -765,8 +765,16 @@ export async function checkUnrecordedOutcomeSurfaces(mod) {
     if (verb === "add-loop") throw Object.assign(new Error("refused"), { error: "no_block" });
     return inner(verb, args);
   };
-  await assert.rejects(runWith(mod, [page({ opportunities: [opp("A")] })], { recorder, carrDeals: [carr("A")] }),
-    e => e.code === "run_outcome_unrecorded");
+  let n = 0;
+  const inner2 = recorder.record;
+  recorder.record = async (verb, args) => {
+    if (verb === "add-loop" && ++n === 2) throw Object.assign(new Error("refused"), { error: "no_block" });
+    if (verb === "add-loop") return { ok: true };
+    return inner2(verb, args);
+  };
+  await assert.rejects(runWith(mod, [page({ opportunities: [opp("A"), opp("B")] })],
+    { recorder, carrDeals: [carr("A"), carr("B")] }),
+  e => e.code === "run_outcome_unrecorded" && e.detail.findings_recorded === 1 && e.detail.findings_planned === 2);
 }
 
 /** Only record-layer-made sources count: a look-alike loop-episode source is refused. */
