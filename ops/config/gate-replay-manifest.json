@@ -718,6 +718,33 @@
         }
       ]
     },
+    "session-presence-hook.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "SessionStart",
+          "matcher": "",
+          "fixtures": [],
+          "no_replay": "SessionStart has no per-record input to replay: the hook reads only the session id and its own environment, and its effect is a room post the sandbox must never make."
+        },
+        {
+          "event": "SessionEnd",
+          "matcher": "",
+          "fixtures": [
+            "scenarios"
+          ],
+          "allow_only": "A presence recorder that NEVER BLOCKS: run_hook always returns 0, prints nothing, and holds no block, deny or announce call; its only effect is a per-session outbox file, and under gate replay it never spawns the child that posts to the Model Room."
+        },
+        {
+          "event": "UserPromptSubmit",
+          "matcher": "",
+          "fixtures": [
+            "prompts"
+          ],
+          "allow_only": "A presence recorder that NEVER BLOCKS: run_hook always returns 0, prints nothing, and holds no block, deny or announce call; its only effect is a per-session outbox file, and under gate replay it never spawns the child that posts to the Model Room."
+        }
+      ]
+    },
     "settings-change-gate.py": {
       "role": "gate",
       "wirings": [

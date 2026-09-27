@@ -1145,6 +1145,8 @@ rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:dd2a9a8193d4	announce	j
 rule-shape-gate.py	PreToolUse[mcp__.*__(teach|activate-rule)]	(all)	counts	allow=2 announce=1
 rule-shape-gate.py	PreToolUse[mcp__.*__(teach|activate-rule)]	tool_calls:0d9264aee317	announce	ENFORCEMENT CLASSIFICATION OBLIGATION — rule <hex> ("a rule ships with its enforcement decided at creation") applies to the rule you are abo
 scheduled-run-record.py	Stop	(all)	counts	allow=87
+session-presence-hook.py	SessionEnd	(all)	counts	allow=1
+session-presence-hook.py	UserPromptSubmit	(all)	counts	allow=6
 settings-change-gate.py	PostToolUse[Bash]	(all)	counts	allow=320
 settings-change-gate.py	PreToolUse[Bash]	(all)	counts	allow=320
 staging-observation-tracker.py	PostToolUse[Bash]	(all)	counts	allow=320
