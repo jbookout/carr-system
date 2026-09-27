@@ -101,14 +101,17 @@ released batch ONLY if ALL of these hold:
   2. F's DECIDING approval (the same exact or main-merge-only rule above, so a
      marker on an older approval, on a non-verdict comment or on an untrusted
      comment never counts) carries its own line `Fixes-Forward: #<B's PR
-     number>` starting in column 0, outside any fenced block (so quoted,
+     number>` starting in column 0, outside any fenced code block, <pre>-
+     style block or HTML comment, tracked as CommonMark does (a fence closes
+     only with its own character and at least its own length), so quoted,
      indented, fenced or inline text never counts; CRLF is fine; one number
-     per line, several lines for several blocked PRs);
+     per line, several lines for several blocked PRs;
   3. the release target is at or after F's merge commit (re-checked in git),
-     and F's change is still present at the target: reverting F on the target
-     would change the tree. A later revert of F in the same batch, or a later
-     rewrite of F's lines, fails this; a later PR that carries the fix forward
-     again needs its own marker (and passes the same check).
+     and ALL of F's change is still present at the target: every path F
+     changed has the same blob and mode at the target as at F. A later full
+     or partial revert of F, or any later edit to a path F changed, fails
+     this; a later PR that carries the fix forward again needs its own marker
+     (and passes the same check for its own change).
 A target between B and F therefore stays a review_blocked hold: the defective
 commit can never ship alone, only in the same atomic release as its fix. B's
 BLOCK verdict is left as it is, B is never listed as approved, and its release
@@ -588,24 +591,61 @@ def _latest_approval(comments: list[dict], cfg: dict) -> dict:
 
 
 FIXES_FORWARD_RE = re.compile(r"^Fixes-Forward:[ \t]*#([1-9][0-9]*)[ \t]*$")
-_FENCE_RE = re.compile(r"^[ ]{0,3}(```|~~~)")
+# CommonMark: a fence opens with 0-3 spaces, then a run of 3+ backticks or
+# 3+ tildes; a backtick opener's info string may not contain a backtick. It
+# closes ONLY on a line of 0-3 spaces, a run of the SAME character at least
+# as long as the opener, then nothing but spaces or tabs. An unclosed fence
+# runs to the end of the comment.
+_FENCE_OPEN_RE = re.compile(r"^ {0,3}(?P<run>`{3,}(?=[^`]*$)|~{3,})")
+_FENCE_CLOSE_RE = re.compile(r"^ {0,3}(?P<run>`{3,}|~{3,})[ \t]*$")
+# CommonMark HTML blocks that render as code or not at all: type 1 (<pre>,
+# <script>, <style>, <textarea>) ends at the line carrying its closing tag,
+# type 2 (<!--) at the line carrying `-->`.
+_HTML_OPEN_RE = re.compile(r"^ {0,3}<(?P<tag>pre|script|style|textarea)(?:[ \t>]|$)", re.IGNORECASE)
+_HTML_COMMENT_OPEN_RE = re.compile(r"^ {0,3}<!--")
+# CommonMark line endings are LF, CRLF and CR only; str.splitlines() would
+# also break on U+2028, form feed and friends, which render mid-line.
+_LINE_END_RE = re.compile(r"\r\n|\r|\n")
 
 
 def fixes_forward(approval: dict) -> set[int]:
     """The PR numbers an approval names on its own `Fixes-Forward: #<n>`
     lines: the line starts in column 0 (so never quoted, indented or inline),
     carries one number without a leading zero and nothing after it but
-    spaces, and sits outside any ``` or ~~~ fenced block. CRLF is tolerated.
+    spaces, and sits outside any fenced code block, <pre>/<script>/<style>/
+    <textarea> block or HTML comment, each tracked as CommonMark does (a
+    fence closes only with its own character and at least its own length;
+    see _FENCE_OPEN_RE). A fence or HTML block inside a quote or list item
+    starts after column 0, is not tracked, and cannot swallow a column-0
+    line, so a marker after it is top level, as CommonMark renders it.
     Read ONLY from the comment that approval_of() returned as deciding, so a
     marker on an older approval, a non-verdict comment or an untrusted
     comment never counts."""
     found: set[int] = set()
-    fenced = False
-    for line in str(approval.get("body") or "").splitlines():
-        if _FENCE_RE.match(line):
-            fenced = not fenced
+    fence: tuple[str, int] | None = None     # (character, run length) of the open fence
+    html_end: str | None = None              # the text that closes the open HTML block
+    for line in _LINE_END_RE.split(str(approval.get("body") or "")):
+        if fence is not None:
+            closer = _FENCE_CLOSE_RE.match(line)
+            if closer and closer.group("run")[0] == fence[0] and len(closer.group("run")) >= fence[1]:
+                fence = None
             continue
-        m = None if fenced else FIXES_FORWARD_RE.match(line.rstrip("\r"))
+        if html_end is not None:
+            if html_end in line.lower():
+                html_end = None
+            continue
+        opened = _FENCE_OPEN_RE.match(line)
+        if opened:
+            fence = (opened.group("run")[0], len(opened.group("run")))
+            continue
+        tag = _HTML_OPEN_RE.match(line)
+        if tag or _HTML_COMMENT_OPEN_RE.match(line):
+            end = f"</{tag.group('tag').lower()}>" if tag else "-->"
+            rest = line[tag.end():] if tag else line[line.index("<!--") + 4:]
+            if end not in rest.lower():
+                html_end = end
+            continue
+        m = FIXES_FORWARD_RE.match(line)
         if m:
             found.add(int(m.group(1)))
     return found
@@ -1121,9 +1161,11 @@ class Pipeline:
              exact or main-merge-only rule, carries the line
              `Fixes-Forward: #<B's PR number>` (fixes_forward());
           3. the target is at or after F's merge commit (re-checked in git),
-             and F's change is still PRESENT at the target (change_present):
-             a later revert of F, or a later rewrite of F's lines, drops F as
-             the fixer unless that later PR carries its own marker.
+             and ALL of F's change is still PRESENT at the target
+             (change_present: every path F changed is unchanged since F): a
+             later full or partial revert of F, or any later edit to a path F
+             changed, drops F as the fixer unless that later PR carries its
+             own marker.
         B is bound by its commit on main and the PR GitHub maps it to; F by
         its merge_commit_sha, its PR number and its approval's Reviewed-SHA.
         The first unfixed B raises; nothing is shipped partially.
@@ -1147,8 +1189,8 @@ class Pipeline:
                     break
             if fix is None:
                 why = (f"the change of fixing PR(s) {', '.join('#' + str(c['pr']) for c in candidates)} "
-                       f"is no longer present at the target (reverted or rewritten since); a later PR "
-                       f"that carries the fix needs its own `Fixes-Forward: #{b['pr']}`"
+                       f"is no longer present in full at the target (a path it changed was reverted "
+                       f"or edited since); a later PR that carries the fix needs its own `Fixes-Forward: #{b['pr']}`"
                        if candidates else
                        f"no later PR in this batch at or before the target {sha[:12]} has a deciding "
                        f"approval carrying `Fixes-Forward: #{b['pr']}`")
@@ -1161,17 +1203,23 @@ class Pipeline:
         return out
 
     def change_present(self, repo_dir: Path, fix: str, target: str) -> bool:
-        """True when the change `fix` introduced is still in `target`: reverting
-        `fix` on top of `target` (a three-way merge with base fix, ours target,
-        theirs fix^1, exactly what `git revert` computes) applies cleanly AND
-        changes the tree. A no-op revert means the change is gone (a later
-        revert); a conflict means its lines were rewritten since, which is not
-        proof either. Both are False, so the batch holds (fail closed)."""
+        """True only when the WHOLE change `fix` introduced is still in
+        `target`: every path `fix` changed against its first parent (added,
+        modified, deleted or mode-changed; renames split into their two paths)
+        has, at `target`, exactly the blob and mode it has at `fix` (or is
+        still absent). A later revert of all of it, a partial revert of one
+        path or of one hunk, and a later edit anywhere in a fixed path all
+        fail this, so the batch holds (fail closed); a later PR that keeps the
+        fix while editing those paths carries its own `Fixes-Forward` marker
+        and passes this same check for its own change. A `fix` that changed
+        nothing, or any git error, is False too."""
+        def paths(a: str, b: str) -> set[str]:
+            out = self.git("diff-tree", "-r", "--no-renames", "--name-only", "-z", a, b, cwd=repo_dir)
+            return {p for p in out.split("\0") if p}
         try:
-            merged = self.git("merge-tree", "--write-tree", f"--merge-base={fix}", target, f"{fix}^1",
-                              cwd=repo_dir).splitlines()[0].strip()
-            return merged != self.git("rev-parse", f"{target}^{{tree}}", cwd=repo_dir)
-        except (StepFailed, IndexError):
+            touched = paths(f"{fix}^1", fix)
+            return bool(touched) and not (touched & paths(fix, target))
+        except StepFailed:
             return False
 
     def main_merge_only(self, repo_dir: Path, number: int, reviewed: str, head: str,

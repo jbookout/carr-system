@@ -1590,6 +1590,121 @@ class FixForward(Base):
         self.assertEqual(ff({"body": "APPROVE\nFixes-Forward: #01342"}), set(), "leading zero")
         self.assertEqual(ff({"body": "APPROVE\nFixes-Forward: #1342, #1343"}), set())
 
+    # -- review of c7bf3ccc, finding (b): a fence closes only per CommonMark --
+
+    def test_marker_parser_closes_a_fence_only_with_its_own_character_and_length(self):
+        ff = rp.fixes_forward
+        fenced = {
+            "shorter backtick run inside a four-backtick fence":
+                "APPROVE\n````text\n```\nFixes-Forward: #1342\n````\n",
+            "tilde line inside a backtick fence":
+                "APPROVE\n```text\n~~~\nFixes-Forward: #1342\n```\n",
+            "backtick line inside a tilde fence":
+                "APPROVE\n~~~\n```\nFixes-Forward: #1342\n~~~\n",
+            "shorter tilde run inside a four-tilde fence":
+                "APPROVE\n~~~~\n~~~\nFixes-Forward: #1342\n~~~~\n",
+            "same-character line with a non-whitespace suffix does not close":
+                "APPROVE\n```\n``` not a closer\nFixes-Forward: #1342\n```\n",
+            "same-character longer line with a suffix does not close":
+                "APPROVE\n```\n````x\nFixes-Forward: #1342\n```\n",
+            "a closer indented four spaces is content":
+                "APPROVE\n```\n    ```\nFixes-Forward: #1342\n```\n",
+            "an unclosed fence runs to the end of the comment":
+                "APPROVE\n```\nFixes-Forward: #1342\n",
+            "a backtick info string containing a backtick is not an opener":
+                "APPROVE\n```a`b\n```\nFixes-Forward: #1342\n```\n",
+            "an HTML comment hides the marker":
+                "APPROVE\n<!--\nFixes-Forward: #1342\n-->\n",
+            "a <pre> block is code":
+                "APPROVE\n<pre>\nFixes-Forward: #1342\n</pre>\n",
+            "U+2028 renders mid-line, it is not a line break":
+                "APPROVE\nsee Fixes-Forward: #1342\n",
+            "CRLF fence lines":
+                "APPROVE\r\n````\r\n```\r\nFixes-Forward: #1342\r\n````\r\n",
+        }
+        for why, body in fenced.items():
+            with self.subTest(why):
+                self.assertEqual(ff({"body": body}), set(), why)
+        closed = {
+            "a longer run of the same character closes":
+                "APPROVE\n```\nx\n`````\nFixes-Forward: #1342\n",
+            "a four-backtick fence closed by four backticks":
+                "APPROVE\n````\n```\n````\nFixes-Forward: #1342\n",
+            "a closer indented up to three spaces with trailing spaces closes":
+                "APPROVE\n~~~\nx\n   ~~~  \nFixes-Forward: #1342\n",
+            "a fence opened inside a quote closes with the quote":
+                "APPROVE\n> ```\nFixes-Forward: #1342\n",
+            "after an HTML comment closes":
+                "APPROVE\n<!-- note -->\nFixes-Forward: #1342\n",
+        }
+        for why, body in closed.items():
+            with self.subTest(why):
+                self.assertEqual(ff({"body": body}), {1342}, why)
+
+    def marker_body(self, n, fence_example):
+        return f"APPROVE\nReviewed-SHA: {pr_head(n)}\n{fence_example}"
+
+    def test_marker_inside_a_longer_fence_with_a_shorter_inner_line_holds(self):
+        # the reviewer's repro: four-backtick example containing a three-backtick line
+        b, f, nb, nf = self.two_commits()
+        body = self.marker_body(nf, f"````text\n```\nFixes-Forward: #{nb}\n````\n")
+        runner, rec = self.tick({nb: [self.block(nb)], nf: [approve(nf, cid=6000 + nf, body=body)]})
+        self.assert_held(runner, rec, nb)
+        self.assertFalse(rec.get("fix_forwards"))
+
+    def test_marker_inside_a_backtick_fence_after_a_tilde_line_holds(self):
+        b, f, nb, nf = self.two_commits()
+        body = self.marker_body(nf, f"```text\n~~~\nFixes-Forward: #{nb}\n```\n")
+        runner, rec = self.tick({nb: [self.block(nb)], nf: [approve(nf, cid=6000 + nf, body=body)]})
+        self.assert_held(runner, rec, nb)
+        self.assertFalse(rec.get("fix_forwards"))
+
+    def test_marker_after_a_fence_line_with_a_suffix_holds(self):
+        b, f, nb, nf = self.two_commits()
+        body = self.marker_body(nf, f"```\n``` example\nFixes-Forward: #{nb}\n```\n")
+        runner, rec = self.tick({nb: [self.block(nb)], nf: [approve(nf, cid=6000 + nf, body=body)]})
+        self.assert_held(runner, rec, nb)
+        self.assertFalse(rec.get("fix_forwards"))
+
+    # -- review of c7bf3ccc, finding (a): the WHOLE fix must still be present --
+
+    def test_partial_revert_of_a_two_path_fix_holds(self):
+        # the reviewer's repro: F fixes a.js and improves b.js; a later ordinarily
+        # approved R restores only a.js=defect. The inverse of F still changes b.js,
+        # but the essential repair is gone.
+        b, nb = self.land({"mcp-server/src/a.js": "defect", "mcp-server/src/b.js": "old"})
+        f, nf = self.land({"mcp-server/src/a.js": "fixed", "mcp-server/src/b.js": "unrelated improvement"})
+        r, _ = self.land({"mcp-server/src/a.js": "defect"})
+        runner, rec = self.tick({nb: [self.block(nb)], nf: [self.fix_approve(nf, [nb])]})
+        self.assertEqual(rec["sha"], r)
+        self.assert_held(runner, rec, nb)
+        self.assertIn("no longer present", rec["detail"])
+        self.assertFalse(rec.get("fix_forwards"))
+
+    def test_partial_revert_of_one_hunk_of_a_two_hunk_fix_holds(self):
+        filler = "".join(f"line {i}\n" for i in range(20))
+        b, nb = self.land({"mcp-server/src/a.js": f"defect one\n{filler}defect two\n"})
+        f, nf = self.land({"mcp-server/src/a.js": f"fixed one\n{filler}fixed two\n"})
+        r, _ = self.land({"mcp-server/src/a.js": f"fixed one\n{filler}defect two\n"})
+        runner, rec = self.tick({nb: [self.block(nb)], nf: [self.fix_approve(nf, [nb])]})
+        self.assertEqual(rec["sha"], r)
+        self.assert_held(runner, rec, nb)
+        self.assertFalse(rec.get("fix_forwards"))
+
+    def test_a_later_edit_elsewhere_in_a_fix_path_holds_unless_it_carries_the_marker(self):
+        # conservative by design: a later change to ANY path the fix touched
+        # needs its own reviewer to attest the fix is still whole
+        filler = "".join(f"line {i}\n" for i in range(20))
+        b, nb = self.land({"mcp-server/src/a.js": f"defect\n{filler}tail\n"})
+        f, nf = self.land({"mcp-server/src/a.js": f"fixed\n{filler}tail\n"})
+        m, nm = self.land({"mcp-server/src/a.js": f"fixed\n{filler}new tail\n"})
+        runner, rec = self.tick({nb: [self.block(nb)], nf: [self.fix_approve(nf, [nb])]})
+        self.assert_held(runner, rec, nb)
+        runner, rec = self.tick({nb: [self.block(nb)], nf: [self.fix_approve(nf, [nb])],
+                                 nm: [self.fix_approve(nm, [nb])]})
+        self.assertEqual(rec["status"], "shipped", rec)
+        self.assertEqual(rec["fix_forwards"][0]["fixing_pr"], nm)
+
 
 class SquashGitHub(FakeGitHub):
     """FakeGitHub, except the squash commit `merged` maps to PR `number`
