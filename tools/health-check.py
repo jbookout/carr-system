@@ -711,6 +711,9 @@ print(json.dumps({"registered": sorted(TARGETS), "rows": rows, "retired": retire
                                     from ops.calendar_prebrief_runtime_activation_receipt r
                                     join ops.calendar_prebrief_allowed_calendar a
                                       on a.sponsor='joe' and a.active_revision_id=r.allowlist_revision_id
+                                    join ops.calendar_prebrief_allowlist_receipt l2
+                                      on l2.id=a.active_revision_id and l2.sponsor='joe'
+                                     and l2.configuration_digest=a.configuration_digest
                                    where r.id=(select l.id
                                                  from ops.calendar_prebrief_runtime_activation_receipt l
                                                 where l.sponsor='joe'

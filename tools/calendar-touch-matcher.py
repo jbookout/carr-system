@@ -48,7 +48,7 @@ GROUP_CONTAINER = os.path.expanduser(
 # opens, rebuilt every night; the draft is not the record.
 #
 # The relative paths are the exporters' own ROSTER_REL / REGISTRY_REL
-# (exporters/targets.py); ops/calendar-touch-matcher-selftest.py pins them so the
+# (exporters/targets.py); tools/test-calendar-touch-matcher.py pins them so the
 # two cannot drift apart silently again.
 ROSTER_REL = "DNA/Clients/client-roster.xlsx"
 REGISTRY_REL = "DNA/Leads/lead-registry.xlsx"

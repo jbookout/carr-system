@@ -77,12 +77,17 @@ class BuildKeepsGrant(unittest.TestCase):
         (self.repo / "tools" / "calendar-access-stub.c").write_text("int main(void){return 1;}\n")
         result = self.run_build()
         self.assertEqual(self.compiles(), 2)
-        self.assertIn("grant Calendars", result.stderr)
+        self.assertIn("must grant Calendars", result.stderr)
 
-    def test_force_rebuilds(self):
+    def test_force_rebuilds_and_warns_the_grant_is_void(self):
         self.existing_build()
-        self.run_build("--force")
+        result = self.run_build("--force")
         self.assertEqual(self.compiles(), 1)
+        self.assertIn("must grant Calendars", result.stderr)
+
+    def test_kept_build_does_not_warn(self):
+        self.existing_build()
+        self.assertNotIn("grant Calendars", self.run_build().stderr)
 
     def test_invalid_signature_rebuilds(self):
         self.existing_build()

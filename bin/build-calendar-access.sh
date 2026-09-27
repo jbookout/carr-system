@@ -64,8 +64,7 @@ if [ "$FORCE" -eq 0 ] && [ -x "$BIN" ] && codesign -v "$APP" 2>/dev/null; then
     echo "build-calendar-access: OK — existing signed bundle kept (its Calendar grant stays valid)"
     exit 0
   fi
-  echo "build-calendar-access: stub source changed since the last build — rebuilding;" >&2
-  echo "  the new signature needs Joe to grant Calendars to CARR Calendar Access again" >&2
+  echo "build-calendar-access: stub source changed since the last build — rebuilding" >&2
 fi
 
 command -v clang >/dev/null 2>&1 || {
@@ -88,3 +87,7 @@ codesign -v "$APP" 2>/dev/null || {
 printf '%s\n' "$SRC_SHA" > "$STAMP"
 
 echo "build-calendar-access: OK — Mach-O stub built and bundle signed ad-hoc"
+# Every compile mints a new cdhash, whatever triggered it (--force, an invalid
+# seal, a changed stub): say so on every path that reaches here.
+echo "build-calendar-access: NEW signature — Joe must grant Calendars to CARR Calendar Access again" >&2
+echo "  (System Settings > Privacy & Security > Calendars)" >&2
