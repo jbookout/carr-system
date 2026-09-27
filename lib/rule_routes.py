@@ -249,7 +249,7 @@ def call_paths(tool_input: object) -> list[str]:
         # apply_patch accepts surrounding blank space and CRLF envelopes. Parse
         # the same normalized boundary rather than rejecting a valid patch.
         command = command.replace("\r\n", "\n").strip()
-    if isinstance(command, str) and command.startswith("*** Begin Patch\n"):
+    if isinstance(command, str) and re.match(r"\A\*\*\* Begin Patch[ \t]*\n", command):
         paths.extend(match.group(1).strip() for match in re.finditer(
             r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", command, re.M))
         paths.extend(match.group(1).strip() for match in re.finditer(

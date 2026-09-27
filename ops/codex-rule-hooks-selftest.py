@@ -81,24 +81,53 @@ def main():
     assert edit_rows <= patch_rows, sorted(edit_rows - patch_rows)
     assert "bbffc139" not in rule_routes.matched_rule_ids(
         routes, "apply_patch", update_patch)
-    for variant in (lambda text: "\n" + text,
-                    lambda text: text.replace("\n", "\r\n")):
+    update_rules = set(rule_routes.matched_rule_ids(routes, "apply_patch", update_patch))
+    move_rows_expected = {row["trigger_id"] for row in rail.matched_triggers(
+        dict(patch_payload, tool_input=move_call))}
+    add_rows_expected = {row["trigger_id"] for row in rail.matched_triggers(
+        dict(patch_payload, tool_input=add_call))}
+    forms = (
+        lambda text: text,
+        lambda text: text.replace("\n", "\r\n"),
+        lambda text: "\n" + text,
+        lambda text: text.replace("*** Begin Patch\n", "*** Begin Patch \n", 1),
+        lambda text: text.replace("*** Begin Patch\n", "*** Begin Patch\t\n", 1),
+        lambda text: ("\n" + text.replace("*** Begin Patch\n", "*** Begin Patch \t\n", 1))
+                     .replace("\n", "\r\n"),
+    )
+    for variant in forms:
         update_variant = {"command": variant(update_patch["command"])}
+        assert "hooks/ledger-sweep.py" in rule_routes.call_paths(update_variant)
         update_ids = set(rule_routes.matched_rule_ids(
             routes, "apply_patch", update_variant))
+        assert update_ids == update_rules, (update_ids, update_rules)
         assert destination_rules <= update_ids, sorted(destination_rules - update_ids)
         update_rows = {row["trigger_id"] for row in rail.matched_triggers(
             dict(patch_payload, tool_input=update_variant))}
+        assert update_rows == patch_rows, (update_rows, patch_rows)
         assert edit_rows <= update_rows, sorted(edit_rows - update_rows)
         move_variant = {"command": variant(move_call["command"])}
         assert {"scratch.txt", "hooks/probe.py"} <= set(rule_routes.call_paths(move_variant))
         move_ids = set(rule_routes.matched_rule_ids(
             routes, "apply_patch", move_variant))
+        assert move_ids == move_rules, (move_ids, move_rules)
         assert destination_rules <= move_ids, sorted(destination_rules - move_ids)
         move_rows = {row["trigger_id"] for row in rail.matched_triggers(
             dict(patch_payload, tool_input=move_variant))}
+        assert move_rows == move_rows_expected, (move_rows, move_rows_expected)
         assert "5e186a09dcf2" in move_rows
+        add_variant = {"command": variant(add_call["command"])}
+        assert "hooks/probe.py" in rule_routes.call_paths(add_variant)
+        add_ids = set(rule_routes.matched_rule_ids(routes, "apply_patch", add_variant))
+        assert add_ids == add_rules, (add_ids, add_rules)
+        assert destination_rules <= add_ids, sorted(destination_rules - add_ids)
+        add_rows = {row["trigger_id"] for row in rail.matched_triggers(
+            dict(patch_payload, tool_input=add_variant))}
+        assert add_rows == add_rows_expected, (add_rows, add_rows_expected)
+        assert "5e186a09dcf2" in add_rows
     assert rule_routes.call_paths({"command": "prose before\n" + update_patch["command"]}) == []
+    assert rule_routes.call_paths({"command": "cat <<'PATCH'\n" + update_patch["command"]
+                                   + "\nPATCH"}) == []
     assert "search-doctrine" in rule_routes.call_verbs("mcp__carr__search_doctrine", {})
     assert "confirm-merge" in rule_routes.call_verbs(
         "mcp__carr__call_verb", {"verb": "confirm-merge"})
