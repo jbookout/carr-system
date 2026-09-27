@@ -100,15 +100,14 @@ released batch ONLY if ALL of these hold:
      and B is its ancestor in git;
   2. F's DECIDING approval (the same exact or main-merge-only rule above, so a
      marker on an older approval, on a non-verdict comment or on an untrusted
-     comment never counts) carries its own line `Fixes-Forward: #<B's PR
-     number>` starting in column 0, outside any fenced block (so quoted,
-     indented, fenced or inline text never counts; CRLF is fine; one number
-     per line, several lines for several blocked PRs);
+     comment never counts) carries `Fixes-Forward: #<B's PR number>` in a
+     contiguous authority header immediately after first-line APPROVE and
+     second-line Reviewed-SHA. One number per line; multiple consecutive
+     lines can name multiple blocked PRs. Later prose and examples never count;
   3. the release target is at or after F's merge commit (re-checked in git),
-     and F's change is still present at the target: reverting F on the target
-     would change the tree. A later revert of F in the same batch, or a later
-     rewrite of F's lines, fails this; a later PR that carries the fix forward
-     again needs its own marker (and passes the same check).
+     and every path F changed still has F's exact blob and mode at the target.
+     A later revert or rewrite of any F path fails this; a later PR that
+     carries the fix forward again needs its own marker and passes this check.
 A target between B and F therefore stays a review_blocked hold: the defective
 commit can never ship alone, only in the same atomic release as its fix. B's
 BLOCK verdict is left as it is, B is never listed as approved, and its release
@@ -588,33 +587,25 @@ def _latest_approval(comments: list[dict], cfg: dict) -> dict:
 
 
 FIXES_FORWARD_RE = re.compile(r"^Fixes-Forward:[ \t]*#([1-9][0-9]*)[ \t]*$")
-_FENCE_RE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})")
-_FENCE_END_RE = re.compile(r"^[ ]{0,3}([`~]+)[ \t]*$")
+FIXES_FORWARD_REVIEWED_RE = re.compile(r"^Reviewed-SHA: [0-9a-f]{40}[ \t]*$")
 
 
 def fixes_forward(approval: dict) -> set[int]:
-    """The PR numbers an approval names on its own `Fixes-Forward: #<n>`
-    lines: the line starts in column 0 (so never quoted, indented or inline),
-    carries one number without a leading zero and nothing after it but
-    spaces, and sits outside any ``` or ~~~ fenced block. CRLF is tolerated.
-    Read ONLY from the comment that approval_of() returned as deciding, so a
-    marker on an older approval, a non-verdict comment or an untrusted
-    comment never counts."""
+    """Read only consecutive authority-header markers after exact APPROVE and
+    Reviewed-SHA lines. The first prose, blank, or example line ends the
+    header. This narrow grammar makes Markdown/HTML rendering irrelevant:
+    a marker later in a quoted, fenced, code-span, or HTML example cannot
+    confer release authority. CRLF is tolerated. The caller passes only the
+    deciding approval returned by approval_of()."""
+    lines = str(approval.get("body") or "").splitlines()
+    if len(lines) < 3 or lines[0] != "APPROVE" or not FIXES_FORWARD_REVIEWED_RE.fullmatch(lines[1]):
+        return set()
     found: set[int] = set()
-    fence: tuple[str, int] | None = None
-    for line in str(approval.get("body") or "").splitlines():
-        if fence is not None:
-            end = _FENCE_END_RE.fullmatch(line)
-            if end and set(end.group(1)) == {fence[0]} and len(end.group(1)) >= fence[1]:
-                fence = None
-            continue
-        opening = _FENCE_RE.match(line)
-        if opening:
-            fence = (opening.group(1)[0], len(opening.group(1)))
-            continue
+    for line in lines[2:]:
         m = FIXES_FORWARD_RE.match(line.rstrip("\r"))
-        if m:
-            found.add(int(m.group(1)))
+        if not m:
+            break
+        found.add(int(m.group(1)))
     return found
 
 

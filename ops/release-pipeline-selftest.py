@@ -1643,19 +1643,22 @@ class FixForward(Base):
 
     def test_marker_parser_is_line_exact(self):
         ff = rp.fixes_forward
-        self.assertEqual(ff({"body": "APPROVE\nFixes-Forward: #1342\n"}), {1342})
-        self.assertEqual(ff({"body": "APPROVE\r\nFixes-Forward: #1342\r\n"}), {1342})
-        self.assertEqual(ff({"body": "APPROVE\nFixes-Forward:   #1342  \n"}), {1342})
-        self.assertEqual(ff({"body": "APPROVE\n  Fixes-Forward: #1342\n"}), set(), "indented")
-        self.assertEqual(ff({"body": "APPROVE\n    Fixes-Forward: #1342\n"}), set(), "indented code block")
-        self.assertEqual(ff({"body": "APPROVE\n```\nFixes-Forward: #1342\n```\n"}), set(), "fenced")
-        self.assertEqual(ff({"body": "APPROVE\n~~~text\nFixes-Forward: #1342\n~~~\n"}), set(), "fenced")
-        self.assertEqual(ff({"body": "APPROVE\n```\nx\n```\nFixes-Forward: #1342\n"}), {1342})
-        self.assertEqual(ff({"body": "APPROVE\nsee Fixes-Forward: #1342"}), set())
-        self.assertEqual(ff({"body": "APPROVE\n> Fixes-Forward: #1342"}), set())
-        self.assertEqual(ff({"body": "APPROVE\nFixes-Forward: 1342"}), set())
-        self.assertEqual(ff({"body": "APPROVE\nFixes-Forward: #01342"}), set(), "leading zero")
-        self.assertEqual(ff({"body": "APPROVE\nFixes-Forward: #1342, #1343"}), set())
+        prefix = f"APPROVE\nReviewed-SHA: {'a' * 40}\n"
+        crlf_prefix = f"APPROVE\r\nReviewed-SHA: {'a' * 40}\r\n"
+        self.assertEqual(ff({"body": prefix + "Fixes-Forward: #1342\n"}), {1342})
+        self.assertEqual(ff({"body": crlf_prefix + "Fixes-Forward: #1342\r\n"}), {1342})
+        self.assertEqual(ff({"body": prefix + "Fixes-Forward:   #1342  \n"}), {1342})
+        self.assertEqual(ff({"body": prefix + "  Fixes-Forward: #1342\n"}), set(), "indented")
+        self.assertEqual(ff({"body": prefix + "    Fixes-Forward: #1342\n"}), set(), "indented code block")
+        self.assertEqual(ff({"body": prefix + "```\nFixes-Forward: #1342\n```\n"}), set(), "fenced")
+        self.assertEqual(ff({"body": prefix + "~~~text\nFixes-Forward: #1342\n~~~\n"}), set(), "fenced")
+        self.assertEqual(ff({"body": prefix + "```\nx\n```\nFixes-Forward: #1342\n"}), set(),
+                         "a marker after prose or examples is outside the authority header")
+        self.assertEqual(ff({"body": prefix + "see Fixes-Forward: #1342"}), set())
+        self.assertEqual(ff({"body": prefix + "> Fixes-Forward: #1342"}), set())
+        self.assertEqual(ff({"body": prefix + "Fixes-Forward: 1342"}), set())
+        self.assertEqual(ff({"body": prefix + "Fixes-Forward: #01342"}), set(), "leading zero")
+        self.assertEqual(ff({"body": prefix + "Fixes-Forward: #1342, #1343"}), set())
 
     def test_mismatched_or_shorter_fences_do_not_authorize_a_fix(self):
         ff = rp.fixes_forward
@@ -1679,6 +1682,31 @@ class FixForward(Base):
                 approval = approve(nf, body=f"APPROVE\nReviewed-SHA: {pr_head(nf)}\n{example}\n")
                 runner, rec = self.tick({nb: [self.block(nb)], nf: [approval]})
                 self.assert_held(runner, rec, nb)
+
+    def test_hidden_marker_contexts_hold_full_release(self):
+        b, f, nb, nf = self.two_commits()
+        examples = (
+            f"Example <!--\nFixes-Forward: #{nb}\n-->",
+            f"<!--\nFixes-Forward: #{nb}\n-->",
+            f"<pre>\nFixes-Forward: #{nb}\n</pre>",
+            f"Example <pre>\nFixes-Forward: #{nb}\n</pre>",
+            f"Example <textarea>\nFixes-Forward: #{nb}\n</textarea>",
+            f"Example ``\nFixes-Forward: #{nb}\n``",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                approval = approve(nf, body=f"APPROVE\nReviewed-SHA: {pr_head(nf)}\n{example}\n")
+                runner, rec = self.tick({nb: [self.block(nb)], nf: [approval]})
+                self.assert_held(runner, rec, nb)
+
+    def test_only_contiguous_header_markers_confer_authority(self):
+        ff = rp.fixes_forward
+        reviewed = f"Reviewed-SHA: {'a' * 40}"
+        self.assertEqual(ff({"body": f"APPROVE\n{reviewed}\nFixes-Forward: #1342\n"
+                                     "Fixes-Forward: #1343\nExplanation follows\n"}), {1342, 1343})
+        for prefix in ("Example\n", "\n", "<!-- -->\n", "```\n```\n"):
+            with self.subTest(prefix=prefix):
+                self.assertEqual(ff({"body": f"APPROVE\n{reviewed}\n{prefix}Fixes-Forward: #1342\n"}), set())
 
 
 class SquashGitHub(FakeGitHub):
