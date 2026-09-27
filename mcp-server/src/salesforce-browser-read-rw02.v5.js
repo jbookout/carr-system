@@ -995,9 +995,22 @@ export async function runSalesforceBrowserReadReconciliation(options = {}) {
           return stopRun(reason_id, { kernel, index });
         };
         if (verdict.decision === "log_in_permitted" || verdict.decision === "code_autofill_permitted") {
-          // The approved challenge permits only the sign-in action. Run every
-          // other page check on this observation before either click. Preserve
-          // the observed challenge in the stop receipt if a check fails.
+          // A separate page challenge may be absent or match this sign-in step.
+          // A contradictory challenge must reach the kernel unchanged and stop
+          // before a click, including CAPTCHA and an unobservable challenge.
+          if (snapshot.page.challenge !== "none" && snapshot.page.challenge !== challenge) {
+            let observedKernel, challengeVerdict;
+            try {
+              observedKernel = kernelPage(binding, snapshot.page, ui_contract_digest, null);
+              challengeVerdict = evaluatePageObservation(observedKernel);
+            } catch (error) {
+              if (error?.name !== "V5RW02Error") throw error;
+              return stopHere(observationStopReason(error));
+            }
+            return stopRun(challengeVerdict.reason_id, { kernel: observedKernel, index });
+          }
+          // Suppress only this authorized challenge while running the other
+          // page checks before either sign-in click.
           let pageGuard;
           try { pageGuard = evaluatePageObservation(
             kernelPage(binding, snapshot.page, ui_contract_digest, "none")); }

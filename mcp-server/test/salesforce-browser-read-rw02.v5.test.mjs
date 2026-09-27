@@ -86,6 +86,52 @@ test("sign-in actions require page safety before each click", async () => {
   }
 });
 
+test("contradictory page challenges stop before sign-in actions", async () => {
+  for (const [challengeForStep, reason_id] of [
+    [() => "captcha", "authentication_challenge"],
+    [() => "unstated", "challenge_state_unobservable"],
+    [() => "session_expired", "authentication_challenge"],
+    [step => step === "password" ? "mfa_challenge" : "login_required", "authentication_challenge"],
+  ]) {
+    for (const step of ["password", "code"]) {
+      const challenge = challengeForStep(step);
+      const log = [];
+      const recorder = new SpyRecorder();
+      const password = page({ sign_in: { state: "password_prompt", credentials_autofilled: true },
+        observation: step === "password" ? { challenge } : {} });
+      const code = page({ sign_in: { state: "code_prompt" },
+        observation: step === "code" ? { challenge } : {} });
+      const out = await runWith(mod, [], { reader: new FakeReaderDriver([[password, code, page()]]),
+        recorder, signInOperator: new FakeCodeDriver({ log, fillOn: [1] }),
+        serverClock: mod.createServerClock(new FakeClockClient()) });
+      assertSafeStop(mod, out, recorder, { stop_class: "auth_challenge", reason_id });
+      assert.equal(out.run_outcome, "stopped");
+      assert.equal(out.page_stop.challenge, challenge, `${step}: observed challenge is retained`);
+      assert.equal(recorder.calls.filter(c => c.verb === "record-salesforce-page-stop").length, 1);
+      assert.equal(recorder.calls.some(c => c.args.outcome === "clean"), false);
+      assert.deepEqual(log, step === "password" ? [] : ["clickLogIn"],
+        `${step}: ${challenge} causes no click on the unsafe page`);
+    }
+  }
+});
+
+test("the expected login and MFA challenges still complete", async () => {
+  const log = [];
+  const out = await runWith(mod, [], {
+    reader: new FakeReaderDriver([[
+      page({ sign_in: { state: "password_prompt", credentials_autofilled: true },
+        observation: { challenge: "login_required" } }),
+      page({ sign_in: { state: "code_prompt" }, observation: { challenge: "mfa_challenge" } }),
+      page(),
+    ]]),
+    signInOperator: new FakeCodeDriver({ log, fillOn: [1] }),
+    serverClock: mod.createServerClock(new FakeClockClient()),
+  });
+  assert.equal(out.decision, "reconciled");
+  assert.ok(log.includes("clickLogIn"));
+  assert.ok(log.includes("clickCodeField"));
+});
+
 test("a full read run never touches any driver write method", async () => {
   const driver = new FakeReaderDriver([
     page({ opportunities: [opp("A", { team: ["joe-sf"] })], has_next: true }),
