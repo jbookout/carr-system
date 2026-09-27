@@ -87,7 +87,7 @@ import { agentActorForToken, authenticatedIdentity, continuityActorForTokenMaps,
 import { pipelineChanges } from "./dealroom.js";
 import { authorizeProgram6Action, createDealroomHandler, isDealroomRequest, isLegacyDealroomRequest } from "./dealroom-web.js";
 import { createProgram6RoutineController } from "./program6-routine-controller.js";
-import { appendRoomTurn, DEFAULT_ROOM, readRoomQueue, readRoomTurns } from "./partner-room.js";
+import { appendRoomTurn, DEFAULT_ROOM, OBSERVATORY_ROOM, readRoomQueue, readRoomTurns } from "./partner-room.js";
 import { createCaptureHandler } from "./capture.js";
 import { TOOLS } from "./tools.js";
 import { buildRelease } from "./release.js";
@@ -636,14 +636,17 @@ const dealroomHandler = createDealroomHandler({
     const client = { query: async (text, params = []) => ({ rows: await sql.query(text, params) }) };
     return readCommandCenterSummary({ client, actor, correlationId: correlationId || env.CORRELATION_ID });
   },
-  // The Model Room observatory's two doors onto the partner room. Both call the
-  // SAME functions the read-room / add-room-turn verbs call (partner-room.js) —
+  // The Model Room observatory's doors onto the room wire. Turns are read and
+  // posted in OBSERVATORY_ROOM, the room the local bridge polls, so a browser
+  // post reaches the queue; the queue projection is read from DEFAULT_ROOM where
+  // Hermes writes it. All call the SAME functions the read-room / add-room-turn
+  // verbs call (partner-room.js) —
   // these two adapters supply a connection and nothing else, so the panel can
   // never read a different wire than a desk does.
   roomReadFn: (env, params) => {
     const sql = neon(env.DATABASE_URL_READER);
     const client = { query: async (text, values = []) => ({ rows: await sql.query(text, values) }) };
-    return readRoomTurns(client, { room: DEFAULT_ROOM, ...params });
+    return readRoomTurns(client, { room: OBSERVATORY_ROOM, ...params });
   },
   queueReadFn: (env, params) => {
     const sql = neon(env.DATABASE_URL_READER);
@@ -654,7 +657,7 @@ const dealroomHandler = createDealroomHandler({
     const pool = new Pool({ connectionString: env.DATABASE_URL_WRITER });
     const client = await pool.connect();
     try {
-      return await appendRoomTurn(client, { room: DEFAULT_ROOM, ...params });
+      return await appendRoomTurn(client, { room: OBSERVATORY_ROOM, ...params });
     } finally {
       client.release();
       await pool.end();
