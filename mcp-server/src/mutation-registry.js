@@ -4,7 +4,15 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v90 is the runtime selector after the rule-boot change to standing-context:
+// v91 (PROVISIONAL) is the runtime selector for DoctorCRE V5-RW02's safe-stop
+// run store. It registers the read-salesforce-autonomy-counter read, the
+// record-salesforce-run-outcome writer and the human-only
+// revoke-salesforce-read-consent writer, and reseals update-deal for its new
+// invoiced_on field. None carries a Salesforce or other provider effect. It
+// chains over v90's own seal (0731) with 0733/0734; final numbering is
+// assigned at merge.
+//
+// Superseded note (v90): v90 was the runtime selector after the rule-boot change to standing-context:
 // its input schema gained detail="boot" and an integer page (the paginated
 // rule boot served from rule-boot.js). The verb stays read-only; the runtime
 // compares its schema_digest before admitting it, so the selector has to read
@@ -175,7 +183,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v90.generated.js";
+} from "./scac-mutation-registry.v91.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 

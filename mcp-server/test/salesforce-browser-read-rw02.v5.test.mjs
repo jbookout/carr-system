@@ -1,5 +1,7 @@
-// V5-RW02 browser-only Salesforce READ adapter: read-only guarantee, sign-in
-// stops, reconciliation findings and the 5-consecutive-clean counter.
+// V5-RW02 browser-only Salesforce READ adapter: read-only guarantee, typed
+// safe stops (auth challenge, UI drift, unexpected recipient or account,
+// policy conflict), the system-started sign-in on the server clock, Dell's
+// consent record, loop episodes, the invoiced scope and the counter.
 // Synthetic data only. No real browser, no real Salesforce, no network.
 
 import test from "node:test";
@@ -9,19 +11,25 @@ import { fileURLToPath } from "node:url";
 
 import * as mod from "../src/salesforce-browser-read-rw02.v5.js";
 import {
-  FakeReaderDriver, FakeCodeDriver, SpyRecorder, bindingSource, carr, opp, page,
+  FakeReaderDriver, FakeCodeDriver, SpyRecorder, bindingSource, carr, opp, page, runWith, pressed,
+  assertSafeStop, findingCalls,
   checkReadOnlyFacade, checkRecorderAllowlist, checkMissingJoeFlagged, checkCounterResets,
   checkCodeRetryBound, checkAbsenceNeedsCompleteRead, checkCodeStepNeedsSystemStart,
   checkNoFindingsAfterStop, checkHasNextStrict, checkKeysDistinctPerOpportunity, checkCredentialTextRefused,
   checkPageCapExact, checkFacadeForwardsNoArgs, checkCredentialKeyRefusedByName, checkRepeatRunArgsIdentical,
   checkEmptyReadInconclusive, checkGetterSwapHarmless,
+  checkAuthChallengesStop, checkSystemSignInCodeExhausted, checkSystemSignInFilledContinues,
+  checkServerClockTicket, checkUiDriftStops, checkUnexpectedAccountStops, checkPlanRecipientGuard,
+  checkPolicyConflictStops, checkConsentRecord, checkNoPartialWrites, checkLoopEpisodes, checkInvoicedScope,
+  checkFailureRecordsUnclean, checkWriteInterruptedTyped, checkUnrecordedOutcomeSurfaces,
+  checkSourcesMustBeServerMade,
 } from "./salesforce-browser-read-rw02.fixtures.mjs";
 
 const {
   V5_RW02_READER_METHODS, V5_RW02_READ_MODE_RECORD_VERBS, V5_RW02_AUTONOMY_THRESHOLD,
-  V5_RW02_CODE_AUTOFILL_MAX_ATTEMPTS, V5RW02BrowserReadError,
-  readOnlyReader, readModeRecorder, classifySignIn, attemptCodeAutofill,
-  reconcileSalesforceDeals, evaluateAutonomyCounter, runSalesforceBrowserReadReconciliation,
+  V5_RW02_CODE_AUTOFILL_MAX_ATTEMPTS, V5_RW02_SAFE_STOP_CLASSES, V5_RW02_SAFE_STOP_REASONS,
+  V5_RW02_SAFE_STOP_MESSAGES, V5_RW02_SIGN_IN_OPERATOR_METHODS, V5RW02BrowserReadError,
+  classifySignIn, attemptCodeAutofill, reconcileSalesforceDeals, evaluateAutonomyCounter,
   unavailableBindingSource,
 } = mod;
 
@@ -34,14 +42,23 @@ test("the read facade exposes exactly the reader methods and never the driver", 
   assert.deepEqual([...V5_RW02_READER_METHODS], ["nextPage", "observe"]);
 });
 
+test("the sign-in facade exposes exactly the Log in press and the four code-step clicks", () => {
+  const driver = new FakeCodeDriver();
+  driver.typeText = () => {}; driver.readCode = () => "123456";
+  const facade = mod.signInOperator(driver);
+  assert.deepEqual(Object.keys(facade).sort(), [...V5_RW02_SIGN_IN_OPERATOR_METHODS]);
+  assert.equal(facade.typeText, undefined);
+  assert.equal(facade.readCode, undefined);
+  assert.equal(Object.getPrototypeOf(facade), null);
+  assert.ok(Object.isFrozen(facade));
+});
+
 test("a full read run never touches any driver write method", async () => {
   const driver = new FakeReaderDriver([
     page({ opportunities: [opp("A", { team: ["joe-sf"] })], has_next: true }),
     page({ opportunities: [opp("B", { team: [] })], has_next: false }),
   ]);
-  const recorder = new SpyRecorder();
-  const out = await runSalesforceBrowserReadReconciliation({ reader: driver,
-    bindingSource: bindingSource(), carrDeals: async () => [carr("A"), carr("B")], recorder });
+  const out = await runWith(mod, [], { reader: driver, carrDeals: [carr("A"), carr("B")] });
   assert.equal(out.decision, "reconciled");
   assert.equal(driver.writeCalls, 0, "no write-shaped driver method may be called");
   assert.deepEqual(driver.readCalls.sort(), ["nextPage", "observe", "observe"]);
@@ -52,24 +69,27 @@ test("a full read run never touches any driver write method", async () => {
 test("the recorder refuses every verb outside the read-mode allowlist", async () => {
   await checkRecorderAllowlist(mod);
   assert.deepEqual([...V5_RW02_READ_MODE_RECORD_VERBS],
-    ["add-loop", "record-finding", "record-salesforce-page-stop"]);
+    ["add-loop", "record-finding", "record-salesforce-page-stop", "record-salesforce-run-outcome"]);
 });
 
-test("a run records only through allowlisted verbs", async () => {
+test("a run records only through allowlisted verbs, and ends with its clean outcome", async () => {
   const recorder = new SpyRecorder();
-  await runSalesforceBrowserReadReconciliation({
-    reader: new FakeReaderDriver([page({ opportunities: [opp("A"), opp("Z", { team: ["joe-sf"] })] })]),
-    bindingSource: bindingSource(), carrDeals: async () => [carr("A"), carr("Q")], recorder });
-  assert.ok(recorder.calls.length >= 3);
+  await runWith(mod, [page({ opportunities: [opp("A"), opp("Z", { team: ["joe-sf"] })] })],
+    { recorder, carrDeals: [carr("A"), carr("Q")] });
+  assert.ok(recorder.calls.length >= 4);
   for (const { verb } of recorder.calls) assert.ok(V5_RW02_READ_MODE_RECORD_VERBS.includes(verb), verb);
+  const last = recorder.calls.at(-1);
+  assert.equal(last.verb, "record-salesforce-run-outcome");
+  assert.deepEqual(Object.keys(last.args).sort(), ["action_kind", "idempotency_key", "outcome", "run_ref"]);
+  assert.equal(last.args.action_kind, mod.V5_RW02_READ_RUN_KIND);
+  assert.equal(last.args.outcome, "clean");
 });
 
-test("the runner takes no mode, writer, partner, org or capability argument", async () => {
+test("the runner takes no mode, writer, partner, org, consent or capability argument", async () => {
   for (const extra of [{ mode: "write" }, { writer: {} }, { partner: "joe" }, { org_id: "00Dx" },
-    { capability: {} }, { tenant: "carr-internal" }, { binding: {} }]) {
-    await assert.rejects(runSalesforceBrowserReadReconciliation({ reader: new FakeReaderDriver([]),
-      bindingSource: bindingSource(), carrDeals: async () => [], recorder: new SpyRecorder(), ...extra }),
-    e => e instanceof V5RW02BrowserReadError && e.code === "unknown_option", JSON.stringify(extra));
+    { capability: {} }, { tenant: "carr-internal" }, { binding: {} }, { dellConsent: true }, { nowMs: 1 }]) {
+    await assert.rejects(runWith(mod, [], extra),
+      e => e instanceof V5RW02BrowserReadError && e.code === "unknown_option", JSON.stringify(extra));
   }
 });
 
@@ -78,56 +98,175 @@ test("the module source names no Salesforce write method and no deal-mutating ve
     import.meta.url)), "utf8");
   // A verb can only be called by its name as a string literal.
   for (const verb of ["update-deal", "patch-deal-field", "link-salesforce-reference", "new-deal",
-    "record-salesforce-write-readback", "record-salesforce-duplicate-check", "call-verb"])
+    "record-salesforce-write-readback", "record-salesforce-duplicate-check", "call-verb",
+    "revoke-salesforce-read-consent"])
     assert.ok(!src.includes(`"${verb}"`) && !src.includes(`'${verb}'`) && !src.includes(`\`${verb}`), verb);
-  for (const method of ["saveOpportunity", "addTeamMember", "clickLogIn", ".type(", "typeText", ".fill("])
+  for (const method of ["saveOpportunity", "addTeamMember", ".type(", "typeText", ".fill(", "readCode"])
     assert.ok(!src.includes(method), method);
+  // clickLogIn exists only as a sign-in facade method and its one call site.
+  assert.equal(src.split("clickLogIn").length - 1, 2);
 });
 
 // ---------------------------------------------------------------------------
-// 2. Identity comes from the server-side binding, never from the caller.
+// 2. Identity and consent come from server-side records, never the caller.
 // ---------------------------------------------------------------------------
 
 test("no org binding means no run", async () => {
   const recorder = new SpyRecorder();
   const driver = new FakeReaderDriver([page()]);
-  const out = await runSalesforceBrowserReadReconciliation({ reader: driver,
-    bindingSource: unavailableBindingSource, carrDeals: async () => [], recorder });
-  assert.equal(out.decision, "refused");
-  assert.equal(out.reason_id, "org_binding_unavailable");
+  const out = await runWith(mod, [], { reader: driver, recorder, bindingSource: unavailableBindingSource });
+  assertSafeStop(mod, out, recorder, { stop_class: "binding", reason_id: "org_binding_unavailable" });
   assert.equal(driver.readCalls.length, 0, "the browser is not even observed");
   assert.equal(recorder.calls.length, 0);
 });
 
-test("the source must be Dell's org, with Dell's own OK", async () => {
-  for (const [patch, reason] of [[{ source_partner: "joe" }, "source_not_dell"],
-    [{ dell_consent: null }, "dell_consent_absent"],
-    [{ dell_consent: { granted: false, decision_ref: "d-1" } }, "dell_consent_absent"]]) {
-    const driver = new FakeReaderDriver([page()]);
-    const out = await runSalesforceBrowserReadReconciliation({ reader: driver,
-      bindingSource: bindingSource(patch), carrDeals: async () => [], recorder: new SpyRecorder() });
-    assert.equal(out.reason_id, reason);
-    assert.equal(driver.readCalls.length, 0);
+test("the source must be Dell's org", async () => {
+  const driver = new FakeReaderDriver([page()]);
+  const out = await runWith(mod, [], { reader: driver, bindingSource: bindingSource({ source_partner: "joe" }) });
+  assertSafeStop(mod, out, null, { stop_class: "binding", reason_id: "source_not_dell" });
+  assert.equal(driver.readCalls.length, 0);
+});
+
+test("Dell's consent is its decision record: allowed with the consent ref, refused when missing, revoked or a flag", async () => {
+  await checkConsentRecord(mod);
+});
+
+test("evaluateDellConsent needs every property of the record at once", () => {
+  const record = { decision_id: mod.V5_RW02_DELL_CONSENT_DECISION_ID, sponsoring_human_slug: "dell",
+    human_quote_present: true };
+  assert.equal(mod.evaluateDellConsent({ record, revoked: false }).decision, "allowed");
+  assert.equal(mod.evaluateDellConsent({ record, revoked: false }).recorded_by_partner, "dell");
+  assert.equal(mod.evaluateDellConsent({ record, revoked: false }).consent_basis, "dell_own_record");
+  for (const reading of [null, "yes", true, { granted: true }, { record, revoked: undefined },
+    { record: { ...record, human_quote_present: "yes" }, revoked: false }]) {
+    assert.equal(mod.evaluateDellConsent(reading).decision, "refused", JSON.stringify(reading));
   }
 });
 
-test("a page signed in to another org or seat stops through the kernel ladder", async () => {
-  for (const [obs, reason] of [[{ org_id: "00DjoeOrg000001" }, "org_mismatch"],
-    [{ signed_in_account_ref: "joe-seat" }, "signed_in_account_mismatch"],
-    [{ ui_contract_digest: `sha256:${"9".repeat(64)}` }, "ui_drift"]]) {
-    const recorder = new SpyRecorder();
-    const out = await runSalesforceBrowserReadReconciliation({
-      reader: new FakeReaderDriver([page({ observation: obs, opportunities: [opp("A")] })]),
-      bindingSource: bindingSource(), carrDeals: async () => [carr("A")], recorder });
-    assert.equal(out.decision, "stopped");
-    assert.equal(out.reason_id, reason);
-    assert.deepEqual(recorder.calls.map(c => c.verb), ["record-salesforce-page-stop"]);
-    assert.equal(out.findings_recorded, 0, "a stopped run concludes nothing");
-  }
+test("the server-side consent source reads the pinned decision through the record layer", async () => {
+  const seen = [];
+  const src = mod.createDellConsentSource({ query: async (sql, params) => {
+    seen.push([sql, params]);
+    return { rows: [{ consent: JSON.stringify({ record: null, revoked: false }) }] };
+  } });
+  assert.deepEqual(await src.read(), { record: null, revoked: false });
+  assert.match(seen[0][0], /ops\.rw02_consent_record\(\$1::uuid\)/);
+  assert.deepEqual(seen[0][1], [mod.V5_RW02_DELL_CONSENT_DECISION_ID]);
 });
 
 // ---------------------------------------------------------------------------
-// 3. Sign-in: only stop conditions, never credential entry.
+// 3. Typed safe stops (checkable_done 1).
+// ---------------------------------------------------------------------------
+
+test("every registered stop reason has a registered class and a plain-language message", () => {
+  for (const [reason_id, cls] of Object.entries(V5_RW02_SAFE_STOP_REASONS)) {
+    assert.ok(V5_RW02_SAFE_STOP_CLASSES.includes(cls), reason_id);
+    assert.ok(V5_RW02_SAFE_STOP_MESSAGES[reason_id].length > 30, reason_id);
+    assert.ok(!/undefined|\$\{/.test(V5_RW02_SAFE_STOP_MESSAGES[reason_id]), reason_id);
+    // What happened, then exactly one outcome fixed by where the stop happens,
+    // then a next step: a consent or binding stop never says "nothing was
+    // filed" (it never reached the browser), and a page stop never says the
+    // read did not start.
+    const message = V5_RW02_SAFE_STOP_MESSAGES[reason_id];
+    const outcomes = Object.values(mod.V5_RW02_SAFE_STOP_OUTCOMES).filter(o => message.includes(o));
+    assert.equal(outcomes.length, 1, reason_id);
+    const expected = ["binding", "consent"].includes(cls) ? mod.V5_RW02_SAFE_STOP_OUTCOMES.before_browser
+      : ["finding_recipient_unexpected", "finding_outside_scope", "loop_episode_unreadable"].includes(reason_id)
+        ? mod.V5_RW02_SAFE_STOP_OUTCOMES.plan : mod.V5_RW02_SAFE_STOP_OUTCOMES.page;
+    assert.equal(outcomes[0], expected, reason_id);
+    const next = message.slice(message.indexOf(expected) + expected.length).trim();
+    assert.ok(next.length > 10 && next.endsWith("."), `${reason_id} has no next step`);
+  }
+  for (const r of mod.V5_RW02_SIGN_IN_STOP_REASONS) assert.equal(V5_RW02_SAFE_STOP_REASONS[r], "auth_challenge", r);
+  for (const cls of ["auth_challenge", "ui_drift", "unexpected_recipient_or_account", "policy_conflict"])
+    assert.ok(Object.values(V5_RW02_SAFE_STOP_REASONS).includes(cls), cls);
+});
+
+test("CAPTCHA, a new-device prompt and a security check stop typed after a clean page, filing nothing", async () => {
+  await checkAuthChallengesStop(mod);
+});
+
+test("a system-started sign-in whose code never fills stops after exactly 3 attempts", async () => {
+  await checkSystemSignInCodeExhausted(mod);
+});
+
+test("a system-started sign-in that fills continues; without a sign-in step it is the partner's", async () => {
+  await checkSystemSignInFilledContinues(mod);
+});
+
+test("sign-in is only before the first page, and Log in is pressed at most once", async () => {
+  const mid = new SpyRecorder();
+  const out = await runWith(mod, [page({ opportunities: [opp("A")], has_next: true }),
+    page({ sign_in: { state: "password_prompt", credentials_autofilled: true } })],
+  { recorder: mid, signInOperator: new FakeCodeDriver(),
+    serverClock: mod.createServerClock({ query: async () => ({ rows: [{ now_ms: "1" }] }) }) });
+  assertSafeStop(mod, out, mid, { stop_class: "auth_challenge", reason_id: "sign_in_prompt_mid_read" });
+  const log = [];
+  const twice = new SpyRecorder();
+  const again = await runWith(mod, [], { recorder: twice,
+    reader: new FakeReaderDriver([[page({ sign_in: { state: "password_prompt", credentials_autofilled: true } })]]),
+    signInOperator: new FakeCodeDriver({ log }),
+    serverClock: mod.createServerClock({ query: async () => ({ rows: [{ now_ms: "1" }] }) }) });
+  assertSafeStop(mod, again, twice, { stop_class: "auth_challenge", reason_id: "sign_in_not_accepted" });
+  assert.deepEqual(log, ["clickLogIn"]);
+});
+
+test("a sign-in ticket is minted on the server clock at the press; caller time is refused", async () => {
+  await checkServerClockTicket(mod);
+});
+
+test("UI drift stops: a missing selector, a changed layout, an unparseable row, a self-reported fingerprint", async () => {
+  await checkUiDriftStops(mod);
+});
+
+test("the UI fingerprint is the adapter's digest of layout and matched selectors", () => {
+  const a = mod.rw02ReadUiFingerprint({ layout_ref: "l.v1", selectors_matched: ["b", "a", "a"] });
+  assert.equal(a, mod.rw02ReadUiFingerprint({ layout_ref: "l.v1", selectors_matched: ["a", "b"] }));
+  assert.notEqual(a, mod.rw02ReadUiFingerprint({ layout_ref: "l.v2", selectors_matched: ["a", "b"] }));
+  assert.notEqual(a, mod.rw02ReadUiFingerprint({ layout_ref: "l.v1", selectors_matched: ["a", "b", "c"] }));
+});
+
+test("another seat, org or origin, or a page showing recipients, stops as unexpected account or recipient", async () => {
+  await checkUnexpectedAccountStops(mod);
+});
+
+test("a finding bound for the wrong recipient or outside scope refuses the whole plan", async () => {
+  await checkPlanRecipientGuard(mod);
+});
+
+test("a page-reported policy conflict, a field value or a credential key stops as a policy conflict", async () => {
+  await checkPolicyConflictStops(mod);
+});
+
+test("a stop found while planning the third finding leaves zero findings written", async () => {
+  await checkNoPartialWrites(mod);
+});
+
+test("an unexpected failure after the browser is touched still records the run unclean", async () => {
+  await checkFailureRecordsUnclean(mod);
+});
+
+test("a record verb refusing part-way is a typed interruption with its true count, and an unclean run", async () => {
+  await checkWriteInterruptedTyped(mod);
+});
+
+test("an unclean run whose outcome cannot be recorded is surfaced, never swallowed", async () => {
+  await checkUnrecordedOutcomeSurfaces(mod);
+});
+
+test("consent and loop-episode sources count only when the record layer's factory made them; no caller clock", async () => {
+  await checkSourcesMustBeServerMade(mod);
+});
+
+test("every run gets a fresh run reference that nothing a caller supplies can repeat", async () => {
+  const a = await runWith(mod, [page()]);
+  const b = await runWith(mod, [page()]);
+  assert.match(a.run_ref, /^[0-9a-f]{24}$/);
+  assert.notEqual(a.run_ref, b.run_ref);
+});
+
+// ---------------------------------------------------------------------------
+// 4. Sign-in classification and the code step.
 // ---------------------------------------------------------------------------
 
 test("sign-in stop conditions produce typed stops", () => {
@@ -135,18 +274,25 @@ test("sign-in stop conditions produce typed stops", () => {
     [{ state: "password_prompt", credentials_autofilled: false }, "password_prompt_without_autofill"],
     [{ state: "password_prompt" }, "password_prompt_without_autofill"],
     [{ state: "code_prompt" }, "unprompted_code_prompt"],
+    [{ state: "captcha" }, "captcha"],
+    [{ state: "new_device_prompt" }, "new_device_prompt"],
     [{ state: "security_challenge" }, "security_challenge"],
     [{ state: "unknown" }, "sign_in_state_unobservable"],
-    [{ state: "password_prompt", credentials_autofilled: true }, "partner_sign_in_required"],
+    [{ state: "two_factor_push" }, "sign_in_state_unobservable"],
   ];
   for (const [signIn, reason] of cases) {
     const a = classifySignIn(signIn, { systemStartedSignIn: false });
     assert.equal(a.decision, "stop", reason);
     assert.equal(a.reason_id, reason);
+    assert.equal(a.stop_class, "auth_challenge");
     assert.equal(a.resolution_owner, "partner_at_the_browser");
     assert.equal(a.credential_entry_performed, false);
   }
   assert.equal(classifySignIn({ state: "signed_in" }, { systemStartedSignIn: false }).decision, "continue");
+  assert.equal(classifySignIn({ state: "password_prompt", credentials_autofilled: true }).decision, "log_in_permitted");
+  // Even a system-started sign-in never answers a CAPTCHA or a new device.
+  for (const state of ["captcha", "new_device_prompt"])
+    assert.equal(classifySignIn({ state }, { systemStartedSignIn: true }).decision, "stop");
 });
 
 test("a sign-in observation carrying a credential-shaped field is refused outright, by name", async () => {
@@ -155,25 +301,23 @@ test("a sign-in observation carrying a credential-shaped field is refused outrig
     e => e.code === "unknown_field");
 });
 
-test("a code prompt stops the run and is recorded as an MFA page stop", async () => {
+test("a code prompt the system did not start stops the run and is recorded as an MFA page stop", async () => {
   const recorder = new SpyRecorder();
-  const out = await runSalesforceBrowserReadReconciliation({
-    reader: new FakeReaderDriver([page({ sign_in: { state: "code_prompt" } })]),
-    bindingSource: bindingSource(), carrDeals: async () => [], recorder });
-  assert.equal(out.decision, "stopped");
-  assert.equal(out.reason_id, "unprompted_code_prompt");
+  const out = await runWith(mod, [page({ sign_in: { state: "code_prompt" } })], { recorder });
+  assertSafeStop(mod, out, recorder, { stop_class: "auth_challenge", reason_id: "unprompted_code_prompt" });
   assert.equal(out.page_stop.challenge, "mfa_challenge");
   assert.equal(recorder.calls[0].verb, "record-salesforce-page-stop");
   assert.equal(recorder.calls[0].args.page.observation.challenge, "mfa_challenge");
 });
 
 test("the code autofill step: click field, click the suggestion, check filled", async () => {
-  const driver = new FakeCodeDriver({ suggestionOn: [1], fillAfterSuggestion: true });
-  const a = await attemptCodeAutofill({ driver, ticket: mod.beginSystemSignIn({ nowMs: 5 }), nowMs: 6 });
+  const { ticket, driver } = await pressed(mod, { driver: new FakeCodeDriver({ suggestionOn: [1],
+    fillAfterSuggestion: true }) });
+  const a = await attemptCodeAutofill({ driver, ticket });
   assert.equal(a.decision, "filled");
   assert.equal(a.attempts, 1);
-  assert.deepEqual(driver.log, ["clickCodeField", "autofillSuggestionVisible", "clickAutofillSuggestion",
-    "codeFieldFilled"]);
+  assert.deepEqual(driver.log, ["clickLogIn", "clickCodeField", "autofillSuggestionVisible",
+    "clickAutofillSuggestion", "codeFieldFilled"]);
 });
 
 test("the code autofill step stops for the partner after exactly 3 attempts", async () => {
@@ -185,24 +329,13 @@ test("the code autofill step never clicks anything for a sign-in the system did 
   await checkCodeStepNeedsSystemStart(mod);
 });
 
-test("a sign-in ticket is single-use and goes stale", async () => {
-  const ticket = mod.beginSystemSignIn({ nowMs: 1_000 });
-  const stale = new FakeCodeDriver({ fillOn: [1] });
-  const a = await attemptCodeAutofill({ driver: stale, ticket,
-    nowMs: 1_000 + mod.V5_RW02_SIGN_IN_TICKET_TTL_MS + 1 });
-  assert.equal(a.reason_id, "sign_in_ticket_stale");
-  assert.deepEqual(stale.log, []);
+test("a sign-in ticket is single-use", async () => {
+  const { ticket } = await pressed(mod);
+  const first = new FakeCodeDriver({ fillOn: [1] });
+  assert.equal((await attemptCodeAutofill({ driver: first, ticket })).decision, "filled");
   const reuse = new FakeCodeDriver({ fillOn: [1] });
-  assert.equal((await attemptCodeAutofill({ driver: reuse, ticket, nowMs: 1_001 })).reason_id,
-    "sign_in_ticket_spent");
+  assert.equal((await attemptCodeAutofill({ driver: reuse, ticket })).reason_id, "sign_in_ticket_spent");
   assert.deepEqual(reuse.log, []);
-  const filled = mod.beginSystemSignIn({ nowMs: 0 });
-  assert.equal((await attemptCodeAutofill({ driver: new FakeCodeDriver({ fillOn: [1] }), ticket: filled,
-    nowMs: 0 })).decision, "filled");
-  const after = new FakeCodeDriver({ fillOn: [1] });
-  assert.equal((await attemptCodeAutofill({ driver: after, ticket: filled, nowMs: 1 })).reason_id,
-    "sign_in_ticket_spent");
-  assert.deepEqual(after.log, []);
   assert.ok(Object.isFrozen(ticket) && Object.keys(ticket).length === 0, "the ticket carries no readable state");
 });
 
@@ -211,15 +344,16 @@ test("a run that stops on a later page records the stop and concludes nothing", 
 });
 
 test("a non-boolean filled report stops rather than guessing", async () => {
+  const { ticket } = await pressed(mod);
   const driver = new FakeCodeDriver({ suggestionOn: [], filledValue: "123456" });
-  const a = await attemptCodeAutofill({ driver, ticket: mod.beginSystemSignIn({ nowMs: 0 }), nowMs: 0 });
+  const a = await attemptCodeAutofill({ driver, ticket });
   assert.equal(a.decision, "stop");
   assert.equal(a.reason_id, "code_fill_state_unobservable");
   assert.ok(!JSON.stringify(a).includes("123456"), "the code value never enters the answer");
 });
 
 // ---------------------------------------------------------------------------
-// 4. Reconciliation: presence and partner membership only.
+// 5. Reconciliation: presence and partner membership only.
 // ---------------------------------------------------------------------------
 
 test("a deal in Dell's Salesforce without Joe is flagged; Joe as owner or team member is present", async () => {
@@ -244,10 +378,15 @@ test("absence is never concluded from an incomplete read", async () => {
   await checkAbsenceNeedsCompleteRead(mod);
 });
 
-test("the same opportunity reported twice with different facts is an inconsistent read", () => {
+test("the same opportunity read twice with different facts stops as an inconsistent result", async () => {
   assert.throws(() => reconcileSalesforceDeals({ joeUserRef: "joe-sf", complete: true,
     salesforce: [opp("A"), opp("A", { team: ["joe-sf"] })], carr: [] }),
   e => e.code === "inconsistent_result");
+  const recorder = new SpyRecorder();
+  const out = await runWith(mod, [page({ opportunities: [opp("A")], has_next: true }),
+    page({ opportunities: [opp("A", { team: ["joe-sf"] })] })], { recorder });
+  assertSafeStop(mod, out, recorder, { stop_class: "inconsistent_result",
+    reason_id: "opportunity_read_twice_differently" });
 });
 
 test("reconciliation never compares or proposes field values", () => {
@@ -260,11 +399,10 @@ test("reconciliation never compares or proposes field values", () => {
 
 test("findings are recorded: missing Joe as a Dell loop, unknown as a partner loop, absent as a finding", async () => {
   const recorder = new SpyRecorder();
-  const out = await runSalesforceBrowserReadReconciliation({
-    reader: new FakeReaderDriver([page({ opportunities: [opp("A"), opp("N", { team: ["joe-sf"] })] })]),
-    bindingSource: bindingSource(), carrDeals: async () => [carr("A"), carr("Q")], recorder });
+  const out = await runWith(mod, [page({ opportunities: [opp("A"), opp("N", { team: ["joe-sf"] })] })],
+    { recorder, carrDeals: [carr("A"), carr("Q")] });
   assert.equal(out.decision, "reconciled");
-  assert.deepEqual(out.counts, { missing_joe: 1, unknown_to_carr: 1, absent_from_salesforce: 1 });
+  assert.deepEqual(out.counts, { missing_joe: 1, unknown_to_carr: 1, absent_from_salesforce: 1, reopened_loops: 0 });
   const loops = recorder.calls.filter(c => c.verb === "add-loop").map(c => c.args);
   const dell = loops.find(l => l.owner === "Dell");
   assert.equal(dell.kind, "team_loop");
@@ -284,9 +422,14 @@ test("findings are recorded: missing Joe as a Dell loop, unknown as a partner lo
     assert.ok(!Object.hasOwn(c.args, "tenant") && !Object.hasOwn(c.args, "actor"),
       `${c.verb} passes a caller identity`);
   }
+  assert.equal(findingCalls(recorder).length, 3);
 });
 
-test("a repeat run sends byte-identical arguments, so nothing is refused or filed twice", async () => {
+test("a closed loop whose finding is true again files a new action; an open one replays", async () => {
+  await checkLoopEpisodes(mod);
+});
+
+test("a repeat run sends byte-identical finding arguments, so nothing is refused or filed twice", async () => {
   await checkRepeatRunArgsIdentical(mod);
 });
 
@@ -318,24 +461,23 @@ test("a getter that answers differently on a second read cannot smuggle a value 
   await checkGetterSwapHarmless(mod);
 });
 
-test("the absence comparison is open deals only (CARR exposes no invoiced marker)", () => {
+test("the absence scope is open and closed-won deals not yet invoiced", async () => {
+  await checkInvoicedScope(mod);
   const r = reconcileSalesforceDeals({ joeUserRef: "joe-sf", complete: true,
     salesforce: [opp("A", { team: ["joe-sf"] })], carr: [carr("A")] });
-  assert.equal(r.absence_scope, "open_deals_only_no_invoiced_marker_exposed");
+  assert.equal(r.absence_scope, "open_or_closed_won_not_invoiced");
 });
 
 test("the run caps the number of pages it will read", async () => {
   const pages = Array.from({ length: mod.V5_RW02_READ_PAGE_CAP + 1 }, () => page({ has_next: true }));
   const recorder = new SpyRecorder();
-  const out = await runSalesforceBrowserReadReconciliation({ reader: new FakeReaderDriver(pages),
-    bindingSource: bindingSource(), carrDeals: async () => [], recorder });
-  assert.equal(out.decision, "stopped");
-  assert.equal(out.reason_id, "page_cap_reached");
-  assert.equal(out.findings_recorded, 0);
+  const out = await runWith(mod, pages, { recorder });
+  assertSafeStop(mod, out, recorder, { stop_class: "inconsistent_result", reason_id: "page_cap_reached" });
 });
 
 // ---------------------------------------------------------------------------
-// 5. The 5-consecutive-clean counter (decision 493de438). Data + pure function.
+// 6. The 5-consecutive-clean counter (decision 493de438). Data + pure function;
+//    the server-side store is tested in salesforce-read-run-store-rw02.
 // ---------------------------------------------------------------------------
 
 const run = (n, outcome = "clean", action_kind = "opportunity_phase_update") =>
@@ -361,6 +503,13 @@ test("any unclean run resets the count", async () => {
     assert.equal(a.consecutive_clean, 1, bad);
     assert.equal(a.threshold_met, false);
   }
+});
+
+test("the read run is a counted kind of its own", () => {
+  assert.ok(mod.V5_RW02_AUTONOMY_KINDS.includes(mod.V5_RW02_READ_RUN_KIND));
+  const a = evaluateAutonomyCounter({ action_kind: mod.V5_RW02_READ_RUN_KIND,
+    runs: [1, 2, 3, 4, 5].map(n => run(n, "clean", mod.V5_RW02_READ_RUN_KIND)) });
+  assert.equal(a.threshold_met, true);
 });
 
 test("the counter never promotes anything in this slice", () => {
