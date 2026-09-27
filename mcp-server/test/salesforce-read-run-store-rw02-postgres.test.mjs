@@ -104,6 +104,15 @@ test("V5-RW02 run ledger, consent record, loop episodes and invoiced scope on re
       assert.equal(read.consecutive_clean, 0);
       assert.equal(read.threshold_met, false);
       assert.equal(read.runs_recorded, 6);
+      // The Worker runs a read verb on its READER login; the counter answers there too.
+      const reader = await clientFor(pg, copy, "carr_reader");
+      try {
+        const actorId = (await reader.query("select id from public.actor where slug=$1", [JOE.slug])).rows[0].id;
+        const onReader = await TOOLS["read-salesforce-autonomy-counter"].handler(reader, { ...JOE, id: actorId },
+          { action_kind: KIND });
+        assert.equal(onReader.consecutive_clean, 0);
+        assert.equal(onReader.runs_recorded, 6);
+      } finally { await reader.end(); }
       // Another kind neither counts nor resets.
       const other = await verb(pg, copy, "read-salesforce-autonomy-counter", { action_kind: "opportunity_create" });
       assert.equal(other.consecutive_clean, 0);
