@@ -371,6 +371,13 @@ def borderlines(probs, yes_at=YES_AT, no_at=NO_AT):
 #     same action never gets two labels; the rule's other cases are reviewed.
 # The signals live in ops/fixtures/rule-delivery-eval/action-signals.v2.json,
 # written from each rule's statement, not from the production trigger table.
+#
+# FLOORS (round 4). A third review found same-feature pairs on both sides of
+# the lower bound for rules still dense at it. So: rules flagged that way get
+# a floor below 0 (every case reviewed); for every other rule, the pairs just
+# below its bound are sampled (sample_below_floor), adjudicated, and the gold
+# rate published; a sample above 10% gold lowers the floor again. The floors
+# and every sample's gold rate are committed in review-floors.v2.json.
 # A pair in the review set is gold iff its written adjudication says so;
 # outside it, not gold. Jev (strict second pass) is evidence only: it scored
 # some clearly binding pairs at 0.12-0.18, so it never decides.
@@ -437,16 +444,49 @@ def action_settled(cases, signals):
     return exact_rules, labels
 
 
-def review_plan(cases, probs, signals, extended_rules):
+def load_review_floors(path):
+    """The committed per-rule review floors (review-floors.v2.json):
+    {"floors": {rule id: floor}, "samples": [...]}. A floor below 0 reviews
+    every case of the rule."""
+    with open(path, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    floors = doc["floors"]
+    for rid, v in floors.items():
+        if not isinstance(v, (int, float)) or v >= REVIEW_LOW:
+            raise ValueError(f"floor for {rid} must be a number below REVIEW_LOW, got {v!r}")
+    return floors
+
+
+def sample_below_floor(probs, rid, floor, exclude, n):
+    """The `n` unreviewed pairs of rule `rid` just below `floor` (highest p
+    first, ties at the n-th score included), and the new floor that puts
+    exactly them into the review set: the highest p left below them (or -1
+    when none is left). `exclude` holds pairs already in the review set.
+    Returns (sampled pairs, new floor)."""
+    below = sorted(((row[rid], cid) for cid, row in probs.items()
+                    if rid in row and row[rid] <= floor and (cid, rid) not in exclude),
+                   reverse=True)
+    if not below:
+        return [], floor
+    cut = below[min(n, len(below)) - 1][0]
+    picked = [(cid, rid) for p, cid in below if p >= cut]
+    rest = [p for p, _cid in below if p < cut]
+    return picked, (max(rest) if rest else -1.0)
+
+
+def review_plan(cases, probs, signals, extended_rules, floors=None):
     """Everything the review-set scheme needs, from its committed inputs.
     Returns {"low_by_rule", "signals_hit", "settled_rules", "settled_labels",
-    "review"}: the per-rule lower bound (REVIEW_LOW_EXTENDED for
-    `extended_rules`), the (case, rule) pairs carrying a signal, the rules and
+    "review"}: the per-rule lower bound (a committed floor from `floors` when
+    the rule has one, else REVIEW_LOW_EXTENDED for `extended_rules`, else
+    REVIEW_LOW), the (case, rule) pairs carrying a signal, the rules and
     per-case labels settled by policy (UNIVERSAL_POLICY and the action
     signals), and the review set itself."""
     rules = {rid for row in probs.values() for rid in row}
     extended = set(extended_rules)
-    low = {rid: (REVIEW_LOW_EXTENDED if rid in extended else REVIEW_LOW) for rid in rules}
+    floors = floors or {}
+    low = {rid: (floors[rid] if rid in floors
+                 else REVIEW_LOW_EXTENDED if rid in extended else REVIEW_LOW) for rid in rules}
     exact_rules, act = action_settled(cases, signals)
     settled_rules = set(UNIVERSAL_POLICY) | exact_rules
     settled_labels = {}
