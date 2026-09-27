@@ -587,22 +587,29 @@ def _latest_approval(comments: list[dict], cfg: dict) -> dict:
 
 
 FIXES_FORWARD_RE = re.compile(r"^Fixes-Forward:[ \t]*#([1-9][0-9]*)[ \t]*$")
-FIXES_FORWARD_REVIEWED_RE = re.compile(r"^Reviewed-SHA: [0-9a-f]{40}[ \t]*$")
+FIXES_FORWARD_REVIEWED_RE = re.compile(r"^Reviewed-SHA: ([0-9a-f]{40})[ \t]*$")
 
 
-def fixes_forward(approval: dict) -> set[int]:
+def fixes_forward(approval: dict, reviewed_sha: str) -> set[int]:
     """Read only consecutive authority-header markers after exact APPROVE and
     Reviewed-SHA lines. The first prose, blank, or example line ends the
     header. This narrow grammar makes Markdown/HTML rendering irrelevant:
     a marker later in a quoted, fenced, code-span, or HTML example cannot
     confer release authority. CRLF is tolerated. The caller passes only the
     deciding approval returned by approval_of()."""
-    lines = str(approval.get("body") or "").splitlines()
-    if len(lines) < 3 or lines[0] != "APPROVE" or not FIXES_FORWARD_REVIEWED_RE.fullmatch(lines[1]):
+    # Split on LF only. Python's splitlines() treats U+2028 and several other
+    # Unicode separators as line breaks even though approval_of()'s reviewed
+    # SHA matcher and GitHub's comment text do not. All authority lines must
+    # be literal LF/CRLF lines and line two must name the SHA that was accepted.
+    lines = [line.removesuffix("\r") for line in str(approval.get("body") or "").split("\n")]
+    if len(lines) < 3 or lines[0] != "APPROVE":
+        return set()
+    reviewed_line = FIXES_FORWARD_REVIEWED_RE.fullmatch(lines[1])
+    if reviewed_line is None or reviewed_line.group(1) != reviewed_sha:
         return set()
     found: set[int] = set()
     for line in lines[2:]:
-        m = FIXES_FORWARD_RE.match(line.rstrip("\r"))
+        m = FIXES_FORWARD_RE.match(line)
         if not m:
             break
         found.add(int(m.group(1)))
@@ -1094,7 +1101,7 @@ class Pipeline:
                 reviews.append({"pr": number, "rule": rule, "reviewed_sha": reviewed_sha, "head_sha": head_sha})
                 fixers.append({"pr": number, "commit": commit, "position": position,
                                "merge_commit_sha": str(pr.get("merge_commit_sha") or ""),
-                               "fixes": fixes_forward(approval), "reviewed_sha": reviewed_sha,
+                               "fixes": fixes_forward(approval, reviewed_sha), "reviewed_sha": reviewed_sha,
                                "url": str(approval.get("html_url") or "")})
             if touches:
                 release_prs.append({"pr": number, "head_sha": head_sha})

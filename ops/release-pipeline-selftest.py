@@ -1469,6 +1469,13 @@ class FixForward(Base):
         runner, rec = self.tick({nb: [self.block(nb)], nf: [self.fix_approve(nf, [nb + 1000])]})
         self.assert_held(runner, rec, nb)
 
+    def test_unicode_line_separator_cannot_spoof_fix_forward_header(self):
+        b, f, nb, nf = self.two_commits()
+        body = (f"APPROVE\u2028Reviewed-SHA: {'a' * 40}\u2028Fixes-Forward: #{nb}\n"
+                f"Reviewed-SHA: {pr_head(nf)}\n")
+        runner, rec = self.tick({nb: [self.block(nb)], nf: [approve(nf, body=body)]})
+        self.assert_held(runner, rec, nb)
+
     def test_marker_on_a_non_deciding_approval_holds(self):
         b, f, nb, nf = self.two_commits()
         later_plain = approve(nf, when="2026-09-30T04:00:00Z", cid=7001)
@@ -1642,10 +1649,12 @@ class FixForward(Base):
         self.assertEqual(sorted(x["blocked_pr"] for x in rec["fix_forwards"]), sorted([na, nb]))
 
     def test_marker_parser_is_line_exact(self):
-        ff = rp.fixes_forward
+        ff = lambda approval: rp.fixes_forward(approval, "a" * 40)
         prefix = f"APPROVE\nReviewed-SHA: {'a' * 40}\n"
         crlf_prefix = f"APPROVE\r\nReviewed-SHA: {'a' * 40}\r\n"
         self.assertEqual(ff({"body": prefix + "Fixes-Forward: #1342\n"}), {1342})
+        self.assertEqual(rp.fixes_forward({"body": prefix + "Fixes-Forward: #1342\n"}, "b" * 40),
+                         set(), "the header SHA must be the accepted reviewed SHA")
         self.assertEqual(ff({"body": crlf_prefix + "Fixes-Forward: #1342\r\n"}), {1342})
         self.assertEqual(ff({"body": prefix + "Fixes-Forward:   #1342  \n"}), {1342})
         self.assertEqual(ff({"body": prefix + "  Fixes-Forward: #1342\n"}), set(), "indented")
@@ -1661,7 +1670,7 @@ class FixForward(Base):
         self.assertEqual(ff({"body": prefix + "Fixes-Forward: #1342, #1343"}), set())
 
     def test_mismatched_or_shorter_fences_do_not_authorize_a_fix(self):
-        ff = rp.fixes_forward
+        ff = lambda approval: rp.fixes_forward(approval, "a" * 40)
         examples = [
             "````\n```\nFixes-Forward: #1342\n````",
             "````\n~~~\nFixes-Forward: #1342\n````",
@@ -1700,7 +1709,7 @@ class FixForward(Base):
                 self.assert_held(runner, rec, nb)
 
     def test_only_contiguous_header_markers_confer_authority(self):
-        ff = rp.fixes_forward
+        ff = lambda approval: rp.fixes_forward(approval, "a" * 40)
         reviewed = f"Reviewed-SHA: {'a' * 40}"
         self.assertEqual(ff({"body": f"APPROVE\n{reviewed}\nFixes-Forward: #1342\n"
                                      "Fixes-Forward: #1343\nExplanation follows\n"}), {1342, 1343})
