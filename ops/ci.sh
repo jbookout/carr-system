@@ -1531,6 +1531,18 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     fi
   fi
 
+  # V5-R03 action-needed producer: recipient routing, deferred exclusion and
+  # replay dedupe on synthetic rows inside a rolled-back transaction.
+  if [ -f mcp-server/test/r03-loop-queue-postgres.sql ]; then
+    if ! run_quiet "$LOGDIR/r03-loop-queue-postgres.log" \
+         "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+         -f mcp-server/test/r03-loop-queue-postgres.sql; then
+      tail -30 "$LOGDIR/r03-loop-queue-postgres.log" >&2
+      bad migration "the R03 loop producer and dedupe proof failed"
+      return
+    fi
+  fi
+
   # WR-000116: defaults without an insert, the compare-and-swap, the first save,
   # the replay, the two named refusals and quiet_now across a midnight
   # wrap-around in a zone the proof's own SQL chooses.
