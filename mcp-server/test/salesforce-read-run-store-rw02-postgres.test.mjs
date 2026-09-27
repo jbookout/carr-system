@@ -1,4 +1,4 @@
-// salesforce-read-run-store-rw02-postgres.test.mjs — migration 0732 on REAL
+// salesforce-read-run-store-rw02-postgres.test.mjs — migration 0733 on REAL
 // PostgreSQL: the attended-run ledger and its reset, the clean-after-stop
 // refusal, the consent record read and its revocation, the loop-episode read,
 // and the invoiced marker in the reconciliation absence scope.
@@ -79,8 +79,8 @@ test("V5-RW02 run ledger, consent record, loop episodes and invoiced scope on re
     await admin.query(`CREATE DATABASE ${copy} TEMPLATE ${source}`);
     db = await clientFor(pg, copy);
     const applied = await db.query(
-      "select 1 from public.schema_migrations where filename = '0732_salesforce_rw02_safe_stop_run_store.sql'");
-    assert.equal(applied.rows.length, 1, "migration 0732 is applied as the numbered file");
+      "select 1 from public.schema_migrations where filename = '0733_salesforce_rw02_safe_stop_run_store.sql'");
+    assert.equal(applied.rows.length, 1, "migration 0733 is applied as the numbered file");
     await db.query(
       `insert into public.actor (slug, kind, display_name, active) values ('joe', 'human', 'joe', true)
        on conflict (slug) do nothing`);

@@ -3769,7 +3769,7 @@ export const TOOLS = {
       // city and lane joined the list in 0074, when they stopped being source_row
       // passthrough and became real columns. Before that they were unsettable,
       // which is why salesforce-diff could only ever REPORT a city move.
-      // invoiced_on joined in 0732 (V5-RW02): a won deal stays in the Salesforce
+      // invoiced_on joined in 0733 (V5-RW02): a won deal stays in the Salesforce
       // reconciliation absence scope until it is marked invoiced.
       const allowed = ["deal_type","phase","segment","outcome","closed_on","won_value","notes_path",
                        "salesforce_id","city","lane","invoiced_on"];

@@ -1,6 +1,6 @@
 // DoctorCRE v5 V5-RW02 — the server-side half of the safe-stop slice.
 //
-// Three verbs over the ledgers migration 0732 installs, and no others:
+// Three verbs over the ledgers migration 0733 installs, and no others:
 //
 //   record-salesforce-run-outcome   write      one attended run's outcome, per
 //                                              kind; the consecutive-clean count

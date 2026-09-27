@@ -1,6 +1,6 @@
 // V5-RW02 run-outcome ledger, counter read and consent revocation: the store
 // module against a fake database that models ops.rw02_* exactly as migration
-// 0732 defines them. The real SQL is proved on PostgreSQL by
+// 0733 defines them. The real SQL is proved on PostgreSQL by
 // salesforce-read-run-store-rw02-postgres.test.mjs. Synthetic data only.
 
 import test from "node:test";
@@ -12,7 +12,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import * as real from "../src/salesforce-read-run-store-rw02.v5.js";
 
-/** A fake of the 0732 functions: append-only rows, count after the last unclean run. */
+/** A fake of the 0733 functions: append-only rows, count after the last unclean run. */
 export class FakeLedgerDb {
   constructor({ pageStops = [], partner = "joe", decisions = [] } = {}) {
     this.rows = []; this.pageStops = pageStops; this.partner = partner; this.decisions = decisions;

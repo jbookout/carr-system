@@ -13,7 +13,7 @@
 alter table public.deal add column invoiced_on date;
 
 comment on column public.deal.invoiced_on is
-  'The date the deal was invoiced (V5-RW02, 0732). Set through update-deal. Salesforce reconciliation compares every deal that is open or closed won and NOT yet invoiced, because a won deal still owes Dell''s Salesforce its opportunity until the invoice goes out (corporate credit and payment depend on it). Null means not invoiced.';
+  'The date the deal was invoiced (V5-RW02, 0733). Set through update-deal. Salesforce reconciliation compares every deal that is open or closed won and NOT yet invoiced, because a won deal still owes Dell''s Salesforce its opportunity until the invoice goes out (corporate credit and payment depend on it). Null means not invoiced.';
 
 -- The view keeps its columns in order and gains invoiced_on at the end; it
 -- still exposes neither the Salesforce placeholder columns nor source_row.
@@ -293,20 +293,20 @@ grant execute on function ops.rw02_attended_runs(text) to carr_reader, carr_writ
 grant execute on function ops.rw02_consent_record(uuid) to carr_reader, carr_writer, carr_authority;
 grant execute on function ops.rw02_loop_episodes(text) to carr_reader, carr_writer, carr_authority;
 
-do $rw02_0732$
+do $rw02_0733$
 begin
   if (select count(*) from pg_trigger
        where tgrelid in ('ops.rw02_attended_run'::regclass, 'ops.rw02_consent_revocation'::regclass)
          and not tgisinternal) <> 4 then
-    raise exception '0732 FAILED: RW02 append-only or truncate guard missing';
+    raise exception '0733 FAILED: RW02 append-only or truncate guard missing';
   end if;
   if has_table_privilege('carr_writer', 'ops.rw02_attended_run', 'INSERT,UPDATE,DELETE,TRUNCATE')
      or has_table_privilege('carr_reader', 'ops.rw02_attended_run', 'SELECT')
      or has_table_privilege('carr_writer', 'ops.rw02_consent_revocation', 'INSERT,UPDATE,DELETE,TRUNCATE') then
-    raise exception '0732 FAILED: an RW02 ledger is directly reachable by a runtime role';
+    raise exception '0733 FAILED: an RW02 ledger is directly reachable by a runtime role';
   end if;
   if not has_table_privilege('carr_reader', 'public.v_deal_reconciliation_read', 'SELECT') then
-    raise exception '0732 FAILED: the reconciliation view lost its reader grant';
+    raise exception '0733 FAILED: the reconciliation view lost its reader grant';
   end if;
 end
-$rw02_0732$;
+$rw02_0733$;
