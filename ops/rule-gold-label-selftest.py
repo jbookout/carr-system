@@ -149,10 +149,12 @@ def test_review_set(gl):
           not any(r == "rmerge" for _c, r in review)
           and [plan["settled_labels"][c]["rmerge"] for c in ("c1", "c2", "c3")]
           == [False, False, True])
-    adj = [{"case": c, "rule": r, "gold": (c, r) == ("c1", "rmid"), "reason": "x " * 12}
+    case_by_id = {c["id"]: c for c in cases}
+    adj = [{"case": c, "rule": r, "gold": (c, r) == ("c1", "rmid"), "reason": "x " * 12,
+            "case_binding": gl.adjudication_case_binding(case_by_id[c])}
            for c, r in sorted(review)]
     got = gl.gold_sets_reviewed(probs, adj, plan["low_by_rule"], plan["signals_hit"],
-                                plan["settled_labels"], plan["settled_rules"])
+                                plan["settled_labels"], plan["settled_rules"], cases=cases)
     gold_c1 = set(got["c1"])
     check("review: gold is adjudicated-true plus settled-true, nothing auto",
           {"rmid", "rspawn"} <= gold_c1 and "rhigh" not in gold_c1
@@ -168,17 +170,67 @@ def test_review_set(gl):
           {c for c, _r in fplan["review"]} == {"s0"} | {c for c, _r in picked}, (floor, fplan["review"]))
     try:
         gl.gold_sets_reviewed(probs, adj[1:], plan["low_by_rule"], plan["signals_hit"],
-                              plan["settled_labels"], plan["settled_rules"])
+                              plan["settled_labels"], plan["settled_rules"], cases=cases)
         check("review: a missing adjudication stops the build", False)
     except ValueError:
         check("review: a missing adjudication stops the build", True)
     try:
-        extra = adj + [{"case": "c3", "rule": "rhigh", "gold": True, "reason": "x " * 12}]
+        extra = adj + [{"case": "c3", "rule": "rhigh", "gold": True, "reason": "x " * 12,
+                        "case_binding": gl.adjudication_case_binding(case_by_id["c3"])}]
         gl.gold_sets_reviewed(probs, extra, plan["low_by_rule"], plan["signals_hit"],
-                              plan["settled_labels"], plan["settled_rules"])
+                              plan["settled_labels"], plan["settled_rules"], cases=cases)
         check("review: an adjudication outside the review set stops the build", False)
     except ValueError:
         check("review: an adjudication outside the review set stops the build", True)
+
+
+def test_adjudication_bindings(gl):
+    cases = [{"id": "case-a", "prompt": "Review the privacy guard", "origin": "subagent-brief",
+              "tool_calls": [{"tool_name": "Read", "tool_input": {"path": "guard.py"}}]},
+             {"id": "case-b", "prompt": "Build the privacy guard", "origin": "subagent-brief",
+              "tool_calls": []}]
+    good = [{"case": c["id"], "rule": "rule-a", "gold": i == 0,
+             "reason": "This case has its own independent decision.",
+             "case_binding": gl.adjudication_case_binding(c)} for i, c in enumerate(cases)]
+    gl.validate_adjudication_bindings(list(reversed(good)), cases)
+    check("binding: output order is irrelevant; identities travel with decisions", True)
+    binding = gl.adjudication_case_binding(cases[0])
+    check("binding: labels, probabilities and held-out split cannot change the evidence hash",
+          binding == gl.adjudication_case_binding(dict(cases[0], gold=["x"], split="test", p=0.9)))
+    mutations = {
+        "missing binding": [{k: v for k, v in good[0].items() if k != "case_binding"}],
+        "shifted outer case id": [dict(good[0], case="case-b")],
+        "shifted output binding": [dict(good[0], case_binding=good[1]["case_binding"])],
+        "stale input hash": [dict(good[0], case_binding=dict(binding, input_sha256="0" * 64))],
+        "unknown case": [dict(good[0], case="case-c")],
+        "string gold": [dict(good[0], gold="false")],
+        "duplicate decision": [good[0], good[0]],
+    }
+    for name, rows in mutations.items():
+        try:
+            gl.validate_adjudication_bindings(rows, cases)
+            check("binding refuses " + name, False)
+        except ValueError:
+            check("binding refuses " + name, True)
+    for field, value in (("prompt", "A different action"), ("origin", "notification"),
+                         ("tool_calls", [{"tool_name": "Write", "tool_input": {"path": "guard.py"}}])):
+        changed = [dict(cases[0], **{field: value}), cases[1]]
+        try:
+            gl.validate_adjudication_bindings(good, changed)
+            check("binding refuses changed " + field, False)
+        except ValueError:
+            check("binding refuses changed " + field, True)
+    # This is the silent positional-zip failure from the Tour review: take a
+    # valid output for A and store its whole answer under B. The gold builder,
+    # not merely a sidecar validator, must refuse it.
+    try:
+        gl.gold_sets_reviewed({"case-b": {"rule-a": 0.8}},
+                              [dict(good[0], case="case-b")], {"rule-a": 0.25},
+                              set(), {}, set(), cases=cases)
+        check("binding: shifted adjudicator output stops gold construction", False)
+    except ValueError as exc:
+        check("binding: shifted adjudicator output stops gold construction",
+              "binding mismatch" in str(exc), str(exc))
 
 
 def test_fixture(gl, ev):
@@ -210,7 +262,7 @@ def test_fixture(gl, ev):
     check("fixture records the review bounds the library uses",
           lab["review_low"] == gl.REVIEW_LOW and lab["review_low_extended"] == gl.REVIEW_LOW_EXTENDED)
     rebuilt = gl.gold_sets_reviewed(base_probs, adjud, plan["low_by_rule"], plan["signals_hit"],
-                                    plan["settled_labels"], plan["settled_rules"])
+                                    plan["settled_labels"], plan["settled_rules"], cases=base)
     diffs = [c["id"] for c in base if rebuilt[c["id"]] != c["gold"]]
     check("gold rebuilds exactly from probabilities + signals + adjudications",
           not diffs, diffs[:5])
@@ -221,6 +273,36 @@ def test_fixture(gl, ev):
           plan["review"] == set(keys), (len(plan["review"]), len(set(keys))))
     short = [k for k, a in zip(keys, adjud) if len((a.get("reason") or "").split()) < 6]
     check("every adjudication has a written reason", not short, short[:5])
+    # These are reviewed case/action distinctions, not model-score thresholds.
+    # Keep the review receipt separate from the first-pass Jev probabilities.
+    repair = json.loads((FIX_DIR / "adjudication-repair.v2.json").read_text())
+    current = {(a["case"], a["rule"]): a for a in adjud}
+    check("repair: selected original decisions and reviewed outputs remain auditable",
+          len(repair["rows"]) == 31 and all(
+              r["before"]["case"] == r["after"]["case"] == r["case"]
+              and r["before"]["rule"] == r["after"]["rule"] == r["rule"]
+              and current[(r["case"], r["rule"])] == r["after"]
+              and r["after"]["reason"].startswith(r["case"] + ":")
+              for r in repair["rows"]))
+    expected_tour = {14: True, 15: False, 16: True, 17: False, 18: False,
+                     19: False, 20: True, 21: False, 22: False, 23: True,
+                     24: False, 25: False, 26: False, 27: True, 28: False}
+    check("repair: Tour escalation labels follow each case's own action",
+          all(current[(f"v2-tour-{n:03d}", "c20dc3d5")]["gold"] == gold
+              for n, gold in expected_tour.items()))
+    check("repair: bare diagnosis/build completion notices have the same strict boundary",
+          current[("v2-tour-022", "c20dc3d5")]["gold"] is False
+          and current[("v2-sfb-020", "c20dc3d5")]["gold"] is False)
+    verification_cases = ("v2-chat-010", "v2-chat-015", "v2-tour-007", "v2-notif-008",
+                          "v2-notif-026", "v2-notif-025", "v2-notif-030", "v2-rel-030",
+                          "v2-eng-025", "v2-disp-029", "v2-eng-015")
+    check("repair: verification binds the claim, including when the turn omits the check",
+          all(current[(cid, "f47a8fe9")]["gold"] is True for cid in verification_cases))
+    check("repair: retry is not its neighboring correction; broad audit is not a new build",
+          current[("v2-chat-022", "bbffc139")]["gold"] is False
+          and current[("v2-chat-023", "bbffc139")]["gold"] is True
+          and current[("v2-disp-007", "20d106f1")]["gold"] is False
+          and current[("v2-disp-012", "20d106f1")]["gold"] is False)
     # 3a. floors: every published sample is in the review set, its gold rate
     # matches the adjudications, and a sample above 10% gold was followed by a
     # lower floor (a later sample) unless nothing was left below it.
@@ -273,9 +355,10 @@ def test_fixture(gl, ev):
     check("later cases land in both splits by hash", set(placed.values()) == {"train", "test"})
     # 5. hygiene
     raw = (FIXTURE.read_text(encoding="utf-8") + ADJ.read_text(encoding="utf-8")
+           + (FIX_DIR / "adjudication-repair.v2.json").read_text(encoding="utf-8")
            + (FIX_DIR / lab["action_signals"]["file"]).read_text(encoding="utf-8"))
     hits = gl.scrub_findings(raw)
-    check("fixture, adjudications and signals carry nothing the scrub refuses",
+    check("fixture, adjudications, repair audit and signals carry nothing the scrub refuses",
           not hits, hits[:5])
     check("fixture declares itself paraphrased", doc.get("provenance", "").startswith("paraphrased"))
     tool_ok = all(isinstance(c.get("tool_calls"), list) and all(
@@ -325,6 +408,48 @@ def test_fixture(gl, ev):
     check("universal-trigger rules carry exactly the policy label on every case",
           not off_policy, off_policy[:5])
     return doc, labels
+
+
+def test_bound_build_cli(doc, labels):
+    """Exercise the actual build boundary, including its no-output refusal."""
+    with tempfile.TemporaryDirectory(prefix="bound-gold-build-") as tmp:
+        base = Path(tmp)
+        inputs = {
+            "probs": probs_from_labels(labels),
+            "roster": {"rules": [{"id": rid} for rid in labels["rules"]]},
+            "extended": doc["labelling"]["review_low_extended_rules"],
+            "doctrine": {cid: {"sections": rows} for cid, rows in labels["doctrine"].items()},
+        }
+        for name, value in inputs.items():
+            (base / (name + ".json")).write_text(json.dumps(value))
+        command = [sys.executable, str(REPO / "tools/rule-gold-label.py"), "build",
+                   "--cases", str(FIXTURE), "--corpus", str(base / "roster.json"),
+                   "--probs", str(base / "probs.json"),
+                   "--extended-rules", str(base / "extended.json"),
+                   "--doctrine-probs", str(base / "doctrine.json"),
+                   "--doctrine-adjudications", str(DADJ),
+                   "--labelled-on", doc["labelling"]["labelled_on"]]
+        out = base / "good" / "cases.v2.json"
+        run = subprocess.run(command + ["--adjudications", str(ADJ), "--out", str(out)],
+                             capture_output=True, text=True)
+        check("bound CLI: full fixture rebuild succeeds", run.returncode == 0, run.stderr[-400:])
+        if run.returncode == 0:
+            check("bound CLI: fixture rebuild is byte-identical", out.read_bytes() == FIXTURE.read_bytes())
+            check("bound CLI: output preserves all adjudicator bindings",
+                  (out.parent / ADJ.name).read_bytes() == ADJ.read_bytes())
+        bad = read_adjudications()
+        selected = next(a for a in bad if a["case"] == "v2-tour-016" and a["rule"] == "c20dc3d5")
+        neighbor = next(a for a in bad if a["case"] == "v2-tour-015" and a["rule"] == "c20dc3d5")
+        for key in ("gold", "reason", "case_binding"):
+            selected[key] = copy.deepcopy(neighbor[key])
+        bad_path = base / "shifted.jsonl"
+        bad_path.write_text("".join(json.dumps(row) + "\n" for row in bad))
+        refused_out = base / "refused" / "cases.v2.json"
+        run = subprocess.run(command + ["--adjudications", str(bad_path), "--out", str(refused_out)],
+                             capture_output=True, text=True)
+        check("bound CLI: a neighbor's full answer is refused before any output",
+              run.returncode != 0 and "case binding mismatch" in run.stderr
+              and not refused_out.parent.exists(), run.stderr[-400:])
 
 
 def test_scrub(gl):
@@ -708,8 +833,10 @@ def main() -> int:
     ev = load(EVAL, "rule_delivery_eval_for_gold_selftest")
     test_bands(gl)
     test_review_set(gl)
+    test_adjudication_bindings(gl)
     test_scrub(gl)
     doc, labels = test_fixture(gl, ev)
+    test_bound_build_cli(doc, labels)
     test_classes(gl, labels)
     test_harness_v2(ev)
     test_cli_train()

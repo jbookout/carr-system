@@ -2854,6 +2854,7 @@
     "a9ecd5b4",
     "b3ea627f",
     "c20dc3d5",
+    "f47a8fe9",
     "fa217e48"
    ],
    "gold_doctrine": [
@@ -3478,6 +3479,7 @@
     "767f9b41",
     "7e9739f2",
     "b3ea627f",
+    "f47a8fe9",
     "fa217e48"
    ],
    "gold_doctrine": [
@@ -4149,7 +4151,6 @@
     "5be2f462",
     "7e9739f2",
     "b3ea627f",
-    "bbffc139",
     "e313a3ca",
     "fa217e48"
    ],
@@ -8671,6 +8672,7 @@
     "97326357",
     "a9ecd5b4",
     "b3ea627f",
+    "f47a8fe9",
     "fa217e48"
    ],
    "gold_doctrine": [
@@ -9665,6 +9667,7 @@
     "bbffc139",
     "e313a3ca",
     "e8868cbe",
+    "f47a8fe9",
     "fa217e48",
     "fc21a431"
    ],
@@ -15286,6 +15289,7 @@
     "a9ecd5b4",
     "b3ea627f",
     "e313a3ca",
+    "f47a8fe9",
     "fa217e48"
    ],
    "gold_doctrine": [
@@ -15549,6 +15553,7 @@
     "a9ecd5b4",
     "b3ea627f",
     "c20dc3d5",
+    "f47a8fe9",
     "fa217e48"
    ],
    "gold_doctrine": [
@@ -18685,6 +18690,7 @@
     "95e76c1f",
     "b3ea627f",
     "bbffc139",
+    "f47a8fe9",
     "fa217e48",
     "fc21a431"
    ],
@@ -19347,7 +19353,6 @@
     "9293d609",
     "a7784a18",
     "c1db316c",
-    "c20dc3d5",
     "e65efc68",
     "fa217e48"
    ],
@@ -19366,7 +19371,6 @@
    "gold_guidance_deferred": [
     "9293d609",
     "c1db316c",
-    "c20dc3d5",
     "e65efc68"
    ],
    "id": "v2-tour-015",
@@ -19451,11 +19455,13 @@
     "4f7c348f",
     "67580c28",
     "a9ecd5b4",
+    "c20dc3d5",
     "fa217e48"
    ],
    "gold_doctrine": [],
    "gold_guidance_deferred": [
-    "67580c28"
+    "67580c28",
+    "c20dc3d5"
    ],
    "id": "v2-tour-016",
    "origin": "subagent-brief",
@@ -19554,7 +19560,6 @@
     "a9ecd5b4",
     "bc9188b4",
     "c1db316c",
-    "c20dc3d5",
     "e65efc68",
     "fa217e48"
    ],
@@ -19566,7 +19571,6 @@
    ],
    "gold_guidance_deferred": [
     "c1db316c",
-    "c20dc3d5",
     "e65efc68"
    ],
    "id": "v2-tour-017",
@@ -19823,12 +19827,15 @@
     "2b66211d",
     "4f7c348f",
     "a6e6ab4e",
+    "c20dc3d5",
     "fa217e48"
    ],
    "gold_doctrine": [
     "7360938f-77ed-4ea9-9867-264eb8191ad4#5eadfcad-7402-45f7-8945-6cf49355e02f"
    ],
-   "gold_guidance_deferred": [],
+   "gold_guidance_deferred": [
+    "c20dc3d5"
+   ],
    "id": "v2-tour-020",
    "origin": "subagent-brief",
    "prompt": "You're an independent verifier of an already-merged commit, checked out detached in its own release worktree: don't modify files, commit, push, or touch any database or deployment. The commit is the PR that declares the tour property registration migration and its seal migration as one atomic migration group and seals the result as the next SCAC version; its parent is the PR that introduced that registration migration, the previous seal, and the verb for registering tour properties. Back each point with evidence: (1) using git show --stat and the full diff, describe what moved in the migrate tool under tools (where the atomic group is declared), in the new follow-on migration, in the freshly generated SCAC mutation registry file, and in any bump of the runtime selector to the new version, and whether the scope stays limited to that purpose. (2) Whether the atomic-group logic in the migrate tool stages both migrations inside a single transaction, commits only when both have succeeded, and leaves all other migrations alone; locate the matching selftest or unit test (in ops, tools, or the server's tests, mentioning atomic groups or migrating) and execute it when it's a self-contained Python or node test, via the repo venv's python, but don't run anything requiring a database connection string. (3) From the server folder, execute node --test solely against test files whose text mentions scac, the new version or the tour-property registration verb (locate them using grep), and give pass and fail counts. (4) Take as given that production applied the two migrations as one committed atomic group and then the follow-on migration cleanly. Return a concise plain-prose review under 250 words in exactly this shape: an opening line reading Independent review: PASS, or else Independent review: FAIL, followed by three to five numbered findings, each with concrete evidence (file, test counts), and no em-dashes.",
@@ -19870,14 +19877,12 @@
     "5be2f462",
     "7e9739f2",
     "b3ea627f",
-    "c20dc3d5",
     "fa217e48"
    ],
    "gold_doctrine": [],
    "gold_guidance_deferred": [
     "7e9739f2",
-    "b3ea627f",
-    "c20dc3d5"
+    "b3ea627f"
    ],
    "id": "v2-tour-021",
    "origin": "selector-log",
@@ -20084,7 +20089,6 @@
     "a6e6ab4e",
     "b3ea627f",
     "bbffc139",
-    "c20dc3d5",
     "ca841807",
     "e313a3ca",
     "e8868cbe",
@@ -20104,8 +20108,7 @@
    "gold_guidance_deferred": [
     "7e9739f2",
     "86647daf",
-    "b3ea627f",
-    "c20dc3d5"
+    "b3ea627f"
    ],
    "id": "v2-tour-024",
    "origin": "defect",
@@ -20342,6 +20345,7 @@
     "b3ea627f",
     "bc9188b4",
     "c1db316c",
+    "c20dc3d5",
     "e313a3ca",
     "e65efc68",
     "fa217e48"
@@ -20362,6 +20366,7 @@
     "7e9739f2",
     "b3ea627f",
     "c1db316c",
+    "c20dc3d5",
     "e65efc68"
    ],
    "id": "v2-tour-027",
@@ -20420,7 +20425,6 @@
     "7e9739f2",
     "a6e6ab4e",
     "b3ea627f",
-    "c20dc3d5",
     "ca841807",
     "fa217e48"
    ],
@@ -20432,8 +20436,7 @@
    "gold_guidance_deferred": [
     "152ceb65",
     "7e9739f2",
-    "b3ea627f",
-    "c20dc3d5"
+    "b3ea627f"
    ],
    "id": "v2-tour-028",
    "origin": "verb-grounded",
@@ -20658,6 +20661,7 @@
    "file": "action-signals.v2.json",
    "rule": "an exact rule is gold iff the case carries its signal; a signal_implies_gold entry makes every case carrying it gold; other entries only put the case in the review set"
   },
+  "adjudication_binding": "Each rule adjudication echoes its worklist case id and SHA256 of id, origin, prompt and full tool inputs. Build refuses missing or mismatched bindings. Legacy binding import alone is not semantic review.",
   "doctrine": "shortlist then label (ops/rule_gold_label.py): Jev noul per doctrine document, plus search-doctrine hits, then a Jev noul per shortlisted section; borderline pairs adjudicated in writing. Recall of doctrine gold is bounded by the shortlist.",
   "doctrine_band": {
    "no_at": 0.35,
