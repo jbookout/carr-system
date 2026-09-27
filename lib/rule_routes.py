@@ -248,6 +248,8 @@ def call_paths(tool_input: object) -> list[str]:
     if isinstance(command, str) and command.startswith("*** Begin Patch\n"):
         paths.extend(match.group(1).strip() for match in re.finditer(
             r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", command, re.M))
+        paths.extend(match.group(1).strip() for match in re.finditer(
+            r"^\*\*\* Move to: (.+)$", command, re.M))
     return paths
 
 

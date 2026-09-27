@@ -58,6 +58,29 @@ def main():
     assert rule_routes.route_matches({"kind": "path_rule", "path_globs": ["hooks/*.py"]},
                                       "apply_patch", edit_call)
     assert rule_routes.matched_rule_ids(routes, "apply_patch", edit_call)
+    move_call = {"command": "*** Begin Patch\n*** Update File: scratch.txt\n*** Move to: hooks/probe.py\n@@\n-before\n+after\n*** End Patch"}
+    move_paths = rule_routes.call_paths(move_call)
+    assert {"scratch.txt", "hooks/probe.py"} <= set(move_paths), move_paths
+    destination_rules = {"43e2ef76", "86647daf", "a7784a18", "a9ecd5b4",
+                         "c0b38d80", "e65efc68"}
+    move_rules = set(rule_routes.matched_rule_ids(routes, "apply_patch", move_call))
+    assert destination_rules <= move_rules, sorted(destination_rules - move_rules)
+    add_call = {"command": "*** Begin Patch\n*** Add File: hooks/probe.py\n+after\n*** End Patch"}
+    add_rules = set(rule_routes.matched_rule_ids(routes, "apply_patch", add_call))
+    assert move_rules == add_rules and len(move_rules) == 9, (move_rules, add_rules)
+    move_out = {"command": "*** Begin Patch\n*** Update File: hooks/probe.py\n*** Move to: scratch.txt\n@@\n-before\n+after\n*** End Patch"}
+    assert destination_rules <= set(rule_routes.matched_rule_ids(routes, "apply_patch", move_out))
+    update_patch = {"command": "*** Begin Patch\n*** Update File: hooks/ledger-sweep.py\n@@\n-old\n+new\n*** End Patch"}
+    patch_payload = {"hook_event_name": "PreToolUse", "tool_name": "apply_patch",
+                     "tool_input": update_patch}
+    edit_payload = dict(patch_payload, tool_name="Edit",
+                        tool_input={"file_path": "hooks/ledger-sweep.py"})
+    edit_rows = {row["trigger_id"] for row in rail.matched_triggers(edit_payload)}
+    patch_rows = {row["trigger_id"] for row in rail.matched_triggers(patch_payload)}
+    assert {"de72ad57b2c8", "5e186a09dcf2"} <= edit_rows
+    assert edit_rows <= patch_rows, sorted(edit_rows - patch_rows)
+    assert "bbffc139" not in rule_routes.matched_rule_ids(
+        routes, "apply_patch", update_patch)
     assert "search-doctrine" in rule_routes.call_verbs("mcp__carr__search_doctrine", {})
     assert "confirm-merge" in rule_routes.call_verbs(
         "mcp__carr__call_verb", {"verb": "confirm-merge"})
