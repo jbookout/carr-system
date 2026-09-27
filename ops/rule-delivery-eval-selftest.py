@@ -226,6 +226,28 @@ def test_deterministic_adapters(ev, cases, meta):
     check("JIT is only scored on cases with tool calls",
           set(deliveries["jit_pretooluse"]) == {case["id"] for case in tooled},
           sorted(deliveries["jit_pretooluse"]))
+    check("layered_triggers is present and scored only on cases with tool calls",
+          set(deliveries.get("layered_triggers", {})) == {case["id"] for case in tooled},
+          sorted(deliveries.get("layered_triggers", {})))
+    check("layered_triggers delivers at least what the compiled table delivers",
+          all(deliveries["jit_pretooluse"][cid]["rules"] <= out["rules"]
+              for cid, out in deliveries["layered_triggers"].items()))
+    hook = ev._load(str(REPO / "hooks" / "rule-pack-preuse-reselection.py"), "eval_selftest_hook")
+    for case in tooled:
+        routed = set()
+        for index, call in enumerate(case["tool_calls"]):
+            routed.update(hook.routed_rule_ids({
+                "hook_event_name": "PreToolUse", "tool_name": call["tool_name"],
+                "tool_input": call.get("tool_input"), "session_id": "s",
+                "tool_use_id": f"t{index}"}))
+        check(f"layered_triggers carries every routed rule for {case['id']}",
+              routed <= deliveries["layered_triggers"][case["id"]]["rules"])
+    agent_case = {"id": "route-agent", "stratum": "engineering", "prompt": "spawn",
+                  "gold": ["185013c6"], "disputed": [],
+                  "tool_calls": [{"tool_name": "Agent", "tool_input": {"prompt": "x"}}]}
+    layered = next(a for a in adapters if a["name"] == "layered_triggers")
+    check("layered_triggers delivers a gold rule its Agent route names",
+          "185013c6" in layered["select"](agent_case)["rules"])
     layer0 = {rid for rid, row in meta.items() if row["layer"] == "layer0"}
     check("boot delivers exactly layer zero",
           all(out["rules"] == layer0 for out in deliveries["boot_layer0"].values()))
