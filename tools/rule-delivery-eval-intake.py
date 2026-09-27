@@ -23,8 +23,11 @@ tool calls before the case is sent anywhere:
     and lead owners), read from the record at intake time (deal-board and
     lead-board through ./run.sh call; or --names-file), turned into terms by
     ops/rule_gold_label.record_name_terms (full names plus distinctive
-    surname-like tokens; ordinary words dropped), and matched as whole words,
-    case-insensitively. A refusal says a name was caught but never which one;
+    surname-like tokens in any script; ordinary words dropped), and matched
+    as whole words, case- and accent-insensitively, in the prompt and in every
+    string value (and key) of the tool calls as parsed, never in their JSON
+    text. An empty names source refuses like an unreadable one. A refusal
+    says a name was caught but never which one;
   * patterns: emails, phone numbers, money and square-foot figures, URL hosts,
     bare hostnames (internal suffixes, a tailnet, and public TLDs other than
     the example domains), house-style machine names, IPs, credential, key and
@@ -56,6 +59,7 @@ import glob
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -129,7 +133,6 @@ def find_live_turn(ref, shadow=SHADOW, projects=PROJECTS):
 
 
 def _verb(verb, args):
-    import subprocess
     proc = subprocess.run(["./run.sh", "call", verb, json.dumps(args)], cwd=REPO,
                           capture_output=True, text=True, stdin=subprocess.DEVNULL,
                           timeout=300)
@@ -156,15 +159,22 @@ def record_name_rows():
 
 
 def load_names(names_file=None):
-    """The name terms to refuse. Fails closed: when the record cannot be read
-    the intake refuses rather than skipping the check."""
+    """The name terms to refuse. Fails closed, whatever the source: when the
+    record cannot be read, or either source yields no name terms at all (an
+    empty or malformed --names-file included), the intake refuses rather than
+    running with an empty name check."""
     gl = _load("rule_gold_label")
     if names_file:
         with open(names_file, "r", encoding="utf-8") as handle:
             rows = json.load(handle)
+        if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+            raise ValueError("--names-file must be a JSON list of {name, kind}")
     else:
         rows = record_name_rows()
-    return gl.record_name_terms(rows)
+    terms = gl.record_name_terms(rows)
+    if not terms:
+        raise ValueError("the names source yielded no name terms")
+    return terms
 
 
 def main(argv=None):
@@ -207,7 +217,7 @@ def main(argv=None):
     calls = [json.loads(c) for c in args.tool_call] if args.tool_call else None
     try:
         names = load_names(args.names_file)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
         print(f"refused: the person and practice name check could not run ({exc}), so "
               "the case was not checked, written or sent to Jev. Retry when the record "
               "is reachable, or pass --names-file.", file=sys.stderr)

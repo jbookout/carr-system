@@ -10,14 +10,19 @@ Offline: no Jev request, no record-layer call, no write outside a throwaway
 directory.
 
 WHAT IS PROVEN:
-  1. The bands: p >= YES_AT gold, p <= NO_AT not, between is borderline, and a
-     borderline pair with no written adjudication stops the build rather than
-     silently becoming "not gold".
+  1. The rule gold's REVIEW SET: no auto-gold at the top, the per-rule lower
+     bound, an action signal pulls a low-scored case in, an exact signal
+     settles its rule on every case, a signal_implies_gold entry settles gold
+     on every case carrying it; a missing adjudication or one outside the set
+     stops the build. (The doctrine target keeps the band: p >= YES_AT gold,
+     p <= NO_AT not, a borderline pair with no adjudication stops the build.)
   2. The committed gold is REPRODUCIBLE: rebuilding it from the committed
-     first-pass probabilities and adjudications gives exactly the fixture's
-     gold, for every case.
-  3. Every adjudication carries a written reason, and every borderline pair in
-     the committed probabilities has exactly one.
+     first-pass probabilities, action signals and adjudications gives exactly
+     the fixture's gold, for every case; exact and signal-implied labels are
+     the same on every case carrying the signal (the model-routing rule on
+     every subagent dispatch).
+  3. Every adjudication carries a written reason, and every review-set pair has
+     exactly one.
   4. The split is fixed by seed: recomputing it reproduces every case's split;
      each stratum holds out ceil(30%); a later case is placed by hash without
      moving any existing case.
@@ -107,6 +112,66 @@ def test_bands(gl):
     check("an adjudicated no stays out", got == {"c1": ["r1"]}, got)
 
 
+def test_review_set(gl):
+    """The review-set scheme: no auto-gold at the top, a per-rule lower bound,
+    the action signal pulls a low-scored case in, an exact signal settles its
+    rule on every case, and a signal_implies_gold entry settles gold on the
+    cases carrying it whatever their score."""
+    spawn = {"tool_name": "Agent", "tool_input": {"prompt": "do a thing"}}
+    merge = {"tool_name": "mcp__carr__confirm-merge", "tool_input": {}}
+    cases = [{"id": "c1", "tool_calls": [spawn]}, {"id": "c2", "tool_calls": []},
+             {"id": "c3", "tool_calls": [merge]}]
+    signals = [
+        {"rule": "rspawn", "mode": "review", "tools": ["^(?:Agent|Task)$"],
+         "input_regex": None, "signal_implies_gold": True},
+        {"rule": "rlook", "mode": "review", "tools": ["^Agent$"], "input_regex": None,
+         "signal_implies_gold": False},
+        {"rule": "rmerge", "mode": "exact", "tools": ["^mcp__.+__confirm-merge$"],
+         "input_regex": None, "signal_implies_gold": True}]
+    probs = {"c1": {"rhigh": 0.95, "rmid": 0.30, "rext": 0.22, "rspawn": 0.12, "rlook": 0.05,
+                    "rmerge": 0.9},
+             "c2": {"rhigh": 0.10, "rmid": 0.10, "rext": 0.10, "rspawn": 0.40, "rlook": 0.05,
+                    "rmerge": 0.9},
+             "c3": {"rhigh": 0.10, "rmid": 0.10, "rext": 0.10, "rspawn": 0.05, "rlook": 0.05,
+                    "rmerge": 0.1}}
+    plan = gl.review_plan(cases, probs, signals, ["rext"])
+    review = plan["review"]
+    check("review: p >= 0.75 is reviewed, not auto-gold", ("c1", "rhigh") in review)
+    check("review: p above REVIEW_LOW is reviewed", ("c1", "rmid") in review)
+    check("review: an extended rule is reviewed down to REVIEW_LOW_EXTENDED",
+          ("c1", "rext") in review)
+    check("review: a signal pulls a low-scored case in", ("c1", "rlook") in review)
+    check("review: a signal-implied gold pair is settled, not reviewed",
+          ("c1", "rspawn") not in review and plan["settled_labels"]["c1"]["rspawn"] is True)
+    check("review: the signal rule's other cases are still reviewed by score",
+          ("c2", "rspawn") in review)
+    check("review: an exact rule is settled on every case by its signal",
+          not any(r == "rmerge" for _c, r in review)
+          and [plan["settled_labels"][c]["rmerge"] for c in ("c1", "c2", "c3")]
+          == [False, False, True])
+    adj = [{"case": c, "rule": r, "gold": (c, r) == ("c1", "rmid"), "reason": "x " * 12}
+           for c, r in sorted(review)]
+    got = gl.gold_sets_reviewed(probs, adj, plan["low_by_rule"], plan["signals_hit"],
+                                plan["settled_labels"], plan["settled_rules"])
+    gold_c1 = set(got["c1"])
+    check("review: gold is adjudicated-true plus settled-true, nothing auto",
+          {"rmid", "rspawn"} <= gold_c1 and "rhigh" not in gold_c1
+          and got["c3"] == ["rmerge"], got)
+    try:
+        gl.gold_sets_reviewed(probs, adj[1:], plan["low_by_rule"], plan["signals_hit"],
+                              plan["settled_labels"], plan["settled_rules"])
+        check("review: a missing adjudication stops the build", False)
+    except ValueError:
+        check("review: a missing adjudication stops the build", True)
+    try:
+        extra = adj + [{"case": "c3", "rule": "rhigh", "gold": True, "reason": "x " * 12}]
+        gl.gold_sets_reviewed(probs, extra, plan["low_by_rule"], plan["signals_hit"],
+                              plan["settled_labels"], plan["settled_rules"])
+        check("review: an adjudication outside the review set stops the build", False)
+    except ValueError:
+        check("review: an adjudication outside the review set stops the build", True)
+
+
 def test_fixture(gl, ev):
     doc = json.loads(FIXTURE.read_text(encoding="utf-8"))
     cases = doc["cases"]
@@ -126,18 +191,41 @@ def test_fixture(gl, ev):
           all(len(probs.get(c["id"], {})) == len(live) for c in base))
     unknown = sorted({rid for c in cases for rid in c["gold"] if rid not in live})
     check("every gold id is a labelled live rule", not unknown, unknown)
-    # 2. reproducible gold
-    rebuilt = gl.gold_sets({c["id"]: probs[c["id"]] for c in base}, adjud)
+    # 2. reproducible gold, under the review-set scheme
+    lab = doc["labelling"]
+    signals = gl.load_action_signals(FIX_DIR / lab["action_signals"]["file"])
+    base_probs = {c["id"]: probs[c["id"]] for c in base}
+    plan = gl.review_plan(base, base_probs, signals, lab["review_low_extended_rules"])
+    check("fixture records the review bounds the library uses",
+          lab["review_low"] == gl.REVIEW_LOW and lab["review_low_extended"] == gl.REVIEW_LOW_EXTENDED)
+    rebuilt = gl.gold_sets_reviewed(base_probs, adjud, plan["low_by_rule"], plan["signals_hit"],
+                                    plan["settled_labels"], plan["settled_rules"])
     diffs = [c["id"] for c in base if rebuilt[c["id"]] != c["gold"]]
-    check("gold rebuilds exactly from probabilities + adjudications", not diffs, diffs[:5])
+    check("gold rebuilds exactly from probabilities + signals + adjudications",
+          not diffs, diffs[:5])
     # 3. adjudications
     keys = [(a["case"], a["rule"]) for a in adjud]
     check("no pair adjudicated twice", len(keys) == len(set(keys)))
-    border = {(c, r) for c, r, _p in gl.borderlines({c["id"]: probs[c["id"]] for c in base})}
-    check("every borderline pair is adjudicated, and only those",
-          border == set(keys), (len(border), len(set(keys))))
+    check("every review-set pair is adjudicated, and only those",
+          plan["review"] == set(keys), (len(plan["review"]), len(set(keys))))
     short = [k for k, a in zip(keys, adjud) if len((a.get("reason") or "").split()) < 6]
     check("every adjudication has a written reason", not short, short[:5])
+    # 3b. the action signals are applied the same way on every case
+    exact = set(lab["action_signals"]["exact_rules"])
+    off_exact = [(c["id"], rid) for c in base for rid in exact
+                 if (rid in c["gold"]) != plan["settled_labels"][c["id"]][rid]]
+    check("action-policy (exact) rules are gold iff the case carries the signal",
+          not off_exact, off_exact[:5])
+    gold_of = {c["id"]: set(c["gold"]) for c in base}
+    off_implied = [(c["id"], s["rule"]) for c in base for s in signals
+                   if s.get("signal_implies_gold") and gl.signal_hit(c, s)
+                   and s["rule"] not in gold_of[c["id"]]]
+    check("every case carrying a signal_implies_gold signal is gold for that rule",
+          not off_implied, off_implied[:5])
+    spawns = [c["id"] for c in base
+              if any(t.get("tool_name") in ("Agent", "Task") for t in c["tool_calls"])]
+    check("the model-routing rule is gold on every subagent dispatch",
+          bool(spawns) and all("fb110a39" in gold_of[cid] for cid in spawns), len(spawns))
     # 4. split
     splits = gl.assign_splits(base, seed=doc["split"]["seed"])
     moved = [c["id"] for c in base if splits[c["id"]] != c["split"]]
@@ -153,9 +241,11 @@ def test_fixture(gl, ev):
           before == gl.assign_splits(base, seed=doc["split"]["seed"]))
     check("later cases land in both splits by hash", set(placed.values()) == {"train", "test"})
     # 5. hygiene
-    raw = FIXTURE.read_text(encoding="utf-8") + ADJ.read_text(encoding="utf-8")
+    raw = (FIXTURE.read_text(encoding="utf-8") + ADJ.read_text(encoding="utf-8")
+           + (FIX_DIR / lab["action_signals"]["file"]).read_text(encoding="utf-8"))
     hits = gl.scrub_findings(raw)
-    check("fixture and adjudications carry nothing the scrub refuses", not hits, hits[:5])
+    check("fixture, adjudications and signals carry nothing the scrub refuses",
+          not hits, hits[:5])
     check("fixture declares itself paraphrased", doc.get("provenance", "").startswith("paraphrased"))
     tool_ok = all(isinstance(c.get("tool_calls"), list) and all(
         isinstance(t, dict) and isinstance(t.get("tool_name"), str) for t in c["tool_calls"])
@@ -307,6 +397,12 @@ def test_harness_v2(ev):
           row["doctrine"]["outside_labelled"] == 1, row["doctrine"])
     check("a path that delivers no doctrine is not charged doctrine misses",
           report["paths"]["rules_only"]["doctrine"] is None, report["paths"]["rules_only"])
+    declared = ev.score(cases, {"door": {"t1": {"rules": set()}, "t2": {"rules": set()},
+                                         "t3": {"rules": set()}}},
+                        {"door": set()}, META, doctrine_paths={"door"})
+    check("a declared doctrine path that delivers nothing scores 0%, not 'does not deliver'",
+          (declared["paths"]["door"]["doctrine"] or {}).get("recall") == 0.0,
+          declared["paths"]["door"]["doctrine"])
     check("the doctrine table says which paths do not deliver doctrine",
           "does not deliver doctrine" in ev.render_markdown(report, {}, paths=["sys", "rules_only"]))
     check("doctrine misses reach the notification stratum too",
@@ -442,7 +538,8 @@ def test_intake(gl, doc, labels):
     except ValueError as exc:
         check("intake refuses a tool-call input copied from the live turn",
               "tool-call input" in str(exc), str(exc))
-    names = gl.record_name_terms([{"name": "Ada Brightwater", "kind": "person"}])
+    names = gl.record_name_terms([{"name": "Ada Brightwater", "kind": "person"},
+                                  {"name": "Zoë Ångström-Løvgren", "kind": "person"}])
     try:
         gl.intake_case(doc, "live-ref-1", rid, live_rules=live, extra_names=names,
                        prompt="Draft the renewal note for Brightwater.", stratum="deals_clients")
@@ -450,6 +547,32 @@ def test_intake(gl, doc, labels):
     except ValueError as exc:
         check("intake refuses a record name without echoing it",
               "name" in str(exc) and "Brightwater" not in str(exc), str(exc))
+    clean = "Ship the feature branch up and raise a review request."
+    for label, calls, prompt in (
+            ("after a newline in a tool-call input",
+             [{"tool_name": "SendMessage", "tool_input": {"message": "notes:\nBrightwater asked"}}],
+             clean),
+            ("after a tab in a tool-call input",
+             [{"tool_name": "Write", "tool_input": {"content": "owner\tBrightwater"}}], clean),
+            ("in a tool-call dict key",
+             [{"tool_name": "Write", "tool_input": {"Brightwater": "x"}}], clean),
+            ("spelled with accents the record lacks",
+             [], "Draft the note for Brîghtwäter today."),
+            ("an accented surname alone, written plainly",
+             [], "Ask Angstrom-Lovgren for the plans."),
+            ("an accented surname alone, written with its accents",
+             [{"tool_name": "SendMessage", "tool_input": {"message": "cc\nÅngström-Løvgren"}}],
+             clean)):
+        try:
+            gl.intake_case(doc, "live-ref-1", rid, live_rules=live, extra_names=names,
+                           prompt=prompt, stratum="deals_clients", tool_calls=calls)
+            check(f"intake refuses a record name {label}", False)
+        except ValueError as exc:
+            check(f"intake refuses a record name {label}",
+                  "name" in str(exc) and "rightw" not in str(exc) and "ngstr" not in str(exc),
+                  str(exc))
+    check("an accented surname becomes a name term on its own",
+          any(gl.fold(t) == gl.fold("Ångström-Løvgren") for t in names), names)
     with tempfile.TemporaryDirectory(prefix="rule-gold-label-selftest-") as tmp:
         fix = Path(tmp) / "cases.v2.json"
         fix.write_text(FIXTURE.read_text(encoding="utf-8"))
@@ -514,10 +637,38 @@ def test_intake_order(gl, doc, rid, fix, corpus, names_file, tmp):
                      "--calls-log", str(tmp / "calls.jsonl")])
     check("an accepted intake does reach Jev (so the order test can fail)",
           code == 0 and len(stub.requests) >= 1, (code, len(stub.requests)))
+    accepted_requests = len(stub.requests)
+    code = cli.main(["--case-id", base, "--missed-rule", rid, "--fixture", str(fix),
+                     "--corpus", str(corpus), "--names-file", str(names_file), "--dry-run",
+                     "--calls-log", str(tmp / "calls.jsonl"),
+                     "--tool-call", json.dumps({"tool_name": "SendMessage",
+                                                "tool_input": {"message": "fyi\nBrightwater"}})])
+    check("the CLI refuses a name after a newline in a tool call, before Jev",
+          code == 1 and len(stub.requests) == accepted_requests, (code, len(stub.requests)))
     missing = tmp / "no-such-names.json"
     code = cli.main(["--case-id", base, "--missed-rule", rid, "--fixture", str(fix),
                      "--corpus", str(corpus), "--names-file", str(missing), "--no-label"])
     check("intake refuses when the name check cannot run (fails closed)", code == 2, code)
+    for label, content in (("an empty names file", "[]"),
+                           ("a names file with no usable name", '[{"name": "", "kind": "person"}]'),
+                           ("a names file that is not a list", '{"name": "x"}')):
+        empty = tmp / "empty-names.json"
+        empty.write_text(content)
+        code = cli.main(["--case-id", base, "--missed-rule", rid, "--fixture", str(fix),
+                         "--corpus", str(corpus), "--names-file", str(empty), "--no-label",
+                         "--prompt", "Ask Brightwater to confirm.", "--stratum", "deals_clients"])
+        check(f"intake refuses {label} like an unreadable record (exit 2)", code == 2, code)
+
+    def timeout_verb(verb, args):
+        raise subprocess.TimeoutExpired(cmd="run.sh", timeout=300)
+    real_verb = cli._verb
+    cli._verb = timeout_verb
+    code = cli.main(["--case-id", base, "--missed-rule", rid, "--fixture", str(fix),
+                     "--corpus", str(corpus), "--no-label"])
+    cli._verb = real_verb
+    check("a record-read timeout exits 2, not the refused code 1", code == 2, code)
+    check("nothing reached Jev in any of the fail-closed runs",
+          len(stub.requests) == accepted_requests, len(stub.requests))
     cli._load = real_load
 
 
@@ -525,6 +676,7 @@ def main() -> int:
     gl = load(LIB, "rule_gold_label_for_selftest")
     ev = load(EVAL, "rule_delivery_eval_for_gold_selftest")
     test_bands(gl)
+    test_review_set(gl)
     test_scrub(gl)
     doc, labels = test_fixture(gl, ev)
     test_classes(gl, labels)
