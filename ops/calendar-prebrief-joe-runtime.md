@@ -17,3 +17,28 @@ The manifest remains disabled as the bootstrap default. The sole live exception
 is authority-managed: generic control-plane sync preserves it only while the
 latest Joe activation receipt matches the current allowlist. A changed
 allowlist fences both scheduling and claiming until a new explicit activation.
+
+## Moving to another Mac (done on the Studio 2026-09-27)
+
+Two things do not travel with `~/.config/carr`, and both failed silently here:
+
+1. **The allowlist.** It stores EventKit calendar identifiers, which are local
+   to each Mac. The MacBook's allowlist names no calendar on the Studio, so
+   every capture would refuse with "configured allowlisted calendar is absent".
+   Run the catalog on the new Mac through the installed app (`discover-catalog`,
+   then `discover-allowlist` with the chosen index), then
+   `calendar-prebrief-activation.py register-allowlist`. Registering changes the
+   allowlist and fences the scheduler, so `seal-activate-joe-live` must follow.
+2. **The Calendar grant.** macOS ties it to the bundle id plus the bundle's
+   ad-hoc cdhash. `bin/build-calendar-access.sh` now keeps a valid build rather
+   than recompiling, and the installer copies that build, so the installed app
+   and the repo bundle share one cdhash and one grant. A recompile (a new Mac,
+   a changed stub, or `--force`) means Joe grants Calendars again: System
+   Settings > Privacy & Security > Calendars > CARR Calendar Access.
+
+The scoped database logins do travel: `joe-live-preflight` proves all five
+before anything is re-registered, and re-running the provisioner would only
+rotate production passwords that already work.
+
+Standing check: `./run.sh health` (jobs section) flags a missed weekday slot or
+two receipted runs in a row that read 0 events, once activation is current.
