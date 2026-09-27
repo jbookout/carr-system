@@ -33,6 +33,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 from lib.loadpy import load_module_from_path  # noqa: E402
+from lib import launchd_calendar  # noqa: E402
 
 cw = load_module_from_path("cutover_watch", str(REPO / "tools" / "cutover-watch.py"))
 st = load_module_from_path("scheduler_truth", str(REPO / "tools" / "scheduler-truth.py"))
@@ -209,7 +210,7 @@ case("plist StandardOut/ErrorPath land under {{REPO}}/out/",
      and str(_pl.get("StandardErrorPath", "")).startswith("{{REPO}}/out/"))
 
 case("plist wakes every 30 minutes as specified",
-     lambda: _pl.get("StartInterval") == 1800)
+     lambda: "StartInterval" not in _pl and launchd_calendar.cadence_seconds(_pl) == 1800)
 
 case("plist carries a mechanism-doctrine-gate declaration",
      lambda: bool(re.search(r"doctrine:\s*[A-Za-z0-9][A-Za-z0-9._-]{3,}\s*-->", _plist_text)))
@@ -233,7 +234,7 @@ case("services.json entry names the right plist",
 case("services.json entry is launchd runtime with an owner_actor",
      lambda: _svc.get("runtime") == "launchd" and bool(_svc.get("owner_actor")))
 
-case("services.json entry declares an expected cadence matching the plist's StartInterval",
+case("services.json entry declares an expected cadence matching the plist's calendar cadence",
      lambda: any(e.get("expected_cadence_seconds") == 1800 for e in _svc.get("environments", [])))
 
 # ---------------------------------------------------------------------------

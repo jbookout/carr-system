@@ -27,7 +27,7 @@ would have deleted the four bin/run-scheduled.sh wrapper lines that commit
 HIGH, the wrapper is part of what keeps the recording announcement durable,
 Florida is all-party-consent, a failure is legal exposure. `install` goes the
 other way: it renders the TRACKED template (which carries the wrapper and the
-still-recording StartInterval, PR #328) onto the machine, so a converge can
+still-recording five-minute tick, PR #328) onto the machine, so a converge can
 only ever restore the wrapper, never strip it. ops/machine-converge-selftest.py
 proves that end-to-end: a live plist seeded WITHOUT the wrapper comes out of a
 converge WITH it.
