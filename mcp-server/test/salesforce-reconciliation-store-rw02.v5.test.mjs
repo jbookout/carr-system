@@ -222,6 +222,20 @@ test("the handler actor must be the database principal, or nothing is recorded",
   );
 });
 
+test("the evidence read admits the reader bundle's database identity; a write never does", async () => {
+  // Live 2026-09-27: a read verb runs on the reader login, where the database
+  // principal is always 'carr-reader', never the handler's actor.
+  const db = new FakeDb({ principal: "carr-reader" });
+  const store = createSalesforceReconciliationStore({ db });
+  const out = await store.readActionEvidence({ action_kind: "opportunity_create" }, ctx);
+  assert.equal(out.evidence_authenticated, false);
+  await assert.rejects(
+    store.recordPageStop({ idempotency_key: "rw02-reader-write", page: page({ challenge: "mfa_challenge" }) }, ctx),
+    e => e instanceof V5RW02StoreError && e.code === "actor_context_mismatch",
+  );
+  assert.equal(db.rows.length, 0, "the reader identity never records anything");
+});
+
 test("the evidence read asks the REAL window evaluator for per-action scope only", async () => {
   const fields = { schema_version: "doctorcre-v5-rw02-action-evidence.v1", tenant: T,
     action_kind: "opportunity_create", step_key: "rw02-step-synthetic-1", preview_digest: D(2),
