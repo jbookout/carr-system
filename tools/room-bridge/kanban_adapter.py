@@ -441,12 +441,17 @@ class QueueService:
             elif paths is None:
                 reason = "script_needs_data"
         elif row["route"] == "code" and alias == "flash":
-            # flash-run needs one allowlisted git project and a bounded test command, named in the body exactly as
-            # the desk reads them (flash_wire.code_inputs over flash_wire.task_parts' body)
+            # Defense in depth: a Flash code run executes model-driven code on this host, so it is accepted only from
+            # a server-derived trusted origin (never `seat`), and only when the body names one allowlisted git
+            # project and one bounded test command, read exactly as the desk reads them (flash_wire.code_inputs over
+            # flash_wire.task_parts' body).
+            origin = f"{command.get('origin_channel')}:{command.get('origin_actor')}"
             import flash_wire
             spec, _, refusal = flash_wire.code_inputs(command.get("body") or "",
                                                       roots=policy.get("code_project_roots") or [])
-            if refusal:
+            if origin not in (policy.get("code_task_origins") or []):
+                reason = "code_origin_untrusted"
+            elif refusal:
                 reason = "code_project_refused"
             elif spec is None:
                 reason = "code_needs_project"

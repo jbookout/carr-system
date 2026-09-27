@@ -309,6 +309,22 @@ def _git(cwd: str, *args: str, env=None, timeout: float = 120):
     return done.returncode, (done.stdout + done.stderr)
 
 
+_FLASH_RUN_MOD = None
+
+
+def _flash_run_module():
+    """tools/flash-run.py loaded as a module (its name has a dash), cached. The desk reuses flash-run's own
+    sandbox_profile/sandbox_wrap/_sandbox_env so the re-check is sandboxed identically to flash-run's runs."""
+    global _FLASH_RUN_MOD
+    if _FLASH_RUN_MOD is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("flash_run", str(FLASH_RUN))
+        assert spec and spec.loader
+        _FLASH_RUN_MOD = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_FLASH_RUN_MOD)
+    return _FLASH_RUN_MOD
+
+
 def _code_fixer() -> str:
     try:
         return json.loads(POLICY_PATH.read_text())["routes"]["code"]["then"]["desk"]
@@ -318,22 +334,63 @@ def _code_fixer() -> str:
 
 def _run_group(argv: list[str], cwd: str, env, timeout: float):
     """(exit code, output) of argv in its own process group, no shell; (None, output) when it outlived timeout, in
-    which case the WHOLE group is killed, so nothing it started (Flash attempts, test workers) keeps running."""
+    which case the WHOLE group is SIGKILLed. Output goes to a file, and after the kill we wait only briefly on the
+    DIRECT child and never on its pipes, so a descendant that called setsid() and escaped the group cannot hold the
+    desk past the timeout (independent review of PR #1324)."""
+    out_path = os.path.join(cwd, f".flash_desk_{uuid.uuid4().hex[:8]}.log")
     try:
-        proc = subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, start_new_session=True)
-    except OSError as exc:
-        return 127, f"could not start {argv[0]}: {type(exc).__name__}"
-    try:
-        out, _ = proc.communicate(timeout=max(1.0, timeout))
-    except subprocess.TimeoutExpired:
+        with open(out_path, "wb") as fh:
+            try:
+                proc = subprocess.Popen(argv, cwd=cwd, env=env, stdout=fh, stderr=subprocess.STDOUT,
+                                        stdin=subprocess.DEVNULL, start_new_session=True)
+            except OSError as exc:
+                return 127, f"could not start {argv[0]}: {type(exc).__name__}"
+            timed_out = False
+            try:
+                proc.wait(timeout=max(1.0, timeout))
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
+            with open(out_path, "r", errors="replace") as fh:
+                out = fh.read()
+        except OSError:
+            out = ""
+        return (None if timed_out else proc.returncode), out
+    finally:
+        try:
+            os.unlink(out_path)
         except OSError:
             pass
-        out, _ = proc.communicate()
-        return None, out or ""
-    return proc.returncode, out or ""
+
+
+def _sweep_stale_worktrees(project: str, env) -> None:
+    """Remove leftover flash/queue-* worktrees and their branches before a run, so a desk killed mid-run (its
+    finally never reached) does not leave debris in the project. Worktree paths are the desk's own temp dirs
+    (prefix flash-code-), so only this desk's leftovers match; branches are deleted only once their worktree is
+    gone. Best effort: never raises."""
+    code, out = _git(project, "worktree", "list", "--porcelain", env=env)
+    if code == 0:
+        for line in out.splitlines():
+            if line.startswith("worktree ") and "flash-code-" in line and os.sep + "tree" in line:
+                path = line[len("worktree "):]
+                if not os.path.exists(path):
+                    _git(project, "worktree", "remove", "--force", path, env=env)
+    _git(project, "worktree", "prune", env=env)
+    code, out = _git(project, "for-each-ref", "--format=%(refname:short)", "refs/heads/flash/queue-", env=env)
+    if code == 0:
+        for branch in out.split():
+            # `branch -d` deletes only a branch with no unmerged commits: exactly the debris a killed run leaves (a
+            # branch created at HEAD before any commit). A delivered success branch is ahead of HEAD, and a branch a
+            # live worktree holds is in use, so git refuses -d for both — they are preserved.
+            _git(project, "branch", "-d", branch, env=env)
 
 
 FLASH_RUN_EXITS = {2: "flash-run could not start (launcher or environment)",
@@ -345,15 +402,27 @@ FLASH_RUN_EXITS = {2: "flash-run could not start (launcher or environment)",
 def _run_flash_code(question: str, spec: dict, task_id: str | None, *, command: list[str] | None = None,
                     timeout: float | None = None) -> dict:
     """Run tools/flash-run.py on a NEW branch of the project, in a throwaway git worktree, never the project's own
-    tree: {"outcome": "success"|"blocked", "summary", "text", "branch"?}. flash-run gets --escalate suggest, so it
-    never dispatches another desk. On a pass the desk re-runs the test itself (no shell), commits on the new branch
-    and keeps it; nothing is merged or pushed. Anything else drops the worktree AND the branch. The whole run,
-    including the re-check, ends within CODE_TIMEOUT_S; a timeout kills flash-run's whole process group."""
+    tree: {"outcome": "success"|"blocked", "summary", "text", "branch"?}. flash-run runs SANDBOXED (--sandbox on):
+    it refuses here if macOS sandbox-exec is absent, so model-driven code never runs unsandboxed. It also gets
+    --escalate suggest (never dispatches another desk) and --no-learn (posted room text never seeds a later Flash
+    prompt). Stale flash/queue-* worktrees are swept first. On a pass the desk re-runs the test itself, sandboxed,
+    then commits on the new branch and keeps it; nothing is merged or pushed. Anything else drops the worktree AND
+    the branch. The whole run, including the re-check, ends within CODE_TIMEOUT_S; a timeout SIGKILLs the whole
+    process group without blocking on any escaped descendant."""
     timeout = CODE_TIMEOUT_S if timeout is None else timeout
     deadline = time.monotonic() + timeout
     project = spec["project"]
     branch = f"flash/queue-{task_id or 'room'}-{time.strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6]}"
     fixer = _code_fixer()
+
+    def blocked(reason: str, text: str = "") -> dict:
+        return {"outcome": "blocked", "summary": f"{reason}; no branch kept, needs {fixer}.",
+                "text": (text or reason).strip()}
+
+    fr = _flash_run_module()
+    live = command is None  # tests inject a fake flash-run and their own harness; skip the real sandbox gate then
+    if live and not os.path.exists(fr.SANDBOX_EXEC):
+        return blocked("no macOS sandbox on this machine; a Flash code run never executes model code unsandboxed")
     parent = tempfile.mkdtemp(prefix="flash-code-")
     tree = os.path.join(parent, "tree")
     exclude = os.path.join(parent, "exclude")
@@ -363,10 +432,7 @@ def _run_flash_code(question: str, spec: dict, task_id: str | None, *, command: 
     # and flash-run's) from ever adding those links, whatever the project's own .gitignore says
     env = dict(os.environ, GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="core.excludesFile", GIT_CONFIG_VALUE_0=exclude)
     keep = False
-
-    def blocked(reason: str, text: str = "") -> dict:
-        return {"outcome": "blocked", "summary": f"{reason}; no branch kept, needs {fixer}.",
-                "text": (text or reason).strip()}
+    _sweep_stale_worktrees(project, env)
 
     code, out = _git(project, "worktree", "add", "-q", "-b", branch, tree, "HEAD", env=env)
     if code != 0:
@@ -377,7 +443,7 @@ def _run_flash_code(question: str, spec: dict, task_id: str | None, *, command: 
             if os.path.isdir(os.path.join(project, dep)) and not os.path.lexists(os.path.join(tree, dep)):
                 os.symlink(os.path.join(project, dep), os.path.join(tree, dep))
         argv = [*(command or [sys.executable, str(FLASH_RUN)]), "run", "--cwd", tree, "--test", spec["test"],
-                "--escalate", "suggest", "--", question]
+                "--sandbox", "on", "--no-learn", "--escalate", "suggest", "--", question]
         rc, log = _run_group(argv, tree, env, deadline - time.monotonic())
         if rc is None:
             return blocked(f"Flash's code run did not finish in {timeout:.0f}s")
@@ -389,7 +455,15 @@ def _run_flash_code(question: str, spec: dict, task_id: str | None, *, command: 
             return blocked("the worktree left its new branch", tail)
         if deadline - time.monotonic() < 5:
             return blocked(f"no time left to re-check the test within {timeout:.0f}s", tail)
-        rc, check = _run_group(spec["test_argv"], tree, None, deadline - time.monotonic())
+        # The re-check runs the (model-modified) test again, so it is sandboxed exactly as flash-run's own runs were.
+        recheck = spec["test_argv"]
+        recheck_env = None
+        if live:
+            reads = fr._dep_reads(project)
+            recheck = fr.sandbox_wrap(spec["test_argv"], tree, reads=reads,
+                                      execs=[os.path.join(project, ".venv", "bin")], port=fr.flash_port())
+            recheck_env = fr._sandbox_env(os.environ, tree)
+        rc, check = _run_group(recheck, tree, recheck_env, deadline - time.monotonic())
         if rc is None:
             return blocked(f"the desk's re-check of `{spec['test']}` did not finish in {timeout:.0f}s", tail)
         if rc != 0:

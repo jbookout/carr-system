@@ -50,6 +50,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -70,6 +71,61 @@ SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".mypy_cach
 ATTEMPT_TIMEOUT = 600
 ATTEMPT_TOOLS = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
 TEST_TIMEOUT = 600
+SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+
+
+def flash_port(url=None):
+    """The loopback port the Flash server listens on, or None when the base URL is not loopback."""
+    import urllib.parse
+    u = urllib.parse.urlparse(url or os.environ.get("ANTHROPIC_BASE_URL")
+                             or os.environ.get("CARR_FLASH_URL") or "http://127.0.0.1:8000")
+    return (u.port or 80) if u.hostname in ("127.0.0.1", "localhost") else None
+
+
+def sandbox_profile(work, *, reads=(), execs=(), port=None):
+    """A macOS seatbelt profile for a model-driven run (the Flash agent and the tests it writes), the same shape as
+    tools/flash-script.py sandbox_profile() (#1250/#1316). The task text is untrusted, so a planted line can steer
+    the agent toward secrets or the network. Writes go only inside `work` (the throwaway attempt copy or worktree);
+    nothing under the home folder, the shared temp dirs, the Postgres/Homebrew state, /etc/ssh or the keychains is
+    readable except `work`, the interpreters, and the `reads` passed (the project's .venv/node_modules and the Flash
+    launcher). Network is closed except the loopback Flash port. The only programs that may start are system tool
+    dirs and the `execs` passed, so a binary the model writes into `work` can never be executed. mach-lookup,
+    Apple Events and signals to other processes are denied, which closes `open`, the keychain agent and launchd."""
+    work = os.path.realpath(work)
+    home = os.path.realpath(os.path.expanduser("~"))
+    interp_prefixes = {os.path.realpath(p) for p in (sys.prefix, sys.base_prefix)}
+    reads = sorted({work, *interp_prefixes, *(os.path.realpath(p) for p in reads if p)})
+    exec_dirs = sorted({"/usr/bin", "/bin", "/usr/libexec", "/opt/homebrew", "/usr/local/bin",
+                        *(os.path.realpath(p) for p in execs if p)})
+    # The running interpreter may live under an allowed dir already, but a virtualenv often copies python outside
+    # one; allow it explicitly (its own path and resolved path), the way flash-script does.
+    interp_execs = sorted({sys.executable, os.path.realpath(sys.executable)})
+    private = sorted({os.path.realpath(p) for p in (
+        home, "/private/tmp", "/private/var/folders", "/Users/Shared", "/opt/homebrew/var", "/opt/homebrew/etc",
+        "/usr/local/var", "/usr/local/etc", "/etc/ssh", "/Library/Keychains")})
+    allpaths = [*private, *reads, *exec_dirs, *interp_execs]
+    if any('"' in p or "\\" in p for p in allpaths):
+        raise ValueError("path not expressible in a sandbox profile")
+    net = f'(allow network-outbound (remote ip "localhost:{port}"))' if port else ""
+    return ("(version 1)(allow default)"
+            f"(deny network*){net}"
+            "(deny file-read* " + " ".join(f'(subpath "{p}")' for p in private) + ")"
+            "(allow file-read* " + " ".join(f'(subpath "{p}")' for p in reads) + ")"
+            "(allow file-read-metadata)"
+            "(deny file-write*)"
+            f'(allow file-write* (subpath "{work}") (literal "/dev/null"))'
+            "(deny process-exec*)"
+            "(allow process-exec " + " ".join(f'(subpath "{p}")' for p in exec_dirs)
+            + " " + " ".join(f'(literal "{p}")' for p in interp_execs) + ")"
+            "(deny mach-lookup)(deny appleevent-send)(deny signal (target others))")
+
+
+def sandbox_wrap(argv, work, *, reads=(), execs=(), port=None):
+    """Prefix argv with sandbox-exec under a profile for `work`. Raises FileNotFoundError when sandbox-exec is
+    absent, so the caller fails closed rather than running model code unsandboxed."""
+    if not os.path.exists(SANDBOX_EXEC):
+        raise FileNotFoundError("sandbox-exec is not on this machine")
+    return [SANDBOX_EXEC, "-p", sandbox_profile(work, reads=reads, execs=execs, port=port), *argv]
 
 
 def _lib(name):
@@ -106,6 +162,57 @@ def _sh(cmd, cwd, timeout, env=None):
     except subprocess.TimeoutExpired as exc:
         partial = (exc.stdout or b"") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
         return 124, f"timed out after {timeout}s\n{partial if isinstance(partial, str) else ''}"
+
+
+def bounded_run(argv, cwd, timeout, env=None):
+    """Run argv (a list, no shell) in its own process group with output to a file, and a timeout that actually
+    bounds the wall clock. On timeout the whole group is SIGKILLed; then we wait only briefly and DO NOT block on
+    inherited pipes, so a descendant that called setsid() and escaped the group cannot hold us past the timeout
+    (independent review of #1324). Returns (exit_code, output); the code is 124 on timeout."""
+    out_path = os.path.join(cwd, f".flash_test_{uuid.uuid4().hex[:8]}.log")
+    try:
+        with open(out_path, "wb") as fh:
+            try:
+                p = subprocess.Popen(argv, cwd=cwd, stdout=fh, stderr=subprocess.STDOUT,
+                                     stdin=subprocess.DEVNULL, env=env, start_new_session=True)
+            except OSError as exc:
+                return 127, f"could not start {argv[0]}: {type(exc).__name__}"
+            timed_out = False
+            try:
+                p.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                try:
+                    os.killpg(p.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                try:
+                    p.wait(timeout=5)  # reap the direct child only; never wait on an escaped setsid descendant
+                except subprocess.TimeoutExpired:
+                    pass
+        try:
+            with open(out_path, "r", errors="replace") as fh:
+                output = fh.read()
+        except OSError:
+            output = ""
+        if timed_out:
+            return 124, f"timed out after {timeout:.0f}s\n{output}"
+        return (p.returncode if p.returncode is not None else 124), output
+    finally:
+        try:
+            os.unlink(out_path)
+        except OSError:
+            pass
+
+
+def _run_test(test_cmd, cwd, timeout, *, sandbox=False, reads=(), execs=(), port=None):
+    """Run the test command in `cwd`. Sandboxed, it goes through /bin/sh under the seatbelt profile (model-written
+    tests are untrusted); unsandboxed it keeps the old shell run. Either way the timeout bounds the wall clock."""
+    if sandbox:
+        argv = sandbox_wrap(["/bin/sh", "-c", test_cmd], cwd, reads=reads, execs=execs, port=port)
+        env = _sandbox_env(os.environ, cwd)
+        return bounded_run(argv, cwd, timeout, env=env)
+    return _sh(test_cmd, cwd, timeout)
 
 
 def _tracked_files(cwd):
@@ -230,7 +337,32 @@ def rules_block(rules):
     return "\n".join(lines)
 
 
-def run_attempt(n, cwd, prompt, test_cmd, effort, workdir, think=True, rules_text=None):
+def _dep_reads(cwd):
+    """The dependency dirs a sandboxed attempt may read (resolved): the project's virtualenv and node_modules, plus
+    the Flash launcher. Everything else under the home folder stays denied."""
+    reads = [FLASH]
+    for dep in (".venv", "node_modules"):
+        p = os.path.join(cwd, dep)
+        if os.path.exists(p):
+            reads.append(os.path.realpath(p))
+    return reads
+
+
+def _sandbox_env(base, dest):
+    """Env for a sandboxed agent: a throwaway HOME and TMPDIR inside the writable attempt copy (so the Flash
+    launcher's $HOME/.claude-local and any temp files land where writes are allowed), and no inherited credential
+    beyond a minimal allowlist. The launcher re-exports the Anthropic base URL and model itself."""
+    home = os.path.join(dest, ".home")
+    os.makedirs(home, exist_ok=True)
+    keep = {k: base[k] for k in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL",
+                                 "ANTHROPIC_SMALL_FAST_MODEL", "CARR_FLASH_URL", "CARR_FLASH_MODEL",
+                                 "MAX_THINKING_TOKENS", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
+            if k in base}
+    return {"PATH": "/opt/homebrew/bin:/usr/bin:/bin", "HOME": home, "TMPDIR": dest, "LANG": "C.UTF-8",
+            "PYTHONDONTWRITEBYTECODE": "1", **keep}
+
+
+def run_attempt(n, cwd, prompt, test_cmd, effort, workdir, think=True, rules_text=None, sandbox=False):
     dest = os.path.join(workdir, f"attempt-{n}")
     os.makedirs(dest)
     make_copy(cwd, dest)
@@ -249,14 +381,20 @@ def run_attempt(n, cwd, prompt, test_cmd, effort, workdir, think=True, rules_tex
     # Appended, not replacing: the base prompt stays byte-identical across tasks so the
     # server's prompt cache still covers it; only the rules tail is read fresh.
     extra = ["--append-system-prompt", rules_text] if rules_text else []
-    code, transcript = _sh([FLASH, "-p", prompt, "--effort", effort or "low",
-                            "--permission-mode", "acceptEdits",
-                            "--tools", *ATTEMPT_TOOLS, *extra,
-                            "--allowedTools", *allowed], dest, ATTEMPT_TIMEOUT, env=env)
+    argv = [FLASH, "-p", prompt, "--effort", effort or "low", "--permission-mode", "acceptEdits",
+            "--tools", *ATTEMPT_TOOLS, *extra, "--allowedTools", *allowed]
+    reads, execs, port = _dep_reads(cwd), [os.path.join(cwd, ".venv", "bin")], flash_port()
+    if sandbox:
+        # The agent runs model-driven code, so it is sandboxed: writes only inside this attempt copy, no reads under
+        # home except its deps, network only to the local Flash port. A throwaway HOME keeps its config writable.
+        argv = sandbox_wrap(argv, dest, reads=reads, execs=execs, port=port)
+        env = _sandbox_env(env or os.environ, dest)
+    code, transcript = _sh(argv, dest, ATTEMPT_TIMEOUT, env=env)
     elapsed = round(time.monotonic() - started, 1)
     test_code, test_out = (None, "")
     if test_cmd:
-        test_code, test_out = _sh(test_cmd, dest, TEST_TIMEOUT)
+        test_code, test_out = _run_test(test_cmd, dest, TEST_TIMEOUT, sandbox=sandbox, reads=reads,
+                                        execs=execs, port=port)
     patch = read_patch(dest)
     return {"id": f"attempt-{n}", "code_or_diff": patch[:20000], "patch": patch,
             "test_output": test_out[-6000:], "test_exit_code": test_code,
@@ -418,6 +556,17 @@ def cmd_run(a):
     intake = _lib("jev_intake")
     notebook = _lib("jev_notebook")
 
+    sandbox = a.sandbox == "on" or (a.sandbox == "auto" and os.path.exists(SANDBOX_EXEC))
+    if a.sandbox == "on" and not os.path.exists(SANDBOX_EXEC):
+        _say("refusing: --sandbox on but sandbox-exec is not on this machine; model code does not run unsandboxed")
+        row["outcome"] = "no_sandbox"
+        _append(RUNS_LOG, row)
+        return 2
+    if a.sandbox == "auto" and not sandbox:
+        _say("WARNING: no sandbox-exec on this machine; the attempt runs UNSANDBOXED (interactive use only)")
+    row["sandbox"] = sandbox
+    learn = not a.no_learn
+
     amb = intake.check_ambiguity(task)
     row["ambiguity"] = amb.get("verdict")
     if amb.get("verdict") == "ambiguous" and not a.force:
@@ -472,7 +621,7 @@ def cmd_run(a):
             think = think_for(a.think, effort, n)
             _say(f"attempt {n}/{attempts} (effort {effort}, thinking {'on' if think else 'off'})")
             cand = run_attempt(n, cwd, retry_prompt(prompt, candidates[-1] if candidates else None),
-                               a.test, effort, workdir, think=think, rules_text=rules_text)
+                               a.test, effort, workdir, think=think, rules_text=rules_text, sandbox=sandbox)
             candidates.append(cand)
             status = "no test" if cand["test_exit_code"] is None else (
                 "tests pass" if cand["test_exit_code"] == 0 else f"tests fail ({cand['test_exit_code']})")
@@ -497,9 +646,10 @@ def cmd_run(a):
         if chosen is None or not chosen["patch"].strip():
             failure = candidates[-1]["test_output"] if candidates else ""
             _say("no attempt was good enough")
-            notebook.record_mistake("no_candidate", task,
-                                    f"{attempts} attempts; last failure: {failure[-500:]}",
-                                    "escalated", source=f"flash-run {run_id}")
+            if learn:  # queue runs pass --no-learn: posted task text must never seed a later prompt
+                notebook.record_mistake("no_candidate", task,
+                                        f"{attempts} attempts; last failure: {failure[-500:]}",
+                                        "escalated", source=f"flash-run {run_id}")
             row["outcome"] = "no_candidate"
             row["escalation"] = escalate(task, cwd, run_id, failure, context_files[:8],
                                          a.escalate, test_cmd=a.test)
@@ -525,7 +675,9 @@ def cmd_run(a):
         _say(f"applied {chosen['id']}")
         final_code = None
         if a.test:
-            final_code, final_out = _sh(a.test, cwd, TEST_TIMEOUT)
+            final_code, final_out = _run_test(a.test, cwd, TEST_TIMEOUT, sandbox=sandbox,
+                                              reads=_dep_reads(cwd), execs=[os.path.join(cwd, ".venv", "bin")],
+                                              port=flash_port())
             _say("tests pass in the real tree" if final_code == 0
                  else f"tests FAIL in the real tree ({final_code})\n{final_out[-1500:]}")
         review = _lib("jev_done_checks").triage_review(chosen["patch"][:40000], task)
@@ -535,10 +687,10 @@ def cmd_run(a):
             _say("review triage: this change touches risky code — have Claude review it: "
                  + str((review.get("detail") or {}).get("advice") or ""))
         row["outcome"] = "applied_pass" if final_code in (0, None) else "applied_fail"
-        if final_code == 0:
+        if final_code == 0 and learn:
             _append(EXAMPLES_LOG, {"id": run_id, "title": task[:120],
                                    "summary": chosen["patch"][:1500], "at": _now()})
-        elif final_code is not None:
+        elif final_code is not None and learn:
             notebook.record_mistake("applied_but_failing", task, final_out[-800:],
                                     "needs follow-up", source=f"flash-run {run_id}")
         _append(RUNS_LOG, row)
@@ -632,6 +784,12 @@ def main(argv):
                    help="skip Jev's per-task rule pick (attempts get no RULES FOR THIS TASK block)")
     r.add_argument("--dry-run", action="store_true", help="print the chosen patch, do not apply")
     r.add_argument("--keep", action="store_true", help="keep the attempt copies")
+    r.add_argument("--sandbox", choices=["auto", "on", "off"], default="auto",
+                   help="run the agent and the tests under macOS sandbox-exec: auto = on if present (else a warning "
+                        "and an unsandboxed run), on = required (refuse if absent), off = never. Queue runs pass on.")
+    r.add_argument("--no-learn", action="store_true",
+                   help="do not write the task to the examples log or the mistake notebook (queue runs pass this, "
+                        "so untrusted room text can never seed a later prompt)")
     pl = sub.add_parser("plan")
     pl.add_argument("file")
     s = sub.add_parser("scorecard")

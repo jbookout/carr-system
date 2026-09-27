@@ -433,7 +433,13 @@ def test_the_queue_prompt_still_carries_the_protocol_mark():
 import subprocess  # noqa: E402
 import time  # noqa: E402
 
-CODE_POLICY = {**POLICY, "queue_targets": {**POLICY["queue_targets"], "code": "flash"}}
+CODE_POLICY = {**POLICY, "queue_targets": {**POLICY["queue_targets"], "code": "flash"},
+               "code_task_origins": ["browser-human:joe"]}
+
+
+def code_turn(body, *, channel="browser-human", actor="joe"):
+    return {"body": body, "msg_id": "33333333-3333-4333-8333-333333333333", "seat": "claude", "sponsor": "joe",
+            "seq": 7, "origin_channel": channel, "origin_actor": actor}
 
 
 def _git(cwd, *args):
@@ -552,8 +558,8 @@ def code_service(root, route="code"):
     return svc, adapter
 
 
-def enqueue(body, key="k1"):
-    return turn(f"@queue enqueue target=auto cap=repo-write key={key} :: Fix add\n{body}")
+def enqueue(body, key="k1", **origin):
+    return code_turn(f"@queue enqueue target=auto cap=repo-write key={key} :: Fix add\n{body}", **origin)
 
 
 def test_auto_code_task_with_an_allowed_project_goes_to_flash():
@@ -581,6 +587,17 @@ def test_auto_code_task_with_a_refused_project_or_test_falls_back():
         assert accepted["route"]["fallback_reason"] == "code_project_refused", (body, accepted)
 
 
+def test_auto_code_task_from_an_untrusted_origin_falls_back():
+    # Defense in depth: a model-posted (mcp) code task never reaches Flash; it falls back to Opus.
+    root = code_root()
+    svc, _ = code_service(root)
+    acc = svc.handle(enqueue(code_body(root), channel="mcp", actor="claude"), room="p")["receipt"]["queue_accepted"]
+    assert acc["target"] == "claude-desktop" and acc["route"]["fallback_reason"] == "code_origin_untrusted", acc
+    # an unknown browser actor is refused even earlier, by the grammar's origin check
+    rej = svc.handle(enqueue(code_body(root), channel="browser-human", actor="mallory"), room="p")["receipt"]
+    assert "queue_rejected" in rej and rej["queue_rejected"]["code"] == "origin_untrusted", rej
+
+
 def test_auto_code_task_falls_back_when_jev_abstained():
     root = code_root()
     for flag in ({"jev_error": "JudgeUnavailable: down"}, {"fallback": True}):
@@ -600,8 +617,8 @@ def code_prompt(body, title="Fix add"):
 def test_a_project_line_in_the_title_counts_on_neither_side():
     root = code_root()
     svc, _ = code_service(root)
-    out = svc.handle(turn(f"@queue enqueue target=auto cap=repo-write :: project: {root}/app\n"
-                          "test: python3 tests/check.py\nFix add"), room="p")
+    out = svc.handle(code_turn(f"@queue enqueue target=auto cap=repo-write :: project: {root}/app\n"
+                               "test: python3 tests/check.py\nFix add"), room="p")
     assert out["receipt"]["queue_accepted"]["route"]["fallback_reason"] == "code_needs_project", out
     prompt = code_prompt("test: python3 tests/check.py\nFix add", title=f"project: {root}/app")
     body = flash_wire.task_parts(prompt)[2]
