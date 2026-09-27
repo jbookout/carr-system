@@ -174,5 +174,33 @@ p = run(root, stub, "--canary", "--days", "7", extra_env={
 check("canary bypasses normal intake and emits only its strict aggregate",
       p.returncode == 0 and 'calendar-capture: canary-result' in p.stdout)
 
+# 7. One unresolved external attendee cannot suppress an independently proven
+# exact match.  The intake still refuses the run; only the exact match is
+# eligible for the canonical activity call.  All identities here are synthetic.
+mixed = {
+    "counts": {"emails": 2, "exact": 1, "domain": 0, "unknown": 1,
+               "internal": 0, "upcoming": 0},
+    "exact": [{"ref": "C-TEST", "email": "known@example.test",
+               "last_seen": "2026-09-25", "events": [{"day": "2026-09-25",
+               "title": "Synthetic meeting"}]}],
+    "domain": [],
+    "unknown": [{"email": "new@example.test", "last_seen": "2026-09-25"}],
+}
+root, stub = fixture(appends="events scanned: 2; carrying attendees: 2\nexit=0",
+                     dump_json="{}", matcher_json=json.dumps(mixed))
+(root / "tools" / "calendar-intake-gate.py").write_text(
+    "import sys\nprint('synthetic unresolved intake', file=sys.stderr)\nsys.exit(78)\n")
+(root / "run.sh").write_text(
+    "#!/bin/sh\nprintf '%s\\n' \"$2\" >> out/canonical-calls.txt\n"
+    "printf '{\"ok\": true}\\n'\n")
+(root / "run.sh").chmod(0o755)
+p = run(root, stub)
+calls = (root / "out" / "canonical-calls.txt")
+check("unresolved intake still refuses completion", p.returncode == 78,
+      f"exit={p.returncode}")
+check("unresolved intake preserves the independent exact touch",
+      calls.is_file() and calls.read_text().splitlines() == ["log-activity"],
+      f"calls={calls.read_text() if calls.exists() else 'none'}")
+
 print(f"\n{'OK all checks passed' if not failures else f'FAIL {len(failures)}: ' + ', '.join(failures)}")
 sys.exit(1 if failures else 0)

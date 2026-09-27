@@ -203,20 +203,8 @@ if [ "$CANARY" -eq 1 ]; then
   exec "$PY" "$REPO/tools/calendar-canary-result.py" --proposals "$MATCH_JSON"
 fi
 
-# An address that does not resolve in the record is not a successful capture.
-# It starts a deterministic intake: local-mail search, research, then an
-# evidence-backed record result.  Until the intake worker supplies all three
-# receipts, this run refuses completion instead of silently treating an unknown
-# attendee as a harmless calendar row.  --dry-run remains read-only and prints
-# candidates without requiring (or creating) evidence.
-if [ "$DRY" -ne 1 ]; then
-  if ! "$PY" "$REPO/tools/calendar-intake-gate.py" \
-          --proposals "$MATCH_JSON" --evidence "$INTAKE_EVIDENCE"; then
-    echo "calendar-capture: REFUSE unmatched attendee intake is incomplete; no successful completion receipt" >&2
-    exit 78
-  fi
-fi
-
+# Exact matches have their own evidence and deterministic idempotency keys.
+# Process them even when a separate unknown attendee still requires intake.
 "$PY" - "$MATCH_JSON" "$DRY" "$DAYS" "${SCANNED:-0}" "$RECEIPT_SAFE" <<'PYEOF'
 import json, subprocess, sys, pathlib
 path, dry, days, scanned, receipt_safe = (sys.argv[1], sys.argv[2] == "1", sys.argv[3],
@@ -281,3 +269,23 @@ print(f"calendar-capture: source=eventkit mode=live scanned={scanned} exact={c['
       f"domain={c['domain']} unknown={c['unknown']} writes={written} failed={failed}")
 sys.exit(1 if failed else 0)
 PYEOF
+CAPTURE_STATUS=$?
+
+# An address that does not resolve in the record is not a successful capture.
+# It starts a deterministic intake: local-mail search, research, then an
+# evidence-backed record result.  Until the intake worker supplies all three
+# receipts, this run refuses completion.  --dry-run remains read-only and
+# prints candidates without requiring (or creating) evidence.
+INTAKE_STATUS=0
+if [ "$DRY" -ne 1 ]; then
+  "$PY" "$REPO/tools/calendar-intake-gate.py" \
+          --proposals "$MATCH_JSON" --evidence "$INTAKE_EVIDENCE" || INTAKE_STATUS=$?
+fi
+if [ "$CAPTURE_STATUS" -ne 0 ]; then
+  echo "calendar-capture: FAIL one or more exact touches were not logged" >&2
+  exit "$CAPTURE_STATUS"
+fi
+if [ "$INTAKE_STATUS" -ne 0 ]; then
+  echo "calendar-capture: REFUSE unmatched attendee intake is incomplete; no successful completion receipt" >&2
+  exit 78
+fi
