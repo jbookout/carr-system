@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# doctrine: rule-delivery-load-layers
 """rule-boot-gate.py — no tool runs until this context has read the rules.
 
 Joe asked for 100% recall on relevant rules; Jev chose this design (p=1.00).
