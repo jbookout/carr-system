@@ -114,6 +114,11 @@ def sandbox_profile(work, *, reads=(), execs=(), port=None):
             "(allow file-read-metadata)"
             "(deny file-write*)"
             f'(allow file-write* (subpath "{work}") (literal "/dev/null"))'
+            # Git metadata is never writable from inside, anywhere: a `.git` file or directory, at any depth. Model
+            # code that planted core.fsmonitor or a filter in a .git/config (or swapped a worktree's .git pointer)
+            # would have it run by the UNSANDBOXED git that reads the patch back afterwards (re-review of #1324).
+            # This rule comes after the allow above, so it wins.
+            '(deny file-write* (regex #"/\\.git(/|$)"))'
             "(deny process-exec*)"
             "(allow process-exec " + " ".join(f'(subpath "{p}")' for p in exec_dirs)
             + " " + " ".join(f'(literal "{p}")' for p in interp_execs) + ")"
@@ -164,45 +169,140 @@ def _sh(cmd, cwd, timeout, env=None):
         return 124, f"timed out after {timeout}s\n{partial if isinstance(partial, str) else ''}"
 
 
-def bounded_run(argv, cwd, timeout, env=None):
-    """Run argv (a list, no shell) in its own process group with output to a file, and a timeout that actually
-    bounds the wall clock. On timeout the whole group is SIGKILLed; then we wait only briefly and DO NOT block on
-    inherited pipes, so a descendant that called setsid() and escaped the group cannot hold us past the timeout
-    (independent review of #1324). Returns (exit_code, output); the code is 124 on timeout."""
-    out_path = os.path.join(cwd, f".flash_test_{uuid.uuid4().hex[:8]}.log")
+# Every process a contained run starts carries this marker in its environment, so a descendant that setsid()'d AND
+# was reparented to init (its parent already gone) can still be found and killed.
+RUN_MARK = "CARR_FLASH_CONTAIN"
+
+
+def _children_map():
     try:
-        with open(out_path, "wb") as fh:
-            try:
-                p = subprocess.Popen(argv, cwd=cwd, stdout=fh, stderr=subprocess.STDOUT,
-                                     stdin=subprocess.DEVNULL, env=env, start_new_session=True)
-            except OSError as exc:
-                return 127, f"could not start {argv[0]}: {type(exc).__name__}"
-            timed_out = False
-            try:
-                p.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                timed_out = True
+        out = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    kids = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            kids.setdefault(int(parts[1]), []).append(int(parts[0]))
+    return kids
+
+
+def _descendants(root):
+    """Every live descendant of root, walked by ppid. A setsid() child leaves the process GROUP but keeps its
+    parent, so it is found here as long as the tree is still attached (we walk before killing anything)."""
+    if not root:
+        return set()
+    kids, seen, stack = _children_map(), set(), [root]
+    while stack:
+        for child in kids.get(stack.pop(), []):
+            if child not in seen:
+                seen.add(child)
+                stack.append(child)
+    return seen
+
+
+def _marked(token):
+    """Processes whose environment carries this run's marker, including orphans already reparented to init."""
+    needle, pids = f"{RUN_MARK}={token}", set()
+    if os.path.isdir("/proc"):  # Linux
+        for d in os.listdir("/proc"):
+            if d.isdigit():
                 try:
-                    os.killpg(p.pid, signal.SIGKILL)
+                    with open(f"/proc/{d}/environ", "rb") as fh:
+                        if needle.encode() in fh.read().split(b"\0"):
+                            pids.add(int(d))
                 except OSError:
                     pass
-                try:
-                    p.wait(timeout=5)  # reap the direct child only; never wait on an escaped setsid descendant
-                except subprocess.TimeoutExpired:
-                    pass
+    else:  # macOS: ps -E appends each own-user process's environment
+        try:
+            out = subprocess.run(["ps", "-A", "-E", "-ww", "-o", "pid=,command="], capture_output=True, text=True,
+                                 timeout=10).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return pids
+        for line in out.splitlines():
+            pid, _, rest = line.strip().partition(" ")
+            if pid.isdigit() and needle in rest.split():
+                pids.add(int(pid))
+    pids.discard(os.getpid())
+    return pids
+
+
+def kill_run(root, token):
+    """Stop, then SIGKILL, every process of a contained run: root's live descendant tree and anything carrying the
+    run's marker. SIGSTOP first, repeated until no new process appears, so nothing can fork a replacement between
+    the snapshot and the kill; then SIGKILL all of them and root's process group."""
+    stopped = set()
+    for _ in range(8):
+        found = _descendants(root) | _marked(token)
+        if root:
+            found.add(root)
+        new = found - stopped
+        if not new:
+            break
+        for pid in new:
+            try:
+                os.kill(pid, signal.SIGSTOP)
+            except OSError:
+                pass
+        stopped |= new
+    for pid in stopped:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    if root:
+        try:
+            os.killpg(root, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def run_contained(argv, cwd, timeout, env=None):
+    """Run argv (a list, no shell) contained: its own session, output to a file outside `cwd` (never in the tree
+    git later reads), a per-run marker in its environment, and a timeout that bounds the wall clock. On timeout
+    the WHOLE run is killed (kill_run), including a setsid() descendant, and we never block on an inherited pipe.
+    On a normal exit, anything the run left behind (a daemonised child) is killed too. Returns (exit_code, output),
+    exit_code None on timeout."""
+    token = uuid.uuid4().hex
+    child_env = dict(os.environ if env is None else env)
+    child_env[RUN_MARK] = token
+    fd, out_path = tempfile.mkstemp(prefix="flash-contained-", suffix=".log")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            try:
+                p = subprocess.Popen(argv, cwd=cwd, stdout=fh, stderr=subprocess.STDOUT,
+                                     stdin=subprocess.DEVNULL, env=child_env, start_new_session=True)
+            except OSError as exc:
+                return 127, f"could not start {argv[0]}: {type(exc).__name__}"
+            try:
+                p.wait(timeout=max(1.0, timeout))
+                timed_out = False
+            except subprocess.TimeoutExpired:
+                timed_out = True
+            kill_run(p.pid if timed_out else None, token)
+            try:
+                p.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
         try:
             with open(out_path, "r", errors="replace") as fh:
                 output = fh.read()
         except OSError:
             output = ""
-        if timed_out:
-            return 124, f"timed out after {timeout:.0f}s\n{output}"
-        return (p.returncode if p.returncode is not None else 124), output
+        return (None if timed_out else p.returncode), output
     finally:
         try:
             os.unlink(out_path)
         except OSError:
             pass
+
+
+def bounded_run(argv, cwd, timeout, env=None):
+    """run_contained with the shell convention: (124, "timed out ...") on timeout."""
+    code, output = run_contained(argv, cwd, timeout, env=env)
+    if code is None:
+        return 124, f"timed out after {timeout:.0f}s\n{output}"
+    return code, output
 
 
 def _run_test(test_cmd, cwd, timeout, *, sandbox=False, reads=(), execs=(), port=None):
@@ -227,9 +327,36 @@ def _tracked_files(cwd):
     return files
 
 
+# Git run by THIS process after model code touched a tree must not trust anything in that tree (re-review of #1324):
+# the repository lives in a git dir the model can never write (gitdir_for: a sibling of the copy, outside the
+# sandbox's writable folder), no system or global config is read, and the exec-capable hooks are pinned off. An
+# in-tree .gitattributes can only name drivers, and no trusted config defines any, so it cannot run anything.
+GIT_HARDEN = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.untrackedCache=false"]
+
+
+def git_env(base=None):
+    env = dict(os.environ if base is None else base)
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"):
+        env.pop(key, None)
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0")
+    return env
+
+
+def gitdir_for(dest):
+    """The trusted git dir of a throwaway copy: a sibling of it, so never inside the folder model code may write."""
+    return os.path.realpath(dest).rstrip(os.sep) + ".gitdir"
+
+
+def tgit(gitdir, worktree, *args, timeout=120, env=None):
+    """git on `worktree` through an explicit, trusted git dir, hardened; never discovers a .git in the tree."""
+    return _sh(["git", "--git-dir", gitdir, "--work-tree", worktree, *GIT_HARDEN, *args], worktree, timeout,
+               env=git_env(env))
+
+
 def make_copy(cwd, dest):
     """A throwaway copy of the working tree with a baseline commit, so the attempt's
-    change can be read back as a patch no matter what state the real tree is in."""
+    change can be read back as a patch no matter what state the real tree is in. The copy's
+    repository is kept OUTSIDE it (gitdir_for), so nothing written into the copy is ever git metadata."""
     for rel in _tracked_files(cwd):
         src = os.path.join(cwd, rel)
         dst = os.path.join(dest, rel)
@@ -241,18 +368,20 @@ def make_copy(cwd, dest):
         src = os.path.join(cwd, dep)
         if os.path.isdir(src) and not os.path.lexists(os.path.join(dest, dep)):
             os.symlink(src, os.path.join(dest, dep))
-    for args in (["git", "init", "-q"], ["git", "add", "-A"],
-                 ["git", "-c", "user.email=flash@local", "-c", "user.name=flash",
+    gitdir = gitdir_for(dest)
+    for args in (["init", "-q"], ["add", "-A"],
+                 ["-c", "user.email=flash@local", "-c", "user.name=flash",
                   "commit", "-q", "--no-verify", "-m", "baseline"]):
-        _sh(args, dest, 120)
+        tgit(gitdir, dest, *args)
 
 
 def read_patch(dest):
     # Leave out what running code generates (bytecode caches, build output): the copy never took those
     # folders, so a change to them re-creates files the real folder already has and the patch won't apply.
     skip = [f":(exclude,glob)**/{d}/**" for d in sorted(SKIP_DIRS - {".git"})] + [":(exclude,glob)**/*.pyc"]
-    _sh(["git", "add", "-A", "--", ".", *skip], dest, 120)
-    _, patch = _sh(["git", "diff", "--cached", "--binary"], dest, 120)
+    gitdir = gitdir_for(dest)
+    tgit(gitdir, dest, "add", "-A", "--", ".", *skip)
+    _, patch = tgit(gitdir, dest, "diff", "--cached", "--binary")
     return patch
 
 
@@ -384,12 +513,17 @@ def run_attempt(n, cwd, prompt, test_cmd, effort, workdir, think=True, rules_tex
     argv = [FLASH, "-p", prompt, "--effort", effort or "low", "--permission-mode", "acceptEdits",
             "--tools", *ATTEMPT_TOOLS, *extra, "--allowedTools", *allowed]
     reads, execs, port = _dep_reads(cwd), [os.path.join(cwd, ".venv", "bin")], flash_port()
+    gitdir = gitdir_for(dest)
     if sandbox:
-        # The agent runs model-driven code, so it is sandboxed: writes only inside this attempt copy, no reads under
-        # home except its deps, network only to the local Flash port. A throwaway HOME keeps its config writable.
-        argv = sandbox_wrap(argv, dest, reads=reads, execs=execs, port=port)
-        env = _sandbox_env(env or os.environ, dest)
-    code, transcript = _sh(argv, dest, ATTEMPT_TIMEOUT, env=env)
+        # The agent runs model-driven code, so it is sandboxed: writes only inside this attempt copy (never git
+        # metadata), no reads under home except its deps and its read-only git dir, network only to the local Flash
+        # port. A throwaway HOME keeps its config writable. It runs contained, so nothing it starts outlives it.
+        argv = sandbox_wrap(argv, dest, reads=[*reads, gitdir], execs=execs, port=port)
+        env = dict(_sandbox_env(env or os.environ, dest), GIT_DIR=gitdir, GIT_WORK_TREE=dest)
+        code, transcript = bounded_run(argv, dest, ATTEMPT_TIMEOUT, env=env)
+    else:
+        env = dict(env or os.environ, GIT_DIR=gitdir, GIT_WORK_TREE=dest)
+        code, transcript = _sh(argv, dest, ATTEMPT_TIMEOUT, env=env)
     elapsed = round(time.monotonic() - started, 1)
     test_code, test_out = (None, "")
     if test_cmd:
@@ -529,6 +663,7 @@ def escalate(task, cwd, run_id, failure, files, mode, *, test_cmd=None, kind="co
     finally:
         if copy_dir:
             shutil.rmtree(copy_dir, ignore_errors=True)
+            shutil.rmtree(gitdir_for(copy_dir), ignore_errors=True)
     if not patch:
         result.update(outcome="dispatched", detail=status)
         return result

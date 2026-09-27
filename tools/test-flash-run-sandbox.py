@@ -170,24 +170,215 @@ def no_sandbox_binary_means_the_wrap_refuses():
         fr.SANDBOX_EXEC = saved
 
 
-# ── the timeout actually bounds the run ───────────────────────────────────────────────────────────────────────
-def a_two_second_timeout_returns_within_about_three_seconds_despite_a_setsid_escape():
-    # The reviewer's case: a child that calls setsid() leaves the group and holds the output pipe. bounded_run must
-    # not wait on it. Reproduce and require the call to return in ~3 s for a 2 s timeout.
+# ── git escape canaries (re-review of #1324, finding 1) ──────────────────────────────────────────────────────
+# A canary is a harmless hook script that only touches a scratch file. If git ever runs it from config the model
+# planted, the file appears. Each case asserts it never does; the control proves the canary really fires.
+def _git(cwd, *args):
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+
+
+def _project():
+    p = _work()
+    with open(os.path.join(p, "a.txt"), "w") as fh:
+        fh.write("one\n")
+    _git(p, "init", "-q", "-b", "main")
+    _git(p, "add", "a.txt")
+    _git(p, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "base")
+    return p
+
+
+def _canary():
+    """(hook path, canary file path): running the hook creates the canary."""
+    d = _work()
+    canary = os.path.join(d, "CANARY")
+    hook = os.path.join(d, "hook.sh")
+    with open(hook, "w") as fh:
+        fh.write(f"#!/bin/sh\ntouch '{canary}'\n")
+    os.chmod(hook, 0o755)
+    return hook, canary
+
+
+def _fsmonitor(hook):
+    return f"[core]\n\tfsmonitor = {hook}\n"
+
+
+def canary_control_fires_when_git_trusts_planted_config():
+    # Proves the canary works: plain git in a repo whose .git/config names the hook DOES run it.
+    project = _project()
+    hook, canary = _canary()
+    with open(os.path.join(project, ".git", "config"), "a") as fh:
+        fh.write(_fsmonitor(hook))
+    with open(os.path.join(project, "a.txt"), "a") as fh:
+        fh.write("two\n")
+    subprocess.run(["git", "status", "--short"], cwd=project, capture_output=True, text=True)
+    assert os.path.exists(canary), "control: the canary did not fire, so the escape tests would prove nothing"
+
+
+def attempt_copy_ignores_an_in_tree_git_config_planted_unsandboxed():
+    # Layer (b): even if model code DID write <copy>/.git/config, read_patch uses the copy's trusted git dir.
+    project = _project()
     work = _work()
+    dest = os.path.join(work, "attempt-1")
+    os.makedirs(dest)
+    fr.make_copy(project, dest)
+    hook, canary = _canary()
+    os.makedirs(os.path.join(dest, ".git"), exist_ok=True)
+    with open(os.path.join(dest, ".git", "config"), "w") as fh:
+        fh.write(_fsmonitor(hook))
+    with open(os.path.join(dest, "a.txt"), "a") as fh:
+        fh.write("two\n")
+    patch = fr.read_patch(dest)
+    assert not os.path.exists(canary), "read_patch ran a hook from a git config planted in the tree"
+    assert "+two" in patch, patch
+
+
+def desk_worktree_git_ignores_a_swapped_git_pointer():
+    # Layer (b) for the desk: a tree whose .git was swapped for a directory with a hook is never read, because the
+    # desk names the worktree's real admin dir (captured before any model code ran).
+    project = _project()
+    tree = os.path.join(_work(), "tree")
+    _git(project, "worktree", "add", "-q", "-b", "flash/queue-t_canary", tree, "HEAD")
+    with open(os.path.join(tree, ".git")) as fh:
+        admin = os.path.realpath(fh.read().strip()[len("gitdir:"):].strip())
+    hook, canary = _canary()
+    os.unlink(os.path.join(tree, ".git"))
+    os.makedirs(os.path.join(tree, ".git"))
+    with open(os.path.join(tree, ".git", "config"), "w") as fh:
+        fh.write(_fsmonitor(hook))
+    with open(os.path.join(tree, "a.txt"), "a") as fh:
+        fh.write("two\n")
+    fr.tgit(admin, tree, "add", "-A")
+    code, diff = fr.tgit(admin, tree, "diff", "--cached")
+    assert not os.path.exists(canary), "desk git ran a hook from a swapped .git in the worktree"
+    assert "+two" in diff, diff
+    _git(project, "worktree", "prune")
+
+
+PLANT = '''
+import os
+results = []
+def attempt(label, fn):
+    try:
+        fn()
+        results.append(label + "_OK")
+    except Exception as e:
+        results.append(label + "_DENIED:" + type(e).__name__)
+{body}
+open("a.txt", "a").write("two\\n")
+print(" ".join(results))
+'''
+
+
+@sandboxed
+def sandboxed_agent_cannot_plant_git_config_in_its_attempt_copy():
+    # The reviewer's first path, replayed through the real sandbox and the real read_patch.
+    project = _project()
+    work = _work()
+    dest = os.path.join(work, "attempt-1")
+    os.makedirs(dest)
+    fr.make_copy(project, dest)
+    hook, canary = _canary()
+    gitdir = fr.gitdir_for(dest)
+    body = (f"attempt('TRUSTED_GITDIR', lambda: open({os.path.join(gitdir, 'config')!r}, 'a').write({_fsmonitor(hook)!r}))\n"
+            f"attempt('INTREE_GITDIR', lambda: (os.makedirs('.git', exist_ok=True), "
+            f"open('.git/config', 'w').write({_fsmonitor(hook)!r})))\n"
+            f"attempt('NESTED_GIT', lambda: (os.makedirs('sub/.git', exist_ok=True), "
+            f"open('sub/.git/config', 'w').write({_fsmonitor(hook)!r})))\n")
+    code, out = _run(PLANT.format(body=body), dest, reads=[gitdir], port=fr.flash_port())
+    assert "TRUSTED_GITDIR_OK" not in out and "INTREE_GITDIR_OK" not in out and "NESTED_GIT_OK" not in out, out
+    patch = fr.read_patch(dest)
+    assert not os.path.exists(canary), f"the canary fired after read_patch: {out}"
+    assert "+two" in patch, (out, patch)
+
+
+@sandboxed
+def sandboxed_test_cannot_swap_the_worktree_git_pointer():
+    # The reviewer's second path: the final test / re-check (work = the desk's worktree) swaps .git, then the desk's
+    # git runs. Replayed through the real sandbox and the desk's trusted git calls.
+    project = _project()
+    tree = os.path.join(_work(), "tree")
+    _git(project, "worktree", "add", "-q", "-b", "flash/queue-t_canary2", tree, "HEAD")
+    with open(os.path.join(tree, ".git")) as fh:
+        admin = os.path.realpath(fh.read().strip()[len("gitdir:"):].strip())
+    hook, canary = _canary()
+    body = (f"attempt('POINTER_WRITE', lambda: open('.git', 'w').write('gitdir: evil\\n'))\n"
+            f"attempt('POINTER_UNLINK', lambda: os.unlink('.git'))\n"
+            f"attempt('GITDIR_SWAP', lambda: (os.makedirs('.git', exist_ok=True), "
+            f"open('.git/config', 'w').write({_fsmonitor(hook)!r})))\n")
+    code, out = _run(PLANT.format(body=body), tree, port=fr.flash_port())
+    assert "POINTER_WRITE_OK" not in out and "POINTER_UNLINK_OK" not in out and "GITDIR_SWAP_OK" not in out, out
+    fr.tgit(admin, tree, "add", "-A")
+    code, diff = fr.tgit(admin, tree, "diff", "--cached")
+    subprocess.run(["git", "status", "--short"], cwd=tree, capture_output=True, text=True)  # even discovery-mode git
+    assert not os.path.exists(canary), f"the canary fired after the desk's git: {out}"
+    assert "+two" in diff, (out, diff)
+    _git(project, "worktree", "remove", "--force", tree)
+
+
+# ── the timeout actually bounds the run ───────────────────────────────────────────────────────────────────────
+def _alive(pid):
+    """True when pid is a live (not zombie) process."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    return bool(state) and not state.startswith("Z")
+
+
+def _wait_gone(pid, seconds=3.0):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if not _alive(pid):
+            return True
+        time.sleep(0.1)
+    return not _alive(pid)
+
+
+def _grandchild_program(work, *, parent_sleeps):
+    """A program that starts a setsid() grandchild (sleeping 30 s, pid written to a file), then sleeps or exits."""
+    pidfile = os.path.join(work, "grandchild.pid")
     prog = (
         "import subprocess, sys, time\n"
-        "subprocess.Popen([sys.executable, '-c', 'import os,time; os.setsid(); time.sleep(8)'])\n"
-        "time.sleep(60)\n"
+        f"subprocess.Popen([sys.executable, '-c', \"import os,time; os.setsid(); "
+        f"open({pidfile!r},'w').write(str(os.getpid())); time.sleep(30)\"])\n"
+        "for _ in range(50):\n"
+        f"    import os\n"
+        f"    if os.path.exists({pidfile!r}): break\n"
+        "    time.sleep(0.05)\n"
+        f"time.sleep({parent_sleeps})\n"
     )
-    path = os.path.join(work, "slow.py")
+    path = os.path.join(work, "prog_gc.py")
     with open(path, "w") as fh:
         fh.write(prog)
+    return path, pidfile
+
+
+def a_two_second_timeout_returns_within_about_three_seconds_and_kills_the_setsid_grandchild():
+    # The reviewer's case: a child that calls setsid() leaves the group and holds the output pipe. The run must return
+    # in ~3 s for a 2 s timeout, AND the grandchild must be dead afterwards, not abandoned to init.
+    work = _work()
+    path, pidfile = _grandchild_program(work, parent_sleeps=60)
     started = time.monotonic()
     code, out = fr.bounded_run([sys.executable, path], work, 2)
     elapsed = time.monotonic() - started
     assert code == 124, f"expected a timeout code, got {code}: {out}"
     assert elapsed < 4.0, f"bounded_run held for {elapsed:.1f}s past a 2s timeout (escaped child was waited on)"
+    grandchild = int(open(pidfile).read())
+    assert _wait_gone(grandchild), f"the setsid grandchild {grandchild} survived the timeout"
+
+
+def a_daemon_left_behind_by_a_normal_exit_is_killed_too():
+    # A run that daemonises a setsid child and then exits 0 must not leave it running (it would keep writing into
+    # the tree while the desk's git runs): the run's environment marker finds it after it is reparented.
+    work = _work()
+    path, pidfile = _grandchild_program(work, parent_sleeps=0)
+    code, out = fr.bounded_run([sys.executable, path], work, 20)
+    assert code == 0, (code, out)
+    grandchild = int(open(pidfile).read())
+    assert _wait_gone(grandchild), f"the daemonised grandchild {grandchild} was left running after a normal exit"
 
 
 def main() -> int:

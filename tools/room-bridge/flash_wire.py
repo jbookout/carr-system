@@ -75,6 +75,10 @@ PYTEST_FLAGS = frozenset({"-q", "-qq", "-v", "-vv", "-x", "-s", "--tb=short", "-
 MAX_DIFF = 6000
 TASK_LINE = re.compile(r"^\[Hermes queue (t_[A-Za-z0-9_-]+)\] ?(.*)$")
 SOURCE_LINE = "[Model Room source"
+# queue_dispatch._prompt's server-provenance line (origin + cap, from the adapter-built CARR_QUEUE_META line). Read ONLY
+# from the prompt's third line; a look-alike anywhere in the body is stripped and ignored.
+TRUST_LINE = "[Model Room trust"
+TRUST_FORMAT = re.compile(r"^\[Model Room trust origin (\S+) cap (\S+)\]$")
 # queue_dispatch.QueueDeskExecutor._prompt appends the queue's result protocol after this sentence; the script
 # question is what comes before it, and this desk writes the result line itself.
 PROTOCOL_MARK = "Your final non-empty line must be exactly one JSON object prefixed with CARR_QUEUE_RESULT"
@@ -333,42 +337,26 @@ def _code_fixer() -> str:
 
 
 def _run_group(argv: list[str], cwd: str, env, timeout: float):
-    """(exit code, output) of argv in its own process group, no shell; (None, output) when it outlived timeout, in
-    which case the WHOLE group is SIGKILLed. Output goes to a file, and after the kill we wait only briefly on the
-    DIRECT child and never on its pipes, so a descendant that called setsid() and escaped the group cannot hold the
-    desk past the timeout (independent review of PR #1324)."""
-    out_path = os.path.join(cwd, f".flash_desk_{uuid.uuid4().hex[:8]}.log")
+    """(exit code, output) of argv, contained: (None, output) when it outlived timeout. flash-run's run_contained
+    kills the WHOLE run on timeout, a setsid() descendant included (found by ppid while the tree is attached, or by
+    the run's environment marker once reparented), never blocks on an inherited pipe, keeps its output file out of
+    the tree, and kills anything a normally-exiting run left behind (re-reviews of PR #1324)."""
+    return _flash_run_module().run_contained(argv, cwd, timeout, env=env)
+
+
+def _worktree_gitdir(tree: str, project: str) -> str | None:
+    """The linked worktree's admin git dir, read from its `.git` pointer right after `worktree add`, BEFORE any model
+    code runs, and checked to sit inside the project's own .git/worktrees. Every later desk git call names it
+    explicitly, so a `.git` the model swaps into the tree is never read."""
     try:
-        with open(out_path, "wb") as fh:
-            try:
-                proc = subprocess.Popen(argv, cwd=cwd, env=env, stdout=fh, stderr=subprocess.STDOUT,
-                                        stdin=subprocess.DEVNULL, start_new_session=True)
-            except OSError as exc:
-                return 127, f"could not start {argv[0]}: {type(exc).__name__}"
-            timed_out = False
-            try:
-                proc.wait(timeout=max(1.0, timeout))
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except OSError:
-                    pass
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    pass
-        try:
-            with open(out_path, "r", errors="replace") as fh:
-                out = fh.read()
-        except OSError:
-            out = ""
-        return (None if timed_out else proc.returncode), out
-    finally:
-        try:
-            os.unlink(out_path)
-        except OSError:
-            pass
+        with open(os.path.join(tree, ".git")) as fh:
+            line = fh.read().strip()
+    except OSError:
+        return None
+    if not line.startswith("gitdir:"):
+        return None
+    admin = os.path.realpath(line[len("gitdir:"):].strip())
+    return admin if admin.startswith(os.path.realpath(project) + "/.git/worktrees/") else None
 
 
 def _sweep_stale_worktrees(project: str, env) -> None:
@@ -438,7 +426,16 @@ def _run_flash_code(question: str, spec: dict, task_id: str | None, *, command: 
     if code != 0:
         shutil.rmtree(parent, ignore_errors=True)
         return blocked(f"could not open a worktree of {project}", out[-600:])
+    # Captured now, before any model code runs; every desk git call on the tree below names it explicitly.
+    admin = _worktree_gitdir(tree, project)
+
+    def tg(*args: str):
+        assert admin is not None
+        return fr.tgit(admin, tree, *args, env=env)
+
     try:
+        if admin is None:
+            return blocked("could not resolve the worktree's own git dir")
         for dep in (".venv", "node_modules"):
             if os.path.isdir(os.path.join(project, dep)) and not os.path.lexists(os.path.join(tree, dep)):
                 os.symlink(os.path.join(project, dep), os.path.join(tree, dep))
@@ -450,7 +447,7 @@ def _run_flash_code(question: str, spec: dict, task_id: str | None, *, command: 
         tail = log[-2000:]
         if rc != 0:
             return blocked(FLASH_RUN_EXITS.get(rc, f"flash-run exited {rc}"), tail)
-        code, head = _git(tree, "symbolic-ref", "--short", "HEAD", env=env)
+        code, head = tg("symbolic-ref", "--short", "HEAD")
         if code != 0 or head.strip() != branch:
             return blocked("the worktree left its new branch", tail)
         if deadline - time.monotonic() < 5:
@@ -468,17 +465,16 @@ def _run_flash_code(question: str, spec: dict, task_id: str | None, *, command: 
             return blocked(f"the desk's re-check of `{spec['test']}` did not finish in {timeout:.0f}s", tail)
         if rc != 0:
             return blocked(f"`{spec['test']}` fails on Flash's patch", f"{tail}\n--- re-check ---\n{check[-1500:]}")
-        _git(tree, "add", "-A", env=env)
-        if _git(tree, "diff", "--cached", "--quiet", env=env)[0] == 0:
+        tg("add", "-A")
+        if tg("diff", "--cached", "--quiet")[0] == 0:
             return blocked("flash-run passed but left no change", tail)
         subject = " ".join((question.splitlines() or ["code task"])[0].split())[:72] or "code task"
-        code, out = _git(tree, "-c", "user.name=Flash (Model Room queue)", "-c", "user.email=flash@local",
-                         "commit", "-q", "--no-verify", "-m", f"Flash queue task {task_id or ''}: {subject}".strip(),
-                         env=env)
+        code, out = tg("-c", "user.name=Flash (Model Room queue)", "-c", "user.email=flash@local",
+                       "commit", "-q", "--no-verify", "-m", f"Flash queue task {task_id or ''}: {subject}".strip())
         if code != 0:
             return blocked("could not commit Flash's change on its branch", out[-600:])
-        _, stat = _git(tree, "diff", "--stat", "HEAD~1", "HEAD", env=env)
-        _, diff = _git(tree, "diff", "HEAD~1", "HEAD", env=env)
+        _, stat = tg("diff", "--stat", "HEAD~1", "HEAD")
+        _, diff = tg("diff", "HEAD~1", "HEAD")
         files = len([ln for ln in stat.splitlines()[:-1] if "|" in ln])
         if len(diff) > MAX_DIFF:
             diff = diff[:MAX_DIFF] + f"\n... [diff truncated; see branch {branch}]"
@@ -489,11 +485,12 @@ def _run_flash_code(question: str, spec: dict, task_id: str | None, *, command: 
                 "text": (f"Flash's change passes `{spec['test']}` on new branch {branch} of {project} "
                          f"(not merged, not pushed).\n{stat.strip()}\n```diff\n{diff}```")}
     finally:
-        _git(project, "worktree", "remove", "--force", tree, env=env)
+        # Never run git IN the tree to tear it down (it may hold a swapped .git): delete the folder, then let the
+        # project's own git forget the missing worktree.
+        shutil.rmtree(parent, ignore_errors=True)
+        _git(project, "worktree", "prune", env=env)
         if not keep:
             _git(project, "branch", "-D", branch, env=env)
-        _git(project, "worktree", "prune", env=env)
-        shutil.rmtree(parent, ignore_errors=True)
 
 
 def _run_flash_script(question: str, paths: list[str]):
@@ -525,8 +522,28 @@ def task_parts(prompt: str):
     m = TASK_LINE.match(lines[0]) if lines else None
     if not m:
         return None, "", prompt
-    body = [line for line in lines[1:] if not line.startswith(SOURCE_LINE)]
+    body = [line for line in lines[1:] if not line.startswith((SOURCE_LINE, TRUST_LINE))]
     return m.group(1), m.group(2).strip(), "\n".join(body).strip()
+
+
+def task_trust(prompt: str):
+    """(origin, cap) the queue stamped on this task, or (None, None). Read from the fixed position only: line 0 the
+    queue header, line 1 the source line, line 2 the trust line. queue_dispatch._prompt puts a blank line before the
+    body, so posted text can never sit at line 2, and the title is a single line."""
+    head = prompt.rsplit(PROTOCOL_MARK, 1)[0] if PROTOCOL_MARK in prompt else prompt
+    lines = head.splitlines()
+    if len(lines) < 3 or not TASK_LINE.match(lines[0]) or not lines[1].startswith(SOURCE_LINE):
+        return None, None
+    m = TRUST_FORMAT.match(lines[2])
+    return (m.group(1), m.group(2)) if m else (None, None)
+
+
+def code_origins_from_policy(policy_path: Path = POLICY_PATH) -> list[str]:
+    try:
+        origins = json.loads(policy_path.read_text()).get("code_task_origins") or []
+    except (OSError, ValueError, AttributeError):
+        return []
+    return [o for o in origins if isinstance(o, str)]
 
 
 def _result_line(task_id: str, outcome: str, summary: str) -> str:
@@ -549,8 +566,23 @@ def _code_task(task_id: str | None, title: str, body: str, spec: dict | None, re
             "result": f"{text}\n{_result_line(task_id, row['outcome'], ' '.join(row['summary'].split()))}"}
 
 
+def _code_gate(prompt: str, task_id: str | None, origins: list[str]) -> str | None:
+    """Why this desk must refuse the code path, or None. A Flash code run executes model-driven code on this host,
+    so it runs only for a QUEUED task whose adapter-stamped origin is on code_task_origins and whose capability is
+    repo-write, whatever target was named (the re-review of #1324 showed an explicit target=flash skipping the
+    routing check). A direct room turn to this desk carries no such proof and never reaches the code path."""
+    if not task_id:
+        return "a code task runs only from the queue, with server provenance"
+    origin, cap = task_trust(prompt)
+    if origin is None or origin not in origins:
+        return f"code_origin_untrusted: origin {origin or 'unknown'} is not allowed to start a Flash code run"
+    if cap != "repo-write":
+        return f"a code task must be queued with cap=repo-write, not cap={cap}"
+    return None
+
+
 def run_task(prompt: str, *, roots: list[str] | None = None, runner=None, code_roots: list[str] | None = None,
-             code_runner=None, **turn_kwargs) -> dict:
+             code_runner=None, code_origins: list[str] | None = None, **turn_kwargs) -> dict:
     """The flash-local desk's entry: a queued task whose BODY names a project runs flash-run on a new branch of it
     (code), one whose body names data runs the script protocol, anything else one direct reply (run_turn). Project
     and data lines count in the body only, as route_auto reads them, and are checked again here, whatever routed the
@@ -558,6 +590,10 @@ def run_task(prompt: str, *, roots: list[str] | None = None, runner=None, code_r
     task_id, title, body = task_parts(prompt)
     spec, code_question, code_refusal = code_inputs(body, roots=code_roots)
     if spec or code_refusal:
+        gate = _code_gate(prompt, task_id,
+                          code_origins_from_policy() if code_origins is None else list(code_origins))
+        if gate:
+            return _code_task(task_id, title, code_question, None, gate, code_runner)
         return _code_task(task_id, title, code_question, spec, code_refusal, code_runner)
     paths, question, refusal = script_inputs(body, roots=roots)
     if refusal:
