@@ -264,7 +264,9 @@ def _run_sh_is_this_repo(prog, cwd):
 def _carr_verb(name):
     for prefix in CARR_MCP_PREFIXES:
         if name.startswith(prefix):
-            return name[len(prefix):]
+            # Codex exposes the MCP verb with underscores; the record-layer
+            # vocabulary and Claude adapter use hyphens for the same verb.
+            return name[len(prefix):].replace("_", "-")
     return None
 
 

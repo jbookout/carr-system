@@ -186,7 +186,12 @@ def _row_matches(tool_name: str, tool_input: object, row: dict) -> bool:
         return False
     try:
         if kind == "verb":
-            return re.search(pattern, tool_name) is not None
+            if re.search(pattern, tool_name):
+                return True
+            if tool_name.startswith(("mcp__carr__", "mcp__carr_records__")):
+                prefix, verb = tool_name.rsplit("__", 1)
+                return re.search(pattern, prefix + "__" + verb.replace("_", "-")) is not None
+            return False
         if kind == "bash_family":
             if tool_name not in {"Bash", "functions.exec"}:
                 return False
