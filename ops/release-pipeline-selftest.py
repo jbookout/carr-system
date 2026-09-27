@@ -181,6 +181,7 @@ class FakeGitHub:
             {"name": "test", "status": "completed", "conclusion": "success"}]
         self.raise_on = raise_on
         self.heads: dict[str, int] = {}
+        self.merge_commit: dict[str, str] = {}   # commit -> the PR's merge_commit_sha, when not itself
 
     def pr_number(self, sha):
         return 100 + int(sha[:4], 16) % 800
@@ -190,7 +191,8 @@ class FakeGitHub:
             raise ValueError("malformed GitHub JSON")
         n = self.pr_number(sha)
         self.heads[pr_head(n)] = n
-        return {"number": n, "merged_at": "2026-09-30T00:00:00Z", "head": {"sha": pr_head(n)}}
+        return {"number": n, "merged_at": "2026-09-30T00:00:00Z", "head": {"sha": pr_head(n)},
+                "merge_commit_sha": self.merge_commit.get(sha, sha)}
 
     def commit_date(self, sha):
         return HEAD_DATE
@@ -1365,6 +1367,173 @@ class ReviewGate(Base):
             rp.subprocess.run = real
         self.assertIn("--paginate", seen[0])
 
+
+
+class FixForward(Base):
+    """A merged PR B whose latest trusted verdict is BLOCK may ship ONLY
+    together with its fix: a LATER commit in the same batch, at or before the
+    release target, from merged PR F whose DECIDING approval (exact or
+    main-merge-only) carries the line `Fixes-Forward: #<B>`. Anything else is
+    a review_blocked hold. Never a fresh APPROVE on B's defective head."""
+
+    def block(self, n, *, when="2026-09-30T02:00:00Z", cid=None):
+        return approve(n, when=when, cid=cid or 5000 + n,
+                       body=f"BLOCKING: P1 defect\n\nReviewed-SHA: {pr_head(n)}\n")
+
+    def fix_approve(self, n, names, *, when="2026-09-30T03:00:00Z", cid=None, assoc="OWNER", prefix=""):
+        lines = "".join(f"{prefix}Fixes-Forward: #{b}\n" for b in names)
+        return approve(n, when=when, cid=cid or 6000 + n, assoc=assoc,
+                       body=f"APPROVE\nReviewed-SHA: {pr_head(n)}\n{lines}")
+
+    def two_commits(self):
+        b = self.fx.commit({"mcp-server/src/a.js": "defect"})
+        f = self.fx.commit({"mcp-server/src/a.js": "fixed"})
+        gh = FakeGitHub()
+        nb, nf = gh.pr_number(b), gh.pr_number(f)
+        self.assertNotEqual(nb, nf, "fixture PR-number collision; rerun")
+        return b, f, nb, nf
+
+    def tick(self, comments, *, canary=None, live=None, merge_commit=None):
+        live = live or {"sha": self.fx.base}
+        runner = FakeRunner(live=live)
+        gh = FakeGitHub(comments=comments, canary=canary)
+        gh.merge_commit = merge_commit or {}
+        self.assertEqual(self.fx.pipeline(runner, github=gh, live=live).tick(["worker"]), 0)
+        return runner, self.fx.records()[-1]
+
+    def assert_held(self, runner, rec, nb):
+        self.assertEqual(rec["status"], "blocked")
+        self.assertEqual(rec["reason"], "review_blocked")
+        self.assertIn(f"#{nb}", rec["detail"])
+        self.assertFalse(DEPLOY_STEPS & {n for n, _ in runner.calls}, "a held batch ran a deploy step")
+        self.assertNotIn("failed_sha", self.fx.state().get("worker", {}))
+
+    def test_fix_in_batch_and_target_after_fix_releases_with_evidence(self):
+        b, f, nb, nf = self.two_commits()
+        runner, rec = self.tick({nb: [approve(nb, cid=1), self.block(nb)], nf: [self.fix_approve(nf, [nb])]})
+        self.assertEqual(rec["status"], "shipped", rec)
+        self.assertEqual(rec["sha"], f)
+        [ff] = rec["fix_forwards"]
+        self.assertEqual(ff["blocked_pr"], nb)
+        self.assertEqual(ff["blocked_commit"], b)
+        self.assertEqual(ff["fixing_pr"], nf)
+        self.assertEqual(ff["fixing_commit"], f)
+        self.assertEqual(ff["fixing_reviewed_sha"], pr_head(nf))
+        self.assertEqual(ff["fixing_approval_url"], f"https://github.com/o/r/pull/{nf}#issuecomment-{6000 + nf}")
+        self.assertTrue(ff["block_url"].endswith(f"#issuecomment-{5000 + nb}"))
+        self.assertNotIn(nb, rec["prs"], "a blocked PR is never listed as approved")
+
+    def test_target_between_blocked_and_fix_holds(self):
+        b, f, nb, nf = self.two_commits()
+        # the canary is green on the blocked commit only: the target is B itself
+        runner, rec = self.tick({nb: [self.block(nb)], nf: [self.fix_approve(nf, [nb])]},
+                                canary={b: ("completed", "success")})
+        self.assertEqual(rec["sha"], b)
+        self.assert_held(runner, rec, nb)
+
+    def test_target_on_a_commit_between_blocked_and_fix_holds(self):
+        b = self.fx.commit({"mcp-server/src/a.js": "defect"})
+        m = self.fx.commit({"mcp-server/src/b.js": "unrelated"})
+        f = self.fx.commit({"mcp-server/src/a.js": "fixed"})
+        gh = FakeGitHub()
+        nb, nm, nf = gh.pr_number(b), gh.pr_number(m), gh.pr_number(f)
+        self.assertEqual(len({nb, nm, nf}), 3, "fixture PR-number collision; rerun")
+        runner, rec = self.tick({nb: [self.block(nb)], nf: [self.fix_approve(nf, [nb])]},
+                                canary={m: ("completed", "success")})
+        self.assertEqual(rec["sha"], m)
+        self.assert_held(runner, rec, nb)
+
+    def test_marker_naming_the_wrong_pr_holds(self):
+        b, f, nb, nf = self.two_commits()
+        runner, rec = self.tick({nb: [self.block(nb)], nf: [self.fix_approve(nf, [nb + 1000])]})
+        self.assert_held(runner, rec, nb)
+
+    def test_marker_on_a_non_deciding_approval_holds(self):
+        b, f, nb, nf = self.two_commits()
+        later_plain = approve(nf, when="2026-09-30T04:00:00Z", cid=7001)
+        runner, rec = self.tick({nb: [self.block(nb)], nf: [self.fix_approve(nf, [nb]), later_plain]})
+        self.assert_held(runner, rec, nb)
+
+    def test_marker_on_a_trusted_non_verdict_comment_holds(self):
+        b, f, nb, nf = self.two_commits()
+        handoff = approve(nf, when="2026-09-30T05:00:00Z", cid=7002,
+                          body=f"Hand-off to the orchestrator\nFixes-Forward: #{nb}\n")
+        runner, rec = self.tick({nb: [self.block(nb)], nf: [approve(nf), handoff]})
+        self.assert_held(runner, rec, nb)
+
+    def test_marker_on_an_untrusted_comment_holds(self):
+        b, f, nb, nf = self.two_commits()
+        outsider = self.fix_approve(nf, [nb], when="2026-09-30T06:00:00Z", cid=7003, assoc="NONE")
+        runner, rec = self.tick({nb: [self.block(nb)], nf: [approve(nf), outsider]})
+        self.assert_held(runner, rec, nb)
+
+    def test_quoted_marker_does_not_count(self):
+        b, f, nb, nf = self.two_commits()
+        runner, rec = self.tick({nb: [self.block(nb)], nf: [self.fix_approve(nf, [nb], prefix="> ")]})
+        self.assert_held(runner, rec, nb)
+
+    def test_fixing_pr_not_in_the_batch_holds(self):
+        f = self.fx.commit({"mcp-server/src/a.js": "earlier fix"})
+        b = self.fx.commit({"mcp-server/src/a.js": "defect"})
+        gh = FakeGitHub()
+        nf, nb = gh.pr_number(f), gh.pr_number(b)
+        self.assertNotEqual(nb, nf, "fixture PR-number collision; rerun")
+        # F already released: the batch is B alone
+        runner, rec = self.tick({nb: [self.block(nb)], nf: [self.fix_approve(nf, [nb])]}, live={"sha": f})
+        self.assertEqual(rec["from_sha"], f)
+        self.assert_held(runner, rec, nb)
+
+    def test_fixing_pr_merged_before_the_blocked_pr_holds(self):
+        f = self.fx.commit({"mcp-server/src/a.js": "earlier fix"})
+        b = self.fx.commit({"mcp-server/src/a.js": "defect"})
+        gh = FakeGitHub()
+        nf, nb = gh.pr_number(f), gh.pr_number(b)
+        self.assertNotEqual(nb, nf, "fixture PR-number collision; rerun")
+        runner, rec = self.tick({nb: [self.block(nb)], nf: [self.fix_approve(nf, [nb])]})
+        self.assertEqual(rec["sha"], b)
+        self.assert_held(runner, rec, nb)
+
+    def test_fixing_pr_whose_own_latest_verdict_is_block_holds(self):
+        b, f, nb, nf = self.two_commits()
+        runner, rec = self.tick({nb: [self.block(nb)],
+                                 nf: [self.fix_approve(nf, [nb]), self.block(nf, when="2026-09-30T09:00:00Z")]})
+        self.assertEqual(rec["status"], "blocked")
+        self.assertEqual(rec["reason"], "review_blocked")
+        self.assertFalse(DEPLOY_STEPS & {n for n, _ in runner.calls})
+
+    def test_fixing_commit_that_is_not_the_fixing_prs_merge_commit_holds(self):
+        # GitHub maps the commit to F, but F's own merge_commit_sha is elsewhere
+        # (e.g. an earlier commit of a rebase merge): the fix is not proven in.
+        b, f, nb, nf = self.two_commits()
+        runner, rec = self.tick({nb: [self.block(nb)], nf: [self.fix_approve(nf, [nb])]},
+                                merge_commit={f: "ab" * 20})
+        self.assert_held(runner, rec, nb)
+
+    def test_a_marker_never_rescues_a_stale_or_missing_review(self):
+        # the marker only answers a BLOCK verdict; an unreviewed PR still holds as before
+        b, f, nb, nf = self.two_commits()
+        runner, rec = self.tick({nb: [approve(nb, body="Independent review: PASS")],
+                                 nf: [self.fix_approve(nf, [nb])]})
+        self.assertEqual(rec["reason"], "review_stale")
+
+    def test_one_fix_may_carry_several_markers(self):
+        a = self.fx.commit({"mcp-server/src/a.js": "defect a"})
+        b = self.fx.commit({"mcp-server/src/b.js": "defect b"})
+        f = self.fx.commit({"mcp-server/src/a.js": "fixed", "mcp-server/src/b.js": "fixed"})
+        gh = FakeGitHub()
+        na, nb, nf = gh.pr_number(a), gh.pr_number(b), gh.pr_number(f)
+        self.assertEqual(len({na, nb, nf}), 3, "fixture PR-number collision; rerun")
+        runner, rec = self.tick({na: [self.block(na)], nb: [self.block(nb)], nf: [self.fix_approve(nf, [na, nb])]})
+        self.assertEqual(rec["status"], "shipped", rec)
+        self.assertEqual(sorted(x["blocked_pr"] for x in rec["fix_forwards"]), sorted([na, nb]))
+
+    def test_marker_parser_is_line_exact(self):
+        self.assertEqual(rp.fixes_forward({"body": "APPROVE\nFixes-Forward: #1342\n"}), {1342})
+        self.assertEqual(rp.fixes_forward({"body": "APPROVE\n  Fixes-Forward:   #1342  \n"}), {1342})
+        self.assertEqual(rp.fixes_forward({"body": "APPROVE\nsee Fixes-Forward: #1342"}), set())
+        self.assertEqual(rp.fixes_forward({"body": "APPROVE\n> Fixes-Forward: #1342"}), set())
+        self.assertEqual(rp.fixes_forward({"body": "APPROVE\nFixes-Forward: 1342"}), set())
+        self.assertEqual(rp.fixes_forward({"body": "APPROVE\nFixes-Forward: #1342, #1343"}), set())
 
 
 class SquashGitHub(FakeGitHub):

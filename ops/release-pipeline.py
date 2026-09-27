@@ -88,8 +88,33 @@ LATEST comment carrying a verdict (first line APPROVE-marker or BLOCK-marker,
 config review_markers/block_markers) from a trusted author (author_association
 OWNER/MEMBER/COLLABORATOR, or a configured login) decides; it must be APPROVE;
 and it must carry exactly one `Reviewed-SHA: <40-hex>` line equal to the PR's
-head SHA (no dates: an exact SHA is the only freshness proof). Worker lane
-also: every PR in the batch that touches a release path has a green `ops/ci.sh
+head SHA (no dates: an exact SHA is the only freshness proof).
+
+FIX-FORWARD, the one exception to "must be APPROVE", and only for a BLOCK
+verdict (never a missing or stale review). A merged PR B whose latest trusted
+verdict is BLOCK has defective code on main; a fresh APPROVE on B's defective
+head is exactly what must never be posted to get past it. Instead B may be in a
+released batch ONLY if ALL of these hold:
+  1. a LATER first-parent commit of the SAME batch, so at or before the release
+     target, is exactly PR F's merge commit (GitHub's merge_commit_sha for F),
+     and B is its ancestor in git;
+  2. F's DECIDING approval (the same exact or main-merge-only rule above, so a
+     marker on an older approval, on a non-verdict comment, on an untrusted
+     comment, or quoted/inline text never counts) carries its own line
+     `Fixes-Forward: #<B's PR number>` (one number per line; several lines
+     for several blocked PRs);
+  3. the release target is at or after F's merge commit (re-checked in git).
+A target between B and F therefore stays a review_blocked hold: the defective
+commit can never ship alone, only in the same atomic release as its fix. B's
+BLOCK verdict is left as it is, B is never listed as approved, and its release
+paths still need green CI. The run record (and the dry-run output) carries
+`fix_forwards`: the blocked PR and its commit on main, the BLOCK comment URL,
+the fixing PR and its merge commit, the fixing approval's Reviewed-SHA and URL.
+Both lanes read review evidence through the same code, so the rule is the same
+for the app lane. The reviewer of F is the one who attests
+that F fixes B, so the marker goes on F's independent approval, nowhere else.
+
+Worker lane also: every PR in the batch that touches a release path has a green `ops/ci.sh
 --strict` (and secret-class) CI run. The Worker releases up to the NEWEST
 first-parent commit whose own main canary concluded success (plus any
 canary-ignored commits directly above it), not necessarily HEAD: commits whose
@@ -540,14 +565,33 @@ def latest_verdict(comments: list[dict], cfg: dict, head_sha: str) -> dict:
     return approval_of(comments, cfg, head_sha)[0]
 
 
-def _latest_approval(comments: list[dict], cfg: dict) -> dict:
+def deciding_verdict(comments: list[dict], cfg: dict) -> dict | None:
+    """The LATEST trusted comment that carries a verdict, or None."""
     carrying = [c for c in comments if trusted_commenter(c, cfg) and verdict(c.get("body", ""), cfg)]
     if not carrying:
+        return None
+    return max(carrying, key=lambda c: (str(c.get("created_at") or ""), int(c.get("id") or 0)))
+
+
+def _latest_approval(comments: list[dict], cfg: dict) -> dict:
+    last = deciding_verdict(comments, cfg)
+    if last is None:
         raise Blocked("no_independent_review", "no trusted comment carries a review verdict")
-    last = max(carrying, key=lambda c: (str(c.get("created_at") or ""), int(c.get("id") or 0)))
     if verdict(last.get("body", ""), cfg) != "approve":
         raise Blocked("review_blocked", f"the latest review verdict is BLOCK ({last.get('html_url')})")
     return last
+
+
+FIXES_FORWARD_RE = re.compile(r"^[ \t]*Fixes-Forward:[ \t]*#([0-9]+)[ \t]*$", re.M)
+
+
+def fixes_forward(approval: dict) -> set[int]:
+    """The PR numbers an approval names on its own `Fixes-Forward: #<n>`
+    lines: one number per line, the whole line, nothing quoted or inline.
+    Read ONLY from the comment that approval_of() returned as deciding, so a
+    marker on an older approval, a non-verdict comment or an untrusted
+    comment never counts."""
+    return {int(n) for n in FIXES_FORWARD_RE.findall(str(approval.get("body") or ""))}
 
 
 def evidence_ref_from_url(url: str) -> str:
@@ -991,7 +1035,13 @@ class Pipeline:
         pre_pipeline: list[int] = []
         release_prs: list[dict] = []
         head: dict | None = None
-        for commit in self.batch_commits(repo_dir, base, sha):
+        # FIX-FORWARD. A PR whose latest trusted verdict is BLOCK is not a hold
+        # by itself if a LATER commit of THIS batch fixes it (see
+        # resolve_fix_forwards); it is parked here and decided after the walk.
+        blocked: list[dict] = []
+        fixers: list[dict] = []
+        commits = self.batch_commits(repo_dir, base, sha)   # newest first
+        for position, commit in enumerate(commits):
             pr = gh.pr_for_commit(commit)
             if pr is None:
                 raise Blocked("no_pull_request", f"{commit[:12]} reached main without a merged pull request")
@@ -1001,9 +1051,10 @@ class Pipeline:
                                   lane_cfg)
             approval: dict | None
             rule = reviewed_sha = ""
+            comments = gh.comments(number)   # read ONCE: the verdict and the BLOCK link come from one snapshot
             try:
                 approval, rule, reviewed_sha = approval_of(
-                    gh.comments(number), lane_cfg, head_sha,
+                    comments, lane_cfg, head_sha,
                     # called synchronously inside this iteration, so the closure sees this commit's values
                     covers=lambda r: self.main_merge_only(repo_dir, number, r, head_sha, commit))
             except Blocked as b:
@@ -1012,22 +1063,75 @@ class Pipeline:
                         and str(pr.get("merged_at") or "") < cutover):
                     pre_pipeline.append(number)
                     approval = None
+                elif b.reason == "review_blocked":
+                    block = deciding_verdict(comments, lane_cfg) or {}
+                    blocked.append({"pr": number, "commit": commit, "position": position,
+                                    "url": str(block.get("html_url") or ""), "detail": b.detail})
+                    approval = None
                 else:
                     raise Blocked(b.reason, f"PR #{number} ({commit[:12]}): {b.detail}")
             if approval is not None:
                 reviewed.append(number)
                 reviews.append({"pr": number, "rule": rule, "reviewed_sha": reviewed_sha, "head_sha": head_sha})
+                fixers.append({"pr": number, "commit": commit, "position": position,
+                               "merge_commit_sha": str(pr.get("merge_commit_sha") or ""),
+                               "fixes": fixes_forward(approval), "reviewed_sha": reviewed_sha,
+                               "url": str(approval.get("html_url") or "")})
             if touches:
                 release_prs.append({"pr": number, "head_sha": head_sha})
             if commit == sha and approval is not None:
                 head = {"pr": number, "head_sha": head_sha, "url": str(approval.get("html_url") or ""),
                         "event": events.get(commit) or {}, "rule": rule, "reviewed_sha": reviewed_sha}
+        fix_forwards = self.resolve_fix_forwards(repo_dir, sha, blocked, fixers)
         if head is None:
             raise Blocked("no_independent_review", f"the head commit {sha[:12]} has no approval")
         return {"head": head, "prs": reviewed, "pre_pipeline_prs": pre_pipeline, "release_prs": release_prs,
-                "reviews": reviews,
+                "reviews": reviews, "fix_forwards": fix_forwards,
                 "verifier": choose_verifier(lane_cfg, head["event"]),
                 "verifier_evidence": evidence_ref_from_url(head["url"])}
+
+    def resolve_fix_forwards(self, repo_dir: Path, sha: str, blocked: list[dict],
+                             fixers: list[dict]) -> list[dict]:
+        """Each BLOCKED commit B of the batch base..sha ships only with its fix,
+        else the whole batch is a review_blocked hold. ALL of these must hold:
+          1. a LATER first-parent commit of the SAME batch (so at or before the
+             release target `sha`) is EXACTLY PR F's merge_commit_sha as
+             GitHub reports it; `blocked`/`fixers` carry each commit's
+             position in the newest-first batch, so "later" is a smaller
+             position, never a date, and git re-checks that B is an ancestor
+             of F's merge commit;
+          2. F's DECIDING approval, the one approval_of() accepted under the
+             exact or main-merge-only rule, carries the line
+             `Fixes-Forward: #<B's PR number>` (fixes_forward());
+          3. the target is at or after F's merge commit (re-checked in git).
+        B is bound by its commit on main and the PR GitHub maps it to; F by
+        its merge_commit_sha, its PR number and its approval's Reviewed-SHA.
+        The first unfixed B raises; nothing is shipped partially.
+        A target between B and F never contains F, so it holds: the defective
+        commit can never ship alone. B's BLOCK verdict is never rewritten or
+        re-approved; B is not added to the approved PR list."""
+        out: list[dict] = []
+        for b in blocked:
+            fix = next((f for f in sorted(fixers, key=lambda f: -f["position"])
+                        if f["position"] < b["position"] and b["pr"] in f["fixes"]
+                        and f["merge_commit_sha"] == f["commit"]), None)
+            if fix is not None:
+                try:
+                    self.git("merge-base", "--is-ancestor", fix["commit"], sha, cwd=repo_dir)
+                    self.git("merge-base", "--is-ancestor", b["commit"], fix["commit"], cwd=repo_dir)
+                except StepFailed:
+                    fix = None
+            if fix is None:
+                raise Blocked("review_blocked",
+                              f"PR #{b['pr']} ({b['commit'][:12]}): {b['detail']}; no later PR in this "
+                              f"batch at or before the target {sha[:12]} has a deciding approval "
+                              f"carrying `Fixes-Forward: #{b['pr']}`")
+            out.append({"blocked_pr": b["pr"], "blocked_commit": b["commit"], "block_url": b["url"],
+                        "fixing_pr": fix["pr"], "fixing_commit": fix["commit"],
+                        "fixing_reviewed_sha": fix["reviewed_sha"], "fixing_approval_url": fix["url"]})
+            self.out(f"  fix-forward: PR #{b['pr']} ({b['commit'][:12]}) is BLOCKED and ships only with "
+                     f"its fix PR #{fix['pr']} ({fix['commit'][:12]}), approval {fix['url']}")
+        return out
 
     def main_merge_only(self, repo_dir: Path, number: int, reviewed: str, head: str,
                         merged: str) -> str | None:
@@ -1209,7 +1313,7 @@ class Pipeline:
         run_id = self.ci_run(gh, lane_cfg, head["pr"], head["head_sha"])
         repo_name = lane_cfg["github_repo"]
         return {"pr": head["pr"], "prs": rev["prs"], "pre_pipeline_prs": rev["pre_pipeline_prs"],
-                "reviews": rev["reviews"], "review_rule": head["rule"],
+                "reviews": rev["reviews"], "fix_forwards": rev["fix_forwards"], "review_rule": head["rule"],
                 "reviewed_sha": head["reviewed_sha"], "pr_head_sha": head["head_sha"],
                 "verifier": rev["verifier"], "verifier_evidence": rev["verifier_evidence"],
                 "test_evidence": f"github-actions:{repo_name}/runs/{run_id}#{lane_cfg['test_evidence_label']}",
@@ -1650,6 +1754,7 @@ class Pipeline:
         return {"release_key": key, "provider_version_id": version, "migrations_applied": pending,
                 "do_migration": self.do_migration,
                 "pr": ev["pr"], "prs": ev["prs"], "reviews": ev.get("reviews", []),
+                "fix_forwards": ev.get("fix_forwards", []),
                 "review_rule": ev.get("review_rule"), "reviewed_sha": ev.get("reviewed_sha"),
                 "pr_head_sha": ev.get("pr_head_sha"), "verifier": ev["verifier"],
                 "verifier_evidence": ev["verifier_evidence"], "test_evidence": ev["test_evidence"],
@@ -1772,7 +1877,8 @@ class Pipeline:
             self.remove_worktrees()
         head = rev.get("head") or {}
         return {"run_dir": str(self.run_dir), "prs": rev["prs"], "pre_pipeline_prs": rev["pre_pipeline_prs"],
-                "reviews": rev.get("reviews", []), "review_rule": head.get("rule"),
+                "reviews": rev.get("reviews", []), "fix_forwards": rev.get("fix_forwards", []),
+                "review_rule": head.get("rule"),
                 "reviewed_sha": head.get("reviewed_sha"), "pr_head_sha": head.get("head_sha"),
                 "review_evidence": rev["verifier_evidence"]}
 
