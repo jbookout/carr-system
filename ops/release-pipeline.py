@@ -588,7 +588,8 @@ def _latest_approval(comments: list[dict], cfg: dict) -> dict:
 
 
 FIXES_FORWARD_RE = re.compile(r"^Fixes-Forward:[ \t]*#([1-9][0-9]*)[ \t]*$")
-_FENCE_RE = re.compile(r"^[ ]{0,3}(```|~~~)")
+_FENCE_RE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})")
+_FENCE_END_RE = re.compile(r"^[ ]{0,3}([`~]+)[ \t]*$")
 
 
 def fixes_forward(approval: dict) -> set[int]:
@@ -600,12 +601,18 @@ def fixes_forward(approval: dict) -> set[int]:
     marker on an older approval, a non-verdict comment or an untrusted
     comment never counts."""
     found: set[int] = set()
-    fenced = False
+    fence: tuple[str, int] | None = None
     for line in str(approval.get("body") or "").splitlines():
-        if _FENCE_RE.match(line):
-            fenced = not fenced
+        if fence is not None:
+            end = _FENCE_END_RE.fullmatch(line)
+            if end and set(end.group(1)) == {fence[0]} and len(end.group(1)) >= fence[1]:
+                fence = None
             continue
-        m = None if fenced else FIXES_FORWARD_RE.match(line.rstrip("\r"))
+        opening = _FENCE_RE.match(line)
+        if opening:
+            fence = (opening.group(1)[0], len(opening.group(1)))
+            continue
+        m = FIXES_FORWARD_RE.match(line.rstrip("\r"))
         if m:
             found.add(int(m.group(1)))
     return found
@@ -1161,17 +1168,17 @@ class Pipeline:
         return out
 
     def change_present(self, repo_dir: Path, fix: str, target: str) -> bool:
-        """True when the change `fix` introduced is still in `target`: reverting
-        `fix` on top of `target` (a three-way merge with base fix, ours target,
-        theirs fix^1, exactly what `git revert` computes) applies cleanly AND
-        changes the tree. A no-op revert means the change is gone (a later
-        revert); a conflict means its lines were rewritten since, which is not
-        proof either. Both are False, so the batch holds (fail closed)."""
+        """Require every path touched by the attested fix to match its blob
+        and mode at the target. A partial revert or later edit needs a fresh
+        reviewed Fixes-Forward marker, even if another fix path remains."""
         try:
-            merged = self.git("merge-tree", "--write-tree", f"--merge-base={fix}", target, f"{fix}^1",
-                              cwd=repo_dir).splitlines()[0].strip()
-            return merged != self.git("rev-parse", f"{target}^{{tree}}", cwd=repo_dir)
-        except (StepFailed, IndexError):
+            paths = [p for p in self.git("diff", "--no-renames", "--name-only", "-z", f"{fix}^1", fix,
+                                         cwd=repo_dir).split("\0") if p]
+            if not paths:
+                return False
+            self.git("diff", "--quiet", fix, target, "--", *paths, cwd=repo_dir)
+            return True
+        except StepFailed:
             return False
 
     def main_merge_only(self, repo_dir: Path, number: int, reviewed: str, head: str,
