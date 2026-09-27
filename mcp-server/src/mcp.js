@@ -311,10 +311,10 @@ export const PROFILES = {
     // least likely to have a human beside it. It is additive and keyed, it
     // de-dupes onto an open fingerprint rather than growing the pile, and it
     // structurally cannot touch the columns that close an incident — closing is
-    // partner authority (close-incident is humanOnly and refuses anything that
-    // is not Joe or Dell), so the widest thing this profile can do with the
-    // operational ledger is say truthfully that something broke.
-    "open-incident",
+    // partner authority (close-incident is humanOnly). Triage may advance only
+    // detected -> triaged with a next action and provisional impact; it cannot
+    // set severity, root cause, recovery evidence, or a closed state.
+    "open-incident", "triage-incident",
   ]),
 
   // AWAY MODE, added 2026-08-03 on Joe's ruling. The scheduled CEO session that
@@ -349,7 +349,7 @@ export const PROFILES = {
     // everything capture holds
     "log-activity", "stamp-touch", "add-loop", "update-loop",
     "set-next-action", "complete-action", "add-critical-date", "record-finding",
-    "record-signal", "record-branch-evidence", "record-defect", "open-incident",
+    "record-signal", "record-branch-evidence", "record-defect", "open-incident", "triage-incident",
     // plus: close what it opened, advance the book, draft, and keep the record honest
     "close-loop", "update-deal", "add-premises", "record-counter",
     "prepare-document", "update-document-status",
