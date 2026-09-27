@@ -284,15 +284,19 @@ def test_lookup_by_handle_name_and_title():
         raise AssertionError("an unknown name must be refused")
 
 
-def test_send_posts_an_addressed_turn():
+def test_send_posts_a_session_message_receipt_that_no_desk_answers():
+    """PR #1345 review, finding 2: a plain turn fans out to every seated desk,
+    each spending a dispatch on a message meant for one session. A receipt never
+    reaches a desk (state.route_turn's kind filter); the bridge's session router
+    carries it to the one handle it names."""
     calls = []
     directory = {"sessions": {"codex-6394537b": {"handle": "codex-6394537b", "name": "sol"}}}
     sp.send(directory, "sol", "please confirm", seat="claude",
             post=lambda body, seat, **kw: calls.append((body, seat, kw)) or {"ok": True},
             room="model-room")
     body, seat, kw = calls[0]
-    assert body == "@codex-6394537b please confirm"
-    assert seat == "claude" and kw["kind"] == "turn" and kw["room"] == "model-room"
+    assert json.loads(body) == {"session_message": {"to": "codex-6394537b", "text": "please confirm"}}
+    assert seat == "claude" and kw["kind"] == "receipt" and kw["room"] == "model-room"
 
 
 def main() -> int:

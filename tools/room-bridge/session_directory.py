@@ -180,8 +180,42 @@ def mentioned(data: dict, turn: dict) -> list[str]:
     return out
 
 
+def _session_message(turn: dict) -> dict | None:
+    """The {"to", "text"} of a `session-presence send` receipt, or None.
+
+    `send` posts a receipt rather than a turn because state.route_turn queues
+    every kind="turn" row onto every seated desk: a message meant for one
+    session would cost each desk a dispatch (PR #1345 review). Receipts reach
+    no desk; this router alone carries them."""
+    if turn.get("kind") != "receipt":
+        return None
+    try:
+        body = json.loads(str(turn.get("body") or ""))
+    except (ValueError, TypeError):
+        return None
+    msg = body.get("session_message") if isinstance(body, dict) else None
+    if not isinstance(msg, dict):
+        return None
+    to, text = msg.get("to"), msg.get("text")
+    if not (isinstance(to, str) and isinstance(text, str) and text.strip()):
+        return None
+    return {"to": to.lower(), "text": text}
+
+
+def addressed(data: dict, turn: dict) -> list[str]:
+    """Handles a room row is addressed to: @-mentions in a turn, or the one
+    target of a session_message receipt (by handle or alias)."""
+    msg = _session_message(turn)
+    if msg is None:
+        return mentioned(data, turn)
+    return [h for h, e in sorted((data.get("sessions") or {}).items())
+            if h == msg["to"] or (e.get("name") and e["name"] == msg["to"])][:1]
+
+
 def format_turn(turn: dict) -> str:
-    return f"[model-room · {turn.get('seat') or '?'}] {turn.get('body') or ''}"
+    msg = _session_message(turn)
+    text = msg["text"] if msg is not None else (turn.get("body") or "")
+    return f"[model-room · {turn.get('seat') or '?'}] {text}"
 
 
 def _delivered(state: dict) -> list:
@@ -192,14 +226,15 @@ def _delivered(state: dict) -> list:
 
 
 def route(data: dict, turns: list[dict], state: dict, *, deliver, add_room_turn) -> list[dict]:
-    """Carry each @-addressed turn into the session(s) it names, once each."""
+    """Carry each @-addressed turn or session_message receipt into the
+    session(s) it names, once each."""
     outcomes: list[dict] = []
     seen = _delivered(state)
     for turn in turns:
         msg_id = str(turn.get("msg_id") or "")
         if not msg_id:
             continue
-        for handle in mentioned(data, turn):
+        for handle in addressed(data, turn):
             key = f"{handle}|{msg_id}"
             if key in seen:
                 continue

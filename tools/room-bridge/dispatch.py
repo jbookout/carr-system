@@ -133,6 +133,7 @@ def _to_codex(
     env: dict | None,
     fresh: bool = False,
     config_overrides: tuple[str, ...] = (),
+    live_desktop: bool = False,
 ) -> dict:
     """Send one task to a standing Codex thread, resuming it when there is one.
 
@@ -149,10 +150,18 @@ def _to_codex(
     # started inside that owner instead; the session answers in its own window,
     # the same contract as a live Claude desk. No owner (Desktop closed, or the
     # thread not open there) keeps the durable resume path below.
-    if thread and codex_ipc.thread_owner(thread) is not None:
+    #
+    # OPT-IN, and its own status. Only the conversational bridge asks for this
+    # (bridge.deliver passes live_desktop=True). A caller that waits for a result
+    # in the desk log, like the queue executor, would read a plain "delivered" as
+    # "wait", time out, and dispatch again, starting a fresh turn in the same
+    # Desktop thread on every retry (PR #1345 review). "delivered_live" says the
+    # answer arrives in the session's own window and nowhere a caller can wait on.
+    if live_desktop and thread and codex_ipc.thread_owner(thread) is not None:
         live = codex_ipc.start_turn(thread, task)
         if live.get("status") != "not_live":
-            return {"resumed": True, **live, "thread_id": thread}
+            status = "delivered_live" if live.get("status") == "delivered" else live.get("status")
+            return {"resumed": True, **live, "status": status, "thread_id": thread}
     with tempfile.TemporaryDirectory(prefix="hermes-codex-") as tmp:
         last = Path(tmp) / "last-message.txt"
         argv = ["codex", "exec"]
@@ -268,8 +277,13 @@ def dispatch(
     fresh: bool = False,
     config_overrides: tuple[str, ...] = (),
     cwd: str | None = None,
+    live_desktop: bool = False,
 ) -> dict:
     """Send one task to one desk. Raises DeskError when the desk is not usable.
+
+    `live_desktop` (codex-session desks only) lets a thread Codex Desktop holds
+    open take the turn in its own window, returning status "delivered_live".
+    Only a caller that expects no result back may set it; see _to_codex.
 
     `cwd` (codex-session desks only) runs this one task in that directory on a FRESH
     thread and leaves the desk's standing thread untouched: flash-run's escalation gives
@@ -315,6 +329,7 @@ def dispatch(
     else:
         outcome = _to_codex(
             entry, task, env, fresh=fresh, config_overrides=config_overrides,
+            live_desktop=live_desktop,
         )
         # pin the desk to its thread so the next task lands in the same one
         if outcome.get("thread_id"):

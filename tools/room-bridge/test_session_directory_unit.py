@@ -149,6 +149,33 @@ def test_route_delivers_once_per_turn_across_cycles():
     assert sink.posts[0]["seat"] == "hermes" and sink.posts[0]["kind"] == "receipt"
 
 
+def test_session_message_receipt_reaches_only_its_target_and_no_desk():
+    """PR #1345 review, finding 2: `session-presence send` posts a receipt so no
+    seated desk spends a dispatch on it; the directory router delivers it to the
+    one handle it names (by handle or alias), once."""
+    data = sd.empty()
+    sd.ingest(data, [presence("codex-6394537b", name="sol"), presence("codex-aaaaaaaa", seq=11)],
+              host=HOST, now=NOW)
+    sd.refresh(data, now=NOW, host=HOST, probe=lambda e: True)
+    msg = {"kind": "receipt", "seat": "claude", "seq": 30, "msg_id": "t-30",
+           "body": json.dumps({"session_message": {"to": "codex-6394537b", "text": "please confirm"}})}
+    # the desk fan-out filter: a receipt is queued onto no desk
+    assert state_mod.route_turn(state_mod.default_state(), msg, {"codex-desk": "codex"}) == []
+    delivered = []
+    state = state_mod.default_state()
+    out = sd.route(data, [msg], state,
+                   deliver=lambda e, text, mid: delivered.append((e["handle"], text)) or {"status": "delivered"},
+                   add_room_turn=Sink())
+    assert delivered == [("codex-6394537b", "[model-room · claude] please confirm")]
+    assert [o["handle"] for o in out] == ["codex-6394537b"]
+    assert sd.route(data, [msg], state, deliver=lambda *a: {"status": "delivered"}, add_room_turn=Sink()) == []
+    # a message to a handle that is not listed, or a malformed one, reaches nobody
+    for body in ({"session_message": {"to": "codex-ffffffff", "text": "x"}},
+                 {"session_message": {"to": "codex-6394537b"}}, {"session_message": "x"}):
+        stray = {**msg, "msg_id": f"t-{len(str(body))}", "body": json.dumps(body)}
+        assert sd.addressed(data, stray) == []
+
+
 def test_route_to_a_dead_session_is_reported_not_attempted():
     data = sd.empty()
     sd.ingest(data, [presence("codex-6394537b", name="sol")], host=HOST, now=NOW)

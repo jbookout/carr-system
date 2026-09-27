@@ -412,12 +412,17 @@ def lookup(directory: dict, query: str) -> dict:
 
 def send(directory: dict, query: str, text: str, *, seat: str, post=None,
          room: str = ROOM) -> dict:
-    """Post an @-addressed turn; the bridge carries it into the session."""
+    """Post a session_message receipt; the bridge carries it into the session.
+
+    A receipt, not a turn: every seated desk answers a kind="turn" row, so a
+    message for one session would cost each desk a dispatch. The bridge's
+    session router (session_directory.addressed) delivers it to one handle."""
     target = lookup(directory, query)
     if not text.strip():
         raise PresenceError("empty message")
-    body = f"@{target['handle']} {text.strip()}"
-    return (post or _default_post)(body, seat, kind="turn", room=room)
+    body = json.dumps({"session_message": {"to": target["handle"], "text": text.strip()}},
+                      separators=(",", ":"))
+    return (post or _default_post)(body, seat, kind="receipt", room=room)
 
 
 # ---------------------------------------------------------------------------

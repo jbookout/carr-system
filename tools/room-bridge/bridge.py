@@ -517,12 +517,15 @@ def deliver(name: str, entry: dict, seat: str, queued_turn: dict, *, state: dict
         return {"desk": name, "outcome": "delivered_async"}
 
     if kind in ("codex-session", "codex-live", "flash-local"):
-        row = dispatch_fn(name, text, registry=registry, results_path=results_path)
+        # Only a codex-session desk can sit on a thread Codex Desktop holds, and
+        # this conversational path is the one caller that waits for nothing back,
+        # so it alone opts into the Desktop route (see dispatch._to_codex).
+        extra = {"live_desktop": True} if kind == "codex-session" else {}
+        row = dispatch_fn(name, text, registry=registry, results_path=results_path, **extra)
         status = row.get("status")
-        if status == "delivered":
-            # A codex-session desk whose thread Codex Desktop holds open: the
-            # turn was started inside that window (dispatch._to_codex, via
-            # codex_ipc) and the session answers there, like a claude desk.
+        if status == "delivered_live":
+            # The turn was started inside the Desktop window that owns the
+            # thread (codex_ipc) and the session answers there, like a claude desk.
             return {"desk": name, "outcome": "delivered_live"}
         if status == "completed":
             add_room_turn(body=(row.get("result") or "").strip() or "(empty reply)",
