@@ -566,7 +566,7 @@ export function measureQ115Dimensions(components) {
 //     version, so each crossing belongs to exactly one version;
 //   - a replay, a refusal and a race loser all leave the incurred totals
 //     unchanged, so their before and after bands are equal and nothing fires;
-//   - a signal id is `budget-signal:<tree>:<node>:<kind>:v<version>`, so two
+//   - a signal id is `budget-signal:<scope>:<node>:<kind>:v<version>`, so two
 //     readers of the same commit derive the same id and a persisting caller can
 //     keep the first and drop the rest;
 //   - staying above a threshold fires nothing. Falling back below it and then
@@ -659,15 +659,25 @@ function sameEntry(a, b) {
  * that crossed, and comparing across several operations would pin a crossing
  * to whichever version the caller happened to stop at. Equal versions (a
  * replay) fire nothing. A gap, a different tree or a rewritten history THROWS.
+ *
+ * `scope_ref` names the stored ledger the signal belongs to (the durable
+ * path's tree_ref, which is unique where tree_id is not). Without one the id
+ * is scoped by tree_id and tree_version, which is unique only in-process.
  */
-export function detectCostThresholdCrossings({ before_ledger: before, after_ledger: after } = {}) {
+export function detectCostThresholdCrossings({
+  before_ledger: before, after_ledger: after, scope_ref: scopeRefInput,
+} = {}) {
   const beforeVersion = ledgerVersion(before);
   const afterVersion = ledgerVersion(after);
-  if (before.tree.tree_id !== after.tree.tree_id
-    || before.tree.node_ids.join("\n") !== after.tree.node_ids.join("\n")) {
+  // The tree digest covers tree_id, tree_version, every node and every
+  // ceiling: two ledgers over different trees are never one lineage.
+  if (before.tree.tree_digest !== after.tree.tree_digest) {
     fail("ledger_lineage_mismatch", "before_ledger and after_ledger are not the same scope tree",
       { before_tree_id: before.tree.tree_id, after_tree_id: after.tree.tree_id });
   }
+  const scopeRef = scopeRefInput === undefined
+    ? `${after.tree.tree_id}:t${after.tree.tree_version}`
+    : assertRef(scopeRefInput, "scope_ref");
   const delta = afterVersion - beforeVersion;
   if (delta !== 0 && delta !== 1) {
     fail("ledger_versions_not_adjacent",
@@ -703,7 +713,7 @@ export function detectCostThresholdCrossings({ before_ledger: before, after_ledg
       signals.push({
         schema_version: V5_BUDGET_SIGNAL_SCHEMA_VERSION,
         tenant: ORGANIZATION_TENANT_ID,
-        signal_id: `budget-signal:${treeId}:${nodeId}:${crossing.kind}:v${afterVersion}`,
+        signal_id: `budget-signal:${scopeRef}:${nodeId}:${crossing.kind}:v${afterVersion}`,
         kind: crossing.kind,
         trigger: crossing.trigger,
         tree_id: treeId,

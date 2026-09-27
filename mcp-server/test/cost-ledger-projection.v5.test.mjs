@@ -551,6 +551,9 @@ test("A04-SIGNAL-DURABLE: a committed crossing fires once and its replay fires n
   assert.deepEqual(sliceSignals(crossed.signals), ["warning"]);
   assert.equal(crossed.signals.find(s => s.node_id === "slice").ledger_version,
     Number(crossed.result.ledger_version));
+  assert.equal(crossed.signals.find(s => s.node_id === "slice").signal_id,
+    `budget-signal:${treeRef}:slice:warning:v${crossed.result.ledger_version}`,
+    "a stored signal is scoped by the unique tree_ref, not the shareable tree_id");
 
   const replay = await commit(actual("op-b", 1));
   assert.equal(replay.outcome.replayed, true);
@@ -637,6 +640,7 @@ test("A04-OVERDRAWN-DURABLE: an overdrawn stored hierarchy refuses a new reserva
     assert.equal(denied.outcome.reason_id, "ancestor_overdrawn");
     // The slice breached its own ceiling, and a breach marks every ancestor.
     assert.deepEqual(denied.outcome.overdrawn_node_ids, ["slice", "child", "root"]);
+    assert.deepEqual(denied.outcome.overdrawn_caused_by_node_ids, ["slice"]);
     assert.match(denied.outcome.detail, /Nothing already reserved is changed/);
     const stored = await client.query(
       "select refusal_reason_id from ops.cost_ledger_operation where tree_ref=$1 and operation_id='op-new'", [treeRef]);

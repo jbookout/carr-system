@@ -46,8 +46,8 @@ const CHILD = "child:assurance";
 const SLICE = "slice:a04";
 const SIBLING = "slice:a05";
 
-function treeValue(sliceCeiling = 300) {
-  return compileScopeTree({
+function treeSource(sliceCeiling = 300) {
+  return {
     schema_version: V5_SCOPE_TREE_SCHEMA_VERSION,
     tree_id: "tree:a04-signals",
     tree_version: 1,
@@ -57,7 +57,11 @@ function treeValue(sliceCeiling = 300) {
       { node_id: SLICE, parent_node_id: CHILD, scope_kind: "slice", authorization_ceiling_units: sliceCeiling },
       { node_id: SIBLING, parent_node_id: CHILD, scope_kind: "slice", authorization_ceiling_units: 300 },
     ],
-  });
+  };
+}
+
+function treeValue(sliceCeiling = 300) {
+  return compileScopeTree(treeSource(sliceCeiling));
 }
 
 let counter = 0;
@@ -104,7 +108,9 @@ test("FIRE: 149 fires nothing, 150 fires one warning, staying above fires nothin
   let fired = step(ledger, postActual, actualOp(149));
   assert.deepEqual(fired.signals, [], "149 percent has not reached the warning line");
 
-  fired = step(fired.ledger, postActual, actualOp(1));
+  const before150 = fired.ledger;
+  const crossingOp = actualOp(1);
+  fired = step(before150, postActual, crossingOp);
   assert.deepEqual(summary(fired.signals), [`${SLICE}:warning`]);
   const [warning] = fired.signals;
   assert.equal(warning.schema_version, V5_BUDGET_SIGNAL_SCHEMA_VERSION);
@@ -113,7 +119,12 @@ test("FIRE: 149 fires nothing, 150 fires one warning, staying above fires nothin
   assert.equal(warning.variance_basis_points_before, 14900);
   assert.equal(warning.variance_basis_points_after, 15000);
   assert.equal(warning.ledger_version, ledgerVersion(fired.ledger));
-  assert.equal(warning.signal_id, `budget-signal:tree:a04-signals:${SLICE}:warning:v${ledgerVersion(fired.ledger)}`);
+  assert.equal(warning.signal_id, `budget-signal:tree:a04-signals:t1:${SLICE}:warning:v${ledgerVersion(fired.ledger)}`);
+  assert.equal(warning.operation_id, crossingOp.operation_id, "the signal names the operation that crossed");
+  const scoped = detectCostThresholdCrossings({ before_ledger: before150, after_ledger: fired.ledger,
+    scope_ref: "wr111:stored-tree" });
+  assert.equal(scoped[0].signal_id, `budget-signal:wr111:stored-tree:${SLICE}:warning:v${ledgerVersion(fired.ledger)}`,
+    "a stored ledger's tree_ref, not its tree_id, scopes the id");
   assert.match(warning.message, /^Cost warning: slice:a04 has now spent 150 units, 150\.00% of its 100-unit estimate/);
   assert.equal(warning.permitted_levers, undefined, "a warning pulls no replan lever");
 
@@ -242,6 +253,25 @@ test("FIRE: only adjacent ledgers of one lineage can be compared", () => {
   assert.equal(code(() => detectCostThresholdCrossings({ before_ledger: otherTree, after_ledger: base })),
     "ledger_lineage_mismatch");
 
+  // Same nodes, but a different tree_id, or the same tree_id with a different
+  // ceiling: each is a different scope tree, not one lineage.
+  const next = postActual(one, actualOp(1)).ledger;
+  const renamed = compileScopeTree({ ...treeSource(), tree_id: "tree:renamed" });
+  assert.equal(code(() => detectCostThresholdCrossings({ before_ledger: one, after_ledger: { ...next, tree: renamed } })),
+    "ledger_lineage_mismatch");
+  assert.equal(code(() => detectCostThresholdCrossings({ before_ledger: one, after_ledger: { ...next, tree: treeValue(999) } })),
+    "ledger_lineage_mismatch");
+
+  // Identical entry logs that differ only in a REFUSED operation: a refusal
+  // writes no entry, so only the applied index tells the lineages apart.
+  const tooBig = id => ({ operation_id: `op:${id}`, node_id: SLICE, reservation_id: `res:${id}`,
+    amount_units: 9999, requested_at: AT });
+  const refusedX = reserve(base, tooBig("refused-x")).ledger;
+  const refusedYThenActual = postActual(reserve(base, tooBig("refused-y")).ledger, actualOp(5)).ledger;
+  assert.deepEqual(refusedX.entries, base.entries);
+  assert.equal(code(() => detectCostThresholdCrossings({ before_ledger: refusedX, after_ledger: refusedYThenActual })),
+    "ledger_lineage_mismatch");
+
   // Same applied operations, but a history entry was rewritten: an "after"
   // that lowered an earlier charge could otherwise manufacture or hide a
   // crossing while looking adjacent.
@@ -359,6 +389,8 @@ test("RACE: a reservation racing an overdrawing actual is refused ancestor_overd
   const recomputed = cell.recompute(sibling);
   assert.equal(recomputed.outcome.reason_id, "ancestor_overdrawn");
   assert.deepEqual(recomputed.outcome.overdrawn_node_ids, [CHILD, ROOT]);
+  assert.deepEqual(recomputed.outcome.overdrawn_caused_by_node_ids, [SLICE],
+    "SIBLING, CHILD and ROOT are all within their own ceilings; SLICE is the budget actually over");
   assert.equal(recomputed.outcome.detail, V5_ANCESTOR_OVERDRAWN_DETAIL);
 });
 
@@ -381,6 +413,7 @@ test("OVERDRAWN: a refused reservation leaves every existing reservation as it w
     assert.deepEqual(denied.outcome.requires, [...V5_OVERDRAWN_REMEDIES]);
     assert.equal(denied.outcome.detail, V5_ANCESTOR_OVERDRAWN_DETAIL);
     assert.equal(denied.outcome.available_units, undefined);
+    assert.deepEqual(denied.outcome.overdrawn_caused_by_node_ids, [SLICE]);
     ledger = denied.ledger;
   }
   assert.deepEqual(ledger.open_reservations, before.open_reservations);
@@ -400,6 +433,8 @@ test("OVERDRAWN: a refused reservation leaves every existing reservation as it w
 test("OVERDRAWN: the refusal text names what is denied, what is untouched and the three ways forward", () => {
   assert.match(V5_ANCESTOR_OVERDRAWN_DETAIL, /^New reservation refused/);
   assert.match(V5_ANCESTOR_OVERDRAWN_DETAIL, /Nothing already reserved is changed/);
+  assert.match(V5_ANCESTOR_OVERDRAWN_DETAIL, /or some budget inside it has committed more than its authorized ceiling/,
+    "a sibling's breach marks the shared parent, so the text must not claim the parent itself is over");
   assert.match(V5_ANCESTOR_OVERDRAWN_DETAIL, /open an incident, replan the work, or get the ceiling explicitly raised/);
   assert.equal(v5CostLedgerProjection().overdrawn_refusal_touches_existing_reservations, false);
 });

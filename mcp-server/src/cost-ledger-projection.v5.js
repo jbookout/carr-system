@@ -239,10 +239,17 @@ export async function commitLedgerOperation({ client, tree_ref: treeRef, step })
   // applied), a database-level replay and a refused cell move all fire nothing,
   // and because the lock above is held, a second process that raced this one
   // loads the ledger AFTER this commit and finds no crossing left to fire.
+  //
+  // FAIL-CLOSED ON PURPOSE. Detection runs inside the caller's transaction,
+  // after the commit function, so a throw here rolls the operation back. That
+  // is intended: a crossing is detectable only across THIS commit, so a commit
+  // that landed while its signal was lost would lose that warning or replan
+  // for good. Nothing about the ledger's own truth is refused by this; the
+  // same operation can be retried.
   const moved = committed.committed === true && outcome.replayed !== true
     && result?.ok === true && result?.replayed !== true;
   const signals = moved
-    ? detectCostThresholdCrossings({ before_ledger: ledger, after_ledger: nextLedger })
+    ? detectCostThresholdCrossings({ before_ledger: ledger, after_ledger: nextLedger, scope_ref: treeRef })
     : [];
   return { ok: true, outcome, result, signals };
 }
