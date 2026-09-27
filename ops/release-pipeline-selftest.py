@@ -1735,7 +1735,8 @@ class UpdateBranchReview(Base):
 
     N = 777
 
-    def build(self, *, merge_touches_pr_file=False, merge_touches_other_file=False):
+    def build(self, *, merge_touches_pr_file=False, merge_touches_other_file=False,
+              pr_rel="mcp-server/src/pr.js", main_extra=None):
         fx = self.fx
         author = fx.tmp / "author"
         git(fx.tmp, "clone", "-q", str(fx.origin), str(author))
@@ -1743,15 +1744,18 @@ class UpdateBranchReview(Base):
         git(author, "config", "user.name", "a")
         git(author, "checkout", "-q", "-b", "pr")
         (author / "mcp-server/src").mkdir(parents=True, exist_ok=True)
-        (author / "mcp-server/src/pr.js").write_text("reviewed\n")
+        (author / pr_rel).write_text("reviewed\n")
         git(author, "add", "-A")
         git(author, "commit", "-q", "-m", "the PR")
         reviewed = git(author, "rev-parse", "HEAD")
-        main_moved = fx.commit({"mcp-server/src/other.js": "main moved"})   # main advances
+        main_files = {"mcp-server/src/other.js": "main moved"}
+        if main_extra is not None:
+            main_files[main_extra] = "main added"
+        main_moved = fx.commit(main_files)   # main advances
         git(author, "fetch", "-q", "origin", "main")
         git(author, "merge", "-q", "--no-ff", "--no-edit", "origin/main")   # what update-branch does
         if merge_touches_pr_file or merge_touches_other_file:
-            rel = "mcp-server/src/pr.js" if merge_touches_pr_file else "mcp-server/src/sneak.js"
+            rel = pr_rel if merge_touches_pr_file else "mcp-server/src/sneak.js"
             (author / rel).write_text("changed inside the merge, after review\n")
             git(author, "add", "-A")
             git(author, "commit", "-q", "--amend", "--no-edit")
@@ -1800,6 +1804,15 @@ class UpdateBranchReview(Base):
         self.assertEqual((rec["status"], rec["reason"]), ("blocked", "review_stale"))
         self.assertIn("mcp-server/src/pr.js", rec["detail"])
         self.assertIsNone(self.fx.state().get("worker", {}).get("failed_sha"))
+
+    def test_merge_that_touches_whitespace_pr_file_holds(self):
+        reviewed, head, merged = self.build(merge_touches_pr_file=True,
+                                            pr_rel=" pr.js", main_extra="\tpr.js")
+        rc, runner = self.tick(merged, head, reviewed)
+        self.assertEqual(rc, 0)
+        self.assertEqual(runner.calls, [])
+        rec = self.fx.records()[-1]
+        self.assertEqual((rec["status"], rec["reason"]), ("blocked", "review_stale"))
 
     def test_merge_that_smuggles_a_non_pr_file_holds(self):
         reviewed, head, merged = self.build(merge_touches_other_file=True)

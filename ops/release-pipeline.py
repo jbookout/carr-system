@@ -1213,7 +1213,11 @@ class Pipeline:
                 return False
 
         def names(a: str, b: str) -> set[str]:
-            return {x for x in self.git("diff", "--name-only", a, b, cwd=repo_dir).splitlines() if x.strip()}
+            # A line-split Git path list can turn a tab/newline-bearing name
+            # into another path. Keep NUL-delimited names intact when proving
+            # that an update-branch merge left reviewed PR files unchanged.
+            return {x for x in self.git("diff", "--no-renames", "--name-only", "-z", a, b,
+                                        cwd=repo_dir, trim_output=False).split("\0") if x}
 
         if not (have(reviewed) and have(head)):
             with contextlib.suppress(StepFailed):   # squash merges leave H off main: fetch the PR head
