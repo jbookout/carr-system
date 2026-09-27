@@ -2,7 +2,7 @@
 """bridge.py — the partner room's live wire to local desks.
 
 ONE POLL CYCLE, RUN PERIODICALLY BY LAUNCHD. This is the house pattern every
-other unattended service in this repo already uses (StartInterval + a short,
+other unattended service in this repo already uses (a launchd calendar schedule + a short,
 bounded invocation — see ops/config/services.json's capture-poll/partner-ping
 entries and bin/run-scheduled.sh's own header) rather than a hand-rolled
 always-on daemon: launchd IS the supervisor, each firing is one receipted
