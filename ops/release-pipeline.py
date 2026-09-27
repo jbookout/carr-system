@@ -756,11 +756,14 @@ class Pipeline:
 
     def git(self, *args: str, cwd: Path | None = None, trim_output: bool = True) -> str:
         proc = subprocess.run(["git", "-C", str(cwd or self.repo), *args], env=self.env,
-                              stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                              errors="surrogateescape", timeout=300)
+                              stdin=subprocess.DEVNULL, capture_output=True, timeout=300)
         if proc.returncode != 0:
-            raise StepFailed(f"git {args[0]}", proc.returncode, "", (proc.stderr or "").strip()[:300])
-        return proc.stdout.strip() if trim_output else proc.stdout
+            raise StepFailed(f"git {args[0]}", proc.returncode, "", os.fsdecode(proc.stderr).strip()[:300])
+        # fsdecode preserves filename bytes via surrogateescape. text=True
+        # applies universal-newline conversion and would corrupt CR/CRLF names
+        # in the NUL-delimited path list used by change_present().
+        output = os.fsdecode(proc.stdout)
+        return output.strip() if trim_output else output
 
     def step(self, name: str, argv: list[str], cwd: Path, *, timeout: int = 3600,
              env: dict[str, str] | None = None) -> Result:

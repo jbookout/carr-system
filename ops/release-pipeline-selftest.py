@@ -1566,6 +1566,24 @@ class FixForward(Base):
         self.assertEqual(rec["sha"], r)
         self.assert_held(runner, rec, nb)
 
+    def test_partial_revert_of_carriage_return_path_holds(self):
+        name = "carriage\rreturn.js"
+        b, nb = self.land({name: "defect", "mcp-server/src/a.js": "old"})
+        f, nf = self.land({name: "fixed", "mcp-server/src/a.js": "unrelated improvement"})
+        r, nr = self.land({name: "defect"})
+        runner, rec = self.tick({nb: [self.block(nb)], nf: [self.fix_approve(nf, [nb])]})
+        self.assertEqual(rec["sha"], r)
+        self.assert_held(runner, rec, nb)
+
+    def test_partial_revert_of_crlf_path_holds(self):
+        name = "carriage\r\nreturn.js"
+        b, nb = self.land({name: "defect", "mcp-server/src/a.js": "old"})
+        f, nf = self.land({name: "fixed", "mcp-server/src/a.js": "unrelated improvement"})
+        r, nr = self.land({name: "defect"})
+        runner, rec = self.tick({nb: [self.block(nb)], nf: [self.fix_approve(nf, [nb])]})
+        self.assertEqual(rec["sha"], r)
+        self.assert_held(runner, rec, nb)
+
     def test_a_later_edit_of_the_fix_lines_holds_unless_it_carries_the_marker_too(self):
         b, f, nb, nf = self.two_commits()
         g, ng = self.land({"mcp-server/src/a.js": "fixed better"})
