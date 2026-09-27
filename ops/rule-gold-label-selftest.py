@@ -296,6 +296,29 @@ def test_fixture(gl, ev):
     check("repair: unfinished column audit remains explicit and covers the remaining cases",
           set(followup["remaining_for_full_semantic_audit"])
           == {c["id"] for c in base} - {r["case"] for r in followup["rows"]})
+    column = repair["full_column_review"]
+    column_rows = column["changed_rows"]
+    check("repair: full f47 column review covers every case with a claim-based criterion",
+          column["rule"] == "f47a8fe9"
+          and column["reviewed_cases"] == len(base) == 240
+          and column["changed_count"] == len(column_rows) == 26
+          and column["unchanged_count"] == len(base) - len(column_rows)
+          and "Whether the recorded turn actually re-executed" in column["criterion"])
+    check("repair: full-column changes preserve before/after case bindings",
+          len({r["case"] for r in column_rows}) == len(column_rows)
+          and all(r["before"]["case"] == r["after"]["case"] == r["case"]
+                  and r["before"]["case_binding"] == r["after"]["case_binding"]
+                  and r["before"]["rule"] == r["after"]["rule"] == "f47a8fe9"
+                  and r["before"]["gold"] is False and r["after"]["gold"] is True
+                  and current[(r["case"], "f47a8fe9")] == r["after"]
+                  for r in column_rows))
+    check("repair: claim trigger covers verified and unverified completion, absence and full sets",
+          all(current[(cid, "f47a8fe9")]["gold"] is True for cid in
+              ("v2-chat-002", "v2-chat-010", "v2-chat-015", "v2-rel-002",
+               "v2-notif-004", "v2-notif-018", "v2-sfb-028", "v2-tour-018"))
+          and all(current[(cid, "f47a8fe9")]["gold"] is False for cid in
+                  ("v2-chat-001", "v2-chat-006", "v2-notif-027", "v2-rel-024",
+                   "v2-tour-021")))
     check("repair: readiness claims bind with and without recorded verification",
           all(current[(cid, "f47a8fe9")]["gold"] is True for cid in
               ("v2-chat-005", "v2-chat-012", "v2-chat-019", "v2-chat-027"))
