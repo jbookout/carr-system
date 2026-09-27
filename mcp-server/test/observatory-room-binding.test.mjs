@@ -32,3 +32,9 @@ test("the Worker reads and posts Observatory turns in that room; the queue proje
   assert.match(adapter("queueReadFn"), /room: DEFAULT_ROOM/);
   assert.equal(DEFAULT_ROOM, "partner-line");
 });
+
+test("assign-profile's wire receipt lands where the panel reads", () => {
+  const src = read("mcp-server/src/agent-profiles.js");
+  assert.match(src, /room: OBSERVATORY_ROOM, sponsor, seat: "claude", kind: "receipt"/);
+  assert.doesNotMatch(src, /"partner-line"/);
+});
