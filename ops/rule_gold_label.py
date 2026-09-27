@@ -25,6 +25,17 @@ benchmark exists to measure, so it cannot be inside the labeller); and the
 rule as the state with one noul per case (used here only as the SECOND PASS,
 because it asks the same question from the other side).
 
+THE STRICT RE-LABEL (2026-09-27). A merge review re-judged a sample of the
+first gold with a stricter question and found about a third of it not binding,
+and found universal-trigger rules labelled inconsistently across cases. The
+gold was re-labelled end to end: rule_question() now asks whether the rule
+binds the ACTION the turn takes (ignoring it here would violate it); the case
+state says who reads the turn's closing reply (partner, or the orchestrating
+agent for a subagent brief) and whether the turn opens a session; and the
+rules in UNIVERSAL_POLICY are settled by one written policy each instead of a
+per-case judgment. Every borderline pair was then second-passed and
+adjudicated again under the strict standard.
+
 THE BANDS. p >= YES_AT is gold, p <= NO_AT is not, anything between is
 BORDERLINE. Every borderline pair gets a second Jev pass from the other side
 (the rule as state, the case as the question, a stricter wording) and then a
@@ -98,37 +109,101 @@ def call_line(call):
     return name
 
 
+def audience(case):
+    """Who reads the prose this turn ends with. A subagent brief opens a
+    subagent session whose reply goes to the orchestrating agent; every other
+    case is a turn in a partner's session (a notification arrives in one), so
+    its closing prose is read by the partner."""
+    return "orchestrator" if case.get("origin") == "subagent-brief" else "partner"
+
+
+def opens_session(case):
+    """A subagent brief is the first message of a new session; the other cases
+    are single turns taken from inside a running session."""
+    return case.get("origin") == "subagent-brief"
+
+
 def case_state(case):
     is_machine = case["prompt"].lstrip().startswith("<task-notification>")
-    return {"system": SYSTEM_NOTE,
-            "turn": {"from": "machine notification" if is_machine else "partner",
-                     "message": case["prompt"],
-                     "tool_calls": [call_line(c) for c in case.get("tool_calls") or []]}}
+    turn = {"from": ("machine notification" if is_machine else
+                     "orchestrating agent (a subagent brief)" if opens_session(case) else
+                     "partner"),
+            "message": case["prompt"],
+            "tool_calls": [call_line(c) for c in case.get("tool_calls") or []]}
+    if "origin" in case:
+        turn["reply_read_by"] = audience(case)
+        turn["opens_a_session"] = opens_session(case)
+    return {"system": SYSTEM_NOTE, "turn": turn}
 
 
+# THE STRICT QUESTION (the gold standard since the 2026-09-27 re-label). The
+# first labelling asked whether a rule "binds on the turn"; a stricter
+# re-judgment of a sample put 97 of 263 gold pairs at p <= 0.35, so the gold
+# leaned padded, and padded gold would tune the system to over-deliver. The
+# question now asks about the ACTION: is the rule's trigger met by what this
+# turn asks for or does, so that doing this turn while ignoring the rule would
+# violate it?
 def rule_question(tsc, rule, limit=STATEMENT_CHARS):
     text = _clip(rule["statement"], limit)
     return tsc.noul(
         "A standing rule for the assistant:\n<<<\n" + text + "\n>>>\n\n"
-        "Does this rule BIND on `turn`? It binds when the turn's message or its tool "
-        "calls meet the rule's own trigger, so that an assistant handling exactly this "
-        "turn must apply, check or respect the rule to act correctly. A rule about the "
-        "project in general, or about some other kind of turn, does not bind.",
-        true="The turn meets this rule's trigger; the assistant must apply or check it on this turn.",
-        false="This turn does not meet the rule's trigger; the rule governs something this turn does not do.")
+        "Does this rule bind the ACTION taken in `turn`? Answer yes only if the rule's own "
+        "trigger is met by what this turn asks for or does (its message, its tool calls, "
+        "and the reply it ends with, read by `reply_read_by`), so that handling exactly "
+        "this turn while ignoring the rule would VIOLATE it. Topical overlap, general "
+        "relevance, or a rule that would bind some later or different action does not "
+        "count.",
+        true="The rule's trigger is met by this turn's action; ignoring it here would violate it.",
+        false="Ignoring this rule on this turn would not violate it; its trigger is not met here.")
+
+
+# RULES WITH A UNIVERSAL TRIGGER get one written policy, applied uniformly,
+# instead of a per-case judgment (the first labelling was inconsistent across
+# cases: gold on about half the partner turns and on a third to all of the
+# subagent briefs). {rule id: (predicate name, reason)}. The label is the
+# predicate's value; Jev is not asked about these rules.
+UNIVERSAL_POLICY = {
+    "5be2f462": ("partner_prose", "binds every session's prose to a partner; a partner-session "
+                                  "turn ends in prose the partner reads, a subagent brief's "
+                                  "reply goes to the orchestrating agent"),
+    "7e9739f2": ("partner_prose", "a hard rule on every reply to the partner; not on a reply "
+                                  "to an orchestrating agent"),
+    "0156e9fa": ("partner_prose", "fires on closing any message to the partner"),
+    "b3ea627f": ("partner_prose", "fires at the moment a session closes a message to the "
+                                  "partner"),
+    "4f7c348f": ("opens_session", "recitation happens at session open, before the first tool "
+                                  "batch; a subagent brief opens a session, a mid-session "
+                                  "partner turn does not"),
+}
+POLICY_PREDICATES = {
+    "partner_prose": lambda case: audience(case) == "partner",
+    "opens_session": opens_session,
+}
+
+
+def policy_labels(case):
+    """{rule id: bool} for the rules UNIVERSAL_POLICY settles."""
+    return {rid: bool(POLICY_PREDICATES[pred](case))
+            for rid, (pred, _reason) in UNIVERSAL_POLICY.items()}
 
 
 def label_case(case, rules, tsc, *, calls_log, timeout=120.0, chunk=None):
-    """{rule id: probability} for one case, every rule, in one request (or in
-    `chunk`-sized requests when a smaller request is wanted). Returns
-    (probabilities, usage) with usage {"input_tokens", "output_tokens", "requests"}."""
+    """{rule id: probability} for one case, every rule, in `chunk`-sized
+    requests. Rules settled by UNIVERSAL_POLICY are not asked: they get 1.0 or
+    0.0 from the policy. Returns (probabilities, usage) with usage
+    {"input_tokens", "output_tokens", "requests"}."""
     probs, usage = {}, {"input_tokens": 0, "output_tokens": 0, "requests": 0}
     size = chunk or CHUNK
     state = case_state(case)
+    for rid, value in policy_labels(case).items():
+        if any(r["id"] == rid for r in rules):
+            probs[rid] = 1.0 if value else 0.0
+    rules = [r for r in rules if r["id"] not in UNIVERSAL_POLICY]
     for start in range(0, len(rules), size):
         part = rules[start:start + size]
         answer = tsc.ask(state, {r["id"]: rule_question(tsc, r) for r in part},
-                         calls_log=calls_log, timeout=timeout)
+                         calls_log=calls_log, timeout=timeout,
+                         facets=["evidence_matching"])
         for rid, row in (answer.get("answers") or {}).items():
             probs[rid] = round(float(row["noul"]), 4)
         u = answer.get("usage") or {}
@@ -147,15 +222,19 @@ def second_pass(rule, cases, tsc, *, calls_log, timeout=120.0):
     for case in cases:
         s = case_state(case)["turn"]
         calls = "; ".join(s["tool_calls"]) or "none"
+        reader = s.get("reply_read_by")
         questions[case["id"]] = tsc.noul(
             f"Turn from {s['from']}:\n<<<\n{_clip(s['message'], 1800)}\n>>>\n"
-            f"Tool calls made in reply: {calls}\n\n"
-            "Is `rule` binding on this specific turn — is its trigger actually met here, "
-            "so that ignoring the rule on this turn would be a violation of it? "
-            "Topical overlap alone is not enough.",
-            true="The rule's trigger is met on this turn; ignoring it here would violate it.",
-            false="The rule's trigger is not met on this turn.")
-    answer = tsc.ask(state, questions, calls_log=calls_log, timeout=timeout)
+            f"Tool calls made in reply: {calls}\n"
+            + (f"The reply this turn ends with is read by: {reader}.\n" if reader else "")
+            + "\nDoes `rule` bind the ACTION taken in this turn — is its trigger actually met "
+            "by what the turn asks for or does, so that handling this turn while ignoring "
+            "the rule would violate it? Topical overlap, or a rule that would bind a later "
+            "or different action, is not enough.",
+            true="The rule's trigger is met by this turn's action; ignoring it here would violate it.",
+            false="The rule's trigger is not met by this turn's action.")
+    answer = tsc.ask(state, questions, calls_log=calls_log, timeout=timeout,
+                     facets=["evidence_matching"])
     u = answer.get("usage") or {}
     return ({cid: round(float(row["noul"]), 4) for cid, row in (answer.get("answers") or {}).items()},
             {"input_tokens": int(u.get("input_tokens") or 0),
@@ -170,14 +249,19 @@ def second_pass(rule, cases, tsc, *, calls_log, timeout=120.0):
 #   1. one Jev noul per doctrine DOCUMENT (title and opening text, all 261),
 #      case as state: which documents govern this turn;
 #   2. plus the deterministic search-doctrine hits for the turn's text;
-#   3. candidates = every section of the documents at p >= DOC_AT (the top
-#      DOC_TOP at most) plus the search hits, capped at SECTION_CAP;
+#   3. candidates = the search hits first, then every section of the
+#      documents at p >= DOC_AT (the top DOC_TOP at most), capped at
+#      SECTION_CAP;
 #   4. one Jev noul per candidate section, case as state; the same bands as
 #      rules, and every borderline pair is adjudicated in writing.
+# The cap was 120 for the first labelling and cut 11 cases (search hits went
+# last and were cut first). At 400 no case is cut: the largest uncapped
+# shortlist on the v2 set is 356 sections, and the 1,263 extra section
+# questions for those 11 cases cost about 0.8M input tokens.
 
 DOC_AT = 0.5
 DOC_TOP = 6
-SECTION_CAP = 120
+SECTION_CAP = 400
 SECTION_CHARS = 1200
 DOC_CHUNK = 90
 SECTION_CHUNK = 60
@@ -233,8 +317,9 @@ def doctrine_label_case(case, documents, sections, tsc, *, calls_log, search_ref
                            calls_log, timeout)
     top = [did for did, p in sorted(doc_p.items(), key=lambda kv: -kv[1]) if p >= DOC_AT][:DOC_TOP]
     by_ref = {s["ref"]: s for s in sections}
-    picked = [s["ref"] for s in sections if s["doc"] in top]
-    picked += [ref for ref in search_refs if ref in by_ref and ref not in picked]
+    # Search hits FIRST, so the cap can never cut the door's own hits.
+    picked = [ref for ref in dict.fromkeys(search_refs) if ref in by_ref]
+    picked += [s["ref"] for s in sections if s["doc"] in top and s["ref"] not in picked]
     picked = picked[:SECTION_CAP]
     sec_p, u2 = _ask_nouls(tsc, state, [by_ref[r] for r in picked], section_question, "ref",
                            SECTION_CHUNK, calls_log, timeout)
@@ -366,25 +451,121 @@ SCRUB_PATTERNS = {
     "dollar": r"\$\s?\d{2,}|\$\s?\d+(?:\.\d+)?\s?(?:k|m|mm|million|/)",
     "square_feet": r"\b\d[\d,]*\s?(?:sf|sq\.? ?ft|square feet|rsf|usf)\b",
     "url_host": r"https?://(?!example\.com|x\.com/example)[\w.-]+",
+    # A bare host with no scheme: an internal suffix (.local, .lan, .internal,
+    # .home.arpa, a tailnet), or any dotted name on a common public TLD other
+    # than the reserved example domains. A file name (report.json) has no TLD
+    # from this list, so it passes.
+    "bare_host": (r"\b(?:[a-z0-9-]+\.)+(?:local|lan|internal|intranet|corp|home\.arpa|ts\.net)\b"
+                  r"|\b(?!example\.(?:com|org|net)\b)(?:[a-z0-9-]+\.)+"
+                  r"(?:com|net|org|io|dev|ai|app|co|us|cloud|xyz)\b"),
+    # A machine name in the house style (<owner>s-mac-studio, a macbook-air).
+    "machine_name": r"\b[a-z0-9]+s?-(?:mac|macbook|mbp|imac)(?:-[a-z0-9]+)*\b",
     "ip": r"\b\d{1,3}(?:\.\d{1,3}){3}\b",
-    "credential_path": r"(?:~/\.config/|\.env\b|\.age\b|id_rsa|id_ed25519|typesafe\.env|api[_-]?key\s*=)",
+    "credential_path": (r"(?:~/\.config/|\.env\b|\.age\b|typesafe\.env|api[_-]?key\s*="
+                        r"|\bid_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?\b"
+                        r"|(?:^|[\s/~\"'])\.ssh(?:/|\b)|\bauthorized_keys\b|\bknown_hosts\b"
+                        r"|\.gnupg\b|\bprivate[_-]?key\b|\.(?:pem|p12|pfx|key)\b)"),
     "token_like": r"\b(?:sk|pk|ghp|gho|xox[bp])[-_][A-Za-z0-9]{12,}",
 }
 
 
+def name_findings(text, names=()):
+    """The record names (person or practice) `text` carries, matched as whole
+    words, case-insensitively. The names come from the record layer at intake
+    time and are never written anywhere."""
+    hits = []
+    for name in names:
+        name = (name or "").strip()
+        if len(name) < 3:
+            continue
+        if re.search(r"(?<![a-z0-9])" + re.escape(name.lower()) + r"(?![a-z0-9])", text.lower()):
+            hits.append(name)
+    return hits
+
+
 def scrub_findings(text, extra_names=()):
     """[(pattern name, match)] for anything a committed case must not carry.
-    `extra_names` are literal strings (person or practice names known to the
-    caller) to refuse as well."""
+    `extra_names` are person or practice names (from the record) to refuse as
+    well; a name hit is reported as ("name", "<withheld>") so the refusal
+    never echoes the name it caught."""
     hits = []
     for name, pattern in SCRUB_PATTERNS.items():
         for m in re.finditer(pattern, text, flags=re.I):
             hits.append((name, m.group(0)))
-    low = text.lower()
-    for name in extra_names:
-        if name and name.lower() in low:
-            hits.append(("name", name))
+    hits += [("name", "<withheld>") for _ in name_findings(text, extra_names)]
     return hits
+
+
+# Name tokens too generic to refuse on their own (a practice called "X Family
+# Dental" must not make every prompt about dental work refusable).
+GENERIC_NAME_TOKENS = frozenset("""
+the and of for at in on llc inc pllc pa pc md dds dmd do lp ltd co corp group groups
+medical medicine dental dentistry health healthcare clinic clinics center centre centers
+care family practice practices partners partner associates services service office offices
+building plaza suite pediatric pediatrics orthopedic orthopedics physical therapy vision eye
+eyecare surgery surgical specialists specialty urgent primary women womens children childrens
+imaging lab labs pharmacy wellness rehab rehabilitation hospital hospitals institute south
+north east west gulf coast bay beach city county new first street road avenue drive lease
+deal renewal expansion relocation sale site property properties space tenant landlord
+""".split())
+
+
+OWNER_ROLE_WORDS = frozenset({"agent", "local", "none", "null", "unassigned", "owner", "system",
+                              "bot", "session", "machine"})
+
+
+def common_words(path="/usr/share/dict/words"):
+    """Lower-case English words, to keep ordinary words out of the name terms.
+    The system word list's lower-case entries when it exists (proper nouns
+    there are capitalised, so they stay distinctive), always joined with
+    GENERIC_NAME_TOKENS."""
+    words = set(GENERIC_NAME_TOKENS)
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+            words |= {w.strip() for w in handle if w.strip() and w.strip().islower()}
+    except OSError:
+        pass
+    return words
+
+
+def record_name_terms(rows, common=None):
+    """Name strings to refuse, from record rows [{"name": ..., "kind": ...}].
+
+    kind "partner" (a deal's or lead's owner): every alphabetic token of three
+    letters or more except the role words in OWNER_ROLE_WORDS, even a common
+    word, since a partner's first name is the likeliest name to slip into a
+    prompt. kind "person" or "practice" (a client, a lead): the
+    full name when it has two or more words or is not a common word, plus each
+    title-case token of four letters or more that is not a common word (a
+    surname alone still identifies). kind "deal" (a deal's own name): the full
+    name only, and only when it has two or more words. Ordinary words drawn
+    from free-text record names ("from", "code", "Studio") are dropped, or
+    every prompt would be refused."""
+    common = common_words() if common is None else common
+    terms = set()
+    for row in rows:
+        full = " ".join(str(row.get("name") or "").split())
+        kind = row.get("kind")
+        if len(full) < 3:
+            continue
+        multiword = len(full.split()) >= 2
+        if kind == "partner":
+            # Owner labels are first names, sometimes wrapped in a role label
+            # ("Agent (<name>-local)"): keep every alphabetic token but the
+            # role words.
+            terms.update(tok for tok in re.findall(r"[A-Za-z]{3,}", full)
+                         if tok.lower() not in OWNER_ROLE_WORDS)
+            continue
+        if kind == "deal":
+            if multiword:
+                terms.add(full)
+            continue
+        if multiword or full.lower() not in common:
+            terms.add(full)
+        for tok in re.findall(r"\b[A-Z][a-z][A-Za-z'-]{2,}\b", full):
+            if tok.lower() not in common:
+                terms.add(tok)
+    return sorted(terms)
 
 
 def longest_shared_run(a, b):
@@ -412,6 +593,63 @@ def longest_shared_run(a, b):
 MAX_SHARED_RUN = 5
 
 
+def _string_leaves(obj):
+    if isinstance(obj, str):
+        yield obj
+    elif isinstance(obj, dict):
+        for key, value in obj.items():
+            yield from _string_leaves(key)
+            yield from _string_leaves(value)
+    elif isinstance(obj, (list, tuple)):
+        for value in obj:
+            yield from _string_leaves(value)
+
+
+def validate_intake(doc, case_id, missed_rule, *, live_rules, prompt=None, stratum=None,
+                    tool_calls=None, source_text=None, extra_names=()):
+    """Every refusal the intake makes, run BEFORE anything leaves the machine
+    (the Jev labelling pass comes after this returns). Returns (prompt,
+    stratum, tool_calls, new case id); raises ValueError naming the kind of
+    problem, never echoing a caught name or the live turn's words.
+
+    Refused: an unknown rule; a live reference without a paraphrase and a
+    stratum; a prompt OR any string inside the tool calls that shares more
+    than MAX_SHARED_RUN consecutive words with the live turn; anything
+    scrub_findings() catches (emails, phones, figures, URL and bare hosts,
+    machine names, IPs, credential, key and ssh paths, tokens, and the
+    person and practice names in `extra_names`); a miss already present."""
+    if missed_rule not in live_rules:
+        raise ValueError(f"{missed_rule} is not a live rule")
+    existing = {c["id"]: c for c in doc.get("cases") or []}
+    base = existing.get(case_id)
+    if base is None and (not prompt or not stratum):
+        raise ValueError("a live reference needs --prompt (a paraphrase) and --stratum")
+    prompt = prompt or base["prompt"]
+    stratum = stratum or base["stratum"]
+    calls = tool_calls if tool_calls is not None else ((base or {}).get("tool_calls") or [])
+    if source_text is not None:
+        run = longest_shared_run(prompt, source_text)
+        if run > MAX_SHARED_RUN:
+            raise ValueError(f"the prompt shares a {run}-word run with the live turn: "
+                             "paraphrase it")
+        for text in _string_leaves(calls):
+            run = longest_shared_run(text, source_text)
+            if run > MAX_SHARED_RUN:
+                raise ValueError(f"a tool-call input shares a {run}-word run with the live "
+                                 "turn: paraphrase it")
+    hits = scrub_findings(prompt + " " + json.dumps(calls), extra_names)
+    if hits:
+        # Kinds only: the refusal never repeats the material it caught.
+        kinds = sorted({kind for kind, _ in hits})
+        raise ValueError(f"the case carries material that may not be committed: "
+                         f"{', '.join(kinds)} (reword it; the matched text is not shown)")
+    slug = re.sub(r"[^a-z0-9]+", "-", case_id.lower()).strip("-")[:24]
+    new_id = f"reg-{slug}-{missed_rule}"
+    if new_id in existing:
+        raise ValueError(f"{new_id} already exists: this miss is already in the benchmark")
+    return prompt, stratum, calls, new_id
+
+
 def intake_case(doc, case_id, missed_rule, *, live_rules, prompt=None, stratum=None,
                 tool_calls=None, source_text=None, probs=None, extra_names=(),
                 seed=None):
@@ -431,27 +669,11 @@ def intake_case(doc, case_id, missed_rule, *, live_rules, prompt=None, stratum=N
     writing, which keeps the intake from inventing labels. Without `probs`
     the case carries the copied case's gold (or only the missed rule) and is
     marked labels="partial"."""
-    if missed_rule not in live_rules:
-        raise ValueError(f"{missed_rule} is not a live rule")
     existing = {c["id"]: c for c in doc.get("cases") or []}
     base = existing.get(case_id)
-    if base is None:
-        if not prompt or not stratum:
-            raise ValueError("a live reference needs --prompt (a paraphrase) and --stratum")
-        if source_text is not None:
-            run = longest_shared_run(prompt, source_text)
-            if run > MAX_SHARED_RUN:
-                raise ValueError(f"prompt shares a {run}-word run with the live turn: paraphrase it")
-    prompt = prompt or base["prompt"]
-    stratum = stratum or base["stratum"]
-    calls = tool_calls if tool_calls is not None else ((base or {}).get("tool_calls") or [])
-    hits = scrub_findings(prompt + " " + json.dumps(calls), extra_names)
-    if hits:
-        raise ValueError(f"case carries material that may not be committed: {hits[:5]}")
-    slug = re.sub(r"[^a-z0-9]+", "-", case_id.lower()).strip("-")[:24]
-    new_id = f"reg-{slug}-{missed_rule}"
-    if new_id in existing:
-        raise ValueError(f"{new_id} already exists: this miss is already in the benchmark")
+    prompt, stratum, calls, new_id = validate_intake(
+        doc, case_id, missed_rule, live_rules=live_rules, prompt=prompt, stratum=stratum,
+        tool_calls=tool_calls, source_text=source_text, extra_names=extra_names)
     disputed, labels = [], "dense"
     if probs:
         gold = {rid for rid, p in probs.items() if rid in live_rules and p >= YES_AT}

@@ -13,9 +13,37 @@ ONE COMMAND, so live misses feed the benchmark instead of a to-do list:
     out/rule-delivery-shadow.jsonl, or a transcript turn uuid. The command finds
     the partner's words for that turn in local session history to CHECK the
     paraphrase against — they are never written anywhere. Without --prompt it
-    stops and says so; with it, a prompt that shares more than five consecutive
-    words with the live turn, or carries a name, figure, hostname or credential
-    path, is refused.
+    stops and says so.
+
+CHECKS (ops/rule_gold_label.validate_intake), all run on the final prompt and
+tool calls before the case is sent anywhere:
+  * verbatim (live references only): the prompt, and every string inside the
+    tool calls, may share at most five consecutive words with the live turn;
+  * names: client, lead and practice names and the partners' names (the deal
+    and lead owners), read from the record at intake time (deal-board and
+    lead-board through ./run.sh call; or --names-file), turned into terms by
+    ops/rule_gold_label.record_name_terms (full names plus distinctive
+    surname-like tokens; ordinary words dropped), and matched as whole words,
+    case-insensitively. A refusal says a name was caught but never which one;
+  * patterns: emails, phone numbers, money and square-foot figures, URL hosts,
+    bare hostnames (internal suffixes, a tailnet, and public TLDs other than
+    the example domains), house-style machine names, IPs, credential, key and
+    ssh paths, and token-shaped strings.
+
+WHAT LEAVES THE MACHINE. Reading the names sends only the two read requests
+above, which carry nothing from the case. Only after every check passes, and
+unless --no-label is given, the labelling pass (ops/rule_gold_label.label_case)
+sends Jev the case's prompt and one line per tool call, together with a fixed
+description of the setting and the live rules' statements as the questions.
+Nothing else from the case is sent.
+
+EXITS. 1: a check refused the case (nothing written, nothing sent to Jev).
+2: the command could not run a check or find the live turn — including when
+the names cannot be read, since the name check fails closed rather than being
+skipped (nothing written, nothing sent to Jev). 0: the case was built and
+printed; with --dry-run nothing is written, otherwise it is appended to the
+fixture. A refusal names the kind of problem only: never a caught name, never
+the matched text, never the live turn's words.
 
 The missed rule is gold by observation. Every other live rule is labelled by
 one Jev first pass (ops/rule_gold_label.label_case, the same scheme as the
@@ -100,6 +128,45 @@ def find_live_turn(ref, shadow=SHADOW, projects=PROJECTS):
     return best
 
 
+def _verb(verb, args):
+    import subprocess
+    proc = subprocess.run(["./run.sh", "call", verb, json.dumps(args)], cwd=REPO,
+                          capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                          timeout=300)
+    if proc.returncode != 0:
+        raise OSError(f"{verb} exited {proc.returncode}")
+    return json.loads(proc.stdout)
+
+
+def record_name_rows():
+    """[{name, kind}] from the record: deal clients, deal names and deal owners
+    (deal-board), and leads and lead owners (lead-board). The owners are the
+    partners. Read at intake time, held in memory, never written."""
+    rows = []
+    for deal in _verb("deal-board", {}).get("deals") or []:
+        rows.append({"name": deal.get("client_name"), "kind": "practice"})
+        rows.append({"name": deal.get("name"), "kind": "deal"})
+        rows.append({"name": deal.get("lead_owner"), "kind": "partner"})
+    for lead in _verb("lead-board", {}).get("leads") or []:
+        rows.append({"name": lead.get("name"), "kind": "practice"})
+        rows.append({"name": lead.get("owner_label"), "kind": "partner"})
+    if not any(row["name"] for row in rows):
+        raise ValueError("the record returned no names")
+    return rows
+
+
+def load_names(names_file=None):
+    """The name terms to refuse. Fails closed: when the record cannot be read
+    the intake refuses rather than skipping the check."""
+    gl = _load("rule_gold_label")
+    if names_file:
+        with open(names_file, "r", encoding="utf-8") as handle:
+            rows = json.load(handle)
+    else:
+        rows = record_name_rows()
+    return gl.record_name_terms(rows)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--case-id", required=True)
@@ -114,6 +181,9 @@ def main(argv=None):
     parser.add_argument("--no-label", action="store_true", help="skip the Jev pass")
     parser.add_argument("--calls-log", default=DEFAULT_CALLS)
     parser.add_argument("--dry-run", action="store_true", help="print the case, write nothing")
+    parser.add_argument("--names-file",
+                        help="JSON [{name, kind}] to check names against instead of reading "
+                             "the record (offline use and tests)")
     args = parser.parse_args(argv)
 
     gl = _load("rule_gold_label")
@@ -135,19 +205,32 @@ def main(argv=None):
                   "paraphrase of it and --stratum.", file=sys.stderr)
             return 2
     calls = [json.loads(c) for c in args.tool_call] if args.tool_call else None
+    try:
+        names = load_names(args.names_file)
+    except (OSError, ValueError) as exc:
+        print(f"refused: the person and practice name check could not run ({exc}), so "
+              "the case was not checked, written or sent to Jev. Retry when the record "
+              "is reachable, or pass --names-file.", file=sys.stderr)
+        return 2
+    # Every check runs here, BEFORE the Jev pass: a refused case never leaves
+    # the machine.
+    try:
+        prompt, _stratum, calls, _new_id = gl.validate_intake(
+            doc, args.case_id, args.missed_rule, live_rules=live, prompt=args.prompt,
+            stratum=args.stratum, tool_calls=calls, source_text=source, extra_names=names)
+    except ValueError as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 1
     probs = None
     if not args.no_label:
         tsc = _load("typesafe_client")
-        draft = {"id": "intake", "prompt": args.prompt or next(
-            c["prompt"] for c in doc["cases"] if c["id"] == args.case_id),
-                 "tool_calls": calls if calls is not None else next(
-                     (c["tool_calls"] for c in doc["cases"] if c["id"] == args.case_id), [])}
-        probs, usage = gl.label_case(draft, rules, tsc, calls_log=args.calls_log)
+        probs, usage = gl.label_case({"id": "intake", "prompt": prompt, "tool_calls": calls},
+                                     rules, tsc, calls_log=args.calls_log)
         print(json.dumps({"jev": usage}), file=sys.stderr)
     try:
         case = gl.intake_case(doc, args.case_id, args.missed_rule, live_rules=live,
                               prompt=args.prompt, stratum=args.stratum, tool_calls=calls,
-                              source_text=source, probs=probs,
+                              source_text=source, probs=probs, extra_names=names,
                               seed=(doc.get("split") or {}).get("seed"))
     except ValueError as exc:
         print(f"refused: {exc}", file=sys.stderr)

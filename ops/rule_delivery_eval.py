@@ -86,7 +86,8 @@ SPLITS = ("train", "test")
 # A doctrine section ref: the store's document id, '#', its section id.
 # Opaque ids on purpose: doctrine slugs and section keys carry person and
 # practice names, which a committed fixture must not.
-DOCTRINE_REF = re.compile(r"^[a-z0-9][a-z0-9._-]*#[a-z0-9][a-z0-9._-]*$")
+_UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+DOCTRINE_REF = re.compile(rf"^{_UUID}#{_UUID}$")
 MACHINE_STRATA = ("notifications",)
 EVAL_SESSION = "rule-delivery-eval"
 
@@ -157,12 +158,13 @@ def load_cases(path, split=None):
         if not isinstance(calls, list) or not all(
                 isinstance(c, dict) and isinstance(c.get("tool_name"), str) for c in calls):
             raise ValueError(f"{row['id']}: tool_calls must be [{{tool_name, tool_input}}]")
-        # gold_doctrine: a second, reserved target set of doctrine section
-        # refs ("document#section"), carried but not yet scored.
+        # gold_doctrine: the second target set, doctrine section refs as
+        # opaque store ids ("<document id>#<section id>"). A slug-shaped ref
+        # is refused here, for any cases file: slugs carry names.
         doctrine = row.get("gold_doctrine") or []
         if not isinstance(doctrine, list) or not all(
                 isinstance(ref, str) and DOCTRINE_REF.match(ref) for ref in doctrine):
-            raise ValueError(f"{row['id']}: gold_doctrine must be ['document#section', ...]")
+            raise ValueError(f"{row['id']}: gold_doctrine must be ['<document id>#<section id>', ...] (store uuids, not slugs)")
         cases.append({"id": row["id"], "stratum": row["stratum"], "prompt": row["prompt"],
                       "tool_calls": calls, "gold": sorted(set(gold)),
                       "gold_doctrine": sorted(set(doctrine)),
@@ -272,7 +274,7 @@ def _run_verb(repo, verb, args):
     return json.loads(proc.stdout)
 
 
-_DOC_IDS = {}
+_DOC_IDS: dict[str, dict[str, str]] = {}
 
 
 def doctrine_doc_ids(repo):
@@ -540,7 +542,8 @@ def deliveries_from_report(report):
     return out
 
 
-def score(cases, deliveries, path_universes, meta, labelled=None, classes=None, groups=None):
+def score(cases, deliveries, path_universes, meta, labelled=None, classes=None, groups=None,
+          doctrine_labelled=None):
     """The report. See the module docstring for what is counted where.
 
     `classes`, when given, is {rule id: class} (ops/rule_gold_label.rule_classes:
@@ -555,7 +558,15 @@ def score(cases, deliveries, path_universes, meta, labelled=None, classes=None, 
     `labelled`, when given, is the set of rule ids the gold labellers could
     choose from. A delivered id outside it cannot be judged right or wrong, so
     it is set aside (counted per path as `outside_labelled`) rather than
-    charged as a false positive."""
+    charged as a false positive.
+
+    DOCTRINE is scored the same way. `doctrine_labelled`, when given, is
+    {case id: set of section refs the labellers judged for that case} (its
+    shortlist). A delivered ref outside the case's shortlist was never
+    labelled, so it is set aside (`doctrine.outside_labelled`), not charged.
+    And a path is scored on doctrine only if it DELIVERS doctrine: a path
+    that returned no doctrine ref for any case in this run reports
+    doctrine None ("does not deliver"), not a 0% recall."""
     by_id = {case["id"]: case for case in cases}
     report = {"schema": REPORT_SCHEMA, "cases": len(cases),
               "strata": dict(Counter(case["stratum"] for case in cases)),
@@ -577,7 +588,9 @@ def score(cases, deliveries, path_universes, meta, labelled=None, classes=None, 
         # case (machine turns too): gold_doctrine against delivered refs.
         doctrine = [0, 0, 0]
         doctrine_strata = {}
+        doctrine_outside = 0
         doctrine_scored = False
+        delivers_doctrine = any(out.get("doctrine") for out in per_case.values())
         for case_id, out in per_case.items():
             case = by_id.get(case_id)
             if case is None:
@@ -601,10 +614,15 @@ def score(cases, deliveries, path_universes, meta, labelled=None, classes=None, 
                                                  "tp": tp, "fp": fp, "fn": fn}
             misses.update(fn)
             false_pos.update(fp)
-            if "gold_doctrine" in case:
+            if "gold_doctrine" in case and delivers_doctrine:
                 doctrine_scored = True
                 dgold = set(case.get("gold_doctrine") or ())
-                dtp, dfp, dfn = confusion(dgold, set(out.get("doctrine") or ()))
+                dgot = set(out.get("doctrine") or ())
+                if doctrine_labelled is not None:
+                    judged = set(doctrine_labelled.get(case_id) or ()) | dgold
+                    doctrine_outside += len(dgot - judged)
+                    dgot &= judged
+                dtp, dfp, dfn = confusion(dgold, dgot)
                 for table in (doctrine, doctrine_strata.setdefault(case["stratum"], [0, 0, 0])):
                     table[0] += len(dtp)
                     table[1] += len(dfp)
@@ -672,7 +690,8 @@ def score(cases, deliveries, path_universes, meta, labelled=None, classes=None, 
                          if classes is not None else None),
             "by_group": ({grp: prf(*row) for grp, row in sorted(by_group.items())}
                          if groups is not None else None),
-            "doctrine": prf(*doctrine) if doctrine_scored else None,
+            "doctrine": ({**prf(*doctrine), "outside_labelled": doctrine_outside}
+                         if doctrine_scored else None),
             "doctrine_by_stratum": ({st: prf(*row) for st, row in sorted(doctrine_strata.items())}
                                     if doctrine_scored else None),
             "outside_labelled": sorted(outside.items(), key=lambda kv: (-kv[1], kv[0])),
@@ -771,11 +790,16 @@ def render_markdown(report, statements=None, *, top=10, paths=None):
                   for rid, n in row["false_positives"][:top]]
     if any(report["paths"][name].get("doctrine") for name in order):
         lines += ["", "Doctrine (second target: section refs), all cases:", "",
-                  "| path | doctrine P | doctrine R | TP | FN |", "|---|---|---|---|---|"]
+                  "| path | doctrine P | doctrine R | TP | FN | set aside (not labelled) |",
+                  "|---|---|---|---|---|---|"]
         for name in order:
-            d = report["paths"][name].get("doctrine") or {}
+            d = report["paths"][name].get("doctrine")
+            if d is None:
+                lines.append(f"| {name} | does not deliver doctrine | | | | |")
+                continue
             lines.append(f"| {name} | {_pct(d.get('precision'))} | {_pct(d.get('recall'))} | "
-                         f"{d.get('tp', '–')} | {d.get('fn', '–')} |")
+                         f"{d.get('tp', '–')} | {d.get('fn', '–')} | "
+                         f"{d.get('outside_labelled', 0)} |")
     group_names = sorted({g for name in order
                           for g in (report["paths"][name].get("by_group") or {})})
     if group_names:
