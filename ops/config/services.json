@@ -564,7 +564,7 @@
           "deploy_mechanism": "Claude Code scheduled task (native), cron 30 7 * * 1",
           "expected_cadence_seconds": 604800,
           "cadence_grace_seconds": 172800,
-          "notes": "RESTORED 2026-09-26 after a 2026-09-23 stoppage: an in-progress MacBook->Studio hub move copied this task's SKILL.md onto the Studio (with 16 others) but never registered it with create_scheduled_task, while the MacBook copy was deleted; the MacBook's own scheduled-tasks.json kept the stale enabled row pointing at the now-missing file. Family changed from Local Mac edge to Studio edge: the Studio is the host now, MacBook is a thin client over SSH."
+          "notes": "Re-registered on the Studio 2026-09-26; verification pending: the first proof run stalled on a tool-approval prompt (session local_e02d4dc8-67ed-4b3c-b9be-8ad1aa39cbf2, still 'running', 39 messages, no readback yet). Cause: an in-progress MacBook->Studio hub move on 2026-09-23 copied this task's SKILL.md onto the Studio (one of 22 folders copied that day) but never registered it with create_scheduled_task, while the MacBook copy was deleted; the MacBook's own scheduled-tasks.json kept the stale enabled row pointing at the now-missing file. Family changed from Local Mac edge to Studio edge: the Studio is the host now, MacBook is a thin client over SSH."
         }
       ]
     },
@@ -601,7 +601,7 @@
           "deploy_mechanism": "Claude Code scheduled task (native), cron 0 8 * * 5",
           "expected_cadence_seconds": 604800,
           "cadence_grace_seconds": 172800,
-          "notes": "RESTORED 2026-09-26 after a 2026-09-23 stoppage: an in-progress MacBook->Studio hub move copied this task's SKILL.md onto the Studio (with 16 others) but never registered it with create_scheduled_task, while the MacBook copy was deleted; the MacBook's own scheduled-tasks.json kept the stale enabled row pointing at the now-missing file. Family changed from Local Mac edge to Studio edge: the Studio is the host now, MacBook is a thin client over SSH."
+          "notes": "Re-registered on the Studio 2026-09-26; verification pending. The proof run (session local_cd8147c6-846b-4abd-ac1c-7b0779fa7644) shows as 'succeeded' only because the coordinator stopped it about 10 seconds in, to keep a test run from queuing real posts to Blotato -- that is not a completed run. Its transcript was read back: it called standing-context and read-loop (both read-only) and one Bash call that was interrupted; no write verb was ever called, and no file under the vault's Marketing/Social Media/ changed. This task's first real run is its next scheduled Friday firing. Cause: an in-progress MacBook->Studio hub move on 2026-09-23 copied this task's SKILL.md onto the Studio (one of 22 folders copied that day) but never registered it with create_scheduled_task, while the MacBook copy was deleted; the MacBook's own scheduled-tasks.json kept the stale enabled row pointing at the now-missing file. Family changed from Local Mac edge to Studio edge: the Studio is the host now, MacBook is a thin client over SSH."
         }
       ]
     },
@@ -620,7 +620,7 @@
           "deploy_mechanism": "Claude Code scheduled task (native), cron 0 9 6-10 * * (fires daily in-window; the task's own ledger gate runs it once per month)",
           "expected_cadence_seconds": 2592000,
           "cadence_grace_seconds": 518400,
-          "notes": "RESTORED 2026-09-26 (90-day audit follow-up): no ops.run row in 90 days, and this id never appears in any historical MacBook scheduled-tasks.json this audit examined -- registered on the Studio for the first time, not re-registered. Registry (control-plane-workflows.v1.json) has always marked it enabled with a live cadence, and services.json already tracked its cadence/grace, so the gap looks like a registration that never completed rather than a deliberate pause. Family changed from Local Mac edge to Studio edge."
+          "notes": "Re-registered on the Studio 2026-09-26; verification pending: the first proof run stalled on a tool-approval prompt (session local_33c8a931-dd0d-403b-b9b8-e9d18466e12e, still 'running', no readback yet). 90-day audit follow-up: no ops.run row in 90 days, and this id never appears in any historical MacBook scheduled-tasks.json this audit examined -- registered on the Studio for the first time, not re-registered. Registry (control-plane-workflows.v1.json) has always marked it enabled with a live cadence, and services.json already tracked its cadence/grace, so the gap looks like a registration that never completed rather than a deliberate pause. Family changed from Local Mac edge to Studio edge."
         }
       ]
     },
@@ -639,7 +639,7 @@
           "deploy_mechanism": "Claude Code scheduled task (native), cron 0 9 5-11 * * (fires daily in-window; the task's own ledger gate runs it once per month)",
           "expected_cadence_seconds": 2592000,
           "cadence_grace_seconds": 518400,
-          "notes": "RESTORED 2026-09-26 (90-day audit follow-up): no ops.run row in 90 days, and this id never appears in any historical MacBook scheduled-tasks.json this audit examined -- registered on the Studio for the first time, not re-registered. Registry (control-plane-workflows.v1.json) has always marked it enabled with a live cadence, and services.json already tracked its cadence/grace, so the gap looks like a registration that never completed rather than a deliberate pause. Family changed from Local Mac edge to Studio edge."
+          "notes": "Re-registered on the Studio 2026-09-26; verification pending: the first proof run stalled on a tool-approval prompt (session local_e6e64335-a092-462d-9a70-e2511f75e0a4, still 'running', no readback yet). 90-day audit follow-up: no ops.run row in 90 days, and this id never appears in any historical MacBook scheduled-tasks.json this audit examined -- registered on the Studio for the first time, not re-registered. Registry (control-plane-workflows.v1.json) has always marked it enabled with a live cadence, and services.json already tracked its cadence/grace, so the gap looks like a registration that never completed rather than a deliberate pause. Family changed from Local Mac edge to Studio edge."
         }
       ]
     },
@@ -658,7 +658,7 @@
           "deploy_mechanism": "Claude Code scheduled task (native), cron 30 8 15-21 * * (fires daily in-window; the task's own ledger gate runs it once per month)",
           "expected_cadence_seconds": 2592000,
           "cadence_grace_seconds": 518400,
-          "notes": "RESTORED 2026-09-26 (90-day audit follow-up): the MacBook's own scheduled-tasks.json showed this disabled since 2026-08-21 (its last real run), independently of and earlier than the 2026-09-23 hub-move incident and not part of the 2026-08-23 usage-crunch pause list (reenable-paused-schedules-0826 names 7 tasks and this is not one). No documented deliberate-retirement decision found for it; registry keeps it enabled with a live cadence. Re-registered on the Studio from the tracked ops/scheduled-tasks/system-sweep-monthly.SKILL.md contract. Family changed from Local Mac edge to Studio edge."
+          "notes": "Re-registered on the Studio 2026-09-26; verification pending: the first proof run stalled on a tool-approval prompt (session local_09173937-4d4e-4c52-bcb8-2d07c2cb1985, still 'running', no readback yet). 90-day audit follow-up: the MacBook's own scheduled-tasks.json showed this disabled since 2026-08-21 (its last real run), independently of and earlier than the 2026-09-23 hub-move incident and not part of the 2026-08-23 usage-crunch pause list (reenable-paused-schedules-0826 names 7 tasks and this is not one). No documented deliberate-retirement decision found for it; registry keeps it enabled with a live cadence. Re-registered on the Studio from the tracked ops/scheduled-tasks/system-sweep-monthly.SKILL.md contract. Family changed from Local Mac edge to Studio edge."
         }
       ]
     },
@@ -677,7 +677,7 @@
           "deploy_mechanism": "Claude Code scheduled task (native), cron 0 9 15-21 * * (fires daily in-window; the task's own ledger gate runs it once per month)",
           "expected_cadence_seconds": 2592000,
           "cadence_grace_seconds": 518400,
-          "notes": "RESTORED 2026-09-26 (90-day audit follow-up): same finding as its sibling system-sweep-monthly -- the MacBook's own scheduled-tasks.json showed this disabled since 2026-08-21, independently of and earlier than the 2026-09-23 hub-move incident and not part of the 2026-08-23 usage-crunch pause list (reenable-paused-schedules-0826 names 7 tasks and this is not one). No documented deliberate-retirement decision found; registry keeps it enabled with a live cadence. Re-registered on the Studio from the tracked ops/scheduled-tasks/playbook-review-monthly.SKILL.md contract. Family changed from Local Mac edge to Studio edge."
+          "notes": "Re-registered on the Studio 2026-09-26; verification pending: the first proof run stalled on a tool-approval prompt (session local_dab62ffc-bb07-4313-bf5e-52b50edb0926, still 'running', no readback yet). 90-day audit follow-up: same finding as its sibling system-sweep-monthly -- the MacBook's own scheduled-tasks.json showed this disabled since 2026-08-21, independently of and earlier than the 2026-09-23 hub-move incident and not part of the 2026-08-23 usage-crunch pause list (reenable-paused-schedules-0826 names 7 tasks and this is not one). No documented deliberate-retirement decision found; registry keeps it enabled with a live cadence. Re-registered on the Studio from the tracked ops/scheduled-tasks/playbook-review-monthly.SKILL.md contract. Family changed from Local Mac edge to Studio edge."
         }
       ]
     },
@@ -696,7 +696,7 @@
           "deploy_mechanism": "Claude Code scheduled task (native), cron 0 9 * * 4",
           "expected_cadence_seconds": 604800,
           "cadence_grace_seconds": 172800,
-          "notes": "RESTORED 2026-09-26 after a 2026-09-23 stoppage: an in-progress MacBook->Studio hub move copied this task's SKILL.md onto the Studio (with 16 others) but never registered it with create_scheduled_task, while the MacBook copy was deleted; the MacBook's own scheduled-tasks.json kept the stale enabled row pointing at the now-missing file. Family changed from Local Mac edge to Studio edge: the Studio is the host now, MacBook is a thin client over SSH."
+          "notes": "Re-registered on the Studio 2026-09-26; verification pending: the first proof run stalled on a tool-approval prompt (session local_9ee2bbde-38db-49f3-be02-ae051a04a945, still 'running', 104 messages, real progress -- loaded the briefing and started pulling the enrichment queue -- but no readback yet). Cause: an in-progress MacBook->Studio hub move on 2026-09-23 copied this task's SKILL.md onto the Studio (one of 22 folders copied that day) but never registered it with create_scheduled_task, while the MacBook copy was deleted; the MacBook's own scheduled-tasks.json kept the stale enabled row pointing at the now-missing file. Family changed from Local Mac edge to Studio edge: the Studio is the host now, MacBook is a thin client over SSH."
         }
       ]
     },
@@ -769,7 +769,7 @@
           "deploy_mechanism": "Claude Code scheduled task (native), cron 0 11 * * 1-5",
           "expected_cadence_seconds": 86400,
           "cadence_grace_seconds": 172800,
-          "notes": "Weekdays only; the grace spans the weekend stand-down, same as local-briefs. RESTORED 2026-09-26 after a 2026-09-23 stoppage: an in-progress MacBook->Studio hub move copied this task's SKILL.md onto the Studio (with 16 others) but never registered it with create_scheduled_task, while the MacBook copy was deleted; the MacBook's own scheduled-tasks.json kept the stale enabled row pointing at the now-missing file. Family changed from Local Mac edge to Studio edge: the Studio is the host now, MacBook is a thin client over SSH."
+          "notes": "Weekdays only; the grace spans the weekend stand-down, same as local-briefs. Re-registered on the Studio 2026-09-26; verification pending: the first proof run stalled on a tool-approval prompt (session local_b7bf275a-0bd8-4587-b746-16ac0f8840ac, still 'running', 63 messages, no readback yet). Cause: an in-progress MacBook->Studio hub move on 2026-09-23 copied this task's SKILL.md onto the Studio (one of 22 folders copied that day) but never registered it with create_scheduled_task, while the MacBook copy was deleted; the MacBook's own scheduled-tasks.json kept the stale enabled row pointing at the now-missing file. Family changed from Local Mac edge to Studio edge: the Studio is the host now, MacBook is a thin client over SSH."
         }
       ]
     },
@@ -788,7 +788,7 @@
           "deploy_mechanism": "Claude Code scheduled task (native), cron 15 8 * * 1",
           "expected_cadence_seconds": 604800,
           "cadence_grace_seconds": 172800,
-          "notes": "RESTORED 2026-09-26 after a 2026-09-23 stoppage: an in-progress MacBook->Studio hub move copied this task's SKILL.md onto the Studio (with 16 others) but never registered it with create_scheduled_task, while the MacBook copy was deleted; the MacBook's own scheduled-tasks.json kept the stale enabled row pointing at the now-missing file. Family changed from Local Mac edge to Studio edge: the Studio is the host now, MacBook is a thin client over SSH."
+          "notes": "Re-registered on the Studio 2026-09-26; verification pending: the first proof run stalled on a tool-approval prompt (session local_d2af6b2a-7262-43e4-ab37-62c6cea6562a, still 'running', 44 messages, no readback yet). Cause: an in-progress MacBook->Studio hub move on 2026-09-23 copied this task's SKILL.md onto the Studio (one of 22 folders copied that day) but never registered it with create_scheduled_task, while the MacBook copy was deleted; the MacBook's own scheduled-tasks.json kept the stale enabled row pointing at the now-missing file. Family changed from Local Mac edge to Studio edge: the Studio is the host now, MacBook is a thin client over SSH."
         }
       ]
     },
@@ -807,7 +807,7 @@
           "deploy_mechanism": "Claude Code scheduled task (native), cron 30 9 * * 1",
           "expected_cadence_seconds": 604800,
           "cadence_grace_seconds": 172800,
-          "notes": "ENABLED AND UNREGISTERED until 2026-08-15, found by cross-checking list_scheduled_tasks against this file rather than by anything noticing on its own. The registry's own rule above is that only currently-enabled tasks are registered and disabled ones are deliberately left out, so this omission was a gap and not a choice: unregistered it had no cadence, nothing could call it stale, and ops/edge-liveness.py could not see it go quiet from off the Mac. Same 7-day cadence and 2-day grace as every other weekly task, for the reason local-briefs established — a weekly job can miss its one window if the Mac is asleep. Criticality is low because its output feeds the Friday batch rather than any client-facing or recovery path: a missed week costs that batch some fuel and nothing else. RESTORED 2026-09-26 after a SECOND registration gap (2026-09-23): an in-progress MacBook->Studio hub move copied this task's SKILL.md onto the Studio (with 16 others) but again never called create_scheduled_task, while the MacBook copy was deleted and its scheduled-tasks.json kept the stale enabled row. Family changed from Local Mac edge to Studio edge: the Studio is the host now, MacBook is a thin client over SSH. This is the same failure class as the 2026-08-15 gap above and neither edge-liveness.py nor any other automated check has caught either occurrence -- both were found by a human cross-check."
+          "notes": "ENABLED AND UNREGISTERED until 2026-08-15, found by cross-checking list_scheduled_tasks against this file rather than by anything noticing on its own. The registry's own rule above is that only currently-enabled tasks are registered and disabled ones are deliberately left out, so this omission was a gap and not a choice: unregistered it had no cadence, nothing could call it stale, and ops/edge-liveness.py could not see it go quiet from off the Mac. Same 7-day cadence and 2-day grace as every other weekly task, for the reason local-briefs established — a weekly job can miss its one window if the Mac is asleep. Criticality is low because its output feeds the Friday batch rather than any client-facing or recovery path: a missed week costs that batch some fuel and nothing else. Re-registered on the Studio 2026-09-26 after a SECOND registration gap (2026-09-23); verification pending: the first proof run stalled on a tool-approval prompt (session local_7f276c32-2bc0-4484-af4d-08dd24bc5114, still 'running', 36 messages, no readback yet). Cause: an in-progress MacBook->Studio hub move copied this task's SKILL.md onto the Studio (one of 22 folders copied that day) but again never called create_scheduled_task, while the MacBook copy was deleted and its scheduled-tasks.json kept the stale enabled row. Family changed from Local Mac edge to Studio edge: the Studio is the host now, MacBook is a thin client over SSH. This is the same failure class as the 2026-08-15 gap above and neither edge-liveness.py nor any other automated check has caught either occurrence -- both were found by a human cross-check."
         }
       ]
     },

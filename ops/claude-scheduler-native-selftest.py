@@ -32,6 +32,19 @@ def refuses(fn) -> bool:
     return False
 
 
+def value_or_none(fn):
+    """Run fn and return its result, or None on CutoverRefusal -- so a check
+    on the RESULT can fail cleanly with a FAIL line instead of the refusal
+    propagating out of check()'s own argument evaluation and crashing the
+    whole selftest with a traceback. On main's pre-fix code this is exactly
+    what happens to the zoneinfo.default/ case below: system_timezone()
+    raises before check() is ever called."""
+    try:
+        return fn()
+    except CutoverRefusal:
+        return None
+
+
 def check_system_timezone() -> None:
     """system_timezone() reads the REAL host probe path, unlike every other
     check in this file, which passes host_timezone= directly and so never
@@ -49,7 +62,7 @@ def check_system_timezone() -> None:
             localtime = root / f"localtime-{zonedir}"
             localtime.symlink_to(zone_target)
             check(f"system_timezone resolves through {zonedir}/",
-                  system_timezone(localtime) == "America/Chicago")
+                  value_or_none(lambda localtime=localtime: system_timezone(localtime)) == "America/Chicago")
         no_zone_target = root / "not-a-zone-dir" / "file"
         no_zone_target.parent.mkdir(parents=True, exist_ok=True)
         no_zone_target.write_text("x", encoding="utf-8")
