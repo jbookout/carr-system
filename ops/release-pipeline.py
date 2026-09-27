@@ -99,11 +99,16 @@ released batch ONLY if ALL of these hold:
      target, is exactly PR F's merge commit (GitHub's merge_commit_sha for F),
      and B is its ancestor in git;
   2. F's DECIDING approval (the same exact or main-merge-only rule above, so a
-     marker on an older approval, on a non-verdict comment, on an untrusted
-     comment, or quoted/inline text never counts) carries its own line
-     `Fixes-Forward: #<B's PR number>` (one number per line; several lines
-     for several blocked PRs);
-  3. the release target is at or after F's merge commit (re-checked in git).
+     marker on an older approval, on a non-verdict comment or on an untrusted
+     comment never counts) carries its own line `Fixes-Forward: #<B's PR
+     number>` starting in column 0, outside any fenced block (so quoted,
+     indented, fenced or inline text never counts; CRLF is fine; one number
+     per line, several lines for several blocked PRs);
+  3. the release target is at or after F's merge commit (re-checked in git),
+     and F's change is still present at the target: reverting F on the target
+     would change the tree. A later revert of F in the same batch, or a later
+     rewrite of F's lines, fails this; a later PR that carries the fix forward
+     again needs its own marker (and passes the same check).
 A target between B and F therefore stays a review_blocked hold: the defective
 commit can never ship alone, only in the same atomic release as its fix. B's
 BLOCK verdict is left as it is, B is never listed as approved, and its release
@@ -582,16 +587,28 @@ def _latest_approval(comments: list[dict], cfg: dict) -> dict:
     return last
 
 
-FIXES_FORWARD_RE = re.compile(r"^[ \t]*Fixes-Forward:[ \t]*#([0-9]+)[ \t]*$", re.M)
+FIXES_FORWARD_RE = re.compile(r"^Fixes-Forward:[ \t]*#([1-9][0-9]*)[ \t]*$")
+_FENCE_RE = re.compile(r"^[ ]{0,3}(```|~~~)")
 
 
 def fixes_forward(approval: dict) -> set[int]:
     """The PR numbers an approval names on its own `Fixes-Forward: #<n>`
-    lines: one number per line, the whole line, nothing quoted or inline.
+    lines: the line starts in column 0 (so never quoted, indented or inline),
+    carries one number without a leading zero and nothing after it but
+    spaces, and sits outside any ``` or ~~~ fenced block. CRLF is tolerated.
     Read ONLY from the comment that approval_of() returned as deciding, so a
     marker on an older approval, a non-verdict comment or an untrusted
     comment never counts."""
-    return {int(n) for n in FIXES_FORWARD_RE.findall(str(approval.get("body") or ""))}
+    found: set[int] = set()
+    fenced = False
+    for line in str(approval.get("body") or "").splitlines():
+        if _FENCE_RE.match(line):
+            fenced = not fenced
+            continue
+        m = None if fenced else FIXES_FORWARD_RE.match(line.rstrip("\r"))
+        if m:
+            found.add(int(m.group(1)))
+    return found
 
 
 def evidence_ref_from_url(url: str) -> str:
@@ -1103,7 +1120,10 @@ class Pipeline:
           2. F's DECIDING approval, the one approval_of() accepted under the
              exact or main-merge-only rule, carries the line
              `Fixes-Forward: #<B's PR number>` (fixes_forward());
-          3. the target is at or after F's merge commit (re-checked in git).
+          3. the target is at or after F's merge commit (re-checked in git),
+             and F's change is still PRESENT at the target (change_present):
+             a later revert of F, or a later rewrite of F's lines, drops F as
+             the fixer unless that later PR carries its own marker.
         B is bound by its commit on main and the PR GitHub maps it to; F by
         its merge_commit_sha, its PR number and its approval's Reviewed-SHA.
         The first unfixed B raises; nothing is shipped partially.
@@ -1112,26 +1132,47 @@ class Pipeline:
         re-approved; B is not added to the approved PR list."""
         out: list[dict] = []
         for b in blocked:
-            fix = next((f for f in sorted(fixers, key=lambda f: -f["position"])
-                        if f["position"] < b["position"] and b["pr"] in f["fixes"]
-                        and f["merge_commit_sha"] == f["commit"]), None)
-            if fix is not None:
+            candidates = [f for f in sorted(fixers, key=lambda f: -f["position"])
+                          if f["position"] < b["position"] and b["pr"] in f["fixes"]
+                          and f["merge_commit_sha"] == f["commit"]]
+            fix = None
+            for cand in candidates:
                 try:
-                    self.git("merge-base", "--is-ancestor", fix["commit"], sha, cwd=repo_dir)
-                    self.git("merge-base", "--is-ancestor", b["commit"], fix["commit"], cwd=repo_dir)
+                    self.git("merge-base", "--is-ancestor", cand["commit"], sha, cwd=repo_dir)
+                    self.git("merge-base", "--is-ancestor", b["commit"], cand["commit"], cwd=repo_dir)
                 except StepFailed:
-                    fix = None
+                    continue
+                if self.change_present(repo_dir, cand["commit"], sha):
+                    fix = cand
+                    break
             if fix is None:
-                raise Blocked("review_blocked",
-                              f"PR #{b['pr']} ({b['commit'][:12]}): {b['detail']}; no later PR in this "
-                              f"batch at or before the target {sha[:12]} has a deciding approval "
-                              f"carrying `Fixes-Forward: #{b['pr']}`")
+                why = (f"the change of fixing PR(s) {', '.join('#' + str(c['pr']) for c in candidates)} "
+                       f"is no longer present at the target (reverted or rewritten since); a later PR "
+                       f"that carries the fix needs its own `Fixes-Forward: #{b['pr']}`"
+                       if candidates else
+                       f"no later PR in this batch at or before the target {sha[:12]} has a deciding "
+                       f"approval carrying `Fixes-Forward: #{b['pr']}`")
+                raise Blocked("review_blocked", f"PR #{b['pr']} ({b['commit'][:12]}): {b['detail']}; {why}")
             out.append({"blocked_pr": b["pr"], "blocked_commit": b["commit"], "block_url": b["url"],
                         "fixing_pr": fix["pr"], "fixing_commit": fix["commit"],
                         "fixing_reviewed_sha": fix["reviewed_sha"], "fixing_approval_url": fix["url"]})
             self.out(f"  fix-forward: PR #{b['pr']} ({b['commit'][:12]}) is BLOCKED and ships only with "
                      f"its fix PR #{fix['pr']} ({fix['commit'][:12]}), approval {fix['url']}")
         return out
+
+    def change_present(self, repo_dir: Path, fix: str, target: str) -> bool:
+        """True when the change `fix` introduced is still in `target`: reverting
+        `fix` on top of `target` (a three-way merge with base fix, ours target,
+        theirs fix^1, exactly what `git revert` computes) applies cleanly AND
+        changes the tree. A no-op revert means the change is gone (a later
+        revert); a conflict means its lines were rewritten since, which is not
+        proof either. Both are False, so the batch holds (fail closed)."""
+        try:
+            merged = self.git("merge-tree", "--write-tree", f"--merge-base={fix}", target, f"{fix}^1",
+                              cwd=repo_dir).splitlines()[0].strip()
+            return merged != self.git("rev-parse", f"{target}^{{tree}}", cwd=repo_dir)
+        except (StepFailed, IndexError):
+            return False
 
     def main_merge_only(self, repo_dir: Path, number: int, reviewed: str, head: str,
                         merged: str) -> str | None:
