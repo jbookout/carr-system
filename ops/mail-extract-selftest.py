@@ -8,6 +8,7 @@ import importlib.util
 import inspect
 import json
 import pathlib
+import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -78,6 +79,9 @@ check("mailbox listing keeps Mail's indices while excluding junk",
 check("mailbox enumeration performs no per-mailbox message count",
       "count of messages" not in mx.LIST_SCRIPT and
       "name of every mailbox of acct" in mx.LIST_SCRIPT)
+check("mail capture AppleScript contains no outbound send command",
+      not re.search(r"\bsend\b", mx.LIST_SCRIPT + mx.EXTRACT_SCRIPT,
+                    flags=re.IGNORECASE))
 
 # THE JOIN THAT MATTERS: every key the matcher reads off a message must be a key
 # the extractor writes. This is the seam loop #169 found dead — the matcher was
