@@ -2,7 +2,7 @@
 -- where 0736 has landed. Counts metadata only; no titles or bodies are returned.
 -- A persisted in-app row is not evidence that a human saw or acknowledged it.
 with targeted as (
-  select l.id,l.kind,l.owner,l.created_at,l.marker,l.due_on,
+  select l.id,l.kind,l.owner,l.created_by,l.created_at,l.marker,l.due_on,
          r.id as recipient_actor,r.slug as recipient_slug,
          (l.personal_to is null or l.personal_to=r.id) as visible_to_recipient,
          (l.created_by <> r.id) as other_authored,
@@ -25,25 +25,38 @@ with targeted as (
          nr.notification_id as read_id,
          exists (select 1 from public.event v
                   where v.subject_type='loop' and v.subject_id=e.id
-                    and ((v.verb='add-loop' and
+                    and ((v.verb='add-loop' and v.actor_id=e.created_by and
                           v.new_value->>'owner'=e.owner and
                           v.new_value->>'kind'=e.kind)
                       or (v.verb='reconcile-loop-notification' and
                           v.cause='import_migration' and
                           v.new_value->>'source'='current_loop_item' and
                           v.new_value->>'owner'=e.owner and
-                          v.new_value->>'kind'=e.kind))) as has_source_event,
+                          v.new_value->>'kind'=e.kind and
+                          exists (select 1 from public.actor x
+                                   where x.id=v.actor_id and x.slug='claude'
+                                     and x.kind='automation')))) as has_source_event,
          exists (select 1 from public.event v
                   where v.subject_type='loop' and v.subject_id=e.id
-                    and v.verb='add-loop' and
+                    and v.verb='add-loop' and v.actor_id=e.created_by and
                     v.new_value->>'owner'=e.owner and
                     v.new_value->>'kind'=e.kind) as has_creation_event,
-         (select count(*) from ops.loop_notification_attempt a
-           where a.loop_id=e.id and a.recipient_actor=e.recipient_actor
-             and a.outcome='failed') as failed_attempts,
-         (select count(*) from ops.loop_notification_attempt a
-           where a.loop_id=e.id and a.recipient_actor=e.recipient_actor
-             and a.outcome='deduplicated') as deduped_attempts
+         (select count(*) from public.event a
+           where a.subject_type='loop' and a.subject_id=e.id
+             and a.verb='loop-notification-attempt'
+             and a.new_value->>'recipient_actor'=e.recipient_actor::text
+             and a.new_value->>'outcome'='failed'
+             and exists (select 1 from public.actor x
+                          where x.id=a.actor_id and x.slug='claude'
+                            and x.kind='automation')) as failed_attempts,
+         (select count(*) from public.event a
+           where a.subject_type='loop' and a.subject_id=e.id
+             and a.verb='loop-notification-attempt'
+             and a.new_value->>'recipient_actor'=e.recipient_actor::text
+             and a.new_value->>'outcome'='deduplicated'
+             and exists (select 1 from public.actor x
+                          where x.id=a.actor_id and x.slug='claude'
+                            and x.kind='automation')) as deduped_attempts
     from eligible e
     left join lateral (
       select n.id from ops.notification n
