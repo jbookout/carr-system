@@ -29,6 +29,8 @@ PLANTED MUTANTS. The same cases are re-run against copies of the gate with
 one defect planted each; every mutant must turn at least one case red (see
 MUTANTS below).
 """
+import contextlib
+import io
 import json
 import os
 import re
@@ -112,16 +114,35 @@ class Case:
             fh.write(FAULT_SITECUSTOMIZE)
         self.env["PYTHONPATH"] = folder
 
+    def subprocess_only(self):
+        """The disk-full fault lives in a sitecustomize that only a fresh
+        interpreter loads, so those cases keep a real process per call."""
+        return "PYTHONPATH" in self.env
+
     def arm(self, source="startup"):
+        if not self.subprocess_only():
+            with InProcess(self) as (_hook, lib):
+                return lib.arm_session(SESSION, source) + "\n"
         code = ("import sys; sys.path.insert(0, sys.argv[1]); "
                 "from lib.rule_boot_gate import arm_session; print(arm_session(sys.argv[2], sys.argv[3]))")
         return subprocess.run([sys.executable, "-c", code, self.tree, SESSION, source],
                               capture_output=True, text=True, env=self.env, timeout=30).stdout
 
     def hook(self, payload):
-        out = subprocess.run([sys.executable, os.path.join(self.tree, "hooks", "rule-boot-gate.py")],
-                             input=json.dumps(payload), capture_output=True, text=True,
-                             env=self.env, timeout=30).stdout.strip()
+        if self.subprocess_only():
+            out = subprocess.run([sys.executable, os.path.join(self.tree, "hooks", "rule-boot-gate.py")],
+                                 input=json.dumps(payload), capture_output=True, text=True,
+                                 env=self.env, timeout=30).stdout.strip()
+        else:
+            with InProcess(self) as (hook, _lib):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    sys.stdin = io.StringIO(json.dumps(payload))
+                    try:
+                        hook.main()
+                    finally:
+                        sys.stdin = sys.__stdin__
+                out = buf.getvalue().strip()
         return json.loads(out)["hookSpecificOutput"] if out else None
 
     def hooks_parallel(self, payloads):
@@ -176,6 +197,64 @@ class Case:
             payload.update(hook_event_name="PostToolUseFailure",
                            error="could not reach the deployed Worker: fetch failed")
         return pre, self.hook(payload)
+
+
+_LOADED: dict = {}
+_ENV_KEYS = ("CARR_RULE_BOOT_STATE_DIR", "CARR_HOOK_GUARD_LOG", "CARR_RULE_BOOT_FETCH_STUB")
+
+
+def _load(tree):
+    """The tree's own hooks/rule-boot-gate.py and lib/rule_boot_gate.py, loaded
+    once per tree (a mutant tree gets its own mutated lib)."""
+    if tree not in _LOADED:
+        import importlib.util
+        import types
+        tag = f"_rbg_{len(_LOADED)}"
+        lspec = importlib.util.spec_from_file_location(f"{tag}_lib", os.path.join(tree, "lib", "rule_boot_gate.py"))
+        lib = importlib.util.module_from_spec(lspec)
+        lspec.loader.exec_module(lib)
+        hspec = importlib.util.spec_from_file_location(f"{tag}_hook", os.path.join(tree, "hooks", "rule-boot-gate.py"))
+        hook = importlib.util.module_from_spec(hspec)
+        hspec.loader.exec_module(hook)
+        _LOADED[tree] = (hook, lib, types.ModuleType("lib"))
+    return _LOADED[tree]
+
+
+class InProcess:
+    """Run the tree's real hook main() in this interpreter, under the case's
+    environment, with `from lib.rule_boot_gate import ...` resolving to that
+    tree's lib. It replaces one interpreter start per hook call (the selftest
+    ran ~337s that way, past CI's per-script cap), not the code under test."""
+
+    def __init__(self, case):
+        self.case = case
+
+    def __enter__(self):
+        hook, lib, pkg = _load(self.case.tree)
+        self.saved_env = {k: os.environ.get(k) for k in _ENV_KEYS}
+        for k in _ENV_KEYS:
+            if self.case.env.get(k) is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = self.case.env[k]
+        hook.LOG = self.case.env["CARR_HOOK_GUARD_LOG"]
+        self.saved_mods = {k: sys.modules.get(k) for k in ("lib", "lib.rule_boot_gate")}
+        pkg.rule_boot_gate = lib
+        sys.modules["lib"], sys.modules["lib.rule_boot_gate"] = pkg, lib
+        return hook, lib
+
+    def __exit__(self, *exc):
+        for k, v in self.saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        for k, v in self.saved_mods.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+        return False
 
 
 FAULT_SITECUSTOMIZE = """
