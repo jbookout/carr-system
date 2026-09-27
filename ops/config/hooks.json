@@ -341,9 +341,38 @@
           "timeout": 15
         }
       ]
+    },
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "{{REPO}}/.venv/bin/python {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/session-presence-hook.py claude",
+          "timeout": 5
+        }
+      ]
+    }
+  ],
+  "SessionEnd": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "{{REPO}}/.venv/bin/python {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/session-presence-hook.py claude",
+          "timeout": 5
+        }
+      ]
     }
   ],
   "UserPromptSubmit": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "{{REPO}}/.venv/bin/python {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/session-presence-hook.py claude",
+          "timeout": 5
+        }
+      ]
+    },
     {
       "hooks": [
         {
