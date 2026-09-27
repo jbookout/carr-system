@@ -49,6 +49,7 @@ import {
   V5_F01_OPERATIONS,
   recordSourceAuthorityStoreTools,
 } from "../src/record-source-authority-store.v5.js";
+import { connectionRouteForTool } from "../src/mcp.js";
 
 const DSN = process.env.DATABASE_URL || "";
 const REQUIRED = process.env.CARR_F01_DB_REQUIRED === "1";
@@ -203,6 +204,41 @@ async function call(pg, database, { role, actor }, name, args) {
       const answer = await TOOLS[name].handler(client, actor, args);
       await client.query("COMMIT");
       return answer;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw error;
+    }
+  } finally {
+    await client.end();
+  }
+}
+
+/**
+ * One verb on the ROUTE mcp.js's connectionRouteForTool picks for it, rather
+ * than on a role the test chooses. `call` above always runs as carr_writer with
+ * the acting actor set — reads included — which is why this suite never saw the
+ * 2026-09-27 live refusal: the read was routed to the reader connection, where
+ * 0732 derives the fixed actor 'carr-reader'. The reader route here is the
+ * carr_reader bundle with no transaction and no actor context, as mcp.js runs
+ * it; a writer route is carr_writer, `begin read only` for a declared read,
+ * with the acting actor set.
+ */
+async function callOnRoute(pg, database, route, actor, name, args) {
+  const client = await adminClient(pg, database);
+  try {
+    if (route === "reader") {
+      await client.query("SET SESSION AUTHORIZATION carr_reader");
+      return { answer: await TOOLS[name].handler(client, actor, args), read_only: null };
+    }
+    assert.equal(route, "writer_read_only", "this helper only runs the read routes");
+    await client.query("SET SESSION AUTHORIZATION carr_writer");
+    await client.query("BEGIN READ ONLY");
+    await client.query("select set_config('carr.acting_actor_slug',$1::text,true)", [actor.slug]);
+    try {
+      const readOnly = (await client.query("show transaction_read_only")).rows[0].transaction_read_only;
+      const answer = await TOOLS[name].handler(client, actor, args);
+      await client.query("COMMIT");
+      return { answer, read_only: readOnly };
     } catch (error) {
       await client.query("ROLLBACK").catch(() => {});
       throw error;
@@ -451,6 +487,35 @@ test("F01 on real PostgreSQL: migration, SQL fixtures and the registered verbs",
       // A second install against a stale prior refuses (CAS).
       await refusedWith(call(pg, db, AUTHORITY_JOE, "register-record-source-authority-policy",
         { ...POLICY_ARGS, idempotency_key: "syn-live-policy-0002" }), "stale_policy_digest");
+    });
+
+    await t.test("the read allows on the route mcp.js picks for it, and the reader bundle cannot attribute it", async () => {
+      const args = { selector: { kind: "current_policy" } };
+      // The live failure, on real roles: the reader bundle's database actor is
+      // 'carr-reader', never the caller, so the strict check refuses.
+      await assert.rejects(callOnRoute(pg, db, "reader", AGENT, "read-record-source-authority", args),
+        error => {
+          assert.equal(error?.payload?.error, "actor_context_mismatch");
+          assert.equal(error.payload.detail?.database_actor, "carr-reader");
+          assert.equal(error.payload.detail?.handler_actor, AGENT.slug);
+          return true;
+        });
+      const route = connectionRouteForTool(TOOLS["read-record-source-authority"]);
+      assert.equal(route, "writer_read_only");
+      const { answer, read_only } = await callOnRoute(pg, db, route, AGENT,
+        "read-record-source-authority", args);
+      assert.equal(read_only, "on", "the read ran inside a read-only transaction");
+      assert.equal(answer.decision, "allow");
+      assert.equal(answer.actor_slug, AGENT.slug);
+      // The body is the installed policy as the database itself digests it.
+      const probe = await adminClient(pg, db);
+      try {
+        const installed = (await probe.query("select ops.f01_current_policy_digest() as d")).rows[0].d;
+        assert.match(installed, /^sha256:[0-9a-f]{64}$/);
+        assert.equal(answer.readback.policy_digest, installed);
+      } finally {
+        await probe.end();
+      }
     });
 
     await t.test("owner observation establishes the field, with its four records", async () => {
