@@ -212,6 +212,18 @@ test("V5-RW02 evidence store replay and write-time refusals on real PostgreSQL",
       assert.equal(read.trust_scope, "per_action");
       assert.equal(read.evidence_total, 1);
       assert.equal(read.evidence_authenticated, false);
+      // Live 2026-09-27: the Worker runs a read verb on its READER login, where
+      // the database principal is 'carr-reader' and the handler actor is the
+      // partner. The read must answer there, exactly as it does on the writer.
+      const reader = await clientFor(pg, copy, "carr_reader");
+      try {
+        const actorId = (await reader.query("select id from public.actor where slug=$1", [JOE.slug])).rows[0].id;
+        const onReader = await TOOLS["read-salesforce-action-evidence"].handler(reader, { ...JOE, id: actorId },
+          { action_kind: "opportunity_create" });
+        assert.equal(onReader.decision, "window_read");
+        assert.equal(onReader.evidence_total, 1);
+        assert.equal(onReader.evidence_authenticated, false);
+      } finally { await reader.end(); }
     });
   } finally {
     if (db) await db.end();
