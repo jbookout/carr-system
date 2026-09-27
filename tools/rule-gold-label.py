@@ -219,7 +219,8 @@ def cmd_borderlines(args, gl):
     second = _read_json(args.second, {})
     signals = gl.load_action_signals(args.signals)
     case_probs = {c["id"]: probs[c["id"]] for c in drafts}
-    plan = gl.review_plan(drafts, case_probs, signals, _read_json(args.extended_rules, []))
+    plan = gl.review_plan(drafts, case_probs, signals, _read_json(args.extended_rules, []),
+                          _floors(args, gl))
     rows = [{"case": cid, "rule": rid, "p_first": case_probs[cid][rid],
              "p_second": second.get(cid, {}).get(rid),
              "action_signal": (cid, rid) in plan["signals_hit"]}
@@ -229,6 +230,12 @@ def cmd_borderlines(args, gl):
             handle.write(json.dumps(row) + "\n")
     print(json.dumps({"review_pairs": len(rows), "cases": len({r['case'] for r in rows}),
                       "rules": len({r['rule'] for r in rows})}))
+
+
+def _floors(args, gl):
+    """The committed per-rule review floors, or {} when there is no floors file."""
+    path = getattr(args, "floors", None)
+    return gl.load_review_floors(path) if path and os.path.exists(path) else {}
 
 
 def _read_adjudications(path):
@@ -247,7 +254,8 @@ def cmd_build(args, gl):
     signals = gl.load_action_signals(args.signals)
     extended = sorted(_read_json(args.extended_rules, []))
     case_probs = {c["id"]: probs[c["id"]] for c in drafts}
-    plan = gl.review_plan(drafts, case_probs, signals, extended)
+    floors = _floors(args, gl)
+    plan = gl.review_plan(drafts, case_probs, signals, extended, floors)
     gold = gl.gold_sets_reviewed(case_probs, adjudications, plan["low_by_rule"],
                                  plan["signals_hit"], plan["settled_labels"],
                                  plan["settled_rules"])
@@ -296,6 +304,12 @@ def cmd_build(args, gl):
                          "review_low": gl.REVIEW_LOW,
                          "review_low_extended": gl.REVIEW_LOW_EXTENDED,
                          "review_low_extended_rules": extended,
+                         "review_floors": {
+                             "file": os.path.basename(args.floors) if floors else None,
+                             "rule": "a committed floor replaces the rule's lower bound; below 0 "
+                                     "reviews every case. Floors come from adjudicated samples "
+                                     "just below the bound (gold rate published per sample); a "
+                                     "sample above 10% gold lowered the floor again"},
                          "action_signals": {
                              "file": os.path.basename(args.signals),
                              "exact_rules": sorted({s["rule"] for s in signals
@@ -426,6 +440,8 @@ def main(argv=None):
     p.add_argument("--signals", default=os.path.join(
         REPO, "ops", "fixtures", "rule-delivery-eval", "action-signals.v2.json"))
     p.add_argument("--extended-rules", required=True)
+    p.add_argument("--floors", default=os.path.join(
+        REPO, "ops", "fixtures", "rule-delivery-eval", "review-floors.v2.json"))
     p.add_argument("--out", required=True)
     p = sub.add_parser("build", parents=[common])
     p.add_argument("--adjudications", required=True)
@@ -434,6 +450,9 @@ def main(argv=None):
         help="action-signal table (JSON)")
     p.add_argument("--extended-rules", required=True,
                    help="JSON list of rule ids reviewed down to REVIEW_LOW_EXTENDED")
+    p.add_argument("--floors", default=os.path.join(
+        REPO, "ops", "fixtures", "rule-delivery-eval", "review-floors.v2.json"),
+                   help="per-rule review floors (JSON); ignored if the file is absent")
     p.add_argument("--out", required=True)
     p.add_argument("--seed", default=None)
     p.add_argument("--labelled-on", default=None)

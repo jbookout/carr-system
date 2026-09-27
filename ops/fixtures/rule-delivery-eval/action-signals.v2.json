@@ -1,6 +1,6 @@
 {
  "version": 1,
- "note": "Action signals per rule, derived from each rule's own statement (not from the production trigger table). mode exact: the rule's trigger IS the action, so the label is the signal alone. signal_implies_gold: every case carrying the signal is gold for that rule whatever its score; cases without it are reviewed as usual. Other review entries only force the case into the review set.",
+ "note": "Action signals per rule, derived from each rule's own statement (not from the production trigger table). mode exact: the rule's trigger IS the action, so the label is the signal alone. signal_implies_gold: every case carrying the signal is gold for that rule whatever its score; cases without it are reviewed as usual. Other review entries only force the case into the review set. A squash merge counts as a commit boundary for every rule whose trigger is a commit or merge boundary.",
  "signals": [
   {
    "rule": "14181e60",
@@ -9,10 +9,10 @@
     "^(?:Write|Edit|MultiEdit|NotebookEdit)$"
    ],
    "input_regex": "\\\"file_path\\\":\\s*\\\"[^\\\"]*\\.md\\\"",
-   "signal_implies_gold": true,
+   "signal_implies_gold": false,
    "other_triggers": true,
    "trigger": "The moment a session is about to Write/Edit a .md file: route the content to the database unless the file is on the machine-required manifest.",
-   "why": "Write/Edit of a .md path is the stated binding moment; the manifest exception and the surface-registry clause need review."
+   "why": "Write/Edit of a .md path is the stated binding moment; the manifest exception and the surface-registry clause need review. The condition needs a reader, so the signal only routes the case to adjudication; it does not force gold."
   },
   {
    "rule": "14181e60",
@@ -21,10 +21,10 @@
     "^Bash$"
    ],
    "input_regex": "(?:>>?|\\btee\\s+(?:-a\\s+)?)\\s*[^\\s\\\"'|;&]*\\.md\\b",
-   "signal_implies_gold": true,
+   "signal_implies_gold": false,
    "other_triggers": true,
    "trigger": "A .md file created or modified through a shell redirect or tee.",
-   "why": "A shell write of a .md file is the same act the rule governs (the guard blocks .md create/modify)."
+   "why": "A shell write of a .md file is the same act the rule governs (the guard blocks .md create/modify). The condition needs a reader, so the signal only routes the case to adjudication; it does not force gold."
   },
   {
    "rule": "185013c6",
@@ -61,6 +61,18 @@
    "other_triggers": false,
    "trigger": "Applying a Salesforce-proposed phase change through the deal update verbs.",
    "why": "Writing a deal phase is where the hold applies; whether it came from the Salesforce diff and moves backwards needs review."
+  },
+  {
+   "rule": "24e10ee8",
+   "mode": "review",
+   "tools": [
+    "^Bash$"
+   ],
+   "input_regex": "\\bgh\\s+pr\\s+merge\\b(?![^\\\"]*--disable-auto)",
+   "signal_implies_gold": false,
+   "other_triggers": true,
+   "trigger": "A squash merge (gh pr merge that merges, including --auto) is a commit boundary.",
+   "why": "An act written into a commit message: a squash merge writes the commit message."
   },
   {
    "rule": "24e10ee8",
@@ -164,11 +176,23 @@
    "tools": [
     "^Bash$"
    ],
-   "input_regex": "git\\s+(?:-C\\s+\\S+\\s+)?commit\\b|wrangler\\s+(?:deploy|versions\\s+upload)|\\\"command\\\":\\s*\\\"(?:[^\\\"]*(?:&&|;|\\|\\|)\\s*)?(?:\\./)?(?:bin/deploy[\\w-]*|run\\.sh\\s+(?:deploy|release)\\b)",
-   "signal_implies_gold": true,
+   "input_regex": "\\bgh\\s+pr\\s+merge\\b(?![^\\\"]*--disable-auto)",
+   "signal_implies_gold": false,
+   "other_triggers": true,
+   "trigger": "A squash merge (gh pr merge that merges, including --auto) is a commit boundary.",
+   "why": "Boundary sweep before a commit: a squash merge writes a commit to main."
+  },
+  {
+   "rule": "4a9188f3",
+   "mode": "review",
+   "tools": [
+    "^Bash$"
+   ],
+   "input_regex": "git\\s+(?:-C\\s+\\S+\\s+)?commit\\b|wrangler\\s+(?:deploy|versions\\s+upload)|\\\"command\\\":\\s*\\\"(?:[^\\\"]*(?:&&|;|\\|\\|)\\s*)?(?:\\./)?(?:bin/(?:deploy[\\w-]*|migrate-prod\\.sh)|run\\.sh\\s+(?:deploy|release)\\b)",
+   "signal_implies_gold": false,
    "other_triggers": true,
    "trigger": "Boundary sweep for untaught rulings before any commit or deploy (also before a handoff/checkpoint and on subject change).",
-   "why": "Commit and deploy are named detectable sweep moments; the rule's seven partner-speech triggers are not actions."
+   "why": "Commit and deploy are named detectable sweep moments; the rule's seven partner-speech triggers are not actions. The production-migration script is a deploy. A commit, deploy and squash merge are treated alike: the signal routes the case to adjudication (a dry run is not a deploy), it does not force gold."
   },
   {
    "rule": "4a9188f3",
@@ -426,10 +450,10 @@
     "^(?:Write|Edit|MultiEdit|NotebookEdit)$"
    ],
    "input_regex": "\\\"file_path\\\":\\s*\\\"[^\\\"]*\\.(?:js|mjs|cjs|ts|tsx|jsx|py|sh|sql|swift|go|rb|css|html)\\\"",
-   "signal_implies_gold": true,
+   "signal_implies_gold": false,
    "other_triggers": true,
    "trigger": "A session that changes code works in its own worktree and owns branch, checks, PR, merge, verification and cleanup.",
-   "why": "Editing a code file makes it a coding session; whether the shared checkout was used and delivery was owned needs review."
+   "why": "Editing a code file makes it a coding session; whether the shared checkout was used and delivery was owned needs review. The condition needs a reader, so the signal only routes the case to adjudication; it does not force gold."
   },
   {
    "rule": "ab814a26",
@@ -456,6 +480,30 @@
    "why": "teach/amend-rule is the teaching/amending act; the standing audit direction on violations is a separate non-action trigger."
   },
   {
+   "rule": "bbffc139",
+   "mode": "review",
+   "tools": [
+    "^Bash$"
+   ],
+   "input_regex": "\\bgh\\s+pr\\s+merge\\b(?![^\\\"]*--disable-auto)",
+   "signal_implies_gold": false,
+   "other_triggers": true,
+   "trigger": "A squash merge (gh pr merge that merges, including --auto) is a commit boundary.",
+   "why": "Ledger boundary sweep at a commit or merge to main: a squash merge is one."
+  },
+  {
+   "rule": "bc9188b4",
+   "mode": "review",
+   "tools": [
+    "^Bash$"
+   ],
+   "input_regex": "\\bgh\\s+pr\\s+merge\\b(?![^\\\"]*--disable-auto)",
+   "signal_implies_gold": false,
+   "other_triggers": true,
+   "trigger": "A squash merge (gh pr merge that merges, including --auto) is a commit boundary.",
+   "why": "Committing: a squash merge is a commit boundary; whether the run's own paths were committed by name needs a reader."
+  },
+  {
    "rule": "bc9188b4",
    "mode": "review",
    "tools": [
@@ -474,10 +522,22 @@
     "^Bash$"
    ],
    "input_regex": "git\\s+(?:-C\\s+\\S+\\s+)?(?:commit\\b|add\\s+(?:-A|--all|\\.(?:\\s|$|\\\")))",
-   "signal_implies_gold": true,
+   "signal_implies_gold": false,
    "other_triggers": true,
    "trigger": "Committing: name each path, never `git add -A`/`-a`/`.`.",
    "why": "A commit or bulk add is where the commit-by-named-path constraint binds."
+  },
+  {
+   "rule": "c0b38d80",
+   "mode": "review",
+   "tools": [
+    "^Bash$"
+   ],
+   "input_regex": "\\bgh\\s+pr\\s+merge\\b(?![^\\\"]*--disable-auto)",
+   "signal_implies_gold": false,
+   "other_triggers": true,
+   "trigger": "A squash merge (gh pr merge that merges, including --auto) is a commit boundary.",
+   "why": "A commit touching a gate script: a squash merge commits the PR's diff to main."
   },
   {
    "rule": "c0b38d80",
