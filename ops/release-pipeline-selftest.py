@@ -1386,7 +1386,7 @@ class FixForward(Base):
     """A merged PR B whose latest trusted verdict is BLOCK may ship ONLY
     together with its fix: a LATER commit in the same batch, at or before the
     release target, that is exactly PR F's merge commit, whose DECIDING
-    approval (exact or main-merge-only) carries the line `Fixes-Forward: #<B>`,
+    approval (exact or main-merge-only) has `Fixes-Forward: #<B>` as line 3,
     and whose change is still present at the target. Anything else is a
     review_blocked hold. Never a fresh APPROVE on B's defective head."""
 
@@ -1582,80 +1582,110 @@ class FixForward(Base):
                                  nf: [self.fix_approve(nf, [nb])]})
         self.assertEqual(rec["reason"], "review_stale")
 
-    def test_one_fix_may_carry_several_markers(self):
+    def test_a_second_marker_line_is_ambiguous_and_holds(self):
+        # Only the exact third line carries authority, and any other mention of
+        # the marker makes the approval ambiguous, so it refuses closed. A fix
+        # for two blocked PRs therefore cannot release both on one approval.
         a, na = self.land({"mcp-server/src/a.js": "defect a"})
         b, nb = self.land({"mcp-server/src/b.js": "defect b"})
         f, nf = self.land({"mcp-server/src/a.js": "fixed", "mcp-server/src/b.js": "fixed"})
         runner, rec = self.tick({na: [self.block(na)], nb: [self.block(nb)], nf: [self.fix_approve(nf, [na, nb])]})
-        self.assertEqual(rec["status"], "shipped", rec)
-        self.assertEqual(sorted(x["blocked_pr"] for x in rec["fix_forwards"]), sorted([na, nb]))
+        self.assertEqual(rec["status"], "blocked")
+        self.assertEqual(rec["reason"], "review_blocked")
+        self.assertFalse(rec.get("fix_forwards"))
+        self.assertFalse(DEPLOY_STEPS & {n for n, _ in runner.calls})
 
-    def test_marker_parser_is_line_exact(self):
-        ff = rp.fixes_forward
-        self.assertEqual(ff({"body": "APPROVE\nFixes-Forward: #1342\n"}), {1342})
-        self.assertEqual(ff({"body": "APPROVE\r\nFixes-Forward: #1342\r\n"}), {1342})
-        self.assertEqual(ff({"body": "APPROVE\nFixes-Forward:   #1342  \n"}), {1342})
-        self.assertEqual(ff({"body": "APPROVE\n  Fixes-Forward: #1342\n"}), set(), "indented")
-        self.assertEqual(ff({"body": "APPROVE\n    Fixes-Forward: #1342\n"}), set(), "indented code block")
-        self.assertEqual(ff({"body": "APPROVE\n```\nFixes-Forward: #1342\n```\n"}), set(), "fenced")
-        self.assertEqual(ff({"body": "APPROVE\n~~~text\nFixes-Forward: #1342\n~~~\n"}), set(), "fenced")
-        self.assertEqual(ff({"body": "APPROVE\n```\nx\n```\nFixes-Forward: #1342\n"}), {1342})
-        self.assertEqual(ff({"body": "APPROVE\nsee Fixes-Forward: #1342"}), set())
-        self.assertEqual(ff({"body": "APPROVE\n> Fixes-Forward: #1342"}), set())
-        self.assertEqual(ff({"body": "APPROVE\nFixes-Forward: 1342"}), set())
-        self.assertEqual(ff({"body": "APPROVE\nFixes-Forward: #01342"}), set(), "leading zero")
-        self.assertEqual(ff({"body": "APPROVE\nFixes-Forward: #1342, #1343"}), set())
+    # -- review of 2f65210b: the marker is ONLY the exact third line --
 
-    # -- review of c7bf3ccc, finding (b): a fence closes only per CommonMark --
+    SHA = "a" * 40
 
-    def test_marker_parser_closes_a_fence_only_with_its_own_character_and_length(self):
-        ff = rp.fixes_forward
-        fenced = {
-            "shorter backtick run inside a four-backtick fence":
-                "APPROVE\n````text\n```\nFixes-Forward: #1342\n````\n",
-            "tilde line inside a backtick fence":
-                "APPROVE\n```text\n~~~\nFixes-Forward: #1342\n```\n",
-            "backtick line inside a tilde fence":
-                "APPROVE\n~~~\n```\nFixes-Forward: #1342\n~~~\n",
-            "shorter tilde run inside a four-tilde fence":
-                "APPROVE\n~~~~\n~~~\nFixes-Forward: #1342\n~~~~\n",
-            "same-character line with a non-whitespace suffix does not close":
-                "APPROVE\n```\n``` not a closer\nFixes-Forward: #1342\n```\n",
-            "same-character longer line with a suffix does not close":
-                "APPROVE\n```\n````x\nFixes-Forward: #1342\n```\n",
-            "a closer indented four spaces is content":
-                "APPROVE\n```\n    ```\nFixes-Forward: #1342\n```\n",
-            "an unclosed fence runs to the end of the comment":
-                "APPROVE\n```\nFixes-Forward: #1342\n",
-            "a backtick info string containing a backtick is not an opener":
-                "APPROVE\n```a`b\n```\nFixes-Forward: #1342\n```\n",
-            "an HTML comment hides the marker":
-                "APPROVE\n<!--\nFixes-Forward: #1342\n-->\n",
-            "a <pre> block is code":
-                "APPROVE\n<pre>\nFixes-Forward: #1342\n</pre>\n",
-            "U+2028 renders mid-line, it is not a line break":
-                "APPROVE\nsee\u2028Fixes-Forward: #1342\n",
-            "CRLF fence lines":
-                "APPROVE\r\n````\r\n```\r\nFixes-Forward: #1342\r\n````\r\n",
+    def ff(self, body, reviewed=None):
+        cfg = json.loads((HERE / "config" / "release-pipeline.v1.json").read_text())["worker"]
+        return rp.fixes_forward({"body": body}, cfg, reviewed or self.SHA)
+
+    def test_marker_counts_only_as_the_exact_third_line_of_the_approval(self):
+        S = self.SHA
+        good = f"APPROVE\nReviewed-SHA: {S}\nFixes-Forward: #1342"
+        counts = {
+            "exact three lines": good,
+            "trailing newline": good + "\n",
+            "CRLF": good.replace("\n", "\r\n") + "\r\n",
+            "prose after line 3": good + "\n\nNotes: the fix restores the guard.\n",
+            "APPROVE-WITH-NITS verdict line": good.replace("APPROVE", "APPROVE-WITH-NITS", 1),
+            "the other configured approve marker": good.replace("APPROVE", "Independent review: PASS", 1),
         }
-        for why, body in fenced.items():
+        for why, body in counts.items():
             with self.subTest(why):
-                self.assertEqual(ff({"body": body}), set(), why)
-        closed = {
-            "a longer run of the same character closes":
-                "APPROVE\n```\nx\n`````\nFixes-Forward: #1342\n",
-            "a four-backtick fence closed by four backticks":
-                "APPROVE\n````\n```\n````\nFixes-Forward: #1342\n",
-            "a closer indented up to three spaces with trailing spaces closes":
-                "APPROVE\n~~~\nx\n   ~~~  \nFixes-Forward: #1342\n",
-            "a fence opened inside a quote closes with the quote":
-                "APPROVE\n> ```\nFixes-Forward: #1342\n",
-            "after an HTML comment closes":
-                "APPROVE\n<!-- note -->\nFixes-Forward: #1342\n",
+                self.assertEqual(self.ff(body), {1342}, why)
+        never = {
+            "marker on line 4 after a blank line": f"APPROVE\nReviewed-SHA: {S}\n\nFixes-Forward: #1342\n",
+            "marker on line 2": f"APPROVE\nFixes-Forward: #1342\nReviewed-SHA: {S}\n",
+            "no Reviewed-SHA line": "APPROVE\nFixes-Forward: #1342\n",
+            "line 2 names another SHA": f"APPROVE\nReviewed-SHA: {'b' * 40}\nFixes-Forward: #1342\n",
+            "line 2 not exact": f"APPROVE\nReviewed-SHA:  {S}\nFixes-Forward: #1342\n",
+            "a blank line before the verdict": "\n" + good,
+            "line 1 is BLOCK": good.replace("APPROVE", "BLOCK", 1),
+            "line 1 is not a verdict": good.replace("APPROVE", "Looks fine", 1),
+            "trailing text on line 3": good + " and more",
+            "trailing space on line 3": good + " ",
+            "leading space on line 3": good.replace("\nFixes", "\n Fixes"),
+            "lower case": good.replace("Fixes-Forward", "fixes-forward"),
+            "two numbers": good + ", #1343",
+            "leading zero": good.replace("#1342", "#01342"),
+            "no hash": good.replace("#1342", "1342"),
+            "code span on line 3": f"APPROVE\nReviewed-SHA: {S}\n`Fixes-Forward: #1342`\n",
+            "quoted on line 3": f"APPROVE\nReviewed-SHA: {S}\n> Fixes-Forward: #1342\n",
+            "fence opened on line 3": f"APPROVE\nReviewed-SHA: {S}\n```\nFixes-Forward: #1342\n```\n",
+            "four-backtick fence with an inner triple": f"APPROVE\nReviewed-SHA: {S}\n````text\n```\nFixes-Forward: #1342\n````\n",
+            "tilde line inside a backtick fence": f"APPROVE\nReviewed-SHA: {S}\n```text\n~~~\nFixes-Forward: #1342\n```\n",
+            "inline HTML comment opener": f"APPROVE\nReviewed-SHA: {S}\nExample <!--\nFixes-Forward: #1342\n-->\n",
+            "HTML comment on line 3": f"APPROVE\nReviewed-SHA: {S}\n<!-- Fixes-Forward: #1342 -->\n",
+            "U+2028 on line 3": f"APPROVE\nReviewed-SHA: {S}\nsee Fixes-Forward: #1342\n",
+            "U+2028 joining lines 2 and 3": f"APPROVE\nReviewed-SHA: {S} Fixes-Forward: #1342\n",
+            "CR-only line endings": good.replace("\n", "\r"),
+            "a second marker later": good + "\nFixes-Forward: #1343\n",
+            "the same marker repeated later": good + "\n\nFixes-Forward: #1342\n",
+            "a hidden marker later": good + "\n<!--\nFixes-Forward: #1343\n-->\n",
+            "the word in later prose": good + "\n\nsee the fixes-forward rule\n",
         }
-        for why, body in closed.items():
+        for why, body in never.items():
             with self.subTest(why):
-                self.assertEqual(ff({"body": body}), {1342}, why)
+                self.assertEqual(self.ff(body), set(), why)
+
+    def test_marker_after_an_inline_html_comment_opener_holds(self):
+        # the 2f65210b review repro: the marker is inside an HTML comment
+        b, f, nb, nf = self.two_commits()
+        body = f"APPROVE\nReviewed-SHA: {pr_head(nf)}\nExample <!--\nFixes-Forward: #{nb}\n-->\n"
+        runner, rec = self.tick({nb: [self.block(nb)], nf: [approve(nf, cid=6000 + nf, body=body)]})
+        self.assert_held(runner, rec, nb)
+        self.assertFalse(rec.get("fix_forwards"))
+
+    def test_marker_on_a_later_line_holds(self):
+        b, f, nb, nf = self.two_commits()
+        body = f"APPROVE\nReviewed-SHA: {pr_head(nf)}\n\nFixes-Forward: #{nb}\n"
+        runner, rec = self.tick({nb: [self.block(nb)], nf: [approve(nf, cid=6000 + nf, body=body)]})
+        self.assert_held(runner, rec, nb)
+        self.assertFalse(rec.get("fix_forwards"))
+
+    def test_marker_after_a_unicode_line_separator_holds(self):
+        b, f, nb, nf = self.two_commits()
+        body = f"APPROVE\nReviewed-SHA: {pr_head(nf)}\nsee Fixes-Forward: #{nb}\n"
+        runner, rec = self.tick({nb: [self.block(nb)], nf: [approve(nf, cid=6000 + nf, body=body)]})
+        self.assert_held(runner, rec, nb)
+
+    # -- review of 2f65210b: filenames are bytes; never strip git -z output --
+
+    def test_partial_revert_is_seen_when_whitespace_filenames_change_sort_position(self):
+        # the 2f65210b review repro: in F's diff the space-leading path sorts
+        # first, in F..R the tab-leading one does; a text strip() trims a
+        # different name each time and the two sets stop intersecting
+        b, nb = self.land({" leading.js": "defect", "mcp-server/src/z.js": "old"})
+        f, nf = self.land({" leading.js": "fixed", "mcp-server/src/z.js": "improvement"})
+        r, _ = self.land({" leading.js": "defect", "\tearlier.js": "new"})
+        runner, rec = self.tick({nb: [self.block(nb)], nf: [self.fix_approve(nf, [nb])]})
+        self.assertEqual(rec["sha"], r)
+        self.assert_held(runner, rec, nb)
+        self.assertFalse(rec.get("fix_forwards"))
 
     def marker_body(self, n, fence_example):
         return f"APPROVE\nReviewed-SHA: {pr_head(n)}\n{fence_example}"
@@ -1722,7 +1752,6 @@ class FixForward(Base):
         self.assertEqual(rec["fix_forwards"][0]["fixing_pr"], nm)
 
     def test_mismatched_or_shorter_fences_do_not_authorize_a_fix(self):
-        ff = rp.fixes_forward
         examples = [
             "````\n```\nFixes-Forward: #1342\n````",
             "````\n~~~\nFixes-Forward: #1342\n````",
@@ -1732,7 +1761,7 @@ class FixForward(Base):
         for example in examples:
             with self.subTest(example=example):
                 body = f"APPROVE\nReviewed-SHA: {'a' * 40}\n{example}\n"
-                self.assertEqual(ff({"body": body}), set())
+                self.assertEqual(self.ff(body), set())
 
     def test_fenced_example_marker_holds_full_release(self):
         b, f, nb, nf = self.two_commits()
@@ -1771,23 +1800,24 @@ class UpdateBranchReview(Base):
 
     N = 777
 
-    def build(self, *, merge_touches_pr_file=False, merge_touches_other_file=False):
+    def build(self, *, merge_touches_pr_file=False, merge_touches_other_file=False,
+              pr_rel="mcp-server/src/pr.js", main_files=None):
         fx = self.fx
         author = fx.tmp / "author"
         git(fx.tmp, "clone", "-q", str(fx.origin), str(author))
         git(author, "config", "user.email", "a@example.invalid")
         git(author, "config", "user.name", "a")
         git(author, "checkout", "-q", "-b", "pr")
-        (author / "mcp-server/src").mkdir(parents=True, exist_ok=True)
-        (author / "mcp-server/src/pr.js").write_text("reviewed\n")
+        (author / pr_rel).parent.mkdir(parents=True, exist_ok=True)
+        (author / pr_rel).write_text("reviewed\n")
         git(author, "add", "-A")
         git(author, "commit", "-q", "-m", "the PR")
         reviewed = git(author, "rev-parse", "HEAD")
-        main_moved = fx.commit({"mcp-server/src/other.js": "main moved"})   # main advances
+        main_moved = fx.commit(main_files or {"mcp-server/src/other.js": "main moved"})   # main advances
         git(author, "fetch", "-q", "origin", "main")
         git(author, "merge", "-q", "--no-ff", "--no-edit", "origin/main")   # what update-branch does
         if merge_touches_pr_file or merge_touches_other_file:
-            rel = "mcp-server/src/pr.js" if merge_touches_pr_file else "mcp-server/src/sneak.js"
+            rel = pr_rel if merge_touches_pr_file else "mcp-server/src/sneak.js"
             (author / rel).write_text("changed inside the merge, after review\n")
             git(author, "add", "-A")
             git(author, "commit", "-q", "--amend", "--no-edit")
@@ -1836,6 +1866,19 @@ class UpdateBranchReview(Base):
         self.assertEqual((rec["status"], rec["reason"]), ("blocked", "review_stale"))
         self.assertIn("mcp-server/src/pr.js", rec["detail"])
         self.assertIsNone(self.fx.state().get("worker", {}).get("failed_sha"))
+
+    def test_merge_that_touches_a_whitespace_named_pr_file_holds(self):
+        # same filename-identity defect as the fix-forward path check: the PR
+        # file " pr.js" sorts first in merge-base..R (and was trimmed) but
+        # second in R..H behind main's tab-named file, so the sets missed
+        reviewed, head, merged = self.build(merge_touches_pr_file=True, pr_rel=" pr.js",
+                                            main_files={"\tmain.js": "main moved",
+                                                        "mcp-server/src/other.js": "main moved"})
+        rc, runner = self.tick(merged, head, reviewed)
+        self.assertEqual(runner.calls, [])
+        rec = self.fx.records()[-1]
+        self.assertEqual((rec["status"], rec.get("reason")), ("blocked", "review_stale"), rec)
+        self.assertIn("changed after review", rec["detail"])
 
     def test_merge_that_smuggles_a_non_pr_file_holds(self):
         reviewed, head, merged = self.build(merge_touches_other_file=True)

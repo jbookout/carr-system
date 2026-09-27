@@ -100,12 +100,13 @@ released batch ONLY if ALL of these hold:
      and B is its ancestor in git;
   2. F's DECIDING approval (the same exact or main-merge-only rule above, so a
      marker on an older approval, on a non-verdict comment or on an untrusted
-     comment never counts) carries its own line `Fixes-Forward: #<B's PR
-     number>` starting in column 0, outside any fenced code block, <pre>-
-     style block or HTML comment, tracked as CommonMark does (a fence closes
-     only with its own character and at least its own length), so quoted,
-     indented, fenced or inline text never counts; CRLF is fine; one number
-     per line, several lines for several blocked PRs;
+     comment never counts) is EXACTLY: line 1 the APPROVE verdict line,
+     line 2 `Reviewed-SHA: <its 40-hex SHA>`, line 3 `Fixes-Forward: #<B's
+     PR number>`. Nothing else authorizes: a marker on any other line, a
+     malformed line 3, or any other mention of fixes-forward anywhere in the
+     body (so quoted, fenced, commented or inline text never counts, and an
+     ambiguous approval refuses closed). CRLF is fine. One approval names
+     one blocked PR;
   3. the release target is at or after F's merge commit (re-checked in git),
      and ALL of F's change is still present at the target: every path F
      changed has the same blob and mode at the target as at F. A later full
@@ -590,65 +591,35 @@ def _latest_approval(comments: list[dict], cfg: dict) -> dict:
     return last
 
 
-FIXES_FORWARD_RE = re.compile(r"^Fixes-Forward:[ \t]*#([1-9][0-9]*)[ \t]*$")
-# CommonMark: a fence opens with 0-3 spaces, then a run of 3+ backticks or
-# 3+ tildes; a backtick opener's info string may not contain a backtick. It
-# closes ONLY on a line of 0-3 spaces, a run of the SAME character at least
-# as long as the opener, then nothing but spaces or tabs. An unclosed fence
-# runs to the end of the comment.
-_FENCE_OPEN_RE = re.compile(r"^ {0,3}(?P<run>`{3,}(?=[^`]*$)|~{3,})")
-_FENCE_CLOSE_RE = re.compile(r"^ {0,3}(?P<run>`{3,}|~{3,})[ \t]*$")
-# CommonMark HTML blocks that render as code or not at all: type 1 (<pre>,
-# <script>, <style>, <textarea>) ends at the line carrying its closing tag,
-# type 2 (<!--) at the line carrying `-->`.
-_HTML_OPEN_RE = re.compile(r"^ {0,3}<(?P<tag>pre|script|style|textarea)(?:[ \t>]|$)", re.IGNORECASE)
-_HTML_COMMENT_OPEN_RE = re.compile(r"^ {0,3}<!--")
-# CommonMark line endings are LF, CRLF and CR only; str.splitlines() would
-# also break on U+2028, form feed and friends, which render mid-line.
-_LINE_END_RE = re.compile(r"\r\n|\r|\n")
+_FF_SHA_LINE_RE = re.compile(r"Reviewed-SHA: ([0-9a-f]{40})")
+_FF_MARKER_LINE_RE = re.compile(r"Fixes-Forward: #([1-9][0-9]{0,9})")
 
 
-def fixes_forward(approval: dict) -> set[int]:
-    """The PR numbers an approval names on its own `Fixes-Forward: #<n>`
-    lines: the line starts in column 0 (so never quoted, indented or inline),
-    carries one number without a leading zero and nothing after it but
-    spaces, and sits outside any fenced code block, <pre>/<script>/<style>/
-    <textarea> block or HTML comment, each tracked as CommonMark does (a
-    fence closes only with its own character and at least its own length;
-    see _FENCE_OPEN_RE). A fence or HTML block inside a quote or list item
-    starts after column 0, is not tracked, and cannot swallow a column-0
-    line, so a marker after it is top level, as CommonMark renders it.
-    Read ONLY from the comment that approval_of() returned as deciding, so a
-    marker on an older approval, a non-verdict comment or an untrusted
-    comment never counts."""
-    found: set[int] = set()
-    fence: tuple[str, int] | None = None     # (character, run length) of the open fence
-    html_end: str | None = None              # the text that closes the open HTML block
-    for line in _LINE_END_RE.split(str(approval.get("body") or "")):
-        if fence is not None:
-            closer = _FENCE_CLOSE_RE.match(line)
-            if closer and closer.group("run")[0] == fence[0] and len(closer.group("run")) >= fence[1]:
-                fence = None
-            continue
-        if html_end is not None:
-            if html_end in line.lower():
-                html_end = None
-            continue
-        opened = _FENCE_OPEN_RE.match(line)
-        if opened:
-            fence = (opened.group("run")[0], len(opened.group("run")))
-            continue
-        tag = _HTML_OPEN_RE.match(line)
-        if tag or _HTML_COMMENT_OPEN_RE.match(line):
-            end = f"</{tag.group('tag').lower()}>" if tag else "-->"
-            rest = line[tag.end():] if tag else line[line.index("<!--") + 4:]
-            if end not in rest.lower():
-                html_end = end
-            continue
-        m = FIXES_FORWARD_RE.match(line)
-        if m:
-            found.add(int(m.group(1)))
-    return found
+def fixes_forward(approval: dict, cfg: dict, reviewed_sha: str) -> set[int]:
+    """The ONE blocked PR number a deciding approval attests it fixes, or an
+    empty set. It counts ONLY in this exact shape, split on LF alone (a single
+    trailing CR per line is tolerated, so CRLF works):
+        line 1  the verdict line, which verdict() reads as approve
+        line 2  exactly `Reviewed-SHA: <reviewed_sha>` (the SHA approval_of()
+                accepted for this approval)
+        line 3  exactly `Fixes-Forward: #<n>`, n without a leading zero
+    Nothing else ever authorizes a release, and ambiguity refuses closed: if
+    `fixes-forward` appears anywhere else in the body, in any case, inside
+    any markup, the approval names nothing. No Markdown is parsed, so fences,
+    HTML comments, code spans, quotes and Unicode line separators cannot move
+    a marker into or out of line 3. Read ONLY from the comment that
+    approval_of() returned as deciding."""
+    body = str(approval.get("body") or "")
+    lines = [line[:-1] if line.endswith("\r") else line for line in body.split("\n")]
+    if len(lines) < 3 or verdict(lines[0], cfg) != "approve" or lines[0] != lines[0].lstrip():
+        return set()
+    sha = _FF_SHA_LINE_RE.fullmatch(lines[1])
+    marker = _FF_MARKER_LINE_RE.fullmatch(lines[2])
+    if not (sha and marker and reviewed_sha and sha.group(1) == reviewed_sha):
+        return set()
+    if "fixes-forward" in "\n".join(lines[:2] + lines[3:]).casefold():
+        return set()
+    return {int(marker.group(1))}
 
 
 def evidence_ref_from_url(url: str) -> str:
@@ -793,6 +764,18 @@ class Pipeline:
         if proc.returncode != 0:
             raise StepFailed(f"git {args[0]}", proc.returncode, "", (proc.stderr or "").strip()[:300])
         return proc.stdout.strip()
+
+    def git_bytes(self, *args: str, cwd: Path | None = None) -> bytes:
+        """git's stdout as raw bytes: no decoding, no newline translation and
+        no strip. Every filename-bearing read (-z output) goes through here,
+        because a path may begin or end with whitespace, and trimming it
+        changes which file is meant."""
+        proc = subprocess.run(["git", "-C", str(cwd or self.repo), *args], env=self.env,
+                              stdin=subprocess.DEVNULL, capture_output=True, timeout=300)
+        if proc.returncode != 0:
+            raise StepFailed(f"git {args[0]}", proc.returncode, "",
+                             proc.stderr.decode("utf-8", "replace").strip()[:300])
+        return proc.stdout
 
     def step(self, name: str, argv: list[str], cwd: Path, *, timeout: int = 3600,
              env: dict[str, str] | None = None) -> Result:
@@ -1132,7 +1115,7 @@ class Pipeline:
                 reviews.append({"pr": number, "rule": rule, "reviewed_sha": reviewed_sha, "head_sha": head_sha})
                 fixers.append({"pr": number, "commit": commit, "position": position,
                                "merge_commit_sha": str(pr.get("merge_commit_sha") or ""),
-                               "fixes": fixes_forward(approval), "reviewed_sha": reviewed_sha,
+                               "fixes": fixes_forward(approval, lane_cfg, reviewed_sha), "reviewed_sha": reviewed_sha,
                                "url": str(approval.get("html_url") or "")})
             if touches:
                 release_prs.append({"pr": number, "head_sha": head_sha})
@@ -1158,8 +1141,8 @@ class Pipeline:
              position, never a date, and git re-checks that B is an ancestor
              of F's merge commit;
           2. F's DECIDING approval, the one approval_of() accepted under the
-             exact or main-merge-only rule, carries the line
-             `Fixes-Forward: #<B's PR number>` (fixes_forward());
+             exact or main-merge-only rule, carries `Fixes-Forward: #<B's
+             PR number>` as its exact third line (fixes_forward());
           3. the target is at or after F's merge commit (re-checked in git),
              and ALL of F's change is still PRESENT at the target
              (change_present: every path F changed is unchanged since F): a
@@ -1213,9 +1196,9 @@ class Pipeline:
         fix while editing those paths carries its own `Fixes-Forward` marker
         and passes this same check for its own change. A `fix` that changed
         nothing, or any git error, is False too."""
-        def paths(a: str, b: str) -> set[str]:
-            out = self.git("diff-tree", "-r", "--no-renames", "--name-only", "-z", a, b, cwd=repo_dir)
-            return {p for p in out.split("\0") if p}
+        def paths(a: str, b: str) -> set[bytes]:
+            out = self.git_bytes("diff-tree", "-r", "--no-renames", "--name-only", "-z", a, b, cwd=repo_dir)
+            return {p for p in out.split(b"\0") if p}
         try:
             touched = paths(f"{fix}^1", fix)
             return bool(touched) and not (touched & paths(fix, target))
@@ -1255,7 +1238,10 @@ class Pipeline:
                 return False
 
         def names(a: str, b: str) -> set[str]:
-            return {x for x in self.git("diff", "--name-only", a, b, cwd=repo_dir).splitlines() if x.strip()}
+            # bytes and NUL-split: a text strip() trims whitespace off whichever
+            # path sorts first, so the same file could miss itself across diffs
+            out = self.git_bytes("diff-tree", "-r", "--no-renames", "--name-only", "-z", a, b, cwd=repo_dir)
+            return {os.fsdecode(x) for x in out.split(b"\0") if x}
 
         if not (have(reviewed) and have(head)):
             with contextlib.suppress(StepFailed):   # squash merges leave H off main: fetch the PR head
