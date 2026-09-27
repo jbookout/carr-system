@@ -157,6 +157,15 @@ def test_review_set(gl):
     check("review: gold is adjudicated-true plus settled-true, nothing auto",
           {"rmid", "rspawn"} <= gold_c1 and "rhigh" not in gold_c1
           and got["c3"] == ["rmerge"], got)
+    sprobs = {f"s{i}": {"rs": p} for i, p in enumerate([0.24, 0.22, 0.22, 0.20, 0.10])}
+    picked, floor = gl.sample_below_floor(sprobs, "rs", 0.25, set(), 2)
+    check("floors: a sample takes the pairs just below the bound, ties included",
+          sorted(picked) == [("s1", "rs"), ("s2", "rs")] or sorted(picked) ==
+          [("s0", "rs"), ("s1", "rs"), ("s2", "rs")], picked)
+    fplan = gl.review_plan([{"id": k, "tool_calls": []} for k in sprobs], sprobs, [], [],
+                           {"rs": floor})
+    check("floors: the new floor puts exactly the sample (and above) into the review set",
+          {c for c, _r in fplan["review"]} == {"s0"} | {c for c, _r in picked}, (floor, fplan["review"]))
     try:
         gl.gold_sets_reviewed(probs, adj[1:], plan["low_by_rule"], plan["signals_hit"],
                               plan["settled_labels"], plan["settled_rules"])
@@ -195,7 +204,9 @@ def test_fixture(gl, ev):
     lab = doc["labelling"]
     signals = gl.load_action_signals(FIX_DIR / lab["action_signals"]["file"])
     base_probs = {c["id"]: probs[c["id"]] for c in base}
-    plan = gl.review_plan(base, base_probs, signals, lab["review_low_extended_rules"])
+    floors_doc = json.loads((FIX_DIR / lab["review_floors"]["file"]).read_text(encoding="utf-8"))
+    floors = gl.load_review_floors(FIX_DIR / lab["review_floors"]["file"])
+    plan = gl.review_plan(base, base_probs, signals, lab["review_low_extended_rules"], floors)
     check("fixture records the review bounds the library uses",
           lab["review_low"] == gl.REVIEW_LOW and lab["review_low_extended"] == gl.REVIEW_LOW_EXTENDED)
     rebuilt = gl.gold_sets_reviewed(base_probs, adjud, plan["low_by_rule"], plan["signals_hit"],
@@ -210,6 +221,26 @@ def test_fixture(gl, ev):
           plan["review"] == set(keys), (len(plan["review"]), len(set(keys))))
     short = [k for k, a in zip(keys, adjud) if len((a.get("reason") or "").split()) < 6]
     check("every adjudication has a written reason", not short, short[:5])
+    # 3a. floors: every published sample is in the review set, its gold rate
+    # matches the adjudications, and a sample above 10% gold was followed by a
+    # lower floor (a later sample) unless nothing was left below it.
+    decided = {(a["case"], a["rule"]): bool(a["gold"]) for a in adjud}
+    samples = floors_doc["samples"]
+    rate_ok = all(s["n"] == len(s["pairs"]) and s["gold"] == sum(decided[tuple(p)] for p in s["pairs"])
+                  for s in samples)
+    check("every below-floor sample is adjudicated and its published gold rate is exact",
+          rate_ok and all(tuple(p) in plan["review"] for s in samples for p in s["pairs"]))
+    last = {}
+    for s in sorted(samples, key=lambda s: s["batch"]):
+        last[s["rule"]] = s
+    unresolved = [rid for rid, s in last.items() if s["gold"] / s["n"] > 0.10 and any(
+        base_probs[c].get(rid, 1) <= floors[rid] and (c, rid) not in plan["review"] for c in base_probs)]
+    check("no rule's last sample is above 10% gold while pairs remain below its floor",
+          not unresolved, unresolved[:5])
+    full = [rid for rid, v in floors.items() if v < 0]
+    check("floors below 0 review every case of the rule",
+          all((c["id"], rid) in plan["review"] or rid in plan["settled_labels"][c["id"]]
+              for rid in full for c in base), full)
     # 3b. the action signals are applied the same way on every case
     exact = set(lab["action_signals"]["exact_rules"])
     off_exact = [(c["id"], rid) for c in base for rid in exact
