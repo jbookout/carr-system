@@ -415,6 +415,41 @@ def settings_matches_repo():
     return validate_expected_wiring(live, want), None
 
 
+# A gate new in source and not yet installed reports PENDING INSTALL, not a
+# failure: its source lands (and is blessed) before `config-as-code install`
+# wires it, and a false GATE INTEGRITY FAILURE in every session in between
+# would teach sessions to ignore the real one. Only while NONE of the gate's
+# tuples is installed, and only until it has been seen installed once on this
+# machine (a stamp under out/): after that, a missing tuple is tampering and
+# fails like any other.
+PENDING_INSTALL_GATES = ("rule-boot-gate.py",)
+PENDING_INSTALL_STAMP_DIR = os.path.join(REPO, "out", "gate-install-seen")
+
+
+def split_pending_install(wiring_errors, live):
+    """(real_errors, pending_gate_names) for the Claude adapter wiring."""
+    live_commands = [str(t[3]) for t in hook_tuples(live)]
+    pending, real = set(), []
+    for err in wiring_errors:
+        gate = next((g for g in PENDING_INSTALL_GATES
+                     if err.endswith(f"hook {g}; found 0")), None)
+        installed_any = gate and any(c.endswith("/" + gate) or c.endswith(" " + gate)
+                                     for c in live_commands)
+        seen = gate and os.path.exists(os.path.join(PENDING_INSTALL_STAMP_DIR, gate))
+        if gate and not installed_any and not seen:
+            pending.add(gate)
+        else:
+            real.append(err)
+    for gate in PENDING_INSTALL_GATES:
+        if any(c.endswith("/" + gate) for c in live_commands):
+            try:
+                os.makedirs(PENDING_INSTALL_STAMP_DIR, exist_ok=True)
+                open(os.path.join(PENDING_INSTALL_STAMP_DIR, gate), "a").close()
+            except OSError:
+                pass
+    return real, sorted(pending)
+
+
 def delegation_hook_contract():
     """Load the versioned, exact CARR-project interception contract."""
     try:
@@ -741,8 +776,15 @@ def main():
             )
 
     claude_state = claude_configuration_state()
+    pending_install = []
     if claude_state == "configured":
         wiring_errors, err = settings_matches_repo()
+        if not err and wiring_errors:
+            try:
+                live_hooks = json.load(open(SETTINGS)).get("hooks", {})
+            except Exception:
+                live_hooks = {}
+            wiring_errors, pending_install = split_pending_install(wiring_errors, live_hooks)
         if err:
             problems.append(f"CLAUDE ADAPTER WIRING: {err}")
         elif wiring_errors:
@@ -824,7 +866,10 @@ def main():
                 f"so a buggy gate never needs a password to fix. In-session gate edits "
                 f"are approved through gate-edit-gate.py instead. Do NOT propose "
                 f"ops/harden-gates.sh as a fix; it is kept only for a deliberate reversal")
-    print(f"GATE INTEGRITY: {len(base)} gates match baseline; installed adapter wiring exact{note}")
+    wiring_word = ("installed adapter wiring exact except PENDING INSTALL (in source, not yet "
+                   f"installed by config-as-code install; not a failure): {', '.join(pending_install)}"
+                   if pending_install else "installed adapter wiring exact")
+    print(f"GATE INTEGRITY: {len(base)} gates match baseline; {wiring_word}{note}")
     print(f"CLIENT ADAPTERS: Claude={claude_state}; Codex={codex_state}; "
           f"Claude-project={project_adapter_state}. CARR core is client-independent; "
           "adapter equality does not prove runtime invocation.")

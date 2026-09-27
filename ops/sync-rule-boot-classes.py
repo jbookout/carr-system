@@ -23,6 +23,14 @@ index plus the always-on text exceeds `budget_tokens` (chars / chars_per_token),
 naming the largest always-on rules. It never suggests truncating: an overage
 is resolved by consolidating rules or by a budget decision that is Joe's.
 
+EVERY SCOPE IS MEASURED: unsponsored, every partner named in `sponsors`
+(Dell and Joe today) and any partner a classified rule is personal to. And
+EVERY ACTIVE RULE MUST BE CLASSIFIED: an active id in
+ops/config/rule-enforcement-map.json that is not in the class file would
+render as class U in full text, outside this estimate, so --check fails on it.
+The one exclusion is the rule_surface "intro_politics" rules, which the verb's
+query leaves out of the boot.
+
 Usage:
     ./.venv/bin/python ops/sync-rule-boot-classes.py            # regenerate
     ./.venv/bin/python ops/sync-rule-boot-classes.py --check    # parity + budget; exit 1 on either
@@ -35,6 +43,8 @@ import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLASSES_PATH = os.path.join(REPO, "ops", "config", "rule-classes.v1.json")
+MAP_PATH = os.path.join(REPO, "ops", "config", "rule-enforcement-map.json")
+EXCLUDED_SURFACES = {"intro_politics"}
 OUT_PATH = os.path.join(REPO, "mcp-server", "src", "rule-boot-classes.js")
 CLASSES = {"a", "b", "c", "d", "e"}
 MAX_SUMMARY_WORDS = 20
@@ -139,7 +149,8 @@ def estimate(doc, sponsor=None):
 
 def budget_findings(doc):
     limit = int(doc.get("budget_tokens", 40000))
-    sponsors = sorted({r.get("personal_to") for r in doc["rules"].values() if r.get("personal_to")})
+    sponsors = sorted({r.get("personal_to") for r in doc["rules"].values() if r.get("personal_to")}
+                      | set(doc.get("sponsors") or []))
     findings = []
     for sponsor in [None, *sponsors]:
         chars, tokens, big = estimate(doc, sponsor)
@@ -152,6 +163,33 @@ def budget_findings(doc):
                 "(amend-rule / retire-rule); never truncate the boot text.")
         else:
             findings.append(f"ok  {label}: ~{tokens:,.0f} of {limit:,} tokens ({chars:,} chars)")
+    return findings
+
+
+def coverage_findings(doc, map_path=MAP_PATH):
+    """Every active rule in the enforcement map is classified, in its scope."""
+    try:
+        with open(map_path, encoding="utf-8") as fh:
+            mapping = json.load(fh)
+    except (OSError, ValueError) as exc:
+        return [f"RULE BOOT COVERAGE: cannot read {os.path.relpath(map_path, REPO)}: {exc}"]
+    controls = mapping.get("rule_controls") or {}
+    excluded = {k[:8] for k, v in controls.items()
+                if isinstance(v, dict) and v.get("rule_surface") in EXCLUDED_SURFACES}
+    rules = doc["rules"]
+    known = set(doc.get("sponsors") or [])
+    findings = []
+    for scope, ids in sorted((mapping.get("active_rule_ids") or {}).items()):
+        owner = None if scope == "shared" else scope
+        if owner and owner not in known:
+            findings.append(f"RULE BOOT COVERAGE: partner {owner!r} has active rules but is not in "
+                            "`sponsors`, so its scope is not measured against the budget")
+        loose = sorted(i[:8] for i in ids if i[:8] not in excluded
+                       and (i[:8] not in rules or (rules[i[:8]].get("personal_to") or None) != owner))
+        if loose:
+            findings.append(f"RULE BOOT COVERAGE: {len(loose)} active {scope} rule(s) are not classified "
+                            f"for that scope and would render as class U in full text, outside the budget: "
+                            f"{', '.join(loose[:20])}. Classify them in ops/config/rule-classes.v1.json.")
     return findings
 
 
@@ -184,9 +222,9 @@ def main(argv=None):
               "ops/config/rule-classes.v1.json. Regenerate: "
               "./.venv/bin/python ops/sync-rule-boot-classes.py")
         rc = 1
-    for line in budget_findings(doc):
+    for line in budget_findings(doc) + coverage_findings(doc):
         print(line)
-        if line.startswith("RULE BOOT OVER BUDGET"):
+        if line.startswith(("RULE BOOT OVER BUDGET", "RULE BOOT COVERAGE")):
             rc = 1
     if rc == 0:
         print(f"rule-boot classes: module in parity with {len(doc['rules'])} classified rules")

@@ -10,17 +10,24 @@ other tool call. hooks/gate-integrity.py arms the gate at SessionStart
 (startup, resume, clear, compact) and tells the model which calls to make.
 
 Registered on PreToolUse with matcher ".*" so it sees every tool, which is why
-it is deliberately tiny: no network, no model, one small state read (see
-lib/rule_boot_gate.py for the state layout, the fetch-call grammar and why it
-can never deadlock).
+it is deliberately tiny: no network, no model, one small state read. Also
+registered on PostToolUse and PostToolUseFailure for the fetch (Bash and the
+MCP standing-context), where it reads what the fetch returned: a real page
+(recorded; a new digest or page count re-arms the session), a rejection of
+detail=boot (the Worker is not deployed yet) or an error (store unreachable).
+See lib/rule_boot_gate.py for the state layout, the fetch-call grammar and
+why it can never lock a context out.
 
-  · a boot page fetch (MCP standing-context or the one `./run.sh call
-    standing-context '<json>'` shell form)  -> allow, and record the page
+  · a boot page fetch (CARR MCP standing-context or the one `./run.sh call
+    standing-context '<json>'` shell form)  -> allow, and record the attempt
   · other standing-context calls, the read-only rule verbs, ToolSearch -> allow
-  · every page of the armed digest fetched in this context              -> allow
-  · store unreachable at arming                -> allow + RULES UNAVAILABLE notice
-  · session never armed                        -> allow + a notice (fail open)
-  · otherwise                                  -> DENY, naming the exact calls
+  · every page of the armed digest confirmed in this context          -> allow
+  · a fetch in this context failed, or the store was unreachable at arming
+    and the context has attempted once          -> allow + RULES UNAVAILABLE
+  · the Worker does not serve detail=boot yet   -> allow + NOT DEPLOYED (once)
+  · the hold could not be recorded (state unwritable) -> allow + notice
+  · held DENY_CAP times without progress        -> allow + RULES UNREAD
+  · otherwise                                   -> DENY, naming the exact calls
 
 FAILS OPEN on any internal error, like every other hook here: a gate that
 crashes must never be able to stop work. Logged to out/hook-guard.log.
@@ -47,8 +54,8 @@ def log(msg):
         pass
 
 
-def emit(decision, text):
-    out = {"hookEventName": "PreToolUse"}
+def emit(decision, text, event="PreToolUse"):
+    out = {"hookEventName": event}
     if decision == "deny":
         out.update(permissionDecision="deny", permissionDecisionReason=text)
     elif text:
@@ -64,9 +71,16 @@ def main():
     except Exception as exc:
         log(f"ALLOW(parse-error) {exc}")
         return 0
+    if not isinstance(payload, dict):
+        return 0
+    event = payload.get("hook_event_name") or "PreToolUse"
     try:
+        if event in ("PostToolUse", "PostToolUseFailure"):
+            from lib.rule_boot_gate import observe
+            emit("allow", observe(payload), event)
+            return 0
         from lib.rule_boot_gate import verdict
-        decision, text = verdict(payload if isinstance(payload, dict) else {})
+        decision, text = verdict(payload)
         if decision == "deny":
             log(f"DENY tool={payload.get('tool_name')} agent={payload.get('agent_id') or 'main'}")
         emit(decision, text)
