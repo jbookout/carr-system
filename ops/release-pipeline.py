@@ -534,7 +534,18 @@ def trusted_commenter(comment: dict, cfg: dict) -> bool:
     return assoc in allowed or (bool(login) and login in logins)
 
 
-REVIEWED_SHA_RE = re.compile(r"^\s*Reviewed-SHA:\s*([0-9a-f]{40})\s*$", re.M)
+REVIEWED_SHA_LINE_RE = re.compile(r"Reviewed-SHA: ([0-9a-f]{40})")
+
+
+def reviewed_header_sha(body: str) -> str | None:
+    """Only a literal first-line APPROVE and second-line SHA authorize release."""
+    lines = [line.removesuffix("\r") for line in (body or "").split("\n")]
+    if len(lines) < 2 or lines[0] != "APPROVE":
+        return None
+    second = REVIEWED_SHA_LINE_RE.fullmatch(lines[1])
+    if second is None or any("reviewed-sha:" in line.lower() for line in lines[2:]):
+        return None
+    return second.group(1)
 
 
 def approval_of(comments: list[dict], cfg: dict, head_sha: str,
@@ -550,7 +561,8 @@ def approval_of(comments: list[dict], cfg: dict, head_sha: str,
     plus nothing but merges of main (what `gh pr update-branch` adds after a
     review); covers() returns the reason otherwise, and the approval is stale."""
     last = _latest_approval(comments, cfg)
-    reviewed = REVIEWED_SHA_RE.findall(str(last.get("body") or ""))
+    header_sha = reviewed_header_sha(str(last.get("body") or ""))
+    reviewed = [header_sha] if header_sha else []
     if head_sha and reviewed == [head_sha]:
         return last, "exact", head_sha
     why = "no main-merge rule available"
@@ -586,7 +598,6 @@ def _latest_approval(comments: list[dict], cfg: dict) -> dict:
 
 
 FIXES_FORWARD_RE = re.compile(r"^Fixes-Forward:[ \t]*#([1-9][0-9]*)[ \t]*$")
-FIXES_FORWARD_REVIEWED_RE = re.compile(r"^Reviewed-SHA: ([0-9a-f]{40})[ \t]*$")
 
 
 def fixes_forward(approval: dict, reviewed_sha: str) -> set[int]:
@@ -603,8 +614,7 @@ def fixes_forward(approval: dict, reviewed_sha: str) -> set[int]:
     lines = [line.removesuffix("\r") for line in str(approval.get("body") or "").split("\n")]
     if len(lines) < 3 or lines[0] != "APPROVE":
         return set()
-    reviewed_line = FIXES_FORWARD_REVIEWED_RE.fullmatch(lines[1])
-    if reviewed_line is None or reviewed_line.group(1) != reviewed_sha:
+    if reviewed_header_sha(str(approval.get("body") or "")) != reviewed_sha:
         return set()
     found: set[int] = set()
     for line in lines[2:]:

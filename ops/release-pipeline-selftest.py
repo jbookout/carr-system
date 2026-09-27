@@ -159,7 +159,7 @@ HEAD_DATE = "2026-09-29T00:00:00Z"
 
 def approve(pr, *, when="2026-09-30T00:00:00Z", assoc="OWNER", body=None, cid=None, reviewed=None):
     if body is None:
-        body = f"Independent review: PASS\n\nReviewed-SHA: {reviewed or pr_head(pr)}\n"
+        body = f"APPROVE\nReviewed-SHA: {reviewed or pr_head(pr)}\n"
     return {"id": cid or 900 + pr, "body": body, "created_at": when, "author_association": assoc,
             "user": {"login": "jbookout" if assoc == "OWNER" else "stranger"},
             "html_url": f"https://github.com/o/r/pull/{pr}#issuecomment-{cid or 900 + pr}"}
@@ -1276,7 +1276,7 @@ class VerifierIsNotMaker(unittest.TestCase):
             fx = Fixture(Path(tmp))
             sha = fx.commit({"mcp-server/src/a.js": "1"})
             n = FakeGitHub().pr_number(sha)
-            gh = FakeGitHub(comments={n: [approve(n, body=f"Independent review: PASS\nVerifier: joe\nReviewed-SHA: {pr_head(n)}")]})
+            gh = FakeGitHub(comments={n: [approve(n, body=f"APPROVE\nReviewed-SHA: {pr_head(n)}\nVerifier: joe")]})
             live = {"sha": fx.base}
             runner = FakeRunner(live=live)
             fx.pipeline(runner, github=gh, live=live).tick(["worker"])
@@ -1355,6 +1355,16 @@ class ReviewGate(Base):
         self.assertEqual(self.blocked_reason(lambda n: [approve(n, body="Independent review: PASS")]),
                          "review_stale")
 
+    def test_hidden_or_later_reviewed_sha_cannot_approve_a_release(self):
+        for make_body in (
+            lambda n: f"APPROVE <!--\nReviewed-SHA: {pr_head(n)}\n-->",
+            lambda n: f"APPROVE `\nReviewed-SHA: {pr_head(n)}\n`",
+            lambda n: f"APPROVE\nExplanation\n```\nReviewed-SHA: {pr_head(n)}\n```",
+        ):
+            with self.subTest(kind=make_body(1001).split("\n", 1)[0]):
+                self.assertEqual(self.blocked_reason(lambda n: [approve(n, body=make_body(n))]),
+                                 "review_stale")
+
     def test_a_short_sha_prefix_is_not_enough(self):
         self.assertEqual(self.blocked_reason(lambda n: [approve(
             n, body=f"Independent review: PASS at {pr_head(n)[:12]}")]), "review_stale")
@@ -1363,6 +1373,16 @@ class ReviewGate(Base):
         self.fx.commit({"mcp-server/src/a.js": "1"})
         live = {"sha": self.fx.base}
         self.assertEqual(self.fx.pipeline(FakeRunner(live=live), live=live).tick(["worker"]), 0)
+        self.assertEqual(self.fx.records()[-1]["status"], "shipped")
+
+    def test_crlf_literal_review_header_ships(self):
+        sha = self.fx.commit({"mcp-server/src/a.js": "1"})
+        n = FakeGitHub().pr_number(sha)
+        comment = approve(n, body=f"APPROVE\r\nReviewed-SHA: {pr_head(n)}\r\n")
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live)
+        self.assertEqual(self.fx.pipeline(runner, github=FakeGitHub(comments={n: [comment]}),
+                                          live=live).tick(["worker"]), 0)
         self.assertEqual(self.fx.records()[-1]["status"], "shipped")
 
     def test_verdict_comments_are_read_across_pages(self):
@@ -1492,7 +1512,8 @@ class FixForward(Base):
         body = (f"APPROVE\u2028Reviewed-SHA: {'a' * 40}\u2028Fixes-Forward: #{nb}\n"
                 f"Reviewed-SHA: {pr_head(nf)}\n")
         runner, rec = self.tick({nb: [self.block(nb)], nf: [approve(nf, body=body)]})
-        self.assert_held(runner, rec, nb)
+        self.assertEqual(runner.calls, [])
+        self.assertEqual((rec["status"], rec["reason"]), ("blocked", "review_stale"))
 
     def test_marker_on_a_non_deciding_approval_holds(self):
         b, f, nb, nf = self.two_commits()
