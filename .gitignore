@@ -20,10 +20,12 @@ _to_delete/
 frozen-sources/
 exporters/templates/
 
-# PII output baselines — full HTML stays local, only sha256 tracked (ORDER 42b, 2026-08-06)
+# PII output baselines — full file stays local, only sha256 tracked (ORDER 42b, 2026-08-06;
+# renewal-radar.json added 2026-09-26 — tenant/landlord names, addresses and phones).
 # See baselines/SHA256SUMS. Regenerate locally: tools/check.sh --out <name> tells you how.
 baselines/lead-board.html
 baselines/deal-room-panhandle.html
+baselines/renewal-radar.json
 
 # Encrypted DB dumps — archived to R2 instead of git (ORDER 42b, 2026-08-06). See bin/backup-dump.sh.
 backups/*.sql.age

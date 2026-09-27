@@ -4,7 +4,15 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v88 (PROVISIONAL) is the runtime selector for DoctorCRE V5-RW02's attended
+// v90 is the runtime selector after the rule-boot change to standing-context:
+// its input schema gained detail="boot" and an integer page (the paginated
+// rule boot served from rule-boot.js). The verb stays read-only; the runtime
+// compares its schema_digest before admitting it, so the selector has to read
+// the registry that sealed the new schema. It chains over v89's own seal
+// (0730) with 0731. v89 itself only sealed an external-admin script row, so
+// the selector moved straight from v88 to v90.
+//
+// Superseded note (v88): v88 (PROVISIONAL) was the runtime selector for DoctorCRE V5-RW02's attended
 // Salesforce reconciliation record layer. It registers three observation /
 // readback writers and one per-action evidence reader, while the store and
 // registry both preserve zero provider-effect authority. It chains over v87's
@@ -167,7 +175,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v88.generated.js";
+} from "./scac-mutation-registry.v90.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 
