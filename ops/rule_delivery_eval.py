@@ -89,6 +89,9 @@ SPLITS = ("train", "test")
 _UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 DOCTRINE_REF = re.compile(rf"^{_UUID}#{_UUID}$")
 MACHINE_STRATA = ("notifications",)
+# The adapters that can deliver doctrine refs (declared, not inferred from a
+# run's output, so a doctrine path failing on every case still scores 0%).
+DOCTRINE_PATHS = ("doctrine_search",)
 EVAL_SESSION = "rule-delivery-eval"
 
 # Files a dry run must never create or modify, relative to <repo>/out.
@@ -543,7 +546,7 @@ def deliveries_from_report(report):
 
 
 def score(cases, deliveries, path_universes, meta, labelled=None, classes=None, groups=None,
-          doctrine_labelled=None):
+          doctrine_labelled=None, doctrine_paths=None):
     """The report. See the module docstring for what is counted where.
 
     `classes`, when given, is {rule id: class} (ops/rule_gold_label.rule_classes:
@@ -564,9 +567,12 @@ def score(cases, deliveries, path_universes, meta, labelled=None, classes=None, 
     {case id: set of section refs the labellers judged for that case} (its
     shortlist). A delivered ref outside the case's shortlist was never
     labelled, so it is set aside (`doctrine.outside_labelled`), not charged.
-    And a path is scored on doctrine only if it DELIVERS doctrine: a path
-    that returned no doctrine ref for any case in this run reports
-    doctrine None ("does not deliver"), not a 0% recall."""
+    And a path is scored on doctrine only if it DELIVERS doctrine.
+    `doctrine_paths`, when given, DECLARES which paths can deliver doctrine
+    (DOCTRINE_PATHS for the harness's own adapters): those are always scored,
+    so a doctrine path that errors on every case reads 0%, not "does not
+    deliver"; every other path reports doctrine None. Without it, a path is
+    scored when it returned a doctrine ref for some case in this run."""
     by_id = {case["id"]: case for case in cases}
     report = {"schema": REPORT_SCHEMA, "cases": len(cases),
               "strata": dict(Counter(case["stratum"] for case in cases)),
@@ -590,7 +596,8 @@ def score(cases, deliveries, path_universes, meta, labelled=None, classes=None, 
         doctrine_strata = {}
         doctrine_outside = 0
         doctrine_scored = False
-        delivers_doctrine = any(out.get("doctrine") for out in per_case.values())
+        delivers_doctrine = (name in doctrine_paths if doctrine_paths is not None
+                             else any(out.get("doctrine") for out in per_case.values()))
         for case_id, out in per_case.items():
             case = by_id.get(case_id)
             if case is None:

@@ -11,11 +11,13 @@ ops/rule_gold_label.py; this is its command line. Five steps, each resumable:
     doctrine-catalog / doctrine-search / doctrine-label
                  The doctrine target (shortlist then label; see the library).
                  Section refs are opaque store ids, never slugs.
-    borderlines  Write the adjudication worklist: every borderline pair with
-                 both probabilities, for a written decision.
+    borderlines  Write the adjudication worklist: the REVIEW SET (every pair
+                 above the rule's lower bound, and every case carrying the
+                 rule's action signal), with both probabilities.
     build        Assemble cases.v2.json from the drafted cases, the first-pass
-                 probabilities and the adjudications (a borderline pair with no
-                 written decision is an error), with the seeded 30% test split.
+                 probabilities, the action signals and the adjudications (a
+                 review pair with no written decision, or a decision outside
+                 the review set, is an error), with the seeded 30% test split.
     spot-check   Pull a stratified sample of labels for a human to check.
 
     tools/rule-gold-label.py label --cases drafts.jsonl --corpus corpus-live.json \\
@@ -210,14 +212,23 @@ def cmd_second(args, gl, tsc):
 
 
 def cmd_borderlines(args, gl):
+    """The adjudication worklist: the REVIEW SET (see the library), with both
+    probabilities and whether the case carries the rule's action signal."""
+    drafts = read_cases(args.cases)
     probs = _read_json(args.probs, {})
     second = _read_json(args.second, {})
-    rows = [{"case": cid, "rule": rid, "p_first": p, "p_second": second.get(cid, {}).get(rid)}
-            for cid, rid, p in gl.borderlines(probs)]
+    signals = gl.load_action_signals(args.signals)
+    case_probs = {c["id"]: probs[c["id"]] for c in drafts}
+    plan = gl.review_plan(drafts, case_probs, signals, _read_json(args.extended_rules, []))
+    rows = [{"case": cid, "rule": rid, "p_first": case_probs[cid][rid],
+             "p_second": second.get(cid, {}).get(rid),
+             "action_signal": (cid, rid) in plan["signals_hit"]}
+            for cid, rid in sorted(plan["review"])]
     with open(args.out, "w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row) + "\n")
-    print(json.dumps({"borderline_pairs": len(rows), "cases": len({r['case'] for r in rows})}))
+    print(json.dumps({"review_pairs": len(rows), "cases": len({r['case'] for r in rows}),
+                      "rules": len({r['rule'] for r in rows})}))
 
 
 def _read_adjudications(path):
@@ -233,7 +244,13 @@ def cmd_build(args, gl):
     drafts = read_cases(args.cases)
     probs = _read_json(args.probs, {})
     adjudications = _read_adjudications(args.adjudications)
-    gold = gl.gold_sets({c["id"]: probs[c["id"]] for c in drafts}, adjudications)
+    signals = gl.load_action_signals(args.signals)
+    extended = sorted(_read_json(args.extended_rules, []))
+    case_probs = {c["id"]: probs[c["id"]] for c in drafts}
+    plan = gl.review_plan(drafts, case_probs, signals, extended)
+    gold = gl.gold_sets_reviewed(case_probs, adjudications, plan["low_by_rule"],
+                                 plan["signals_hit"], plan["settled_labels"],
+                                 plan["settled_rules"])
     dprobs = {cid: row["sections"] for cid, row in _read_json(args.doctrine_probs, {}).items()}
     dadj = _read_adjudications(args.doctrine_adjudications) if args.doctrine_adjudications else []
     dgold = gl.gold_sets({c["id"]: dprobs.get(c["id"], {}) for c in drafts}, dadj) if dprobs else {}
@@ -269,9 +286,24 @@ def cmd_build(args, gl):
                                               for rid, (pred, reason)
                                               in sorted(gl.UNIVERSAL_POLICY.items())},
                          "live_rules": len(rules),
-                         "yes_at": gl.YES_AT, "no_at": gl.NO_AT,
-                         "borderline": "second Jev pass from the rule side, then a written "
-                                       "adjudication per pair; the adjudication decides",
+                         "review": "per rule, every pair with first-pass p above review_low "
+                                   "(review_low_extended for the listed rules), and every case "
+                                   "carrying the rule's action signal, gets a written "
+                                   "adjudication that decides; there is no auto-gold. Pairs "
+                                   "outside the review set are not gold. A second Jev pass is "
+                                   "evidence only (round 3, 2026-09-27, after a review found "
+                                   "the 0.35-0.75 band labelled the same situation two ways)",
+                         "review_low": gl.REVIEW_LOW,
+                         "review_low_extended": gl.REVIEW_LOW_EXTENDED,
+                         "review_low_extended_rules": extended,
+                         "action_signals": {
+                             "file": os.path.basename(args.signals),
+                             "exact_rules": sorted({s["rule"] for s in signals
+                                                    if s["mode"] == "exact"}),
+                             "rule": "an exact rule is gold iff the case carries its signal; a "
+                                     "signal_implies_gold entry makes every case carrying it gold; "
+                                     "other entries only put the case in the review set"},
+                         "doctrine_band": {"yes_at": gl.YES_AT, "no_at": gl.NO_AT},
                          "doctrine": "shortlist then label (ops/rule_gold_label.py): Jev noul per "
                                      "doctrine document, plus search-doctrine hits, then a Jev "
                                      "noul per shortlisted section; borderline pairs adjudicated "
@@ -313,10 +345,13 @@ def cmd_build(args, gl):
                        ("doctrine-adjudications.v2.jsonl", dadj)):
         with open(os.path.join(base, name), "w", encoding="utf-8") as handle:
             for row in sorted(rows, key=lambda a: (a["case"], a["rule"])):
-                handle.write(json.dumps({"case": row["case"], "rule": row["rule"],
-                                         "gold": bool(row["gold"]),
-                                         "reason": row["reason"].strip()},
-                                        sort_keys=True) + "\n")
+                out = {"case": row["case"], "rule": row["rule"], "gold": bool(row["gold"]),
+                       "reason": row["reason"].strip()}
+                # jev_misfire: the adjudicator overruled a clear Jev score
+                # (gold below 0.30, or not gold at 0.75+); the reason says why.
+                if "jev_misfire" in row:
+                    out["jev_misfire"] = bool(row["jev_misfire"])
+                handle.write(json.dumps(out, sort_keys=True) + "\n")
     print(json.dumps({"cases": len(cases), **doc["split"]["counts"],
                       "gold_pairs": sum(len(c["gold"]) for c in cases),
                       "doctrine_pairs": sum(len(c["gold_doctrine"]) for c in cases)}))
@@ -388,9 +423,17 @@ def main(argv=None):
     p.add_argument("--doctrine-probs", required=True)
     p = sub.add_parser("borderlines", parents=[common])
     p.add_argument("--second", required=True)
+    p.add_argument("--signals", default=os.path.join(
+        REPO, "ops", "fixtures", "rule-delivery-eval", "action-signals.v2.json"))
+    p.add_argument("--extended-rules", required=True)
     p.add_argument("--out", required=True)
     p = sub.add_parser("build", parents=[common])
     p.add_argument("--adjudications", required=True)
+    p.add_argument("--signals", default=os.path.join(
+        REPO, "ops", "fixtures", "rule-delivery-eval", "action-signals.v2.json"),
+        help="action-signal table (JSON)")
+    p.add_argument("--extended-rules", required=True,
+                   help="JSON list of rule ids reviewed down to REVIEW_LOW_EXTENDED")
     p.add_argument("--out", required=True)
     p.add_argument("--seed", default=None)
     p.add_argument("--labelled-on", default=None)

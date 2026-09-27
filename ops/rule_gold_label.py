@@ -36,12 +36,20 @@ rules in UNIVERSAL_POLICY are settled by one written policy each instead of a
 per-case judgment. Every borderline pair was then second-passed and
 adjudicated again under the strict standard.
 
-THE BANDS. p >= YES_AT is gold, p <= NO_AT is not, anything between is
-BORDERLINE. Every borderline pair gets a second Jev pass from the other side
-(the rule as state, the case as the question, a stricter wording) and then a
-written human-or-model adjudication; the adjudication, not either Jev pass,
-decides the label, and its reason is kept beside it. An adjudication file row
-is {"case": id, "rule": id, "gold": bool, "reason": text}.
+THE REVIEW SET (rule gold, round 3, 2026-09-27). A second review found the
+0.35-0.75 band labelled the same situation two ways (clear dispatch turns at
+p <= 0.35 never reviewed; auto-gold at p >= 0.75 contradicting the rule's own
+trigger). The rule gold now has no auto-gold: per rule, every pair with p
+above REVIEW_LOW (REVIEW_LOW_EXTENDED for rules whose earlier in-band gold
+rate was high), and every case carrying the rule's action signal, gets a
+second Jev pass (evidence only) and a written adjudication that applies ONE
+trigger to all of that rule's cases; the adjudication decides. Pairs outside
+the set are not gold. Action signals (action-signals.v2.json) settle some
+labels outright; see "the review band" below. An adjudication file row is
+{"case": id, "rule": id, "gold": bool, "reason": text, "jev_misfire": bool}.
+
+THE BANDS (doctrine gold). p >= YES_AT is gold, p <= NO_AT is not, anything
+between is BORDERLINE and gets a written adjudication that decides.
 
 THE SPLIT. 30 per cent of cases are held out as TEST, fixed by seed:
 within each stratum, cases are ordered by sha256(seed:id) and the first
@@ -69,6 +77,7 @@ import json
 import math
 import os
 import re
+import unicodedata
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -344,6 +353,155 @@ def borderlines(probs, yes_at=YES_AT, no_at=NO_AT):
                   if band(p, yes_at, no_at) == "borderline")
 
 
+# ------------------------------------------------------------------ the review band (round 3)
+#
+# The strict re-label adjudicated only 0.35 < p < 0.75, so the same situation
+# got two labels depending on which side of 0.35 the first pass fell (a
+# second review found clear dispatch turns unreviewed at p <= 0.35 for the
+# model-routing rule, and auto-gold at p >= 0.75 that contradicted that rule's
+# own adjudicated trigger). The gold now comes from a REVIEW SET, per rule:
+#   * every pair with p > the rule's lower bound (REVIEW_LOW, or
+#     REVIEW_LOW_EXTENDED for a rule whose in-band gold rate was high), with
+#     NO auto-gold at the top: p >= 0.75 is reviewed like the rest;
+#   * every case carrying the rule's exact ACTION SIGNAL, whatever its p;
+#   * a rule in ACTION_POLICY (an `exact` entry: its trigger IS the action) is
+#     settled by the signal alone, like UNIVERSAL_POLICY;
+#   * a `signal_implies_gold` entry settles gold on every case carrying the
+#     signal (e.g. every subagent spawn binds the model-routing rule), so the
+#     same action never gets two labels; the rule's other cases are reviewed.
+# The signals live in ops/fixtures/rule-delivery-eval/action-signals.v2.json,
+# written from each rule's statement, not from the production trigger table.
+# A pair in the review set is gold iff its written adjudication says so;
+# outside it, not gold. Jev (strict second pass) is evidence only: it scored
+# some clearly binding pairs at 0.12-0.18, so it never decides.
+
+REVIEW_LOW = 0.25
+REVIEW_LOW_EXTENDED = 0.20
+
+
+def signal_hit(case, signal):
+    """Does any tool call in `case` carry the action `signal`
+    ({"tools": [regex over tool_name], "input_regex": regex or None})?"""
+    for call in case.get("tool_calls") or []:
+        name = call.get("tool_name") or ""
+        if not any(re.search(t, name) for t in signal.get("tools") or ()):
+            continue
+        pattern = signal.get("input_regex")
+        if pattern is None or re.search(pattern, json.dumps(call.get("tool_input") or {},
+                                                             sort_keys=True), re.I):
+            return True
+    return False
+
+
+def signal_pairs(cases, signals):
+    """{(case id, rule id)} for every case carrying a rule's action signal."""
+    return {(c["id"], s["rule"]) for c in cases for s in signals if signal_hit(c, s)}
+
+
+def load_action_signals(path):
+    """The committed action-signal table (action-signals.v2.json): a list of
+    {rule, mode exact|review, tools, input_regex, signal_implies_gold, ...}."""
+    with open(path, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    signals = doc["signals"]
+    for s in signals:
+        if s.get("mode") not in ("exact", "review"):
+            raise ValueError(f"signal for {s.get('rule')}: mode must be exact or review")
+        for t in s.get("tools") or ():
+            re.compile(t)
+        if s.get("input_regex"):
+            re.compile(s["input_regex"])
+    return signals
+
+
+def action_settled(cases, signals):
+    """Labels the action signals settle, applied the same way on every case
+    whatever its score. Returns (settled rules, {case id: {rule id: bool}}):
+      * a rule with any `exact` entry (ACTION_POLICY) is settled on every case:
+        gold iff the case carries one of the rule's exact signals;
+      * a `signal_implies_gold` entry settles gold on the cases carrying it;
+        the rule's other cases stay in the ordinary review."""
+    exact_rules = {s["rule"] for s in signals if s.get("mode") == "exact"}
+    labels = {}
+    for c in cases:
+        row = {}
+        for rid in exact_rules:
+            row[rid] = any(signal_hit(c, s) for s in signals
+                           if s["rule"] == rid and s.get("mode") == "exact")
+        for s in signals:
+            if s["rule"] in exact_rules or not s.get("signal_implies_gold"):
+                continue
+            if signal_hit(c, s):
+                row[s["rule"]] = True
+        labels[c["id"]] = row
+    return exact_rules, labels
+
+
+def review_plan(cases, probs, signals, extended_rules):
+    """Everything the review-set scheme needs, from its committed inputs.
+    Returns {"low_by_rule", "signals_hit", "settled_rules", "settled_labels",
+    "review"}: the per-rule lower bound (REVIEW_LOW_EXTENDED for
+    `extended_rules`), the (case, rule) pairs carrying a signal, the rules and
+    per-case labels settled by policy (UNIVERSAL_POLICY and the action
+    signals), and the review set itself."""
+    rules = {rid for row in probs.values() for rid in row}
+    extended = set(extended_rules)
+    low = {rid: (REVIEW_LOW_EXTENDED if rid in extended else REVIEW_LOW) for rid in rules}
+    exact_rules, act = action_settled(cases, signals)
+    settled_rules = set(UNIVERSAL_POLICY) | exact_rules
+    settled_labels = {}
+    for c in cases:
+        row = dict(policy_labels(c))
+        row.update(act.get(c["id"]) or {})
+        # only rules that were live (labelled) on the labelling date
+        settled_labels[c["id"]] = {rid: v for rid, v in row.items() if rid in rules}
+    hits = signal_pairs(cases, signals)
+    settled_pairs = {(cid, rid) for cid, row in settled_labels.items() for rid in row}
+    return {"low_by_rule": low, "signals_hit": hits, "settled_rules": settled_rules,
+            "settled_labels": settled_labels,
+            "review": review_set(probs, low, hits, settled_rules, settled_pairs)}
+
+
+def review_set(probs, low_by_rule, signals_hit, settled_rules=(), settled_pairs=()):
+    """{(case id, rule id)} the adjudication must cover: p above the rule's
+    lower bound, or the case carries the rule's action signal. Rules in
+    `settled_rules` (policy rules) and pairs in `settled_pairs` (signal-settled
+    gold) are excluded: their label is written, not judged."""
+    out = set()
+    for cid, row in probs.items():
+        for rid, p in row.items():
+            if rid in settled_rules or (cid, rid) in settled_pairs:
+                continue
+            if p > low_by_rule.get(rid, REVIEW_LOW) or (cid, rid) in signals_hit:
+                out.add((cid, rid))
+    return out
+
+
+def gold_sets_reviewed(probs, adjudications, low_by_rule, signals_hit, settled_labels,
+                       settled_rules):
+    """{case id: sorted gold ids} under the review-set scheme.
+    `settled_labels` is {case id: {rule id: bool}} for every policy-settled
+    pair (UNIVERSAL_POLICY, ACTION_POLICY, and signal-implied gold);
+    `settled_rules` are the rules settled on every case. A review pair without
+    an adjudication is an error; an adjudication outside the review set is an
+    error too (it would be a label nobody can reproduce)."""
+    decided = {(a["case"], a["rule"]): bool(a["gold"]) for a in adjudications}
+    settled_pairs = {(cid, rid) for cid, row in settled_labels.items() for rid in row}
+    need = review_set(probs, low_by_rule, signals_hit, settled_rules, settled_pairs)
+    missing = sorted(need - set(decided))
+    extra = sorted(set(decided) - need)
+    if missing or extra:
+        raise ValueError(f"{len(missing)} review pairs lack an adjudication (first "
+                         f"{missing[:3]}); {len(extra)} adjudications fall outside the review "
+                         f"set (first {extra[:3]})")
+    out = {}
+    for cid in probs:
+        gold = {rid for rid, v in (settled_labels.get(cid) or {}).items() if v}
+        gold |= {rid for (c, rid), v in decided.items() if c == cid and v}
+        out[cid] = sorted(gold)
+    return out
+
+
 def gold_sets(probs, adjudications, yes_at=YES_AT, no_at=NO_AT):
     """{case id: sorted gold ids}. A borderline pair with no adjudication is an
     error, not a silent 'not gold': every one must be decided in writing."""
@@ -469,16 +627,33 @@ SCRUB_PATTERNS = {
 }
 
 
+#: Letters NFKD does not decompose into a base letter plus a mark.
+_FOLD_EXTRA = str.maketrans({"ø": "o", "Ø": "o", "æ": "ae", "Æ": "ae", "œ": "oe", "Œ": "oe",
+                             "ß": "ss", "đ": "d", "Đ": "d", "ł": "l", "Ł": "l", "þ": "th",
+                             "Þ": "th", "ð": "d", "Ð": "d", "ı": "i"})
+
+
+def fold(text):
+    """Lower-case with accents removed (NFKD, combining marks dropped, and the
+    few letters NFKD leaves whole mapped to their plain spelling), so an
+    accented name and its plain spelling match each other either way."""
+    decomposed = unicodedata.normalize("NFKD", (text or "").translate(_FOLD_EXTRA))
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch)).casefold()
+
+
 def name_findings(text, names=()):
     """The record names (person or practice) `text` carries, matched as whole
-    words, case-insensitively. The names come from the record layer at intake
-    time and are never written anywhere."""
+    words, case-insensitively and accent-insensitively (both sides folded).
+    A word boundary is any non-letter, non-digit character, so a name after a
+    newline, a tab or punctuation still matches. The names come from the
+    record layer at intake time and are never written anywhere."""
     hits = []
+    folded = fold(text)
     for name in names:
         name = (name or "").strip()
         if len(name) < 3:
             continue
-        if re.search(r"(?<![a-z0-9])" + re.escape(name.lower()) + r"(?![a-z0-9])", text.lower()):
+        if re.search(r"(?<![^\W_])" + re.escape(fold(name)) + r"(?![^\W_])", folded):
             hits.append(name)
     return hits
 
@@ -553,18 +728,23 @@ def record_name_terms(rows, common=None):
             # Owner labels are first names, sometimes wrapped in a role label
             # ("Agent (<name>-local)"): keep every alphabetic token but the
             # role words.
-            terms.update(tok for tok in re.findall(r"[A-Za-z]{3,}", full)
-                         if tok.lower() not in OWNER_ROLE_WORDS)
+            terms.update(tok for tok in re.findall(r"[^\W\d_]{3,}", full)
+                         if fold(tok) not in OWNER_ROLE_WORDS)
             continue
         if kind == "deal":
             if multiword:
                 terms.add(full)
             continue
-        if multiword or full.lower() not in common:
+        if multiword or fold(full) not in common:
             terms.add(full)
-        for tok in re.findall(r"\b[A-Z][a-z][A-Za-z'-]{2,}\b", full):
-            if tok.lower() not in common:
-                terms.add(tok)
+        # Title-case tokens of four letters or more, any script (an accented
+        # surname is a term on its own too). A hyphenated or apostrophe name
+        # is kept whole, and each of its parts is considered as well.
+        for word in re.findall(r"[^\W\d_]+(?:['-][^\W\d_]+)*", full):
+            for tok in dict.fromkeys([word, *re.split(r"['-]", word)]):
+                if (len(tok) >= 4 and tok[0].isupper() and tok[1:2].islower()
+                        and fold(tok) not in common):
+                    terms.add(tok)
     return sorted(terms)
 
 
@@ -637,7 +817,13 @@ def validate_intake(doc, case_id, missed_rule, *, live_rules, prompt=None, strat
             if run > MAX_SHARED_RUN:
                 raise ValueError(f"a tool-call input shares a {run}-word run with the live "
                                  "turn: paraphrase it")
-    hits = scrub_findings(prompt + " " + json.dumps(calls), extra_names)
+    # Every check runs on the parsed values (the prompt and each string leaf
+    # of the tool calls, keys included), never on JSON text: serialising
+    # would turn a newline or tab before a name into "\n"/"\t" glued to it,
+    # and escape accented letters to \uXXXX.
+    hits = []
+    for text in [prompt, *_string_leaves(calls)]:
+        hits += scrub_findings(text, extra_names)
     if hits:
         # Kinds only: the refusal never repeats the material it caught.
         kinds = sorted({kind for kind, _ in hits})
