@@ -25,6 +25,10 @@
 import { personalScopeForActor } from "./identity.js";
 
 export const DEFAULT_ROOM = "partner-line";
+// The room the Observatory panel reads and posts turns in: the one the local
+// room bridge polls (ops/launchd/com.carr.room-bridge.plist CARR_ROOM_BRIDGE_ROOM).
+// The queue projection stays in DEFAULT_ROOM under its fixed Hermes provenance.
+export const OBSERVATORY_ROOM = "model-room";
 const SLUG = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const UUID = /^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$/;
 export const ROOM_BODY_MAX = 20000;
