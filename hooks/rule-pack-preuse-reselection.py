@@ -39,6 +39,37 @@ one typed advisory receipt is injected. The content_regex rows no longer run
 against tool payloads. Exact verbs, command families, and paths remain code-
 owned because those are structured facts rather than semantic judgments.
 
+ROUTE TRIGGERS (100%-recall design, 2026-09-26). ops/config/rule-routes.v1.json
+is now the source of truth for which rules a tool call triggers: every active
+rule carries at least one route (lib/rule_routes.py), and its `trigger` and
+`path_rule` routes are exact matches on the tool name, the record verb (the
+MCP tool, the call-verb passthrough, or `run.sh call`), a Bash command
+pattern, or a path glob. On a PreToolUse call that hits any route, the rules
+it hits are UNIONED with the compiled table's rows, fetched through the same
+standing-context door in ONE call, and injected as a third receipt
+(ROUTE_RECEIPT_SCHEMA). What exists today is kept: a call no route hits takes
+the generalized rail above unchanged, and the scheduled rail is untouched.
+Two properties the route rail adds. It dedupes PER RULE PER SESSION: a rule
+delivered in full is not re-injected for the same tool within 30 minutes, and
+a different tool delivers it again. And it FITS THE CAP: Claude Code persists
+any additionalContext over 10,000 characters to a file and shows a 2,000-
+character preview, which is not delivery, so rules not already in the
+always-on file are fitted first, then the rest, and any rule that does not
+fit is still listed by id with a one-line summary — never dropped silently.
+The cap holds by construction, not by margin: the final rendered receipt is
+measured, and a routed set too large even for an id-only receipt becomes one
+compact notice naming every id (lib/rule_routes.notice_too_large).
+
+THE ROUTE RAIL FAILS OPEN, VISIBLY. No failure blocks or rewrites the call,
+and none is silent. A missing or malformed route file announces RULE ROUTE
+FILE UNREADABLE on every admitted call, naming the rules that may bind, and
+still carries the table rail's delivery after the notice. A door failure, an
+exception anywhere in the rail, or a crash anywhere in process() ends in a
+fixed notice (never the exception's own text) saying the rules were NOT
+delivered and what to do before acting, instead of exit 1 with empty
+stdout. A malformed single route counts as matched, so it over-delivers its
+rule rather than dropping it; ops/rule-route-coverage.py refuses it in CI.
+
 NOT DONE HERE, ON PURPOSE: hooks/rule-pack-drift-gate.py's Stop-side keyword
 telemetry still only recognizes the original schema's receipt as "loaded"
 evidence for scheduled-automation; it does not yet credit a generalized-rail
@@ -77,6 +108,7 @@ from lib.rule_delivery_shadow import (  # noqa:E402
     WINDOW_SOURCE_PATHS, file_sha256, source_sha256,
 )
 from lib.claude_rule_delivery_dedupe import should_deliver, transcript_path_digest  # noqa:E402
+from lib import rule_routes  # noqa:E402
 
 
 MAP = REPO / "ops/config/rule-enforcement-map.json"
@@ -552,6 +584,144 @@ def _process_prompt(payload: dict, runner: Callable,
         return _context(canonical(receipt).decode("utf-8"), "UserPromptSubmit")
 
 
+# ---------------------------------------------------------------------------
+# ROUTE RAIL (100%-recall design). ops/config/rule-routes.v1.json decides which
+# rules a call triggers; the compiled table's rows ride along in the same call.
+
+
+def load_route_doc() -> dict:
+    """The committed route file. Raises rule_routes.RouteFileError when it is
+    missing or malformed; process() turns that into a loud notice, never a
+    silent fall-through to the table-only rail."""
+    return rule_routes.load_routes(REPO)
+
+
+def routed_rule_ids(payload: dict) -> list[str]:
+    """Every rule whose trigger or path route this PreToolUse call hits. Pure:
+    no dedupe state is read, so the eval harness can call it directly. Raises
+    rule_routes.RouteFileError when the route file cannot be used."""
+    if payload.get("hook_event_name") != "PreToolUse":
+        return []
+    tool_name = payload.get("tool_name")
+    if not isinstance(tool_name, str) or not tool_name:
+        return []
+    doc = load_route_doc()
+    return rule_routes.matched_rule_ids(doc, tool_name, payload.get("tool_input"))
+
+
+def _unroutable_candidates() -> list[str]:
+    """When the route file cannot be read: every corpus rule that is not
+    delivered at boot (class a) or through a surviving duplicate (class e).
+    These are the rules that MIGHT bind a call; the notice names them all."""
+    try:
+        classes = rule_routes.rule_classes(REPO)
+        return sorted(rid for rid in rule_routes.corpus_ids(REPO)
+                      if (classes.get(rid) or {}).get("class") not in {"a", "e"})
+    except Exception:
+        return []
+
+
+def _route_packs(ids: list[str]) -> list[str]:
+    """Packs of the pack-layer rules among ids. Declaring them is what lets the
+    door return a pack-only rule (the intro-politics scope) by id."""
+    layers = json.loads(MAP.read_text(encoding="utf-8")).get("rule_load_layers") or {}
+    packs: set[str] = set()
+    for rid in ids:
+        row = layers.get(rid)
+        if isinstance(row, dict) and row.get("load_layer") == "pack":
+            packs.update(p for p in row.get("packs") or () if _nonempty(p))
+    return sorted(packs)
+
+
+def _route_statements(response: dict, packs: list[str], ids: list[str]):
+    """Like _validate_generalized_selector, but a routed id the store does not
+    return is reported (not_found) instead of failing every other rule."""
+    identity = response.get("identity")
+    if not valid_local_identity(identity):
+        raise RuntimeError("selector identity is incomplete")
+    delivery = response.get("rule_delivery")
+    if (not isinstance(delivery, dict)
+            or delivery.get("mode") not in {"shadow", "enforced"}
+            or sorted(delivery.get("declared_packs") or []) != packs
+            or delivery.get("packs_not_found", []) != []):
+        raise RuntimeError("selector delivery plan is not exact")
+    shared = response.get("shared_rules")
+    personal = response.get("personal_rules")
+    if not isinstance(shared, list) or not isinstance(personal, list):
+        raise RuntimeError("selector rule pools are malformed")
+    found: dict[str, str] = {}
+    for item in shared + personal:
+        if not isinstance(item, dict):
+            raise RuntimeError("selector returned a malformed rule")
+        short = item.get("id")
+        if short in ids:
+            if short in found or not _nonempty(item.get("statement")):
+                raise RuntimeError("selector returned duplicate or nonbinding rule")
+            found[short] = item["statement"]
+    not_found = sorted(set(ids) - set(found))
+    return identity, delivery, found, not_found
+
+
+def _route_delivery(payload: dict, rows: list[dict], routed: list[str],
+                    runner: Callable) -> dict | None:
+    tool_name = payload["tool_name"]
+    trigger_ids, _table_packs, table_ids = (merge_trigger_delivery(rows) if rows
+                                            else ([], [], []))
+    candidates = sorted(set(routed) | set(table_ids))
+    ids = rule_routes.fresh_ids(payload["session_id"], tool_name, candidates)
+    if not ids:
+        return None
+    try:
+        packs = _route_packs(ids)
+        response = _run_generalized_selector(packs, ids, runner)
+        identity, delivery, found, not_found = _route_statements(response, packs, ids)
+    except Exception:
+        return _context(rule_routes.notice_door_failure(ids))
+    client = _client(payload)
+    base = {
+        "schema": rule_routes.ROUTE_RECEIPT_SCHEMA,
+        "client": client,
+        "session_id": payload["session_id"],
+        "turn_id": payload.get("turn_id") if client == "codex" else None,
+        "tool_use_id": payload["tool_use_id"],
+        "tool_name": tool_name,
+        "tool_input_sha256": digest(payload["tool_input"]),
+        "routes_digest": rule_routes.routes_digest(REPO),
+        "triggers_digest": file_sha256(TRIGGERS_PATH),
+        "map_digest": file_sha256(MAP),
+        "source_digest": source_sha256(REPO),
+        "trigger_ids": trigger_ids,
+        "route_rule_ids": sorted(set(routed) & set(ids)),
+        "packs": packs,
+        "identity": {key: identity[key] for key in (
+            "agent_principal_id", "runtime_principal", "sponsoring_human_id")},
+        "rule_ids": ids,
+        "not_found": not_found,
+        "instruction": rule_routes.ROUTE_INSTRUCTION,
+        "rule_delivery": {"mode": delivery["mode"], "declared_packs": packs,
+                          "packs_not_found": []},
+    }
+
+    def render(full: list[dict], overflow: list[dict]) -> str:
+        row = dict(base, rules=[{"id": r["id"], "statement": r["statement"]} for r in full],
+                   overflow=overflow)
+        row["receipt_id"] = receipt_id(row)
+        return canonical(row).decode("utf-8")
+
+    rules = [{"id": rid, "statement": found[rid]} for rid in sorted(found)]
+    full, overflow = rule_routes.fit_rules(rules, render,
+                                           always_on=rule_routes.always_on_ids())
+    text = render(full, overflow)
+    if not rule_routes.within_cap(text):
+        # THE CAP HOLDS BY CONSTRUCTION. Even an id-only receipt grows ~50
+        # characters per id, so a large enough routed set cannot fit as a
+        # receipt at all. Then nothing is claimed as delivered: the compact
+        # notice names every id and records nothing for dedupe.
+        return _context(rule_routes.notice_too_large(ids))
+    rule_routes.record_delivered(payload["session_id"], tool_name, [r["id"] for r in full])
+    return _context(text)
+
+
 def process(payload: dict, *, runner: Callable = subprocess.run,
             adviser: Callable[[str], list[dict]] | None = None,
             build_adviser: Callable[[str], dict] | None = None) -> dict | None:
@@ -569,13 +739,34 @@ def process(payload: dict, *, runner: Callable = subprocess.run,
             # preserve the miss and for the operator to reproduce through the door.
             return _context(FAILURE_CONTEXT)
 
-    # THE GENERALIZED RAIL (WR-000019 slice S9). Only reached when the
-    # original exact shape did not match, so a background Bash/functions.exec
-    # call keeps getting exactly the original behavior above and nothing from
-    # this rail layers onto it.
+    # THE ROUTE AND GENERALIZED RAILS (WR-000019 slice S9). Only reached when
+    # the original exact shape did not match, so a background
+    # Bash/functions.exec call keeps getting exactly the original behavior
+    # above and nothing from these rails layers onto it.
     if not (_nonempty(payload.get("session_id")) and _nonempty(payload.get("tool_use_id"))):
         return None
     rows = matched_triggers(payload)
+    # THE ROUTE RAIL. When the route file routes any rule to this call, it
+    # owns the delivery (the table's rows ride along in the same door call).
+    # Every failure below ends in a fixed notice naming what was not
+    # delivered: never an exception, never a silent table-only fall-through.
+    try:
+        routed = routed_rule_ids(payload)
+    except rule_routes.RouteFileError as exc:
+        return _route_file_unreadable(payload, rows, runner, exc.reason)
+    except Exception:
+        return _context(rule_routes.notice_error())
+    if routed:
+        try:
+            return _route_delivery(payload, rows, routed, runner)
+        except Exception:
+            table = merge_trigger_delivery(rows)[2] if rows else []
+            return _context(rule_routes.notice_error(sorted(set(routed) | set(table))))
+    return _table_delivery(payload, rows, runner)
+
+
+def _table_delivery(payload: dict, rows: list[dict], runner: Callable) -> dict | None:
+    """The compiled-table (generalized) rail, unchanged."""
     if not rows:
         return None
     try:
@@ -587,6 +778,34 @@ def process(payload: dict, *, runner: Callable = subprocess.run,
         return _context(GENERALIZED_FAILURE_CONTEXT)
 
 
+def _route_file_unreadable(payload: dict, rows: list[dict], runner: Callable,
+                           reason: str) -> dict:
+    """The route file is missing or malformed: announce it loudly on every
+    admitted call, naming the rules that may bind, and still deliver whatever
+    the table rail delivers, after the notice so a truncated preview keeps it."""
+    candidates = _unroutable_candidates()
+    notice = rule_routes.notice_file_unreadable(reason, candidates)
+    table = _table_delivery(payload, rows, runner)  # never raises: its own fixed notice
+    extra = ((table or {}).get("hookSpecificOutput") or {}).get("additionalContext")
+    if extra:
+        combined = notice + "\n\n" + extra
+        if rule_routes.within_cap(combined):
+            return _context(combined)
+        table_ids = merge_trigger_delivery(rows)[2] if rows else []
+        notice = rule_routes.notice_file_unreadable(
+            reason, sorted(set(candidates) | set(table_ids)))
+    return _context(notice)
+
+
+HOOK_ERROR_CONTEXT = (
+    "RULE DELIVERY HOOK ERROR (internal_error): rule-pack-preuse-reselection failed, so "
+    "NO rule was delivered for this step; you have not seen them. Nothing was blocked or "
+    "changed. Before you act: call the standing-context verb with no arguments, read each "
+    "rule whose subject covers what you are about to do, and follow it; if standing-context "
+    "also fails, stop and tell the user the rules could not be read."
+)
+
+
 def main() -> int:
     try:
         payload = json.load(sys.stdin)
@@ -594,7 +813,14 @@ def main() -> int:
         return 0
     if not isinstance(payload, dict):
         return 0
-    output = process(payload)
+    try:
+        output = process(payload)
+    except Exception:
+        # FAIL OPEN, VISIBLY. A crash would exit 1 with empty stdout: the call
+        # proceeds and the model is told nothing. Never echo the exception.
+        event = payload.get("hook_event_name")
+        output = _context(HOOK_ERROR_CONTEXT,
+                          event if event in {"PreToolUse", "UserPromptSubmit"} else "PreToolUse")
     if output is not None:
         print(json.dumps(output, sort_keys=True, separators=(",", ":")))
     return 0

@@ -273,6 +273,8 @@ def test_success_is_fresh_and_database_capability_is_not_forwarded():
     assert adapter.STANDING_CONTEXT_NATIVE_PROJECTION_JS in seen["prompt"]
     assert adapter.STANDING_CONTEXT_RULE_CHUNK_JS in seen["prompt"]
     assert "rule-jit-trigger-delivery/v1" in seen["prompt"]
+    assert "rule-route-trigger-delivery/v1" in seen["prompt"]
+    assert "any context beginning `RULE ROUTE` as rules NOT delivered" in seen["prompt"]
     assert "never treat its `declared_packs`, identity, or receipt id as the native" in seen["prompt"]
     assert "repeat until remaining=0" in seen["prompt"]
     assert "Never print the raw CallToolResult" in seen["prompt"]

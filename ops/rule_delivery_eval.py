@@ -27,6 +27,12 @@ adapter calls the production selection function itself:
                     two-stage selector; still the Flash path);
   jit_pretooluse    hooks/rule-pack-preuse-reselection.py's own
                     matched_triggers()/_matches() on each tool call;
+  layered_triggers  the same hook's route rail: routed_rule_ids() over
+                    ops/config/rule-routes.v1.json, unioned with the compiled
+                    table rows it carries in the same door call, on each tool
+                    call (exact matches; no dedupe state is read). Charged for
+                    gold of every layer, since routes cover every layer. The
+                    boot layer is scored beside it in a follow-up;
   drift_shadow      hooks/rule-pack-drift-gate.py as shipped: mode shadow
                     loads nothing;
   drift_if_acting   the same gate's evaluate(): the packs it says the turn
@@ -154,6 +160,7 @@ def universes(meta, names):
     layer0 = {rid for rid, row in meta.items() if row["layer"] == "layer0"}
     table = {"prompt_compiled": pack, "prompt_full": pack, "jit_pretooluse": pack,
              "drift_shadow": pack, "drift_if_acting": pack, "boot_layer0": layer0,
+             "layered_triggers": everything,
              "jev_rule_select": everything, "system_moment": everything,
              "system_moment_packlayer": pack,
              "system_moment_plus_drift": everything, "system_scoped_boot": everything}
@@ -263,6 +270,23 @@ def build_adapters(repo, *, jev="off", client_factory=None, calls_log=os.devnull
                 rules.update(preuse.merge_trigger_delivery(rows)[2])
         return {"rules": rules, "packs": {p for r in rules for p in meta.get(r, {}).get("packs", [])}}
 
+    def layered(case):
+        rules = set()
+        for index, call in enumerate(case["tool_calls"]):
+            payload = {"hook_event_name": "PreToolUse", "tool_name": call["tool_name"],
+                       "tool_input": call.get("tool_input"), "session_id": EVAL_SESSION,
+                       "tool_use_id": f"eval-{case['id']}-{index}"}
+            if hook._matches(payload):
+                # The scheduled rail still owns a background Bash call.
+                rules.update(hook.scheduled_rule_ids())
+                continue
+            routed = hook.routed_rule_ids(payload)
+            rows = hook.matched_triggers(payload)
+            table = preuse.merge_trigger_delivery(rows)[2] if rows else []
+            rules.update(routed)
+            rules.update(table)
+        return {"rules": rules, "packs": {p for r in rules for p in meta.get(r, {}).get("packs", [])}}
+
     drift = _load(os.path.join(repo, "hooks", "rule-pack-drift-gate.py"), "drift_gate_eval")
     triggers, members, _digest = drift.load_packs()
 
@@ -284,6 +308,8 @@ def build_adapters(repo, *, jev="off", client_factory=None, calls_log=os.devnull
     adapters = [
         {"name": "prompt_compiled", "select": prompt_compiled, "jev": False},
         {"name": "jit_pretooluse", "select": jit, "jev": False,
+         "applies": lambda case: bool(case["tool_calls"])},
+        {"name": "layered_triggers", "select": layered, "jev": False,
          "applies": lambda case: bool(case["tool_calls"])},
         {"name": "drift_shadow", "select": drift_shadow, "jev": False},
         {"name": "drift_if_acting", "select": drift_acting, "jev": False},
@@ -564,6 +590,7 @@ def render_markdown(report, statements=None, *, top=10, paths=None):
     statements = statements or {}
     order = paths or [p for p in SYSTEM_ROWS + ("prompt_full",
                                   "prompt_compiled", "jev_rule_select", "jit_pretooluse",
+                                  "layered_triggers",
                                   "drift_shadow", "drift_if_acting", "boot_layer0")
                       if p in report["paths"]]
     lines = [f"Cases: {report['cases']} ({', '.join(f'{k} {v}' for k, v in sorted(report['strata'].items()))})",
