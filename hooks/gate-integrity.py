@@ -831,11 +831,64 @@ def main():
     return 0
 
 
-if __name__ == "__main__":
+def _session_start_payload():
+    """The SessionStart hook payload, or None when this is not a hook run.
+
+    Only a bare invocation (no flags) fed a SessionStart JSON payload counts:
+    CI's --strict, --bless, --selftest and every script that runs this file by
+    hand never arm the rule boot gate and never touch the network. stdin is
+    read without blocking, because hand runs inherit whatever stdin they have;
+    under hooks/hook-meter-run.py it is an in-memory stream with no fileno.
+    """
+    if len(sys.argv) > 1 or sys.stdin is None:
+        return None
     try:
-        sys.exit(main())
+        if sys.stdin.isatty():
+            return None
+        try:
+            import select
+            ready, _, _ = select.select([sys.stdin.fileno()], [], [], 0.2)
+            if not ready:
+                return None
+        except (AttributeError, OSError, ValueError):
+            pass
+        payload = json.loads(sys.stdin.read() or "null")
+    except Exception:
+        return None
+    if isinstance(payload, dict) and payload.get("hook_event_name") == "SessionStart":
+        return payload
+    return None
+
+
+def arm_rule_boot(payload):
+    """Arm (or re-arm) hooks/rule-boot-gate.py for this session.
+
+    Runs on every SessionStart source -- startup, resume, clear and compact --
+    because each of them starts a context that has not read the rules: a
+    compacted context has lost them. lib/rule_boot_gate.py reads page 1 of
+    standing-context detail=boot from the store to learn the digest and the
+    page count, writes the arm state, and returns the instruction text
+    (under the 10k SessionStart cap). The store unreachable is stated, never
+    papered over (CLAUDE.md: no local fallback). Never raises.
+    """
+    try:
+        sys.path.insert(0, REPO)
+        from lib.rule_boot_gate import arm_session
+        return arm_session(payload.get("session_id") or payload.get("sessionId"),
+                           payload.get("source"))
+    except Exception as exc:
+        return f"RULE BOOT: could not arm the rule gate ({exc}); read the rules with standing-context detail=boot before acting."
+
+
+if __name__ == "__main__":
+    hook_payload = _session_start_payload()
+    try:
+        rc = main()
     except Exception as exc:
         # Fail OPEN and SILENT-ish: a broken attestation must never block a
         # session, but it must not claim everything is fine either.
         print(f"GATE INTEGRITY: check could not run ({exc}) — treat gates as UNVERIFIED.")
-        sys.exit(0)
+        rc = 0
+    if hook_payload is not None:
+        print(arm_rule_boot(hook_payload))
+    sys.exit(rc)

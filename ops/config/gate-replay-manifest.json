@@ -607,6 +607,21 @@
     "refused_content.py": {
       "role": "helper"
     },
+    "rule-boot-gate.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "PreToolUse",
+          "matcher": ".*",
+          "fixtures": [
+            "reads",
+            "edits",
+            "agent",
+            "tool_calls"
+          ]
+        }
+      ]
+    },
     "rule-pack-drift-gate.py": {
       "role": "gate",
       "wirings": [
@@ -828,6 +843,7 @@
     "lib/loadpy.py",
     "lib/local_principal.py",
     "lib/machine_prerequisites.py",
+    "lib/rule_boot_gate.py",
     "lib/rule_delivery_preuse.py",
     "lib/rule_delivery_shadow.py",
     "lib/scheduled_run.py",

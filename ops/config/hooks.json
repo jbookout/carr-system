@@ -1,6 +1,16 @@
 {
   "PreToolUse": [
     {
+      "matcher": ".*",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "{{REPO}}/.venv/bin/python {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/rule-boot-gate.py",
+          "timeout": 5
+        }
+      ]
+    },
+    {
       "matcher": "Bash|Write|Edit|MultiEdit|Agent|WebFetch|WebSearch|mcp__.*",
       "hooks": [
         {

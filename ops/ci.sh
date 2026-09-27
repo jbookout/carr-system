@@ -772,12 +772,16 @@ PYEOF
   # gate for mcp-server/src/core-rule-ids.js against ops/config/rule-
   # triage.v1.json's `home: "core"` set -- the generated module doctrine.js
   # reads because a Cloudflare Worker has no filesystem at request time.
+  # rule-boot-classes-check JOINED 2026-09-26 (gated rule boot): the same
+  # parity shape for mcp-server/src/rule-boot-classes.js against
+  # ops/config/rule-classes.v1.json, plus the rule boot's token budget (fails
+  # naming the largest always-on rules; never truncates).
   for inv in enforcement-coverage-check audit-queue-freshness-check map-row-evidence-check \
              rule-enforcement-map-check rule-load-layer-check rule-classification-parity-check \
              reachability-check selftest-git-isolation-check \
              drive-dependency-inventory drive-retirement-readiness-gate \
              mechanism-doctrine-gate scheduler-cutover-coverage-gate \
-             boot-budget-check core-rule-ids-check; do
+             boot-budget-check core-rule-ids-check rule-boot-classes-check; do
     [ -f "ops/$inv.py" ] || continue
     run_quiet "$LOGDIR/gate-$inv.log" "$PY" "ops/$inv.py" \
       || { inherited_abort "$inv" "$PY" "ops/$inv.py"
