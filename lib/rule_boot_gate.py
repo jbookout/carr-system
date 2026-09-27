@@ -105,13 +105,15 @@ TOOLLESS_AGENT_TYPES = frozenset({"statusline-setup"})
 # The only redirects are 2>&1, 2>/dev/null and </dev/null. Each <filter> only
 # reshapes what the fetch printed and cannot run, write or invent anything:
 #     jq [display options] [path filter]   paths only: .a.b, .[], .[0], |, ",", keys, length, type
-#     python3|python -c '<code>'           an AST whitelist: import json/sys, read stdin, print
-#     python3|python -m json.tool [opts]
+#     python3|python -c '<code>'           an AST whitelist: import json/sys, read stdin, print;
+#                                          no string-rewriting methods
+#     python3|python -m json.tool [opts]   (both Python forms only from a checkout root:
+#                                          Python imports from its working directory)
 #     head|tail [-n N | -N | -c N]         cat
 # Anything else — `;`, `||`, `&`, a second `&&`, `$`, backticks, a file
 # argument, a write, an unknown program — is not a fetch and is held as usual.
 # A relative cd is refused because PostToolUse may see the post-cd cwd.
-# Because no filter can invent output, a page read through a pipe is confirmed
+# Because no filter can invent or rewrite output, a page read through a pipe is confirmed
 # the same way as a direct one: by the answer's own digest, page and text.
 # KNOWN RESIDUALS (Jev, 2026-09-27, kind rule-boot-gate-fetch-recognition-
 # loopholes; top gap edited_worktree_run_sh 0.95), kept on purpose: the gate
@@ -131,9 +133,11 @@ _JQ_PATH_TOKEN = re.compile(
 _HEAD_TAIL_ARGS = re.compile(r"(?:-n ?\+?\d{1,7}|-c ?\+?\d{1,9}|-\d{1,7}|-n\+?\d{1,7}|-c\+?\d{1,9})?")
 _JSON_TOOL_ARGS = re.compile(r"(?:\s*(?:--indent \d{1,2}|--sort-keys|--compact|--no-ensure-ascii|--tab))*")
 _PY_CALLABLES = frozenset({"print", "len", "sorted", "str"})
+# No string-transforming method (split, join, replace, strip, lower...): with
+# one, a filter could rewrite the page text and still print a valid rule_boot
+# (review of #1343: "maybe".join(text.split("NEVER")) passed as read).
 _PY_ATTRS = frozenset({"load", "loads", "dumps", "stdin", "stdout", "read", "write", "get", "keys",
-                       "values", "items", "splitlines", "strip", "rstrip", "lstrip", "split", "join",
-                       "startswith", "endswith", "upper", "lower"})
+                       "values", "items"})
 _PY_KEYWORDS = frozenset({"indent", "ensure_ascii", "sort_keys", "end", "sep", "flush"})
 _PY_STR = re.compile(r"[A-Za-z0-9_ .#*\n\t-]*")
 # Only the Worker's own closed-vocabulary refusal of `detail` means "not
@@ -314,6 +318,12 @@ def _is_this_repos_run_sh(path):
         return bool(mine) and _git_common_dir(os.path.dirname(real)) == mine
     except OSError:
         return False
+
+
+def _is_checkout_root(folder):
+    """True when `folder` is the root of this checkout or a worktree of it."""
+    return bool(folder) and os.path.isabs(folder) and _is_this_repos_run_sh(os.path.join(folder, "run.sh")) \
+        and os.path.realpath(folder) == os.path.dirname(os.path.realpath(os.path.join(folder, "run.sh")))
 
 
 def _lex(command):
@@ -510,6 +520,12 @@ def parse_bash_fetch(command, cwd):
         return None
     if not all(_harmless_filter(stage) for stage in stages[1:]):
         return None
+    # Python puts its working directory first on sys.path, so `import json`
+    # would run a json.py planted there. A Python filter runs only from a
+    # checkout root of this repo (review of #1343).
+    uses_python = any(stage[0][1] in ("python3", "python") for stage in stages[1:])
+    if uses_python and not _is_checkout_root(base):
+        return None
     args = {}
     if len(words) == 4:
         try:
@@ -569,8 +585,9 @@ def fetch_instructions(pages, digest=None, pages_total=None):
         f"'{{\"detail\":\"boot\",\"page\":{first}}}'\n"
         "Until then only these calls, other standing-context calls, the read-only rule verbs "
         "(applicable-rules, resolve-doctrine-rules, read-doctrine, search-doctrine, doctrine-index, "
-        "doctrine-sections) and ToolSearch will run. A pipe into a formatter (jq, python3 -c, head) "
-        "is still a fetch if the whole JSON prints; a command chained with && or ; is not. "
+        "doctrine-sections) and ToolSearch will run. A leading `cd <absolute repo path> &&` and a pipe "
+        "into a formatter (jq, python3 -c from the repo root, head) keep it a fetch if the whole JSON "
+        "prints; anything run after the fetch (&&, ;, ||, &) does not. "
         "This can never lock you out: a fetch that "
         f"fails unlocks you with a notice, and after {DENY_CAP} holds without a fetch the gate "
         "stops holding this context.")

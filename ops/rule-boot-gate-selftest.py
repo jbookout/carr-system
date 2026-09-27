@@ -651,6 +651,9 @@ def case_piped_formatter(c):
                f"{abs_cmd(1)} | python3 -c 'import json,sys; d=json.load(sys.stdin); d[\"rule_boot\"][\"page\"]=2; print(json.dumps(d))'",
                f"{abs_cmd(1)} | python3 -c 'print(\"{{\\\"rule_boot\\\": 1}}\")'",
                f"{abs_cmd(1)} | python3 /tmp/evil.py",
+               # Rewriting the text while keeping the JSON (review of #1343, nit 2).
+               f"{abs_cmd(1)} | python3 -c 'import sys; print(\"maybe\".join(sys.stdin.read().split(\"NEVER\")))'",
+               f"{abs_cmd(1)} | python3 -c 'import sys; print(sys.stdin.read().lower())'",
                f"{abs_cmd(1)} | jq env", f"{abs_cmd(1)} | jq '{{rule_boot:{{digest:\"sha256:x\"}}}}'",
                f"{abs_cmd(1)} | jq -n '\"x\"'", f"{abs_cmd(1)} | jq . /etc/hosts",
                f"{abs_cmd(1)} | head -n 5 /etc/hosts", f"{abs_cmd(1)} | cat /etc/hosts",
@@ -658,6 +661,16 @@ def case_piped_formatter(c):
                f"{RUN_SH} call standing-context \"$(id)\""]
     for i, cmd in enumerate(refused):
         assert denied(c.call("Bash", {"command": cmd}, agent=f"pipe-{i}")), f"not a harmless pipe: {cmd}"
+    # A Python filter imports json from its working directory, so it runs only
+    # from a checkout root of this repo (review of #1343, nit 1).
+    for i, (cmd, cwd) in enumerate([(f"{abs_cmd(1)} | {PY_FORMAT}", "/tmp"),
+                                    (f"cd /tmp && {abs_cmd(1)} | python3 -m json.tool", REPO),
+                                    (f"{abs_cmd(1)} | {PY_FORMAT}", os.path.join(REPO, "ops"))]):
+        assert denied(c.call("Bash", {"command": cmd}, agent=f"pycwd-{i}", cwd=cwd)), f"python off-root: {cmd} @ {cwd}"
+    assert not denied(c.call("Bash", {"command": f"{abs_cmd(1)} | jq ."}, agent="jq-tmp", cwd="/tmp")), \
+        "jq imports nothing from the cwd: any cwd"
+    assert not denied(c.call("Bash", {"command": f"cd {REPO} && ./run.sh call standing-context {boot_arg(1)} | {PY_FORMAT}"},
+                             agent="py-root", cwd="/tmp")), "python after cd to the repo root is fine"
 
 
 def case_parallel_batch(c):
@@ -894,6 +907,7 @@ MUTANTS = {
                                         '        return False')],
     "unreadable-page-read-as-outage": [('        if p in attempted and f"u{p}" not in names:', '        if p in attempted:')],
     "cd-form-refused": [('        base, tokens = target, tokens[3:]', '        return None')],
+    "python-any-cwd": [('    if uses_python and not _is_checkout_root(base):', '    if False:')],
 }
 
 
