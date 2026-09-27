@@ -131,9 +131,10 @@ def dispatch(task, context="", *, pin=None, flash_free=True, policy=None, catalo
     # decide() flags overflow for any route whose model is Flash, but only a route that actually queues to the Flash
     # target is affected by Flash being busy; code and script spawns go to the Opus desk and keep their tier.
     routed_target = policy["queue_targets"][row["route"]]
-    if row["route"] == "script" and routed_target == "flash":
-        # Flash's script protocol runs only on a queued task that names its data (tools/room-bridge/flash_wire.py);
-        # an in-process spawn has no data to hand it, and Jev's abstention also lands here, so it keeps the Opus desk.
+    if row["route"] in ("script", "code") and routed_target == "flash":
+        # Flash's script and code protocols run only on a queued task that names its data, or its project and test
+        # (tools/room-bridge/flash_wire.py); an in-process spawn has none to hand it, and Jev's abstention also lands
+        # on script, so both keep the Opus desk.
         routed_target = policy["queue_targets"]["fallback"]
     overflow = row["overflow"] and routed_target == "flash"
     if overflow:

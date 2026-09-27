@@ -50,6 +50,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -63,13 +64,83 @@ RUNS_LOG = os.path.join(OUT, "flash-runs.jsonl")
 EXAMPLES_LOG = os.path.join(OUT, "flash-examples.jsonl")
 HANDOFF_DIR = os.path.join(OUT, "flash-handoffs")
 FLASH = os.environ.get("FLASH_BIN") or shutil.which("flash") or os.path.expanduser("~/.local/bin/flash")
-SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".mypy_cache", "out", "dist", "build"}
+SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache", "out", "dist",
+             "build"}
 # Runaway cutoff. A scoped slice that has not finished in ten minutes is thinking in circles
 # (the run-length benchmark task spent 214 s on its first try and still failed), and the
 # next attempt, which starts with that attempt's failure in its prompt, is the better bet.
 ATTEMPT_TIMEOUT = 600
 ATTEMPT_TOOLS = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
 TEST_TIMEOUT = 600
+SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+
+
+def flash_port(url=None):
+    """The loopback port the Flash server listens on, or None when the base URL is not loopback."""
+    import urllib.parse
+    u = urllib.parse.urlparse(url or os.environ.get("ANTHROPIC_BASE_URL")
+                             or os.environ.get("CARR_FLASH_URL") or "http://127.0.0.1:8000")
+    return (u.port or 80) if u.hostname in ("127.0.0.1", "localhost") else None
+
+
+def scratch_for(work):
+    """The sandboxed run's HOME and TMPDIR live here: a sibling of the tree, never inside it, so what the launcher
+    (its CLAUDE_CONFIG_DIR session logs, caches) and the tests (pytest tmp_path) write there can never reach the
+    patch, the committed branch or the diff posted to the room (third review of #1324). Writable to the sandbox,
+    removed with the run."""
+    return os.path.realpath(work).rstrip(os.sep) + ".scratch"
+
+
+def sandbox_profile(work, *, reads=(), execs=(), port=None):
+    """A macOS seatbelt profile for a model-driven run (the Flash agent and the tests it writes), the same shape as
+    tools/flash-script.py sandbox_profile() (#1250/#1316). The task text is untrusted, so a planted line can steer
+    the agent toward secrets or the network. Writes go only inside `work` (the throwaway attempt copy or worktree);
+    nothing under the home folder, the shared temp dirs, the Postgres/Homebrew state, /etc/ssh or the keychains is
+    readable except `work`, the interpreters, and the `reads` passed (the project's .venv/node_modules and the Flash
+    launcher). Network is closed except the loopback Flash port. The only programs that may start are system tool
+    dirs and the `execs` passed, so a binary the model writes into `work` can never be executed. mach-lookup,
+    Apple Events and signals to other processes are denied, which closes `open`, the keychain agent and launchd."""
+    work = os.path.realpath(work)
+    scratch = scratch_for(work)
+    home = os.path.realpath(os.path.expanduser("~"))
+    interp_prefixes = {os.path.realpath(p) for p in (sys.prefix, sys.base_prefix)}
+    reads = sorted({work, scratch, *interp_prefixes, *(os.path.realpath(p) for p in reads if p)})
+    exec_dirs = sorted({"/usr/bin", "/bin", "/usr/libexec", "/opt/homebrew", "/usr/local/bin",
+                        *(os.path.realpath(p) for p in execs if p)})
+    # The running interpreter may live under an allowed dir already, but a virtualenv often copies python outside
+    # one; allow it explicitly (its own path and resolved path), the way flash-script does.
+    interp_execs = sorted({sys.executable, os.path.realpath(sys.executable)})
+    private = sorted({os.path.realpath(p) for p in (
+        home, "/private/tmp", "/private/var/folders", "/Users/Shared", "/opt/homebrew/var", "/opt/homebrew/etc",
+        "/usr/local/var", "/usr/local/etc", "/etc/ssh", "/Library/Keychains")})
+    allpaths = [*private, *reads, *exec_dirs, *interp_execs, scratch]
+    if any('"' in p or "\\" in p for p in allpaths):
+        raise ValueError("path not expressible in a sandbox profile")
+    net = f'(allow network-outbound (remote ip "localhost:{port}"))' if port else ""
+    return ("(version 1)(allow default)"
+            f"(deny network*){net}"
+            "(deny file-read* " + " ".join(f'(subpath "{p}")' for p in private) + ")"
+            "(allow file-read* " + " ".join(f'(subpath "{p}")' for p in reads) + ")"
+            "(allow file-read-metadata)"
+            "(deny file-write*)"
+            f'(allow file-write* (subpath "{work}") (subpath "{scratch}") (literal "/dev/null"))'
+            # Git metadata is never writable from inside, anywhere: a `.git` file or directory, at any depth. Model
+            # code that planted core.fsmonitor or a filter in a .git/config (or swapped a worktree's .git pointer)
+            # would have it run by the UNSANDBOXED git that reads the patch back afterwards (re-review of #1324).
+            # This rule comes after the allow above, so it wins.
+            '(deny file-write* (regex #"/\\.git(/|$)"))'
+            "(deny process-exec*)"
+            "(allow process-exec " + " ".join(f'(subpath "{p}")' for p in exec_dirs)
+            + " " + " ".join(f'(literal "{p}")' for p in interp_execs) + ")"
+            "(deny mach-lookup)(deny appleevent-send)(deny signal (target others))")
+
+
+def sandbox_wrap(argv, work, *, reads=(), execs=(), port=None):
+    """Prefix argv with sandbox-exec under a profile for `work`. Raises FileNotFoundError when sandbox-exec is
+    absent, so the caller fails closed rather than running model code unsandboxed."""
+    if not os.path.exists(SANDBOX_EXEC):
+        raise FileNotFoundError("sandbox-exec is not on this machine")
+    return [SANDBOX_EXEC, "-p", sandbox_profile(work, reads=reads, execs=execs, port=port), *argv]
 
 
 def _lib(name):
@@ -108,6 +179,155 @@ def _sh(cmd, cwd, timeout, env=None):
         return 124, f"timed out after {timeout}s\n{partial if isinstance(partial, str) else ''}"
 
 
+# Every process a contained run starts carries this marker in its environment, so a descendant that setsid()'d AND
+# was reparented to init (its parent already gone) can still be found and killed.
+RUN_MARK = "CARR_FLASH_CONTAIN"
+
+
+def _children_map():
+    try:
+        out = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    kids = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            kids.setdefault(int(parts[1]), []).append(int(parts[0]))
+    return kids
+
+
+def _descendants(root):
+    """Every live descendant of root, walked by ppid. A setsid() child leaves the process GROUP but keeps its
+    parent, so it is found here as long as the tree is still attached (we walk before killing anything)."""
+    if not root:
+        return set()
+    kids, seen, stack = _children_map(), set(), [root]
+    while stack:
+        for child in kids.get(stack.pop(), []):
+            if child not in seen:
+                seen.add(child)
+                stack.append(child)
+    return seen
+
+
+def _marked(token):
+    """Processes whose environment carries this run's marker, including orphans already reparented to init."""
+    needle, pids = f"{RUN_MARK}={token}", set()
+    if os.path.isdir("/proc"):  # Linux
+        for d in os.listdir("/proc"):
+            if d.isdigit():
+                try:
+                    with open(f"/proc/{d}/environ", "rb") as fh:
+                        if needle.encode() in fh.read().split(b"\0"):
+                            pids.add(int(d))
+                except OSError:
+                    pass
+    else:  # macOS: ps -E appends each own-user process's environment
+        try:
+            out = subprocess.run(["ps", "-A", "-E", "-ww", "-o", "pid=,command="], capture_output=True, text=True,
+                                 timeout=10).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return pids
+        for line in out.splitlines():
+            pid, _, rest = line.strip().partition(" ")
+            if pid.isdigit() and needle in rest.split():
+                pids.add(int(pid))
+    pids.discard(os.getpid())
+    return pids
+
+
+def kill_run(root, token):
+    """Stop, then SIGKILL, every process of a contained run: root's live descendant tree and anything carrying the
+    run's marker. SIGSTOP first, repeated until no new process appears, so nothing can fork a replacement between
+    the snapshot and the kill; then SIGKILL all of them and root's process group."""
+    stopped = set()
+    for _ in range(8):
+        found = _descendants(root) | _marked(token)
+        if root:
+            found.add(root)
+        new = found - stopped
+        if not new:
+            break
+        for pid in new:
+            try:
+                os.kill(pid, signal.SIGSTOP)
+            except OSError:
+                pass
+        stopped |= new
+    for pid in stopped:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    if root:
+        try:
+            os.killpg(root, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def run_contained(argv, cwd, timeout, env=None):
+    """Run argv (a list, no shell) contained: its own session, output to a file outside `cwd` (never in the tree
+    git later reads), a per-run marker in its environment, and a timeout that bounds the wall clock. On timeout
+    the WHOLE run is killed (kill_run), including a setsid() descendant, and we never block on an inherited pipe.
+    On a normal exit, anything the run left behind (a daemonised child) is killed too. Returns (exit_code, output),
+    exit_code None on timeout."""
+    token = uuid.uuid4().hex
+    child_env = dict(os.environ if env is None else env)
+    child_env[RUN_MARK] = token
+    fd, out_path = tempfile.mkstemp(prefix="flash-contained-", suffix=".log")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            try:
+                p = subprocess.Popen(argv, cwd=cwd, stdout=fh, stderr=subprocess.STDOUT,
+                                     stdin=subprocess.DEVNULL, env=child_env, start_new_session=True)
+            except OSError as exc:
+                return 127, f"could not start {argv[0]}: {type(exc).__name__}"
+            try:
+                p.wait(timeout=max(1.0, timeout))
+                timed_out = False
+            except subprocess.TimeoutExpired:
+                timed_out = True
+            kill_run(p.pid if timed_out else None, token)
+            try:
+                p.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+        try:
+            with open(out_path, "r", errors="replace") as fh:
+                output = fh.read()
+        except OSError:
+            output = ""
+        return (None if timed_out else p.returncode), output
+    finally:
+        try:
+            os.unlink(out_path)
+        except OSError:
+            pass
+
+
+def bounded_run(argv, cwd, timeout, env=None):
+    """run_contained with the shell convention: (124, "timed out ...") on timeout."""
+    code, output = run_contained(argv, cwd, timeout, env=env)
+    if code is None:
+        return 124, f"timed out after {timeout:.0f}s\n{output}"
+    return code, output
+
+
+def _run_test(test_cmd, cwd, timeout, *, sandbox=False, reads=(), execs=(), port=None):
+    """Run the test command in `cwd`. Sandboxed, it goes through /bin/sh under the seatbelt profile (model-written
+    tests are untrusted); unsandboxed it keeps the old shell run. Either way the timeout bounds the wall clock."""
+    if sandbox:
+        argv = sandbox_wrap(["/bin/sh", "-c", test_cmd], cwd, reads=reads, execs=execs, port=port)
+        env = _sandbox_env(os.environ, cwd)
+        try:
+            return bounded_run(argv, cwd, timeout, env=env)
+        finally:
+            drop_scratch(cwd)  # beside a real project on an interactive run, so never left behind
+    return _sh(test_cmd, cwd, timeout)
+
+
 def _tracked_files(cwd):
     code, out = _sh(["git", "ls-files", "-co", "--exclude-standard", "-z"], cwd, 60)
     if code == 0 and out:
@@ -120,29 +340,70 @@ def _tracked_files(cwd):
     return files
 
 
+# Git run by THIS process after model code touched a tree must not trust anything in that tree (re-review of #1324):
+# the repository lives in a git dir the model can never write (gitdir_for: a sibling of the copy, outside the
+# sandbox's writable folder), no system or global config is read, and the exec-capable hooks are pinned off. An
+# in-tree .gitattributes can only name drivers, and no trusted config defines any, so it cannot run anything.
+GIT_HARDEN = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.untrackedCache=false"]
+
+
+_GIT_ENV_LIB = None
+
+
+def git_env(base=None, excludes=None):
+    """A git environment that trusts nothing inherited: ops/git_env.scrubbed_env drops the location variables
+    (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, ...) and every GIT_CONFIG_COUNT/KEY/VALUE pair (which can carry
+    core.worktree); system and global config are off. The only config added back is our own excludes file."""
+    global _GIT_ENV_LIB
+    if _GIT_ENV_LIB is None:
+        _GIT_ENV_LIB = _lib("git_env")
+    env = _GIT_ENV_LIB.scrubbed_env(base)
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0")
+    if excludes:
+        env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="core.excludesFile", GIT_CONFIG_VALUE_0=excludes)
+    return env
+
+
+def gitdir_for(dest):
+    """The trusted git dir of a throwaway copy: a sibling of it, so never inside the folder model code may write."""
+    return os.path.realpath(dest).rstrip(os.sep) + ".gitdir"
+
+
+def tgit(gitdir, worktree, *args, timeout=120, env=None, excludes=None):
+    """git on `worktree` through an explicit, trusted git dir, hardened; never discovers a .git in the tree."""
+    return _sh(["git", "--git-dir", gitdir, "--work-tree", worktree, *GIT_HARDEN, *args], worktree, timeout,
+               env=git_env(env, excludes))
+
+
 def make_copy(cwd, dest):
     """A throwaway copy of the working tree with a baseline commit, so the attempt's
-    change can be read back as a patch no matter what state the real tree is in."""
+    change can be read back as a patch no matter what state the real tree is in. The copy's
+    repository is kept OUTSIDE it (gitdir_for), so nothing written into the copy is ever git metadata."""
     for rel in _tracked_files(cwd):
         src = os.path.join(cwd, rel)
         dst = os.path.join(dest, rel)
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copy2(src, dst, follow_symlinks=False)
-    venv = os.path.join(cwd, ".venv")
-    if os.path.isdir(venv):
-        os.symlink(venv, os.path.join(dest, ".venv"))
-    for args in (["git", "init", "-q"], ["git", "add", "-A"],
-                 ["git", "-c", "user.email=flash@local", "-c", "user.name=flash",
+    # The project's installed dependencies are linked, not copied: .venv for Python, node_modules so a
+    # `node --test` in the copy resolves the project's packages (the Model Room queue's code tasks use both).
+    for dep in (".venv", "node_modules"):
+        src = os.path.join(cwd, dep)
+        if os.path.isdir(src) and not os.path.lexists(os.path.join(dest, dep)):
+            os.symlink(src, os.path.join(dest, dep))
+    gitdir = gitdir_for(dest)
+    for args in (["init", "-q"], ["add", "-A"],
+                 ["-c", "user.email=flash@local", "-c", "user.name=flash",
                   "commit", "-q", "--no-verify", "-m", "baseline"]):
-        _sh(args, dest, 120)
+        tgit(gitdir, dest, *args)
 
 
 def read_patch(dest):
     # Leave out what running code generates (bytecode caches, build output): the copy never took those
     # folders, so a change to them re-creates files the real folder already has and the patch won't apply.
     skip = [f":(exclude,glob)**/{d}/**" for d in sorted(SKIP_DIRS - {".git"})] + [":(exclude,glob)**/*.pyc"]
-    _sh(["git", "add", "-A", "--", ".", *skip], dest, 120)
-    _, patch = _sh(["git", "diff", "--cached", "--binary"], dest, 120)
+    gitdir = gitdir_for(dest)
+    tgit(gitdir, dest, "add", "-A", "--", ".", *skip)
+    _, patch = tgit(gitdir, dest, "diff", "--cached", "--binary")
     return patch
 
 
@@ -227,7 +488,39 @@ def rules_block(rules):
     return "\n".join(lines)
 
 
-def run_attempt(n, cwd, prompt, test_cmd, effort, workdir, think=True, rules_text=None):
+def _dep_reads(cwd):
+    """The dependency dirs a sandboxed attempt may read (resolved): the project's virtualenv and node_modules, plus
+    the Flash launcher. Everything else under the home folder stays denied."""
+    reads = [FLASH]
+    for dep in (".venv", "node_modules"):
+        p = os.path.join(cwd, dep)
+        if os.path.exists(p):
+            reads.append(os.path.realpath(p))
+    return reads
+
+
+def _sandbox_env(base, dest):
+    """Env for a sandboxed run: a throwaway HOME and TMPDIR in the scratch folder BESIDE the tree (scratch_for), so
+    the Flash launcher's $HOME/.claude-local, caches and test temp files land where writes are allowed but never in
+    the patch; and no inherited credential beyond a minimal allowlist. The launcher re-exports the Anthropic base
+    URL and model itself. The caller removes the scratch folder (drop_scratch)."""
+    scratch = scratch_for(dest)
+    home, tmp = os.path.join(scratch, "home"), os.path.join(scratch, "tmp")
+    os.makedirs(home, exist_ok=True)
+    os.makedirs(tmp, exist_ok=True)
+    keep = {k: base[k] for k in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL",
+                                 "ANTHROPIC_SMALL_FAST_MODEL", "CARR_FLASH_URL", "CARR_FLASH_MODEL",
+                                 "MAX_THINKING_TOKENS", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
+            if k in base}
+    return {"PATH": "/opt/homebrew/bin:/usr/bin:/bin", "HOME": home, "TMPDIR": tmp, "LANG": "C.UTF-8",
+            "PYTHONDONTWRITEBYTECODE": "1", **keep}
+
+
+def drop_scratch(dest):
+    shutil.rmtree(scratch_for(dest), ignore_errors=True)
+
+
+def run_attempt(n, cwd, prompt, test_cmd, effort, workdir, think=True, rules_text=None, sandbox=False):
     dest = os.path.join(workdir, f"attempt-{n}")
     os.makedirs(dest)
     make_copy(cwd, dest)
@@ -246,14 +539,25 @@ def run_attempt(n, cwd, prompt, test_cmd, effort, workdir, think=True, rules_tex
     # Appended, not replacing: the base prompt stays byte-identical across tasks so the
     # server's prompt cache still covers it; only the rules tail is read fresh.
     extra = ["--append-system-prompt", rules_text] if rules_text else []
-    code, transcript = _sh([FLASH, "-p", prompt, "--effort", effort or "low",
-                            "--permission-mode", "acceptEdits",
-                            "--tools", *ATTEMPT_TOOLS, *extra,
-                            "--allowedTools", *allowed], dest, ATTEMPT_TIMEOUT, env=env)
+    argv = [FLASH, "-p", prompt, "--effort", effort or "low", "--permission-mode", "acceptEdits",
+            "--tools", *ATTEMPT_TOOLS, *extra, "--allowedTools", *allowed]
+    reads, execs, port = _dep_reads(cwd), [os.path.join(cwd, ".venv", "bin")], flash_port()
+    gitdir = gitdir_for(dest)
+    if sandbox:
+        # The agent runs model-driven code, so it is sandboxed: writes only inside this attempt copy (never git
+        # metadata), no reads under home except its deps and its read-only git dir, network only to the local Flash
+        # port. A throwaway HOME keeps its config writable. It runs contained, so nothing it starts outlives it.
+        argv = sandbox_wrap(argv, dest, reads=[*reads, gitdir], execs=execs, port=port)
+        env = dict(_sandbox_env(env or os.environ, dest), GIT_DIR=gitdir, GIT_WORK_TREE=dest)
+        code, transcript = bounded_run(argv, dest, ATTEMPT_TIMEOUT, env=env)
+    else:
+        env = dict(env or os.environ, GIT_DIR=gitdir, GIT_WORK_TREE=dest)
+        code, transcript = _sh(argv, dest, ATTEMPT_TIMEOUT, env=env)
     elapsed = round(time.monotonic() - started, 1)
     test_code, test_out = (None, "")
     if test_cmd:
-        test_code, test_out = _sh(test_cmd, dest, TEST_TIMEOUT)
+        test_code, test_out = _run_test(test_cmd, dest, TEST_TIMEOUT, sandbox=sandbox, reads=reads,
+                                        execs=execs, port=port)
     patch = read_patch(dest)
     return {"id": f"attempt-{n}", "code_or_diff": patch[:20000], "patch": patch,
             "test_output": test_out[-6000:], "test_exit_code": test_code,
@@ -388,6 +692,7 @@ def escalate(task, cwd, run_id, failure, files, mode, *, test_cmd=None, kind="co
     finally:
         if copy_dir:
             shutil.rmtree(copy_dir, ignore_errors=True)
+            shutil.rmtree(gitdir_for(copy_dir), ignore_errors=True)
     if not patch:
         result.update(outcome="dispatched", detail=status)
         return result
@@ -414,6 +719,17 @@ def cmd_run(a):
     row = {"run_id": run_id, "at": _now(), "cwd": cwd, "task": task[:2000], "test": a.test}
     intake = _lib("jev_intake")
     notebook = _lib("jev_notebook")
+
+    sandbox = a.sandbox == "on" or (a.sandbox == "auto" and os.path.exists(SANDBOX_EXEC))
+    if a.sandbox == "on" and not os.path.exists(SANDBOX_EXEC):
+        _say("refusing: --sandbox on but sandbox-exec is not on this machine; model code does not run unsandboxed")
+        row["outcome"] = "no_sandbox"
+        _append(RUNS_LOG, row)
+        return 2
+    if a.sandbox == "auto" and not sandbox:
+        _say("WARNING: no sandbox-exec on this machine; the attempt runs UNSANDBOXED (interactive use only)")
+    row["sandbox"] = sandbox
+    learn = not a.no_learn
 
     amb = intake.check_ambiguity(task)
     row["ambiguity"] = amb.get("verdict")
@@ -469,7 +785,7 @@ def cmd_run(a):
             think = think_for(a.think, effort, n)
             _say(f"attempt {n}/{attempts} (effort {effort}, thinking {'on' if think else 'off'})")
             cand = run_attempt(n, cwd, retry_prompt(prompt, candidates[-1] if candidates else None),
-                               a.test, effort, workdir, think=think, rules_text=rules_text)
+                               a.test, effort, workdir, think=think, rules_text=rules_text, sandbox=sandbox)
             candidates.append(cand)
             status = "no test" if cand["test_exit_code"] is None else (
                 "tests pass" if cand["test_exit_code"] == 0 else f"tests fail ({cand['test_exit_code']})")
@@ -494,9 +810,10 @@ def cmd_run(a):
         if chosen is None or not chosen["patch"].strip():
             failure = candidates[-1]["test_output"] if candidates else ""
             _say("no attempt was good enough")
-            notebook.record_mistake("no_candidate", task,
-                                    f"{attempts} attempts; last failure: {failure[-500:]}",
-                                    "escalated", source=f"flash-run {run_id}")
+            if learn:  # queue runs pass --no-learn: posted task text must never seed a later prompt
+                notebook.record_mistake("no_candidate", task,
+                                        f"{attempts} attempts; last failure: {failure[-500:]}",
+                                        "escalated", source=f"flash-run {run_id}")
             row["outcome"] = "no_candidate"
             row["escalation"] = escalate(task, cwd, run_id, failure, context_files[:8],
                                          a.escalate, test_cmd=a.test)
@@ -522,7 +839,9 @@ def cmd_run(a):
         _say(f"applied {chosen['id']}")
         final_code = None
         if a.test:
-            final_code, final_out = _sh(a.test, cwd, TEST_TIMEOUT)
+            final_code, final_out = _run_test(a.test, cwd, TEST_TIMEOUT, sandbox=sandbox,
+                                              reads=_dep_reads(cwd), execs=[os.path.join(cwd, ".venv", "bin")],
+                                              port=flash_port())
             _say("tests pass in the real tree" if final_code == 0
                  else f"tests FAIL in the real tree ({final_code})\n{final_out[-1500:]}")
         review = _lib("jev_done_checks").triage_review(chosen["patch"][:40000], task)
@@ -532,10 +851,10 @@ def cmd_run(a):
             _say("review triage: this change touches risky code — have Claude review it: "
                  + str((review.get("detail") or {}).get("advice") or ""))
         row["outcome"] = "applied_pass" if final_code in (0, None) else "applied_fail"
-        if final_code == 0:
+        if final_code == 0 and learn:
             _append(EXAMPLES_LOG, {"id": run_id, "title": task[:120],
                                    "summary": chosen["patch"][:1500], "at": _now()})
-        elif final_code is not None:
+        elif final_code is not None and learn:
             notebook.record_mistake("applied_but_failing", task, final_out[-800:],
                                     "needs follow-up", source=f"flash-run {run_id}")
         _append(RUNS_LOG, row)
@@ -629,6 +948,12 @@ def main(argv):
                    help="skip Jev's per-task rule pick (attempts get no RULES FOR THIS TASK block)")
     r.add_argument("--dry-run", action="store_true", help="print the chosen patch, do not apply")
     r.add_argument("--keep", action="store_true", help="keep the attempt copies")
+    r.add_argument("--sandbox", choices=["auto", "on", "off"], default="auto",
+                   help="run the agent and the tests under macOS sandbox-exec: auto = on if present (else a warning "
+                        "and an unsandboxed run), on = required (refuse if absent), off = never. Queue runs pass on.")
+    r.add_argument("--no-learn", action="store_true",
+                   help="do not write the task to the examples log or the mistake notebook (queue runs pass this, "
+                        "so untrusted room text can never seed a later prompt)")
     pl = sub.add_parser("plan")
     pl.add_argument("file")
     s = sub.add_parser("scorecard")
