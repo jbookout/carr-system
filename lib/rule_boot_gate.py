@@ -96,10 +96,12 @@ TOOLLESS_AGENT_TYPES = frozenset({"statusline-setup"})
 _BASH_FETCH = re.compile(
     r"^(?P<prog>\./run\.sh|~/carr-system/run\.sh|/[^\s'\"`$;&|<>()\\]+/run\.sh)"
     r"\s+call\s+standing-context(?:\s+'(?P<json>[^']*)')?\s*$")
+# Only the Worker's own closed-vocabulary refusal of `detail` means "not
+# deployed yet"; any other error is an outage.
 _BOOT_UNSUPPORTED = re.compile(
-    r"value_not_in_declared_vocabulary[\s\S]{0,400}\"?(detail|page)\"?"
-    r"|\"?(detail|page)\"?[\s\S]{0,400}value_not_in_declared_vocabulary"
-    r"|(unknown|unexpected|undeclared|additional)[\s\S]{0,80}\"page\"")
+    r"value_not_in_declared_vocabulary[\s\S]{0,300}\"?field\"?\s*[:=]\s*\"?detail\b"
+    r"|\"?field\"?\s*[:=]\s*\"?detail\b[\s\S]{0,300}value_not_in_declared_vocabulary")
+_OUT_OF_RANGE = "page_out_of_range"
 
 # The four notices. Wording reviewed by Jev (semantic_creation,
 # kind rule-boot-gate-notice-texts): each says what happened and what to do.
@@ -130,6 +132,15 @@ STATE_UNWRITABLE_NOTICE = (
     "pages are already in this conversation, fetch them now with " + _FETCH_BOTH + "; if you "
     "have neither tool, carry on and write \"CARR rules not read\" in your result. (2) Tell "
     "the user the rule gate's state folder cannot be written.")
+# After the first full notice in a context, later calls carry only this.
+SHORT_NOTICE = {
+    "unavailable": ("RULES UNAVAILABLE: the CARR store is unreachable, so the rules are unread. Tell "
+                    "the user if you have not yet; you may keep working."),
+    "unarmed": ("RULE BOOT NOT ARMED: the rules are unread. Fetch standing-context "
+                "{\"detail\":\"boot\"} if you can, or say in your result that the rules are unread."),
+    "cap": ("RULES UNREAD: the gate no longer holds this context. Fetch standing-context "
+            "{\"detail\":\"boot\",\"page\":1} if you can; else write \"CARR rules not read\" in your result."),
+}
 UNARMED_NOTICE = (
     "RULE BOOT NOT ARMED: SessionStart did not arm the rule gate for this session. Read every "
     "page standing-context {\"detail\":\"boot\"} names before acting, or say the rules are unread.")
@@ -341,8 +352,9 @@ def _find_boot(value, depth=0):
 
 
 def read_answer(response):
-    """What a boot fetch came back as: ("boot", rule_boot) | ("unsupported", None)
-    | ("failed", None). Parses a Bash result or an MCP result; never raises."""
+    """What a boot fetch came back as: ("boot", rule_boot) | ("out_of_range",
+    {digest, pages_total}) | ("unsupported", None) | ("failed", None). Parses a
+    Bash result or an MCP result; never raises."""
     boot = _find_boot(response)
     if boot:
         return "boot", boot
@@ -360,9 +372,22 @@ def read_answer(response):
             boot = _find_boot(parsed)
             if boot:
                 return "boot", boot
+    for text in texts:
+        if _OUT_OF_RANGE in text:
+            return "out_of_range", _out_of_range_facts(text)
+    if isinstance(response, dict) and response.get("error") == _OUT_OF_RANGE:
+        return "out_of_range", {"digest": response.get("digest"), "pages_total": response.get("pages_total")}
     if any(_BOOT_UNSUPPORTED.search(t[:20000]) for t in texts):
         return "unsupported", None
     return "failed", None
+
+
+def _out_of_range_facts(text):
+    """digest and pages_total from the Worker's page_out_of_range refusal."""
+    total = re.search(r"\"?pages_total\"?\s*[:=]\s*(\d{1,4})", text)
+    digest = re.search(r"\"?digest\"?\s*[:=]\s*\"?(sha256:[0-9a-f]{8,64})", text)
+    return {"digest": digest.group(1) if digest else None,
+            "pages_total": int(total.group(1)) if total else None}
 
 
 # ---------------------------------------------------------------- arming
@@ -418,14 +443,24 @@ def _toolless(payload):
     return bool(payload.get("agent_id") or payload.get("agentId")) and kind in TOOLLESS_AGENT_TYPES
 
 
+def _notice(folder, name, full):
+    """The full notice the first time in a context, then its one-line form
+    (the full one again whenever the marker cannot be written)."""
+    if f"shown-{name}" in _markers(folder):
+        return SHORT_NOTICE[name]
+    _touch(folder, f"shown-{name}")
+    return full
+
+
 def _hold(folder, confirmed, reason):
-    """Deny, but only on state written now; capped per context."""
+    """Deny, but only on state written now; capped per context. Past the cap
+    nothing more is written."""
+    held = sum(1 for n in _markers(folder) if n.startswith(f"d{confirmed}-"))
+    if held >= DENY_CAP:
+        return "allow", _notice(folder, "cap", CAP_NOTICE.format(n=DENY_CAP))
     why = _touch(folder, f"d{confirmed}-{secrets.token_hex(4)}")
     if why:
         return "allow", STATE_UNWRITABLE_NOTICE.format(why=why)
-    held = sum(1 for n in _markers(folder) if n.startswith(f"d{confirmed}-"))
-    if held > DENY_CAP:
-        return "allow", CAP_NOTICE.format(n=DENY_CAP)
     return "deny", reason
 
 
@@ -472,17 +507,17 @@ def verdict(payload, now=None):
         # with the notice.
         notice = UNAVAILABLE_NOTICE if arm else UNARMED_NOTICE
         if attempted or "failed" in names:
-            return "allow", notice
+            return "allow", _notice(folder, "unavailable" if arm else "unarmed", notice)
         return _hold(folder, 0, notice + "\nBefore any other tool, ATTEMPT the rule boot fetch once in "
                      "this context (it is always allowed, and a failure still unlocks you):\n"
                      + fetch_instructions([1]))
-    if "failed" in names:
-        return "allow", UNAVAILABLE_NOTICE
     confirmed = _pages(names, "c")
     total = int(arm.get("pages_total") or 0)
     missing = [p for p in range(1, total + 1) if p not in confirmed]
     if not missing:
         return "allow", None
+    if "failed" in names:
+        return "allow", _notice(folder, "unavailable", UNAVAILABLE_NOTICE)
     # A page attempted but never answered: PostToolUse writes c<N> or failed,
     # so silence past the grace means the fetch failed without a result.
     now = now or time.time()
@@ -493,7 +528,7 @@ def verdict(payload, now=None):
             except OSError:
                 continue
             if age > PENDING_GRACE_S:
-                return "allow", UNAVAILABLE_NOTICE
+                return "allow", _notice(folder, "unavailable", UNAVAILABLE_NOTICE)
     return _hold(folder, len(confirmed), fetch_instructions(missing, arm.get("digest"), total))
 
 
@@ -514,9 +549,9 @@ def observe(payload):
         response = payload.get("error")
     answer, boot = read_answer(response)
     arm = read_arm(session_id)
-    if answer == "boot":
-        total = int(boot.get("pages_total") or 0)
-        digest = str(boot.get("digest") or "")
+    if answer in ("boot", "out_of_range"):
+        total = int((boot or {}).get("pages_total") or 0)
+        digest = str((boot or {}).get("digest") or "")
         if total >= 1 and digest and (not arm or arm.get("status") != "armed"
                                       or arm.get("digest") != digest
                                       or int(arm.get("pages_total") or 0) != total):
@@ -528,10 +563,19 @@ def observe(payload):
                 write_arm(session_id, arm)
             except OSError:
                 return None
-        key = _stand_in(arm)
-        folder = _fetch_dir(session_id, agent_id, key)
+        folder = _fetch_dir(session_id, agent_id, _stand_in(arm))
+        if answer == "out_of_range":
+            # Not an outage: the page does not exist. The context is held as
+            # usual for the pages that do (bounded by the deny cap).
+            return (f"RULE BOOT: page {page} does not exist; this boot has {total or 'fewer'} "
+                    "page(s). Fetch the pages the gate names.")
         _touch(folder, f"p{page}")
         _touch(folder, f"c{page}")
+        for stale in ("failed", "unsupported"):
+            try:
+                os.unlink(os.path.join(folder, stale))
+            except OSError:
+                pass
         return None
     folder = _fetch_dir(session_id, agent_id, _stand_in(arm))
     if answer == "unsupported":

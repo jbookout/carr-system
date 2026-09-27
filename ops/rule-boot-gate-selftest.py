@@ -10,11 +10,12 @@ answer (or PostToolUseFailure with the error).
 
 THE LOCKOUT CASES come first, in the risk order Jev gave on 2026-09-26 for
 the PR #1328 review round (out/jev-judge.jsonl, kind
-rule-boot-gate-lockout-test-risk): deny cap 0.76, outage after a good arm
-0.76, mid-session digest change 0.63, foreign MCP prefix 0.61, disk full
-(armed) 0.57, tool-less subagent 0.52, Worker not deployed 0.52, state
-folder unwritable (armed) 0.51 and (never armed) 0.48, disk full (never
-armed) 0.47. Then the first round's order (kind rule-boot-gate-test-risk):
+rule-boot-gate-lockout-test-risk-r3, second review round): deny cap 0.77,
+outage after a good arm 0.75, out-of-range page is not an outage 0.65,
+mid-session digest change 0.62, foreign MCP prefix 0.54, tool-less subagent
+0.52, Worker not deployed 0.49, state folder unwritable (armed) 0.48, disk
+full (armed) 0.48, a failure is not sticky 0.48, state folder unwritable
+(never armed) 0.44, disk full (never armed) 0.40, short repeat notices 0.25. Then the first round's order (kind rule-boot-gate-test-risk):
 unreachable-no-deadlock 0.79, fetch-never-denied 0.77, deny-before/allow-after
 0.74, digest-change re-arms 0.69, re-arm on compact 0.68, subagent path 0.65.
 Pages-complete and no-sponsor-leak are properties of the verb and are proven
@@ -110,6 +111,10 @@ class Case:
             payload.update(hook_event_name="PostToolUse", tool_response=(
                 [{"type": "text", "text": body}] if form == "mcp"
                 else {"stdout": body, "stderr": "", "interrupted": False}))
+        elif answer == "out_of_range":
+            payload.update(hook_event_name="PostToolUseFailure", error=(
+                'TOOL ERROR {"error": "page_out_of_range", "page": %d, "pages_total": %d, '
+                '"digest": "sha256:%s"}' % (page, pages or self.pages, (digest or self.digest) * 8)))
         elif answer == "unsupported":
             payload.update(hook_event_name="PostToolUseFailure", error=(
                 'TOOL ERROR {"error": "value_not_in_declared_vocabulary", "verb": '
@@ -326,6 +331,52 @@ def case_disk_full_never_armed(c):
     never_denied(c, agent="sub-7")
 
 
+def case_out_of_range_not_outage(c):
+    c.stub("a", pages=3)
+    c.arm()
+    pre, post = c.fetch(9, answer="out_of_range")
+    assert not denied(pre) and "does not exist" in notice(post), post
+    r = c.call(*READ)
+    assert denied(r), f"a page past the end must not unlock the context: {r}"
+    assert "UNAVAILABLE" not in r["permissionDecisionReason"], r
+    # The boot shrinks mid-session: a/4 is armed, the store now serves b/3.
+    c2 = Case(c.tree, tempfile.mkdtemp(dir=c.work))
+    c2.stub("a", pages=4)
+    c2.arm()
+    for p in (1, 2, 3):
+        c2.fetch(p)
+    c2.fetch(4, answer="out_of_range", digest="b", pages=3)
+    r = c2.call(*READ)
+    assert denied(r) and "3 page(s)" in r["permissionDecisionReason"], f"re-armed on b/3: {r}"
+    for p in (1, 2, 3):
+        c2.fetch(p, digest="b", pages=3)
+    assert c2.call(*READ) is None
+
+
+def case_failure_not_sticky(c):
+    c.stub("a", pages=3)
+    c.arm()
+    c.fetch(1, answer="error")
+    assert "UNAVAILABLE" in notice(c.call(*READ))
+    for p in (1, 2, 3):
+        c.fetch(p)
+    assert c.call(*READ) is None, "every page confirmed after the outage: silent"
+
+
+def case_notice_short_after_first(c):
+    c.stub("a", pages=3)
+    c.arm()
+    for _ in range(3):
+        c.call(*READ)
+    first = notice(c.call(*READ))
+    second = notice(c.call(*READ))
+    assert "RULES UNREAD" in first and len(first) > 200, first
+    assert second.startswith("RULES UNREAD") and len(second) < 200, second
+    folder = os.path.join(c.state, SESSION, "fetched", "main")
+    holds = [n for _r, _d, files in os.walk(folder) for n in files if n.startswith("d")]
+    assert len(holds) == 3, f"no marker is written past the cap: {holds}"
+
+
 # --- first-round cases
 
 def case_unreachable_no_deadlock(c):
@@ -444,16 +495,20 @@ def case_answer_parsing(c):
         [{"type": "text", "text": json.dumps({"ok": True, "rule_boot": {
             "schema": "carr-rule-boot/v1", "digest": "sha256:ab", "page": 1, "pages_total": 2}})}],
         "HTTP 502 from the Worker",
+        'unexpected server error while rendering "page"',
+        {"stdout": "", "stderr": 'TOOL ERROR {"error": "page_out_of_range", "page": 9, '
+                                 '"pages_total": 3, "digest": "sha256:abababababab"}'},
     ]
     out = subprocess.run([sys.executable, "-c", code, c.tree, json.dumps(samples)],
                          capture_output=True, text=True, timeout=30).stdout
-    assert json.loads(out) == ["unsupported", "failed", "boot", "failed"], out
+    assert json.loads(out) == ["unsupported", "failed", "boot", "failed", "failed", "out_of_range"], out
 
 
-CASES = [case_deny_cap, case_outage_after_good_arm, case_mid_session_digest_change,
-         case_foreign_mcp_prefix, case_disk_full_armed, case_toolless_subagent,
-         case_not_deployed_distinct, case_state_unwritable_armed,
-         case_state_unwritable_never_armed, case_disk_full_never_armed,
+CASES = [case_deny_cap, case_outage_after_good_arm, case_out_of_range_not_outage,
+         case_mid_session_digest_change, case_foreign_mcp_prefix, case_toolless_subagent,
+         case_not_deployed_distinct, case_state_unwritable_armed, case_disk_full_armed,
+         case_failure_not_sticky, case_state_unwritable_never_armed, case_disk_full_never_armed,
+         case_notice_short_after_first,
          case_unreachable_no_deadlock, case_fetch_never_denied, case_deny_before_allow_after,
          case_digest_change_rearms, case_rearm_on_compact, case_subagent_path,
          case_answer_parsing]
@@ -533,15 +588,20 @@ MUTANTS = {
                                  '"epoch": (read_arm(session_id) or {}).get("epoch") or secrets.token_hex(6)}')],
     "digest-change-ignored": [('    digest = safe_key(str(arm.get("digest") or "").replace("sha256:", ""), "none")[:24]',
                                '    digest = "same"')],
-    "deadlock-after-unreachable-attempt": [('        if attempted or "failed" in names:\n            return "allow", notice',
-                                            '        if False:\n            return "allow", notice')],
+    "deadlock-after-unreachable-attempt": [('        if attempted or "failed" in names:\n            return "allow", _notice(',
+                                            '        if False:\n            return "allow", _notice(')],
     # PR #1328 review round.
-    "deny-on-unwritten-state": [('    if why:\n        return "allow", STATE_UNWRITABLE_NOTICE.format(why=why)\n    held',
-                                 '    if False:\n        return "allow", STATE_UNWRITABLE_NOTICE.format(why=why)\n    held')],
-    "no-deny-cap": [('    if held > DENY_CAP:', '    if False:')],
+    "deny-on-unwritten-state": [('    if why:\n        return "allow", STATE_UNWRITABLE_NOTICE.format(why=why)\n    return "deny", reason',
+                                 '    if False:\n        return "allow", STATE_UNWRITABLE_NOTICE.format(why=why)\n    return "deny", reason')],
+    "no-deny-cap": [('    if held >= DENY_CAP:', '    if False:')],
+    "out-of-range-read-as-outage": [('        if _OUT_OF_RANGE in text:', '        if False:')],
+    "failed-sticky": [('    if not missing:\n        return "allow", None\n    if "failed" in names:',
+                       '    if not missing and "failed" not in names:\n        return "allow", None\n    if "failed" in names:'),
+                      ('        for stale in ("failed", "unsupported"):', '        for stale in ():')],
+    "notice-every-call": [('    if f"shown-{name}" in _markers(folder):', '    if False:')],
     "toolless-denied": [('    if _toolless(payload):', '    if False:')],
-    "outage-needs-every-page": [('    if "failed" in names:\n        return "allow", UNAVAILABLE_NOTICE',
-                                 '    if False:\n        return "allow", UNAVAILABLE_NOTICE')],
+    "outage-needs-every-page": [('    if "failed" in names:\n        return "allow", _notice(folder, "unavailable"',
+                                 '    if False:\n        return "allow", _notice(folder, "unavailable"')],
     "not-deployed-read-as-unreachable": [('    if str(reason or "").startswith("not_deployed"):',
                                           '    if False:')],
     "mid-session-digest-ignored": [('        if total >= 1 and digest and (', '        if False and (')],
