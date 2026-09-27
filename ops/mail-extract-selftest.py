@@ -59,6 +59,26 @@ check("Mail is probed before it is addressed, and never launched",
       "pgrep" in src and "mail_is_running" in src and
       "EX_CONFIG" in inspect.getsource(mx.main))
 
+# The live nightly run timed out while listing mailboxes. Reproduce the list
+# format without opening Mail, including the index gap left by a skipped box.
+listing = mx.RS.join([
+    mx.US.join(("1", "1", "Synthetic Account", "Inbox")),
+    mx.US.join(("1", "2", "Synthetic Account", "Junk Email")),
+    mx.US.join(("1", "3", "Synthetic Account", "Sent Items")),
+])
+original_osa = mx.osa
+try:
+    mx.osa = lambda script: listing
+    boxes = mx.list_mailboxes()
+finally:
+    mx.osa = original_osa
+check("mailbox listing keeps Mail's indices while excluding junk",
+      boxes == [(1, 1, "Synthetic Account", "Inbox"),
+                (1, 3, "Synthetic Account", "Sent Items")], boxes)
+check("mailbox enumeration performs no per-mailbox message count",
+      "count of messages" not in mx.LIST_SCRIPT and
+      "name of every mailbox of acct" in mx.LIST_SCRIPT)
+
 # THE JOIN THAT MATTERS: every key the matcher reads off a message must be a key
 # the extractor writes. This is the seam loop #169 found dead — the matcher was
 # pointed at a scratchpad file nothing produced.

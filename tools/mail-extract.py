@@ -56,13 +56,14 @@ tell application "Mail"
   repeat with acct in (every account)
     set ai to ai + 1
     try
+      set accountName to name of acct
+      -- One bulk Apple event per account. Counting each mailbox's messages
+      -- made the nightly list walk time out before extraction could start.
+      set mailboxNames to name of every mailbox of acct
       set bi to 0
-      repeat with m in (every mailbox of acct)
+      repeat with mailboxName in mailboxNames
         set bi to bi + 1
-        try
-          set c to (count of messages of m)
-          if c > 0 then set out to out & (ai as string) & "@@US@@" & (bi as string) & "@@US@@" & (name of acct) & "@@US@@" & (name of m) & "@@US@@" & (c as string) & "@@RS@@"
-        end try
+        set out to out & (ai as string) & "@@US@@" & (bi as string) & "@@US@@" & accountName & "@@US@@" & (contents of mailboxName) & "@@RS@@"
       end repeat
     end try
   end repeat
@@ -141,13 +142,13 @@ def list_mailboxes():
     boxes = []
     for rec in osa(LIST_SCRIPT).split(RS):
         cols = rec.split(US)
-        if len(cols) != 5:
+        if len(cols) != 4:
             continue
-        ai, bi, account, name, count = (c.strip() for c in cols)
+        ai, bi, account, name = (c.strip() for c in cols)
         if not account or name.lower() in SKIP_MAILBOXES:
             continue
         try:
-            boxes.append((int(ai), int(bi), account, name, int(count)))
+            boxes.append((int(ai), int(bi), account, name))
         except ValueError:
             continue
     return boxes
@@ -218,7 +219,7 @@ def main() -> int:
         return 1
 
     messages, failures = [], []
-    for ai, bi, account, name, count in boxes:
+    for ai, bi, account, name in boxes:
         try:
             messages.extend(extract_mailbox(ai, bi, account, name, since))
         except Exception as exc:                     # one bad mailbox is not the run
