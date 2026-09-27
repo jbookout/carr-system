@@ -50,6 +50,7 @@ from desks import DeskError, Registry  # noqa: E402
 import claude_wire as inject_mod  # noqa: E402  — the Idea 78 wire, see the module
 import claude_desktop_wire  # noqa: E402 — background supervisor + supported /desktop
 import codex_wire  # noqa: E402  — Codex worked out this protocol, see the module
+import codex_ipc  # noqa: E402  — a thread Codex Desktop holds open, see the module
 import flash_wire  # noqa: E402  — the local Flash model as a desk, see the module
 import execution_contract  # noqa: E402 — portable Job Passport v1 seam
 import verb_io  # noqa: E402 — the ONE path to the record layer; see that module
@@ -141,6 +142,17 @@ def _to_codex(
     carries it, and --json reports the thread id in its first event.
     """
     thread = None if fresh else entry.get("thread_id")
+    # A THREAD CODEX DESKTOP HOLDS OPEN CANNOT BE RESUMED FROM HERE. Found live
+    # 2026-09-27: the orchestrator's Desktop thread refused `codex exec resume`
+    # with "thread ... already has an active writer", so a turn addressed to it
+    # never arrived. When the Desktop router names an owner, the turn is
+    # started inside that owner instead; the session answers in its own window,
+    # the same contract as a live Claude desk. No owner (Desktop closed, or the
+    # thread not open there) keeps the durable resume path below.
+    if thread and codex_ipc.thread_owner(thread) is not None:
+        live = codex_ipc.start_turn(thread, task)
+        if live.get("status") != "not_live":
+            return {"resumed": True, **live, "thread_id": thread}
     with tempfile.TemporaryDirectory(prefix="hermes-codex-") as tmp:
         last = Path(tmp) / "last-message.txt"
         argv = ["codex", "exec"]
