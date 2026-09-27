@@ -9,7 +9,7 @@ session it names.
 
 WHY A SEPARATE FILE FROM hermes-desks.json. A desk is a place Hermes may
 dispatch work to, and desks.py refuses a pid socket as a desk on purpose (a pid
-is any window Joe happens to have open). A self-announced session is different:
+is any window that happens to be open). A self-announced session is different:
 it published its own name, title and address, so it can be reached by an
 explicit @-mention from someone who read that name. Keeping the two in separate
 files keeps the queue, seat fan-out and the pid-socket refusal exactly as they

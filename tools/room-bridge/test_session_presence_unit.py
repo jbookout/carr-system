@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Contract tests for session_presence.py — every session announcing itself.
 
-Joe, 2026-09-27: "sessions need to post theirself to the model room at session
+Requirement, 2026-09-27: "sessions need to post theirself to the model room at session
 start so that every other session can reach them easily", widened the same day
 to "not just claude or codex, every session no matter what model".
 
@@ -155,6 +155,18 @@ def test_hook_session_start_writes_outbox_and_spawns_no_inline_post():
     assert len(spawned) == 1
     box = json.loads((d / "outbox" / "claude-51fa95bb.json").read_text())
     assert box["record"]["event"] == "announce" and box["posted_at"] is None
+
+
+def test_gate_replay_never_reaches_the_room():
+    # ops/gate-replay.py runs every wired hook in a sandbox; a replay must
+    # never spawn the child that posts to the live Model Room
+    d = tmpdir()
+    spawned = []
+    rc = sp.run_hook("claude", stdin=io.StringIO(json.dumps({
+        "hook_event_name": "SessionStart", "session_id": CLAUDE_ID})),
+        env={**claude_env(), "CARR_GATE_REPLAY_ROOT": "/tmp/replay"}, presence_dir=d, host="h",
+        post=None, spawn_flush=lambda p: spawned.append(p), stdout=io.StringIO(), stderr=io.StringIO())
+    assert rc == 0 and spawned == []
 
 
 def test_hook_fails_open_on_garbage_and_logs():

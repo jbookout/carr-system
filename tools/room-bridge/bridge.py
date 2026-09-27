@@ -1047,7 +1047,7 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
             and queue_scanned_desks == required_queue_desks):
         state_mod.prune_queue_unavailable_since(state, queue_ready_task_ids)
 
-    # SELF-ANNOUNCED SESSIONS (Joe, 2026-09-27: every session posts itself to
+    # SELF-ANNOUNCED SESSIONS (requirement, 2026-09-27: every session posts itself to
     # the room so every other session can reach it). Read presence receipts off
     # this cycle's turns, probe every local session, expire the silent ones,
     # and carry each @-addressed turn into the session it names. Contained: a

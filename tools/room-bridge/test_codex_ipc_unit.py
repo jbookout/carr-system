@@ -11,7 +11,7 @@ initialize, then thread-owner-discovery, then thread-follower-start-turn.
 These tests run a fake router on a temporary unix socket that speaks the same
 framing (4-byte little-endian length + UTF-8 JSON) and checks every frame the
 client sends, so a wrong method name, version, or turn shape fails here instead
-of in Joe's live orchestrator thread.
+of in the live orchestrator thread.
 """
 
 from __future__ import annotations

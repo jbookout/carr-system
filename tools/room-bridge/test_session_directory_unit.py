@@ -75,7 +75,7 @@ def test_reannounce_updates_and_depart_removes():
 def test_alias_colliding_with_a_desk_seat_is_dropped():
     data = sd.empty()
     sd.ingest(data, [presence("codex-6394537b", name="codex")], host=HOST, now=NOW,
-              reserved={"codex", "claude", "joe-desk"})
+              reserved={"codex", "claude", "codex-desk"})
     assert data["sessions"]["codex-6394537b"]["name"] is None
 
 
@@ -112,7 +112,7 @@ def test_mentions_match_handle_and_alias_on_word_boundaries():
     assert sd.mentioned(data, turn("@sol please merge")) == ["codex-6394537b"]
     assert sd.mentioned(data, turn("ping @codex-6394537b now")) == ["codex-6394537b"]
     assert sd.mentioned(data, turn("@sol-orchestrator hi")) == []
-    assert sd.mentioned(data, turn("email me@sol.com")) == []
+    assert sd.mentioned(data, turn("mail user@sol")) == []
     assert sd.mentioned(data, turn("@sol x", kind="receipt")) == []
 
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """session_presence.py — every session announces itself to the Model Room.
 
-Joe, 2026-09-27: "sessions need to post theirself to the model room at session
+Requirement, 2026-09-27: "sessions need to post theirself to the model room at session
 start so that every other session can reach them easily", widened the same day
 to "not just claude or codex, every session no matter what model".
 
@@ -360,13 +360,19 @@ def run_hook(runtime_hint: str, *, stdin=None, env=None, presence_dir: Path | No
     """The hook entry. Always exits 0 and prints nothing."""
     del post, stdout, stderr  # the hook never posts inline and never prints
     presence_dir = Path(presence_dir or PRESENCE_DIR)
+    env = os.environ if env is None else env
+    spawn = spawn_flush or _spawn_flush
+    if env.get("CARR_GATE_REPLAY_ROOT"):
+        # ops/gate-replay.py runs every wired hook over fixtures in a sandbox.
+        # The record is still built and written there; it never reaches the room.
+        def spawn(path: Path) -> None:
+            return None
     try:
         raw = (stdin or sys.stdin).read()
         payload = json.loads(raw) if raw.strip() else {}
-        handle_event(payload, runtime_hint=runtime_hint,
-                     env=os.environ if env is None else env,
+        handle_event(payload, runtime_hint=runtime_hint, env=env,
                      presence_dir=presence_dir, host=host or this_host(),
-                     spawn_flush=spawn_flush or _spawn_flush)
+                     spawn_flush=spawn)
     except Exception as exc:  # noqa: BLE001 — fail open, always
         _log(presence_dir, f"{runtime_hint} hook skipped: {exc.__class__.__name__}: {exc}")
     return 0
