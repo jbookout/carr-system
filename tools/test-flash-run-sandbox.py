@@ -510,18 +510,131 @@ def a_daemon_left_behind_by_a_normal_exit_is_killed_too():
     assert _wait_gone(grandchild), f"the daemonised grandchild {grandchild} was left running after a normal exit"
 
 
+# ── the REAL agent starts under the profile (first live run of #1324 exited 71 on the launcher exec) ──────────────
+def live(fn):
+    fn._live = True
+    return fn
+
+
+def _flash_up():
+    import urllib.request
+    port = fr.flash_port()
+    if port is None or not os.path.exists(fr.FLASH):
+        return False
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=3) as resp:
+            return resp.status == 200
+    except OSError:
+        return False
+
+
+SMOKE = os.path.expanduser("~/flash-projects/flash-smoke")
+SMOKE_CALC = ('def average(values):\n    """Return the arithmetic mean of a non-empty list of numbers."""\n'
+              "    return sum(values) / (len(values) + 1)\n")
+SMOKE_TEST = ("import sys\nfrom calc import average\n\ndef main():\n    assert average([2, 4, 6]) == 4\n"
+              "    assert average([5]) == 5\n    print('ok')\n\nif __name__ == '__main__':\n    try:\n        main()\n"
+              "    except AssertionError as exc:\n        print('FAIL', exc); sys.exit(1)\n")
+
+
+def _smoke_project():
+    """The smoke project the coordinator names when it is on this machine, else an identical throwaway copy."""
+    if os.path.isdir(os.path.join(SMOKE, ".git")):
+        return SMOKE
+    p = _work()
+    for name, body in (("calc.py", SMOKE_CALC), ("test_calc.py", SMOKE_TEST)):
+        with open(os.path.join(p, name), "w") as fh:
+            fh.write(body)
+    _git(p, "init", "-q", "-b", "main")
+    _git(p, "add", "-A")
+    _git(p, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "base")
+    return p
+
+
+def flash_port_ignores_the_callers_public_anthropic_base_url():
+    # A Claude session calling flash-run carries ANTHROPIC_BASE_URL=https://api.anthropic.com; reading it closed the
+    # Flash port and the launcher's own health check failed inside the sandbox.
+    saved = {k: os.environ.get(k) for k in ("ANTHROPIC_BASE_URL", "CARR_FLASH_URL")}
+    try:
+        os.environ["ANTHROPIC_BASE_URL"] = "https://api.anthropic.com"
+        os.environ.pop("CARR_FLASH_URL", None)
+        assert fr.flash_port() == 8000, fr.flash_port()
+        os.environ["CARR_FLASH_URL"] = "http://127.0.0.1:8123"
+        assert fr.flash_port() == 8123, fr.flash_port()
+        os.environ["CARR_FLASH_URL"] = "https://flash.example.invalid"
+        assert fr.flash_port() is None, "a non-loopback Flash URL must leave the network fully closed"
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def sandbox_env_carries_no_caller_api_key_and_redirects_the_harness_tmp():
+    dest = os.path.join(_work(), "attempt-1")
+    os.makedirs(dest)
+    env = fr._sandbox_env({"ANTHROPIC_API_KEY": "caller-key-standin", "ANTHROPIC_BASE_URL": "https://x.invalid",
+                           "PATH": "/x"}, dest)
+    assert "ANTHROPIC_API_KEY" not in env and "ANTHROPIC_BASE_URL" not in env, env
+    scratch = fr.scratch_for(dest)
+    assert env["CLAUDE_CODE_TMPDIR"] == env["TMPDIR"] and env["TMPDIR"].startswith(scratch + os.sep), env
+    fr.drop_scratch(dest)
+
+
+@sandboxed
+def the_launcher_exec_allowance_opens_that_one_file_not_its_folder():
+    # agent_execs() allows the launcher by exact path; a sibling beside it (a model-planted or unrelated tool in
+    # ~/.local/bin) must still be refused. Mirrors the real layout: the folder is read-denied except the launcher.
+    tools = os.path.realpath(tempfile.mkdtemp(prefix="flash-fakebin-", dir=os.path.expanduser("~")))
+    TEMPS.append(tools)
+    launcher, sibling = os.path.join(tools, "flash"), os.path.join(tools, "other")
+    for path, word in ((launcher, "LAUNCHER_RAN"), (sibling, "SIBLING_RAN")):
+        with open(path, "w") as fh:
+            fh.write(f"#!/bin/sh\necho {word}\n")
+        os.chmod(path, 0o755)
+    work = _work()
+    code, out = fr.bounded_run(fr.sandbox_wrap([launcher], work, reads=[launcher], execs=[launcher]), work, 30)
+    assert code == 0 and "LAUNCHER_RAN" in out, f"the allowed launcher did not run: {code} {out}"
+    code, out = fr.bounded_run(fr.sandbox_wrap([sibling], work, reads=[launcher], execs=[launcher]), work, 30)
+    assert "SIBLING_RAN" not in out and code != 0, f"a sibling of the launcher ran under the sandbox: {code} {out}"
+    code, out = fr.bounded_run(fr.sandbox_wrap([launcher], work, reads=[launcher]), work, 30)
+    assert "LAUNCHER_RAN" not in out, "control: without the allowance the launcher must be refused, as live"
+
+
+@sandboxed
+@live
+def live_the_real_flash_agent_starts_sandboxed_and_patches_the_smoke_project():
+    project = _smoke_project()
+    with open(os.path.join(project, "calc.py")) as fh:
+        before = fh.read()
+    workdir = _work()
+    row = fr.run_attempt(1, project, "Fix the bug in calc.py so that `python3 test_calc.py` passes. Edit calc.py "
+                         "only.", "python3 test_calc.py", "low", workdir, think=False, sandbox=True)
+    probe = row["probe_results"]
+    print(f"          live: agent exit {probe['agent_exit_code']}, patch lines {probe['patch_lines']}, "
+          f"tests passed {probe['tests_passed']}, {row['elapsed_s']}s")
+    assert probe["agent_exit_code"] == 0, f"the real agent did not start or finish: {row['agent_output'][-800:]}"
+    assert row["patch"].strip(), f"the real agent returned an empty patch: {row['agent_output'][-800:]}"
+    assert _patch_files(row["patch"]) == ["calc.py"], row["patch"]
+    with open(os.path.join(project, "calc.py")) as fh:
+        assert fh.read() == before, "the attempt edited the source project instead of its throwaway copy"
+
+
 def main() -> int:
     if not SANDBOXED:
         print("no macOS sandbox-exec on this machine; @sandboxed exploit-replay cases are skipped (Linux CI)")
     for name, fn in list(globals().items()):
         if not (name and callable(fn) and getattr(fn, "__module__", None) == "__main__"):
             continue
-        if name in ("check", "sandboxed", "main"):
+        if name in ("check", "sandboxed", "live", "main"):
             continue
         if name.startswith("_"):
             continue
         if getattr(fn, "_sandboxed", False) and not SANDBOXED:
             print(f"  skip  {name} (needs the macOS sandbox)")
+            continue
+        if getattr(fn, "_live", False) and not _flash_up():
+            print(f"  skip  {name} (the Flash server is not answering, or no launcher)")
             continue
         check(name.replace("_", " "), fn)
     for d in TEMPS:

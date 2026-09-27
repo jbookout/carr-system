@@ -76,10 +76,13 @@ SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 
 
 def flash_port(url=None):
-    """The loopback port the Flash server listens on, or None when the base URL is not loopback."""
+    """The loopback port the Flash server listens on, or None when the Flash URL is not loopback.
+
+    Only the Flash-specific setting counts (CARR_FLASH_URL, else the launcher's own 127.0.0.1:8000). The ambient
+    ANTHROPIC_BASE_URL belongs to whoever CALLS flash-run (a Claude session carries https://api.anthropic.com), and
+    the launcher overwrites it anyway; reading it closed the Flash port for the first live run (2026-09-27)."""
     import urllib.parse
-    u = urllib.parse.urlparse(url or os.environ.get("ANTHROPIC_BASE_URL")
-                             or os.environ.get("CARR_FLASH_URL") or "http://127.0.0.1:8000")
+    u = urllib.parse.urlparse(url or os.environ.get("CARR_FLASH_URL") or "http://127.0.0.1:8000")
     return (u.port or 80) if u.hostname in ("127.0.0.1", "localhost") else None
 
 
@@ -499,6 +502,12 @@ def _dep_reads(cwd):
     return reads
 
 
+def agent_execs():
+    """The programs the sandboxed AGENT (not its tests) may start beyond the system dirs: the Flash launcher itself,
+    by exact path. Live run 2026-09-27: without it sandbox-exec's own execvp of the launcher is refused (exit 71)."""
+    return [FLASH]
+
+
 def _sandbox_env(base, dest):
     """Env for a sandboxed run: a throwaway HOME and TMPDIR in the scratch folder BESIDE the tree (scratch_for), so
     the Flash launcher's $HOME/.claude-local, caches and test temp files land where writes are allowed but never in
@@ -508,12 +517,15 @@ def _sandbox_env(base, dest):
     home, tmp = os.path.join(scratch, "home"), os.path.join(scratch, "tmp")
     os.makedirs(home, exist_ok=True)
     os.makedirs(tmp, exist_ok=True)
-    keep = {k: base[k] for k in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL",
-                                 "ANTHROPIC_SMALL_FAST_MODEL", "CARR_FLASH_URL", "CARR_FLASH_MODEL",
+    # No ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY from the caller: the launcher sets its own local values, and the
+    # caller's may be a real API key that model-driven code could read from its environment.
+    keep = {k: base[k] for k in ("CARR_FLASH_URL", "CARR_FLASH_MODEL",
                                  "MAX_THINKING_TOKENS", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
             if k in base}
-    return {"PATH": "/opt/homebrew/bin:/usr/bin:/bin", "HOME": home, "TMPDIR": tmp, "LANG": "C.UTF-8",
-            "PYTHONDONTWRITEBYTECODE": "1", **keep}
+    # CLAUDE_CODE_TMPDIR: the Claude Code harness ignores TMPDIR and opens /tmp/claude-<uid> (live run 2026-09-27:
+    # EPERM on /tmp/claude-501), a folder SHARED with every other Claude session on the host; point it at scratch.
+    return {"PATH": "/opt/homebrew/bin:/usr/bin:/bin", "HOME": home, "TMPDIR": tmp, "CLAUDE_CODE_TMPDIR": tmp,
+            "LANG": "C.UTF-8", "PYTHONDONTWRITEBYTECODE": "1", **keep}
 
 
 def drop_scratch(dest):
@@ -544,6 +556,7 @@ def run_attempt(n, cwd, prompt, test_cmd, effort, workdir, think=True, rules_tex
     reads, execs, port = _dep_reads(cwd), [os.path.join(cwd, ".venv", "bin")], flash_port()
     gitdir = gitdir_for(dest)
     if sandbox:
+        execs = [*execs, *agent_execs()]
         # The agent runs model-driven code, so it is sandboxed: writes only inside this attempt copy (never git
         # metadata), no reads under home except its deps and its read-only git dir, network only to the local Flash
         # port. A throwaway HOME keeps its config writable. It runs contained, so nothing it starts outlives it.
