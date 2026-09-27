@@ -106,7 +106,7 @@ TOOLLESS_AGENT_TYPES = frozenset({"statusline-setup"})
 # reshapes what the fetch printed and cannot run, write or invent anything:
 #     jq [display options] [path filter]   paths only: .a.b, .[], .[0], |, ",", keys, length, type
 #     python3|python -c '<code>'           an AST whitelist: import json/sys, read stdin, print;
-#                                          no string-rewriting methods
+#                                          no loops, branches, or string-rewriting methods
 #     python3|python -m json.tool [opts]   (both Python forms only from a checkout root:
 #                                          Python imports from its working directory)
 #     head|tail [-n N | -N | -c N]         cat
@@ -133,9 +133,9 @@ _JQ_PATH_TOKEN = re.compile(
 _HEAD_TAIL_ARGS = re.compile(r"(?:-n ?\+?\d{1,7}|-c ?\+?\d{1,9}|-\d{1,7}|-n\+?\d{1,7}|-c\+?\d{1,9})?")
 _JSON_TOOL_ARGS = re.compile(r"(?:\s*(?:--indent \d{1,2}|--sort-keys|--compact|--no-ensure-ascii|--tab))*")
 _PY_CALLABLES = frozenset({"print", "len", "sorted", "str"})
-# No string-transforming method (split, join, replace, strip, lower...): with
-# one, a filter could rewrite the page text and still print a valid rule_boot
-# (review of #1343: "maybe".join(text.split("NEVER")) passed as read).
+# No string-transforming method (split, join, replace, strip, lower...) or
+# control flow: either can rewrite page text and still print a valid rule_boot
+# with its original digest and length.
 _PY_ATTRS = frozenset({"load", "loads", "dumps", "stdin", "stdout", "read", "write", "get", "keys",
                        "values", "items"})
 _PY_KEYWORDS = frozenset({"indent", "ensure_ascii", "sort_keys", "end", "sep", "flush"})
@@ -399,10 +399,8 @@ def _python_code_ok(code):
         tree = ast.parse(code, mode="exec")
     except (SyntaxError, ValueError):
         return False
-    allowed = (ast.Module, ast.Expr, ast.Assign, ast.Import, ast.alias, ast.For, ast.If, ast.IfExp,
-               ast.Compare, ast.BoolOp, ast.UnaryOp, ast.Call, ast.Attribute, ast.Name, ast.Constant,
-               ast.Subscript, ast.Tuple, ast.keyword, ast.Load, ast.Store, ast.And, ast.Or, ast.Not,
-               ast.Eq, ast.NotEq, ast.In, ast.NotIn, ast.Is, ast.IsNot, ast.Pass)
+    allowed = (ast.Module, ast.Expr, ast.Assign, ast.Import, ast.alias, ast.Call, ast.Attribute,
+               ast.Name, ast.Constant, ast.Subscript, ast.keyword, ast.Load, ast.Store)
     shadowable = set(dir(builtins)) - _PY_CALLABLES - {"True", "False", "None"}
     for node in ast.walk(tree):
         if not isinstance(node, allowed):
@@ -412,10 +410,6 @@ def _python_code_ok(code):
                 return False
         elif isinstance(node, ast.Assign):
             if not all(isinstance(t, ast.Name) for t in node.targets):
-                return False
-        elif isinstance(node, ast.For):
-            targets = node.target.elts if isinstance(node.target, ast.Tuple) else [node.target]
-            if node.orelse or not all(isinstance(t, ast.Name) for t in targets):
                 return False
         elif isinstance(node, ast.Attribute):
             if node.attr not in _PY_ATTRS or not isinstance(node.ctx, ast.Load):

@@ -733,6 +733,9 @@ def case_piped_formatter(c):
                # Rewriting the text while keeping the JSON (review of #1343, nit 2).
                f"{abs_cmd(1)} | python3 -c 'import sys; print(\"maybe\".join(sys.stdin.read().split(\"NEVER\")))'",
                f"{abs_cmd(1)} | python3 -c 'import sys; print(sys.stdin.read().lower())'",
+               # A character loop can rewrite text without a string method and keep
+               # the boot page's JSON, digest, and length intact.
+               f"{abs_cmd(1)} | python3 -c 'import sys\nfor ch in sys.stdin.read(): print(\"X\" if ch == \"N\" else ch, end=\"\")'",
                f"{abs_cmd(1)} | jq env", f"{abs_cmd(1)} | jq '{{rule_boot:{{digest:\"sha256:x\"}}}}'",
                f"{abs_cmd(1)} | jq -n '\"x\"'", f"{abs_cmd(1)} | jq . /etc/hosts",
                f"{abs_cmd(1)} | head -n 5 /etc/hosts", f"{abs_cmd(1)} | cat /etc/hosts",
