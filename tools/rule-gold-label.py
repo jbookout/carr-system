@@ -221,7 +221,10 @@ def cmd_borderlines(args, gl):
     case_probs = {c["id"]: probs[c["id"]] for c in drafts}
     plan = gl.review_plan(drafts, case_probs, signals, _read_json(args.extended_rules, []),
                           _floors(args, gl))
-    rows = [{"case": cid, "rule": rid, "p_first": case_probs[cid][rid],
+    by_id = {c["id"]: c for c in drafts}
+    rows = [{"case": cid, "rule": rid,
+             "case_binding": gl.adjudication_case_binding(by_id[cid]),
+             "p_first": case_probs[cid][rid],
              "p_second": second.get(cid, {}).get(rid),
              "action_signal": (cid, rid) in plan["signals_hit"]}
             for cid, rid in sorted(plan["review"])]
@@ -258,7 +261,7 @@ def cmd_build(args, gl):
     plan = gl.review_plan(drafts, case_probs, signals, extended, floors)
     gold = gl.gold_sets_reviewed(case_probs, adjudications, plan["low_by_rule"],
                                  plan["signals_hit"], plan["settled_labels"],
-                                 plan["settled_rules"])
+                                 plan["settled_rules"], cases=drafts)
     dprobs = {cid: row["sections"] for cid, row in _read_json(args.doctrine_probs, {}).items()}
     dadj = _read_adjudications(args.doctrine_adjudications) if args.doctrine_adjudications else []
     dgold = gl.gold_sets({c["id"]: dprobs.get(c["id"], {}) for c in drafts}, dadj) if dprobs else {}
@@ -294,6 +297,10 @@ def cmd_build(args, gl):
                                               for rid, (pred, reason)
                                               in sorted(gl.UNIVERSAL_POLICY.items())},
                          "live_rules": len(rules),
+                         "adjudication_binding": "Each rule adjudication echoes its worklist "
+                                     "case id and SHA256 of id, origin, prompt and full tool "
+                                     "inputs. Build refuses missing or mismatched bindings. "
+                                     "Legacy binding import alone is not semantic review.",
                          "review": "per rule, every pair with first-pass p above review_low "
                                    "(review_low_extended for the listed rules), and every case "
                                    "carrying the rule's action signal, gets a written "
@@ -361,6 +368,8 @@ def cmd_build(args, gl):
             for row in sorted(rows, key=lambda a: (a["case"], a["rule"])):
                 out = {"case": row["case"], "rule": row["rule"], "gold": bool(row["gold"]),
                        "reason": row["reason"].strip()}
+                if "case_binding" in row:
+                    out["case_binding"] = row["case_binding"]
                 # jev_misfire: the adjudicator overruled a clear Jev score
                 # (gold below 0.30, or not gold at 0.75+); the reason says why.
                 if "jev_misfire" in row:
