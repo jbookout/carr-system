@@ -445,6 +445,14 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0726_salesforce_reconciliation_rw02_store.sql",
         "0727_salesforce_reconciliation_rw02_scac_successor.sql",
     ),
+    # DoctorCRE V5-RW02 safe stops: 0732 installs the append-only attended-run
+    # outcome ledger, the consent-revocation record, their SECURITY DEFINER
+    # doors and the deal invoiced marker; 0733 seals those ingresses and grants
+    # as provisional v90, chained from v89 (0730). Both or neither.
+    (
+        "0732_salesforce_rw02_safe_stop_run_store.sql",
+        "0733_salesforce_rw02_safe_stop_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -539,6 +547,10 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0726_salesforce_reconciliation_rw02_store.sql",
         "0727_salesforce_reconciliation_rw02_scac_successor.sql",
+    ),
+    (
+        "0732_salesforce_rw02_safe_stop_run_store.sql",
+        "0733_salesforce_rw02_safe_stop_scac_successor.sql",
     ),
 )
 

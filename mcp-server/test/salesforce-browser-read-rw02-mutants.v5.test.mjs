@@ -21,6 +21,9 @@ import {
   checkNoFindingsAfterStop, checkHasNextStrict, checkKeysDistinctPerOpportunity, checkCredentialTextRefused,
   checkPageCapExact, checkFacadeForwardsNoArgs, checkCredentialKeyRefusedByName, checkRepeatRunArgsIdentical,
   checkEmptyReadInconclusive, checkGetterSwapHarmless,
+  checkAuthChallengesStop, checkSystemSignInCodeExhausted, checkServerClockTicket, checkUiDriftStops,
+  checkUnexpectedAccountStops, checkPlanRecipientGuard, checkPolicyConflictStops, checkConsentRecord,
+  checkNoPartialWrites, checkLoopEpisodes, checkInvoicedScope, checkFailureRecordsUnclean,
 } from "./salesforce-browser-read-rw02.fixtures.mjs";
 
 const SRC = fileURLToPath(new URL("../src/", import.meta.url));
@@ -55,8 +58,8 @@ async function killed(check, ...pairs) {
 
 test("MUTANT R1 write reachable: the read facade hands back the driver itself", () => killed(
   checkReadOnlyFacade,
-  ["  return Object.freeze(facade);\n}\n\n/** A recorder that can reach",
-    "  return driver;\n}\n\n/** A recorder that can reach"]));
+  ["    facade[name] = () => method.call(driver);\n  }\n  return Object.freeze(facade);\n}",
+    "    facade[name] = () => method.call(driver);\n  }\n  return driver;\n}"]));
 
 test("MUTANT R2 write reachable: the read-mode recorder forwards any verb", () => killed(
   checkRecorderAllowlist,
@@ -82,22 +85,22 @@ test("MUTANT R6 absence concluded from a partial read", () => killed(
 test("MUTANT R7 code step accepts a caller-built {started_by_system: true} as a sign-in", () => killed(
   checkCodeStepNeedsSystemStart,
   ["SIGN_IN_TICKETS.get(ticket) : undefined;",
-    "(SIGN_IN_TICKETS.get(ticket) ?? (ticket.started_by_system === true ? { minted_at_ms: 0, attempts_used: 0, spent: false } : undefined)) : undefined;"]));
+    "(SIGN_IN_TICKETS.get(ticket) ?? (ticket.started_by_system === true ? { minted_at_ms: 0, readClock: async () => 0, attempts_used: 0, spent: false } : undefined)) : undefined;"]));
 
 test("MUTANT R8 a stopped run still records findings from its partial read", () => killed(
   checkNoFindingsAfterStop,
-  ["page: kernel });\n      return freeze(", "page: kernel });\n      break; return freeze("]));
+  ["        return stopHere(verdict.reason_id);\n      }", "        await stopHere(verdict.reason_id); break;\n      }"]));
 
 // --- Reviewer's surviving mutants -----------------------------------------
 
 test("MUTANT M1 a non-boolean has_next is treated as the end of the list", () => killed(
   checkHasNextStrict,
-  ["if (hasNext !== true && hasNext !== false) fail(\"invalid_shape\", \"observe().has_next must be a boolean\");\n    if (hasNext === false) break;",
+  ["if (hasNext !== true && hasNext !== false) return stopRun(\"observation_shape_drift\", { index });\n      if (hasNext === false) break;",
     "if (hasNext !== true) break;"]));
 
 test("MUTANT M4 the missing-Joe loop is keyed on the opportunity name", () => killed(
   checkKeysDistinctPerOpportunity,
-  ["idempotency_key: key(\"missing-joe\", f.opportunity_id),", "idempotency_key: key(\"missing-joe\", f.name),"]));
+  ["key(\"missing-joe\", f.opportunity_id)", "key(\"missing-joe\", f.name)"]));
 
 test("MUTANT M5 the credential-pattern text check is dropped", () => killed(
   checkCredentialTextRefused,
@@ -121,8 +124,7 @@ test("MUTANT M10 the credential-key refusal is dropped (falls through to unknown
 
 test("MUTANT M11 the unknown-to-CARR key includes run_ref", () => killed(
   checkRepeatRunArgsIdentical,
-  ["idempotency_key: key(\"unknown-to-carr\", f.opportunity_id),",
-    "idempotency_key: key(\"unknown-to-carr\", f.opportunity_id, run_ref),"]));
+  ["key(\"unknown-to-carr\", f.opportunity_id)", "key(\"unknown-to-carr\", f.opportunity_id, run_ref)"]));
 
 // --- Reviewer's findings as mutants ---------------------------------------
 
@@ -151,3 +153,145 @@ test("MUTANT F4 the absent finding is keyed per run", () => killed(
 test("MUTANT F5 an empty complete read concludes every open deal absent", () => killed(
   checkEmptyReadInconclusive,
   ["const concluded = complete && opportunities.length > 0;", "const concluded = complete;"]));
+
+// --- Safe stops, the follow-ups and the counter's outcome record ----------
+// S1-S30: one or more planted bugs per safe-stop refusal and per follow-up,
+// against the fixtures Jev ranked proportionate (verification_selection,
+// 2026-09-27). Every one must be killed by the check named beside it.
+
+test("MUTANT S1 auth: a CAPTCHA is treated as signed in", () => killed(
+  checkAuthChallengesStop,
+  ["if (raw.state === \"captcha\") return signInStop(\"captcha\");",
+    "if (raw.state === \"captcha\") return freeze({ decision: \"continue\" });"]));
+
+test("MUTANT S2 auth: a new-device prompt is reported as an unobservable state", () => killed(
+  checkAuthChallengesStop,
+  ["if (raw.state === \"new_device_prompt\") return signInStop(\"new_device_prompt\");",
+    "if (raw.state === \"new_device_prompt\") return signInStop(\"sign_in_state_unobservable\");"]));
+
+test("MUTANT S3 auth: a fourth code attempt is allowed", () => killed(
+  checkSystemSignInCodeExhausted,
+  ["while (state.attempts_used < V5_RW02_CODE_AUTOFILL_MAX_ATTEMPTS) {",
+    "while (state.attempts_used <= V5_RW02_CODE_AUTOFILL_MAX_ATTEMPTS) {"]));
+
+test("MUTANT S4 auth: a code prompt after a spent code step gets a second code step", () => killed(
+  checkSystemSignInCodeExhausted,
+  ["if (code.decision !== \"filled\") return stopHere(code.reason_id);",
+    "if (code.decision !== \"filled\") { signIn.codeTried = false; signIn.ticket = null; continue; }"]));
+
+test("MUTANT S5 clock: a caller-supplied time is accepted at the press", () => killed(
+  checkServerClockTicket,
+  ["  if (\"nowMs\" in args || \"now\" in args || \"clock\" in args) fail(\"caller_clock_refused\",\n    \"the sign-in time is read from the server clock, never passed in\");",
+    "  if (false) fail(\"caller_clock_refused\", \"\");"]));
+
+test("MUTANT S6 clock: the server clock is read after the click, not at the press", () => killed(
+  checkServerClockTicket,
+  ["  const minted_at_ms = await readClock();\n  await operator.clickLogIn();",
+    "  await operator.clickLogIn();\n  const minted_at_ms = await readClock();"]));
+
+test("MUTANT S7 clock: staleness is never measured (the mint time stands in for now)", () => killed(
+  checkServerClockTicket,
+  ["const nowMs = await state.readClock();", "const nowMs = state.minted_at_ms;"]));
+
+test("MUTANT S8 clock: any function is accepted as the server clock", () => killed(
+  checkServerClockTicket,
+  ["const read = clock !== null && typeof clock === \"object\" ? SERVER_CLOCKS.get(clock) : undefined;",
+    "const read = typeof clock === \"function\" ? clock : clock !== null && typeof clock === \"object\" ? SERVER_CLOCKS.get(clock) : undefined;"]));
+
+test("MUTANT S9 drift: a missing selector is not checked (only the fingerprint)", () => killed(
+  checkUiDriftStops,
+  ["if (missing.length) return stopRun(\"ui_selector_missing\",", "if (false) return stopRun(\"ui_selector_missing\","]));
+
+test("MUTANT S10 drift: the driver's own fingerprint is trusted", () => killed(
+  checkUiDriftStops,
+  ["const observation = { ...pageObservation, ui_contract_digest };",
+    "const observation = { ui_contract_digest, ...pageObservation };"],
+  ["if (Object.hasOwn(snapshot.page, \"ui_contract_digest\")) fail(", "if (false) fail("]));
+
+test("MUTANT S11 drift: an unparseable row is filed as a policy conflict", () => killed(
+  checkUiDriftStops,
+  ["  return \"row_shape_drift\";\n}", "  return \"field_value_observed\";\n}"]));
+
+test("MUTANT S12 drift: the fingerprint ignores the layout", () => killed(
+  checkUiDriftStops,
+  ["return digest({ kind: \"rw02-read-ui-fingerprint.v1\", layout_ref, selectors });",
+    "return digest({ kind: \"rw02-read-ui-fingerprint.v1\", layout_ref: \"synthetic-list-view.v1\", selectors });"]));
+
+test("MUTANT S13 account: the expected seat is taken from the page itself", () => killed(
+  checkUnexpectedAccountStops,
+  ["expected_account_ref: binding.org.account_ref, expected_ui_contract_digest",
+    "expected_account_ref: pageObservation.signed_in_account_ref, expected_ui_contract_digest"]));
+
+test("MUTANT S14 recipient: recipients shown on the page are dropped before the ladder", () => killed(
+  checkUnexpectedAccountStops,
+  ["const observation = { ...pageObservation, ui_contract_digest };",
+    "const observation = { ...pageObservation, ui_contract_digest, recipients: null };"]));
+
+test("MUTANT S15 recipient: a loop's owner is not checked", () => killed(
+  checkPlanRecipientGuard,
+  ["if (!expected || item.args.kind !== expected.kind || item.args.owner !== expected.owner)",
+    "if (!expected || item.args.kind !== expected.kind)"]));
+
+test("MUTANT S16 scope: an absence finding may name any deal", () => killed(
+  checkPlanRecipientGuard,
+  ["|| !dealIds.has(item.args.subject))", ")"]));
+
+test("MUTANT S17 scope: any verb passes the plan guard", () => killed(
+  checkPlanRecipientGuard,
+  ["    } else return \"finding_outside_scope\";\n  }\n  return null;", "    }\n  }\n  return null;"]));
+
+test("MUTANT S18 policy: page-reported policy conflicts are dropped", () => killed(
+  checkPolicyConflictStops,
+  ["const observation = { ...pageObservation, ui_contract_digest };",
+    "const observation = { ...pageObservation, ui_contract_digest, policy_conflicts: [] };"]));
+
+test("MUTANT S19 policy: a row carrying a field value is treated as drift, not a policy conflict", () => killed(
+  checkPolicyConflictStops,
+  ["  if (error?.code === \"unknown_field\") return \"field_value_observed\";\n", ""]));
+
+test("MUTANT S20 consent: a revoked record still allows the run", () => killed(
+  checkConsentRecord,
+  ["  if (revoked !== false) return refuse(\"dell_consent_revoked\");\n", ""]));
+
+test("MUTANT S21 consent: any sponsor's record counts", () => killed(
+  checkConsentRecord,
+  ["if (!V5_RW02_CONSENT_SPONSORS.includes(record.sponsoring_human_slug))",
+    "if (false)"]));
+
+test("MUTANT S22 consent: a record without the partner's words counts", () => killed(
+  checkConsentRecord,
+  ["  if (record.human_quote_present !== true) return refuse(\"dell_consent_quote_absent\");\n", ""]));
+
+test("MUTANT S23 consent: any decision id counts, not the pinned one", () => killed(
+  checkConsentRecord,
+  ["if (!plain(record) || record.decision_id !== V5_RW02_DELL_CONSENT_DECISION_ID)", "if (!plain(record))"]));
+
+test("MUTANT S24 consent: a consent flag on the binding is not refused by name", () => killed(
+  checkConsentRecord,
+  ["if (plain(raw) && Object.hasOwn(raw, \"dell_consent\"))", "if (false)"]));
+
+test("MUTANT S25 partial write: each finding is written as it is planned", () => killed(
+  checkNoPartialWrites,
+  ["    const plan = [];\n", "    const plan = []; const push = plan.push.bind(plan);\n    plan.push = item => { recorder.record(item.verb, item.args); return push(item); };\n"]));
+
+test("MUTANT S26 episodes: a closed loop replays instead of filing a new action", () => killed(
+  checkLoopEpisodes,
+  ["if (status === \"open\") return { key: episodeKeyFor(base, latest)", "return { key: episodeKeyFor(base, latest)"]));
+
+test("MUTANT S27 episodes: episode 1 moves off the base key (old loops would refile)", () => killed(
+  checkLoopEpisodes,
+  ["return episode === 1 ? base : `${base}:e${episode}`;", "return `${base}:e${episode}`;"]));
+
+test("MUTANT S28 episodes: an unreadable loop status is treated as open", () => killed(
+  checkLoopEpisodes,
+  ["  if (typeof status !== \"string\") return { stop: \"loop_episode_unreadable\" };\n", ""]));
+
+test("MUTANT S29 invoiced: the absence scope ignores the invoiced marker", () => killed(
+  checkInvoicedScope,
+  ["where invoiced_on is null and (outcome is null or outcome = 'won') order by id",
+    "where outcome is null and closed_on is null order by id"]));
+
+test("MUTANT S30 counter: an unexpected failure is not recorded as an unclean run", () => killed(
+  checkFailureRecordsUnclean,
+  ["    if (!outcomeRecorded) await recordOutcome(\"failed\").catch(() => {});\n    throw error;",
+    "    throw error;"]));
