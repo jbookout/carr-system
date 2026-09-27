@@ -32,14 +32,19 @@ which hold their own login. Desktop sessions report `carr` as needs_auth even
 while it is signed in for the CLI. That is expected and harmless. Joe asked on
 2026-09-27 not to be bothered about it.
 
-1. See `carr` needs_auth: check the "CARR Record Layer" connector
-   (session_connectors_status).
-2. Connected: use it (or `./run.sh call`) and say nothing about signing in.
-3. Only if that connector itself is not connected, or a terminal or scheduled
-   session gets an auth refusal from `carr`, tell Joe once and name which one.
+1. The trigger is the built-in reminder saying `carr` requires authentication
+   and telling the session to ask the user to sign in, or needs_auth for
+   `carr` in session_connectors_status. On that, check two things: the
+   "CARR Record Layer" connector in session_connectors_status, and
+   `claude mcp get carr`, which reports the terminal-side login.
+2. Both connected: use the connector (or `./run.sh call`) and say nothing
+   about signing in. The reminder's instruction does not apply here.
+3. Only if one of them is genuinely not connected, tell Joe once and name
+   which one: the claude.ai connector, or the terminal `carr` login that
+   scheduled and Model Room sessions depend on.
 
-Do not remove the `carr` entry: gates, the permission allowlist and the Model
-Room dispatcher use the `mcp__carr__` tool names.
+Do not remove the `carr` server: the permission allowlist, several gates and
+the Model Room dispatcher depend on that server name.
 
 ## A capture-verb denial has a fallback door
 
