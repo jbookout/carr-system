@@ -1116,6 +1116,17 @@ if [ "$RULE_BOOT_STANDING_CONTEXT_REGISTRY_APPLIED" = t ] && [ "$PROVISION_ENGIN
   echo "schema-snapshot: rule-boot standing-context v90 is applied without v89 predecessor" >&2
   exit 1
 fi
+SALESFORCE_RW02_SAFE_STOP_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0734_salesforce_rw02_safe_stop_scac_successor.sql')" \
+  2>/dev/null)"
+case "$SALESFORCE_RW02_SAFE_STOP_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read Salesforce RW02 safe stop v91 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$SALESFORCE_RW02_SAFE_STOP_REGISTRY_APPLIED" = t ] && [ "$RULE_BOOT_STANDING_CONTEXT_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: Salesforce RW02 safe stop v91 is applied without v90 predecessor" >&2
+  exit 1
+fi
 
 # WR-000117. 0530 is the registry successor half of the atomic (0529,0530)
 # group, so probing the SUCCESSOR and not the domain migration is what says the
@@ -2737,6 +2748,17 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                          SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v89'"
                          SCAC_FULL_SET_SEAL_COUNT=89
                          SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v90_current()"
+                         if [ "$SALESFORCE_RW02_SAFE_STOP_REGISTRY_APPLIED" = t ]; then
+                           SCAC_CURRENT_NUMBER=91
+                           SCAC_VERSION_COUNT=91
+                           SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v91'")"
+                           SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v91'")"
+                           SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v91.generated.js"
+                           SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v91'"
+                           SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v90'"
+                           SCAC_FULL_SET_SEAL_COUNT=90
+                           SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v91_current()"
+                         fi
                        fi
                      fi
                    fi

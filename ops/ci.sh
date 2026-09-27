@@ -1445,7 +1445,7 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
   # V5-RW02 joins it: the evidence store's replay projection, its typed
   # conflict and its write-time refusal of malformed or double-counted
   # readback evidence only exist on real rows as carr_writer.
-  for proof in cost-ledger-projection.v5 doc-conversation notifications session-identity dispatch-spine meeting-mode delivery-cadence-a05-tools amend-closed-loop-postgres action-class-successor-registry-postgres independent-review-cycle-postgres a02-rule-enforcement-postgres salesforce-reconciliation-rw02-postgres; do
+  for proof in cost-ledger-projection.v5 doc-conversation notifications session-identity dispatch-spine meeting-mode delivery-cadence-a05-tools amend-closed-loop-postgres action-class-successor-registry-postgres independent-review-cycle-postgres a02-rule-enforcement-postgres salesforce-reconciliation-rw02-postgres salesforce-read-run-store-rw02-postgres; do
     if [ -f "mcp-server/test/$proof.test.mjs" ]; then
       if ! DATABASE_URL="$dsn" CARR_COST_LEDGER_DB_REQUIRED=1 \
            CARR_DOC_CONVERSATION_DB_REQUIRED=1 CARR_R03_DB_REQUIRED=1 \
