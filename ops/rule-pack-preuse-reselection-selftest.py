@@ -1272,7 +1272,7 @@ with tempfile.TemporaryDirectory() as route_tmp:
             lambda r: r["kind"] == "trigger" and "Agent" in r.get("tools", []))
         agent_ids = routed_for("Agent", {"description": "x", "prompt": "y"})
         check("an Agent call routes exactly the rules whose trigger names Agent",
-              set(agent_ids) == agent_expected and agent_expected, agent_ids)
+              bool(set(agent_ids) == agent_expected and agent_expected), agent_ids)
 
         # Verb names reach through all three doors: MCP tool, call-verb, Bash.
         deal_expected = rules_routed_by(
@@ -1282,8 +1282,8 @@ with tempfile.TemporaryDirectory() as route_tmp:
         via_call_verb = set(routed_for("mcp__carr__call-verb", {"verb": "new-deal", "args": {}}))
         via_bash = set(routed_for("Bash", {"command": "./run.sh call new-deal '{\"a\":1}'"}))
         check("a verb routes identically through every MCP prefix, call-verb and run.sh call",
-              deal_expected and deal_expected <= via_mcp and via_mcp == via_other_prefix
-              and deal_expected <= via_call_verb and deal_expected <= via_bash,
+              bool(deal_expected and deal_expected <= via_mcp and via_mcp == via_other_prefix
+                   and deal_expected <= via_call_verb and deal_expected <= via_bash),
               (sorted(deal_expected), sorted(via_mcp), sorted(via_call_verb), sorted(via_bash)))
         check("a verb name is matched exactly, never by prefix or similarity",
               not deal_expected & set(routed_for("mcp__carr__new-dealership", {})))
@@ -1295,7 +1295,7 @@ with tempfile.TemporaryDirectory() as route_tmp:
             and any(re.search(p, "git push -u origin feature", re.I)
                     for p in r.get("bash_patterns", [])))
         check("git push routes exactly the rules whose bash patterns match it",
-              push_expected and push_ids == push_expected and "86647daf" in push_ids,
+              bool(push_expected and push_ids == push_expected and "86647daf" in push_ids),
               sorted(push_ids))
         check("a neutral Bash command routes nothing",
               routed_for("Bash", {"command": "ls -la"}) == [])
@@ -1310,8 +1310,8 @@ with tempfile.TemporaryDirectory() as route_tmp:
               {"e65efc68", "bd4a6d22"} <= ci_ids, sorted(ci_ids))
         path_rules = rules_routed_by(lambda r: r["kind"] == "path_rule")
         check("every path_rule route carries only globs",
-              all(set(r) == {"kind", "path_globs"} for e in ROUTES["rules"].values()
-                  for r in e["routes"] if r["kind"] == "path_rule") and path_rules)
+              bool(all(set(r) == {"kind", "path_globs"} for e in ROUTES["rules"].values()
+                       for r in e["routes"] if r["kind"] == "path_rule") and path_rules))
 
         # Connector glob: the mail draft tool on any server segment.
         draft_ids = set(routed_for("mcp__e16bdf9e-a665__create_draft", {"to": "x"}))
@@ -1348,7 +1348,8 @@ with tempfile.TemporaryDirectory() as route_tmp:
               rail.process(repeat, runner=repeat_runner) is None
               and repeat_runner.calls == [])
         # A different tool re-delivers the rules both tools route.
-        other = gen_payload(tool="Bash", tool_input={"command": "codex exec 'do x'"},
+        other = gen_payload(tool="Bash",
+                            tool_input={"command": "python3 ops/dispatch.py send claude-desk x"},
                             session="route-session", tool_use_id="route-3")
         other_ids = rail.routed_rule_ids(other)
         shared = sorted(set(other_ids) & set(agent_ids))
@@ -1357,7 +1358,7 @@ with tempfile.TemporaryDirectory() as route_tmp:
         other_out = rail.process(other, runner=Runner(route_result(other_union)))
         other_row = json.loads(context(other_out))
         check("a different tool re-delivers rules already delivered to another tool",
-              shared and set(shared) <= {r["id"] for r in other_row["rules"]},
+              bool(shared and set(shared) <= {r["id"] for r in other_row["rules"]}),
               (shared, other_row.get("rule_ids")))
         # A different session starts clean.
         fresh = copy.deepcopy(call)
@@ -1389,11 +1390,12 @@ with tempfile.TemporaryDirectory() as route_tmp:
         check("overflow: no routed rule is dropped — each is full text or listed",
               sorted(delivered + overflowed) == union, (delivered, overflowed))
         check("overflow: some rules overflowed and each carries a one-line summary",
-              overflowed and all(o["summary"].startswith("RULE ") for o in big_row["overflow"]),
+              bool(overflowed and all(o["summary"].startswith("RULE ")
+                                      for o in big_row["overflow"])),
               big_row["overflow"][:2])
         check("overflow: rules not in the always-on file are delivered before those that are",
-              delivered and (not set(delivered) & set(always_on)
-                             or set(union) - set(always_on) <= set(delivered)), delivered)
+              bool(delivered and (not set(delivered) & set(always_on)
+                                  or set(union) - set(always_on) <= set(delivered))), delivered)
         check("overflow: the receipt still validates",
               routes_lib.validate_route_receipt(big_row, repo=REPO))
         check("overflow: only fully delivered rules are recorded for dedupe",
