@@ -284,6 +284,23 @@ def test_fixture(gl, ev):
               and current[(r["case"], r["rule"])] == r["after"]
               and r["after"]["reason"].startswith(r["case"] + ":")
               for r in repair["rows"]))
+    followup = repair["column_followup"]
+    check("repair: bounded column follow-up preserves case-bound before/after evidence",
+          len(followup["rows"]) == 6 and all(
+              r["before"]["case"] == r["after"]["case"] == r["case"]
+              and r["before"]["case_binding"] == r["after"]["case_binding"]
+              and r["before"]["rule"] == r["after"]["rule"] == "f47a8fe9"
+              and current[(r["case"], r["rule"])] == r["after"]
+              and r["after"]["reason"].startswith(r["case"] + ":")
+              for r in followup["rows"]))
+    check("repair: unfinished column audit remains explicit and covers the remaining cases",
+          set(followup["remaining_for_full_semantic_audit"])
+          == {c["id"] for c in base} - {r["case"] for r in followup["rows"]})
+    check("repair: readiness claims bind with and without recorded verification",
+          all(current[(cid, "f47a8fe9")]["gold"] is True for cid in
+              ("v2-chat-005", "v2-chat-012", "v2-chat-019", "v2-chat-027"))
+          and all(current[(cid, "f47a8fe9")]["gold"] is False for cid in
+                  ("v2-chat-001", "v2-chat-006")))
     expected_tour = {14: True, 15: False, 16: True, 17: False, 18: False,
                      19: False, 20: True, 21: False, 22: False, 23: True,
                      24: False, 25: False, 26: False, 27: True, 28: False}
