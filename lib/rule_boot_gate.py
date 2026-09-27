@@ -818,6 +818,13 @@ def verdict(payload, now=None):
     unreadable = [p for p in missing if f"u{p}" in names]
     lead = (f"Page(s) {', '.join(map(str, unreadable))} came back without the whole page (a pipe or "
             "formatter kept only part of it), so they do not count as read.\n") if unreadable else ""
+    source = str(arm.get("source") or "")
+    if not agent_id and not confirmed and source in ("compact", "resume", "clear"):
+        # The main context's pages are keyed by the arm's epoch, so reads made
+        # before this SessionStart do not count: say so, or a context that
+        # remembers reading them (in its summary) thinks the gate is broken.
+        lead += (f"This session was re-armed at SessionStart ({source}): pages read before it do "
+                 "not count, because this context no longer holds them. Read every page again.\n")
     return _hold(folder, len(confirmed), lead + fetch_instructions(missing, arm.get("digest"), total))
 
 

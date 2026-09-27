@@ -724,6 +724,41 @@ def case_three_mcp_prefixes(c):
         assert c.call(*READ, agent=agent) is None, f"{prefix} pages read"
 
 
+def case_connector_after_compaction(c):
+    """Coordinator's report 2026-09-27: connector fetches, including after a
+    compaction, and piped Bash fetches. Reads made before a compaction do not
+    survive it (the context lost them), and the hold says so; connector
+    fetches made after it unlock the context."""
+    conn = "mcp__b36e17b6-7e3b-4e65-b890-21f21d538440__standing-context"
+    c.stub_sized("a", pages=7)
+    c.arm()
+
+    def connector(p):
+        args = {"detail": "boot", "page": p}
+        assert not denied(c.call(conn, args)), f"connector fetch {p} held"
+        c.hook({"hook_event_name": "PostToolUse", "session_id": SESSION, "cwd": REPO, "tool_name": conn,
+                "tool_input": args,
+                "tool_response": [{"type": "text", "text": json.dumps({"ok": True, "rule_boot": c.boot(p)})}]})
+
+    for p in range(1, 8):
+        connector(p)
+    assert c.call(*READ) is None, "seven connector pages read: allowed"
+    c.arm("compact")
+    r = c.call(*READ)
+    assert denied(r) and "compact" in r["permissionDecisionReason"], f"held, saying why: {r}"
+    for p in range(1, 8):
+        connector(p)
+    assert c.call(*READ) is None, "connector pages read after the compaction: allowed"
+    # Piped Bash fetches after another compaction, including head that keeps the whole page.
+    c.arm("compact")
+    for p in range(1, 8):
+        tail = "| head -n 100000" if p % 2 else "| jq ."
+        pre, _ = c.fetch_cmd(f"{abs_cmd(p)} {tail}", p, stdout=indent2 if "jq" in tail else None)
+        assert not denied(pre), f"piped fetch {p} held: {pre}"
+    assert c.call(*READ) is None, "piped pages read after the compaction: allowed"
+    assert len(c.holds()) == 1, f"only the deliberate READ above was a hold, no fetch: {c.holds()}"
+
+
 def case_confirm_needs_the_real_page(c):
     """Loopholes in what counts as read."""
     # Without total_chars (an older Worker) the page check stands alone.
@@ -794,7 +829,8 @@ CASES = [case_deny_cap, case_outage_after_good_arm, case_out_of_range_not_outage
          case_digest_change_rearms, case_rearm_on_compact, case_subagent_path,
          case_answer_parsing,
          case_absolute_form, case_cd_then_run_sh, case_piped_formatter, case_parallel_batch,
-         case_all_pages_clear_advisory, case_three_mcp_prefixes, case_confirm_needs_the_real_page,
+         case_all_pages_clear_advisory, case_three_mcp_prefixes, case_connector_after_compaction,
+         case_confirm_needs_the_real_page,
          case_same_checkout_worktree]
 
 
@@ -907,6 +943,8 @@ MUTANTS = {
                                         '        return False')],
     "unreadable-page-read-as-outage": [('        if p in attempted and f"u{p}" not in names:', '        if p in attempted:')],
     "cd-form-refused": [('        base, tokens = target, tokens[3:]', '        return None')],
+    "compaction-hold-silent": [('    if not agent_id and not confirmed and source in ("compact", "resume", "clear"):',
+                                '    if False:')],
     "python-any-cwd": [('    if uses_python and not _is_checkout_root(base):', '    if False:')],
 }
 
