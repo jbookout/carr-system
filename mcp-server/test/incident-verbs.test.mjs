@@ -531,6 +531,39 @@ test("triage same-key retry replays the receipt before attempting another transi
   assert.ok(!fake.sql.some(([sql]) => sql.startsWith("update ops.incident")));
 });
 
+test("the allocated 100th incident ref is accepted for triage", async () => {
+  const allocator = new Fake({
+    "from tool_call where idempotency_key": [],
+    "from ops.service where key": [{ id: "svc-1", key: "carr-mcp" }],
+    "coalesce(max(substring(ref": [{ day: "20260823", seq: 100 }],
+    "insert into ops.incident (": [{ id: "inc-100" }],
+    "as occurrences from ops.incident": [{ occurrences: 1 }],
+  });
+  const opened = await TOOLS["open-incident"].handler(allocator, agent, {
+    idempotency_key: "open-100", service: "carr-mcp", environment: "production",
+    operation: "run-100", failure_class: "exit_1",
+  });
+  const ref = opened.ref;
+  assert.equal(ref, "INC-20260823-100", "the allocator grows past two digits at 100");
+  const shape = new RegExp(TOOLS["triage-incident"].inputSchema.properties.ref.pattern);
+  const linkShape = new RegExp(TOOLS["link-incident-work-request"].inputSchema.properties.incident_ref.pattern);
+  assert.equal(shape.test("INC-20260823-01"), true);
+  assert.equal(shape.test("INC-20260823-99"), true);
+  assert.equal(shape.test(ref), true, "allocator pads to a minimum of two digits, not exactly two");
+  assert.equal(linkShape.test(ref), true, "the adjacent incident-link door uses the same ref contract");
+  for (const invalid of ["INC-20260823-00", "INC-20260823-001", "INC-20260823-1", "INC-20260823-100x"])
+    assert.equal(shape.test(invalid), false, invalid);
+  const fake = new Fake({
+    "from tool_call where idempotency_key": [],
+    "update ops.incident set state = 'triaged'": [{ id: "inc-100", ref, state: "triaged",
+      next_action: "inspect run", business_impact: "unknown" }],
+  });
+  const out = await TOOLS["triage-incident"].handler(fake, agent, {
+    idempotency_key: "triage-100", ref, next_action: "inspect run", impact_assessment: "unknown",
+  });
+  assert.equal(out.ref, ref);
+});
+
 test("a repeat of an OPEN fingerprint attaches instead of minting a second row", async () => {
   const fake = new Fake({
     "from tool_call where idempotency_key": [],

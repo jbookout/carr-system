@@ -336,6 +336,11 @@ const BOARD_LIMIT_DEFAULT = 60;
 const BOARD_LIMIT_MAX = 200;
 const FACT_LIMIT_DEFAULT = 50;
 const TRACE_CORRELATION_MAX = 25;
+// The allocator uses padStart(2), so its sequence is 01..99, 100, 101...
+// (not a fixed two-digit suffix). Share this with every schema and handler
+// that validates an incident ref so the hundredth row remains addressable.
+const INCIDENT_REF_PATTERN = "^INC-[0-9]{8}-(?:0[1-9]|[1-9][0-9]+)$";
+const INCIDENT_REF_RE = new RegExp(INCIDENT_REF_PATTERN);
 
 // OCCURRENCES: ONE NUMBER, TWO WRITERS, NEITHER OF THEM WRONG.
 //
@@ -850,7 +855,7 @@ export function incidentTools({ withEnvelope, writeEvent, ToolError, authorizati
         "hypotheses. Only detected -> triaged is allowed; a second transition needs a new action.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
         idempotency_key: { type: "string" },
-        ref: { type: "string", pattern: "^INC-[0-9]{8}-[0-9]{2}$" },
+        ref: { type: "string", pattern: INCIDENT_REF_PATTERN },
         next_action: { type: "string", description: "the concrete next investigation or mitigation step" },
         impact_assessment: { type: "string", description: "provisional business impact; 'unknown' is valid when evidence is insufficient" },
       }, required: ["idempotency_key", "ref", "next_action", "impact_assessment"] },
@@ -864,7 +869,7 @@ export function incidentTools({ withEnvelope, writeEvent, ToolError, authorizati
         const ref = String(args.ref || "").trim();
         const nextAction = String(args.next_action || "").trim();
         const impact = String(args.impact_assessment || "").trim();
-        if (!/^INC-[0-9]{8}-[0-9]{2}$/.test(ref))
+        if (!INCIDENT_REF_RE.test(ref))
           throw new ToolError({ error: "invalid_incident_ref", ref });
         if (!nextAction || !impact)
           throw new ToolError({ error: "triage_details_required", ref,
@@ -904,7 +909,7 @@ export function incidentTools({ withEnvelope, writeEvent, ToolError, authorizati
         "serialize before the existing envelope replay boundary.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
         idempotency_key: { type: "string", pattern: "^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$" },
-        incident_ref: { type: "string", pattern: "^INC-[0-9]{8}-[0-9]{2}$" },
+        incident_ref: { type: "string", pattern: INCIDENT_REF_PATTERN },
         work_request: { type: "string", pattern: "^WR-[0-9]{1,12}$" },
       }, required: ["idempotency_key", "incident_ref", "work_request"] },
       handler: async (c, actor, args) => {
