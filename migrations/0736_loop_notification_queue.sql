@@ -8,35 +8,23 @@
 -- and a device delivery sender remain separate work. In-app pending means
 -- persisted for the feed, not seen or acknowledged by the recipient.
 
-create table ops.loop_notification_attempt (
-  id bigserial primary key,
-  loop_id uuid not null references public.loop_item(id),
-  source_event_id uuid not null references public.event(id),
-  recipient_actor uuid not null references public.actor(id),
-  notification_id uuid references ops.notification(id),
-  outcome text not null check (outcome in ('minted','deduplicated','failed')),
-  failure_code text,
-  attempted_at timestamptz not null default clock_timestamp(),
-  check ((outcome = 'failed') = (failure_code is not null)),
-  check ((outcome = 'failed') = (notification_id is null))
-);
-create index loop_notification_attempt_loop_idx
-  on ops.loop_notification_attempt(loop_id, recipient_actor, attempted_at desc);
-
--- Append-only, metadata-only receipts. Runtime bundles cannot write them.
-create trigger loop_notification_attempt_no_change before update or delete
-  on ops.loop_notification_attempt for each row
-  execute function ops.notification_rows_immutable();
-create trigger loop_notification_attempt_no_truncate before truncate
-  on ops.loop_notification_attempt for each statement
-  execute function ops.notification_rows_immutable();
-create trigger scac_reference_monitor_guard_row before insert or update or delete
-  on ops.loop_notification_attempt for each row
-  execute function ops.scac_reference_monitor_guard();
-create trigger scac_reference_monitor_guard_truncate before truncate
-  on ops.loop_notification_attempt for each statement
-  execute function ops.scac_reference_monitor_guard();
-revoke all on ops.loop_notification_attempt from public,carr_reader,carr_writer,carr_jobs,carr_authority;
+-- The migration ledger must be contiguous. 0733/0734 are an atomic pair;
+-- 0735 is the calendar predecessor from PR #1337. A failed preflight leaves
+-- no objects or data behind and prevents a later out-of-order 0735 apply.
+do $r03_order$
+declare v_733 timestamptz; v_734 timestamptz; v_735 timestamptz;
+begin
+  select applied_at into v_733 from public.schema_migrations
+   where filename='0733_salesforce_rw02_safe_stop_run_store.sql';
+  select applied_at into v_734 from public.schema_migrations
+   where filename='0734_salesforce_rw02_safe_stop_scac_successor.sql';
+  select applied_at into v_735 from public.schema_migrations
+   where filename='0735_calendar_prebrief_skip_unknown_attendees.sql';
+  if v_733 is null or v_734 is null or v_735 is null or
+     v_733 > v_734 or v_734 > v_735 then
+    raise exception '0736 requires ordered 0733/0734/0735 migration ledger';
+  end if;
+end $r03_order$;
 
 -- A single, conservative eligibility rule is shared by live inserts and the
 -- bounded reconciliation. Current add-loop accepts exact joe/dell/claude
@@ -72,6 +60,7 @@ returns boolean language plpgsql security definer set search_path=pg_catalog,ops
 as $$
 declare v_event public.event%rowtype; v_loop public.loop_item%rowtype;
         v_target record; v_result jsonb; v_notification uuid;
+        v_automation uuid; v_failure text;
 begin
   select * into v_event from public.event where id = p_event;
   if not found or v_event.subject_type <> 'loop' or
@@ -102,6 +91,10 @@ begin
     end if;
   end if;
 
+  select id into v_automation from public.actor
+   where slug='claude' and kind='automation';
+  if v_automation is null then return false; end if;
+
   begin
     v_result := ops.mint_notification(
       'event', v_event.id, 'loop', v_loop.id::text,
@@ -110,24 +103,36 @@ begin
       v_target.recipient_slug, false, false);
     v_notification := nullif(v_result->>'notification_id','')::uuid;
     if v_notification is null then
-      insert into ops.loop_notification_attempt
-        (loop_id,source_event_id,recipient_actor,outcome,failure_code)
-      values (v_loop.id,v_event.id,v_target.recipient_actor,'failed',
-              coalesce(v_result->>'reason_id','mint_without_notification'));
-      return false;
+      raise exception using errcode='P0001',
+        message='mint_without_notification';
     end if;
-    insert into ops.loop_notification_attempt
-      (loop_id,source_event_id,recipient_actor,notification_id,outcome)
-    values (v_loop.id,v_event.id,v_target.recipient_actor,v_notification,
-            case when coalesce((v_result->>'deduplicated')::boolean,false)
-                 then 'deduplicated' else 'minted' end);
+    -- A metadata-only event uses the existing admitted event surface. The
+    -- new verb cannot trigger another enqueue. Keep receipt and mint atomic.
+    insert into public.event
+      (occurred_at,actor_id,verb,subject_type,subject_id,new_value,cause)
+    values (clock_timestamp(),v_automation,'loop-notification-attempt','loop',v_loop.id,
+            jsonb_build_object('source_event_id',v_event.id,
+                               'recipient_actor',v_target.recipient_actor,
+                               'notification_id',v_notification,
+                               'outcome',case when coalesce((v_result->>'deduplicated')::boolean,false)
+                                              then 'deduplicated' else 'minted' end),
+            'automation_job');
     return true;
   exception when others then
-    -- The nested block rolls back a partial mint. Keep the source loop/event
-    -- and a sanitized failure code; no payload or provider error is stored.
-    insert into ops.loop_notification_attempt
-      (loop_id,source_event_id,recipient_actor,outcome,failure_code)
-    values (v_loop.id,v_event.id,v_target.recipient_actor,'failed',SQLSTATE);
+    -- The nested block rolls back a partial mint. A failed receipt write is
+    -- also contained: never roll back the original add-loop event for this
+    -- best-effort notification producer.
+    v_failure := SQLSTATE;
+    begin
+      insert into public.event
+        (occurred_at,actor_id,verb,subject_type,subject_id,new_value,cause)
+      values (clock_timestamp(),v_automation,'loop-notification-attempt','loop',v_loop.id,
+              jsonb_build_object('source_event_id',v_event.id,
+                                 'recipient_actor',v_target.recipient_actor,
+                                 'outcome','failed','failure_code',v_failure),
+              'automation_job');
+    exception when others then null;
+    end;
     return false;
   end;
 end $$;
