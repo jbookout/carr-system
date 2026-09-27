@@ -46,7 +46,13 @@ second Jev pass (evidence only) and a written adjudication that applies ONE
 trigger to all of that rule's cases; the adjudication decides. Pairs outside
 the set are not gold. Action signals (action-signals.v2.json) settle some
 labels outright; see "the review band" below. An adjudication file row is
-{"case": id, "rule": id, "gold": bool, "reason": text, "jev_misfire": bool}.
+{"case": id, "rule": id, "gold": bool, "reason": text, "jev_misfire": bool,
+ "case_binding": {"case_id": id, "input_sha256": digest}}. The worklist emits
+the binding and the adjudicator must return it with its own decision; never
+attach case ids to an ordered list of anonymous answers. Build verifies the
+echoed id and the exact case input before accepting any reviewed rule label.
+This detects shifted outputs and changed inputs, not semantic mistakes in a
+reason. A mechanical binding import of legacy rows is not a fresh review.
 
 THE BANDS (doctrine gold). p >= YES_AT is gold, p <= NO_AT is not, anything
 between is BORDERLINE and gets a written adjudication that decides.
@@ -517,15 +523,49 @@ def review_set(probs, low_by_rule, signals_hit, settled_rules=(), settled_pairs=
     return out
 
 
+def adjudication_case_binding(case):
+    """Identity of the evidence the adjudicator saw, excluding gold and split.
+
+    The independent output must echo this binding. Excluding gold/probabilities
+    prevents circular evidence; excluding split keeps adjudication blind to the
+    held-out partition. Full tool inputs are included, not call_line's preview.
+    """
+    evidence = {"case_id": case["id"], "prompt": case.get("prompt", ""),
+                "origin": case.get("origin"), "tool_calls": case.get("tool_calls") or []}
+    encoded = json.dumps(evidence, sort_keys=True, ensure_ascii=False,
+                         separators=(",", ":")).encode("utf-8")
+    return {"case_id": case["id"], "input_sha256": hashlib.sha256(encoded).hexdigest()}
+
+
+def validate_adjudication_bindings(adjudications, cases):
+    """Refuse unbound, shifted, stale, duplicated or malformed decisions."""
+    bindings = {c["id"]: adjudication_case_binding(c) for c in cases}
+    if len(bindings) != len(cases):
+        raise ValueError("duplicate case id in adjudication inputs")
+    seen = set()
+    for row in adjudications:
+        pair = (row.get("case"), row.get("rule"))
+        if (not all(isinstance(v, str) and v for v in pair)
+                or type(row.get("gold")) is not bool):
+            raise ValueError("adjudication requires case, rule and boolean gold")
+        if pair in seen:
+            raise ValueError(f"duplicate adjudication for {pair}")
+        seen.add(pair)
+        expected = bindings.get(pair[0])
+        if expected is None or row.get("case_binding") != expected:
+            raise ValueError(f"adjudication case binding mismatch for {pair}")
+
+
 def gold_sets_reviewed(probs, adjudications, low_by_rule, signals_hit, settled_labels,
-                       settled_rules):
+                       settled_rules, *, cases):
     """{case id: sorted gold ids} under the review-set scheme.
     `settled_labels` is {case id: {rule id: bool}} for every policy-settled
     pair (UNIVERSAL_POLICY, ACTION_POLICY, and signal-implied gold);
     `settled_rules` are the rules settled on every case. A review pair without
     an adjudication is an error; an adjudication outside the review set is an
     error too (it would be a label nobody can reproduce)."""
-    decided = {(a["case"], a["rule"]): bool(a["gold"]) for a in adjudications}
+    validate_adjudication_bindings(adjudications, cases)
+    decided = {(a["case"], a["rule"]): a["gold"] for a in adjudications}
     settled_pairs = {(cid, rid) for cid, row in settled_labels.items() for rid in row}
     need = review_set(probs, low_by_rule, signals_hit, settled_rules, settled_pairs)
     missing = sorted(need - set(decided))
