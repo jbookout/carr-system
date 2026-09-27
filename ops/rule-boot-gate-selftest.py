@@ -736,6 +736,9 @@ def case_piped_formatter(c):
                # A character loop can rewrite text without a string method and keep
                # the boot page's JSON, digest, and length intact.
                f"{abs_cmd(1)} | python3 -c 'import sys\nfor ch in sys.stdin.read(): print(\"X\" if ch == \"N\" else ch, end=\"\")'",
+               # Even straight-line reads can replace one byte while preserving
+               # the boot page's length and claimed digest.
+               f"{abs_cmd(1)} | python3 -c 'import sys; print(sys.stdin.read(169), end=\"\"); sys.stdin.read(1); print(\"X\", end=\"\"); print(sys.stdin.read(), end=\"\")'",
                f"{abs_cmd(1)} | jq env", f"{abs_cmd(1)} | jq '{{rule_boot:{{digest:\"sha256:x\"}}}}'",
                f"{abs_cmd(1)} | jq -n '\"x\"'", f"{abs_cmd(1)} | jq . /etc/hosts",
                f"{abs_cmd(1)} | head -n 5 /etc/hosts", f"{abs_cmd(1)} | cat /etc/hosts",
@@ -1017,7 +1020,7 @@ MUTANTS = {
                                       '    if False:')],
     "no-length-check": [('    if want < 1:\n        return False', '    if True:\n        return False')],
     "any-filter-harmless": [('def _harmless_filter(stage):\n', 'def _harmless_filter(stage):\n    return True\n')],
-    "any-python-code": [('def _python_code_ok(code):\n', 'def _python_code_ok(code):\n    return True\n')],
+    "any-python-code": [('            return args[1] == _PY_JSON_PRETTY', '            return True')],
     "any-jq-filter": [('    if flt is None:\n        return True\n    pos = 0', '    if True:\n        return True\n    pos = 0')],
     "lookalike-worktree": [('    if os.path.realpath(os.path.join(gitdir, back)) != os.path.realpath(dotgit):\n        return None',
                             '    if False:\n        return None')],

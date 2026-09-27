@@ -105,8 +105,8 @@ TOOLLESS_AGENT_TYPES = frozenset({"statusline-setup"})
 # The only redirects are 2>&1, 2>/dev/null and </dev/null. Each <filter> only
 # reshapes what the fetch printed and cannot run, write or invent anything:
 #     jq [display options] [path filter]   paths only: .a.b, .[], .[0], |, ",", keys, length, type
-#     python3|python -c '<code>'           an AST whitelist: import json/sys, read stdin, print;
-#                                          no loops, branches, or string-rewriting methods
+#     python3|python -c '<code>'           one literal JSON pretty-printer, whose
+#                                          parse/serialize path preserves every field
 #     python3|python -m json.tool [opts]   (both Python forms only from a checkout root:
 #                                          Python imports from its working directory)
 #     head|tail [-n N | -N | -c N]         cat
@@ -132,14 +132,11 @@ _JQ_PATH_TOKEN = re.compile(
     r'|(?:keys|length|type)(?![A-Za-z0-9_])')
 _HEAD_TAIL_ARGS = re.compile(r"(?:-n ?\+?\d{1,7}|-c ?\+?\d{1,9}|-\d{1,7}|-n\+?\d{1,7}|-c\+?\d{1,9})?")
 _JSON_TOOL_ARGS = re.compile(r"(?:\s*(?:--indent \d{1,2}|--sort-keys|--compact|--no-ensure-ascii|--tab))*")
-_PY_CALLABLES = frozenset({"print", "len", "sorted", "str"})
-# No string-transforming method (split, join, replace, strip, lower...) or
-# control flow: either can rewrite page text and still print a valid rule_boot
-# with its original digest and length.
-_PY_ATTRS = frozenset({"load", "loads", "dumps", "stdin", "stdout", "read", "write", "get", "keys",
-                       "values", "items"})
-_PY_KEYWORDS = frozenset({"indent", "ensure_ascii", "sort_keys", "end", "sep", "flush"})
-_PY_STR = re.compile(r"[A-Za-z0-9_ .#*\n\t-]*")
+# An AST node whitelist cannot prove dataflow: even read/print-only code can
+# replace a byte by splitting stdin reads and printing a constant in between.
+# This exact script reads the complete JSON once and serializes that object
+# without assignment to its fields. Other -c programs are not trusted fetches.
+_PY_JSON_PRETTY = "import json,sys; print(json.dumps(json.load(sys.stdin), indent=2))"
 # Only the Worker's own closed-vocabulary refusal of `detail` means "not
 # deployed yet"; any other error is an outage.
 _BOOT_UNSUPPORTED = re.compile(
@@ -389,50 +386,6 @@ def _expand(word, quoted, base):
     return os.path.join(base, word) if base and os.path.isabs(base) else None
 
 
-def _python_code_ok(code):
-    """True when `code` can only read stdin as JSON or text and print it."""
-    import ast
-    import builtins
-    if len(code) > 2000:
-        return False
-    try:
-        tree = ast.parse(code, mode="exec")
-    except (SyntaxError, ValueError):
-        return False
-    allowed = (ast.Module, ast.Expr, ast.Assign, ast.Import, ast.alias, ast.Call, ast.Attribute,
-               ast.Name, ast.Constant, ast.Subscript, ast.keyword, ast.Load, ast.Store)
-    shadowable = set(dir(builtins)) - _PY_CALLABLES - {"True", "False", "None"}
-    for node in ast.walk(tree):
-        if not isinstance(node, allowed):
-            return False
-        if isinstance(node, ast.Import):
-            if any(a.name not in ("json", "sys") or (a.asname or "x").startswith("_") for a in node.names):
-                return False
-        elif isinstance(node, ast.Assign):
-            if not all(isinstance(t, ast.Name) for t in node.targets):
-                return False
-        elif isinstance(node, ast.Attribute):
-            if node.attr not in _PY_ATTRS or not isinstance(node.ctx, ast.Load):
-                return False
-        elif isinstance(node, ast.Name):
-            if node.id.startswith("_") or node.id in shadowable:
-                return False
-        elif isinstance(node, ast.Subscript):
-            if not isinstance(node.ctx, ast.Load) or not (
-                    isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str)):
-                return False
-        elif isinstance(node, ast.Constant):
-            value = node.value
-            if isinstance(value, str) and not _PY_STR.fullmatch(value):
-                return False
-            if not (value is None or isinstance(value, (str, int, float, bool))):
-                return False
-        elif isinstance(node, ast.keyword):
-            if node.arg not in _PY_KEYWORDS:
-                return False
-    return True
-
-
 def _jq_ok(args):
     """jq with display options and at most one path-only filter, no files."""
     flt, i = None, 0
@@ -465,7 +418,7 @@ def _harmless_filter(stage):
         return _jq_ok(args)
     if prog in ("python3", "python"):
         if len(args) == 2 and args[0] == "-c":
-            return _python_code_ok(args[1])
+            return args[1] == _PY_JSON_PRETTY
         return args[:2] == ["-m", "json.tool"] and bool(_JSON_TOOL_ARGS.fullmatch(" ".join(args[2:])))
     if prog in ("head", "tail"):
         return bool(_HEAD_TAIL_ARGS.fullmatch(" ".join(args)))
