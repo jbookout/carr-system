@@ -94,6 +94,14 @@ def main():
         lambda text: text.replace("*** Begin Patch\n", "*** Begin Patch\t\n", 1),
         lambda text: ("\n" + text.replace("*** Begin Patch\n", "*** Begin Patch \t\n", 1))
                      .replace("\n", "\r\n"),
+        lambda text: text.replace("*** Begin Patch\n", "*** Begin Patch\u00a0\n", 1),
+        lambda text: text.replace("*** Begin Patch\n", "*** Begin Patch\u2003\n", 1),
+        lambda text: text.replace("*** Begin Patch\n", "*** Begin Patch\u202f\n", 1),
+        lambda text: text.replace("*** Begin Patch\n", "*** Begin Patch\u3000\n", 1),
+        lambda text: text.replace("*** Begin Patch\n", "*** Begin Patch\v\n", 1),
+        lambda text: text.replace("*** Begin Patch\n", "*** Begin Patch\u0085\n", 1),
+        lambda text: text.replace("*** Begin Patch\n", "*** Begin Patch\u2028\n", 1),
+        lambda text: text.replace("*** Begin Patch\n", "*** Begin Patch\u2029\n", 1),
     )
     for variant in forms:
         update_variant = {"command": variant(update_patch["command"])}
@@ -128,6 +136,10 @@ def main():
     assert rule_routes.call_paths({"command": "prose before\n" + update_patch["command"]}) == []
     assert rule_routes.call_paths({"command": "cat <<'PATCH'\n" + update_patch["command"]
                                    + "\nPATCH"}) == []
+    for suffix in ("\u200b", "\u2060", "\ufeff", "\x1c", "\x1d", "\x1e", "\x1f"):
+        invalid = update_patch["command"].replace(
+            "*** Begin Patch\n", f"*** Begin Patch{suffix}\n", 1)
+        assert rule_routes.call_paths({"command": invalid}) == []
     assert "search-doctrine" in rule_routes.call_verbs("mcp__carr__search_doctrine", {})
     assert "confirm-merge" in rule_routes.call_verbs(
         "mcp__carr__call_verb", {"verb": "confirm-merge"})
