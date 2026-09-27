@@ -15,7 +15,7 @@
       "assignee": "desk:flash-model",
       "desk": "flash-model",
       "effective_model": "flash (local, thinking off)",
-      "capabilities": ["read"]
+      "capabilities": ["read", "repo-write"]
     },
     "claude": {
       "enabled": true,

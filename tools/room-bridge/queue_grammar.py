@@ -157,6 +157,9 @@ def _parse_enqueue(turn: dict, head: str, body: str, catalog: dict) -> ParseResu
         "priority_label": priority, "runtime": runtime, "key": key, "after": after,
         "finish": finish, "title": title, "body": body, "idempotency_key": idempotency,
         "manual": bool(entry.get("adapter") == "manual" and cap in HUMAN_ONLY),
+        # server-owned provenance, already validated present by _origin; carried so routing can gate a Flash code
+        # run on a trusted origin (kanban_adapter.route_auto), never on `seat`.
+        "origin_channel": turn.get("origin_channel"), "origin_actor": turn.get("origin_actor"),
     })
 
 
