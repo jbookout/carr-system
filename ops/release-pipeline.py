@@ -763,6 +763,12 @@ class Pipeline:
         output = os.fsdecode(proc.stdout)
         return output.strip() if trim_output else output
 
+    def changed_paths(self, before: str, after: str, *, cwd: Path | None = None) -> list[str]:
+        """Exact Git path names for release, CI and review decisions."""
+        output = self.git("diff", "--no-renames", "--name-only", "-z", before, after,
+                          cwd=cwd, trim_output=False)
+        return [path for path in output.split("\0") if path]
+
     def step(self, name: str, argv: list[str], cwd: Path, *, timeout: int = 3600,
              env: dict[str, str] | None = None) -> Result:
         """Run one step, or in dry-run only print it. Nonzero is StepFailed.
@@ -1073,8 +1079,7 @@ class Pipeline:
                 raise Blocked("no_pull_request", f"{commit[:12]} reached main without a merged pull request")
             number, head_sha = int(pr["number"]), str(pr["head"]["sha"])
             parent = self.git("rev-parse", f"{commit}^1", cwd=repo_dir)
-            touches, _ = classify(self.git("diff", "--name-only", parent, commit, cwd=repo_dir).splitlines(),
-                                  lane_cfg)
+            touches, _ = classify(self.changed_paths(parent, commit, cwd=repo_dir), lane_cfg)
             approval: dict | None
             rule = reviewed_sha = ""
             comments = gh.comments(number)   # read ONCE: the verdict and the BLOCK link come from one snapshot
@@ -1177,8 +1182,7 @@ class Pipeline:
             # Keep -z output intact: trimming would corrupt a leading-space
             # filename. The later diff must treat every name literally, since
             # a filename may itself begin with Git's pathspec-magic syntax.
-            paths = [p for p in self.git("diff", "--no-renames", "--name-only", "-z", f"{fix}^1", fix,
-                                         cwd=repo_dir, trim_output=False).split("\0") if p]
+            paths = self.changed_paths(f"{fix}^1", fix, cwd=repo_dir)
             if not paths:
                 return False
             self.git("--literal-pathspecs", "diff", "--quiet", fix, target, "--", *paths,
@@ -1220,11 +1224,7 @@ class Pipeline:
                 return False
 
         def names(a: str, b: str) -> set[str]:
-            # A line-split Git path list can turn a tab/newline-bearing name
-            # into another path. Keep NUL-delimited names intact when proving
-            # that an update-branch merge left reviewed PR files unchanged.
-            return {x for x in self.git("diff", "--no-renames", "--name-only", "-z", a, b,
-                                        cwd=repo_dir, trim_output=False).split("\0") if x}
+            return set(self.changed_paths(a, b, cwd=repo_dir))
 
         if not (have(reviewed) and have(head)):
             with contextlib.suppress(StepFailed):   # squash merges leave H off main: fetch the PR head
@@ -1264,7 +1264,7 @@ class Pipeline:
             parent = self.git("rev-parse", f"{commit}^1")
         except StepFailed:      # a root commit: nothing to call ignored
             return False
-        paths = [p for p in self.git("diff", "--name-only", parent, commit).splitlines() if p.strip()]
+        paths = self.changed_paths(parent, commit)
         ignore = lane_cfg.get("canary_ignored_globs") or []
         return bool(paths) and all(any(_glob_hit(p, g) for g in ignore) for p in paths)
 
@@ -1521,8 +1521,7 @@ class Pipeline:
                 self.git("merge-base", "--is-ancestor", base, sha, cwd=repo_dir)
             except StepFailed:
                 raise Blocked("history_diverged", f"released {base[:12]} is not an ancestor of main {sha[:12]}")
-            if lane == "worker" and classify(self.git("diff", "--name-only", base, sha, cwd=repo_dir)
-                                             .splitlines(), lane_cfg)[0]:
+            if lane == "worker" and classify(self.changed_paths(base, sha, cwd=repo_dir), lane_cfg)[0]:
                 # From here on `sha` is the RELEASE TARGET, the newest green
                 # canary commit, not HEAD: review, CI, upload, live readback and
                 # the state/record rows all name it. A doc/test-only batch needs
@@ -1539,7 +1538,7 @@ class Pipeline:
                              f"{failed[:12]} ({lane_state.get('failed_step')}); waiting for a green "
                              "fix-forward")
                     return 0
-            changed = self.git("diff", "--name-only", base, sha, cwd=repo_dir).splitlines()
+            changed = self.changed_paths(base, sha, cwd=repo_dir)
             needed, hits = classify(changed, lane_cfg)
             self.out(f"release-pipeline[{lane}]: batch {base[:12]}..{sha[:12]}: "
                      f"{len(changed)} path(s), {len(hits)} release path(s)")

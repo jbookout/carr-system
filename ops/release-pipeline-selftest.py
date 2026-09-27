@@ -467,6 +467,15 @@ class Batching(Base):
         self.assertEqual(self.fx.state()["worker"]["last_released_sha"], latest)
         self.assertEqual(self.fx.records()[-1]["status"], "no_release_needed")
 
+    def test_unicode_named_worker_source_is_not_skipped_as_docs_only(self):
+        target = self.fx.commit({"mcp-server/src/unicodé.js": "source"})
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live)
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
+        self.assertEqual(self.fx.records()[-1]["status"], "shipped")
+        self.assertEqual(self.fx.records()[-1]["sha"], target)
+        self.assertIn("upload", runner.names())
+
     def test_released_main_is_a_noop(self):
         runner = FakeRunner()
         self.assertEqual(self.fx.pipeline(runner).tick(["worker"]), 0)
@@ -1892,6 +1901,17 @@ class CanaryAndCI(Base):
         rec = self.fx.records()[-1]
         self.assertEqual(rec["reason"], "ci_not_green")
         self.assertIn(f"PR #{FakeGitHub().pr_number(first)}", rec["detail"])
+
+    def test_unicode_named_release_path_cannot_hide_failed_ci(self):
+        first = self.fx.commit({"mcp-server/src/unicodé.js": "1"})
+        self.fx.commit({"mcp-server/src/ordinary.js": "2"})
+        runner = FakeRunner()
+        gh = FakeGitHub(red_ci_prs={FakeGitHub().pr_number(first)})
+        self.assertEqual(self.fx.pipeline(runner, github=gh).tick(["worker"]), 0,
+                         self.fx.records())
+        self.assertEqual(runner.calls, [])
+        rec = self.fx.records()[-1]
+        self.assertEqual(rec["reason"], "ci_not_green")
 
 
 class ReleaseTarget(Base):
