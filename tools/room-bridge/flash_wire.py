@@ -462,7 +462,7 @@ def _result_line(task_id: str, outcome: str, summary: str) -> str:
 
 def _code_task(task_id: str | None, title: str, body: str, spec: dict | None, refusal: str | None,
                code_runner) -> dict:
-    if refusal:
+    if refusal or spec is None:
         row = {"outcome": "blocked", "summary": f"Flash's code task was refused: {refusal}.",
                "text": f"Flash's code task was refused: {refusal}."}
     else:
