@@ -214,7 +214,7 @@ c = d["counts"]
 print(f"calendar-capture: window {days}d — {c['emails']} attendee address(es): "
       f"{c['exact']} exact, {c['domain']} domain-only, {c['unknown']} unknown")
 
-if not receipt_safe:
+if dry and not receipt_safe:
     for u in d["unknown"]:
         print(f"  research candidate  {u['email']}  (last seen {u['last_seen']})")
     for m in d["domain"]:
@@ -259,10 +259,9 @@ for e in d["exact"]:
     r = subprocess.run(["./run.sh", "call", "log-activity", args],
                        capture_output=True, text=True)
     ok = '"ok": true' in r.stdout or '"ok":true' in r.stdout
-    print(f"  {'logged touch  ' if ok else 'FAILED to log '} {e['ref']}  via {e['email']}")
+    print("  logged exact touch" if ok else "  FAILED to log exact touch")
     if not ok:
         failed += 1
-        print("    " + (r.stdout or r.stderr).strip().replace("\n", "\n    ")[:400])
     else:
         written += 1
 print(f"calendar-capture: source=eventkit mode=live scanned={scanned} exact={c['exact']} "
@@ -279,7 +278,8 @@ CAPTURE_STATUS=$?
 INTAKE_STATUS=0
 if [ "$DRY" -ne 1 ]; then
   "$PY" "$REPO/tools/calendar-intake-gate.py" \
-          --proposals "$MATCH_JSON" --evidence "$INTAKE_EVIDENCE" || INTAKE_STATUS=$?
+          --proposals "$MATCH_JSON" --evidence "$INTAKE_EVIDENCE" \
+          --aggregate-only || INTAKE_STATUS=$?
 fi
 if [ "$CAPTURE_STATUS" -ne 0 ]; then
   echo "calendar-capture: FAIL one or more exact touches were not logged" >&2

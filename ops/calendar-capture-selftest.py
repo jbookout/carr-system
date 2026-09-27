@@ -188,8 +188,8 @@ mixed = {
 }
 root, stub = fixture(appends="events scanned: 2; carrying attendees: 2\nexit=0",
                      dump_json="{}", matcher_json=json.dumps(mixed))
-(root / "tools" / "calendar-intake-gate.py").write_text(
-    "import sys\nprint('synthetic unresolved intake', file=sys.stderr)\nsys.exit(78)\n")
+shutil.copy2(REPO / "tools" / "calendar-intake-gate.py",
+             root / "tools" / "calendar-intake-gate.py")
 (root / "run.sh").write_text(
     "#!/bin/sh\nprintf '%s\\n' \"$2\" >> out/canonical-calls.txt\n"
     "printf '{\"ok\": true}\\n'\n")
@@ -201,6 +201,16 @@ check("unresolved intake still refuses completion", p.returncode == 78,
 check("unresolved intake preserves the independent exact touch",
       calls.is_file() and calls.read_text().splitlines() == ["log-activity"],
       f"calls={calls.read_text() if calls.exists() else 'none'}")
+check("live refusal output is aggregate-only",
+      not any(value in p.stdout + p.stderr for value in (
+          "new@example.test", "known@example.test", "C-TEST", "Synthetic meeting")))
+(root / "run.sh").write_text(
+    "#!/bin/sh\nprintf 'refused known@example.test C-TEST\n'\nexit 1\n")
+(root / "run.sh").chmod(0o755)
+p = run(root, stub)
+check("failed exact write takes precedence without leaking call output",
+      p.returncode == 1 and not any(value in p.stdout + p.stderr for value in (
+          "new@example.test", "known@example.test", "C-TEST", "Synthetic meeting")))
 
 print(f"\n{'OK all checks passed' if not failures else f'FAIL {len(failures)}: ' + ', '.join(failures)}")
 sys.exit(1 if failures else 0)
