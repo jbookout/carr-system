@@ -341,9 +341,22 @@ def main() -> int:
     original_run = mod.subprocess.run
     original_active = os.environ.get(mod.ACTIVE_LAUNCHD_LABEL_ENV)
     calls: list[list[str]] = []
+    loaded_paths: dict[str, str] = {}
+    print_error = ""
 
     def fake_run(args, *unused_args, **unused_kwargs):
         calls.append(list(args))
+        if args[1] == "print":
+            if print_error:
+                return SimpleNamespace(returncode=1, stdout="", stderr=print_error)
+            label = args[2].rsplit("/", 1)[-1]
+            if label not in loaded_paths:
+                return SimpleNamespace(
+                    returncode=113, stdout="",
+                    stderr=f'Could not find service "{label}" in domain for user gui: 501',
+                )
+            return SimpleNamespace(returncode=0,
+                                   stdout=f"path = {loaded_paths[label]}\n", stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     cases: list[bool] = []
@@ -424,18 +437,66 @@ def main() -> int:
             ))
 
             other_dest.write_text(desired_other, encoding="utf-8")
+            loaded_paths[other_label] = str(other_dest)
             calls.clear()
-            with contextlib.redirect_stdout(io.StringIO()):
+            with contextlib.redirect_stdout(io.StringIO()) as kept_out:
                 other = mod.install_launchd_plist(
                     other_dest.name, str(other_dest), desired_other, True
                 )
             cases.append(check(
-                "active fleet install still unloads and loads every other plist",
-                other == "loaded"
-                and [call[:2] for call in calls]
-                == [["launchctl", "unload"], ["launchctl", "load"]],
-                (other, calls),
+                "unchanged loaded other job remains loaded without a reload",
+                other == "kept" and calls == [
+                    ["launchctl", "print", f"gui/{os.getuid()}/{other_label}"]
+                ] and other_dest.read_text(encoding="utf-8") == desired_other
+                and "kept loaded" in kept_out.getvalue(),
+                (other, calls, kept_out.getvalue()),
             ))
+
+            loaded_paths[other_label] = str(root / "foreign.plist")
+            calls.clear()
+            with contextlib.redirect_stdout(io.StringIO()) as foreign_out:
+                foreign = mod.install_launchd_plist(
+                    other_dest.name, str(other_dest), desired_other, True
+                )
+            cases.append(check(
+                "same label loaded from a foreign path is not silently accepted",
+                foreign == "failed" and calls == [
+                    ["launchctl", "print", f"gui/{os.getuid()}/{other_label}"]
+                ] and other_dest.read_text(encoding="utf-8") == desired_other
+                and "INSPECT FAILED" in foreign_out.getvalue(),
+                (foreign, calls, foreign_out.getvalue()),
+            ))
+
+            loaded_paths.pop(other_label)
+            calls.clear()
+            with contextlib.redirect_stdout(io.StringIO()):
+                absent = mod.install_launchd_plist(
+                    other_dest.name, str(other_dest), desired_other, True
+                )
+            cases.append(check(
+                "unchanged absent job is loaded",
+                absent == "loaded" and [call[:2] for call in calls]
+                == [["launchctl", "print"], ["launchctl", "unload"],
+                    ["launchctl", "load"]]
+                and other_dest.read_text(encoding="utf-8") == desired_other,
+                (absent, calls),
+            ))
+
+            print_error = "Operation not permitted"
+            calls.clear()
+            with contextlib.redirect_stdout(io.StringIO()) as error_out:
+                ambiguous = mod.install_launchd_plist(
+                    other_dest.name, str(other_dest), desired_other, True
+                )
+            cases.append(check(
+                "ambiguous launchctl inspection refuses without altering the job",
+                ambiguous == "failed" and calls == [
+                    ["launchctl", "print", f"gui/{os.getuid()}/{other_label}"]
+                ] and other_dest.read_text(encoding="utf-8") == desired_other
+                and "INSPECT FAILED" in error_out.getvalue(),
+                (ambiguous, calls, error_out.getvalue()),
+            ))
+            print_error = ""
 
             os.environ.pop(mod.ACTIVE_LAUNCHD_LABEL_ENV, None)
             calls.clear()

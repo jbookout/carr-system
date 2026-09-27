@@ -1828,6 +1828,27 @@ def install_launchd_plist(filename, dest, body, body_matches):
             return "kept"
         return hand_off_self_reload(filename, dest, body, label)
 
+    if body_matches and label:
+        # The hourly installer must not disturb a definition that is already
+        # loaded. Repeated unload/load cycles can strand a RunAtLoad/KeepAlive
+        # job in launchd's pending-spawn state even though its plist is right.
+        target = f"gui/{os.getuid()}/{label}"
+        inspected = subprocess.run(["launchctl", "print", target],
+                                   capture_output=True, text=True, check=False)
+        if inspected.returncode == 0:
+            path_match = re.search(r"(?m)^\s*path = (.+)$", inspected.stdout or "")
+            if path_match and path_match.group(1).strip() == dest:
+                print(f"      kept loaded ({label}; body unchanged)")
+                return "kept"
+            print(f"      INSPECT FAILED ({label} is loaded from an unexpected path); "
+                  "destination left unchanged")
+            return "failed"
+        detail = ((inspected.stderr or "") + "\n" + (inspected.stdout or "")).strip()
+        if inspected.returncode != 113 or f'Could not find service "{label}"' not in detail:
+            print(f"      INSPECT FAILED ({detail[:80] or 'unknown launchctl error'}); "
+                  "destination left unchanged")
+            return "failed"
+
     if not body_matches:
         with open(dest, "w", encoding="utf-8") as fh:
             fh.write(body)
