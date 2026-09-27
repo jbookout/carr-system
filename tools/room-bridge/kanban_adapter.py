@@ -440,6 +440,16 @@ class QueueService:
                 reason = "script_data_refused"
             elif paths is None:
                 reason = "script_needs_data"
+        elif row["route"] == "code" and alias == "flash":
+            # flash-run needs one allowlisted git project and a bounded test command, named in the body exactly as
+            # the desk reads them (flash_wire.code_inputs over flash_wire.task_parts' body)
+            import flash_wire
+            spec, _, refusal = flash_wire.code_inputs(command.get("body") or "",
+                                                      roots=policy.get("code_project_roots") or [])
+            if refusal:
+                reason = "code_project_refused"
+            elif spec is None:
+                reason = "code_needs_project"
         if reason:
             alias = targets.get("fallback")
         return {"target": alias, "route": row["route"], "model": row.get("model"), "effort": row.get("effort"),

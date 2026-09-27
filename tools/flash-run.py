@@ -128,9 +128,12 @@ def make_copy(cwd, dest):
         dst = os.path.join(dest, rel)
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copy2(src, dst, follow_symlinks=False)
-    venv = os.path.join(cwd, ".venv")
-    if os.path.isdir(venv):
-        os.symlink(venv, os.path.join(dest, ".venv"))
+    # The project's installed dependencies are linked, not copied: .venv for Python, node_modules so a
+    # `node --test` in the copy resolves the project's packages (the Model Room queue's code tasks use both).
+    for dep in (".venv", "node_modules"):
+        src = os.path.join(cwd, dep)
+        if os.path.isdir(src) and not os.path.lexists(os.path.join(dest, dep)):
+            os.symlink(src, os.path.join(dest, dep))
     for args in (["git", "init", "-q"], ["git", "add", "-A"],
                  ["git", "-c", "user.email=flash@local", "-c", "user.name=flash",
                   "commit", "-q", "--no-verify", "-m", "baseline"]):

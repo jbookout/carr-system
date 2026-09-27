@@ -429,6 +429,320 @@ def test_the_queue_prompt_still_carries_the_protocol_mark():
     assert flash_wire.PROTOCOL_MARK in queued_prompt("x")
 
 
+# ── code tasks: a queued task that names a project and a test runs flash-run on a new branch of that project ──────
+import subprocess  # noqa: E402
+import time  # noqa: E402
+
+CODE_POLICY = {**POLICY, "queue_targets": {**POLICY["queue_targets"], "code": "flash"}}
+
+
+def _git(cwd, *args):
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+
+
+def code_root():
+    """A folder of projects: one git project (`app`, with one test script), one plain folder and one link."""
+    root = os.path.realpath(tempfile.mkdtemp(prefix="flash-projects-"))
+    app = os.path.join(root, "app")
+    os.makedirs(os.path.join(app, "tests"))
+    with open(os.path.join(app, "calc.py"), "w") as fh:
+        fh.write("def add(a, b):\n    return a - b\n")
+    with open(os.path.join(app, "tests", "check.py"), "w") as fh:
+        fh.write("import sys\nsys.path.insert(0, '.')\nimport calc\nassert calc.add(2, 2) == 4\n")
+    _git(app, "init", "-q", "-b", "main")
+    _git(app, "add", "-A")
+    _git(app, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "base")
+    os.makedirs(os.path.join(root, "plain"))
+    os.symlink(app, os.path.join(root, "alias"))
+    return root
+
+
+def code_body(root, project="app", test="python3 tests/check.py", extra="Fix add so the test passes."):
+    lines = [extra, f"project: {root}/{project}"]
+    if test is not None:
+        lines.append(f"test: {test}")
+    return "\n".join(lines)
+
+
+def test_code_inputs_takes_an_allowed_git_project_and_a_bounded_test():
+    root = code_root()
+    spec, question, err = flash_wire.code_inputs(code_body(root), roots=[root])
+    assert err is None and spec["project"] == f"{root}/app", (spec, err)
+    assert spec["test_argv"] == ["python3", "tests/check.py"], spec
+    assert "project:" not in question and "test:" not in question and "Fix add" in question, question
+    spec, _, err = flash_wire.code_inputs(code_body(root, test="pytest -q -x tests/check.py::test_one"),
+                                          roots=[root])
+    assert err is None and spec["test_argv"] == ["python3", "-m", "pytest", "-q", "-x",
+                                                 "tests/check.py::test_one"], (spec, err)
+    spec, _, err = flash_wire.code_inputs(code_body(root, test="node --test tests"), roots=[root])
+    assert err is None and spec["test_argv"] == ["node", "--test", "tests"], (spec, err)
+
+
+def test_code_inputs_refuses_a_disallowed_project():
+    root = code_root()
+    other = code_root()
+    for body in (code_body(other), code_body(root, project="../" + os.path.basename(other) + "/app"),
+                 code_body(root, project="missing"), f"x\nproject: {root}\ntest: pytest"):
+        spec, _, err = flash_wire.code_inputs(body, roots=[root])
+        assert spec is None and err, (body, spec, err)
+    spec, _, err = flash_wire.code_inputs(code_body(root), roots=[])
+    assert spec is None and "configured" in err, err
+    spec, _, err = flash_wire.code_inputs(code_body(root) + f"\nproject: {root}/app", roots=[root])
+    assert spec is None and "one project" in err, err
+
+
+def test_code_inputs_refuses_a_symlinked_project():
+    root = code_root()
+    spec, _, err = flash_wire.code_inputs(code_body(root, project="alias"), roots=[root])
+    assert spec is None and "link" in err, err
+
+
+def test_code_inputs_refuses_a_folder_that_is_not_a_git_work_tree():
+    root = code_root()
+    spec, _, err = flash_wire.code_inputs(code_body(root, project="plain"), roots=[root])
+    assert spec is None and "git" in err, err
+    # a subfolder of a git project is not that project's own work tree either
+    spec, _, err = flash_wire.code_inputs(code_body(root, project="app/tests"), roots=[root])
+    assert spec is None and "git" in err, err
+
+
+INJECTIONS = [
+    "pytest; rm -rf ~", "pytest && id", "pytest | sh", "pytest $(whoami)", "pytest `id`",
+    "python3 tests/check.py > /etc/passwd", "bash -c id", "sh tests/check.py", "npm test", "make test",
+    "python3 -c print(1)", "python3 /etc/hosts.py", "python3 ../other/check.py", "python3 tests/../../x.py",
+    "pytest --basetemp=/Users", "pytest -p evil", "pytest -c /etc/hosts", "pytest /etc", "pytest ~/secrets",
+    "node -e process.exit(0)", "node --test --require=/tmp/x.js", "pytest 'tests/check.py'",
+    "pytest tests/check.py\\", "python3 tests/check.py --out=$HOME", "", "pytest -k",
+    "python3 tests/missing.py", "env X=1 pytest", "/usr/bin/python3 tests/check.py", "python3 -m http.server",
+]
+
+
+def test_injection_attempts_in_the_test_line_are_refused():
+    root = code_root()
+    for test in INJECTIONS:
+        spec, _, err = flash_wire.code_inputs(code_body(root, test=test), roots=[root])
+        assert spec is None and err, (test, spec)
+    spec, _, err = flash_wire.code_inputs(code_body(root, test=None), roots=[root])
+    assert spec is None and "test" in err, err
+    spec, _, err = flash_wire.code_inputs(code_body(root) + "\ntest: pytest", roots=[root])
+    assert spec is None and err, err
+
+
+def test_a_test_script_that_is_a_link_is_refused():
+    root = code_root()
+    os.symlink("/etc/hosts", os.path.join(root, "app", "tests", "link.py"))
+    spec, _, err = flash_wire.code_inputs(code_body(root, test="python3 tests/link.py"), roots=[root])
+    assert spec is None and err, (spec, err)
+
+
+def test_a_task_naming_both_data_and_a_project_is_refused_on_both_sides():
+    root = code_root()
+    body = code_body(root) + "\ndata: /tmp/x.csv"
+    assert flash_wire.code_inputs(body, roots=[root])[2]
+    assert flash_wire.script_inputs(body, roots=[root])[2]
+
+
+def code_service(root, route="code"):
+    adapter = FakeAdapter()
+    router = FakeRouter(route)
+    router.load_policy = lambda: {**CODE_POLICY, "code_project_roots": [root]}
+    catalog = {**CATALOG, "targets": {**CATALOG["targets"], "flash": {
+        **CATALOG["targets"]["flash"], "capabilities": ["read", "repo-write"]}}}
+    svc = kanban_adapter.QueueService(catalog=catalog, adapter=adapter, router=router, flash_up=lambda: True)
+    return svc, adapter
+
+
+def enqueue(body, key="k1"):
+    return turn(f"@queue enqueue target=auto cap=repo-write key={key} :: Fix add\n{body}")
+
+
+def test_auto_code_task_with_an_allowed_project_goes_to_flash():
+    root = code_root()
+    svc, adapter = code_service(root)
+    accepted = svc.handle(enqueue(code_body(root)), room="p")["receipt"]["queue_accepted"]
+    assert accepted["target"] == "flash" and accepted["route"]["fallback_reason"] is None, accepted
+
+
+def test_auto_code_task_without_a_project_falls_back():
+    root = code_root()
+    svc, _ = code_service(root)
+    accepted = svc.handle(enqueue("Fix add."), room="p")["receipt"]["queue_accepted"]
+    assert accepted["target"] == "claude-desktop" and accepted["route"]["fallback_reason"] == "code_needs_project"
+
+
+def test_auto_code_task_with_a_refused_project_or_test_falls_back():
+    root = code_root()
+    svc, _ = code_service(root)
+    for n, body in enumerate((code_body(root, project="plain"), code_body(root, project="alias"),
+                              code_body(code_root()), code_body(root, test="pytest; rm -rf ~"),
+                              code_body(root, test=None))):
+        accepted = svc.handle(enqueue(body, key=f"r{n}"), room="p")["receipt"]["queue_accepted"]
+        assert accepted["target"] == "claude-desktop", (body, accepted)
+        assert accepted["route"]["fallback_reason"] == "code_project_refused", (body, accepted)
+
+
+def test_auto_code_task_falls_back_when_jev_abstained():
+    root = code_root()
+    for flag in ({"jev_error": "JudgeUnavailable: down"}, {"fallback": True}):
+        svc, _ = code_service(root)
+        decide = svc._router.decide
+        svc._router.decide = lambda *a, _d=decide, _f=flag, **k: {**_d(*a, **k), **_f}
+        accepted = svc.handle(enqueue(code_body(root)), room="p")["receipt"]["queue_accepted"]
+        assert accepted["target"] == "claude-desktop" and accepted["route"]["fallback_reason"] == "jev_abstained"
+
+
+def code_prompt(body, title="Fix add"):
+    return queue_dispatch.QueueDeskExecutor._prompt({
+        "task_id": "t_code0001", "title": title, "instructions": body,
+        "meta": {"source_seq": 5, "source_msg_id": "m", "cap": "repo-write"}})
+
+
+def test_a_project_line_in_the_title_counts_on_neither_side():
+    root = code_root()
+    svc, _ = code_service(root)
+    out = svc.handle(turn(f"@queue enqueue target=auto cap=repo-write :: project: {root}/app\n"
+                          "test: python3 tests/check.py\nFix add"), room="p")
+    assert out["receipt"]["queue_accepted"]["route"]["fallback_reason"] == "code_needs_project", out
+    prompt = code_prompt("test: python3 tests/check.py\nFix add", title=f"project: {root}/app")
+    body = flash_wire.task_parts(prompt)[2]
+    assert body == "test: python3 tests/check.py\nFix add", body
+    spec, _, err = flash_wire.code_inputs(body, roots=[root])
+    assert spec is None and err is None
+    out = flash_wire.run_task(prompt, roots=[], code_roots=[root],
+                              code_runner=lambda *a: (_ for _ in ()).throw(AssertionError("must not run")),
+                              opener=opener_returning({"choices": [{"message": {"content": "ok"}}]}))
+    assert out["status"] == "completed" and out["result"] == "ok", out
+
+
+def test_flash_desk_runs_a_code_task_and_writes_a_success_line():
+    root = code_root()
+    seen = []
+
+    def runner(question, spec, task_id):
+        seen.append((question, spec, task_id))
+        return {"outcome": "success", "branch": "flash/queue-t_code0001-x",
+                "summary": "Flash's change passes on new branch flash/queue-t_code0001-x", "text": "diff here"}
+    out = flash_wire.run_task(code_prompt(code_body(root)), roots=[], code_roots=[root], code_runner=runner)
+    question, spec, task_id = seen[0]
+    assert task_id == "t_code0001" and spec["project"] == f"{root}/app" and "Fix add" in question, seen
+    assert "CARR_QUEUE_RESULT" not in question and "project:" not in question, question
+    result = queue_dispatch.parse_terminal_result(out["result"], "t_code0001", "repo-write")
+    assert out["status"] == "completed" and result["outcome"] == "success", out
+    assert "flash/queue-t_code0001-x" in result["summary"] and out["result"].startswith("diff here"), out
+
+
+def test_flash_desk_blocks_a_failed_code_run_and_a_refused_project():
+    root = code_root()
+    out = flash_wire.run_task(code_prompt(code_body(root)), roots=[], code_roots=[root],
+                              code_runner=lambda *a: {"outcome": "blocked", "summary": "no attempt passed",
+                                                      "text": "log"})
+    result = queue_dispatch.parse_terminal_result(out["result"], "t_code0001", "repo-write")
+    assert result["outcome"] == "blocked", out
+    out = flash_wire.run_task(code_prompt(code_body(root, test="pytest; rm -rf ~")), roots=[], code_roots=[root],
+                              code_runner=lambda *a: (_ for _ in ()).throw(AssertionError("must not run")))
+    result = queue_dispatch.parse_terminal_result(out["result"], "t_code0001", "repo-write")
+    assert result["outcome"] == "blocked" and "refused" in result["summary"], out
+
+
+FAKE_FLASH_RUN = """import os, sys
+args = sys.argv[1:]
+cwd = args[args.index("--cwd") + 1]
+assert args[args.index("--escalate") + 1] == "suggest", args
+assert args[args.index("--test") + 1] == "python3 tests/check.py", args
+mode = os.environ.get("FAKE_FLASH_MODE", "fix")
+if mode == "sleep":
+    import subprocess, time
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    open(os.environ["FAKE_FLASH_PID"], "w").write(str(child.pid))
+    time.sleep(60)
+if mode == "fix":
+    with open(os.path.join(cwd, "calc.py"), "w") as fh:
+        fh.write("def add(a, b):\\n    return a + b\\n")
+    sys.exit(0)
+sys.exit(5)
+"""
+
+
+def fake_flash_run():
+    path = os.path.join(tempfile.mkdtemp(prefix="fake-flash-run-"), "flash-run.py")
+    with open(path, "w") as fh:
+        fh.write(FAKE_FLASH_RUN)
+    return [sys.executable, path]
+
+
+def _out(project, *args):
+    return subprocess.run(["git", *args], cwd=project, capture_output=True, text=True).stdout
+
+
+def _run_with(mode, spec, **kw):
+    saved = dict(os.environ)
+    os.environ["FAKE_FLASH_MODE"] = mode
+    try:
+        return flash_wire._run_flash_code("Fix add", spec, "t_code0001", command=fake_flash_run(), **kw)
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
+def test_code_run_lands_on_a_new_branch_and_never_touches_the_project_tree():
+    root = code_root()
+    project = f"{root}/app"
+    spec, _, err = flash_wire.code_inputs(code_body(root), roots=[root])
+    assert err is None, err
+    row = _run_with("fix", spec)
+    assert row["outcome"] == "success", row
+    branch = row["branch"]
+    assert branch.startswith("flash/queue-t_code0001") and branch in _out(project, "branch").split(), row
+    assert _out(project, "symbolic-ref", "--short", "HEAD").strip() == "main"
+    with open(os.path.join(project, "calc.py")) as fh:
+        assert "a - b" in fh.read(), "the real tree must be unchanged"
+    assert "a + b" in _out(project, "show", f"{branch}:calc.py")
+    assert len(_out(project, "log", "--oneline", "main").splitlines()) == 1
+    assert len(_out(project, "worktree", "list").strip().splitlines()) == 1
+    assert _out(project, "status", "--porcelain") == ""
+    assert "calc.py" in row["text"] and "+    return a + b" in row["text"], row
+    assert branch in row["summary"], row
+
+
+def test_a_failed_code_run_leaves_no_branch_and_no_worktree():
+    root = code_root()
+    project = f"{root}/app"
+    spec, _, _ = flash_wire.code_inputs(code_body(root), roots=[root])
+    row = _run_with("fail", spec)
+    assert row["outcome"] == "blocked" and _out(project, "branch").split() == ["*", "main"], row
+    assert len(_out(project, "worktree", "list").strip().splitlines()) == 1
+
+
+def test_a_code_run_ends_before_the_queue_claim_expires():
+    assert flash_wire.CODE_TIMEOUT_S < 900 and flash_wire.CODE_TIMEOUT_S <= flash_wire.SCRIPT_TIMEOUT_S
+
+
+def test_a_code_run_timeout_kills_the_whole_process_group():
+    root = code_root()
+    project = f"{root}/app"
+    spec, _, _ = flash_wire.code_inputs(code_body(root), roots=[root])
+    pidfile = os.path.join(tempfile.mkdtemp(), "pid")
+    os.environ["FAKE_FLASH_PID"] = pidfile
+    try:
+        row = _run_with("sleep", spec, timeout=3)
+    finally:
+        os.environ.pop("FAKE_FLASH_PID", None)
+    assert row["outcome"] == "blocked" and "3s" in row["summary"], row
+    child = int(open(pidfile).read())
+    time.sleep(0.3)
+    state = subprocess.run(["ps", "-o", "stat=", "-p", str(child)], capture_output=True, text=True).stdout.strip()
+    assert not state or state.startswith("Z"), f"grandchild {child} survived ({state})"
+    assert _out(project, "branch").split() == ["*", "main"]
+    assert len(_out(project, "worktree", "list").strip().splitlines()) == 1
+
+
+def test_the_real_policy_names_code_project_roots_and_routes_code_to_flash():
+    policy = kanban_adapter._model_router().load_policy()
+    assert policy["queue_targets"]["code"] == "flash", policy["queue_targets"]
+    assert isinstance(policy.get("code_project_roots"), list) and policy["code_project_roots"]
+    assert "repo-write" in kanban_adapter.load_catalog()["targets"]["flash"]["capabilities"]
+
+
 def main() -> int:
     check("wire answers with thinking off", test_wire_answers_with_thinking_off)
     check("wire empty reply is no_answer", test_wire_empty_reply_is_no_answer_not_completed)
@@ -445,7 +759,8 @@ def main() -> int:
           test_retried_auto_command_reports_the_existing_tasks_actual_target)
     check("real catalog and policy agree", test_real_catalog_and_policy_agree)
     for name, fn in list(globals().items()):
-        if name.startswith("test_") and ("script" in name or "flash_desk" in name or "protocol_mark" in name):
+        if name.startswith("test_") and any(k in name for k in ("script", "flash_desk", "protocol_mark", "code",
+                                                                "project", "injection")):
             check(name[5:].replace("_", " "), fn)
     if FAILURES:
         print(f"{len(FAILURES)} flash desk test(s) failed", file=sys.stderr)
