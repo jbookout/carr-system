@@ -214,11 +214,18 @@ with psycopg.connect(dsn) as conn, conn.cursor() as cur:
     cur.execute("select ops.resolve_calendar_prebrief_email_ref(%s)", ("prebrief-exact@example.test",))
     if required(cur, "ephemeral exact email resolver") != (ref,):
         raise RuntimeError("device resolver did not return the one live canonical ref")
-    # 0735: an address with no canonical ref at all is skipped and counted by
+    # 0735: an address no party row carries is skipped and counted by
     # the caller, so the resolver answers NULL instead of refusing the snapshot.
     cur.execute("select ops.resolve_calendar_prebrief_email_ref(%s)", ("unknown@example.test",))
     if required(cur, "ephemeral unknown email resolver") != (None,):
         raise RuntimeError("device resolver must answer NULL for an address the record does not hold")
+    cur.execute("reset session authorization")
+    # 0735: "unknown" is decided at the party level. A person the record holds
+    # without a canonical ref yet is known, not a stranger, so it still refuses.
+    cur.execute("insert into party(kind,name,email,created_by,updated_by) values('person',%s,%s,%s,%s)",
+                ("Calendar Prebrief pending", "prebrief-pending@example.test", actor, actor))
+    cur.execute("set session authorization carr_calendar_prebrief_resolver_joe")
+    refused(cur, "select ops.resolve_calendar_prebrief_email_ref(%s)", ("prebrief-pending@example.test",), "22023", "exactly one live unmerged")
     cur.execute("reset session authorization")
     cur.execute("set session authorization carr_calendar_prebrief_joe")
     refused(cur, "select ops.resolve_calendar_prebrief_email_ref(%s)", ("prebrief-exact@example.test",), "42501", "permission denied")

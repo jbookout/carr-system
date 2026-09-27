@@ -196,9 +196,9 @@ def attendee_key(email: str) -> str:
 def _snapshot_from_raw(payload: Mapping[str, Any], sponsor: str, resolve, unknown: set[str] | None = None) -> dict[str, Any]:
     """Build the DB-bound snapshot; unresolved outside attendees go to ``unknown``.
 
-    ``resolve`` returns a ref, None for an address the record holds no contact
-    for (skipped and counted, migration 0735), or raises for an ambiguous or
-    tombstoned identity, which still refuses the whole snapshot.
+    ``resolve`` returns a ref, None for an address no party row carries
+    (skipped and counted, migration 0735), or raises for an ambiguous,
+    tombstoned or ref-less known identity, which still refuses the snapshot.
     """
     if set(payload) != {"version", "window", "observed_calendars", "events"} or payload.get("version") != 1 or not isinstance(payload.get("events"), list):
         raise Refusal("collector payload has an unsupported shape")
@@ -361,7 +361,8 @@ UNKNOWN_KEYS_CAP = 64
 
 
 def unknown_report(keys: set[str]) -> dict[str, Any]:
-    """Count plus opaque ids of skipped attendees; bounded so stdout stays small."""
+    """Count plus pseudonymous ids of skipped attendees (confirmable by anyone
+    holding the address, never reversible without it); bounded so stdout stays small."""
     ordered = sorted(keys)
     return {"count": len(ordered), "attendee_keys": ordered[:UNKNOWN_KEYS_CAP]}
 

@@ -164,6 +164,7 @@ class UnknownAttendeeCheck(unittest.TestCase):
         self.assertEqual([k for k, _ in self.found("{not json")], ["calendar_prebrief_unknowns_unreadable"])
         self.assertEqual([k for k, _ in self.found({"scheduled_for": slot(28).isoformat()})],
                          ["calendar_prebrief_unknowns_unreadable"])
+        self.assertEqual([k for k, _ in self.found(self.summary(-1))], ["calendar_prebrief_unknowns_unreadable"])
 
 
 if __name__ == "__main__":

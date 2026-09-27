@@ -282,6 +282,11 @@ def write_last_run(receipt: Mapping[str, Any], unknown: Mapping[str, Any], path:
         os.replace(temporary, path)
     except OSError:
         print("calendar prebrief Joe runtime: WARN last-run summary not written", file=sys.stderr)
+        # Never leave an older run's summary standing in for this one.
+        try:
+            path.unlink()
+        except OSError:
+            pass
 
 
 def main() -> int:

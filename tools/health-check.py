@@ -1148,6 +1148,8 @@ def _calendar_prebrief_unknowns(now, path=CALENDAR_PREBRIEF_LAST_RUN):
     so it is surfaced here (the runtime's addressless last-run summary is the only
     place it lives) and cleared by intake. A summary older than four days is
     ignored: a stale run is the missed-run finding's business, not this one's.
+    The summary is written under the checkout the runtime runs from, so a
+    health run from any other checkout finds no file and stays silent.
     Returns (finding_key, detail) pairs; never an address.
     """
     try:
@@ -1160,7 +1162,8 @@ def _calendar_prebrief_unknowns(now, path=CALENDAR_PREBRIEF_LAST_RUN):
                  f"{CALENDAR_PREBRIEF_KEY} last-run summary unreadable · {CALENDAR_PREBRIEF_UNKNOWN_BREACH}")]
     report = body.get("unknown_attendees") if isinstance(body, dict) else None
     when = _iso(body.get("scheduled_for")) if isinstance(body, dict) else None
-    if not isinstance(report, dict) or type(report.get("count")) is not int or when is None:
+    if (not isinstance(report, dict) or type(report.get("count")) is not int
+            or report["count"] < 0 or when is None):
         return [("calendar_prebrief_unknowns_unreadable",
                  f"{CALENDAR_PREBRIEF_KEY} last-run summary malformed · {CALENDAR_PREBRIEF_UNKNOWN_BREACH}")]
     if now - when > timedelta(days=4) or report["count"] == 0:
@@ -1376,8 +1379,12 @@ def _canonical_health():
                 print(f"  ⚠︎ {detail}")
                 # A missed slot is a specific calendar instant, reported like
                 # job_missing_due; zero events is a state, not a clock crossing.
-                # Skipped-attendee counts are intake debt that moves daily, not a
-                # code regression, so the release gate reports but does not diff them.
+                # Skipped-attendee counts are intake debt that moves daily. The
+                # key is time_rolling but NOT on the release pipeline's
+                # first-appearance allowlist, so the release gate still diffs it
+                # like doctrine_gate: a first appearance between baseline and
+                # live read fails that release. The finding carries count 1,
+                # so N rising day to day does not.
                 rc = _red(key, detail, subject=CALENDAR_PREBRIEF_KEY,
                           time_rolling=(key in ("calendar_prebrief_missed_run",
                                                 "calendar_prebrief_unknown_attendees")))
