@@ -32,8 +32,16 @@ WHAT IS PROVEN:
      split and writes the class table.
   8. The regression intake: a live miss becomes a case with the missed rule
      gold, borderline rules disputed, a hash-placed split; a copied prompt, a
-     scrub hit, an unknown rule or a duplicate is refused; the command line
-     appends to a fixture copy.
+     copied tool-call input, a record name (never echoed), a bare host, a
+     machine name, a key or ssh path, a scrub hit, an unknown rule or a
+     duplicate is refused; every refusal happens BEFORE any Jev request (the
+     CLI's main() is run with a stub client that counts requests); the name
+     check fails closed; the command line appends to a fixture copy.
+  9. The universal-trigger policy: the rules UNIVERSAL_POLICY settles carry
+     exactly the policy's label on every case.
+ 10. Doctrine scoring sets aside refs outside a case's labelled shortlist and
+     does not score paths that deliver no doctrine; the harness refuses a
+     slug-shaped doctrine ref; with no --split a v2 file is scored on test.
 """
 import copy
 import importlib.util
@@ -190,6 +198,11 @@ def test_fixture(gl, ev):
           group == manifest & live and len(group) >= 90, len(group))
     check("each case's deferred tag is its gold within the group",
           all(c["gold_guidance_deferred"] == [r for r in c["gold"] if r in group] for c in base))
+    # 9. the universal-trigger policy is applied uniformly
+    off_policy = [(c["id"], rid) for c in base for rid, want in gl.policy_labels(c).items()
+                  if rid in live and (rid in c["gold"]) != want]
+    check("universal-trigger rules carry exactly the policy label on every case",
+          not off_policy, off_policy[:5])
     return doc, labels
 
 
@@ -207,6 +220,33 @@ def test_scrub(gl):
               gl.scrub_findings(text))
     check("scrub passes example.com and awk positionals",
           not gl.scrub_findings("see https://example.com/a and awk '{print $1}'"))
+    home = "~/"
+    for text, name in (
+            ("ssh into build-box" + dot + "local and restart", "bare_host"),
+            ("the portal at app" + dot + "somecorp" + dot + "com is down", "bare_host"),
+            ("the node on the " + "tail" + "a1b2" + dot + "ts" + dot + "net mesh", "bare_host"),
+            ("run it on sams" + "-mac" + "-studio tonight", "machine_name"),
+            ("copy " + home + dot + "ssh/" + "id_" + "ed25519 over", "credential_path"),
+            ("the deploy key in keys/deploy" + dot + "pem", "credential_path"),
+            ("append to authorized" + "_keys on the box", "credential_path")):
+        check(f"scrub catches {name}: {text[:28]}",
+              any(h[0] == name for h in gl.scrub_findings(text)), gl.scrub_findings(text))
+    check("scrub passes file names and plain words",
+          not gl.scrub_findings("edit report.json and cases.v2.json, then open the Mac Studio "
+                                "notes and the key rule list"))
+    # names come from the record; a hit is reported without echoing the name
+    terms = gl.record_name_terms([{"name": "Quillfeather Family Dental", "kind": "practice"},
+                                  {"name": "Ada Brightwater", "kind": "person"},
+                                  {"name": "Suite expansion", "kind": "deal"}])
+    check("record names: full names and distinctive tokens, generic words dropped",
+          {"Quillfeather Family Dental", "Quillfeather", "Brightwater", "Ada Brightwater"}
+          <= set(terms) and "Family" not in terms and "Dental" not in terms
+          and "Suite" not in terms, terms)
+    hits = gl.scrub_findings("draft a note to brightwater about the renewal", terms)
+    check("a record name is caught case-insensitively and withheld in the finding",
+          hits == [("name", "<withheld>")], hits)
+    check("a name inside another word is not a hit",
+          not gl.scrub_findings("the brightwaterline report", terms))
     check("shared-run counts consecutive words",
           gl.longest_shared_run("please merge the pull request now", "merge the pull request") == 4)
 
@@ -226,6 +266,12 @@ def test_classes(gl, labels):
           set(classes.values()) == set(gl.RULE_CLASSES), sorted(set(classes.values())))
 
 
+def _uuid(n):
+    return f"{n:08x}-0000-4000-8000-{n:012x}"
+
+
+REF_A, REF_B, REF_C, REF_Z, REF_UNLAB = (f"{_uuid(i)}#{_uuid(100 + i)}" for i in range(1, 6))
+
 META = {"a": {"layer": "layer0", "packs": []}, "p": {"layer": "pack", "packs": ["x"]},
         "q": {"layer": "pack", "packs": ["x"]}}
 CLASSES = {"a": "always_on", "p": "topic", "q": "action_point"}
@@ -240,19 +286,29 @@ def test_harness_v2(ev):
         {"id": "t3", "stratum": "notifications", "prompt": "<task-notification>", "tool_calls": [],
          "gold": [], "disputed": [], "split": "test"},
     ]
-    cases[0]["gold_doctrine"] = ["doc-a#s1", "doc-b#s2"]
-    cases[2]["gold_doctrine"] = ["doc-c#s3"]
-    deliveries = {"sys": {"t1": {"rules": {"a", "p"}, "doctrine": {"doc-a#s1", "doc-z#s9"}},
-                          "t2": {"rules": {"p"}}, "t3": {"rules": {"p"}}}}
+    cases[0]["gold_doctrine"] = [REF_A, REF_B]
+    cases[2]["gold_doctrine"] = [REF_C]
+    deliveries = {"sys": {"t1": {"rules": {"a", "p"}, "doctrine": {REF_A, REF_Z, REF_UNLAB}},
+                          "t2": {"rules": {"p"}}, "t3": {"rules": {"p"}}},
+                  "rules_only": {"t1": {"rules": {"a"}}, "t2": {"rules": set()},
+                                 "t3": {"rules": set()}}}
     groups = {"a": "other", "p": "guidance_deferred", "q": "guidance_deferred"}
-    report = ev.score(cases, deliveries, {"sys": set(META)}, META, classes=CLASSES,
-                      groups=groups)
+    # REF_Z was on t1's labelled shortlist (judged not gold); REF_UNLAB was not.
+    report = ev.score(cases, deliveries, {"sys": set(META), "rules_only": set(META)}, META,
+                      classes=CLASSES, groups=groups,
+                      doctrine_labelled={"t1": {REF_A, REF_B, REF_Z}, "t3": {REF_C}})
     row = report["paths"]["sys"]
-    # doctrine over all cases: tp doc-a#s1; fp doc-z#s9; fn doc-b#s2, doc-c#s3.
+    # doctrine over all cases: tp REF_A; fp REF_Z; fn REF_B, REF_C; REF_UNLAB set aside.
     check("doctrine is scored apart from rules",
           row["doctrine"]["tp"] == 1 and row["doctrine"]["fp"] == 1
           and row["doctrine"]["fn"] == 2 and row["doctrine"]["recall"] == round(1 / 3, 4),
           row["doctrine"])
+    check("a delivered doctrine ref outside the case's labelled shortlist is set aside",
+          row["doctrine"]["outside_labelled"] == 1, row["doctrine"])
+    check("a path that delivers no doctrine is not charged doctrine misses",
+          report["paths"]["rules_only"]["doctrine"] is None, report["paths"]["rules_only"])
+    check("the doctrine table says which paths do not deliver doctrine",
+          "does not deliver doctrine" in ev.render_markdown(report, {}, paths=["sys", "rules_only"]))
     check("doctrine misses reach the notification stratum too",
           row["doctrine_by_stratum"]["notifications"]["fn"] == 1, row["doctrine_by_stratum"])
     # groups: other tp a; deferred tp p (t1), fp p (t2), fn q (t2).
@@ -282,18 +338,20 @@ def test_harness_v2(ev):
         check("load_cases keeps only the test split",
               [c["id"] for c in ev.load_cases(str(path), split="test")] == ["t2", "t3"])
         refs = copy.deepcopy(cases)
-        refs[0]["gold_doctrine"] = ["engineering-workflow-sop#02-before-you-push"]
+        refs[0]["gold_doctrine"] = [REF_A]
         path.write_text(json.dumps({"schema": ev.CASES_SCHEMA_V2, "cases": refs}))
-        check("a doctrine section ref is carried through",
-              ev.load_cases(str(path))[0]["gold_doctrine"]
-              == ["engineering-workflow-sop#02-before-you-push"])
-        refs[0]["gold_doctrine"] = ["not a ref"]
-        path.write_text(json.dumps({"schema": ev.CASES_SCHEMA_V2, "cases": refs}))
-        try:
-            ev.load_cases(str(path))
-            check("a malformed doctrine ref is refused", False)
-        except ValueError:
-            check("a malformed doctrine ref is refused", True)
+        check("an opaque doctrine section ref is carried through",
+              ev.load_cases(str(path))[0]["gold_doctrine"] == [REF_A])
+        for label, bad_ref in (("a malformed doctrine ref", "not a ref"),
+                               ("a slug-shaped doctrine ref (slugs carry names)",
+                                "engineering-workflow-sop#02-before-you-push")):
+            refs[0]["gold_doctrine"] = [bad_ref]
+            path.write_text(json.dumps({"schema": ev.CASES_SCHEMA_V2, "cases": refs}))
+            try:
+                ev.load_cases(str(path))
+                check(f"the harness refuses {label}", False)
+            except ValueError:
+                check(f"the harness refuses {label}", True)
         bad = copy.deepcopy(cases)
         bad[0]["split"] = "dev"
         path.write_text(json.dumps({"schema": ev.CASES_SCHEMA_V2, "cases": bad}))
@@ -317,6 +375,16 @@ def test_cli_train():
             check("report is train-only", data.get("split") == "train")
             check("report has per-class rows",
                   data["paths"]["system_scoped_boot"].get("by_class") is not None)
+        result = subprocess.run(
+            [sys.executable, str(EVAL_CLI), "--cases", str(FIXTURE), "--jev", "off",
+             "--out-dir", tmp],
+            capture_output=True, text=True, timeout=600, cwd=str(REPO))
+        data = json.loads(report.read_text()) if report.exists() else {}
+        check("with no --split, a v2 file is scored on test only",
+              result.returncode == 0 and data.get("split") == "test"
+              and data.get("cases") == sum(1 for c in json.loads(FIXTURE.read_text())["cases"]
+                                           if c["split"] == "test"),
+              (result.returncode, data.get("split"), data.get("cases")))
 
 
 def test_intake(gl, doc, labels):
@@ -363,20 +431,94 @@ def test_intake(gl, doc, labels):
         check("intake refuses a miss already in the benchmark", False)
     except ValueError:
         check("intake refuses a miss already in the benchmark", True)
+    # The verbatim guard covers the tool calls as well as the prompt.
+    try:
+        gl.intake_case(doc, "live-ref-1", rid, live_rules=live, source_text=source,
+                       prompt="Ship the feature branch up and raise a review request.",
+                       stratum="engineering",
+                       tool_calls=[{"tool_name": "SendMessage",
+                                    "tool_input": {"to": "orchestrator", "message": source}}])
+        check("intake refuses a tool-call input copied from the live turn", False)
+    except ValueError as exc:
+        check("intake refuses a tool-call input copied from the live turn",
+              "tool-call input" in str(exc), str(exc))
+    names = gl.record_name_terms([{"name": "Ada Brightwater", "kind": "person"}])
+    try:
+        gl.intake_case(doc, "live-ref-1", rid, live_rules=live, extra_names=names,
+                       prompt="Draft the renewal note for Brightwater.", stratum="deals_clients")
+        check("intake refuses a record name without echoing it", False)
+    except ValueError as exc:
+        check("intake refuses a record name without echoing it",
+              "name" in str(exc) and "Brightwater" not in str(exc), str(exc))
     with tempfile.TemporaryDirectory(prefix="rule-gold-label-selftest-") as tmp:
         fix = Path(tmp) / "cases.v2.json"
         fix.write_text(FIXTURE.read_text(encoding="utf-8"))
         corpus = Path(tmp) / "corpus.json"
         corpus.write_text(json.dumps({"rules": [{"id": r, "statement": "s"} for r in live]}))
+        names_file = Path(tmp) / "names.json"
+        names_file.write_text(json.dumps([{"name": "Ada Brightwater", "kind": "person"}]))
         result = subprocess.run(
             [sys.executable, str(INTAKE_CLI), "--case-id", base["id"], "--missed-rule", rid,
-             "--fixture", str(fix), "--corpus", str(corpus), "--no-label"],
+             "--fixture", str(fix), "--corpus", str(corpus), "--no-label",
+             "--names-file", str(names_file)],
             capture_output=True, text=True, timeout=120, cwd=str(REPO))
         check("intake CLI exits zero", result.returncode == 0, result.stderr[-800:])
         after = json.loads(fix.read_text())
         check("intake CLI appended exactly one case",
               len(after["cases"]) == len(doc["cases"]) + 1
               and after["cases"][-1]["missed_rule"] == rid)
+        test_intake_order(gl, doc, rid, fix, corpus, names_file, Path(tmp))
+
+
+class _StubJev:
+    """Stands in for ops/typesafe_client in-process: records every request."""
+
+    def __init__(self):
+        self.requests = []
+
+    def noul(self, question, true=None, false=None):
+        return {"kind": "noul", "question": question}
+
+    def ask(self, state, questions, **_kwargs):
+        self.requests.append(state)
+        return {"answers": {qid: {"noul": 0.1} for qid in questions},
+                "usage": {"input_tokens": 1}}
+
+
+def test_intake_order(gl, doc, rid, fix, corpus, names_file, tmp):
+    """NOTHING LEAVES THE MACHINE BEFORE THE CHECKS PASS: run the intake's own
+    main() with a stub in place of the Jev client and count its requests."""
+    cli = load(INTAKE_CLI, "rule_delivery_eval_intake_for_selftest")
+    stub = _StubJev()
+    real_load = cli._load
+    cli._load = lambda name: stub if name == "typesafe_client" else real_load(name)
+    before = fix.read_text()
+    base = doc["cases"][1]["id"]
+    at, dot = "@", "."
+    refusing = (
+        ("a record name", ["--prompt", "Ask Brightwater to confirm the tour time."]),
+        ("an email", ["--prompt", "Mail the draft to someone" + at + "somecorp" + dot + "org."]),
+        ("a bare host", ["--prompt", "Restart the worker on build-box" + dot + "local."]),
+        ("an ssh key path", ["--prompt", "Copy the file under ~/" + dot + "ssh to the box."]),
+    )
+    for label, extra in refusing:
+        code = cli.main(["--case-id", base, "--missed-rule", rid, "--fixture", str(fix),
+                         "--corpus", str(corpus), "--names-file", str(names_file),
+                         "--stratum", "deals_clients", "--calls-log", str(tmp / "calls.jsonl"),
+                         *extra])
+        check(f"intake refuses {label} before any Jev request",
+              code == 1 and not stub.requests, (code, len(stub.requests)))
+    check("a refused intake leaves the fixture byte-identical", fix.read_text() == before)
+    code = cli.main(["--case-id", base, "--missed-rule", rid, "--fixture", str(fix),
+                     "--corpus", str(corpus), "--names-file", str(names_file), "--dry-run",
+                     "--calls-log", str(tmp / "calls.jsonl")])
+    check("an accepted intake does reach Jev (so the order test can fail)",
+          code == 0 and len(stub.requests) >= 1, (code, len(stub.requests)))
+    missing = tmp / "no-such-names.json"
+    code = cli.main(["--case-id", base, "--missed-rule", rid, "--fixture", str(fix),
+                     "--corpus", str(corpus), "--names-file", str(missing), "--no-label"])
+    check("intake refuses when the name check cannot run (fails closed)", code == 2, code)
+    cli._load = real_load
 
 
 def main() -> int:

@@ -58,6 +58,29 @@ def _groups(meta):
     return _gold_label().rule_groups(REPO, list(meta))
 
 
+def _doctrine_labelled(cases_path):
+    """{case id: set of doctrine refs its labellers judged} from the labels file
+    committed beside a v2 cases file (its `doctrine` shortlist probabilities),
+    or None when there is none. A delivered ref outside it is set aside."""
+    path = os.path.join(os.path.dirname(os.path.abspath(cases_path)), "labels.v2.json")
+    if not os.path.exists(path):
+        return None
+    with open(path, "r", encoding="utf-8") as handle:
+        doctrine = json.load(handle).get("doctrine")
+    if not isinstance(doctrine, dict):
+        return None
+    return {cid: set(refs) for cid, refs in doctrine.items()}
+
+
+def _is_v2(path, ev):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            head = json.load(handle)
+    except ValueError:
+        return False
+    return isinstance(head, dict) and head.get("schema") == ev.CASES_SCHEMA_V2
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--cases", default=FIXTURE)
@@ -70,8 +93,10 @@ def main(argv=None):
                         help="where Jev call receipts go (default: discarded)")
     parser.add_argument("--out-dir", default=os.path.join(REPO, "out", "rule-delivery-eval"))
     parser.add_argument("--top", type=int, default=10)
-    parser.add_argument("--split", choices=("train", "test"),
-                        help="score one split of a v2 cases file. Tuning reads train only.")
+    parser.add_argument("--split", choices=("train", "test", "all"),
+                        help="which split of a v2 cases file to score. Defaults to test "
+                        "for a v2 file (the held-out numbers); tuning reads train only; "
+                        "'all' scores both. A v1 file has no split.")
     parser.add_argument("--doctrine-search", action="store_true",
                         help="also run the doctrine search door (search-doctrine through "
                         "./run.sh call, read-only) as a doctrine-only path")
@@ -80,6 +105,10 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     ev = _library()
+    if args.split is None and _is_v2(args.cases, ev):
+        args.split = "test"
+    if args.split == "all":
+        args.split = None
     cases = ev.load_cases(args.cases, split=args.split)
     statements, live_ids = {}, []
     if args.corpus:
@@ -106,7 +135,8 @@ def main(argv=None):
     ev.add_system_rows(deliveries)
     report = ev.score(cases, deliveries, ev.universes(meta, list(deliveries)), meta,
                       labelled=set(live_ids) if live_ids else None,
-                      classes=_classes(meta), groups=_groups(meta))
+                      classes=_classes(meta), groups=_groups(meta),
+                      doctrine_labelled=_doctrine_labelled(args.cases))
     report["split"] = args.split
     report["dry_run"] = True
     report["jev"] = jev_mode

@@ -261,6 +261,13 @@ def cmd_build(args, gl):
     doc = {"schema": FIXTURE_SCHEMA, "provenance": PROVENANCE,
            "labelling": {"scheme": "case as state, one Jev noul per live rule "
                                    "(ops/rule_gold_label.py)",
+                         "question": "strict: does the rule bind the ACTION taken in this "
+                                     "turn, so that ignoring it here would violate it "
+                                     "(re-labelled 2026-09-27 after a review found the "
+                                     "first, looser question padded the gold)",
+                         "universal_policy": {rid: {"label_is": pred, "reason": reason}
+                                              for rid, (pred, reason)
+                                              in sorted(gl.UNIVERSAL_POLICY.items())},
                          "live_rules": len(rules),
                          "yes_at": gl.YES_AT, "no_at": gl.NO_AT,
                          "borderline": "second Jev pass from the rule side, then a written "
