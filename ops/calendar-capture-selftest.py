@@ -212,5 +212,21 @@ check("failed exact write takes precedence without leaking call output",
       p.returncode == 1 and not any(value in p.stdout + p.stderr for value in (
           "new@example.test", "known@example.test", "C-TEST", "Synthetic meeting")))
 
+# 8. Matcher diagnostics can contain attendee data. The launcher and Control
+# Plane persist command output, so only fixed failure classes may leave this job.
+root, stub = fixture(appends="events scanned: 2; carrying attendees: 2\nexit=0",
+                     dump_json="{}")
+(root / "tools" / "calendar-touch-matcher.py").write_text(
+    "import sys\nprint('matcher failed for synthetic@example.test', file=sys.stderr)\nsys.exit(5)\n")
+p = run(root, stub)
+check("matcher failure output is aggregate-only",
+      p.returncode == 1 and "synthetic@example.test" not in p.stdout + p.stderr)
+(root / "tools" / "calendar-touch-matcher.py").write_text(
+    "import sys\nprint('operation not permitted for synthetic@example.test', file=sys.stderr)\nsys.exit(5)\n")
+p = run(root, stub)
+check("matcher permission failure keeps safe diagnosis without identity",
+      p.returncode == 4 and "FULL DISK ACCESS" in p.stderr
+      and "synthetic@example.test" not in p.stdout + p.stderr)
+
 print(f"\n{'OK all checks passed' if not failures else f'FAIL {len(failures)}: ' + ', '.join(failures)}")
 sys.exit(1 if failures else 0)

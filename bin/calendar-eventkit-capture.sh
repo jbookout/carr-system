@@ -152,10 +152,9 @@ SCANNED="$(printf '%s' "$RUN_LOG" | sed -n 's/.*events scanned: \([0-9]*\).*/\1/
 echo "calendar-capture: read OK — ${SCANNED:-?} events scanned"
 
 # ---------------------------------------------------------------- 2. the match
-# The matcher's stderr is KEPT, not discarded. The first launchd fire of this
-# job failed with "the matcher did not complete" and nothing else, because this
-# line sent the reason to /dev/null — a job reporting a failure it has already
-# thrown away, which is the same shape as answering emptily instead of refusing.
+# Keep matcher stderr in local scratch for failure-class detection. The first
+# launchd fire discarded it and lost the diagnosis; printing it into the job log
+# would expose attendee data. Only fixed aggregate messages leave this script.
 MATCH_JSON="$OUTPUT_ROOT/calendar-touch-proposals.json"
 MATCH_ERR="$OUTPUT_ROOT/calendar-matcher.err"
 INTAKE_EVIDENCE="$OUTPUT_ROOT/calendar-intake-evidence.json"
@@ -181,7 +180,6 @@ else
 fi
 if [ "$MATCH_STATUS" -ne 0 ]; then
   echo "calendar-capture: FAIL the matcher did not complete" >&2
-  sed 's/^/    /' "$MATCH_ERR" >&2
   # The matcher reads the local Calendar database directly, which is a SEPARATE
   # macOS permission from the EventKit read above: Full Disk Access, granted to
   # the responsible process. A launchd agent's responsible process is not the
