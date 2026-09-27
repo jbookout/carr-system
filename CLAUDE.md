@@ -23,6 +23,24 @@ Drive gotcha: Google Drive File Stream serves online-only placeholders; a
 grep over the Drive mirror can miss content that exists. Materialize files
 offline before trusting a negative grep there.
 
+## "carr needs authentication" is not a reason to ask Joe to sign in
+
+Two routes reach the same record layer. The claude.ai "CARR Record Layer"
+connector is account-wide and serves every desktop session. The user-config
+MCP server named `carr` serves terminal, scheduled and Model Room sessions,
+which hold their own login. Desktop sessions report `carr` as needs_auth even
+while it is signed in for the CLI. That is expected and harmless. Joe asked on
+2026-09-27 not to be bothered about it.
+
+1. See `carr` needs_auth: check the "CARR Record Layer" connector
+   (session_connectors_status).
+2. Connected: use it (or `./run.sh call`) and say nothing about signing in.
+3. Only if that connector itself is not connected, or a terminal or scheduled
+   session gets an auth refusal from `carr`, tell Joe once and name which one.
+
+Do not remove the `carr` entry: gates, the permission allowlist and the Model
+Room dispatcher use the `mcp__carr__` tool names.
+
 ## A capture-verb denial has a fallback door
 
 `report-problem`, `record-defect`, and `add-loop` are now directly
