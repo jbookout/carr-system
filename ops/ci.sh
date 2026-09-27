@@ -776,12 +776,17 @@ PYEOF
   # parity shape for mcp-server/src/rule-boot-classes.js against
   # ops/config/rule-classes.v1.json, plus the rule boot's token budget (fails
   # naming the largest always-on rules; never truncates).
+  # rule-route-coverage JOINED 2026-09-26 (100%-recall rule delivery). Same
+  # kind again: repository files only. It fails when an active rule has no
+  # delivery route, a corpus rule is missing from ops/config/rule-routes.v1.json,
+  # or a trigger names a verb, tool or gate that cannot fire.
   for inv in enforcement-coverage-check audit-queue-freshness-check map-row-evidence-check \
              rule-enforcement-map-check rule-load-layer-check rule-classification-parity-check \
              reachability-check selftest-git-isolation-check \
              drive-dependency-inventory drive-retirement-readiness-gate \
              mechanism-doctrine-gate scheduler-cutover-coverage-gate \
-             boot-budget-check core-rule-ids-check rule-boot-classes-check; do
+             boot-budget-check core-rule-ids-check rule-route-coverage \
+             rule-boot-classes-check; do
     [ -f "ops/$inv.py" ] || continue
     run_quiet "$LOGDIR/gate-$inv.log" "$PY" "ops/$inv.py" \
       || { inherited_abort "$inv" "$PY" "ops/$inv.py"

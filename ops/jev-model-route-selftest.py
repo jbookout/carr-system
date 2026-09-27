@@ -178,7 +178,7 @@ class Dispatch(unittest.TestCase):
         self.assertEqual(out["effort"], POLICY["overflow"]["effort"])
 
     def test_flash_busy_never_lowers_a_code_task_off_opus(self):
-        # Code and script queue to the Opus desk; Flash being busy has nothing to do with them.
+        # Code and script spawns go to the Opus desk; Flash being busy has nothing to do with them.
         out = dispatch({"code": 0.9}, flash_free=False)
         self.assertEqual((out["target"], out["subagent_model"], out["effort"]), ("claude-desktop", "opus", "high"))
         self.assertFalse(out["overflow"])
@@ -188,6 +188,16 @@ class Dispatch(unittest.TestCase):
         self.assertEqual(POLICY["queue_targets"]["script"], "flash")
         out = dispatch({"script": 0.9}, flash_free=True)
         self.assertEqual((out["target"], out["subagent_model"]), ("claude-desktop", "opus"))
+
+    def test_a_code_spawn_stays_on_opus_though_code_queues_to_flash(self):
+        # Flash runs code tasks only from the queue, with a named project and test; a spawn has neither to give it.
+        self.assertEqual(POLICY["queue_targets"]["code"], "flash")
+        for free in (True, False):
+            out = dispatch({"code": 0.9}, flash_free=free)
+            self.assertEqual((out["route"], out["target"], out["subagent_model"], out["effort"]),
+                             ("code", "claude-desktop", "opus", "high"))
+            self.assertFalse(out["overflow"])
+            self.assertEqual(out["routed"]["target"], "claude-desktop")
 
     def test_flash_busy_with_jev_down_stays_on_opus(self):
         out = dispatch(error=TimeoutError("down"), flash_free=False)

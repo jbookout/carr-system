@@ -29,6 +29,11 @@ from typing import Callable
 META_PREFIX = "[CARR_QUEUE_META "
 RESULT_PREFIX = "CARR_QUEUE_RESULT "
 META_FIELDS = {"v", "target", "cap", "source_seq", "source_msg_id", "finish"}
+# kanban_adapter stamps server-derived provenance as an optional field; tasks without it keep working.
+META_OPTIONAL = {"origin"}
+ORIGIN_VALUE = re.compile(r"[a-z][a-z-]{0,31}:[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+# The desk-facing line carrying that provenance; always the prompt's third line (see _prompt), never body text.
+TRUST_PREFIX = "[Model Room trust"
 RESULT_FIELDS = {"v", "task_id", "outcome", "summary"}
 RECORD_WRITE_EVIDENCE_FIELDS = {"mcp_verb", "record_id", "readback_verb", "readback_record_id"}
 TERMINAL_STATES = {"done", "review", "blocked", "archived"}
@@ -99,6 +104,19 @@ def _decode_exact(raw: str, fields: set[str], label: str) -> dict:
     return value
 
 
+def _decode_meta(raw: str) -> dict:
+    """The six required metadata fields, plus the optional server-stamped `origin` when present and well-formed."""
+    try:
+        value = json.loads(raw)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise QueueDispatchError("queue task metadata is not valid JSON") from exc
+    if not isinstance(value, dict) or not META_FIELDS <= set(value) <= META_FIELDS | META_OPTIONAL:
+        raise QueueDispatchError("queue task metadata fields are invalid")
+    if "origin" in value and not (isinstance(value["origin"], str) and ORIGIN_VALUE.fullmatch(value["origin"])):
+        raise QueueDispatchError("queue task metadata fields are invalid")
+    return value
+
+
 def parse_queue_task(task: dict, target_alias: str, target: dict) -> dict:
     task_id = task.get("id")
     body = task.get("body")
@@ -107,7 +125,7 @@ def parse_queue_task(task: dict, target_alias: str, target: dict) -> dict:
     first, separator, instructions = body.partition("\n")
     if not separator or not first.startswith(META_PREFIX) or not first.endswith("]"):
         raise QueueDispatchError("queue task metadata is absent")
-    meta = _decode_exact(first[len(META_PREFIX):-1], META_FIELDS, "queue task metadata")
+    meta = _decode_meta(first[len(META_PREFIX):-1])
     if (meta["v"] != 1 or meta["target"] != target_alias or
             meta["cap"] not in target.get("capabilities", [])):
         raise QueueDispatchError("queue task metadata does not match its target")
@@ -236,6 +254,11 @@ class QueueDeskExecutor:
             f"[Model Room source seq {parsed['meta']['source_seq']} "
             f"msg_id {parsed['meta']['source_msg_id']}]\n"
         )
+        origin = parsed["meta"].get("origin")
+        if isinstance(origin, str) and ORIGIN_VALUE.fullmatch(origin):
+            # Server provenance from the adapter-built metadata line: always the prompt's third line, directly after
+            # the source line and before the blank line that starts the body, so posted text can never stand here.
+            source += f"{TRUST_PREFIX} origin {origin} cap {parsed['meta']['cap']}]\n"
         evidence = ""
         if parsed["meta"]["cap"] == "record-write":
             evidence = (

@@ -656,7 +656,7 @@
       "wirings": [
         {
           "event": "PreToolUse",
-          "matcher": "Bash|Write|Edit|MultiEdit|Agent|WebFetch|WebSearch|mcp__.*",
+          "matcher": "Bash|Write|Edit|MultiEdit|Agent|WebFetch|WebSearch|Artifact|AskUserQuestion|mcp__.*",
           "fixtures": [
             "bash",
             "edits",
@@ -862,6 +862,7 @@
     "lib/rule_boot_gate.py",
     "lib/rule_delivery_preuse.py",
     "lib/rule_delivery_shadow.py",
+    "lib/rule_routes.py",
     "lib/scheduled_run.py",
     "lib/transcript_read.py"
   ]
