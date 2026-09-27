@@ -1584,6 +1584,23 @@ class FixForward(Base):
         self.assertEqual(rec["sha"], r)
         self.assert_held(runner, rec, nb)
 
+    def test_filename_matrix_preserves_fix_presence_decision(self):
+        names = (" leading.js", "trailing.js ", "carriage\rreturn.js", "line\nfeed.js",
+                 "carriage\r\nreturn.js", ":(literal)odd.js", "tab\tname.js",
+                 "unicodé.js", "-dash.js")
+        for name in names:
+            with self.subTest(name=repr(name)), tempfile.TemporaryDirectory() as td:
+                self.fx = Fixture(Path(td))
+                self.nums = {}
+                b, nb = self.land({name: "defect", "mcp-server/src/a.js": "old"})
+                f, nf = self.land({name: "fixed", "mcp-server/src/a.js": "unrelated improvement"})
+                u, nu = self.land({"mcp-server/src/unrelated.js": "later edit"})
+                self.assertTrue(self.fx.pipeline(FakeRunner()).change_present(self.fx.repo, f, u))
+                r, nr = self.land({name: "defect"})
+                runner, rec = self.tick({nb: [self.block(nb)], nf: [self.fix_approve(nf, [nb])]})
+                self.assertEqual(rec["sha"], r)
+                self.assert_held(runner, rec, nb)
+
     def test_a_later_edit_of_the_fix_lines_holds_unless_it_carries_the_marker_too(self):
         b, f, nb, nf = self.two_commits()
         g, ng = self.land({"mcp-server/src/a.js": "fixed better"})
