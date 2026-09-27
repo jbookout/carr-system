@@ -50,20 +50,37 @@ export function bindingSource(patch = {}) {
     joe_user_ref: "joe-sf", ...patch }) };
 }
 
-/** What ops.rw02_consent_record answers for the pinned decision. */
-export function consentSource({ record = {}, revoked = false, missing = false } = {}) {
-  return { read: async () => ({ revoked, record: missing ? null : { decision_id: CONSENT_DECISION_ID,
-    sponsoring_human_slug: "joe", human_quote_present: true, ...record } }) };
+/**
+ * A synthetic database client answering ops.rw02_consent_record. The run only
+ * accepts a source made by createDellConsentSource, so tests hand this CLIENT
+ * to the real factory (runWith does it) rather than a look-alike source.
+ */
+export class FakeConsentClient {
+  constructor(reading) { this.reading = reading; }
+  async query(text, params) {
+    assert.match(String(text), /ops\.rw02_consent_record\(\$1::uuid\)/);
+    assert.deepEqual(params, [CONSENT_DECISION_ID]);
+    if (this.reading instanceof Error) throw this.reading;
+    return { rows: [{ consent: this.reading }] };
+  }
 }
 
-/** What ops.rw02_loop_episodes answers: base key -> [{idempotency_key, status}]. */
+/** What ops.rw02_consent_record answers for the pinned decision. */
+export function consentSource({ record = {}, revoked = false, missing = false } = {}) {
+  return new FakeConsentClient({ revoked, record: missing ? null : { decision_id: CONSENT_DECISION_ID,
+    sponsoring_human_slug: "joe", human_quote_present: true, ...record } });
+}
+
+/** A synthetic client answering ops.rw02_loop_episodes: base key -> [{idempotency_key, status}]. */
 export class FakeFindingState {
   constructor(byBase = {}) { this.byBase = byBase; this.asked = []; }
-  async loopEpisodes(base) {
+  async query(text, params) {
+    assert.match(String(text), /ops\.rw02_loop_episodes\(\$1::text\)/);
+    const base = params[0];
     this.asked.push(base);
     const rows = typeof this.byBase === "function" ? this.byBase(base) : this.byBase[base];
     if (rows instanceof Error) throw rows;
-    return rows ?? [];
+    return { rows: rows ?? [] };
   }
 }
 
@@ -159,13 +176,21 @@ export class SpyRecorder {
 export const FINDING_VERBS = Object.freeze(["add-loop", "record-finding"]);
 export const findingCalls = recorder => recorder.calls.filter(c => FINDING_VERBS.includes(c.verb));
 
-/** Build a run with synthetic server-side sources; any option may be overridden. */
+/**
+ * Build a run with synthetic server-side sources; any option may be overridden.
+ * Synthetic database CLIENTS go through the module's own factories, exactly as
+ * production does; anything else is passed through untouched (to be refused).
+ */
 export function runWith(mod, pages, { recorder = new SpyRecorder(), carrDeals = [], ...rest } = {}) {
   const reader = rest.reader ?? new FakeReaderDriver(pages);
   delete rest.reader;
+  const consent = Object.hasOwn(rest, "consentSource") ? rest.consentSource : consentSource();
+  const episodes = Object.hasOwn(rest, "findingState") ? rest.findingState : new FakeFindingState();
+  delete rest.consentSource; delete rest.findingState;
   return mod.runSalesforceBrowserReadReconciliation({ reader, bindingSource: bindingSource(),
-    consentSource: consentSource(), findingState: new FakeFindingState(), carrDeals: async () => carrDeals,
-    recorder, ...rest });
+    consentSource: consent instanceof FakeConsentClient ? mod.createDellConsentSource(consent) : consent,
+    findingState: episodes instanceof FakeFindingState ? mod.createLoopEpisodeSource(episodes) : episodes,
+    carrDeals: async () => carrDeals, recorder, ...rest });
 }
 
 /** Every safe stop, whatever its class, has the same shape and wrote no finding. */
@@ -368,11 +393,11 @@ export async function checkRepeatRunArgsIdentical(mod) {
   const carrDeals = [carr("A"), carr("Q"),
     { deal_id: "00000000-0000-4000-8000-00000000000f", name: "Unlinked", salesforce_id: null }];
   const first = await runWith(mod, [page({ opportunities: [opp("A"), opp("N", { name: "Old name" })] })],
-    { recorder, carrDeals, clock: () => "2026-09-26T12:00:00.000Z" });
+    { recorder, carrDeals });
   const firstArgs = findingCalls(recorder).map(c => JSON.stringify(c));
   const before = recorder.calls.length;
   const second = await runWith(mod, [page({ opportunities: [opp("A", { name: "Renamed A" }),
-    opp("N", { name: "New name" })] })], { recorder, carrDeals, clock: () => "2026-09-27T08:30:00.000Z" });
+    opp("N", { name: "New name" })] })], { recorder, carrDeals });
   assert.notEqual(first.run_ref, second.run_ref);
   const secondArgs = recorder.calls.slice(before).filter(c => FINDING_VERBS.includes(c.verb))
     .map(c => JSON.stringify(c));
@@ -600,9 +625,13 @@ export async function checkConsentRecord(mod) {
     [{ consentSource: consentSource({ record: { sponsoring_human_slug: null } }) }, "dell_consent_not_partner_record"],
     [{ consentSource: consentSource({ record: { sponsoring_human_slug: "claude" } }) }, "dell_consent_not_partner_record"],
     [{ consentSource: consentSource({ record: { human_quote_present: false } }) }, "dell_consent_quote_absent"],
-    [{ consentSource: { read: async () => { throw new Error("db down"); } } }, "consent_source_unavailable"],
+    [{ consentSource: new FakeConsentClient(new Error("db down")) }, "consent_source_unavailable"],
     [{ consentSource: undefined }, "consent_source_unavailable"],
-    [{ consentSource: { read: async () => ({ granted: true }) } }, "dell_consent_record_missing"],
+    [{ consentSource: new FakeConsentClient({ granted: true }) }, "dell_consent_record_missing"],
+    // A look-alike source that simply answers "consent in force" was not made
+    // by the record layer's factory, so it is not a consent source at all.
+    [{ consentSource: { read: async () => ({ revoked: false, record: { decision_id: CONSENT_DECISION_ID,
+      sponsoring_human_slug: "dell", human_quote_present: true } }) } }, "consent_source_unavailable"],
     [{ bindingSource: bindingSource({ dell_consent: { granted: true, decision_ref: CONSENT_DECISION_ID } }) },
       "consent_flag_refused"],
   ];
@@ -681,4 +710,73 @@ export async function checkFailureRecordsUnclean(mod) {
   const ok = new SpyRecorder();
   await runWith(mod, [page({ opportunities: [opp("A", { team: ["joe-sf"] })] })], { recorder: ok, carrDeals: [carr("A")] });
   assert.deepEqual(ok.calls.map(c => [c.verb, c.args.outcome]), [["record-salesforce-run-outcome", "clean"]]);
+}
+
+/**
+ * A record verb refusing the 2nd of 3 planned findings AFTER the plan passed:
+ * a typed interruption with the true count, the run recorded unclean, and
+ * never presented as a zero-write safe stop.
+ */
+export async function checkWriteInterruptedTyped(mod) {
+  const recorder = new SpyRecorder();
+  const inner = recorder.record.bind(recorder);
+  let n = 0;
+  recorder.record = async (verb, args) => {
+    if (FINDING_VERBS.includes(verb) && ++n === 2)
+      throw Object.assign(new Error("refused"), { error: "blocker_detail_vague" });
+    return inner(verb, args);
+  };
+  const out = await runWith(mod, [page({ opportunities: [opp("A"), opp("B"), opp("C")] })],
+    { recorder, carrDeals: [carr("A"), carr("B"), carr("C")] });
+  assert.equal(out.answer_kind, "rw02-write-interrupted.v1");
+  assert.equal(out.decision, "interrupted");
+  assert.equal(out.reason_id, "finding_write_interrupted");
+  assert.equal(out.findings_recorded, 1);
+  assert.equal(out.partial_writes, 1, "a partial write is reported as one, not as zero");
+  assert.equal(out.findings_planned, 3);
+  assert.equal(out.cause, "blocker_detail_vague");
+  assert.equal(out.run_outcome, "failed");
+  assert.equal(out.message, mod.V5_RW02_WRITE_INTERRUPTED_MESSAGE);
+  assert.ok(!Object.hasOwn(out, "stop_class"), "an interruption is not a safe stop");
+  const outcomes = recorder.calls.filter(c => c.verb === "record-salesforce-run-outcome");
+  assert.deepEqual(outcomes.map(c => c.args.outcome), ["failed"]);
+}
+
+/** An unclean run whose outcome cannot be recorded is surfaced, never swallowed. */
+export async function checkUnrecordedOutcomeSurfaces(mod) {
+  const failingOutcome = () => {
+    const recorder = new SpyRecorder();
+    const inner = recorder.record.bind(recorder);
+    recorder.record = async (verb, args) => {
+      if (verb === "record-salesforce-run-outcome") throw Object.assign(new Error("db down"), { error: "network" });
+      return inner(verb, args);
+    };
+    return recorder;
+  };
+  // An unexpected failure mid-read, then the outcome write fails too.
+  const reader = new FakeReaderDriver([page()]);
+  reader.observe = async () => { throw new Error("browser crashed"); };
+  await assert.rejects(runWith(mod, [], { reader, recorder: failingOutcome() }),
+    e => e.code === "run_outcome_unrecorded" && e.detail.record_cause === "network");
+  // A write interruption whose unclean outcome cannot be recorded.
+  const recorder = failingOutcome();
+  const inner = recorder.record.bind(recorder);
+  recorder.record = async (verb, args) => {
+    if (verb === "add-loop") throw Object.assign(new Error("refused"), { error: "no_block" });
+    return inner(verb, args);
+  };
+  await assert.rejects(runWith(mod, [page({ opportunities: [opp("A")] })], { recorder, carrDeals: [carr("A")] }),
+    e => e.code === "run_outcome_unrecorded");
+}
+
+/** Only record-layer-made sources count: a look-alike loop-episode source is refused. */
+export async function checkSourcesMustBeServerMade(mod) {
+  await assert.rejects(runWith(mod, [page()], { findingState: { loopEpisodes: async () => [] } }),
+    e => e.code === "finding_state_unavailable");
+  const lookAlike = { read: async () => ({ revoked: false, record: { decision_id: CONSENT_DECISION_ID,
+    sponsoring_human_slug: "dell", human_quote_present: true } }) };
+  const out = await runWith(mod, [page()], { consentSource: lookAlike });
+  assert.equal(out.reason_id, "consent_source_unavailable");
+  await assert.rejects(runWith(mod, [page()], { clock: () => "2026-09-26T12:00:00.000Z" }),
+    e => e.code === "unknown_option", "the run takes no caller clock");
 }

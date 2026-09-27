@@ -21,7 +21,8 @@ import {
   checkAuthChallengesStop, checkSystemSignInCodeExhausted, checkSystemSignInFilledContinues,
   checkServerClockTicket, checkUiDriftStops, checkUnexpectedAccountStops, checkPlanRecipientGuard,
   checkPolicyConflictStops, checkConsentRecord, checkNoPartialWrites, checkLoopEpisodes, checkInvoicedScope,
-  checkFailureRecordsUnclean,
+  checkFailureRecordsUnclean, checkWriteInterruptedTyped, checkUnrecordedOutcomeSurfaces,
+  checkSourcesMustBeServerMade,
 } from "./salesforce-browser-read-rw02.fixtures.mjs";
 
 const {
@@ -245,18 +246,23 @@ test("an unexpected failure after the browser is touched still records the run u
   await checkFailureRecordsUnclean(mod);
 });
 
-test("a finding write that fails part-way is a typed interruption and an unclean run", async () => {
-  const recorder = new SpyRecorder();
-  const inner = recorder.record.bind(recorder);
-  let n = 0;
-  recorder.record = async (verb, args) => {
-    if (verb === "add-loop" && ++n === 2) throw Object.assign(new Error("transport"), { error: "network" });
-    return inner(verb, args);
-  };
-  await assert.rejects(runWith(mod, [page({ opportunities: [opp("A"), opp("B")] })],
-    { recorder, carrDeals: [carr("A"), carr("B")] }),
-  e => e.code === "finding_write_interrupted" && e.detail.findings_recorded === 1 && e.detail.findings_planned === 2);
-  assert.equal(recorder.calls.at(-1).args.outcome, "failed");
+test("a record verb refusing part-way is a typed interruption with its true count, and an unclean run", async () => {
+  await checkWriteInterruptedTyped(mod);
+});
+
+test("an unclean run whose outcome cannot be recorded is surfaced, never swallowed", async () => {
+  await checkUnrecordedOutcomeSurfaces(mod);
+});
+
+test("consent and loop-episode sources count only when the record layer's factory made them; no caller clock", async () => {
+  await checkSourcesMustBeServerMade(mod);
+});
+
+test("every run gets a fresh run reference that nothing a caller supplies can repeat", async () => {
+  const a = await runWith(mod, [page()]);
+  const b = await runWith(mod, [page()]);
+  assert.match(a.run_ref, /^[0-9a-f]{24}$/);
+  assert.notEqual(a.run_ref, b.run_ref);
 });
 
 // ---------------------------------------------------------------------------

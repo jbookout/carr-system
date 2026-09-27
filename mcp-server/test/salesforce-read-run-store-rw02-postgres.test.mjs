@@ -40,13 +40,13 @@ async function clientFor(pg, database, role = null) {
 }
 
 /** One unit of work as mcp.js runs a verb: its own transaction as carr_writer. */
-async function asWriter(pg, database, fn, { partner = null } = {}) {
+async function asWriter(pg, database, fn, { partner = null, acting = JOE.slug } = {}) {
   const client = await clientFor(pg, database, "carr_writer");
   try {
     const a = await client.query("select id from public.actor where slug=$1", [JOE.slug]);
     const actor = { ...JOE, id: a.rows[0].id };
     await client.query("BEGIN");
-    await client.query("select set_config('carr.acting_actor_slug',$1::text,true)", [JOE.slug]);
+    await client.query("select set_config('carr.acting_actor_slug',$1::text,true)", [acting]);
     if (partner) await client.query("select set_config('carr.verified_human_actor_slug',$1::text,true)", [partner]);
     try {
       const out = await fn(client, actor);
@@ -114,6 +114,21 @@ test("V5-RW02 run ledger, consent record, loop episodes and invoiced scope on re
       }
     });
 
+    await t.test("two concurrent first recordings of one run: one row, and a typed conflict or replay", async () => {
+      const run_ref = hex24();
+      const args = outcome => ({ idempotency_key: `rw02-run-outcome:${run_ref}:${outcome}`, run_ref,
+        action_kind: KIND, outcome, ...(outcome === "stopped" ? { stop_class: "ui_drift", reason_id: "ui_drift" } : {}) });
+      const settled = await Promise.allSettled([
+        verb(pg, copy, "record-salesforce-run-outcome", args("clean")),
+        verb(pg, copy, "record-salesforce-run-outcome", args("stopped"))]);
+      const rejected = settled.filter(r => r.status === "rejected");
+      assert.equal(rejected.length, 1, "exactly one of two different facts for one run lands");
+      assert.ok(rejected[0].reason instanceof ToolError, String(rejected[0].reason));
+      assert.equal(rejected[0].reason.payload.error, "run_outcome_conflict");
+      assert.equal((await db.query("select count(*)::int as n from ops.rw02_attended_run where run_ref=$1",
+        [run_ref])).rows[0].n, 1);
+    });
+
     await t.test("a run that recorded a page stop cannot be recorded clean", async () => {
       const run_ref = hex24();
       await verb(pg, copy, "record-salesforce-page-stop", { idempotency_key: `rw02-read:${run_ref}:page-stop:0`,
@@ -160,9 +175,19 @@ test("V5-RW02 run ledger, consent record, loop episodes and invoiced scope on re
       await assert.rejects(verb(pg, copy, "revoke-salesforce-read-consent", {
         idempotency_key: randomUUID(), decision_id: decision, human_quote: "withdrawn" }),
       e => e instanceof ToolError && e.payload.error === "verified_partner_required");
+      // A verified-partner setting that names a different human than the acting
+      // human actor is refused: the setting alone cannot forge a revocation.
+      await assert.rejects(verb(pg, copy, "revoke-salesforce-read-consent", {
+        idempotency_key: randomUUID(), decision_id: decision, human_quote: "withdrawn" }, { partner: "dell" }),
+      e => e instanceof ToolError && e.payload.error === "verified_partner_required");
+      assert.equal((await readConsent()).revoked, false);
       const revoked = await verb(pg, copy, "revoke-salesforce-read-consent", {
-        idempotency_key: randomUUID(), decision_id: decision, human_quote: "withdrawn" }, { partner: "dell" });
+        idempotency_key: randomUUID(), decision_id: decision, human_quote: "withdrawn" },
+      { partner: "dell", acting: "dell" });
       assert.equal(revoked.revoked_by, "dell");
+      const dellId = (await db.query("select id from public.actor where slug='dell'")).rows[0].id;
+      assert.equal((await db.query("select revoked_by_actor_id from ops.rw02_consent_revocation where decision_id=$1",
+        [decision])).rows[0].revoked_by_actor_id, dellId, "the revocation names the actor that made it");
       assert.equal((await readConsent()).revoked, true);
       await assert.rejects(verb(pg, copy, "revoke-salesforce-read-consent", {
         idempotency_key: randomUUID(), decision_id: randomUUID(), human_quote: "withdrawn" }, { partner: "joe" }),
@@ -185,13 +210,16 @@ test("V5-RW02 run ledger, consent record, loop episodes and invoiced scope on re
               `T-rw02-${id.slice(0, 8)}`]);
         }
       } finally { await db.query("set session_replication_role = origin"); }
-      for (const [key, loop] of [[base, loopA], [`${base}:e2`, loopB], [`${base}:e3`, randomUUID()]]) {
+      for (const [key, loop] of [[base, loopA], [`${base}:e2`, loopB], [`${base}:e3`, randomUUID()],
+        [`${base}:eX`, randomUUID()], [`${base}:e0`, randomUUID()], [`${base}:e1`, randomUUID()],
+        [`${base}:e2x`, randomUUID()]]) {
         await db.query(`insert into public.tool_call (idempotency_key, verb, actor_id, request_hash, response)
           values ($1, 'add-loop', $2, 'synthetic', $3)`, [key, actor, JSON.stringify({ ok: true, loop_id: loop })]);
       }
       const rows = await asWriter(pg, copy, client => createLoopEpisodeSource(client).loopEpisodes(base));
       assert.deepEqual(rows.map(r => [r.idempotency_key, r.status]).sort(),
-        [[base, "done"], [`${base}:e2`, "open"], [`${base}:e3`, null]]);
+        [[base, "done"], [`${base}:e2`, "open"], [`${base}:e3`, null]],
+        "malformed look-alike keys (:eX, :e0, :e1, :e2x) are not episodes and are not answered");
       const foreign = await asWriter(pg, copy, client => createLoopEpisodeSource(client).loopEpisodes("add-loop-anything"));
       assert.deepEqual(foreign, [], "only RW02 finding keys are answered");
     });
@@ -221,6 +249,13 @@ test("V5-RW02 run ledger, consent record, loop episodes and invoiced scope on re
         for (const label of ["won_invoiced", "lost", "paused"])
           assert.ok(!inScope.has(ids[label]), `${label} is out of the absence scope`);
       } finally { await reader.end(); }
+      // update-deal refuses an impossible invoice date before it reaches the
+      // database, instead of failing later as a raw cast error.
+      for (const invoiced_on of ["2026-13-45", "2026-02-30", "2026-9-1", 20260901]) {
+        await assert.rejects(verb(pg, copy, "update-deal", { idempotency_key: randomUUID(), deal: ids.open,
+          base_version: 1, fields: { invoiced_on } }),
+        e => e instanceof ToolError && e.payload.error === "invalid_invoiced_on", String(invoiced_on));
+      }
     });
 
     await t.test("the server clock is the database clock", async () => {

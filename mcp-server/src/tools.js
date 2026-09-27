@@ -3777,8 +3777,13 @@ export const TOOLS = {
         hint: "moving a deal between clients is structural, not a field edit — use reassign-deal" });
       const keys = Object.keys(args.fields).filter(k => allowed.includes(k));
       if (!keys.length) throw new ToolError({ error: "no_updatable_fields", allowed });
+      // A real calendar date: the pattern, then a round trip, so 2026-13-45 or
+      // 2026-02-30 is refused here instead of failing later as a raw cast error.
+      const isCalendarDate = value => typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) &&
+        !Number.isNaN(Date.parse(`${value}T00:00:00Z`)) &&
+        new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value;
       if (keys.includes("invoiced_on") && args.fields.invoiced_on !== null &&
-          !(typeof args.fields.invoiced_on === "string" && /^\d{4}-\d{2}-\d{2}$/.test(args.fields.invoiced_on)))
+          !isCalendarDate(args.fields.invoiced_on))
         throw new ToolError({ error: "invalid_invoiced_on",
           hint: "invoiced_on is a calendar date YYYY-MM-DD, or null to clear it" });
       // Legacy phase edits share the Deal Room event stream. Acquire its lock

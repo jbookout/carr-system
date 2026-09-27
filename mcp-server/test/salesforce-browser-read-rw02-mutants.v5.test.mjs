@@ -24,6 +24,7 @@ import {
   checkAuthChallengesStop, checkSystemSignInCodeExhausted, checkServerClockTicket, checkUiDriftStops,
   checkUnexpectedAccountStops, checkPlanRecipientGuard, checkPolicyConflictStops, checkConsentRecord,
   checkNoPartialWrites, checkLoopEpisodes, checkInvoicedScope, checkFailureRecordsUnclean,
+  checkWriteInterruptedTyped, checkUnrecordedOutcomeSurfaces, checkSourcesMustBeServerMade,
 } from "./salesforce-browser-read-rw02.fixtures.mjs";
 
 const SRC = fileURLToPath(new URL("../src/", import.meta.url));
@@ -293,5 +294,28 @@ test("MUTANT S29 invoiced: the absence scope ignores the invoiced marker", () =>
 
 test("MUTANT S30 counter: an unexpected failure is not recorded as an unclean run", () => killed(
   checkFailureRecordsUnclean,
-  ["    if (!outcomeRecorded) await recordOutcome(\"failed\").catch(() => {});\n    throw error;",
-    "    throw error;"]));
+  ["    if (outcomeRecorded) throw error;\n", "    throw error;\n"]));
+
+test("MUTANT S31 run ref: the run reference is fixed, so two runs share one outcome key", () => killed(
+  checkRepeatRunArgsIdentical,
+  ["  const run_ref = randomUUID().replace(/-/g, \"\").slice(0, 24);",
+    "  const run_ref = \"0\".repeat(24);"]));
+
+test("MUTANT S32 consent: any object with read() is accepted as the consent source", () => killed(
+  checkSourcesMustBeServerMade,
+  ["  if (!CONSENT_SOURCES.has(consentSource)) return refused(",
+    "  if (!consentSource || typeof consentSource.read !== \"function\") return refused("]));
+
+test("MUTANT S33 episodes: any object with loopEpisodes() is accepted as the episode source", () => killed(
+  checkSourcesMustBeServerMade,
+  ["  if (!EPISODE_SOURCES.has(findingState)) fail(",
+    "  if (!findingState || typeof findingState.loopEpisodes !== \"function\") fail("]));
+
+test("MUTANT S34 interruption: a partial write is thrown untyped instead of answered with its count", () => killed(
+  checkWriteInterruptedTyped,
+  ["        return interrupted({ run_ref,", "        throw interrupted({ run_ref,"]));
+
+test("MUTANT S35 unrecorded: a failure to record an unclean outcome is swallowed", () => killed(
+  checkUnrecordedOutcomeSurfaces,
+  ["    try { await recordOutcome(\"failed\"); }\n    catch (recordError) {\n      throw new",
+    "    try { await recordOutcome(\"failed\"); }\n    catch (recordError) {\n      if (false) throw new"]));

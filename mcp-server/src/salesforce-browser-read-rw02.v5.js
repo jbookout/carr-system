@@ -54,6 +54,8 @@
 // repeat run replays. A loop filed for a finding and since CLOSED, whose
 // finding is true again, is filed under the next episode key: a new action.
 
+import { randomUUID } from "node:crypto";
+
 import { digest } from "./artifact-trust.js";
 import { V5_NO_EFFECTS } from "./global-boundaries.v5.js";
 import {
@@ -429,9 +431,15 @@ function serverClockReader(clock) {
  * { record: {decision_id, sponsoring_human_slug, human_quote_present} | null,
  *   revoked: boolean }. ops.rw02_consent_record does the read.
  */
+// Module-private registries: the run accepts a consent source or a loop-episode
+// source only if one of the factories below made it, so a caller cannot hand in
+// an object whose read() simply answers "consent in force" or "no earlier loop".
+const CONSENT_SOURCES = new WeakSet();
+const EPISODE_SOURCES = new WeakSet();
+
 export function createDellConsentSource(client) {
   if (!client || typeof client.query !== "function") fail("consent_source_unavailable", "a database client is required");
-  return Object.freeze({
+  const source = Object.freeze({
     read: async () => {
       const r = await client.query("select ops.rw02_consent_record($1::uuid) as consent",
         [V5_RW02_DELL_CONSENT_DECISION_ID]);
@@ -439,6 +447,8 @@ export function createDellConsentSource(client) {
       return typeof consent === "string" ? JSON.parse(consent) : consent ?? null;
     },
   });
+  CONSENT_SOURCES.add(source);
+  return source;
 }
 
 /**
@@ -448,13 +458,15 @@ export function createDellConsentSource(client) {
  */
 export function createLoopEpisodeSource(client) {
   if (!client || typeof client.query !== "function") fail("finding_state_unavailable", "a database client is required");
-  return Object.freeze({
+  const source = Object.freeze({
     loopEpisodes: async baseKey => {
       const r = await client.query(
         "select idempotency_key, status from ops.rw02_loop_episodes($1::text)", [baseKey]);
       return (r?.rows ?? []).map(row => ({ idempotency_key: row.idempotency_key, status: row.status ?? null }));
     },
   });
+  EPISODE_SOURCES.add(source);
+  return source;
 }
 
 // ---------------------------------------------------------------------------
@@ -744,7 +756,7 @@ export function evaluateAutonomyCounter({ action_kind, runs } = {}) {
 // ---------------------------------------------------------------------------
 
 const RUN_OPTIONS = Object.freeze(["reader", "bindingSource", "consentSource", "findingState", "carrDeals",
-  "recorder", "clock", "signInOperator", "serverClock"]);
+  "recorder", "signInOperator", "serverClock"]);
 
 function stopAnswer(reason_id, detail = {}) {
   const stop_class = V5_RW02_SAFE_STOP_REASONS[reason_id];
@@ -759,6 +771,19 @@ function stopAnswer(reason_id, detail = {}) {
 function refused(reason_id, detail = {}) {
   return freeze({ ...stopAnswer(reason_id, detail), decision: "refused", stage: "before_browser",
     browser_touched: false });
+}
+
+/** A finding write failed after the plan passed: typed, counted, never called a safe stop. */
+export const V5_RW02_WRITE_INTERRUPTED_MESSAGE =
+  "A finding write failed after the run's checks passed, so some of this run's findings may have been filed. " +
+  "The run was recorded unclean. Start the read again; it files the rest without repeating what was filed.";
+
+function interrupted({ run_ref, consent, findings_recorded, findings_planned, cause }) {
+  return freeze({ schema_version: V5_RW02_BROWSER_READ_SCHEMA_VERSION, answer_kind: "rw02-write-interrupted.v1",
+    decision: "interrupted", reason_id: "finding_write_interrupted", message: V5_RW02_WRITE_INTERRUPTED_MESSAGE,
+    run_ref, consent, findings_recorded, findings_planned, partial_writes: findings_recorded, cause,
+    run_outcome: "failed", resumable_by_idempotent_replay: true, automatic_retry_permitted: false,
+    credential_entry_performed: false, salesforce_writes: 0, effects: EFFECTS });
 }
 
 function normalizeBinding(raw) {
@@ -872,18 +897,18 @@ export async function runSalesforceBrowserReadReconciliation(options = {}) {
   const unknown = Object.keys(options).filter(k => !RUN_OPTIONS.includes(k));
   if (unknown.length) fail("unknown_option",
     "the read run takes no mode, writer, partner, org, tenant, consent flag or capability option", { unknown });
-  const { bindingSource, consentSource, findingState, carrDeals, clock = () => new Date().toISOString() } = options;
+  const { bindingSource, consentSource, findingState, carrDeals } = options;
   const recorder = readModeRecorder(options.recorder);
   if (!bindingSource || typeof bindingSource.read !== "function") fail("binding_source_unavailable",
     "a server-side binding source is required");
   if (typeof carrDeals !== "function") fail("carr_source_unavailable", "a CARR deal source is required");
-  if (!findingState || typeof findingState.loopEpisodes !== "function") fail("finding_state_unavailable",
-    "a server-side loop-episode source is required");
+  if (!EPISODE_SOURCES.has(findingState)) fail("finding_state_unavailable",
+    "the loop-episode source must be the record layer's (createLoopEpisodeSource)");
 
   // Before the browser is touched: the binding, then Dell's consent record.
   const { binding, refusal } = normalizeBinding(await bindingSource.read());
   if (refusal) return refusal;
-  if (!consentSource || typeof consentSource.read !== "function") return refused("consent_source_unavailable",
+  if (!CONSENT_SOURCES.has(consentSource)) return refused("consent_source_unavailable",
     { decision_ref: V5_RW02_DELL_CONSENT_DECISION_ID });
   let reading;
   try { reading = structuredClone(await consentSource.read()); }
@@ -896,8 +921,10 @@ export async function runSalesforceBrowserReadReconciliation(options = {}) {
   const reader = readOnlyReader(options.reader);
   const operator = options.signInOperator === undefined ? null : signInOperator(options.signInOperator);
   if (options.serverClock !== undefined) serverClockReader(options.serverClock);
-  const started_at = clock();
-  const run_ref = digest({ kind: "rw02-browser-read-run.v1", org: binding.org, started_at }).slice(7, 31);
+  // A fresh random reference per run, never derived from a time or anything a
+  // caller supplies: two runs can never share one outcome key, so a stopped run
+  // can never be absorbed into an earlier run recorded clean.
+  const run_ref = randomUUID().replace(/-/g, "").slice(0, 24);
 
   // The run's outcome is recorded server-side EXACTLY once, whatever ends it:
   // clean, a typed stop, or an unexpected failure. An unrecorded unclean run
@@ -1077,13 +1104,17 @@ export async function runSalesforceBrowserReadReconciliation(options = {}) {
     for (const item of plan) {
       try { await recorder.record(item.verb, item.args); }
       catch (error) {
-        // Not a safe stop: a transport failure after some writes. Every finding
-        // is idempotently keyed, so the next run replays what landed and files
-        // the rest. The run is recorded unclean so it cannot count as clean.
-        await recordOutcome("failed").catch(() => {});
-        throw new V5RW02BrowserReadError("finding_write_interrupted",
-          "a finding write failed; the next run replays the written ones and files the rest",
-          { findings_recorded, findings_planned: plan.length, cause: error?.error ?? error?.code ?? "unknown" });
+        // The plan guard above refuses everything the adapter can foresee
+        // before the first write. A record verb's own refusal or a lost
+        // connection after the plan passed is NOT a safe stop: some findings
+        // may have landed. It is reported as exactly that, typed, with the
+        // count, and the run is recorded unclean (a failure to record that is
+        // an error, never swallowed). Every finding is idempotently keyed, so
+        // the next run replays what landed and files the rest.
+        await recordOutcome("failed");
+        return interrupted({ run_ref, consent: consent_ref, findings_recorded, findings_planned: plan.length,
+          cause: typeof error?.error === "string" ? error.error
+            : typeof error?.code === "string" ? error.code : "unknown" });
       }
       findings_recorded++;
     }
@@ -1098,7 +1129,16 @@ export async function runSalesforceBrowserReadReconciliation(options = {}) {
 
   try { return await readAndReconcile(); }
   catch (error) {
-    if (!outcomeRecorded) await recordOutcome("failed").catch(() => {});
+    if (outcomeRecorded) throw error;
+    // An unclean run whose outcome cannot be recorded must not pass silently:
+    // the counter would then skip a reset. Both failures are surfaced.
+    try { await recordOutcome("failed"); }
+    catch (recordError) {
+      throw new V5RW02BrowserReadError("run_outcome_unrecorded",
+        "the run failed and its unclean outcome could not be recorded; do not count this run",
+        { run_ref, cause: error?.code ?? error?.message ?? "unknown",
+          record_cause: recordError?.error ?? recordError?.code ?? "unknown" });
+    }
     throw error;
   }
 }

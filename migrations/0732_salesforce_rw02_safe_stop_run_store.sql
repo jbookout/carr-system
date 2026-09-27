@@ -56,6 +56,7 @@ create table ops.rw02_consent_revocation (
   id uuid primary key default gen_random_uuid(),
   decision_id uuid not null,
   revoked_by text not null check (revoked_by in ('joe', 'dell')),
+  revoked_by_actor_id uuid not null,
   human_quote text not null check (length(btrim(human_quote)) >= 3 and length(human_quote) <= 2000),
   idempotency_key uuid not null unique,
   revoked_at timestamptz not null default clock_timestamp()
@@ -135,9 +136,22 @@ begin
             and starts_with(s.idempotency_key, 'rw02-read:' || p_run_ref || ':')) then
       raise exception 'rw02_clean_run_contradicted';
     end if;
+    -- Two first recordings of one run can race past the select above (it
+    -- locks nothing while no row exists). The loser inserts nothing and is
+    -- answered as a replay or a typed conflict, never a raw unique violation.
     insert into ops.rw02_attended_run (action_kind, run_ref, outcome, stop_class, reason_id, recorded_by)
     values (p_action_kind, p_run_ref, p_outcome, p_stop_class, p_reason_id, v_actor)
+    on conflict (action_kind, run_ref) do nothing
     returning * into v_row;
+    if not found then
+      select * into v_row from ops.rw02_attended_run
+       where action_kind = p_action_kind and run_ref = p_run_ref;
+      if v_row.outcome is distinct from p_outcome or v_row.stop_class is distinct from p_stop_class
+         or v_row.reason_id is distinct from p_reason_id or v_row.recorded_by is distinct from v_actor then
+        raise exception 'rw02_run_outcome_conflict';
+      end if;
+      v_replayed := true;
+    end if;
   end if;
   return jsonb_build_object(
     'action_kind', v_row.action_kind, 'run_ref', v_row.run_ref, 'outcome', v_row.outcome,
@@ -190,7 +204,11 @@ as $$
 $$;
 
 -- A partner withdraws a consent decision. The partner is the verified human
--- the server sets for a humanOnly act, never an argument.
+-- the server sets for a humanOnly act, never an argument. The acting actor the
+-- server established for the transaction must also resolve through
+-- ops.portfolio_writer_actor_id (the 0700 consent precedent): an active actor,
+-- and when that actor is a human, the same human as the verified partner. Its
+-- id is stored with the revocation, so every revocation names who made it.
 create or replace function ops.rw02_revoke_consent(
   p_decision_id uuid, p_human_quote text, p_idempotency_key uuid
 ) returns jsonb
@@ -199,14 +217,21 @@ set search_path = pg_catalog, public, ops
 as $$
 declare
   v_partner text := nullif(current_setting('carr.verified_human_actor_slug', true), '');
+  v_actor_id uuid;
   v_row ops.rw02_consent_revocation%rowtype;
 begin
   if v_partner is null or v_partner not in ('joe', 'dell') then
     raise exception 'rw02_verified_partner_required';
   end if;
+  begin
+    v_actor_id := ops.portfolio_writer_actor_id();
+  exception when others then
+    raise exception 'rw02_verified_partner_required';
+  end;
   select * into v_row from ops.rw02_consent_revocation where idempotency_key = p_idempotency_key;
   if found then
-    if v_row.decision_id <> p_decision_id or v_row.revoked_by <> v_partner or v_row.human_quote <> p_human_quote then
+    if v_row.decision_id <> p_decision_id or v_row.revoked_by <> v_partner
+       or v_row.revoked_by_actor_id <> v_actor_id or v_row.human_quote <> p_human_quote then
       raise exception 'rw02_revocation_conflict';
     end if;
   else
@@ -215,8 +240,8 @@ begin
                       and e.verb = 'log-decision') then
       raise exception 'rw02_consent_decision_unknown';
     end if;
-    insert into ops.rw02_consent_revocation (decision_id, revoked_by, human_quote, idempotency_key)
-    values (p_decision_id, v_partner, p_human_quote, p_idempotency_key)
+    insert into ops.rw02_consent_revocation (decision_id, revoked_by, revoked_by_actor_id, human_quote, idempotency_key)
+    values (p_decision_id, v_partner, v_actor_id, p_human_quote, p_idempotency_key)
     returning * into v_row;
   end if;
   return jsonb_build_object('revocation_id', v_row.id, 'decision_id', v_row.decision_id::text,
@@ -244,7 +269,11 @@ as $$
      and li.id = (tc.response->>'loop_id')::uuid
    where p_base_key ~ '^rw02-(missing-joe|unknown-to-carr):[0-9a-f]{32}$'
      and tc.verb = 'add-loop'
-     and (tc.idempotency_key = p_base_key or starts_with(tc.idempotency_key, p_base_key || ':e'))
+     -- Exactly the base key or a well-formed episode key (<base>:e2 and up).
+     -- A malformed look-alike (<base>:eX, <base>:e0) is not an episode and is
+     -- not answered, so no writer can wedge reconciliation with one. The base
+     -- is hex-only (checked above), so it is safe inside the pattern.
+     and tc.idempotency_key ~ ('^' || p_base_key || '(:e([2-9]|[1-9][0-9]{1,5}))?$')
    order by tc.created_at, tc.idempotency_key
 $$;
 
