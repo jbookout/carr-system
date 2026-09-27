@@ -136,7 +136,8 @@ def main(argv=None):
     report = ev.score(cases, deliveries, ev.universes(meta, list(deliveries)), meta,
                       labelled=set(live_ids) if live_ids else None,
                       classes=_classes(meta), groups=_groups(meta),
-                      doctrine_labelled=_doctrine_labelled(args.cases))
+                      doctrine_labelled=_doctrine_labelled(args.cases),
+                      doctrine_paths=set(ev.DOCTRINE_PATHS) & set(deliveries))
     report["split"] = args.split
     report["dry_run"] = True
     report["jev"] = jev_mode
