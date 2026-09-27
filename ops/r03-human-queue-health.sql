@@ -1,6 +1,8 @@
 -- Read-only V5-R03 standing check. Run with tools/db-tap.py sql on a database
 -- where 0736 has landed. Counts metadata only; no titles or bodies are returned.
 -- A persisted in-app row is not evidence that a human saw or acknowledged it.
+-- failed_attempts is historical; unresolved_failed_attempts counts failures
+-- only while their recipient still lacks an in-app row.
 with targeted as (
   select l.id,l.kind,l.owner,l.created_by,l.created_at,l.marker,l.due_on,
          r.id as recipient_actor,r.slug as recipient_slug,
@@ -78,8 +80,11 @@ select r.slug as recipient,
        count(m.in_app_id) as in_app_rows,
        count(m.read_id) as acknowledged,
        count(m.id) filter (where m.notification_id is null) as unnotified,
+       count(m.id) filter (where m.in_app_id is null) as missing_in_app_rows,
        count(m.id) filter (where not m.has_source_event) as missing_source_event,
        coalesce(sum(m.failed_attempts),0) as failed_attempts,
+       coalesce(sum(m.failed_attempts)
+         filter (where m.in_app_id is null),0) as unresolved_failed_attempts,
        coalesce(sum(m.deduped_attempts),0) as deduped_attempts,
        (select count(*) from targeted t where t.recipient_actor=r.id
          and t.visible_to_recipient and t.other_authored and t.deferred) as deferred_excluded,
@@ -89,6 +94,10 @@ select r.slug as recipient,
        floor(extract(epoch from now()-min(m.created_at)
          filter (where m.notification_id is null and m.has_creation_event))/86400)::integer
          as oldest_unnotified_days,
-       'On unnotified or failed: R03 owner repairs the producer or retries the bounded reconciliation; verify this check reaches zero and close the existing product blocker only then.' as breach_response
+       case when count(m.id) filter
+                   (where m.in_app_id is null or not m.has_source_event) = 0
+            then 'No open R03 producer gap in this recipient set; historical failures remain diagnostic.'
+            else 'On missing in-app delivery or source provenance: R03 owner repairs the producer or retries the bounded reconciliation; verify the open-gap counters reach zero.'
+       end as breach_response
   from recipients r left join measured m on m.recipient_actor=r.id
  group by r.id,r.slug order by r.slug;

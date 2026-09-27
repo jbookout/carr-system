@@ -1531,14 +1531,33 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     fi
   fi
 
-  # V5-R03 action-needed producer: recipient routing, deferred exclusion and
-  # replay dedupe on synthetic rows inside a rolled-back transaction.
+  # V5-R03 action-needed producer: recipient routing, recovery standing,
+  # deferred exclusion and replay dedupe in a rolled-back transaction.
   if [ -f mcp-server/test/r03-loop-queue-postgres.sql ]; then
     if ! run_quiet "$LOGDIR/r03-loop-queue-postgres.log" \
-         "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+         "$psql_bin" -X -v ON_ERROR_STOP=1 -P format=csv -d "$dsn" \
          -f mcp-server/test/r03-loop-queue-postgres.sql; then
       tail -30 "$LOGDIR/r03-loop-queue-postgres.log" >&2
       bad migration "the R03 loop producer and dedupe proof failed"
+      return
+    fi
+    if ! awk -F, '
+      $0=="r03_recovered_health" { phase=1; next }
+      $0=="r03_actor_mismatch_health" { phase=2; next }
+      $1=="joe" && phase==1 {
+        recovered=($2==3 && $3==3 && $4==3 && $6==0 && $7==0 &&
+                   $8==0 && $9==1 && $10==0 && index($15,"No open")==1)
+        phase=0
+      }
+      $1=="joe" && phase==2 {
+        mismatch=($2==4 && $3==3 && $4==3 && $6==1 && $7==1 &&
+                  $8==1 && $9==1 && $10==0 && index($15,"On missing")==1)
+        phase=0
+      }
+      END { exit !(recovered && mismatch) }
+    ' "$LOGDIR/r03-loop-queue-postgres.log"; then
+      tail -30 "$LOGDIR/r03-loop-queue-postgres.log" >&2
+      bad migration "R03 standing report conflates historical and unresolved failures"
       return
     fi
   fi

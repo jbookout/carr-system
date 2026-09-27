@@ -21,7 +21,7 @@ do $r03_fixture$
 declare v_joe uuid; v_dell uuid; v_claude uuid; v_block uuid;
         v_seq integer; v_action uuid; v_self uuid; v_future uuid;
         v_dell_action uuid; v_writer_action uuid; v_failed_action uuid;
-        v_bad_actor_action uuid; v_count integer;
+        v_count integer;
 begin
   select id into strict v_joe from public.actor where slug='joe' and kind='human';
   select id into strict v_dell from public.actor where slug='dell' and kind='human';
@@ -57,13 +57,9 @@ begin
     (kind,number,block_id,render_seq,title,owner,marker,tier,created_by,updated_by)
   values ('action_required','R03-SYNTH-6',v_block,v_seq+5,'Synthetic failed mint','joe',
           'none','shared',v_claude,v_claude) returning id into v_failed_action;
-  insert into public.loop_item
-    (kind,number,block_id,render_seq,title,owner,marker,tier,created_by,updated_by)
-  values ('action_required','R03-SYNTH-7',v_block,v_seq+6,'Synthetic actor mismatch','joe',
-          'none','shared',v_claude,v_claude) returning id into v_bad_actor_action;
   perform set_config('r03.writer_action_id',v_writer_action::text,true);
   perform set_config('r03.failed_action_id',v_failed_action::text,true);
-  perform set_config('r03.bad_actor_action_id',v_bad_actor_action::text,true);
+  perform set_config('r03.block_id',v_block::text,true);
   perform set_config('r03.claude_actor_id',v_claude::text,true);
 
   -- Keep the synthetic device lane inside a quiet window. The producer uses
@@ -198,7 +194,47 @@ begin
   end if;
 end $r03_failure_result$;
 
+-- Retry the same eligible action after the synthetic mint refusal is gone.
+-- Its historical failure remains in the event log, but in-app delivery now
+-- resolves the active product gap.
+set session authorization carr_writer;
+insert into public.event(occurred_at,actor_id,verb,subject_type,subject_id,new_value,cause)
+values (now(),current_setting('r03.claude_actor_id')::uuid,'add-loop','loop',
+        current_setting('r03.failed_action_id')::uuid,
+        jsonb_build_object('owner','joe','kind','action_required'),'system');
+reset session authorization;
+do $r03_recovery_result$
+begin
+  if not exists (select 1 from ops.notification n
+                  join ops.notification_delivery d on d.notification_id=n.id
+                   and d.channel='in_app'
+                  where n.subject_type='loop'
+                    and n.subject_ref=current_setting('r03.failed_action_id')) then
+    raise exception 'retry did not restore in-app delivery';
+  end if;
+  if not exists (select 1 from public.event
+                  where subject_type='loop' and verb='loop-notification-attempt'
+                    and subject_id=current_setting('r03.failed_action_id')::uuid
+                    and new_value->>'outcome'='failed') then
+    raise exception 'recovery erased historical failure evidence';
+  end if;
+end $r03_recovery_result$;
+select 'r03_recovered_health' as phase;
+\i ops/r03-human-queue-health.sql
+
 -- A mismatched actor is not a valid creation event or mint source.
+do $r03_bad_actor_fixture$
+declare v_action uuid; v_claude uuid;
+begin
+  select id into strict v_claude from public.actor
+   where slug='claude' and kind='automation';
+  insert into public.loop_item
+    (kind,number,block_id,render_seq,title,owner,marker,tier,created_by,updated_by)
+  values ('action_required','R03-SYNTH-7',current_setting('r03.block_id')::uuid,
+          7,'Synthetic actor mismatch','joe','none','shared',v_claude,v_claude)
+  returning id into v_action;
+  perform set_config('r03.bad_actor_action_id',v_action::text,true);
+end $r03_bad_actor_fixture$;
 insert into public.event(occurred_at,actor_id,verb,subject_type,subject_id,new_value,cause)
 values (now(),(select id from public.actor where slug='joe' and kind='human'),
         'add-loop','loop',current_setting('r03.bad_actor_action_id')::uuid,
@@ -212,7 +248,8 @@ begin
   end if;
 end $r03_actor_result$;
 
--- Compile and execute the read-only standing query against this exact schema.
+-- Execute the same standing query after adding the actor mismatch.
+select 'r03_actor_mismatch_health' as phase;
 \i ops/r03-human-queue-health.sql
 
 rollback;
