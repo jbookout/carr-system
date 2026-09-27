@@ -72075,6 +72075,37 @@
       ],
       "expected_count": 984,
       "expected_sha256": "20b32f68fc05092b520b70061032b51181db9740025ce420c945124e7e6b6cf3"
+    },
+    {
+      "version": "v90",
+      "remove": [],
+      "upsert": [
+        {
+          "ingress_key": "mcp-tool:standing-context",
+          "ingress_kind": "mcp_tool",
+          "operation": "standing-context",
+          "effect_class": "audit_side_effect",
+          "source_locator": "mcp-server/src/doctrine.js",
+          "schema_digest": "e4842fcf04f5634da352194e688c61c54c45616d5898aed3bb36a5af026b1b57",
+          "source_digest": "7b034306e97f1485ec072fd597770dd3fc3f2069682f51e2040e6d23d60b927f",
+          "write": false,
+          "human_only": false,
+          "authority_only": false,
+          "principal_mode": "authenticated_registered_principal",
+          "mutation_kind": null,
+          "target_surface": "scac.surface.database",
+          "delegates_to": [],
+          "request_shape": "closed_top_level_schema",
+          "idempotency_mode": "not_applicable",
+          "rollback_class": "append_only_audit",
+          "admission_class": "application_default_deny",
+          "owner_package": "11",
+          "implementation_state": "source_guarded_not_deployed",
+          "classification_authorizing": false
+        }
+      ],
+      "expected_count": 984,
+      "expected_sha256": "9313a9f2e924efa7f32b8e9c604407a3c4aab1f02c88e6fa2e183aed41a88a17"
     }
   ],
   "current_source_review": {

@@ -607,6 +607,37 @@
     "refused_content.py": {
       "role": "helper"
     },
+    "rule-boot-gate.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "PreToolUse",
+          "matcher": ".*",
+          "fixtures": [
+            "reads",
+            "edits",
+            "agent",
+            "tool_calls"
+          ]
+        },
+        {
+          "event": "PostToolUse",
+          "matcher": "Bash|mcp__.*__standing-context",
+          "fixtures": [
+            "bash"
+          ],
+          "allow_only": "PostToolUse and PostToolUseFailure only READ a boot fetch's answer (lib/rule_boot_gate.py observe()): they never deny, and they speak only when the call is a standing-context detail=boot fetch whose answer is an error or a rejection. No real fixture is such a fetch, and the fetch paths are covered end to end by ops/rule-boot-gate-selftest.py."
+        },
+        {
+          "event": "PostToolUseFailure",
+          "matcher": "Bash|mcp__.*__standing-context",
+          "fixtures": [
+            "bash"
+          ],
+          "allow_only": "PostToolUse and PostToolUseFailure only READ a boot fetch's answer (lib/rule_boot_gate.py observe()): they never deny, and they speak only when the call is a standing-context detail=boot fetch whose answer is an error or a rejection. No real fixture is such a fetch, and the fetch paths are covered end to end by ops/rule-boot-gate-selftest.py."
+        }
+      ]
+    },
     "rule-pack-drift-gate.py": {
       "role": "gate",
       "wirings": [
@@ -828,6 +859,7 @@
     "lib/loadpy.py",
     "lib/local_principal.py",
     "lib/machine_prerequisites.py",
+    "lib/rule_boot_gate.py",
     "lib/rule_delivery_preuse.py",
     "lib/rule_delivery_shadow.py",
     "lib/rule_routes.py",
