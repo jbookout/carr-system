@@ -1298,6 +1298,22 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     fi
   fi
 
+  # 0732: the F01/J102/RW02 actor gate as the Worker's REAL login shapes
+  # (app_writer in carr_writer, app_reader in carr_reader), not the NOLOGIN
+  # bundles every other fixture impersonates. It also covers the negative cast:
+  # exporter, owner-shaped, jobs-holding and unrelated logins stay refused, and
+  # the reader cannot write. One rolled-back transaction, role creation
+  # included.
+  if [ -f mcp-server/test/f01-login-bundle-membership-postgres.sql ]; then
+    if ! run_quiet "$LOGDIR/f01-login-bundle-membership-postgres.log" \
+         "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+         -f mcp-server/test/f01-login-bundle-membership-postgres.sql; then
+      tail -30 "$LOGDIR/f01-login-bundle-membership-postgres.log" >&2
+      bad migration "the F01 login-bundle membership proof (0732) failed"
+      return
+    fi
+  fi
+
   # V5-F05: the typed contract binder and actor-scoped universe census need a
   # real database. The unit class exercises the runtime adapter with a fake
   # client; this lane proves append-only persistence, idempotent replay,
