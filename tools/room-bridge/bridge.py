@@ -79,6 +79,8 @@ import queue_dispatch  # noqa: E402
 import queue_grammar  # noqa: E402
 import queue_projection  # noqa: E402
 import registry_ext  # noqa: E402
+import session_directory  # noqa: E402
+import session_presence  # noqa: E402
 import state as state_mod  # noqa: E402
 import verb_io  # noqa: E402
 
@@ -515,8 +517,16 @@ def deliver(name: str, entry: dict, seat: str, queued_turn: dict, *, state: dict
         return {"desk": name, "outcome": "delivered_async"}
 
     if kind in ("codex-session", "codex-live", "flash-local"):
-        row = dispatch_fn(name, text, registry=registry, results_path=results_path)
+        # Only a codex-session desk can sit on a thread Codex Desktop holds, and
+        # this conversational path is the one caller that waits for nothing back,
+        # so it alone opts into the Desktop route (see dispatch._to_codex).
+        extra = {"live_desktop": True} if kind == "codex-session" else {}
+        row = dispatch_fn(name, text, registry=registry, results_path=results_path, **extra)
         status = row.get("status")
+        if status == "delivered_live":
+            # The turn was started inside the Desktop window that owns the
+            # thread (codex_ipc) and the session answers there, like a claude desk.
+            return {"desk": name, "outcome": "delivered_live"}
         if status == "completed":
             add_room_turn(body=(row.get("result") or "").strip() or "(empty reply)",
                           seat=seat, kind="turn", msg_id=str(uuid.uuid4()))
@@ -545,7 +555,7 @@ def heartbeat_due(state: dict, *, now: str | None = None,
 
 
 def heartbeat_body(desk_entries: dict, cursor: int, cycle_at: str,
-                   profiles: list | None = None) -> str:
+                   profiles: list | None = None, sessions: list | None = None) -> str:
     """The compact JSON the panel parses. `desks` carries every REGISTERED desk,
     seated or not: a desk with no room_seat is exactly the panel's dormant
     case, and omitting it would make an unwired desk indistinguishable from a
@@ -576,20 +586,27 @@ def heartbeat_body(desk_entries: dict, cursor: int, cycle_at: str,
     heartbeat: dict = {"desks": rows, "cursor": cursor, "cycle_at": cycle_at}
     if profiles is not None:
         heartbeat["profiles"] = profiles
+    # `sessions` is the self-announced session roster (session_directory.py):
+    # every session that posted itself to the room, with this cycle's liveness
+    # and the address another session uses to reach it. Absent, never empty,
+    # when the directory could not be read this cycle — same stance as profiles.
+    if sessions is not None:
+        heartbeat["sessions"] = sessions
     return json.dumps({"heartbeat": heartbeat}, separators=(",", ":"))
 
 
 def post_heartbeat(state: dict, desk_entries: dict, *, add_room_turn, cursor: int,
                    now: str | None = None,
                    interval_s: float = HEARTBEAT_INTERVAL_S,
-                   profiles: list | None = None) -> dict | None:
+                   profiles: list | None = None,
+                   sessions: list | None = None) -> dict | None:
     """Publish the roster receipt if the throttle allows, and record that it
     went out. Returns None when throttled, so run_once's summary says honestly
     whether this cycle spoke."""
     if not heartbeat_due(state, now=now, interval_s=interval_s):
         return None
     stamp = now or _now()
-    body = heartbeat_body(desk_entries, cursor, stamp, profiles=profiles)
+    body = heartbeat_body(desk_entries, cursor, stamp, profiles=profiles, sessions=sessions)
     add_room_turn(body=body, seat="hermes", kind="receipt", msg_id=str(uuid.uuid4()))
     state_mod.set_heartbeat_at(state, stamp)
     return {"posted_at": stamp, "desks": len(desk_entries), "cursor": cursor}
@@ -687,10 +704,16 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
              queue_projector=queue_projection.project_once,
              engineering_dispatcher=run_engineering_dispatch,
              now_fn=_now,
+             session_directory_path: Path | None = None,
+             session_probe=None, session_deliver=None, host: str | None = None,
              log=print) -> dict:
     registry = registry or desks.Registry()
     results_path = Path(results_path or dispatch.DEFAULT_RESULTS)
     state = state_mod.load_state(state_path)
+    # The self-announced session directory lives beside the desk registry, so a
+    # test's temporary registry never touches the real one.
+    session_directory_path = Path(session_directory_path or
+                                  registry.path.parent / "session-directory.json")
 
     desk_entries = registry.entries()
     # A claude-desktop desk is explicit-queue-only. Keeping its seat in the
@@ -1027,6 +1050,33 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
             and queue_scanned_desks == required_queue_desks):
         state_mod.prune_queue_unavailable_since(state, queue_ready_task_ids)
 
+    # SELF-ANNOUNCED SESSIONS (requirement, 2026-09-27: every session posts itself to
+    # the room so every other session can reach it). Read presence receipts off
+    # this cycle's turns, probe every local session, expire the silent ones,
+    # and carry each @-addressed turn into the session it names. Contained: a
+    # failure here is a cycle error, never a reason to lose the desk work above.
+    session_summary: dict = {"ingested": [], "expired": [], "delivered": []}
+    session_rows = None
+    try:
+        directory = session_directory.load(session_directory_path)
+        reserved = set(desk_entries) | {str(e.get("room_seat")) for e in desk_entries.values()
+                                        if e.get("room_seat")} | {"hermes", "human", "queue"}
+        cycle_host = host or session_presence.this_host()
+        cycle_now = now_fn()
+        session_summary["ingested"] = session_directory.ingest(
+            directory, turns, host=cycle_host, now=cycle_now, reserved=reserved)
+        session_summary["expired"] = session_directory.refresh(
+            directory, now=cycle_now, host=cycle_host,
+            probe=session_probe or session_directory.make_probe())
+        session_summary["delivered"] = session_directory.route(
+            directory, turns, state, deliver=session_deliver or session_directory.make_deliverer(),
+            add_room_turn=add_room_turn)
+        session_directory.save(session_directory_path, directory)
+        session_rows = session_directory.roster(directory)
+    except Exception as exc:  # noqa: BLE001 — contained to the session directory
+        errors.append({"desk": "(sessions)", "error": "session_directory_failed",
+                       "detail": str(exc)[:500]})
+
     restarts = settle_restarts(desk_entries, auth_by_desk, state,
                                 add_room_turn=add_room_turn, registry=registry,
                                 stop=desk_stop, start=desk_start)
@@ -1067,7 +1117,7 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
         heartbeat = post_heartbeat(
             state, registry_ext.all_desks(registry.path),
             add_room_turn=add_room_turn, cursor=state["last_seq"],
-            profiles=profiles,
+            profiles=profiles, sessions=session_rows,
         )
     except RuntimeError as e:
         # A heartbeat that cannot be posted is a reportable cycle error, never a
@@ -1101,6 +1151,7 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
         "queue_projection": projection_events,
         "queue_reconciliation": queue_reconciliation,
         "engineering": engineering,
+        "sessions": session_summary,
     }
     log(f"room-bridge: {len(turns)} turn(s), {len(delivered)} desk action(s), "
         f"{len(assignments)} assignment event(s), {len(queue_events)} queue event(s), {len(controls)} control(s), "
