@@ -6,6 +6,8 @@ The logic lives in ops/rule_delivery_eval.py (a library, for the reason
 ops/typesafe_client.py documents); this is its command line.
 
     tools/rule-delivery-eval.py                       # committed synthetic fixture, Jev off
+    tools/rule-delivery-eval.py --cases ops/fixtures/rule-delivery-eval/cases.v2.json \
+        --split train                                 # the v2 benchmark, train split only
     tools/rule-delivery-eval.py --cases out/rule-delivery-eval/gold.jsonl \\
         --jev live --workers 4 --corpus out/rule-delivery-eval/corpus-live.json
 
@@ -35,6 +37,27 @@ def _library():
     return module
 
 
+def _gold_label():
+    import importlib.util
+    path = os.path.join(REPO, "ops", "rule_gold_label.py")
+    spec = importlib.util.spec_from_file_location("rule_gold_label", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _classes(meta):
+    """{rule id: always_on|action_point|topic|gate_named}, by the ordered
+    questions in ops/rule_gold_label.py."""
+    return _gold_label().rule_classes(REPO, list(meta))
+
+
+def _groups(meta):
+    """{rule id: guidance_deferred|other}: the reporting split for the rules
+    audits/guidance-migration-manifest.v1.tsv retyped as deferred guidance."""
+    return _gold_label().rule_groups(REPO, list(meta))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--cases", default=FIXTURE)
@@ -47,12 +70,17 @@ def main(argv=None):
                         help="where Jev call receipts go (default: discarded)")
     parser.add_argument("--out-dir", default=os.path.join(REPO, "out", "rule-delivery-eval"))
     parser.add_argument("--top", type=int, default=10)
+    parser.add_argument("--split", choices=("train", "test"),
+                        help="score one split of a v2 cases file. Tuning reads train only.")
+    parser.add_argument("--doctrine-search", action="store_true",
+                        help="also run the doctrine search door (search-doctrine through "
+                        "./run.sh call, read-only) as a doctrine-only path")
     parser.add_argument("--rescore", help="a saved report.json: re-score its deliveries "
                         "against --cases instead of running the paths again (no Jev)")
     args = parser.parse_args(argv)
 
     ev = _library()
-    cases = ev.load_cases(args.cases)
+    cases = ev.load_cases(args.cases, split=args.split)
     statements, live_ids = {}, []
     if args.corpus:
         with open(args.corpus, "r", encoding="utf-8") as handle:
@@ -71,12 +99,15 @@ def main(argv=None):
         deliveries, errors = ev.deliveries_from_report(saved), saved.get("errors") or {}
         jev_mode = saved.get("jev")
     else:
-        adapters = ev.build_adapters(REPO, jev=args.jev, calls_log=args.calls_log)
+        adapters = ev.build_adapters(REPO, jev=args.jev, calls_log=args.calls_log,
+                                     doctrine_search=args.doctrine_search)
         deliveries, errors = ev.run_adapters(cases, adapters, workers=max(1, args.workers))
         jev_mode = args.jev
     ev.add_system_rows(deliveries)
     report = ev.score(cases, deliveries, ev.universes(meta, list(deliveries)), meta,
-                      labelled=set(live_ids) if live_ids else None)
+                      labelled=set(live_ids) if live_ids else None,
+                      classes=_classes(meta), groups=_groups(meta))
+    report["split"] = args.split
     report["dry_run"] = True
     report["jev"] = jev_mode
     report["errors"] = {name: errs for name, errs in errors.items() if errs}

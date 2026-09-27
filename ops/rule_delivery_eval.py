@@ -68,8 +68,19 @@ import re
 from collections import Counter
 
 CASES_SCHEMA = "rule-delivery-eval-cases/v1"
+CASES_SCHEMA_V2 = "rule-delivery-eval-cases/v2"
 REPORT_SCHEMA = "rule-delivery-eval-report/v1"
 STRATA = ("engineering", "deals_clients", "comms", "scheduling", "notifications")
+# v2 (cases.v2.json, dense gold over every live rule) is stratified by the
+# kinds of turn the rule system actually misses on, not by v1's topics.
+STRATA_V2 = ("engineering", "deals_clients", "chat_only", "merge_release",
+             "agent_dispatch", "salesforce_browser", "tour_maps", "notifications")
+STRATA_BY_SCHEMA = {CASES_SCHEMA: STRATA, CASES_SCHEMA_V2: STRATA_V2}
+SPLITS = ("train", "test")
+# A doctrine section ref: the store's document id, '#', its section id.
+# Opaque ids on purpose: doctrine slugs and section keys carry person and
+# practice names, which a committed fixture must not.
+DOCTRINE_REF = re.compile(r"^[a-z0-9][a-z0-9._-]*#[a-z0-9][a-z0-9._-]*$")
 MACHINE_STRATA = ("notifications",)
 EVAL_SESSION = "rule-delivery-eval"
 
@@ -94,18 +105,27 @@ def _load(path, name):
     return module
 
 
-def load_cases(path):
-    """Validated cases from a cases file (schema CASES_SCHEMA) or a JSONL file
-    of case objects. Raises ValueError on anything malformed."""
+def load_cases(path, split=None):
+    """Validated cases from a cases file (schema CASES_SCHEMA or
+    CASES_SCHEMA_V2) or a JSONL file of case objects. Raises ValueError on
+    anything malformed.
+
+    `split` ("train" or "test") keeps only that split of a v2 file. TUNING MAY
+    READ ONLY THE TRAIN SPLIT; the test split is the held-out 30 per cent
+    (ops/rule_gold_label.assign_splits) and exists to be scored, not studied."""
     with open(path, "r", encoding="utf-8") as handle:
         text = handle.read()
     if str(path).endswith(".jsonl"):
         rows = [json.loads(line) for line in text.splitlines() if line.strip()]
+        strata = set(STRATA) | set(STRATA_V2)
     else:
         doc = json.loads(text)
-        if doc.get("schema") != CASES_SCHEMA:
-            raise ValueError(f"{path}: schema is not {CASES_SCHEMA}")
+        if doc.get("schema") not in STRATA_BY_SCHEMA:
+            raise ValueError(f"{path}: schema is not {CASES_SCHEMA} or {CASES_SCHEMA_V2}")
+        strata = set(STRATA_BY_SCHEMA[doc["schema"]])
         rows = doc.get("cases")
+    if split is not None and split not in SPLITS:
+        raise ValueError(f"split must be one of {SPLITS}")
     if not isinstance(rows, list) or not rows:
         raise ValueError(f"{path}: no cases")
     seen = set()
@@ -116,8 +136,12 @@ def load_cases(path):
         if row["id"] in seen:
             raise ValueError(f"{path}: duplicate case id {row['id']}")
         seen.add(row["id"])
-        if row.get("stratum") not in STRATA:
+        if row.get("stratum") not in strata:
             raise ValueError(f"{row['id']}: unknown stratum {row.get('stratum')!r}")
+        if row.get("split") is not None and row["split"] not in SPLITS:
+            raise ValueError(f"{row['id']}: unknown split {row.get('split')!r}")
+        if split is not None and row.get("split") != split:
+            continue
         if not isinstance(row.get("prompt"), str):
             raise ValueError(f"{row['id']}: prompt must be a string")
         gold = row.get("gold")
@@ -127,9 +151,19 @@ def load_cases(path):
         if not isinstance(calls, list) or not all(
                 isinstance(c, dict) and isinstance(c.get("tool_name"), str) for c in calls):
             raise ValueError(f"{row['id']}: tool_calls must be [{{tool_name, tool_input}}]")
+        # gold_doctrine: a second, reserved target set of doctrine section
+        # refs ("document#section"), carried but not yet scored.
+        doctrine = row.get("gold_doctrine") or []
+        if not isinstance(doctrine, list) or not all(
+                isinstance(ref, str) and DOCTRINE_REF.match(ref) for ref in doctrine):
+            raise ValueError(f"{row['id']}: gold_doctrine must be ['document#section', ...]")
         cases.append({"id": row["id"], "stratum": row["stratum"], "prompt": row["prompt"],
                       "tool_calls": calls, "gold": sorted(set(gold)),
-                      "disputed": sorted(set(row.get("disputed") or []))})
+                      "gold_doctrine": sorted(set(doctrine)),
+                      "disputed": sorted(set(row.get("disputed") or [])),
+                      "split": row.get("split")})
+    if not cases:
+        raise ValueError(f"{path}: no cases in split {split!r}")
     return cases
 
 
@@ -156,7 +190,9 @@ def universes(meta, names):
              "drift_shadow": pack, "drift_if_acting": pack, "boot_layer0": layer0,
              "jev_rule_select": everything, "system_moment": everything,
              "system_moment_packlayer": pack,
-             "system_moment_plus_drift": everything, "system_scoped_boot": everything}
+             "system_moment_plus_drift": everything, "system_scoped_boot": everything,
+             # The doctrine search door delivers doctrine only; it owes no rule.
+             "doctrine_search": set()}
     return {name: table.get(name, everything) for name in names}
 
 
@@ -221,7 +257,42 @@ def _raise(*_args, **_kwargs):
     raise RuntimeError("Jev judgment disabled for this adapter")
 
 
-def build_adapters(repo, *, jev="off", client_factory=None, calls_log=os.devnull):
+def _run_verb(repo, verb, args):
+    import subprocess
+    proc = subprocess.run(["./run.sh", "call", verb, json.dumps(args)],
+                          cwd=str(repo), capture_output=True, text=True,
+                          stdin=subprocess.DEVNULL, timeout=300)
+    return json.loads(proc.stdout)
+
+
+_DOC_IDS = {}
+
+
+def doctrine_doc_ids(repo):
+    """doc slug -> store document id, from one doctrine-index read (cached)."""
+    key = str(repo)
+    if key not in _DOC_IDS:
+        docs = _run_verb(repo, "doctrine-index", {}).get("documents") or []
+        _DOC_IDS[key] = {d["slug"]: d["id"] for d in docs
+                         if d.get("slug") and d.get("id")}
+    return _DOC_IDS[key]
+
+
+def doctrine_search_refs(repo, prompt, limit=10):
+    """What a session gets if it asks the doctrine door itself: search-doctrine
+    on the turn's text through ./run.sh call (read-only, deterministic FTS).
+    NOT an automatic path: it measures what the door would have found.
+    Refs are opaque store ids (<document id>#<section id>), as in the gold."""
+    query = " ".join(prompt.replace("<", " ").split())[:300]
+    hits = _run_verb(repo, "search-doctrine",
+                     {"q": query, "limit": limit}).get("hits") or []
+    ids = doctrine_doc_ids(repo)
+    return {f"{ids[h['doc_slug']]}#{h['section_id']}" for h in hits
+            if h.get("section_id") and ids.get(h.get("doc_slug"))}
+
+
+def build_adapters(repo, *, jev="off", client_factory=None, calls_log=os.devnull,
+                   doctrine_search=False):
     """Adapters for every path. `jev` is "off" (deterministic paths only) or
     "live" (adds prompt_full and jev_rule_select). `client_factory(calls_log)`
     returns the Jev client; default is JevProxy over ops/typesafe_client."""
@@ -289,6 +360,10 @@ def build_adapters(repo, *, jev="off", client_factory=None, calls_log=os.devnull
         {"name": "drift_if_acting", "select": drift_acting, "jev": False},
         {"name": "boot_layer0", "select": boot, "jev": False},
     ]
+    if doctrine_search:
+        adapters.append({"name": "doctrine_search", "jev": True,
+                         "select": lambda case: {"rules": set(), "packs": None,
+                                                 "doctrine": doctrine_search_refs(repo, case["prompt"])}})
     if jev == "live":
         if client_factory is None:
             tsc = _load(os.path.join(repo, "ops", "typesafe_client.py"), "tsc_eval")
@@ -331,7 +406,8 @@ def run_adapters(cases, adapters, *, workers=1):
                 result = adapter["select"](case)
                 return case["id"], {"rules": set(result.get("rules") or ()),
                                     "packs": (set(result["packs"]) if result.get("packs")
-                                              is not None else None)}, None
+                                              is not None else None),
+                                    "doctrine": set(result.get("doctrine") or ())}, None
             except Exception as exc:  # noqa: BLE001 - recorded, scored as empty
                 return case["id"], {"rules": set(), "packs": set()}, type(exc).__name__
         if workers > 1 and adapter.get("jev"):
@@ -380,12 +456,15 @@ def add_system_rows(deliveries):
     for case_id in set(prompt) | set(boot) | set(drift):
         moment = set(prompt.get(case_id, {}).get("rules") or ())
         moment |= jit.get(case_id, {}).get("rules") or set()
-        rows["system_moment"][case_id] = {"rules": moment, "packs": None}
+        doctrine = set(prompt.get(case_id, {}).get("doctrine") or ())
+        doctrine |= jit.get(case_id, {}).get("doctrine") or set()
+        rows["system_moment"][case_id] = {"rules": moment, "packs": None, "doctrine": doctrine}
         rows["system_moment_packlayer"][case_id] = {"rules": moment, "packs": None}
         rows["system_moment_plus_drift"][case_id] = {
             "rules": moment | (drift.get(case_id, {}).get("rules") or set()), "packs": None}
         rows["system_scoped_boot"][case_id] = {
-            "rules": moment | (boot.get(case_id, {}).get("rules") or set()), "packs": None}
+            "rules": moment | (boot.get(case_id, {}).get("rules") or set()), "packs": None,
+            "doctrine": doctrine | (boot.get(case_id, {}).get("doctrine") or set())}
     deliveries.update(rows)
     return deliveries
 
@@ -429,12 +508,23 @@ def deliveries_from_report(report):
             out.setdefault(name, {})[case_id] = {"rules": set(row.get("raw_delivered")
                                                               or row.get("delivered") or ()),
                                                  "packs": set(packs) if packs is not None
-                                                 else None}
+                                                 else None,
+                                                 "doctrine": set(row.get("doctrine_delivered")
+                                                                 or ())}
     return out
 
 
-def score(cases, deliveries, path_universes, meta, labelled=None):
+def score(cases, deliveries, path_universes, meta, labelled=None, classes=None, groups=None):
     """The report. See the module docstring for what is counted where.
+
+    `classes`, when given, is {rule id: class} (ops/rule_gold_label.rule_classes:
+    always_on, action_point, topic, gate_named). Each path then also reports
+    `by_class` over the human cases: a miss and a hit count against the class
+    of the gold rule, a false positive against the class of the delivered one.
+    `groups` ({rule id: group}) is a second, orthogonal reporting split counted
+    the same way into `by_group`: today "guidance_deferred" (the 93 rules
+    audits/guidance-migration-manifest.v1.tsv retyped as guidance in August,
+    which standing-context defers to consumers never built) against "other".
 
     `labelled`, when given, is the set of rule ids the gold labellers could
     choose from. A delivered id outside it cannot be judged right or wrong, so
@@ -454,6 +544,14 @@ def score(cases, deliveries, path_universes, meta, labelled=None):
         notes = {"cases": 0, "cases_with_delivery": 0, "fp": 0, "tp": 0, "fn": 0,
                  "delivered": 0}
         misses, false_pos = Counter(), Counter()
+        by_class = {}
+        by_group = {}
+        covered = [0, 0]  # human cases owing at least one rule, and of those fully served
+        # Doctrine, the second target set, scored apart from rules over every
+        # case (machine turns too): gold_doctrine against delivered refs.
+        doctrine = [0, 0, 0]
+        doctrine_strata = {}
+        doctrine_scored = False
         for case_id, out in per_case.items():
             case = by_id.get(case_id)
             if case is None:
@@ -477,6 +575,17 @@ def score(cases, deliveries, path_universes, meta, labelled=None):
                                                  "tp": tp, "fp": fp, "fn": fn}
             misses.update(fn)
             false_pos.update(fp)
+            if "gold_doctrine" in case:
+                doctrine_scored = True
+                dgold = set(case.get("gold_doctrine") or ())
+                dtp, dfp, dfn = confusion(dgold, set(out.get("doctrine") or ()))
+                for table in (doctrine, doctrine_strata.setdefault(case["stratum"], [0, 0, 0])):
+                    table[0] += len(dtp)
+                    table[1] += len(dfp)
+                    table[2] += len(dfn)
+                report["per_case"][case_id][name]["doctrine_fn"] = dfn
+                report["per_case"][case_id][name]["doctrine_delivered"] = sorted(
+                    out.get("doctrine") or ())
             if case["stratum"] in MACHINE_STRATA:
                 notes["cases"] += 1
                 notes["cases_with_delivery"] += 1 if delivered else 0
@@ -489,12 +598,25 @@ def score(cases, deliveries, path_universes, meta, labelled=None):
                 human[1] += len(fp)
                 human[2] += len(fn)
                 human[3] += len(tp_u)
-                row = strata.setdefault(case["stratum"], [0, 0, 0, 0, 0])
-                row[0] += len(tp)
-                row[1] += len(fp)
-                row[2] += len(fn)
-                row[3] += len(tp_u)
-                row[4] += 1
+                if gold:
+                    covered[0] += 1
+                    covered[1] += 0 if fn else 1
+                for table, split in ((by_class, classes), (by_group, groups)):
+                    if split is None:
+                        continue
+                    for bucket, ids in ((0, tp), (1, fp), (2, fn), (3, tp_u)):
+                        for rid in ids:
+                            table.setdefault(split.get(rid, "unclassed"),
+                                             [0, 0, 0, 0])[bucket] += 1
+            # Every stratum gets a row, notifications included: v2 reports
+            # recall per stratum for all eight. The pooled human figures above
+            # still leave machine turns out.
+            row = strata.setdefault(case["stratum"], [0, 0, 0, 0, 0])
+            row[0] += len(tp)
+            row[1] += len(fp)
+            row[2] += len(fn)
+            row[3] += len(tp_u)
+            row[4] += 1
             if out.get("packs") is not None:
                 packs_scored = True
                 gold_packs = {p for rid in gold if meta.get(rid, {}).get("layer") == PACK_LAYER
@@ -506,13 +628,27 @@ def score(cases, deliveries, path_universes, meta, labelled=None):
         n = notes["cases"]
         report["paths"][name] = {
             "universe_size": len(universe),
-            "cases_scored": len(per_case),
+            # Only cases in this run's case set: a rescore over one split
+            # carries deliveries for the other split too.
+            "cases_scored": sum(1 for case_id in per_case if case_id in by_id),
             "human": prf(*human),
+            # Jev (verification_selection, 2026-09-26) ranked "share of cases
+            # with any miss" among the acceptance numbers: a case is served
+            # only when EVERY rule it owes arrives.
+            "cases_fully_served": {"cases_owing": covered[0], "fully_served": covered[1],
+                                   "share": round(covered[1] / covered[0], 4) if covered[0] else None},
             "by_stratum": {st: {**prf(*row[:4]), "cases": row[4]}
                            for st, row in sorted(strata.items())},
             "notifications": {**notes,
                               "delivered_mean": round(notes["delivered"] / n, 3) if n else None},
             "packs": prf(*packs) if packs_scored else None,
+            "by_class": ({cls: prf(*row) for cls, row in sorted(by_class.items())}
+                         if classes is not None else None),
+            "by_group": ({grp: prf(*row) for grp, row in sorted(by_group.items())}
+                         if groups is not None else None),
+            "doctrine": prf(*doctrine) if doctrine_scored else None,
+            "doctrine_by_stratum": ({st: prf(*row) for st, row in sorted(doctrine_strata.items())}
+                                    if doctrine_scored else None),
             "outside_labelled": sorted(outside.items(), key=lambda kv: (-kv[1], kv[0])),
             "misses": sorted(misses.items(), key=lambda kv: (-kv[1], kv[0])),
             "false_positives": sorted(false_pos.items(), key=lambda kv: (-kv[1], kv[0])),
@@ -564,26 +700,40 @@ def render_markdown(report, statements=None, *, top=10, paths=None):
     statements = statements or {}
     order = paths or [p for p in SYSTEM_ROWS + ("prompt_full",
                                   "prompt_compiled", "jev_rule_select", "jit_pretooluse",
-                                  "drift_shadow", "drift_if_acting", "boot_layer0")
+                                  "drift_shadow", "drift_if_acting", "boot_layer0",
+                                  "doctrine_search")
                       if p in report["paths"]]
     lines = [f"Cases: {report['cases']} ({', '.join(f'{k} {v}' for k, v in sorted(report['strata'].items()))})",
              "",
-             "| path | cases | human P | human R | human F1 | notif. cases w/ delivery | notif. FP | pack P | pack R |",
-             "|---|---|---|---|---|---|---|---|---|"]
+             "| path | cases | human P | human R | human F1 | cases fully served | notif. cases w/ delivery | notif. FP | pack P | pack R |",
+             "|---|---|---|---|---|---|---|---|---|---|"]
     for name in order:
         row = report["paths"][name]
         h, n, pk = row["human"], row["notifications"], row["packs"] or {}
         lines.append(f"| {name} | {row['cases_scored']} | {_pct(h['precision'])} | "
                      f"{_pct(h['recall'])} | {_pct(h['f1'])} | "
+                     f"{_pct((row.get('cases_fully_served') or {}).get('share'))} | "
                      f"{n['cases_with_delivery']}/{n['cases']} | {n['fp']} | "
                      f"{_pct(pk.get('precision'))} | {_pct(pk.get('recall'))} |")
-    strata = [s for s in STRATA if s not in MACHINE_STRATA]
-    lines += ["", "Recall by stratum:", "",
-              "| path | " + " | ".join(strata) + " |", "|---|" + "---|" * len(strata)]
-    for name in order:
-        by = report["paths"][name]["by_stratum"]
-        lines.append(f"| {name} | " + " | ".join(_pct((by.get(s) or {}).get("recall"))
-                                                 for s in strata) + " |")
+    present = set(report["strata"])
+    strata = ([s for s in STRATA_V2 if s in present] if present - set(STRATA)
+              else [s for s in STRATA if s not in MACHINE_STRATA])
+    for metric in ("recall", "precision"):
+        lines += ["", f"{metric.capitalize()} by stratum:", "",
+                  "| path | " + " | ".join(strata) + " |", "|---|" + "---|" * len(strata)]
+        for name in order:
+            by = report["paths"][name]["by_stratum"]
+            lines.append(f"| {name} | " + " | ".join(_pct((by.get(s) or {}).get(metric))
+                                                     for s in strata) + " |")
+    if any(report["paths"][name].get("by_class") for name in order):
+        classes = ("always_on", "action_point", "topic", "gate_named")
+        lines += ["", "Recall / precision by rule class (human cases):", "",
+                  "| path | " + " | ".join(classes) + " |", "|---|" + "---|" * len(classes)]
+        for name in order:
+            by = report["paths"][name].get("by_class") or {}
+            lines.append(f"| {name} | " + " | ".join(
+                f"{_pct((by.get(c) or {}).get('recall'))} / {_pct((by.get(c) or {}).get('precision'))}"
+                for c in classes) + " |")
     for name in [p for p in ("system_moment", "prompt_full") if p in report["paths"]]:
         row = report["paths"][name]
         lines += ["", f"Top misses — {name}:", "", "| rule | cases | summary |", "|---|---|---|"]
@@ -593,4 +743,22 @@ def render_markdown(report, statements=None, *, top=10, paths=None):
                   "|---|---|---|"]
         lines += [f"| {rid} | {n} | {one_line(statements.get(rid))} |"
                   for rid, n in row["false_positives"][:top]]
+    if any(report["paths"][name].get("doctrine") for name in order):
+        lines += ["", "Doctrine (second target: section refs), all cases:", "",
+                  "| path | doctrine P | doctrine R | TP | FN |", "|---|---|---|---|---|"]
+        for name in order:
+            d = report["paths"][name].get("doctrine") or {}
+            lines.append(f"| {name} | {_pct(d.get('precision'))} | {_pct(d.get('recall'))} | "
+                         f"{d.get('tp', '–')} | {d.get('fn', '–')} |")
+    group_names = sorted({g for name in order
+                          for g in (report["paths"][name].get("by_group") or {})})
+    if group_names:
+        lines += ["", "Recall / precision by rule group (human cases):", "",
+                  "| path | " + " | ".join(group_names) + " |",
+                  "|---|" + "---|" * len(group_names)]
+        for name in order:
+            by = report["paths"][name].get("by_group") or {}
+            lines.append(f"| {name} | " + " | ".join(
+                f"{_pct((by.get(g) or {}).get('recall'))} / {_pct((by.get(g) or {}).get('precision'))}"
+                for g in group_names) + " |")
     return "\n".join(lines) + "\n"
