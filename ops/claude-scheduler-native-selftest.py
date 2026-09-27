@@ -70,6 +70,16 @@ def check_system_timezone() -> None:
         no_zone_localtime.symlink_to(no_zone_target)
         check("system_timezone refuses a resolved path with no zoneinfo component",
               refuses(lambda: system_timezone(no_zone_localtime)))
+        # Flagged in review: an ancestor directory that happens to be named
+        # zoneinfo.<anything> earlier in the path must not steal the match
+        # from the real zoneinfo directory that owns the tz name.
+        lookalike_target = root / "zoneinfo.bak" / "usr" / "share" / "zoneinfo" / "America" / "Chicago"
+        lookalike_target.parent.mkdir(parents=True, exist_ok=True)
+        lookalike_target.write_text("tzdata", encoding="utf-8")
+        lookalike_localtime = root / "localtime-lookalike-ancestor"
+        lookalike_localtime.symlink_to(lookalike_target)
+        check("system_timezone matches the LAST zoneinfo component, not an earlier lookalike ancestor",
+              value_or_none(lambda: system_timezone(lookalike_localtime)) == "America/Chicago")
         missing = root / "localtime-missing"
         check("system_timezone refuses when nothing exists to resolve",
               refuses(lambda: system_timezone(missing)))
