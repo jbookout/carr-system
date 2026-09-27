@@ -64,6 +64,23 @@ MAX_NEAR_MISS = 8
 # negative is a rule that never arrives.
 SURFACE_AT = 0.50
 NEAR_MISS_AT = 0.60
+
+# The floor a compiled KEYWORD must clear to become part of a prompt_regex row
+# (R2, 2026-09-26 rule-delivery eval, ops/rule_delivery_eval.py). SURFACE_AT
+# still decides what the compiled document records, so Jev's 0.50-0.60
+# answers stay on file and this floor can move without asking Jev again; the
+# prompt rows use this one. Measured on 79 labelled real situations: keywords
+# Jev scored in 0.50-0.60 were mostly the common words that fired everywhere
+# ("claude" 0.57 on the Copilot rule, "carr" 0.58 on the prospects rule).
+# Verb, command, path and tool rows (the PreToolUse rail) keep SURFACE_AT.
+PROMPT_SURFACE_AT = 0.60
+
+# Words that name the house and its assistants rather than any rule's moment:
+# nearly every partner message and notification carries one, so as a
+# single-word statement candidate they fire a rule everywhere. A phrase that
+# contains one ("carr surface") is still a candidate. "joe" and "dell" are
+# already STOPWORDS.
+HOUSE_WORDS = frozenset({"carr", "claude"})
 ALWAYS_ON_AT = 0.70
 NO_CUE_AT = 0.70
 
@@ -196,7 +213,8 @@ def candidates(rule, *, all_rules, pack_keywords, verbs, history=()):
     idf_pairs = _idf([_bigrams(d) for d in docs.values()])
     mine = docs.get(rule["id"]) or _words(text)
     tf = Counter(mine)
-    for word, _ in sorted(tf.items(), key=lambda kv: (-kv[1] * idf_words.get(kv[0], 1.0), kv[0]))[:MAX_WORDS]:
+    singles = [(w, c) for w, c in tf.items() if w not in HOUSE_WORDS]
+    for word, _ in sorted(singles, key=lambda kv: (-kv[1] * idf_words.get(kv[0], 1.0), kv[0]))[:MAX_WORDS]:
         add("keyword", word, "statement")
     tf2 = Counter(_bigrams(mine))
     for pair, _ in sorted(tf2.items(), key=lambda kv: (-kv[1] * idf_pairs.get(kv[0], 1.0), kv[0]))[:MAX_PHRASES]:
@@ -235,7 +253,8 @@ def candidates(rule, *, all_rules, pack_keywords, verbs, history=()):
             floor = max(2, 0.1 * len(bound))
             scored = {}
             for word, count in here.items():
-                if count < floor or not base[word] or not re.fullmatch(r"[a-z][a-z'-]*", word):
+                if count < floor or not base[word] or word in HOUSE_WORDS \
+                        or not re.fullmatch(r"[a-z][a-z'-]*", word):
                     continue
                 lift = (count / len(bound)) / (base[word] / len(history))
                 if lift > 1.5:
@@ -442,6 +461,15 @@ def _alternation(terms):
     return "|".join(parts)
 
 
+def prompt_keywords(entry):
+    """{keyword: probability} an entry's prompt_regex row is built from: at
+    or above PROMPT_SURFACE_AT, and never a bare house word (an entry compiled
+    before HOUSE_WORDS existed may still carry one)."""
+    keywords = ((entry or {}).get("triggers") or {}).get("keywords") or {}
+    return {k: p for k, p in keywords.items()
+            if isinstance(p, (int, float)) and p >= PROMPT_SURFACE_AT and k not in HOUSE_WORDS}
+
+
 def trigger_rows(doc):
     """Rows for ops/config/rule-jit-triggers.v1.json, one group per rule and
     kind. prompt_regex runs at UserPromptSubmit only; verb, bash_family and
@@ -452,11 +480,16 @@ def trigger_rows(doc):
             continue
         trig = entry.get("triggers") or {}
         packs = sorted(entry.get("packs") or [])
-        if trig.get("keywords"):
-            row = {"kind": "prompt_regex", "pattern": _alternation(trig["keywords"]),
+        keywords = prompt_keywords(entry)
+        if keywords:
+            row = {"kind": "prompt_regex", "pattern": _alternation(keywords),
                    "packs": packs, "rule_ids": [rid], "source": "jev_compiled"}
-            if entry.get("negatives"):
-                row["negative_pattern"] = _alternation(entry["negatives"])
+            # interpret()'s rule, re-applied to the keywords that survive: a
+            # near-miss only means something beside a positive it would mask.
+            words = {w for k in keywords for w in k.split()}
+            negatives = [n for n in (entry.get("negatives") or {}) if words & set(n.split())]
+            if negatives:
+                row["negative_pattern"] = _alternation(negatives)
             rows.append(row)
         verbs = sorted(trig.get("verbs") or [])
         tools = sorted(trig.get("tools") or [])

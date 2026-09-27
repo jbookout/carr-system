@@ -29,6 +29,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -636,7 +637,53 @@ def prop_surface_floor(rtc_m, rtd_m):
     return got["triggers"]["keywords"] == {"push": 0.5} and got["mode"] == "triggered"
 
 
+# R2 (2026-09-26 rule-delivery eval): the same words, two kinds of prompt.
+ENVELOPE_WITH_WORDS = ("<task-notification>\n<task-id>a2</task-id>\n<status>completed</status>\n"
+                       "<summary>Agent \"x\" finished: git push to the vendor branch</summary>\n"
+                       "</task-notification>")
+HUMAN_WITH_WORDS = "Agent x finished: git push to the vendor branch"
+
+
+def prop_envelope_no_compiled_rules(rtc_m, rtd_m):
+    """A machine envelope (classified by the real ops/machine_envelope.py, not
+    by the envelope= override) gets ZERO compiled-trigger rules; a human
+    prompt carrying the same words still gets them."""
+    with tempfile.TemporaryDirectory() as tmp:
+        on_envelope = run(rtd_m, ENVELOPE_WITH_WORDS, tmp)
+    with tempfile.TemporaryDirectory() as tmp:
+        on_human = run(rtd_m, HUMAN_WITH_WORDS, tmp)
+    compiled = [r for r in on_envelope if r["source"] == "compiled_trigger"]
+    return (compiled == [] and ids(on_envelope) == []
+            and {"aaaa0001", "aaaa0002"} <= {r["id"] for r in on_human
+                                            if r["source"] == "compiled_trigger"})
+
+
+def prop_prompt_floor(rtc_m, rtd_m):
+    """A compiled keyword joins a prompt row only at PROMPT_SURFACE_AT (0.60)
+    or above, and never as a bare house word; a phrase holding one still can."""
+    doc = rtc_m.document([entry(RULES[0], keywords={"git push": 0.6, "push": 0.59,
+                                                    "carr": 0.9, "carr surface": 0.9})])
+    rows = [r for r in rtc_m.trigger_rows(doc) if r["kind"] == "prompt_regex"]
+    return (len(rows) == 1 and re.search(rows[0]["pattern"], "git push now")
+            and re.search(rows[0]["pattern"], "the carr surface")
+            and not re.search(rows[0]["pattern"], "push it")
+            and not re.search(rows[0]["pattern"], "carr is fine"))
+
+
+def prop_no_house_word_candidate(rtc_m, rtd_m):
+    rule = {"id": "cccc0001", "gist": "carr surfaces", "packs": ["governance-rules"],
+            "statement": "Every CARR surface Claude builds shows its source. CARR CARR."}
+    cands, _near = rtc_m.candidates(rule, all_rules=[rule] + RULES, pack_keywords={},
+                                    verbs=set())
+    values = {value for kind, value, _ in cands if kind == "keyword"}
+    return "carr" not in values and "claude" not in values and "carr surface" in values
+
+
 PROPERTIES = {
+    "a machine envelope gets zero compiled-trigger rules; a human prompt with the same words "
+    "still does": prop_envelope_no_compiled_rules,
+    "a prompt keyword needs PROMPT_SURFACE_AT and is never a bare house word": prop_prompt_floor,
+    "a house word is never a single-word candidate": prop_no_house_word_candidate,
     "negative phrases mask their shared word": prop_negative_masks,
     "a missing trigger table still judges a human prompt, within budget": prop_fail_open,
     "residual and stale rules are judged on every human prompt": prop_residual_every_human_prompt,
@@ -840,7 +887,27 @@ MUTANTS = [
      ("human = not (_is_envelope(situation) if envelope is None else envelope)",
       "human = True")),
     ("a machine envelope costs zero Jev requests", RTD_PATH,
-     ('if not human and row.get("source") in HUMAN_ONLY_SOURCES:', "if False:")),
+     ('if not human and row.get("source") not in ENVELOPE_SOURCES:', "if False:")),
+    # R2 removed: the pre-R2 envelope policy, where only partner-prompt cues
+    # were held back and Jev's compiled keywords still ran on a notification.
+    ("a machine envelope gets zero compiled-trigger rules; a human prompt with the same words "
+     "still does", RTD_PATH,
+     ('if not human and row.get("source") not in ENVELOPE_SOURCES:',
+      'if not human and row.get("source") == "prompt_cue":')),
+    # The envelope classification bypassed: every prompt treated as human.
+    ("a machine envelope gets zero compiled-trigger rules; a human prompt with the same words "
+     "still does", RTD_PATH,
+     ("human = not (_is_envelope(situation) if envelope is None else envelope)",
+      "human = True")),
+    # The prompt floor lowered back to the compile floor, and the house-word
+    # filter removed from rows and from candidates.
+    ("a prompt keyword needs PROMPT_SURFACE_AT and is never a bare house word", RTC_PATH,
+     ("p >= PROMPT_SURFACE_AT and k not in HOUSE_WORDS", "p >= SURFACE_AT and k not in HOUSE_WORDS")),
+    ("a prompt keyword needs PROMPT_SURFACE_AT and is never a bare house word", RTC_PATH,
+     ("p >= PROMPT_SURFACE_AT and k not in HOUSE_WORDS", "p >= PROMPT_SURFACE_AT")),
+    ("a house word is never a single-word candidate", RTC_PATH,
+     ("singles = [(w, c) for w, c in tf.items() if w not in HOUSE_WORDS]",
+      "singles = list(tf.items())")),
     ("the real default ranker makes one request and its choices are judged", RTD_PATH,
      ('return [rule_id for rule_id, _ in ranked][:limit], 1, answer.get("model") or "jev"',
       'return [rule_id for rule_id, _ in ranked][:limit], 1, None')),
