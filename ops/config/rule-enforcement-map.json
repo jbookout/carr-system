@@ -814,17 +814,6 @@
         "mcp-server/test/intake-research-gates.test.mjs"
       ]
     },
-    "rule_boot_gate": {
-      "failure_mode": "PreToolUse deny",
-      "implementation": [
-        "hooks/rule-boot-gate.py",
-        "lib/rule_boot_gate.py",
-        "hooks/gate-integrity.py"
-      ],
-      "test": [
-        "command:python3 ops/rule-boot-gate-selftest.py"
-      ]
-    },
     "rule_shape": {
       "failure_mode": "approval succeeds only when exact registered enforcement is installed and bound to that rule id plus statement hash, then atomically activates it; missing or unrelated enforcement refuses approval and direct activation is retired",
       "implementation": [
