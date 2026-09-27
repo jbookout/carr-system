@@ -626,7 +626,7 @@
           "fixtures": [
             "bash"
           ],
-          "allow_only": "PostToolUse and PostToolUseFailure only READ a boot fetch's answer (lib/rule_boot_gate.py observe()): they never deny, and they speak only when the call is a standing-context detail=boot fetch whose answer is an error or a rejection. No real fixture is such a fetch, and the fetch paths are covered end to end by ops/rule-boot-gate-selftest.py."
+          "allow_only": "PostToolUse and PostToolUseFailure only READ a boot fetch's answer (lib/rule_boot_gate.py observe()): they never deny, and they speak only when the call is a standing-context detail=boot fetch whose answer is an error, a rejection, or not the whole requested page. No real fixture is such a fetch, and the fetch paths are covered end to end by ops/rule-boot-gate-selftest.py."
         },
         {
           "event": "PostToolUseFailure",
@@ -634,7 +634,7 @@
           "fixtures": [
             "bash"
           ],
-          "allow_only": "PostToolUse and PostToolUseFailure only READ a boot fetch's answer (lib/rule_boot_gate.py observe()): they never deny, and they speak only when the call is a standing-context detail=boot fetch whose answer is an error or a rejection. No real fixture is such a fetch, and the fetch paths are covered end to end by ops/rule-boot-gate-selftest.py."
+          "allow_only": "PostToolUse and PostToolUseFailure only READ a boot fetch's answer (lib/rule_boot_gate.py observe()): they never deny, and they speak only when the call is a standing-context detail=boot fetch whose answer is an error, a rejection, or not the whole requested page. No real fixture is such a fetch, and the fetch paths are covered end to end by ops/rule-boot-gate-selftest.py."
         }
       ]
     },

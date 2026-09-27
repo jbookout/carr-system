@@ -18,8 +18,13 @@ detail=boot (the Worker is not deployed yet) or an error (store unreachable).
 See lib/rule_boot_gate.py for the state layout, the fetch-call grammar and
 why it can never lock a context out.
 
-  · a boot page fetch (CARR MCP standing-context or the one `./run.sh call
-    standing-context '<json>'` shell form)  -> allow, and record the attempt
+  · a boot page fetch (CARR MCP standing-context, or a Bash command that runs
+    this repo's run.sh `call standing-context '<json>'` by any path, after an
+    absolute `cd ... &&`, and through harmless output filters — the grammar is
+    in lib/rule_boot_gate.py)                 -> allow, and record the attempt;
+    a page counts as READ only when PostToolUse finds that page's rule_boot
+    (matching page, digest and text) in the result, and the page lengths add
+    up to the boot's total_chars
   · other standing-context calls, the read-only rule verbs, ToolSearch -> allow
   · every page of the armed digest confirmed in this context          -> allow
   · a fetch in this context failed, or the store was unreachable at arming
