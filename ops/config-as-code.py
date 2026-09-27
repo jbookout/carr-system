@@ -1872,22 +1872,23 @@ def install_launchd_plist(filename, dest, body, body_matches):
             return "kept"
         return hand_off_self_reload(filename, dest, body, label)
 
-    if body_matches and not os.path.exists(pending):
+    # Every non-self mutation first proves this label is absent or belongs to
+    # this destination. A pending retry is an obligation to reconcile, not
+    # authority to unload a same-label job registered from another path.
+    state, detail = launchd_registration(label)
+    if state == "loaded" and detail != dest:
+        print(f"      INSPECT FAILED ({label} is loaded from an unexpected path); "
+              "destination left unchanged")
+        return "failed"
+    if state == "failed":
+        print(f"      INSPECT FAILED ({detail}); destination left unchanged")
+        return "failed"
+    if body_matches and not os.path.exists(pending) and state == "loaded":
         # The hourly installer must not disturb a definition that is already
         # loaded. Repeated unload/load cycles can strand a RunAtLoad/KeepAlive
         # job in launchd's pending-spawn state even though its plist is right.
-        state, detail = launchd_registration(label)
-        if state == "loaded":
-            if detail == dest:
-                print(f"      kept loaded ({label}; body unchanged)")
-                return "kept"
-            print(f"      INSPECT FAILED ({label} is loaded from an unexpected path); "
-                  "destination left unchanged")
-            return "failed"
-        if state != "absent":
-            print(f"      INSPECT FAILED ({detail}); "
-                  "destination left unchanged")
-            return "failed"
+        print(f"      kept loaded ({label}; body unchanged)")
+        return "kept"
 
     # This marker is written before the disk plist changes. A failed or
     # interrupted reload leaves it behind across installer processes, so a

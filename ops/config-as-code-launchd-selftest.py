@@ -612,7 +612,57 @@ def main() -> int:
                 (foreign, calls, foreign_out.getvalue()),
             ))
 
-            loaded_paths.pop(other_label)
+            pending = Path(str(other_dest) + ".pending-reload")
+            other_dest.write_text(plist(other_label, "/usr/bin/false"), encoding="utf-8")
+            calls.clear()
+            with contextlib.redirect_stdout(io.StringIO()):
+                changed_foreign = mod.install_launchd_plist(
+                    other_dest.name, str(other_dest), desired_other, False
+                )
+            cases.append(check(
+                "changed plist refuses foreign registration before touching disk",
+                changed_foreign == "failed" and calls == [
+                    ["launchctl", "print", f"gui/{os.getuid()}/{other_label}"]
+                ] and other_dest.read_text(encoding="utf-8")
+                == plist(other_label, "/usr/bin/false") and not pending.exists(),
+                (changed_foreign, calls),
+            ))
+
+            other_dest.write_text(desired_other, encoding="utf-8")
+            pending.write_text("synthetic pending reload\n", encoding="utf-8")
+            calls.clear()
+            with contextlib.redirect_stdout(io.StringIO()):
+                pending_foreign = mod.install_launchd_plist(
+                    other_dest.name, str(other_dest), desired_other, True
+                )
+            cases.append(check(
+                "pending retry refuses foreign registration before touching marker or job",
+                pending_foreign == "failed" and calls == [
+                    ["launchctl", "print", f"gui/{os.getuid()}/{other_label}"]
+                ] and other_dest.read_text(encoding="utf-8") == desired_other
+                and pending.read_text(encoding="utf-8") == "synthetic pending reload\n",
+                (pending_foreign, calls),
+            ))
+
+            pending.write_text("synthetic pending reload\n", encoding="utf-8")
+            print_error = "Operation not permitted"
+            calls.clear()
+            with contextlib.redirect_stdout(io.StringIO()):
+                pending_ambiguous = mod.install_launchd_plist(
+                    other_dest.name, str(other_dest), desired_other, True
+                )
+            cases.append(check(
+                "pending retry refuses ambiguous inspection before touching marker or job",
+                pending_ambiguous == "failed" and calls == [
+                    ["launchctl", "print", f"gui/{os.getuid()}/{other_label}"]
+                ] and other_dest.read_text(encoding="utf-8") == desired_other
+                and pending.read_text(encoding="utf-8") == "synthetic pending reload\n",
+                (pending_ambiguous, calls),
+            ))
+            print_error = ""
+            pending.unlink()
+
+            loaded_paths.pop(other_label, None)
             calls.clear()
             with contextlib.redirect_stdout(io.StringIO()):
                 absent = mod.install_launchd_plist(
@@ -654,7 +704,8 @@ def main() -> int:
                 "external install renders and reloads the changed fleet plist",
                 external == "loaded"
                 and [call[:2] for call in calls]
-                == [["launchctl", "unload"], ["launchctl", "print"],
+                == [["launchctl", "print"], ["launchctl", "unload"],
+                    ["launchctl", "print"],
                     ["launchctl", "load"], ["launchctl", "print"]]
                 and fleet_dest.read_text(encoding="utf-8") == desired_fleet,
                 (external, calls),
