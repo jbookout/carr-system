@@ -44,6 +44,21 @@ def tmpdir() -> Path:
     return Path(tempfile.mkdtemp(prefix="presence-"))
 
 
+def test_this_host_survives_a_scheduler_path_without_sbin():
+    """launchd jobs run with a PATH that can lack /usr/sbin. A bare `scutil`
+    then fails, the DHCP name "Mac" wins, and the bridge marks every session
+    on this machine other_host (2026-09-27: every Codex delivery refused)."""
+    import os
+    import subprocess
+    code = ("import sys; sys.path.insert(0, %r); import session_presence as sp; "
+            "print(sp.this_host())") % str(HERE)
+    with_sbin = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                               env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}).stdout.strip()
+    without = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                             env={"PATH": "/usr/bin:/bin"}).stdout.strip()
+    assert without == with_sbin, f"host differs by PATH: {without!r} vs {with_sbin!r}"
+
+
 def test_claude_record_shape():
     rec = sp.build_record({"hook_event_name": "SessionStart", "session_id": CLAUDE_ID,
                            "cwd": "/Users/x/carr-system", "source": "startup"},
