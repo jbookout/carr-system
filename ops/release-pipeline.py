@@ -754,12 +754,13 @@ class Pipeline:
         self.out(f"  -> slice-marker: {outcome}")
         return outcome
 
-    def git(self, *args: str, cwd: Path | None = None) -> str:
+    def git(self, *args: str, cwd: Path | None = None, trim_output: bool = True) -> str:
         proc = subprocess.run(["git", "-C", str(cwd or self.repo), *args], env=self.env,
-                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300)
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              errors="surrogateescape", timeout=300)
         if proc.returncode != 0:
             raise StepFailed(f"git {args[0]}", proc.returncode, "", (proc.stderr or "").strip()[:300])
-        return proc.stdout.strip()
+        return proc.stdout.strip() if trim_output else proc.stdout
 
     def step(self, name: str, argv: list[str], cwd: Path, *, timeout: int = 3600,
              env: dict[str, str] | None = None) -> Result:
@@ -1172,11 +1173,15 @@ class Pipeline:
         and mode at the target. A partial revert or later edit needs a fresh
         reviewed Fixes-Forward marker, even if another fix path remains."""
         try:
+            # Keep -z output intact: trimming would corrupt a leading-space
+            # filename. The later diff must treat every name literally, since
+            # a filename may itself begin with Git's pathspec-magic syntax.
             paths = [p for p in self.git("diff", "--no-renames", "--name-only", "-z", f"{fix}^1", fix,
-                                         cwd=repo_dir).split("\0") if p]
+                                         cwd=repo_dir, trim_output=False).split("\0") if p]
             if not paths:
                 return False
-            self.git("diff", "--quiet", fix, target, "--", *paths, cwd=repo_dir)
+            self.git("--literal-pathspecs", "diff", "--quiet", fix, target, "--", *paths,
+                     cwd=repo_dir)
             return True
         except StepFailed:
             return False

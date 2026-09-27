@@ -1550,6 +1550,22 @@ class FixForward(Base):
         self.assertEqual(rec["sha"], r)
         self.assert_held(runner, rec, nb)
 
+    def test_partial_revert_of_leading_space_path_holds(self):
+        b, nb = self.land({" leading.js": "defect", "mcp-server/src/a.js": "old"})
+        f, nf = self.land({" leading.js": "fixed", "mcp-server/src/a.js": "unrelated improvement"})
+        r, nr = self.land({" leading.js": "defect"})
+        runner, rec = self.tick({nb: [self.block(nb)], nf: [self.fix_approve(nf, [nb])]})
+        self.assertEqual(rec["sha"], r)
+        self.assert_held(runner, rec, nb)
+
+    def test_partial_revert_of_pathspec_magic_name_holds(self):
+        b, nb = self.land({":(literal)odd.js": "defect", "mcp-server/src/a.js": "old"})
+        f, nf = self.land({":(literal)odd.js": "fixed", "mcp-server/src/a.js": "unrelated improvement"})
+        r, nr = self.land({":(literal)odd.js": "defect"})
+        runner, rec = self.tick({nb: [self.block(nb)], nf: [self.fix_approve(nf, [nb])]})
+        self.assertEqual(rec["sha"], r)
+        self.assert_held(runner, rec, nb)
+
     def test_a_later_edit_of_the_fix_lines_holds_unless_it_carries_the_marker_too(self):
         b, f, nb, nf = self.two_commits()
         g, ng = self.land({"mcp-server/src/a.js": "fixed better"})
