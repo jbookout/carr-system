@@ -236,10 +236,15 @@ with psycopg.connect(dsn) as conn, conn.cursor() as cur:
     cur.execute("set session authorization carr_calendar_prebrief_resolver_joe")
     refused(cur, "select ops.resolve_calendar_prebrief_email_ref(%s)", ("prebrief-exact@example.test",), "22023", "exactly one live unmerged")
     cur.execute("reset session authorization")
+    # The twin stays live and ref-less while the ref-bearing party is
+    # tombstoned: the tombstone's live client ref must not answer for it.
+    cur.execute("update party set deleted_at=now() where id=%s", (parties[0],))
+    cur.execute("set session authorization carr_calendar_prebrief_resolver_joe")
+    refused(cur, "select ops.resolve_calendar_prebrief_email_ref(%s)", ("prebrief-exact@example.test",), "22023", "exactly one live unmerged")
+    cur.execute("reset session authorization")
     cur.execute("update party set deleted_at=now() where id=%s", (twin,))
     # A soft-deleted party whose client row is still live is a tombstoned
-    # identity, not a live contact: it refuses too.
-    cur.execute("update party set deleted_at=now() where id=%s", (parties[0],))
+    # identity, not a live contact: alone, it refuses too.
     cur.execute("set session authorization carr_calendar_prebrief_resolver_joe")
     refused(cur, "select ops.resolve_calendar_prebrief_email_ref(%s)", ("prebrief-exact@example.test",), "22023", "exactly one live unmerged")
     cur.execute("reset session authorization")

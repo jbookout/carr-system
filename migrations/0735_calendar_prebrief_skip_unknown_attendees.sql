@@ -27,9 +27,14 @@
 --   merged refs, only soft-deleted or merged party rows (even when a role row
 --   under one is still live), and a party with no canonical ref yet.
 --
--- The live-party requirement is stricter than 0229, which counted refs only:
--- a second live party row with the same address, or a tombstoned party whose
--- client/lead/vendor row is still live, used to resolve and now refuses.
+-- Only refs under that one live party are counted, so the ref returned is
+-- always that party's own. Versus 0229, which counted refs only:
+--   * now refuse: a second live party row with the same address, or a
+--     tombstoned party whose client/lead/vendor row is still live;
+--   * now resolves: one live party with exactly one ref whose address also
+--     sits on a tombstoned party with a different ref. That used to refuse as
+--     two refs; the tombstone is not a live contact, so the live party's own
+--     ref answers.
 --
 -- "Unknown" is decided at the PARTY level, not the ref level: a person the
 -- record already holds (pending, tombstoned, merged) is never reported as a
@@ -56,9 +61,12 @@ begin
   if v_parties=0 then
     return null;
   end if;
+  -- Only refs under a LIVE party count, so the one ref returned is always the
+  -- one live party's own (a tombstone's live role row can never answer).
   select count(distinct r.ref),min(r.ref) into v_live,v_ref
     from party p join v_ref_index r on r.party_id=p.id and not r.merged
-   where lower(btrim(p.email))=lower(btrim(p_email));
+   where lower(btrim(p.email))=lower(btrim(p_email))
+     and p.deleted_at is null and p.merged_into is null;
   if v_live_parties<>1 or v_live<>1 then
     raise exception using errcode='22023',message='calendar prebrief email resolver requires exactly one live unmerged canonical ref';
   end if;
