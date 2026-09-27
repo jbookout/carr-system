@@ -994,6 +994,19 @@ export async function runSalesforceBrowserReadReconciliation(options = {}) {
           catch { kernel = null; }
           return stopRun(reason_id, { kernel, index });
         };
+        if (verdict.decision === "log_in_permitted" || verdict.decision === "code_autofill_permitted") {
+          // The approved challenge permits only the sign-in action. Run every
+          // other page check on this observation before either click. Preserve
+          // the observed challenge in the stop receipt if a check fails.
+          let pageGuard;
+          try { pageGuard = evaluatePageObservation(
+            kernelPage(binding, snapshot.page, ui_contract_digest, "none")); }
+          catch (error) {
+            if (error?.name !== "V5RW02Error") throw error;
+            return stopHere(observationStopReason(error));
+          }
+          if (pageGuard.decision === "stop") return stopHere(pageGuard.reason_id);
+        }
         // The system signs in only before the first page; mid-read it stops.
         if (index > 0 && verdict.decision !== "stop") return stopHere("sign_in_prompt_mid_read");
         if (verdict.decision === "log_in_permitted") {

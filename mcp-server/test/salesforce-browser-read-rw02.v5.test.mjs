@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 
 import * as mod from "../src/salesforce-browser-read-rw02.v5.js";
 import {
-  FakeReaderDriver, FakeCodeDriver, SpyRecorder, bindingSource, carr, opp, page, runWith, pressed,
+  FakeReaderDriver, FakeCodeDriver, FakeClockClient, SpyRecorder, bindingSource, carr, opp, page, runWith, pressed,
   assertSafeStop, findingCalls,
   checkReadOnlyFacade, checkRecorderAllowlist, checkMissingJoeFlagged, checkCounterResets,
   checkCodeRetryBound, checkAbsenceNeedsCompleteRead, checkCodeStepNeedsSystemStart,
@@ -51,6 +51,39 @@ test("the sign-in facade exposes exactly the Log in press and the four code-step
   assert.equal(facade.readCode, undefined);
   assert.equal(Object.getPrototypeOf(facade), null);
   assert.ok(Object.isFrozen(facade));
+});
+
+test("sign-in actions require page safety before each click", async () => {
+  const mismatches = [
+    ["origin_mismatch", { observation: { origin: "https://wrong-origin.invalid" } }],
+    ["org_mismatch", { observation: { org_id: "00Dwrong" } }],
+    ["signed_in_account_mismatch", { observation: { signed_in_account_ref: "wrong-seat" } }],
+    ["ui_drift", { ui: { layout_ref: "changed-layout" } }],
+    ["unexpected_recipient", { observation: { recipients: ["someone-else"] } }],
+    ["policy_conflict", { observation: { policy_conflicts: ["read_forbidden"] } }],
+    ["inconsistent_result", { observation: { result_consistency: "inconsistent" } }],
+  ];
+  for (const [reason_id, mismatch] of mismatches) {
+    for (const step of ["password", "code"]) {
+      const log = [];
+      const recorder = new SpyRecorder();
+      const signInOperator = new FakeCodeDriver({ log, fillOn: [1] });
+      const password = page({ sign_in: { state: "password_prompt", credentials_autofilled: true },
+        ...(step === "password" ? mismatch : {}) });
+      const code = page({ sign_in: { state: "code_prompt" },
+        ...(step === "code" ? mismatch : {}) });
+      const reader = new FakeReaderDriver([[password, code, page()]]);
+      const out = await runWith(mod, [], { reader, recorder, signInOperator,
+        serverClock: mod.createServerClock(new FakeClockClient()) });
+      assertSafeStop(mod, out, recorder, { stop_class: mod.V5_RW02_SAFE_STOP_REASONS[reason_id], reason_id });
+      assert.equal(out.run_outcome, "stopped", `${step}: ${reason_id}`);
+      assert.equal(recorder.calls.filter(c => c.verb === "record-salesforce-page-stop").length, 1,
+        `${step}: ${reason_id} records its unsafe observation`);
+      assert.equal(recorder.calls.some(c => c.args.outcome === "clean"), false);
+      assert.deepEqual(log, step === "password" ? [] : ["clickLogIn"],
+        `${step}: ${reason_id} causes no click on the unsafe page`);
+    }
+  }
 });
 
 test("a full read run never touches any driver write method", async () => {
