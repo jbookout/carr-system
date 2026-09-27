@@ -227,6 +227,23 @@ with psycopg.connect(dsn) as conn, conn.cursor() as cur:
     cur.execute("set session authorization carr_calendar_prebrief_resolver_joe")
     refused(cur, "select ops.resolve_calendar_prebrief_email_ref(%s)", ("prebrief-pending@example.test",), "22023", "exactly one live unmerged")
     cur.execute("reset session authorization")
+    # Two live party rows share the address and only one carries a ref: that is
+    # two live contacts, so it refuses rather than attributing to the one with
+    # a ref. The twin is soft-deleted again before the later cases.
+    cur.execute("insert into party(kind,name,email,created_by,updated_by) values('person',%s,%s,%s,%s) returning id",
+                ("Calendar Prebrief twin", "prebrief-exact@example.test", actor, actor))
+    twin = required(cur, "ref-less twin party")[0]
+    cur.execute("set session authorization carr_calendar_prebrief_resolver_joe")
+    refused(cur, "select ops.resolve_calendar_prebrief_email_ref(%s)", ("prebrief-exact@example.test",), "22023", "exactly one live unmerged")
+    cur.execute("reset session authorization")
+    cur.execute("update party set deleted_at=now() where id=%s", (twin,))
+    # A soft-deleted party whose client row is still live is a tombstoned
+    # identity, not a live contact: it refuses too.
+    cur.execute("update party set deleted_at=now() where id=%s", (parties[0],))
+    cur.execute("set session authorization carr_calendar_prebrief_resolver_joe")
+    refused(cur, "select ops.resolve_calendar_prebrief_email_ref(%s)", ("prebrief-exact@example.test",), "22023", "exactly one live unmerged")
+    cur.execute("reset session authorization")
+    cur.execute("update party set deleted_at=null where id=%s", (parties[0],))
     cur.execute("set session authorization carr_calendar_prebrief_joe")
     refused(cur, "select ops.resolve_calendar_prebrief_email_ref(%s)", ("prebrief-exact@example.test",), "42501", "permission denied")
     cur.execute("reset session authorization")

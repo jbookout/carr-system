@@ -197,8 +197,9 @@ def _snapshot_from_raw(payload: Mapping[str, Any], sponsor: str, resolve, unknow
     """Build the DB-bound snapshot; unresolved outside attendees go to ``unknown``.
 
     ``resolve`` returns a ref, None for an address no party row carries
-    (skipped and counted, migration 0735), or raises for an ambiguous,
-    tombstoned or ref-less known identity, which still refuses the snapshot.
+    (skipped and counted, migration 0735), or raises for any known identity
+    that is not exactly one live party with exactly one live ref (ambiguous,
+    tombstoned or ref-less), which still refuses the snapshot.
     """
     if set(payload) != {"version", "window", "observed_calendars", "events"} or payload.get("version") != 1 or not isinstance(payload.get("events"), list):
         raise Refusal("collector payload has an unsupported shape")

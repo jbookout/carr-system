@@ -18,12 +18,18 @@
 --
 -- Three outcomes, decided here and nowhere else:
 --   no party row at all carries the address -> NULL: the caller skips and
---   (deleted rows included)                    counts the attendee
---   exactly one live unmerged ref             -> that ref (unchanged)
---   anything else: two or more live refs,     -> 22023, unchanged: the record
---   only merged refs, a soft-deleted party,       knows this person but not
---   or a party with no canonical ref yet          unambiguously, so it still
---                                                 refuses rather than choosing
+--   (deleted and merged rows included)         counts the attendee
+--   exactly one live party row AND exactly    -> that ref
+--   one live unmerged ref
+--   anything else -> 22023: the record knows this person but not unambiguously,
+--   so it refuses rather than choosing. That covers two or more live refs, two
+--   or more live party rows (even when only one of them carries a ref), only
+--   merged refs, only soft-deleted or merged party rows (even when a role row
+--   under one is still live), and a party with no canonical ref yet.
+--
+-- The live-party requirement is stricter than 0229, which counted refs only:
+-- a second live party row with the same address, or a tombstoned party whose
+-- client/lead/vendor row is still live, used to resolve and now refuses.
 --
 -- "Unknown" is decided at the PARTY level, not the ref level: a person the
 -- record already holds (pending, tombstoned, merged) is never reported as a
@@ -36,14 +42,15 @@
 
 create or replace function ops.resolve_calendar_prebrief_email_ref(p_email text)
 returns text language plpgsql security definer set search_path=ops,public,pg_temp as $$
-declare v_parties integer; v_live integer; v_ref text;
+declare v_parties integer; v_live_parties integer; v_live integer; v_ref text;
 begin
   perform ops.calendar_prebrief_resolver_sponsor();
   if p_email is null or length(p_email)>320
      or lower(btrim(p_email)) !~ '^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$' then
     raise exception using errcode='42501',message='calendar prebrief email resolver requires one bounded exact email';
   end if;
-  select count(*) into v_parties
+  select count(*),count(*) filter (where p.deleted_at is null and p.merged_into is null)
+    into v_parties,v_live_parties
     from party p
    where lower(btrim(p.email))=lower(btrim(p_email));
   if v_parties=0 then
@@ -52,7 +59,7 @@ begin
   select count(distinct r.ref),min(r.ref) into v_live,v_ref
     from party p join v_ref_index r on r.party_id=p.id and not r.merged
    where lower(btrim(p.email))=lower(btrim(p_email));
-  if v_live<>1 then
+  if v_live_parties<>1 or v_live<>1 then
     raise exception using errcode='22023',message='calendar prebrief email resolver requires exactly one live unmerged canonical ref';
   end if;
   return v_ref;
@@ -60,6 +67,7 @@ end $$;
 
 comment on function ops.resolve_calendar_prebrief_email_ref(text) is
   'One exact attendee email -> its single live canonical ref; NULL when no '
-  'party row carries it (caller skips and counts); 22023 for any other '
-  'known-but-not-unique identity. Raw email never stored. Migration 0735.';
+  'party row carries it (caller skips and counts); the ref only for exactly '
+  'one live party and one live ref; 22023 for any other known identity. Raw '
+  'email never stored. Migration 0735.';
 

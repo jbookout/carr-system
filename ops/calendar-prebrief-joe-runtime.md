@@ -52,8 +52,9 @@ keys (never an address; anyone holding a candidate address can confirm it
 against a key, so treat the keys as pseudonymous, not anonymous) in the child result, the runtime's tick output, and
 `out/calendar-prebrief-joe-last-run.json`. `./run.sh health` turns a nonzero
 count into intake work (rule d7c69aa6). An attendee matching two or more live
-contacts, only merged ones, or a party row with no canonical ref yet (including
-a soft-deleted one) still refuses, because a wrong attribution is worse than a
+contacts, two or more live party rows (even if only one carries a ref), only
+merged ones, only soft-deleted or merged party rows (even if a role row under one
+is still live), or a party row with no canonical ref yet still refuses, because a wrong attribution is worse than a
 missing one. "Unknown" means no party row carries the address at all, so a
 person the record already holds is never reported for intake to create twice.
 The count is not in the database receipt. The health finding is time-rolling
