@@ -11,6 +11,7 @@ import pathlib
 import queue
 import socket as socketlib
 import uuid
+import re
 import subprocess
 import sys
 import threading
@@ -347,6 +348,17 @@ class RouteShadow:
             finally:
                 self.queue.task_done()
 
+    @staticmethod
+    def _error_class(message) -> str | None:
+        """Only the exception class names and an HTTP status: a vendor error body may echo the request, and the
+        request is the utterance (review of #1323)."""
+        if not message:
+            return None
+        names = list(dict.fromkeys(re.findall(r"\b[A-Z][A-Za-z]*(?:Error|Exception|Unavailable|Timeout)\b",
+                                              str(message))))
+        status = re.search(r"\bHTTP (\d{3})\b", str(message))
+        return (": ".join(names) or "error") + (f" HTTP {status.group(1)}" if status else "")
+
     def _record(self, job: dict) -> None:
         text = job.pop("text")
         row = {"at": datetime.datetime.now(datetime.timezone.utc).isoformat(), "kind": "doc-voice",
@@ -362,10 +374,10 @@ class RouteShadow:
             out = (self.router or jev_router())(text)
             row.update(route=out.get("route"), target=out.get("target"), would_model=out.get("subagent_model"),
                        effort=out.get("effort"), abstained=bool(out.get("fallback")),
-                       scores=out.get("scores") or {}, jev_error=out.get("jev_error"),
+                       scores=out.get("scores") or {}, jev_error=self._error_class(out.get("jev_error")),
                        policy_version=out.get("policy_version"), policy_sha256=out.get("policy_sha256"))
         except Exception as exc:
-            row["error"] = f"{type(exc).__name__}: {exc}"[:300]
+            row["error"] = self._error_class(f"{type(exc).__name__}: {exc}")
         del text
         try:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)

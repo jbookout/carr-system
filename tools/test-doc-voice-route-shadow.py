@@ -298,6 +298,27 @@ class RealPolicyRouter(ShadowCase):
         self.assertTrue(row["abstained"])
         self.assertIn("TimeoutError", row["jev_error"])
 
+    def test_a_vendor_error_that_echoes_the_request_never_reaches_the_log(self):
+        # Review of #1323: jev_error carried up to 300 characters of the vendor's error body.
+        echo = RuntimeError(f"TypeSafeError: TypeSafe returned HTTP 422: {{'input': {UTTERANCE!r}}}")
+        shadow = self.install(convo_core.jev_router(judge=self.FakeJudge(error=echo)))
+        self.turn()
+        self.assertTrue(shadow.drain(10))
+        raw = self.log.read_text()
+        self.assertNotIn(UTTERANCE, raw)
+        row = self.rows()[0]
+        self.assertIn("HTTP 422", row["jev_error"])
+        self.assertIn("TypeSafeError", row["jev_error"])
+
+    def test_a_raising_router_logs_its_class_not_its_message(self):
+        def router(text):
+            raise ValueError(f"bad input {text}")
+        shadow = self.install(router)
+        self.turn()
+        self.assertTrue(shadow.drain(10))
+        self.assertNotIn(UTTERANCE, self.log.read_text())
+        self.assertEqual(self.rows()[0]["error"], "ValueError")
+
     def test_router_never_writes_jev_model_routes_own_text_row(self):
         judge = self.FakeJudge({"direct": 0.9})
         router = convo_core.jev_router(judge=judge)
