@@ -772,6 +772,10 @@ PYEOF
   # gate for mcp-server/src/core-rule-ids.js against ops/config/rule-
   # triage.v1.json's `home: "core"` set -- the generated module doctrine.js
   # reads because a Cloudflare Worker has no filesystem at request time.
+  # rule-boot-classes-check JOINED 2026-09-26 (gated rule boot): the same
+  # parity shape for mcp-server/src/rule-boot-classes.js against
+  # ops/config/rule-classes.v1.json, plus the rule boot's token budget (fails
+  # naming the largest always-on rules; never truncates).
   # rule-route-coverage JOINED 2026-09-26 (100%-recall rule delivery). Same
   # kind again: repository files only. It fails when an active rule has no
   # delivery route, a corpus rule is missing from ops/config/rule-routes.v1.json,
@@ -781,7 +785,8 @@ PYEOF
              reachability-check selftest-git-isolation-check \
              drive-dependency-inventory drive-retirement-readiness-gate \
              mechanism-doctrine-gate scheduler-cutover-coverage-gate \
-             boot-budget-check core-rule-ids-check rule-route-coverage; do
+             boot-budget-check core-rule-ids-check rule-route-coverage \
+             rule-boot-classes-check; do
     [ -f "ops/$inv.py" ] || continue
     run_quiet "$LOGDIR/gate-$inv.log" "$PY" "ops/$inv.py" \
       || { inherited_abort "$inv" "$PY" "ops/$inv.py"
@@ -1289,6 +1294,22 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
          node --test mcp-server/test/record-source-authority-live-pg.v5.test.mjs; then
       tail -40 "$LOGDIR/record-source-authority-live-pg.log" >&2
       bad migration "V5-F01 record-source-authority PostgreSQL acceptance failed"
+      return
+    fi
+  fi
+
+  # 0732: the F01/J102/RW02 actor gate as the Worker's REAL login shapes
+  # (app_writer in carr_writer, app_reader in carr_reader), not the NOLOGIN
+  # bundles every other fixture impersonates. It also covers the negative cast:
+  # exporter, owner-shaped, jobs-holding and unrelated logins stay refused, and
+  # the reader cannot write. One rolled-back transaction, role creation
+  # included.
+  if [ -f mcp-server/test/f01-login-bundle-membership-postgres.sql ]; then
+    if ! run_quiet "$LOGDIR/f01-login-bundle-membership-postgres.log" \
+         "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+         -f mcp-server/test/f01-login-bundle-membership-postgres.sql; then
+      tail -30 "$LOGDIR/f01-login-bundle-membership-postgres.log" >&2
+      bad migration "the F01 login-bundle membership proof (0732) failed"
       return
     fi
   fi

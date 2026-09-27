@@ -1,6 +1,16 @@
 {
   "PreToolUse": [
     {
+      "matcher": ".*",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "{{REPO}}/.venv/bin/python {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/rule-boot-gate.py",
+          "timeout": 5
+        }
+      ]
+    },
+    {
       "matcher": "Bash|Write|Edit|MultiEdit|Agent|WebFetch|WebSearch|Artifact|AskUserQuestion|mcp__.*",
       "hooks": [
         {
@@ -215,6 +225,28 @@
           "type": "command",
           "command": "{{REPO}}/.venv/bin/python {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/jev-supervisor.py",
           "timeout": 25
+        }
+      ]
+    },
+    {
+      "matcher": "Bash|mcp__.*__standing-context",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "{{REPO}}/.venv/bin/python {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/rule-boot-gate.py",
+          "timeout": 5
+        }
+      ]
+    }
+  ],
+  "PostToolUseFailure": [
+    {
+      "matcher": "Bash|mcp__.*__standing-context",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "{{REPO}}/.venv/bin/python {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/rule-boot-gate.py",
+          "timeout": 5
         }
       ]
     }
