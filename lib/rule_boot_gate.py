@@ -19,7 +19,10 @@ STATE LAYOUT (under out/rule-boot-gate/, gitignored, per machine):
                                           epoch
     <session>/fetched/<agent>/<key>/      one directory per context and digest
         p<N>        page N's fetch was ATTEMPTED (PreToolUse)
-        c<N>        page N came back as a real boot page (PostToolUse)
+        c<N>        page N came back as a real boot page (PostToolUse); holds
+                    the page text's length, summed against total_chars
+        u<N>        page N's answer, through a filter, was not the whole page:
+                    not read, and not an outage either
         failed      a fetch came back as an error: the store is unreachable
         unsupported the Worker rejected detail=boot: not deployed yet
         d<H>-<rnd>  one deny, made when H pages were confirmed
@@ -93,9 +96,50 @@ REACH_TOOLS = frozenset({"ToolSearch"})
 # fetch, so they are never denied (the deny cap covers custom ones).
 TOOLLESS_AGENT_TYPES = frozenset({"statusline-setup"})
 
-_BASH_FETCH = re.compile(
-    r"^(?P<prog>\./run\.sh|~/carr-system/run\.sh|/[^\s'\"`$;&|<>()\\]+/run\.sh)"
-    r"\s+call\s+standing-context(?:\s+'(?P<json>[^']*)')?\s*$")
+# THE BASH FETCH GRAMMAR (fixed 2026-09-27 after the gate held a live session's
+# real fetches). A fetch is recognised by what the command DOES, not by one
+# spelling of it:
+#     [cd <absolute dir> &&] <run.sh> call standing-context ['<json>'] [redirect]... [| <filter>]...
+# <run.sh> is any path (absolute, ~/, or relative to the cwd or the cd target)
+# that resolves to this checkout's run.sh or a git worktree of the same repo.
+# The only redirects are 2>&1, 2>/dev/null and </dev/null. Each <filter> only
+# reshapes what the fetch printed and cannot run, write or invent anything:
+#     jq [display options] [path filter]   paths only: .a.b, .[], .[0], |, ",", keys, length, type
+#     python3|python -c '<code>'           an AST whitelist: import json/sys, read stdin, print;
+#                                          no string-rewriting methods
+#     python3|python -m json.tool [opts]   (both Python forms only from a checkout root:
+#                                          Python imports from its working directory)
+#     head|tail [-n N | -N | -c N]         cat
+# Anything else — `;`, `||`, `&`, a second `&&`, `$`, backticks, a file
+# argument, a write, an unknown program — is not a fetch and is held as usual.
+# A relative cd is refused because PostToolUse may see the post-cd cwd.
+# Because no filter can invent or rewrite output, a page read through a pipe is confirmed
+# the same way as a direct one: by the answer's own digest, page and text.
+# KNOWN RESIDUALS (Jev, 2026-09-27, kind rule-boot-gate-fetch-recognition-
+# loopholes; top gap edited_worktree_run_sh 0.95), kept on purpose: the gate
+# trusts the run.sh it recognises, and a session can edit a worktree's run.sh
+# (or what it calls: tools/call-verb.py, tools/db-tap.py, mcp-server/local-verb.mjs)
+# or put another jq/python3 first on PATH. Closing that means pinning the whole
+# fetch chain, and the gate exists to put the rules in front of a cooperating
+# context, not to sandbox one; the permission system still judges every command.
+_SAFE_CHAR = re.compile(r"[A-Za-z0-9_./~+:=,@%-]")
+_REDIRECT = re.compile(r"(?:2>&1|2>\s*/dev/null|<\s*/dev/null)(?=[\s|]|$)")
+_JQ_OPTS = frozenset({"-r", "-c", "-S", "-M", "-C", "-j", "-a", "--raw-output", "--compact-output",
+                      "--sort-keys", "--tab", "--monochrome-output", "--color-output",
+                      "--ascii-output", "--join-output"})
+_JQ_PATH_TOKEN = re.compile(
+    r'\s+|\|\s*|,|\.\[\]|\.\["[A-Za-z0-9_]+"\]|\.[A-Za-z_][A-Za-z0-9_]*|\.|\[\d{1,4}\]|\[\]'
+    r'|(?:keys|length|type)(?![A-Za-z0-9_])')
+_HEAD_TAIL_ARGS = re.compile(r"(?:-n ?\+?\d{1,7}|-c ?\+?\d{1,9}|-\d{1,7}|-n\+?\d{1,7}|-c\+?\d{1,9})?")
+_JSON_TOOL_ARGS = re.compile(r"(?:\s*(?:--indent \d{1,2}|--sort-keys|--compact|--no-ensure-ascii|--tab))*")
+_PY_CALLABLES = frozenset({"print", "len", "sorted", "str"})
+# No string-transforming method (split, join, replace, strip, lower...): with
+# one, a filter could rewrite the page text and still print a valid rule_boot
+# (review of #1343: "maybe".join(text.split("NEVER")) passed as read).
+_PY_ATTRS = frozenset({"load", "loads", "dumps", "stdin", "stdout", "read", "write", "get", "keys",
+                       "values", "items"})
+_PY_KEYWORDS = frozenset({"indent", "ensure_ascii", "sort_keys", "end", "sep", "flush"})
+_PY_STR = re.compile(r"[A-Za-z0-9_ .#*\n\t-]*")
 # Only the Worker's own closed-vocabulary refusal of `detail` means "not
 # deployed yet"; any other error is an outage.
 _BOOT_UNSUPPORTED = re.compile(
@@ -234,31 +278,263 @@ def _page_of(args):
     return page if 1 <= page <= 9999 else None
 
 
-def _run_sh_is_this_repo(prog, cwd):
-    """True when `prog` names this checkout's run.sh (or a worktree of it)."""
+def _git_common_dir(base):
+    """The shared .git folder of the checkout rooted at `base`, or None.
+
+    A main checkout's .git is that folder. A worktree's .git file names
+    <common>/worktrees/<name>, whose `commondir` leads back to <common> and
+    whose `gitdir` names this worktree's .git again: git's own back-reference,
+    required here so a lookalike folder whose .git merely points into ours is
+    not taken for a worktree. Raises OSError on an unreadable pointer."""
+    dotgit = os.path.join(base, ".git")
+    if os.path.isdir(dotgit):
+        return os.path.realpath(dotgit)
+    with open(dotgit, encoding="utf-8") as fh:
+        pointer = fh.read(4096)
+    if not pointer.startswith("gitdir:"):
+        return None
+    gitdir = os.path.join(base, pointer.split(":", 1)[1].strip())
+    with open(os.path.join(gitdir, "gitdir"), encoding="utf-8") as fh:
+        back = fh.read(4096).strip()
+    if os.path.realpath(os.path.join(gitdir, back)) != os.path.realpath(dotgit):
+        return None
+    with open(os.path.join(gitdir, "commondir"), encoding="utf-8") as fh:
+        common = os.path.realpath(os.path.join(gitdir, fh.read(4096).strip()))
+    if os.path.dirname(os.path.dirname(os.path.realpath(gitdir))) != common:
+        return None
+    return common
+
+
+def _is_this_repos_run_sh(path):
+    """True when `path` is run.sh at the root of this checkout, or of the main
+    checkout or any git worktree of the same repository."""
     try:
-        if prog == "./run.sh":
-            base = os.path.realpath(cwd or "")
-            candidate = os.path.join(base, "run.sh")
-        elif prog.startswith("~/"):
-            candidate = os.path.expanduser(prog)
-            base = os.path.dirname(candidate)
-        else:
-            candidate = prog
-            base = os.path.dirname(candidate)
-        if not os.path.isfile(candidate):
+        if os.path.basename(path) != "run.sh" or not os.path.isfile(path):
             return False
-        mine = os.path.realpath(os.path.join(REPO, "run.sh"))
-        if os.path.realpath(candidate) == mine:
+        real = os.path.realpath(path)
+        if real == os.path.realpath(os.path.join(REPO, "run.sh")):
             return True
-        # A git worktree of this checkout: its .git file points into ours.
-        with open(os.path.join(base, ".git"), encoding="utf-8") as fh:
-            pointer = fh.read(4096)
-        common = os.path.realpath(os.path.join(REPO, ".git"))
-        return pointer.startswith("gitdir:") and os.path.realpath(
-            pointer.split(":", 1)[1].strip()).startswith(common + os.sep + "worktrees" + os.sep)
+        mine = _git_common_dir(REPO)
+        return bool(mine) and _git_common_dir(os.path.dirname(real)) == mine
     except OSError:
         return False
+
+
+def _is_checkout_root(folder):
+    """True when `folder` is the root of this checkout or a worktree of it."""
+    return bool(folder) and os.path.isabs(folder) and _is_this_repos_run_sh(os.path.join(folder, "run.sh")) \
+        and os.path.realpath(folder) == os.path.dirname(os.path.realpath(os.path.join(folder, "run.sh")))
+
+
+def _lex(command):
+    """The command as ("word", text, quoted) / ("op", "&&"|"|") / ("redir", text)
+    tokens, or None when it uses anything outside the fetch grammar."""
+    tokens, buf, state = [], [], {"quoted": False, "active": False}
+
+    def end_word():
+        if state["active"]:
+            tokens.append(("word", "".join(buf), state["quoted"]))
+        buf.clear()
+        state.update(quoted=False, active=False)
+
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if ch in " \t":
+            end_word()
+            i += 1
+            continue
+        if not state["active"]:
+            m = _REDIRECT.match(command, i)
+            if m:
+                tokens.append(("redir", re.sub(r"\s+", "", m.group(0)), False))
+                i = m.end()
+                continue
+        if ch in "'\"":
+            j = command.find(ch, i + 1)
+            if j < 0:
+                return None
+            inner = command[i + 1:j]
+            if ch == '"' and any(c in inner for c in "$`\\!"):
+                return None
+            buf.append(inner)
+            state.update(quoted=True, active=True)
+            i = j + 1
+            continue
+        if command.startswith("&&", i):
+            end_word()
+            tokens.append(("op", "&&", False))
+            i += 2
+            continue
+        if ch == "|" and not command.startswith("||", i) and not command.startswith("|&", i):
+            end_word()
+            tokens.append(("op", "|", False))
+            i += 1
+            continue
+        if not _SAFE_CHAR.fullmatch(ch):
+            return None
+        buf.append(ch)
+        state["active"] = True
+        i += 1
+    end_word()
+    return tokens
+
+
+def _expand(word, quoted, base):
+    """An absolute path for a path word, or None. Only an unquoted ~ expands."""
+    if not quoted and (word == "~" or word.startswith("~/")):
+        word = os.path.expanduser(word)
+    if os.path.isabs(word):
+        return word
+    return os.path.join(base, word) if base and os.path.isabs(base) else None
+
+
+def _python_code_ok(code):
+    """True when `code` can only read stdin as JSON or text and print it."""
+    import ast
+    import builtins
+    if len(code) > 2000:
+        return False
+    try:
+        tree = ast.parse(code, mode="exec")
+    except (SyntaxError, ValueError):
+        return False
+    allowed = (ast.Module, ast.Expr, ast.Assign, ast.Import, ast.alias, ast.For, ast.If, ast.IfExp,
+               ast.Compare, ast.BoolOp, ast.UnaryOp, ast.Call, ast.Attribute, ast.Name, ast.Constant,
+               ast.Subscript, ast.Tuple, ast.keyword, ast.Load, ast.Store, ast.And, ast.Or, ast.Not,
+               ast.Eq, ast.NotEq, ast.In, ast.NotIn, ast.Is, ast.IsNot, ast.Pass)
+    shadowable = set(dir(builtins)) - _PY_CALLABLES - {"True", "False", "None"}
+    for node in ast.walk(tree):
+        if not isinstance(node, allowed):
+            return False
+        if isinstance(node, ast.Import):
+            if any(a.name not in ("json", "sys") or (a.asname or "x").startswith("_") for a in node.names):
+                return False
+        elif isinstance(node, ast.Assign):
+            if not all(isinstance(t, ast.Name) for t in node.targets):
+                return False
+        elif isinstance(node, ast.For):
+            targets = node.target.elts if isinstance(node.target, ast.Tuple) else [node.target]
+            if node.orelse or not all(isinstance(t, ast.Name) for t in targets):
+                return False
+        elif isinstance(node, ast.Attribute):
+            if node.attr not in _PY_ATTRS or not isinstance(node.ctx, ast.Load):
+                return False
+        elif isinstance(node, ast.Name):
+            if node.id.startswith("_") or node.id in shadowable:
+                return False
+        elif isinstance(node, ast.Subscript):
+            if not isinstance(node.ctx, ast.Load) or not (
+                    isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str)):
+                return False
+        elif isinstance(node, ast.Constant):
+            value = node.value
+            if isinstance(value, str) and not _PY_STR.fullmatch(value):
+                return False
+            if not (value is None or isinstance(value, (str, int, float, bool))):
+                return False
+        elif isinstance(node, ast.keyword):
+            if node.arg not in _PY_KEYWORDS:
+                return False
+    return True
+
+
+def _jq_ok(args):
+    """jq with display options and at most one path-only filter, no files."""
+    flt, i = None, 0
+    while i < len(args):
+        a = args[i]
+        if a in _JQ_OPTS:
+            i += 1
+        elif a == "--indent" and i + 1 < len(args) and args[i + 1].isdigit():
+            i += 2
+        elif flt is None and not a.startswith("-"):
+            flt, i = a, i + 1
+        else:
+            return False
+    if flt is None:
+        return True
+    pos = 0
+    while pos < len(flt):
+        m = _JQ_PATH_TOKEN.match(flt, pos)
+        if not m or m.end() == pos:
+            return False
+        pos = m.end()
+    return bool(flt.strip())
+
+
+def _harmless_filter(stage):
+    if not stage or any(t[0] != "word" for t in stage):
+        return False
+    prog, args = stage[0][1], [t[1] for t in stage[1:]]
+    if prog == "jq":
+        return _jq_ok(args)
+    if prog in ("python3", "python"):
+        if len(args) == 2 and args[0] == "-c":
+            return _python_code_ok(args[1])
+        return args[:2] == ["-m", "json.tool"] and bool(_JSON_TOOL_ARGS.fullmatch(" ".join(args[2:])))
+    if prog in ("head", "tail"):
+        return bool(_HEAD_TAIL_ARGS.fullmatch(" ".join(args)))
+    if prog == "cat":
+        return not args
+    return False
+
+
+def parse_bash_fetch(command, cwd):
+    """(args, direct) when `command` is a standing-context fetch in the grammar
+    above (`direct` False when output passes through a filter), else None."""
+    tokens = _lex(str(command or "").strip())
+    if not tokens:
+        return None
+    base = cwd
+    if tokens[0][:2] == ("word", "cd") and not tokens[0][2]:
+        if len(tokens) < 4 or tokens[1][0] != "word" or tokens[2][:2] != ("op", "&&"):
+            return None
+        target = _expand(tokens[1][1], tokens[1][2], None)
+        if not target:
+            return None  # a relative cd: PostToolUse may see the post-cd cwd
+        base, tokens = target, tokens[3:]
+    # Any further && lands inside a stage below, where only words and
+    # redirects are allowed, so it is refused there.
+    stages, current = [], []
+    for t in tokens:
+        if t[:2] == ("op", "|"):
+            stages.append(current)
+            current = []
+        else:
+            current.append(t)
+    stages.append(current)
+    head = stages[0]
+    if not head or head[0][0] != "word":
+        return None
+    words = [t for t in head if t[0] == "word"]
+    if not all(t[0] in ("word", "redir") for t in head) or [t[0] for t in head[:len(words)]] != ["word"] * len(words):
+        return None  # a redirect only after the arguments
+    if len(words) not in (3, 4) or [w[1] for w in words[1:3]] != ["call", "standing-context"]:
+        return None
+    prog = words[0]
+    if "/" not in prog[1]:
+        return None  # a bare `run.sh` is looked up on PATH, not here
+    path = _expand(prog[1], prog[2], base)
+    if not path or not _is_this_repos_run_sh(path):
+        return None
+    if not all(_harmless_filter(stage) for stage in stages[1:]):
+        return None
+    # Python puts its working directory first on sys.path, so `import json`
+    # would run a json.py planted there. A Python filter runs only from a
+    # checkout root of this repo (review of #1343).
+    uses_python = any(stage[0][1] in ("python3", "python") for stage in stages[1:])
+    if uses_python and not _is_checkout_root(base):
+        return None
+    args = {}
+    if len(words) == 4:
+        try:
+            args = json.loads(words[3][1])
+        except ValueError:
+            return None
+        if not isinstance(args, dict):
+            return None
+    return args, len(stages) == 1
 
 
 def _carr_verb(name):
@@ -268,33 +544,32 @@ def _carr_verb(name):
     return None
 
 
+def _classify(tool_name, tool_input, cwd=None):
+    """(kind, page, direct): classify() plus whether a Bash fetch's output
+    reached the tool result unfiltered (always True for MCP)."""
+    name = str(tool_name or "")
+    if name in REACH_TOOLS:
+        return ("readonly", None, True)
+    verb = _carr_verb(name)
+    if verb in READ_ONLY_RULE_VERBS:
+        if verb == "standing-context":
+            return ("fetch", _page_of(tool_input), True)
+        return ("readonly", None, True)
+    if name == "Bash" and isinstance(tool_input, dict):
+        parsed = parse_bash_fetch(tool_input.get("command"), cwd)
+        if parsed:
+            return ("fetch", _page_of(parsed[0]), parsed[1])
+    return ("other", None, True)
+
+
 def classify(tool_name, tool_input, cwd=None):
     """("fetch", page), ("readonly", None) or ("other", None).
 
     "fetch" with a page is a boot page fetch, to be recorded; "fetch" with
     None is any other standing-context call (allowed, not recorded).
     """
-    name = str(tool_name or "")
-    if name in REACH_TOOLS:
-        return ("readonly", None)
-    verb = _carr_verb(name)
-    if verb in READ_ONLY_RULE_VERBS:
-        if verb == "standing-context":
-            return ("fetch", _page_of(tool_input))
-        return ("readonly", None)
-    if name == "Bash" and isinstance(tool_input, dict):
-        command = str(tool_input.get("command") or "").strip()
-        bash = _BASH_FETCH.match(command)
-        if bash and _run_sh_is_this_repo(bash.group("prog"), cwd):
-            raw = bash.group("json")
-            try:
-                args = json.loads(raw) if raw is not None else {}
-            except ValueError:
-                return ("other", None)
-            if not isinstance(args, dict):
-                return ("other", None)
-            return ("fetch", _page_of(args))
-    return ("other", None)
+    kind, page, _direct = _classify(tool_name, tool_input, cwd)
+    return kind, page
 
 
 def fetch_instructions(pages, digest=None, pages_total=None):
@@ -310,7 +585,10 @@ def fetch_instructions(pages, digest=None, pages_total=None):
         f"'{{\"detail\":\"boot\",\"page\":{first}}}'\n"
         "Until then only these calls, other standing-context calls, the read-only rule verbs "
         "(applicable-rules, resolve-doctrine-rules, read-doctrine, search-doctrine, doctrine-index, "
-        "doctrine-sections) and ToolSearch will run. This can never lock you out: a fetch that "
+        "doctrine-sections) and ToolSearch will run. A leading `cd <absolute repo path> &&` and a pipe "
+        "into a formatter (jq, python3 -c from the repo root, head) keep it a fetch if the whole JSON "
+        "prints; anything run after the fetch (&&, ;, ||, &) does not. "
+        "This can never lock you out: a fetch that "
         f"fails unlocks you with a notice, and after {DENY_CAP} holds without a fetch the gate "
         "stops holding this context.")
 
@@ -425,6 +703,8 @@ def arm_session(session_id, source, now=None):
            "epoch": secrets.token_hex(6)}
     if isinstance(boot, dict) and boot.get("digest") and int(boot.get("pages_total") or 0) >= 1:
         arm.update(status="armed", digest=boot["digest"], pages_total=int(boot["pages_total"]))
+        if int(boot.get("total_chars") or 0) >= 1:
+            arm["total_chars"] = int(boot["total_chars"])
         write_arm(session_id, arm)
         return fetch_instructions(list(range(1, arm["pages_total"] + 1)), arm["digest"], arm["pages_total"])
     if str(reason or "").startswith("not_deployed"):
@@ -515,31 +795,113 @@ def verdict(payload, now=None):
     total = int(arm.get("pages_total") or 0)
     missing = [p for p in range(1, total + 1) if p not in confirmed]
     if not missing:
-        return "allow", None
+        if not _short_text(folder, arm):
+            return "allow", None
+        return _hold(folder, len(confirmed), (
+            "RULE BOOT: every page came back, but their text does not add up to the boot's length "
+            f"({arm.get('total_chars')} characters), so part of it was cut on the way to you. "
+            "Fetch every page again and keep the whole JSON.\n")
+            + fetch_instructions(list(range(1, total + 1)), arm.get("digest"), total))
     if "failed" in names:
         return "allow", _notice(folder, "unavailable", UNAVAILABLE_NOTICE)
     # A page attempted but never answered: PostToolUse writes c<N> or failed,
     # so silence past the grace means the fetch failed without a result.
     now = now or time.time()
     for p in missing:
-        if p in attempted:
+        if p in attempted and f"u{p}" not in names:
             try:
                 age = now - os.path.getmtime(os.path.join(folder, f"p{p}"))
             except OSError:
                 continue
             if age > PENDING_GRACE_S:
                 return "allow", _notice(folder, "unavailable", UNAVAILABLE_NOTICE)
-    return _hold(folder, len(confirmed), fetch_instructions(missing, arm.get("digest"), total))
+    unreadable = [p for p in missing if f"u{p}" in names]
+    lead = (f"Page(s) {', '.join(map(str, unreadable))} came back without the whole page (a pipe or "
+            "formatter kept only part of it), so they do not count as read.\n") if unreadable else ""
+    source = str(arm.get("source") or "")
+    if not agent_id and not confirmed and source in ("compact", "resume", "clear"):
+        # The main context's pages are keyed by the arm's epoch, so reads made
+        # before this SessionStart do not count: say so, or a context that
+        # remembers reading them (in its summary) thinks the gate is broken.
+        lead += (f"This session was re-armed at SessionStart ({source}): pages read before it do "
+                 "not count, because this context no longer holds them. Read every page again.\n")
+    return _hold(folder, len(confirmed), lead + fetch_instructions(missing, arm.get("digest"), total))
+
+
+def _utf16_len(text):
+    """A string's length as JavaScript counts it (rule-boot.js total_chars)."""
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
+
+
+def _is_page(boot, page):
+    """A boot answer is page `page` read in full: it names that page and a
+    digest, and carries the page's text."""
+    try:
+        same_page = int(boot.get("page")) == int(page)
+    except (TypeError, ValueError):
+        return False
+    text = boot.get("text")
+    return same_page and str(boot.get("digest") or "").startswith("sha256:") and \
+        isinstance(text, str) and text != ""
+
+
+def _put(folder, name, content):
+    """Create or overwrite folder/name with `content`. None, or the OSError text."""
+    try:
+        os.makedirs(folder, exist_ok=True)
+        fd = os.open(os.path.join(folder, name), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        try:
+            os.write(fd, content.encode("utf-8"))
+        finally:
+            os.close(fd)
+        return None
+    except OSError as exc:
+        return errno.errorcode.get(exc.errno, "OSError") if exc.errno else str(exc)
+
+
+def _short_text(folder, arm):
+    """True when every page is confirmed but their texts' lengths do not add up
+    to the boot's total_chars: some page was cut on its way to the context.
+    Skipped (False) when the arm carries no total_chars or a page marker
+    carries no length (a marker written before lengths were recorded)."""
+    want = int(arm.get("total_chars") or 0)
+    if want < 1:
+        return False
+    got = 0
+    for p in range(1, int(arm.get("pages_total") or 0) + 1):
+        try:
+            with open(os.path.join(folder, f"c{p}"), encoding="utf-8") as fh:
+                raw = fh.read(32).strip()
+        except OSError:
+            return False
+        if not raw.isdigit():
+            return False
+        got += int(raw)
+    return got != want
+
+
+INCONCLUSIVE_NOTICE = (
+    "RULE BOOT: page {page}'s answer did not carry that whole page (its rule_boot JSON with the "
+    "digest, page {page} and the page text), so it does not count as read. A pipe or formatter "
+    "that keeps only part of the output, or cuts it, does this. Fetch page {page} again without "
+    "the pipe, or with one that prints the whole JSON.")
 
 
 def observe(payload):
     """PostToolUse on a boot fetch: record what came back, re-arm the session
-    on a new digest or page count. Returns a notice for the context, or None."""
+    on a new digest or page count. Returns a notice for the context, or None.
+
+    A page is confirmed only by an answer that is that page (_is_page), and
+    its text length is recorded so completion can be checked against the
+    boot's total_chars. When the fetch's output went through a filter, only a
+    confirmed page counts: anything else is INCONCLUSIVE (the filter, not the
+    store, may be what failed), which neither confirms a page nor unlocks
+    the context as an outage."""
     session_id = payload.get("session_id") or payload.get("sessionId")
     agent_id = payload.get("agent_id") or payload.get("agentId")
-    kind, page = classify(payload.get("tool_name") or payload.get("toolName") or "",
-                          payload.get("tool_input") or payload.get("toolInput") or {},
-                          payload.get("cwd"))
+    kind, page, direct = _classify(payload.get("tool_name") or payload.get("toolName") or "",
+                                   payload.get("tool_input") or payload.get("toolInput") or {},
+                                   payload.get("cwd"))
     if kind != "fetch" or page is None:
         return None
     response = payload.get("tool_response")
@@ -548,6 +910,10 @@ def observe(payload):
     if response is None:
         response = payload.get("error")
     answer, boot = read_answer(response)
+    if answer == "boot" and not _is_page(boot, page):
+        answer = "inconclusive"
+    if not direct and answer != "boot":
+        answer = "inconclusive"
     arm = read_arm(session_id)
     if answer in ("boot", "out_of_range"):
         total = int((boot or {}).get("pages_total") or 0)
@@ -559,6 +925,9 @@ def observe(payload):
                    "pages_total": total, "rearmed_by": "fetch", "armed_at": int(time.time())}
             arm.setdefault("epoch", secrets.token_hex(6))
             arm.pop("reason", None)
+            arm.pop("total_chars", None)
+            if int((boot or {}).get("total_chars") or 0) >= 1:
+                arm["total_chars"] = int(boot["total_chars"])
             try:
                 write_arm(session_id, arm)
             except OSError:
@@ -570,14 +939,17 @@ def observe(payload):
             return (f"RULE BOOT: page {page} does not exist; this boot has {total or 'fewer'} "
                     "page(s). Fetch the pages the gate names.")
         _touch(folder, f"p{page}")
-        _touch(folder, f"c{page}")
-        for stale in ("failed", "unsupported"):
+        _put(folder, f"c{page}", str(_utf16_len(boot["text"])))
+        for stale in ("failed", "unsupported", f"u{page}"):
             try:
                 os.unlink(os.path.join(folder, stale))
             except OSError:
                 pass
         return None
     folder = _fetch_dir(session_id, agent_id, _stand_in(arm))
+    if answer == "inconclusive":
+        _touch(folder, f"u{page}")
+        return INCONCLUSIVE_NOTICE.format(page=page)
     if answer == "unsupported":
         _touch(folder, "unsupported")
         return NOT_DEPLOYED_NOTICE
