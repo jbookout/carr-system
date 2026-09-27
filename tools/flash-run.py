@@ -64,7 +64,8 @@ RUNS_LOG = os.path.join(OUT, "flash-runs.jsonl")
 EXAMPLES_LOG = os.path.join(OUT, "flash-examples.jsonl")
 HANDOFF_DIR = os.path.join(OUT, "flash-handoffs")
 FLASH = os.environ.get("FLASH_BIN") or shutil.which("flash") or os.path.expanduser("~/.local/bin/flash")
-SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".mypy_cache", "out", "dist", "build"}
+SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache", "out", "dist",
+             "build"}
 # Runaway cutoff. A scoped slice that has not finished in ten minutes is thinking in circles
 # (the run-length benchmark task spent 214 s on its first try and still failed), and the
 # next attempt, which starts with that attempt's failure in its prompt, is the better bet.
@@ -82,6 +83,14 @@ def flash_port(url=None):
     return (u.port or 80) if u.hostname in ("127.0.0.1", "localhost") else None
 
 
+def scratch_for(work):
+    """The sandboxed run's HOME and TMPDIR live here: a sibling of the tree, never inside it, so what the launcher
+    (its CLAUDE_CONFIG_DIR session logs, caches) and the tests (pytest tmp_path) write there can never reach the
+    patch, the committed branch or the diff posted to the room (third review of #1324). Writable to the sandbox,
+    removed with the run."""
+    return os.path.realpath(work).rstrip(os.sep) + ".scratch"
+
+
 def sandbox_profile(work, *, reads=(), execs=(), port=None):
     """A macOS seatbelt profile for a model-driven run (the Flash agent and the tests it writes), the same shape as
     tools/flash-script.py sandbox_profile() (#1250/#1316). The task text is untrusted, so a planted line can steer
@@ -92,9 +101,10 @@ def sandbox_profile(work, *, reads=(), execs=(), port=None):
     dirs and the `execs` passed, so a binary the model writes into `work` can never be executed. mach-lookup,
     Apple Events and signals to other processes are denied, which closes `open`, the keychain agent and launchd."""
     work = os.path.realpath(work)
+    scratch = scratch_for(work)
     home = os.path.realpath(os.path.expanduser("~"))
     interp_prefixes = {os.path.realpath(p) for p in (sys.prefix, sys.base_prefix)}
-    reads = sorted({work, *interp_prefixes, *(os.path.realpath(p) for p in reads if p)})
+    reads = sorted({work, scratch, *interp_prefixes, *(os.path.realpath(p) for p in reads if p)})
     exec_dirs = sorted({"/usr/bin", "/bin", "/usr/libexec", "/opt/homebrew", "/usr/local/bin",
                         *(os.path.realpath(p) for p in execs if p)})
     # The running interpreter may live under an allowed dir already, but a virtualenv often copies python outside
@@ -103,7 +113,7 @@ def sandbox_profile(work, *, reads=(), execs=(), port=None):
     private = sorted({os.path.realpath(p) for p in (
         home, "/private/tmp", "/private/var/folders", "/Users/Shared", "/opt/homebrew/var", "/opt/homebrew/etc",
         "/usr/local/var", "/usr/local/etc", "/etc/ssh", "/Library/Keychains")})
-    allpaths = [*private, *reads, *exec_dirs, *interp_execs]
+    allpaths = [*private, *reads, *exec_dirs, *interp_execs, scratch]
     if any('"' in p or "\\" in p for p in allpaths):
         raise ValueError("path not expressible in a sandbox profile")
     net = f'(allow network-outbound (remote ip "localhost:{port}"))' if port else ""
@@ -113,7 +123,7 @@ def sandbox_profile(work, *, reads=(), execs=(), port=None):
             "(allow file-read* " + " ".join(f'(subpath "{p}")' for p in reads) + ")"
             "(allow file-read-metadata)"
             "(deny file-write*)"
-            f'(allow file-write* (subpath "{work}") (literal "/dev/null"))'
+            f'(allow file-write* (subpath "{work}") (subpath "{scratch}") (literal "/dev/null"))'
             # Git metadata is never writable from inside, anywhere: a `.git` file or directory, at any depth. Model
             # code that planted core.fsmonitor or a filter in a .git/config (or swapped a worktree's .git pointer)
             # would have it run by the UNSANDBOXED git that reads the patch back afterwards (re-review of #1324).
@@ -311,7 +321,10 @@ def _run_test(test_cmd, cwd, timeout, *, sandbox=False, reads=(), execs=(), port
     if sandbox:
         argv = sandbox_wrap(["/bin/sh", "-c", test_cmd], cwd, reads=reads, execs=execs, port=port)
         env = _sandbox_env(os.environ, cwd)
-        return bounded_run(argv, cwd, timeout, env=env)
+        try:
+            return bounded_run(argv, cwd, timeout, env=env)
+        finally:
+            drop_scratch(cwd)  # beside a real project on an interactive run, so never left behind
     return _sh(test_cmd, cwd, timeout)
 
 
@@ -334,11 +347,20 @@ def _tracked_files(cwd):
 GIT_HARDEN = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.untrackedCache=false"]
 
 
-def git_env(base=None):
-    env = dict(os.environ if base is None else base)
-    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"):
-        env.pop(key, None)
+_GIT_ENV_LIB = None
+
+
+def git_env(base=None, excludes=None):
+    """A git environment that trusts nothing inherited: ops/git_env.scrubbed_env drops the location variables
+    (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, ...) and every GIT_CONFIG_COUNT/KEY/VALUE pair (which can carry
+    core.worktree); system and global config are off. The only config added back is our own excludes file."""
+    global _GIT_ENV_LIB
+    if _GIT_ENV_LIB is None:
+        _GIT_ENV_LIB = _lib("git_env")
+    env = _GIT_ENV_LIB.scrubbed_env(base)
     env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0")
+    if excludes:
+        env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="core.excludesFile", GIT_CONFIG_VALUE_0=excludes)
     return env
 
 
@@ -347,10 +369,10 @@ def gitdir_for(dest):
     return os.path.realpath(dest).rstrip(os.sep) + ".gitdir"
 
 
-def tgit(gitdir, worktree, *args, timeout=120, env=None):
+def tgit(gitdir, worktree, *args, timeout=120, env=None, excludes=None):
     """git on `worktree` through an explicit, trusted git dir, hardened; never discovers a .git in the tree."""
     return _sh(["git", "--git-dir", gitdir, "--work-tree", worktree, *GIT_HARDEN, *args], worktree, timeout,
-               env=git_env(env))
+               env=git_env(env, excludes))
 
 
 def make_copy(cwd, dest):
@@ -478,17 +500,24 @@ def _dep_reads(cwd):
 
 
 def _sandbox_env(base, dest):
-    """Env for a sandboxed agent: a throwaway HOME and TMPDIR inside the writable attempt copy (so the Flash
-    launcher's $HOME/.claude-local and any temp files land where writes are allowed), and no inherited credential
-    beyond a minimal allowlist. The launcher re-exports the Anthropic base URL and model itself."""
-    home = os.path.join(dest, ".home")
+    """Env for a sandboxed run: a throwaway HOME and TMPDIR in the scratch folder BESIDE the tree (scratch_for), so
+    the Flash launcher's $HOME/.claude-local, caches and test temp files land where writes are allowed but never in
+    the patch; and no inherited credential beyond a minimal allowlist. The launcher re-exports the Anthropic base
+    URL and model itself. The caller removes the scratch folder (drop_scratch)."""
+    scratch = scratch_for(dest)
+    home, tmp = os.path.join(scratch, "home"), os.path.join(scratch, "tmp")
     os.makedirs(home, exist_ok=True)
+    os.makedirs(tmp, exist_ok=True)
     keep = {k: base[k] for k in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL",
                                  "ANTHROPIC_SMALL_FAST_MODEL", "CARR_FLASH_URL", "CARR_FLASH_MODEL",
                                  "MAX_THINKING_TOKENS", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
             if k in base}
-    return {"PATH": "/opt/homebrew/bin:/usr/bin:/bin", "HOME": home, "TMPDIR": dest, "LANG": "C.UTF-8",
+    return {"PATH": "/opt/homebrew/bin:/usr/bin:/bin", "HOME": home, "TMPDIR": tmp, "LANG": "C.UTF-8",
             "PYTHONDONTWRITEBYTECODE": "1", **keep}
+
+
+def drop_scratch(dest):
+    shutil.rmtree(scratch_for(dest), ignore_errors=True)
 
 
 def run_attempt(n, cwd, prompt, test_cmd, effort, workdir, think=True, rules_text=None, sandbox=False):

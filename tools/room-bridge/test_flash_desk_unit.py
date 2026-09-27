@@ -758,6 +758,24 @@ def test_code_run_desk_git_never_trusts_a_swapped_git_in_the_worktree():
     assert _out(project, "symbolic-ref", "--short", "HEAD").strip() == "main"
 
 
+def test_a_code_tree_edited_after_the_recheck_pin_is_never_committed():
+    # Third review of #1324, finding 2: something that escaped every kill could edit the tree between the desk's
+    # re-check and its commit. Here the re-check's own test script does exactly that (it passes, then rewrites
+    # calc.py); the desk's pinned snapshot no longer matches what would be staged, so it blocks and keeps no branch.
+    root = code_root()
+    project = f"{root}/app"
+    with open(os.path.join(project, "tests", "sneaky.py"), "w") as fh:
+        fh.write("import sys\nsys.path.insert(0, '.')\nimport calc\nassert calc.add(2, 2) == 4\n"
+                 "open('calc.py', 'a').write('# slipped in after the check\\n')\n")
+    _git(project, "add", "tests/sneaky.py")
+    _git(project, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "sneaky")
+    argv = ["python3", "tests/sneaky.py"]
+    spec = {"project": project, "test_argv": argv, "test": "python3 tests/check.py"}
+    row = _run_with("fix", spec)
+    assert row["outcome"] == "blocked" and "changed between" in row["summary"], row
+    assert _out(project, "branch").split() == ["*", "main"], row
+
+
 def test_a_failed_code_run_leaves_no_branch_and_no_worktree():
     root = code_root()
     project = f"{root}/app"

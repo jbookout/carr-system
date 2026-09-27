@@ -344,6 +344,39 @@ def _run_group(argv: list[str], cwd: str, env, timeout: float):
     return _flash_run_module().run_contained(argv, cwd, timeout, env=env)
 
 
+def _tree_snapshot(tg) -> dict | None:
+    """{path: blob id, or None when deleted} for every change in the tree against HEAD, via the trusted git dir.
+    Taken before the desk's re-check; the commit must stage exactly this, so a process that escaped every kill
+    (double-forked, setsid, environment emptied) cannot slip an edit in between the re-check and the commit."""
+    code, out = tg("status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames")
+    if code != 0:
+        return None
+    paths = sorted({entry[3:] for entry in out.split("\0") if len(entry) > 3})
+    snap: dict = {}
+    for path in paths:
+        if os.path.lexists(os.path.join(tg.tree, path)):
+            code, blob = tg("hash-object", "--no-filters", "--", path)
+            if code != 0:
+                return None
+            snap[path] = blob.strip()
+        else:
+            snap[path] = None
+    return snap
+
+
+def _staged_matches(tg, snap: dict) -> bool:
+    """True when the index holds exactly the snapshot: the same changed paths, with the same blobs."""
+    code, out = tg("diff", "--cached", "--name-only", "-z", "--no-renames")
+    if code != 0 or set(p for p in out.split("\0") if p) != set(snap):
+        return False
+    for path, blob in snap.items():
+        code, entry = tg("ls-files", "-s", "-z", "--", path)
+        staged = entry.split("\0")[0].split()[1] if code == 0 and entry.strip() else None
+        if staged != blob:
+            return False
+    return True
+
+
 def _worktree_gitdir(tree: str, project: str) -> str | None:
     """The linked worktree's admin git dir, read from its `.git` pointer right after `worktree add`, BEFORE any model
     code runs, and checked to sit inside the project's own .git/worktrees. Every later desk git call names it
@@ -388,7 +421,7 @@ FLASH_RUN_EXITS = {2: "flash-run could not start (launcher or environment)",
 
 
 def _run_flash_code(question: str, spec: dict, task_id: str | None, *, command: list[str] | None = None,
-                    timeout: float | None = None) -> dict:
+                    timeout: float | None = None, sandbox: bool | None = None) -> dict:
     """Run tools/flash-run.py on a NEW branch of the project, in a throwaway git worktree, never the project's own
     tree: {"outcome": "success"|"blocked", "summary", "text", "branch"?}. flash-run runs SANDBOXED (--sandbox on):
     it refuses here if macOS sandbox-exec is absent, so model-driven code never runs unsandboxed. It also gets
@@ -408,14 +441,16 @@ def _run_flash_code(question: str, spec: dict, task_id: str | None, *, command: 
                 "text": (text or reason).strip()}
 
     fr = _flash_run_module()
-    live = command is None  # tests inject a fake flash-run and their own harness; skip the real sandbox gate then
+    # The live desk always sandboxes. Tests that inject a fake flash-run choose: off on a machine without a sandbox,
+    # on to drive the real sandboxed re-check and commit.
+    live = (command is None) if sandbox is None else sandbox
     if live and not os.path.exists(fr.SANDBOX_EXEC):
         return blocked("no macOS sandbox on this machine; a Flash code run never executes model code unsandboxed")
     parent = tempfile.mkdtemp(prefix="flash-code-")
     tree = os.path.join(parent, "tree")
     exclude = os.path.join(parent, "exclude")
     with open(exclude, "w") as fh:
-        fh.write("/.venv\n/node_modules\n")
+        fh.write("/.venv\n/node_modules\n.pytest_cache/\n__pycache__/\n*.pyc\n")
     # the project's .venv and node_modules are linked into the worktree so its tests run; this keeps git (the desk's
     # and flash-run's) from ever adding those links, whatever the project's own .gitignore says
     env = dict(os.environ, GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="core.excludesFile", GIT_CONFIG_VALUE_0=exclude)
@@ -431,7 +466,8 @@ def _run_flash_code(question: str, spec: dict, task_id: str | None, *, command: 
 
     def tg(*args: str):
         assert admin is not None
-        return fr.tgit(admin, tree, *args, env=env)
+        return fr.tgit(admin, tree, *args, env=env, excludes=exclude)
+    tg.tree = tree  # type: ignore[attr-defined]
 
     try:
         if admin is None:
@@ -452,6 +488,10 @@ def _run_flash_code(question: str, spec: dict, task_id: str | None, *, command: 
             return blocked("the worktree left its new branch", tail)
         if deadline - time.monotonic() < 5:
             return blocked(f"no time left to re-check the test within {timeout:.0f}s", tail)
+        # Pin the content the re-check is about to prove; the commit must stage exactly this (_staged_matches).
+        snap = _tree_snapshot(tg)
+        if snap is None:
+            return blocked("could not record the change before the re-check", tail)
         # The re-check runs the (model-modified) test again, so it is sandboxed exactly as flash-run's own runs were.
         recheck = spec["test_argv"]
         recheck_env = None
@@ -468,6 +508,8 @@ def _run_flash_code(question: str, spec: dict, task_id: str | None, *, command: 
         tg("add", "-A")
         if tg("diff", "--cached", "--quiet")[0] == 0:
             return blocked("flash-run passed but left no change", tail)
+        if not _staged_matches(tg, snap):
+            return blocked("the tree changed between the desk's re-check and its commit", tail)
         subject = " ".join((question.splitlines() or ["code task"])[0].split())[:72] or "code task"
         code, out = tg("-c", "user.name=Flash (Model Room queue)", "-c", "user.email=flash@local",
                        "commit", "-q", "--no-verify", "-m", f"Flash queue task {task_id or ''}: {subject}".strip())

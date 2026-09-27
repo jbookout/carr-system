@@ -21,6 +21,10 @@ spec = importlib.util.spec_from_file_location("flash_run", os.path.join(HERE, "f
 assert spec and spec.loader
 fr = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fr)
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "ops"))
+from git_env import fixture_env  # noqa: E402
+
+ENV = fixture_env()  # every fixture git call below runs with this: no inherited GIT_DIR, no real config
 
 FAILURES: list[str] = []
 SANDBOXED = os.path.exists(fr.SANDBOX_EXEC)
@@ -174,7 +178,7 @@ def no_sandbox_binary_means_the_wrap_refuses():
 # A canary is a harmless hook script that only touches a scratch file. If git ever runs it from config the model
 # planted, the file appears. Each case asserts it never does; the control proves the canary really fires.
 def _git(cwd, *args):
-    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True, env=ENV)
 
 
 def _project():
@@ -210,7 +214,7 @@ def canary_control_fires_when_git_trusts_planted_config():
         fh.write(_fsmonitor(hook))
     with open(os.path.join(project, "a.txt"), "a") as fh:
         fh.write("two\n")
-    subprocess.run(["git", "status", "--short"], cwd=project, capture_output=True, text=True)
+    subprocess.run(["git", "status", "--short"], cwd=project, capture_output=True, text=True, env=ENV)
     assert os.path.exists(canary), "control: the canary did not fire, so the escape tests would prove nothing"
 
 
@@ -309,10 +313,135 @@ def sandboxed_test_cannot_swap_the_worktree_git_pointer():
     assert "POINTER_WRITE_OK" not in out and "POINTER_UNLINK_OK" not in out and "GITDIR_SWAP_OK" not in out, out
     fr.tgit(admin, tree, "add", "-A")
     code, diff = fr.tgit(admin, tree, "diff", "--cached")
-    subprocess.run(["git", "status", "--short"], cwd=tree, capture_output=True, text=True)  # even discovery-mode git
+    subprocess.run(["git", "status", "--short"], cwd=tree, capture_output=True, text=True, env=ENV)  # even discovery-mode git
     assert not os.path.exists(canary), f"the canary fired after the desk's git: {out}"
     assert "+two" in diff, (out, diff)
     _git(project, "worktree", "remove", "--force", tree)
+
+
+# ── patch content: only what the model edited (third review of #1324) ────────────────────────────────────────
+# The sandboxed run's HOME and TMPDIR must never land in the patch, the committed branch or the room diff: the
+# launcher writes its CLAUDE_CONFIG_DIR session logs and caches under HOME, and pytest's tmp_path lives under TMPDIR.
+TEST_WITH_TMP_PATH = (
+    "import os, sys\n"
+    "sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))\n"
+    "import calc\n"
+    "def test_add(tmp_path):\n"
+    "    (tmp_path / 'scratch.txt').write_text('pytest temp file')\n"
+    "    assert calc.add(2, 2) == 4\n"
+)
+
+LAUNCHER_SIM = '''
+import os
+home, tmp = os.environ["HOME"], os.environ["TMPDIR"]
+os.makedirs(os.path.join(home, ".claude-local", "projects", "p1"), exist_ok=True)
+open(os.path.join(home, ".claude-local", "projects", "p1", "session.jsonl"), "w").write("{{}}\\n")
+os.makedirs(os.path.join(home, ".cache"), exist_ok=True)
+open(os.path.join(home, ".cache", "blob"), "w").write("cache")
+open(os.path.join(tmp, "agent-temp.txt"), "w").write("temp")
+open("calc.py", "w").write("def add(a, b):\\n    return a + b\\n")
+print("SIM_DONE", home, tmp)
+'''
+
+
+def _pytest_project():
+    p = _work()
+    os.makedirs(os.path.join(p, "tests"))
+    with open(os.path.join(p, "calc.py"), "w") as fh:
+        fh.write("def add(a, b):\n    return a - b\n")
+    with open(os.path.join(p, "tests", "test_calc.py"), "w") as fh:
+        fh.write(TEST_WITH_TMP_PATH)
+    _git(p, "init", "-q", "-b", "main")
+    _git(p, "add", "calc.py", "tests/test_calc.py")
+    _git(p, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "base")
+    return p
+
+
+def _patch_files(patch):
+    return sorted({line.split(" b/", 1)[1] for line in patch.splitlines() if line.startswith("diff --git a/")})
+
+
+def sandbox_home_and_tmpdir_sit_beside_the_tree_not_in_it():
+    dest = _work()
+    env = fr._sandbox_env(os.environ, dest)
+    for key in ("HOME", "TMPDIR"):
+        path = os.path.realpath(env[key])
+        assert not (path == dest or path.startswith(dest + os.sep)), f"{key}={path} is inside the tree {dest}"
+        assert path.startswith(fr.scratch_for(dest) + os.sep), (key, path)
+    fr.drop_scratch(dest)
+    assert not os.path.exists(fr.scratch_for(dest))
+
+
+@sandboxed
+def patch_content_control_catches_a_home_inside_the_tree():
+    # Proves the patch-content check is sensitive: with the OLD layout (scratch inside the tree) the same run leaks
+    # the launcher's session log into the patch.
+    saved, saved_drop = fr.scratch_for, fr.drop_scratch
+    fr.scratch_for = lambda work: os.path.join(os.path.realpath(work), ".home")
+    fr.drop_scratch = lambda work: None  # the old layout never removed it
+    try:
+        patch = _attempt_patch()
+    finally:
+        fr.scratch_for, fr.drop_scratch = saved, saved_drop
+    assert "session.jsonl" in patch, "control: an in-tree HOME did not leak, so the real check would prove nothing"
+
+
+@sandboxed
+def attempt_patch_holds_only_the_model_edit_with_a_real_pytest_tmp_path_suite():
+    patch = _attempt_patch()
+    assert _patch_files(patch) == ["calc.py"], f"the attempt patch holds more than the model's edit: {_patch_files(patch)}"
+    for leaked in (".claude-local", "session.jsonl", ".cache", "agent-temp", "scratch.txt", ".pytest_cache", ".home"):
+        assert leaked not in patch, f"{leaked} reached the patch"
+
+
+def _attempt_patch():
+    project = _pytest_project()
+    work = _work()
+    dest = os.path.join(work, "attempt-1")
+    os.makedirs(dest)
+    fr.make_copy(project, dest)
+    # the agent step, as run_attempt runs it: sandboxed, with the sandbox HOME/TMPDIR
+    path = os.path.join(_work(), "sim.py")
+    with open(path, "w") as fh:
+        fh.write(LAUNCHER_SIM.format())
+    argv = fr.sandbox_wrap([sys.executable, path], dest, reads=[path, fr.gitdir_for(dest)], port=fr.flash_port())
+    code, out = fr.bounded_run(argv, dest, 60, env=fr._sandbox_env(os.environ, dest))
+    assert "SIM_DONE" in out, out
+    # the test step, as run_attempt runs it: a real pytest suite that uses tmp_path, sandboxed
+    code, out = fr._run_test(f"{sys.executable} -m pytest -q tests", dest, 120, sandbox=True, port=fr.flash_port())
+    assert code == 0, out
+    return fr.read_patch(dest)
+
+
+@sandboxed
+def desk_commit_holds_only_the_model_edit_with_a_real_pytest_tmp_path_suite():
+    sys.path.insert(0, os.path.join(HERE, "room-bridge"))
+    import flash_wire
+    project = _pytest_project()
+    sim = os.path.join(_work(), "sim.py")
+    with open(sim, "w") as fh:
+        fh.write(LAUNCHER_SIM.format())
+    fake = os.path.join(_work(), "fake-flash-run.py")
+    with open(fake, "w") as fh:
+        fh.write(
+            "import importlib.util, os, sys\n"
+            f"spec = importlib.util.spec_from_file_location('fr', {os.path.join(HERE, 'flash-run.py')!r})\n"
+            "fr = importlib.util.module_from_spec(spec); spec.loader.exec_module(fr)\n"
+            "a = sys.argv[1:]; cwd = a[a.index('--cwd') + 1]; test = a[a.index('--test') + 1]\n"
+            f"argv = fr.sandbox_wrap([sys.executable, {sim!r}], cwd, reads=[{sim!r}], port=fr.flash_port())\n"
+            "code, out = fr.bounded_run(argv, cwd, 60, env=fr._sandbox_env(os.environ, cwd))\n"
+            "assert 'SIM_DONE' in out, out\n"
+            "code, out = fr._run_test(test, cwd, 120, sandbox=True, port=fr.flash_port())\n"
+            "print(out); sys.exit(0 if code == 0 else 5)\n")
+    argv = [sys.executable, "-m", "pytest", "-q", "tests"]
+    spec = {"project": project, "test_argv": argv, "test": " ".join(argv)}
+    row = flash_wire._run_flash_code("Fix add", spec, "t_patch01", command=[sys.executable, fake], sandbox=True)
+    assert row["outcome"] == "success", row
+    files = subprocess.run(["git", "show", "--name-only", "--format=", row["branch"]], cwd=project,
+                           capture_output=True, text=True, env=ENV).stdout.split()
+    assert files == ["calc.py"], f"the desk committed more than the model's edit: {files}"
+    for leaked in (".claude-local", "session.jsonl", ".cache", "agent-temp", "scratch.txt", ".pytest_cache"):
+        assert leaked not in row["text"], f"{leaked} reached the diff posted to the room"
 
 
 # ── the timeout actually bounds the run ───────────────────────────────────────────────────────────────────────
