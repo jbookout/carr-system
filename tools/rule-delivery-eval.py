@@ -5,8 +5,8 @@ path and report precision, recall and F1 per path and for the system.
 The logic lives in ops/rule_delivery_eval.py (a library, for the reason
 ops/typesafe_client.py documents); this is its command line.
 
-    ops/rule-delivery-eval.py                       # committed synthetic fixture, Jev off
-    ops/rule-delivery-eval.py --cases out/rule-delivery-eval/gold.jsonl \\
+    tools/rule-delivery-eval.py                       # committed synthetic fixture, Jev off
+    tools/rule-delivery-eval.py --cases out/rule-delivery-eval/gold.jsonl \\
         --jev live --workers 4 --corpus out/rule-delivery-eval/corpus-live.json
 
 DRY RUN ALWAYS. No production log, cache or audit file is written (see the

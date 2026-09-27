@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """rule-delivery-eval-selftest.py -- acceptance test for the rule-delivery
-evaluation harness (ops/rule_delivery_eval.py, CLI ops/rule-delivery-eval.py).
+evaluation harness (ops/rule_delivery_eval.py, CLI tools/rule-delivery-eval.py).
 
 Written before the harness, and it is the harness's only proof that its
 numbers mean what they say. Everything here is offline: no Jev request, no
@@ -47,7 +47,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 LIB = REPO / "ops" / "rule_delivery_eval.py"
-CLI = REPO / "ops" / "rule-delivery-eval.py"
+CLI = REPO / "tools" / "rule-delivery-eval.py"
 FIXTURE = REPO / "ops" / "fixtures" / "rule-delivery-eval" / "cases.v1.json"
 
 sys.path.append(str(REPO / "lib"))

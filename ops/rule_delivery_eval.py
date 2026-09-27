@@ -55,7 +55,7 @@ micro numbers); per-stratum recall (0.88); notification turns scored apart
 from the pooled human numbers (0.85); pack-level scoring for the
 pack-granular drift observer (0.86).
 
-A LIBRARY. The command line is ops/rule-delivery-eval.py; this file carries
+A LIBRARY. The command line is tools/rule-delivery-eval.py; this file carries
 no entrypoint construct, for the sealed-inventory reason
 ops/typesafe_client.py documents.
 """
