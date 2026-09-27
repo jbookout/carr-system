@@ -3,7 +3,7 @@
 
 WHY THIS EXISTS. Found live 2026-09-27, when the orchestrator seat moved to a
 Codex Desktop thread and a room turn addressed to it never arrived. The desk
-dispatched it with `codex exec resume <thread>`, which opens a SECOND writer on
+dispatched it through the exec-resume path (dispatch._to_codex), which opens a SECOND writer on
 the thread; Codex refuses that while Desktop is the active writer ("thread ...
 already has an active writer"). So a thread that is open in Desktop can only
 take a new turn from inside the process that owns it.

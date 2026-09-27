@@ -3,7 +3,7 @@
 
 WHY THIS EXISTS, found live 2026-09-27: the orchestrator seat moved to a Codex
 Desktop thread and a room turn addressed to it failed with "thread ... already
-has an active writer". `codex exec resume` opens a second writer on the thread,
+has an active writer". The exec-resume path opens a second writer on the thread,
 which Codex refuses while the Desktop app holds it. The Desktop app routes a new
 turn on a thread it owns through its own IPC router (~/.codex/ipc/ipc.sock):
 initialize, then thread-owner-discovery, then thread-follower-start-turn.

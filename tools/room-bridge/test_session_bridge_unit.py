@@ -4,8 +4,8 @@
 Two things are proven here, end to end through bridge.run_once with fakes:
 
 1. THE ROOT CAUSE OF THE 2026-09-27 NON-DELIVERY. A codex-session desk bound to
-   a thread that Codex Desktop holds open cannot be reached by `codex exec
-   resume` (the thread already has an active writer). dispatch now asks the
+   a thread that Codex Desktop holds open cannot be reached by the exec-resume
+   path (the thread already has an active writer). dispatch now asks the
    Desktop IPC router first and, when the thread has an owner, starts the turn
    inside that owner. The bridge treats that as a live delivery (the session
    answers in its own window), never as a failure receipt.
@@ -152,7 +152,7 @@ def test_codex_desk_on_a_desktop_held_thread_goes_through_ipc_when_asked():
          mock.patch.object(dispatch.codex_ipc, "start_turn",
                            return_value={"status": "delivered", "thread_id": THREAD, "mode": "start"}) as st, \
          mock.patch.object(dispatch.subprocess, "run",
-                           side_effect=AssertionError("codex exec must not run")):
+                           side_effect=AssertionError("the exec-resume subprocess must not run")):
         out = dispatch._to_codex(entry, "hello", None, live_desktop=True)
     # its own status: the session answers in its window, so no caller that waits
     # for a desk-log result may mistake this for a log-backed "delivered"
@@ -188,7 +188,7 @@ def test_queue_task_to_a_desktop_held_thread_is_never_left_pending_for_a_retry()
     """The review's reproduction, end to end through the REAL queue executor and
     the REAL dispatch.dispatch, called the way bridge.py's dispatch_queue calls
     it. Only the external edges are faked: the Desktop router says the thread
-    has a live owner, and `codex exec resume` is refused as it is live."""
+    has a live owner, and the exec-resume subprocess is refused as it is live."""
     import queue_dispatch
     import test_queue_dispatch_unit as Q  # fixtures only
 
