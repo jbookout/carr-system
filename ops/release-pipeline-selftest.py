@@ -1534,6 +1534,22 @@ class FixForward(Base):
         self.assert_held(runner, rec, nb)
         self.assertIn("no longer present", rec["detail"])
 
+    def test_partial_revert_of_two_file_fix_holds(self):
+        b, nb = self.land({"mcp-server/src/a.js": "defect", "mcp-server/src/b.js": "old"})
+        f, nf = self.land({"mcp-server/src/a.js": "fixed", "mcp-server/src/b.js": "unrelated improvement"})
+        r, nr = self.land({"mcp-server/src/a.js": "defect"})
+        runner, rec = self.tick({nb: [self.block(nb)], nf: [self.fix_approve(nf, [nb])]})
+        self.assertEqual(rec["sha"], r)
+        self.assert_held(runner, rec, nb)
+
+    def test_partial_revert_of_one_file_fix_holds(self):
+        b, nb = self.land({"mcp-server/src/a.js": "bad one\nbad two\n"})
+        f, nf = self.land({"mcp-server/src/a.js": "good one\ngood two\n"})
+        r, nr = self.land({"mcp-server/src/a.js": "bad one\ngood two\n"})
+        runner, rec = self.tick({nb: [self.block(nb)], nf: [self.fix_approve(nf, [nb])]})
+        self.assertEqual(rec["sha"], r)
+        self.assert_held(runner, rec, nb)
+
     def test_a_later_edit_of_the_fix_lines_holds_unless_it_carries_the_marker_too(self):
         b, f, nb, nf = self.two_commits()
         g, ng = self.land({"mcp-server/src/a.js": "fixed better"})
@@ -1618,7 +1634,7 @@ class FixForward(Base):
             "a <pre> block is code":
                 "APPROVE\n<pre>\nFixes-Forward: #1342\n</pre>\n",
             "U+2028 renders mid-line, it is not a line break":
-                "APPROVE\nsee Fixes-Forward: #1342\n",
+                "APPROVE\nsee\u2028Fixes-Forward: #1342\n",
             "CRLF fence lines":
                 "APPROVE\r\n````\r\n```\r\nFixes-Forward: #1342\r\n````\r\n",
         }
@@ -1704,6 +1720,29 @@ class FixForward(Base):
                                  nm: [self.fix_approve(nm, [nb])]})
         self.assertEqual(rec["status"], "shipped", rec)
         self.assertEqual(rec["fix_forwards"][0]["fixing_pr"], nm)
+
+    def test_mismatched_or_shorter_fences_do_not_authorize_a_fix(self):
+        ff = rp.fixes_forward
+        examples = [
+            "````\n```\nFixes-Forward: #1342\n````",
+            "````\n~~~\nFixes-Forward: #1342\n````",
+            "~~~\n```\nFixes-Forward: #1342\n~~~",
+            "````\n````example\nFixes-Forward: #1342\n````",
+        ]
+        for example in examples:
+            with self.subTest(example=example):
+                body = f"APPROVE\nReviewed-SHA: {'a' * 40}\n{example}\n"
+                self.assertEqual(ff({"body": body}), set())
+
+    def test_fenced_example_marker_holds_full_release(self):
+        b, f, nb, nf = self.two_commits()
+        for example in (f"````\n```\nFixes-Forward: #{nb}\n````",
+                        f"````\n~~~\nFixes-Forward: #{nb}\n````",
+                        f"````\n````example\nFixes-Forward: #{nb}\n````"):
+            with self.subTest(example=example):
+                approval = approve(nf, body=f"APPROVE\nReviewed-SHA: {pr_head(nf)}\n{example}\n")
+                runner, rec = self.tick({nb: [self.block(nb)], nf: [approval]})
+                self.assert_held(runner, rec, nb)
 
 
 class SquashGitHub(FakeGitHub):
