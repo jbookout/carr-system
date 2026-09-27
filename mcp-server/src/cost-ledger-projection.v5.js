@@ -30,6 +30,7 @@ import {
   projectLedger,
   V5_SCOPE_TREE_SCHEMA_VERSION,
 } from "./hierarchical-cost-ledger.v5.js";
+import { detectCostThresholdCrossings } from "./cost-variance-replan.v5.js";
 
 export const METERING_PATH = "/api/v1/metering";
 export const METERING_SCHEMA_VERSION = "doctorcre-v5-metering.v1";
@@ -232,7 +233,18 @@ export async function commitLedgerOperation({ client, tree_ref: treeRef, step })
      outcome.accepted === false ? (outcome.reason_id ?? null) : null,
      ledgerVersion(nextLedger), ledgerStateDigest(nextLedger),
      JSON.stringify(newEntries)]);
-  return { ok: true, outcome, result: applied.rows[0].result };
+  const result = applied.rows[0].result;
+  // THE SIGNALS FIRE HERE AND ONLY HERE: on a commit that really moved the
+  // cell to a new version. A module-level replay (the operation id is already
+  // applied), a database-level replay and a refused cell move all fire nothing,
+  // and because the lock above is held, a second process that raced this one
+  // loads the ledger AFTER this commit and finds no crossing left to fire.
+  const moved = committed.committed === true && outcome.replayed !== true
+    && result?.ok === true && result?.replayed !== true;
+  const signals = moved
+    ? detectCostThresholdCrossings({ before_ledger: ledger, after_ledger: nextLedger })
+    : [];
+  return { ok: true, outcome, result, signals };
 }
 
 /**

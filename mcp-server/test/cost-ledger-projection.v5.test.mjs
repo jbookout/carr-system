@@ -515,3 +515,136 @@ test("MTR-CAP-NOT-USAGE: a cap is never usage, and an unenumerable source withho
     assert.equal(empty.coverage.sources.length, 1);
     assert.equal(empty.coverage.sources[0].enumerable, true);
   });
+
+// ---------------------------------------------------------------------------
+// V5-A04: budget signals fire on the durable path, once per crossing, and two
+// real connections racing each other cannot both fire one crossing or both
+// take one headroom.
+// ---------------------------------------------------------------------------
+
+const estimateSlice = units => ({
+  kind: "record_estimate",
+  operation: { operation_id: "op-estimate", node_id: "slice", expected_total_cost_units: units,
+    basis_digest: `sha256:${"a".repeat(64)}`, recorded_at: "2026-09-01T00:00:00.000Z" },
+});
+
+const actual = (id, units) => ({
+  kind: "post_actual",
+  operation: { operation_id: id, node_id: "slice", amount_units: units,
+    vendor_reference: `INV-${id}`, incurred_at: "2026-09-01T00:00:00.000Z" },
+});
+
+const sliceSignals = signals => signals.filter(s => s.node_id === "slice").map(s => s.kind).sort();
+
+test("A04-SIGNAL-DURABLE: a committed crossing fires once and its replay fires nothing", async t => {
+  const pg = await skipUnlessDatabase(t);
+  if (!pg) return;
+  const client = await connect(pg);
+  t.after(() => client.end().catch(() => {}));
+  const c = wrap(client);
+  const { treeRef } = await freshTree(c);
+
+  const commit = step => inTransaction(client, () => commitLedgerOperation({ client: c, tree_ref: treeRef, step }));
+  assert.deepEqual((await commit(estimateSlice(100))).signals, []);
+  assert.deepEqual((await commit(actual("op-a", 149))).signals, []);
+  const crossed = await commit(actual("op-b", 1));
+  assert.deepEqual(sliceSignals(crossed.signals), ["warning"]);
+  assert.equal(crossed.signals.find(s => s.node_id === "slice").ledger_version,
+    Number(crossed.result.ledger_version));
+
+  const replay = await commit(actual("op-b", 1));
+  assert.equal(replay.outcome.replayed, true);
+  assert.deepEqual(replay.signals, [], "a retry of the crossing operation fires nothing");
+
+  const ceiling = await commit(reserve("op-too-big", "res-too-big", 9999));
+  assert.equal(ceiling.outcome.accepted, false);
+  assert.deepEqual(ceiling.signals, [], "a refusal moves no money and fires nothing");
+});
+
+test("A04-SIGNAL-RACE: two connections racing one crossing under the row lock fire it once", async t => {
+  const pg = await skipUnlessDatabase(t);
+  if (!pg) return;
+  const owner = await connect(pg);
+  const first = await connect(pg);
+  const second = await connect(pg);
+  t.after(() => Promise.all([owner, first, second].map(x => x.end().catch(() => {}))));
+  const { treeRef } = await freshTree(wrap(owner));
+  const o = wrap(owner);
+  await inTransaction(owner, () => commitLedgerOperation({ client: o, tree_ref: treeRef, step: estimateSlice(100) }));
+  await inTransaction(owner, () => commitLedgerOperation({ client: o, tree_ref: treeRef, step: actual("op-base", 130) }));
+
+  // FIRST takes the lock and commits a 30-unit actual (130 -> 160). SECOND,
+  // offering its own 30-unit actual from the same starting point, blocks on
+  // the lock until FIRST commits, then loads 160 and moves it to 190.
+  await first.query("begin");
+  const firstResult = await commitLedgerOperation({ client: wrap(first), tree_ref: treeRef, step: actual("op-first", 30) });
+  await second.query("begin");
+  let secondDone = false;
+  const secondPromise = commitLedgerOperation({ client: wrap(second), tree_ref: treeRef, step: actual("op-second", 30) })
+    .then(value => { secondDone = true; return value; });
+  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.equal(secondDone, false, "the second writer must be waiting on the row lock");
+  await first.query("commit");
+  const secondResult = await secondPromise;
+  await second.query("commit");
+
+  assert.deepEqual(sliceSignals(firstResult.signals), ["warning"]);
+  assert.deepEqual(secondResult.signals, [], "190 percent is the same crossing; it does not fire again");
+  assert.equal(Number(secondResult.result.ledger_version), Number(firstResult.result.ledger_version) + 1);
+});
+
+test("A04-RESERVE-RACE: two connections racing reservations past the ceiling admit one", async t => {
+  const pg = await skipUnlessDatabase(t);
+  if (!pg) return;
+  const owner = await connect(pg);
+  const first = await connect(pg);
+  const second = await connect(pg);
+  t.after(() => Promise.all([owner, first, second].map(x => x.end().catch(() => {}))));
+  const { treeRef } = await freshTree(wrap(owner));
+
+  // The slice ceiling is 100. Each reservation of 60 fits an empty ledger on
+  // its own; together they do not.
+  await first.query("begin");
+  const firstResult = await commitLedgerOperation({ client: wrap(first), tree_ref: treeRef, step: reserve("op-r1", "res-r1", 60) });
+  await second.query("begin");
+  const secondPromise = commitLedgerOperation({ client: wrap(second), tree_ref: treeRef, step: reserve("op-r2", "res-r2", 60) });
+  await first.query("commit");
+  const secondResult = await secondPromise;
+  await second.query("commit");
+
+  assert.equal(firstResult.outcome.accepted, true);
+  assert.equal(secondResult.outcome.accepted, false);
+  assert.equal(secondResult.outcome.reason_id, "ceiling_exceeded");
+  assert.equal(secondResult.outcome.available_units, 40);
+  const open = await owner.query(
+    "select reservation_id from ops.cost_ledger_entry where tree_ref=$1 and kind='reservation'", [treeRef]);
+  assert.deepEqual(open.rows.map(r => r.reservation_id), ["res-r1"]);
+});
+
+test("A04-OVERDRAWN-DURABLE: an overdrawn stored hierarchy refuses a new reservation and keeps the old one open",
+  async t => {
+    const pg = await skipUnlessDatabase(t);
+    if (!pg) return;
+    const client = await connect(pg);
+    t.after(() => client.end().catch(() => {}));
+    const c = wrap(client);
+    const { treeRef } = await freshTree(c);
+    const commit = step => inTransaction(client, () => commitLedgerOperation({ client: c, tree_ref: treeRef, step }));
+
+    assert.equal((await commit(reserve("op-keep", "res-keep", 40))).outcome.accepted, true);
+    await commit(actual("op-over", 200));
+    const denied = await commit(reserve("op-new", "res-new", 1));
+    assert.equal(denied.outcome.reason_id, "ancestor_overdrawn");
+    // The slice breached its own ceiling, and a breach marks every ancestor.
+    assert.deepEqual(denied.outcome.overdrawn_node_ids, ["slice", "child", "root"]);
+    assert.match(denied.outcome.detail, /Nothing already reserved is changed/);
+    const stored = await client.query(
+      "select refusal_reason_id from ops.cost_ledger_operation where tree_ref=$1 and operation_id='op-new'", [treeRef]);
+    assert.equal(stored.rows[0].refusal_reason_id, "ancestor_overdrawn");
+
+    const cancelled = await commit({ kind: "cancel_reservation",
+      operation: { operation_id: "op-cancel-keep", reservation_id: "res-keep",
+        cancelled_at: "2026-09-01T00:00:00.000Z" } });
+    assert.equal(cancelled.outcome.accepted, true,
+      "the reservation that existed before the overdraw still cancels");
+  });

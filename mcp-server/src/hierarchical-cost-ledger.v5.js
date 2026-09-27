@@ -706,6 +706,14 @@ export function recordEstimate(ledger, operation) {
   });
 }
 
+/**
+ * The refusal text for `ancestor_overdrawn`. The typed part of the refusal is
+ * `reason_id`; this sentence is for the human reading the outcome, and it is a
+ * constant so every denial says the same thing in the same words.
+ */
+export const V5_ANCESTOR_OVERDRAWN_DETAIL =
+  "New reservation refused: this budget, or a budget that contains it, has committed more than its authorized ceiling. Nothing already reserved is changed; existing reservations can still be cancelled or turned into actual charges. To move forward, open an incident, replan the work, or get the ceiling explicitly raised. New reservations are accepted again once no containing budget is over its ceiling.";
+
 const RESERVE_KEYS = Object.freeze([
   "operation_id", "node_id", "reservation_id", "amount_units", "requested_at",
 ]);
@@ -753,6 +761,11 @@ export function reserve(ledger, operation) {
           node_id: nodeId,
           overdrawn_node_ids: overdrawnOnChain,
           requires: [...V5_OVERDRAWN_REMEDIES],
+          // Says what is denied, what is NOT touched, and what clears it. The
+          // middle clause matters: a refusal here withdraws nothing, and a
+          // caller holding an open reservation must not read this as a reason
+          // to abandon it.
+          detail: V5_ANCESTOR_OVERDRAWN_DETAIL,
         }),
       };
     }
@@ -1766,6 +1779,7 @@ export function v5CostLedgerProjection() {
     conversion_can_run_twice: false,
     retry_creates_a_second_entry: false,
     overdrawn_denies_new_reservation: true,
+    overdrawn_refusal_touches_existing_reservations: false,
     commit_names_the_base_it_was_computed_from: true,
     stale_base_commit_can_be_admitted: false,
     two_commits_from_one_base_can_both_land: false,
