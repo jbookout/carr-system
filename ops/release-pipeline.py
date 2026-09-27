@@ -471,7 +471,7 @@ def _glob_regex(glob: str) -> "re.Pattern[str]":
 
 
 def _glob_hit(path: str, glob: str) -> bool:
-    return bool(_glob_regex(glob).match(path))
+    return bool(_glob_regex(glob).fullmatch(path))
 
 
 def classify(paths: Iterable[str], lane_cfg: dict) -> tuple[bool, list[str]]:
@@ -482,8 +482,7 @@ def classify(paths: Iterable[str], lane_cfg: dict) -> tuple[bool, list[str]]:
     ignore = lane_cfg.get("non_release_globs") or []
     hits = []
     for p in paths:
-        p = p.strip()
-        if not p:
+        if p == "":
             continue
         if prefixes is not None and not any(p == x.rstrip("/") or p.startswith(x) for x in prefixes):
             continue

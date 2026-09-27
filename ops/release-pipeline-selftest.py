@@ -476,6 +476,15 @@ class Batching(Base):
         self.assertEqual(self.fx.records()[-1]["sha"], target)
         self.assertIn("upload", runner.names())
 
+    def test_trailing_space_source_name_is_not_treated_as_markdown(self):
+        target = self.fx.commit({"mcp-server/src/runtime.md ": "source"})
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live)
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
+        self.assertEqual(self.fx.records()[-1]["status"], "shipped")
+        self.assertEqual(self.fx.records()[-1]["sha"], target)
+        self.assertIn("upload", runner.names())
+
     def test_released_main_is_a_noop(self):
         runner = FakeRunner()
         self.assertEqual(self.fx.pipeline(runner).tick(["worker"]), 0)
@@ -1909,6 +1918,26 @@ class CanaryAndCI(Base):
         gh = FakeGitHub(red_ci_prs={FakeGitHub().pr_number(first)})
         self.assertEqual(self.fx.pipeline(runner, github=gh).tick(["worker"]), 0,
                          self.fx.records())
+        self.assertEqual(runner.calls, [])
+        rec = self.fx.records()[-1]
+        self.assertEqual(rec["reason"], "ci_not_green")
+
+    def test_trailing_space_release_path_cannot_hide_failed_ci(self):
+        first = self.fx.commit({"mcp-server/src/runtime.md ": "1"})
+        self.fx.commit({"mcp-server/src/ordinary.js": "2"})
+        runner = FakeRunner()
+        gh = FakeGitHub(red_ci_prs={FakeGitHub().pr_number(first)})
+        self.assertEqual(self.fx.pipeline(runner, github=gh).tick(["worker"]), 0)
+        self.assertEqual(runner.calls, [])
+        rec = self.fx.records()[-1]
+        self.assertEqual(rec["reason"], "ci_not_green")
+
+    def test_trailing_newline_release_path_cannot_hide_failed_ci(self):
+        first = self.fx.commit({"mcp-server/src/runtime.md\n": "1"})
+        self.fx.commit({"mcp-server/src/ordinary.js": "2"})
+        runner = FakeRunner()
+        gh = FakeGitHub(red_ci_prs={FakeGitHub().pr_number(first)})
+        self.assertEqual(self.fx.pipeline(runner, github=gh).tick(["worker"]), 0)
         self.assertEqual(runner.calls, [])
         rec = self.fx.records()[-1]
         self.assertEqual(rec["reason"], "ci_not_green")
