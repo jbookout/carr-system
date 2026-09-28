@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Behavioral tests for the progress-board command line surface."""
 
+import copy
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 
 
@@ -261,6 +264,193 @@ class ProgressBoardCLI(unittest.TestCase):
         self.assertIn("stall-pulse", html)
         self.assertIn("prefers-reduced-motion:reduce", html)
 
+    def test_stall_banner_uses_render_age_and_fails_closed(self):
+        if not shutil.which("node"):
+            self.skipTest("node is needed to execute the inline browser script")
+        self.run_board("init", "demo", "--title", "Demo")
+        html = (self.root / "boards" / "demo.html").read_text()
+        script = html.split("<script>", 1)[1].split("</script>", 1)[0]
+        harness = r"""
+const vm = require('node:vm');
+const source = require('node:fs').readFileSync(0, 'utf8');
+const banner = {hidden: true};
+let tick;
+let now = Date.parse(source.match(/var renderedAt=Date.parse\('([^']+)'\)/)[1]);
+const FakeDate = {parse: Date.parse, now: () => now};
+function execute(code, target) {
+  vm.runInNewContext(code, {
+    Date: FakeDate, Number, document: {
+      getElementById: () => target, querySelectorAll: () => []
+    }, setInterval: callback => {if (!tick) tick = callback},
+    addEventListener: () => {}, location: {pathname: '/demo.html'},
+    sessionStorage: {getItem: () => null, setItem: () => {}}
+  });
+}
+execute(source, banner);
+if (!banner.hidden) process.exit(1);
+now += 360001; tick();
+if (banner.hidden) process.exit(2);
+const invalid = {hidden: true};
+execute(source.replace(/var renderedAt=Date.parse\('[^']+'\)/,
+                       "var renderedAt=Date.parse('invalid')"), invalid);
+if (invalid.hidden) process.exit(3);
+const future = {hidden: true};
+execute(source.replace(/var renderedAt=Date.parse\('[^']+'\)/,
+                       `var renderedAt=Date.parse('${new Date(now + 3600000).toISOString()}')`), future);
+if (future.hidden) process.exit(4);
+"""
+        result = subprocess.run(["node", "-e", harness], input=script, text=True,
+                                capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_completed_html_has_links_but_no_automatic_external_requests(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("task", "demo", "a", "--title", "A", "--status", "done",
+                       "--executor", "Codex", "--pr", "42", "--stage", "live",
+                       "--evidence", "Observed outcome")
+        self.run_board("deliver", "demo", "--title", "Link", "--link", "https://example.com")
+        html = (self.root / "boards" / "demo.html").read_text()
+        self.assertIn('href="https://github.com/jbookout/carr-system/pull/42"', html)
+        self.assertIn('href="https://example.com"', html)
+
+        class ResourceCollector(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.resources = []
+
+            def handle_starttag(self, tag, attrs):
+                values = dict(attrs)
+                self.resources.extend(values.get(name) for name in
+                                      ("src", "srcset", "poster", "data", "action", "formaction")
+                                      if values.get(name))
+                if tag == "link" and values.get("href"):
+                    self.resources.append(values["href"])
+
+        parsed = ResourceCollector()
+        parsed.feed(html)
+        self.assertEqual(parsed.resources, [])
+        self.assertNotRegex(html, r"@import|url\(['\"]?https?://|\b(?:fetch|XMLHttpRequest|WebSocket|EventSource|sendBeacon)\s*\(")
+
+    def test_legacy_live_without_evidence_and_done_without_pr_fail_closed(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("task", "demo", "legacy", "--title", "Legacy", "--status", "done",
+                       "--executor", "Codex", "--pr", "42")
+        state = self.read_state("demo")
+        state["tasks"]["legacy"]["stage"] = "measured"
+        state["tasks"]["legacy"]["status"] = "measured"
+        (self.root / "boards" / "demo.json").write_text(json.dumps(state))
+        self.run_board("task", "demo", "plain", "--title", "Plain", "--status", "done",
+                       "--executor", "Codex")
+        html = (self.root / "boards" / "demo.html").read_text()
+        self.assertIn("0 completed · 2 remaining", html)
+        self.assertNotIn('data-task-id="legacy" data-stage="live"', html)
+        self.assertNotIn('data-task-id="plain" data-stage="merged"', html)
+
+    def test_reopening_live_clears_completion(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("task", "demo", "a", "--title", "A", "--status", "done",
+                       "--executor", "Codex", "--stage", "live", "--evidence", "Observed outcome")
+        self.run_board("task", "demo", "a", "--status", "running")
+        task = self.read_state("demo")["tasks"]["a"]
+        self.assertEqual(task["status"], "running")
+        self.assertNotIn("stage", task)
+        self.assertNotIn("evidence", task)
+        self.assertNotIn("completed_at", task)
+
+    def test_malformed_github_payload_keeps_previous_status(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("task", "demo", "a", "--title", "A", "--status", "running",
+                       "--executor", "Codex", "--pr", "42")
+        prior = self.read_state("demo")
+        self.env.pop("PROGRESS_BOARD_SKIP_GH")
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        gh = bin_dir / "gh"
+        fixture = self.root / "gh.json"
+        gh.write_text("#!/usr/bin/env python3\nimport os\nfrom pathlib import Path\n"
+                      "print(Path(os.environ['BOARD_GH_FIXTURE']).read_text())\n")
+        gh.chmod(0o755)
+        self.env["PATH"] = str(bin_dir) + os.pathsep + self.env["PATH"]
+        self.env["BOARD_GH_FIXTURE"] = str(fixture)
+        valid = {
+            "state": "OPEN", "isDraft": False, "headRefOid": "a" * 40,
+            "author": {"login": "builder"},
+            "statusCheckRollup": [{"conclusion": "SUCCESS", "status": "COMPLETED"}],
+            "comments": [{"author": {"login": "reviewer"},
+                          "authorAssociation": "COLLABORATOR",
+                          "body": "APPROVE\nReviewed-SHA: " + "a" * 40,
+                          "createdAt": "2026-09-28T10:00:00Z"}],
+        }
+        fields = [
+            (("state",), []), (("isDraft",), []), (("headRefOid",), []),
+            (("author",), []), (("author", "login"), []),
+            (("statusCheckRollup",), {}), (("statusCheckRollup", 0), []),
+            (("statusCheckRollup", 0, "conclusion"), []),
+            (("statusCheckRollup", 0, "status"), []),
+            (("comments",), {}), (("comments", 0), []),
+            (("comments", 0, "author"), []),
+            (("comments", 0, "author", "login"), []),
+            (("comments", 0, "authorAssociation"), []),
+            (("comments", 0, "body"), []),
+            (("comments", 0, "createdAt"), []),
+        ]
+        for path, wrong_type in fields:
+            for missing in (False, True):
+                if missing and isinstance(path[-1], int):
+                    continue
+                with self.subTest(path=path, missing=missing):
+                    payload = copy.deepcopy(valid)
+                    parent = payload
+                    for part in path[:-1]:
+                        parent = parent[part]
+                    if missing:
+                        del parent[path[-1]]
+                    else:
+                        parent[path[-1]] = wrong_type
+                    fixture.write_text(json.dumps(payload))
+                    self.run_board("render", "demo")
+                    self.assertEqual(self.read_state("demo"), prior)
+                    self.assertIn("GitHub PR data unavailable or invalid",
+                                  (self.root / "boards" / "demo.html").read_text())
+        fixture.write_text("[]")
+        self.run_board("render", "demo")
+        self.assertEqual(self.read_state("demo"), prior)
+
+    def test_review_readiness_requires_independent_trusted_latest_verdict(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("task", "demo", "a", "--title", "A", "--status", "running",
+                       "--executor", "Codex", "--pr", "42")
+        self.env.pop("PROGRESS_BOARD_SKIP_GH")
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        gh = bin_dir / "gh"
+        fixture = self.root / "gh.json"
+        gh.write_text("#!/usr/bin/env python3\nimport os\nfrom pathlib import Path\n"
+                      "print(Path(os.environ['BOARD_GH_FIXTURE']).read_text())\n")
+        gh.chmod(0o755)
+        self.env["PATH"] = str(bin_dir) + os.pathsep + self.env["PATH"]
+        self.env["BOARD_GH_FIXTURE"] = str(fixture)
+        sha = "a" * 40
+        base = {"state": "OPEN", "isDraft": False, "headRefOid": sha,
+                "author": {"login": "builder"},
+                "statusCheckRollup": [{"conclusion": "SUCCESS", "status": "COMPLETED"}]}
+        def comment(login, association, body, created):
+            return {"author": {"login": login}, "authorAssociation": association,
+                    "body": body, "createdAt": created}
+        approve = "APPROVE\nReviewed-SHA: " + sha + "\n"
+        cases = [
+            ([comment("builder", "OWNER", approve, "2026-09-28T10:00:00Z")], "Awaiting review"),
+            ([comment("outsider", "NONE", approve, "2026-09-28T10:00:00Z")], "Awaiting review"),
+            ([comment("reviewer", "COLLABORATOR", approve, "2026-09-28T10:00:00Z")], "Ready to merge"),
+            ([comment("reviewer", "COLLABORATOR", approve, "2026-09-28T10:00:00Z"),
+              comment("reviewer", "COLLABORATOR", "BLOCK\nNeeds a fix", "2026-09-28T11:00:00Z")], "Review blocked"),
+        ]
+        for comments, expected in cases:
+            with self.subTest(expected=expected, comments=comments):
+                fixture.write_text(json.dumps({**base, "comments": comments}))
+                self.run_board("render", "demo")
+                self.assertEqual(self.read_state("demo")["tasks"]["a"]["pr_phase"], expected)
+
     def test_pr_derivation_and_offline_retention(self):
         self.run_board("init", "demo", "--title", "Demo")
         self.run_board("task", "demo", "a", "--title", "A", "--status", "running",
@@ -277,16 +467,20 @@ class ProgressBoardCLI(unittest.TestCase):
         self.env["BOARD_GH_FIXTURE"] = str(fixture)
         sha = "a" * 40
         base = {"state": "OPEN", "isDraft": False, "headRefOid": sha,
+                "author": {"login": "builder"},
                 "statusCheckRollup": [{"conclusion": "SUCCESS", "status": "COMPLETED"}],
                 "comments": []}
+        def review(body):
+            return {"author": {"login": "reviewer"}, "authorAssociation": "COLLABORATOR",
+                    "createdAt": "2026-09-28T10:00:00Z", "body": body}
         cases = [
             ({"state": "MERGED"}, "done", "merged", "Merged"),
             ({"state": "CLOSED"}, "failed", "ci", "Closed unmerged"),
             ({"isDraft": True}, "running", "build", "Draft"),
             ({"statusCheckRollup": [{"conclusion": "FAILURE", "status": "COMPLETED"}]}, "blocked", "ci", "Checks failing"),
             ({"statusCheckRollup": [{"conclusion": "", "status": "IN_PROGRESS"}]}, "running", "ci", "CI"),
-            ({"comments": [{"body": "APPROVE\nReviewed-SHA: " + "b" * 40 + "\n"}]}, "review", "review", "Awaiting review"),
-            ({"comments": [{"body": "APPROVE\nReviewed-SHA: " + sha + "\n"}]}, "review", "review", "Ready to merge"),
+            ({"comments": [review("APPROVE\nReviewed-SHA: " + "b" * 40 + "\n")]}, "review", "review", "Awaiting review"),
+            ({"comments": [review("APPROVE\nReviewed-SHA: " + sha + "\n")]}, "review", "review", "Ready to merge"),
         ]
         previous_update = self.read_state("demo")["tasks"]["a"]["updated_at"]
         for change, status, stage, phase in cases:
@@ -306,7 +500,7 @@ class ProgressBoardCLI(unittest.TestCase):
         gh.write_text("#!/bin/sh\nexit 1\n")
         self.run_board("render", "demo")
         self.assertEqual(self.read_state("demo"), prior)
-        self.assertIn("GitHub unreachable", (self.root / "boards" / "demo.html").read_text())
+        self.assertIn("GitHub PR data unavailable or invalid", (self.root / "boards" / "demo.html").read_text())
         gh.write_text("#!/usr/bin/env python3\nimport os\nfrom pathlib import Path\n"
                       "print(Path(os.environ['BOARD_GH_FIXTURE']).read_text())\n")
         fixture.write_text(json.dumps({**base, "state": "MERGED"}))
