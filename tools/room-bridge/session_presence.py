@@ -97,10 +97,12 @@ def _parse(ts: str | None) -> datetime | None:
 
 def this_host() -> str:
     """A stable per-machine name. The DHCP hostname ("Mac") is the same on
-    every Mac on the network, so macOS's LocalHostName ("Mac-Studio") wins."""
+    every Mac on the network, so macOS's LocalHostName ("Mac-Studio") wins.
+    scutil is called by absolute path: launchd PATHs can lack /usr/sbin, and
+    the DHCP fallback then made the bridge treat local sessions as remote."""
     name = ""
     try:
-        name = subprocess.run(["scutil", "--get", "LocalHostName"], capture_output=True,
+        name = subprocess.run(["/usr/sbin/scutil", "--get", "LocalHostName"], capture_output=True,
                               text=True, timeout=1).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         pass
