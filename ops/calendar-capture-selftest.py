@@ -174,5 +174,98 @@ p = run(root, stub, "--canary", "--days", "7", extra_env={
 check("canary bypasses normal intake and emits only its strict aggregate",
       p.returncode == 0 and 'calendar-capture: canary-result' in p.stdout)
 
+# 7. One unresolved external attendee cannot suppress an independently proven
+# exact match.  The intake still refuses the run; only the exact match is
+# eligible for the canonical activity call.  All identities here are synthetic.
+mixed = {
+    "counts": {"emails": 2, "exact": 1, "domain": 0, "unknown": 1,
+               "internal": 0, "upcoming": 0},
+    "exact": [{"ref": "C-TEST", "email": "known@example.test",
+               "last_seen": "2026-09-25", "events": [{"day": "2026-09-25",
+               "title": "Synthetic meeting"}]}],
+    "domain": [],
+    "unknown": [{"email": "new@example.test", "last_seen": "2026-09-25"}],
+}
+root, stub = fixture(appends="events scanned: 2; carrying attendees: 2\nexit=0",
+                     dump_json="{}", matcher_json=json.dumps(mixed))
+shutil.copy2(REPO / "tools" / "calendar-intake-gate.py",
+             root / "tools" / "calendar-intake-gate.py")
+(root / "run.sh").write_text(
+    "#!/bin/sh\nprintf '%s\\n' \"$2\" >> out/canonical-calls.txt\n"
+    "printf '{\"ok\": true}\\n'\n")
+(root / "run.sh").chmod(0o755)
+p = run(root, stub)
+calls = (root / "out" / "canonical-calls.txt")
+check("unresolved intake still refuses completion", p.returncode == 78,
+      f"exit={p.returncode}")
+check("unresolved intake preserves the independent exact touch",
+      calls.is_file() and calls.read_text().splitlines() == ["log-activity"],
+      f"calls={calls.read_text() if calls.exists() else 'none'}")
+check("live refusal output is aggregate-only",
+      not any(value in p.stdout + p.stderr for value in (
+          "new@example.test", "known@example.test", "C-TEST", "Synthetic meeting")))
+(root / "run.sh").write_text(
+    "#!/bin/sh\nprintf 'refused known@example.test C-TEST\n'\nexit 1\n")
+(root / "run.sh").chmod(0o755)
+p = run(root, stub)
+check("failed exact write takes precedence without leaking call output",
+      p.returncode == 1 and not any(value in p.stdout + p.stderr for value in (
+          "new@example.test", "known@example.test", "C-TEST", "Synthetic meeting")))
+
+# 8. Matcher diagnostics can contain attendee data. The launcher and Control
+# Plane persist command output, so only fixed failure classes may leave this job.
+root, stub = fixture(appends="events scanned: 2; carrying attendees: 2\nexit=0",
+                     dump_json="{}")
+(root / "tools" / "calendar-touch-matcher.py").write_text(
+    "import sys\nprint('matcher failed for synthetic@example.test', file=sys.stderr)\nsys.exit(5)\n")
+p = run(root, stub)
+check("matcher failure output is aggregate-only",
+      p.returncode == 1 and "synthetic@example.test" not in p.stdout + p.stderr)
+(root / "tools" / "calendar-touch-matcher.py").write_text(
+    "import sys\nprint('operation not permitted for synthetic@example.test', file=sys.stderr)\nsys.exit(5)\n")
+p = run(root, stub)
+check("matcher permission failure keeps safe diagnosis without identity",
+      p.returncode == 4 and "FULL DISK ACCESS" in p.stderr
+      and "synthetic@example.test" not in p.stdout + p.stderr)
+
+# 9. Only successful process completion and a top-level JSON boolean true can
+# acknowledge an activity write. Error payloads stay out of persisted logs.
+response_cases = [
+    ("nested success cannot override top-level refusal",
+     '{"ok":false,"nested":{"ok":true}}', 0, False),
+    ("nonzero helper status cannot acknowledge a write",
+     '{"ok":true}', 1, False),
+    ("invalid JSON cannot acknowledge a write",
+     'not-json "ok":true', 0, False),
+    ("array response cannot acknowledge a write",
+     '[{"ok":true}]', 0, False),
+    ("numeric truth cannot acknowledge a write",
+     '{"ok":1}', 0, False),
+    ("missing success cannot acknowledge a write",
+     '{"activity_id":"synthetic-activity"}', 0, False),
+    ("JSON whitespace preserves valid success",
+     '{"ok" : true, "activity_id":"synthetic-activity"}', 0, True),
+]
+exact_only = {**mixed, "unknown": [],
+              "counts": {"emails": 1, "exact": 1, "domain": 0, "unknown": 0,
+                         "internal": 0, "upcoming": 0}}
+for name, response, status, succeeds in response_cases:
+    root, stub = fixture(appends="events scanned: 1; carrying attendees: 1\nexit=0",
+                         dump_json="{}", matcher_json=json.dumps(exact_only))
+    shutil.copy2(REPO / "tools" / "calendar-intake-gate.py",
+                 root / "tools" / "calendar-intake-gate.py")
+    (root / "run.sh").write_text(
+        "#!/usr/bin/env python3\nimport sys\n"
+        f"print({response!r})\n"
+        "print('known@example.test C-TEST Synthetic meeting', file=sys.stderr)\n"
+        f"sys.exit({status})\n")
+    (root / "run.sh").chmod(0o755)
+    p = run(root, stub)
+    output = p.stdout + p.stderr
+    marker = "writes=1 failed=0" if succeeds else "writes=0 failed=1"
+    check(name, p.returncode == (0 if succeeds else 1) and marker in output
+          and not any(value in output for value in (
+              "known@example.test", "C-TEST", "Synthetic meeting", response)))
+
 print(f"\n{'OK all checks passed' if not failures else f'FAIL {len(failures)}: ' + ', '.join(failures)}")
 sys.exit(1 if failures else 0)

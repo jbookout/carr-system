@@ -66,6 +66,13 @@ with tempfile.TemporaryDirectory() as raw:
                         "--evidence", str(evidence_path)], text=True, capture_output=True)
     check("CLI refuses missing evidence file", p.returncode == 78 and "REFUSE" in p.stderr,
           p.stdout + p.stderr)
+    p = subprocess.run([sys.executable, str(SCRIPT), "--proposals", str(proposal_path),
+                        "--evidence", str(evidence_path), "--aggregate-only"],
+                       text=True, capture_output=True)
+    check("aggregate refusal carries count without attendee identity",
+          p.returncode == 78 and "unresolved=1" in p.stderr
+          and "new@example.com" not in p.stdout + p.stderr,
+          p.stdout + p.stderr)
 
 print("OK all checks passed" if not failed else "FAIL " + ", ".join(failed))
 raise SystemExit(bool(failed))
