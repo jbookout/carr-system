@@ -195,6 +195,8 @@ class ProgressBoardCLI(unittest.TestCase):
             "measured",
             "--health",
             "question",
+            "--evidence",
+            "Verified in operation",
         )
 
         state = self.read_state("demo")
@@ -205,10 +207,10 @@ class ProgressBoardCLI(unittest.TestCase):
         self.assertEqual(html.count('class="pipeline-node '), 8)  # desk and phone SVGs
         for task_id, stage in (
             ("queued-task", "queued"), ("ci-task", "ci"),
-            ("blocked-task", "merged"), ("question-task", "measured"),
+            ("blocked-task", "merged"), ("question-task", "live"),
         ):
             self.assertEqual(html.count(f'data-task-id="{task_id}" data-stage="{stage}"'), 2)
-        for label in ("Queued", "Building", "Review", "CI", "Merged", "Measured"):
+        for label in ("Queued", "Building", "Review", "CI", "Merged", "Live"):
             self.assertIn(label, html)
         self.assertIn("node-blocked", html)
         self.assertIn("node-question", html)
@@ -305,6 +307,97 @@ class ProgressBoardCLI(unittest.TestCase):
         self.run_board("render", "demo")
         self.assertEqual(self.read_state("demo"), prior)
         self.assertIn("GitHub unreachable", (self.root / "boards" / "demo.html").read_text())
+        gh.write_text("#!/usr/bin/env python3\nimport os\nfrom pathlib import Path\n"
+                      "print(Path(os.environ['BOARD_GH_FIXTURE']).read_text())\n")
+        fixture.write_text(json.dumps({**base, "state": "MERGED"}))
+        self.run_board("render", "demo")
+        self.assertEqual(self.read_state("demo")["tasks"]["a"]["stage"], "merged")
+        self.assertIn("0 completed · 1 remaining", (self.root / "boards" / "demo.html").read_text())
+        self.run_board("task", "demo", "a", "--stage", "live", "--evidence", "Production response measured")
+        completed_at = self.read_state("demo")["tasks"]["a"]["completed_at"]
+        self.run_board("render", "demo")
+        task = self.read_state("demo")["tasks"]["a"]
+        self.assertEqual(task["stage"], "live")
+        self.assertEqual(task["completed_at"], completed_at)
+
+    def test_stage_palette_is_shared_by_nodes_columns_and_status_chips(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        for stage in ("queued", "build", "review", "ci", "merged", "live"):
+            args = ["task", "demo", stage, "--title", stage, "--status", "queued",
+                    "--executor", "Codex"]
+            if stage != "queued":
+                args += ["--pr", "42", "--stage", stage]
+            if stage == "live":
+                args += ["--evidence", "Observed successful operation"]
+            self.run_board(*args)
+        html = (self.root / "boards" / "demo.html").read_text()
+        colors = {"queued": "#f2f6fc", "build": "#fb7b32", "review": "#bf9cff",
+                  "ci": "#ff88bd", "merged": "#65baff", "live": "#7dddc0"}
+        for stage, color in colors.items():
+            with self.subTest(stage=stage):
+                self.assertIn(f"--stage-{stage}:{color}", html)
+                self.assertIn(f'.stage[data-stage="{stage}"]', html)
+                self.assertIn(f'.pipeline-node[data-stage="{stage}"]', html)
+                self.assertIn(f'.task-card[data-stage="{stage}"]', html)
+                self.assertIn(f'data-task-ref="{stage}"', html)
+                label = {"build": "Building", "ci": "CI"}.get(stage, stage.title())
+                self.assertIn(f'class="stage-chip">{label}</span>', html)
+
+    def test_live_requires_explicit_evidence_and_merge_does_not_complete(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("task", "demo", "a", "--title", "A", "--status", "running",
+                       "--executor", "Codex", "--pr", "42")
+        missing = subprocess.run([sys.executable, str(SCRIPT), "task", "demo", "a", "--stage", "live"],
+                                 cwd=REPO, env=self.env, text=True, capture_output=True)
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("evidence", missing.stderr.lower())
+        self.assertEqual(self.read_state("demo")["tasks"]["a"].get("stage"), None)
+        self.run_board("task", "demo", "a", "--stage", "live", "--evidence", "Page returned expected data")
+        task = self.read_state("demo")["tasks"]["a"]
+        self.assertEqual(task["stage"], "live")
+        self.assertEqual(task["evidence"], "Page returned expected data")
+        self.assertTrue(task["completed_at"])
+        self.assertIn("Page returned expected data", (self.root / "boards" / "demo.html").read_text())
+
+    def test_legacy_measured_maps_to_live(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("task", "demo", "legacy", "--title", "Legacy", "--status", "done",
+                       "--executor", "Codex", "--pr", "42", "--stage", "measured",
+                       "--evidence", "Legacy verified")
+        state = self.read_state("demo")
+        self.assertEqual(state["tasks"]["legacy"]["stage"], "live")
+        state["tasks"]["legacy"]["stage"] = "measured"
+        (self.root / "boards" / "demo.json").write_text(json.dumps(state))
+        self.run_board("render", "demo")
+        html = (self.root / "boards" / "demo.html").read_text()
+        self.assertIn('data-task-id="legacy" data-stage="live"', html)
+        self.assertNotIn("Measured", html)
+
+    def test_completed_order_counts_and_pipeline_retirement(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        for task_id in ("old", "new", "waiting"):
+            self.run_board("task", "demo", task_id, "--title", task_id, "--status", "running",
+                           "--executor", "Codex", "--pr", "42")
+        for task_id in ("old", "new"):
+            self.run_board("task", "demo", task_id, "--stage", "live",
+                           "--evidence", f"{task_id} measured")
+        state = self.read_state("demo")
+        now = datetime.now(timezone.utc)
+        state["tasks"]["old"]["completed_at"] = (now - timedelta(hours=25)).isoformat()
+        state["tasks"]["new"]["completed_at"] = (now - timedelta(hours=1)).isoformat()
+        (self.root / "boards" / "demo.json").write_text(json.dumps(state))
+        self.run_board("render", "demo")
+        html = (self.root / "boards" / "demo.html").read_text()
+        self.assertIn("2 completed · 1 remaining", html)
+        completed = html.split('<h2>Completed</h2>', 1)[1]
+        self.assertLess(completed.index('data-task-ref="new"'), completed.index('data-task-ref="old"'))
+        self.assertIn("old measured", completed)
+        self.assertIn("new measured", completed)
+        self.assertIn("https://github.com/jbookout/carr-system/pull/42", completed)
+        self.assertIn("CT", completed)
+        pipeline = html.split('<h2>Delivery pipeline</h2>', 1)[1].split('<h2>Tasks by status</h2>', 1)[0]
+        self.assertIn('data-task-id="new"', pipeline)
+        self.assertNotIn('data-task-id="old"', pipeline)
 
 
 if __name__ == "__main__":
