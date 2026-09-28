@@ -205,11 +205,6 @@ by definition: `CARR_ALLOW_MAIN_COMMIT=1 git commit ...`, for one command only.
 
 ## Checks
 
-## Progress board
-
-For work >5 steps or >30 min, update `out/boards/<project>.html` via
-`tools/progress_board.py` after each step; record Joe questions with defaults.
-
 `ops/ci.sh` is the ONE check script. The GitHub workflow and the pre-push hook
 both call it; neither contains check logic, so a check added there appears in
 both. Run one class while iterating:
@@ -222,6 +217,11 @@ both. Run one class while iterating:
 `ops/ci-selftest.py` tests the checker itself. Do not remove the bash re-exec at
 the top of `ops/ci.sh`: under zsh its class loop does not word-split, and the
 script will report every class green having executed none.
+
+## Progress board
+
+For work >5 steps or >30 min, update `out/boards/<project>.html` via
+`tools/progress_board.py` after each step; record Joe questions with defaults.
 
 ## Git discipline on a shared tree
 
