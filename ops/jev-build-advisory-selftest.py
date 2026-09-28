@@ -116,6 +116,14 @@ class AdvisoryTests(unittest.TestCase):
             with self.assertRaises(advisory.AdvisoryUnavailable):
                 advisory.advise("Build this", client=client)
             attempt = health.parse_time(json.loads(judge.read_text().splitlines()[-1])["at"])
+            healthy_at = (attempt - timedelta(minutes=1)).isoformat()
+            state.write_text(json.dumps({"state": "healthy",
+                                         "last_success_at": healthy_at,
+                                         "event_at": healthy_at}))
+            calls.write_text(json.dumps({
+                "ts": healthy_at, "ok": True, "usable": True,
+                "schema_valid": True, "http_status": 200, "model": "jev-test",
+                "usage": {"input_tokens": 1, "output_tokens": 1}}) + "\n")
             first = health.evaluate(judge, calls, now=attempt + timedelta(minutes=30),
                                     state_path=state)
             self.assertEqual((first["status"], first["pending"]), ("skip", True))

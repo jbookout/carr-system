@@ -114,7 +114,8 @@ def transition(state, event, *, at, now, threshold_hours=THRESHOLD_HOURS,
                       event_at=at.isoformat(), reason=reason or
                       ("invalid_data" if event == "unusable_success" else "unknown"))
         expired = (now - anchor).total_seconds() >= threshold_hours * 3600
-        result["state"] = "outage_open" if before == "outage_open" or expired else "failing_in_grace"
+        result["state"] = ("outage_open" if before in ("outage_open", "unknown") or
+                           event == "unusable_success" or expired else "failing_in_grace")
     elif event in ("legacy_incomplete", "state_corrupt"):
         anchor = anchor or legacy_mtime or at
         result.update(state="outage_open", first_failure_at=anchor.isoformat(),
@@ -122,14 +123,15 @@ def transition(state, event, *, at, now, threshold_hours=THRESHOLD_HOURS,
                       reason="state_unreadable" if event == "state_corrupt" else
                       result.get("reason") or "log_unreadable")
     elif event in ("log_missing", "log_corrupt", "log_truncated"):
-        if before == "failing_in_grace" and anchor and (
-                now - anchor).total_seconds() >= threshold_hours * 3600:
+        if before == "failing_in_grace":
             result["state"] = "outage_open"
         elif before == "healthy":
             result["state"] = "unknown"
         result["reason"] = "log_unreadable"
-    elif event == "state_missing" and before == "healthy":
-        result["state"] = "unknown"
+    elif event == "state_missing":
+        anchor = anchor or legacy_mtime or at
+        result.update(state="outage_open", first_failure_at=anchor.isoformat(),
+                      event_at=at.isoformat(), reason="state_unreadable")
     current = result["state"]
     result["status"] = ("ok" if current == "healthy" else "warn" if
                         current == "outage_open" or current == "unknown" and
@@ -178,7 +180,11 @@ def evaluate(judge_path, calls_path, *, now=None, threshold_hours=THRESHOLD_HOUR
     if "state" not in state and (state.get("loop_id") or state.get("open_key")):
         state = transition(state, "legacy_incomplete", at=now, now=now, legacy_mtime=mtime)
     elif "state" not in state:
-        state["state"] = "failing_in_grace" if parse_time(state.get("first_failure_at")) else "unknown"
+        if state_path:
+            state = transition(state, "legacy_incomplete", at=now, now=now,
+                               legacy_mtime=mtime)
+        else:
+            state["state"] = "failing_in_grace" if parse_time(state.get("first_failure_at")) else "unknown"
     if state["state"] not in STATES:
         state = transition(state, "legacy_incomplete", at=now, now=now, legacy_mtime=mtime)
     if ((state["state"] in ("failing_in_grace", "outage_open") and
@@ -204,9 +210,16 @@ def evaluate(judge_path, calls_path, *, now=None, threshold_hours=THRESHOLD_HOUR
     for row in calls:
         at = parse_time(row.get("ts"))
         if at and at <= now:
-            # Pre-validation receipts cannot prove recovery or a bad answer.
-            # A fresh client records both outcomes with schema_valid present.
+            if row.get("cache_hit") is True:
+                continue
+            # An old success claim without validation is uncertain. Provider
+            # failures have no HTTP 2xx response; the judgment log classifies them.
             if "schema_valid" not in row:
+                if row.get("ok") is True:
+                    events.append((at, "legacy_incomplete", "log_unreadable", None))
+                continue
+            status = row.get("http_status")
+            if type(status) is not int or not 200 <= status < 300:
                 continue
             events.append((at, "usable_success" if usable_receipt(row) else "unusable_success",
                            "invalid_data", row))
@@ -229,8 +242,9 @@ def evaluate(judge_path, calls_path, *, now=None, threshold_hours=THRESHOLD_HOUR
                                now=now, threshold_hours=threshold_hours,
                                reason=state.get("reason"))
     if "status" not in state:
-        state = transition(state, "state_missing", at=now, now=now,
-                           threshold_hours=threshold_hours)
+        state["status"] = ("ok" if state["state"] == "healthy" else
+                           "warn" if state["state"] == "outage_open" else "skip")
+        state["pending"] = state["state"] in ("failing_in_grace", "outage_open")
     success = parse_time(state.get("last_success_at"))
     state["age_hours"] = round(max((now - success).total_seconds() / 3600, 0), 1) if success else None
     if state["state"] == "healthy" and state["age_hours"] is not None and state["age_hours"] > threshold_hours and not state.get("loop_id"):

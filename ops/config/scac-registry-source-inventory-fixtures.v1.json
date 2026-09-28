@@ -72229,6 +72229,44 @@
       ],
       "expected_count": 987,
       "expected_sha256": "49d47bafe29ddd29da57396045478d76e757b44c469df34278937c88ce76451c"
+    },
+    {
+      "version": "v92",
+      "reason": "Incident triage verb and its bounded incident-reference contract successor.",
+      "expected_count": 988,
+      "expected_sha256": "74ba9b18b0b545e7db7ab1d1ca61b8c8ab9303455be1f9cfc96b9ad03c09c468",
+      "remove": [],
+      "row_replacements": {
+        "mcp-tool:link-incident-work-request": {
+          "schema_digest": "76672e7fefca24c529b76db3f81d7e4847b44ed78acd41e9eabb8af3018670f8"
+        }
+      },
+      "source_digest_replacements": {},
+      "upsert": [
+        {
+          "ingress_key": "mcp-tool:triage-incident",
+          "ingress_kind": "mcp_tool",
+          "operation": "triage-incident",
+          "effect_class": "administrative_mutation",
+          "source_locator": "mcp-server/src/incident.js",
+          "schema_digest": "96edb83b9e05b76a9a11a0f10c0a7499ddf0c557463718f20ae578cdf71d5555",
+          "source_digest": "02ebf4bfcde7ab0753b4fd0584dafd1525e8e6687f5ddf08e4ca2995fea214ab",
+          "write": true,
+          "human_only": false,
+          "authority_only": false,
+          "principal_mode": "server_verified_human_or_native_agent",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.database",
+          "delegates_to": [],
+          "request_shape": "closed_top_level_schema",
+          "idempotency_mode": "operation_principal_manifest_bound",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "application_default_deny",
+          "owner_package": "11",
+          "implementation_state": "source_guarded_not_deployed",
+          "classification_authorizing": false
+        }
+      ]
     }
   ],
   "current_source_review": {
