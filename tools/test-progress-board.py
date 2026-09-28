@@ -2,18 +2,24 @@
 """Behavioral tests for the progress-board command line surface."""
 
 import json
+import importlib.util
 import os
 import re
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "tools" / "progress_board.py"
+SPEC = importlib.util.spec_from_file_location("progress_board", SCRIPT)
+assert SPEC is not None and SPEC.loader is not None
+BOARD = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(BOARD)
 
 
 class ProgressBoardCLI(unittest.TestCase):
@@ -116,7 +122,7 @@ class ProgressBoardCLI(unittest.TestCase):
         self.assertIn("Claude cloud credits", html)
         self.assertIn("POLICY VIOLATION", html)
 
-    def test_html_has_all_panels_and_no_external_urls(self):
+    def test_html_has_all_panels_and_only_the_hosted_board_url(self):
         self.run_board("init", "demo", "--title", "Demo")
         self.run_board("ask", "demo", "q1", "--question", "Question?", "--default", "Proceed")
         self.run_board("deliver", "demo", "--title", "Done", "--link", "board.html")
@@ -130,7 +136,8 @@ class ProgressBoardCLI(unittest.TestCase):
         ):
             self.assertIn(panel, html)
         self.assertIn('http-equiv="refresh" content="10"', html)
-        self.assertNotRegex(html, r"https?://")
+        self.assertIn('href="https://app.doctorcre.com/progress-board?board=demo"', html)
+        self.assertEqual(html.count("https://app.doctorcre.com"), 1)
         self.assertNotIn("<script src=", html)
         self.assertIn("sessionStorage", html)
         self.assertIn("scrollY", html)
@@ -398,6 +405,128 @@ class ProgressBoardCLI(unittest.TestCase):
         pipeline = html.split('<h2>Delivery pipeline</h2>', 1)[1].split('<h2>Tasks by status</h2>', 1)[0]
         self.assertIn('data-task-id="new"', pipeline)
         self.assertNotIn('data-task-id="old"', pipeline)
+
+    def test_static_board_links_to_signed_in_route_and_preserves_asker(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("ask", "demo", "q1", "--question", "Choose route?", "--default", "Proceed",
+                       "--asker-ref", "one-shot:session-1", "--choice", "Proceed", "--choice", "Hold")
+        question = self.read_state("demo")["questions"]["q1"]
+        self.assertEqual(question["asker_ref"], "one-shot:session-1")
+        self.assertEqual(question["choices"], ["Proceed", "Hold"])
+        html = (self.root / "boards" / "demo.html").read_text()
+        self.assertIn('href="https://app.doctorcre.com/progress-board?board=demo"', html)
+        self.assertNotIn('target="_blank"', html)
+        self.assertNotIn("one-shot:session-1", html)
+
+    def test_publish_uses_remote_version_and_checks_readback(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("ask", "demo", "q1", "--question", "Choose route?", "--default", "Proceed",
+                       "--asker-ref", "one-shot:session-1", "--choice", "Proceed", "--choice", "Hold")
+        calls = []
+        remote = {"snapshot": None, "questions": []}
+
+        def caller(verb, args):
+            calls.append((verb, args))
+            if verb == "read-progress-board":
+                return {"ok": True, **remote}
+            if verb == "publish-board-snapshot":
+                remote["snapshot"] = {"board_id": "demo", "version": 1, "snapshot_json": args["snapshot"]}
+                return {"ok": True, "snapshot": remote["snapshot"]}
+            if verb == "ask-board-question":
+                remote["questions"] = [{"question_id": "q1", "revision": 1, "prompt": args["prompt"],
+                                        "choices": args["choices"], "allow_free_text": args["allow_free_text"],
+                                        "default_answer": args["default_answer"], "asker_ref": args["asker_ref"]}]
+                return {"ok": True, "question": remote["questions"][0]}
+            raise AssertionError(verb)
+
+        with patch.dict(os.environ, {"PROGRESS_BOARD_ROOT": str(self.root)}), patch.object(BOARD, "call_verb", caller):
+            result = BOARD.publish_board("demo")
+        self.assertEqual(result["snapshot_version"], 1)
+        self.assertEqual([verb for verb, _ in calls], ["read-progress-board", "publish-board-snapshot",
+                                                       "ask-board-question", "read-progress-board"])
+        self.assertEqual(calls[1][1]["base_version"], 0)
+        self.assertEqual(calls[2][1]["asker_ref"], "one-shot:session-1")
+        self.assertNotIn("answer", calls[1][1]["snapshot"])
+
+    def test_legacy_question_revision_retains_free_text_mode(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("ask", "demo", "q1", "--question", "Original?", "--default", "Proceed")
+        state = self.read_state("demo")
+        legacy = state["questions"]["q1"]
+        for field in ("choices", "free_text", "asker_ref", "revision", "history"):
+            legacy.pop(field)
+        (self.root / "boards" / "demo.json").write_text(json.dumps(state))
+        self.run_board("ask", "demo", "q1", "--question", "Revised?", "--default", "Proceed")
+        old = self.read_state("demo")["questions"]["q1"]["history"][0]
+        fields = BOARD.question_revision(old, "demo")
+        self.assertEqual(fields["choices"], [])
+        self.assertIs(fields["allow_free_text"], True)
+        self.assertEqual(fields["asker_ref"], "orchestrator:demo")
+
+    def test_poller_durably_records_then_acknowledges_and_replays_pending_ack(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("ask", "demo", "q1", "--question", "Choose route?", "--default", "Proceed",
+                       "--asker-ref", "one-shot:session-1")
+        answer = {"id": "11111111-1111-4111-8111-111111111111", "cursor": "7", "board_id": "demo",
+                  "question_id": "q1", "question_revision": 1, "asker_ref": "one-shot:session-1",
+                  "answer_text": "Hold", "answered_by": "joe", "version": 1, "status": "Sent"}
+        failed_once = False
+        calls = []
+
+        def caller(verb, args):
+            nonlocal failed_once
+            calls.append((verb, args))
+            if verb == "read-board-answers":
+                return {"ok": True, "answers": [answer] if args["after_cursor"] < 7 else [], "next_cursor": 7}
+            if verb == "acknowledge-board-answer":
+                inbox = (self.root / "boards" / "demo-answers.jsonl").read_text()
+                self.assertIn(answer["id"], inbox, "inbox must be durable before Received")
+                if not failed_once:
+                    failed_once = True
+                    raise RuntimeError("temporary refusal")
+                return {"ok": True, "answer": {**answer, "version": 2, "status": "Received"}}
+            raise AssertionError(verb)
+
+        with patch.dict(os.environ, {"PROGRESS_BOARD_ROOT": str(self.root)}), patch.object(BOARD, "call_verb", caller):
+            with self.assertRaises(RuntimeError):
+                BOARD.poll_board_answers("demo")
+            BOARD.poll_board_answers("demo")
+        events = [json.loads(line) for line in (self.root / "boards" / "demo-answers.jsonl").read_text().splitlines()]
+        self.assertEqual([event["kind"] for event in events], ["answer", "ack"])
+        self.assertEqual([args["after_cursor"] for verb, args in calls if verb == "read-board-answers"], [0, 6, 7])
+        self.assertEqual(len([verb for verb, _ in calls if verb == "acknowledge-board-answer"]), 2)
+
+    def test_poller_recovers_received_ack_after_crash_before_local_receipt(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("ask", "demo", "q1", "--question", "Choose route?", "--default", "Proceed",
+                       "--asker-ref", "one-shot:session-1")
+        answer = {"id": "11111111-1111-4111-8111-111111111111", "cursor": "7", "board_id": "demo",
+                  "question_id": "q1", "question_revision": 1, "asker_ref": "one-shot:session-1",
+                  "answer_text": "Hold", "answered_by": "joe", "version": 1, "status": "Sent"}
+
+        def caller(verb, args):
+            if verb == "read-board-answers":
+                return {"ok": True, "answers": [{**answer, "version": 2, "status": "Received"}]
+                        if args["after_cursor"] == 6 else [], "next_cursor": 7}
+            if verb == "acknowledge-board-answer":
+                raise RuntimeError("board_version_conflict")
+            raise AssertionError(verb)
+
+        with patch.dict(os.environ, {"PROGRESS_BOARD_ROOT": str(self.root)}), patch.object(BOARD, "call_verb", caller):
+            BOARD.append_answer_event("demo", {"kind": "answer", "answer": answer})
+            BOARD.poll_board_answers("demo")
+        events = [json.loads(line) for line in (self.root / "boards" / "demo-answers.jsonl").read_text().splitlines()]
+        self.assertEqual([event["kind"] for event in events], ["answer", "ack"])
+
+    def test_existing_launchd_render_runs_publish_and_poll_without_a_model(self):
+        events = []
+        args = type("Args", (), {"project": "carr-v5", "publish": False})()
+        with patch.object(BOARD, "render", lambda project: events.append(("render", project))), \
+             patch.object(BOARD, "publish_board", lambda project: events.append(("publish", project))), \
+             patch.object(BOARD, "poll_board_answers", lambda project: events.append(("poll", project))):
+            BOARD.command_render(args)
+        self.assertEqual(events, [("render", "carr-v5"), ("publish", "carr-v5"),
+                                  ("poll", "carr-v5")])
 
 
 if __name__ == "__main__":
