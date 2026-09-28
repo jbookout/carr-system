@@ -102,17 +102,23 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Refuse calendar completion until unmatched attendees have intake evidence")
     ap.add_argument("--proposals", type=Path, required=True)
     ap.add_argument("--evidence", type=Path, required=True)
+    ap.add_argument("--aggregate-only", action="store_true",
+                    help="report counts only for stored command logs and receipts")
     args = ap.parse_args()
     try:
         gaps = unresolved(load_json(args.proposals, "calendar proposals"),
                           load_evidence(args.evidence))
     except ValueError as exc:
-        print(f"calendar-intake-gate: REFUSE {exc}", file=sys.stderr)
+        message = "invalid intake evidence or proposals" if args.aggregate_only else str(exc)
+        print(f"calendar-intake-gate: REFUSE {message}", file=sys.stderr)
         return 78
     if gaps:
-        print("calendar-intake-gate: REFUSE unmatched attendee intake remains", file=sys.stderr)
-        for email, missing in sorted(gaps.items()):
-            print(f"  {email}: missing {', '.join(missing)}", file=sys.stderr)
+        if args.aggregate_only:
+            print(f"calendar-intake-gate: REFUSE unresolved={len(gaps)}", file=sys.stderr)
+        else:
+            print("calendar-intake-gate: REFUSE unmatched attendee intake remains", file=sys.stderr)
+            for email, missing in sorted(gaps.items()):
+                print(f"  {email}: missing {', '.join(missing)}", file=sys.stderr)
         return 78
     print("calendar-intake-gate: accepted all unmatched attendees carry mail, research, and canonical-record evidence")
     return 0
