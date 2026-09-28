@@ -41,8 +41,7 @@ STATUS_TO_STAGE = {
     "review": "review",
     "blocked": "review",
     "failed": "ci",
-    "done": "merged",
-    "measured": "live",
+    "done": "build",
 }
 STUCK_AFTER = timedelta(hours=2)
 
@@ -147,9 +146,16 @@ def executor_pool(executor: str) -> str:
 def task_stage(task: dict[str, Any]) -> str:
     requested = task.get("stage")
     if requested == "measured":
-        return "live"
+        requested = "live"
+    evidence = task.get("evidence")
+    if requested == "live" and not (isinstance(evidence, str) and evidence.strip()):
+        requested = None
     if requested in PIPELINE_STAGES:
         return requested
+    if task.get("status") == "done":
+        return "merged" if task.get("pr") is not None and task.get("pr_phase") == "Merged" else "build"
+    if task.get("status") == "measured":
+        return "live" if isinstance(evidence, str) and evidence.strip() else "build"
     return STATUS_TO_STAGE.get(task.get("status", "queued"), "queued")
 
 
@@ -268,7 +274,7 @@ def pipeline_svg(tasks: dict[str, dict[str, Any]]) -> str:
 
 def checks_summary(payload: dict[str, Any]) -> str:
     rollup = payload.get("statusCheckRollup") or []
-    if not isinstance(rollup, list):
+    if not isinstance(rollup, list) or any(not isinstance(check, dict) for check in rollup):
         return "checks unavailable"
     passed = pending = failed = 0
     for check in rollup:
@@ -291,7 +297,7 @@ def pr_info(number: int) -> dict[str, Any] | None:
         return None
     try:
         result = subprocess.run(
-            ["gh", "pr", "view", str(number), "--json", "state,isDraft,headRefOid,statusCheckRollup,comments"],
+            ["gh", "pr", "view", str(number), "--json", "state,isDraft,headRefOid,statusCheckRollup,comments,author"],
             capture_output=True,
             text=True,
             timeout=5,
@@ -300,7 +306,36 @@ def pr_info(number: int) -> dict[str, Any] | None:
         if result.returncode != 0:
             return None
         payload = json.loads(result.stdout)
-        return payload if isinstance(payload, dict) and payload.get("state") in {"OPEN", "CLOSED", "MERGED"} else None
+        if not isinstance(payload, dict):
+            return None
+        state = payload.get("state")
+        if not isinstance(state, str) or state not in {"OPEN", "CLOSED", "MERGED"}:
+            return None
+        if not isinstance(payload.get("isDraft"), bool) or not isinstance(payload.get("headRefOid"), str):
+            return None
+        author = payload.get("author")
+        if not isinstance(author, dict) or not isinstance(author.get("login"), str):
+            return None
+        checks = payload.get("statusCheckRollup")
+        if not isinstance(checks, list):
+            return None
+        for check in checks:
+            if (not isinstance(check, dict) or "conclusion" not in check
+                    or not (check["conclusion"] is None or isinstance(check["conclusion"], str))
+                    or not isinstance(check.get("status"), str)):
+                return None
+        comments = payload.get("comments")
+        if not isinstance(comments, list):
+            return None
+        for comment in comments:
+            if not isinstance(comment, dict):
+                return None
+            commenter = comment.get("author")
+            if (not isinstance(commenter, dict) or not isinstance(commenter.get("login"), str)
+                    or not all(isinstance(comment.get(field), str)
+                               for field in ("authorAssociation", "body", "createdAt"))):
+                return None
+        return payload
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
         return None
 
@@ -321,11 +356,26 @@ def derived_pr_state(payload: dict[str, Any]) -> tuple[str, str, str]:
     if not checks or any(str(check.get("conclusion") or "").upper() not in passing for check in checks):
         return "running", "ci", "CI"
     head = str(payload.get("headRefOid") or "").lower()
-    approved = any(
-        re.match(rf"\AAPPROVE\r?\nReviewed-SHA: {re.escape(head)}(?:\r?\n|\Z)",
-                 str(comment.get("body") or ""))
-        for comment in (payload.get("comments") or [])
-    ) if re.fullmatch(r"[0-9a-f]{40}", head) else False
+    author = payload.get("author") or {}
+    maker = str(author.get("login") or "").lower()
+    verdicts = []
+    if maker:
+        for index, comment in enumerate(payload.get("comments") or []):
+            commenter = comment.get("author") or {}
+            login = str(commenter.get("login") or "").lower() if isinstance(commenter, dict) else ""
+            association = str(comment.get("authorAssociation") or "").upper()
+            lines = str(comment.get("body") or "").splitlines()
+            if (login and login != maker and association in {"OWNER", "MEMBER", "COLLABORATOR"}
+                    and lines and lines[0] in {"APPROVE", "BLOCK"}):
+                verdicts.append((str(comment.get("createdAt") or ""), index, lines))
+    if not verdicts:
+        return "review", "review", "Awaiting review"
+    lines = max(verdicts)[2]
+    if lines[0] == "BLOCK":
+        return "blocked", "review", "Review blocked"
+    approved = (re.fullmatch(r"[0-9a-f]{40}", head) is not None and len(lines) >= 2
+                and lines[1] == f"Reviewed-SHA: {head}"
+                and not any("reviewed-sha:" in line.lower() for line in lines[2:]))
     return "review", "review", "Ready to merge" if approved else "Awaiting review"
 
 
@@ -413,7 +463,7 @@ def render_state(state: dict[str, Any], pr_infos: dict[str, dict[str, Any] | Non
         f'<div class="completed-top"><strong>{esc(task.get("title", task_id))}</strong><span class="stage-chip">Live</span>'
         f'<time datetime="{esc((completed_at(task) or render_time).isoformat())}">'
         f'{esc(local_updated((completed_at(task) or render_time).isoformat()))}</time></div>'
-        f'<p class="completed-evidence"><b>MEASURED</b> {esc(task.get("evidence") or "Legacy measured state; evidence not recorded")}</p>'
+        f'<p class="completed-evidence"><b>MEASURED</b> {esc(task["evidence"])}</p>'
         f'<div class="completed-meta"><span><b>EXECUTOR</b> {esc(task.get("executor", "unassigned"))}</span>'
         + (f'<a href="https://github.com/jbookout/carr-system/pull/{int(task["pr"])}">PR {int(task["pr"])} ↗</a>'
            if isinstance(task.get("pr"), int) and task["pr"] > 0 else '<span>No PR</span>')
@@ -466,7 +516,7 @@ def render_state(state: dict[str, Any], pr_infos: dict[str, dict[str, Any] | Non
         "__PROJECT__": esc(state["project"]),
         "__HEADLINE__": headline,
         "__RENDERED_AT__": esc(rendered_at),
-        "__GITHUB_BANNER__": '<div class="github-banner" role="status">GitHub unreachable · showing previous PR status</div>' if github_unreachable else "",
+        "__GITHUB_BANNER__": '<div class="github-banner" role="status">GitHub PR data unavailable or invalid · showing previous PR status</div>' if github_unreachable else "",
         "__QUESTIONS__": question_cards,
         "__QUESTION_COUNT__": str(len(waiting)),
         "__STUCK__": stuck_cards,
@@ -522,7 +572,7 @@ h1{font-size:clamp(2.35rem,5vw,4.4rem);line-height:1.02;letter-spacing:-.035em;m
 <script>
 (function(){
   var renderedAt=Date.parse('__RENDERED_AT__');
-  function checkStall(){var banner=document.getElementById('stall-banner');banner.hidden=!(Number.isFinite(renderedAt)&&Date.now()-renderedAt>360000)}
+  function checkStall(){var banner=document.getElementById('stall-banner');var age=Date.now()-renderedAt;banner.hidden=Number.isFinite(age)&&age>=-30000&&age<=360000}
   checkStall();setInterval(checkStall,1000);
   var key='carr-board:'+location.pathname+':';
   try{var saved=sessionStorage.getItem(key+'scrollY');if(saved!==null){requestAnimationFrame(function(){scrollTo(0,Number(saved)||0)})}}catch(_){}
@@ -638,7 +688,9 @@ def command_task(args: argparse.Namespace) -> None:
         task["status"] = "done"
         task["evidence"] = args.evidence.strip()
         task["completed_at"] = prior.get("completed_at") if task_stage(prior) == "live" else task_time
-    elif stage and task_stage(prior) == "live":
+    elif task_stage(prior) == "live" and (stage or (args.status and args.status != "done")):
+        if not stage:
+            task.pop("stage", None)
         task.pop("evidence", None)
         task.pop("completed_at", None)
     if args.health is not None:
