@@ -61,10 +61,7 @@ skip is recorded in `out/map-architecture-gate.jsonl` but does not block, so
 the session making the call enforces it.
 
 ## Orchestrated work
-For work >5 steps or >30 min, the orchestrator seat is the only Claude-plan draw.
-Subagents run on Codex (gpt-6-sol high for research/review/design/non-trivial builds; gpt-5.6-luna for mechanical), Grok, Flash Next, or Claude cloud credits.
-A subagent keeps `out/boards/<project>.html` current via `tools/progress_board.py` after every step.
-Put decisions for Joe on the board as questions with a default; work continues on the default.
+See [AGENTS](AGENTS.md#progress-board).
 
 ## Dell migration trigger
 
