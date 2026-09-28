@@ -1267,6 +1267,16 @@ check("the trigger table with prompt_regex rows still loads for the PreToolUse r
 # A background-task notification gets the real advisory's skip, not a Jev
 # call, and the receipt it rides on still validates and requires nothing.
 build_module = load("jev_build_advisory_hooktest", REPO / "ops/jev_build_advisory.py")
+def billing_build_adviser(_prompt):
+    raise build_module.AdvisoryUnavailable("billing_exhausted")
+
+billing_output = rail.process(prompt_payload(client="codex"), runner=Runner(),
+                              adviser=lambda _t: [], build_adviser=billing_build_adviser)
+billing_row = json.loads(context(billing_output))
+check("Codex build receipt names billing exhaustion without a provider body",
+      billing_row["advisory"]["reason"] == "billing_exhausted"
+      and "Joe must add credits" in billing_row["advisory"]["instruction"]
+      and contract.validate_build_receipt(billing_row, repo=REPO))
 notification = ("<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n"
                 "<summary>Agent \"x\" finished</summary>\n</task-notification>")
 skip_output = rail.process(prompt_payload(prompt=notification), runner=Runner(),

@@ -88,6 +88,30 @@ class AdvisoryTests(unittest.TestCase):
         self.assertEqual(failure["effect"], "visible_advisory_abstention")
         self.assertNotIn("error", failure)
 
+    def test_http_failure_reason_is_redacted_and_visible(self):
+        class Failing(FakeClient):
+            def ask(self, *args, **kwargs):
+                raise RuntimeError("TypeSafe returned HTTP 402: SECRET RESPONSE BODY")
+        with self.assertRaises(advisory.AdvisoryUnavailable) as caught:
+            advisory.advise("Build this", client=Failing())
+        failure = advisory.unavailable(caught.exception.reason)
+        self.assertEqual(failure["reason"], "billing_exhausted")
+        self.assertIn("Joe must add credits", failure["instruction"])
+        self.assertNotIn("SECRET", json.dumps(failure))
+
+    def test_failure_reason_classes(self):
+        for source, expected in (
+            ("TypeSafe returned HTTP 401: SECRET", "auth_failed"),
+            ("TypeSafe returned HTTP 403: SECRET", "auth_failed"),
+            ("TypeSafe returned HTTP 429: SECRET", "rate_limited"),
+            ("TypeSafe returned HTTP 503: SECRET", "server_5xx"),
+            ("timed out", "timeout"),
+            ("could not reach host: SECRET", "network"),
+            ("unexpected SECRET", "unknown"),
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(advisory.failure_reason(RuntimeError(source)), expected)
+
 
 NOTIFICATION = ("<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n"
                 "<summary>Agent \"Build X\" finished</summary>\n</task-notification>")

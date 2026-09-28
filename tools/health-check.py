@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
 from zoneinfo import ZoneInfo
 import health_submodule as _health_sub
+import jev_outage_health as _jev_outage
 
 # Script-relative, NOT expanduser("~/carr-system") — same fix as commit fad87a4
 # (tests) and c4d040d (gates). This is the ONLY caller of ops/renders-verify.py,
@@ -1635,6 +1636,43 @@ def _canonical_health():
         except Exception as e:
             print(f"  ⚠︎ {'credential health':<18} check failed ({type(e).__name__}: {e})")
             rc = _red("credential_health", f"check failed ({type(e).__name__}: {e})", hard_error=True)
+
+    if CANONICAL_SECTION == "all":
+        # Jev liveness compares the last successful provider receipt with a
+        # recent failed judgment attempt. The row's loop is filed once and
+        # closed only after a later successful call appears in these logs.
+        try:
+            _joh = _jev_outage.evaluate(
+                os.path.join(REPO_ROOT, "out", "jev-judge.jsonl"),
+                os.path.join(REPO_ROOT, "out", "jev-calls.jsonl"))
+            _loop_state = os.path.join(REPO_ROOT, "out", "jev-outage-loop.json")
+            _action = _jev_outage.ACTION
+            _outcome = _jev_outage.reconcile(
+                _joh, _loop_state,
+                lambda name, payload: _jev_outage.call_verb(name, payload, repo=REPO_ROOT))
+            if _joh["status"] == "warn":
+                _last = (f"last success {_joh['age_hours']}h ago"
+                         if _joh["age_hours"] is not None else "no successful call recorded")
+                _detail = (f"{_last}; recent attempt failed "
+                           f"({_joh['reason']}); loop {_outcome}")
+                print(f"  ⚠︎ {'Jev live judgment':<18} {_detail} · {_action}")
+                rc = _red("jev_live_outage", _detail)
+            elif _outcome == "error":
+                _detail = "outage loop could not be auto-cleared"
+                print(f"  ⚠︎ {'Jev live judgment':<18} {_detail} · {_action}")
+                rc = _red("jev_live_outage", _detail)
+            else:
+                _summary = ("success verified; outage loop cleared" if _outcome == "cleared"
+                            else "recent failure; last success is inside the grace window"
+                            if _joh["pending"]
+                            else "no recent failed attempts" if _joh["status"] == "skip"
+                            else "successful Jev call is fresh")
+                print(f"  {'OK' if _joh['status'] == 'ok' else '--'} "
+                      f"{'Jev live judgment':<18} {_summary} · {_action}")
+        except Exception as e:
+            _detail = f"outage evidence unreadable ({type(e).__name__})"
+            print(f"  ⚠︎ {'Jev live judgment':<18} {_detail} · {_jev_outage.ACTION}")
+            rc = _red("jev_live_outage", _detail)
 
     if CANONICAL_SECTION == "all":
         # Jev call receipt tamper audit (migrations/0587). The receipt store is
