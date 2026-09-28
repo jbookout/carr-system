@@ -62,6 +62,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -247,25 +248,51 @@ def _question_kind(questions):
     return ",".join(sorted(kinds)) or "unknown"
 
 
+# Keep these names aligned with lib/jev_required_actions.py's FACET_NAMES.
+# The receipt reader previously inferred them from raw question IDs; infer
+# them before logging so no caller-chosen ID text needs to reach the ledger.
+RECEIPT_FACETS = (
+    "architecture_or_design", "semantic_creation", "diagnosis",
+    "verification_selection", "evidence_matching", "next_action_priority",
+)
+
+
+def _receipt_facets(questions, facets):
+    names = {str(f) for f in facets} if facets else set()
+    for facet in RECEIPT_FACETS:
+        pattern = re.compile(r"[_\s-]+".join(map(re.escape, facet.split("_"))), re.I)
+        if any(isinstance(qid, str) and pattern.search(qid) for qid in questions):
+            names.add(facet)
+    return sorted(names)
+
+
+def _cache_key(endpoint, account, credential, model, caller, question_kind, prompt_sha256):
+    # The credential hash scopes unnamed accounts without persisting a secret.
+    return _prompt_sha256({
+        "endpoint": endpoint, "account": account,
+        "credential_sha256": hashlib.sha256(credential.encode("utf-8")).hexdigest(),
+        "model": model, "caller": caller, "question_kind": question_kind,
+        "prompt_sha256": prompt_sha256,
+    })
+
+
 def _cache_connection(path):
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
     db = sqlite3.connect(path, timeout=2)
     os.chmod(path, 0o600)
-    db.execute("CREATE TABLE IF NOT EXISTS results ("
-               "caller TEXT NOT NULL, question_kind TEXT NOT NULL, "
-               "prompt_sha256 TEXT NOT NULL, expires_at REAL NOT NULL, "
-               "result_json TEXT NOT NULL, "
-               "PRIMARY KEY (caller, question_kind, prompt_sha256))")
+    db.execute("CREATE TABLE IF NOT EXISTS results_v2 ("
+               "cache_key TEXT PRIMARY KEY, expires_at REAL NOT NULL, "
+               "result_json TEXT NOT NULL)")
     return db
 
 
-def _cached_result(path, caller, question_kind, prompt_sha256):
+def _cached_result(path, cache_key):
     try:
         db = _cache_connection(path)
         try:
             row = db.execute(
-                "SELECT result_json, expires_at FROM results WHERE caller=? AND question_kind=? AND prompt_sha256=?",
-                (caller, question_kind, prompt_sha256)).fetchone()
+                "SELECT result_json, expires_at FROM results_v2 WHERE cache_key=?",
+                (cache_key,)).fetchone()
         finally:
             db.close()
         if row and row[1] > time.time():
@@ -277,13 +304,13 @@ def _cached_result(path, caller, question_kind, prompt_sha256):
     return None
 
 
-def _store_cached_result(path, caller, question_kind, prompt_sha256, result, ttl):
+def _store_cached_result(path, cache_key, result, ttl):
     try:
         db = _cache_connection(path)
         try:
-            db.execute("DELETE FROM results WHERE expires_at <= ?", (time.time(),))
-            db.execute("INSERT OR REPLACE INTO results VALUES (?,?,?,?,?)",
-                       (caller, question_kind, prompt_sha256, time.time() + ttl,
+            db.execute("DELETE FROM results_v2 WHERE expires_at <= ?", (time.time(),))
+            db.execute("INSERT OR REPLACE INTO results_v2 VALUES (?,?,?)",
+                       (cache_key, time.time() + ttl,
                         json.dumps(result, separators=(",", ":"))))
             db.commit()
         finally:
@@ -315,11 +342,12 @@ def _append_call_receipt(questions, facets, result, log_path, *, caller=None,
         row = {
             "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "session": _session_id(),
-            "question_ids": sorted(questions),
+            "question_ids_sha256": [hashlib.sha256(qid.encode("utf-8")).hexdigest()
+                                    for qid in sorted(questions)],
             "caller": caller,
             "question_kind": question_kind,
             "prompt_sha256": prompt_sha256,
-            "facets": sorted({str(f) for f in facets}) if facets else [],
+            "facets": _receipt_facets(questions, facets),
             "model": answered.get("model"),
             "usage": usage,
             "input_tokens": usage.get("input_tokens") if usage else None,
@@ -339,7 +367,7 @@ def _append_call_receipt(questions, facets, result, log_path, *, caller=None,
 def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
         api_key=None, retries=RATE_LIMIT_RETRIES, endpoint=ENDPOINT, opener=None,
         facets=None, calls_log=JEV_CALLS_LOG, deadline=None, caller=None,
-        cache_ttl_seconds=0, cache_path=JUDGE_CACHE_PATH):
+        cache_ttl_seconds=0, cache_path=JUDGE_CACHE_PATH, account=None):
     """Evaluate `state` against a map of questions in ONE request.
 
     `state` is a string, or a mapping when the context has several parts —
@@ -370,6 +398,8 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
     `caller` names the invoking code in the usage log; if omitted it is inferred
     from the immediate caller file. A positive `cache_ttl_seconds` enables the
     shared on-disk result cache, used by jev_judge with the configured 60s TTL.
+    `account` names an account or organization when the caller has one. The
+    credential hash also scopes the cache, including when no name is supplied.
     Cache hits return usage=None and cannot count as fresh vendor-call evidence.
     """
     if not isinstance(questions, dict) or not questions:
@@ -393,8 +423,11 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
     if not isinstance(cache_ttl_seconds, (int, float)) or not math.isfinite(cache_ttl_seconds) or cache_ttl_seconds < 0:
         raise TypeSafeError("cache_ttl_seconds must be a finite nonnegative number")
     use_cache = cache_ttl_seconds > 0 and opener is None
+    credential = api_key or read_api_key()
+    cache_key = (_cache_key(endpoint, account, credential, model, caller,
+                            question_kind, prompt_sha256) if use_cache else None)
     if use_cache:
-        hit = _cached_result(cache_path, caller, question_kind, prompt_sha256)
+        hit = _cached_result(cache_path, cache_key)
         if hit is not None:
             _append_call_receipt(questions, facets, hit, calls_log, caller=caller,
                                  question_kind=question_kind, prompt_sha256=prompt_sha256,
@@ -404,7 +437,7 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
     request = urllib.request.Request(
         endpoint, data=body, method="POST",
         headers={
-            "Authorization": f"Bearer {api_key or read_api_key()}",
+            "Authorization": f"Bearer {credential}",
             "Content-Type": "application/json",
             # Cloudflare rejects urllib's default Python-urllib signature with
             # error 1010. Identify this server-side client explicitly.
@@ -433,8 +466,8 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
                 _append_call_receipt(questions, facets, result, calls_log, caller=caller,
                                      question_kind=question_kind, prompt_sha256=prompt_sha256)
                 if use_cache:
-                    _store_cached_result(cache_path, caller, question_kind,
-                                         prompt_sha256, result, cache_ttl_seconds)
+                    _store_cached_result(cache_path, cache_key, result,
+                                         cache_ttl_seconds)
             return result
         except urllib.error.HTTPError as err:
             if opener is None:

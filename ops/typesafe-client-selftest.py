@@ -17,6 +17,7 @@ than left to a reviewer noticing.
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import io
 import json
 import re
@@ -110,6 +111,37 @@ class SpendHealthTests(unittest.TestCase):
             self.assertEqual([x[0] for x in events], ["add-loop", "read-loop", "update-loop",
                                                   "read-loop", "close-loop"])
             self.assertEqual(events[-1][1]["base_version"], 1)
+
+    def test_success_without_usage_is_unknown_and_preserves_spend_warning(self):
+        self.assertTrue(SPEND_SPEC and SPEND_SPEC.loader)
+        spend = importlib.util.module_from_spec(SPEND_SPEC)
+        SPEND_SPEC.loader.exec_module(spend)
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "calls.jsonl"
+            state = Path(d) / "loop.json"
+            config = MODULE_PATH.parent / "config" / "jev-cost-guard.v1.json"
+            events = []
+
+            def verb(name, payload):
+                events.append(name)
+                return {"ok": True, "loop_id": "warning-1"}
+
+            day = __import__("datetime").datetime(2026, 9, 28, tzinfo=__import__("datetime").timezone.utc)
+            log.write_text(json.dumps({"ts": "2026-09-28T01:00:00Z", "ok": True,
+                                       "usage": {"input_tokens": 12_000_000}}) + "\n")
+            self.assertIn("WARN", spend.check_spend(log, config, state, verb, now=day))
+            self.assertEqual(events, ["add-loop"])
+            log.write_text(log.read_text() + json.dumps({
+                "ts": "2026-09-29T01:00:00Z", "ok": True, "usage": None,
+            }) + "\n")
+            unknown = spend.check_spend(log, config, state, verb,
+                                        now=day.replace(day=29))
+            self.assertIn("UNKNOWN", unknown)
+            self.assertIn("missing usage", unknown)
+            self.assertNotIn("OK", unknown)
+            self.assertNotIn("$0.000", unknown)
+            self.assertEqual(events, ["add-loop"])
+            self.assertEqual(json.loads(state.read_text())["loop_id"], "warning-1")
 
 
 class LibraryShapeTests(unittest.TestCase):
@@ -300,6 +332,25 @@ class CallReceiptTests(unittest.TestCase):
     must carry the response's usage when present, and (round 3) must carry
     no response id the vendor never supplies."""
 
+    def test_new_receipts_hash_question_ids_and_preserve_facet_credit(self):
+        name = "private_semantic_creation_question"
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "calls.jsonl"
+            with patch.object(client.urllib.request, "urlopen", responder(ANSWER)):
+                client.ask("state", {name: client.noul("is this relevant?")},
+                           api_key="secret", calls_log=str(log))
+            raw = log.read_text()
+            row = json.loads(raw.splitlines()[0])
+        self.assertNotIn(name, raw)
+        self.assertNotIn("question_ids", row)
+        self.assertEqual(row["question_ids_sha256"], [hashlib.sha256(name.encode()).hexdigest()])
+        reader_path = MODULE_PATH.parent.parent / "lib" / "jev_required_actions.py"
+        spec = importlib.util.spec_from_file_location("jev_required_actions", reader_path)
+        assert spec and spec.loader
+        reader = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(reader)
+        self.assertTrue(reader._call_covers_facet(row, "semantic_creation"))
+
     def test_real_call_receipt_includes_usage_and_no_response_id(self):
         # This exercises _append_call_receipt directly with a real-shaped
         # response (the function ask() calls only when opener is None, i.e.
@@ -376,6 +427,46 @@ class CallReceiptTests(unittest.TestCase):
                                    caller=caller, cache_ttl_seconds=60,
                                    cache_path=cache, calls_log=str(Path(d) / "calls.jsonl"))
             self.assertEqual(len(requests), 4)
+
+    def test_cache_separates_endpoint_account_model_and_question_kind(self):
+        with tempfile.TemporaryDirectory() as d:
+            requests = []
+
+            def answer(request, timeout=None):
+                requests.append(request)
+                return FakeResponse(json.dumps({**ANSWER, "answers": {"q": len(requests)}}).encode())
+
+            kw = {"caller": "same-caller", "cache_ttl_seconds": 60,
+                  "cache_path": str(Path(d) / "cache.sqlite3"),
+                  "calls_log": str(Path(d) / "calls.jsonl")}
+            with patch.object(client.urllib.request, "urlopen", answer):
+                first = client.ask("same state", {"q": client.noul("same?")},
+                                   api_key="account-a", endpoint="https://one.example/api",
+                                   model="jev-a", **kw)
+                by_endpoint = client.ask("same state", {"q": client.noul("same?")},
+                                         api_key="account-a", endpoint="https://two.example/api",
+                                         model="jev-a", **kw)
+                by_account = client.ask("same state", {"q": client.noul("same?")},
+                                        api_key="account-a", endpoint="https://one.example/api",
+                                        model="jev-a", account="org-b", **kw)
+                by_credential = client.ask("same state", {"q": client.noul("same?")},
+                                           api_key="account-b", endpoint="https://one.example/api",
+                                           model="jev-a", **kw)
+                by_model = client.ask("same state", {"q": client.noul("same?")},
+                                      api_key="account-a", endpoint="https://one.example/api",
+                                      model="jev-b", **kw)
+                by_kind = client.ask("same state", {"q": client.score("same?", ["no", "yes"])},
+                                     api_key="account-a", endpoint="https://one.example/api",
+                                     model="jev-a", **kw)
+                repeated = client.ask("same state", {"q": client.noul("same?")},
+                                      api_key="account-a", endpoint="https://one.example/api",
+                                      model="jev-a", **kw)
+            self.assertEqual(len(requests), 6)
+            self.assertEqual([x["answers"]["q"] for x in
+                              (first, by_endpoint, by_account, by_credential, by_model, by_kind)],
+                             [1, 2, 3, 4, 5, 6])
+            self.assertEqual(repeated["answers"], first["answers"])
+            self.assertTrue(repeated["cache_hit"])
 
     def test_mock_opener_path_writes_no_receipt(self):
         """A call made through `opener` (the offline selftest/mock path) must

@@ -89,7 +89,7 @@ def _id(day, action, amount):
 
 
 def _today_usage(log_path, day):
-    calls = tokens = 0
+    calls = tokens = unknown = 0
     with Path(log_path).open(encoding="utf-8") as handle:
         for line in handle:
             try:
@@ -102,12 +102,13 @@ def _today_usage(log_path, day):
                 usage = row.get("usage") or {}
                 value = usage.get("input_tokens")
                 if type(value) is not int or value < 0:
+                    unknown += 1
                     continue
                 calls += 1
                 tokens += value
             except (ValueError, KeyError, TypeError, AttributeError):
                 continue
-    return calls, tokens
+    return calls, tokens, unknown
 
 
 def check_spend(log_path=USAGE_LOG, config_path=CONFIG, state_path=LOOP_STATE,
@@ -119,11 +120,17 @@ def check_spend(log_path=USAGE_LOG, config_path=CONFIG, state_path=LOOP_STATE,
     day = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).date().isoformat()
     if not Path(log_path).is_file():
         return f"UNAVAILABLE jev spend — local usage log absent · {ACTION}"
-    calls, tokens = _today_usage(log_path, day)
+    calls, tokens, unknown = _today_usage(log_path, day)
     amount = tokens * price / 1_000_000
+    if unknown and amount <= threshold:
+        return (f"UNKNOWN jev spend — {unknown} successful calls missing usage "
+                f"({calls} measured calls; warning retained until usage is measurable) "
+                f"· {ACTION}")
     status = "WARN" if amount > threshold else "OK"
     line = (f"{status} jev spend — ${amount:.3f} estimated local / UTC day "
             f"({calls} calls, {tokens} input tokens; threshold ${threshold:.2f}) · {ACTION}")
+    if unknown:
+        line += f" · at least this amount; {unknown} successful calls missing usage"
     body = (f"Jev estimated local spend is ${amount:.3f} on {day} UTC, above "
             f"${threshold:.2f}/day. Find caller in jev usage log at "
             "out/jev-calls.jsonl, inspect prompt hashes for duplicate judge "
