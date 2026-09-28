@@ -247,7 +247,8 @@ response_cases = [
      '{"ok" : true, "activity_id":"synthetic-activity"}', 0, True),
 ]
 exact_only = {**mixed, "unknown": [],
-              "counts": {**mixed["counts"], "emails": 1, "unknown": 0}}
+              "counts": {"emails": 1, "exact": 1, "domain": 0, "unknown": 0,
+                         "internal": 0, "upcoming": 0}}
 for name, response, status, succeeds in response_cases:
     root, stub = fixture(appends="events scanned: 1; carrying attendees: 1\nexit=0",
                          dump_json="{}", matcher_json=json.dumps(exact_only))
