@@ -70,7 +70,7 @@ listing = mx.RS.join([
 ])
 original_osa = mx.osa
 try:
-    calls = []
+    calls: list[tuple[str, tuple[str, ...], int]] = []
 
     def fake_osa(script, *args, timeout=0):
         calls.append((script, args, timeout))
