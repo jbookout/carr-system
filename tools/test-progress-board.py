@@ -247,6 +247,65 @@ class ProgressBoardCLI(unittest.TestCase):
         self.assertRegex(html, r'@media\s*\(prefers-reduced-motion:\s*reduce\)')
         self.assertRegex(html, r'prefers-reduced-motion:reduce[^}]*animation:none')
 
+    def test_two_clocks_and_stall_banner(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("task", "demo", "a", "--title", "A", "--status", "running", "--executor", "Codex")
+        html = (self.root / "boards" / "demo.html").read_text()
+        self.assertIn("Live · refreshed", html)
+        self.assertIn("Last task change", html)
+        self.assertIn("Board refresh stalled", html)
+        self.assertIn("Date.now()", html)
+        self.assertIn("360000", html)
+        self.assertIn("stall-pulse", html)
+        self.assertIn("prefers-reduced-motion:reduce", html)
+
+    def test_pr_derivation_and_offline_retention(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("task", "demo", "a", "--title", "A", "--status", "running",
+                       "--executor", "Codex", "--pr", "42", "--note", "Keep this note")
+        self.env.pop("PROGRESS_BOARD_SKIP_GH")
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        gh = bin_dir / "gh"
+        gh.write_text("#!/usr/bin/env python3\nimport os,sys\nfrom pathlib import Path\n"
+                      "print(Path(os.environ['BOARD_GH_FIXTURE']).read_text())\n")
+        gh.chmod(0o755)
+        self.env["PATH"] = str(bin_dir) + os.pathsep + self.env["PATH"]
+        fixture = self.root / "gh.json"
+        self.env["BOARD_GH_FIXTURE"] = str(fixture)
+        sha = "a" * 40
+        base = {"state": "OPEN", "isDraft": False, "headRefOid": sha,
+                "statusCheckRollup": [{"conclusion": "SUCCESS", "status": "COMPLETED"}],
+                "comments": []}
+        cases = [
+            ({"state": "MERGED"}, "done", "merged", "Merged"),
+            ({"state": "CLOSED"}, "failed", "ci", "Closed unmerged"),
+            ({"isDraft": True}, "running", "build", "Draft"),
+            ({"statusCheckRollup": [{"conclusion": "FAILURE", "status": "COMPLETED"}]}, "blocked", "ci", "Checks failing"),
+            ({"statusCheckRollup": [{"conclusion": "", "status": "IN_PROGRESS"}]}, "running", "ci", "CI"),
+            ({"comments": [{"body": "APPROVE\nReviewed-SHA: " + "b" * 40 + "\n"}]}, "review", "review", "Awaiting review"),
+            ({"comments": [{"body": "APPROVE\nReviewed-SHA: " + sha + "\n"}]}, "review", "review", "Ready to merge"),
+        ]
+        previous_update = self.read_state("demo")["tasks"]["a"]["updated_at"]
+        for change, status, stage, phase in cases:
+            with self.subTest(phase=phase):
+                fixture.write_text(json.dumps({**base, **change}))
+                self.run_board("render", "demo")
+                task = self.read_state("demo")["tasks"]["a"]
+                self.assertEqual((task["status"], task["stage"], task["pr_phase"]),
+                                 (status, stage, phase))
+                self.assertEqual(task["note"], "Keep this note")
+                self.assertGreater(task["updated_at"], previous_update)
+                previous_update = task["updated_at"]
+                self.assertIn(phase, (self.root / "boards" / "demo.html").read_text())
+        self.run_board("render", "demo")
+        self.assertEqual(self.read_state("demo")["tasks"]["a"]["updated_at"], previous_update)
+        prior = self.read_state("demo")
+        gh.write_text("#!/bin/sh\nexit 1\n")
+        self.run_board("render", "demo")
+        self.assertEqual(self.read_state("demo"), prior)
+        self.assertIn("GitHub unreachable", (self.root / "boards" / "demo.html").read_text())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

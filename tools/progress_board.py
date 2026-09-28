@@ -265,9 +265,9 @@ def checks_summary(payload: dict[str, Any]) -> str:
     for check in rollup:
         conclusion = str(check.get("conclusion") or "").upper()
         status = str(check.get("status") or "").upper()
-        if conclusion in {"SUCCESS", "SK success".upper()}:
+        if conclusion in {"SUCCESS", "SKIPPED", "NEUTRAL"}:
             passed += 1
-        elif conclusion in {"FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED"}:
+        elif conclusion in {"FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"}:
             failed += 1
         elif status:
             pending += 1
@@ -277,30 +277,47 @@ def checks_summary(payload: dict[str, Any]) -> str:
     return f"{passed} pass · {pending} pending · {failed} fail"
 
 
-def pr_info(number: int | None) -> dict[str, str]:
-    if number is None:
-        return {"state": "—", "checks": "—", "head": ""}
+def pr_info(number: int) -> dict[str, Any] | None:
     if os.environ.get("PROGRESS_BOARD_SKIP_GH") or shutil.which("gh") is None:
-        return {"state": "offline", "checks": "checks unavailable", "head": ""}
+        return None
     try:
         result = subprocess.run(
-            ["gh", "pr", "view", str(number), "--json", "state,headRefOid,statusCheckRollup"],
+            ["gh", "pr", "view", str(number), "--json", "state,isDraft,headRefOid,statusCheckRollup,comments"],
             capture_output=True,
             text=True,
             timeout=5,
             check=False,
         )
         if result.returncode != 0:
-            return {"state": "offline", "checks": "checks unavailable", "head": ""}
+            return None
         payload = json.loads(result.stdout)
-        head = str(payload.get("headRefOid") or "")[:8]
-        return {
-            "state": str(payload.get("state") or "unknown").lower(),
-            "checks": checks_summary(payload),
-            "head": head,
-        }
+        return payload if isinstance(payload, dict) and payload.get("state") in {"OPEN", "CLOSED", "MERGED"} else None
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
-        return {"state": "offline", "checks": "checks unavailable", "head": ""}
+        return None
+
+
+def derived_pr_state(payload: dict[str, Any]) -> tuple[str, str, str]:
+    state = str(payload.get("state") or "").upper()
+    if state == "MERGED":
+        return "done", "merged", "Merged"
+    if state == "CLOSED":
+        return "failed", "ci", "Closed unmerged"
+    if payload.get("isDraft"):
+        return "running", "build", "Draft"
+    checks = payload.get("statusCheckRollup") or []
+    failing = {"FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"}
+    passing = {"SUCCESS", "SKIPPED", "NEUTRAL"}
+    if any(str(check.get("conclusion") or "").upper() in failing for check in checks):
+        return "blocked", "ci", "Checks failing"
+    if not checks or any(str(check.get("conclusion") or "").upper() not in passing for check in checks):
+        return "running", "ci", "CI"
+    head = str(payload.get("headRefOid") or "").lower()
+    approved = any(
+        re.match(rf"\AAPPROVE\r?\nReviewed-SHA: {re.escape(head)}(?:\r?\n|\Z)",
+                 str(comment.get("body") or ""))
+        for comment in (payload.get("comments") or [])
+    ) if re.fullmatch(r"[0-9a-f]{40}", head) else False
+    return "review", "review", "Ready to merge" if approved else "Awaiting review"
 
 
 def esc(value: Any) -> str:
@@ -317,8 +334,11 @@ def local_updated(timestamp: str) -> str:
         return timestamp
 
 
-def render_state(state: dict[str, Any]) -> str:
+def render_state(state: dict[str, Any], pr_infos: dict[str, dict[str, Any] | None] | None = None,
+                 rendered_at: str | None = None) -> str:
     tasks = state.get("tasks", {})
+    pr_infos = pr_infos or {}
+    rendered_at = rendered_at or stamp()
     questions = state.get("questions", {})
     deliverables = state.get("deliverables", [])
     waiting = [(qid, q) for qid, q in questions.items() if not q.get("answer")]
@@ -327,16 +347,19 @@ def render_state(state: dict[str, Any]) -> str:
     for task_id, task in tasks.items():
         grouped.setdefault(task.get("status", "queued"), []).append((task_id, task))
     pools = Counter(executor_pool(task.get("executor", "unassigned")) for task in tasks.values())
-    refreshed_prs = {task_id: pr_info(task.get("pr")) for task_id, task in tasks.items()}
-    updated = state.get("updated_at") or stamp()
+    github_unreachable = any(task.get("pr") is not None and pr_infos.get(task_id) is None
+                             for task_id, task in tasks.items())
+    task_change = max((task.get("updated_at") or "" for task in tasks.values()),
+                      default=state.get("created_at") or rendered_at)
 
     def fingerprint(value: Any) -> str:
         return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()[:12]
 
     def card(task_id: str, task: dict[str, Any]) -> str:
-        info = refreshed_prs[task_id]
+        info = pr_infos.get(task_id)
         pr = task.get("pr")
-        pr_label = f"PR {pr} · {info['state']} · {info['checks']}" if pr is not None else "No PR"
+        pr_label = (f"PR {pr} · {task.get('pr_phase', str(info.get('state', 'unknown')).title() if info else 'previous status')}"
+                    f" · {task.get('pr_checks', checks_summary(info) if info else 'checks unavailable')}") if pr is not None else "No PR"
         note = f'<p class="task-note">{esc(task["note"])}</p>' if task.get("note") else ""
         age = elapsed_text(task.get("updated_at", ""))
         state_class = pulse_state(task)
@@ -400,12 +423,15 @@ def render_state(state: dict[str, Any]) -> str:
         f'<strong>{len(grouped["running"])} running</strong>'
         f'<strong>{len(waiting)} need Joe</strong>'
         f'<strong>{len(stuck)} blocked</strong>'
-        f'<span class="headline-clock">Updated {esc(local_updated(updated))} <span class="relative-age" data-age-at="{esc(updated)}">· {esc(elapsed_text(updated))}</span></span>'
+        f'<span class="headline-clock"><span>Live · refreshed {esc(local_updated(rendered_at))}</span>'
+        f'<span class="task-change-clock">Last task change <span class="relative-age" data-age-at="{esc(task_change)}">{esc(elapsed_text(task_change))}</span></span></span>'
     )
     replacements = {
         "__TITLE__": esc(state.get("title", state["project"])),
         "__PROJECT__": esc(state["project"]),
         "__HEADLINE__": headline,
+        "__RENDERED_AT__": esc(rendered_at),
+        "__GITHUB_BANNER__": '<div class="github-banner" role="status">GitHub unreachable · showing previous PR status</div>' if github_unreachable else "",
         "__QUESTIONS__": question_cards,
         "__QUESTION_COUNT__": str(len(waiting)),
         "__STUCK__": stuck_cards,
@@ -428,7 +454,7 @@ h1,h2,h3,.headline strong,.metric,.stage-label{font-family:"Avenir Next Condense
 h1{font-size:clamp(2.35rem,5vw,4.4rem);line-height:1.02;letter-spacing:-.035em;margin:4px 0 8px;font-weight:700}h2{font-size:1.05rem;letter-spacing:.08em;text-transform:uppercase;margin:0}h3{margin:0}
 .shell{position:relative;max-width:1510px;margin:auto;padding:28px clamp(16px,3.4vw,56px) 70px}.masthead{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:22px}.brand{display:flex;align-items:center;gap:10px;color:#c8ddf0;font-size:.72rem;font-weight:800;letter-spacing:.2em;text-transform:uppercase}.brand-mark{width:19px;height:19px;border:2px solid var(--orange);border-right-color:transparent;border-radius:50%;box-shadow:0 0 17px rgba(251,123,50,.55)}.edition{color:var(--muted);font-size:.72rem;letter-spacing:.1em;text-transform:uppercase}.eyebrow{color:var(--orange);font-size:.72rem;font-weight:800;letter-spacing:.2em;text-transform:uppercase}.subtitle{color:#a9bfd4;margin:0 0 20px;font-size:.91rem}
 .headline{display:flex;align-items:center;gap:0;min-height:58px;margin-bottom:18px;padding:8px 16px;border:1px solid rgba(251,123,50,.29);border-radius:14px;background:linear-gradient(90deg,rgba(251,123,50,.13),rgba(17,51,87,.65) 39%,rgba(8,27,48,.48));box-shadow:0 16px 42px rgba(0,0,0,.24),inset 0 1px rgba(255,255,255,.08);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)}
-.headline strong{font-size:1.3rem;white-space:nowrap;padding:0 19px;border-right:1px solid var(--line);letter-spacing:.015em}.headline strong:first-child{padding-left:0;color:var(--blue)}.headline strong:nth-child(2){color:var(--orange)}.headline strong:nth-child(3){color:var(--red);border:0}.headline-clock{margin-left:auto;color:#b8ccdd;font-size:.76rem;text-align:right}.relative-age{color:var(--muted)}
+.headline strong{font-size:1.3rem;white-space:nowrap;padding:0 19px;border-right:1px solid var(--line);letter-spacing:.015em}.headline strong:first-child{padding-left:0;color:var(--blue)}.headline strong:nth-child(2){color:var(--orange)}.headline strong:nth-child(3){color:var(--red);border:0}.headline-clock{display:grid;margin-left:auto;color:#b8ccdd;font-size:.76rem;text-align:right}.task-change-clock,.relative-age{color:var(--muted)}.stall-banner,.github-banner{margin:0 0 14px;padding:11px 15px;border-radius:12px;font-weight:750}.stall-banner{border:1px solid var(--red);color:#fff;background:rgba(176,29,39,.45);animation:stall-pulse 1s ease-in-out infinite}.github-banner{border:1px solid var(--orange);color:#ffd2ad;background:rgba(125,64,20,.34)}[hidden]{display:none!important}@keyframes stall-pulse{50%{box-shadow:0 0 24px rgba(255,105,107,.5)}}
 .panel{position:relative;min-width:0;padding:20px 22px;border:1px solid var(--line);border-radius:18px;background:linear-gradient(145deg,rgba(17,46,80,.67),rgba(5,18,34,.82) 58%,rgba(7,24,44,.76));box-shadow:0 24px 52px rgba(0,0,0,.23),inset 0 1px rgba(255,255,255,.065);backdrop-filter:blur(22px);-webkit-backdrop-filter:blur(22px)}.panel:before{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;background:linear-gradient(120deg,rgba(255,255,255,.055),transparent 34%)}.panel-head{position:relative;display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:14px}.panel-head .count{color:var(--orange);font-size:.77rem;font-weight:800;letter-spacing:.11em}.upper-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}.pipeline-panel{margin-bottom:14px;overflow:hidden}.pipeline-panel .panel-head{margin-bottom:8px}.section-caption{color:var(--muted);font-size:.77rem;margin:0 0 10px}
 .empty{display:flex;align-items:center;gap:10px;min-height:46px;color:#a5bbcd;margin:0;font-size:.89rem}.empty-symbol{display:inline-grid;place-items:center;width:27px;height:27px;border-radius:50%;background:rgba(125,221,192,.12);color:var(--green);font-weight:800}.compact{min-height:30px;font-size:.78rem}
 .question-card,.task-card,.deliverable,.ledger-row{position:relative;border:1px solid var(--line);border-radius:12px;background:rgba(1,9,19,.47)}.question-card{display:flex;gap:12px;padding:13px 15px;border-color:rgba(251,123,50,.31)}.question-card+.question-card,.task-card+.task-card,.deliverable+.deliverable{margin-top:8px}.question-card strong{display:block;font-size:.94rem}.question-card p{margin:5px 0;color:#cad9e6;font-size:.82rem}.question-card p b{color:var(--orange);font-size:.63rem;letter-spacing:.1em}.question-card time{color:var(--muted);font-size:.7rem}.question-mark{display:grid;place-items:center;flex:0 0 30px;height:30px;border:1px solid var(--orange);border-radius:9px;color:var(--orange);font-weight:800}
@@ -443,6 +469,7 @@ h1{font-size:clamp(2.35rem,5vw,4.4rem);line-height:1.02;letter-spacing:-.035em;m
 </style></head><body><main class="shell">
 <div class="masthead"><div class="brand"><span class="brand-mark" aria-hidden="true"></span>CARR <span style="color:#789cb9">/</span> SYSTEMS</div><span class="edition">Orchestration · __PROJECT__</span></div>
 <header><div class="eyebrow">Mission control / __PROJECT__</div><h1>__TITLE__</h1><p class="subtitle">Every task, decision, and delivery in one live view.</p></header>
+<div id="stall-banner" class="stall-banner" role="alert" hidden>Board refresh stalled</div>__GITHUB_BANNER__
 <div class="headline" aria-label="Project summary">__HEADLINE__</div>
 <div class="upper-grid">
 <section class="panel"><div class="panel-head"><h2>Questions waiting on Joe</h2><span class="count">__QUESTION_COUNT__ OPEN</span></div>__QUESTIONS__</section>
@@ -456,6 +483,9 @@ h1{font-size:clamp(2.35rem,5vw,4.4rem);line-height:1.02;letter-spacing:-.035em;m
 </div></main>
 <script>
 (function(){
+  var renderedAt=Date.parse('__RENDERED_AT__');
+  function checkStall(){var banner=document.getElementById('stall-banner');banner.hidden=!(Number.isFinite(renderedAt)&&Date.now()-renderedAt>360000)}
+  checkStall();setInterval(checkStall,1000);
   var key='carr-board:'+location.pathname+':';
   try{var saved=sessionStorage.getItem(key+'scrollY');if(saved!==null){requestAnimationFrame(function(){scrollTo(0,Number(saved)||0)})}}catch(_){}
   var changedItems={};
@@ -478,7 +508,7 @@ h1{font-size:clamp(2.35rem,5vw,4.4rem);line-height:1.02;letter-spacing:-.035em;m
   function updateAges(){document.querySelectorAll('[data-age-at]').forEach(function(el){
     var at=Date.parse(el.dataset.ageAt);if(!Number.isFinite(at))return;
     var minutes=Math.max(0,Math.floor((Date.now()-at)/60000));
-    var age='updated '+minutes+' min ago';el.textContent=(el.classList.contains('relative-age')?'· ':'')+age;
+    var age=minutes+' min ago';el.textContent=el.classList.contains('relative-age')?age:'updated '+age;
   })}
   updateAges();setInterval(updateAges,10000);
   addEventListener('beforeunload',function(){try{sessionStorage.setItem(key+'scrollY',String(scrollY))}catch(_){}});
@@ -490,8 +520,28 @@ h1{font-size:clamp(2.35rem,5vw,4.4rem);line-height:1.02;letter-spacing:-.035em;m
 
 def render(project: str) -> None:
     state = read_state(project)
+    pr_infos: dict[str, dict[str, Any] | None] = {}
+    changed = False
+    for task_id, task in state.get("tasks", {}).items():
+        if task.get("pr") is None:
+            continue
+        info = pr_info(task["pr"])
+        pr_infos[task_id] = info
+        if info is None:
+            continue
+        status, stage, phase = derived_pr_state(info)
+        observed = (("status", status), ("stage", stage), ("pr_phase", phase),
+                    ("pr_checks", checks_summary(info)), ("pr_head", info.get("headRefOid") or ""))
+        if any(task.get(key) != value for key, value in observed):
+            task.update(observed)
+            task["updated_at"] = now_utc().isoformat(timespec="microseconds")
+            changed = True
+    if changed:
+        state["updated_at"] = max(task["updated_at"] for task in state["tasks"].values())
+        write_json(state)
     board_dir().mkdir(parents=True, exist_ok=True)
-    html_path(project).write_text(render_state(state), encoding="utf-8")
+    html_path(project).write_text(render_state(state, pr_infos,
+                                              now_utc().isoformat(timespec="microseconds")), encoding="utf-8")
 
 
 def write_and_render(state: dict[str, Any]) -> None:
@@ -530,7 +580,7 @@ def command_task(args: argparse.Namespace) -> None:
         "status": args.status,
         "executor": args.executor,
         "pr": args.pr,
-        "note": args.note,
+        "note": args.note if args.note is not None else prior.get("note"),
         "created_at": prior.get("created_at", task_time),
         "updated_at": task_time,
     }
