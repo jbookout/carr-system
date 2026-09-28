@@ -42,3 +42,21 @@ rotate production passwords that already work.
 
 Standing check: `./run.sh health` (jobs section) flags a missed weekday slot or
 two receipted runs in a row that read 0 events, once activation is current.
+
+## Unknown attendees are skipped, ambiguous ones refuse (migration 0735)
+
+An outside attendee the record holds no contact for no longer refuses Joe's
+whole prebrief: the resolver answers NULL, the coordinator skips that attendee,
+and the run reports `unknown_attendees` as a count plus pseudonymous sha256
+keys (never an address; anyone holding a candidate address can confirm it
+against a key, so treat the keys as pseudonymous, not anonymous) in the child result, the runtime's tick output, and
+`out/calendar-prebrief-joe-last-run.json`. `./run.sh health` turns a nonzero
+count into intake work (rule d7c69aa6). An attendee matching two or more live
+contacts, two or more live party rows (even if only one carries a ref), only
+merged ones, only soft-deleted or merged party rows (even if a role row under one
+is still live), or a party row with no canonical ref yet still refuses, because a wrong attribution is worse than a
+missing one. "Unknown" means no party row carries the address at all, so a
+person the record already holds is never reported for intake to create twice.
+The count is not in the database receipt. The health finding is time-rolling
+but not on the release pipeline's first-appearance allowlist, so the release
+gate still diffs it.
