@@ -25,15 +25,15 @@ from urllib.parse import urlsplit
 
 
 STATUSES = ("queued", "running", "review", "blocked", "done", "failed")
-PIPELINE_STAGES = ("queued", "build", "review", "ci", "merged", "measured")
-PR_STAGES = PIPELINE_STAGES[1:]
+PIPELINE_STAGES = ("queued", "build", "review", "ci", "merged", "live")
+PR_STAGES = PIPELINE_STAGES[1:] + ("measured",)
 STAGE_LABELS = {
     "queued": "Queued",
     "build": "Building",
     "review": "Review",
     "ci": "CI",
     "merged": "Merged",
-    "measured": "Measured",
+    "live": "Live",
 }
 STATUS_TO_STAGE = {
     "queued": "queued",
@@ -41,7 +41,8 @@ STATUS_TO_STAGE = {
     "review": "review",
     "blocked": "review",
     "failed": "ci",
-    "done": "measured",
+    "done": "merged",
+    "measured": "live",
 }
 STUCK_AFTER = timedelta(hours=2)
 
@@ -145,9 +146,24 @@ def executor_pool(executor: str) -> str:
 
 def task_stage(task: dict[str, Any]) -> str:
     requested = task.get("stage")
-    if task.get("pr") is not None and requested in PIPELINE_STAGES:
+    if requested == "measured":
+        return "live"
+    if requested in PIPELINE_STAGES:
         return requested
     return STATUS_TO_STAGE.get(task.get("status", "queued"), "queued")
+
+
+def completed_at(task: dict[str, Any]) -> datetime | None:
+    if task_stage(task) != "live":
+        return None
+    timestamp = task.get("completed_at") or task.get("updated_at")
+    if not isinstance(timestamp, str):
+        return None
+    try:
+        value = datetime.fromisoformat(timestamp)
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+    except ValueError:
+        return None
 
 
 def task_health(task: dict[str, Any]) -> str:
@@ -195,14 +211,7 @@ def pipeline_svg(tasks: dict[str, dict[str, Any]]) -> str:
             for i, line in enumerate(lines)
         )
         pr = f"PR {task['pr']}" if task.get("pr") is not None else "No PR"
-        if pulse == "critical":
-            halo = f'<path class="node-halo" d="M{x + 28} {y + 12} L{x + 44} {y + 29} L{x + 28} {y + 46} L{x + 12} {y + 29} Z"/>'
-        elif pulse == "attention":
-            halo = f'<rect class="node-halo" x="{x + 13}" y="{y + 14}" width="30" height="30" rx="6"/>'
-        elif task.get("status") == "done":
-            halo = f'<path class="node-halo" d="M{x + 20} {y + 14} L{x + 36} {y + 14} L{x + 44} {y + 29} L{x + 36} {y + 44} L{x + 20} {y + 44} L{x + 12} {y + 29} Z"/>'
-        else:
-            halo = f'<circle class="node-halo" cx="{x + 28}" cy="{y + 29}" r="15"/>'
+        halo = f'<circle class="node-halo" cx="{x + 28}" cy="{y + 29}" r="15"/>'
         return (
             f'<g class="pipeline-node node-{health} node-state-{pulse} pulse-{pulse}" data-task-id="{esc(task_id)}" '
             f'data-stage="{esc(stage)}" data-executor-pool="{esc(pool)}" tabindex="0" '
@@ -233,7 +242,7 @@ def pipeline_svg(tasks: dict[str, dict[str, Any]]) -> str:
         for i in range(5)
     )
     desktop = (
-        f'<svg class="pipeline-diagram pipeline-desktop" viewBox="0 0 1224 {desktop_height}" role="img" aria-label="Delivery pipeline from queued to measured">'
+        f'<svg class="pipeline-diagram pipeline-desktop" viewBox="0 0 1224 {desktop_height}" role="img" aria-label="Delivery pipeline from queued to live">'
         f'{connectors}{"".join(desk_parts)}</svg>'
     )
 
@@ -254,7 +263,7 @@ def pipeline_svg(tasks: dict[str, dict[str, Any]]) -> str:
         if i < 5:
             mobile_parts.append(f'<path class="pipeline-connector" d="M180 {y + section_height} V{y + section_height + 14}"/>')
         y += section_height + 14
-    phone = f'<svg class="pipeline-diagram pipeline-phone" viewBox="0 0 360 {y}" role="img" aria-label="Delivery pipeline from queued to measured">{"".join(mobile_parts)}</svg>'
+    phone = f'<svg class="pipeline-diagram pipeline-phone" viewBox="0 0 360 {y}" role="img" aria-label="Delivery pipeline from queued to live">{"".join(mobile_parts)}</svg>'
     return desktop + phone
 
 def checks_summary(payload: dict[str, Any]) -> str:
@@ -265,9 +274,9 @@ def checks_summary(payload: dict[str, Any]) -> str:
     for check in rollup:
         conclusion = str(check.get("conclusion") or "").upper()
         status = str(check.get("status") or "").upper()
-        if conclusion in {"SUCCESS", "SK success".upper()}:
+        if conclusion in {"SUCCESS", "SKIPPED", "NEUTRAL"}:
             passed += 1
-        elif conclusion in {"FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED"}:
+        elif conclusion in {"FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"}:
             failed += 1
         elif status:
             pending += 1
@@ -277,30 +286,47 @@ def checks_summary(payload: dict[str, Any]) -> str:
     return f"{passed} pass · {pending} pending · {failed} fail"
 
 
-def pr_info(number: int | None) -> dict[str, str]:
-    if number is None:
-        return {"state": "—", "checks": "—", "head": ""}
+def pr_info(number: int) -> dict[str, Any] | None:
     if os.environ.get("PROGRESS_BOARD_SKIP_GH") or shutil.which("gh") is None:
-        return {"state": "offline", "checks": "checks unavailable", "head": ""}
+        return None
     try:
         result = subprocess.run(
-            ["gh", "pr", "view", str(number), "--json", "state,headRefOid,statusCheckRollup"],
+            ["gh", "pr", "view", str(number), "--json", "state,isDraft,headRefOid,statusCheckRollup,comments"],
             capture_output=True,
             text=True,
             timeout=5,
             check=False,
         )
         if result.returncode != 0:
-            return {"state": "offline", "checks": "checks unavailable", "head": ""}
+            return None
         payload = json.loads(result.stdout)
-        head = str(payload.get("headRefOid") or "")[:8]
-        return {
-            "state": str(payload.get("state") or "unknown").lower(),
-            "checks": checks_summary(payload),
-            "head": head,
-        }
+        return payload if isinstance(payload, dict) and payload.get("state") in {"OPEN", "CLOSED", "MERGED"} else None
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
-        return {"state": "offline", "checks": "checks unavailable", "head": ""}
+        return None
+
+
+def derived_pr_state(payload: dict[str, Any]) -> tuple[str, str, str]:
+    state = str(payload.get("state") or "").upper()
+    if state == "MERGED":
+        return "done", "merged", "Merged"
+    if state == "CLOSED":
+        return "failed", "ci", "Closed unmerged"
+    if payload.get("isDraft"):
+        return "running", "build", "Draft"
+    checks = payload.get("statusCheckRollup") or []
+    failing = {"FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"}
+    passing = {"SUCCESS", "SKIPPED", "NEUTRAL"}
+    if any(str(check.get("conclusion") or "").upper() in failing for check in checks):
+        return "blocked", "ci", "Checks failing"
+    if not checks or any(str(check.get("conclusion") or "").upper() not in passing for check in checks):
+        return "running", "ci", "CI"
+    head = str(payload.get("headRefOid") or "").lower()
+    approved = any(
+        re.match(rf"\AAPPROVE\r?\nReviewed-SHA: {re.escape(head)}(?:\r?\n|\Z)",
+                 str(comment.get("body") or ""))
+        for comment in (payload.get("comments") or [])
+    ) if re.fullmatch(r"[0-9a-f]{40}", head) else False
+    return "review", "review", "Ready to merge" if approved else "Awaiting review"
 
 
 def esc(value: Any) -> str:
@@ -317,34 +343,51 @@ def local_updated(timestamp: str) -> str:
         return timestamp
 
 
-def render_state(state: dict[str, Any]) -> str:
+def render_state(state: dict[str, Any], pr_infos: dict[str, dict[str, Any] | None] | None = None,
+                 rendered_at: str | None = None) -> str:
     tasks = state.get("tasks", {})
+    render_time = datetime.fromisoformat(rendered_at) if rendered_at else now_utc()
+    completed = sorted(((task_id, task) for task_id, task in tasks.items() if task_stage(task) == "live"),
+                       key=lambda item: completed_at(item[1]) or datetime.min.replace(tzinfo=timezone.utc),
+                       reverse=True)
+    active = {}
+    for task_id, task in tasks.items():
+        completion_time = completed_at(task)
+        if completion_time is None or render_time - completion_time < timedelta(hours=24):
+            active[task_id] = task
+    pr_infos = pr_infos or {}
+    rendered_at = rendered_at or stamp()
     questions = state.get("questions", {})
     deliverables = state.get("deliverables", [])
     waiting = [(qid, q) for qid, q in questions.items() if not q.get("answer")]
-    stuck = [(task_id, task) for task_id, task in tasks.items() if is_stuck(task) or task.get("status") == "failed"]
+    stuck = [(task_id, task) for task_id, task in active.items() if is_stuck(task) or task.get("status") == "failed"]
     grouped: dict[str, list[tuple[str, dict[str, Any]]]] = {status: [] for status in STATUSES}
-    for task_id, task in tasks.items():
+    for task_id, task in active.items():
         grouped.setdefault(task.get("status", "queued"), []).append((task_id, task))
     pools = Counter(executor_pool(task.get("executor", "unassigned")) for task in tasks.values())
-    refreshed_prs = {task_id: pr_info(task.get("pr")) for task_id, task in tasks.items()}
-    updated = state.get("updated_at") or stamp()
+    github_unreachable = any(task.get("pr") is not None and pr_infos.get(task_id) is None
+                             for task_id, task in tasks.items())
+    task_change = max((task.get("updated_at") or "" for task in tasks.values()),
+                      default=state.get("created_at") or rendered_at)
 
     def fingerprint(value: Any) -> str:
         return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()[:12]
 
     def card(task_id: str, task: dict[str, Any]) -> str:
-        info = refreshed_prs[task_id]
+        info = pr_infos.get(task_id)
         pr = task.get("pr")
-        pr_label = f"PR {pr} · {info['state']} · {info['checks']}" if pr is not None else "No PR"
+        pr_label = (f"PR {pr} · {task.get('pr_phase', str(info.get('state', 'unknown')).title() if info else 'previous status')}"
+                    f" · {task.get('pr_checks', checks_summary(info) if info else 'checks unavailable')}") if pr is not None else "No PR"
         note = f'<p class="task-note">{esc(task["note"])}</p>' if task.get("note") else ""
         age = elapsed_text(task.get("updated_at", ""))
         state_class = pulse_state(task)
         marker = "◇" if task.get("status") == "queued" else "!" if state_class == "critical" else "?" if state_class == "attention" else "✓" if state_class == "still" else "↗"
+        stage = task_stage(task)
         return (
-            f'<article class="task-card pulse-{state_class}" data-task-ref="{esc(task_id)}" data-item-key="task:{esc(task_id)}" data-fingerprint="{fingerprint(task)}">'
+            f'<article class="task-card pulse-{state_class}" data-stage="{stage}" data-task-ref="{esc(task_id)}" data-item-key="task:{esc(task_id)}" data-fingerprint="{fingerprint(task)}">'
             f'<div class="task-main"><span class="state-mark" aria-hidden="true">{marker}</span>'
             f'<div class="task-copy"><strong>{esc(task.get("title", task_id))}</strong><span class="task-id">{esc(task_id)}</span></div>'
+            f'<span class="stage-chip">{STAGE_LABELS[stage]}</span>'
             f'<span class="task-age" data-age-at="{esc(task.get("updated_at", ""))}">{esc(age)}</span></div>'
             f'<div class="task-data"><span><b>EXECUTOR</b>{esc(task.get("executor", "unassigned"))}</span>'
             f'<span><b>DELIVERY</b>{esc(pr_label)}</span></div>{note}</article>'
@@ -363,6 +406,20 @@ def render_state(state: dict[str, Any]) -> str:
         f'{"".join(card(task_id, task) for task_id, task in grouped.get(status, [])) or "<p class=\"empty compact\">No tasks</p>"}</section>'
         for status in STATUSES
     )
+
+    completed_cards = "".join(
+        f'<article class="completed-card task-card" data-stage="live" data-task-ref="{esc(task_id)}" '
+        f'data-item-key="completed:{esc(task_id)}" data-fingerprint="{fingerprint(task)}">'
+        f'<div class="completed-top"><strong>{esc(task.get("title", task_id))}</strong><span class="stage-chip">Live</span>'
+        f'<time datetime="{esc((completed_at(task) or render_time).isoformat())}">'
+        f'{esc(local_updated((completed_at(task) or render_time).isoformat()))}</time></div>'
+        f'<p class="completed-evidence"><b>MEASURED</b> {esc(task.get("evidence") or "Legacy measured state; evidence not recorded")}</p>'
+        f'<div class="completed-meta"><span><b>EXECUTOR</b> {esc(task.get("executor", "unassigned"))}</span>'
+        + (f'<a href="https://github.com/jbookout/carr-system/pull/{int(task["pr"])}">PR {int(task["pr"])} ↗</a>'
+           if isinstance(task.get("pr"), int) and task["pr"] > 0 else '<span>No PR</span>')
+        + '</div></article>'
+        for task_id, task in completed
+    ) or '<p class="empty"><span class="empty-symbol">◇</span>No completed tasks yet.</p>'
 
     def deliverable_link(item: dict[str, Any]) -> str:
         link = str(item.get("link", "")).strip()
@@ -400,19 +457,25 @@ def render_state(state: dict[str, Any]) -> str:
         f'<strong>{len(grouped["running"])} running</strong>'
         f'<strong>{len(waiting)} need Joe</strong>'
         f'<strong>{len(stuck)} blocked</strong>'
-        f'<span class="headline-clock">Updated {esc(local_updated(updated))} <span class="relative-age" data-age-at="{esc(updated)}">· {esc(elapsed_text(updated))}</span></span>'
+        f'<strong class="completion-count">{len(completed)} completed · {len(tasks) - len(completed)} remaining</strong>'
+        f'<span class="headline-clock"><span>Live · refreshed {esc(local_updated(rendered_at))}</span>'
+        f'<span class="task-change-clock">Last task change <span class="relative-age" data-age-at="{esc(task_change)}">{esc(elapsed_text(task_change))}</span></span></span>'
     )
     replacements = {
         "__TITLE__": esc(state.get("title", state["project"])),
         "__PROJECT__": esc(state["project"]),
         "__HEADLINE__": headline,
+        "__RENDERED_AT__": esc(rendered_at),
+        "__GITHUB_BANNER__": '<div class="github-banner" role="status">GitHub unreachable · showing previous PR status</div>' if github_unreachable else "",
         "__QUESTIONS__": question_cards,
         "__QUESTION_COUNT__": str(len(waiting)),
         "__STUCK__": stuck_cards,
         "__STUCK_COUNT__": str(len(stuck)),
-        "__PIPELINE__": pipeline_svg(tasks),
-        "__TASK_COUNT__": str(len(tasks)),
+        "__PIPELINE__": pipeline_svg(active),
+        "__TASK_COUNT__": str(len(active)),
         "__STATUSES__": status_sections,
+        "__COMPLETED__": completed_cards,
+        "__COMPLETED_COUNT__": str(len(completed)),
         "__DELIVERABLES__": deliverable_cards,
         "__DELIVERABLE_COUNT__": str(len(deliverables)),
         "__LEDGER__": "".join(ledger_rows),
@@ -421,41 +484,46 @@ def render_state(state: dict[str, Any]) -> str:
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="10"><title>__TITLE__ · CARR progress board</title>
 <style>
-:root{color-scheme:dark;--ground:#030914;--navy:#0a203b;--ink:#f2f6fc;--muted:#8fa9c2;--line:rgba(151,190,226,.17);--orange:#fb7b32;--blue:#65baff;--red:#ff696b;--green:#7dddc0}
+:root{color-scheme:dark;--ground:#030914;--navy:#0a203b;--ink:#f2f6fc;--muted:#8fa9c2;--line:rgba(151,190,226,.17);--orange:#fb7b32;--blue:#65baff;--red:#ff696b;--green:#7dddc0;--stage-queued:#f2f6fc;--stage-build:#fb7b32;--stage-review:#bf9cff;--stage-ci:#ff88bd;--stage-merged:#65baff;--stage-live:#7dddc0}
 *{box-sizing:border-box}html{background:var(--ground)}body{margin:0;min-width:0;overflow-x:hidden;color:var(--ink);font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(ellipse 58rem 38rem at 12% -8%,rgba(23,83,145,.35),transparent 68%),radial-gradient(ellipse 38rem 25rem at 91% 9%,rgba(251,123,50,.11),transparent 70%),linear-gradient(180deg,#071628 0,#030914 50rem,#040c18 100%);background-attachment:fixed}
 body:before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.16;background-image:linear-gradient(rgba(117,176,229,.13) 1px,transparent 1px),linear-gradient(90deg,rgba(117,176,229,.13) 1px,transparent 1px);background-size:46px 46px;mask-image:linear-gradient(#000,transparent 72%)}
 h1,h2,h3,.headline strong,.metric,.stage-label{font-family:"Avenir Next Condensed","Arial Narrow","Helvetica Neue",sans-serif;font-stretch:condensed}
 h1{font-size:clamp(2.35rem,5vw,4.4rem);line-height:1.02;letter-spacing:-.035em;margin:4px 0 8px;font-weight:700}h2{font-size:1.05rem;letter-spacing:.08em;text-transform:uppercase;margin:0}h3{margin:0}
 .shell{position:relative;max-width:1510px;margin:auto;padding:28px clamp(16px,3.4vw,56px) 70px}.masthead{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:22px}.brand{display:flex;align-items:center;gap:10px;color:#c8ddf0;font-size:.72rem;font-weight:800;letter-spacing:.2em;text-transform:uppercase}.brand-mark{width:19px;height:19px;border:2px solid var(--orange);border-right-color:transparent;border-radius:50%;box-shadow:0 0 17px rgba(251,123,50,.55)}.edition{color:var(--muted);font-size:.72rem;letter-spacing:.1em;text-transform:uppercase}.eyebrow{color:var(--orange);font-size:.72rem;font-weight:800;letter-spacing:.2em;text-transform:uppercase}.subtitle{color:#a9bfd4;margin:0 0 20px;font-size:.91rem}
 .headline{display:flex;align-items:center;gap:0;min-height:58px;margin-bottom:18px;padding:8px 16px;border:1px solid rgba(251,123,50,.29);border-radius:14px;background:linear-gradient(90deg,rgba(251,123,50,.13),rgba(17,51,87,.65) 39%,rgba(8,27,48,.48));box-shadow:0 16px 42px rgba(0,0,0,.24),inset 0 1px rgba(255,255,255,.08);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)}
-.headline strong{font-size:1.3rem;white-space:nowrap;padding:0 19px;border-right:1px solid var(--line);letter-spacing:.015em}.headline strong:first-child{padding-left:0;color:var(--blue)}.headline strong:nth-child(2){color:var(--orange)}.headline strong:nth-child(3){color:var(--red);border:0}.headline-clock{margin-left:auto;color:#b8ccdd;font-size:.76rem;text-align:right}.relative-age{color:var(--muted)}
+.headline strong{font-size:1.3rem;white-space:nowrap;padding:0 19px;border-right:1px solid var(--line);letter-spacing:.015em}.headline strong:first-child{padding-left:0;color:var(--blue)}.headline strong:nth-child(2){color:var(--orange)}.headline strong:nth-child(3){color:var(--red)}.headline strong.completion-count{color:var(--green);font-size:1.08rem;border:0}.headline-clock{display:grid;margin-left:auto;color:#b8ccdd;font-size:.76rem;text-align:right}.task-change-clock,.relative-age{color:var(--muted)}.stall-banner,.github-banner{margin:0 0 14px;padding:11px 15px;border-radius:12px;font-weight:750}.stall-banner{border:1px solid var(--red);color:#fff;background:rgba(176,29,39,.45);animation:stall-pulse 1s ease-in-out infinite}.github-banner{border:1px solid var(--orange);color:#ffd2ad;background:rgba(125,64,20,.34)}[hidden]{display:none!important}@keyframes stall-pulse{50%{box-shadow:0 0 24px rgba(255,105,107,.5)}}
 .panel{position:relative;min-width:0;padding:20px 22px;border:1px solid var(--line);border-radius:18px;background:linear-gradient(145deg,rgba(17,46,80,.67),rgba(5,18,34,.82) 58%,rgba(7,24,44,.76));box-shadow:0 24px 52px rgba(0,0,0,.23),inset 0 1px rgba(255,255,255,.065);backdrop-filter:blur(22px);-webkit-backdrop-filter:blur(22px)}.panel:before{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;background:linear-gradient(120deg,rgba(255,255,255,.055),transparent 34%)}.panel-head{position:relative;display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:14px}.panel-head .count{color:var(--orange);font-size:.77rem;font-weight:800;letter-spacing:.11em}.upper-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}.pipeline-panel{margin-bottom:14px;overflow:hidden}.pipeline-panel .panel-head{margin-bottom:8px}.section-caption{color:var(--muted);font-size:.77rem;margin:0 0 10px}
 .empty{display:flex;align-items:center;gap:10px;min-height:46px;color:#a5bbcd;margin:0;font-size:.89rem}.empty-symbol{display:inline-grid;place-items:center;width:27px;height:27px;border-radius:50%;background:rgba(125,221,192,.12);color:var(--green);font-weight:800}.compact{min-height:30px;font-size:.78rem}
 .question-card,.task-card,.deliverable,.ledger-row{position:relative;border:1px solid var(--line);border-radius:12px;background:rgba(1,9,19,.47)}.question-card{display:flex;gap:12px;padding:13px 15px;border-color:rgba(251,123,50,.31)}.question-card+.question-card,.task-card+.task-card,.deliverable+.deliverable{margin-top:8px}.question-card strong{display:block;font-size:.94rem}.question-card p{margin:5px 0;color:#cad9e6;font-size:.82rem}.question-card p b{color:var(--orange);font-size:.63rem;letter-spacing:.1em}.question-card time{color:var(--muted);font-size:.7rem}.question-mark{display:grid;place-items:center;flex:0 0 30px;height:30px;border:1px solid var(--orange);border-radius:9px;color:var(--orange);font-weight:800}
-.pipeline-diagram{display:block;width:100%;height:auto;overflow:visible}.pipeline-phone{display:none}.stage-well{fill:rgba(2,13,29,.52);stroke:rgba(136,178,217,.2);stroke-width:1}.stage-index{font:700 12px -apple-system,sans-serif;letter-spacing:.1em;fill:var(--orange)}.stage-label{font-size:22px;font-weight:800;fill:var(--ink)}.stage-count{font:700 13px -apple-system,sans-serif;fill:var(--muted)}.pipeline-connector{fill:none;stroke:var(--orange);stroke-width:2;stroke-linecap:round;opacity:.72}.node-shape{fill:rgba(10,31,54,.95);stroke:var(--node-accent);stroke-width:1.15}.node-halo{fill:var(--node-accent)}.executor-glyph{fill:#03101d;font:800 12px -apple-system,sans-serif}.node-label{fill:var(--ink);font:650 12px -apple-system,sans-serif}.node-meta{fill:#a6bfd2;font:700 9px -apple-system,sans-serif;letter-spacing:.03em}.pipeline-empty{fill:var(--muted);font:13px -apple-system,sans-serif}.node-healthy{--node-accent:var(--blue)}.node-question{--node-accent:var(--orange)}.node-blocked{--node-accent:var(--red)}.node-state-still[data-stage="measured"]{--node-accent:var(--green)}.pipeline-node:focus .node-shape,.pipeline-node:hover .node-shape{stroke-width:2.5;fill:#173957}.pipeline-node{cursor:default;outline:none}.pipeline-node.linked .node-shape{stroke-width:2.5;fill:#173957}.task-card.linked{border-color:var(--orange);background:rgba(251,123,50,.13)}
-.status-groups{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.status-group{min-width:0}.status-heading{display:flex;justify-content:space-between;align-items:center;gap:10px;border-bottom:1px solid var(--line);padding:3px 0 9px;margin-bottom:10px}.status-heading h3{font-size:.75rem;letter-spacing:.13em;text-transform:uppercase;color:#b4c9d9}.status-heading span{font-family:"Arial Narrow",sans-serif;color:var(--orange);font-weight:800;font-size:1.12rem}.task-card{padding:11px 12px;min-width:0}.task-main{display:flex;align-items:flex-start;gap:9px}.task-copy{display:flex;flex-direction:column;min-width:0}.task-copy strong{font-size:.87rem;line-height:1.27}.task-id{color:var(--muted);font-size:.66rem;margin-top:2px}.task-age{margin-left:auto;color:var(--muted);font-size:.64rem;white-space:nowrap}.state-mark{display:grid;place-items:center;flex:0 0 22px;height:22px;border-radius:7px;color:var(--state-accent);border:1px solid var(--state-accent);font-size:.7rem;font-weight:800}.task-data{display:grid;gap:3px;margin:8px 0 0 31px;font-size:.72rem;color:#c5d7e5}.task-data span{min-width:0;overflow-wrap:anywhere}.task-data b{display:inline-block;margin-right:7px;color:#7595ad;font-size:.57rem;letter-spacing:.08em}.task-note{margin:6px 0 0 31px;color:#a5bbce;font-size:.72rem;overflow-wrap:anywhere}
-.pulse-healthy{--state-accent:var(--blue)}.pulse-attention{--state-accent:var(--orange)}.pulse-critical{--state-accent:var(--red)}.pulse-still{--state-accent:var(--green)}.pulse-healthy.task-card,.pulse-healthy.question-card{border-left:3px solid var(--blue)}.pulse-attention.task-card,.pulse-attention.question-card{border-left:3px solid var(--orange)}.pulse-critical.task-card{border-left:3px solid var(--red)}.pulse-still.task-card{border-left:3px solid var(--green)}.status-queued .pulse-still.task-card{--state-accent:var(--blue);border-left-color:var(--blue)}
+.pipeline-diagram{display:block;width:100%;height:auto;overflow:visible}.pipeline-phone{display:none}.stage-well{fill:rgba(2,13,29,.52);stroke:var(--stage-accent);stroke-width:1.5}.stage-index{font:700 12px -apple-system,sans-serif;letter-spacing:.1em;fill:var(--stage-accent)}.stage-label{font-size:22px;font-weight:800;fill:var(--stage-accent)}.stage-count{font:700 13px -apple-system,sans-serif;fill:var(--muted)}.pipeline-connector{fill:none;stroke:var(--orange);stroke-width:2;stroke-linecap:round;opacity:.72}.node-shape{fill:rgba(10,31,54,.95);stroke:var(--stage-accent);stroke-width:1.15}.node-halo{fill:var(--stage-accent)}.executor-glyph{fill:#03101d;font:800 12px -apple-system,sans-serif}.node-label{fill:var(--ink);font:650 12px -apple-system,sans-serif}.node-meta{fill:#a6bfd2;font:700 9px -apple-system,sans-serif;letter-spacing:.03em}.pipeline-empty{fill:var(--muted);font:13px -apple-system,sans-serif}.stage[data-stage="queued"],.pipeline-node[data-stage="queued"],.task-card[data-stage="queued"]{--stage-accent:var(--stage-queued)}.stage[data-stage="build"],.pipeline-node[data-stage="build"],.task-card[data-stage="build"]{--stage-accent:var(--stage-build)}.stage[data-stage="review"],.pipeline-node[data-stage="review"],.task-card[data-stage="review"]{--stage-accent:var(--stage-review)}.stage[data-stage="ci"],.pipeline-node[data-stage="ci"],.task-card[data-stage="ci"]{--stage-accent:var(--stage-ci)}.stage[data-stage="merged"],.pipeline-node[data-stage="merged"],.task-card[data-stage="merged"]{--stage-accent:var(--stage-merged)}.stage[data-stage="live"],.pipeline-node[data-stage="live"],.task-card[data-stage="live"]{--stage-accent:var(--stage-live)}.pipeline-node:focus .node-shape,.pipeline-node:hover .node-shape{stroke-width:2.5;fill:#173957}.pipeline-node{cursor:default;outline:none}.pipeline-node.linked .node-shape{stroke-width:2.5;fill:#173957}.task-card.linked{border-color:var(--stage-accent);background:rgba(251,123,50,.13)}
+.status-groups{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.status-group{min-width:0}.status-heading{display:flex;justify-content:space-between;align-items:center;gap:10px;border-bottom:1px solid var(--line);padding:3px 0 9px;margin-bottom:10px}.status-heading h3{font-size:.75rem;letter-spacing:.13em;text-transform:uppercase;color:#b4c9d9}.status-heading span{font-family:"Arial Narrow",sans-serif;color:var(--orange);font-weight:800;font-size:1.12rem}.task-card{padding:11px 12px;min-width:0;border-left:3px solid var(--stage-accent)}.task-main{display:flex;align-items:flex-start;gap:9px;flex-wrap:wrap}.task-copy{display:flex;flex-direction:column;min-width:0}.task-copy strong{font-size:.87rem;line-height:1.27}.task-id{color:var(--muted);font-size:.66rem;margin-top:2px}.task-age{margin-left:auto;color:var(--muted);font-size:.64rem;white-space:nowrap}.stage-chip{display:inline-block;border:1px solid var(--stage-accent);border-radius:999px;padding:1px 7px;color:var(--stage-accent);font-size:.67rem;font-weight:800;white-space:nowrap}.state-mark{display:grid;place-items:center;flex:0 0 22px;height:22px;border-radius:7px;color:var(--state-accent);border:1px solid var(--state-accent);font-size:.7rem;font-weight:800}.task-data{display:grid;gap:3px;margin:8px 0 0 31px;font-size:.72rem;color:#c5d7e5}.task-data span{min-width:0;overflow-wrap:anywhere}.task-data b{display:inline-block;margin-right:7px;color:#7595ad;font-size:.57rem;letter-spacing:.08em}.task-note{margin:6px 0 0 31px;color:#a5bbce;font-size:.72rem;overflow-wrap:anywhere}.completed-panel{margin-top:14px}.completed-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.completed-card{margin:0!important}.completed-top{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}.completed-top time{margin-left:auto;color:var(--muted);font-size:.7rem}.completed-evidence{margin:8px 0;color:#d8e8f2;font-size:.8rem}.completed-evidence b,.completed-meta b{color:var(--green);font-size:.63rem;letter-spacing:.08em}.completed-meta{display:flex;justify-content:space-between;gap:8px;font-size:.73rem}.completed-meta a{color:var(--blue)}.pipeline-legend{margin:8px 0 0;color:#afc5d7;font-size:.78rem}
+.pulse-healthy{--state-accent:var(--blue)}.pulse-attention{--state-accent:var(--orange)}.pulse-critical{--state-accent:var(--red)}.pulse-still{--state-accent:var(--green)}
 .pipeline-node.pulse-healthy .node-halo{animation:breath 3.5s ease-in-out infinite;transform-box:fill-box;transform-origin:center}.pipeline-node.pulse-attention .node-halo{animation:breath 2s ease-in-out infinite;transform-box:fill-box;transform-origin:center}.pipeline-node.pulse-critical .node-halo{animation:breath 1s ease-in-out infinite;transform-box:fill-box;transform-origin:center}.pulse-healthy.task-card,.pulse-attention.question-card,.pulse-attention.task-card,.pulse-critical.task-card{animation:glow var(--pulse-speed) ease-in-out infinite}.pulse-healthy{--pulse-speed:3.5s}.pulse-attention{--pulse-speed:2s}.pulse-critical{--pulse-speed:1s}@keyframes breath{50%{opacity:.55;transform:scale(.8)}}@keyframes glow{50%{box-shadow:inset 0 0 18px rgba(101,186,255,.085)}}.changed{animation:changed-flash 1s ease-out 1!important}@keyframes changed-flash{0%{background:rgba(251,123,50,.34)}100%{background:rgba(1,9,19,.47)}}
 .lower-grid{display:grid;grid-template-columns:1.2fr .8fr;gap:14px;margin-top:14px}.deliverable{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;font-size:.84rem}.deliverable a{color:var(--ink);font-weight:700;text-decoration:none}.deliverable a:hover{text-decoration:underline;color:var(--orange)}.deliverable a span{margin-left:7px;color:var(--orange)}.deliverable time{color:var(--muted);font-size:.69rem;white-space:nowrap}.ledger-row{display:flex;align-items:center;gap:10px;padding:8px 11px;font-size:.8rem}.ledger-row+.ledger-row{margin-top:6px}.ledger-glyph{display:grid;place-items:center;width:25px;height:25px;border-radius:8px;background:rgba(101,186,255,.14);color:var(--blue);font-size:.7rem;font-weight:800}.ledger-row strong{margin-left:auto;color:var(--blue);font-family:"Arial Narrow",sans-serif;font-size:1.1rem}.ledger-row em{display:block;color:var(--red);font-size:.64rem;font-style:normal;font-weight:800;letter-spacing:.03em}.ledger-violation{border-color:var(--red);background:rgba(255,105,107,.09)}.ledger-violation .ledger-glyph,.ledger-violation strong{color:var(--red)}
 @media(max-width:1000px){.status-groups{grid-template-columns:repeat(2,minmax(0,1fr))}.headline-clock{max-width:24ch}}
-@media(max-width:700px){.shell{padding:16px 12px 50px}.masthead{margin-bottom:16px}.edition{display:none}.subtitle{margin-bottom:15px}.headline{display:grid;grid-template-columns:repeat(3,1fr);gap:4px 0;padding:10px 8px}.headline strong{padding:0 6px;text-align:center;font-size:.98rem}.headline-clock{grid-column:1/-1;max-width:none;margin:4px 0 0;text-align:center;font-size:.69rem}.upper-grid,.lower-grid,.status-groups{grid-template-columns:1fr}.panel{padding:15px 13px;border-radius:15px}.pipeline-desktop{display:none}.pipeline-phone{display:block}.status-groups{gap:13px}.deliverable{align-items:flex-start;flex-direction:column;gap:3px}h1{font-size:clamp(2rem,8vw,2.5rem);overflow-wrap:anywhere}.stage-label{font-size:18px}}
+@media(max-width:700px){.shell{padding:16px 12px 50px}.masthead{margin-bottom:16px}.edition{display:none}.subtitle{margin-bottom:15px}.headline{display:grid;grid-template-columns:repeat(2,1fr);gap:4px 0;padding:10px 8px}.headline strong{padding:0 6px;text-align:center;font-size:.98rem}.headline-clock{grid-column:1/-1;max-width:none;margin:4px 0 0;text-align:center;font-size:.69rem}.upper-grid,.lower-grid,.status-groups,.completed-list{grid-template-columns:1fr}.panel{padding:15px 13px;border-radius:15px}.pipeline-desktop{display:none}.pipeline-phone{display:block}.status-groups{gap:13px}.deliverable{align-items:flex-start;flex-direction:column;gap:3px}h1{font-size:clamp(2rem,8vw,2.5rem);overflow-wrap:anywhere}.stage-label{font-size:18px}}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important;scroll-behavior:auto!important}.changed{outline:2px solid var(--orange)}.node-halo{opacity:1!important;transform:none!important}}
 </style></head><body><main class="shell">
 <div class="masthead"><div class="brand"><span class="brand-mark" aria-hidden="true"></span>CARR <span style="color:#789cb9">/</span> SYSTEMS</div><span class="edition">Orchestration · __PROJECT__</span></div>
 <header><div class="eyebrow">Mission control / __PROJECT__</div><h1>__TITLE__</h1><p class="subtitle">Every task, decision, and delivery in one live view.</p></header>
+<div id="stall-banner" class="stall-banner" role="alert" hidden>Board refresh stalled</div>__GITHUB_BANNER__
 <div class="headline" aria-label="Project summary">__HEADLINE__</div>
 <div class="upper-grid">
 <section class="panel"><div class="panel-head"><h2>Questions waiting on Joe</h2><span class="count">__QUESTION_COUNT__ OPEN</span></div>__QUESTIONS__</section>
 <section class="panel"><div class="panel-head"><h2>Stuck</h2><span class="count">__STUCK_COUNT__ ITEMS</span></div>__STUCK__</section>
 </div>
-<section class="panel pipeline-panel"><div class="panel-head"><h2>Delivery pipeline</h2><span class="count">__TASK_COUNT__ TASKS</span></div><p class="section-caption">Queued → Building → Review → CI → Merged → Measured</p>__PIPELINE__</section>
+<section class="panel pipeline-panel"><div class="panel-head"><h2>Delivery pipeline</h2><span class="count">__TASK_COUNT__ ACTIVE TASKS</span></div><p class="section-caption">Queued → Building → Review → CI → Merged → Live</p>__PIPELINE__<p class="pipeline-legend">Merged = code on main. Live = released where it runs and verified by a measured outcome.</p></section>
 <section class="panel"><div class="panel-head"><h2>Tasks by status</h2><span class="count">__TASK_COUNT__ TOTAL</span></div><div class="status-groups">__STATUSES__</div></section>
+<section class="panel completed-panel"><div class="panel-head"><h2>Completed</h2><span class="count">__COMPLETED_COUNT__ LIVE</span></div><div class="completed-list">__COMPLETED__</div></section>
 <div class="lower-grid">
 <section class="panel"><div class="panel-head"><h2>Latest deliverables</h2><span class="count">__DELIVERABLE_COUNT__ LINKS</span></div>__DELIVERABLES__</section>
 <section class="panel"><div class="panel-head"><h2>Executor ledger</h2><span class="count">5 POOLS</span></div>__LEDGER__</section>
 </div></main>
 <script>
 (function(){
+  var renderedAt=Date.parse('__RENDERED_AT__');
+  function checkStall(){var banner=document.getElementById('stall-banner');banner.hidden=!(Number.isFinite(renderedAt)&&Date.now()-renderedAt>360000)}
+  checkStall();setInterval(checkStall,1000);
   var key='carr-board:'+location.pathname+':';
   try{var saved=sessionStorage.getItem(key+'scrollY');if(saved!==null){requestAnimationFrame(function(){scrollTo(0,Number(saved)||0)})}}catch(_){}
   var changedItems={};
@@ -478,7 +546,7 @@ h1{font-size:clamp(2.35rem,5vw,4.4rem);line-height:1.02;letter-spacing:-.035em;m
   function updateAges(){document.querySelectorAll('[data-age-at]').forEach(function(el){
     var at=Date.parse(el.dataset.ageAt);if(!Number.isFinite(at))return;
     var minutes=Math.max(0,Math.floor((Date.now()-at)/60000));
-    var age='updated '+minutes+' min ago';el.textContent=(el.classList.contains('relative-age')?'· ':'')+age;
+    var age=minutes+' min ago';el.textContent=el.classList.contains('relative-age')?age:'updated '+age;
   })}
   updateAges();setInterval(updateAges,10000);
   addEventListener('beforeunload',function(){try{sessionStorage.setItem(key+'scrollY',String(scrollY))}catch(_){}});
@@ -490,8 +558,30 @@ h1{font-size:clamp(2.35rem,5vw,4.4rem);line-height:1.02;letter-spacing:-.035em;m
 
 def render(project: str) -> None:
     state = read_state(project)
+    pr_infos: dict[str, dict[str, Any] | None] = {}
+    changed = False
+    for task_id, task in state.get("tasks", {}).items():
+        if task.get("pr") is None:
+            continue
+        info = pr_info(task["pr"])
+        pr_infos[task_id] = info
+        if info is None:
+            continue
+        status, stage, phase = derived_pr_state(info)
+        if task_stage(task) == "live":
+            status, stage = "done", "live"
+        observed = (("status", status), ("stage", stage), ("pr_phase", phase),
+                    ("pr_checks", checks_summary(info)), ("pr_head", info.get("headRefOid") or ""))
+        if any(task.get(key) != value for key, value in observed):
+            task.update(observed)
+            task["updated_at"] = now_utc().isoformat(timespec="microseconds")
+            changed = True
+    if changed:
+        state["updated_at"] = max(task["updated_at"] for task in state["tasks"].values())
+        write_json(state)
     board_dir().mkdir(parents=True, exist_ok=True)
-    html_path(project).write_text(render_state(state), encoding="utf-8")
+    html_path(project).write_text(render_state(state, pr_infos,
+                                              now_utc().isoformat(timespec="microseconds")), encoding="utf-8")
 
 
 def write_and_render(state: dict[str, Any]) -> None:
@@ -521,22 +611,37 @@ def command_init(args: argparse.Namespace) -> None:
 
 def command_task(args: argparse.Namespace) -> None:
     state = read_state(args.project)
-    if args.stage and args.pr is None:
-        raise SystemExit("--stage requires --pr")
     task_time = stamp()
     prior = state.setdefault("tasks", {}).get(args.task_id, {})
-    task = {
-        "title": args.title,
-        "status": args.status,
-        "executor": args.executor,
-        "pr": args.pr,
-        "note": args.note,
+    if not prior and not all((args.title, args.status, args.executor)):
+        raise SystemExit("new tasks require --title, --status, and --executor")
+    stage = "live" if args.stage == "measured" else args.stage
+    if stage and stage != "live" and args.pr is None and prior.get("pr") is None:
+        raise SystemExit("--stage requires --pr")
+    if stage == "live" and not (args.evidence or "").strip():
+        raise SystemExit("Live requires --evidence describing the measured operational outcome")
+    if args.evidence and stage != "live":
+        raise SystemExit("--evidence requires --stage live")
+    task = dict(prior)
+    task.update({
+        "title": args.title or prior.get("title"),
+        "status": args.status or prior.get("status"),
+        "executor": args.executor or prior.get("executor"),
+        "pr": args.pr if args.pr is not None else prior.get("pr"),
+        "note": args.note if args.note is not None else prior.get("note"),
         "created_at": prior.get("created_at", task_time),
         "updated_at": task_time,
-    }
+    })
     if args.stage:
-        task["stage"] = args.stage
-    if args.health != "healthy":
+        task["stage"] = stage
+    if stage == "live":
+        task["status"] = "done"
+        task["evidence"] = args.evidence.strip()
+        task["completed_at"] = prior.get("completed_at") if task_stage(prior) == "live" else task_time
+    elif stage and task_stage(prior) == "live":
+        task.pop("evidence", None)
+        task.pop("completed_at", None)
+    if args.health is not None:
         task["health"] = args.health
     state["tasks"][args.task_id] = task
     write_and_render(state)
@@ -589,13 +694,14 @@ def parser() -> argparse.ArgumentParser:
     task = commands.add_parser("task")
     task.add_argument("project")
     task.add_argument("task_id")
-    task.add_argument("--title", required=True)
-    task.add_argument("--status", required=True, choices=STATUSES)
-    task.add_argument("--executor", required=True)
+    task.add_argument("--title")
+    task.add_argument("--status", choices=STATUSES)
+    task.add_argument("--executor")
     task.add_argument("--pr", type=int)
     task.add_argument("--stage", choices=PR_STAGES)
-    task.add_argument("--health", choices=("healthy", "question", "blocked"), default="healthy")
+    task.add_argument("--health", choices=("healthy", "question", "blocked"))
     task.add_argument("--note")
+    task.add_argument("--evidence")
     task.set_defaults(func=command_task)
     ask = commands.add_parser("ask")
     ask.add_argument("project")
