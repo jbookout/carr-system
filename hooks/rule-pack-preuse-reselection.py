@@ -128,7 +128,6 @@ SEMANTIC_FAILURE_CONTEXT = (
     "The partner message was not blocked or rewritten; no semantic rule was "
     "treated as loaded."
 )
-PATH_INPUT_KEYS = ("file_path", "path", "notebook_path")
 # typesafe_client's state guard is 96k characters. Leave headroom for JSON
 # structure and reject above it rather than judging only a prompt's edges while
 # issuing a receipt that appears to cover the whole message.
@@ -165,10 +164,9 @@ def _extract_command(tool_input: object) -> str | None:
 
 
 def _extract_paths(tool_input: object) -> list[str]:
-    if not isinstance(tool_input, dict):
-        return []
-    return [tool_input[key] for key in PATH_INPUT_KEYS
-            if isinstance(tool_input.get(key), str) and tool_input[key].strip()]
+    # Share the Codex apply_patch and ordinary file-path parser with the
+    # declarative route rail. A patch's Move to destination binds too.
+    return rule_routes.call_paths(tool_input)
 
 
 def _serialized_payload(tool_name: str, tool_input: object) -> str:
@@ -186,7 +184,12 @@ def _row_matches(tool_name: str, tool_input: object, row: dict) -> bool:
         return False
     try:
         if kind == "verb":
-            return re.search(pattern, tool_name) is not None
+            if re.search(pattern, tool_name):
+                return True
+            if tool_name.startswith(("mcp__carr__", "mcp__carr_records__")):
+                prefix, verb = tool_name.rsplit("__", 1)
+                return re.search(pattern, prefix + "__" + verb.replace("_", "-")) is not None
+            return False
         if kind == "bash_family":
             if tool_name not in {"Bash", "functions.exec"}:
                 return False
