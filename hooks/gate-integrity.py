@@ -469,9 +469,39 @@ def delegation_hook_contract():
     if (not isinstance(contract["command"], str)
             or not isinstance(contract["timeout"], int)):
         return None, "delegation hook contract command/timeout is malformed"
-    if "/Users/" in contract["command"] or "${HOME}/carr-system/" not in contract["command"]:
-        return None, "delegation hook contract is not machine-portable"
+    err = contract_shape_error(contract["command"],
+                               contract.get("canonical_only_commands", []))
+    if err:
+        return None, err
     return contract, None
+
+
+def contract_shape_error(command, canonical_only=()):
+    """The path-resolution contract for the delegation hook command.
+
+    The command must prefer the canonical ~/carr-system checkout (so on a Mac a
+    worktree or branch can never swap in its own gate) and must fall back to
+    $CLAUDE_PROJECT_DIR when that checkout is absent (a Claude Code cloud
+    container clones the repo elsewhere; without the fallback python3 exits 2
+    and every Bash/Read/Grep/Glob call is blocked). ops/cloud-hook-paths-
+    selftest.py runs the command itself in both layouts; this is the static
+    half, so a hand edit to the contract that drops either path fails here.
+
+    canonical_only_commands is an exact, enumerated list of the older
+    canonical-only form, accepted for Mac-only projects such as the Drive vault
+    whose live settings still carry it. On a Mac both forms run the same file.
+    """
+    if "/Users/" in command or "${HOME}/carr-system/" not in command:
+        return "delegation hook contract is not machine-portable"
+    if "${CLAUDE_PROJECT_DIR" not in command:
+        return "delegation hook contract has no $CLAUDE_PROJECT_DIR fallback"
+    if not isinstance(canonical_only, (list, tuple)):
+        return "delegation hook canonical_only_commands must be a list"
+    for extra in canonical_only:
+        if (not isinstance(extra, str) or "/Users/" in extra
+                or "${HOME}/carr-system/" not in extra):
+            return "delegation hook canonical_only_commands entry is not machine-portable"
+    return None
 
 
 def validate_delegation_wiring(live, contract):
@@ -487,12 +517,13 @@ def validate_delegation_wiring(live, contract):
                 and entry.get("matcher") == contract["matcher"]]
     if len(matching) != 1:
         return False, "expected exactly one project PreToolUse matcher"
-    expected_hook = {
+    accepted = [contract["command"], *contract.get("canonical_only_commands", [])]
+    expected_hooks = [[{
         "type": "command",
-        "command": contract["command"],
+        "command": command,
         "timeout": contract["timeout"],
-    }
-    if matching[0].get("hooks") != [expected_hook]:
+    }] for command in accepted]
+    if matching[0].get("hooks") not in expected_hooks:
         return False, "project matcher command or timeout is not exact"
     return True, None
 
@@ -602,6 +633,40 @@ def delegation_wiring_selftest():
     for name, live, expected in cases:
         accepted, _ = validate_delegation_wiring(live, contract)
         ok = accepted == expected
+        print(f"{'PASS' if ok else 'FAIL'}  {name}")
+        outcomes.append(ok)
+    # A Mac-only project (the Drive vault) may keep the canonical-only form;
+    # it is an exact, enumerated alternative, never a substring match.
+    legacy = "/exact/canonical-only/delegation-gate.py"
+    with_legacy = dict(contract, canonical_only_commands=[legacy])
+    legacy_live = {"PreToolUse": [{"matcher": "Bash|Read", "hooks": [{
+        "type": "command", "command": legacy, "timeout": 10,
+    }]}]}
+    suffixed_legacy = {"PreToolUse": [{"matcher": "Bash|Read", "hooks": [{
+        "type": "command", "command": legacy + " --later", "timeout": 10,
+    }]}]}
+    legacy_cases = [
+        ("listed canonical-only command accepted", legacy_live, with_legacy, True),
+        ("canonical-only command without a listing rejected", legacy_live, contract, False),
+        ("suffixed canonical-only command rejected", suffixed_legacy, with_legacy, False),
+        ("portable command still accepted beside a listing", good, with_legacy, True),
+    ]
+    for name, live, which, expected in legacy_cases:
+        accepted, _ = validate_delegation_wiring(live, which)
+        ok = accepted == expected
+        print(f"{'PASS' if ok else 'FAIL'}  {name}")
+        outcomes.append(ok)
+    portable = ('if [ -d "${HOME}/carr-system/hooks" ]; then r="${HOME}/carr-system"; '
+                'else r="${CLAUDE_PROJECT_DIR:-}"; fi; exec python3 "$r/hooks/delegation-gate.py"')
+    shape_cases = [
+        ("contract with a $CLAUDE_PROJECT_DIR fallback accepted", portable, [], True),
+        ("contract without a $CLAUDE_PROJECT_DIR fallback rejected",
+         '/usr/bin/env python3 "${HOME}/carr-system/hooks/delegation-gate.py"', [], False),
+        ("contract with a machine-specific canonical-only command rejected", portable,
+         ["/usr/bin/env python3 /Users/x/carr-system/hooks/delegation-gate.py"], False),
+    ]
+    for name, command, extra, expected in shape_cases:
+        ok = (contract_shape_error(command, extra) is None) == expected
         print(f"{'PASS' if ok else 'FAIL'}  {name}")
         outcomes.append(ok)
     expected_wiring = {"PreToolUse": [{"matcher": "Bash", "hooks": [{
