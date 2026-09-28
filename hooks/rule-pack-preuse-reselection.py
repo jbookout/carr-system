@@ -8,8 +8,9 @@ source-owned rules as additional context, and leaves the original tool input
 untouched.  Any failure remains visible to Stop telemetry and never blocks.
 
 GENERALIZED (WR-000019 slice S9). The paragraph above describes the ORIGINAL
-rail exactly as it shipped, and that rail's logic, receipt schema and tests
-are untouched below — proven, single-pack, single-shape, left alone. This
+single-pack, single-shape rail. Its full receipt contract remains when it fits
+the visible hook context cap; an oversized receipt yields a short not-delivered
+notice so a file preview cannot masquerade as rule delivery. This
 file now also drives a SECOND, more general rail off the declarative
 compiled trigger table, ops/config/rule-jit-triggers.v1.json
 (ops/rule-jit-compile.py is its only writer): an MCP verb call, a Bash
@@ -47,8 +48,8 @@ MCP tool, the call-verb passthrough, or `run.sh call`), a Bash command
 pattern, or a path glob. On a PreToolUse call that hits any route, the rules
 it hits are UNIONED with the compiled table's rows, fetched through the same
 standing-context door in ONE call, and injected as a third receipt
-(ROUTE_RECEIPT_SCHEMA). What exists today is kept: a call no route hits takes
-the generalized rail above unchanged, and the scheduled rail is untouched.
+(ROUTE_RECEIPT_SCHEMA). A call no route hits takes the generalized rail above
+unchanged, and the scheduled rail retains its exact-match precedence.
 Two properties the route rail adds. It dedupes PER RULE PER SESSION: a rule
 delivered in full is not re-injected for the same tool within 30 minutes, and
 a different tool delivers it again. And it FITS THE CAP: Claude Code persists
@@ -342,6 +343,19 @@ def _deduped_context(payload: dict, receipt: dict) -> dict | None:
                                    digest(rule_set), len(text.encode("utf-8")))):
         return None
     return _context(text)
+
+
+def _scheduled_oversize_notice(ids: list[str]) -> str:
+    # The original receipt contract credits the pack only when every rule is
+    # present in full. Claude hides oversized additionalContext behind a file
+    # preview, so a partial receipt would falsely certify delivery.
+    return (
+        "RULE PACK PREUSE DELIVERY TOO LARGE: scheduled-automation rules were "
+        "NOT delivered. The full receipt exceeds the visible hook context cap. "
+        "The tool call was not blocked or changed. Before acting, fetch these "
+        "rules with standing-context rule_ids in batches and read their full "
+        "text: " + ", ".join(ids) + "."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -731,11 +745,17 @@ def process(payload: dict, *, runner: Callable = subprocess.run,
     if payload.get("hook_event_name") == "UserPromptSubmit":
         return _process_prompt(payload, runner, adviser, build_adviser)
     if _matches(payload):
-        # THE ORIGINAL RAIL, untouched: exact shape, exact pack, exact receipt.
+        # Keep the original receipt when it is visible in full. An oversized
+        # receipt is not delivery: Claude persists it and shows a preview.
         try:
             ids = scheduled_rule_ids()
             response = _run_selector(ids, runner)
-            return _deduped_context(payload, _receipt(payload, response, ids))
+            row = _receipt(payload, response, ids)
+            if not rule_routes.within_cap(canonical(row).decode("utf-8")):
+                notice = _scheduled_oversize_notice(ids)
+                return _context(notice if rule_routes.within_cap(notice)
+                                else rule_routes.notice_too_large(ids))
+            return _deduped_context(payload, row)
         except Exception:
             # Never surface provider/auth/network exception text: it may contain a
             # bearer, URL, or local path.  The fixed category is enough for Stop to
