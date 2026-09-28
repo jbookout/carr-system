@@ -70,6 +70,13 @@ import sys
 # __file__ resolves through the absolute canonical path this hook is invoked
 # by, so REPO is the canonical tree regardless of which worktree's session
 # triggered it (same reasoning as worktree-self-plumb.py).
+#
+# CLOUD CONTAINERS (2026-09-27): the settings command runs this file only when
+# ~/carr-system/hooks exists and exits 0 otherwise. A Claude Code cloud clone
+# has no local actor, no launchd and no ~/.config/carr, and would otherwise
+# read as an unidentified secondary machine and run `config-as-code install
+# --apply` against the container. It must never converge there; ops/cloud-
+# hook-paths-selftest.py pins that no-op.
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOME = os.path.expanduser("~")
 ACTOR_FILE = os.path.join(HOME, ".config", "carr", "local-actor.json")
