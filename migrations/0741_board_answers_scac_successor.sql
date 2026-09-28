@@ -708,8 +708,8 @@ begin
   select * into registry from ops.scac_mutation_registry_version
     where registry_version=latest.registry_version;
   grant_state:=case when registry.registry_version='scac-mutation-registry.v94' and
-    (grant_snapshot->>'entry_count')::integer=316 and
-    grant_snapshot->>'grant_digest'='sha256:1be07d2716cf51291b48d2c7724454bd8e47d8152d5d082f05a23bcc8e33437a'
+    (grant_snapshot->>'entry_count')::integer=322 and
+    grant_snapshot->>'grant_digest'='sha256:c8ce3685983e4fbfd361f7b1e6fdac9b0974502bc32c979b4738bc6e651aa296'
     then 'current' else 'drifted_or_unbound' end;
   with recursive connected(oid) as (
     select oid from pg_roles where rolname in ('carr_writer','carr_jobs','carr_authority')

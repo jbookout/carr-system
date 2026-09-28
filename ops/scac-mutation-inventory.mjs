@@ -18692,6 +18692,12 @@ export function renderBoardAnswersRegistrySql(rows, predecessorSql = null) {
       .replaceAll(`observed_count<>${oldValue.count}`, `observed_count<>${newValue.count}`)
       .replaceAll(`observed_digest<>'${oldValue.digest}'`, `observed_digest<>'${newValue.digest}'`);
   }
+  const oldGrants = oldCatalogBaseline.runtime_dml_grants;
+  const newGrants = newCatalogBaseline.runtime_dml_grants;
+  sql = replaceExactlyOnce(sql,
+    `(grant_snapshot->>'entry_count')::integer=${oldGrants.count} and\n    grant_snapshot->>'grant_digest'='${oldGrants.digest}'`,
+    `(grant_snapshot->>'entry_count')::integer=${newGrants.count} and\n    grant_snapshot->>'grant_digest'='${newGrants.digest}'`,
+    "v94 reference monitor grant binding");
   const originalVersions = Array.from({ length: 93 }, (_, index) =>
     `'scac-mutation-registry.v${index + 1}'`).join(",");
   const corruptedVersions = originalVersions.replace(
