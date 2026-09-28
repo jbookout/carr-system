@@ -8,6 +8,7 @@ can be opened directly and refreshes itself without a server.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import os
@@ -15,10 +16,12 @@ import re
 import shutil
 import subprocess
 import sys
+import textwrap
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 
 STATUSES = ("queued", "running", "review", "blocked", "done", "failed")
@@ -126,7 +129,18 @@ def violation(executor: str) -> bool:
 
 
 def executor_pool(executor: str) -> str:
-    return (executor.strip().split(maxsplit=1) or ["unassigned"])[0].lower()
+    value = executor.lower().strip()
+    if "orchestrator" in value:
+        return "orchestrator"
+    if "claude" in value or "opus" in value or "sonnet" in value:
+        return "claude-cloud"
+    if "flash next" in value or "flash-next" in value:
+        return "flash-next"
+    if "grok" in value:
+        return "grok"
+    if "codex" in value or "gpt-" in value:
+        return "codex"
+    return "unassigned"
 
 
 def task_stage(task: dict[str, Any]) -> str:
@@ -137,67 +151,109 @@ def task_stage(task: dict[str, Any]) -> str:
 
 
 def task_health(task: dict[str, Any]) -> str:
-    if task.get("status") == "blocked" or task.get("health") == "blocked":
+    if task.get("status") in {"blocked", "failed"} or task.get("health") == "blocked" or is_stuck(task):
         return "blocked"
-    if task.get("health") == "question" or task.get("question"):
+    if task.get("status") == "review" or task.get("health") == "question" or task.get("question"):
         return "question"
     return "healthy"
 
 
+def pulse_state(task: dict[str, Any]) -> str:
+    if task_health(task) == "blocked":
+        return "critical"
+    if task_health(task) == "question":
+        return "attention"
+    if task.get("status") in {"done", "queued"}:
+        return "still"
+    return "healthy"
+
+
 def executor_glyph(executor: str) -> str:
-    pool = executor_pool(executor)
-    return pool[:1].upper() or "?"
+    return {"codex": "C", "grok": "G", "flash-next": "F", "claude-cloud": "✦", "orchestrator": "O"}.get(executor_pool(executor), "?")
 
 
 def pipeline_svg(tasks: dict[str, dict[str, Any]]) -> str:
+    """Draw task cards in six connected SVG stages for desk and phone."""
     columns: dict[str, list[tuple[str, dict[str, Any]]]] = {stage: [] for stage in PIPELINE_STAGES}
     for task_id, task in tasks.items():
         columns[task_stage(task)].append((task_id, task))
 
-    node_height = 58
-    stage_header_height = 48
-    max_rows = max((len(nodes) for nodes in columns.values()), default=0)
-    svg_height = max(300, 54 + stage_header_height + max_rows * node_height + 18)
-    mobile_rows = sum(1 + len(nodes) for nodes in columns.values())
-    svg_height = max(svg_height, 54 + mobile_rows * 48)
-
-    nodes = []
-    for stage in PIPELINE_STAGES:
-        stage_nodes = []
-        for task_id, task in columns[stage]:
-            health = task_health(task)
-            pool = executor_pool(task.get("executor", "unassigned"))
-            stage_nodes.append(
-                f'<div class="pipeline-node node-{health}" data-task-id="{esc(task_id)}" '
-                f'data-stage="{esc(stage)}" data-executor-pool="{esc(pool)}" '
-                f'aria-label="{esc(task.get("title", task_id))} · {esc(STAGE_LABELS[stage])}">'
-                f'<span class="executor-glyph" aria-hidden="true">{esc(executor_glyph(task.get("executor", "unassigned")))}</span>'
-                f'<span class="pipeline-node-copy"><strong>{esc(task.get("title", task_id))}</strong>'
-                f'<small>{esc(pool)} · {esc(health)}</small></span></div>'
-            )
-        nodes.append(
-            f'<section class="pipeline-stage" data-stage="{esc(stage)}">'
-            f'<h3>{esc(STAGE_LABELS[stage])}</h3>'
-            f'<div class="pipeline-nodes">{"".join(stage_nodes) or "<span class=\"pipeline-empty\">—</span>"}</div>'
-            "</section>"
+    def node(task_id: str, task: dict[str, Any], stage: str, x: int, y: int, width: int, phone: bool) -> str:
+        executor = task.get("executor", "unassigned")
+        pool = executor_pool(executor)
+        health = task_health(task)
+        pulse = pulse_state(task)
+        title = str(task.get("title", task_id))
+        max_chars = 35 if phone else 16
+        lines = textwrap.wrap(title, width=max_chars, break_long_words=True) or [task_id]
+        max_lines = 2 if phone else 3
+        if len(lines) > max_lines:
+            lines = lines[:max_lines]
+            lines[-1] = lines[-1][: max_chars - 1] + "…"
+        label = "".join(
+            f'<tspan x="{x + 54}" y="{y + 24 + i * 15}">{esc(line)}</tspan>'
+            for i, line in enumerate(lines)
+        )
+        pr = f"PR {task['pr']}" if task.get("pr") is not None else "No PR"
+        if pulse == "critical":
+            halo = f'<path class="node-halo" d="M{x + 28} {y + 12} L{x + 44} {y + 29} L{x + 28} {y + 46} L{x + 12} {y + 29} Z"/>'
+        elif pulse == "attention":
+            halo = f'<rect class="node-halo" x="{x + 13}" y="{y + 14}" width="30" height="30" rx="6"/>'
+        else:
+            halo = f'<circle class="node-halo" cx="{x + 28}" cy="{y + 29}" r="15"/>'
+        return (
+            f'<g class="pipeline-node node-{health} node-state-{pulse} pulse-{pulse}" data-task-id="{esc(task_id)}" '
+            f'data-stage="{esc(stage)}" data-executor-pool="{esc(pool)}" tabindex="0" '
+            f'aria-label="{esc(title)} · {esc(STAGE_LABELS[stage])} · {esc(pool)} · {esc(pr)}">'
+            f'<rect class="node-shape" x="{x}" y="{y}" width="{width}" height="{84 if phone else 100}" rx="13"/>'
+            f'{halo}'
+            f'<text class="executor-glyph" x="{x + 28}" y="{y + 33}" text-anchor="middle">{esc(executor_glyph(executor))}</text>'
+            f'<text class="node-label">{label}</text>'
+            f'<text class="node-meta" x="{x + 16}" y="{y + (70 if phone else 86)}">{esc(pool.replace("-", " ").upper())} · {esc(pr)}</text>'
+            '</g>'
         )
 
-    arrows = "".join(
-        f'<path class="pipeline-arrow" d="M{x} 34 H{x + 142}" />'
-        for x in (188, 380, 572, 764, 956)
+    desktop_height = max(216, 104 + max((len(items) for items in columns.values()), default=0) * 112)
+    desk_parts = []
+    for i, stage in enumerate(PIPELINE_STAGES):
+        x = 8 + i * 202
+        items = columns[stage]
+        desk_parts.append(
+            f'<g class="stage" data-stage="{stage}"><rect class="stage-well" x="{x}" y="30" width="190" height="{desktop_height - 40}" rx="17"/>'
+            f'<text class="stage-index" x="{x + 14}" y="59">0{i + 1}</text>'
+            f'<text class="stage-label" x="{x + 14}" y="82">{STAGE_LABELS[stage]}</text>'
+            f'<text class="stage-count" x="{x + 174}" y="58" text-anchor="end">{len(items):02d}</text>'
+            + "".join(node(task_id, task, stage, x + 8, 96 + j * 112, 174, False) for j, (task_id, task) in enumerate(items))
+            + '</g>'
+        )
+    connectors = "".join(
+        f'<path class="pipeline-connector" d="M{198 + i * 202} 120 H{210 + i * 202}"/>'
+        for i in range(5)
     )
-    return (
-        f'<svg class="pipeline-diagram" viewBox="0 0 1200 {svg_height}" role="img" '
-        f'aria-labelledby="pipeline-title pipeline-desc" preserveAspectRatio="xMidYMin meet">'
-        '<title id="pipeline-title">Task delivery pipeline</title>'
-        '<desc id="pipeline-desc">Tasks move from queued through building, review, CI, merged, and measured.</desc>'
-        f'<g aria-hidden="true">{arrows}</g>'
-        f'<foreignObject class="pipeline-foreign-object" x="20" y="52" width="1160" height="{svg_height - 52}">'
-        '<div class="pipeline-grid">'
-        f'{"".join(nodes)}'
-        '</div></foreignObject></svg>'
+    desktop = (
+        f'<svg class="pipeline-diagram pipeline-desktop" viewBox="0 0 1224 {desktop_height}" role="img" aria-label="Delivery pipeline from queued to measured">'
+        f'{connectors}{"".join(desk_parts)}</svg>'
     )
 
+    mobile_parts = []
+    y = 12
+    for i, stage in enumerate(PIPELINE_STAGES):
+        items = columns[stage]
+        section_height = 45 + max(len(items), 1) * 94
+        mobile_parts.append(
+            f'<g class="stage" data-stage="{stage}"><rect class="stage-well" x="0" y="{y}" width="360" height="{section_height}" rx="16"/>'
+            f'<text class="stage-index" x="18" y="{y + 27}">0{i + 1}</text>'
+            f'<text class="stage-label" x="49" y="{y + 29}">{STAGE_LABELS[stage]}</text>'
+            f'<text class="stage-count" x="340" y="{y + 27}" text-anchor="end">{len(items):02d}</text>'
+            + ("".join(node(task_id, task, stage, 12, y + 43 + j * 94, 336, True) for j, (task_id, task) in enumerate(items))
+               if items else f'<text class="pipeline-empty" x="19" y="{y + 82}">No tasks at this stage</text>')
+            + '</g>'
+        )
+        if i < 5:
+            mobile_parts.append(f'<path class="pipeline-connector" d="M180 {y + section_height} V{y + section_height + 14}"/>')
+        y += section_height + 14
+    phone = f'<svg class="pipeline-diagram pipeline-phone" viewBox="0 0 360 {y}" role="img" aria-label="Delivery pipeline from queued to measured">{"".join(mobile_parts)}</svg>'
+    return desktop + phone
 
 def checks_summary(payload: dict[str, Any]) -> str:
     rollup = payload.get("statusCheckRollup") or []
@@ -263,96 +319,163 @@ def render_state(state: dict[str, Any]) -> str:
     tasks = state.get("tasks", {})
     questions = state.get("questions", {})
     deliverables = state.get("deliverables", [])
-    stuck = [(task_id, task) for task_id, task in tasks.items() if is_stuck(task)]
-    waiting = [(qid, question) for qid, question in questions.items() if not question.get("answer")]
+    waiting = [(qid, q) for qid, q in questions.items() if not q.get("answer")]
+    stuck = [(task_id, task) for task_id, task in tasks.items() if is_stuck(task) or task.get("status") == "failed"]
     grouped: dict[str, list[tuple[str, dict[str, Any]]]] = {status: [] for status in STATUSES}
     for task_id, task in tasks.items():
         grouped.setdefault(task.get("status", "queued"), []).append((task_id, task))
     pools = Counter(executor_pool(task.get("executor", "unassigned")) for task in tasks.values())
     refreshed_prs = {task_id: pr_info(task.get("pr")) for task_id, task in tasks.items()}
-    counts = [len(grouped.get(status, [])) for status in STATUSES]
-    max_count = max(max(counts), 1)
+    updated = state.get("updated_at") or stamp()
 
-    def task_card(task_id: str, task: dict[str, Any]) -> str:
+    def fingerprint(value: Any) -> str:
+        return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()[:12]
+
+    def card(task_id: str, task: dict[str, Any]) -> str:
+        info = refreshed_prs[task_id]
         pr = task.get("pr")
-        pr_text = "No PR"
-        if pr is not None:
-            info = refreshed_prs[task_id]
-            pr_text = f"PR {esc(pr)} · {esc(info['state'])} · {esc(info['checks'])}"
-            if info["head"]:
-                pr_text += f" · {esc(info['head'])}"
+        pr_label = f"PR {pr} · {info['state']} · {info['checks']}" if pr is not None else "No PR"
         note = f'<p class="task-note">{esc(task["note"])}</p>' if task.get("note") else ""
-        stuck_badge = '<span class="badge danger">STUCK</span>' if is_stuck(task) else ""
+        age = elapsed_text(task.get("updated_at", ""))
+        state_class = pulse_state(task)
+        marker = "!" if state_class == "critical" else "?" if state_class == "attention" else "✓" if state_class == "still" else "↗"
         return (
-            f'<article class="task-card {"task-stuck" if is_stuck(task) else ""}">'
-            f'<div class="task-top"><strong>{esc(task.get("title", task_id))}</strong>'
-            f'<span class="task-id">{esc(task_id)}</span>{stuck_badge}</div>'
-            f'<div class="task-meta"><span>{esc(task.get("executor", "unassigned"))}</span>'
-            f'<span>{pr_text}</span></div>{note}'
-            f'<time datetime="{esc(task.get("updated_at", ""))}">{esc(elapsed_text(task.get("updated_at", "")))}</time>'
-            "</article>"
+            f'<article class="task-card pulse-{state_class}" data-task-ref="{esc(task_id)}" data-item-key="task:{esc(task_id)}" data-fingerprint="{fingerprint(task)}">'
+            f'<div class="task-main"><span class="state-mark" aria-hidden="true">{marker}</span>'
+            f'<div class="task-copy"><strong>{esc(task.get("title", task_id))}</strong><span class="task-id">{esc(task_id)}</span></div>'
+            f'<span class="task-age" data-age-at="{esc(task.get("updated_at", ""))}">{esc(age)}</span></div>'
+            f'<div class="task-data"><span><b>EXECUTOR</b>{esc(task.get("executor", "unassigned"))}</span>'
+            f'<span><b>DELIVERY</b>{esc(pr_label)}</span></div>{note}</article>'
         )
 
     question_cards = "".join(
-        f'<article class="question pulse"><div class="question-title">{esc(question.get("question", qid))}</div>'
-        f'<div class="default"><span>DEFAULT</span> {esc(question.get("default", "Continue"))}</div>'
-        f'<div class="question-time">{esc(elapsed_text(question.get("updated_at", question.get("created_at", ""))))}</div></article>'
-        for qid, question in waiting
-    ) or '<p class="empty">No decisions are waiting on Joe.</p>'
-
-    stuck_cards = "".join(task_card(task_id, task) for task_id, task in stuck) or '<p class="empty">Nothing is stuck.</p>'
-    status_sections = []
-    for status in STATUSES:
-        cards = grouped.get(status, [])
-        status_sections.append(
-            f'<section class="status-group"><div class="status-heading"><h3>{esc(status.title())}</h3>'
-            f'<span>{len(cards)}</span></div>{"".join(task_card(task_id, task) for task_id, task in cards) or "<p class=\"empty\">—</p>"}</section>'
-        )
-    deliverable_cards = "".join(
-        f'<article class="deliverable"><strong>{esc(item.get("title", "Deliverable"))}</strong>'
-        f'<span>{esc(item.get("link", ""))}</span>'
-        f'<time datetime="{esc(item.get("created_at", ""))}">{esc(local_updated(item.get("created_at", "")))}</time></article>'
-        for item in deliverables
-    ) or '<p class="empty">No deliverables yet.</p>'
-    ledger_cards = "".join(
-        f'<div class="ledger-row {"ledger-violation" if any(violation(t.get("executor", "")) and executor_pool(t.get("executor", "")) == pool for t in tasks.values()) else ""}">'
-        f'<span>{esc(pool)}</span><strong>{count}</strong>'
-        f'{"<em>POLICY VIOLATION · Claude-plan draw</em>" if any(violation(t.get("executor", "")) and executor_pool(t.get("executor", "")) == pool for t in tasks.values()) else ""}</div>'
-        for pool, count in sorted(pools.items())
-    ) or '<p class="empty">No executors recorded.</p>'
-    bars = "".join(
-        f'<div class="bar-row"><span>{esc(status[:3].upper())}</span><div class="bar"><i style="width:{int((count / max_count) * 100)}%"></i></div><b>{count}</b></div>'
-        for status, count in zip(STATUSES, counts)
+        f'<article class="question-card pulse-attention" data-item-key="question:{esc(qid)}" data-fingerprint="{fingerprint(q)}">'
+        f'<span class="question-mark" aria-hidden="true">?</span><div><strong>{esc(q.get("question", qid))}</strong>'
+        f'<p><b>IF JOE DOES NOT ANSWER</b> {esc(q.get("default", "Continue"))}</p>'
+        f'<time datetime="{esc(q.get("updated_at", ""))}" data-age-at="{esc(q.get("updated_at", q.get("created_at", "")))}">{esc(elapsed_text(q.get("updated_at", q.get("created_at", ""))))}</time></div></article>'
+        for qid, q in waiting
+    ) or '<p class="empty"><span class="empty-symbol">✓</span>No questions are waiting on Joe.</p>'
+    stuck_cards = "".join(card(task_id, task) for task_id, task in stuck) or '<p class="empty"><span class="empty-symbol">✓</span>Nothing is stuck.</p>'
+    status_sections = "".join(
+        f'<section class="status-group status-{esc(status)}"><div class="status-heading"><h3>{esc(status.title())}</h3><span>{len(grouped.get(status, [])):02d}</span></div>'
+        f'{"".join(card(task_id, task) for task_id, task in grouped.get(status, [])) or "<p class=\"empty compact\">No tasks</p>"}</section>'
+        for status in STATUSES
     )
-    pipeline = pipeline_svg(tasks)
-    updated = state.get("updated_at", stamp())
 
-    return f'''<!doctype html>
+    def deliverable_link(item: dict[str, Any]) -> str:
+        link = str(item.get("link", "")).strip()
+        # A link is inert until clicked. Never allow active URL schemes in a local artifact.
+        if link and urlsplit(link).scheme.lower() in {"", "http", "https", "file"} and not link.startswith("//"):
+            return f'<a href="{esc(link)}">{esc(item.get("title", "Deliverable"))}<span aria-hidden="true">↗</span></a>'
+        return f'<strong>{esc(item.get("title", "Deliverable"))}</strong>'
+
+    deliverable_cards = "".join(
+        f'<article class="deliverable" data-item-key="deliverable:{i}" data-fingerprint="{fingerprint(item)}">'
+        f'{deliverable_link(item)}<time datetime="{esc(item.get("created_at", ""))}">{esc(local_updated(item.get("created_at", "")))}</time></article>'
+        for i, item in enumerate(deliverables[:12])
+    ) or '<p class="empty"><span class="empty-symbol">◇</span>No deliverables yet.</p>'
+
+    pool_labels = (
+        ("codex", "Codex", "C"),
+        ("grok", "Grok", "G"),
+        ("flash-next", "Flash Next", "F"),
+        ("claude-cloud", "Claude cloud credits", "✦"),
+        ("orchestrator", "Orchestrator seat", "O"),
+    )
+    ledger_rows = []
+    for key, label, glyph in pool_labels:
+        offenders = [t for t in tasks.values() if executor_pool(t.get("executor", "")) == key and violation(t.get("executor", ""))]
+        violation_note = '<em>POLICY VIOLATION · in-plan Claude subagent</em>' if offenders else ""
+        ledger_rows.append(
+            f'<div class="ledger-row {"ledger-violation" if offenders else ""}">'
+            f'<span class="ledger-glyph" aria-hidden="true">{glyph}</span><span>{label}{violation_note}</span>'
+            f'<strong>{pools[key]:02d}</strong></div>'
+        )
+    if pools["unassigned"]:
+        ledger_rows.append(f'<div class="ledger-row"><span class="ledger-glyph">?</span><span>Unassigned</span><strong>{pools["unassigned"]:02d}</strong></div>')
+
+    headline = (
+        f'<strong>{len(grouped["running"])} running</strong>'
+        f'<strong>{len(waiting)} need Joe</strong>'
+        f'<strong>{len(stuck)} blocked</strong>'
+        f'<span class="headline-clock">Updated {esc(local_updated(updated))} <span class="relative-age" data-age-at="{esc(updated)}">· {esc(elapsed_text(updated))}</span></span>'
+    )
+    replacements = {
+        "__TITLE__": esc(state.get("title", state["project"])),
+        "__PROJECT__": esc(state["project"]),
+        "__HEADLINE__": headline,
+        "__QUESTIONS__": question_cards,
+        "__QUESTION_COUNT__": str(len(waiting)),
+        "__STUCK__": stuck_cards,
+        "__STUCK_COUNT__": str(len(stuck)),
+        "__PIPELINE__": pipeline_svg(tasks),
+        "__TASK_COUNT__": str(len(tasks)),
+        "__STATUSES__": status_sections,
+        "__DELIVERABLES__": deliverable_cards,
+        "__DELIVERABLE_COUNT__": str(len(deliverables)),
+        "__LEDGER__": "".join(ledger_rows),
+    }
+    page = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="10"><title>{esc(state.get("title", state["project"]))} · CARR progress board</title>
+<meta http-equiv="refresh" content="10"><title>__TITLE__ · CARR progress board</title>
 <style>
-:root {{ color-scheme: dark; --ground:#06101e; --panel:rgba(13,34,59,.78); --panel-strong:#0b2545; --ink:#edf4fb; --muted:#8ca4bb; --line:rgba(152,188,220,.18); --orange:#f26b1d; --blue:#59a9df; --red:#ff6b5f; --green:#69d6a0; }}
-* {{ box-sizing:border-box; }} html {{ background:var(--ground); }} body {{ margin:0; min-width:0; overflow-x:hidden; background:radial-gradient(circle at 15% 0%,#123863 0,transparent 36rem),var(--ground); color:var(--ink); font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; line-height:1.45; }}
-h1,h2,h3,strong,.eyebrow {{ font-family:"Arial Narrow","Avenir Next Condensed",ui-sans-serif,system-ui,sans-serif; letter-spacing:.02em; }} h1 {{ margin:.15rem 0 .35rem; font-size:clamp(1.65rem,4vw,2.7rem); }} h2 {{ margin:0; font-size:1rem; text-transform:uppercase; letter-spacing:.12em; }} h3 {{ margin:0; font-size:.83rem; text-transform:uppercase; letter-spacing:.13em; color:var(--muted); }}
-.shell {{ max-width:1280px; margin:auto; padding:28px clamp(16px,4vw,48px) 54px; }} .eyebrow {{ color:var(--orange); font-size:.68rem; font-weight:800; text-transform:uppercase; letter-spacing:.2em; }} .subhead {{ color:var(--muted); margin:0; }} .updated {{ color:var(--muted); font-size:.78rem; margin-top:18px; }}
-.panels {{ display:grid; gap:16px; margin-top:24px; }} .panel {{ padding:20px; border:1px solid var(--line); border-radius:18px; background:linear-gradient(145deg,rgba(20,52,87,.78),var(--panel)); box-shadow:0 18px 50px rgba(0,0,0,.22); backdrop-filter:blur(14px); }} .panel-head {{ display:flex; justify-content:space-between; gap:12px; align-items:baseline; margin-bottom:16px; }} .count {{ color:var(--orange); font-size:1.15rem; font-weight:800; }}
-.question,.task-card,.deliverable,.ledger-row {{ border:1px solid var(--line); border-radius:12px; background:rgba(3,14,28,.4); padding:13px 14px; }} .question + .question,.task-card + .task-card,.deliverable + .deliverable {{ margin-top:10px; }} .question-title {{ font-weight:750; }} .default {{ margin-top:7px; color:#d6e2ed; font-size:.9rem; }} .default span {{ color:var(--orange); font-size:.68rem; font-weight:800; letter-spacing:.12em; }} .question-time,.task-card time {{ display:block; color:var(--muted); font-size:.72rem; margin-top:8px; }}
-.status-groups {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }} .status-group {{ min-width:0; }} .status-heading {{ display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--line); padding-bottom:8px; margin-bottom:10px; }} .status-heading span {{ color:var(--blue); font-weight:800; }} .task-top {{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }} .task-id {{ color:var(--muted); font-size:.72rem; }} .task-meta {{ display:flex; flex-wrap:wrap; gap:5px 12px; color:#bfd1e1; font-size:.78rem; margin-top:7px; }} .task-note {{ color:var(--muted); font-size:.82rem; margin:.6rem 0 0; }} .badge {{ border-radius:99px; padding:2px 7px; font-size:.61rem; font-weight:900; letter-spacing:.08em; }} .danger {{ background:rgba(255,107,95,.18); color:var(--red); }}
-.board-visual {{ display:grid; grid-template-columns:minmax(0,1fr) 260px; gap:20px; align-items:center; margin-bottom:18px; }} .bars {{ min-width:0; }} .bar-row {{ display:grid; grid-template-columns:38px minmax(0,1fr) 24px; align-items:center; gap:9px; color:var(--muted); font-size:.67rem; font-weight:800; }} .bar-row + .bar-row {{ margin-top:7px; }} .bar {{ height:7px; border-radius:99px; background:#102944; overflow:hidden; }} .bar i {{ display:block; height:100%; border-radius:99px; background:linear-gradient(90deg,var(--blue),var(--orange)); }} .board-visual svg {{ width:100%; height:auto; }}
-.pipeline-panel {{ margin-top:24px; }} .pipeline-diagram {{ display:block; width:100%; height:auto; overflow:visible; }} .pipeline-arrow {{ fill:none; stroke:var(--orange); stroke-width:2; stroke-linecap:round; stroke-dasharray:5 7; opacity:.65; }} .pipeline-grid {{ display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:10px; width:100%; }} .pipeline-stage {{ min-width:0; min-height:92px; padding:10px; border:1px solid var(--line); border-radius:12px; background:rgba(3,14,28,.45); }} .pipeline-stage h3 {{ color:var(--orange); font-size:.68rem; margin:0 0 9px; }} .pipeline-nodes {{ display:grid; gap:8px; }} .pipeline-node {{ display:flex; align-items:center; gap:8px; min-width:0; padding:8px; border:1px solid color-mix(in srgb,var(--node-accent) 60%,transparent); border-radius:10px; background:color-mix(in srgb,var(--node-accent) 12%,rgba(3,14,28,.8)); color:var(--ink); }} .pipeline-node-copy {{ display:grid; min-width:0; gap:2px; }} .pipeline-node-copy strong,.pipeline-node-copy small {{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }} .pipeline-node-copy strong {{ font-size:.74rem; }} .pipeline-node-copy small {{ color:var(--muted); font-size:.61rem; text-transform:uppercase; letter-spacing:.06em; }} .executor-glyph {{ display:grid; flex:0 0 22px; width:22px; height:22px; place-items:center; border-radius:50%; background:var(--node-accent); color:#06101e; font-size:.67rem; font-weight:900; }} .node-healthy {{ --node-accent:var(--green); }} .node-question {{ --node-accent:var(--orange); }} .node-blocked {{ --node-accent:var(--red); animation:block-pulse 2.2s ease-in-out infinite; }} .pipeline-empty {{ color:var(--muted); font-size:.8rem; }}
-.ledger-row {{ display:flex; align-items:center; gap:12px; }} .ledger-row + .ledger-row {{ margin-top:8px; }} .ledger-row strong {{ margin-left:auto; color:var(--blue); }} .ledger-row em {{ color:var(--red); font-size:.67rem; font-style:normal; font-weight:800; letter-spacing:.04em; }} .empty {{ color:var(--muted); margin:0; }}
-.pulse {{ animation:pulse 2.8s ease-in-out infinite; }} @keyframes pulse {{ 0%,100% {{ box-shadow:0 0 0 0 rgba(242,107,29,0); }} 50% {{ box-shadow:0 0 0 5px rgba(242,107,29,.08); }} }} @keyframes block-pulse {{ 0%,100% {{ box-shadow:0 0 0 0 rgba(255,107,95,0); }} 50% {{ box-shadow:0 0 0 5px rgba(255,107,95,.2); }} }} @media (prefers-reduced-motion:reduce) {{ .pulse,.node-blocked {{ animation:none; }}}}
-@media (max-width:900px) {{ .status-groups {{ grid-template-columns:repeat(2,minmax(0,1fr)); }} .board-visual {{ grid-template-columns:1fr 190px; }} }} @media (max-width:700px) {{ .shell {{ padding-top:20px; }} .panel {{ padding:16px; border-radius:14px; }} .status-groups,.board-visual {{ grid-template-columns:1fr; }} .board-visual svg {{ max-height:100px; }} .task-meta {{ display:grid; }} .pipeline-diagram {{ min-height:520px; }} .pipeline-arrow {{ display:none; }} .pipeline-grid {{ grid-template-columns:1fr; gap:8px; }} .pipeline-stage {{ display:grid; grid-template-columns:minmax(90px,1fr) minmax(0,3fr); align-items:start; gap:10px; }} .pipeline-stage h3 {{ margin:4px 0 0; }} }}
-</style></head><body><main class="shell"><header><div class="eyebrow">CARR · orchestrated work</div><h1>{esc(state.get("title", state["project"]))}</h1><p class="subhead">Project <strong>{esc(state["project"])}</strong> · live local board</p><div class="updated">{esc(elapsed_text(updated))} · {esc(local_updated(updated))}</div></header>
-<section class="panel pipeline-panel"><div class="panel-head"><h2>Delivery pipeline</h2><span class="count">{len(tasks)} tasks</span></div>{pipeline}</section>
-<div class="panels">
-<section class="panel"><div class="panel-head"><h2>Questions waiting on Joe</h2><span class="count">{len(waiting)}</span></div>{question_cards}</section>
-<section class="panel"><div class="panel-head"><h2>Stuck</h2><span class="count">{len(stuck)}</span></div>{stuck_cards}</section>
-<section class="panel"><div class="panel-head"><h2>Tasks by status</h2><span class="count">{len(tasks)}</span></div><div class="board-visual"><div class="bars">{bars}</div><svg viewBox="0 0 320 110" role="img" aria-label="Task status distribution"><path d="M18 86 C62 22 101 68 143 31 S218 12 302 45" fill="none" stroke="#59a9df" stroke-width="3" opacity=".8"/><circle cx="18" cy="86" r="6" fill="#f26b1d"/><circle cx="143" cy="31" r="6" fill="#f26b1d"/><circle cx="302" cy="45" r="6" fill="#f26b1d"/><path d="M18 96H302" stroke="rgba(152,188,220,.22)"/><text x="18" y="106" fill="#8ca4bb" font-size="10">flow</text><text x="267" y="106" fill="#8ca4bb" font-size="10">delivery</text></svg></div><div class="status-groups">{"".join(status_sections)}</div></section>
-<section class="panel"><div class="panel-head"><h2>Latest deliverables</h2><span class="count">{len(deliverables)}</span></div>{deliverable_cards}</section>
-<section class="panel"><div class="panel-head"><h2>Executor ledger</h2><span class="count">{len(pools)} pools</span></div>{ledger_cards}</section>
-</div></main></body></html>'''
-
+:root{color-scheme:dark;--ground:#030914;--navy:#0a203b;--ink:#f2f6fc;--muted:#8fa9c2;--line:rgba(151,190,226,.17);--orange:#fb7b32;--blue:#65baff;--red:#ff696b;--green:#7dddc0}
+*{box-sizing:border-box}html{background:var(--ground)}body{margin:0;min-width:0;overflow-x:hidden;color:var(--ink);font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(ellipse 58rem 38rem at 12% -8%,rgba(23,83,145,.35),transparent 68%),radial-gradient(ellipse 38rem 25rem at 91% 9%,rgba(251,123,50,.11),transparent 70%),linear-gradient(180deg,#071628 0,#030914 50rem,#040c18 100%);background-attachment:fixed}
+body:before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.16;background-image:linear-gradient(rgba(117,176,229,.13) 1px,transparent 1px),linear-gradient(90deg,rgba(117,176,229,.13) 1px,transparent 1px);background-size:46px 46px;mask-image:linear-gradient(#000,transparent 72%)}
+h1,h2,h3,.headline strong,.metric,.stage-label{font-family:"Avenir Next Condensed","Arial Narrow","Helvetica Neue",sans-serif;font-stretch:condensed}
+h1{font-size:clamp(2.35rem,5vw,4.4rem);line-height:1.02;letter-spacing:-.035em;margin:4px 0 8px;font-weight:700}h2{font-size:1.05rem;letter-spacing:.08em;text-transform:uppercase;margin:0}h3{margin:0}
+.shell{position:relative;max-width:1510px;margin:auto;padding:28px clamp(16px,3.4vw,56px) 70px}.masthead{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:22px}.brand{display:flex;align-items:center;gap:10px;color:#c8ddf0;font-size:.72rem;font-weight:800;letter-spacing:.2em;text-transform:uppercase}.brand-mark{width:19px;height:19px;border:2px solid var(--orange);border-right-color:transparent;border-radius:50%;box-shadow:0 0 17px rgba(251,123,50,.55)}.edition{color:var(--muted);font-size:.72rem;letter-spacing:.1em;text-transform:uppercase}.eyebrow{color:var(--orange);font-size:.72rem;font-weight:800;letter-spacing:.2em;text-transform:uppercase}.subtitle{color:#a9bfd4;margin:0 0 20px;font-size:.91rem}
+.headline{display:flex;align-items:center;gap:0;min-height:58px;margin-bottom:18px;padding:8px 16px;border:1px solid rgba(251,123,50,.29);border-radius:14px;background:linear-gradient(90deg,rgba(251,123,50,.13),rgba(17,51,87,.65) 39%,rgba(8,27,48,.48));box-shadow:0 16px 42px rgba(0,0,0,.24),inset 0 1px rgba(255,255,255,.08);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)}
+.headline strong{font-size:1.3rem;white-space:nowrap;padding:0 19px;border-right:1px solid var(--line);letter-spacing:.015em}.headline strong:first-child{padding-left:0;color:var(--blue)}.headline strong:nth-child(2){color:var(--orange)}.headline strong:nth-child(3){color:var(--red);border:0}.headline-clock{margin-left:auto;color:#b8ccdd;font-size:.76rem;text-align:right}.relative-age{color:var(--muted)}
+.panel{position:relative;min-width:0;padding:20px 22px;border:1px solid var(--line);border-radius:18px;background:linear-gradient(145deg,rgba(17,46,80,.67),rgba(5,18,34,.82) 58%,rgba(7,24,44,.76));box-shadow:0 24px 52px rgba(0,0,0,.23),inset 0 1px rgba(255,255,255,.065);backdrop-filter:blur(22px);-webkit-backdrop-filter:blur(22px)}.panel:before{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;background:linear-gradient(120deg,rgba(255,255,255,.055),transparent 34%)}.panel-head{position:relative;display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:14px}.panel-head .count{color:var(--orange);font-size:.77rem;font-weight:800;letter-spacing:.11em}.upper-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}.pipeline-panel{margin-bottom:14px;overflow:hidden}.pipeline-panel .panel-head{margin-bottom:8px}.section-caption{color:var(--muted);font-size:.77rem;margin:0 0 10px}
+.empty{display:flex;align-items:center;gap:10px;min-height:46px;color:#a5bbcd;margin:0;font-size:.89rem}.empty-symbol{display:inline-grid;place-items:center;width:27px;height:27px;border-radius:50%;background:rgba(125,221,192,.12);color:var(--green);font-weight:800}.compact{min-height:30px;font-size:.78rem}
+.question-card,.task-card,.deliverable,.ledger-row{position:relative;border:1px solid var(--line);border-radius:12px;background:rgba(1,9,19,.47)}.question-card{display:flex;gap:12px;padding:13px 15px;border-color:rgba(251,123,50,.31)}.question-card+.question-card,.task-card+.task-card,.deliverable+.deliverable{margin-top:8px}.question-card strong{display:block;font-size:.94rem}.question-card p{margin:5px 0;color:#cad9e6;font-size:.82rem}.question-card p b{color:var(--orange);font-size:.63rem;letter-spacing:.1em}.question-card time{color:var(--muted);font-size:.7rem}.question-mark{display:grid;place-items:center;flex:0 0 30px;height:30px;border:1px solid var(--orange);border-radius:9px;color:var(--orange);font-weight:800}
+.pipeline-diagram{display:block;width:100%;height:auto;overflow:visible}.pipeline-phone{display:none}.stage-well{fill:rgba(2,13,29,.52);stroke:rgba(136,178,217,.2);stroke-width:1}.stage-index{font:700 12px -apple-system,sans-serif;letter-spacing:.1em;fill:var(--orange)}.stage-label{font-size:22px;font-weight:800;fill:var(--ink)}.stage-count{font:700 13px -apple-system,sans-serif;fill:var(--muted)}.pipeline-connector{fill:none;stroke:var(--orange);stroke-width:2;stroke-linecap:round;opacity:.72}.node-shape{fill:rgba(10,31,54,.95);stroke:var(--node-accent);stroke-width:1.15}.node-halo{fill:var(--node-accent)}.executor-glyph{fill:#03101d;font:800 12px -apple-system,sans-serif}.node-label{fill:var(--ink);font:650 12px -apple-system,sans-serif}.node-meta{fill:#a6bfd2;font:700 9px -apple-system,sans-serif;letter-spacing:.03em}.pipeline-empty{fill:var(--muted);font:13px -apple-system,sans-serif}.node-healthy{--node-accent:var(--blue)}.node-question{--node-accent:var(--orange)}.node-blocked{--node-accent:var(--red)}.node-state-still[data-stage="measured"]{--node-accent:var(--green)}.pipeline-node:focus .node-shape,.pipeline-node:hover .node-shape{stroke-width:2.5;fill:#173957}.pipeline-node{cursor:default;outline:none}.pipeline-node.linked .node-shape{stroke-width:2.5;fill:#173957}.task-card.linked{border-color:var(--orange);background:rgba(251,123,50,.13)}
+.status-groups{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.status-group{min-width:0}.status-heading{display:flex;justify-content:space-between;align-items:center;gap:10px;border-bottom:1px solid var(--line);padding:3px 0 9px;margin-bottom:10px}.status-heading h3{font-size:.75rem;letter-spacing:.13em;text-transform:uppercase;color:#b4c9d9}.status-heading span{font-family:"Arial Narrow",sans-serif;color:var(--orange);font-weight:800;font-size:1.12rem}.task-card{padding:11px 12px;min-width:0}.task-main{display:flex;align-items:flex-start;gap:9px}.task-copy{display:flex;flex-direction:column;min-width:0}.task-copy strong{font-size:.87rem;line-height:1.27}.task-id{color:var(--muted);font-size:.66rem;margin-top:2px}.task-age{margin-left:auto;color:var(--muted);font-size:.64rem;white-space:nowrap}.state-mark{display:grid;place-items:center;flex:0 0 22px;height:22px;border-radius:7px;color:var(--state-accent);border:1px solid var(--state-accent);font-size:.7rem;font-weight:800}.task-data{display:grid;gap:3px;margin:8px 0 0 31px;font-size:.72rem;color:#c5d7e5}.task-data span{min-width:0;overflow-wrap:anywhere}.task-data b{display:inline-block;margin-right:7px;color:#7595ad;font-size:.57rem;letter-spacing:.08em}.task-note{margin:6px 0 0 31px;color:#a5bbce;font-size:.72rem;overflow-wrap:anywhere}
+.pulse-healthy{--state-accent:var(--blue)}.pulse-attention{--state-accent:var(--orange)}.pulse-critical{--state-accent:var(--red)}.pulse-still{--state-accent:var(--green)}.pulse-healthy.task-card,.pulse-healthy.question-card{border-left:3px solid var(--blue)}.pulse-attention.task-card,.pulse-attention.question-card{border-left:3px solid var(--orange)}.pulse-critical.task-card{border-left:3px solid var(--red)}.pulse-still.task-card{border-left:3px solid var(--green)}
+.pipeline-node.pulse-healthy .node-halo{animation:breath 3.5s ease-in-out infinite;transform-box:fill-box;transform-origin:center}.pipeline-node.pulse-attention .node-halo{animation:breath 2s ease-in-out infinite;transform-box:fill-box;transform-origin:center}.pipeline-node.pulse-critical .node-halo{animation:breath 1s ease-in-out infinite;transform-box:fill-box;transform-origin:center}.pulse-healthy.task-card,.pulse-attention.question-card,.pulse-attention.task-card,.pulse-critical.task-card{animation:glow var(--pulse-speed) ease-in-out infinite}.pulse-healthy{--pulse-speed:3.5s}.pulse-attention{--pulse-speed:2s}.pulse-critical{--pulse-speed:1s}@keyframes breath{50%{opacity:.55;transform:scale(.8)}}@keyframes glow{50%{box-shadow:inset 0 0 18px rgba(101,186,255,.085)}}.changed{animation:changed-flash 1s ease-out 1!important}@keyframes changed-flash{0%{background:rgba(251,123,50,.34)}100%{background:rgba(1,9,19,.47)}}
+.lower-grid{display:grid;grid-template-columns:1.2fr .8fr;gap:14px;margin-top:14px}.deliverable{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;font-size:.84rem}.deliverable a{color:var(--ink);font-weight:700;text-decoration:none}.deliverable a:hover{text-decoration:underline;color:var(--orange)}.deliverable a span{margin-left:7px;color:var(--orange)}.deliverable time{color:var(--muted);font-size:.69rem;white-space:nowrap}.ledger-row{display:flex;align-items:center;gap:10px;padding:8px 11px;font-size:.8rem}.ledger-row+.ledger-row{margin-top:6px}.ledger-glyph{display:grid;place-items:center;width:25px;height:25px;border-radius:8px;background:rgba(101,186,255,.14);color:var(--blue);font-size:.7rem;font-weight:800}.ledger-row strong{margin-left:auto;color:var(--blue);font-family:"Arial Narrow",sans-serif;font-size:1.1rem}.ledger-row em{display:block;color:var(--red);font-size:.64rem;font-style:normal;font-weight:800;letter-spacing:.03em}.ledger-violation{border-color:var(--red);background:rgba(255,105,107,.09)}.ledger-violation .ledger-glyph,.ledger-violation strong{color:var(--red)}
+@media(max-width:1000px){.status-groups{grid-template-columns:repeat(2,minmax(0,1fr))}.headline-clock{max-width:24ch}}
+@media(max-width:700px){.shell{padding:16px 12px 50px}.masthead{margin-bottom:16px}.edition{display:none}.subtitle{margin-bottom:15px}.headline{display:grid;grid-template-columns:repeat(3,1fr);gap:4px 0;padding:10px 8px}.headline strong{padding:0 6px;text-align:center;font-size:.98rem}.headline-clock{grid-column:1/-1;max-width:none;margin:4px 0 0;text-align:center;font-size:.69rem}.upper-grid,.lower-grid,.status-groups{grid-template-columns:1fr}.panel{padding:15px 13px;border-radius:15px}.pipeline-desktop{display:none}.pipeline-phone{display:block}.status-groups{gap:13px}.deliverable{align-items:flex-start;flex-direction:column;gap:3px}h1{font-size:clamp(2rem,8vw,2.5rem);overflow-wrap:anywhere}.stage-label{font-size:18px}}
+@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important;scroll-behavior:auto!important}.changed{outline:2px solid var(--orange)}.node-halo{opacity:1!important;transform:none!important}}
+</style></head><body><main class="shell">
+<div class="masthead"><div class="brand"><span class="brand-mark" aria-hidden="true"></span>CARR <span style="color:#789cb9">/</span> SYSTEMS</div><span class="edition">Orchestration · __PROJECT__</span></div>
+<header><div class="eyebrow">Mission control / __PROJECT__</div><h1>__TITLE__</h1><p class="subtitle">Every task, decision, and delivery in one live view.</p></header>
+<div class="headline" aria-label="Project summary">__HEADLINE__</div>
+<div class="upper-grid">
+<section class="panel"><div class="panel-head"><h2>Questions waiting on Joe</h2><span class="count">__QUESTION_COUNT__ OPEN</span></div>__QUESTIONS__</section>
+<section class="panel"><div class="panel-head"><h2>Stuck</h2><span class="count">__STUCK_COUNT__ ITEMS</span></div>__STUCK__</section>
+</div>
+<section class="panel pipeline-panel"><div class="panel-head"><h2>Delivery pipeline</h2><span class="count">__TASK_COUNT__ TASKS</span></div><p class="section-caption">Queued → Building → Review → CI → Merged → Measured</p>__PIPELINE__</section>
+<section class="panel"><div class="panel-head"><h2>Tasks by status</h2><span class="count">__TASK_COUNT__ TOTAL</span></div><div class="status-groups">__STATUSES__</div></section>
+<div class="lower-grid">
+<section class="panel"><div class="panel-head"><h2>Latest deliverables</h2><span class="count">__DELIVERABLE_COUNT__ LINKS</span></div>__DELIVERABLES__</section>
+<section class="panel"><div class="panel-head"><h2>Executor ledger</h2><span class="count">5 POOLS</span></div>__LEDGER__</section>
+</div></main>
+<script>
+(function(){
+  var key='carr-board:'+location.pathname+':';
+  try{var saved=sessionStorage.getItem(key+'scrollY');if(saved!==null){requestAnimationFrame(function(){scrollTo(0,Number(saved)||0)})}}catch(_){}
+  document.querySelectorAll('[data-item-key]').forEach(function(el){
+    try{var itemKey=key+el.dataset.itemKey;var prior=sessionStorage.getItem(itemKey);var now=el.dataset.fingerprint;if(prior&&prior!==now){el.classList.add('changed');setTimeout(function(){el.classList.remove('changed')},1100)}sessionStorage.setItem(itemKey,now)}catch(_){}
+  });
+  document.querySelectorAll('[data-task-id],[data-task-ref]').forEach(function(el){
+    function link(on){var id=el.dataset.taskId||el.dataset.taskRef;document.querySelectorAll('[data-task-id],[data-task-ref]').forEach(function(other){if((other.dataset.taskId||other.dataset.taskRef)===id){other.classList.toggle('linked',on)}})}
+    el.addEventListener('mouseenter',function(){link(true)});el.addEventListener('mouseleave',function(){link(false)});
+    el.addEventListener('focus',function(){link(true)});el.addEventListener('blur',function(){link(false)});
+  });
+  function updateAges(){document.querySelectorAll('[data-age-at]').forEach(function(el){
+    var at=Date.parse(el.dataset.ageAt);if(!Number.isFinite(at))return;
+    var minutes=Math.max(0,Math.floor((Date.now()-at)/60000));
+    var age='updated '+minutes+' min ago';el.textContent=(el.classList.contains('relative-age')?'· ':'')+age;
+  })}
+  updateAges();setInterval(updateAges,10000);
+  addEventListener('beforeunload',function(){try{sessionStorage.setItem(key+'scrollY',String(scrollY))}catch(_){}});
+})();
+</script></body></html>"""
+    for key, value in replacements.items():
+        page = page.replace(key, value)
+    return page
 
 def render(project: str) -> None:
     state = read_state(project)

@@ -3,6 +3,7 @@
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -112,6 +113,8 @@ class ProgressBoardCLI(unittest.TestCase):
         html = (self.root / "boards" / "demo.html").read_text()
         self.assertIn("policy violation", html.lower())
         self.assertIn("ledger-violation", html)
+        self.assertIn("Claude cloud credits", html)
+        self.assertIn("POLICY VIOLATION", html)
 
     def test_html_has_all_panels_and_no_external_urls(self):
         self.run_board("init", "demo", "--title", "Demo")
@@ -129,6 +132,9 @@ class ProgressBoardCLI(unittest.TestCase):
         self.assertIn('http-equiv="refresh" content="10"', html)
         self.assertNotRegex(html, r"https?://")
         self.assertNotIn("<script src=", html)
+        self.assertIn("sessionStorage", html)
+        self.assertIn("scrollY", html)
+        self.assertIn("data-fingerprint=", html)
 
     def test_pipeline_svg_has_one_node_per_task_and_places_each_node(self):
         self.run_board("init", "demo", "--title", "Demo")
@@ -196,18 +202,49 @@ class ProgressBoardCLI(unittest.TestCase):
         self.assertEqual(state["tasks"]["blocked-task"]["stage"], "merged")
         html = (self.root / "boards" / "demo.html").read_text()
 
-        self.assertEqual(html.count('class="pipeline-node '), 4)
-        self.assertIn('data-task-id="queued-task" data-stage="queued"', html)
-        self.assertIn('data-task-id="ci-task" data-stage="ci"', html)
-        self.assertIn('data-task-id="blocked-task" data-stage="merged"', html)
-        self.assertIn('data-task-id="question-task" data-stage="measured"', html)
+        self.assertEqual(html.count('class="pipeline-node '), 8)  # desk and phone SVGs
+        for task_id, stage in (
+            ("queued-task", "queued"), ("ci-task", "ci"),
+            ("blocked-task", "merged"), ("question-task", "measured"),
+        ):
+            self.assertEqual(html.count(f'data-task-id="{task_id}" data-stage="{stage}"'), 2)
         for label in ("Queued", "Building", "Review", "CI", "Merged", "Measured"):
             self.assertIn(label, html)
         self.assertIn("node-blocked", html)
         self.assertIn("node-question", html)
         self.assertIn("executor-glyph", html)
         self.assertIn("prefers-reduced-motion", html)
-        self.assertIn("pipeline-grid", html)
+        self.assertIn('class="pipeline-diagram pipeline-desktop"', html)
+        self.assertIn('class="pipeline-diagram pipeline-phone"', html)
+        self.assertIn("PR 42", html)
+        self.assertIn("pipeline-connector", html)
+
+    def test_headline_counts_and_section_order(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("task", "demo", "a", "--title", "Running", "--status", "running", "--executor", "Codex")
+        self.run_board("task", "demo", "b", "--title", "Blocked", "--status", "blocked", "--executor", "Grok")
+        self.run_board("ask", "demo", "q", "--question", "Choose route?", "--default", "Continue")
+        html = (self.root / "boards" / "demo.html").read_text()
+        self.assertRegex(html, r'1 running.*1 need Joe.*1 blocked')
+        labels = ["Questions waiting on Joe", "Stuck", "Delivery pipeline", "Tasks by status", "Latest deliverables", "Executor ledger"]
+        positions = [html.index(f"<h2>{label}</h2>") for label in labels]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("CT", html)
+        self.assertIn("min ago", html)
+
+    def test_pulse_classes_and_reduced_motion_fallback(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        for task_id, status, extra in (
+            ("a", "running", []), ("b", "review", []),
+            ("c", "blocked", []), ("d", "failed", []),
+            ("e", "done", []), ("f", "queued", []),
+        ):
+            self.run_board("task", "demo", task_id, "--title", task_id, "--status", status, "--executor", "Codex", *extra)
+        html = (self.root / "boards" / "demo.html").read_text()
+        for state in ("healthy", "attention", "critical", "still"):
+            self.assertIn(f"pulse-{state}", html)
+        self.assertRegex(html, r'@media\s*\(prefers-reduced-motion:\s*reduce\)')
+        self.assertRegex(html, r'prefers-reduced-motion:reduce[^}]*animation:none')
 
 
 if __name__ == "__main__":
