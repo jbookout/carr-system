@@ -58,9 +58,13 @@ basis. Network reachability is separate and already granted: both hosts sit in
 KNOWN_HOSTS in hooks/guard-unattended.py.
 """
 
+import hashlib
 import json
+import math
 import os
+import sqlite3
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -106,12 +110,17 @@ CANONICAL_REPO = _canonical_repo_root(REPO)
 # satisfied. Every successful ask() now appends one best-effort row here —
 # never on failure, never the request or the answers, just enough for a
 # reader (lib/jev_required_actions.py) to bind a call to a session, a time
-# window, and the facets it named. Writing this must never turn a working
+# window, and the facets it named. Failed attempts and cache hits carry ok=false
+# and cannot count as evidence that the vendor answered. Writing this must never turn a working
 # Jev call into a failure, so every step here is wrapped and swallowed.
 # Uses CANONICAL_REPO (not the possibly-worktree-local REPO) so every
 # worktree's ask() and the canonical checkout's Stop-hook reader agree on one
 # physical file — see _canonical_repo_root above.
 JEV_CALLS_LOG = os.path.join(CANONICAL_REPO, "out", "jev-calls.jsonl")
+JUDGE_CACHE_PATH = os.path.join(CANONICAL_REPO, "out", "jev-judge-cache.sqlite3")
+with open(os.path.join(REPO, "ops", "config", "jev-cost-guard.v1.json"), encoding="utf-8") as _config_file:
+    JEV_COST_CONFIG = json.load(_config_file)
+JUDGE_CACHE_TTL_SECONDS = JEV_COST_CONFIG["judge_cache_ttl_seconds"]
 # The env vars a caller's own session id is found under, same set
 # ops/settlement-run-token.py's NATIVE_SESSION_KEYS already uses.
 SESSION_ID_ENV_KEYS = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_HOST_SESSION_ID",
@@ -218,8 +227,75 @@ def _session_id():
     return None
 
 
-def _append_call_receipt(questions, facets, result, log_path):
-    """Best-effort, APPEND-ONLY JSONL row, never on the request or the
+def _caller_name():
+    """The immediate caller of ask(), with no source text or stack arguments."""
+    try:
+        return os.path.splitext(os.path.basename(sys._getframe(2).f_code.co_filename))[0]
+    except (AttributeError, ValueError):
+        return "unknown"
+
+
+def _prompt_sha256(payload):
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _question_kind(questions):
+    kinds = {q.get("type") for q in questions.values() if isinstance(q, dict)
+             and q.get("type") in ("noul", "choice", "score")}
+    return ",".join(sorted(kinds)) or "unknown"
+
+
+def _cache_connection(path):
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    db = sqlite3.connect(path, timeout=2)
+    os.chmod(path, 0o600)
+    db.execute("CREATE TABLE IF NOT EXISTS results ("
+               "caller TEXT NOT NULL, question_kind TEXT NOT NULL, "
+               "prompt_sha256 TEXT NOT NULL, expires_at REAL NOT NULL, "
+               "result_json TEXT NOT NULL, "
+               "PRIMARY KEY (caller, question_kind, prompt_sha256))")
+    return db
+
+
+def _cached_result(path, caller, question_kind, prompt_sha256):
+    try:
+        db = _cache_connection(path)
+        try:
+            row = db.execute(
+                "SELECT result_json, expires_at FROM results WHERE caller=? AND question_kind=? AND prompt_sha256=?",
+                (caller, question_kind, prompt_sha256)).fetchone()
+        finally:
+            db.close()
+        if row and row[1] > time.time():
+            answer = json.loads(row[0])
+            # A cache hit made no vendor call. Do not repeat the old billable usage.
+            return {**answer, "usage": None, "cache_hit": True}
+    except (OSError, sqlite3.Error, ValueError, TypeError):
+        pass
+    return None
+
+
+def _store_cached_result(path, caller, question_kind, prompt_sha256, result, ttl):
+    try:
+        db = _cache_connection(path)
+        try:
+            db.execute("DELETE FROM results WHERE expires_at <= ?", (time.time(),))
+            db.execute("INSERT OR REPLACE INTO results VALUES (?,?,?,?,?)",
+                       (caller, question_kind, prompt_sha256, time.time() + ttl,
+                        json.dumps(result, separators=(",", ":"))))
+            db.commit()
+        finally:
+            db.close()
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        pass  # Cache failure changes neither the answer nor a real call receipt.
+
+
+def _append_call_receipt(questions, facets, result, log_path, *, caller=None,
+                         question_kind=None, prompt_sha256=None, ok=True,
+                         cache_hit=False, error=None):
+    """Best-effort, APPEND-ONLY JSONL row, never storing the request or the
     answers, never able to turn a successful ask() into a failure. See
     JEV_CALLS_LOG above.
 
@@ -235,15 +311,24 @@ def _append_call_receipt(questions, facets, result, log_path):
     """
     try:
         answered = result if isinstance(result, dict) else {}
+        usage = answered.get("usage") if isinstance(answered.get("usage"), dict) else None
         row = {
             "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "session": _session_id(),
             "question_ids": sorted(questions),
+            "caller": caller,
+            "question_kind": question_kind,
+            "prompt_sha256": prompt_sha256,
             "facets": sorted({str(f) for f in facets}) if facets else [],
             "model": answered.get("model"),
-            "usage": answered.get("usage") if isinstance(answered.get("usage"), dict) else None,
-            "ok": True,
+            "usage": usage,
+            "input_tokens": usage.get("input_tokens") if usage else None,
+            "output_tokens": usage.get("output_tokens") if usage else None,
+            "ok": ok,
+            "cache_hit": cache_hit,
         }
+        if error:
+            row["error"] = error
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         with open(log_path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(row) + "\n")
@@ -253,7 +338,8 @@ def _append_call_receipt(questions, facets, result, log_path):
 
 def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
         api_key=None, retries=RATE_LIMIT_RETRIES, endpoint=ENDPOINT, opener=None,
-        facets=None, calls_log=JEV_CALLS_LOG, deadline=None):
+        facets=None, calls_log=JEV_CALLS_LOG, deadline=None, caller=None,
+        cache_ttl_seconds=0, cache_path=JUDGE_CACHE_PATH):
     """Evaluate `state` against a map of questions in ONE request.
 
     `state` is a string, or a mapping when the context has several parts —
@@ -280,12 +366,20 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
     remaining, and no attempt or retry starts once it has passed — a caller
     under a hook timeout gets a TypeSafeError instead of a killed hook.
     `retries=0` turns rate-limit retries off entirely.
+
+    `caller` names the invoking code in the usage log; if omitted it is inferred
+    from the immediate caller file. A positive `cache_ttl_seconds` enables the
+    shared on-disk result cache, used by jev_judge with the configured 60s TTL.
+    Cache hits return usage=None and cannot count as fresh vendor-call evidence.
     """
     if not isinstance(questions, dict) or not questions:
         raise TypeSafeError("ask needs a non-empty map of questions")
 
     payload = {"state": state, "model": model, "questions": questions}
     body = json.dumps(payload).encode("utf-8")
+    caller = caller or _caller_name()
+    question_kind = _question_kind(questions)
+    prompt_sha256 = _prompt_sha256(payload)
 
     state_chars = len(json.dumps(state))
     if state_chars > STATE_BUDGET_CHARS:
@@ -295,6 +389,17 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
             "a state fills with detail unrelated to the decision, so trimming "
             "is the fix rather than raising the guard."
         )
+
+    if not isinstance(cache_ttl_seconds, (int, float)) or not math.isfinite(cache_ttl_seconds) or cache_ttl_seconds < 0:
+        raise TypeSafeError("cache_ttl_seconds must be a finite nonnegative number")
+    use_cache = cache_ttl_seconds > 0 and opener is None
+    if use_cache:
+        hit = _cached_result(cache_path, caller, question_kind, prompt_sha256)
+        if hit is not None:
+            _append_call_receipt(questions, facets, hit, calls_log, caller=caller,
+                                 question_kind=question_kind, prompt_sha256=prompt_sha256,
+                                 ok=False, cache_hit=True)
+            return hit
 
     request = urllib.request.Request(
         endpoint, data=body, method="POST",
@@ -325,9 +430,17 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
             # the vendor, so a receipt for it would let a selftest run count
             # as this turn's real Jev evidence.
             if opener is None:
-                _append_call_receipt(questions, facets, result, calls_log)
+                _append_call_receipt(questions, facets, result, calls_log, caller=caller,
+                                     question_kind=question_kind, prompt_sha256=prompt_sha256)
+                if use_cache:
+                    _store_cached_result(cache_path, caller, question_kind,
+                                         prompt_sha256, result, cache_ttl_seconds)
             return result
         except urllib.error.HTTPError as err:
+            if opener is None:
+                _append_call_receipt(questions, facets, None, calls_log, caller=caller,
+                                     question_kind=question_kind, prompt_sha256=prompt_sha256,
+                                     ok=False, error=f"HTTP {err.code}")
             # 429 is documented as expected under load, and the service's own
             # limits "can change without notice". Honour retry-after when it is
             # sent; fall back to a short backoff when it is not.
@@ -354,11 +467,21 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
                 pass
             raise TypeSafeError(f"TypeSafe returned HTTP {err.code}: {detail}") from None
         except urllib.error.URLError as err:
+            if opener is None:
+                _append_call_receipt(questions, facets, None, calls_log, caller=caller,
+                                     question_kind=question_kind, prompt_sha256=prompt_sha256,
+                                     ok=False, error="network")
             raise TypeSafeError(
                 f"could not reach {endpoint}: {err.reason}. If this is a refusal "
                 "rather than a network fault, check that the host is still in "
                 "KNOWN_HOSTS in hooks/guard-unattended.py."
             ) from None
+        except Exception as err:
+            if opener is None:
+                _append_call_receipt(questions, facets, None, calls_log, caller=caller,
+                                     question_kind=question_kind, prompt_sha256=prompt_sha256,
+                                     ok=False, error=type(err).__name__)
+            raise
 
 
 def decide(answer, *, yes_at=0.8, no_at=0.2, min_confidence=0.6):

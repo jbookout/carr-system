@@ -160,6 +160,8 @@ def judge(subject, questions, *, timeout=20.0, client=None, api_key=None,
             extra["retries"] = retries
         if deadline is not None:
             extra["deadline"] = deadline
+        if hasattr(tsc, "JUDGE_CACHE_TTL_SECONDS"):
+            extra.update(caller="jev_judge", cache_ttl_seconds=tsc.JUDGE_CACHE_TTL_SECONDS)
         answer = tsc.ask(subject, questions, timeout=timeout, api_key=api_key, **extra)
     except Exception as exc:  # deliberately broad: see JudgeUnavailable
         raise JudgeUnavailable(f"{type(exc).__name__}: {exc}") from None
@@ -204,6 +206,7 @@ def record(kind, subject_ref, answer, existing_decision=None, *, note=None,
     else:
         row["model"] = answer.get("model")
         row["usage"] = answer.get("usage")
+        row["cache_hit"] = answer.get("cache_hit", False)
         row["elapsed_ms"] = answer.get("elapsed_ms")
         row["answers"] = answer.get("answers")
     try:
