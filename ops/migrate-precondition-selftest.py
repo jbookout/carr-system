@@ -181,6 +181,26 @@ PRE_STRICT_ATOMIC_GROUP_ALLOWLIST = frozenset({
     "0532_room_dispatch_spine_scac_successor.sql",
 })
 
+# 0736 was already applied to the production ledger before the pairing
+# requirement could be met. Its SECURITY DEFINER helpers revoke EXECUTE.
+# This one historical exception is valid only for both exact applied artifacts.
+HISTORICAL_UNPAIRED_SCAC_PAIRS = {
+    ("0736_loop_notification_queue.sql", "0737_incident_triage_scac_successor.sql"): (
+        "039846670f2e206b2e99a82f95ebb9738a285496c77c7444ef9dd41cf115e7ca",
+        "ef0b44a3599e51f6f473e937ad961b581ed24e773f85a0c08527c8d3d381e103",
+    ),
+}
+
+
+def historical_unpaired_pairs(
+    migrations: list[tuple[str, bytes]],
+) -> set[tuple[str, str]]:
+    digests = {name: hashlib.sha256(sql).hexdigest() for name, sql in migrations}
+    return {
+        pair for pair, expected in HISTORICAL_UNPAIRED_SCAC_PAIRS.items()
+        if (digests.get(pair[0]), digests.get(pair[1])) == expected
+    }
+
 
 def check(name: str, ok: bool, detail: str = "") -> None:
     (PASS if ok else FAIL).append(name)
@@ -410,6 +430,56 @@ def test_redeclared_function_needs_no_new_pairing() -> None:
           required == [])
 
 
+def test_historical_unpaired_pair_is_byte_exact() -> None:
+    """Only the two reviewed, already-applied migration artifacts are exempt."""
+    pred_name = "0736_loop_notification_queue.sql"
+    succ_name = "0737_incident_triage_scac_successor.sql"
+    pred = (REPO / "migrations" / pred_name).read_bytes().decode("utf-8")
+    succ = (REPO / "migrations" / succ_name).read_bytes().decode("utf-8")
+    pair = (pred_name, succ_name)
+    ordered = [("0001_unrelated.sql", "select 1;"), (pred_name, pred), (succ_name, succ)]
+    check("the historical 0736/0737 pair still opens authority",
+          pair in find_atomic_seal_requirements(ordered))
+    check("only the exact historical filenames and bytes are exempt",
+          historical_unpaired_pairs([(name, sql.encode()) for name, sql in ordered]) == {pair})
+
+    variants = {
+        "changed 0736 bytes": (pred_name, pred + "\n-- drift", succ_name, succ),
+        "changed 0737 bytes": (pred_name, pred, succ_name, succ + "\n-- drift"),
+        "changed 0736 line endings": (pred_name, pred.replace("\n", "\r\n"), succ_name, succ),
+        "other predecessor filename": ("0900_loop_notification_queue.sql", pred, succ_name, succ),
+        "other successor filename": (pred_name, pred, "0901_incident_triage_scac_successor.sql", succ),
+        "other overload": (
+            pred_name, pred + "\ncreate function ops.loop_notification_candidate(text) "
+            "returns boolean language sql security definer as $$ select true $$;", succ_name, succ),
+        "commented revoke": (
+            pred_name,
+            pred.replace(
+                "revoke all on function ops.loop_notification_candidate(uuid)\n"
+                "  from public,carr_reader,carr_writer,carr_jobs,carr_authority;",
+                "-- revoke all on function ops.loop_notification_candidate(uuid)\n"
+                "--   from public,carr_reader,carr_writer,carr_jobs,carr_authority;", 1),
+            succ_name, succ),
+        "GRANT ON ROUTINE": (
+            pred_name, pred + "\ngrant execute on routine ops.loop_notification_candidate(uuid) "
+            "to carr_writer;", succ_name, succ),
+        "GRANT ON ALL ROUTINES IN SCHEMA": (
+            pred_name, pred + "\ngrant execute on all routines in schema ops "
+            "to carr_writer;", succ_name, succ),
+    }
+    for label, (changed_pred_name, changed_pred, changed_succ_name, changed_succ) in variants.items():
+        changed_pair = (changed_pred_name, changed_succ_name)
+        changed_ordered = [
+            ("0001_unrelated.sql", "select 1;"),
+            (changed_pred_name, changed_pred),
+            (changed_succ_name, changed_succ),
+        ]
+        check(f"{label} still requires pairing",
+              changed_pair in find_atomic_seal_requirements(changed_ordered)
+              and changed_pair not in historical_unpaired_pairs(
+                  [(name, sql.encode()) for name, sql in changed_ordered]))
+
+
 def test_new_authority_migrations_are_atomically_sealed() -> None:
     """The live check: run the predicate against the real migration tree and
     require every result to be declared in ATOMIC_MIGRATION_GROUPS, and
@@ -422,7 +492,15 @@ def test_new_authority_migrations_are_atomically_sealed() -> None:
           len(required) > 0)
 
     atomic_pairs = declared_atomic_pairs(migrate.ATOMIC_MIGRATION_GROUPS)
-    missing_atomic = [pair for pair in required if pair not in atomic_pairs]
+    historical_names = {name for pair in HISTORICAL_UNPAIRED_SCAC_PAIRS for name in pair}
+    historical_unpaired = historical_unpaired_pairs([
+        (name, (REPO / "migrations" / name).read_bytes())
+        for name, _sql in ordered if name in historical_names
+    ])
+    missing_atomic = [
+        pair for pair in required
+        if pair not in atomic_pairs and pair not in historical_unpaired
+    ]
     check("every migration that opens new SCAC authority is paired with its "
           "seal in ATOMIC_MIGRATION_GROUPS",
           not missing_atomic,
@@ -431,7 +509,9 @@ def test_new_authority_migrations_are_atomically_sealed() -> None:
     strict_pairs = declared_strict_pairs(migrate.STRICT_ATOMIC_MIGRATION_GROUPS)
     missing_strict = [
         pair for pair in required
-        if pair not in strict_pairs and pair[1] not in PRE_STRICT_ATOMIC_GROUP_ALLOWLIST
+        if pair not in strict_pairs
+        and pair[1] not in PRE_STRICT_ATOMIC_GROUP_ALLOWLIST
+        and pair not in historical_unpaired
     ]
     check("every migration that opens new SCAC authority is paired with its "
           "seal in STRICT_ATOMIC_MIGRATION_GROUPS too, unless pre-existing",
@@ -453,6 +533,14 @@ def test_industry_events_domain_and_seal_are_atomic() -> None:
           pair in declared_strict_pairs(migrate.STRICT_ATOMIC_MIGRATION_GROUPS))
 
 
+def test_board_answers_domain_and_seal_are_atomic() -> None:
+    pair = ("0740_board_answers.sql", "0741_board_answers_scac_successor.sql")
+    check("board answers domain and seal share an atomic migration group",
+          pair in declared_atomic_pairs(migrate.ATOMIC_MIGRATION_GROUPS))
+    check("board answers domain and seal share a strict atomic migration group",
+          pair in declared_strict_pairs(migrate.STRICT_ATOMIC_MIGRATION_GROUPS))
+
+
 def main() -> int:
     print("migrate-precondition-selftest")
     test_table_shape()
@@ -462,8 +550,10 @@ def main() -> int:
     test_reviewed_controller_transaction_artifact_is_exact()
     test_seeded_failing_case_proves_the_check_fires()
     test_redeclared_function_needs_no_new_pairing()
+    test_historical_unpaired_pair_is_byte_exact()
     test_new_authority_migrations_are_atomically_sealed()
     test_industry_events_domain_and_seal_are_atomic()
+    test_board_answers_domain_and_seal_are_atomic()
     print()
     print(f"migrate-precondition-selftest: {len(PASS)}/{len(PASS) + len(FAIL)} passed")
     if FAIL:

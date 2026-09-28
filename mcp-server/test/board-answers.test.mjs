@@ -143,7 +143,7 @@ test("migration pairs the typed records with a sealed successor", () => {
   for (const table of ["board_snapshot", "board_question", "board_answer"])
     assert.match(schema, new RegExp(`create table public\\.${table}`));
   assert.match(schema, /unique \(organization_tenant_id,board_id,question_id,question_revision\)/i);
-  assert.match(seal, /scac-mutation-registry\.v93/);
+  assert.match(seal, /scac-mutation-registry\.v94/);
   assert.equal((migrate.match(/0740_board_answers\.sql/g) || []).length, 2);
   assert.equal((migrate.match(/0741_board_answers_scac_successor\.sql/g) || []).length, 2);
 });
