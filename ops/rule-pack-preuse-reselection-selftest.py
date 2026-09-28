@@ -184,6 +184,22 @@ check("receipt carries every dynamic member and full binding text",
       and all(item["statement"].startswith("binding scheduled rule") for item in row["rules"]),
       row.get("rules"))
 
+# Claude persists additionalContext over 10,000 characters behind a preview.
+# A full receipt beyond that limit is a false delivery claim: the model only
+# sees the preview, while Stop telemetry may credit every scheduled rule.
+oversize_response = selector_result()
+oversize_response["shared_rules"][0]["statement"] = "binding scheduled rule " + "x" * 12_000
+oversize_output = rail.process(payload(), runner=Runner(oversize_response))
+oversize_text = context(oversize_output)
+check("oversize scheduled rail stays within the visible context budget",
+      rail.rule_routes.within_cap(oversize_text), len(oversize_text))
+check("oversize scheduled rail names every undelivered rule without a receipt",
+      oversize_text.startswith("RULE PACK PREUSE DELIVERY TOO LARGE")
+      and "NOT delivered" in oversize_text
+      and all(short in oversize_text for short in EXPECTED_IDS)
+      and "rule-delivery-preuse-reselection/v1" not in oversize_text,
+      oversize_text[:160])
+
 dell_output = rail.process(
     payload(), runner=Runner(selector_result(agent="dell-local", sponsor="dell")))
 check("sanctioned Dell local identity receives the same rail",
