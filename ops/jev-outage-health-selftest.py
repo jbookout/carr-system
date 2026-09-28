@@ -41,6 +41,20 @@ class OutageTests(unittest.TestCase):
                                      now=health.parse_time("2026-09-28T12:00:00Z"))
             self.assertEqual(result["status"], "skip")
 
+    def test_failed_402_stays_warn_until_a_later_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            calls = root / "calls.jsonl"
+            judge = root / "judge.jsonl"
+            calls.write_text(json.dumps({"ts": "2026-09-28T01:00:00Z", "ok": True}) + "\n")
+            judge.write_text(json.dumps({"at": "2026-09-28T11:00:00Z",
+                                         "error": "TypeSafe returned HTTP 402"}) + "\n")
+            for when in ("2026-09-28T12:00:00Z", "2026-09-28T14:00:00Z"):
+                with self.subTest(when=when):
+                    result = health.evaluate(judge, calls, now=health.parse_time(when))
+                    self.assertEqual((result["status"], result["reason"]),
+                                     ("warn", "billing_exhausted"))
+
     def test_one_loop_then_auto_close_after_success(self):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory) / "state.json"

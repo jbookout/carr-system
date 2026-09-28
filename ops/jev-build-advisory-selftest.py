@@ -99,6 +99,25 @@ class AdvisoryTests(unittest.TestCase):
         self.assertIn("Joe must add credits", failure["instruction"])
         self.assertNotIn("SECRET", json.dumps(failure))
 
+    def test_advisory_only_402_reaches_outage_health_without_raw_body(self):
+        from tools import jev_outage_health as health
+
+        class Failing(FakeClient):
+            def ask(self, *args, **kwargs):
+                raise RuntimeError("TypeSafe returned HTTP 402: SECRET RESPONSE BODY")
+
+        with tempfile.TemporaryDirectory() as directory:
+            calls = Path(directory) / "calls.jsonl"
+            judge = Path(directory) / "out" / "jev-judge.jsonl"
+            client = Failing()
+            client.CANONICAL_REPO = directory
+            with self.assertRaises(advisory.AdvisoryUnavailable):
+                advisory.advise("Build this", client=client)
+            result = health.evaluate(judge, calls)
+            self.assertEqual((result["status"], result["reason"]),
+                             ("warn", "billing_exhausted"))
+            self.assertNotIn("SECRET", judge.read_text())
+
     def test_failure_reason_classes(self):
         for source, expected in (
             ("TypeSafe returned HTTP 401: SECRET", "auth_failed"),

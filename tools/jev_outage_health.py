@@ -38,6 +38,11 @@ def _rows(path):
 
 
 def _safe_reason(error):
+    advisory = re.fullmatch(r"build_advisory:([a-z_]+)", error or "")
+    if advisory and advisory.group(1) in (
+            "billing_exhausted", "auth_failed", "rate_limited", "timeout",
+            "network", "server_5xx", "unknown"):
+        return advisory.group(1)
     match = re.search(r"\bTypeSafe returned HTTP (\d{3})\b", error or "")
     status = int(match.group(1)) if match else None
     if status == 402:
@@ -52,7 +57,7 @@ def _safe_reason(error):
 
 
 def evaluate(judge_path, calls_path, *, now=None, threshold_hours=THRESHOLD_HOURS):
-    """WARN only when a failed attempt is recent and success is stale."""
+    """Keep an overdue failed attempt in WARN until a later success."""
     now = now or datetime.now(timezone.utc)
     success = attempt = None
     reason = "unknown"
@@ -70,15 +75,15 @@ def evaluate(judge_path, calls_path, *, now=None, threshold_hours=THRESHOLD_HOUR
             attempt = at
             reason = _safe_reason(row["error"])
     age = (now - success).total_seconds() / 3600 if success else None
-    recent_attempt = attempt and 0 <= (now - attempt).total_seconds() / 3600 <= threshold_hours
+    pending = bool(attempt and attempt <= now and (success is None or attempt > success))
     if success and (attempt is None or success > attempt):
         status = "ok" if age <= threshold_hours or attempt else "skip"
-    elif recent_attempt and (success is None or attempt > success):
+    elif pending:
         status = "warn" if age is None or age > threshold_hours else "skip"
     else:
         status = "skip"
     return {"status": status, "reason": reason if status == "warn" else None,
-            "pending": bool(attempt and (success is None or attempt > success)),
+            "pending": pending,
             "age_hours": round(max(age, 0), 1) if age is not None else None}
 
 

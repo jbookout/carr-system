@@ -296,7 +296,13 @@ def _advise(partner_request: str, *, client: Any | None = None,
             retries=0,
         )
     except Exception as exc:
-        raise AdvisoryUnavailable(failure_reason(exc)) from None
+        reason = failure_reason(exc)
+        from ops import jev_judge
+        log_path = os.path.join(getattr(tsc, "CANONICAL_REPO", REPO),
+                                "out", "jev-judge.jsonl")
+        jev_judge.record("build_advisory", "provider_call", None,
+                         error=f"build_advisory:{reason}", log_path=log_path)
+        raise AdvisoryUnavailable(reason) from None
     answers = response.get("answers") if isinstance(response, dict) else None
     model = response.get("model") if isinstance(response, dict) else None
     if not isinstance(answers, dict) or not isinstance(model, str) or not model.strip():
