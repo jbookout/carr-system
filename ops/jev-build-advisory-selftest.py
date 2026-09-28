@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -109,12 +110,22 @@ class AdvisoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             calls = Path(directory) / "calls.jsonl"
             judge = Path(directory) / "out" / "jev-judge.jsonl"
+            state = Path(directory) / "outage-state.json"
             client = Failing()
             client.CANONICAL_REPO = directory
             with self.assertRaises(advisory.AdvisoryUnavailable):
                 advisory.advise("Build this", client=client)
-            result = health.evaluate(judge, calls)
-            self.assertEqual((result["status"], result["reason"]),
+            attempt = health.parse_time(json.loads(judge.read_text().splitlines()[-1])["at"])
+            first = health.evaluate(judge, calls, now=attempt + timedelta(minutes=30),
+                                    state_path=state)
+            self.assertEqual((first["status"], first["pending"]), ("skip", True))
+            self.assertEqual(health.reconcile(first, state,
+                lambda name, payload: self.fail(f"premature {name}")), "none")
+            self.assertEqual(json.loads(state.read_text())["first_failure_at"],
+                             attempt.isoformat())
+            expired = health.evaluate(judge, calls, now=attempt + timedelta(hours=2),
+                                      state_path=state)
+            self.assertEqual((expired["status"], expired["reason"]),
                              ("warn", "billing_exhausted"))
             self.assertNotIn("SECRET", judge.read_text())
 

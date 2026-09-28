@@ -105,9 +105,9 @@ def evaluate(judge_path, calls_path, *, now=None, threshold_hours=THRESHOLD_HOUR
     pending = bool(attempt and attempt <= now and (success is None or attempt > success))
     grace_expired = bool(first_failure and
                          (now - first_failure).total_seconds() / 3600 >= threshold_hours)
-    if (open_loop or first_failure) and (not calls_readable or
-            open_loop and not known_attempt or
-            judge_lost and pending and (open_loop or grace_expired)):
+    if ((open_loop and (not calls_readable or not known_attempt)) or
+            ((open_loop or first_failure) and judge_lost and pending and
+             (open_loop or grace_expired))):
         return {"status": "warn", "reason": "log_unreadable", "pending": pending,
                 "age_hours": round(max((now - success).total_seconds() / 3600, 0), 1)
                 if success else None,
