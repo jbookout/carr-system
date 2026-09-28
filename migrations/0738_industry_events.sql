@@ -35,3 +35,8 @@ create index industry_event_tenant_start_idx
 revoke all on public.industry_event from public, carr_reader, carr_writer, carr_jobs, carr_authority;
 grant select on public.industry_event to carr_reader;
 grant select, insert, update on public.industry_event to carr_writer;
+
+create trigger scac_reference_monitor_guard_row before insert or update or delete
+on public.industry_event for each row execute function ops.scac_reference_monitor_guard();
+create trigger scac_reference_monitor_guard_truncate before truncate
+on public.industry_event for each statement execute function ops.scac_reference_monitor_guard();

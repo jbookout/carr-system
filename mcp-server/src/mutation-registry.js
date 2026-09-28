@@ -4,12 +4,15 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v92 (PROVISIONAL) is the runtime selector for the tenant-scoped Industry
-// Events record contract: add, list and update event records. It chains over
-// v91's safe-stop registry and remains fail-closed until the 0738 catalog lane
-// supplies measured grants.
+// v93 is the runtime selector for the tenant-scoped Industry Events record
+// contract. Its 0739 successor chains after incident triage v92 (0737).
 //
-// v91 (PROVISIONAL) is the runtime selector for DoctorCRE V5-RW02's safe-stop
+// Superseded note (v92): v92 was the runtime selector for the bounded incident-triage
+// transition and its exact incident-reference contract. It chains over v91
+// (0734) after the ordered 0733/0734/0735/0736 ledger; final numbering is
+// assigned at merge.
+//
+// Superseded note (v91): v91 (PROVISIONAL) was the runtime selector for DoctorCRE V5-RW02's safe-stop
 // run store. It registers the read-salesforce-autonomy-counter read, the
 // record-salesforce-run-outcome writer and the human-only
 // revoke-salesforce-read-consent writer, and reseals update-deal for its new
@@ -188,7 +191,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v92.generated.js";
+} from "./scac-mutation-registry.v93.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 
