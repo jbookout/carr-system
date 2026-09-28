@@ -3,14 +3,35 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 THRESHOLD_HOURS = 2
-ACTION = ("on breach: open/update one deduplicated loop (owner Joe; add TypeSafe "
-          "credits); verify a successful Jev call; auto-clear on the next success")
+REMEDIATION = {
+    "billing_exhausted": "add TypeSafe credits",
+    "auth_failed": "repair the TypeSafe API credential",
+    "rate_limited": "restore TypeSafe quota or wait for its reset",
+    "timeout": "repair TypeSafe call timeout",
+    "network": "restore network reachability to TypeSafe",
+    "server_5xx": "verify TypeSafe service recovery",
+    "invalid_data": "repair the Jev response contract",
+    "log_unreadable": "repair the Jev evidence logs",
+    "state_unreadable": "repair the Jev outage state file",
+    "unknown": "diagnose the failed TypeSafe call",
+}
+STATES = frozenset({"healthy", "failing_in_grace", "outage_open", "unknown"})
+EVENTS = frozenset({"usable_success", "unusable_success", "classified_failure",
+                    "log_missing", "log_corrupt", "log_truncated",
+                    "legacy_incomplete", "state_missing", "state_corrupt"})
+
+
+def action(reason):
+    remedy = REMEDIATION.get(reason, REMEDIATION["unknown"])
+    return ("on breach: open/update one deduplicated loop (owner Joe; "
+            f"{remedy}); verify a usable Jev judgment; auto-clear on that judgment")
 
 
 def parse_time(value):
@@ -30,6 +51,92 @@ def _rows(path):
             if not isinstance(row, dict):
                 raise ValueError("non-object log row")
             yield row
+
+
+def _log(path):
+    try:
+        return list(_rows(path)), None
+    except FileNotFoundError:
+        return [], "log_missing"
+    except json.JSONDecodeError:
+        return [], "log_truncated"
+    except (OSError, UnicodeError, ValueError):
+        return [], "log_corrupt"
+
+
+def usable_receipt(row):
+    """A receipt can prove recovery only after the client validated its answer."""
+    usage = row.get("usage")
+    status = row.get("http_status")
+    return (row.get("ok") is True and row.get("usable") is True and
+            row.get("schema_valid") is True and type(status) is int and 200 <= status < 300 and
+            isinstance(row.get("model"), str) and bool(row["model"].strip()) and
+            isinstance(usage, dict) and
+            all(type(usage.get(key)) is int and usage[key] >= 0
+                for key in ("input_tokens", "output_tokens")))
+
+
+def clear(state, evidence):
+    """The only transition into healthy; caller must prove usable_success."""
+    if not isinstance(evidence, dict) or not usable_receipt(evidence):
+        raise ValueError("Jev recovery requires a usable success receipt")
+    at = parse_time(evidence.get("ts"))
+    if at is None:
+        raise ValueError("Jev recovery requires a timestamped receipt")
+    last_attempt = parse_time(state.get("attempt_at"))
+    if last_attempt and at <= last_attempt:
+        raise ValueError("Jev recovery receipt predates the failed attempt")
+    return {**state, "state": "healthy", "event_at": at.isoformat(),
+            "last_success_at": at.isoformat(), "first_failure_at": None,
+            "attempt_at": None, "reason": None,
+            "recovered_by_usable_success": True}
+
+
+def transition(state, event, *, at, now, threshold_hours=THRESHOLD_HOURS,
+               legacy_mtime=None, reason=None, evidence=None):
+    """One state transition and its health verdict for every monitored input."""
+    if event not in EVENTS:
+        raise ValueError(f"unknown Jev outage event: {event}")
+    result = dict(state)
+    before = result.get("state", "unknown")
+    if before not in STATES:
+        before = "unknown"
+    result["state"] = before
+    anchor = parse_time(result.get("first_failure_at"))
+    if event == "usable_success":
+        result = clear(result, evidence)
+    elif event in ("classified_failure", "unusable_success"):
+        if before not in ("failing_in_grace", "outage_open"):
+            anchor = at
+        elif anchor is None:
+            anchor = legacy_mtime or at
+        result.update(first_failure_at=anchor.isoformat(), attempt_at=at.isoformat(),
+                      event_at=at.isoformat(), reason=reason or
+                      ("invalid_data" if event == "unusable_success" else "unknown"))
+        expired = (now - anchor).total_seconds() >= threshold_hours * 3600
+        result["state"] = "outage_open" if before == "outage_open" or expired else "failing_in_grace"
+    elif event in ("legacy_incomplete", "state_corrupt"):
+        anchor = anchor or legacy_mtime or at
+        result.update(state="outage_open", first_failure_at=anchor.isoformat(),
+                      attempt_at=result.get("attempt_at") or anchor.isoformat(),
+                      reason="state_unreadable" if event == "state_corrupt" else
+                      result.get("reason") or "log_unreadable")
+    elif event in ("log_missing", "log_corrupt", "log_truncated"):
+        if before == "failing_in_grace" and anchor and (
+                now - anchor).total_seconds() >= threshold_hours * 3600:
+            result["state"] = "outage_open"
+        elif before == "healthy":
+            result["state"] = "unknown"
+        result["reason"] = "log_unreadable"
+    elif event == "state_missing" and before == "healthy":
+        result["state"] = "unknown"
+    current = result["state"]
+    result["status"] = ("ok" if current == "healthy" else "warn" if
+                        current == "outage_open" or current == "unknown" and
+                        result.get("reason") in ("log_unreadable", "state_unreadable")
+                        else "skip")
+    result["pending"] = current in ("failing_in_grace", "outage_open")
+    return result
 
 
 def _safe_reason(error):
@@ -53,78 +160,84 @@ def _safe_reason(error):
 
 def evaluate(judge_path, calls_path, *, now=None, threshold_hours=THRESHOLD_HOURS,
              state_path=None):
-    """Keep an overdue failed attempt in WARN until a later success."""
+    """Replay valid evidence through the same reducer used by the transition test."""
     now = now or datetime.now(timezone.utc)
+    mtime = None
     try:
         state = json.loads(Path(state_path).read_text(encoding="utf-8")) if state_path else {}
+        if state_path:
+            mtime = datetime.fromtimestamp(Path(state_path).stat().st_mtime, timezone.utc)
+        if not isinstance(state, dict):
+            raise ValueError("non-object state")
     except FileNotFoundError:
-        state = {}
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return {"status": "warn", "reason": "log_unreadable", "pending": True,
-                "age_hours": None, "attempt_at": None}
-    open_loop = bool(state.get("loop_id") or state.get("open_key"))
-    first_failure = parse_time(state.get("first_failure_at"))
-    success = attempt = None
-    reason = "unknown"
-    calls_readable = judge_readable = True
-    try:
-        for row in _rows(calls_path):
-            at = parse_time(row.get("ts"))
-            if at and row.get("ok") is True and (success is None or at > success):
-                success = at
+        state = transition({}, "state_missing", at=now, now=now)
     except (OSError, UnicodeError, ValueError):
-        calls_readable = False
-        success = None
-    try:
-        for row in _rows(judge_path):
-            at = parse_time(row.get("at"))
-            if not at:
+        if state_path and Path(state_path).exists():
+            mtime = datetime.fromtimestamp(Path(state_path).stat().st_mtime, timezone.utc)
+        state = transition({}, "state_corrupt", at=now, now=now, legacy_mtime=mtime)
+    if "state" not in state and (state.get("loop_id") or state.get("open_key")):
+        state = transition(state, "legacy_incomplete", at=now, now=now, legacy_mtime=mtime)
+    elif "state" not in state:
+        state["state"] = "failing_in_grace" if parse_time(state.get("first_failure_at")) else "unknown"
+    if state["state"] not in STATES:
+        state = transition(state, "legacy_incomplete", at=now, now=now, legacy_mtime=mtime)
+    if ((state["state"] in ("failing_in_grace", "outage_open") and
+         not parse_time(state.get("first_failure_at"))) or
+            (state.get("loop_id") and state["state"] == "healthy")):
+        state = transition(state, "legacy_incomplete", at=now, now=now, legacy_mtime=mtime)
+
+    calls, call_loss = _log(calls_path)
+    judges, judge_loss = _log(judge_path)
+    recorded_attempt = parse_time(state.get("attempt_at"))
+    latest_logged_attempt = max((at for row in judges
+                                 if isinstance(row.get("error"), str)
+                                 if (at := parse_time(row.get("at")))), default=None)
+    if (recorded_attempt and
+            (latest_logged_attempt is None or latest_logged_attempt < recorded_attempt)):
+        judge_loss = judge_loss or "log_truncated"
+    lost_evidence = (judge_loss if state.get("attempt_at") else None) or (
+        call_loss if state.get("last_success_at") else None)
+    if lost_evidence:
+        state = transition(state, lost_evidence, at=now, now=now,
+                           threshold_hours=threshold_hours)
+    events = []
+    for row in calls:
+        at = parse_time(row.get("ts"))
+        if at and at <= now:
+            # Pre-validation receipts cannot prove recovery or a bad answer.
+            # A fresh client records both outcomes with schema_valid present.
+            if "schema_valid" not in row:
                 continue
-            # Fake-model rows cannot prove provider recovery; only the
-            # TypeSafe client's real-call receipt ledger can do that.
-            if isinstance(row.get("error"), str) and (attempt is None or at > attempt):
-                attempt = at
-                reason = _safe_reason(row["error"])
-    except (OSError, UnicodeError, ValueError):
-        judge_readable = False
-        attempt = None
-    logged_attempt = attempt
-    known_attempt = parse_time(state.get("attempt_at")) if open_loop or first_failure else None
-    if open_loop and not known_attempt and state_path:
-        # Older state has no anchor. Use its visible failed attempt, or the
-        # state's mtime if that evidence has disappeared.
-        known_attempt = logged_attempt or datetime.fromtimestamp(
-            Path(state_path).stat().st_mtime, timezone.utc)
-    if known_attempt and (attempt is None or known_attempt > attempt):
-        attempt = known_attempt
-        reason = state.get("reason") or reason
-    if attempt and (not first_failure or success and first_failure < success < attempt):
-        first_failure = attempt
-    judge_lost = (not judge_readable or not logged_attempt or
-                  known_attempt and logged_attempt < known_attempt)
-    pending = bool(attempt and attempt <= now and (success is None or attempt > success))
-    grace_expired = bool(first_failure and
-                         (now - first_failure).total_seconds() / 3600 >= threshold_hours)
-    if ((open_loop and (not calls_readable or not known_attempt)) or
-            ((open_loop or first_failure) and judge_lost and pending and
-             (open_loop or grace_expired))):
-        return {"status": "warn", "reason": "log_unreadable", "pending": pending,
-                "age_hours": round(max((now - success).total_seconds() / 3600, 0), 1)
-                if success else None,
-                "attempt_at": attempt.isoformat() if attempt else None,
-                "first_failure_at": first_failure.isoformat() if first_failure else None}
-    age = (now - success).total_seconds() / 3600 if success else None
-    if success and (attempt is None or success > attempt):
-        status = "ok" if age <= threshold_hours or attempt else "skip"
-    elif pending:
-        status = "warn" if grace_expired else "skip"
-    else:
-        status = "skip"
-    return {"status": status, "reason": reason if status == "warn" else None,
-            "pending": pending,
-            "age_hours": round(max(age, 0), 1) if age is not None else None,
-            "attempt_at": attempt.isoformat() if attempt else None,
-            "first_failure_at": first_failure.isoformat() if first_failure else None}
+            events.append((at, "usable_success" if usable_receipt(row) else "unusable_success",
+                           "invalid_data", row))
+    for row in judges:
+        at = parse_time(row.get("at"))
+        if at and at <= now and isinstance(row.get("error"), str):
+            events.append((at, "classified_failure", _safe_reason(row["error"]), None))
+    boundary = parse_time(state.get("event_at")) or parse_time(state.get("attempt_at"))
+    for at, event, reason, evidence in sorted(events, key=lambda item: (item[0], item[1])):
+        if boundary and at <= boundary:
+            continue
+        state = transition(state, event, at=at, now=now,
+                           threshold_hours=threshold_hours, legacy_mtime=mtime,
+                           reason=reason, evidence=evidence)
+    if state["state"] == "failing_in_grace":
+        anchor = parse_time(state.get("first_failure_at"))
+        if anchor and (now - anchor).total_seconds() >= threshold_hours * 3600:
+            state = transition(state, "classified_failure",
+                               at=parse_time(state.get("attempt_at")) or anchor,
+                               now=now, threshold_hours=threshold_hours,
+                               reason=state.get("reason"))
+    if "status" not in state:
+        state = transition(state, "state_missing", at=now, now=now,
+                           threshold_hours=threshold_hours)
+    success = parse_time(state.get("last_success_at"))
+    state["age_hours"] = round(max((now - success).total_seconds() / 3600, 0), 1) if success else None
+    if state["state"] == "healthy" and state["age_hours"] is not None and state["age_hours"] > threshold_hours and not state.get("loop_id"):
+        state["status"] = "skip"
+    if state["status"] == "skip":
+        state["reason"] = None if not state["pending"] else state.get("reason")
+    return state
 
 
 def _save(path, state):
@@ -136,43 +249,52 @@ def _save(path, state):
 
 
 def _body(reason):
-    if reason == "log_unreadable":
+    if reason in ("log_unreadable", "state_unreadable"):
         return ("Jev outage remains open: judgment log or call receipt log is "
-                "missing, truncated, or unreadable. Repair the evidence log, "
-                "then verify with a successful Jev call. This loop auto-closes "
-                "only after that success.")
+                "missing, truncated, or unreadable, or the outage state is unreadable. "
+                "Repair the affected evidence and state file, "
+                "then verify with a usable Jev judgment. This loop auto-closes "
+                "only after that judgment.")
     cause = ("TypeSafe account has no API credits" if reason == "billing_exhausted"
              else f"TypeSafe call failed ({reason})")
     return (f"Jev is offline: {cause}. Joe owns remediation: add TypeSafe credits "
             "when billing is exhausted; otherwise repair the named provider failure. "
-            "Verify with a successful Jev call. This loop auto-closes on the next success.")
+            "Verify with a usable Jev judgment. This loop auto-closes on that judgment.")
 
 
 def reconcile(result, state_path, verb):
     """Idempotently open/update the one outage loop, then close on success."""
+    path = Path(state_path)
     try:
-        state = json.loads(Path(state_path).read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
+        state = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(state, dict):
+            raise ValueError("non-object state")
+    except FileNotFoundError:
+        state = {}
+    except (OSError, UnicodeError, ValueError):
+        # Preserve the damaged evidence before replacing the generated state.
+        try:
+            shutil.copy2(path, path.with_name(path.name + f".corrupt-{uuid.uuid4()}"))
+        except OSError:
+            return "error"
         state = {}
     if result["status"] == "skip" and result["pending"]:
-        first = parse_time(result.get("first_failure_at"))
-        if first:
-            state["first_failure_at"] = first.isoformat()
-            state["attempt_at"] = result.get("attempt_at")
-            _save(state_path, state)
+        _save(state_path, {**state, **result})
         return "none"
     if result["status"] == "warn":
         reason = result["reason"]
+        previous = dict(state)
+        state = {**state, **result}
         first = parse_time(result.get("first_failure_at"))
-        first_changed = bool(first and state.get("first_failure_at") != first.isoformat())
+        first_changed = bool(first and previous.get("first_failure_at") != first.isoformat())
         if first:
             state["first_failure_at"] = first.isoformat()
         if state.get("loop_id"):
             newer_attempt = parse_time(result.get("attempt_at"))
-            saved_attempt = parse_time(state.get("attempt_at"))
+            saved_attempt = parse_time(previous.get("attempt_at"))
             if newer_attempt and (not saved_attempt or newer_attempt > saved_attempt):
                 state["attempt_at"] = newer_attempt.isoformat()
-            if state.get("reason") == reason:
+            if previous.get("reason") == reason:
                 if first_changed or newer_attempt and (
                         not saved_attempt or newer_attempt > saved_attempt):
                     _save(state_path, state)
@@ -199,24 +321,28 @@ def reconcile(result, state_path, verb):
         loop_id = response.get("loop_id")
         if not response.get("ok") or not isinstance(loop_id, str):
             return "error"
-        _save(state_path, {"loop_id": loop_id, "reason": reason,
-                           "attempt_at": result.get("attempt_at"),
-                           "first_failure_at": state.get("first_failure_at")})
+        _save(state_path, {**state, "loop_id": loop_id, "state": "outage_open"})
         return "opened"
-    if result["status"] == "ok" and state.get("loop_id"):
+    if (result["status"] == "ok" and result.get("state") == "healthy" and
+            result.get("recovered_by_usable_success") is True and state.get("loop_id")):
         key = state.get("close_key") or str(uuid.uuid4())
         state["close_key"] = key
         _save(state_path, state)
         response = verb("close-loop", {
             "idempotency_key": key, "loop_id": state["loop_id"], "resolution": "done",
-            "outcome": "A new successful Jev call verified that the TypeSafe outage cleared."})
+            "outcome": "A new usable Jev judgment verified that the TypeSafe outage cleared."})
         if not response.get("ok"):
             return "error"
-        _save(state_path, {})
+        _save(state_path, {key: value for key, value in result.items()
+                           if key not in ("loop_id", "open_key", "close_key")})
         return "cleared"
-    if result["status"] == "ok" and state.get("first_failure_at"):
-        _save(state_path, {})
+    if (result["status"] == "ok" and result.get("state") == "healthy" and
+            result.get("recovered_by_usable_success") is True and state.get("first_failure_at")):
+        _save(state_path, result)
         return "cleared"
+    if (result["status"] == "ok" and result.get("state") == "healthy" and
+            result.get("recovered_by_usable_success") is True):
+        _save(state_path, result)
     return "none"
 
 

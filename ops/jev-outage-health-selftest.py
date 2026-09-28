@@ -11,14 +11,102 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 import jev_outage_health as health  # noqa:E402
 
 
+def receipt(ts):
+    return {"ts": ts, "ok": True, "usable": True, "schema_valid": True,
+            "http_status": 200, "model": "jev-test",
+            "usage": {"input_tokens": 10, "output_tokens": 2}}
+
+
 class OutageTests(unittest.TestCase):
+    def test_health_action_names_remedy_and_clear_condition(self):
+        self.assertIn("add TypeSafe credits", health.action("billing_exhausted"))
+        self.assertIn("repair the Jev response contract", health.action("invalid_data"))
+        self.assertIn("auto-clear on that judgment", health.action("invalid_data"))
+
+    def test_complete_state_event_transition_table(self):
+        """Four states by nine events; recovery has exactly one entrance."""
+        now = health.parse_time("2026-09-28T14:00:00Z")
+        old = health.parse_time("2026-09-28T11:00:00Z")
+        cases = {
+            "healthy": [
+                ("usable_success", "healthy", "ok"),
+                ("unusable_success", "failing_in_grace", "skip"),
+                ("classified_failure", "failing_in_grace", "skip"),
+                ("log_missing", "unknown", "warn"),
+                ("log_corrupt", "unknown", "warn"),
+                ("log_truncated", "unknown", "warn"),
+                ("legacy_incomplete", "outage_open", "warn"),
+                ("state_missing", "unknown", "skip"),
+                ("state_corrupt", "outage_open", "warn"),
+            ],
+            "failing_in_grace": [
+                ("usable_success", "healthy", "ok"),
+                ("unusable_success", "outage_open", "warn"),
+                ("classified_failure", "outage_open", "warn"),
+                ("log_missing", "outage_open", "warn"),
+                ("log_corrupt", "outage_open", "warn"),
+                ("log_truncated", "outage_open", "warn"),
+                ("legacy_incomplete", "outage_open", "warn"),
+                ("state_missing", "failing_in_grace", "skip"),
+                ("state_corrupt", "outage_open", "warn"),
+            ],
+            "outage_open": [
+                ("usable_success", "healthy", "ok"),
+                ("unusable_success", "outage_open", "warn"),
+                ("classified_failure", "outage_open", "warn"),
+                ("log_missing", "outage_open", "warn"),
+                ("log_corrupt", "outage_open", "warn"),
+                ("log_truncated", "outage_open", "warn"),
+                ("legacy_incomplete", "outage_open", "warn"),
+                ("state_missing", "outage_open", "warn"),
+                ("state_corrupt", "outage_open", "warn"),
+            ],
+            "unknown": [
+                ("usable_success", "healthy", "ok"),
+                ("unusable_success", "failing_in_grace", "skip"),
+                ("classified_failure", "failing_in_grace", "skip"),
+                ("log_missing", "unknown", "warn"),
+                ("log_corrupt", "unknown", "warn"),
+                ("log_truncated", "unknown", "warn"),
+                ("legacy_incomplete", "outage_open", "warn"),
+                ("state_missing", "unknown", "skip"),
+                ("state_corrupt", "outage_open", "warn"),
+            ],
+        }
+        self.assertEqual(sum(map(len, cases.values())), 36)
+        for before, rows in cases.items():
+            for event, after, verdict in rows:
+                with self.subTest(before=before, event=event):
+                    initial = {"state": before, "loop_id": "loop-123"} if before == "outage_open" else {"state": before}
+                    if before == "failing_in_grace":
+                        initial["first_failure_at"] = old.isoformat()
+                    result = health.transition(initial, event, at=now, now=now,
+                                               legacy_mtime=old, reason="billing_exhausted",
+                                               evidence=receipt(now.isoformat()) if
+                                               event == "usable_success" else None)
+                    self.assertEqual((result["state"], result["status"]),
+                                     (after, verdict))
+                    if event == "legacy_incomplete":
+                        self.assertEqual(result["first_failure_at"], old.isoformat())
+                    if before == "outage_open" and event != "usable_success":
+                        self.assertEqual(result["loop_id"], "loop-123")
+        for invalid in ({"ts": now.isoformat(), "ok": True},
+                        {**receipt(now.isoformat()), "http_status": 302},
+                        {**receipt(now.isoformat()), "schema_valid": False},
+                        {**receipt(now.isoformat()), "usage": None}):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                health.clear({"state": "outage_open"}, invalid)
+        with self.assertRaises(ValueError):
+            health.clear({"state": "outage_open", "attempt_at": now.isoformat()},
+                         receipt(now.isoformat()))
+
     def test_failure_during_grace_survives_lost_log_until_warning(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             calls = root / "calls.jsonl"
             judge = root / "judge.jsonl"
             state = root / "outage-state.json"
-            calls.write_text(json.dumps({"ts": "2026-09-28T10:00:00Z", "ok": True}) + "\n")
+            calls.write_text(json.dumps(receipt("2026-09-28T10:00:00Z")) + "\n")
             judge.write_text(json.dumps({"at": "2026-09-28T11:00:00Z",
                                          "error": "TypeSafe returned HTTP 402"}) + "\n")
             first = health.evaluate(judge, calls,
@@ -49,20 +137,20 @@ class OutageTests(unittest.TestCase):
                              ("warn", "log_unreadable"))
 
             calls.write_text(calls.read_text() + json.dumps(
-                {"ts": "2026-09-28T13:02:00Z", "ok": True}) + "\n")
+                receipt("2026-09-28T13:02:00Z")) + "\n")
             recovered = health.evaluate(judge, calls,
                 now=health.parse_time("2026-09-28T13:03:00Z"), state_path=state)
             self.assertEqual(recovered["status"], "ok")
             self.assertEqual(health.reconcile(recovered, state,
                 lambda name, payload: self.fail(f"unexpected {name}")), "cleared")
-            self.assertEqual(json.loads(state.read_text()), {})
+            self.assertEqual(json.loads(state.read_text())["state"], "healthy")
 
     def test_stale_success_with_expired_402_attempt_warns_and_recovers(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             calls = root / "calls.jsonl"
             judge = root / "judge.jsonl"
-            calls.write_text(json.dumps({"ts": "2026-09-28T01:00:00Z", "ok": True}) + "\n")
+            calls.write_text(json.dumps(receipt("2026-09-28T01:00:00Z")) + "\n")
             judge.write_text(json.dumps({"at": "2026-09-28T11:00:00Z",
                                          "error": "TypeSafe returned HTTP 402: SECRET"}) + "\n")
             judge.write_text(judge.read_text() + json.dumps({
@@ -74,7 +162,7 @@ class OutageTests(unittest.TestCase):
                              ("warn", "billing_exhausted"))
             self.assertNotIn("SECRET", json.dumps(result))
             calls.write_text(calls.read_text() + json.dumps(
-                {"ts": "2026-09-28T14:01:00Z", "ok": True}) + "\n")
+                receipt("2026-09-28T14:01:00Z")) + "\n")
             self.assertEqual(health.evaluate(judge, calls,
                 now=health.parse_time("2026-09-28T14:02:00Z"))["status"], "ok")
 
@@ -82,7 +170,7 @@ class OutageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             calls = root / "calls.jsonl"
-            calls.write_text(json.dumps({"ts": "2026-09-28T01:00:00Z", "ok": True}) + "\n")
+            calls.write_text(json.dumps(receipt("2026-09-28T01:00:00Z")) + "\n")
             result = health.evaluate(root / "missing.jsonl", calls,
                                      now=health.parse_time("2026-09-28T12:00:00Z"))
             self.assertEqual(result["status"], "skip")
@@ -92,14 +180,14 @@ class OutageTests(unittest.TestCase):
             root = Path(directory)
             calls = root / "calls.jsonl"
             judge = root / "judge.jsonl"
-            calls.write_text(json.dumps({"ts": "2026-09-28T01:00:00Z", "ok": True}) + "\n")
+            calls.write_text(json.dumps(receipt("2026-09-28T01:00:00Z")) + "\n")
             judge.write_text(json.dumps({"at": "2026-09-28T11:00:00Z",
                                          "error": "TypeSafe returned HTTP 402"}) + "\n")
             for when in ("2026-09-28T12:00:00Z", "2026-09-28T14:00:00Z"):
                 with self.subTest(when=when):
                     result = health.evaluate(judge, calls, now=health.parse_time(when))
                     self.assertEqual((result["status"], result["reason"]),
-                                     ("skip", None) if when.endswith("12:00:00Z")
+                                     ("skip", "billing_exhausted") if when.endswith("12:00:00Z")
                                      else ("warn", "billing_exhausted"))
 
     def test_open_outage_stays_warn_when_judge_log_is_missing_or_damaged(self):
@@ -110,7 +198,7 @@ class OutageTests(unittest.TestCase):
                 calls = root / "calls.jsonl"
                 judge = root / "judge.jsonl"
                 state = root / "outage-state.json"
-                calls.write_text(json.dumps({"ts": "2026-09-28T01:00:00Z", "ok": True}) + "\n")
+                calls.write_text(json.dumps(receipt("2026-09-28T01:00:00Z")) + "\n")
                 prefix = json.dumps({"at": "2026-09-28T10:00:00Z",
                                      "error": "TypeSafe returned HTTP 402"}) + "\n"
                 judge.write_text(prefix + json.dumps({"at": "2026-09-28T11:00:00Z",
@@ -134,7 +222,7 @@ class OutageTests(unittest.TestCase):
                 self.assertEqual(health.reconcile(result, state, update), "updated")
                 self.assertIn("judgment log", updates[0][1]["body"])
                 calls.write_text(calls.read_text() + json.dumps(
-                    {"ts": "2026-09-28T14:11:00Z", "ok": True}) + "\n")
+                    receipt("2026-09-28T14:11:00Z")) + "\n")
                 recovered = health.evaluate(judge, calls,
                     now=health.parse_time("2026-09-28T14:12:00Z"), state_path=state)
                 self.assertEqual(recovered["status"], "ok")
@@ -154,7 +242,11 @@ class OutageTests(unittest.TestCase):
             self.assertEqual(len(calls), 1)
             self.assertEqual(calls[0][1]["owner"], "Joe")
             self.assertIn("add TypeSafe credits", calls[0][1]["body"])
-            self.assertEqual(health.reconcile({"status": "ok"}, state, verb), "cleared")
+            recovered = health.transition({"state": "outage_open"}, "usable_success",
+                at=health.parse_time("2026-09-28T14:00:00Z"),
+                now=health.parse_time("2026-09-28T14:00:00Z"),
+                evidence=receipt("2026-09-28T14:00:00Z"))
+            self.assertEqual(health.reconcile(recovered, state, verb), "cleared")
             self.assertEqual(calls[-1][0], "close-loop")
             self.assertEqual(calls[-1][1]["loop_id"], "loop-123")
 
@@ -168,13 +260,13 @@ class OutageTests(unittest.TestCase):
                                          "reason": "billing_exhausted"}))
             opened = health.parse_time("2026-09-28T11:00:00Z").timestamp()
             os.utime(state, (opened, opened))
-            calls.write_text(json.dumps({"ts": "2026-09-28T09:00:00Z", "ok": True}) + "\n")
+            calls.write_text(json.dumps(receipt("2026-09-28T09:00:00Z")) + "\n")
             pending = health.evaluate(judge, calls,
                 now=health.parse_time("2026-09-28T12:00:00Z"), state_path=state)
             self.assertEqual((pending["status"], pending["reason"]),
                              ("warn", "log_unreadable"))
             calls.write_text(calls.read_text() + json.dumps(
-                {"ts": "2026-09-28T11:01:00Z", "ok": True}) + "\n")
+                receipt("2026-09-28T11:01:00Z")) + "\n")
             recovered = health.evaluate(judge, calls,
                 now=health.parse_time("2026-09-28T12:00:00Z"), state_path=state)
             self.assertEqual(recovered["status"], "ok")
@@ -185,7 +277,7 @@ class OutageTests(unittest.TestCase):
             state = root / "state.json"
             judge = root / "judge.jsonl"
             calls = root / "calls.jsonl"
-            calls.write_text(json.dumps({"ts": "2026-09-28T09:00:00Z", "ok": True}) + "\n")
+            calls.write_text(json.dumps(receipt("2026-09-28T09:00:00Z")) + "\n")
             judge.write_text(json.dumps({"at": "2026-09-28T11:00:00Z",
                                          "error": "TypeSafe returned HTTP 402"}) + "\n")
             verb = lambda name, payload: {"ok": True, "loop_id": "loop-123"}
@@ -199,11 +291,76 @@ class OutageTests(unittest.TestCase):
             self.assertEqual(health.reconcile(later, state, verb), "open")
             judge.unlink()
             calls.write_text(calls.read_text() + json.dumps(
-                {"ts": "2026-09-28T14:00:00Z", "ok": True}) + "\n")
+                receipt("2026-09-28T14:00:00Z")) + "\n")
             still_open = health.evaluate(judge, calls,
                 now=health.parse_time("2026-09-28T16:00:00Z"), state_path=state)
             self.assertEqual((still_open["status"], still_open["reason"]),
                              ("warn", "log_unreadable"))
+
+    def test_legacy_open_loop_keeps_mtime_anchor_after_fresh_failed_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "state.json"
+            judge = root / "judge.jsonl"
+            calls = root / "calls.jsonl"
+            state.write_text(json.dumps({"loop_id": "loop-123", "reason": "billing_exhausted"}))
+            opened = health.parse_time("2026-09-28T10:00:00Z")
+            os.utime(state, (opened.timestamp(), opened.timestamp()))
+            judge.write_text(json.dumps({"at": "2026-09-28T14:00:00Z",
+                                         "error": "TypeSafe returned HTTP 402"}) + "\n")
+            result = health.evaluate(judge, calls,
+                now=health.parse_time("2026-09-28T14:01:00Z"), state_path=state)
+            self.assertEqual((result["state"], result["status"]), ("outage_open", "warn"))
+            self.assertEqual(result["first_failure_at"], opened.isoformat())
+
+    def test_http_200_empty_judgment_cannot_clear_open_loop(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "state.json"
+            judge = root / "judge.jsonl"
+            calls = root / "calls.jsonl"
+            state.write_text(json.dumps({"state": "outage_open", "loop_id": "loop-123",
+                                         "reason": "billing_exhausted",
+                                         "first_failure_at": "2026-09-28T10:00:00+00:00",
+                                         "attempt_at": "2026-09-28T11:00:00+00:00"}))
+            judge.write_text(json.dumps({"at": "2026-09-28T11:00:00Z",
+                                         "error": "TypeSafe returned HTTP 402"}) + "\n")
+            calls.write_text(json.dumps({"ts": "2026-09-28T14:00:00Z", "ok": False,
+                                         "usable": False, "schema_valid": False,
+                                         "http_status": 200, "usage": None}) + "\n")
+            result = health.evaluate(judge, calls,
+                now=health.parse_time("2026-09-28T14:01:00Z"), state_path=state)
+            self.assertEqual((result["state"], result["status"]), ("outage_open", "warn"))
+            verbs = []
+            def verb(name, payload):
+                verbs.append(name)
+                return {"ok": True}
+            self.assertIn(health.reconcile(result, state, verb), ("open", "updated"))
+            self.assertNotIn("close-loop", verbs)
+
+    def test_old_receipt_without_validation_is_not_a_new_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            calls = root / "calls.jsonl"
+            calls.write_text(json.dumps({"ts": "2026-09-28T10:00:00Z",
+                                         "ok": True}) + "\n")
+            result = health.evaluate(root / "missing-judge.jsonl", calls,
+                now=health.parse_time("2026-09-28T14:00:00Z"))
+            self.assertEqual((result["state"], result["status"]), ("unknown", "skip"))
+
+    def test_corrupt_state_is_preserved_and_warns(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "state.json"
+            state.write_text("broken-state")
+            result = health.evaluate(root / "judge.jsonl", root / "calls.jsonl",
+                now=health.parse_time("2026-09-28T14:00:00Z"), state_path=state)
+            self.assertEqual((result["state"], result["status"]), ("outage_open", "warn"))
+            self.assertEqual(health.reconcile(result, state,
+                lambda name, payload: {"ok": True, "loop_id": "loop-123"}), "opened")
+            saved = list(root.glob("state.json.corrupt-*"))
+            self.assertEqual(len(saved), 1)
+            self.assertEqual(saved[0].read_text(), "broken-state")
 
 
 if __name__ == "__main__":

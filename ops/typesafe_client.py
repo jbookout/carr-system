@@ -103,8 +103,9 @@ CANONICAL_REPO = _canonical_repo_root(REPO)
 # WHERE A CALL BECOMES OBSERVABLE (decision 0b11c89b, 2026-09-24). A missing
 # Jev call used to be checkable only by grepping a session's Bash history for
 # the string "typesafe_client", which a bare `echo typesafe_client` also
-# satisfied. Every successful ask() now appends one best-effort row here —
-# never on failure, never the request or the answers, just enough for a
+# satisfied. Every HTTP response now appends one best-effort row here;
+# an unusable response is recorded with ok false. Provider failures never
+# append a call row. The request and answers are never included, just enough for a
 # reader (lib/jev_required_actions.py) to bind a call to a session, a time
 # window, and the facets it named. Writing this must never turn a working
 # Jev call into a failure, so every step here is wrapped and swallowed.
@@ -218,6 +219,48 @@ def _session_id():
     return None
 
 
+def usable_judgment(result, questions):
+    """Require one typed answer per requested question and measured usage."""
+    if not isinstance(result, dict) or not isinstance(result.get("model"), str) or not result["model"].strip():
+        return False
+    usage = result.get("usage")
+    if not isinstance(usage, dict) or any(
+            type(usage.get(key)) is not int or usage[key] < 0
+            for key in ("input_tokens", "output_tokens")):
+        return False
+    answers = result.get("answers")
+    if not isinstance(answers, dict) or set(answers) != set(questions):
+        return False
+    for key, question in questions.items():
+        answer = answers.get(key)
+        if not isinstance(question, dict) or not isinstance(answer, dict):
+            return False
+        kind = question.get("type")
+        if answer.get("type") != kind:
+            return False
+        if kind == "noul":
+            value = answer.get("noul")
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
+                return False
+        elif kind == "choice":
+            if answer.get("choice") not in question.get("criteria", {}):
+                return False
+        elif kind == "score":
+            value = answer.get("score")
+            levels = question.get("criteria")
+            if (isinstance(value, bool) or not isinstance(value, (int, float)) or
+                    not isinstance(levels, list) or not 0 <= value <= len(levels) - 1):
+                return False
+        else:
+            return False
+        if kind in ("choice", "score"):
+            confidence = answer.get("confidence")
+            if (isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or
+                    not 0 <= confidence <= 1):
+                return False
+    return True
+
+
 def _append_call_receipt(questions, facets, result, log_path):
     """Best-effort, APPEND-ONLY JSONL row, never on the request or the
     answers, never able to turn a successful ask() into a failure. See
@@ -242,7 +285,10 @@ def _append_call_receipt(questions, facets, result, log_path):
             "facets": sorted({str(f) for f in facets}) if facets else [],
             "model": answered.get("model"),
             "usage": answered.get("usage") if isinstance(answered.get("usage"), dict) else None,
-            "ok": True,
+            "http_status": answered.get("http_status"),
+            "schema_valid": answered.get("schema_valid") is True,
+            "ok": answered.get("usable") is True,
+            "usable": answered.get("usable") is True,
         }
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         with open(log_path, "a", encoding="utf-8") as fh:
@@ -271,8 +317,8 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
 
     Returns the decoded response: {"model": ..., "answers": {...},
     "usage": {...}}. `opener` is for the offline selftest and is not used in
-    production. On a successful response this also appends one best-effort
-    receipt row to `calls_log` (default out/jev-calls.jsonl) — see
+    production. On an HTTP response this also appends one best-effort
+    receipt row to `calls_log`, including an unusable result with ok false — see
     JEV_CALLS_LOG's module-level note for what it carries and why.
 
     `deadline` is optional: an absolute time.monotonic() value. With one,
@@ -318,14 +364,29 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
             attempt_timeout = min(timeout, remaining)
         try:
             with send(request, timeout=attempt_timeout) as response:
-                result = json.load(response)
+                http_status = getattr(response, "status", None)
+                try:
+                    result = json.load(response)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    result = None
+            schema_valid = usable_judgment(result, questions)
+            usable = (type(http_status) is int and 200 <= http_status < 300 and
+                      schema_valid)
             # Round-2 fix: only a REAL production call (no opener) writes a
             # receipt. `opener` is the offline selftest/mock path (see the
             # docstring above) — a mock response was never actually seen by
             # the vendor, so a receipt for it would let a selftest run count
             # as this turn's real Jev evidence.
             if opener is None:
-                _append_call_receipt(questions, facets, result, calls_log)
+                receipt_result = ({**result, "usable": usable,
+                                   "schema_valid": schema_valid,
+                                   "http_status": http_status}
+                                  if isinstance(result, dict) else
+                                  {"usable": False, "schema_valid": False,
+                                   "http_status": http_status})
+                _append_call_receipt(questions, facets, receipt_result, calls_log)
+            if not usable:
+                raise TypeSafeError("TypeSafe returned an unusable judgment")
             return result
         except urllib.error.HTTPError as err:
             # 429 is documented as expected under load, and the service's own

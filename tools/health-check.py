@@ -1638,22 +1638,22 @@ def _canonical_health():
             rc = _red("credential_health", f"check failed ({type(e).__name__}: {e})", hard_error=True)
 
     if CANONICAL_SECTION == "all":
-        # Jev liveness compares the last successful provider receipt with a
+        # Jev liveness compares the last usable provider receipt with a
         # recent failed judgment attempt. The row's loop is filed once and
-        # closed only after a later successful call appears in these logs.
+        # closed only after a later schema-valid judgment appears in these logs.
         try:
             _loop_state = os.path.join(REPO_ROOT, "out", "jev-outage-loop.json")
             _joh = _jev_outage.evaluate(
                 os.path.join(REPO_ROOT, "out", "jev-judge.jsonl"),
                 os.path.join(REPO_ROOT, "out", "jev-calls.jsonl"),
                 state_path=_loop_state)
-            _action = _jev_outage.ACTION
+            _action = _jev_outage.action(_joh.get("reason"))
             _outcome = _jev_outage.reconcile(
                 _joh, _loop_state,
                 lambda name, payload: _jev_outage.call_verb(name, payload, repo=REPO_ROOT))
             if _joh["status"] == "warn":
                 _last = (f"last success {_joh['age_hours']}h ago"
-                         if _joh["age_hours"] is not None else "no successful call recorded")
+                         if _joh["age_hours"] is not None else "no usable call recorded")
                 _condition = ("outage evidence unreadable" if _joh["reason"] == "log_unreadable"
                               else f"recent attempt failed ({_joh['reason']})")
                 _detail = f"{_last}; {_condition}; loop {_outcome}"
@@ -1673,7 +1673,7 @@ def _canonical_health():
                       f"{'Jev live judgment':<18} {_summary} · {_action}")
         except Exception as e:
             _detail = f"outage evidence unreadable ({type(e).__name__})"
-            print(f"  ⚠︎ {'Jev live judgment':<18} {_detail} · {_jev_outage.ACTION}")
+            print(f"  ⚠︎ {'Jev live judgment':<18} {_detail} · {_jev_outage.action('log_unreadable')}")
             rc = _red("jev_live_outage", _detail)
 
     if CANONICAL_SECTION == "all":

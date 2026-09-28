@@ -25,6 +25,7 @@ import tempfile
 import unittest
 import urllib.error
 from pathlib import Path
+from unittest.mock import patch
 
 
 MODULE_PATH = Path(__file__).with_name("typesafe_client.py")
@@ -36,6 +37,7 @@ SPEC.loader.exec_module(client)
 
 class FakeResponse(io.BytesIO):
     """Minimal stand-in for what urlopen hands back as a context manager."""
+    status = 200
 
     def __enter__(self):
         return self
@@ -134,8 +136,12 @@ class AskTests(unittest.TestCase):
         captured = []
         questions = {"a": client.noul("A?"), "b": client.noul("B?"),
                      "c": client.score("C?", ["low", "high"])}
+        answer = {**ANSWER, "answers": {
+            "a": {"type": "noul", "noul": 0.91},
+            "b": {"type": "noul", "noul": 0.13},
+            "c": {"type": "score", "score": 0.7, "confidence": 0.8}}}
         client.ask("state", questions, api_key="k",
-                   opener=responder(ANSWER, captured))
+                   opener=responder(answer, captured))
         self.assertEqual(len(captured), 1, "batching is the whole point; one call per question is 12x the cost")
         sent = json.loads(captured[0].data)
         self.assertEqual(set(sent["questions"]), {"a", "b", "c"})
@@ -245,6 +251,32 @@ class CallReceiptTests(unittest.TestCase):
     must carry the response's usage when present, and (round 3) must carry
     no response id the vendor never supplies."""
 
+    def test_only_schema_valid_answer_with_usage_is_usable(self):
+        questions = {"q": client.noul("?")}
+        self.assertTrue(client.usable_judgment(ANSWER, questions))
+        for bad in ({}, {**ANSWER, "answers": {}},
+                    {**ANSWER, "answers": {"q": {"type": "noul", "noul": 2}}},
+                    {**ANSWER, "usage": {}}, {**ANSWER, "usage": None}):
+            with self.subTest(bad=bad):
+                self.assertFalse(client.usable_judgment(bad, questions))
+        with tempfile.TemporaryDirectory() as d:
+            log = str(Path(d) / "calls.jsonl")
+            client._append_call_receipt(questions, [], {"model": "jev", "usage": None}, log)
+            row = json.loads(Path(log).read_text())
+            self.assertFalse(row["ok"])
+            self.assertFalse(row["usable"])
+
+    def test_http_200_empty_body_records_unusable_call(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = str(Path(d) / "calls.jsonl")
+            with patch.object(client.urllib.request, "urlopen", responder({})):
+                with self.assertRaises(client.TypeSafeError):
+                    client.ask("s", {"q": client.noul("?")}, api_key="k", calls_log=log)
+            row = json.loads(Path(log).read_text())
+            self.assertEqual(row["http_status"], 200)
+            self.assertFalse(row["ok"])
+            self.assertFalse(row["schema_valid"])
+
     def test_real_call_receipt_includes_usage_and_no_response_id(self):
         # This exercises _append_call_receipt directly with a real-shaped
         # response (the function ask() calls only when opener is None, i.e.
@@ -252,7 +284,8 @@ class CallReceiptTests(unittest.TestCase):
         # receipt below for why the mock path can't be used to test this).
         answer = {"model": "jev-1.13.0", "id": "resp-abc123",
                   "answers": {"q": {"type": "noul", "noul": 0.8}},
-                  "usage": {"input_tokens": 11, "output_tokens": 3}}
+                  "usage": {"input_tokens": 11, "output_tokens": 3},
+                  "usable": True, "schema_valid": True, "http_status": 200}
         with tempfile.TemporaryDirectory() as d:
             log = str(Path(d) / "jev-calls.jsonl")
             client._append_call_receipt({"q": 1}, ["semantic_creation"], answer, log)
