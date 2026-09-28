@@ -463,6 +463,59 @@ class ProgressBoardCLI(unittest.TestCase):
         self.assertIs(fields["allow_free_text"], True)
         self.assertEqual(fields["asker_ref"], "orchestrator:demo")
 
+    def test_publish_normalizes_question_and_default_on_repeat(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("ask", "demo", "q1", "--question", "  Choose route?  ",
+                       "--default", "  Proceed  ")
+        remote = {"snapshot": None, "questions": []}
+        writes = []
+
+        def caller(verb, args):
+            if verb == "read-progress-board":
+                return {"ok": True, **remote}
+            writes.append(verb)
+            if verb == "publish-board-snapshot":
+                remote["snapshot"] = {"version": 1, "snapshot_json": args["snapshot"]}
+                return {"ok": True, "snapshot": remote["snapshot"]}
+            if verb == "ask-board-question":
+                remote["questions"] = [{"question_id": "q1", "revision": 1,
+                                        "prompt": args["prompt"].strip(), "choices": args["choices"],
+                                        "allow_free_text": args["allow_free_text"],
+                                        "default_answer": args["default_answer"].strip(),
+                                        "asker_ref": args["asker_ref"]}]
+                return {"ok": True, "question": remote["questions"][0]}
+            raise AssertionError(verb)
+
+        with patch.dict(os.environ, {"PROGRESS_BOARD_ROOT": str(self.root)}), patch.object(BOARD, "call_verb", caller):
+            BOARD.publish_board("demo")
+            BOARD.publish_board("demo")
+        self.assertEqual(writes, ["publish-board-snapshot", "ask-board-question"])
+        self.assertEqual(remote["questions"][0]["prompt"], "Choose route?")
+        self.assertEqual(remote["questions"][0]["default_answer"], "Proceed")
+
+    def test_poller_rejects_answer_for_other_board_or_question_before_inbox_or_ack(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("ask", "demo", "q1", "--question", "Choose route?", "--default", "Proceed",
+                       "--asker-ref", "one-shot:shared")
+        base = {"id": "11111111-1111-4111-8111-111111111111", "cursor": "7",
+                "board_id": "demo", "question_id": "q1", "question_revision": 1,
+                "asker_ref": "one-shot:shared", "answer_text": "Hold", "version": 1, "status": "Sent"}
+        for mismatch in ({"board_id": "other"}, {"question_id": "q2"}, {"question_revision": 2}):
+            calls = []
+
+            def caller(verb, args):
+                calls.append(verb)
+                if verb == "read-board-answers":
+                    return {"ok": True, "answers": [{**base, **mismatch}]}
+                raise AssertionError(verb)
+
+            with self.subTest(mismatch=mismatch), patch.dict(os.environ, {"PROGRESS_BOARD_ROOT": str(self.root)}), \
+                 patch.object(BOARD, "call_verb", caller):
+                with self.assertRaisesRegex(RuntimeError, "does not match"):
+                    BOARD.poll_board_answers("demo")
+                self.assertFalse((self.root / "boards" / "demo-answers.jsonl").exists())
+                self.assertEqual(calls, ["read-board-answers"])
+
     def test_poller_durably_records_then_acknowledges_and_replays_pending_ack(self):
         self.run_board("init", "demo", "--title", "Demo")
         self.run_board("ask", "demo", "q1", "--question", "Choose route?", "--default", "Proceed",

@@ -630,9 +630,9 @@ def question_revision(question: dict[str, Any], project: str) -> dict[str, Any]:
     choices = question.get("choices") or []
     free_text = question.get("free_text")
     return {
-        "prompt": question["question"], "choices": choices,
+        "prompt": question["question"].strip(), "choices": choices,
         "allow_free_text": free_text if isinstance(free_text, bool) else not choices,
-        "default_answer": question.get("default"),
+        "default_answer": question["default"].strip() if question.get("default") is not None else None,
         "asker_ref": safe_asker_ref(question.get("asker_ref") or f"orchestrator:{project}"),
     }
 
@@ -711,11 +711,25 @@ def append_answer_event(project: str, event: dict[str, Any]) -> None:
 
 def poll_board_answers(project: str) -> dict[str, int]:
     state = read_state(project)
-    refs = {safe_asker_ref(q.get("asker_ref") or f"orchestrator:{project}")
-            for current in state.get("questions", {}).values()
-            for q in [*current.get("history", []), current]}
+    expected = {(project, qid, int(q.get("revision") or number)):
+                safe_asker_ref(q.get("asker_ref") or f"orchestrator:{project}")
+                for qid, current in state.get("questions", {}).items()
+                for number, q in enumerate([*current.get("history", []), current], start=1)}
+    refs = set(expected.values())
+
+    def require_own_answer(answer: dict[str, Any], asker: str | None = None) -> None:
+        try:
+            key = (answer["board_id"], answer["question_id"], int(answer["question_revision"]))
+            owner = answer["asker_ref"]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError("board answer does not match a local question") from exc
+        if expected.get(key) != owner or (asker is not None and owner != asker):
+            raise RuntimeError("board answer does not match a local question and asker")
+
     events = read_answer_events(project)
     seen = {event["answer"]["id"]: event["answer"] for event in events if event.get("kind") == "answer"}
+    for answer in seen.values():
+        require_own_answer(answer)
     acked = {event["answer_id"] for event in events if event.get("kind") == "ack"}
     new_count = ack_count = 0
     for asker in sorted(refs):
@@ -724,6 +738,7 @@ def poll_board_answers(project: str) -> dict[str, int]:
             page = call_verb("read-board-answers", {"after_cursor": cursor, "asker_ref": asker, "limit": 500})
             rows = page.get("answers", [])
             for answer in rows:
+                require_own_answer(answer, asker)
                 answer_cursor = int(answer["cursor"])
                 if answer_cursor <= cursor:
                     raise RuntimeError("board answer cursor did not advance")
@@ -756,6 +771,8 @@ def poll_board_answers(project: str) -> dict[str, int]:
                 reread = call_verb("read-board-answers", {
                     "after_cursor": int(answer["cursor"]) - 1, "asker_ref": asker, "limit": 1,
                 }).get("answers", [])
+                if reread:
+                    require_own_answer(reread[0], asker)
                 if len(reread) != 1 or reread[0].get("id") != answer["id"] or \
                         reread[0].get("status") not in {"Received", "Applied"}:
                     raise
@@ -837,11 +854,15 @@ def command_ask(args: argparse.Namespace) -> None:
     state = read_state(args.project)
     question_time = stamp()
     prior = state.setdefault("questions", {}).get(args.q_id, {})
+    question_text = args.question.strip()
+    default = args.default.strip() if args.default is not None else None
+    if not question_text or not default:
+        raise SystemExit("question and default must be nonempty")
     choices = args.choice or []
     if len(choices) > 8 or any(not choice.strip() or len(choice) > 500 for choice in choices) or len(set(choices)) != len(choices):
         raise SystemExit("provide at most eight distinct, nonempty choices")
     free_text = args.free_text or not choices
-    if choices and not free_text and args.default not in choices:
+    if choices and not free_text and default not in choices:
         raise SystemExit("a choice-only question needs a default among its choices")
     asker_ref = safe_asker_ref(args.asker_ref or prior.get("asker_ref") or f"orchestrator:{args.project}")
     revision = int(prior.get("revision") or 1) + 1 if prior else 1
@@ -850,8 +871,8 @@ def command_ask(args: argparse.Namespace) -> None:
         history.append({key: prior.get(key) for key in
                         ("question", "default", "choices", "free_text", "asker_ref", "revision")})
     state["questions"][args.q_id] = {
-        "question": args.question,
-        "default": args.default,
+        "question": question_text,
+        "default": default,
         "choices": choices,
         "free_text": free_text,
         "asker_ref": asker_ref,
