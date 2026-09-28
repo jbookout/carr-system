@@ -1642,10 +1642,11 @@ def _canonical_health():
         # recent failed judgment attempt. The row's loop is filed once and
         # closed only after a later successful call appears in these logs.
         try:
+            _loop_state = os.path.join(REPO_ROOT, "out", "jev-outage-loop.json")
             _joh = _jev_outage.evaluate(
                 os.path.join(REPO_ROOT, "out", "jev-judge.jsonl"),
-                os.path.join(REPO_ROOT, "out", "jev-calls.jsonl"))
-            _loop_state = os.path.join(REPO_ROOT, "out", "jev-outage-loop.json")
+                os.path.join(REPO_ROOT, "out", "jev-calls.jsonl"),
+                state_path=_loop_state)
             _action = _jev_outage.ACTION
             _outcome = _jev_outage.reconcile(
                 _joh, _loop_state,
@@ -1653,8 +1654,9 @@ def _canonical_health():
             if _joh["status"] == "warn":
                 _last = (f"last success {_joh['age_hours']}h ago"
                          if _joh["age_hours"] is not None else "no successful call recorded")
-                _detail = (f"{_last}; recent attempt failed "
-                           f"({_joh['reason']}); loop {_outcome}")
+                _condition = ("outage evidence unreadable" if _joh["reason"] == "log_unreadable"
+                              else f"recent attempt failed ({_joh['reason']})")
+                _detail = f"{_last}; {_condition}; loop {_outcome}"
                 print(f"  ⚠︎ {'Jev live judgment':<18} {_detail} · {_action}")
                 rc = _red("jev_live_outage", _detail)
             elif _outcome == "error":

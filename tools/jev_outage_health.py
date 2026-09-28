@@ -24,17 +24,12 @@ def parse_time(value):
 
 
 def _rows(path):
-    try:
-        with open(path, encoding="utf-8") as source:
-            for line in source:
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(row, dict):
-                    yield row
-    except FileNotFoundError:
-        return
+    with open(path, encoding="utf-8") as source:
+        for line in source:
+            row = json.loads(line)
+            if not isinstance(row, dict):
+                raise ValueError("non-object log row")
+            yield row
 
 
 def _safe_reason(error):
@@ -56,24 +51,60 @@ def _safe_reason(error):
     return "unknown"
 
 
-def evaluate(judge_path, calls_path, *, now=None, threshold_hours=THRESHOLD_HOURS):
+def evaluate(judge_path, calls_path, *, now=None, threshold_hours=THRESHOLD_HOURS,
+             state_path=None):
     """Keep an overdue failed attempt in WARN until a later success."""
     now = now or datetime.now(timezone.utc)
+    try:
+        state = json.loads(Path(state_path).read_text(encoding="utf-8")) if state_path else {}
+    except FileNotFoundError:
+        state = {}
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {"status": "warn", "reason": "log_unreadable", "pending": True,
+                "age_hours": None, "attempt_at": None}
+    open_loop = bool(state.get("loop_id") or state.get("open_key"))
     success = attempt = None
     reason = "unknown"
-    for row in _rows(calls_path):
-        at = parse_time(row.get("ts"))
-        if at and row.get("ok") is True and (success is None or at > success):
-            success = at
-    for row in _rows(judge_path):
-        at = parse_time(row.get("at"))
-        if not at:
-            continue
-        # Judge logs can contain offline fake-model selftest rows. Only the
-        # TypeSafe client's real-call receipt ledger proves provider success.
-        if isinstance(row.get("error"), str) and (attempt is None or at > attempt):
-            attempt = at
-            reason = _safe_reason(row["error"])
+    calls_readable = judge_readable = True
+    try:
+        for row in _rows(calls_path):
+            at = parse_time(row.get("ts"))
+            if at and row.get("ok") is True and (success is None or at > success):
+                success = at
+    except (OSError, UnicodeError, ValueError):
+        calls_readable = False
+        success = None
+    try:
+        for row in _rows(judge_path):
+            at = parse_time(row.get("at"))
+            if not at:
+                continue
+            # Fake-model rows cannot prove provider recovery; only the
+            # TypeSafe client's real-call receipt ledger can do that.
+            if isinstance(row.get("error"), str) and (attempt is None or at > attempt):
+                attempt = at
+                reason = _safe_reason(row["error"])
+    except (OSError, UnicodeError, ValueError):
+        judge_readable = False
+        attempt = None
+    logged_attempt = attempt
+    known_attempt = parse_time(state.get("attempt_at")) if open_loop else None
+    if open_loop and not known_attempt and state_path:
+        # Older state has no anchor. Use its visible failed attempt, or the
+        # state's mtime if that evidence has disappeared.
+        known_attempt = logged_attempt or datetime.fromtimestamp(
+            Path(state_path).stat().st_mtime, timezone.utc)
+    if known_attempt and (attempt is None or known_attempt > attempt):
+        attempt = known_attempt
+        reason = state.get("reason") or reason
+    judge_lost = (not judge_readable or not logged_attempt or
+                  known_attempt and logged_attempt < known_attempt)
+    if open_loop and (not calls_readable or not known_attempt or
+                      judge_lost and not (success and success > known_attempt)):
+        return {"status": "warn", "reason": "log_unreadable", "pending": True,
+                "age_hours": round(max((now - success).total_seconds() / 3600, 0), 1)
+                if success else None,
+                "attempt_at": attempt.isoformat() if attempt else None}
     age = (now - success).total_seconds() / 3600 if success else None
     pending = bool(attempt and attempt <= now and (success is None or attempt > success))
     if success and (attempt is None or success > attempt):
@@ -84,7 +115,8 @@ def evaluate(judge_path, calls_path, *, now=None, threshold_hours=THRESHOLD_HOUR
         status = "skip"
     return {"status": status, "reason": reason if status == "warn" else None,
             "pending": pending,
-            "age_hours": round(max(age, 0), 1) if age is not None else None}
+            "age_hours": round(max(age, 0), 1) if age is not None else None,
+            "attempt_at": attempt.isoformat() if attempt else None}
 
 
 def _save(path, state):
@@ -96,6 +128,11 @@ def _save(path, state):
 
 
 def _body(reason):
+    if reason == "log_unreadable":
+        return ("Jev outage remains open: judgment log or call receipt log is "
+                "missing, truncated, or unreadable. Repair the evidence log, "
+                "then verify with a successful Jev call. This loop auto-closes "
+                "only after that success.")
     cause = ("TypeSafe account has no API credits" if reason == "billing_exhausted"
              else f"TypeSafe call failed ({reason})")
     return (f"Jev is offline: {cause}. Joe owns remediation: add TypeSafe credits "
@@ -112,7 +149,13 @@ def reconcile(result, state_path, verb):
     if result["status"] == "warn":
         reason = result["reason"]
         if state.get("loop_id"):
+            newer_attempt = parse_time(result.get("attempt_at"))
+            saved_attempt = parse_time(state.get("attempt_at"))
+            if newer_attempt and (not saved_attempt or newer_attempt > saved_attempt):
+                state["attempt_at"] = newer_attempt.isoformat()
             if state.get("reason") == reason:
+                if newer_attempt and (not saved_attempt or newer_attempt > saved_attempt):
+                    _save(state_path, state)
                 return "open"
             payload = {"idempotency_key": str(uuid.uuid4()), "loop_id": state["loop_id"],
                        "body": _body(reason)}
@@ -136,7 +179,8 @@ def reconcile(result, state_path, verb):
         loop_id = response.get("loop_id")
         if not response.get("ok") or not isinstance(loop_id, str):
             return "error"
-        _save(state_path, {"loop_id": loop_id, "reason": reason})
+        _save(state_path, {"loop_id": loop_id, "reason": reason,
+                           "attempt_at": result.get("attempt_at")})
         return "opened"
     if result["status"] == "ok" and state.get("loop_id"):
         key = state.get("close_key") or str(uuid.uuid4())
