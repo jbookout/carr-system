@@ -445,6 +445,14 @@ def test_new_authority_migrations_are_atomically_sealed() -> None:
           "stale allowlist entries: " + ", ".join(stale_allowlist))
 
 
+def test_industry_events_domain_and_seal_are_atomic() -> None:
+    pair = ("0738_industry_events.sql", "0739_industry_events_scac_successor.sql")
+    check("industry events domain and seal share an atomic migration group",
+          pair in declared_atomic_pairs(migrate.ATOMIC_MIGRATION_GROUPS))
+    check("industry events domain and seal share a strict atomic migration group",
+          pair in declared_strict_pairs(migrate.STRICT_ATOMIC_MIGRATION_GROUPS))
+
+
 def main() -> int:
     print("migrate-precondition-selftest")
     test_table_shape()
@@ -455,6 +463,7 @@ def main() -> int:
     test_seeded_failing_case_proves_the_check_fires()
     test_redeclared_function_needs_no_new_pairing()
     test_new_authority_migrations_are_atomically_sealed()
+    test_industry_events_domain_and_seal_are_atomic()
     print()
     print(f"migrate-precondition-selftest: {len(PASS)}/{len(PASS) + len(FAIL)} passed")
     if FAIL:

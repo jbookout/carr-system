@@ -524,9 +524,9 @@ export const REGISTRY_V90_VERSION = "scac-mutation-registry.v90";
 // over v90 (0731). Final numbering is assigned at merge.
 export const REGISTRY_V91_VERSION = "scac-mutation-registry.v91";
 // v92 registers the Industry Events record contract: add, list and update
-// verbs for tenant-scoped healthcare CRE event records. 0738 seals it over
+// verbs for tenant-scoped healthcare CRE event records. 0739 seals it over
 // v91 and remains fail-closed until the no-database-migration constraint is
-// lifted and the catalog lane measures the 0737 projection.
+// lifted and the catalog lane measures the 0738 projection.
 export const REGISTRY_V92_VERSION = "scac-mutation-registry.v92";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
@@ -1891,7 +1891,7 @@ const INDUSTRY_EVENTS_UNMEASURED_CATALOG = Object.freeze({
   digest: `sha256:${"0".repeat(64)}`,
 });
 
-export const POST_0737_FORWARD_V92_DB_CATALOG_BASELINE = Object.freeze({
+export const POST_0738_FORWARD_V92_DB_CATALOG_BASELINE = Object.freeze({
   ...POST_0734_FORWARD_V91_DB_CATALOG_BASELINE,
   projection_version: "scac-db-catalog-projection.v92",
   secdef_execute: INDUSTRY_EVENTS_UNMEASURED_CATALOG,
@@ -18431,7 +18431,7 @@ export function renderIndustryEventsRegistrySql(rows, predecessorSql = null) {
   if (sha256(predecessor) !== predecessorDigest)
     throw new Error("v92 predecessor migration pin drifted");
   const oldCatalogBaseline = POST_0734_FORWARD_V91_DB_CATALOG_BASELINE;
-  const newCatalogBaseline = POST_0737_FORWARD_V92_DB_CATALOG_BASELINE;
+  const newCatalogBaseline = POST_0738_FORWARD_V92_DB_CATALOG_BASELINE;
   const oldSeal = registrySeal(REGISTRY_V91_VERSION,
     frozenInventory(REGISTRY_V91_VERSION), oldCatalogBaseline);
   const newSeal = registrySeal(REGISTRY_V92_VERSION, rows, newCatalogBaseline);
@@ -18506,8 +18506,8 @@ export function renderIndustryEventsRegistrySql(rows, predecessorSql = null) {
     `    raise exception 'Industry events v92 requires exact applied 0734'; end if;\n` +
     `  if not exists(select 1 from public.schema_migrations where filename='0736_loop_notification_queue.sql' and sha256='039846670f2e206b2e99a82f95ebb9738a285496c77c7444ef9dd41cf115e7ca') then\n` +
     `    raise exception 'Industry events v92 requires exact applied 0736'; end if;\n` +
-    `  if not exists(select 1 from public.schema_migrations where filename='0737_industry_events.sql' and sha256='8ff3e0bcf1b75477c0e2775fa0ba43fc55fdc633669a74e214d563dfcf16142c') then\n` +
-    `    raise exception 'Industry events v92 requires exact applied 0737'; end if;\n` +
+    `  if not exists(select 1 from public.schema_migrations where filename='0738_industry_events.sql' and sha256='52248e7e21e9624ed8925fed99d60b8588dabda9b09461b1dea080dc20a217b8') then\n` +
+    `    raise exception 'Industry events v92 requires exact applied 0738'; end if;\n` +
     `  select * into v from ops.scac_mutation_registry_version where registry_version='${REGISTRY_V91_VERSION}';\n` +
     `  if v.registry_digest is distinct from '${oldSeal.digest}' or v.entry_count<>${oldSeal.entryCount}\n` +
     `    or v.source_entry_count<>${oldSeal.sourceEntryCount} or v.entry_set_digest is distinct from '${oldEntrySet}'\n` +
@@ -19504,9 +19504,9 @@ export function renderGeneratedFrontier() {
   artifacts["mcp-server/src/scac-mutation-registry.v92.generated.js"] =
     renderRuntimeProjection(v92Rows, {
       version: REGISTRY_V92_VERSION,
-      dbCatalogBaseline: POST_0737_FORWARD_V92_DB_CATALOG_BASELINE,
+      dbCatalogBaseline: POST_0738_FORWARD_V92_DB_CATALOG_BASELINE,
     });
-  artifacts["migrations/0738_industry_events_scac_successor.sql"] =
+  artifacts["migrations/0739_industry_events_scac_successor.sql"] =
     renderIndustryEventsRegistrySql(v92Rows,
       artifacts["migrations/0734_salesforce_rw02_safe_stop_scac_successor.sql"]);
 
@@ -20424,12 +20424,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     const runtimePath = resolve(process.argv[3] ||
       "mcp-server/src/scac-mutation-registry.v92.generated.js");
     const migrationPath = resolve(process.argv[4] ||
-      "migrations/0738_industry_events_scac_successor.sql");
+      "migrations/0739_industry_events_scac_successor.sql");
     const predecessor = readFileSync(resolve(REPO_ROOT,
       "migrations/0734_salesforce_rw02_safe_stop_scac_successor.sql"), "utf8");
     await writeFile(runtimePath, renderRuntimeProjection(rows, {
       version: REGISTRY_V92_VERSION,
-      dbCatalogBaseline: POST_0737_FORWARD_V92_DB_CATALOG_BASELINE,
+      dbCatalogBaseline: POST_0738_FORWARD_V92_DB_CATALOG_BASELINE,
     }));
     await writeFile(migrationPath, renderIndustryEventsRegistrySql(rows, predecessor));
     process.stdout.write(`${runtimePath}\n${migrationPath}\n`);

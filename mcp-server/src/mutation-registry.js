@@ -6,7 +6,7 @@ import {
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
 // v92 (PROVISIONAL) is the runtime selector for the tenant-scoped Industry
 // Events record contract: add, list and update event records. It chains over
-// v91's safe-stop registry and remains fail-closed until the 0737 catalog lane
+// v91's safe-stop registry and remains fail-closed until the 0738 catalog lane
 // supplies measured grants.
 //
 // v91 (PROVISIONAL) is the runtime selector for DoctorCRE V5-RW02's safe-stop

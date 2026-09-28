@@ -2995,7 +2995,7 @@ test("the v36 successor preserves the exact v35 seal and measures both catalog p
   assert.match(probe, /jsonb_build_object\('pre_v36',pre_v36,'forward_v36',forward_v36\)/);
 });
 
-test("v92 admits Industry Events after exact 0734, 0736 and 0737 predecessors", () => {
+test("v92 admits Industry Events after exact 0734, 0736 and 0738 predecessors", () => {
   const rows = frozenInventory(REGISTRY_V92_VERSION);
   const v91 = frozenInventory(REGISTRY_V91_VERSION);
   assert.equal(rows.length, v91.length + 3);
@@ -3003,11 +3003,11 @@ test("v92 admits Industry Events after exact 0734, 0736 and 0737 predecessors", 
     assert.equal(rows.some(row => row.ingress_key === `mcp-tool:${operation}`), true, operation);
     assert.equal(v91.some(row => row.ingress_key === `mcp-tool:${operation}`), false, operation);
   }
-  const sql = fs.readFileSync(new URL("../../migrations/0738_industry_events_scac_successor.sql",
+  const sql = fs.readFileSync(new URL("../../migrations/0739_industry_events_scac_successor.sql",
     import.meta.url), "utf8");
-  assert.match(sql, /0734_salesforce_rw02_safe_stop_scac_successor[.]sql' and sha256='[0-9a-f]{64}'/);
-  assert.match(sql, /0736_loop_notification_queue[.]sql' and sha256='[0-9a-f]{64}'/);
-  assert.match(sql, /0737_industry_events[.]sql' and sha256='8ff3e0bcf1b75477c0e2775fa0ba43fc55fdc633669a74e214d563dfcf16142c'/);
+  assert.match(sql, /0734_salesforce_rw02_safe_stop_scac_successor[.]sql' and sha256='e0472e690df026a81059e8a0643019f5aa81be5781066bc58935fae134a1b0f7'/);
+  assert.match(sql, /0736_loop_notification_queue[.]sql' and sha256='039846670f2e206b2e99a82f95ebb9738a285496c77c7444ef9dd41cf115e7ca'/);
+  assert.match(sql, /0738_industry_events[.]sql' and sha256='52248e7e21e9624ed8925fed99d60b8588dabda9b09461b1dea080dc20a217b8'/);
   assert.match(sql, /ops[.]scac_mutation_registration_v91/);
   assert.match(sql, /ops[.]scac_mutation_registry_v91_seal_available[(][)]/);
   assert.match(sql, /ops[.]scac_mutation_registry_v92_seal_available[(][)]/);
@@ -3023,7 +3023,7 @@ test("the complete source-only frontier is byte-reproducible from frozen inputs"
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
   assert.equal(migrations.length, 98);
   assert.deepEqual(migrations.map(path => path.match(/migrations\/(\d{4})_/)[1]),
-    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545", "0547", "0548", "0549", "0550", "0551", "0552", "0553", "0555", "0557", "0558", "0559", "0560", "0561", "0562", "0563", "0564", "0566", "0567", "0568", "0569", "0570", "0572", "0576", "0578", "0581", "0582", "0584", "0585", "0588", "0589", "0600", "0603", "0609", "0614", "0618", "0625", "0627", "0629", "0701", "0705", "0707", "0709", "0718", "0720", "0722", "0723", "0725", "0727", "0730", "0731", "0734", "0738"]);
+    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545", "0547", "0548", "0549", "0550", "0551", "0552", "0553", "0555", "0557", "0558", "0559", "0560", "0561", "0562", "0563", "0564", "0566", "0567", "0568", "0569", "0570", "0572", "0576", "0578", "0581", "0582", "0584", "0585", "0588", "0589", "0600", "0603", "0609", "0614", "0618", "0625", "0627", "0629", "0701", "0705", "0707", "0709", "0718", "0720", "0722", "0723", "0725", "0727", "0730", "0731", "0734", "0739"]);
   assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 89);
   assert.equal(paths.length, 187);
   // 0502 IS DELIBERATELY ABSENT FROM THIS LIST. It is a hand-authored domain

@@ -72235,6 +72235,29 @@
       "remove": [],
       "upsert": [
         {
+          "ingress_key": "external-admin:tools/migrate.py",
+          "ingress_kind": "external_admin",
+          "operation": "tools/migrate.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "tools/migrate.py",
+          "schema_digest": "37cba91287b12eb57ec96a07b634da6572216fe2155e880d9a0ffaa54b59ebbd",
+          "handler_digest": "37cba91287b12eb57ec96a07b634da6572216fe2155e880d9a0ffaa54b59ebbd",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
           "ingress_key": "mcp-tool:add-industry-event",
           "ingress_kind": "mcp_tool",
           "operation": "add-industry-event",
@@ -72308,7 +72331,7 @@
         "mcp-server/src/tools.js": "600545fc3fa83a0dd60590639663c27209f79e3ed3547a48fe63042f3c376caa"
       },
       "expected_count": 990,
-      "expected_sha256": "8ad8b2bf6202118718a02150937f719d35b2df67f43ddefe4dba8f40faafad87"
+      "expected_sha256": "1dcf42480f4af16b7d69458bc14f77fe47476c584d21f5747d1909f8ca270ffb"
     }
   ],
   "current_source_review": {

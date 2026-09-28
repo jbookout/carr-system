@@ -1,4 +1,4 @@
--- 0737: tenant-scoped healthcare CRE industry events.
+-- 0738: tenant-scoped healthcare CRE industry events.
 -- This is a record contract for conferences, association meetings, trade shows,
 -- and networking events. It stores event facts and attendance intent only; it
 -- does not register attendance, send invitations, or wire the DoctorCRE app.
