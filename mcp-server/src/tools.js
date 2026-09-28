@@ -83,6 +83,7 @@ import { governedCorrespondenceStoreTools } from "./governed-correspondence-stor
 import { assuranceHealthStoreTools } from "./assurance-health-store.v5.js";
 import { completeSetReviewA03StoreTools } from "./independent-review-cycle-store.v5.js";
 import { ruleContextRuntimeTools } from "./rule-context-runtime.v5.js";
+import { boardAnswerTools } from "./board-answers.js";
 export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
 
 // ---------- envelope helpers ----------
@@ -8638,6 +8639,7 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "action-class-successor-registry": "mcp-server/src/action-class-successor-registry.v5.js",
   "complete-set-review-a03-store": "mcp-server/src/independent-review-cycle-store.v5.js",
   "rule-context-runtime": "mcp-server/src/rule-context-runtime.v5.js",
+  "board-answers": "mcp-server/src/board-answers.js",
 });
 
 function bindToolSource(tool, source) {
@@ -9628,6 +9630,7 @@ registerTools({
 
 // Doctrine store verbs (P2, decision 82a2fb62) — same envelope, same contracts.
 registerTools(doctrineTools({ withEnvelope, writeEvent, ToolError }), "doctrine");
+registerTools(boardAnswerTools({ withEnvelope, writeEvent }), "board-answers");
 
 // WR-AI-006: curation proposals are machine-callable; approval and retirement
 // remain human-only inside their handlers and the dispatcher boundary.
