@@ -63,6 +63,7 @@ def evaluate(judge_path, calls_path, *, now=None, threshold_hours=THRESHOLD_HOUR
         return {"status": "warn", "reason": "log_unreadable", "pending": True,
                 "age_hours": None, "attempt_at": None}
     open_loop = bool(state.get("loop_id") or state.get("open_key"))
+    first_failure = parse_time(state.get("first_failure_at"))
     success = attempt = None
     reason = "unknown"
     calls_readable = judge_readable = True
@@ -88,7 +89,7 @@ def evaluate(judge_path, calls_path, *, now=None, threshold_hours=THRESHOLD_HOUR
         judge_readable = False
         attempt = None
     logged_attempt = attempt
-    known_attempt = parse_time(state.get("attempt_at")) if open_loop else None
+    known_attempt = parse_time(state.get("attempt_at")) if open_loop or first_failure else None
     if open_loop and not known_attempt and state_path:
         # Older state has no anchor. Use its visible failed attempt, or the
         # state's mtime if that evidence has disappeared.
@@ -97,26 +98,33 @@ def evaluate(judge_path, calls_path, *, now=None, threshold_hours=THRESHOLD_HOUR
     if known_attempt and (attempt is None or known_attempt > attempt):
         attempt = known_attempt
         reason = state.get("reason") or reason
+    if attempt and (not first_failure or success and first_failure < success < attempt):
+        first_failure = attempt
     judge_lost = (not judge_readable or not logged_attempt or
                   known_attempt and logged_attempt < known_attempt)
-    if open_loop and (not calls_readable or not known_attempt or
-                      judge_lost and not (success and success > known_attempt)):
-        return {"status": "warn", "reason": "log_unreadable", "pending": True,
+    pending = bool(attempt and attempt <= now and (success is None or attempt > success))
+    grace_expired = bool(first_failure and
+                         (now - first_failure).total_seconds() / 3600 >= threshold_hours)
+    if (open_loop or first_failure) and (not calls_readable or
+            open_loop and not known_attempt or
+            judge_lost and pending and (open_loop or grace_expired)):
+        return {"status": "warn", "reason": "log_unreadable", "pending": pending,
                 "age_hours": round(max((now - success).total_seconds() / 3600, 0), 1)
                 if success else None,
-                "attempt_at": attempt.isoformat() if attempt else None}
+                "attempt_at": attempt.isoformat() if attempt else None,
+                "first_failure_at": first_failure.isoformat() if first_failure else None}
     age = (now - success).total_seconds() / 3600 if success else None
-    pending = bool(attempt and attempt <= now and (success is None or attempt > success))
     if success and (attempt is None or success > attempt):
         status = "ok" if age <= threshold_hours or attempt else "skip"
     elif pending:
-        status = "warn" if age is None or age > threshold_hours else "skip"
+        status = "warn" if grace_expired else "skip"
     else:
         status = "skip"
     return {"status": status, "reason": reason if status == "warn" else None,
             "pending": pending,
             "age_hours": round(max(age, 0), 1) if age is not None else None,
-            "attempt_at": attempt.isoformat() if attempt else None}
+            "attempt_at": attempt.isoformat() if attempt else None,
+            "first_failure_at": first_failure.isoformat() if first_failure else None}
 
 
 def _save(path, state):
@@ -146,15 +154,27 @@ def reconcile(result, state_path, verb):
         state = json.loads(Path(state_path).read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
         state = {}
+    if result["status"] == "skip" and result["pending"]:
+        first = parse_time(result.get("first_failure_at"))
+        if first:
+            state["first_failure_at"] = first.isoformat()
+            state["attempt_at"] = result.get("attempt_at")
+            _save(state_path, state)
+        return "none"
     if result["status"] == "warn":
         reason = result["reason"]
+        first = parse_time(result.get("first_failure_at"))
+        first_changed = bool(first and state.get("first_failure_at") != first.isoformat())
+        if first:
+            state["first_failure_at"] = first.isoformat()
         if state.get("loop_id"):
             newer_attempt = parse_time(result.get("attempt_at"))
             saved_attempt = parse_time(state.get("attempt_at"))
             if newer_attempt and (not saved_attempt or newer_attempt > saved_attempt):
                 state["attempt_at"] = newer_attempt.isoformat()
             if state.get("reason") == reason:
-                if newer_attempt and (not saved_attempt or newer_attempt > saved_attempt):
+                if first_changed or newer_attempt and (
+                        not saved_attempt or newer_attempt > saved_attempt):
                     _save(state_path, state)
                 return "open"
             payload = {"idempotency_key": str(uuid.uuid4()), "loop_id": state["loop_id"],
@@ -180,7 +200,8 @@ def reconcile(result, state_path, verb):
         if not response.get("ok") or not isinstance(loop_id, str):
             return "error"
         _save(state_path, {"loop_id": loop_id, "reason": reason,
-                           "attempt_at": result.get("attempt_at")})
+                           "attempt_at": result.get("attempt_at"),
+                           "first_failure_at": state.get("first_failure_at")})
         return "opened"
     if result["status"] == "ok" and state.get("loop_id"):
         key = state.get("close_key") or str(uuid.uuid4())
@@ -191,6 +212,9 @@ def reconcile(result, state_path, verb):
             "outcome": "A new successful Jev call verified that the TypeSafe outage cleared."})
         if not response.get("ok"):
             return "error"
+        _save(state_path, {})
+        return "cleared"
+    if result["status"] == "ok" and state.get("first_failure_at"):
         _save(state_path, {})
         return "cleared"
     return "none"
