@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Behavioral tests for the progress-board command line surface."""
 
+import copy
 import json
 import os
 import re
@@ -365,12 +366,55 @@ if (future.hidden) process.exit(4);
         bin_dir = self.root / "bin"
         bin_dir.mkdir()
         gh = bin_dir / "gh"
-        gh.write_text("#!/usr/bin/env python3\nprint('{\"state\":\"OPEN\",\"isDraft\":false,\"statusCheckRollup\":{\"bad\":1}}')\n")
+        fixture = self.root / "gh.json"
+        gh.write_text("#!/usr/bin/env python3\nimport os\nfrom pathlib import Path\n"
+                      "print(Path(os.environ['BOARD_GH_FIXTURE']).read_text())\n")
         gh.chmod(0o755)
         self.env["PATH"] = str(bin_dir) + os.pathsep + self.env["PATH"]
+        self.env["BOARD_GH_FIXTURE"] = str(fixture)
+        valid = {
+            "state": "OPEN", "isDraft": False, "headRefOid": "a" * 40,
+            "author": {"login": "builder"},
+            "statusCheckRollup": [{"conclusion": "SUCCESS", "status": "COMPLETED"}],
+            "comments": [{"author": {"login": "reviewer"},
+                          "authorAssociation": "COLLABORATOR",
+                          "body": "APPROVE\nReviewed-SHA: " + "a" * 40,
+                          "createdAt": "2026-09-28T10:00:00Z"}],
+        }
+        fields = [
+            (("state",), []), (("isDraft",), []), (("headRefOid",), []),
+            (("author",), []), (("author", "login"), []),
+            (("statusCheckRollup",), {}), (("statusCheckRollup", 0), []),
+            (("statusCheckRollup", 0, "conclusion"), []),
+            (("statusCheckRollup", 0, "status"), []),
+            (("comments",), {}), (("comments", 0), []),
+            (("comments", 0, "author"), []),
+            (("comments", 0, "author", "login"), []),
+            (("comments", 0, "authorAssociation"), []),
+            (("comments", 0, "body"), []),
+            (("comments", 0, "createdAt"), []),
+        ]
+        for path, wrong_type in fields:
+            for missing in (False, True):
+                if missing and isinstance(path[-1], int):
+                    continue
+                with self.subTest(path=path, missing=missing):
+                    payload = copy.deepcopy(valid)
+                    parent = payload
+                    for part in path[:-1]:
+                        parent = parent[part]
+                    if missing:
+                        del parent[path[-1]]
+                    else:
+                        parent[path[-1]] = wrong_type
+                    fixture.write_text(json.dumps(payload))
+                    self.run_board("render", "demo")
+                    self.assertEqual(self.read_state("demo"), prior)
+                    self.assertIn("GitHub PR data unavailable or invalid",
+                                  (self.root / "boards" / "demo.html").read_text())
+        fixture.write_text("[]")
         self.run_board("render", "demo")
         self.assertEqual(self.read_state("demo"), prior)
-        self.assertIn("GitHub unreachable", (self.root / "boards" / "demo.html").read_text())
 
     def test_review_readiness_requires_independent_trusted_latest_verdict(self):
         self.run_board("init", "demo", "--title", "Demo")
@@ -456,7 +500,7 @@ if (future.hidden) process.exit(4);
         gh.write_text("#!/bin/sh\nexit 1\n")
         self.run_board("render", "demo")
         self.assertEqual(self.read_state("demo"), prior)
-        self.assertIn("GitHub unreachable", (self.root / "boards" / "demo.html").read_text())
+        self.assertIn("GitHub PR data unavailable or invalid", (self.root / "boards" / "demo.html").read_text())
         gh.write_text("#!/usr/bin/env python3\nimport os\nfrom pathlib import Path\n"
                       "print(Path(os.environ['BOARD_GH_FIXTURE']).read_text())\n")
         fixture.write_text(json.dumps({**base, "state": "MERGED"}))

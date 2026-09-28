@@ -306,18 +306,35 @@ def pr_info(number: int) -> dict[str, Any] | None:
         if result.returncode != 0:
             return None
         payload = json.loads(result.stdout)
-        if not isinstance(payload, dict) or payload.get("state") not in {"OPEN", "CLOSED", "MERGED"}:
+        if not isinstance(payload, dict):
             return None
-        for field in ("statusCheckRollup", "comments"):
-            items = payload.get(field) or []
-            if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+        state = payload.get("state")
+        if not isinstance(state, str) or state not in {"OPEN", "CLOSED", "MERGED"}:
+            return None
+        if not isinstance(payload.get("isDraft"), bool) or not isinstance(payload.get("headRefOid"), str):
+            return None
+        author = payload.get("author")
+        if not isinstance(author, dict) or not isinstance(author.get("login"), str):
+            return None
+        checks = payload.get("statusCheckRollup")
+        if not isinstance(checks, list):
+            return None
+        for check in checks:
+            if (not isinstance(check, dict) or "conclusion" not in check
+                    or not (check["conclusion"] is None or isinstance(check["conclusion"], str))
+                    or not isinstance(check.get("status"), str)):
                 return None
-        if not isinstance(payload.get("isDraft"), bool):
+        comments = payload.get("comments")
+        if not isinstance(comments, list):
             return None
-        if not isinstance(payload.get("headRefOid"), str):
-            return None
-        if payload.get("author") is not None and not isinstance(payload["author"], dict):
-            return None
+        for comment in comments:
+            if not isinstance(comment, dict):
+                return None
+            commenter = comment.get("author")
+            if (not isinstance(commenter, dict) or not isinstance(commenter.get("login"), str)
+                    or not all(isinstance(comment.get(field), str)
+                               for field in ("authorAssociation", "body", "createdAt"))):
+                return None
         return payload
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
         return None
@@ -499,7 +516,7 @@ def render_state(state: dict[str, Any], pr_infos: dict[str, dict[str, Any] | Non
         "__PROJECT__": esc(state["project"]),
         "__HEADLINE__": headline,
         "__RENDERED_AT__": esc(rendered_at),
-        "__GITHUB_BANNER__": '<div class="github-banner" role="status">GitHub unreachable · showing previous PR status</div>' if github_unreachable else "",
+        "__GITHUB_BANNER__": '<div class="github-banner" role="status">GitHub PR data unavailable or invalid · showing previous PR status</div>' if github_unreachable else "",
         "__QUESTIONS__": question_cards,
         "__QUESTION_COUNT__": str(len(waiting)),
         "__STUCK__": stuck_cards,
