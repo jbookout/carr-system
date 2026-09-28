@@ -22,6 +22,7 @@ import json
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -57,6 +58,18 @@ def test_this_host_survives_a_scheduler_path_without_sbin():
     without = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                              env={"PATH": "/usr/bin:/bin"}).stdout.strip()
     assert without == with_sbin, f"host differs by PATH: {without!r} vs {with_sbin!r}"
+
+
+def test_this_host_uses_system_scutil_and_preserves_fallback():
+    """A PATH-shadowed scutil must not choose the bridge's routing host."""
+    with patch.object(sp.subprocess, "run", return_value=type("Result", (), {"stdout": "Studio-A\n"})()) as run:
+        assert sp.this_host() == "studio-a"
+    run.assert_called_once_with(["/usr/sbin/scutil", "--get", "LocalHostName"],
+                                capture_output=True, text=True, timeout=1)
+
+    with patch.object(sp.subprocess, "run", side_effect=OSError("unavailable")):
+        with patch.object(sp.socket, "gethostname", return_value="Fallback.local"):
+            assert sp.this_host() == "fallback"
 
 
 def test_claude_record_shape():
