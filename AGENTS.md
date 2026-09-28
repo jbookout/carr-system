@@ -218,6 +218,11 @@ both. Run one class while iterating:
 the top of `ops/ci.sh`: under zsh its class loop does not word-split, and the
 script will report every class green having executed none.
 
+## Progress board
+
+For work >5 steps or >30 min, update `out/boards/<project>.html` via
+`tools/progress_board.py` after each step; record Joe questions with defaults.
+
 ## Git discipline on a shared tree
 
 Several sessions run against this one checkout at the same time.
