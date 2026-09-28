@@ -150,7 +150,7 @@ def executor_glyph(executor: str) -> str:
 
 
 def pipeline_svg(tasks: dict[str, dict[str, Any]]) -> str:
-    columns = {stage: [] for stage in PIPELINE_STAGES}
+    columns: dict[str, list[tuple[str, dict[str, Any]]]] = {stage: [] for stage in PIPELINE_STAGES}
     for task_id, task in tasks.items():
         columns[task_stage(task)].append((task_id, task))
 
@@ -265,7 +265,7 @@ def render_state(state: dict[str, Any]) -> str:
     deliverables = state.get("deliverables", [])
     stuck = [(task_id, task) for task_id, task in tasks.items() if is_stuck(task)]
     waiting = [(qid, question) for qid, question in questions.items() if not question.get("answer")]
-    grouped = {status: [] for status in STATUSES}
+    grouped: dict[str, list[tuple[str, dict[str, Any]]]] = {status: [] for status in STATUSES}
     for task_id, task in tasks.items():
         grouped.setdefault(task.get("status", "queued"), []).append((task_id, task))
     pools = Counter(executor_pool(task.get("executor", "unassigned")) for task in tasks.values())
