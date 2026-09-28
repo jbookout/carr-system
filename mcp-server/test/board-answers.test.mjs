@@ -71,7 +71,7 @@ test("concurrent same-key board writes replay the first result", async () => {
           unlock = () => {};
           return { rows: [] };
         }
-        if (sql.includes("select request_hash, response from tool_call")) {
+        if (sql.includes("select request_hash, response")) {
           firstRead();
           return { rows: receipt ? [receipt] : [] };
         }

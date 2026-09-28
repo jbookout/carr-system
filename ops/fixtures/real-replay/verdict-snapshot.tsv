@@ -1136,12 +1136,12 @@ rule-pack-preuse-reselection.py	PreToolUse[Bash|Write|Edit|MultiEdit|Agent|WebFe
 rule-pack-preuse-reselection.py	PreToolUse[Bash|Write|Edit|MultiEdit|Agent|WebFetch|WebSearch|Artifact|AskUserQuestion|mcp__.*]	tool_calls:e173a8c682ff	announce	RULE ROUTE DELIVERY FAILED (selector_unavailable): the rules below bind this tool call and were NOT delivered; you have not seen them. The t
 rule-pack-preuse-reselection.py	PreToolUse[Bash|Write|Edit|MultiEdit|Agent|WebFetch|WebSearch|Artifact|AskUserQuestion|mcp__.*]	tool_calls:f53afacc66e2	announce	RULE ROUTE DELIVERY FAILED (selector_unavailable): the rules below bind this tool call and were NOT delivered; you have not seen them. The t
 rule-pack-preuse-reselection.py	UserPromptSubmit	(all)	counts	announce=6
-rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:569a14d8e0fb	announce	json schema=jev-build-turn-receipt/v# schema=jev-build-advisory-unavailable/v# status=unavailable effect=visible_advisory_abstention
-rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:5fd34f7d4ca1	announce	json schema=jev-build-turn-receipt/v# schema=jev-build-advisory-unavailable/v# status=unavailable effect=visible_advisory_abstention
-rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:7674642d6663	announce	json schema=jev-build-turn-receipt/v# schema=jev-build-advisory-unavailable/v# status=unavailable effect=visible_advisory_abstention
-rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:ab28e9ffe2a1	announce	json schema=jev-build-turn-receipt/v# schema=jev-build-advisory-unavailable/v# status=unavailable effect=visible_advisory_abstention
-rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:c81467db0c27	announce	json schema=jev-build-turn-receipt/v# schema=jev-build-advisory-unavailable/v# status=unavailable effect=visible_advisory_abstention
-rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:dd2a9a8193d4	announce	json schema=jev-build-turn-receipt/v# schema=jev-build-advisory-unavailable/v# status=unavailable effect=visible_advisory_abstention
+rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:569a14d8e0fb	announce	json schema=jev-build-turn-receipt/v# schema=jev-build-advisory-unavailable/v# status=unavailable reason=unknown effect=visible_advisory_abs
+rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:5fd34f7d4ca1	announce	json schema=jev-build-turn-receipt/v# schema=jev-build-advisory-unavailable/v# status=unavailable reason=unknown effect=visible_advisory_abs
+rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:7674642d6663	announce	json schema=jev-build-turn-receipt/v# schema=jev-build-advisory-unavailable/v# status=unavailable reason=unknown effect=visible_advisory_abs
+rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:ab28e9ffe2a1	announce	json schema=jev-build-turn-receipt/v# schema=jev-build-advisory-unavailable/v# status=unavailable reason=unknown effect=visible_advisory_abs
+rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:c81467db0c27	announce	json schema=jev-build-turn-receipt/v# schema=jev-build-advisory-unavailable/v# status=unavailable reason=unknown effect=visible_advisory_abs
+rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:dd2a9a8193d4	announce	json schema=jev-build-turn-receipt/v# schema=jev-build-advisory-unavailable/v# status=unavailable reason=unknown effect=visible_advisory_abs
 rule-shape-gate.py	PreToolUse[mcp__.*__(teach|activate-rule)]	(all)	counts	allow=2 announce=1
 rule-shape-gate.py	PreToolUse[mcp__.*__(teach|activate-rule)]	tool_calls:0d9264aee317	announce	ENFORCEMENT CLASSIFICATION OBLIGATION — rule <hex> ("a rule ships with its enforcement decided at creation") applies to the rule you are abo
 scheduled-run-record.py	Stop	(all)	counts	allow=87
