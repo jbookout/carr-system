@@ -60,9 +60,6 @@ The Stop gate only announces this now (Joe's 2026-08-23 gate rationing): a
 skip is recorded in `out/map-architecture-gate.jsonl` but does not block, so
 the session making the call enforces it.
 
-## Orchestrated work
-See [AGENTS](AGENTS.md#progress-board).
-
 ## Dell migration trigger
 
 In an interactive Claude Code session whose working directory is
