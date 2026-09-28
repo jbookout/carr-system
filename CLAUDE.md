@@ -50,6 +50,14 @@ the classifier declined; that is working around a denial rather than filing it.
 Read current canonical migration/release state before naming frontier/blocker.
 Dated incidents/WRs are history; source/CI grants no live authority.
 
+## Standard progress board
+
+For orchestrated work (>5 steps or >30 min), the orchestrator seat is the only
+Claude-plan draw; subagents run on Codex, Grok, Claude cloud credits, or Flash
+Next. A subagent keeps `out/boards/<project>.html` current via
+`tools/progress_board.py` after every step. Decisions for Joe go on the board
+as questions with a default, and work continues on the default.
+
 ## Map work has one mandatory front door
 
 For any request to recommend, design, build, revise, review, or publish a map,

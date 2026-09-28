@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""Behavioral tests for the progress-board command line surface."""
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+
+REPO = Path(__file__).resolve().parents[1]
+SCRIPT = REPO / "tools" / "progress_board.py"
+
+
+class ProgressBoardCLI(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tempdir.name)
+        self.env = os.environ.copy()
+        self.env["PROGRESS_BOARD_ROOT"] = str(self.root)
+        self.env["PROGRESS_BOARD_SKIP_GH"] = "1"
+
+    def tearDown(self):
+        self.tempdir.cleanup()
+
+    def run_board(self, *args, input_text=None):
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), *args],
+            cwd=REPO,
+            env=self.env,
+            input=input_text,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+
+    def read_state(self, project):
+        return json.loads((self.root / "boards" / f"{project}.json").read_text())
+
+    def test_init_task_ask_answer_and_deliver(self):
+        self.run_board("init", "demo", "--title", "Demo project")
+        self.run_board(
+            "task",
+            "demo",
+            "build",
+            "--title",
+            "Build board",
+            "--status",
+            "running",
+            "--executor",
+            "codex gpt-5.6-luna high",
+            "--pr",
+            "42",
+            "--note",
+            "working",
+        )
+        self.run_board(
+            "ask",
+            "demo",
+            "q1",
+            "--question",
+            "Ship this?",
+            "--default",
+            "continue on the default",
+        )
+        self.run_board("answer", "demo", "q1", input_text="yes\n")
+        self.run_board("deliver", "demo", "--title", "Board ready", "--link", "/tmp/board.html")
+
+        state = self.read_state("demo")
+        self.assertEqual(state["title"], "Demo project")
+        self.assertEqual(state["tasks"]["build"]["status"], "running")
+        self.assertEqual(state["tasks"]["build"]["pr"], 42)
+        self.assertEqual(state["questions"]["q1"]["answer"], "yes")
+        self.assertEqual(state["deliverables"][0]["link"], "/tmp/board.html")
+        self.assertTrue(state["updated_at"])
+
+    def test_stuck_is_derived_for_blocked_and_old_running_tasks(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board(
+            "task", "demo", "blocked", "--title", "Blocked", "--status", "blocked", "--executor", "codex"
+        )
+        self.run_board(
+            "task", "demo", "running", "--title", "Old", "--status", "running", "--executor", "codex"
+        )
+        state_path = self.root / "boards" / "demo.json"
+        state = json.loads(state_path.read_text())
+        old = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+        state["tasks"]["running"]["updated_at"] = old
+        state_path.write_text(json.dumps(state))
+        self.run_board("render", "demo")
+        html = (self.root / "boards" / "demo.html").read_text()
+        self.assertIn("Blocked", html)
+        self.assertIn("Old", html)
+        self.assertIn("Stuck", html)
+
+    def test_ledger_flags_claude_plan_executor(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board(
+            "task",
+            "demo",
+            "violation",
+            "--title",
+            "Wrong seat",
+            "--status",
+            "queued",
+            "--executor",
+            "claude-plan Opus subagent",
+        )
+        html = (self.root / "boards" / "demo.html").read_text()
+        self.assertIn("policy violation", html.lower())
+        self.assertIn("ledger-violation", html)
+
+    def test_html_has_all_panels_and_no_external_urls(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("ask", "demo", "q1", "--question", "Question?", "--default", "Proceed")
+        self.run_board("deliver", "demo", "--title", "Done", "--link", "board.html")
+        html = (self.root / "boards" / "demo.html").read_text()
+        for panel in (
+            "Questions waiting on Joe",
+            "Stuck",
+            "Tasks by status",
+            "Latest deliverables",
+            "Executor ledger",
+        ):
+            self.assertIn(panel, html)
+        self.assertIn('http-equiv="refresh" content="10"', html)
+        self.assertNotRegex(html, r"https?://")
+        self.assertNotIn("<script src=", html)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

@@ -205,6 +205,14 @@ by definition: `CARR_ALLOW_MAIN_COMMIT=1 git commit ...`, for one command only.
 
 ## Checks
 
+## Standard progress board
+
+For orchestrated work (>5 steps or >30 min), the orchestrator seat is the only
+Claude-plan draw; subagents run on Codex, Grok, Claude cloud credits, or Flash
+Next. A subagent keeps `out/boards/<project>.html` current via
+`tools/progress_board.py` after every step. Decisions for Joe go on the board
+as questions with a default, and work continues on the default.
+
 `ops/ci.sh` is the ONE check script. The GitHub workflow and the pre-push hook
 both call it; neither contains check logic, so a check added there appears in
 both. Run one class while iterating:
