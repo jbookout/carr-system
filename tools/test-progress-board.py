@@ -243,6 +243,7 @@ class ProgressBoardCLI(unittest.TestCase):
         html = (self.root / "boards" / "demo.html").read_text()
         for state in ("healthy", "attention", "critical", "still"):
             self.assertIn(f"pulse-{state}", html)
+        self.assertRegex(html, r'data-task-ref="f"[^>]*>.*?<span class="state-mark"[^>]*>◇</span>')
         self.assertRegex(html, r'@media\s*\(prefers-reduced-motion:\s*reduce\)')
         self.assertRegex(html, r'prefers-reduced-motion:reduce[^}]*animation:none')
 
