@@ -73,7 +73,11 @@ BUILD_GUIDANCE_KEYS = frozenset({
     "prioritize_blocker_removal",
 })
 BUILD_ADVISORY_UNAVAILABLE_KEYS = frozenset({
-    "schema", "status", "effect", "instruction",
+    "schema", "status", "reason", "effect", "instruction",
+})
+BUILD_ADVISORY_UNAVAILABLE_REASONS = frozenset({
+    "billing_exhausted", "auth_failed", "rate_limited", "timeout", "network",
+    "server_5xx", "unknown",
 })
 # A background-task notification, cross-session message, Stop-hook reopen or
 # other machine envelope is not a partner request, so no build advice is
@@ -155,6 +159,7 @@ def validate_build_advisory(row: object, *, prompt_sha256: str) -> bool:
     if row.get("schema") == BUILD_ADVISORY_UNAVAILABLE_SCHEMA:
         return (set(row) == BUILD_ADVISORY_UNAVAILABLE_KEYS
                 and row.get("status") == "unavailable"
+                and row.get("reason") in BUILD_ADVISORY_UNAVAILABLE_REASONS
                 and row.get("effect") == "visible_advisory_abstention"
                 and _nonempty(row.get("instruction")))
     if row.get("schema") == BUILD_ADVISORY_SKIPPED_SCHEMA:

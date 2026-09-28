@@ -228,6 +228,48 @@ def _session_id():
     return None
 
 
+def usable_judgment(result, questions):
+    """Require one typed answer per requested question and measured usage."""
+    if not isinstance(result, dict) or not isinstance(result.get("model"), str) or not result["model"].strip():
+        return False
+    usage = result.get("usage")
+    if not isinstance(usage, dict) or any(
+            type(usage.get(key)) is not int or usage[key] < 0
+            for key in ("input_tokens", "output_tokens")):
+        return False
+    answers = result.get("answers")
+    if not isinstance(answers, dict) or set(answers) != set(questions):
+        return False
+    for key, question in questions.items():
+        answer = answers.get(key)
+        if not isinstance(question, dict) or not isinstance(answer, dict):
+            return False
+        kind = question.get("type")
+        if answer.get("type") != kind:
+            return False
+        if kind == "noul":
+            value = answer.get("noul")
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
+                return False
+        elif kind == "choice":
+            if answer.get("choice") not in question.get("criteria", {}):
+                return False
+        elif kind == "score":
+            value = answer.get("score")
+            levels = question.get("criteria")
+            if (isinstance(value, bool) or not isinstance(value, (int, float)) or
+                    not isinstance(levels, list) or not 0 <= value <= len(levels) - 1):
+                return False
+        else:
+            return False
+        if kind in ("choice", "score"):
+            confidence = answer.get("confidence")
+            if (isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or
+                    not 0 <= confidence <= 1):
+                return False
+    return True
+
+
 def _caller_name():
     """The immediate caller of ask(), with no source text or stack arguments."""
     try:
@@ -339,6 +381,8 @@ def _append_call_receipt(questions, facets, result, log_path, *, caller=None,
     try:
         answered = result if isinstance(result, dict) else {}
         usage = answered.get("usage") if isinstance(answered.get("usage"), dict) else None
+        usable = (answered.get("usable") is True if "usable" in answered
+                  else bool(ok and usage))
         row = {
             "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "session": _session_id(),
@@ -352,7 +396,10 @@ def _append_call_receipt(questions, facets, result, log_path, *, caller=None,
             "usage": usage,
             "input_tokens": usage.get("input_tokens") if usage else None,
             "output_tokens": usage.get("output_tokens") if usage else None,
-            "ok": ok,
+            "http_status": answered.get("http_status"),
+            "schema_valid": answered.get("schema_valid") is True,
+            "usable": usable,
+            "ok": bool(ok and usable and not cache_hit),
             "cache_hit": cache_hit,
         }
         if error:
@@ -456,18 +503,39 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
             attempt_timeout = min(timeout, remaining)
         try:
             with send(request, timeout=attempt_timeout) as response:
-                result = json.load(response)
+                http_status = getattr(response, "status", None)
+                try:
+                    result = json.load(response)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    if opener is None:
+                        _append_call_receipt(questions, facets,
+                            {"http_status": http_status, "schema_valid": False,
+                             "usable": False}, calls_log, caller=caller,
+                            question_kind=question_kind, prompt_sha256=prompt_sha256,
+                            ok=False, error="invalid_json")
+                    raise
+            schema_valid = usable_judgment(result, questions)
+            usable = (type(http_status) is int and 200 <= http_status < 300 and
+                      schema_valid)
             # Round-2 fix: only a REAL production call (no opener) writes a
             # receipt. `opener` is the offline selftest/mock path (see the
             # docstring above) — a mock response was never actually seen by
             # the vendor, so a receipt for it would let a selftest run count
             # as this turn's real Jev evidence.
             if opener is None:
-                _append_call_receipt(questions, facets, result, calls_log, caller=caller,
-                                     question_kind=question_kind, prompt_sha256=prompt_sha256)
-                if use_cache:
-                    _store_cached_result(cache_path, cache_key, result,
-                                         cache_ttl_seconds)
+                receipt = ({**result, "http_status": http_status,
+                            "schema_valid": schema_valid, "usable": usable}
+                           if isinstance(result, dict) else
+                           {"http_status": http_status, "schema_valid": False,
+                            "usable": False})
+                _append_call_receipt(questions, facets, receipt, calls_log,
+                                     caller=caller, question_kind=question_kind,
+                                     prompt_sha256=prompt_sha256, ok=usable)
+            if not usable:
+                raise TypeSafeError("TypeSafe returned an unusable judgment")
+            if use_cache:
+                _store_cached_result(cache_path, cache_key, result,
+                                     cache_ttl_seconds)
             return result
         except urllib.error.HTTPError as err:
             if opener is None:
@@ -509,6 +577,8 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
                 "rather than a network fault, check that the host is still in "
                 "KNOWN_HOSTS in hooks/guard-unattended.py."
             ) from None
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeSafeError):
+            raise
         except Exception as err:
             if opener is None:
                 _append_call_receipt(questions, facets, None, calls_log, caller=caller,

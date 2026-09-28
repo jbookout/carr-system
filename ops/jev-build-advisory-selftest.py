@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -87,6 +88,67 @@ class AdvisoryTests(unittest.TestCase):
         self.assertEqual(failure["schema"], "jev-build-advisory-unavailable/v1")
         self.assertEqual(failure["effect"], "visible_advisory_abstention")
         self.assertNotIn("error", failure)
+
+    def test_http_failure_reason_is_redacted_and_visible(self):
+        class Failing(FakeClient):
+            def ask(self, *args, **kwargs):
+                raise RuntimeError("TypeSafe returned HTTP 402: SECRET RESPONSE BODY")
+        with self.assertRaises(advisory.AdvisoryUnavailable) as caught:
+            advisory.advise("Build this", client=Failing())
+        failure = advisory.unavailable(caught.exception.reason)
+        self.assertEqual(failure["reason"], "billing_exhausted")
+        self.assertIn("Joe must add credits", failure["instruction"])
+        self.assertNotIn("SECRET", json.dumps(failure))
+
+    def test_advisory_only_402_reaches_outage_health_without_raw_body(self):
+        from tools import jev_outage_health as health
+
+        class Failing(FakeClient):
+            def ask(self, *args, **kwargs):
+                raise RuntimeError("TypeSafe returned HTTP 402: SECRET RESPONSE BODY")
+
+        with tempfile.TemporaryDirectory() as directory:
+            calls = Path(directory) / "calls.jsonl"
+            judge = Path(directory) / "out" / "jev-judge.jsonl"
+            state = Path(directory) / "outage-state.json"
+            client = Failing()
+            client.CANONICAL_REPO = directory
+            with self.assertRaises(advisory.AdvisoryUnavailable):
+                advisory.advise("Build this", client=client)
+            attempt = health.parse_time(json.loads(judge.read_text().splitlines()[-1])["at"])
+            healthy_at = (attempt - timedelta(minutes=1)).isoformat()
+            state.write_text(json.dumps({"state": "healthy",
+                                         "last_success_at": healthy_at,
+                                         "event_at": healthy_at}))
+            calls.write_text(json.dumps({
+                "ts": healthy_at, "ok": True, "usable": True,
+                "schema_valid": True, "http_status": 200, "model": "jev-test",
+                "usage": {"input_tokens": 1, "output_tokens": 1}}) + "\n")
+            first = health.evaluate(judge, calls, now=attempt + timedelta(minutes=30),
+                                    state_path=state)
+            self.assertEqual((first["status"], first["pending"]), ("skip", True))
+            self.assertEqual(health.reconcile(first, state,
+                lambda name, payload: self.fail(f"premature {name}")), "none")
+            self.assertEqual(json.loads(state.read_text())["first_failure_at"],
+                             attempt.isoformat())
+            expired = health.evaluate(judge, calls, now=attempt + timedelta(hours=2),
+                                      state_path=state)
+            self.assertEqual((expired["status"], expired["reason"]),
+                             ("warn", "billing_exhausted"))
+            self.assertNotIn("SECRET", judge.read_text())
+
+    def test_failure_reason_classes(self):
+        for source, expected in (
+            ("TypeSafe returned HTTP 401: SECRET", "auth_failed"),
+            ("TypeSafe returned HTTP 403: SECRET", "auth_failed"),
+            ("TypeSafe returned HTTP 429: SECRET", "rate_limited"),
+            ("TypeSafe returned HTTP 503: SECRET", "server_5xx"),
+            ("timed out", "timeout"),
+            ("could not reach host: SECRET", "network"),
+            ("unexpected SECRET", "unknown"),
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(advisory.failure_reason(RuntimeError(source)), expected)
 
 
 NOTIFICATION = ("<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n"

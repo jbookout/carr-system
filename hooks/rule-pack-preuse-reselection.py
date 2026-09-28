@@ -480,19 +480,20 @@ def _build_adviser(situation: str) -> dict:
     return module.advise(situation)
 
 
-def _build_unavailable() -> dict:
+def _build_unavailable(error: Exception | None = None) -> dict:
     path = REPO / "ops/jev_build_advisory.py"
     spec = importlib.util.spec_from_file_location("jev_build_advisory_unavailable", path)
     if spec is None or spec.loader is None:
         return {
             "schema": "jev-build-advisory-unavailable/v1",
             "status": "unavailable",
+            "reason": "unknown",
             "effect": "visible_advisory_abstention",
             "instruction": "Jev build-time intake was unavailable; qualified judgment remains explicit and uncredited.",
         }
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.unavailable()
+    return module.unavailable(module.failure_reason(error) if error else "unknown")
 
 
 def _semantic_receipt(payload: dict, response: dict, selected: list[dict],
@@ -584,8 +585,8 @@ def _process_prompt(payload: dict, runner: Callable,
         build = (build_adviser or _build_adviser)(prompt)
         if not isinstance(build, dict):
             raise RuntimeError("build adviser returned malformed advice")
-    except Exception:
-        build = _build_unavailable()
+    except Exception as exc:
+        build = _build_unavailable(exc)
     failure_stage = "semantic_adviser"
     try:
         selected = (adviser(prompt) if adviser is not None
