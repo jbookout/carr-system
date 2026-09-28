@@ -32,12 +32,15 @@ adapter calls the production selection function itself:
                     table rows it carries in the same door call, on each tool
                     call (exact matches; no dedupe state is read). Charged for
                     gold of every layer, since routes cover every layer. The
-                    boot layer is scored beside it in a follow-up;
+                    current boot and historical layer-zero map are scored
+                    beside it;
   drift_shadow      hooks/rule-pack-drift-gate.py as shipped: mode shadow
                     loads nothing;
   drift_if_acting   the same gate's evaluate(): the packs it says the turn
                     needed, delivered as those packs' pack-layer rules;
-  boot_layer0       the layer-zero rules standing-context loads at boot.
+  boot_layer0       historical enforcement-map layer-zero selection.
+  boot_always_on    current Joe-scoped always-on ids from rule-classes.v1.json,
+                    the class contract used by standing-context's live boot.
 
 DRY RUN. Nothing here writes a production log, cache or audit file: the
 selector log goes to os.devnull, no session id is passed (so no dedupe or
@@ -45,14 +48,15 @@ verdict cache is read or written), Jev's per-call receipts go to a sink the
 caller names, and jev_judge.record() is replaced by a no-op on the harness's
 private copy of the module (its outage row would otherwise land in
 out/jev-judge.jsonl). The selftest snapshots GUARDED_OUT_FILES before and
-after a run and fails on any change. The standing-context door the hooks
-call afterwards only fetches rule TEXT for ids already chosen, so it is not
-replayed.
+after a run and fails on any change. The standing-context door that fetches
+selected rule text is not replayed. The actual boot adapter uses the same
+committed class contract as the live Worker and excludes other partners'
+personal rules; live rule statements remain in the store.
 
 RESPONSIBILITY UNIVERSES. A path is charged only for gold rules it is
-responsible for: the prompt and JIT paths for pack-layer rules (layer zero is
-already loaded at boot; control-layer rules are delivered by the gate that
-enforces them), the legacy selector and the system rows for everything. A
+responsible for: the prompt and JIT paths for pack-layer rules (the current
+always-on set is loaded at boot; control-layer rules are delivered by the gate
+that enforces them), the legacy selector and the system rows for everything. A
 delivered rule that is not gold is a false positive wherever it came from.
 
 METRICS (Jev, verification_selection, 2026-09-26): the headline is SYSTEM
@@ -193,12 +197,29 @@ def rule_meta(repo, corpus=None):
     return meta
 
 
-def universes(meta, names):
+def boot_always_on_ids(repo, sponsor="joe"):
+    """Ids the live boot would render in full for one sponsor.
+
+    The runtime scopes active store rows first, then applies the class file's
+    always_on and personal_to fields. The committed class file contains the
+    classified active ids, so this is an offline replay of that second step.
+    """
+    path = os.path.join(repo, "ops", "config", "rule-classes.v1.json")
+    with open(path, "r", encoding="utf-8") as handle:
+        rows = json.load(handle)["rules"]
+    return {rid for rid, row in rows.items()
+            if row.get("always_on") and row.get("personal_to") in (None, sponsor)}
+
+
+def universes(meta, names, *, boot_ids=None):
+    if "boot_always_on" in names and boot_ids is None:
+        raise ValueError("boot_always_on universe requires current boot ids")
     pack = {rid for rid, row in meta.items() if row["layer"] == PACK_LAYER}
     everything = set(meta)
     layer0 = {rid for rid, row in meta.items() if row["layer"] == "layer0"}
     table = {"prompt_compiled": pack, "prompt_full": pack, "jit_pretooluse": pack,
              "drift_shadow": pack, "drift_if_acting": pack, "boot_layer0": layer0,
+             "boot_always_on": set(boot_ids or ()),
              "layered_triggers": everything,
              "jev_rule_select": everything, "system_moment": everything,
              "system_moment_packlayer": pack,
@@ -318,6 +339,7 @@ def build_adapters(repo, *, jev="off", client_factory=None, calls_log=os.devnull
     meta = rule_meta(repo)
     layer0 = {rid for rid, row in meta.items() if row["layer"] == "layer0"}
     pack_layer = {rid for rid, row in meta.items() if row["layer"] == PACK_LAYER}
+    always_on = boot_always_on_ids(repo)
 
     def prompt_delivery(rtd, text, **kwargs):
         rows = rtd.advise(text, session_id=None, log_path=os.devnull, **kwargs)
@@ -381,6 +403,9 @@ def build_adapters(repo, *, jev="off", client_factory=None, calls_log=os.devnull
     def boot(case):
         return {"rules": set(layer0), "packs": set()}
 
+    def live_boot(case):
+        return {"rules": set(always_on), "packs": set()}
+
     adapters = [
         {"name": "prompt_compiled", "select": prompt_compiled, "jev": False},
         {"name": "jit_pretooluse", "select": jit, "jev": False,
@@ -390,6 +415,7 @@ def build_adapters(repo, *, jev="off", client_factory=None, calls_log=os.devnull
         {"name": "drift_shadow", "select": drift_shadow, "jev": False},
         {"name": "drift_if_acting", "select": drift_acting, "jev": False},
         {"name": "boot_layer0", "select": boot, "jev": False},
+        {"name": "boot_always_on", "select": live_boot, "jev": False},
     ]
     if doctrine_search:
         adapters.append({"name": "doctrine_search", "jev": True,
@@ -475,13 +501,13 @@ def add_system_rows(deliveries):
       system_moment_packlayer  the same deliveries, charged only for
                                pack-layer gold (the layer those paths serve);
       system_moment_plus_drift the same plus the drift observer acting;
-      system_scoped_boot       the moment paths plus layer zero: what a session
-                               would hold if the scoped boot were enforced and
-                               it declared no pack.
+      system_scoped_boot       the moment paths plus the current always-on
+                               boot. Historical reports without that adapter
+                               retain their legacy layer-zero interpretation.
     """
     prompt = deliveries.get("prompt_full") or deliveries.get("prompt_compiled") or {}
     jit = deliveries.get("jit_pretooluse") or {}
-    boot = deliveries.get("boot_layer0") or {}
+    boot = deliveries.get("boot_always_on") or deliveries.get("boot_layer0") or {}
     drift = deliveries.get("drift_if_acting") or {}
     rows = {name: {} for name in SYSTEM_ROWS}
     for case_id in set(prompt) | set(boot) | set(drift):
@@ -752,7 +778,8 @@ def render_markdown(report, statements=None, *, top=10, paths=None):
     statements = statements or {}
     order = paths or [p for p in SYSTEM_ROWS + ("prompt_full",
                                   "prompt_compiled", "jev_rule_select", "jit_pretooluse",
-                                  "layered_triggers", "drift_shadow", "drift_if_acting", "boot_layer0",
+                                  "layered_triggers", "drift_shadow", "drift_if_acting",
+                                  "boot_always_on", "boot_layer0",
                                   "doctrine_search")
                       if p in report["paths"]]
     lines = [f"Cases: {report['cases']} ({', '.join(f'{k} {v}' for k, v in sorted(report['strata'].items()))})",
