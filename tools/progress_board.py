@@ -156,10 +156,13 @@ def task_stage(task: dict[str, Any]) -> str:
 def completed_at(task: dict[str, Any]) -> datetime | None:
     if task_stage(task) != "live":
         return None
+    timestamp = task.get("completed_at") or task.get("updated_at")
+    if not isinstance(timestamp, str):
+        return None
     try:
-        value = datetime.fromisoformat(task.get("completed_at") or task.get("updated_at"))
+        value = datetime.fromisoformat(timestamp)
         return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
-    except (TypeError, ValueError):
+    except ValueError:
         return None
 
 
@@ -347,9 +350,11 @@ def render_state(state: dict[str, Any], pr_infos: dict[str, dict[str, Any] | Non
     completed = sorted(((task_id, task) for task_id, task in tasks.items() if task_stage(task) == "live"),
                        key=lambda item: completed_at(item[1]) or datetime.min.replace(tzinfo=timezone.utc),
                        reverse=True)
-    active = {task_id: task for task_id, task in tasks.items()
-              if task_stage(task) != "live" or not completed_at(task)
-              or render_time - completed_at(task) < timedelta(hours=24)}
+    active = {}
+    for task_id, task in tasks.items():
+        completion_time = completed_at(task)
+        if completion_time is None or render_time - completion_time < timedelta(hours=24):
+            active[task_id] = task
     pr_infos = pr_infos or {}
     rendered_at = rendered_at or stamp()
     questions = state.get("questions", {})
