@@ -678,6 +678,16 @@ export async function recordReadCall(insertFn, actor, verb, ok, errorKind) {
   }
 }
 
+// Actor-scoped read doors use a read-only writer transaction and bypass the
+// ordinary reader branch. Schedule their identity-only audit after that
+// transaction; never classify a mutating writer call as a read.
+export function scheduleWriterReadCall(tool, actor, verb, ok, errorKind, waitUntil, insertFn) {
+  if (tool?.writerConnection !== true || tool.write ||
+      typeof waitUntil !== "function" || typeof insertFn !== "function") return false;
+  waitUntil(recordReadCall(insertFn, actor, verb, ok, errorKind));
+  return true;
+}
+
 // Authority operations have a separate, human-principal-bound database
 // connection. The scoped variables permit Joe and Dell to have distinct DB
 // login identities. The unscoped value is deliberately Joe-only: letting a
@@ -934,6 +944,8 @@ export async function callTool(env, actor, name, args, profile = "full") {
   // appends the receipt.
   if (tool.jevProxy === true && jevPrefetched)
     client.jevPrefetched = jevPrefetched;
+  const writerRead = tool.writerConnection === true && !tool.write;
+  let readOk = true, readErrorKind = null;
   try {
     await client.query(tool.writerConnection && !tool.write ? "begin read only" : "begin");
     const a = await client.query("select id from actor where slug=$1", [actor.slug]);
@@ -962,6 +974,11 @@ export async function callTool(env, actor, name, args, profile = "full") {
     return result;
   } catch (e) {
     await client.query("rollback").catch(() => {});
+    if (writerRead) {
+      readOk = false;
+      readErrorKind = e instanceof ToolError
+        ? String(e.payload?.error || "tool_error").slice(0, 64) : "internal_error";
+    }
     // TRANSLATE THE DATABASE'S REFUSAL HERE, WHERE THE CONNECTION IS STILL
     // OPEN. pgConstraintError has existed and been tested since 2026-08-21 and
     // until now had no production caller at all: every check, foreign-key,
@@ -978,11 +995,24 @@ export async function callTool(env, actor, name, args, profile = "full") {
     // By the time the RPC handler's catch sees this, the pool is closed.
     if (!(e instanceof ToolError)) {
       const refusal = pgConstraintError(e);
-      if (refusal) throw await describeConstraint(client, refusal);
+      if (refusal) {
+        const failure = await describeConstraint(client, refusal);
+        if (writerRead && failure instanceof ToolError)
+          readErrorKind = String(failure.payload?.error || "tool_error").slice(0, 64);
+        throw failure;
+      }
     }
     throw e;
   } finally {
     client.release();
+    // Actor-scoped read doors use a read-only writer transaction. Record their
+    // metadata through the same detached audit path as ordinary reader calls;
+    // the transaction has already ended, so this cannot change its answer.
+    if (writerRead && env?.DATABASE_URL_WRITER) {
+      const insertFn = (text, params) => neon(env.DATABASE_URL_WRITER).query(text, params);
+      scheduleWriterReadCall(tool, actor, name, readOk, readErrorKind,
+        env.ctx?.waitUntil?.bind(env.ctx), insertFn);
+    }
     env.ctx?.waitUntil?.(pool.end());
   }
 }
