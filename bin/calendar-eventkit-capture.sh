@@ -256,7 +256,15 @@ for e in d["exact"]:
     })
     r = subprocess.run(["./run.sh", "call", "log-activity", args],
                        capture_output=True, text=True)
-    ok = '"ok": true' in r.stdout or '"ok":true' in r.stdout
+    # local-verb emits one JSON value on stdout; diagnostics stay on stderr.
+    # Nested success, malformed output, and failed processes cannot acknowledge
+    # this activity. Keep every raw response out of persisted capture logs.
+    try:
+        response = json.loads(r.stdout)
+    except json.JSONDecodeError:
+        response = None
+    ok = (r.returncode == 0 and isinstance(response, dict)
+          and response.get("ok") is True)
     print("  logged exact touch" if ok else "  FAILED to log exact touch")
     if not ok:
         failed += 1

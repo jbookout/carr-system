@@ -228,5 +228,43 @@ check("matcher permission failure keeps safe diagnosis without identity",
       p.returncode == 4 and "FULL DISK ACCESS" in p.stderr
       and "synthetic@example.test" not in p.stdout + p.stderr)
 
+# 9. Only successful process completion and a top-level JSON boolean true can
+# acknowledge an activity write. Error payloads stay out of persisted logs.
+response_cases = [
+    ("nested success cannot override top-level refusal",
+     '{"ok":false,"nested":{"ok":true}}', 0, False),
+    ("nonzero helper status cannot acknowledge a write",
+     '{"ok":true}', 1, False),
+    ("invalid JSON cannot acknowledge a write",
+     'not-json "ok":true', 0, False),
+    ("array response cannot acknowledge a write",
+     '[{"ok":true}]', 0, False),
+    ("numeric truth cannot acknowledge a write",
+     '{"ok":1}', 0, False),
+    ("missing success cannot acknowledge a write",
+     '{"activity_id":"synthetic-activity"}', 0, False),
+    ("JSON whitespace preserves valid success",
+     '{"ok" : true, "activity_id":"synthetic-activity"}', 0, True),
+]
+exact_only = {**mixed, "unknown": [],
+              "counts": {**mixed["counts"], "emails": 1, "unknown": 0}}
+for name, response, status, succeeds in response_cases:
+    root, stub = fixture(appends="events scanned: 1; carrying attendees: 1\nexit=0",
+                         dump_json="{}", matcher_json=json.dumps(exact_only))
+    shutil.copy2(REPO / "tools" / "calendar-intake-gate.py",
+                 root / "tools" / "calendar-intake-gate.py")
+    (root / "run.sh").write_text(
+        "#!/usr/bin/env python3\nimport sys\n"
+        f"print({response!r})\n"
+        "print('known@example.test C-TEST Synthetic meeting', file=sys.stderr)\n"
+        f"sys.exit({status})\n")
+    (root / "run.sh").chmod(0o755)
+    p = run(root, stub)
+    output = p.stdout + p.stderr
+    marker = "writes=1 failed=0" if succeeds else "writes=0 failed=1"
+    check(name, p.returncode == (0 if succeeds else 1) and marker in output
+          and not any(value in output for value in (
+              "known@example.test", "C-TEST", "Synthetic meeting", response)))
+
 print(f"\n{'OK all checks passed' if not failures else f'FAIL {len(failures)}: ' + ', '.join(failures)}")
 sys.exit(1 if failures else 0)
