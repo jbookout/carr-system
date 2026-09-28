@@ -29,17 +29,13 @@ lets any red migration through:
 ALSO PINS (added 2026-09-24, after the pairing gap recurred twice --
 0565/0566 on 2026-09-23, then 0575/0576 the very next day, fixed by hand in
 PR #1193): any migration that is the FIRST in the tree to CREATE a
-SECURITY DEFINER function and exposes EXECUTE on it -- i.e. a live change to
+SECURITY DEFINER function or GRANT EXECUTE on one -- i.e. a live change to
 the SCAC mutation catalog -- must be declared as an atomic pair with its
 immediately-following `*_scac_successor.sql` seal in BOTH
 ATOMIC_MIGRATION_GROUPS and STRICT_ATOMIC_MIGRATION_GROUPS. Left undeclared,
 bin/migrate-prod.sh applies the domain file as its own one-migration batch,
 and production's deferred SCAC epoch trigger refuses it at commit ("live
-SCAC vNN mutation catalog drifted"). The already-applied 0736 is the narrow
-exception: its new helpers revoke EXECUTE on each exact signature from PUBLIC
-and every runtime role, and 0737 follows as a standalone successor. Any grant
-or incomplete revoke still requires pairing.
-See test_new_authority_migrations_are_
+SCAC vNN mutation catalog drifted"). See test_new_authority_migrations_are_
 atomically_sealed() and its seeded failing case below.
 
 Run: .venv/bin/python ops/migrate-precondition-selftest.py
@@ -89,76 +85,6 @@ FUNCTION_DEF_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
-GRANT_EXECUTE_RE = re.compile(
-    r"grant\s+(?:execute|all(?:\s+privileges)?)\s+on\s+function\s+"
-    r"([a-zA-Z0-9_.]+)\s*\(", re.IGNORECASE,
-)
-FUNCTION_SIGNATURE_RE = re.compile(
-    r"create\s+(?:or\s+replace\s+)?function\s+([a-zA-Z0-9_.]+)\s*"
-    r"\(([^)]*)\)[^;]*?security\s+definer",
-    re.IGNORECASE | re.DOTALL,
-)
-REVOKE_EXECUTE_RE = re.compile(
-    r"revoke\s+(?:execute|all(?:\s+privileges)?)\s+on\s+function\s+"
-    r"([a-zA-Z0-9_.]+)\s*\(([^)]*)\)\s+from\s+([^;]+);",
-    re.IGNORECASE,
-)
-SCHEMA_WIDE_EXECUTE_RE = re.compile(
-    r"grant\s+(?:execute|all(?:\s+privileges)?)\s+on\s+all\s+functions\s+"
-    r"in\s+schema\s+[^;]+\s+to\s+[^;]+;", re.IGNORECASE,
-)
-RUNTIME_EXECUTE_ROLES = frozenset({
-    "public", "carr_reader", "carr_writer", "carr_jobs", "carr_authority",
-})
-SIMPLE_ARG_TYPES = frozenset({
-    "uuid", "text", "boolean", "integer", "bigint", "jsonb", "date",
-    "timestamptz",
-})
-
-
-def executable_sql(sql: str) -> str:
-    """Ignore comments and function-body text for privilege decisions."""
-    sql = re.sub(r"(\$[a-zA-Z0-9_]*\$).*?\1", " ", sql, flags=re.DOTALL)
-    sql = re.sub(r"'(?:''|[^'])*'", " ", sql)
-    return re.sub(r"--[^\n]*|/\*.*?\*/", "", sql, flags=re.DOTALL)
-
-
-def simple_signature(name: str, args: str) -> tuple[str, tuple[str, ...]] | None:
-    """Normalize only simple signatures; unfamiliar syntax keeps the pair required."""
-    types: list[str] = []
-    for arg in args.split(",") if args.strip() else []:
-        words = arg.lower().split()
-        if len(words) not in (1, 2) or words[-1] not in SIMPLE_ARG_TYPES:
-            return None
-        if len(words) == 2 and not re.fullmatch(r"[a-z_][a-z_0-9]*", words[0]):
-            return None
-        types.append(words[-1])
-    return name.lower(), tuple(types)
-
-
-def fully_private_functions(sql: str) -> set[str]:
-    """Exempt only exact new signatures revoked from every execution role."""
-    executable = executable_sql(sql)
-    if SCHEMA_WIDE_EXECUTE_RE.search(executable):
-        return set()
-    revoked: set[tuple[str, tuple[str, ...]]] = set()
-    for name, args, roles in REVOKE_EXECUTE_RE.findall(executable):
-        signature = simple_signature(name, args)
-        role_set = {role.strip().lower() for role in roles.split(",")}
-        if signature is not None and RUNTIME_EXECUTE_ROLES <= role_set:
-            revoked.add(signature)
-    granted = {name.lower() for name in GRANT_EXECUTE_RE.findall(executable)}
-    declared: dict[str, list[tuple[str, tuple[str, ...]] | None]] = {}
-    for name, args in FUNCTION_SIGNATURE_RE.findall(executable):
-        declared.setdefault(name.lower(), []).append(simple_signature(name, args))
-    return {
-        name for name, signatures in declared.items()
-        if name not in granted and all(
-            signature is not None and signature in revoked
-            for signature in signatures
-        )
-    }
-
 
 def new_authority_functions(sql: str) -> set[str]:
     """Non-boilerplate SECURITY DEFINER functions this migration (re)declares."""
@@ -178,8 +104,7 @@ def find_atomic_seal_requirements(
     when `succ` is a `*_scac_successor.sql` file immediately following a
     plain (not itself self-sealed) `pred`, and `pred` is the FIRST migration
     anywhere in the tree to CREATE [OR REPLACE] some non-boilerplate
-    SECURITY DEFINER function, unless its exact signature has EXECUTE revoked
-    from PUBLIC and all runtime roles in the same migration without a grant.
+    SECURITY DEFINER function.
 
     Only the FIRST declaration counts. A later migration that CREATE OR
     REPLACEs an already-existing function (same name, e.g. a schema/body
@@ -204,11 +129,9 @@ def find_atomic_seal_requirements(
             continue
         if "_scac_successor" in pred_name:
             continue  # predecessor already seals itself in the same file
-        private_functions = fully_private_functions(pred_sql)
         newly_opened = {
             fn for fn in new_authority_functions(pred_sql)
             if first_seen.get(fn) == pred_name
-            and fn.lower() not in private_functions
         }
         if newly_opened:
             required.append((pred_name, succ_name))
@@ -487,111 +410,6 @@ def test_redeclared_function_needs_no_new_pairing() -> None:
           required == [])
 
 
-def test_revoked_new_functions_need_no_pairing() -> None:
-    """0736 defines new SECURITY DEFINER helpers but revokes EXECUTE from
-    every runtime role. Its successor may be applied after 0736 commits."""
-    seeded = [
-        (
-            "0900_private_helpers.sql",
-            "create function ops.private_helper() returns boolean "
-            "language sql security definer as $$ select true $$; "
-            "revoke all on function ops.private_helper() "
-            "from public,carr_reader,carr_writer,carr_jobs,carr_authority;",
-        ),
-        ("0901_private_helpers_scac_successor.sql", "-- GENERATED seal\nselect 1;"),
-    ]
-    check("a new SECURITY DEFINER function with no EXECUTE grant needs no pair",
-          find_atomic_seal_requirements(seeded) == [])
-
-
-def test_private_function_exemption_rejects_other_overload() -> None:
-    seeded = [
-        ("0900_private_helpers.sql",
-         "create function ops.private_helper(text) returns boolean "
-         "language sql security definer as $$ select true $$; "
-         "revoke all on function ops.private_helper(uuid) "
-         "from public,carr_reader,carr_writer,carr_jobs,carr_authority;"),
-        ("0901_private_helpers_scac_successor.sql", "select 1;"),
-    ]
-    check("revoke of another overload cannot exempt a new function",
-          find_atomic_seal_requirements(seeded) == [
-              ("0900_private_helpers.sql", "0901_private_helpers_scac_successor.sql")])
-
-
-def test_private_function_exemption_checks_every_defined_overload() -> None:
-    seeded = [
-        ("0900_private_helpers.sql",
-         "create function ops.private_helper(uuid) returns boolean "
-         "language sql security definer as $$ select true $$; "
-         "create function ops.private_helper(text) returns boolean "
-         "language sql security definer as $$ select true $$; "
-         "revoke all on function ops.private_helper(uuid) "
-         "from public,carr_reader,carr_writer,carr_jobs,carr_authority;"),
-        ("0901_private_helpers_scac_successor.sql", "select 1;"),
-    ]
-    check("a public sibling overload keeps atomic pairing required",
-          find_atomic_seal_requirements(seeded) == [
-              ("0900_private_helpers.sql", "0901_private_helpers_scac_successor.sql")])
-
-
-def test_private_function_exemption_rejects_commented_revoke() -> None:
-    seeded = [
-        ("0900_private_helpers.sql",
-         "create function ops.private_helper() returns boolean "
-         "language sql security definer as $$ select true $$; "
-         "-- revoke all on function ops.private_helper() "
-         "from public,carr_reader,carr_writer,carr_jobs,carr_authority;"),
-        ("0901_private_helpers_scac_successor.sql", "select 1;"),
-    ]
-    check("commented revoke cannot exempt a new function",
-          find_atomic_seal_requirements(seeded) == [
-              ("0900_private_helpers.sql", "0901_private_helpers_scac_successor.sql")])
-
-
-def test_private_function_exemption_rejects_schema_grant() -> None:
-    seeded = [
-        ("0900_private_helpers.sql",
-         "create function ops.private_helper() returns boolean "
-         "language sql security definer as $$ select true $$; "
-         "revoke all on function ops.private_helper() "
-         "from public,carr_reader,carr_writer,carr_jobs,carr_authority; "
-         "grant execute on all functions in schema ops to carr_writer;"),
-        ("0901_private_helpers_scac_successor.sql", "select 1;"),
-    ]
-    check("schema-wide EXECUTE grant cannot exempt a new function",
-          find_atomic_seal_requirements(seeded) == [
-              ("0900_private_helpers.sql", "0901_private_helpers_scac_successor.sql")])
-
-
-def test_private_function_exemption_requires_every_role() -> None:
-    seeded = [
-        ("0900_private_helpers.sql",
-         "create function ops.private_helper() returns boolean "
-         "language sql security definer as $$ select true $$; "
-         "revoke all on function ops.private_helper() "
-         "from public,carr_reader,carr_writer,carr_jobs;"),
-        ("0901_private_helpers_scac_successor.sql", "select 1;"),
-    ]
-    check("missing runtime role keeps atomic pairing required",
-          find_atomic_seal_requirements(seeded) == [
-              ("0900_private_helpers.sql", "0901_private_helpers_scac_successor.sql")])
-
-
-def test_private_function_exemption_rejects_body_text() -> None:
-    seeded = [
-        ("0900_private_helpers.sql",
-         "create function ops.private_helper() returns text "
-         "language sql security definer as $$ "
-         "select 'revoke all on function ops.private_helper() "
-         "from public,carr_reader,carr_writer,carr_jobs,carr_authority;' "
-         "$$;"),
-        ("0901_private_helpers_scac_successor.sql", "select 1;"),
-    ]
-    check("revoke inside function body cannot exempt a new function",
-          find_atomic_seal_requirements(seeded) == [
-              ("0900_private_helpers.sql", "0901_private_helpers_scac_successor.sql")])
-
-
 def test_new_authority_migrations_are_atomically_sealed() -> None:
     """The live check: run the predicate against the real migration tree and
     require every result to be declared in ATOMIC_MIGRATION_GROUPS, and
@@ -636,13 +454,6 @@ def main() -> int:
     test_reviewed_controller_transaction_artifact_is_exact()
     test_seeded_failing_case_proves_the_check_fires()
     test_redeclared_function_needs_no_new_pairing()
-    test_revoked_new_functions_need_no_pairing()
-    test_private_function_exemption_rejects_other_overload()
-    test_private_function_exemption_checks_every_defined_overload()
-    test_private_function_exemption_rejects_commented_revoke()
-    test_private_function_exemption_rejects_schema_grant()
-    test_private_function_exemption_requires_every_role()
-    test_private_function_exemption_rejects_body_text()
     test_new_authority_migrations_are_atomically_sealed()
     print()
     print(f"migrate-precondition-selftest: {len(PASS)}/{len(PASS) + len(FAIL)} passed")
