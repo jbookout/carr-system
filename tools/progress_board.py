@@ -22,6 +22,24 @@ from typing import Any
 
 
 STATUSES = ("queued", "running", "review", "blocked", "done", "failed")
+PIPELINE_STAGES = ("queued", "build", "review", "ci", "merged", "measured")
+PR_STAGES = PIPELINE_STAGES[1:]
+STAGE_LABELS = {
+    "queued": "Queued",
+    "build": "Building",
+    "review": "Review",
+    "ci": "CI",
+    "merged": "Merged",
+    "measured": "Measured",
+}
+STATUS_TO_STAGE = {
+    "queued": "queued",
+    "running": "build",
+    "review": "review",
+    "blocked": "review",
+    "failed": "ci",
+    "done": "measured",
+}
 STUCK_AFTER = timedelta(hours=2)
 
 
@@ -109,6 +127,76 @@ def violation(executor: str) -> bool:
 
 def executor_pool(executor: str) -> str:
     return (executor.strip().split(maxsplit=1) or ["unassigned"])[0].lower()
+
+
+def task_stage(task: dict[str, Any]) -> str:
+    requested = task.get("stage")
+    if task.get("pr") is not None and requested in PIPELINE_STAGES:
+        return requested
+    return STATUS_TO_STAGE.get(task.get("status", "queued"), "queued")
+
+
+def task_health(task: dict[str, Any]) -> str:
+    if task.get("status") == "blocked" or task.get("health") == "blocked":
+        return "blocked"
+    if task.get("health") == "question" or task.get("question"):
+        return "question"
+    return "healthy"
+
+
+def executor_glyph(executor: str) -> str:
+    pool = executor_pool(executor)
+    return pool[:1].upper() or "?"
+
+
+def pipeline_svg(tasks: dict[str, dict[str, Any]]) -> str:
+    columns = {stage: [] for stage in PIPELINE_STAGES}
+    for task_id, task in tasks.items():
+        columns[task_stage(task)].append((task_id, task))
+
+    node_height = 58
+    stage_header_height = 48
+    max_rows = max((len(nodes) for nodes in columns.values()), default=0)
+    svg_height = max(300, 54 + stage_header_height + max_rows * node_height + 18)
+    mobile_rows = sum(1 + len(nodes) for nodes in columns.values())
+    svg_height = max(svg_height, 54 + mobile_rows * 48)
+
+    nodes = []
+    for stage in PIPELINE_STAGES:
+        stage_nodes = []
+        for task_id, task in columns[stage]:
+            health = task_health(task)
+            pool = executor_pool(task.get("executor", "unassigned"))
+            stage_nodes.append(
+                f'<div class="pipeline-node node-{health}" data-task-id="{esc(task_id)}" '
+                f'data-stage="{esc(stage)}" data-executor-pool="{esc(pool)}" '
+                f'aria-label="{esc(task.get("title", task_id))} · {esc(STAGE_LABELS[stage])}">'
+                f'<span class="executor-glyph" aria-hidden="true">{esc(executor_glyph(task.get("executor", "unassigned")))}</span>'
+                f'<span class="pipeline-node-copy"><strong>{esc(task.get("title", task_id))}</strong>'
+                f'<small>{esc(pool)} · {esc(health)}</small></span></div>'
+            )
+        nodes.append(
+            f'<section class="pipeline-stage" data-stage="{esc(stage)}">'
+            f'<h3>{esc(STAGE_LABELS[stage])}</h3>'
+            f'<div class="pipeline-nodes">{"".join(stage_nodes) or "<span class=\"pipeline-empty\">—</span>"}</div>'
+            "</section>"
+        )
+
+    arrows = "".join(
+        f'<path class="pipeline-arrow" d="M{x} 34 H{x + 142}" />'
+        for x in (188, 380, 572, 764, 956)
+    )
+    return (
+        f'<svg class="pipeline-diagram" viewBox="0 0 1200 {svg_height}" role="img" '
+        f'aria-labelledby="pipeline-title pipeline-desc" preserveAspectRatio="xMidYMin meet">'
+        '<title id="pipeline-title">Task delivery pipeline</title>'
+        '<desc id="pipeline-desc">Tasks move from queued through building, review, CI, merged, and measured.</desc>'
+        f'<g aria-hidden="true">{arrows}</g>'
+        f'<foreignObject class="pipeline-foreign-object" x="20" y="52" width="1160" height="{svg_height - 52}">'
+        '<div class="pipeline-grid">'
+        f'{"".join(nodes)}'
+        '</div></foreignObject></svg>'
+    )
 
 
 def checks_summary(payload: dict[str, Any]) -> str:
@@ -236,6 +324,7 @@ def render_state(state: dict[str, Any]) -> str:
         f'<div class="bar-row"><span>{esc(status[:3].upper())}</span><div class="bar"><i style="width:{int((count / max_count) * 100)}%"></i></div><b>{count}</b></div>'
         for status, count in zip(STATUSES, counts)
     )
+    pipeline = pipeline_svg(tasks)
     updated = state.get("updated_at", stamp())
 
     return f'''<!doctype html>
@@ -250,10 +339,12 @@ h1,h2,h3,strong,.eyebrow {{ font-family:"Arial Narrow","Avenir Next Condensed",u
 .question,.task-card,.deliverable,.ledger-row {{ border:1px solid var(--line); border-radius:12px; background:rgba(3,14,28,.4); padding:13px 14px; }} .question + .question,.task-card + .task-card,.deliverable + .deliverable {{ margin-top:10px; }} .question-title {{ font-weight:750; }} .default {{ margin-top:7px; color:#d6e2ed; font-size:.9rem; }} .default span {{ color:var(--orange); font-size:.68rem; font-weight:800; letter-spacing:.12em; }} .question-time,.task-card time {{ display:block; color:var(--muted); font-size:.72rem; margin-top:8px; }}
 .status-groups {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }} .status-group {{ min-width:0; }} .status-heading {{ display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--line); padding-bottom:8px; margin-bottom:10px; }} .status-heading span {{ color:var(--blue); font-weight:800; }} .task-top {{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }} .task-id {{ color:var(--muted); font-size:.72rem; }} .task-meta {{ display:flex; flex-wrap:wrap; gap:5px 12px; color:#bfd1e1; font-size:.78rem; margin-top:7px; }} .task-note {{ color:var(--muted); font-size:.82rem; margin:.6rem 0 0; }} .badge {{ border-radius:99px; padding:2px 7px; font-size:.61rem; font-weight:900; letter-spacing:.08em; }} .danger {{ background:rgba(255,107,95,.18); color:var(--red); }}
 .board-visual {{ display:grid; grid-template-columns:minmax(0,1fr) 260px; gap:20px; align-items:center; margin-bottom:18px; }} .bars {{ min-width:0; }} .bar-row {{ display:grid; grid-template-columns:38px minmax(0,1fr) 24px; align-items:center; gap:9px; color:var(--muted); font-size:.67rem; font-weight:800; }} .bar-row + .bar-row {{ margin-top:7px; }} .bar {{ height:7px; border-radius:99px; background:#102944; overflow:hidden; }} .bar i {{ display:block; height:100%; border-radius:99px; background:linear-gradient(90deg,var(--blue),var(--orange)); }} .board-visual svg {{ width:100%; height:auto; }}
+.pipeline-panel {{ margin-top:24px; }} .pipeline-diagram {{ display:block; width:100%; height:auto; overflow:visible; }} .pipeline-arrow {{ fill:none; stroke:var(--orange); stroke-width:2; stroke-linecap:round; stroke-dasharray:5 7; opacity:.65; }} .pipeline-grid {{ display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:10px; width:100%; }} .pipeline-stage {{ min-width:0; min-height:92px; padding:10px; border:1px solid var(--line); border-radius:12px; background:rgba(3,14,28,.45); }} .pipeline-stage h3 {{ color:var(--orange); font-size:.68rem; margin:0 0 9px; }} .pipeline-nodes {{ display:grid; gap:8px; }} .pipeline-node {{ display:flex; align-items:center; gap:8px; min-width:0; padding:8px; border:1px solid color-mix(in srgb,var(--node-accent) 60%,transparent); border-radius:10px; background:color-mix(in srgb,var(--node-accent) 12%,rgba(3,14,28,.8)); color:var(--ink); }} .pipeline-node-copy {{ display:grid; min-width:0; gap:2px; }} .pipeline-node-copy strong,.pipeline-node-copy small {{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }} .pipeline-node-copy strong {{ font-size:.74rem; }} .pipeline-node-copy small {{ color:var(--muted); font-size:.61rem; text-transform:uppercase; letter-spacing:.06em; }} .executor-glyph {{ display:grid; flex:0 0 22px; width:22px; height:22px; place-items:center; border-radius:50%; background:var(--node-accent); color:#06101e; font-size:.67rem; font-weight:900; }} .node-healthy {{ --node-accent:var(--green); }} .node-question {{ --node-accent:var(--orange); }} .node-blocked {{ --node-accent:var(--red); animation:block-pulse 2.2s ease-in-out infinite; }} .pipeline-empty {{ color:var(--muted); font-size:.8rem; }}
 .ledger-row {{ display:flex; align-items:center; gap:12px; }} .ledger-row + .ledger-row {{ margin-top:8px; }} .ledger-row strong {{ margin-left:auto; color:var(--blue); }} .ledger-row em {{ color:var(--red); font-size:.67rem; font-style:normal; font-weight:800; letter-spacing:.04em; }} .empty {{ color:var(--muted); margin:0; }}
-.pulse {{ animation:pulse 2.8s ease-in-out infinite; }} @keyframes pulse {{ 0%,100% {{ box-shadow:0 0 0 0 rgba(242,107,29,0); }} 50% {{ box-shadow:0 0 0 5px rgba(242,107,29,.08); }} }} @media (prefers-reduced-motion:reduce) {{ .pulse {{ animation:none; }} }}
-@media (max-width:900px) {{ .status-groups {{ grid-template-columns:repeat(2,minmax(0,1fr)); }} .board-visual {{ grid-template-columns:1fr 190px; }} }} @media (max-width:700px) {{ .shell {{ padding-top:20px; }} .panel {{ padding:16px; border-radius:14px; }} .status-groups,.board-visual {{ grid-template-columns:1fr; }} .board-visual svg {{ max-height:100px; }} .task-meta {{ display:grid; }} }}
+.pulse {{ animation:pulse 2.8s ease-in-out infinite; }} @keyframes pulse {{ 0%,100% {{ box-shadow:0 0 0 0 rgba(242,107,29,0); }} 50% {{ box-shadow:0 0 0 5px rgba(242,107,29,.08); }} }} @keyframes block-pulse {{ 0%,100% {{ box-shadow:0 0 0 0 rgba(255,107,95,0); }} 50% {{ box-shadow:0 0 0 5px rgba(255,107,95,.2); }} }} @media (prefers-reduced-motion:reduce) {{ .pulse,.node-blocked {{ animation:none; }}}}
+@media (max-width:900px) {{ .status-groups {{ grid-template-columns:repeat(2,minmax(0,1fr)); }} .board-visual {{ grid-template-columns:1fr 190px; }} }} @media (max-width:700px) {{ .shell {{ padding-top:20px; }} .panel {{ padding:16px; border-radius:14px; }} .status-groups,.board-visual {{ grid-template-columns:1fr; }} .board-visual svg {{ max-height:100px; }} .task-meta {{ display:grid; }} .pipeline-diagram {{ min-height:520px; }} .pipeline-arrow {{ display:none; }} .pipeline-grid {{ grid-template-columns:1fr; gap:8px; }} .pipeline-stage {{ display:grid; grid-template-columns:minmax(90px,1fr) minmax(0,3fr); align-items:start; gap:10px; }} .pipeline-stage h3 {{ margin:4px 0 0; }} }}
 </style></head><body><main class="shell"><header><div class="eyebrow">CARR · orchestrated work</div><h1>{esc(state.get("title", state["project"]))}</h1><p class="subhead">Project <strong>{esc(state["project"])}</strong> · live local board</p><div class="updated">{esc(elapsed_text(updated))} · {esc(local_updated(updated))}</div></header>
+<section class="panel pipeline-panel"><div class="panel-head"><h2>Delivery pipeline</h2><span class="count">{len(tasks)} tasks</span></div>{pipeline}</section>
 <div class="panels">
 <section class="panel"><div class="panel-head"><h2>Questions waiting on Joe</h2><span class="count">{len(waiting)}</span></div>{question_cards}</section>
 <section class="panel"><div class="panel-head"><h2>Stuck</h2><span class="count">{len(stuck)}</span></div>{stuck_cards}</section>
@@ -296,16 +387,24 @@ def command_init(args: argparse.Namespace) -> None:
 
 def command_task(args: argparse.Namespace) -> None:
     state = read_state(args.project)
+    if args.stage and args.pr is None:
+        raise SystemExit("--stage requires --pr")
     task_time = stamp()
-    state.setdefault("tasks", {})[args.task_id] = {
+    prior = state.setdefault("tasks", {}).get(args.task_id, {})
+    task = {
         "title": args.title,
         "status": args.status,
         "executor": args.executor,
         "pr": args.pr,
         "note": args.note,
-        "created_at": state.get("tasks", {}).get(args.task_id, {}).get("created_at", task_time),
+        "created_at": prior.get("created_at", task_time),
         "updated_at": task_time,
     }
+    if args.stage:
+        task["stage"] = args.stage
+    if args.health != "healthy":
+        task["health"] = args.health
+    state["tasks"][args.task_id] = task
     write_and_render(state)
 
 
@@ -360,6 +459,8 @@ def parser() -> argparse.ArgumentParser:
     task.add_argument("--status", required=True, choices=STATUSES)
     task.add_argument("--executor", required=True)
     task.add_argument("--pr", type=int)
+    task.add_argument("--stage", choices=PR_STAGES)
+    task.add_argument("--health", choices=("healthy", "question", "blocked"), default="healthy")
     task.add_argument("--note")
     task.set_defaults(func=command_task)
     ask = commands.add_parser("ask")

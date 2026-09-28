@@ -130,6 +130,85 @@ class ProgressBoardCLI(unittest.TestCase):
         self.assertNotRegex(html, r"https?://")
         self.assertNotIn("<script src=", html)
 
+    def test_pipeline_svg_has_one_node_per_task_and_places_each_node(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board(
+            "task",
+            "demo",
+            "queued-task",
+            "--title",
+            "Queued task",
+            "--status",
+            "queued",
+            "--executor",
+            "codex gpt-5.6-luna high",
+        )
+        self.run_board(
+            "task",
+            "demo",
+            "ci-task",
+            "--title",
+            "CI task",
+            "--status",
+            "running",
+            "--executor",
+            "codex gpt-5.6-luna high",
+            "--pr",
+            "42",
+            "--stage",
+            "ci",
+        )
+        self.run_board(
+            "task",
+            "demo",
+            "blocked-task",
+            "--title",
+            "Blocked task",
+            "--status",
+            "blocked",
+            "--executor",
+            "codex gpt-5.6-luna high",
+            "--pr",
+            "43",
+            "--stage",
+            "merged",
+        )
+        self.run_board(
+            "task",
+            "demo",
+            "question-task",
+            "--title",
+            "Question task",
+            "--status",
+            "review",
+            "--executor",
+            "codex gpt-5.6-luna high",
+            "--pr",
+            "44",
+            "--stage",
+            "measured",
+            "--health",
+            "question",
+        )
+
+        state = self.read_state("demo")
+        self.assertEqual(state["tasks"]["ci-task"]["stage"], "ci")
+        self.assertEqual(state["tasks"]["blocked-task"]["stage"], "merged")
+        html = (self.root / "boards" / "demo.html").read_text()
+
+        self.assertEqual(html.count('class="pipeline-node '), 4)
+        self.assertIn('data-task-id="queued-task" data-stage="queued"', html)
+        self.assertIn('data-task-id="ci-task" data-stage="ci"', html)
+        self.assertIn('data-task-id="blocked-task" data-stage="merged"', html)
+        self.assertIn('data-task-id="question-task" data-stage="measured"', html)
+        for label in ("Queued", "Building", "Review", "CI", "Merged", "Measured"):
+            self.assertIn(label, html)
+        self.assertIn("node-blocked", html)
+        self.assertIn("node-question", html)
+        self.assertIn("executor-glyph", html)
+        self.assertIn("prefers-reduced-motion", html)
+        self.assertIn("pipeline-grid", html)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
