@@ -17,6 +17,7 @@ Second mode, added 2026-08-02:
 classifies scheduled tasks by whether a firing window has actually PASSED, so a
 brand-new task is never mistaken for a broken one. See the scheduler section below.
 """
+import importlib.util
 import json, os, sys, glob, time, re, subprocess, calendar
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
@@ -1510,6 +1511,18 @@ def _canonical_health():
                 rc = _red("repo_loose_work", f"{len(_actionable)} actionable path(s)", count=len(_actionable))
 
     if CANONICAL_SECTION in ("all", "credentials"):
+        # The source log is canonical across worktrees. The row carries its
+        # response action on both OK and WARN, and the helper owns one loop.
+        try:
+            _spend_path = os.path.join(REPO_ROOT, "ops", "jev_spend_health.py")
+            _spend_spec = importlib.util.spec_from_file_location("jev_spend_health", _spend_path)
+            jev_spend_health = importlib.util.module_from_spec(_spend_spec)
+            _spend_spec.loader.exec_module(jev_spend_health)
+            print("  " + jev_spend_health.check_spend())
+        except Exception as exc:
+            print(f"  UNAVAILABLE jev spend — {type(exc).__name__}; "
+                  "on breach: open/update one dedup loop · owner orchestrator · "
+                  "remediation find caller in jev usage log · auto-clear when below threshold")
         # ── credential health (added 2026-09-24) ────────────────────────────
         # Daily liveness lane for every credential CARR needs to run
         # unattended — wrangler/Cloudflare, Neon, the two MCP machine-bearer
