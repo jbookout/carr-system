@@ -10,6 +10,7 @@ import io
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import threading
@@ -1071,14 +1072,55 @@ check("already-loaded layer0 rules are not redelivered but build advice remains"
       and layer0_runner.calls == [])
 
 failed_semantic_output = rail.process(
-    prompt_payload(), runner=Runner(returncode=1, stderr="token=SUPER-SECRET"),
+    prompt_payload(client="codex"),
+    runner=Runner(returncode=1, stderr="token=SUPER-SECRET"),
     adviser=fake_adviser, build_adviser=fake_build_adviser)
 failed_build_receipt = json.loads(context(failed_semantic_output))
 check("semantic rule failure preserves a validated visible build receipt",
       failed_build_receipt["schema"] == contract.BUILD_RECEIPT_SCHEMA
       and failed_build_receipt["semantic_rule_delivery"] == "failed"
+      and failed_build_receipt["client"] == "codex"
+      and failed_build_receipt["turn_id"] == "turn-prompt"
+      and failed_build_receipt["failure_stage"] == "selector_call"
+      and failed_build_receipt["failure_reason"] == "nonzero"
       and contract.validate_build_receipt(failed_build_receipt, repo=REPO)
       and "SUPER-SECRET" not in context(failed_semantic_output))
+
+for name, runner, stage, reason in (
+        ("timeout", Runner(error=subprocess.TimeoutExpired("secret-command", 1)),
+         "selector_call", "timeout"),
+        ("not-ok", Runner(result={"ok": False, "detail": "SUPER-SECRET"}),
+         "selector_call", "not_ok"),
+        ("invalid-store-response", Runner(result=gen_selector_result(
+            packs=semantic_packs, ids=[], mode="shadow")),
+         "selector_response", "invalid_data")):
+    output = rail.process(prompt_payload(client="codex"), runner=runner,
+                          adviser=fake_adviser, build_adviser=fake_build_adviser)
+    row = json.loads(context(output))
+    check("Codex semantic failure classifies " + name + " without exception text",
+          row["failure_stage"] == stage and row["failure_reason"] == reason
+          and contract.validate_build_receipt(row, repo=REPO)
+          and "SUPER-SECRET" not in context(output)
+          and "secret-command" not in context(output))
+
+def fail_adviser(_situation):
+    raise RuntimeError("SUPER-SECRET")
+
+adviser_failed = json.loads(context(rail.process(
+    prompt_payload(client="codex"), runner=Runner(), adviser=fail_adviser,
+    build_adviser=fake_build_adviser)))
+check("semantic adviser failures carry a redacted stage and reason",
+      adviser_failed["failure_stage"] == "semantic_adviser"
+      and adviser_failed["failure_reason"] == "invalid_data"
+      and "SUPER-SECRET" not in json.dumps(adviser_failed))
+
+for wrong_stage, wrong_reason in (("unbounded-secret", "nonzero"),
+                                  ("selector_call", "unbounded-secret")):
+    tampered = dict(failed_build_receipt, failure_stage=wrong_stage,
+                    failure_reason=wrong_reason)
+    tampered["receipt_id"] = contract.receipt_id(tampered)
+    check("unrecognized failure taxonomy is rejected",
+          not contract.validate_build_receipt(tampered, repo=REPO))
 
 # The verdict cache is keyed on the hook payload's OWN session id — never the
 # environment, never a shared default — so the default adviser must carry it.

@@ -370,6 +370,14 @@ def _generalized_selector_args(packs: list[str], ids: list[str]) -> str:
     return canonical({"packs": packs, "rule_ids": ids}).decode("utf-8")
 
 
+class SelectorError(RuntimeError):
+    """A fixed, non-sensitive reason for a failed standing-context call."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
 def _run_generalized_selector(packs: list[str], ids: list[str], runner: Callable) -> dict:
     command = [str(REPO / "run.sh"), "call", "standing-context",
                _generalized_selector_args(packs, ids)]
@@ -377,13 +385,13 @@ def _run_generalized_selector(packs: list[str], ids: list[str], runner: Callable
     result = runner(command, cwd=str(REPO), capture_output=True, text=True,
                     timeout=timeout, check=False, env=_selector_environment())
     if result.returncode != 0:
-        raise RuntimeError("selector returned nonzero")
+        raise SelectorError("nonzero")
     try:
         response = json.loads(result.stdout)
     except (TypeError, ValueError) as exc:
-        raise RuntimeError("selector returned malformed JSON") from exc
+        raise SelectorError("invalid_json") from exc
     if not isinstance(response, dict) or response.get("ok") is not True:
-        raise RuntimeError("selector response was not ok")
+        raise SelectorError("not_ok")
     return response
 
 
@@ -533,7 +541,9 @@ def _semantic_receipt(payload: dict, response: dict, selected: list[dict],
     return row
 
 
-def _build_receipt(payload: dict, advisory: dict, status: str) -> dict:
+def _build_receipt(payload: dict, advisory: dict, status: str,
+                   failure_stage: str | None = None,
+                   failure_reason: str | None = None) -> dict:
     client = _client(payload)
     row = {
         "schema": BUILD_RECEIPT_SCHEMA,
@@ -550,6 +560,9 @@ def _build_receipt(payload: dict, advisory: dict, status: str) -> dict:
         "semantic_rule_delivery": status,
         "advisory": advisory,
     }
+    if status == "failed":
+        row["failure_stage"] = failure_stage
+        row["failure_reason"] = failure_reason
     row["receipt_id"] = receipt_id(row)
     if not validate_build_receipt(row, repo=REPO):
         raise RuntimeError("build receipt failed local validation")
@@ -573,11 +586,13 @@ def _process_prompt(payload: dict, runner: Callable,
             raise RuntimeError("build adviser returned malformed advice")
     except Exception:
         build = _build_unavailable()
+    failure_stage = "semantic_adviser"
     try:
         selected = (adviser(prompt) if adviser is not None
                     else _semantic_adviser(prompt, payload["session_id"]))
         if not isinstance(selected, list):
             raise RuntimeError("semantic selector returned malformed advice")
+        failure_stage = "candidate_selection"
         candidate_ids: list[str] = []
         for row in selected:
             candidate_id = row.get("id")
@@ -591,13 +606,25 @@ def _process_prompt(payload: dict, runner: Callable,
         selected = [by_id[short] for short in ids]
         if any(row.get("probability") is None for row in selected):
             raise RuntimeError("semantic selector omitted probability")
+        failure_stage = "selector_call"
         response = _run_generalized_selector(packs, ids, runner)
+        failure_stage = "selector_response"
+        _validate_generalized_selector(response, packs, ids)
+        failure_stage = "receipt_assembly"
         build_receipt = _build_receipt(payload, build, "delivered")
         receipt = _semantic_receipt(
             payload, response, selected, packs, ids, build_receipt)
         return _context(canonical(receipt).decode("utf-8"), "UserPromptSubmit")
-    except Exception:
-        receipt = _build_receipt(payload, build, "failed")
+    except Exception as exc:
+        if isinstance(exc, SelectorError):
+            failure_reason = exc.reason
+        elif isinstance(exc, subprocess.TimeoutExpired):
+            failure_reason = "timeout"
+        elif isinstance(exc, (RuntimeError, TypeError, ValueError, KeyError)):
+            failure_reason = "invalid_data"
+        else:
+            failure_reason = "exception"
+        receipt = _build_receipt(payload, build, "failed", failure_stage, failure_reason)
         return _context(canonical(receipt).decode("utf-8"), "UserPromptSubmit")
 
 

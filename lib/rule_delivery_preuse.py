@@ -87,6 +87,13 @@ BUILD_RECEIPT_KEYS = frozenset({
     "prompt_sha256", "adviser_digest", "configuration_digest",
     "source_digest", "semantic_rule_delivery", "advisory",
 })
+BUILD_FAILURE_STAGES = frozenset({
+    "semantic_adviser", "candidate_selection", "selector_call",
+    "selector_response", "receipt_assembly",
+})
+BUILD_FAILURE_REASONS = frozenset({
+    "timeout", "nonzero", "invalid_json", "not_ok", "invalid_data", "exception",
+})
 POSTWRITE_RECEIPT_SCHEMA = "jev-post-write-review/v2"
 POSTWRITE_RECEIPT_KEYS = frozenset({
     "schema", "receipt_id", "client", "session_id", "turn_id", "tool_use_id",
@@ -191,7 +198,9 @@ def validate_build_advisory(row: object, *, prompt_sha256: str) -> bool:
 
 def validate_build_receipt(row: object, *, repo: Path) -> bool:
     """Validate the turn-bound build receipt even when no semantic rule binds."""
-    if not isinstance(row, dict) or set(row) != BUILD_RECEIPT_KEYS:
+    if not isinstance(row, dict) or set(row) not in {
+            BUILD_RECEIPT_KEYS,
+            BUILD_RECEIPT_KEYS | {"failure_stage", "failure_reason"}}:
         return False
     if row.get("schema") != BUILD_RECEIPT_SCHEMA:
         return False
@@ -207,6 +216,11 @@ def validate_build_receipt(row: object, *, repo: Path) -> bool:
         return False
     if row.get("semantic_rule_delivery") not in {
             "delivered", "not_applicable", "failed", "not_attempted_oversize"}:
+        return False
+    has_failure = "failure_stage" in row
+    if has_failure and (row["semantic_rule_delivery"] != "failed"
+                        or row["failure_stage"] not in BUILD_FAILURE_STAGES
+                        or row["failure_reason"] not in BUILD_FAILURE_REASONS):
         return False
     expected_config = digest({
         relative: file_sha256(repo / relative)
