@@ -4,7 +4,7 @@ declare v ops.scac_mutation_registry_version%rowtype; registration jsonb;
 begin
   if not exists(select 1 from public.schema_migrations where filename='0739_industry_events_scac_successor.sql' and sha256='e9484f5621f138982847b06b699c5a588689a3e6e83faa1bf33ff6093a100627') then
     raise exception 'Board answers v94 requires exact applied 0739'; end if;
-  if not exists(select 1 from public.schema_migrations where filename='0740_board_answers.sql' and sha256='e2910d8957cefc7e304ebff33d7d75ee5594d386e89339f771013e0b9b9e96ad') then
+  if not exists(select 1 from public.schema_migrations where filename='0740_board_answers.sql' and sha256='d51ae6240e2307c0c5db09ce24f2eecd57a8c2f0c309f4685a48c7b117ba4783') then
     raise exception 'Board answers v94 requires exact applied 0740'; end if;
   select * into v from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v93';
   if v.registry_digest is distinct from 'sha256:1e4583169639b4adb7afabd53b7c5bee724816352823170bf29eb8ea16039d66' or v.entry_count<>2449

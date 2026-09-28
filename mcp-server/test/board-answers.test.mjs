@@ -2,12 +2,16 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { TOOLS, ToolError } from "../src/tools.js";
+import { BOARD_ANSWER_WRITE_VERBS } from "../src/board-answers.js";
 
 const joe = {
   id: "10000000-0000-0000-0000-000000000002", slug: "joe", display: "Joe",
   human: true, via: "oauth-google", client_id: "doctorcre-app",
 };
 const robot = { ...joe, id: "10000000-0000-0000-0000-000000000009", slug: "board-job", human: false };
+const sponsoredRobot = { ...robot, slug: "codex", sponsoring_human_slug: "joe",
+  native_agent_verified: true };
+const dell = { ...joe, id: "10000000-0000-0000-0000-000000000003", slug: "dell", display: "Dell" };
 
 class Fake {
   constructor(plan = {}) { this.plan = plan; this.calls = []; }
@@ -22,8 +26,10 @@ class Fake {
 }
 
 test("board verbs expose typed versioned writes and a partner-only answer", () => {
-  for (const name of ["publish-board-snapshot", "ask-board-question", "revise-board-question",
-    "answer-board-question", "acknowledge-board-answer", "record-board-answer-applied"]) {
+  const writes = ["publish-board-snapshot", "ask-board-question", "revise-board-question",
+    "answer-board-question", "acknowledge-board-answer", "record-board-answer-applied"];
+  assert.deepEqual([...BOARD_ANSWER_WRITE_VERBS], writes);
+  for (const name of writes) {
     assert.equal(TOOLS[name]?.write, true, name);
     assert.ok(TOOLS[name].inputSchema.required.includes("idempotency_key"), name);
     assert.ok(TOOLS[name].inputSchema.required.includes("base_version"), name);
@@ -38,7 +44,7 @@ test("board verbs expose typed versioned writes and a partner-only answer", () =
 test("board snapshot publication is tenant scoped and refuses stale versions", async () => {
   const fake = new Fake({ "update board_snapshot": [] });
   await assert.rejects(
-    () => TOOLS["publish-board-snapshot"].handler(fake, robot, {
+    () => TOOLS["publish-board-snapshot"].handler(fake, sponsoredRobot, {
       board_id: "project", base_version: 1, snapshot: { title: "Project", tasks: {} },
       idempotency_key: "publish-1",
     }),
@@ -48,6 +54,86 @@ test("board snapshot publication is tenant scoped and refuses stale versions", a
   assert.match(sql, /organization_tenant_id/);
   assert.match(sql, /version/);
   assert.ok(params.includes("carr-internal"));
+});
+
+test("concurrent same-key board writes replay the first result", async () => {
+  let receipt = null, snapshot = null, unlock = null;
+  let firstRead;
+  const readStarted = new Promise(resolve => { firstRead = resolve; });
+  function client() {
+    let ownsLock = false;
+    return {
+      release() { if (ownsLock) { ownsLock = false; unlock?.(); unlock = null; } },
+      async query(sql, params = []) {
+        if (sql.includes("pg_advisory_xact_lock")) {
+          while (unlock) await new Promise(resolve => { const previous = unlock; unlock = () => { previous(); resolve(); }; });
+          ownsLock = true;
+          unlock = () => {};
+          return { rows: [] };
+        }
+        if (sql.includes("select request_hash, response from tool_call")) {
+          firstRead();
+          return { rows: receipt ? [receipt] : [] };
+        }
+        if (sql.includes("insert into board_snapshot")) {
+          await new Promise(resolve => setTimeout(resolve, 20));
+          if (snapshot) return { rows: [] };
+          snapshot = { id: "board-1", board_id: "project", version: 1 };
+          return { rows: [snapshot] };
+        }
+        if (sql.includes("insert into tool_call")) {
+          receipt = { request_hash: params[3], response: JSON.parse(params[4]) };
+          return { rows: [] };
+        }
+        return { rows: [] };
+      },
+    };
+  }
+  const args = { idempotency_key: "same-board-key", board_id: "project",
+    base_version: 0, snapshot: { title: "Project" } };
+  async function run(c) {
+    try { return await TOOLS["publish-board-snapshot"].handler(c, joe, args); }
+    finally { c.release(); }
+  }
+  const first = run(client());
+  await readStarted;
+  const second = run(client());
+  const [a, b] = await Promise.all([first, second]);
+  assert.equal(a.snapshot.id, "board-1");
+  assert.equal(b.replayed, true);
+  assert.deepEqual(b.snapshot, a.snapshot);
+});
+
+test("board answers and receipts refuse a different sponsor within the same tenant", async () => {
+  const answerId = "20000000-0000-0000-0000-000000000001";
+  const answer = { id: answerId, asker_ref: "orchestrator:project", answer_text: "Proceed" };
+  const fake = new Fake({
+    "from board_answer a where": params => params.includes("joe") ? [answer] : [],
+    "update board_answer a set received_at": params => params.includes("joe") ? [answer] : [],
+    "update board_answer a set applied_at": params => params.includes("joe") ? [answer] : [],
+  });
+  const args = { after_cursor: 0, asker_ref: "orchestrator:project" };
+  const own = await TOOLS["read-board-answers"].handler(fake, joe, args);
+  assert.equal(own.answers.length, 1);
+  const other = await TOOLS["read-board-answers"].handler(fake, dell, args);
+  assert.deepEqual(other.answers, []);
+  const read = fake.calls.find(([sql]) => sql.includes("from board_answer a where"));
+  assert.match(read[0], /sponsoring_human_slug/);
+  assert.deepEqual(read[1].slice(0, 3), ["carr-internal", "joe", "orchestrator:project"]);
+  await assert.rejects(() => TOOLS["acknowledge-board-answer"].handler(fake, dell,
+    { idempotency_key: "ack-cross-sponsor", answer_id: answerId,
+      asker_ref: "orchestrator:project", base_version: 1 }),
+  error => error instanceof ToolError && error.payload.error === "board_version_conflict");
+  await assert.rejects(() => TOOLS["record-board-answer-applied"].handler(fake, dell,
+    { idempotency_key: "apply-cross-sponsor", answer_id: answerId,
+      base_version: 2, effect_ref: "pr:1400" }),
+  error => error instanceof ToolError && error.payload.error === "board_version_conflict");
+  for (const statement of ["update board_answer a set received_at",
+    "update board_answer a set applied_at"]) {
+    const [sql, params] = fake.calls.find(([query]) => query.includes(statement));
+    assert.match(sql, /a\.sponsoring_human_slug=\$4/);
+    assert.equal(params[3], "dell");
+  }
 });
 
 test("answer uses the authenticated partner, never a caller supplied answered_by", async () => {
@@ -93,23 +179,23 @@ test("Received and Applied require exact versions and record the actor and effec
     "update board_answer a set received_at": [received],
     "update board_answer a set applied_at": [applied],
   });
-  const ack = await TOOLS["acknowledge-board-answer"].handler(fake, robot, {
+  const ack = await TOOLS["acknowledge-board-answer"].handler(fake, sponsoredRobot, {
     idempotency_key: "ack-1", answer_id: answerId,
     asker_ref: "orchestrator:project", base_version: 1,
   });
   assert.equal(ack.answer.status, "Received");
   const [ackSql, ackParams] = fake.calls.find(([sql]) => sql.includes("update board_answer a set received_at"));
   assert.match(ackSql, /received_for_ref/);
-  assert.match(ackSql, /version=\$5/);
-  assert.deepEqual(ackParams, [robot.id, "orchestrator:project", "carr-internal", answerId, 1]);
-  const result = await TOOLS["record-board-answer-applied"].handler(fake, robot, {
+  assert.match(ackSql, /version=\$6/);
+  assert.deepEqual(ackParams, [sponsoredRobot.id, "orchestrator:project", "carr-internal", "joe", answerId, 1]);
+  const result = await TOOLS["record-board-answer-applied"].handler(fake, sponsoredRobot, {
     idempotency_key: "applied-1", answer_id: answerId, base_version: 2,
     effect_ref: "pr:1400",
   });
   assert.equal(result.answer.status, "Applied");
   const [applySql, applyParams] = fake.calls.find(([sql]) => sql.includes("update board_answer a set applied_at"));
   assert.match(applySql, /received_at is not null/);
-  assert.deepEqual(applyParams, [robot.id, "pr:1400", "carr-internal", answerId, 2]);
+  assert.deepEqual(applyParams, [sponsoredRobot.id, "pr:1400", "carr-internal", "joe", answerId, 2]);
 });
 
 test("the board read leaves unanswered questions without a status", async () => {
@@ -124,16 +210,33 @@ test("the board read leaves unanswered questions without a status", async () => 
   assert.match(sql, /q\.current=true/);
 });
 
+test("the published board and its current questions use the authenticated sponsor", async () => {
+  const fake = new Fake({
+    "from board_snapshot": params => params.includes("joe") ? [{ board_id: "project" }] : [],
+    "from board_question q": params => params.includes("joe") ? [{ question_id: "q1" }] : [],
+  });
+  const own = await TOOLS["read-progress-board"].handler(fake, joe, { board_id: "project" });
+  const other = await TOOLS["read-progress-board"].handler(fake, dell, { board_id: "project" });
+  assert.equal(own.questions.length, 1);
+  assert.equal(other.snapshot, null);
+  assert.deepEqual(other.questions, []);
+  for (const [sql, params] of fake.calls.filter(([query]) =>
+    query.includes("from board_snapshot") || query.includes("from board_question q"))) {
+    assert.match(sql, /sponsoring_human_slug=\$2/);
+    assert.ok(params[1] === "joe" || params[1] === "dell");
+  }
+});
+
 test("read cursor and asker reference are both in the tenant scoped query", async () => {
   const fake = new Fake({ "from board_answer": [] });
-  const result = await TOOLS["read-board-answers"].handler(fake, robot,
+  const result = await TOOLS["read-board-answers"].handler(fake, sponsoredRobot,
     { after_cursor: 12, asker_ref: "orchestrator:project" });
   assert.deepEqual(result.answers, []);
   const [sql, params] = fake.calls.find(([statement]) => statement.includes("from board_answer"));
   assert.match(sql, /organization_tenant_id/);
   assert.match(sql, /asker_ref/);
   assert.match(sql, /cursor > /);
-  assert.deepEqual(params.slice(0, 3), ["carr-internal", "orchestrator:project", 12]);
+  assert.deepEqual(params.slice(0, 4), ["carr-internal", "joe", "orchestrator:project", 12]);
 });
 
 test("migration pairs the typed records with a sealed successor", () => {
@@ -146,7 +249,7 @@ test("migration pairs the typed records with a sealed successor", () => {
     assert.match(schema, new RegExp(`on public\\.${table} for each row execute function ops\\.scac_reference_monitor_guard\\(\\)`));
     assert.match(schema, new RegExp(`on public\\.${table} for each statement execute function ops\\.scac_reference_monitor_guard\\(\\)`));
   }
-  assert.match(schema, /unique \(organization_tenant_id,board_id,question_id,question_revision\)/i);
+  assert.match(schema, /unique \(organization_tenant_id,sponsoring_human_slug,board_id,question_id,question_revision\)/i);
   assert.match(seal, /scac-mutation-registry\.v94/);
   assert.match(seal,
     /\(grant_snapshot->>'entry_count'\)::integer=322 and\s+grant_snapshot->>'grant_digest'='sha256:c8ce3685983e4fbfd361f7b1e6fdac9b0974502bc32c979b4738bc6e651aa296'/);

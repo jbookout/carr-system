@@ -4,17 +4,19 @@
 create table public.board_snapshot (
   id uuid primary key default gen_random_uuid(),
   organization_tenant_id text not null check (length(btrim(organization_tenant_id)) > 0),
+  sponsoring_human_slug text not null check (sponsoring_human_slug in ('joe','dell')),
   board_id text not null check (board_id ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$'),
   version bigint not null default 1 check (version > 0),
   snapshot_json jsonb not null check (jsonb_typeof(snapshot_json) = 'object'),
   updated_by_actor_id uuid not null references public.actor(id),
   updated_at timestamptz not null default now(),
-  unique (organization_tenant_id, board_id)
+  unique (organization_tenant_id, sponsoring_human_slug, board_id)
 );
 
 create table public.board_question (
   id uuid primary key default gen_random_uuid(),
   organization_tenant_id text not null,
+  sponsoring_human_slug text not null check (sponsoring_human_slug in ('joe','dell')),
   board_id text not null,
   question_id text not null check (question_id ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$'),
   revision bigint not null check (revision > 0),
@@ -27,20 +29,21 @@ create table public.board_question (
   asked_by_actor_id uuid not null references public.actor(id),
   asked_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  foreign key (organization_tenant_id,board_id)
-    references public.board_snapshot (organization_tenant_id,board_id),
-  unique (organization_tenant_id,board_id,question_id,revision)
+  foreign key (organization_tenant_id,sponsoring_human_slug,board_id)
+    references public.board_snapshot (organization_tenant_id,sponsoring_human_slug,board_id),
+  unique (organization_tenant_id,sponsoring_human_slug,board_id,question_id,revision)
 );
 
 create unique index board_question_one_current
-  on public.board_question (organization_tenant_id,board_id,question_id) where current;
+  on public.board_question (organization_tenant_id,sponsoring_human_slug,board_id,question_id) where current;
 create index board_question_current_board
-  on public.board_question (organization_tenant_id,board_id,asked_at,question_id) where current;
+  on public.board_question (organization_tenant_id,sponsoring_human_slug,board_id,asked_at,question_id) where current;
 
 create table public.board_answer (
   id uuid primary key default gen_random_uuid(),
   cursor bigint generated always as identity unique,
   organization_tenant_id text not null,
+  sponsoring_human_slug text not null check (sponsoring_human_slug in ('joe','dell')),
   board_id text not null,
   question_id text not null,
   question_revision bigint not null,
@@ -57,9 +60,9 @@ create table public.board_answer (
   effect_ref text check (effect_ref is null or length(btrim(effect_ref)) > 0),
   default_overridden boolean not null default false,
   version bigint not null default 1 check (version between 1 and 3),
-  foreign key (organization_tenant_id,board_id,question_id,question_revision)
-    references public.board_question (organization_tenant_id,board_id,question_id,revision),
-  unique (organization_tenant_id,board_id,question_id,question_revision),
+  foreign key (organization_tenant_id,sponsoring_human_slug,board_id,question_id,question_revision)
+    references public.board_question (organization_tenant_id,sponsoring_human_slug,board_id,question_id,revision),
+  unique (organization_tenant_id,sponsoring_human_slug,board_id,question_id,question_revision),
   check ((received_at is null and received_by_actor_id is null and received_for_ref is null and version=1)
       or (received_at is not null and received_by_actor_id is not null and received_for_ref is not null and version>=2)),
   check ((applied_at is null and applied_by_actor_id is null and effect_ref is null and version<=2)
@@ -67,7 +70,7 @@ create table public.board_answer (
 );
 
 create index board_answer_asker_cursor
-  on public.board_answer (organization_tenant_id,asker_ref,cursor);
+  on public.board_answer (organization_tenant_id,sponsoring_human_slug,asker_ref,cursor);
 
 revoke all on public.board_snapshot,public.board_question,public.board_answer
   from public,carr_reader,carr_writer,carr_jobs,carr_authority;
