@@ -9,6 +9,7 @@ import inspect
 import json
 import pathlib
 import re
+import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -69,18 +70,68 @@ listing = mx.RS.join([
 ])
 original_osa = mx.osa
 try:
-    mx.osa = lambda script: listing
-    boxes = mx.list_mailboxes()
+    calls = []
+
+    def fake_osa(script, *args, timeout=0):
+        calls.append((script, args, timeout))
+        if script == mx.LIVENESS_SCRIPT:
+            return "1"
+        if script == mx.ACCOUNT_MAILBOX_SCRIPT:
+            return listing
+        raise AssertionError("unexpected mocked AppleScript")
+
+    mx.osa = fake_osa
+    boxes, status, slow_accounts = mx.list_mailboxes()
 finally:
     mx.osa = original_osa
 check("mailbox listing keeps Mail's indices while excluding junk",
       boxes == [(1, 1, "Synthetic Account", "Inbox"),
                 (1, 3, "Synthetic Account", "Sent Items")], boxes)
+check("mailbox listing probes liveness, then enumerates each account",
+      calls[0][0] == mx.LIVENESS_SCRIPT and
+      calls[1][0] == mx.ACCOUNT_MAILBOX_SCRIPT and
+      calls[1][1] == ("1",) and status == "ready" and slow_accounts == 0,
+      calls)
 check("mailbox enumeration performs no per-mailbox message count",
-      "count of messages" not in mx.LIST_SCRIPT and
-      "name of every mailbox of acct" in mx.LIST_SCRIPT)
+      "count of messages" not in mx.ACCOUNT_MAILBOX_SCRIPT and
+      "name of every mailbox of acct" in mx.ACCOUNT_MAILBOX_SCRIPT)
+
+# A short liveness timeout is classified separately from a slow account
+# enumeration. Both cases are mocked; this test never addresses Apple Mail.
+try:
+    def unresponsive_osa(script, *args, timeout=0):
+        if script == mx.LIVENESS_SCRIPT:
+            raise subprocess.TimeoutExpired("osascript", timeout)
+        raise AssertionError("account enumeration should not start after probe timeout")
+
+    mx.osa = unresponsive_osa
+    boxes, status, slow_accounts = mx.list_mailboxes()
+    check("liveness timeout is classified as mail_unresponsive",
+          boxes == [] and status == "mail_unresponsive" and slow_accounts == 0,
+          (boxes, status, slow_accounts))
+finally:
+    mx.osa = original_osa
+
+try:
+    def slow_account_osa(script, *args, timeout=0):
+        if script == mx.LIVENESS_SCRIPT:
+            return "2"
+        if script == mx.ACCOUNT_MAILBOX_SCRIPT:
+            if args == ("1",):
+                return listing
+            raise subprocess.TimeoutExpired("osascript", timeout)
+        raise AssertionError("unexpected mocked AppleScript")
+
+    mx.osa = slow_account_osa
+    boxes, status, slow_accounts = mx.list_mailboxes()
+    check("account timeout is classified as enumeration_slow",
+          len(boxes) == 2 and status == "enumeration_slow" and slow_accounts == 1,
+          (boxes, status, slow_accounts))
+finally:
+    mx.osa = original_osa
 check("mail capture AppleScript contains no outbound send command",
-      not re.search(r"\bsend\b", mx.LIST_SCRIPT + mx.EXTRACT_SCRIPT,
+      not re.search(r"\bsend\b", mx.LIVENESS_SCRIPT +
+                    mx.ACCOUNT_MAILBOX_SCRIPT + mx.EXTRACT_SCRIPT,
                     flags=re.IGNORECASE))
 
 # THE JOIN THAT MATTERS: every key the matcher reads off a message must be a key
