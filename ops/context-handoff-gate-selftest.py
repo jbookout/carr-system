@@ -3321,6 +3321,27 @@ def static_contract_cases():
     old_hooks = old_codex.get("hooks", {})
     current_hooks = current_codex.get("hooks", {})
     normalized_pretool = json.loads(json.dumps(current_hooks.get("PreToolUse")))
+    expected_boot = {
+        "matcher": ".*",
+        "hooks": [{
+            "type": "command",
+            "command": "{{REPO}}/.venv/bin/python {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/rule-boot-gate.py",
+            "timeout": 5,
+            "additionalContextLimit": 5000,
+        }],
+    }
+    actual_boot = normalized_pretool.pop(0) if normalized_pretool else None
+    check("Codex new boot hold group is exact", actual_boot == expected_boot)
+    old_pretool = old_hooks.get("PreToolUse", [])
+    if normalized_pretool and old_pretool:
+        expected_route = json.loads(json.dumps(old_pretool[0]))
+        expected_route["matcher"] = ".*"
+        expected_route["hooks"][0]["additionalContextLimit"] = 5000
+        check("Codex expanded rule route group is exact",
+              normalized_pretool[0] == expected_route)
+        normalized_pretool[0] = json.loads(json.dumps(old_pretool[0]))
+    else:
+        check("Codex expanded rule route group is exact", False)
     allowed_exec_matchers = {
         "^(Bash|exec_command|functions\\.exec)$": "^(Bash|functions\\.exec)$",
         "^(Bash|exec_command|Read|Grep|Glob|WebFetch|apply_patch|functions\\.(exec|apply_patch)|mcp__(carr|carr_records)__.*)$":
