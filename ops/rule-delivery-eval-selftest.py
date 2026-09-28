@@ -251,6 +251,33 @@ def test_deterministic_adapters(ev, cases, meta):
     layer0 = {rid for rid, row in meta.items() if row["layer"] == "layer0"}
     check("boot delivers exactly layer zero",
           all(out["rules"] == layer0 for out in deliveries["boot_layer0"].values()))
+    # The live standing-context boot is sourced from rule-classes, while the
+    # older enforcement-map layer0 is only a historical comparison path.
+    classes = json.loads((REPO / "ops" / "config" / "rule-classes.v1.json").read_text())
+    joe_boot = {rid for rid, row in classes["rules"].items()
+                if row["always_on"] and row.get("personal_to") in (None, "joe")}
+    dell_boot = {rid for rid, row in classes["rules"].items()
+                 if row["always_on"] and row.get("personal_to") in (None, "dell")}
+    check("live boot contract carries a nonempty always-on set", bool(joe_boot),
+          len(joe_boot))
+    check("boot adapter respects the sponsor's personal boundary",
+          ev.boot_always_on_ids(REPO) == joe_boot
+          and ev.boot_always_on_ids(REPO, sponsor="dell") == dell_boot
+          and all(classes["rules"][rid].get("personal_to") != "dell" for rid in joe_boot))
+    check("actual boot adapter is separate from legacy layer zero",
+          "boot_always_on" in deliveries, sorted(deliveries))
+    if "boot_always_on" in deliveries:
+        check("actual boot adapter delivers exactly Joe's always-on ids",
+              all(out["rules"] == joe_boot for out in deliveries["boot_always_on"].values()))
+        check("actual boot includes rules legacy layer zero omits",
+              {"5be2f462", "fa217e48"} <= joe_boot - layer0)
+        check("actual boot universe charges only its own rule set",
+              ev.universes(meta, ["boot_always_on"], boot_ids=joe_boot)["boot_always_on"]
+              == joe_boot)
+    ev.add_system_rows(deliveries)
+    check("scoped boot unions actual boot instead of legacy layer zero",
+          all(joe_boot <= out["rules"] for out in deliveries["system_scoped_boot"].values()),
+          sorted(deliveries["system_scoped_boot"]))
     after = _snapshot(guarded)
     check("deterministic run wrote no production log, cache or audit file",
           before == after, {k: (before[k], after[k]) for k in before if before[k] != after[k]})
@@ -336,7 +363,8 @@ def test_cli():
             data = json.loads(report.read_text(encoding="utf-8"))
             check("report names the system rows",
                   {"system_moment", "system_moment_plus_drift",
-                   "system_scoped_boot"} <= set(data["paths"]),
+                   "system_scoped_boot", "boot_always_on", "boot_layer0"}
+                  <= set(data["paths"]),
                   sorted(data["paths"]))
             check("report is marked dry-run", data.get("dry_run") is True)
 
