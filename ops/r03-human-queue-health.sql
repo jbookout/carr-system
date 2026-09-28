@@ -1,6 +1,9 @@
 -- Read-only V5-R03 standing check. Run with tools/db-tap.py sql on a database
 -- where 0736 has landed. Counts metadata only; no titles or bodies are returned.
 -- A persisted in-app row is not evidence that a human saw or acknowledged it.
+-- notification-feed uses a read-only writer connection; before read-call audit
+-- coverage of that route is deployed, zero tool_read_call rows do not establish
+-- zero feed reads. Even after coverage, a successful call does not prove sight.
 -- failed_attempts is historical; unresolved_failed_attempts counts failures
 -- only while their recipient still lacks an in-app row.
 with targeted as (
@@ -24,6 +27,7 @@ with targeted as (
   select e.*,
          n.id as notification_id,
          d.id as in_app_id,
+         device.id as device_id,
          nr.notification_id as read_id,
          exists (select 1 from public.event v
                   where v.subject_type='loop' and v.subject_id=e.id
@@ -68,6 +72,8 @@ with targeted as (
     ) n on true
     left join ops.notification_delivery d on d.notification_id=n.id
       and d.channel='in_app'
+    left join ops.notification_delivery device on device.notification_id=n.id
+      and device.channel='device'
     left join ops.notification_read nr on nr.notification_id=n.id
       and nr.recipient_actor=e.recipient_actor
 ), recipients as (
@@ -78,7 +84,16 @@ select r.slug as recipient,
        count(m.id) as eligible_actions,
        count(m.notification_id) as persisted_notifications,
        count(m.in_app_id) as in_app_rows,
+       count(m.device_id) as device_rows,
        count(m.read_id) as acknowledged,
+       (select count(*) from public.tool_read_call tr
+         where tr.verb='notification-feed' and tr.actor_slug=r.slug) as feed_call_observations,
+       (select count(*) from public.tool_read_call tr
+         where tr.verb='notification-feed' and tr.actor_slug=r.slug and tr.ok)
+         as successful_feed_call_observations,
+       (select max(tr.created_at) from public.tool_read_call tr
+         where tr.verb='notification-feed' and tr.actor_slug=r.slug)
+         as latest_feed_call_at,
        count(m.id) filter (where m.notification_id is null) as unnotified,
        count(m.id) filter (where m.in_app_id is null) as missing_in_app_rows,
        count(m.id) filter (where not m.has_source_event) as missing_source_event,
