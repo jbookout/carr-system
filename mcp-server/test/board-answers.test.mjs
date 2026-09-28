@@ -54,7 +54,7 @@ test("answer uses the authenticated partner, never a caller supplied answered_by
   const answer = { id: "answer-1", question_id: "q1", question_revision: 1,
     answer_text: "Proceed", answered_by: "joe", version: 1, status: "Sent" };
   const fake = new Fake({
-    "select request_hash, response from tool_call": [],
+    "select request_hash, response": [],
     "from board_question": [{ question_id: "q1", revision: 1, choices: [], allow_free_text: true,
       default_answer: null, asker_ref: "orchestrator:project" }],
     "insert into board_answer": [answer],
@@ -89,7 +89,7 @@ test("Received and Applied require exact versions and record the actor and effec
   const received = { id: answerId, version: 2, status: "Received" };
   const applied = { id: answerId, version: 3, status: "Applied", effect_ref: "pr:1400" };
   const fake = new Fake({
-    "select request_hash, response from tool_call": [],
+    "select request_hash, response": [],
     "update board_answer a set received_at": [received],
     "update board_answer a set applied_at": [applied],
   });
