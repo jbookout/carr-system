@@ -74,3 +74,18 @@ revoke all on public.board_snapshot,public.board_question,public.board_answer
 grant select on public.board_snapshot,public.board_question,public.board_answer to carr_reader,carr_writer;
 grant insert,update on public.board_snapshot,public.board_question,public.board_answer to carr_writer;
 grant usage,select on sequence public.board_answer_cursor_seq to carr_writer;
+
+create trigger scac_reference_monitor_guard_row before insert or update or delete
+on public.board_snapshot for each row execute function ops.scac_reference_monitor_guard();
+create trigger scac_reference_monitor_guard_truncate before truncate
+on public.board_snapshot for each statement execute function ops.scac_reference_monitor_guard();
+
+create trigger scac_reference_monitor_guard_row before insert or update or delete
+on public.board_question for each row execute function ops.scac_reference_monitor_guard();
+create trigger scac_reference_monitor_guard_truncate before truncate
+on public.board_question for each statement execute function ops.scac_reference_monitor_guard();
+
+create trigger scac_reference_monitor_guard_row before insert or update or delete
+on public.board_answer for each row execute function ops.scac_reference_monitor_guard();
+create trigger scac_reference_monitor_guard_truncate before truncate
+on public.board_answer for each statement execute function ops.scac_reference_monitor_guard();

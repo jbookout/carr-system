@@ -18728,7 +18728,7 @@ export function renderBoardAnswersRegistrySql(rows, predecessorSql = null) {
   const preflight = `do $board_answers_v94_preflight$\ndeclare v ops.scac_mutation_registry_version%rowtype; registration jsonb;\nbegin\n` +
     `  if not exists(select 1 from public.schema_migrations where filename='${predecessorPath.split("/").at(-1)}' and sha256='${predecessorDigest}') then\n` +
     `    raise exception 'Board answers v94 requires exact applied 0739'; end if;\n` +
-    `  if not exists(select 1 from public.schema_migrations where filename='0740_board_answers.sql' and sha256='172939331f781b4ffb3c4d1fbba508f3525c68091fb088df790c8c96f39a8e53') then\n` +
+    `  if not exists(select 1 from public.schema_migrations where filename='0740_board_answers.sql' and sha256='e2910d8957cefc7e304ebff33d7d75ee5594d386e89339f771013e0b9b9e96ad') then\n` +
     `    raise exception 'Board answers v94 requires exact applied 0740'; end if;\n` +
     `  select * into v from ops.scac_mutation_registry_version where registry_version='${REGISTRY_V93_VERSION}';\n` +
     `  if v.registry_digest is distinct from '${oldSeal.digest}' or v.entry_count<>${oldSeal.entryCount}\n` +

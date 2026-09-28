@@ -142,6 +142,10 @@ test("migration pairs the typed records with a sealed successor", () => {
   const migrate = readFileSync(new URL("../../tools/migrate.py", import.meta.url), "utf8");
   for (const table of ["board_snapshot", "board_question", "board_answer"])
     assert.match(schema, new RegExp(`create table public\\.${table}`));
+  for (const table of ["board_snapshot", "board_question", "board_answer"]) {
+    assert.match(schema, new RegExp(`on public\\.${table} for each row execute function ops\\.scac_reference_monitor_guard\\(\\)`));
+    assert.match(schema, new RegExp(`on public\\.${table} for each statement execute function ops\\.scac_reference_monitor_guard\\(\\)`));
+  }
   assert.match(schema, /unique \(organization_tenant_id,board_id,question_id,question_revision\)/i);
   assert.match(seal, /scac-mutation-registry\.v94/);
   assert.match(seal,
