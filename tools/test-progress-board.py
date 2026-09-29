@@ -458,6 +458,47 @@ if (future.hidden) process.exit(4);
                 self.run_board("render", "demo")
                 self.assertEqual(self.read_state("demo")["tasks"]["a"]["pr_phase"], expected)
 
+    def test_same_pr_number_in_two_repositories_and_legacy_state(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("task", "demo", "carr", "--title", "CARR fix", "--status", "running",
+                       "--executor", "Codex", "--pr", "85")
+        self.run_board("task", "demo", "app", "--title", "App fix", "--status", "running",
+                       "--executor", "Codex", "--pr", "85", "--repo", "jbookout/doctorcre-app")
+        state_path = self.root / "boards" / "demo.json"
+        state = json.loads(state_path.read_text())
+        self.assertEqual(state["tasks"]["carr"]["repo"], "jbookout/carr-system")
+        self.assertEqual(state["tasks"]["app"]["repo"], "jbookout/doctorcre-app")
+        del state["tasks"]["carr"]["repo"]  # JSON written before --repo existed
+        state_path.write_text(json.dumps(state))
+
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        gh = bin_dir / "gh"
+        gh.write_text("#!/usr/bin/env python3\nimport json, sys\n"
+                      "args = sys.argv\n"
+                      "assert args[1:4] == ['pr', 'view', '85']\n"
+                      "repo = args[args.index('--repo') + 1]\n"
+                      "assert repo in {'jbookout/carr-system', 'jbookout/doctorcre-app'}\n"
+                      "print(json.dumps({'state': 'MERGED' if repo.endswith('carr-system') else 'OPEN', "
+                      "'isDraft': False, 'headRefOid': 'a' * 40, 'author': {'login': 'builder'}, "
+                      "'statusCheckRollup': [{'conclusion': 'SUCCESS', 'status': 'COMPLETED'}], "
+                      "'comments': []}))\n")
+        gh.chmod(0o755)
+        self.env.pop("PROGRESS_BOARD_SKIP_GH")
+        self.env["PATH"] = str(bin_dir) + os.pathsep + self.env["PATH"]
+        self.run_board("render", "demo")
+        state = self.read_state("demo")
+        self.assertEqual(state["tasks"]["carr"]["pr_phase"], "Merged")
+        self.assertEqual(state["tasks"]["app"]["pr_phase"], "Awaiting review")
+        self.assertNotIn("repo", state["tasks"]["carr"])
+        html = (self.root / "boards" / "demo.html").read_text()
+        self.assertRegex(html, r'data-task-ref="carr"[^>]*>.*?jbookout/carr-system · PR 85')
+        self.assertRegex(html, r'data-task-ref="app"[^>]*>.*?jbookout/doctorcre-app · PR 85')
+        self.run_board("task", "demo", "app", "--stage", "live", "--evidence", "Observed live")
+        self.assertEqual(self.read_state("demo")["tasks"]["app"]["repo"], "jbookout/doctorcre-app")
+        self.assertIn('href="https://github.com/jbookout/doctorcre-app/pull/85"',
+                      (self.root / "boards" / "demo.html").read_text())
+
     def test_pr_derivation_and_offline_retention(self):
         self.run_board("init", "demo", "--title", "Demo")
         self.run_board("task", "demo", "a", "--title", "A", "--status", "running",
