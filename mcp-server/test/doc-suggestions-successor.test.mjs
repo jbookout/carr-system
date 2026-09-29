@@ -27,5 +27,5 @@ test('Doc suggestions follow the schedule registry without reusing its migration
   assert.match(runtime, /SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry\.v96"/);
   assert.match(runtime, /mcp-tool:suggest-doc-work/);
   assert.match(runtime, /mcp-tool:schedule-board/);
-  assert.match(read('mcp-server/src/mutation-registry.js'), /scac-mutation-registry\.v96\.generated\.js/);
+  assert.match(read('mcp-server/src/mutation-registry.js'), /scac-mutation-registry\.v97\.generated\.js/);
 });

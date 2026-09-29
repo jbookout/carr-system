@@ -30,6 +30,7 @@ const METHODS = new Map([
   ["/api/tours/share/issue", "POST"],
   ["/api/tours/share/rotate", "POST"],
   ["/api/tours/share/revoke", "POST"],
+  ["/api/tours/feedback", "GET"],
   ["/api/tours/pdf/render", "POST"],
   ["/api/tours/pdf/status", "GET"],
   ["/api/tours/pdf/review", "POST"],
@@ -132,6 +133,7 @@ const SEAMS = {
   "/api/tours/share/issue": "issueShareGrantFn",
   "/api/tours/share/rotate": "rotateShareGrantFn",
   "/api/tours/share/revoke": "revokeShareGrantFn",
+  "/api/tours/feedback": "readFeedbackFn",
   "/api/tours/pdf/render": "renderPdfFn",
   "/api/tours/pdf/status": "readPdfRenderFn",
   "/api/tours/pdf/review": "reviewPdfFn",
@@ -210,7 +212,7 @@ async function api(request, env, ctx, actor, session, dependencies, pathname) {
     if (pathname === "/api/tours/detail") {
       if ([...url.searchParams.keys()].length !== 1 || !validId(url.searchParams.get("tour_id"))) return json({ error: "invalid_request" }, 400);
       input = { tour_id: url.searchParams.get("tour_id") };
-    } else if (pathname === "/api/tours/projection/candidates") {
+    } else if (pathname === "/api/tours/projection/candidates" || pathname === "/api/tours/feedback") {
       if ([...url.searchParams.keys()].length !== 1 || !validId(url.searchParams.get("projection_id"))) return json({ error: "invalid_request" }, 400);
       input = { projection_id: url.searchParams.get("projection_id") };
     } else if (pathname === "/api/tours/pdf/status" || pathname === "/api/tours/pdf/preview" || pathname === "/api/tours/pdf/download") {

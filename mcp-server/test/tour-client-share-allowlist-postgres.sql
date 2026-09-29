@@ -714,7 +714,7 @@ begin
       'no_unresolved_route_critical_unknown_or_conflict',true,'optional_context_layers_progressively_disclosed',true,
       'ordered_offline_itinerary_verified',true,'phone_and_ipad_interaction_test',true,
       'provider_terms_attribution_expiry_and_cost_gate_passed',true),'receipt_digest','sha256:'||repeat('9',64)),v_actor_id);
-  v_share:=ops.issue_tour_share_grant('tour-client-share-proof','ac100000-0000-4000-8000-000000000001','sha256:'||repeat('a',64),'["view_packet","view_map"]',now()+interval '1 day','sha256:'||repeat('b',64),v_actor_id);
+  v_share:=ops.issue_tour_share_grant('tour-client-share-proof','ac100000-0000-4000-8000-000000000001','sha256:'||repeat('a',64),'["view_packet","view_map","shortlist","comment"]',now()+interval '1 day','sha256:'||repeat('b',64),v_actor_id);
   perform ops.exchange_tour_share_token('sha256:'||repeat('a',64),'sha256:'||repeat('e',64),now()+interval '1 day','sha256:'||repeat('f',64));
   v_packet:=ops.read_tour_share_packet('sha256:'||repeat('e',64));
   v_render:=ops.read_tour_packet_for_render('tour-client-share-proof','ac100000-0000-4000-8000-000000000001',v_actor_id);
@@ -6152,5 +6152,78 @@ begin
     raise exception 'code point sweep: a refusal reason differs from the JavaScript rule';
   end if;
 end $client_text_sweep$;
+
+-- Exercise client write, safe retry, cross-object refusal, broker readback,
+-- rotation and revocation on the sealed fixture without creating a live share.
+do $tour_feedback_proof$
+declare
+  v_tenant constant text := 'tour-client-share-proof';
+  v_projection constant uuid := 'ac100000-0000-4000-8000-000000000001';
+  v_session constant text := 'sha256:'||repeat('e',64);
+  v_projection_ref text;
+  v_property_ref text;
+  v_other_property_ref text;
+  v_actor text;
+  v_first jsonb;
+  v_again jsonb;
+  v_client jsonb;
+  v_broker jsonb;
+  v_old_grant uuid;
+  v_new_grant uuid;
+begin
+  select id::text into strict v_actor from public.actor where slug='joe' and active and kind='human';
+  select id into strict v_old_grant from ops.tour_share_grant where organization_tenant_id=v_tenant and projection_id=v_projection;
+  select 'projection:public:'||substr(encode(public.digest(organization_tenant_id||':'||id::text||':'||projection_digest,'sha256'),'hex'),1,32)
+    into strict v_projection_ref from ops.tour_public_projection where organization_tenant_id=v_tenant and id=v_projection;
+  v_client:=ops.read_tour_share_feedback(v_session);
+  if v_client->>'projection_ref' is distinct from v_projection_ref or jsonb_array_length(v_client->'items')<>1
+    or v_client::text ~* 'ac100000|b1000000|broker|evidence|token_digest|session_digest' then
+    raise exception 'client feedback bootstrap crossed its public boundary: %',v_client;
+  end if;
+  v_property_ref:=v_client->'items'->0->>'property_ref';
+  v_other_property_ref:='property:public:'||repeat('f',32);
+  if ops.write_tour_share_shortlist(v_session,v_projection_ref,v_other_property_ref,true,'d0000000-0000-4000-8000-000000000001') is not null
+     or ops.write_tour_share_comment(v_session,'projection:public:'||repeat('f',32),v_property_ref,'Wrong Tour','d0000000-0000-4000-8000-000000000002') is not null then
+    raise exception 'cross-object feedback write was admitted';
+  end if;
+  v_first:=ops.write_tour_share_shortlist(v_session,v_projection_ref,v_property_ref,true,'d0000000-0000-4000-8000-000000000003');
+  v_again:=ops.write_tour_share_shortlist(v_session,v_projection_ref,v_property_ref,true,'d0000000-0000-4000-8000-000000000003');
+  if v_first is null or v_again is distinct from v_first
+     or ops.write_tour_share_shortlist(v_session,v_projection_ref,v_property_ref,false,'d0000000-0000-4000-8000-000000000003') is not null then
+    raise exception 'shortlist retry was not idempotent';
+  end if;
+  v_first:=ops.write_tour_share_comment(v_session,v_projection_ref,v_property_ref,'Prefer this suite','d0000000-0000-4000-8000-000000000004');
+  v_again:=ops.write_tour_share_comment(v_session,v_projection_ref,v_property_ref,'Prefer this suite','d0000000-0000-4000-8000-000000000004');
+  if v_first is null or v_again is distinct from v_first
+     or ops.write_tour_share_comment(v_session,v_projection_ref,v_property_ref,'Changed text','d0000000-0000-4000-8000-000000000004') is not null then
+    raise exception 'comment retry was not idempotent';
+  end if;
+  if (select count(*) from ops.tour_share_feedback_event where organization_tenant_id=v_tenant and projection_id=v_projection)<>2 then
+    raise exception 'feedback ledger duplicated a safe retry';
+  end if;
+  v_client:=ops.read_tour_share_feedback(v_session);
+  v_broker:=ops.read_tour_feedback(v_tenant,v_projection,v_actor,null,100);
+  if v_client->'items'->0 ? 'shortlisted' or v_client->'items'->0 ? 'comments'
+     or v_client::text like '%Prefer this suite%'
+     or v_broker->'items'->0->>'shortlisted'<>'true' or v_broker->'items'->0->'comments'->0->>'comment'<>'Prefer this suite'
+     or v_broker->'items'->0->>'property_ref' is distinct from v_property_ref
+     or ops.read_tour_feedback('wrong-tenant',v_projection,v_actor,null,100) is not null
+     or ops.read_tour_feedback(v_tenant,v_projection,'',null,100) is not null then
+    raise exception 'client-to-broker feedback readback or tenant denial failed';
+  end if;
+  v_new_grant:=ops.rotate_tour_share_grant(v_tenant,v_old_grant,v_projection,'sha256:'||repeat('c',64),
+    '["view_packet","shortlist","comment"]',now()+interval '1 day','sha256:'||repeat('b',64),v_actor);
+  if ops.read_tour_share_feedback(v_session) is not null
+     or ops.write_tour_share_comment(v_session,v_projection_ref,v_property_ref,'After rotation','d0000000-0000-4000-8000-000000000005') is not null then
+    raise exception 'rotated grant still accepts an old session';
+  end if;
+  perform ops.exchange_tour_share_token('sha256:'||repeat('c',64),'sha256:'||repeat('d',64),now()+interval '1 day','sha256:'||repeat('7',64));
+  if ops.read_tour_share_feedback('sha256:'||repeat('d',64)) is null then raise exception 'rotated grant did not read'; end if;
+  perform ops.revoke_tour_share_grant(v_tenant,v_new_grant,'Client access ended','sha256:'||repeat('9',64),now(),v_actor);
+  if ops.read_tour_share_feedback('sha256:'||repeat('d',64)) is not null
+     or ops.write_tour_share_shortlist('sha256:'||repeat('d',64),v_projection_ref,v_property_ref,true,'d0000000-0000-4000-8000-000000000006') is not null then
+    raise exception 'revoked grant still accepts feedback';
+  end if;
+end $tour_feedback_proof$;
 
 rollback;
