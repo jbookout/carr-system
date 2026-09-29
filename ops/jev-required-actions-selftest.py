@@ -49,7 +49,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 
 from lib.jev_required_actions import (  # noqa: E402
-    current_turn_slice, evaluate_required_actions, facets_called_this_turn,
+    answered_calls_this_turn, current_turn_slice, evaluate_required_actions, facets_called_this_turn,
     find_build_advisory, is_real_user_turn, is_synthetic_continuation, jev_calls_log_mentions,
     latest_user_turn_index, load_jev_call_receipts, missing_facets,
     prompt_names_facet, prompt_names_not_applicable, refused_facets_in_texts,
@@ -1314,6 +1314,10 @@ def false_outage_refusal_does_not_satisfy_when_jev_answered():
 
 def main():
     outcomes = [
+        substantive_credit_controls(),
+        creation_call_still_requires_postwrite_receipt(),
+        unavailable_reason_controls(),
+        unavailable_notice_at_stop(),
         lib_reads_real_shape(),
         lib_reads_nested_message_delivery_shape(),
         lib_old_stdout_shape_no_longer_matches_anything_by_accident(),
@@ -1368,6 +1372,108 @@ def main():
     ]
     print(f"jev-required-actions-selftest: {sum(outcomes)}/{len(outcomes)} passed")
     return 0 if all(outcomes) else 1
+
+
+def unavailable_reason_controls():
+    ok = True
+    for label, attachment, expected in (
+            ("absent", None, "receipt_absent"),
+            ("malformed", build_advisory_attachment([]), "receipt_malformed"),
+            ("upstream billing failure", unavailable_advisory_attachment(), "billing_exhausted"),
+            ("historical reasonless failure", unavailable_advisory_attachment(), "receipt_malformed")):
+        if attachment:
+            receipt = json.loads(attachment["attachment"]["content"][0])
+            if label == "malformed":
+                receipt["advisory"] = {"required_actions": "broken"}
+            elif label == "upstream billing failure":
+                receipt["advisory"]["reason"] = "billing_exhausted"
+            attachment["attachment"]["content"] = [json.dumps(receipt)]
+        recs = [user("fix gate"), *([attachment] if attachment else [])]
+        result = evaluate_required_actions(recs, [], "/nonexistent.jsonl", "s1", [])
+        passed = result["status"] == "unavailable" and result.get("unavailable_reason") == expected
+        ok = ok and passed
+        print(f"{'PASS' if passed else 'FAIL'}  unavailable {label}: {result.get('unavailable_reason')}")
+    return ok
+
+
+def unavailable_notice_at_stop():
+    """Exercise the actual Stop stdout protocol, including an unrelated reopen."""
+    ok = True
+    for other_block in (False, True):
+        attachment = unavailable_advisory_attachment()
+        receipt = json.loads(attachment["attachment"]["content"][0])
+        receipt["advisory"]["reason"] = "billing_exhausted"
+        attachment["attachment"]["content"] = [json.dumps(receipt)]
+        records = ([user("build a seam"), attachment, assistant("Here is the plan.", 2)]
+                   if not other_block else
+                   [_unverified_done_claim(None, None)[0], attachment,
+                    *_unverified_done_claim(None, None)[1:]])
+        with tempfile.TemporaryDirectory(prefix="jev-degraded-") as state:
+            transcript = os.path.join(state, "transcript.jsonl")
+            with open(transcript, "w") as fh:
+                fh.write("".join(json.dumps(r) + "\n" for r in records))
+            proc = subprocess.run([sys.executable, os.path.join(REPO, "hooks", "completion-evidence-gate.py")],
+                                  input=json.dumps({"transcript_path": transcript, "session_id": "jev-degraded-notice",
+                                                    "cwd": REPO, "stop_hook_active": False}),
+                                  text=True, capture_output=True, timeout=30,
+                                  env={**os.environ, "CARR_STOP_LATCH_STATE": state})
+            body = json.loads(proc.stdout or "{}")
+            notice = body.get("systemMessage", "")
+            passed = (proc.returncode == 0 and "JEV DEGRADED" in notice
+                      and "billing_exhausted" in notice and "\n" not in notice
+                      and (body.get("decision") == "block") is other_block)
+            ok = ok and passed
+            print(f"{'PASS' if passed else 'FAIL'}  visible degraded Stop notice; other_block={other_block}: {notice!r}")
+    return ok
+
+
+def creation_call_still_requires_postwrite_receipt():
+    path = write_jev_calls_file([
+        {**call_row(facets=["semantic_creation"]), "caller": "jev_code_review"}])
+    ok = True
+    try:
+        for label, reviews, expected in (
+                ("missing review", [], ["semantic_creation"]),
+                ("unavailable review", [postwrite_attachment("unavailable", "lib/example.py")],
+                 ["semantic_creation"]),
+                ("wrong file reviewed", [postwrite_attachment("clear", "lib/other.py")],
+                 ["semantic_creation"]),
+                ("valid post-write review", [postwrite_attachment("clear", "lib/example.py")], []),
+                ("valid skipped review", [postwrite_attachment("skipped", "lib/example.py")], [])):
+            recs = [user("write the fix"), build_advisory_attachment(["semantic_creation"]),
+                    tool_use("Edit", {"file_path": "lib/example.py"}), *reviews]
+            result = evaluate_required_actions(recs, [], path, "s1", ["lib/example.py"], now=NOW)
+            passed = result["missing"] == expected
+            ok = ok and passed
+            print(f"{'PASS' if passed else 'FAIL'}  creation judgment plus {label}: missing={result['missing']}")
+    finally:
+        os.unlink(path)
+    return ok
+
+
+def substantive_credit_controls():
+    """Intake proves Jev answered; only successful substantive judgments pay actions."""
+    required = ["diagnosis", "semantic_creation", "verification_selection"]
+    recs = [user("fix the gate"), build_advisory_attachment(required)]
+    ok = True
+    for label, changes, expected in (
+            ("automatic intake", {"caller": "jev_build_advisory"}, required),
+            ("failed substantive call", {"caller": "jev_code_review", "ok": False}, required),
+            ("cache hit", {"caller": "jev_code_review", "cache_hit": True}, required),
+            ("unconfirmed success", {"caller": "jev_code_review", "ok": None}, required),
+            ("substantive judgment", {"caller": "jev_code_review"}, [])):
+        row = {**call_row(facets=required), **changes}
+        path = write_jev_calls_file([row])
+        try:
+            result = evaluate_required_actions(recs, [], path, "s1", [], now=NOW)
+        finally:
+            os.unlink(path)
+        passed = result["missing"] == sorted(expected)
+        if label == "automatic intake":
+            passed = passed and answered_calls_this_turn([row], "s1", NOW, now=NOW) == [row]
+        ok = ok and passed
+        print(f"{'PASS' if passed else 'FAIL'}  action credit: {label}; missing={result['missing']}")
+    return ok
 
 
 if __name__ == "__main__":

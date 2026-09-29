@@ -1296,6 +1296,9 @@ def jev_required_actions_check(session, recs):
         jev_audit({"ts": now(), "session": session, "event": "jev_receipt_unexplained",
                    "turn_key": result.get("turn_key"), "receipts": unexplained[:10]})
     jev_audit({"ts": now(), "session": session, **result})
+    if result["status"] == "unavailable":
+        return False, ("JEV DEGRADED — required-action enforcement unavailable "
+                       f"({result['unavailable_reason']}); continuing without action credit."), None
     if result["status"] != "required" or not result["missing"]:
         return False, "", None
     # LATCHED PER TURN, NOT PER SESSION: the identity includes this turn's own
@@ -1436,6 +1439,7 @@ def main():
         # so neither repeats. Named req_* so it cannot be confused with
         # #1228's jev_identity (the requirement-checklist reopen).
         req_blocked, req_reason, req_identity = jev_required_actions_check(session, recs)
+        notice = {"systemMessage": req_reason} if not req_blocked and req_reason else {}
 
         if not blocked:
             if req_blocked:
@@ -1446,8 +1450,11 @@ def main():
                 print(json.dumps({"decision": "block",
                                   "reason": jev_required_actions_message(req_reason)}))
                 return 0
+            messages = [notice["systemMessage"]] if notice else []
             if isinstance(jev, dict) and jev.get("advisory"):
-                print(json.dumps({"systemMessage": jev["advisory"]}))
+                messages.append(jev["advisory"])
+            if messages:
+                print(json.dumps({"systemMessage": "\n".join(messages)}))
             return 0
 
         # THE DUAL IS NEVER LATCHED. dual_block() returns before the tracked
@@ -1471,6 +1478,8 @@ def main():
                            "claim_identity": req_identity})
                     print(json.dumps({"decision": "block",
                                       "reason": jev_required_actions_message(req_reason)}))
+                elif notice:
+                    print(json.dumps(notice))
                 return 0
             record_fire(session, identity)
 
@@ -1491,7 +1500,7 @@ def main():
             "that invokes it, the loaded scheduler, a named recipient, real first use), "
             "or a sentence naming that clause as not done. Rewording the close does not "
             "help — silence blocks the same as \"done\". If your own record already shows "
-            "the work landed, do not close by calling it unbuilt.") + also}))
+            "the work landed, do not close by calling it unbuilt.") + also, **notice}))
         return 0
     except Exception:
         return 0

@@ -782,7 +782,11 @@ def answered_calls_this_turn(call_rows, session_id, boundary_ts, now=None):
 
 
 def credited_calls_this_turn(call_rows, session_id, boundary_ts, required, now=None):
-    """(covered facets, the receipt rows that credited at least one of them)."""
+    """Credit successful substantive judgments, excluding intake and cache reuse.
+
+    Intake still belongs in answered_calls_this_turn: it proves Jev answered,
+    but deciding which actions are required does not perform those actions.
+    """
     if not required or boundary_ts is None or not session_id:
         return set(), []
     if now is None:
@@ -792,7 +796,8 @@ def credited_calls_this_turn(call_rows, session_id, boundary_ts, required, now=N
     for row in call_rows:
         if row.get("session") != session_id and row.get("session_id") != session_id:
             continue
-        if row.get("ok") is False:
+        if (row.get("ok") is not True or row.get("cache_hit") is True
+                or row.get("caller") == "jev_build_advisory"):
             continue
         ts = row.get("ts")
         row_dt = None
@@ -902,9 +907,10 @@ def evaluate_required_actions(recs, window_texts, jev_calls_path, session_id, wr
          "turn_key": <str or None>}
 
     "unavailable" means fail-open: the advisory itself could not be read for
-    this turn, so nothing here is enforceable and the caller must log that
-    rather than reopen. "none" means a real, readable advisory that required
-    nothing this turn. "required" means at least one facet was required, and
+    this turn, so nothing here is enforceable and the caller must log and
+    visibly announce `unavailable_reason` rather than reopen. "none" means a
+    real, readable advisory that required nothing this turn. "required"
+    means at least one facet was required, and
     `missing` (possibly empty) lists the facets neither refused nor covered
     by a per-facet Jev call this turn, PLUS (folded in under the
     "semantic_creation" name) a receipt gap on a turn that wrote code.
@@ -915,8 +921,17 @@ def evaluate_required_actions(recs, window_texts, jev_calls_path, session_id, wr
     turn_slice = current_turn_slice(recs)
     required, turn_key = turn_required_facets(recs)
     if required is None:
+        receipt = prompt_advisory_receipt(recs)
+        unavailable_reason = "receipt_absent" if receipt is None else "receipt_malformed"
+        advisory = receipt.get("advisory") if isinstance(receipt, dict) else None
+        if (isinstance(advisory, dict)
+                and advisory.get("schema") == BUILD_ADVISORY_UNAVAILABLE_SCHEMA):
+            reason = advisory.get("reason")
+            if isinstance(reason, str) and reason.strip():
+                unavailable_reason = " ".join(reason.split())
         return {"status": "unavailable", "required": [], "missing": [],
-                "refused": [], "turn_key": turn_key}
+                "refused": [], "turn_key": turn_key,
+                "unavailable_reason": unavailable_reason}
     if not required:
         return {"status": "none", "required": [], "missing": [],
                 "refused": [], "turn_key": turn_key}
@@ -941,7 +956,6 @@ def evaluate_required_actions(recs, window_texts, jev_calls_path, session_id, wr
     refused = {f for f in refusals if f not in contradicted}
     missing = set(missing_facets(required, refused, called))
     if ("semantic_creation" in required and "semantic_creation" not in refused
-            and "semantic_creation" not in called
             and semantic_creation_receipt_missing(turn_slice, written_paths)):
         missing.add("semantic_creation")
     return {"status": "required", "required": required,
