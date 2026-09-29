@@ -103,10 +103,18 @@ run_codex() {
 }
 
 # run_grok <brief> <out>           — council tier
+# Goes through the sanctioned runner (bin/grok-run.sh), never `grok` directly:
+# it pins the model, streams and joins the text events, and verifies the end
+# event (stopReason and modelUsage). A cancelled or wrong-model run exits
+# nonzero, and its text is moved to <out>.rejected so it can never be read as
+# a chair's answer. The runner's receipt lands in the .err file.
 run_grok() {
-  grok --sandbox read-only \
-    --model "$GROK_MODEL" --reasoning-effort "$GROK_EFFORT" --print \
-    "$(cat "$1")" < /dev/null > "$2" 2>"${2:r}.err"
+  [ "$GROK_MODEL" = "grok-4.7" ] || { print -r -- "run_grok: runner is pinned to grok-4.7, GROK_MODEL=$GROK_MODEL" > "${2:r}.err"; return 4; }
+  "${GROK_RUN:-$REPO/bin/grok-run.sh}" --effort "$GROK_EFFORT" --prompt-file "$1" \
+    < /dev/null > "$2" 2>"${2:r}.err"
+  local rc=$?
+  [ $rc -eq 0 ] || { [ -e "$2" ] && mv -f "$2" "${2:r}.rejected"; }
+  return $rc
 }
 
 # run_precheck <brief> <out>       — triage tier, NOT the council tier
