@@ -64,10 +64,14 @@ test("broker read preserves no shortlist answer, explicit no, and yes", async ()
   }
 });
 
-test("broker feedback read failure remains unavailable", async () => {
-  const client = { async query() { throw new Error("feedback read unavailable"); } };
+test("broker feedback distinguishes removed projection from unavailable read", async () => {
   const tools = tourSharingTools({ ToolError, withEnvelope: async (_c, _a, _v, _x, fn) => fn(), writeEvent: async () => {} });
-  await assert.rejects(tools["read-tour-feedback"].handler(client, actor, { projection_id: projection, cursor: null, limit: 20 }), /feedback read unavailable/);
+  const args = { projection_id: projection, cursor: null, limit: 20 };
+  const removed = { async query() { return { rows: [{ feedback: null }] }; } };
+  await assert.rejects(tools["read-tour-feedback"].handler(removed, actor, args),
+    error => error instanceof ToolError && error.payload.error === "tour_feedback_not_found");
+  const unavailable = { async query() { throw new Error("feedback read unavailable"); } };
+  await assert.rejects(tools["read-tour-feedback"].handler(unavailable, actor, args), /feedback read unavailable/);
 });
 
 test("migration binds feedback to sealed current projection, member property, active grant and idempotent request", () => {
