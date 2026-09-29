@@ -375,7 +375,7 @@ def normalize_task(task: dict[str, Any]) -> bool:
     """Idempotent repair of stored state; never moves updated_at."""
     before = json.dumps(task, sort_keys=True)
     if task.get("status") == "done" or task_stage(task) == "live":
-        for field in ("health", "blocked_reason", "next_action"):
+        for field in ("health", "blocked_reason", "next_action", "blocked_source", "blocked_head"):
             task.pop(field, None)
     if task_stage(task) == "live":
         task.pop("release_wait", None)
@@ -448,15 +448,34 @@ def checks_summary(payload: dict[str, Any]) -> str:
     return f"{passed} pass · {pending} pending · {failed} fail"
 
 
+# launchd starts jobs with PATH=/usr/bin:/bin:/usr/sbin:/sbin, where Homebrew's
+# gh is invisible; a silent "no gh" there left every PR card frozen.
+GH_FALLBACKS = ("/opt/homebrew/bin/gh", "/usr/local/bin/gh")
+
+
+def gh_binary() -> str | None:
+    if os.environ.get("PROGRESS_BOARD_SKIP_GH"):
+        return None
+    found = shutil.which("gh")
+    if found:
+        return found
+    return next((path for path in GH_FALLBACKS if os.access(path, os.X_OK)), None)
+
+
 def gh_available() -> bool:
-    return not os.environ.get("PROGRESS_BOARD_SKIP_GH") and shutil.which("gh") is not None
+    return gh_binary() is not None
+
+
+def log(message: str) -> None:
+    print(f"progress-board: {message}", file=sys.stderr)
 
 
 def gh_text(args: list[str], timeout: int = 30) -> str:
-    if not gh_available():
+    binary = gh_binary()
+    if binary is None:
         raise RuntimeError("gh CLI unavailable")
     try:
-        result = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=timeout, check=False)
+        result = subprocess.run([binary, *args], capture_output=True, text=True, timeout=timeout, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
         raise RuntimeError(f"gh {' '.join(args[:2])} failed: {exc}") from exc
     if result.returncode != 0:
@@ -471,14 +490,36 @@ def gh_json(args: list[str], timeout: int = 30) -> Any:
         raise RuntimeError(f"gh {' '.join(args[:2])} returned invalid JSON") from exc
 
 
-def pr_info(number: int, repo: str) -> dict[str, Any] | None:
-    if not gh_available():
-        return None
+PR_VIEW_FIELDS = "state,isDraft,headRefOid,statusCheckRollup,comments,author,mergeCommit,reviewDecision,mergeable"
+
+
+def valid_check(check: Any) -> bool:
+    """A CheckRun (status + conclusion) or a legacy commit StatusContext (state)."""
+    if not isinstance(check, dict):
+        return False
+    if "status" in check:
+        return (isinstance(check["status"], str) and "conclusion" in check
+                and (check["conclusion"] is None or isinstance(check["conclusion"], str)))
+    return "conclusion" not in check and isinstance(check.get("state"), str)
+
+
+def fetch_pr(number: int, repo: str) -> tuple[dict[str, Any] | None, str | None]:
+    """The PR as GitHub reports it, or why it could not be read."""
+    if gh_binary() is None:
+        return None, "gh CLI not found (PATH or /opt/homebrew/bin)"
     try:
-        payload = gh_json(["pr", "view", str(number), "--repo", repo, "--json",
-                           "state,isDraft,headRefOid,statusCheckRollup,comments,author,mergeCommit"], timeout=5)
-    except RuntimeError:
-        return None
+        payload = gh_json(["pr", "view", str(number), "--repo", repo, "--json", PR_VIEW_FIELDS], timeout=30)
+    except RuntimeError as exc:
+        return None, str(exc)
+    checked = validated_pr(payload)
+    return (checked, None) if checked is not None else (None, "gh returned a malformed PR payload")
+
+
+def pr_info(number: int, repo: str) -> dict[str, Any] | None:
+    return fetch_pr(number, repo)[0]
+
+
+def validated_pr(payload: Any) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         return None
     state = payload.get("state")
@@ -492,11 +533,8 @@ def pr_info(number: int, repo: str) -> dict[str, Any] | None:
     checks = payload.get("statusCheckRollup")
     if not isinstance(checks, list):
         return None
-    for check in checks:
-        if (not isinstance(check, dict) or "conclusion" not in check
-                or not (check["conclusion"] is None or isinstance(check["conclusion"], str))
-                or not isinstance(check.get("status"), str)):
-            return None
+    if not all(valid_check(check) for check in checks):
+        return None
     comments = payload.get("comments")
     if not isinstance(comments, list):
         return None
@@ -511,6 +549,9 @@ def pr_info(number: int, repo: str) -> dict[str, Any] | None:
     merge = payload.get("mergeCommit")
     if merge is not None and not (isinstance(merge, dict) and isinstance(merge.get("oid"), str)):
         return None
+    for field in ("reviewDecision", "mergeable"):
+        if payload.get(field) is not None and not isinstance(payload[field], str):
+            return None
     return payload
 
 
@@ -552,7 +593,25 @@ def review_verdict(payload: dict[str, Any]) -> str:
     return "APPROVE" if approves_head(lines, str(payload.get("headRefOid") or "").lower()) else "Not recorded"
 
 
+FAILING_CHECKS = {"FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"}
+PASSING_CHECKS = {"SUCCESS", "SKIPPED", "NEUTRAL"}
+
+
+def check_outcome(check: dict[str, Any]) -> str:
+    return str(check.get("conclusion") or check.get("state") or "").upper()
+
+
+def failing_check_names(payload: dict[str, Any]) -> list[str]:
+    raw = payload.get("statusCheckRollup")
+    checks = [check for check in raw if isinstance(check, dict)] if isinstance(raw, list) else []
+    return [str(check.get("name") or check.get("context") or "unnamed check")
+            for check in checks if check_outcome(check) in FAILING_CHECKS]
+
+
 def derived_pr_state(payload: dict[str, Any]) -> tuple[str, str, str]:
+    """GitHub's view of a PR as (status, stage, phase). Draft is build; open
+    with checks running is CI; failing checks, a conflict, changes requested
+    or a BLOCK verdict are blocked; everything else waits on review."""
     state = str(payload.get("state") or "").upper()
     if state == "MERGED":
         return "done", "merged", "Merged"
@@ -560,20 +619,31 @@ def derived_pr_state(payload: dict[str, Any]) -> tuple[str, str, str]:
         return "failed", "ci", "Closed unmerged"
     if payload.get("isDraft"):
         return "running", "build", "Draft"
-    checks = payload.get("statusCheckRollup") or []
-    failing = {"FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"}
-    passing = {"SUCCESS", "SKIPPED", "NEUTRAL"}
-    if any(str(check.get("conclusion") or "").upper() in failing for check in checks):
+    raw = payload.get("statusCheckRollup")
+    checks = [check for check in raw if isinstance(check, dict)] if isinstance(raw, list) else []
+    if failing_check_names(payload):
         return "blocked", "ci", "Checks failing"
-    if not checks or any(str(check.get("conclusion") or "").upper() not in passing for check in checks):
+    if str(payload.get("mergeable") or "").upper() == "CONFLICTING":
+        return "blocked", "review", "Merge conflict"
+    if str(payload.get("reviewDecision") or "").upper() == "CHANGES_REQUESTED":
+        return "blocked", "review", "Changes requested"
+    if any(check_outcome(check) not in PASSING_CHECKS for check in checks):
         return "running", "ci", "CI"
     lines = latest_verdict(payload)
-    if not lines:
-        return "review", "review", "Awaiting review"
-    if lines[0] == "BLOCK":
+    if lines and lines[0] == "BLOCK":
         return "blocked", "review", "Review blocked"
-    approved = approves_head(lines, str(payload.get("headRefOid") or "").lower())
-    return "review", "review", "Ready to merge" if approved else "Awaiting review"
+    if lines and approves_head(lines, str(payload.get("headRefOid") or "").lower()):
+        return "review", "review", "Ready to merge"
+    if str(payload.get("reviewDecision") or "").upper() == "APPROVED":
+        return "review", "review", "Approved"
+    return "review", "review", "Awaiting review"
+
+
+def derived_block(payload: dict[str, Any], phase: str) -> tuple[str, str] | None:
+    if phase == "Checks failing":
+        names = failing_check_names(payload)
+        return f"Failing checks: {', '.join(names)}", PHASE_BLOCKS[phase][1]
+    return PHASE_BLOCKS.get(phase)
 
 
 # ── verified releases ────────────────────────────────────────────────────────
@@ -748,22 +818,7 @@ def branch_executor(branch: str, author: str) -> str:
 
 
 def open_pr_state(pr: dict[str, Any]) -> tuple[str, str, str]:
-    if pr.get("isDraft"):
-        return "running", "build", "Draft"
-    raw = pr.get("statusCheckRollup")
-    rollup = [check for check in raw if isinstance(check, dict)] if isinstance(raw, list) else []
-    _, pending, failed = check_counts(rollup)
-    if failed:
-        return "blocked", "ci", "Checks failing"
-    if str(pr.get("mergeable") or "").upper() == "CONFLICTING":
-        return "blocked", "review", "Merge conflict"
-    if str(pr.get("reviewDecision") or "").upper() == "CHANGES_REQUESTED":
-        return "blocked", "review", "Changes requested"
-    if pending:
-        return "running", "ci", "CI"
-    if str(pr.get("reviewDecision") or "").upper() == "APPROVED":
-        return "review", "review", "Approved"
-    return "review", "review", "Awaiting review"
+    return derived_pr_state({**pr, "state": "OPEN", "comments": []})
 
 
 def pr_card(repo: str, pr: dict[str, Any], merged: bool) -> dict[str, Any]:
@@ -785,6 +840,9 @@ def pr_card(repo: str, pr: dict[str, Any], merged: bool) -> dict[str, Any]:
     }
     if not merged and isinstance(pr.get("statusCheckRollup"), list):
         card["pr_checks"] = checks_summary(pr)
+    block = derived_block(pr, phase) if status == "blocked" else None
+    if block:
+        card.update({"blocked_reason": block[0], "next_action": block[1], "blocked_source": "github"})
     if merged:
         card["merged_at"] = pr.get("mergedAt")
         sha = merge_sha(pr)
@@ -885,43 +943,104 @@ def build_all_repos() -> dict[str, Any]:
 
 # ── project boards ───────────────────────────────────────────────────────────
 
+# Fields whose change is a real state change: only these stamp updated_at, so
+# the stage timer and the stale flag read true. Check counts, head and verdict
+# refresh silently.
+DERIVED_STATE = ("status", "stage", "pr_phase", "blocked_reason", "next_action")
+
+
+def manual_block_holds(task: dict[str, Any], info: dict[str, Any], derived_status: str) -> bool:
+    """A blocked note the orchestrator wrote stays until GitHub shows it
+    cleared: the PR merged or closed, or a new head was pushed that is not
+    itself blocked. (Legacy blocks without a source count as manual.)"""
+    if task.get("status") != "blocked" or task.get("blocked_source", "manual") != "manual":
+        return False
+    if not task.get("blocked_reason"):
+        return False
+    if str(info.get("state") or "").upper() in {"MERGED", "CLOSED"}:
+        return False
+    pinned = str(task.get("blocked_head") or task.get("pr_head") or "")
+    moved = bool(pinned) and str(info.get("headRefOid") or "") != pinned
+    return not (moved and derived_status != "blocked")
+
+
+def sync_pr_task(task: dict[str, Any], info: dict[str, Any], at: str) -> bool:
+    """Bring one PR card to GitHub's state. Returns True if anything changed."""
+    status, stage, phase = derived_pr_state(info)
+    floor = task.get("manual_stage")
+    current = task_stage(task)
+    if current == "live":
+        status, stage = "done", "live"
+    elif floor in PIPELINE_STAGES and PIPELINE_STAGES.index(stage) < PIPELINE_STAGES.index(floor):
+        stage = floor  # never move a card back past a later stage set by hand
+    target: dict[str, Any] = {"status": status, "stage": stage, "pr_phase": phase,
+                              "blocked_reason": None, "next_action": None, "blocked_source": None}
+    if manual_block_holds(task, info, status):
+        target.update({"status": "blocked", "blocked_reason": task["blocked_reason"],
+                       "next_action": task.get("next_action"), "blocked_source": "manual",
+                       "blocked_head": task.get("blocked_head") or task.get("pr_head") or info.get("headRefOid")})
+    elif status == "blocked" and current != "live":
+        block = derived_block(info, phase)
+        if block:
+            target.update({"blocked_reason": block[0], "next_action": block[1], "blocked_source": "github"})
+    if target["blocked_source"] != "manual":
+        target["blocked_head"] = None
+    facts: dict[str, Any] = {"pr_checks": checks_summary(info), "pr_head": info.get("headRefOid") or "",
+                             "review_verdict": review_verdict(info)}
+    if merge_sha(info):
+        facts["merge_sha"] = merge_sha(info)
+    stamped = any(task.get(field) != target.get(field) for field in DERIVED_STATE)
+    before = json.dumps(task, sort_keys=True)
+    for field, value in {**target, **facts}.items():
+        if value is None:
+            task.pop(field, None)
+        else:
+            task[field] = value
+    if stamped:
+        task["updated_at"] = at
+        record_stage(task, at, current)
+    normalize_task(task)
+    return json.dumps(task, sort_keys=True) != before
+
+
 def render(project: str) -> None:
-    """Refresh derived PR, release and health facts and write the JSON. The
-    name is kept for the launchd job; nothing here renders a page."""
+    """Sync every PR card from GitHub, refresh release and health facts, and
+    write the JSON. A gh failure never stops the run: it is logged, recorded
+    under github_sync, and the card keeps its last known state. The name is
+    kept for the launchd job; nothing here renders a page."""
     if project == ALL_REPOS_BOARD:
         build_all_repos()
         return
     state = read_state(project)
-    pr_infos: dict[tuple[str, int], dict[str, Any] | None] = {}
+    fetched: dict[tuple[str, int], tuple[dict[str, Any] | None, str | None]] = {}
     changed = False
+    failed: list[dict[str, str]] = []
+    synced = 0
     at = now_utc().isoformat(timespec="microseconds")
-    for task in state.get("tasks", {}).values():
+    for task_id, task in state.get("tasks", {}).items():
         if normalize_task(task):
             changed = True
         if task.get("pr") is None:
             continue
         key = pr_key(task)
-        if key not in pr_infos:
-            pr_infos[key] = pr_info(key[1], key[0])
-        info = pr_infos[key]
+        if key not in fetched:
+            fetched[key] = fetch_pr(key[1], key[0])
+        info, error = fetched[key]
         if info is None:
+            label = f"{key[0].split('/', 1)[1]}#{key[1]}"
+            log(f"sync {label} ({task_id}) failed, keeping last known state: {error}")
+            failed.append({"card": task_id, "pr": label, "error": str(error)[:200]})
             continue
-        status, stage, phase = derived_pr_state(info)
-        if task_stage(task) == "live":
-            status, stage = "done", "live"
-        observed = [("status", status), ("stage", stage), ("pr_phase", phase),
-                    ("pr_checks", checks_summary(info)), ("pr_head", info.get("headRefOid") or ""),
-                    ("review_verdict", review_verdict(info))]
-        if merge_sha(info):
-            observed.append(("merge_sha", merge_sha(info)))
-        if any(task.get(field) != value for field, value in observed):
-            prior_stage = task_stage(task)
-            task.update(observed)
-            task["updated_at"] = at
-            record_stage(task, at, prior_stage)
-            normalize_task(task)
+        synced += 1
+        if sync_pr_task(task, info, at):
             changed = True
         if auto_live(task, task_repo(task), at):
+            changed = True
+    if fetched and not os.environ.get("PROGRESS_BOARD_SKIP_GH"):
+        report = {"at": at, "synced": synced, "failed": failed}
+        previous = state.get("github_sync") or {}
+        if (previous.get("synced"), previous.get("failed")) != (synced, failed) or changed:
+            state["github_sync"] = report
             changed = True
     if changed:
         state["updated_at"] = max(str(task.get("updated_at") or "") for task in state["tasks"].values())
@@ -1157,8 +1276,14 @@ def command_render(args: argparse.Namespace) -> None:
     if args.project == LAUNCHD_BOARD:
         poll_board_answers(args.project)
         # The system-wide board rides the same two-minute job, after the
-        # project board so a gh outage never holds that one back.
-        build_all_repos()
+        # project board so a gh outage never holds that one back. A failed
+        # rebuild is logged and the last known board is published again.
+        try:
+            build_all_repos()
+        except RuntimeError as exc:
+            log(f"all-repos rebuild failed, publishing last known state: {exc}")
+            if not state_path(ALL_REPOS_BOARD).exists():
+                return
         publish_board(ALL_REPOS_BOARD)
 
 
@@ -1229,6 +1354,7 @@ def command_task(args: argparse.Namespace) -> None:
         task["stage"] = stage or "build"
     if args.stage:
         task["stage"] = stage
+        task["manual_stage"] = stage
     if stage == "live":
         task["status"] = "done"
         task["evidence"] = args.evidence.strip()
@@ -1249,9 +1375,14 @@ def command_task(args: argparse.Namespace) -> None:
     if not finished and (task.get("status") == "blocked" or task.get("health") == "blocked"):
         if not (task.get("blocked_reason") and task.get("next_action")):
             raise SystemExit("a blocked task needs --reason and --next-action")
+        if args.reason is not None or args.status == "blocked":
+            # Written by hand: the GitHub sync keeps it until GitHub shows it cleared.
+            task["blocked_source"] = "manual"
+            if task.get("pr_head"):
+                task["blocked_head"] = task["pr_head"]
     else:
-        task.pop("blocked_reason", None)
-        task.pop("next_action", None)
+        for field in ("blocked_reason", "next_action", "blocked_source", "blocked_head"):
+            task.pop(field, None)
     record_stage(task, task_time, task_stage(prior) if prior else None)
     state["tasks"][args.task_id] = task
     write_and_render(state)

@@ -7,6 +7,7 @@ commands and publishes the JSON data contract that page renders.
 """
 
 import copy
+import io
 import json
 import importlib.util
 import os
@@ -452,13 +453,15 @@ class PullRequestStatus(BoardCase):
                         parent[path[-1]] = wrong_type
                     self.set_fixture({"view": payload})
                     self.run_board("render", "demo")
-                    self.assertEqual(self.read_state("demo"), prior)
+                    self.assertEqual(self.read_state("demo")["tasks"], prior["tasks"])
         self.set_fixture({"view": {**self.VALID, "mergeCommit": "not-an-object"}})
         self.run_board("render", "demo")
-        self.assertEqual(self.read_state("demo"), prior)
+        self.assertEqual(self.read_state("demo")["tasks"], prior["tasks"])
         self.set_fixture({"view": []})
         self.run_board("render", "demo")
-        self.assertEqual(self.read_state("demo"), prior)
+        self.assertEqual(self.read_state("demo")["tasks"], prior["tasks"])
+        self.assertEqual(self.read_state("demo")["github_sync"]["failed"][0]["error"],
+                         "gh returned a malformed PR payload")
 
     def test_review_readiness_requires_independent_trusted_latest_verdict(self):
         self.start()
@@ -541,7 +544,8 @@ class PullRequestStatus(BoardCase):
             ({"state": "MERGED"}, "done", "merged", "Merged"),
             ({"state": "CLOSED"}, "failed", "ci", "Closed unmerged"),
             ({"isDraft": True}, "running", "build", "Draft"),
-            ({"statusCheckRollup": [{"conclusion": "FAILURE", "status": "COMPLETED"}]}, "blocked", "ci", "Checks failing"),
+            ({"statusCheckRollup": [{"name": "unit", "conclusion": "FAILURE", "status": "COMPLETED"}]},
+             "blocked", "ci", "Checks failing"),
             ({"statusCheckRollup": [{"conclusion": "", "status": "IN_PROGRESS"}]}, "running", "ci", "CI"),
             ({"comments": [review("APPROVE\nReviewed-SHA: " + "b" * 40 + "\n")]}, "review", "review", "Awaiting review"),
             ({"comments": [review("APPROVE\nReviewed-SHA: " + SHA_A + "\n")]}, "review", "review", "Ready to merge"),
@@ -557,13 +561,13 @@ class PullRequestStatus(BoardCase):
                 self.assertGreater(task["updated_at"], previous_update)
                 previous_update = task["updated_at"]
                 if status == "blocked":
-                    self.assertEqual(BOARD.blocked_detail(task)[0], "CI checks are failing on the PR head")
+                    self.assertEqual(BOARD.blocked_detail(task)[0], "Failing checks: unit")
         self.run_board("render", "demo")
         self.assertEqual(self.read_state("demo")["tasks"]["a"]["updated_at"], previous_update)
         prior = self.read_state("demo")
         self.set_fixture({})
         self.run_board("render", "demo")
-        self.assertEqual(self.read_state("demo"), prior)
+        self.assertEqual(self.read_state("demo")["tasks"], prior["tasks"])
         self.set_fixture({"view": {**base, "state": "MERGED"}})
         self.run_board("render", "demo")
         self.assertEqual(self.read_state("demo")["tasks"]["a"]["stage"], "merged")
@@ -700,6 +704,161 @@ class PullRequestStatus(BoardCase):
         self.assertEqual(tasks["partial"]["stage_history"][0]["entered_at"], "2026-09-29T06:00:00+00:00")
         self.assertEqual(tasks["partial"]["stage_entered_at"], "2026-09-29T06:00:00+00:00")
         self.assertEqual(tasks["legacy"]["updated_at"], "2026-09-29T07:00:00+00:00")
+
+
+class GitHubSync(BoardCase):
+    """Addition 12: every render --publish syncs each PR card from GitHub."""
+
+    OPEN = {
+        "state": "OPEN", "isDraft": False, "headRefOid": SHA_A, "author": {"login": "builder"},
+        "statusCheckRollup": [{"name": "unit", "conclusion": "SUCCESS", "status": "COMPLETED"}],
+        "comments": [], "reviewDecision": "REVIEW_REQUIRED", "mergeable": "MERGEABLE",
+    }
+
+    def start(self, *extra):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("task", "demo", "a", "--title", "A", "--status", "running",
+                       "--executor", "Codex", "--pr", "42", *extra)
+
+    def sync(self, view, *extra_fixture):
+        self.set_fixture({"view": view, **(extra_fixture[0] if extra_fixture else {})})
+        result = self.run_board("render", "demo")
+        return self.read_state("demo")["tasks"]["a"], result
+
+    def test_every_stage_is_derived_from_github(self):
+        self.start()
+        self.fake_gh({})
+        running = [{"name": "unit", "conclusion": None, "status": "IN_PROGRESS"}]
+        failing = [{"name": "unit", "conclusion": "FAILURE", "status": "COMPLETED"},
+                   {"name": "types", "conclusion": "TIMED_OUT", "status": "COMPLETED"},
+                   {"name": "lint", "conclusion": "SUCCESS", "status": "COMPLETED"}]
+        cases = [
+            ("draft", {"isDraft": True}, "running", "build", "Draft", None),
+            ("checks running", {"statusCheckRollup": running}, "running", "ci", "CI", None),
+            ("awaiting review", {}, "review", "review", "Awaiting review", None),
+            ("changes requested", {"reviewDecision": "CHANGES_REQUESTED"}, "blocked", "review",
+             "Changes requested", "A reviewer requested changes"),
+            ("failing checks", {"statusCheckRollup": failing}, "blocked", "ci", "Checks failing",
+             "Failing checks: unit, types"),
+            ("approved", {"reviewDecision": "APPROVED"}, "review", "review", "Approved", None),
+            ("merged", {"state": "MERGED", "mergeCommit": {"oid": SHA_M}}, "done", "merged", "Merged", None),
+        ]
+        for name, change, status, stage, phase, reason in cases:
+            with self.subTest(name):
+                task, _ = self.sync({**self.OPEN, **change})
+                self.assertEqual((task["status"], task["stage"], task["pr_phase"]), (status, stage, phase))
+                detail = BOARD.blocked_detail(task)
+                self.assertEqual(detail[0] if detail else None, reason)
+                self.assertEqual(task["stage_history"][-1]["stage"], stage)
+        # Verified release: the addition-6 auto-live path runs on the same sync.
+        self.shipped("worker", SHA_M)
+        task, _ = self.sync({**self.OPEN, "state": "MERGED", "mergeCommit": {"oid": SHA_M}})
+        self.assertEqual((task["status"], task["stage"]), ("done", "live"))
+        self.assertIn("verified worker release", task["evidence"])
+
+    def test_legacy_commit_statuses_do_not_void_the_sync(self):
+        self.start()
+        self.fake_gh({})
+        rollup = [{"name": "unit", "conclusion": "SUCCESS", "status": "COMPLETED"},
+                  {"__typename": "StatusContext", "context": "deploy/preview", "state": "FAILURE"}]
+        task, _ = self.sync({**self.OPEN, "statusCheckRollup": rollup})
+        self.assertEqual((task["status"], task["stage"]), ("blocked", "ci"))
+        self.assertEqual(BOARD.blocked_detail(task)[0], "Failing checks: deploy/preview")
+
+    def test_sync_never_moves_a_card_back_past_a_later_manual_stage(self):
+        self.start("--stage", "review")
+        self.fake_gh({})
+        task, _ = self.sync({**self.OPEN, "isDraft": True})
+        self.assertEqual(task["stage"], "review", "a manual Review is not undone by a Draft PR")
+        self.assertEqual(task["pr_phase"], "Draft")
+        task, _ = self.sync({**self.OPEN, "state": "MERGED", "mergeCommit": {"oid": SHA_M}})
+        self.assertEqual(task["stage"], "merged", "forward movement past the manual stage still happens")
+
+    def test_manual_block_survives_until_github_shows_it_cleared(self):
+        self.start()
+        self.fake_gh({})
+        self.sync(self.OPEN)
+        self.run_board("task", "demo", "a", "--status", "blocked", "--reason", "Waiting on the DNS cutover",
+                       "--next-action", "Joe flips the record")
+        # GitHub unchanged, or moving without a new head: the note stays.
+        for view in (self.OPEN, {**self.OPEN, "reviewDecision": "APPROVED"}):
+            task, _ = self.sync(view)
+            self.assertEqual(task["status"], "blocked")
+            self.assertEqual(BOARD.blocked_detail(task), ("Waiting on the DNS cutover", "Joe flips the record"))
+        # A new head that is itself failing is not the blocker clearing either.
+        failing = [{"name": "unit", "conclusion": "FAILURE", "status": "COMPLETED"}]
+        task, _ = self.sync({**self.OPEN, "headRefOid": "b" * 40, "statusCheckRollup": failing})
+        self.assertEqual(BOARD.blocked_detail(task)[0], "Waiting on the DNS cutover")
+        # A new, healthy head is GitHub showing the blocker cleared.
+        task, _ = self.sync({**self.OPEN, "headRefOid": "c" * 40})
+        self.assertEqual((task["status"], task["pr_phase"]), ("review", "Awaiting review"))
+        self.assertNotIn("blocked_reason", task)
+        self.assertNotIn("blocked_source", task)
+
+    def test_manual_block_clears_when_the_pr_merges(self):
+        self.start()
+        self.fake_gh({})
+        self.run_board("task", "demo", "a", "--status", "blocked", "--reason", "Hold", "--next-action", "Wait")
+        task, _ = self.sync({**self.OPEN, "state": "MERGED", "mergeCommit": {"oid": SHA_M}})
+        self.assertEqual((task["status"], task["stage"]), ("done", "merged"))
+        self.assertNotIn("blocked_reason", task)
+
+    def test_github_block_clears_itself_when_checks_recover(self):
+        self.start()
+        self.fake_gh({})
+        failing = [{"name": "unit", "conclusion": "FAILURE", "status": "COMPLETED"}]
+        task, _ = self.sync({**self.OPEN, "statusCheckRollup": failing})
+        self.assertEqual(task["blocked_source"], "github")
+        task, _ = self.sync(self.OPEN)
+        self.assertEqual(task["status"], "review")
+        self.assertIsNone(BOARD.blocked_detail(task))
+
+    def test_updated_at_moves_only_when_derived_state_changes(self):
+        self.start()
+        self.fake_gh({})
+        one = [{"name": "unit", "conclusion": None, "status": "IN_PROGRESS"},
+               {"name": "types", "conclusion": None, "status": "QUEUED"}]
+        task, _ = self.sync({**self.OPEN, "statusCheckRollup": one})
+        entered, updated = task["stage_entered_at"], task["updated_at"]
+        # Same state, and a check finishing while others still run: facts refresh, clocks stay.
+        self.sync({**self.OPEN, "statusCheckRollup": one})
+        progress = [{"name": "unit", "conclusion": "SUCCESS", "status": "COMPLETED"}, one[1]]
+        task, _ = self.sync({**self.OPEN, "statusCheckRollup": progress})
+        self.assertEqual(task["pr_checks"], "1 pass · 1 pending · 0 fail")
+        self.assertEqual((task["updated_at"], task["stage_entered_at"]), (updated, entered))
+        self.assertEqual(len(task["stage_history"]), 2)
+        # A real change stamps both.
+        task, _ = self.sync(self.OPEN)
+        self.assertGreater(task["updated_at"], updated)
+        self.assertEqual(task["stage_entered_at"], task["updated_at"])
+
+    def test_gh_failure_is_logged_and_last_known_state_kept(self):
+        self.start()
+        self.fake_gh({})
+        good, _ = self.sync(self.OPEN)
+        prior = self.read_state("demo")["tasks"]
+        self.set_fixture({})  # gh pr view exits 1
+        result = self.run_board("render", "demo")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("carr-system#42", result.stderr)
+        state = self.read_state("demo")
+        self.assertEqual(state["tasks"], prior)
+        self.assertEqual(state["github_sync"]["failed"][0]["card"], "a")
+        self.set_fixture({"view": self.OPEN})
+        self.run_board("render", "demo")
+        self.assertEqual(self.read_state("demo")["github_sync"]["failed"], [])
+
+    def test_gh_is_found_outside_a_launchd_path(self):
+        fallback = self.root / "homebrew" / "gh"
+        fallback.parent.mkdir()
+        fallback.write_text("#!/bin/sh\n")
+        fallback.chmod(0o755)
+        with patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}, clear=False), \
+             patch.object(BOARD.shutil, "which", lambda name: None), \
+             patch.object(BOARD, "GH_FALLBACKS", (str(self.root / "missing" / "gh"), str(fallback))):
+            os.environ.pop("PROGRESS_BOARD_SKIP_GH", None)
+            self.assertEqual(BOARD.gh_binary(), str(fallback))
+        self.assertIn("/opt/homebrew/bin", LAUNCHD_SCRIPT.read_text())
 
 
 class AllRepositoriesBoard(BoardCase):
@@ -1014,20 +1173,24 @@ class PublishAndAnswers(BoardCase):
         self.assertEqual(events, [("render", "carr-v5"), ("publish", "carr-v5"), ("poll", "carr-v5"),
                                   ("build", "all-repos"), ("publish", "all-repos")])
 
-    def test_system_board_failure_does_not_stop_the_project_board(self):
+    def test_system_board_failure_is_logged_and_last_known_state_published(self):
         events = []
         args = type("Args", (), {"project": "carr-v5", "publish": False})()
 
         def broken():
             raise RuntimeError("gh unavailable")
-        with patch.object(BOARD, "render", lambda project: events.append(("render", project))), \
+        (self.root / "boards").mkdir(parents=True, exist_ok=True)
+        (self.root / "boards" / "all-repos.json").write_text(json.dumps({"project": "all-repos", "tasks": {}}))
+        with patch.dict(os.environ, {"PROGRESS_BOARD_ROOT": str(self.root)}), \
+             patch.object(BOARD, "render", lambda project: events.append(("render", project))), \
              patch.object(BOARD, "publish_board", lambda project: events.append(("publish", project))), \
              patch.object(BOARD, "poll_board_answers", lambda project: events.append(("poll", project))), \
-             patch.object(BOARD, "build_all_repos", broken):
-            with self.assertRaisesRegex(RuntimeError, "gh unavailable"):
-                BOARD.command_render(args)
-        self.assertEqual(events, [("render", "carr-v5"), ("publish", "carr-v5"), ("poll", "carr-v5")])
-
+             patch.object(BOARD, "build_all_repos", broken), \
+             patch("sys.stderr", new_callable=io.StringIO) as err:
+            BOARD.command_render(args)
+        self.assertEqual(events, [("render", "carr-v5"), ("publish", "carr-v5"), ("poll", "carr-v5"),
+                                  ("publish", "all-repos")])
+        self.assertIn("gh unavailable", err.getvalue())
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
