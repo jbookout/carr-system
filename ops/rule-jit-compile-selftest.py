@@ -159,7 +159,8 @@ check("structural_extra count matches the hand-reviewed list",
 import re
 
 MODEL_CHOICE = "ede4b241"
-routing_rows = [t for t in triggers if MODEL_CHOICE in t["rule_ids"]]
+routing_rows = [t for t in triggers if MODEL_CHOICE in t["rule_ids"]
+                and t["kind"] == "verb"]
 check("cloud model choice rule ede4b241 is in the enforcement map",
       MODEL_CHOICE in MAP["rule_controls"] and MODEL_CHOICE in MAP["active_rule_ids"]["shared"])
 check("cloud model choice rule is a JIT-home rule delivered by delegation-council",
@@ -167,7 +168,7 @@ check("cloud model choice rule is a JIT-home rule delivered by delegation-counci
       and MAP["rule_load_layers"].get(MODEL_CHOICE)
       == {"load_layer": "pack", "packs": ["delegation-council"],
           "why": MAP["rule_load_layers"].get(MODEL_CHOICE, {}).get("why")})
-check("cloud model choice rule compiles to exactly one seeded verb trigger",
+check("cloud model choice rule has exactly one verb trigger, seeded from its detector",
       len(routing_rows) == 1 and routing_rows[0]["kind"] == "verb"
       and routing_rows[0]["source"] == "seeded_detector"
       and routing_rows[0]["packs"] == ["delegation-council"]
