@@ -239,6 +239,7 @@ MAX_EVIDENCE_FIELD_CHARS = 4000
 SUPPORT_HIGH = 0.60
 SUPPORT_LOW = 0.40
 OMITTED_FAILURE_HIGH = 0.50
+SCOPE_CONFIDENCE_MIN = 0.60
 
 
 def check_done_claim(final_message, evidence, *, client=None, judge_module=None):
@@ -295,14 +296,25 @@ def check_done_claim(final_message, evidence, *, client=None, judge_module=None)
         }
         state = {"final_message": final_message[:MAX_MESSAGE_CHARS], "evidence": ev}
         answer = jj.judge(state, questions, client=client, timeout=TIMEOUT_SECONDS)
-        scope = ((answer.get("answers") or {}).get("claim_scope") or {}).get("choice")
+        scope_answer = (answer.get("answers") or {}).get("claim_scope") or {}
+        scope = scope_answer.get("choice")
+        try:
+            scope_confidence = float(scope_answer.get("confidence"))
+            if not 0.0 <= scope_confidence <= 1.0:
+                scope_confidence = None
+        except (TypeError, ValueError):
+            scope_confidence = None
         jj.record("supervise.done_claim", _text_ref(final_message), answer, None,
-                  note={"evidence_fields": sorted(ev), "claim_scope": scope})
+                  note={"evidence_fields": sorted(ev), "claim_scope": scope,
+                        "scope_confidence": scope_confidence})
 
+        if scope not in ("other", "current_completion") or (scope_confidence is None or
+                                                           scope_confidence < SCOPE_CONFIDENCE_MIN):
+            return _result(check_id, "uncertain", escalate=True,
+                           detail={"claim_scope": scope, "scope_confidence": scope_confidence},
+                           advice="Jev could not tell whether this reply claims completion; inspect the claim and current-task evidence")
         if scope == "other":
             return _result(check_id, "no_claim", detail={"claim_scope": scope})
-        if scope != "current_completion":
-            return _result(check_id, "unavailable", detail={"claim_scope": scope})
 
         supported = _noul(answer, "claims_supported")
         omitted = _noul(answer, "evidence_shows_omitted_failure")

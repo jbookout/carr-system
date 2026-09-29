@@ -210,6 +210,51 @@ class DispatcherTests(unittest.TestCase):
         self.assertIn("check_done_claim", fake.calls)
         self.assertIn("advice from check_done_claim", json.loads(out)["systemMessage"])
 
+    def test_stop_test_evidence_starts_at_latest_human_request(self):
+        m = load("shadow")
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as fh:
+            transcript = fh.name
+            rows = [
+                {"type": "user", "message": {"content": "Earlier task"}},
+                {"message": {"content": [{"type": "tool_use", "name": "Bash", "id": "old",
+                                           "input": {"command": "pytest old_test.py"}}]}},
+                {"message": {"content": [{"type": "tool_result", "tool_use_id": "old",
+                                           "content": "old test passed"}]}},
+                {"type": "user", "message": {"content": "Current task"}},
+                {"message": {"content": [{"type": "tool_use", "name": "Bash", "id": "new",
+                                           "input": {"command": "pytest new_test.py"}}]}},
+                {"message": {"content": [{"type": "tool_result", "tool_use_id": "new",
+                                           "content": "new test failed", "is_error": True}]}},
+            ]
+            fh.write("\n".join(json.dumps(row) for row in rows) + "\n")
+        try:
+            evidence = m._last_test_evidence(transcript)
+            self.assertEqual(evidence["test_command"], "pytest new_test.py")
+            self.assertEqual(evidence["test_output"], "new test failed")
+            self.assertEqual(evidence["test_exit_code"], 1)
+        finally:
+            os.unlink(transcript)
+
+    def test_stop_does_not_reuse_prior_task_test(self):
+        m = load("shadow")
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as fh:
+            transcript = fh.name
+            rows = [
+                {"type": "user", "message": {"content": "Earlier task"}},
+                {"message": {"content": [{"type": "tool_use", "name": "Bash", "id": "old",
+                                           "input": {"command": "pytest old_test.py"}}]}},
+                {"message": {"content": [{"type": "tool_result", "tool_use_id": "old",
+                                           "content": "old test passed"}]}},
+                {"type": "user", "message": {"content": "Current task"}},
+                {"type": "user", "message": {"content": [
+                    {"type": "tool_result", "tool_use_id": "unrelated", "content": "tool data"}]}},
+            ]
+            fh.write("\n".join(json.dumps(row) for row in rows) + "\n")
+        try:
+            self.assertEqual(m._last_test_evidence(transcript), {})
+        finally:
+            os.unlink(transcript)
+
     def test_stop_hook_active_does_nothing(self):
         m = load("advise")
         fake = FakeLibs(verdicts={"check_done_claim": "unsupported"})

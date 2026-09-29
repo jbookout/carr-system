@@ -171,6 +171,33 @@ class TestQualityTests(unittest.TestCase):
 # --------------------------------------------------------- #14 done claim
 
 class DoneClaimTests(unittest.TestCase):
+    def test_low_confidence_other_is_an_uncertain_claim(self):
+        fake = FakeJudge(answers={
+            "claim_scope": {"type": "choice", "choice": "other", "confidence": 0.01},
+            "claims_supported": {"type": "noul", "noul": 0.12},
+            "evidence_shows_omitted_failure": {"type": "noul", "noul": 0.08},
+        })
+        result = jdc.check_done_claim("The fix is done.", {}, judge_module=fake)
+        self.assertEqual(result["verdict"], "uncertain")
+        self.assertTrue(result["escalate"])
+        self.assertIn("advice", result["detail"])
+
+    def test_missing_or_malformed_scope_confidence_is_uncertain(self):
+        for confidence in (None, "bad", -1, 2):
+            with self.subTest(confidence=confidence):
+                fake = FakeJudge(answers={"claim_scope": {
+                    "type": "choice", "choice": "other", "confidence": confidence}})
+                result = jdc.check_done_claim("The fix is done.", {}, judge_module=fake)
+                self.assertEqual(result["verdict"], "uncertain")
+                self.assertTrue(result["escalate"])
+
+    def test_low_confidence_current_completion_is_uncertain(self):
+        fake = FakeJudge(answers={"claim_scope": {
+            "type": "choice", "choice": "current_completion", "confidence": 0.2}})
+        result = jdc.check_done_claim("The fix is done.", {}, judge_module=fake)
+        self.assertEqual(result["verdict"], "uncertain")
+        self.assertTrue(result["escalate"])
+
     def test_recorded_status_report_is_not_current_work_completion(self):
         # cc59a986, 2026-09-29 13:01:52Z: "fixed" describes an older bug.
         message = ("Jev is back online. My hooks showed it answering again right after you added the credit. "

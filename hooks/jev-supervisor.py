@@ -231,7 +231,11 @@ def post_tool_use(payload, run):
 
 
 def _last_test_evidence(transcript):
-    """The most recent test-looking Bash command and its output, from the transcript."""
+    """The latest completed test after the latest human request in the tail.
+
+    If that request is outside the bounded tail, omit test evidence rather than
+    risk attributing an earlier task's test to this one.
+    """
     evidence = {}
     try:
         with open(transcript, "rb") as fh:
@@ -242,12 +246,30 @@ def _last_test_evidence(transcript):
     except OSError:
         return evidence
     commands = {}
+    saw_request = False
     for raw in lines:
         try:
             rec = json.loads(raw)
         except ValueError:
             continue
+        if not isinstance(rec, dict):
+            continue
         content = (rec.get("message") or {}).get("content")
+        if rec.get("type") == "user":
+            human_text = (isinstance(content, str) and bool(content.strip()))
+            if isinstance(content, list):
+                blocks = [b for b in content if isinstance(b, dict)]
+                human_text = (not any(b.get("type") == "tool_result" for b in blocks)
+                              and any(b.get("type") == "text" and
+                                      isinstance(b.get("text"), str) and b["text"].strip()
+                                      for b in blocks))
+            if human_text:
+                saw_request = True
+                commands.clear()
+                evidence = {}
+                continue
+        if not saw_request:
+            continue
         if not isinstance(content, list):
             continue
         for block in content:
@@ -259,8 +281,9 @@ def _last_test_evidence(transcript):
                     commands[block.get("id")] = cmd
             elif block.get("type") == "tool_result" and block.get("tool_use_id") in commands:
                 evidence = {"test_command": commands[block["tool_use_id"]],
-                            "test_output": _text(block.get("content"))[-6000:],
-                            "test_failed": bool(block.get("is_error"))}
+                            "test_output": _text(block.get("content"))[-6000:]}
+                if isinstance(block.get("is_error"), bool):
+                    evidence["test_exit_code"] = int(block["is_error"])
     return evidence
 
 
