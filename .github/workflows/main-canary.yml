@@ -23,12 +23,9 @@
 # cost the majority of the wall clock. If a class starts failing on main and is
 # not in this list, add it here and say why in the same change.
 #
-# THE DEBOUNCE, and its arithmetic. GitHub bills each JOB rounded UP to the whole
-# minute. The sleep is the FIRST step, before the checkout, so a run cancelled
-# during it has done nothing but exist and costs about one billed minute. During
-# a merge burst every run but the last dies there, and one full canary runs after
-# the burst goes quiet. Without the sleep the cancelled runs would each have paid
-# for a checkout, two setup actions, a pip install and an npm ci first.
+# THE DEBOUNCE. The sleep remains the FIRST step, before the checkout. The
+# concurrency group serializes runs and keeps only the newest pending run;
+# a running canary finishes even when another merge lands during the sleep.
 #
 # THIS IS NOT AN ALWAYS-ON JOB and must not become one. It is event-driven on
 # push to main. There is no schedule here on purpose: ci.yml already carries the
@@ -62,12 +59,12 @@ on:
       - "**/*.md"
   workflow_dispatch:
 
-# One canary per merge burst. cancel-in-progress is what collapses 44 merges a
-# day into a handful of completed runs; the sleep below is what makes the
-# cancelled ones cheap.
+# Canaries take 20-30 minutes while merges can land every 20 minutes. Cancelling
+# the running canary starves releases of a completed verdict. Let it finish;
+# GitHub keeps only the newest pending run, replacing older pending runs.
 concurrency:
   group: main-canary
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read

@@ -6,9 +6,9 @@ TWO THINGS ARE UNDER TEST AND THEY FAIL DIFFERENTLY.
 
 The CANARY (.github/workflows/main-canary.yml) is a cost object. Its correctness
 is almost entirely in properties a reader cannot see by looking at it running:
-that the debounce sleep comes BEFORE the checkout, so a cancelled run in a merge
-burst costs one billed minute instead of a checkout plus two setup actions plus
-a pip install; that it runs the four measured classes and not the ten; that it
+that a running canary finishes while the group keeps only the newest pending
+run; that the debounce sleep comes BEFORE the checkout; that it runs the four
+measured classes and not the ten; that it
 has no schedule, because the council forbade a new always-on job. Those are
 asserted against the file, because there is nowhere else they exist.
 
@@ -29,6 +29,7 @@ import importlib.util
 import io
 import os
 import pathlib
+import re
 import sys
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
@@ -73,15 +74,28 @@ def test_the_canary_is_event_driven_and_never_always_on():
           "workflow_dispatch:" in y)
 
 
+def test_a_running_canary_finishes_before_the_newest_pending_run():
+    y = CANARY.read_text(encoding="utf-8")
+    concurrency = re.search(r"^concurrency:\s*\n((?:[ \t]+[^\n]*\n)+)", y, re.M)
+    check("the workflow declares concurrency", concurrency is not None)
+    if concurrency is None:
+        return
+    settings = concurrency.group(1)
+    check("canaries share the main-canary group",
+          re.search(r"^  group: main-canary\s*$", settings, re.M) is not None)
+    # Canaries take 20-30 minutes while merges can land every 20 minutes.
+    # Cancelling the running canary starves releases of a completed verdict;
+    # GitHub still replaces older pending runs with the newest in this group.
+    check("a new merge cannot cancel the running canary and starve releases",
+          re.search(r"^  cancel-in-progress: false\s*$", settings, re.M) is not None)
+
+
 def test_the_debounce_is_real_and_comes_first():
     y = CANARY.read_text(encoding="utf-8")
-    check("one canary per merge burst", "group: main-canary" in y
-          and "cancel-in-progress: true" in y)
     sleep_at = y.find("sleep 90")
     checkout_at = y.find("actions/checkout")
     check("the debounce sleep exists", sleep_at != -1)
-    check("the sleep is BEFORE the checkout, which is what makes a cancelled "
-          "run cost one billed minute instead of a full setup",
+    check("the sleep is BEFORE the checkout, delaying setup until after the debounce",
           -1 < sleep_at < checkout_at, f"sleep at {sleep_at}, checkout at {checkout_at}")
     check("the job is bounded", "timeout-minutes:" in y)
 
@@ -249,6 +263,7 @@ def test_the_pilot_asks_before_it_plans():
 
 def main():
     for fn in (test_the_canary_is_event_driven_and_never_always_on,
+               test_a_running_canary_finishes_before_the_newest_pending_run,
                test_the_debounce_is_real_and_comes_first,
                test_it_runs_the_measured_four_and_not_the_ten,
                test_a_red_canary_stays_red_and_names_main,
