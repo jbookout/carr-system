@@ -433,10 +433,10 @@ test("AC-DS-REGISTRY: both verbs classify as writes, and acknowledge is not a pr
   assert.equal(out.record, true, "record-dispatch-link does not classify as a write");
   assert.equal(out.ack, true, "acknowledge-dispatch does not classify as a write");
   assert.equal(out.notification, true, "the sibling exact entry was disturbed");
-  // A PREFIX WOULD SILENTLY CAPTURE A FUTURE READ named the same way. The two
-  // acknowledge verbs are listed exactly, and there are exactly two.
+  // A PREFIX WOULD SILENTLY CAPTURE A FUTURE READ named the same way. Every
+  // acknowledge write is listed exactly, including board answer receipts.
   assert.equal(out.prefix, false, "acknowledge was promoted to a write prefix");
-  assert.deepEqual(out.exact, ["acknowledge-dispatch", "acknowledge-notification"]);
+  assert.deepEqual(out.exact, ["acknowledge-board-answer", "acknowledge-dispatch", "acknowledge-notification"]);
 });
 
 test("AC-DS-REGISTRY: a refused write is surfaced as its reason and never as a success", () => {

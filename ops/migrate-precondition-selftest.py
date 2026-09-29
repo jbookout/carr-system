@@ -533,6 +533,14 @@ def test_industry_events_domain_and_seal_are_atomic() -> None:
           pair in declared_strict_pairs(migrate.STRICT_ATOMIC_MIGRATION_GROUPS))
 
 
+def test_board_answers_domain_and_seal_are_atomic() -> None:
+    pair = ("0740_board_answers.sql", "0741_board_answers_scac_successor.sql")
+    check("board answers domain and seal share an atomic migration group",
+          pair in declared_atomic_pairs(migrate.ATOMIC_MIGRATION_GROUPS))
+    check("board answers domain and seal share a strict atomic migration group",
+          pair in declared_strict_pairs(migrate.STRICT_ATOMIC_MIGRATION_GROUPS))
+
+
 def main() -> int:
     print("migrate-precondition-selftest")
     test_table_shape()
@@ -545,6 +553,7 @@ def main() -> int:
     test_historical_unpaired_pair_is_byte_exact()
     test_new_authority_migrations_are_atomically_sealed()
     test_industry_events_domain_and_seal_are_atomic()
+    test_board_answers_domain_and_seal_are_atomic()
     print()
     print(f"migrate-precondition-selftest: {len(PASS)}/{len(PASS) + len(FAIL)} passed")
     if FAIL:

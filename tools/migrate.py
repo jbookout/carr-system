@@ -459,6 +459,10 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0738_industry_events.sql",
         "0739_industry_events_scac_successor.sql",
     ),
+    (
+        "0740_board_answers.sql",
+        "0741_board_answers_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -561,6 +565,10 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0738_industry_events.sql",
         "0739_industry_events_scac_successor.sql",
+    ),
+    (
+        "0740_board_answers.sql",
+        "0741_board_answers_scac_successor.sql",
     ),
 )
 
