@@ -89,6 +89,16 @@ class ProgressBoardCLI(unittest.TestCase):
         self.assertEqual(state["tasks"]["pr"]["stage_history"], [{"stage": "review", "at": "earlier"}])
         self.assertEqual(state["tasks"]["other"]["summary"], "Verify that captured mail reaches the CRM.")
         self.assertEqual(state["tasks"]["other"]["provider"], "Anthropic")
+
+    def test_review_verdict_requires_trusted_comment_on_current_head(self):
+        head = "a" * 40
+        payload = {"headRefOid": head, "author": {"login": "builder"},
+                   "comments": [{"author": {"login": "reviewer"}, "authorAssociation": "COLLABORATOR",
+                                 "createdAt": "2026-09-29T10:00:00Z",
+                                 "body": "APPROVE\nReviewed-SHA: " + head}]}
+        self.assertEqual(BOARD.review_verdict(payload), "APPROVE")
+        payload["headRefOid"] = "b" * 40
+        self.assertEqual(BOARD.review_verdict(payload), "Not recorded")
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tempdir.name)

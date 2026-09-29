@@ -478,6 +478,31 @@ def derived_pr_state(payload: dict[str, Any]) -> tuple[str, str, str]:
     return "review", "review", "Ready to merge" if approved else "Awaiting review"
 
 
+def review_verdict(payload: dict[str, Any]) -> str:
+    """Display only the latest trusted reviewer decision for this PR head."""
+    head = str(payload.get("headRefOid") or "").lower()
+    maker = str((payload.get("author") or {}).get("login") or "").lower()
+    verdicts = []
+    for index, comment in enumerate(payload.get("comments") or []):
+        commenter = comment.get("author") or {}
+        login = str(commenter.get("login") or "").lower()
+        association = str(comment.get("authorAssociation") or "").upper()
+        lines = str(comment.get("body") or "").splitlines()
+        if login and login != maker and association in {"OWNER", "MEMBER", "COLLABORATOR"} \
+                and lines and lines[0] in {"APPROVE", "BLOCK"}:
+            verdicts.append((str(comment.get("createdAt") or ""), index, lines))
+    if not verdicts:
+        return "Not recorded"
+    lines = max(verdicts)[2]
+    if lines[0] == "BLOCK":
+        return "BLOCK"
+    if (re.fullmatch(r"[0-9a-f]{40}", head) and len(lines) >= 2
+            and lines[1] == f"Reviewed-SHA: {head}"
+            and not any("reviewed-sha:" in line.lower() for line in lines[2:])):
+        return "APPROVE"
+    return "Not recorded"
+
+
 def esc(value: Any) -> str:
     return html.escape(str(value), quote=True)
 
@@ -696,7 +721,7 @@ h1{font-size:clamp(2.35rem,5vw,4.4rem);line-height:1.02;letter-spacing:-.035em;m
   var taskData=JSON.parse(document.getElementById('board-task-data').textContent||'{}');
   var detail=document.getElementById('task-detail'),detailBody=document.getElementById('task-detail-body');
   function row(label,value){if(value===undefined||value===null||value==='')return;var item=document.createElement('div');item.className='detail-row';var dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=label;dd.textContent=String(value);item.append(dt,dd);detailBody.append(item)}
-  function taskDetail(id){var task=taskData[id];if(!task)return;document.getElementById('task-detail-title').textContent=task.title||id;detailBody.replaceChildren();row('Summary',task.summary);row('Status',task.status);row('Stage',task.stage_label);row('Provider',task.provider);row('Model',task.model);row('Effort',task.effort);row('Repository',task.repo);row('Review',task.pr_phase);row('CI',task.pr_checks);row('Created',task.created_at);row('Updated',task.updated_at);row('Completed',task.completed_at);row('Note',task.note);row('Evidence',task.evidence);String(task.evidence||'').split(' ').filter(function(part){return part.indexOf('https://')===0||part.indexOf('http://')===0}).forEach(function(raw){try{var url=new URL(raw.replace(/[.)]+$/,''));if(!['http:','https:'].includes(url.protocol))return;var link=document.createElement('a');link.href=url.href;link.textContent=url.href;link.target='_blank';link.rel='noopener noreferrer';var item=document.createElement('div');item.className='detail-row';var dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent='Evidence link';dd.append(link);item.append(dt,dd);detailBody.append(item)}catch(_){}});if(task.pr){var link=document.createElement('a');link.href='https://github.com/'+(task.repo||'jbookout/carr-system')+'/pull/'+Number(task.pr);link.textContent='PR '+task.pr+(task.pr_head?' · '+task.pr_head:'');var item=document.createElement('div');item.className='detail-row';var dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent='Pull request';dd.append(link);item.append(dt,dd);detailBody.append(item)}(task.related_questions||[]).forEach(function(q){row('Question',q.question);row('Answer',q.answer||'Unanswered · '+(q.default||''))});(task.stage_history||[]).forEach(function(h){row('Stage history',(h.stage||'')+' · '+(h.status||'')+' · '+(h.at||''))});detail.showModal()}
+  function taskDetail(id){var task=taskData[id];if(!task)return;document.getElementById('task-detail-title').textContent=task.title||id;detailBody.replaceChildren();row('Summary',task.summary);row('Status',task.status);row('Stage',task.stage_label);row('Provider',task.provider);row('Model',task.model);row('Effort',task.effort);row('Repository',task.repo);row('Review',task.review_verdict||task.pr_phase);row('CI',task.pr_checks);row('Created',task.created_at);row('Updated',task.updated_at);row('Completed',task.completed_at);row('Note',task.note);row('Evidence',task.evidence);String(task.evidence||'').split(' ').filter(function(part){return part.indexOf('https://')===0||part.indexOf('http://')===0}).forEach(function(raw){try{var url=new URL(raw.replace(/[.)]+$/,''));if(!['http:','https:'].includes(url.protocol))return;var link=document.createElement('a');link.href=url.href;link.textContent=url.href;link.target='_blank';link.rel='noopener noreferrer';var item=document.createElement('div');item.className='detail-row';var dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent='Evidence link';dd.append(link);item.append(dt,dd);detailBody.append(item)}catch(_){}});if(task.pr){var link=document.createElement('a');link.href='https://github.com/'+(task.repo||'jbookout/carr-system')+'/pull/'+Number(task.pr);link.textContent='PR '+task.pr+(task.pr_head?' · '+task.pr_head:'');var item=document.createElement('div');item.className='detail-row';var dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent='Pull request';dd.append(link);item.append(dt,dd);detailBody.append(item)}(task.pr_links||[]).forEach(function(pr){var number=Number(pr.number),repo=String(pr.repo||'');if(!Number.isSafeInteger(number)||number<=0||repo.split('/').length!==2)return;var link=document.createElement('a');link.href='https://github.com/'+repo+'/pull/'+number;link.textContent=repo+' · PR '+number+(pr.head_sha?' · '+pr.head_sha:'');var item=document.createElement('div');item.className='detail-row';var dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent='Pull request';dd.append(link);item.append(dt,dd);detailBody.append(item)});(task.related_questions||[]).forEach(function(q){row('Question',q.question);row('Answer',q.answer||'Unanswered · '+(q.default||''))});(task.stage_history||[]).forEach(function(h){row('Stage history',(h.stage||'')+' · '+(h.status||'')+' · '+(h.at||''))});detail.showModal()}
   document.querySelectorAll('[data-task-id],[data-task-ref]').forEach(function(el){function open(event){if(event.type==='keydown'&&event.key!=='Enter'&&event.key!==' ')return;if(event.target.closest&&event.target.closest('a'))return;event.preventDefault();taskDetail(el.dataset.taskId||el.dataset.taskRef)}el.addEventListener('click',open);el.addEventListener('keydown',open)});
   var renderedAt=Date.parse('__RENDERED_AT__');
   function checkStall(){var banner=document.getElementById('stall-banner');var age=Date.now()-renderedAt;banner.hidden=Number.isFinite(age)&&age>=-30000&&age<=360000}
@@ -750,7 +775,8 @@ def render(project: str) -> None:
         if task_stage(task) == "live":
             status, stage = "done", "live"
         observed = (("status", status), ("stage", stage), ("pr_phase", phase),
-                    ("pr_checks", checks_summary(info)), ("pr_head", info.get("headRefOid") or ""))
+                    ("pr_checks", checks_summary(info)), ("pr_head", info.get("headRefOid") or ""),
+                    ("review_verdict", review_verdict(info)))
         if any(task.get(key) != value for key, value in observed):
             previous_stage = task_stage(task)
             task.update(observed)
