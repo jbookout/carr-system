@@ -114,40 +114,55 @@ def load_catalog(path=None):
         return json.load(fh)
 
 
-def dispatch(task, context="", *, pin=None, flash_free=True, policy=None, catalog=None, judge=None, client=None,
-             rng=random.random, log_path=LOG_PATH):
-    """What a dispatcher runs for one task: {route, target, desk, subagent_model, effort, pin, pin_reason, routed,
-    scores, fallback, overflow, audit, jev_error}. subagent_model is the Claude tier for an in-process spawn (None:
-    the target is a Model Room desk only). A pin from the policy's `pins` overrides the route and says why; Jev still
-    scores the task so `routed` records what the route alone would have picked. An unknown pin raises ValueError
-    rather than being routed. One row per call goes to log_path, kind "dispatch"."""
+def dispatch(task, context="", *, pin=None, audit_pin=False, work_kind=None, flash_free=True,
+             policy=None, catalog=None, judge=None, client=None, rng=random.random, log_path=LOG_PATH):
+    """Return the selected desk and its route evidence.
+
+    A known pin or typed review/build skips the paid route unless audit_pin
+    explicitly requests a comparison sample. Typed work uses the Codex desk.
+    An unknown pin or work_kind raises ValueError. One receipt is logged.
+    """
     policy = policy or load_policy()
     catalog = catalog or load_catalog()
     pins = {k: v for k, v in policy["pins"].items() if not k.startswith("_")}
     if pin is not None and pin not in pins:
         raise ValueError(f"unknown pin {pin!r}; known: {', '.join(sorted(pins))}")
-    row = decide(task, context, flash_free=flash_free, policy=policy, judge=judge, client=client, rng=rng,
-                 log_path=None)
+    if work_kind not in (None, "review", "build"):
+        raise ValueError("work_kind must be review or build")
+    # Explicit policy pins need no paid routing call. An audit is an explicit
+    # sample, so the comparison route is calculated only for that request.
+    if (pin is not None or work_kind is not None) and not audit_pin:
+        row = {"route": None, "scores": {}, "fallback": False, "overflow": False,
+               "audit": False, "jev_error": None}
+    else:
+        row = decide(task, context, flash_free=flash_free, policy=policy, judge=judge, client=client, rng=rng,
+                     log_path=None)
     # decide() flags overflow for any route whose model is Flash, but only a route that actually queues to the Flash
-    # target is affected by Flash being busy; code and script spawns go to the Opus desk and keep their tier.
-    routed_target = policy["queue_targets"][row["route"]]
+    # target is affected by Flash being busy; code and script spawns use their configured fallback.
+    routed_target = policy["queue_targets"][row["route"]] if row["route"] else None
     if row["route"] in ("script", "code") and routed_target == "flash":
         # Flash's script and code protocols run only on a queued task that names its data, or its project and test
         # (tools/room-bridge/flash_wire.py); an in-process spawn has none to hand it, and Jev's abstention also lands
-        # on script, so both keep the Opus desk.
+        # on script, so both keep the configured fallback desk.
         routed_target = policy["queue_targets"]["fallback"]
     overflow = row["overflow"] and routed_target == "flash"
+    routed_model = routed_effort = None
     if overflow:
         routed_target = policy["queue_targets"]["fallback"]
         routed_model, routed_effort = policy["overflow"]["model"], policy["overflow"]["effort"]
-    else:
+    elif routed_target is not None:
         routed_model = policy["dispatch_targets"][routed_target]["subagent_model"]
         routed_effort = policy["dispatch_targets"][routed_target]["effort"]
-    routed = {"route": row["route"], "target": routed_target, "subagent_model": routed_model}
+    routed = ({"route": row["route"], "target": routed_target, "subagent_model": routed_model}
+              if routed_target is not None else None)
     if pin is None:
         target, subagent_model, effort, reason = routed_target, routed_model, routed_effort, None
     else:
         target, reason = pins[pin]["target"], pins[pin]["reason"]
+        subagent_model = policy["dispatch_targets"][target]["subagent_model"]
+        effort = policy["dispatch_targets"][target]["effort"]
+    if work_kind in ("review", "build") or (pin is None and row["route"] == "code"):
+        target = "sol"
         subagent_model = policy["dispatch_targets"][target]["subagent_model"]
         effort = policy["dispatch_targets"][target]["effort"]
     out = {"route": row["route"], "target": target, "desk": catalog["targets"][target].get("desk"),
@@ -185,10 +200,13 @@ if __name__ == "__main__":
         ap.add_argument("task")
         ap.add_argument("--context", default="")
         ap.add_argument("--pin")
+        ap.add_argument("--audit-pin", action="store_true")
+        ap.add_argument("--work-kind", choices=("review", "build"))
         ap.add_argument("--flash-busy", action="store_true")
         a = ap.parse_args(sys.argv[2:])
         try:
-            print(json.dumps(dispatch(a.task, a.context, pin=a.pin, flash_free=not a.flash_busy), indent=1))
+            print(json.dumps(dispatch(a.task, a.context, pin=a.pin, audit_pin=a.audit_pin,
+                                      work_kind=a.work_kind, flash_free=not a.flash_busy), indent=1))
         except ValueError as exc:
             print(f"jev_model_route: {exc}", file=sys.stderr)
             raise SystemExit(2)

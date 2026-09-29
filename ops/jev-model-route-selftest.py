@@ -152,11 +152,36 @@ class Dispatch(unittest.TestCase):
         out = dispatch({"beyond": 0.9})
         self.assertEqual((out["route"], out["target"], out["subagent_model"]), ("escalate", "claude-desktop", "opus"))
 
-    def test_pin_overrides_the_route_and_says_why(self):
-        out = dispatch({"direct": 0.9}, pin="merge_review")
-        self.assertEqual((out["target"], out["subagent_model"], out["pin"]), ("claude-desktop", "opus", "merge_review"))
+    def test_pin_skips_paid_route_and_uses_codex_desk(self):
+        judge = FakeJudge(error=AssertionError("pin must skip Jev"))
+        out = route.dispatch("review PR", policy=POLICY, judge=judge, pin="merge_review", log_path=None)
+        self.assertEqual(judge.subjects, [])
+        self.assertEqual((out["target"], out["subagent_model"], out["pin"]), ("sol", None, "merge_review"))
         self.assertIn("merge", out["pin_reason"])
-        self.assertEqual(out["routed"], {"route": "direct", "target": "flash", "subagent_model": "haiku"})
+        self.assertIsNone(out["routed"])
+
+    def test_pin_sampled_audit_routes_for_comparison(self):
+        judge = FakeJudge({"direct": 0.9})
+        out = route.dispatch("review PR", policy=POLICY, judge=judge, pin="merge_review",
+                             audit_pin=True, log_path=None)
+        self.assertEqual(len(judge.subjects), 1)
+        self.assertEqual(out["routed"]["route"], "direct")
+
+    def test_typed_review_and_build_skip_paid_route_and_use_codex(self):
+        for kind in ("review", "build"):
+            with self.subTest(kind=kind):
+                judge = FakeJudge(error=AssertionError("typed work must skip Jev"))
+                out = route.dispatch("task", policy=POLICY, judge=judge,
+                                     work_kind=kind, log_path=None)
+                self.assertEqual(judge.subjects, [])
+                self.assertEqual((out["target"], out["desk"], out["subagent_model"]),
+                                 ("sol", "codex-desk", None))
+
+    def test_unknown_work_kind_refuses_before_jev(self):
+        judge = FakeJudge(error=AssertionError("must not call Jev"))
+        with self.assertRaises(ValueError):
+            route.dispatch("task", policy=POLICY, judge=judge, work_kind="misc", log_path=None)
+        self.assertEqual(judge.subjects, [])
 
     def test_sol_pin_is_a_desk_only(self):
         out = dispatch({"beyond": 0.9}, pin="sol_allowance")
@@ -168,8 +193,8 @@ class Dispatch(unittest.TestCase):
 
     def test_jev_down_still_honours_a_pin(self):
         out = dispatch(error=TimeoutError("down"), pin="gate_authority_code")
-        self.assertEqual((out["target"], out["subagent_model"]), ("claude-desktop", "opus"))
-        self.assertIn("TimeoutError", out["jev_error"])
+        self.assertEqual((out["target"], out["subagent_model"]), ("sol", None))
+        self.assertIsNone(out["jev_error"])
 
     def test_flash_busy_spawns_on_overflow_and_queues_to_fallback(self):
         out = dispatch({"direct": 0.9}, flash_free=False)
@@ -177,10 +202,10 @@ class Dispatch(unittest.TestCase):
         self.assertTrue(out["overflow"])
         self.assertEqual(out["effort"], POLICY["overflow"]["effort"])
 
-    def test_flash_busy_never_lowers_a_code_task_off_opus(self):
+    def test_flash_busy_keeps_code_on_codex_desk(self):
         # Code and script spawns go to the Opus desk; Flash being busy has nothing to do with them.
         out = dispatch({"code": 0.9}, flash_free=False)
-        self.assertEqual((out["target"], out["subagent_model"], out["effort"]), ("claude-desktop", "opus", "high"))
+        self.assertEqual((out["target"], out["subagent_model"], out["effort"]), ("sol", None, "high"))
         self.assertFalse(out["overflow"])
 
     def test_a_script_spawn_stays_on_opus_though_script_queues_to_flash(self):
@@ -189,13 +214,13 @@ class Dispatch(unittest.TestCase):
         out = dispatch({"script": 0.9}, flash_free=True)
         self.assertEqual((out["target"], out["subagent_model"]), ("claude-desktop", "opus"))
 
-    def test_a_code_spawn_stays_on_opus_though_code_queues_to_flash(self):
+    def test_a_code_spawn_stays_on_codex_though_code_queues_to_flash(self):
         # Flash runs code tasks only from the queue, with a named project and test; a spawn has neither to give it.
         self.assertEqual(POLICY["queue_targets"]["code"], "flash")
         for free in (True, False):
             out = dispatch({"code": 0.9}, flash_free=free)
             self.assertEqual((out["route"], out["target"], out["subagent_model"], out["effort"]),
-                             ("code", "claude-desktop", "opus", "high"))
+                             ("code", "sol", None, "high"))
             self.assertFalse(out["overflow"])
             self.assertEqual(out["routed"]["target"], "claude-desktop")
 
@@ -210,8 +235,8 @@ class Dispatch(unittest.TestCase):
             route.dispatch("t", policy=POLICY, judge=FakeJudge({"direct": 0.9}), pin="merge_review", log_path=path)
             rows = [json.loads(line) for line in open(path)]
             self.assertEqual(len(rows), 1)
-            self.assertEqual((rows[0]["kind"], rows[0]["pin"], rows[0]["routed"]["route"]),
-                             ("dispatch", "merge_review", "direct"))
+            self.assertEqual((rows[0]["kind"], rows[0]["pin"], rows[0]["routed"]),
+                             ("dispatch", "merge_review", None))
 
 
 class Handoff(unittest.TestCase):

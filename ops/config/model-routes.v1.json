@@ -64,9 +64,9 @@
     "sol": {"subagent_model": null, "effort": "high"}
   },
   "pins": {
-    "_about": "Dispatches that must not be routed, and why (Orchestrator session 2026-09-26, agreed in the Model Room routing coordination). A pinned dispatch still asks Jev and logs the route it would have taken, so pin-versus-route disagreement is measurable. An unknown pin name is refused, never routed.",
-    "merge_review": {"target": "claude-desktop", "reason": "Independent review before a merge must be Opus (merge rule)."},
-    "gate_authority_code": {"target": "claude-desktop", "reason": "Builders and finishers touching gate, authority or seal code (SECURITY DEFINER functions, hooks/*gate*, SCAC seals, admission kernels) must be Opus."},
+    "_about": "Explicit dispatch pins skip Jev unless a sampled audit is requested. An unknown pin name is refused, never routed.",
+    "merge_review": {"target": "sol", "reason": "Independent review before a merge uses an authorized Codex desk."},
+    "gate_authority_code": {"target": "sol", "reason": "Builders and finishers touching gate, authority or seal code use an authorized Codex desk."},
     "sol_allowance": {"target": "sol", "reason": "Joe asked for Sol desks so the Codex allowance is spent; pinned while that directive stands."}
   },
   "overflow": {"_about": "Flash runs one job at a time on the Mac. When it is busy or offline, a Flash route runs on this model instead of queueing (Joe 2026-09-24: we don't want to wait in line for Flash).",

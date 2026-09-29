@@ -183,11 +183,38 @@ def run(module, text, tmp, *, session="s1", now=1000.0, doc=None, ask=None, rank
         ask=ask if ask is not None else Asker(), client=Client,
         rank=rank if rank is not None else Ranker(),
         delivered_cache=delivered, envelope=envelope,
-        log_path=os.path.join(tmp, "log.jsonl"))
+        log_path=os.path.join(tmp, "log.jsonl"), serial_fallback=True)
 
 
 def ids(rows):
     return [row["id"] for row in rows]
+
+
+def prop_human_intent_cache(rtd_m):
+    """An identical human intent reuses all judgments; changed text or rule
+    text asks again. Delivery dedupe remains a separate session concern."""
+    with tempfile.TemporaryDirectory() as tmp:
+        ask, rank = Asker(0.9), Ranker()
+        doc = compiled_doc()
+        cache = os.path.join(tmp, "judgments.json")
+        base = dict(session_id="cache-session", compiled=doc, rules=ROSTER,
+                    ask=ask, rank=rank, client=Client, envelope=False,
+                    triggers_path=table_for(doc, tmp),
+                    judgment_cache=cache, delivered_cache=os.path.join(tmp, "delivered.json"),
+                    log_path=os.path.join(tmp, "log.jsonl"))
+        rtd_m.advise("inspect this lease", now=1000.0, **base)
+        calls = rank.calls + len(ask.calls)
+        rtd_m.advise("inspect this lease", now=1001.0, **base)
+        if rank.calls + len(ask.calls) != calls:
+            return False
+        rtd_m.advise("inspect this lease closely", now=1002.0, **base)
+        if rank.calls + len(ask.calls) <= calls:
+            return False
+        changed = [dict(rule) for rule in ROSTER]
+        changed[-1]["statement"] += " Revised."
+        before = rank.calls + len(ask.calls)
+        rtd_m.advise("inspect this lease", now=1003.0, **{**base, "rules": changed})
+        return rank.calls + len(ask.calls) > before
 
 
 # ---------------------------------------------------------------- properties
@@ -320,10 +347,11 @@ def prop_default_rank(rtc_m, rtd_m):
                          triggers_path=table_for(compiled_doc(), tmp), compiled=compiled_doc(),
                          rules=ROSTER, ask=ask, client=ChoiceClient, rank=None,
                          delivered_cache=os.path.join(tmp, "d"), envelope=False,
-                         log_path=os.path.join(tmp, "log.jsonl"))
+                         log_path=os.path.join(tmp, "log.jsonl"), serial_fallback=True)
             row = json.loads(Path(tmp, "log.jsonl").read_text().splitlines()[-1])
         bound, _ = rtd_m.judge_budgeted("git push please", ROSTER[1:], [],
-                                        ask=Asker(0.9), client=ChoiceClient)
+                                        ask=Asker(0.9), client=ChoiceClient,
+                                        serial_fallback=True)
         model.extend({r["ranking_model"] for r in bound.values()})
     except Exception:
         return False
@@ -410,7 +438,7 @@ def prop_deadline(rtc_m, rtd_m):
     slow = SlowTransport(5.0)
     selected, report = rtd_m.judge_budgeted(
         "anything", ROSTER, [], rank=Ranker(), ask=slow, client=Client, titles={},
-        clock=slow.clock)
+        clock=slow.clock, serial_fallback=True)
     expected = int((rtd_m.DEADLINE_SECONDS - rtd_m.MIN_CALL_SECONDS) // 5.0) + 1
     return (len(slow.calls) == expected < rtd_m.BIND_TOP_K
             and sorted(selected) == sorted(slow.calls) == sorted(report["judged"])
@@ -637,6 +665,8 @@ def prop_surface_floor(rtc_m, rtd_m):
 
 
 PROPERTIES = {
+    "unchanged human intent and roster reuse judgments":
+        lambda _rtc, rtd_m: prop_human_intent_cache(rtd_m),
     "negative phrases mask their shared word": prop_negative_masks,
     "a missing trigger table still judges a human prompt, within budget": prop_fail_open,
     "residual and stale rules are judged on every human prompt": prop_residual_every_human_prompt,
@@ -860,9 +890,11 @@ MUTANTS = [
      ("        elif deadline - clock() < MIN_CALL_SECONDS:", "        elif False:")),
     # Retries restored on the binding and the ranking requests.
     ("a 429 on a binding request is not retried", RTD_PATH,
-     ('extra = {"deadline": deadline, "retries": 0}', 'extra = {"deadline": deadline}')),
+     ('extra = {"deadline": deadline, "retries": 0,\n             "model": _sibling("jev_rule_select").EVALUATED_MODEL}',
+      'extra = {"deadline": deadline,\n             "model": _sibling("jev_rule_select").EVALUATED_MODEL}')),
     ("a 429 on the ranking request is not retried", RTD_PATH,
-     ('extra = {"retries": 0, "deadline": deadline}', 'extra = {"deadline": deadline}')),
+     ('extra = {"retries": 0, "deadline": deadline, "model": jrs.EVALUATED_MODEL}',
+      'extra = {"deadline": deadline, "model": jrs.EVALUATED_MODEL}')),
     # ask() sleeping past the deadline, and attempts at the full timeout.
     ("ask() honours an absolute deadline across 429 retries", TSC_PATH,
      ("if deadline is not None and delay >= deadline - time.monotonic():", "if False:")),
