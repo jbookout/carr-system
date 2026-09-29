@@ -37,5 +37,15 @@ test('Codex session read has its own sealed successor', () => {
   assert.match(sql, /scac-mutation-registry\.v97/);
   const runtime = read('mcp-server/src/scac-mutation-registry.v97.generated.js');
   assert.match(runtime, /mcp-tool:list-my-codex-sessions/);
-  assert.match(read('mcp-server/src/mutation-registry.js'), /scac-mutation-registry\.v97\.generated\.js/);
+});
+
+test('Observatory room read has the live sealed successor', () => {
+  const migrationNames = readdirSync(resolve(root, 'migrations'));
+  assert.equal(migrationNames.filter(name => name.startsWith('0752_')).length, 1);
+  const sql = read('migrations/0752_observatory_room_read_scac_successor.sql');
+  assert.match(sql, /scac-mutation-registry\.v97/);
+  assert.match(sql, /scac-mutation-registry\.v98/);
+  const runtime = read('mcp-server/src/scac-mutation-registry.v98.generated.js');
+  assert.match(runtime, /mcp-tool:read-room-latest/);
+  assert.match(read('mcp-server/src/mutation-registry.js'), /scac-mutation-registry\.v98\.generated\.js/);
 });

@@ -1193,6 +1193,17 @@ if [ "$CODEX_SESSION_READ_REGISTRY_APPLIED" = t ] && [ "$DOC_SUGGESTIONS_REGISTR
   echo "schema-snapshot: Codex session read v97 is applied without v96 predecessor" >&2
   exit 1
 fi
+OBSERVATORY_ROOM_READ_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0752_observatory_room_read_scac_successor.sql')" \
+  2>/dev/null)"
+case "$OBSERVATORY_ROOM_READ_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read Observatory room read v98 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$OBSERVATORY_ROOM_READ_REGISTRY_APPLIED" = t ] && [ "$CODEX_SESSION_READ_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: Observatory room read v98 is applied without v97 predecessor" >&2
+  exit 1
+fi
 
 # WR-000117. 0530 is the registry successor half of the atomic (0529,0530)
 # group, so probing the SUCCESSOR and not the domain migration is what says the
@@ -2884,6 +2895,17 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                                        SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v96'"
                                        SCAC_FULL_SET_SEAL_COUNT=96
                                        SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v97_current()"
+                                       if [ "$OBSERVATORY_ROOM_READ_REGISTRY_APPLIED" = t ]; then
+                                         SCAC_CURRENT_NUMBER=98
+                                         SCAC_VERSION_COUNT=98
+                                         SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v98'")"
+                                         SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v98'")"
+                                         SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v98.generated.js"
+                                         SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v98'"
+                                         SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v97'"
+                                         SCAC_FULL_SET_SEAL_COUNT=97
+                                         SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v98_current()"
+                                       fi
                                      fi
                                    fi
                                  fi

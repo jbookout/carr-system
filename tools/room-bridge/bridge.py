@@ -592,6 +592,21 @@ def heartbeat_body(desk_entries: dict, cursor: int, cycle_at: str,
     # when the directory could not be read this cycle — same stance as profiles.
     if sessions is not None:
         heartbeat["sessions"] = sessions
+        # The room caps a turn at 20,000 characters. A burst of live sessions
+        # must not silence desk health altogether; publish the newest bounded
+        # roster and say how many entries could not fit.
+        if len(json.dumps({"heartbeat": heartbeat}, separators=(",", ":"))) > 20000:
+            newest = sorted(sessions, key=lambda row: str(row.get("last_live_at") or ""), reverse=True)
+            heartbeat["sessions_total"] = len(sessions)
+            heartbeat["sessions_truncated"] = 0
+            heartbeat["sessions"] = []
+            for row in newest:
+                heartbeat["sessions"].append(row)
+                heartbeat["sessions_truncated"] = len(sessions) - len(heartbeat["sessions"])
+                if len(json.dumps({"heartbeat": heartbeat}, separators=(",", ":"))) > 19000:
+                    heartbeat["sessions"].pop()
+                    heartbeat["sessions_truncated"] += 1
+                    break
     return json.dumps({"heartbeat": heartbeat}, separators=(",", ":"))
 
 
