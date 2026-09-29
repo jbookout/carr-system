@@ -192,6 +192,11 @@ WRITE_ACTION_PREFIXES = {
     "update", "write",
 }
 WRITE_ACTION_EXACT = {
+    "acknowledge-board-answer",  # durable Received receipt for a board answer
+    "answer-board-question",      # human partner records a durable answer
+    "ask-board-question",         # opens a named question on the board
+    "publish-board-snapshot",     # publishes the signed-in board view
+    "revise-board-question",      # preserves the prior question revision
     "acknowledge-notification",  # writes ops.notification_read: a durable per-recipient
                                  # receipt a session could report as "I cleared that".
                                  # EXACT rather than a prefix for adjudicate's reason --
