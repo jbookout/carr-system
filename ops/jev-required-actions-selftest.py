@@ -529,7 +529,7 @@ def run_gate(records, session, state, env_extra=None):
                               "stop_hook_active": False, "cwd": REPO}),
             env=env)
         body = json.loads(proc.stdout or "{}")
-        return body.get("decision") == "block", body.get("reason", "")
+        return body.get("decision") == "block", body.get("reason", body.get("systemMessage", ""))
     finally:
         os.unlink(path)
 
@@ -701,6 +701,60 @@ def latch_does_not_reopen_twice_for_the_same_turn():
         print(f"{'PASS' if ok else 'FAIL'}  latch: the SAME turn's finding does not reopen "
               f"twice (first={first}, second={second})")
         return ok
+
+
+def latch_partial_satisfaction_only_notices_in_the_same_turn():
+    """PR 1422 finding 1: partial refusal/call changes the missing set,
+    but Stop feedback keeps the human turn and its one intervention."""
+    ok = True
+    for satisfaction in ("refusal", "call"):
+        session = f"jev-latch-partial-{satisfaction}"
+        calls_path = write_jev_calls_file([])
+        try:
+            with tempfile.TemporaryDirectory(prefix="jev-required-") as state:
+                env = {"CARR_JEV_CALLS_LOG_OVERRIDE": calls_path}
+                records = [user_prompt("design the seam and select verification", "p-partial", -60),
+                           build_advisory_attachment(
+                               ["architecture_or_design", "verification_selection"], "r-partial", -59),
+                           assistant("Here is the plan.", -58)]
+                first, first_reason = run_gate(records, session, state, env)
+                records.append(stop_feedback("p-partial", -57))
+                if satisfaction == "refusal":
+                    records.append(assistant(
+                        "JEV-REFUSED: architecture_or_design the partner already settled "
+                        "the architecture in the prompt.", -56))
+                else:
+                    records.append(bash("python3 -c 'from ops.typesafe_client import ask'", -56))
+                    with open(calls_path, "w") as fh:
+                        fh.write(json.dumps(call_row(
+                            facets=["architecture_or_design"], session=session, when=-55)) + "\n")
+                    records.append(assistant("Jev judged the architecture.", -54))
+                second, notice = run_gate(records, session, state, env)
+                third, repeated_notice = run_gate(records, session, state, env)
+                settled = records + [assistant(
+                    "JEV-REFUSED: verification_selection the prompt already names "
+                    "the exact required checks.", -53)]
+                satisfied, satisfied_notice = run_gate(settled, session, state, env)
+                next_turn = settled + [assistant("That turn is settled.", -52),
+                    user_prompt("select verification for another seam", "p-next", -10),
+                    build_advisory_attachment(["verification_selection"], "r-next", -5),
+                    assistant("Here is the next plan.", 0)]
+                new_turn, new_reason = run_gate(next_turn, session, state, env)
+                passed = (first and "architecture_or_design" in first_reason
+                          and "verification_selection" in first_reason
+                          and not second and not third
+                          and "verification_selection" in notice
+                          and "architecture_or_design" not in notice
+                          and repeated_notice == notice
+                          and not satisfied and not satisfied_notice
+                          and new_turn and "verification_selection" in new_reason)
+                ok = ok and passed
+                print(f"{'PASS' if passed else 'FAIL'}  latch: partial {satisfaction} "
+                      f"only notices remaining facets (first={first}, second={second}, "
+                      f"third={third}, notice={notice!r}, new_turn={new_turn})")
+        finally:
+            os.unlink(calls_path)
+    return ok
 
 
 # ---------------------------------------------------------------------------
@@ -1348,6 +1402,7 @@ def main():
         stale_earlier_turn_advisory_does_not_satisfy_current_turn(),
         latch_is_per_turn_not_per_session(),
         latch_does_not_reopen_twice_for_the_same_turn(),
+        latch_partial_satisfaction_only_notices_in_the_same_turn(),
         post_reopen_turn_still_enforced_end_to_end(),
         post_reopen_turn_with_refusal_after_the_reopen_passes(),
         replay_notification_with_empty_advisory_cannot_erase_required(),

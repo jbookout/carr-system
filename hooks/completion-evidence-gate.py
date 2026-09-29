@@ -1303,15 +1303,18 @@ def jev_required_actions_check(session, recs):
         return False, "", None
     # LATCHED PER TURN, NOT PER SESSION: the identity includes this turn's own
     # build-advisory receipt id (or prompt hash), which is unique per turn, so
-    # the SAME missing-facet set recurring in a LATER turn still reopens.
+    # a LATER turn still reopens. The missing set is deliberately excluded:
+    # partial satisfaction must not mint a second intervention in this turn.
     # stop_latch's own identity/latch machinery is reused unchanged — only the
     # token set fed into it is turn-scoped now.
     identity = claim_identity(
         "completion-evidence-gate", JEV_REQUIRED_REASON,
-        [result.get("turn_key") or session, *result["missing"]])
-    if latched(session, identity):
-        return False, "", None
+        [result.get("turn_key") or session])
     missing = ", ".join(result["missing"])
+    if latched(session, identity):
+        return False, ("JEV REQUIRED ACTIONS NOTICE — this human turn already received "
+                       f"its one reopen; remaining missing facets: {missing}. "
+                       "Continuing without action credit for those facets."), None
     reason = (f"this turn's Jev build advisory required {missing}, and the turn shows "
               "neither a Jev call (ops/typesafe_client.py) nor a named refusal "
               f"(\"JEV-REFUSED: <facet> <reason>\") for it")
