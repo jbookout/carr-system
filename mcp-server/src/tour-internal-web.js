@@ -19,6 +19,8 @@ const STATIC = new Map([
 const METHODS = new Map([
   ["/api/tours/library", "GET"],
   ["/api/tours/detail", "GET"],
+  ["/api/tours/properties/search", "POST"],
+  ["/api/tours/selection-cart", "GET, POST"],
   ["/api/tours/route-version", "POST"],
   ["/api/tours/route-reorder", "POST"],
   ["/api/tours/route-accept", "POST"],
@@ -89,6 +91,27 @@ function exact(value, keys) {
 function ids(value, min = 1, max = 100) {
   return Array.isArray(value) && value.length >= min && value.length <= max && new Set(value).size === value.length && value.every(validId);
 }
+const COUNTIES = new Set(["Escambia", "Santa Rosa", "Okaloosa", "Walton", "Bay"]);
+const AVAILABILITY = new Set(["available", "coming_soon", "under_contract", "unknown"]);
+const SORT = new Set(["updated_desc", "address_asc", "size_asc", "size_desc"]);
+function distinctList(value, allowed, maximum, pattern) {
+  return Array.isArray(value) && value.length <= maximum && new Set(value).size === value.length &&
+    value.every(item => typeof item === "string" && (allowed ? allowed.has(item) : pattern.test(item)));
+}
+function optionalSize(value) { return value === null || Number.isInteger(value) && value >= 0 && value <= 100_000_000; }
+function optionalBoolean(value) { return value === null || typeof value === "boolean"; }
+function validSearch(value) {
+  return exact(value, ["query", "counties", "property_types", "min_square_feet", "max_square_feet", "availability",
+    "entrance_verified", "public_projection_ready", "photos_available", "sort", "cursor", "limit"]) &&
+    (value.query === null || typeof value.query === "string" && value.query.trim().length > 0 && value.query.length <= 200 && !/[\u0000-\u001f\u007f]/.test(value.query)) &&
+    distinctList(value.counties, COUNTIES, 5) && distinctList(value.property_types, null, 12, /^[a-z0-9][a-z0-9_-]{0,63}$/) &&
+    optionalSize(value.min_square_feet) && optionalSize(value.max_square_feet) &&
+    (value.min_square_feet === null || value.max_square_feet === null || value.min_square_feet <= value.max_square_feet) &&
+    distinctList(value.availability, AVAILABILITY, 4) && optionalBoolean(value.entrance_verified) &&
+    optionalBoolean(value.public_projection_ready) && optionalBoolean(value.photos_available) && SORT.has(value.sort) &&
+    (value.cursor === null || typeof value.cursor === "string" && /^[0-9]{1,9}$/.test(value.cursor)) &&
+    Number.isInteger(value.limit) && value.limit >= 1 && value.limit <= 100;
+}
 function scopes(value) {
   return Array.isArray(value) && value.length > 0 && value.length <= SHARE_SCOPES.size && new Set(value).size === value.length && value.every((scope) => SHARE_SCOPES.has(scope));
 }
@@ -104,6 +127,11 @@ function validContent(value) {
 }
 
 const VALID = {
+  "/api/tours/properties/search": validSearch,
+  "/api/tours/selection-cart": (v) => exact(v, ["tour_id", "base_selection_version_id", "expected_selection_version", "property_ids", "selection_digest", "idempotency_key"]) &&
+    validId(v.tour_id) && (v.base_selection_version_id === null || validId(v.base_selection_version_id)) &&
+    Number.isInteger(v.expected_selection_version) && v.expected_selection_version >= 0 && ids(v.property_ids, 0) &&
+    validDigest(v.selection_digest) && validId(v.idempotency_key),
   "/api/tours/route-version": (v) => exact(v, ["tour_id", "expected_route_version", "stop_ids", "idempotency_key"]) && validId(v.tour_id) && Number.isInteger(v.expected_route_version) && v.expected_route_version >= 0 && ids(v.stop_ids, 1) && validId(v.idempotency_key),
   "/api/tours/route-reorder": (v) => exact(v, ["tour_id", "route_version_id", "expected_route_version", "stop_ids", "idempotency_key"]) && validId(v.tour_id) && validId(v.route_version_id) && Number.isInteger(v.expected_route_version) && v.expected_route_version >= 0 && ids(v.stop_ids, 1) && validId(v.idempotency_key),
   "/api/tours/route-accept": (v) => exact(v, ["route_version_id", "expected_prior_route_version", "acceptance_digest", "idempotency_key"]) && validId(v.route_version_id) && Number.isInteger(v.expected_prior_route_version) && v.expected_prior_route_version >= 0 && validDigest(v.acceptance_digest) && validId(v.idempotency_key),
@@ -119,6 +147,8 @@ const VALID = {
 };
 
 const SEAMS = {
+  "/api/tours/properties/search": "searchTourPropertiesFn",
+  "/api/tours/selection-cart": "readTourSelectionCartFn",
   "/api/tours/library": "listToursFn",
   "/api/tours/detail": "readTourFn",
   "/api/tours/route-version": "createRouteVersionFn",
@@ -184,7 +214,7 @@ const CONFLICT_MESSAGES = new Set([
 function dependencyFailure(error) {
   const code = typeof error?.payload?.error === "string" ? error.payload.error : "";
   const message = typeof error?.message === "string" ? error.message : "";
-  return { status: code === "version_conflict" || CONFLICT_MESSAGES.has(message) ? 409 : 503 };
+  return { status: code === "tour_selection_cart_not_found" ? 404 : code === "version_conflict" || CONFLICT_MESSAGES.has(message) ? 409 : 503 };
 }
 async function staticAsset(env, request, pathname) {
   if (!env?.ASSETS?.fetch) return json({ error: "not_found" }, 404);
@@ -202,12 +232,13 @@ async function staticAsset(env, request, pathname) {
 async function api(request, env, ctx, actor, session, dependencies, pathname) {
   const origin = originFor(request, env);
   if (!origin || !actorSession(actor, session)) return json({ error: "unauthorized" }, 401);
-  const seamName = SEAMS[pathname];
+  const seamName = pathname === "/api/tours/selection-cart" && request.method === "POST"
+    ? "appendTourSelectionCartVersionFn" : SEAMS[pathname];
   if (typeof dependencies[seamName] !== "function") return json({ error: "not_found" }, 404);
   let input = null;
   if (request.method === "GET") {
     const url = new URL(request.url);
-    if (pathname === "/api/tours/detail") {
+    if (pathname === "/api/tours/detail" || pathname === "/api/tours/selection-cart") {
       if ([...url.searchParams.keys()].length !== 1 || !validId(url.searchParams.get("tour_id"))) return json({ error: "invalid_request" }, 400);
       input = { tour_id: url.searchParams.get("tour_id") };
     } else if (pathname === "/api/tours/projection/candidates") {
@@ -253,7 +284,7 @@ export function createTourInternalWebHandler(overrides = {}) {
     }
     const method = METHODS.get(url.pathname);
     if (!method) return withSecurityHeaders(json({ error: "not_found" }, 404));
-    if (request.method !== method) return withSecurityHeaders(methodNotAllowed(method));
+    if (!method.split(", ").includes(request.method)) return withSecurityHeaders(methodNotAllowed(method));
     return withSecurityHeaders(await api(request, env, _ctx, actor, session, overrides, url.pathname));
   } };
 }
