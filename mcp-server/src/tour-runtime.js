@@ -259,6 +259,9 @@ export async function runTourPdfRender(context, dependencies = {}) {
 // production passes nothing.
 export function createTourRuntimeAdapters(renderDependencies = {}) {
   return {
+    searchTourPropertiesFn: context => invoke(context, "search-tour-properties", context.input),
+    readTourSelectionCartFn: context => invoke(context, "read-tour-selection-cart", context.input),
+    appendTourSelectionCartVersionFn: context => invoke(context, "append-tour-selection-cart-version", context.input),
     listToursFn: async context => ({ ok: true, data: projectTourLibrary(await internalRead(context,
       "select ops.list_tour_library($1::text,$2::text) as data", [organizationTenantForActor(context.actor)])) }),
     readTourFn: async context => ({ ok: true, data: projectTourDetail(await internalRead(context,
