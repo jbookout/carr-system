@@ -2,8 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { ToolError, executeRegisteredTool, TOOLS } from "../src/tools.js";
 import { callTool } from "../src/mcp.js";
-import { canonicalJson, canonicalSha256, jevAskBinding, prefetchJevAnswer,
-  reserveJevCallAttempt, sha256Hex }
+import fs from "node:fs";
+import { answerDistribution, canonicalJson, canonicalSha256, jevAskBinding, modelIsPinned,
+  prefetchJevAnswer, PROBABILITY_SUM_TOLERANCE, reserveJevCallAttempt, sha256Hex }
   from "../src/jev-call-receipt.js";
 
 const AGENT = { id: "10000000-0000-0000-0000-000000000031", slug: "joe", human: true, via: "test" };
@@ -226,6 +227,54 @@ test("ask-jev purpose call: records the prefetched answer with the server-derive
   assert.equal(replay.receipt_id, result.receipt_id);
   assert.deepEqual(replay.answers, ANSWERS);
   assert.equal(client.rows.length, 1);
+});
+
+// ── calibration: full distribution, entropy, pinned model, state digest ────
+
+const VECTORS = JSON.parse(fs.readFileSync(
+  new URL("../../ops/fixtures/jev-calibration/distribution-vectors.v1.json", import.meta.url), "utf8"));
+
+test("answerDistribution matches the vectors ops/typesafe_client.py also runs", () => {
+  assert.equal(PROBABILITY_SUM_TOLERANCE, VECTORS.probability_sum_tolerance);
+  for (const vector of VECTORS.vectors) {
+    const got = answerDistribution(vector.question, vector.answer);
+    const want = vector.expected;
+    for (const field of ["type", "distribution", "distribution_complete", "top"])
+      assert.deepEqual(got[field], want[field], `${vector.name}: ${field}`);
+    for (const field of ["entropy_bits", "top_probability"]) {
+      if (want[field] === null) assert.equal(got[field], null, `${vector.name}: ${field}`);
+      else assert.ok(Math.abs(got[field] - want[field]) < 1e-12, `${vector.name}: ${field} ${got[field]}`);
+    }
+  }
+});
+
+test("a pinned model is an exact version, never a moving alias", () => {
+  assert.equal(modelIsPinned("jev-latest"), false);
+  assert.equal(modelIsPinned(""), false);
+  assert.equal(modelIsPinned("jev-1.14.0"), true);
+});
+
+test("ask-jev returns and stores a calibration block with every answer's distribution", async () => {
+  const client = new JevReceiptFake();
+  const args = askArgs();
+  const result = await askVia(client, AGENT, args, fakeJevAsk());
+  const block = result.calibration;
+  assert.equal(block.schema, "carr.jev-calibration.v1");
+  assert.equal(block.model_requested, "jev-latest");
+  assert.equal(block.model_answered, "jev-1.14.0");
+  assert.equal(block.model_pinned, false);
+  assert.equal(block.state_sha256, result.state_sha256);
+  assert.equal(block.questions.q1.type, "noul");
+  assert.equal(block.questions.q1.distribution.true, 0.82);
+  assert.ok(Math.abs(block.questions.q1.entropy_bits - 0.6800770457282798) < 1e-12);
+  assert.deepEqual(block.questions.q2.distribution, { a: 0.1, b: 0.9 });
+  assert.equal(block.questions.q2.top, "b");
+  // The envelope ledger keeps it server-side, and a replay returns it.
+  assert.deepEqual(client.toolCalls.get(args.idempotency_key).response.calibration, block);
+  const replay = await askVia(client, AGENT, args, fakeJevAsk());
+  assert.deepEqual(replay.calibration, block);
+  const pinned = await askVia(new JevReceiptFake(), AGENT, askArgs({ model: "jev-1.14.0" }), fakeJevAsk());
+  assert.equal(pinned.calibration.model_pinned, true);
 });
 
 test("a billable attempt is settled by the exact committed receipt", async () => {

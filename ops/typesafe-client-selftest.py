@@ -679,6 +679,116 @@ class CallReceiptTests(unittest.TestCase):
         self.assertEqual(second["facets"], ["diagnosis"])
 
 
+VECTORS_PATH = (MODULE_PATH.parent / "fixtures" / "jev-calibration" /
+                "distribution-vectors.v1.json")
+
+
+class CalibrationRecordTests(unittest.TestCase):
+    """Every Choice/Score/Noul answer carries its FULL distribution, entropy,
+    the pinned model, and a state digest, so accuracy can later be measured
+    per question family rather than argued for."""
+
+    def test_distribution_vectors_shared_with_the_worker(self):
+        vectors = json.loads(VECTORS_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(vectors["probability_sum_tolerance"], client.PROBABILITY_SUM_TOLERANCE)
+        for vector in vectors["vectors"]:
+            with self.subTest(vector["name"]):
+                got = client.answer_distribution(vector["question"], vector["answer"])
+                want = vector["expected"]
+                for field in ("type", "distribution", "distribution_complete", "top"):
+                    self.assertEqual(got[field], want[field], field)
+                for field in ("entropy_bits", "top_probability"):
+                    if want[field] is None:
+                        self.assertIsNone(got[field], field)
+                    else:
+                        self.assertAlmostEqual(got[field], want[field], places=12, msg=field)
+
+    def test_distribution_can_be_read_without_the_question(self):
+        got = client.answer_distribution(None, {"type": "choice", "choice": "a",
+                                                "probabilities": {"a": 0.75, "b": 0.25}})
+        self.assertEqual(got["distribution"], {"a": 0.75, "b": 0.25})
+        self.assertTrue(got["distribution_complete"])
+
+    def test_state_digest_matches_the_worker_canonical_json(self):
+        # Same vector mcp-server/test/jev-call-receipt.test.mjs pins.
+        self.assertEqual(client.state_sha256({"plan": "ship it"}),
+                         hashlib.sha256(b'{"plan":"ship it"}').hexdigest())
+        self.assertEqual(client.state_sha256("plain text state"),
+                         hashlib.sha256(b'"plain text state"').hexdigest())
+
+    def test_pinned_means_an_exact_version_not_a_moving_alias(self):
+        self.assertFalse(client.model_is_pinned("jev-latest"))
+        self.assertFalse(client.model_is_pinned(None))
+        self.assertTrue(client.model_is_pinned("jev-1.13.0"))
+
+    def test_ask_returns_a_calibration_block(self):
+        questions = {"q": client.noul("?"),
+                     "pick": client.choice("which?", {"a": "A", "b": "B"})}
+        answer = {"model": "jev-1.13.0", "usage": {"input_tokens": 3, "output_tokens": 1},
+                  "answers": {"q": {"type": "noul", "noul": 0.8},
+                              "pick": {"type": "choice", "choice": "b", "confidence": 0.9,
+                                       "probabilities": {"a": 0.1, "b": 0.9}}}}
+        result = client.ask({"plan": "ship it"}, questions, api_key="k",
+                            model="jev-1.13.0", opener=responder(answer))
+        block = result["calibration"]
+        self.assertEqual(block["schema"], "carr.jev-calibration.v1")
+        self.assertEqual(block["model_requested"], "jev-1.13.0")
+        self.assertEqual(block["model_answered"], "jev-1.13.0")
+        self.assertTrue(block["model_pinned"])
+        self.assertEqual(block["state_sha256"], client.state_sha256({"plan": "ship it"}))
+        self.assertEqual(block["questions"]["pick"]["distribution"], {"a": 0.1, "b": 0.9})
+        self.assertAlmostEqual(block["questions"]["q"]["entropy_bits"], 0.7219280948873623)
+        # The vendor's own answers are untouched.
+        self.assertEqual(result["answers"], answer["answers"])
+
+    def test_receipt_row_carries_entropy_digest_and_model_but_no_option_text(self):
+        questions = {"b_pick": client.choice("which?", {"secret-option": "A", "other": "B"}),
+                     "a_q": client.noul("?")}
+        answer = {"model": "jev-1.13.0", "usage": {"input_tokens": 3, "output_tokens": 1},
+                  "answers": {"a_q": {"type": "noul", "noul": 0.5},
+                              "b_pick": {"type": "choice", "choice": "other", "confidence": 0.5,
+                                         "probabilities": {"secret-option": 0.5, "other": 0.5}}}}
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "calls.jsonl"
+            with patch.object(client.urllib.request, "urlopen", responder(answer)):
+                client.ask({"plan": "x"}, questions, api_key="k", calls_log=str(log),
+                           cache_ttl_seconds=0)
+            raw = log.read_text()
+        row = json.loads(raw.splitlines()[0])
+        self.assertNotIn("secret-option", raw)
+        self.assertEqual(row["model_requested"], "jev-latest")
+        self.assertFalse(row["model_pinned"])
+        self.assertEqual(row["state_sha256"], client.state_sha256({"plan": "x"}))
+        # Aligned with question_ids_sha256, which is sorted by question id.
+        self.assertEqual(row["entropy_bits"], [1.0, 1.0])
+        self.assertEqual(row["distribution_complete"], [True, True])
+
+    def test_a_calibration_bug_never_fails_a_usable_call(self):
+        with patch.object(client, "calibration_block", side_effect=RuntimeError("boom")):
+            result = client.ask("s", {"q": client.noul("?")}, api_key="k",
+                                opener=responder(ANSWER))
+        self.assertIsNone(result["calibration"])
+        self.assertEqual(result["answers"], ANSWER["answers"])
+
+    def test_failed_call_receipt_has_null_calibration_fields(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = str(Path(d) / "calls.jsonl")
+            client._append_call_receipt({"q": 1}, [], None, log, ok=False, error="network")
+            row = json.loads(Path(log).read_text())
+        self.assertIsNone(row["entropy_bits"])
+        self.assertIsNone(row["state_sha256"])
+
+    def test_cache_hit_still_carries_a_calibration_block(self):
+        with tempfile.TemporaryDirectory() as d:
+            args = {"api_key": "k", "cache_path": str(Path(d) / "c.sqlite3"),
+                    "calls_log": str(Path(d) / "calls.jsonl"), "cache_ttl_seconds": 60}
+            with patch.object(client.urllib.request, "urlopen", responder(ANSWER)):
+                client.ask("s", {"q": client.noul("?")}, **args)
+                hit = client.ask("s", {"q": client.noul("?")}, **args)
+        self.assertTrue(hit["cache_hit"])
+        self.assertAlmostEqual(hit["calibration"]["questions"]["q"]["distribution"]["true"], 0.91)
+
+
 class CanonicalRepoRootTests(unittest.TestCase):
     """Round-2 fix (2026-09-24): `ask()` used to write its receipt next to
     whichever copy of typesafe_client.py was executing — worktree-relative —
