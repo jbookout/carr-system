@@ -102,6 +102,13 @@ case("gh pr create carrying the Claude Code attribution link",
           'Generated with [Claude Code](https://claude.com/claude-code)"'), ALLOW)
 case("claude.com read", fetch("https://claude.com/claude-code"), ALLOW)
 
+# DoctorCRE's production app is a fixed CARR-owned domain. Its gated board
+# route must be reachable for a live, unauthenticated sign-in check.
+case("DoctorCRE app production route is allowed",
+     bash("curl -sS -D - -o /dev/null https://app.doctorcre.com/progress-board"), ALLOW)
+case("DoctorCRE app lookalike remains blocked",
+     bash("curl https://app.doctorcre.com.evil.example/progress-board"), DENY)
+
 # Joe's own private Tailscale tailnet (tailc8cc93.ts.net), added 2026-09-23 so
 # his Mac Studio's local model server ("flash-next") is reachable from his
 # other devices. host_allowlisted does suffix matching, so the one tailnet

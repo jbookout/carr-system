@@ -131,7 +131,10 @@ KNOWN_HOSTS = (
     # integrity-checked by npm from hashes already committed to this repo — the
     # lockfile is the review, not the network call.
     "nodejs.org", "registry.npmjs.org",
-    "api.practicecre.com", "api.doctorcre.com", "api.anthropic.com", "console.neon.tech",
+    # DoctorCRE's production app is CARR-owned infrastructure; release checks
+    # and the signed-out progress-board check read this exact host.
+    "api.practicecre.com", "api.doctorcre.com", "app.doctorcre.com",
+    "api.anthropic.com", "console.neon.tech",
     "neon.tech", "cloudflareapi.com", "cloudflare.com", "r2.cloudflarestorage.com",
     "googleapis.com", "github.com", "api.github.com", "hc-ping.com",
     "npiregistry.cms.hhs.gov", "download.cms.gov",
