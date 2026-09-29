@@ -13,7 +13,7 @@
 # minutes, and each victim session diagnosed a defect it did not cause. The
 # 2026-08-23 CI-failures council measured the cluster and ruled: restore a CHEAP
 # canary, not the full-suite-per-merge object -- one that runs only the classes
-# that actually fail, debounces to one run per merge burst, and whose failure
+# that actually fail, historically debounced to one run per merge burst, and whose failure
 # NAMES main instead of appearing as a red on somebody's innocent pull request.
 #
 # THE FOUR CLASSES ARE THE MEASURED ONES, not a guess. Across the 30 most recent
@@ -26,6 +26,8 @@
 # THE DEBOUNCE. The sleep remains the FIRST step, before the checkout. The
 # concurrency group serializes runs and keeps only the newest pending run;
 # a running canary finishes even when another merge lands during the sleep.
+# The 90-second sleep now costs every started job; it no longer cancels running
+# jobs to collapse a burst. Only pending runs are replaced.
 #
 # THIS IS NOT AN ALWAYS-ON JOB and must not become one. It is event-driven on
 # push to main. There is no schedule here on purpose: ci.yml already carries the
@@ -62,6 +64,23 @@ on:
 # Canaries take 20-30 minutes while merges can land every 20 minutes. Cancelling
 # the running canary starves releases of a completed verdict. Let it finish;
 # GitHub keeps only the newest pending run, replacing older pending runs.
+# Cost snapshot: 2026-09-22 20:50:38 to 2026-09-29 20:50:38 UTC (7 days).
+# 223 runs / 7 = 31.9/day: 135 non-cancelled completions (134 success, 1 failure),
+# 87 cancelled, 1 active; 224 main merges / 7 = 32/day. Job timestamps excluding
+# queue time give 19 rounded runner minutes/completion (median), or 26 for the
+# latest 20 completions; both include the sleep. All 87 cancellations started.
+# Top-up estimate: sum(max(0, T - cancelled_job_minutes)) / 7 = 218/7 = 31.1
+# extra runner min/day at T=19, or 732/7 = 104.6 at T=26. This assumes every
+# cancelled job survives; pending replacement can reduce that estimate. Gross
+# allowance ignoring minutes already spent: 87/7 * 26 = 323.1 extra min/day.
+# These are workload estimates, not daily ceilings: one running + one pending
+# bounds concurrency; the 35-minute timeout bounds each job, not daily usage.
+# Actual added billed min/day = 0: this PUBLIC repo uses standard ubuntu-latest
+# (sample run 35783412154 timing API: billable.UBUNTU.total_ms=0). Policy:
+# https://docs.github.com/en/billing/concepts/product-billing/github-actions
+# Accept the runner-time increase to obtain completed release verdicts instead
+# of starving releases; remeasure if merge cadence, duration or billing changes.
+# Reproduction commands, daily counts and assumptions are in PR #1419.
 concurrency:
   group: main-canary
   cancel-in-progress: false
