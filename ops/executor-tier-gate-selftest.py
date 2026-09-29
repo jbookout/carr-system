@@ -103,12 +103,12 @@ check("a dearer pick never pushes a spawn upward", r is None, r)
 r = run({**brief, "subagent_type": "fork"}, "haiku:0.99")
 check("forks stay exempt", r is None, r)
 
-# The routing policy (ops/jev_model_route.py dispatch) already chose this tier: a pinned or routed spawn states it
-# in its executor line, and this hook must not give the opposite advice on the same launch (Orchestrator session,
-# 2026-09-26: "Jev puts 0.82-0.84 on sonnet" on spawns the merge_review and gate_authority_code pins set to opus).
+# A routing pin exempts an in-process spawn only when the pin actually names
+# that model. The merge_review pin now selects a Codex desk, not Opus.
 pinned = {**brief, "model": "opus", "prompt": "executor: opus per routing pin merge_review\nReview PR 1 adversarially."}
 r = run(pinned, "sonnet:0.84")
-check("a spawn carrying a known routing pin gets no cheaper-tier advice", r is None, r)
+check("an Opus spawn cannot claim the Codex merge-review pin as an exemption",
+      r and "EXECUTOR ADVICE" in r.get("additionalContext", ""), r)
 
 routed = {**brief, "model": "opus", "prompt": "executor: opus per routing dispatch\nChange the parser."}
 r = run(routed, "sonnet:0.84")

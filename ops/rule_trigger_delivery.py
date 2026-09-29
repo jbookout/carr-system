@@ -484,7 +484,7 @@ def advise(situation, *, session_id=None, now=None, triggers_path=TRIGGERS_PATH,
         # Human intent changes invalidate both ranking and binding. The roster
         # includes rule text, so a re-taught rule invalidates the reuse too.
         cache_path = judgment_cache if judgment_cache is not None else (
-            JUDGMENT_CACHE if ask is None and rank is None else None)
+            JUDGMENT_CACHE if ask is None and rank is None and client is None else None)
         verdict_cache = _sibling("jev_verdict_cache") if cache_path else None
         cache_key = (verdict_cache.key({"prompt": text, "serial_fallback": serial_fallback, "roster": [
             [r["id"], r.get("gist"), r.get("statement"), r.get("context")]
