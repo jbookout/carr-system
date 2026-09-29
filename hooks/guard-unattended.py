@@ -808,9 +808,10 @@ def host_allowlisted(host):
     """True if host is on the code list OR the record-derived list."""
     host = (host or "").strip().lower()
     normalized = host.strip(".")
-    # The app host is a single allowed origin, not a suffix for subdomains.
+    # The app host is a single allowed origin. DNS permits one terminal dot;
+    # retaining the raw host here rejects extra dots and subdomains.
     if normalized == "app.doctorcre.com":
-        return host == "app.doctorcre.com"
+        return host in ("app.doctorcre.com", "app.doctorcre.com.")
     if normalized.endswith(".app.doctorcre.com"):
         return False
     host = normalized
@@ -1344,7 +1345,7 @@ def main():
             # where a parser has no single URL to parse).
             try:
                 _p = urlsplit(url if url.startswith(("http://", "https://")) else f"https://{url}")
-                host = (_p.hostname or "").strip(".").lower()
+                host = (_p.hostname or "").lower()
             except Exception:
                 host = ""
             if host and not host_allowlisted(host):
