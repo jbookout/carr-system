@@ -54,7 +54,8 @@ def inline_fixture(cases, **overrides):
 
 
 def case(case_id, label, split, *, validated=True, gold=True, consequence_class="commit_warning"):
-    return {"case_id": case_id, "subject_ref": case_id, "consequence_class": consequence_class,
+    return {"case_id": case_id, "subject_ref": case_id, "question_id": "q",
+            "consequence_class": consequence_class,
             "label": label, "label_status": "validated" if validated else "unvalidated",
             "validated_by": "joe" if validated else None,
             "gold_source_available": gold, "gold_source": "commit abc123" if gold else None,
@@ -74,6 +75,12 @@ class FixtureTests(unittest.TestCase):
     def test_a_well_formed_inline_fixture_validates(self):
         doc = inline_fixture([case("a", True, "calibration"), case("b", False, "held_out")])
         self.assertEqual(cal.validate_fixture(doc), [])
+
+    def test_fixture_rejects_duplicate_join_keys_even_with_distinct_case_ids(self):
+        first = case("a", True, "calibration")
+        second = dict(first, case_id="b")
+        errors = "\n".join(cal.validate_fixture(inline_fixture([first, second])))
+        self.assertIn("duplicate join key", errors)
 
     def test_malformed_fixtures_name_every_problem(self):
         bad = case("a", True, "train")
@@ -178,12 +185,46 @@ class JoinTests(unittest.TestCase):
         self.assertEqual(unit["label_status"], "validated")
         self.assertTrue(unit["conflict"])
 
+    def test_a_validated_outcome_with_self_contradictory_label_is_conflicted(self):
+        outcome = {"judgment_id": "j1", "question_id": "q", "source": "test_result",
+                   "label": "false", "correct": True, "label_status": "validated"}
+        unit = cal.join([noul_row("j1", "s1", 0.9)], [outcome], {})["units"][0]
+        self.assertTrue(unit["conflict"])
+
     def test_fixture_labels_apply_by_subject_and_supply_the_split(self):
         fixture = inline_fixture([case("s1", True, "held_out")])
         unit = cal.join([noul_row("j1", "s1", 0.9)], [], {"defect_class": fixture})["units"]
         live = [u for u in unit if u["judgment_id"] == "j1"][0]
         self.assertEqual((live["split"], live["label_source"], live["correct"]),
                          ("held_out", "fixture", True))
+
+    def test_fixture_join_requires_exact_question_and_consequence_class(self):
+        fixture = inline_fixture([case("s1", True, "held_out")])
+        rows = [noul_row("j1", "s1", 0.9, question_id="other"),
+                noul_row("j2", "s1", 0.9, consequence_class="client_document")]
+        units = cal.join(rows, [], {"defect_class": fixture})["units"]
+        self.assertEqual(len(units), 2)
+        self.assertTrue(all(u["label_source"] is None for u in units))
+        self.assertTrue(all(u["fixture_version"] is None for u in units))
+
+    def test_choice_scores_the_answer_that_was_actually_returned(self):
+        row = noul_row("j1", "s1", 0.9)
+        row["answers"]["q"] = {"type": "choice", "choice": "b",
+                               "probabilities": {"a": 0.8, "b": 0.2}}
+        row["calibration"]["questions"]["q"] = cal._tsc().answer_distribution(
+            None, row["answers"]["q"])
+        outcome = {"judgment_id": "j1", "question_id": "q", "source": "test_result",
+                   "label": "b", "label_status": "validated"}
+        unit = cal.join([row], [outcome], {})["units"][0]
+        self.assertEqual(unit["top"], "a")
+        self.assertEqual(unit["selected_choice"], "b")
+        self.assertIs(unit["correct"], True)
+        self.assertAlmostEqual(unit["selected_probability"], 0.2)
+        report = cal.report([dict(unit, split="calibration"), dict(unit, split="held_out")])
+        cell = next(c for c in report["cells"] if c["family"] == "defect_class"
+                    and c["consequence_class"] == "commit_warning")
+        self.assertEqual(cell["calibration_split"]["probability_edges"], [0.2])
+        self.assertAlmostEqual(cell["held_out"]["probability_bands"][0]["mean_selected_probability"], 0.2)
 
     def test_unlabeled_and_unfamilied_judgments_are_counted_not_dropped_silently(self):
         judgments = [noul_row("j1", "s1", 0.9), noul_row("j2", "s2", 0.9, family=None)]
@@ -284,6 +325,35 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(self.cell(cal.report(unrecorded, targets={"commit_warning": 0.95}),
                                    "defect_class", "commit_warning")["proposal"]["reason"],
                          "model_unrecorded")
+
+    def test_a_moving_alias_cannot_supply_a_proposal(self):
+        proposal = self.cell(cal.report(synthetic_units(model="jev-latest"),
+                                        targets={"commit_warning": 0.95}),
+                             "defect_class", "commit_warning")["proposal"]
+        self.assertEqual((proposal["status"], proposal["reason"]),
+                         ("refused", "model_unpinned"))
+        units = synthetic_units()
+        for unit in units:
+            unit["model_requested"] = "jev-latest"
+            unit["model_pinned"] = False
+        proposal = self.cell(cal.report(units, targets={"commit_warning": 0.95}),
+                             "defect_class", "commit_warning")["proposal"]
+        self.assertEqual(proposal["reason"], "model_unpinned")
+
+    def test_conflicting_validated_labels_refuse_a_proposal(self):
+        units = synthetic_units()
+        units[0]["conflict"] = True
+        proposal = self.cell(cal.report(units, targets={"commit_warning": 0.95}),
+                             "defect_class", "commit_warning")["proposal"]
+        self.assertEqual((proposal["status"], proposal["reason"]),
+                         ("refused", "conflicting_validated_labels"))
+
+    def test_a_proposal_needs_a_scored_choice_probability(self):
+        units = [dict(u, selected_probability=None) for u in synthetic_units()]
+        proposal = self.cell(cal.report(units, targets={"commit_warning": 0.95}),
+                             "defect_class", "commit_warning")["proposal"]
+        self.assertEqual((proposal["status"], proposal["reason"]),
+                         ("refused", "insufficient_validated_labels"))
 
     def test_bands_report_accuracy_and_reliability_on_held_out_only(self):
         report = cal.report(synthetic_units(), targets={}, bins=3)

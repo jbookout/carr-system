@@ -219,6 +219,48 @@ class RouteTests(unittest.TestCase):
         answer = {"model": "jev-1.13.0", "answers": {"q": {"type": "choice", "choice": "a",
                                                            "confidence": 0.99}}}
         self.assertEqual(self._route(answer)["reason"], "no_distribution")
+        answer = {"model": "jev-1.13.0", "calibration": {
+            "schema": "carr.jev-calibration.v1", "model_requested": "jev-1.13.0",
+            "model_answered": "jev-1.13.0", "model_pinned": True,
+            "questions": {"q": {"distribution": {"true": 0.99, "false": 0.01}}}}}
+        self.assertEqual(self._route(answer)["route"], "review")
+
+    def test_supplied_partial_or_forged_calibration_cannot_authorize_an_act(self):
+        answer = self._answer(0.8)  # actual entropy is above the band
+        answer["calibration"] = {"questions": {"q": {"entropy_bits": 0.01}}}
+        self.assertEqual(self._route(answer)["route"], "review")
+        low_entropy = self._answer(0.99)
+        low_entropy["calibration"] = {"questions": {"q": {"entropy_bits": 0.01}}}
+        self.assertEqual(self._route(low_entropy)["reason"], "calibration_mismatch")
+        complete = judge_mod._client().answer_distribution(None, low_entropy["answers"]["q"])
+        complete.pop("distribution")
+        low_entropy["calibration"] = {
+            "schema": "carr.jev-calibration.v1", "model_requested": "jev-1.13.0",
+            "model_answered": "jev-1.13.0", "model_pinned": True,
+            "questions": {"q": complete}}
+        self.assertEqual(self._route(low_entropy)["reason"], "calibration_mismatch")
+        answer["calibration"]["questions"]["q"] = {
+            "entropy_bits": 0.01, "distribution_complete": True,
+            "distribution": {"true": 0.99, "false": 0.01}}
+        self.assertEqual(self._route(answer)["route"], "review")
+
+    def test_moving_model_alias_never_acts_even_if_named_in_a_band(self):
+        alias_bands = {"schema": "carr.jev-calibrated-bands.v1", "bands": {
+            "defect_class": {"commit_warning": {"max_entropy_bits": 0.6,
+                                                  "model": "jev-latest"}}}}
+        self.assertEqual(self._route(self._answer(0.99, model="jev-latest"),
+                                      bands=alias_bands)["route"], "review")
+
+    def test_zero_probability_offered_choice_is_valid_in_a_full_block(self):
+        raw = {"type": "choice", "choice": "b", "probabilities": {"a": 0.1, "b": 0.9}}
+        answer = {"model": "jev-1.13.0", "answers": {"q": raw}}
+        summary = judge_mod._client().answer_distribution(
+            {"type": "choice", "criteria": {"a": "a", "b": "b", "c": "c"}}, raw)
+        answer["calibration"] = {
+            "schema": "carr.jev-calibration.v1", "model_requested": "jev-1.13.0",
+            "model_answered": "jev-1.13.0", "model_pinned": True,
+            "questions": {"q": summary}}
+        self.assertEqual(self._route(answer)["route"], "act")
 
     def test_pooled_or_malformed_bands_are_refused_as_review(self):
         pooled = {"schema": "carr.jev-calibrated-bands.v1",

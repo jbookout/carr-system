@@ -191,6 +191,7 @@ def validate_fixture(doc):
     if not isinstance(cases, list) or not cases:
         return errors + ["a fixture needs at least one case (no cases)"]
     seen = set()
+    seen_join_keys = set()
     for index, item in enumerate(cases):
         where = f"case {index} ({item.get('case_id') if isinstance(item, dict) else '?'})"
         if not isinstance(item, dict):
@@ -202,8 +203,15 @@ def validate_fixture(doc):
         elif case_id in seen:
             errors.append(f"{where}: duplicate case_id")
         seen.add(case_id)
+        join_key = (item.get("subject_ref"), item.get("consequence_class"),
+                    item.get("question_id"))
+        if join_key in seen_join_keys:
+            errors.append(f"{where}: duplicate join key")
+        seen_join_keys.add(join_key)
         if not isinstance(item.get("subject_ref"), str) or not item["subject_ref"]:
             errors.append(f"{where}: subject_ref is required")
+        if not isinstance(item.get("question_id"), str) or not item["question_id"]:
+            errors.append(f"{where}: question_id is required")
         if item.get("consequence_class") not in classes:
             errors.append(f"{where}: consequence_class {item.get('consequence_class')!r} "
                           "is not declared in consequence_classes")
@@ -262,6 +270,7 @@ def _derive_rule_delivery_eval_v2(doc):
             cases.append({
                 "case_id": f"{item['id']}#{rule}",
                 "subject_ref": f"{item['id']}#{rule}",
+                "question_id": "q",
                 "consequence_class": consequence_class,
                 "label": rule in gold,
                 "label_status": "validated" if validated else "unvalidated",
@@ -337,21 +346,25 @@ def _replay_summary(question_type, distribution):
     return _tsc().answer_distribution(None, answer)
 
 
-def _choose_label(candidates, top):
+def _choose_label(candidates, selected):
     """Pick the label to score against; flag validated sources that disagree."""
     if not candidates:
         return None, False
     def verdict(c):
         if c.get("correct") is not None:
             return c["correct"]
-        return None if top is None else normalize_label(c.get("label")) == top
+        return None if selected is None else normalize_label(c.get("label")) == selected
     validated = [c for c in candidates if c.get("label_status") == "validated"]
     pool = validated or candidates
     pool = sorted(pool, key=lambda c: LABEL_PRECEDENCE.index(c["source"])
                   if c["source"] in LABEL_PRECEDENCE else len(LABEL_PRECEDENCE))
     verdicts = {verdict(c) for c in validated if verdict(c) is not None}
+    contradictory = any(c.get("correct") is not None and c.get("label") is not None
+                        and selected is not None
+                        and c["correct"] != (normalize_label(c["label"]) == selected)
+                        for c in validated)
     chosen = pool[0]
-    return {**chosen, "correct": verdict(chosen)}, len(verdicts) > 1
+    return {**chosen, "correct": verdict(chosen)}, contradictory or len(verdicts) > 1
 
 
 def join(judgments, outcomes, fixtures, *, held_out_fraction=0.5):
@@ -371,23 +384,31 @@ def join(judgments, outcomes, fixtures, *, held_out_fraction=0.5):
     case_index = {}
     for family, fixture in fixtures.items():
         for item in fixture["cases"]:
-            case_index[(family, item["subject_ref"])] = (fixture, item)
+            case_index[(family, item["subject_ref"], item["consequence_class"],
+                        item["question_id"])] = (fixture, item)
     used_cases = set()
     units = []
 
     def unit_from(*, unit_id, judgment_id, question_id, family, consequence_class,
-                  subject_ref, model, summary, candidates, fixture_case, recorded_in):
+                  subject_ref, model, summary, candidates, fixture_case, recorded_in,
+                  selected_choice=None, model_requested=None, model_pinned=None):
         split = (fixture_case[1]["split"] if fixture_case else
                  _hash_split(family, subject_ref, held_out_fraction))
-        chosen, conflict = _choose_label(candidates, summary.get("top"))
+        selected = selected_choice if summary.get("type") == "choice" else summary.get("top")
+        distribution = summary.get("distribution")
+        selected_probability = (distribution.get(selected) if isinstance(distribution, dict)
+                                and selected in distribution else None)
+        chosen, conflict = _choose_label(candidates, selected)
         return {
             "unit_id": unit_id, "judgment_id": judgment_id, "question_id": question_id,
             "family": family,
             "consequence_class": consequence_class or (fixture_case[1]["consequence_class"]
                                                        if fixture_case else None),
             "subject_ref": subject_ref, "model": model,
+            "model_requested": model_requested, "model_pinned": model_pinned,
             "entropy_bits": summary.get("entropy_bits"),
             "top": summary.get("top"), "top_probability": summary.get("top_probability"),
+            "selected_choice": selected, "selected_probability": selected_probability,
             "distribution_complete": summary.get("distribution_complete") is True,
             "label": chosen.get("label") if chosen else None,
             "correct": chosen.get("correct") if chosen else None,
@@ -418,9 +439,10 @@ def join(judgments, outcomes, fixtures, *, held_out_fraction=0.5):
                 skipped["no_family"] += 1
                 continue
             subject_ref = row.get("subject_ref")
-            fixture_case = case_index.get((family, subject_ref))
+            consequence_class = _per_question(row.get("consequence_class"), question_id)
+            fixture_case = case_index.get((family, subject_ref, consequence_class, question_id))
             if fixture_case:
-                used_cases.add((family, subject_ref))
+                used_cases.add((family, subject_ref, consequence_class, question_id))
             candidates = [dict(o, label=normalize_label(o.get("label")))
                           for o in by_judgment.get((row.get("judgment_id"), question_id), [])]
             if fixture_case:
@@ -428,24 +450,32 @@ def join(judgments, outcomes, fixtures, *, held_out_fraction=0.5):
             units.append(unit_from(
                 unit_id=f"{row.get('judgment_id')}:{question_id}",
                 judgment_id=row.get("judgment_id"), question_id=question_id, family=family,
-                consequence_class=_per_question(row.get("consequence_class"), question_id),
+                consequence_class=consequence_class,
                 subject_ref=subject_ref, model=model,
                 summary=summary if isinstance(summary, dict) else {},
-                candidates=candidates, fixture_case=fixture_case, recorded_in="judgment_log"))
+                candidates=candidates, fixture_case=fixture_case, recorded_in="judgment_log",
+                model_requested=calibration.get("model_requested"),
+                model_pinned=calibration.get("model_pinned"),
+                selected_choice=(row.get("answers", {}).get(question_id, {}).get("choice")
+                                 if isinstance(row.get("answers"), dict) else None)))
 
     for family, fixture in fixtures.items():
         for item in fixture["cases"]:
             judgment = item.get("judgment")
-            if judgment is None or (family, item["subject_ref"]) in used_cases:
+            if judgment is None or (family, item["subject_ref"], item["consequence_class"],
+                                    item["question_id"]) in used_cases:
                 continue
             fixture_case = (fixture, item)
             units.append(unit_from(
                 unit_id=f"fixture:{family}:{item['case_id']}", judgment_id=None,
-                question_id=None, family=family, consequence_class=item["consequence_class"],
+                question_id=item["question_id"], family=family,
+                consequence_class=item["consequence_class"],
                 subject_ref=item["subject_ref"], model=judgment.get("model"),
                 summary=_replay_summary(fixture["question_type"], judgment["distribution"]),
                 candidates=[fixture_candidate(fixture_case)], fixture_case=fixture_case,
-                recorded_in="fixture"))
+                recorded_in="fixture", selected_choice=judgment.get("choice"),
+                model_requested=judgment.get("model"),
+                model_pinned=_tsc().model_is_pinned(judgment.get("model"))))
     return {"units": units, "skipped": skipped}
 
 
@@ -481,8 +511,10 @@ def band_table(units, key, edges, z):
     bands = []
     lower = None
     for edge in edges + [math.inf]:
-        members = [u for u in units if u[key] is not None
-                   and (lower is None or u[key] > lower) and u[key] <= edge]
+        members = [u for u in units
+                   if u.get(key, u.get("top_probability")) is not None
+                   and (lower is None or u.get(key, u.get("top_probability")) > lower)
+                   and u.get(key, u.get("top_probability")) <= edge]
         if edge == math.inf and not members:
             break
         n = len(members)
@@ -490,12 +522,16 @@ def band_table(units, key, edges, z):
         accuracy = correct / n if n else None
         mean_p = (sum(u["top_probability"] for u in members if u["top_probability"] is not None)
                   / n) if n else None
+        mean_selected = (sum(u.get("selected_probability", u.get("top_probability"))
+                             for u in members if u.get("selected_probability", u.get("top_probability")) is not None)
+                         / n) if n else None
         low, high = wilson(correct, n, z)
         bands.append({"lower_exclusive": lower, "upper_inclusive": None if edge == math.inf else edge,
                       "n": n, "correct": correct, "accuracy": accuracy,
                       "accuracy_lower": low, "accuracy_upper": high,
                       "mean_top_probability": mean_p,
-                      "gap": None if accuracy is None or mean_p is None else mean_p - accuracy})
+                      "mean_selected_probability": mean_selected,
+                      "gap": None if accuracy is None or mean_selected is None else mean_selected - accuracy})
         lower = edge
     return bands
 
@@ -503,6 +539,15 @@ def band_table(units, key, edges, z):
 def _accuracy(units):
     n = len(units)
     return {"n": n, "accuracy": (sum(1 for u in units if u["correct"]) / n) if n else None}
+
+
+def _scorable(unit):
+    selected_probability = unit.get("selected_probability", unit.get("top_probability"))
+    return (unit.get("distribution_complete") is True
+            and unit.get("entropy_bits") is not None
+            and isinstance(selected_probability, (int, float))
+            and not isinstance(selected_probability, bool)
+            and math.isfinite(selected_probability) and 0 <= selected_probability <= 1)
 
 
 def _propose(cell, validated, target, z, pooled):
@@ -514,8 +559,11 @@ def _propose(cell, validated, target, z, pooled):
         return {"status": "no_target",
                 "detail": f"no target accuracy for consequence class {cell['consequence_class']!r}; "
                           "pass --target CLASS=ACCURACY (nothing is assumed)"}
-    calibration = [u for u in validated if u["split"] == "calibration" and u["entropy_bits"] is not None]
-    held_out = [u for u in validated if u["split"] == "held_out" and u["entropy_bits"] is not None]
+    if any(u.get("conflict") for u in validated):
+        return {"status": "refused", "reason": "conflicting_validated_labels",
+                "detail": "resolve conflicting validated labels before proposing a band"}
+    calibration = [u for u in validated if u["split"] == "calibration" and _scorable(u)]
+    held_out = [u for u in validated if u["split"] == "held_out" and _scorable(u)]
     if not calibration or not held_out:
         return {"status": "refused", "reason": "insufficient_validated_labels",
                 "detail": f"{len(calibration)} calibration and {len(held_out)} held-out validated "
@@ -528,6 +576,14 @@ def _propose(cell, validated, target, z, pooled):
     if len(models) > 1:
         return {"status": "refused", "reason": "mixed_models", "models": sorted(models),
                 "detail": "a band is measured on one model; split the data by model"}
+    if not _tsc().model_is_pinned(next(iter(models))):
+        return {"status": "refused", "reason": "model_unpinned",
+                "detail": "a moving model alias cannot anchor a calibrated band"}
+    if any(u.get("model_pinned", _tsc().model_is_pinned(u.get("model"))) is not True
+           or (u.get("model_requested") is not None
+               and u["model_requested"] != u.get("model")) for u in validated):
+        return {"status": "refused", "reason": "model_unpinned",
+                "detail": "each validated judgment needs a pinned requested model matching the answer"}
     chosen = None
     ordered = sorted(calibration, key=lambda u: u["entropy_bits"])
     correct = 0
@@ -564,13 +620,14 @@ def _cell(family, consequence_class, units, targets, bins, z):
     labeled = [u for u in units if u["correct"] is not None]
     validated = [u for u in labeled if u["label_status"] == "validated"]
     unvalidated = [u for u in labeled if u["label_status"] != "validated"]
-    with_entropy = [u for u in validated if u["entropy_bits"] is not None]
+    with_entropy = [u for u in validated if _scorable(u)]
     calibration = [u for u in with_entropy if u["split"] == "calibration"]
     held_out = [u for u in with_entropy if u["split"] == "held_out"]
     entropy_edges = quantile_edges([u["entropy_bits"] for u in calibration], bins)
-    probability_edges = quantile_edges([u["top_probability"] for u in calibration
-                                        if u.get("top_probability") is not None], bins)
-    probability_bands = band_table(held_out, "top_probability", probability_edges, z)
+    probability_edges = quantile_edges([
+        u.get("selected_probability", u.get("top_probability")) for u in calibration
+        if u.get("selected_probability", u.get("top_probability")) is not None], bins)
+    probability_bands = band_table(held_out, "selected_probability", probability_edges, z)
     ece = (sum(b["n"] * abs(b["gap"]) for b in probability_bands if b["gap"] is not None)
            / len(held_out)) if held_out else None
     cell = {

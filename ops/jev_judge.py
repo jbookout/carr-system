@@ -280,7 +280,15 @@ def _band_is_valid(band):
     model = band.get("model") if isinstance(band, dict) else None
     return (not isinstance(limit, bool) and isinstance(limit, (int, float))
             and math.isfinite(limit) and limit >= 0
-            and isinstance(model, str) and bool(model.strip()))
+            and isinstance(model, str) and _client().model_is_pinned(model))
+
+
+def _distribution_matches(recorded, observed):
+    """The question may add offered zero-probability choices absent from the answer."""
+    if not isinstance(recorded, dict) or not isinstance(observed, dict):
+        return False
+    return (all(recorded.get(key) == value for key, value in observed.items())
+            and all(value == 0 for key, value in recorded.items() if key not in observed))
 
 
 def route(answer, key, *, family, consequence_class, bands=None, bands_path=BANDS_PATH):
@@ -297,7 +305,9 @@ def route(answer, key, *, family, consequence_class, bands=None, bands_path=BAND
     """
     bands = load_bands(bands_path) if bands is None else bands
     model = answer.get("model") if isinstance(answer, dict) else None
-    question = (_calibration_of(answer) or {}).get("questions", {}).get(key) if isinstance(answer, dict) else None
+    tsc = _client()
+    raw = answer.get("answers", {}).get(key) if isinstance(answer, dict) and isinstance(answer.get("answers"), dict) else None
+    question = tsc.answer_distribution(None, raw) if isinstance(raw, dict) else None
     entropy = question.get("entropy_bits") if isinstance(question, dict) else None
     verdict = {"route": "review", "reason": None, "entropy_bits": entropy,
                "max_entropy_bits": None, "family": family,
@@ -316,6 +326,23 @@ def route(answer, key, *, family, consequence_class, bands=None, bands_path=BAND
     verdict["max_entropy_bits"] = band["max_entropy_bits"]
     if model != band["model"]:
         return {**verdict, "reason": "model_mismatch"}
+    if not tsc.model_is_pinned(model):
+        return {**verdict, "reason": "model_unpinned"}
+    if not question or question.get("distribution_complete") is not True:
+        return {**verdict, "reason": "no_distribution"}
+    supplied = answer.get("calibration")
+    if supplied is not None:
+        recorded = supplied.get("questions", {}).get(key) if isinstance(supplied, dict) and isinstance(supplied.get("questions"), dict) else None
+        if (not isinstance(recorded, dict) or supplied.get("schema") != "carr.jev-calibration.v1"
+                or supplied.get("model_answered") != model
+                or supplied.get("model_pinned") is not True
+                or supplied.get("model_requested") != model
+                or not _distribution_matches(recorded.get("distribution"),
+                                             question.get("distribution"))
+                or any(recorded.get(field) != question.get(field) for field in
+                       ("type", "distribution_complete", "probability_sum",
+                        "entropy_bits", "top", "top_probability"))):
+            return {**verdict, "reason": "calibration_mismatch"}
     if entropy is None:
         return {**verdict, "reason": "no_distribution"}
     if entropy > band["max_entropy_bits"]:
