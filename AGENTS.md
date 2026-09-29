@@ -220,8 +220,12 @@ script will report every class green having executed none.
 
 ## Progress board
 
-For work >5 steps or >30 min, update `out/boards/<project>.html` via
-`tools/progress_board.py` after each step; record Joe questions with defaults.
+For work >5 steps or >30 min, update the board via `tools/progress_board.py`
+after each step; record Joe questions with defaults, and give a blocked task
+`--reason` and `--next-action`. The tool writes `out/boards/<project>.json` and
+publishes it; the only board UI is https://app.doctorcre.com/progress-board
+(`?board=<project>`, or `?board=all-repos` for every jbookout PR). There is no
+static HTML copy. The launchd job runs `ops/progress-board-render.sh`.
 
 ## Git discipline on a shared tree
 
