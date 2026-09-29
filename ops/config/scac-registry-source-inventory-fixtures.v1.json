@@ -72901,8 +72901,8 @@
           "operation": "tools/migrate.py",
           "effect_class": "administrative_mutation",
           "source_locator": "tools/migrate.py",
-          "schema_digest": "848a8cb63b1e75eef06762e06ffafae398ce48ccaf279c35bacb044df6fa6b67",
-          "handler_digest": "848a8cb63b1e75eef06762e06ffafae398ce48ccaf279c35bacb044df6fa6b67",
+          "schema_digest": "2f0666586e9acd00c6f1f372c2cb2d91deebe1105f0c0e6faa185fc942317840",
+          "handler_digest": "2f0666586e9acd00c6f1f372c2cb2d91deebe1105f0c0e6faa185fc942317840",
           "write": true,
           "human_only": false,
           "authority_only": true,
@@ -72920,7 +72920,7 @@
         }
       ],
       "expected_count": 1007,
-      "expected_sha256": "9f78bf7bd001001b5acff8e3dcb36e9e81d734faa11b23eecbaa9f390fee021c",
+      "expected_sha256": "b550c6b422a339ae71b9d1aad7cd0bb2f3b68666f5e57fe62f7e5c74e381f97c",
       "reason": "Tour client feedback adds one broker-authenticated read verb and binds the atomic migration pair in the registered migration runner. Public writes stay within the opaque browser share boundary; the database catalog successor seals its callable functions."
     }
   ],
