@@ -134,7 +134,9 @@ if CANONICAL_SECTION == "jev-spend":
         _spend_module, _spend_line = _jev_spend_row()
     except Exception as exc:
         print(f"UNAVAILABLE jev spend — {type(exc).__name__}; "
-              "on breach: inspect usage receipt sources and restore the reader")
+              "on breach: nightly ledger records an incident · owner orchestrator · "
+              "remediation restore the receipt reader · verify the next run reads "
+              "all usage sources · noncritical incidents auto-clear after three healthy runs")
         sys.exit(1)
     print(_spend_line)
     sys.exit(_spend_module.nightly_exit_status(_spend_line))

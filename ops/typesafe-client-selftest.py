@@ -121,6 +121,16 @@ class SpendHealthTests(unittest.TestCase):
                          "TEST_SPEND_ROW": line}, timeout=10)
                 self.assertEqual(result.returncode, expected, result.stderr)
                 self.assertEqual(result.stdout.strip(), line)
+            (root / "ops" / "jev_spend_health.py").unlink()
+            missing = subprocess.run(
+                [os.sys.executable, str(root / "tools" / "health-check.py"),
+                 "--section", "jev-spend"],
+                cwd=root, capture_output=True, text=True,
+                env={**os.environ, "PYTHONPATH": str(source_tools)}, timeout=10)
+            self.assertEqual(missing.returncode, 1)
+            for required in ("owner orchestrator", "restore the receipt reader",
+                             "verify the next run", "auto-clear after three healthy runs"):
+                self.assertIn(required, missing.stdout)
 
     def test_daily_spend_warns_and_dedups_one_loop_then_auto_clears(self):
         self.assertTrue(SPEND_SPEC and SPEND_SPEC.loader)
