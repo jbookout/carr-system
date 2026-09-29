@@ -88,9 +88,11 @@ chat-lint-carryover.py	UserPromptSubmit	scenarios:b2d3e4f5a6b7	announce	Keep rep
 chat-lint-gate.py	Stop	(all)	counts	allow=87
 close-before-open-gate.py	PreToolUse[Write|Edit|MultiEdit]	(all)	counts	allow=72 deny=1
 close-before-open-gate.py	PreToolUse[Write|Edit|MultiEdit]	scenarios:b2e5c3d4e5fa	deny	BLOCKED by the CARR close-before-open gate: CLOSE-BEFORE-OPEN: # open work request(s) block a new front: WR-AI-#, WR-AI-#, WR-AI-#, WR-AI-#,
-completion-evidence-gate.py	Stop	(all)	counts	allow=12 reopen=75
+completion-evidence-gate.py	Stop	(all)	counts	allow=4 announce=8 reopen=75
+completion-evidence-gate.py	Stop	advisories:0521ac6e0340/asks-permission	announce	JEV DEGRADED — required-action enforcement unavailable (receipt_absent); continuing without action credit.
 completion-evidence-gate.py	Stop	advisories:0b5544d0632d/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:1131c706f9fd/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
+completion-evidence-gate.py	Stop	advisories:12d66561f2be/plans-only	announce	JEV DEGRADED — required-action enforcement unavailable (receipt_absent); continuing without action credit.
 completion-evidence-gate.py	Stop	advisories:13676fdf59f5/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:157aa0d9648b/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:15eddbb266ab/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
@@ -99,6 +101,7 @@ completion-evidence-gate.py	Stop	advisories:1f526bf12615/claims-done	reopen	COMP
 completion-evidence-gate.py	Stop	advisories:231db862260e/plans-only	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required diagnosis, evidence_matching, next_action_priority, semantic_creation, v
 completion-evidence-gate.py	Stop	advisories:2668b0e59663/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:28aadf3ae8c4/asks-permission	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required diagnosis, evidence_matching, next_action_priority, verification_selecti
+completion-evidence-gate.py	Stop	advisories:2b1cc460a5da/plans-only	announce	JEV DEGRADED — required-action enforcement unavailable (receipt_absent); continuing without action credit.
 completion-evidence-gate.py	Stop	advisories:2d809405bd14/asks-permission	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required evidence_matching, next_action_priority, verification_selection, and the
 completion-evidence-gate.py	Stop	advisories:2db5b2a34d05/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:2fd983d21c1e/plans-only	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required diagnosis, evidence_matching, semantic_creation, verification_selection,
@@ -119,6 +122,7 @@ completion-evidence-gate.py	Stop	advisories:4fb2c03b427a/plans-only	reopen	JEV R
 completion-evidence-gate.py	Stop	advisories:530699f5fcce/plans-only	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required architecture_or_design, diagnosis, next_action_priority, semantic_creati
 completion-evidence-gate.py	Stop	advisories:55b1f4e13560/asks-permission	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required diagnosis, evidence_matching, verification_selection, and the turn shows
 completion-evidence-gate.py	Stop	advisories:6252526ed7ad/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
+completion-evidence-gate.py	Stop	advisories:62654edb6456/plans-only	announce	JEV DEGRADED — required-action enforcement unavailable (receipt_absent); continuing without action credit.
 completion-evidence-gate.py	Stop	advisories:62cb86d9f335/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:6c49f1bc4da1/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:6dd7a872272e/plans-only	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required architecture_or_design, semantic_creation, and the turn shows neither a 
@@ -140,14 +144,17 @@ completion-evidence-gate.py	Stop	advisories:aea07fc2bb4f/reports-evidence	reopen
 completion-evidence-gate.py	Stop	advisories:af3d957cb388/asks-permission	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required semantic_creation, and the turn shows neither a Jev call (ops/typesafe_c
 completion-evidence-gate.py	Stop	advisories:b20628fa6f81/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:b3f78091d839/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
+completion-evidence-gate.py	Stop	advisories:b9c6c42ae722/plans-only	announce	JEV DEGRADED — required-action enforcement unavailable (receipt_absent); continuing without action credit.
 completion-evidence-gate.py	Stop	advisories:bc247231850e/plans-only	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required diagnosis, evidence_matching, next_action_priority, semantic_creation, v
 completion-evidence-gate.py	Stop	advisories:bf272acb7394/asks-permission	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required architecture_or_design, semantic_creation, verification_selection, and t
 completion-evidence-gate.py	Stop	advisories:bf85b55a384d/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:c04be8393118/asks-permission	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required verification_selection, and the turn shows neither a Jev call (ops/types
 completion-evidence-gate.py	Stop	advisories:c1d1b5dc18d5/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:c238afd6be73/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
+completion-evidence-gate.py	Stop	advisories:c3e21c9390ba/plans-only	announce	JEV DEGRADED — required-action enforcement unavailable (receipt_absent); continuing without action credit.
 completion-evidence-gate.py	Stop	advisories:c53aa60b5c3d/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:c8ee324eb8ef/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
+completion-evidence-gate.py	Stop	advisories:cb3ea36af558/asks-permission	announce	JEV DEGRADED — required-action enforcement unavailable (receipt_absent); continuing without action credit.
 completion-evidence-gate.py	Stop	advisories:cc8e35a9c2c1/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:cc9fe9df7afc/asks-permission	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required next_action_priority, and the turn shows neither a Jev call (ops/typesaf
 completion-evidence-gate.py	Stop	advisories:d154f81f90ca/plans-only	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required next_action_priority, and the turn shows neither a Jev call (ops/typesaf
@@ -159,6 +166,7 @@ completion-evidence-gate.py	Stop	advisories:e1f51dde3b65/claims-done	reopen	COMP
 completion-evidence-gate.py	Stop	advisories:e66e6a9d3866/plans-only	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required diagnosis, evidence_matching, next_action_priority, verification_selecti
 completion-evidence-gate.py	Stop	advisories:e79083884848/asks-permission	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required diagnosis, next_action_priority, semantic_creation, and the turn shows n
 completion-evidence-gate.py	Stop	advisories:e9f80b77d08a/plans-only	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required semantic_creation, verification_selection, and the turn shows neither a 
+completion-evidence-gate.py	Stop	advisories:f063a6d896e6/plans-only	announce	JEV DEGRADED — required-action enforcement unavailable (receipt_absent); continuing without action credit.
 completion-evidence-gate.py	Stop	advisories:f274bfc032e8/asks-permission	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required architecture_or_design, next_action_priority, semantic_creation, verific
 completion-evidence-gate.py	Stop	advisories:f510bb7f7997/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:f9556cac264d/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
