@@ -1382,6 +1382,12 @@ with tempfile.TemporaryDirectory() as route_tmp:
         # A path route is a WRITE-moment route: reading a file binds no
         # build-time rule (evals/rule-delivery: routine reads received rules).
         hooks_glob = {"kind": "path_rule", "path_globs": ["*hooks/*.py"]}
+        review_route = {"kind": "path_rule", "path_globs": ["*.html"], "read_only": True}
+        check("a CARR page read keeps review-time path rules",
+              routes_lib.route_matches(review_route, "Read", {"file_path": str(REPO / "dealroom/public/index.html")}))
+        review_ids = set(routed_for("Read", {"file_path": str(REPO / "dealroom/public/index.html")}))
+        check("an actual CARR page read delivers the visual review rules",
+              {"67580c28", "9293d609", "b7ec8f3b"} <= review_ids, sorted(review_ids))
         for reader, args in (("Read", {"file_path": str(REPO / "hooks/x-gate.py")}),
                              ("Grep", {"pattern": "x", "path": str(REPO / "hooks/x-gate.py")}),
                              ("Glob", {"pattern": "*.py", "path": str(REPO / "hooks/x-gate.py")})):
@@ -1398,8 +1404,9 @@ with tempfile.TemporaryDirectory() as route_tmp:
               routes_lib.route_matches(hooks_glob, "apply_patch", {"command":
                   "*** Begin Patch\n*** Add File: hooks/x-gate.py\n+x\n*** End Patch"}))
         path_rules = rules_routed_by(lambda r: r["kind"] == "path_rule")
-        check("every path_rule route carries only globs",
-              bool(all(set(r) == {"kind", "path_globs"} for e in ROUTES["rules"].values()
+        check("every path_rule route carries globs and an optional read policy",
+              bool(all(set(r) in ({"kind", "path_globs"}, {"kind", "path_globs", "read_only"})
+                       and r.get("read_only", True) is True for e in ROUTES["rules"].values()
                        for r in e["routes"] if r["kind"] == "path_rule") and path_rules))
 
         # Connector glob: the mail draft tool on any server segment.

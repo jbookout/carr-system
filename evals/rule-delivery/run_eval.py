@@ -111,10 +111,9 @@ def read_only_command(command):
 def replay_cases():
     """Recorded tool calls from ops/fixtures/real-replay that are routine reads.
 
-    Every Read in read-calls.jsonl, and every recorded Bash command whose
-    segments are all read-only verbs, is a should-not-fire event: inspecting
-    files or history changes nothing a taught rule governs. The fixtures carry
-    no rule labels, so this is the human judgment, stated once for the class."""
+    These fixture reads target routine source/history paths. Their quiet labels
+    apply to those paths only; a read of a CARR surface can bind review rules
+    and is checked separately in selftest.py. The fixtures carry no rule labels."""
     out = []
     base = os.path.join(REPO, "ops", "fixtures", "real-replay")
 
@@ -308,8 +307,14 @@ def _grade_dict(g):
 def write_run(out_dir, variant, rows):
     vdir = os.path.join(out_dir, variant)
     os.makedirs(os.path.join(vdir, "traces"), exist_ok=True)
-    with open(os.path.join(vdir, "results.jsonl"), "w", encoding="utf-8") as handle:
-        for row in rows:
+    result_path = os.path.join(vdir, "results.jsonl")
+    existing = {}
+    if os.path.exists(result_path):
+        with open(result_path, encoding="utf-8") as handle:
+            existing = {row["prompt_id"]: row for row in (json.loads(line) for line in handle if line.strip())}
+    existing.update({row["prompt_id"]: row for row in rows})
+    with open(result_path, "w", encoding="utf-8") as handle:
+        for row in (existing[key] for key in sorted(existing)):
             handle.write(json.dumps(row, sort_keys=True) + "\n")
     for row in rows:
         trace = [{"role": "user", "content": row["prompt"] or "(tool-only turn)"},
@@ -392,36 +397,30 @@ STATS = {
 
 
 def verdict(base, new, goal):
-    """Keep/revert call for one round, from the paired intervals on BOTH splits.
+    """Keep/revert call for one round, from the TRAIN paired intervals.
 
-    goal "recall": recall_micro must rise (test interval lower bound above 0)
+    goal "recall": recall_micro must rise (train interval lower bound above 0)
     while false deliveries on should-not-fire cases and false deliveries per
     event do not rise. goal "tokens": tokens_per_event must fall (test interval
     upper bound below 0) while recall does not fall and neither false measure
-    rises. Train must agree on direction. Returns (keep, reasons)."""
+    rises. The test split is for one final report, never candidate selection."""
     reasons, keep = [], True
-    d = {}
-    for split in ("train", "test"):
-        b, n = load_run(base, split), load_run(new, split)
-        d[split] = {name: paired_bootstrap(b, n, stat) for name, stat in STATS.items()}
+    b, n = load_run(base, "train"), load_run(new, "train")
+    d = {"train": {name: paired_bootstrap(b, n, stat) for name, stat in STATS.items()}}
     target, sign = (("recall_micro", 1) if goal == "recall" else ("tokens_per_event", -1))
-    t_pt, t_lo, t_hi = d["test"][target]
+    t_pt, t_lo, t_hi = d["train"][target]
     if not ((t_lo > 0) if sign > 0 else (t_hi < 0)):
         keep = False
-        reasons.append(f"test {target} delta {t_pt:+.4f} [{t_lo:+.4f}, {t_hi:+.4f}] not clear of zero")
-    if d["train"][target][0] * sign <= 0:
+        reasons.append(f"train {target} delta {t_pt:+.4f} [{t_lo:+.4f}, {t_hi:+.4f}] not clear of zero")
+    if d["train"]["sn_false_rules"][0] > 0:
         keep = False
-        reasons.append(f"train {target} delta {d['train'][target][0]:+.4f} does not agree")
-    for split in ("train", "test"):
-        if d[split]["sn_false_rules"][0] > 0:
-            keep = False
-            reasons.append(f"{split} should-not-fire false deliveries rose {d[split]['sn_false_rules'][0]:+.0f}")
-        if d[split]["false_per_event"][0] > 1e-9:
-            keep = False
-            reasons.append(f"{split} false deliveries per event rose {d[split]['false_per_event'][0]:+.4f}")
-        if goal == "tokens" and d[split]["recall_micro"][0] < -1e-9:
-            keep = False
-            reasons.append(f"{split} recall fell {d[split]['recall_micro'][0]:+.4f}")
+        reasons.append(f"train should-not-fire false deliveries rose {d['train']['sn_false_rules'][0]:+.0f}")
+    if d["train"]["false_per_event"][0] > 1e-9:
+        keep = False
+        reasons.append(f"train false deliveries per event rose {d['train']['false_per_event'][0]:+.4f}")
+    if goal == "tokens" and d["train"]["recall_micro"][0] < -1e-9:
+        keep = False
+        reasons.append(f"train recall fell {d['train']['recall_micro'][0]:+.4f}")
     return keep, reasons, d
 
 
@@ -447,7 +446,7 @@ def main(argv=None):
         return 0
     if args.compare:
         base, new = args.compare
-        for split in ("train", "test"):
+        for split in (("train", "test") if args.split == "all" else (args.split,)):
             b, n = load_run(base, split), load_run(new, split)
             print(f"== {split}: {base} -> {new}")
             for name, stat in STATS.items():

@@ -12,6 +12,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 import run_eval as R  # noqa: E402
+import make_report as M  # noqa: E402
 
 GUARDED = ("rule-trigger-delivery.jsonl", "rule-prompt-delivered.json", "jev-judge.jsonl",
            "jev-rule-select.jsonl", "jev-calls.jsonl")
@@ -36,9 +37,46 @@ def check(name, ok, detail=""):
 
 
 def main():
+    original_load = R.load_run
+    try:
+        R.load_run = lambda variant, split=None: (_ for _ in ()).throw(
+            AssertionError("candidate verdict read held-out test")) if split == "test" else original_load(variant, split)
+        R.verdict("baseline", "v3", "recall")
+        check("candidate verdict reads train only", True)
+    finally:
+        R.load_run = original_load
+    import subprocess
+    train_report = subprocess.run([sys.executable, os.path.join(HERE, "run_eval.py"),
+                                   "--compare", "baseline", "v3", "--split", "train"],
+                                  capture_output=True, text=True, check=True).stdout
+    check("round comparison excludes held-out test", "== train:" in train_report and "== test:" not in train_report)
+    import tempfile
+    with tempfile.TemporaryDirectory() as scratch:
+        train_row = {"prompt_id": "train-case", "split": "train", "prompt": "train", "detail": {}}
+        test_row = {"prompt_id": "test-case", "split": "test", "prompt": "test", "detail": {}}
+        R.write_run(scratch, "candidate", [train_row])
+        R.write_run(scratch, "candidate", [test_row])
+        with open(os.path.join(scratch, "candidate", "results.jsonl"), encoding="utf-8") as handle:
+            saved = [json.loads(line) for line in handle]
+        check("final test run preserves frozen train results", saved == [test_row, train_row])
+    check("receipt source commit resolves and binds shipped source", M.receipt_source_matches())
+    with open(os.path.join(HERE, "receipt.json"), encoding="utf-8") as handle:
+        forged = json.load(handle)
+    check("receipt discloses contaminated historical holdout",
+          forged.get("evaluation_status") == "exploratory_test_used_for_candidate_selection")
+    forged["source_manifest"]["lib/rule_routes.py"] = "0" * 64
+    check("receipt rejects changed shipped source", not M.receipt_source_matches(forged))
     before = snapshot()
     cases = R.load_cases("all")
     world = R.World()
+    review_case = {"id": "surface-review-read", "prompt": "",
+                   "tool_calls": [{"tool_name": "Read", "tool_input": {
+                       "file_path": os.path.join(REPO, "dealroom", "public", "index.html")}}],
+                   "required": ["67580c28", "9293d609", "b7ec8f3b"],
+                   "gold": ["67580c28", "9293d609", "b7ec8f3b"], "disputed": []}
+    review_grade = R.grade(world, review_case, R.replay(world, review_case))
+    check("eval labels a page review as owed and delivered",
+          not review_grade["missed"] and set(review_case["required"]) <= set(review_grade["delivered"]))
 
     # -- task design: split frozen, disjoint, both halves non-trivial
     with open(os.path.join(HERE, "split.json"), "r", encoding="utf-8") as handle:

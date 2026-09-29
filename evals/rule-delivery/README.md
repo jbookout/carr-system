@@ -20,9 +20,10 @@ Nothing is written to production logs or caches. `selftest.py` checks that.
    paraphrased shapes of real session turns, subagent briefs, defects,
    notifications and log lines, each with dense hand-adjudicated gold. The
    repo's own split (30% held out per stratum) is kept.
-2. **Recorded routine reads.** Every `Read` in `ops/fixtures/real-replay/read-calls.jsonl`
-   and every recorded Bash command whose segments are all read-only verbs.
-   Should-not-fire: inspecting files or history binds no taught rule.
+2. **Recorded routine reads.** The `Read` calls in `ops/fixtures/real-replay/read-calls.jsonl`
+   and recorded Bash commands whose segments are all read-only verbs target
+   source/history paths with no review-time rule. Surface reads are positive
+   review cases in `selftest.py`.
 3. **Hand-judged hard cases**, `hard_cases.v1.json`: 33 cases, one sentence of
    justification each. 13 should-not-fire (routine reads, chatter), 7 near
    misses (trigger vocabulary without the action), 13 positives.
@@ -52,9 +53,12 @@ python3 evals/rule-delivery/explain.py                        # train split only
 python3 evals/rule-delivery/make_report.py                    # report.html + receipt.json
 ```
 
-Tuning reads the train split only (`explain.py` refuses anything else). The
-system is deterministic, so run-to-run noise is zero; the noise that remains is
-which cases were sampled, measured by a paired bootstrap over cases.
+The current round command and candidate verdict read the train split only.
+Historical rounds v1-v3 used the test split to decide keep/revert; those test
+intervals are descriptive, not untouched-holdout evidence. The frozen split
+still protects future rounds. `explain.py` reads train only. The system is
+deterministic, so run-to-run noise is zero; paired bootstrap intervals measure
+case-sampling variation only.
 
 ## Not covered here
 

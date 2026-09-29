@@ -305,7 +305,10 @@ def route_matches(route: dict, tool_name: str, tool_input: object,
         globs = _strings(route, "path_globs")
         if not globs:
             raise RouteShapeError("path_globs")
-        if tool_name in READ_ONLY_TOOLS:
+        read_only = route.get("read_only", False)
+        if not isinstance(read_only, bool):
+            raise RouteShapeError("read_only")
+        if tool_name in READ_ONLY_TOOLS and not read_only:
             return False
         paths = call_paths(tool_input)
         return any(fnmatch.fnmatch(path, pattern) for pattern in globs for path in paths)

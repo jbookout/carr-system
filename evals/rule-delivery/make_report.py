@@ -18,11 +18,43 @@ sys.path.insert(0, HERE)
 import run_eval as R  # noqa: E402
 
 KEPT = "kept"
+SOURCE_PATHS = (
+    "lib/rule_routes.py", "ops/config/rule-routes.v1.json", "ops/rule-jit-compile.py",
+    "ops/config/rule-jit-triggers.v1.json", "ops/fixtures/rule-delivery-eval/cases.v2.json",
+    "evals/rule-delivery/hard_cases.v1.json", "evals/rule-delivery/split.json",
+    "evals/rule-delivery/run_eval.py", "evals/rule-delivery/round.sh",
+    "evals/rule-delivery/make_report.py", "evals/rule-delivery/selftest.py",
+)
 
 
 def sha(path):
     with open(path, "rb") as handle:
         return hashlib.sha256(handle.read()).hexdigest()
+
+
+def source_manifest():
+    return {path: sha(os.path.join(REPO, path)) for path in SOURCE_PATHS}
+
+
+def receipt_source_matches(receipt=None):
+    if receipt is None:
+        with open(os.path.join(HERE, "receipt.json"), encoding="utf-8") as handle:
+            receipt = json.load(handle)
+    commit = receipt.get("code_sha", "")
+    if not isinstance(commit, str) or len(commit) != 40:
+        return False
+    if receipt.get("source_manifest") != source_manifest():
+        return False
+    ancestor = subprocess.run(["git", "merge-base", "--is-ancestor", commit, "HEAD"],
+                              cwd=REPO, capture_output=True)
+    if ancestor.returncode:
+        return False
+    for path, expected in receipt["source_manifest"].items():
+        blob = subprocess.run(["git", "show", f"{commit}:{path}"], cwd=REPO,
+                              capture_output=True)
+        if blob.returncode or hashlib.sha256(blob.stdout).hexdigest() != expected:
+            return False
+    return True
 
 
 def ledger():
@@ -87,8 +119,12 @@ def main():
 
     receipt = {"schema": "rule-delivery-eval-receipt/v1",
                "flow": "rule-delivery", "shipped_variant": args.best,
+               "evaluation_status": "exploratory_test_used_for_candidate_selection",
+               "evaluation_note": ("Historical rounds v1-v3 consulted the test split for keep/revert. "
+                                   "Their test intervals are descriptive and are not untouched-holdout evidence."),
                "code_sha": subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True,
                                           text=True).stdout.strip(),
+               "source_manifest": source_manifest(),
                "split_sha256": json.load(open(os.path.join(HERE, "split.json")))["sha256"],
                "inputs": {"v2_cases": sha(R.V2_CASES), "hard_cases": sha(R.HARD_CASES)},
                "metrics": {},
