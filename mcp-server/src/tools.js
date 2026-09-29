@@ -10,6 +10,7 @@ import { doctrineTools } from "./doctrine.js";
 import { situationRetrievalTools } from "./situation-retrieval.js";
 import { investigationTools } from "./investigation.js";
 import { docConversationTools } from "./doc-conversation.js";
+import { docSuggestionTools } from "./doc-suggestions.js";
 import { MEETING_MODE_WRITE_VERBS, meetingModeTools } from "./meeting-mode.js";
 import { notificationTools } from "./notifications.js";
 import { deliveryCadenceA05Tools } from "./delivery-cadence-a05-tools.js";
@@ -8640,6 +8641,7 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "complete-set-review-a03-store": "mcp-server/src/independent-review-cycle-store.v5.js",
   "rule-context-runtime": "mcp-server/src/rule-context-runtime.v5.js",
   "board-answers": "mcp-server/src/board-answers.js",
+  "doc-suggestions": "mcp-server/src/doc-suggestions.js",
 });
 
 function bindToolSource(tool, source) {
@@ -9645,6 +9647,7 @@ registerTools(investigationTools({ withEnvelope, writeEvent, ToolError }), "inve
 // runs on the writer connection because that is the only one that installs the
 // acting-actor context ops.doc_conversation_facts is handed.
 registerTools(docConversationTools({ withEnvelope, writeEvent, ToolError }), "doc-conversation");
+registerTools(docSuggestionTools({ withEnvelope, writeEvent, ToolError }), "doc-suggestions");
 
 // V5-UX-B11: non-recording shared Meeting Mode. The store's definer functions
 // own every transition; an accepted action points at an existing write verb in
