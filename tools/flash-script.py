@@ -233,12 +233,14 @@ def sandbox_profile(work):
     private = sorted({os.path.realpath(p) for p in (
         home, "/private/tmp", "/private/var/folders", "/Users/Shared", "/opt/homebrew/var", "/opt/homebrew/etc",
         "/usr/local/var", "/usr/local/etc", "/etc/ssh", "/Library/Keychains")})
-    # Node reads Homebrew's OpenSSL config on startup. Open only that config subtree,
-    # including its resolved target when symlinked; sibling service/Postgres state stays private.
-    openssl = {path for p in ("/opt/homebrew/etc/openssl@3", "/usr/local/etc/openssl@3")
-               if os.path.exists(p) for path in (p, os.path.realpath(p))}
-    reads = sorted({*reads, *openssl})
-    if any('"' in p or "\\" in p for p in [*private, *reads, *execs]):
+    # Node needs only openssl.cnf, including its resolved file target when symlinked.
+    # Keep this literal exception separate from recursive reads: private/certs stay denied.
+    openssl = sorted({path for p in ("/opt/homebrew/etc/openssl@3/openssl.cnf",
+                                    "/usr/local/etc/openssl@3/openssl.cnf")
+                      if os.path.isfile(p) for path in (p, os.path.realpath(p))})
+    openssl_read = ("(allow file-read* " + " ".join(f'(literal "{p}")' for p in openssl) + ")"
+                    if openssl else "")
+    if any('"' in p or "\\" in p for p in [*private, *reads, *openssl, *execs]):
         raise ValueError("path not expressible in a sandbox profile")
     port = flash_port()
     net = f'(allow network-outbound (remote ip "localhost:{port}"))' if port else ""
@@ -246,6 +248,7 @@ def sandbox_profile(work):
             f"(deny network*){net}"
             "(deny file-read* " + " ".join(f'(subpath "{p}")' for p in private) + ")"
             "(allow file-read* " + " ".join(f'(subpath "{p}")' for p in reads) + ")"
+            + openssl_read +
             # path lookups (stat) must work to start the interpreter; contents and listings stay denied
             "(allow file-read-metadata)"
             "(deny file-write*)"
