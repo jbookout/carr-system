@@ -171,6 +171,65 @@ class TestQualityTests(unittest.TestCase):
 # --------------------------------------------------------- #14 done claim
 
 class DoneClaimTests(unittest.TestCase):
+    def test_judge_receives_current_request_test_history_and_failure_count(self):
+        fake = FakeJudge(answers={
+            "claim_scope": {"type": "choice", "choice": "current_completion", "confidence": 0.99},
+            "claims_supported": {"type": "noul", "noul": 0.9},
+            "evidence_shows_omitted_failure": {"type": "noul", "noul": 0.1},
+        })
+        evidence = {"test_command": "pytest test_regression.py", "test_output": "1 passed",
+                    "test_exit_code": 0, "test_run_count": 2, "test_failure_count": 1,
+                    "test_history": "1. FAIL pytest test_regression.py: 1 failed\n"
+                                    "2. PASS pytest test_regression.py: 1 passed"}
+        result = jdc.check_done_claim("Fixed; tests pass.", evidence, judge_module=fake)
+        self.assertEqual(result["verdict"], "supported")
+        state, questions = fake.last
+        self.assertEqual(state["evidence"]["test_failure_count"], "1")
+        self.assertEqual(state["evidence"]["test_run_count"], "2")
+        self.assertIn("1. FAIL", state["evidence"]["test_history"])
+        self.assertIn("2. PASS", state["evidence"]["test_history"])
+        self.assertIn("later passing", questions["evidence_shows_omitted_failure"]["instructions"])
+
+    def test_truncated_test_history_cannot_support_completion(self):
+        fake = FakeJudge(answers={
+            "claim_scope": {"type": "choice", "choice": "current_completion", "confidence": 0.99},
+            "claims_supported": {"type": "noul", "noul": 0.99},
+            "evidence_shows_omitted_failure": {"type": "noul", "noul": 0.01},
+        })
+        result = jdc.check_done_claim("Fixed; tests pass.", {
+            "test_run_count": 30, "test_failure_count": 3,
+            "test_history_truncated": True,
+            "test_history": "30 runs, 3 failures; some excerpts omitted",
+            "test_exit_code": 0,
+        }, judge_module=fake)
+        self.assertEqual(result["verdict"], "uncertain")
+        self.assertTrue(result["escalate"])
+        self.assertEqual(fake.last[0]["evidence"]["test_history_truncated"], "True")
+
+    def test_truncated_all_pass_history_can_support_completion(self):
+        fake = FakeJudge(answers={
+            "claim_scope": {"type": "choice", "choice": "current_completion", "confidence": 0.99},
+            "claims_supported": {"type": "noul", "noul": 0.99},
+            "evidence_shows_omitted_failure": {"type": "noul", "noul": 0.01},
+        })
+        result = jdc.check_done_claim("Fixed; tests pass.", {
+            "test_run_count": 30, "test_failure_count": 0,
+            "test_history_truncated": True,
+            "test_history": "30 runs, 0 failures; some passing excerpts omitted",
+            "test_exit_code": 0,
+        }, judge_module=fake)
+        self.assertEqual(result["verdict"], "supported")
+
+    def test_judge_sees_end_of_long_latest_test_output(self):
+        fake = FakeJudge(answers={
+            "claim_scope": {"type": "choice", "choice": "current_completion", "confidence": 0.99},
+            "claims_supported": {"type": "noul", "noul": 0.1},
+            "evidence_shows_omitted_failure": {"type": "noul", "noul": 0.9},
+        })
+        jdc.check_done_claim("Fixed.", {"test_output": "x" * 5000 + "FINAL FAILURE"},
+                             judge_module=fake)
+        self.assertIn("FINAL FAILURE", fake.last[0]["evidence"]["test_output"])
+
     def test_low_confidence_other_is_an_uncertain_claim(self):
         fake = FakeJudge(answers={
             "claim_scope": {"type": "choice", "choice": "other", "confidence": 0.01},
