@@ -3013,6 +3013,8 @@ test("the v36 successor preserves the exact v35 seal and measures both catalog p
 
 test("the complete source-only frontier is byte-reproducible from frozen inputs", () => {
   assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS, REGISTRY_V98_VERSION), true);
+  // The push toll calls the bare API; its default must follow the newest frontier.
+  assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
   const paths = assertGeneratedFrontierMatchesCommitted();
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
   assert.equal(migrations.length, 104);

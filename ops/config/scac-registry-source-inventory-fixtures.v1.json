@@ -72919,8 +72919,14 @@
           "classification_authorizing": false
         }
       ],
+      "row_replacements": {
+        "script-entrypoint:ops/scac-mutation-inventory.mjs": {
+          "schema_digest": "92e629a0b7db8df76c3d2b21c2b0fbdd98be262c931d3d478bfdba865ebec753",
+          "handler_digest": "92e629a0b7db8df76c3d2b21c2b0fbdd98be262c931d3d478bfdba865ebec753"
+        }
+      },
       "expected_count": 1007,
-      "expected_sha256": "b550c6b422a339ae71b9d1aad7cd0bb2f3b68666f5e57fe62f7e5c74e381f97c",
+      "expected_sha256": "2a31e73cf303af8dcb9ec1890597baf4425a146db7fa0ada6aeef8b19dcdb522",
       "reason": "Tour client feedback adds one broker-authenticated read verb and binds the atomic migration pair in the registered migration runner. Public writes stay within the opaque browser share boundary; the database catalog successor seals its callable functions."
     }
   ],
