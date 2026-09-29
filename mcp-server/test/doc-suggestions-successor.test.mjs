@@ -27,5 +27,15 @@ test('Doc suggestions follow the schedule registry without reusing its migration
   assert.match(runtime, /SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry\.v96"/);
   assert.match(runtime, /mcp-tool:suggest-doc-work/);
   assert.match(runtime, /mcp-tool:schedule-board/);
-  assert.match(read('mcp-server/src/mutation-registry.js'), /scac-mutation-registry\.v97\.generated\.js/);
+});
+
+test('Codex session read has its own sealed successor', () => {
+  const migrationNames = readdirSync(resolve(root, 'migrations'));
+  assert.equal(migrationNames.filter(name => name.startsWith('0748_')).length, 1);
+  const sql = read('migrations/0748_codex_session_read_scac_successor.sql');
+  assert.match(sql, /scac-mutation-registry\.v96/);
+  assert.match(sql, /scac-mutation-registry\.v97/);
+  const runtime = read('mcp-server/src/scac-mutation-registry.v97.generated.js');
+  assert.match(runtime, /mcp-tool:list-my-codex-sessions/);
+  assert.match(read('mcp-server/src/mutation-registry.js'), /scac-mutation-registry\.v98\.generated\.js/);
 });

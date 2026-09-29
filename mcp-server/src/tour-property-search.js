@@ -103,7 +103,11 @@ function metric(value) {
 }
 function projectSearchItem(value) {
   if (!value || typeof value !== "object" || Array.isArray(value) || !UUID.test(value.property_id || "") || !COUNTY.has(value.county) || value.state !== "FL") return undefined;
-  const output = { property_id: value.property_id };
+  // The SQL search admits only reviewed CARR property/jurisdiction rows. It
+  // does not return a source URL, use rights, or a coordinate precision class;
+  // disclose those gaps instead of inventing provider authority.
+  const output = { property_id: value.property_id, source_label: "CARR reviewed property register",
+    rights_status: "unknown", coordinate_precision: "unknown" };
   if (PROPERTY_REF.test(value.property_ref || "")) output.property_ref = value.property_ref;
   for (const key of ["name", "address", "county", "state", "property_type", "availability", "updated_at", "fact_as_of", "caveat"]) {
     if (typeof value[key] === "string") output[key] = value[key];

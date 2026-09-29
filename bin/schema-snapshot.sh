@@ -1182,15 +1182,27 @@ if [ "$DOC_SUGGESTIONS_REGISTRY_APPLIED" = t ] && [ "$SCHEDULE_BOARD_REGISTRY_AP
   echo "schema-snapshot: Doc suggestions v96 is applied without v95 predecessor" >&2
   exit 1
 fi
+CODEX_SESSION_READ_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0748_codex_session_read_scac_successor.sql')" \
+  2>/dev/null)"
+case "$CODEX_SESSION_READ_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read Codex session read v97 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$CODEX_SESSION_READ_REGISTRY_APPLIED" = t ] && [ "$DOC_SUGGESTIONS_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: Codex session read v97 is applied without v96 predecessor" >&2
+  exit 1
+fi
+
 TOUR_FEEDBACK_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0749_tour_client_feedback_scac_successor.sql')" \
+  "select exists (select 1 from schema_migrations where filename='0750_tour_client_feedback_scac_successor.sql')" \
   2>/dev/null)"
 case "$TOUR_FEEDBACK_REGISTRY_APPLIED" in
   t|f) ;;
-  *) echo "schema-snapshot: could not read Tour feedback v97 registry ledger state" >&2; exit 1 ;;
+  *) echo "schema-snapshot: could not read Tour feedback v98 registry ledger state" >&2; exit 1 ;;
 esac
-if [ "$TOUR_FEEDBACK_REGISTRY_APPLIED" = t ] && [ "$DOC_SUGGESTIONS_REGISTRY_APPLIED" != t ]; then
-  echo "schema-snapshot: Tour feedback v97 is applied without v96 predecessor" >&2
+if [ "$TOUR_FEEDBACK_REGISTRY_APPLIED" = t ] && [ "$CODEX_SESSION_READ_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: Tour feedback v98 is applied without v97 predecessor" >&2
   exit 1
 fi
 
@@ -2874,7 +2886,7 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                                      SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v95'"
                                      SCAC_FULL_SET_SEAL_COUNT=95
                                      SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v96_current()"
-                                     if [ "$TOUR_FEEDBACK_REGISTRY_APPLIED" = t ]; then
+                                     if [ "$CODEX_SESSION_READ_REGISTRY_APPLIED" = t ]; then
                                        SCAC_CURRENT_NUMBER=97
                                        SCAC_VERSION_COUNT=97
                                        SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v97'")"
@@ -2884,6 +2896,17 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                                        SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v96'"
                                        SCAC_FULL_SET_SEAL_COUNT=96
                                        SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v97_current()"
+                                     if [ "$TOUR_FEEDBACK_REGISTRY_APPLIED" = t ]; then
+                                       SCAC_CURRENT_NUMBER=98
+                                       SCAC_VERSION_COUNT=98
+                                       SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v98'")"
+                                       SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v98'")"
+                                       SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v98.generated.js"
+                                       SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v98'"
+                                       SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v97'"
+                                       SCAC_FULL_SET_SEAL_COUNT=97
+                                       SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v98_current()"
+                                     fi
                                      fi
                                    fi
                                  fi
