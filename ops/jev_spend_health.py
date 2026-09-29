@@ -28,6 +28,7 @@ def _root():
 
 ROOT = _root()
 USAGE_LOG = ROOT / "out" / "jev-calls.jsonl"
+FACTORY_USAGE_LOG = Path.home() / ".local" / "state" / "software-factory" / "jev-calls.jsonl"
 LOOP_STATE = ROOT / "out" / "jev-spend-loop.json"
 CONFIG = Path(__file__).resolve().parent / "config" / "jev-cost-guard.v1.json"
 ACTION = ("on breach: open/update one dedup loop · owner orchestrator · "
@@ -94,7 +95,7 @@ def _today_usage(log_path, day):
         for line in handle:
             try:
                 row = json.loads(line)
-                if row.get("ok") is not True or row.get("cache_hit") is True:
+                if row.get("cache_hit") is True:
                     continue
                 stamp = datetime.fromisoformat(str(row["ts"]).replace("Z", "+00:00"))
                 if stamp.astimezone(timezone.utc).date().isoformat() != day:
@@ -102,7 +103,9 @@ def _today_usage(log_path, day):
                 usage = row.get("usage") or {}
                 value = usage.get("input_tokens")
                 if type(value) is not int or value < 0:
-                    unknown += 1
+                    status = row.get("http_status")
+                    if row.get("ok") is True or (type(status) is int and 200 <= status < 300):
+                        unknown += 1
                     continue
                 calls += 1
                 tokens += value
@@ -111,30 +114,70 @@ def _today_usage(log_path, day):
     return calls, tokens, unknown
 
 
+def read_worker_usage(day):
+    """Read the Worker's server-timestamped receipts through its read verb."""
+    row = _run_verb("read-jev-call-receipt-integrity", {}).get("daily_usage")
+    if not isinstance(row, dict) or row.get("utc_day") != day or any(
+            type(row.get(key)) is not int or row[key] < 0
+            for key in ("calls", "input_tokens", "unknown")):
+        raise RuntimeError("Worker daily Jev usage is unavailable or stale")
+    return row
+
+
+def nightly_exit_status(line):
+    """Fail the scheduled step when its receipt or response is incomplete."""
+    return 0 if line.startswith(("OK jev spend", "WARN jev spend")) and not any(
+        marker in line for marker in
+        ("missing usage", "Worker usage unavailable", "loop action FAILED")
+    ) else 1
+
+
 def check_spend(log_path=USAGE_LOG, config_path=CONFIG, state_path=LOOP_STATE,
-                run_verb=_run_verb, *, now=None):
+                run_verb=_run_verb, *, now=None, extra_logs=(), worker_usage=None):
     """Return one health row, with the bound action in the row itself."""
     config = json.loads(Path(config_path).read_text(encoding="utf-8"))
     threshold = float(config["daily_warning_usd"])
     price = float(config["price_usd_per_million_input_tokens"])
     day = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).date().isoformat()
-    if not Path(log_path).is_file():
+    if not Path(log_path).is_file() and not any(Path(extra).is_file() for extra in extra_logs) and worker_usage is None:
         return f"UNAVAILABLE jev spend — local usage log absent · {ACTION}"
-    calls, tokens, unknown = _today_usage(log_path, day)
+    calls, tokens, unknown = _today_usage(log_path, day) if Path(log_path).is_file() else (0, 0, 0)
+    for extra in extra_logs:
+        if Path(extra).is_file():
+            measured = _today_usage(extra, day)
+            calls += measured[0]
+            tokens += measured[1]
+            unknown += measured[2]
+    worker_unavailable = False
+    if worker_usage is not None:
+        try:
+            measured = worker_usage(day)
+            if not isinstance(measured, dict) or any(type(measured.get(key)) is not int or measured[key] < 0
+                                                     for key in ("calls", "input_tokens", "unknown")):
+                raise ValueError("invalid Worker Jev usage")
+            calls += measured["calls"]
+            tokens += measured["input_tokens"]
+            unknown += measured["unknown"]
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+            worker_unavailable = True
     amount = tokens * price / 1_000_000
-    if unknown and amount <= threshold:
-        return (f"UNKNOWN jev spend — {unknown} successful calls missing usage "
+    if (unknown or worker_unavailable) and amount <= threshold:
+        return (f"UNKNOWN jev spend — {unknown} successful calls missing usage"
+                f"; Worker usage {'unavailable' if worker_unavailable else 'read'} "
                 f"({calls} measured calls; warning retained until usage is measurable) "
                 f"· {ACTION}")
     status = "WARN" if amount > threshold else "OK"
-    line = (f"{status} jev spend — ${amount:.3f} estimated local / UTC day "
+    line = (f"{status} jev spend — ${amount:.3f} estimated / UTC day "
             f"({calls} calls, {tokens} input tokens; threshold ${threshold:.2f}) · {ACTION}")
     if unknown:
         line += f" · at least this amount; {unknown} successful calls missing usage"
-    body = (f"Jev estimated local spend is ${amount:.3f} on {day} UTC, above "
+    if worker_unavailable:
+        line += " · at least this amount; Worker usage unavailable"
+    body = (f"Jev estimated recorded spend is ${amount:.3f} on {day} UTC, above "
             f"${threshold:.2f}/day. Find caller in jev usage log at "
-            "out/jev-calls.jsonl, inspect prompt hashes for duplicate judge "
-            "calls, and verify the next UTC-day estimate below threshold.")
+            "out/jev-calls.jsonl, in software-factory's jev-calls.jsonl, "
+            "or in Worker Jev receipts; inspect prompt hashes for duplicate "
+            "calls and verify the next UTC-day estimate below threshold.")
     try:
         with _loop_lock(state_path):
             state = _state(state_path)
@@ -161,12 +204,12 @@ def check_spend(log_path=USAGE_LOG, config_path=CONFIG, state_path=LOOP_STATE,
                     })
                     state.update(reported=amount, day=day)
                     _save_state(state_path, state)
-            elif state.get("loop_id"):
+            elif state.get("loop_id") and not worker_unavailable and not unknown:
                 run_verb("close-loop", {
                     "idempotency_key": _id(day, "clear", amount),
                     "loop_id": state["loop_id"], "resolution": "done",
                     "base_version": _loop_version(run_verb, state["loop_id"]),
-                    "outcome": (f"Auto-cleared: estimated local Jev spend on {day} UTC "
+                    "outcome": (f"Auto-cleared: estimated Jev spend on {day} UTC "
                                 f"is ${amount:.3f}, below ${threshold:.2f}/day."),
                 })
                 _save_state(state_path, {})

@@ -343,6 +343,41 @@ test("jevAskBinding posts {state, model, questions} with bearer auth and a user 
   assert.ok(init.signal);
 });
 
+test("byte-identical Worker questions reuse a 60-second answer without billed usage", async () => {
+  const entries = new Map();
+  const cache = {
+    match: async key => entries.get(key.url)?.clone() ?? null,
+    put: async (key, value) => { entries.set(key.url, value.clone()); },
+  };
+  const fetchImpl = fakeFetch([jsonResponse(200, {
+    model: "jev-1.13.0", answers: ANSWERS,
+    usage: { input_tokens: 1200, output_tokens: 80 },
+  })]);
+  const ask = jevAskBinding({ TYPESAFE_API_KEY: KEY }, fetchImpl, { cache });
+  const request = { state: { a: 1 }, model: "jev-latest", questions: QUESTIONS };
+  const first = await ask(request);
+  const second = await ask(request);
+  assert.equal(fetchImpl.calls.length, 1);
+  assert.equal(first.usage.input_tokens, 1200);
+  assert.equal(second.usage, null);
+  assert.equal(second.cache_hit, true);
+  assert.deepEqual(second.answers, first.answers);
+});
+
+test("Worker caches a valid answer even when the vendor omits usage", async () => {
+  const entries = new Map();
+  const cache = {
+    match: async key => entries.get(key.url)?.clone() ?? null,
+    put: async (key, value) => { entries.set(key.url, value.clone()); },
+  };
+  const fetchImpl = fakeFetch([jsonResponse(200, { model: "jev-1.13.0", answers: ANSWERS })]);
+  const ask = jevAskBinding({ TYPESAFE_API_KEY: KEY }, fetchImpl, { cache });
+  const request = { state: { a: 2 }, model: "jev-latest", questions: QUESTIONS };
+  assert.equal((await ask(request)).usage, null);
+  assert.equal((await ask(request)).cache_hit, true);
+  assert.equal(fetchImpl.calls.length, 1);
+});
+
 test("jevAskBinding retries 429 once inside a 10s total budget", async () => {
   let clock = 0;
   const now = () => clock;
