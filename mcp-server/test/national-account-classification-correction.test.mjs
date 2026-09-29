@@ -103,4 +103,12 @@ test('the reviewed correction leaves Musicologie as the only national account an
   file(false);
   assert.equal(sql("select count(*) from client where client_type='national_account'"), '3');
   assert.equal(sql('select count(*) from event'), '0');
+
+  // CI loads the committed empty schema before applying pending migrations.
+  // That database has no historical CARR client records to correct.
+  sql('drop schema public cascade; create schema public;');
+  sql(fixture);
+  sql('delete from national_account_owner; delete from client;');
+  file();
+  assert.equal(sql('select count(*) from event'), '0');
 });

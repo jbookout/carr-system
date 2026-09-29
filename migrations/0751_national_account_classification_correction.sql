@@ -10,11 +10,19 @@ declare
     '8550b702-e6fb-4bea-8b3e-1fec5b9499bd'::uuid, -- Operation Dental C-204
     '2f7364a7-8167-421d-8492-79815307fba3'::uuid  -- Kain Capital C-205
   ];
+  census text[];
 begin
+  select array_agg(roster_ref order by roster_ref) into census
+    from client where client_type='national_account' and merged_into is null;
+  -- CI's newly built schema has no historical client rows. Only that exact
+  -- absence may skip this production-data correction; partial drift fails.
+  if census is null and not exists
+       (select 1 from client where roster_ref in ('C-161','C-204','C-205')) then
+    return;
+  end if;
+
   -- Fail rather than silently correcting a different live account census.
-  if (select array_agg(roster_ref order by roster_ref)
-        from client where client_type='national_account' and merged_into is null)
-       is distinct from array['C-161','C-204','C-205']::text[] then
+  if census is distinct from array['C-161','C-204','C-205']::text[] then
     raise exception 'national-account correction: live account census changed';
   end if;
 
@@ -37,31 +45,25 @@ begin
         where nao.account_client_id=any(target_ids) and a.slug='joe') <> 2 then
     raise exception 'national-account correction: account ownership changed';
   end if;
-end $$;
 
-update client
-   set client_type=null, updated_by=(select id from actor where slug='system')
- where id in ('8550b702-e6fb-4bea-8b3e-1fec5b9499bd',
-              '2f7364a7-8167-421d-8492-79815307fba3');
+  update client
+     set client_type=null, updated_by=(select id from actor where slug='system')
+   where id=any(target_ids);
 
-insert into event (occurred_at,recorded_at,actor_id,verb,subject_type,subject_id,
-                   field,old_value,new_value,cause,human_quote,agent_rationale)
-select now(),now(),(select id from actor where slug='system'),
-       'correct-national-account-classification','client',c.id,'client_type',
-       to_jsonb('national_account'::text),'null'::jsonb,'human_correction',
-       'National accounts - shows a bunch of random deals that are not national accounts. at this time, the only national account we have is Musicologie.',
-       'Joe ruled on 2026-09-29 that Musicologie is the only national account. '
-       'This client was created through the national-account verb but has no '
-       'franchisee clients, deals, or account reviews. The client and its prior '
-       'events remain; only its account classification and account-only owner are removed.'
-  from client c where c.id in ('8550b702-e6fb-4bea-8b3e-1fec5b9499bd',
-                               '2f7364a7-8167-421d-8492-79815307fba3');
+  insert into event (occurred_at,recorded_at,actor_id,verb,subject_type,subject_id,
+                     field,old_value,new_value,cause,human_quote,agent_rationale)
+  select now(),now(),(select id from actor where slug='system'),
+         'correct-national-account-classification','client',c.id,'client_type',
+         to_jsonb('national_account'::text),'null'::jsonb,'human_correction',
+         'National accounts - shows a bunch of random deals that are not national accounts. at this time, the only national account we have is Musicologie.',
+         'Joe ruled on 2026-09-29 that Musicologie is the only national account. '
+         'This client was created through the national-account verb but has no '
+         'franchisee clients, deals, or account reviews. The client and its prior '
+         'events remain; only its account classification and account-only owner are removed.'
+    from client c where c.id=any(target_ids);
 
-delete from national_account_owner
- where account_client_id in ('8550b702-e6fb-4bea-8b3e-1fec5b9499bd',
-                             '2f7364a7-8167-421d-8492-79815307fba3');
+  delete from national_account_owner where account_client_id=any(target_ids);
 
-do $$ begin
   if (select array_agg(roster_ref order by roster_ref)
         from client where client_type='national_account' and merged_into is null)
        is distinct from array['C-161']::text[] then
