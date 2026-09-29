@@ -5,7 +5,7 @@
   "seeded_detector_rule_ids": 50,
   "seeded_detector_triggers": 14,
   "structural_extra_triggers": 2,
-  "triggers": 146
+  "triggers": 147
  },
  "generated_from": {
   "jev_triggers_sha256": "fe5a1593d9c602327ecd986158c5f77c31d704f8695f0952e81d15552a20ca9d",
@@ -384,6 +384,18 @@
    ],
    "source": "prompt_cue",
    "trigger_id": "695e75487299"
+  },
+  {
+   "kind": "prompt_regex",
+   "packs": [
+    "delegation-council"
+   ],
+   "pattern": "\\b(?:independent|adversarial)\\s+(?:read-only\\s+)?(?:review(?:er)?|verif\\w+|check|pass)\\b|\\b(?:codex|grok)\\s+review\\b",
+   "rule_ids": [
+    "2b66211d"
+   ],
+   "source": "prompt_cue",
+   "trigger_id": "c1817ffc6b1e"
   },
   {
    "kind": "prompt_regex",
