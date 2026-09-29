@@ -29,6 +29,12 @@ WHAT "PERMITTED" MEANS HERE. A passage grounds a claim only when it is:
     whole, never trimmed, and named in the result so the store can be fixed.
 The generated Drive files are never a source: they were retired 2026-08-19.
 
+RETRIEVAL IS NOT SIDE-EFFECT FREE, SO THE HOOK IS OPT-IN. Every search-doctrine
+call writes a log_retrieval_query row, and retrieval curation mines those rows
+for misses. hooks/jev-supervisor.py therefore runs this only when
+CARR_JEV_FACT_BOUNDARY=on; the default makes no search-doctrine call at all. A
+non-logging read path is backlog and needs its own sealed change.
+
 "BLOCK" IS A DECISION, NOT AN ENFORCEMENT. This module returns the decision.
 hooks/jev-supervisor.py surfaces flag and block as advisory lines because the
 2026-08-23 Stop-gate rationing leaves only three hooks able to reopen a turn,

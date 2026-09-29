@@ -505,6 +505,12 @@ class FixtureGateTests(unittest.TestCase):
 class SupervisorWiringTests(unittest.TestCase):
     """hooks/jev-supervisor.py's fact_boundary(): isolated, budgeted, quiet on failure."""
 
+    def setUp(self):
+        os.environ["CARR_JEV_FACT_BOUNDARY"] = "on"
+
+    def tearDown(self):
+        os.environ.pop("CARR_JEV_FACT_BOUNDARY", None)
+
     def load_hook(self):
         os.environ["CARR_JEV_SUPERVISOR"] = "advise"
         spec = importlib.util.spec_from_file_location("jev_supervisor_fact_test", HOOK)
@@ -553,6 +559,60 @@ class SupervisorWiringTests(unittest.TestCase):
             self.assertIsNone(m.fact_boundary({"hook_event_name": "Stop"}, m.Run()))
         finally:
             os.environ.pop("CARR_JEV_FACT_BOUNDARY", None)
+
+    def _run_real_library(self, env_value):
+        """Drive fact_boundary with the REAL library; count verb-door calls.
+
+        The credential check is forced true and subprocess is replaced, so a
+        run that reaches retrieval records its search-doctrine argv here
+        instead of touching the network.
+        """
+        m = self.load_hook()
+        real_lib = m._lib
+        calls = []
+
+        class Proc:
+            returncode = 0
+            stdout = '{"ok":true,"hits":[]}'
+            stderr = ""
+
+        class FakeSubprocess:
+            DEVNULL = -3
+
+            @staticmethod
+            def run(argv, **kwargs):
+                calls.append(list(argv))
+                return Proc()
+
+        def lib(name):
+            mod = real_lib(name)
+            if name == "jev_fact_boundary":
+                mod.credential_ready = lambda client=None: True
+                mod.subprocess = FakeSubprocess
+            return mod
+
+        m._lib = lib
+        os.environ.pop("CARR_JEV_FACT_BOUNDARY", None)
+        if env_value is not None:
+            os.environ["CARR_JEV_FACT_BOUNDARY"] = env_value
+        try:
+            payload = {"hook_event_name": "Stop", "last_assistant_message":
+                       "Stop-gate rationing leaves exactly five hooks able to reopen a turn."}
+            m.fact_boundary(payload, m.Run())
+        finally:
+            os.environ.pop("CARR_JEV_FACT_BOUNDARY", None)
+        return [c for c in calls if "search-doctrine" in c]
+
+    def test_default_is_off_and_makes_zero_search_doctrine_calls(self):
+        """Review finding: each search-doctrine call side-writes a
+        log_retrieval_query row, so the boundary must be opt-in."""
+        self.assertEqual(self._run_real_library(None), [])
+        self.assertEqual(self._run_real_library(""), [])
+        self.assertEqual(self._run_real_library("yes-please"), [])
+
+    def test_explicit_on_reaches_search_doctrine(self):
+        """Control for the default-off test: the counter does see real calls."""
+        self.assertGreater(len(self._run_real_library("on")), 0)
 
 
 # --------------------------------------------------------------- live mode

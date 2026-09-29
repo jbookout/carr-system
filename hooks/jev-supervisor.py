@@ -361,8 +361,10 @@ def fact_boundary(payload, run):
     acknowledgement boundaries (ops/jev_fact_boundary.py). Kept apart from
     stop() and post_tool_use(): it owns its trigger, retrieval and decision,
     runs on what budget they leave, and a failure here returns quietly.
-    CARR_JEV_FACT_BOUNDARY=off turns it off alone."""
-    if os.environ.get("CARR_JEV_FACT_BOUNDARY", "on").strip().lower() == "off":
+    OFF unless CARR_JEV_FACT_BOUNDARY=on: every search-doctrine call it makes
+    side-writes a log_retrieval_query row that retrieval curation mines, so
+    it stays opt-in until a non-logging read path exists."""
+    if os.environ.get("CARR_JEV_FACT_BOUNDARY", "off").strip().lower() != "on":
         return None
     try:
         lib = _lib("jev_fact_boundary")
