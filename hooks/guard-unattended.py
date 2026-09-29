@@ -679,6 +679,11 @@ NET_CLIENT = re.compile(
     r"|socket\.(?:socket|create_connection)|fetch\()",
     re.I)
 URL_RE = re.compile(r"https?://([A-Za-z0-9._-]+)")
+# Retain the URL authority (including IPv6 and port) for local model sends.
+# Host-only trust would also open local databases, SSH and control planes.
+SEND_URL_RE = re.compile(r"https?://[^\s'\"<>`\\]+", re.I)
+LOCAL_MODEL_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+LOCAL_MODEL_PORTS = frozenset({8000, 8596})  # ds4 Flash; local llama-server
 
 # A REMOTE COPY TARGET IS A HOST TOO, and this was a real gap rather than a
 # consequence of the loop #283 change — URL_RE has only ever understood `http://`,
@@ -1293,7 +1298,21 @@ def check(cmd, cwd=None):
             return f"{label} — blocked by the CARR unattended guard"
 
     if is_send_context(cmd):
-        for host in hosts_in(cmd):
+        for url in SEND_URL_RE.findall(cmd):
+            try:
+                target = urlsplit(url)
+                host = (target.hostname or "").lower()
+                if host in LOCAL_MODEL_HOSTS:
+                    if (target.port in LOCAL_MODEL_PORTS
+                            and target.username is None and target.password is None):
+                        continue
+                    return "network send to an unapproved local port — blocked by the CARR unattended guard"
+            except ValueError:
+                return "network send to a malformed URL — blocked by the CARR unattended guard"
+            if not host_allowlisted(host):
+                return (f"network send to an unrecognised host ({host}) — blocked by the "
+                        "CARR unattended guard. Add it to KNOWN_HOSTS if it is legitimate.")
+        for host in REMOTE_TARGET_RE.findall(cmd):
             # host_allowlisted covers KNOWN_HOSTS plus the record-derived client
             # and lead domains. The Bash path gets NO equivalent of the WebFetch
             # open-read class and must not: curl chooses its own method and body,

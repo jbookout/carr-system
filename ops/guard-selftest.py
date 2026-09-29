@@ -79,6 +79,26 @@ def case(name, payload, expect):
 
 
 # ── 1. KNOWN_HOSTS: the code list still works, including today's additions ────
+# Local inference is port-scoped, never a host-wide allowance. Exercise the
+# hook process, including IPv6 which the former hostname regex skipped.
+for host in ("127.0.0.1", "localhost", "[::1]"):
+    for port in (8000, 8596):
+        case(f"local model {host}:{port}",
+             bash(f"curl -X POST http://{host}:{port}/v1/chat/completions -d '{{}}'"), ALLOW)
+    for port in (22, 80, 443, 5432, 8001, 8597):
+        case(f"deny other loopback port {host}:{port}",
+             bash(f"curl http://{host}:{port}/"), DENY)
+    case(f"deny implicit loopback port {host}", bash(f"curl http://{host}/"), DENY)
+    case(f"deny mixed local ports {host}",
+         bash(f"curl http://{host}:8000/ http://{host}:5432/"), DENY)
+    case(f"deny malformed local port {host}", bash(f"curl http://{host}:oops/"), DENY)
+for host in ("127.0.0.2", "localhost.evil.example", "evil.localhost", "[::2]"):
+    case(f"deny near-loopback {host}", bash(f"curl http://{host}:8000/"), DENY)
+case("local model plus unknown remote still denied",
+     bash("curl http://127.0.0.1:8000/ https://unknown-egress.example/"), DENY)
+case("local model interpreter send",
+     bash('python3 -c "import urllib.request; urllib.request.urlopen(\'http://127.0.0.1:8000/v1/models\')"'), ALLOW)
+
 for h in ("https://npiregistry.cms.hhs.gov/api/?version=2.1",
           "https://search.sunbiz.org/Inquiry/CorporationSearch/ByName",
           "https://chiro.alabama.gov/",
