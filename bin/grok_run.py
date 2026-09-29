@@ -7,7 +7,9 @@ import re
 import subprocess
 import sys
 
-MODEL = "grok-4.7"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools/room-bridge"))
+from grok_wire import MODEL, model_usage_error
+
 PREFIX = "Do not call any CARR or record-layer tool; do not write anything unless asked."
 
 
@@ -93,7 +95,7 @@ def parse_output(lines, cli_version):
     code = 0
     if receipt["stopReason"] != "end_turn":
         code = 4
-    elif not any(model.startswith(MODEL) for model in models):
+    elif model_usage_error(usage):
         code = 5
     return "".join(chunks), receipt, code
 

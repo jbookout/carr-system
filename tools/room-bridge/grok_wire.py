@@ -23,6 +23,16 @@ def validate_entry(entry: dict) -> None:
         raise ValueError("Grok retrieval requires grok-4.7/high/read-only")
 
 
+def model_usage_error(models) -> str | None:
+    """Validate the complete provider model set and evidence of a model call."""
+    if not isinstance(models, dict) or set(models) != {PROVIDER_MODEL}:
+        return "grok_provider_model_mismatch"
+    usage = models[PROVIDER_MODEL]
+    if not isinstance(usage, dict) or type(usage.get("modelCalls")) is not int or usage["modelCalls"] < 1:
+        return "grok_provider_usage_invalid"
+    return None
+
+
 def parse_result(stdout: str, returncode: int) -> dict:
     events = []
     for line in stdout.splitlines():
@@ -37,11 +47,10 @@ def parse_result(stdout: str, returncode: int) -> dict:
         return {"status": "failed", "detail": "grok_terminal_event_missing_or_failed"}
     end = ends[0]
     models = end.get("modelUsage")
-    if not isinstance(models, dict) or set(models) != {PROVIDER_MODEL}:
-        return {"status": "failed", "detail": "grok_provider_model_mismatch"}
+    model_error = model_usage_error(models)
+    if model_error:
+        return {"status": "failed", "detail": model_error}
     usage = models[PROVIDER_MODEL]
-    if not isinstance(usage, dict) or not isinstance(usage.get("modelCalls"), int) or usage["modelCalls"] < 1:
-        return {"status": "failed", "detail": "grok_provider_usage_invalid"}
     if end.get("stopReason") != "end_turn":
         return {"status": "failed", "detail": "grok_incomplete_turn"}
     if any(event.get("type") == "error" for event in events):

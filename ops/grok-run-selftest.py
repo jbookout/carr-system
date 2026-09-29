@@ -35,7 +35,7 @@ class GrokRunTests(unittest.TestCase):
         self.assertEqual(run.returncode, 0)
         self.assertEqual(run.stdout, "Hello world\n")
         self.assertEqual(receipt, {
-            "requested_model": "grok-4.7", "actual_models": ["grok-4.7-fast"],
+            "requested_model": "grok-4.7", "actual_models": ["grok-4.7-build"],
             "stopReason": "end_turn", "num_turns": 2, "cost_usd": 0.012,
             "cli_version": "fixture",
         })
@@ -49,6 +49,16 @@ class GrokRunTests(unittest.TestCase):
         run, receipt = self.run_fixture("wrong-model.ndjson")
         self.assertEqual(run.returncode, 5)
         self.assertEqual(receipt["actual_models"], ["grok-4.6"])
+
+    def test_mixed_model_usage_refuses_substitution(self):
+        run, receipt = self.run_fixture("mixed-model.ndjson")
+        self.assertEqual(run.returncode, 5)
+        self.assertEqual(receipt["actual_models"], ["grok-4.6", "grok-4.7-build"])
+
+    def test_lookalike_model_prefix_refuses_substitution(self):
+        run, receipt = self.run_fixture("lookalike-model.ndjson")
+        self.assertEqual(run.returncode, 5)
+        self.assertEqual(receipt["actual_models"], ["grok-4.70"])
 
     def test_empty_text_has_no_narration_and_can_write_receipt_file(self):
         run, _ = self.run_fixture("empty-text.ndjson", receipt_file=True)
