@@ -165,7 +165,7 @@ export function answerDistribution(question, answer) {
   let complete = false, total = null, entropy = null, topProbability = null;
   if (distribution) {
     const values = Object.values(distribution);
-    if (values.every(isProbability)) {
+    if (values.length > 0 && values.every(isProbability)) {
       total = values.reduce((sum, v) => sum + v, 0);
       complete = Math.abs(total - 1) <= PROBABILITY_SUM_TOLERANCE;
       if (complete && total > 0)
@@ -183,6 +183,11 @@ export function answerDistribution(question, answer) {
 // ask-jev response, so the envelope ledger (public.tool_call.response) keeps
 // it server-side beside the receipt, and every number in it is recomputable
 // from the receipt's own stored answers, model and state digest.
+// Recording must never turn a committed receipt into a failed ask-jev.
+function safeCalibrationBlock(...args) {
+  try { return calibrationBlock(...args); } catch { return null; }
+}
+
 export function calibrationBlock(questions, answered, modelRequested, stateSha) {
   const answers = isPlainObject(answered?.answers) ? answered.answers : {};
   const perQuestion = {};
@@ -477,7 +482,7 @@ export function jevCallReceiptTools({ withEnvelope, ToolError }) {
             cache_hit: answered.cache_hit === true,
             state_sha256: stateSha,
             prompt_sha256: promptSha,
-            calibration: calibrationBlock(questions, answered, model, stateSha),
+            calibration: safeCalibrationBlock(questions, answered, model, stateSha),
           };
         });
       },

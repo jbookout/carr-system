@@ -763,6 +763,13 @@ class CalibrationRecordTests(unittest.TestCase):
         self.assertEqual(row["entropy_bits"], [1.0, 1.0])
         self.assertEqual(row["distribution_complete"], [True, True])
 
+    def test_a_calibration_bug_never_fails_a_usable_call(self):
+        with patch.object(client, "calibration_block", side_effect=RuntimeError("boom")):
+            result = client.ask("s", {"q": client.noul("?")}, api_key="k",
+                                opener=responder(ANSWER))
+        self.assertIsNone(result["calibration"])
+        self.assertEqual(result["answers"], ANSWER["answers"])
+
     def test_failed_call_receipt_has_null_calibration_fields(self):
         with tempfile.TemporaryDirectory() as d:
             log = str(Path(d) / "calls.jsonl")

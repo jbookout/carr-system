@@ -84,6 +84,14 @@
         "top": "none", "top_probability": 0.6}
     },
     {
+      "name": "an empty probabilities object is recorded as empty, never as a crash",
+      "question": {"type": "choice", "instructions": "?"},
+      "answer": {"type": "choice", "probabilities": {}},
+      "expected": {"type": "choice", "distribution": {},
+        "distribution_complete": false, "entropy_bits": null,
+        "top": null, "top_probability": null}
+    },
+    {
       "name": "score probabilities keyed by level text are indexed by level position",
       "question": {"type": "score", "instructions": "?", "criteria": ["low", "mid", "high", "max"]},
       "answer": {"type": "score", "score": 1.5, "confidence": 0.25,

@@ -289,7 +289,7 @@ def answer_distribution(question, answer):
             levels = criteria if isinstance(criteria, list) else []
             if isinstance(raw, dict):
                 count = max([len(levels)] + [int(k) + 1 for k in raw
-                                             if isinstance(k, str) and k.isdigit()])
+                                             if isinstance(k, str) and k.isascii() and k.isdigit()])
                 distribution = {}
                 for index in range(count):
                     level = levels[index] if index < len(levels) else None
@@ -301,7 +301,7 @@ def answer_distribution(question, answer):
     top_probability = None
     if distribution is not None:
         values = list(distribution.values())
-        if all(_probability(v) for v in values):
+        if values and all(_probability(v) for v in values):
             total = sum(values)
             complete = abs(total - 1) <= PROBABILITY_SUM_TOLERANCE
             if complete and total > 0:
@@ -328,6 +328,14 @@ def calibration_block(state, questions, result, model_requested):
         "questions": {key: answer_distribution(questions.get(key), answers.get(key))
                       for key in sorted(answers)},
     }
+
+
+def _safe_calibration_block(state, questions, result, model_requested):
+    """Recording must never turn a usable judgment into a failed call."""
+    try:
+        return calibration_block(state, questions, result, model_requested)
+    except Exception:
+        return None
 
 
 def _session_id():
@@ -602,7 +610,7 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
     if use_cache:
         hit = _cached_result(cache_path, cache_key)
         if hit is not None:
-            hit["calibration"] = calibration_block(state, questions, hit, model)
+            hit["calibration"] = _safe_calibration_block(state, questions, hit, model)
             _append_call_receipt(questions, facets, hit, calls_log, caller=caller,
                                  question_kind=question_kind, prompt_sha256=prompt_sha256,
                                  ok=False, cache_hit=True, calibration=hit["calibration"])
@@ -644,7 +652,7 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
             schema_valid = usable_judgment(result, questions)
             usable = (type(http_status) is int and 200 <= http_status < 300 and
                       schema_valid)
-            calibration = (calibration_block(state, questions, result, model)
+            calibration = (_safe_calibration_block(state, questions, result, model)
                            if schema_valid else None)
             # Round-2 fix: only a REAL production call (no opener) writes a
             # receipt. `opener` is the offline selftest/mock path (see the
