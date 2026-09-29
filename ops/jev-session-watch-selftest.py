@@ -17,11 +17,13 @@ allowed and expected here.
 import importlib.util
 import json
 import os
+import subprocess
 import tempfile
 import types
 import unittest
 from pathlib import Path
 from unittest import mock
+from git_env import fixture_env
 
 OPS = Path(__file__).resolve().parent
 MODULE_PATH = OPS / "jev_session_watch.py"
@@ -501,6 +503,16 @@ class LocateBugTests(unittest.TestCase):
 # --------------------------------------------------------------------------
 
 class CheckExistingTests(unittest.TestCase):
+    def test_git_grep_finds_name_tokens_on_host_git(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = fixture_env()
+            subprocess.run(["git", "init", "-q"], cwd=tmp, env=env, check=True)
+            Path(tmp, "billing.py").write_text("def send_invoice(amount):\n    return amount\n")
+            subprocess.run(["git", "add", "billing.py"], cwd=tmp, env=env, check=True)
+            candidates = watch._git_grep_candidates({"invoice"}, tmp)
+            self.assertEqual([(c["path"], c["name"]) for c in candidates],
+                             [("billing.py", "send_invoice")])
+
     def _runner(self, stdout, returncode=0):
         return lambda args: types.SimpleNamespace(stdout=stdout, returncode=returncode)
 

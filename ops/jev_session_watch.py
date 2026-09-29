@@ -807,7 +807,10 @@ def _git_grep_candidates(tokens, repo_root, runner=None):
     if not tokens:
         return []
     pattern = "|".join(re.escape(t) for t in sorted(tokens))
-    args = ["git", "grep", "-n", "-i", "-E", rf"(def|function)\s+\w*({pattern})\w*"]
+    # git grep -E uses the host's regex engine. POSIX classes keep the
+    # shortlist identical on macOS and Linux; \s and \w differ there.
+    args = ["git", "grep", "-n", "-i", "-E",
+            rf"(def|function)[[:space:]]+[[:alnum:]_]*({pattern})[[:alnum:]_]*"]
     try:
         result = runner(args) if runner else subprocess.run(
             args, capture_output=True, text=True, cwd=repo_root, timeout=30)
