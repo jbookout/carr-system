@@ -10,9 +10,8 @@ const queue = { items: [
 ] };
 
 function fakeVendor(inspect, alter = answers => answers) {
-  return async (_url, init) => {
-    const payload = JSON.parse(init.body);
-    inspect?.(payload, init);
+  return async payload => {
+    inspect?.(payload);
     const answers = {};
     for (const key of Object.keys(payload.questions)) {
       if (key.endsWith("_class")) {
@@ -23,18 +22,18 @@ function fakeVendor(inspect, alter = answers => answers) {
         answers[key] = { type: "choice", choice: selected, confidence: 0.9, probabilities };
       } else answers[key] = { type: "noul", noul: 0.8 };
     }
-    return { ok: true, json: async () => ({ model: payload.model, answers: alter(answers) }) };
+    return { model: payload.model, answers: alter(answers),
+      usage: { input_tokens: 12, output_tokens: 2 }, receipt_id: "server-receipt" };
   };
 }
 
 test("one bounded batch names the exact item in every model-visible question", async () => {
   const before = structuredClone(queue);
-  const advisory = await needsJoeAdvisory(queue, { apiKey: "test-only", fetchImpl: fakeVendor((payload, init) => {
+  const advisory = await needsJoeAdvisory(queue, { askJev: fakeVendor(payload => {
     assert.equal(payload.model, "jev-1.13.0");
     assert.equal(payload.state.items.length, 2);
     assert.equal(Object.keys(payload.questions).length, 8);
-    assert.ok(init.body.length <= 52000);
-    assert.equal(init.signal.aborted, false);
+    assert.ok(JSON.stringify(payload).length <= 52000);
     for (const [index, item] of payload.state.items.entries()) {
       const matching = Object.entries(payload.questions).filter(([key]) => key.startsWith(`item_${index}_${item.human_ref}_`));
       assert.equal(matching.length, 4);
@@ -54,15 +53,28 @@ test("one bounded batch names the exact item in every model-visible question", a
   assert.deepEqual(queue, before);
 });
 
+test("production advisory uses the receipt-backed Jev door", async () => {
+  const calls = [];
+  const advisory = await needsJoeAdvisory(queue, {
+    askJev: async request => {
+      calls.push(request);
+      return fakeVendor()(request);
+    },
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].model, "jev-1.13.0");
+  assert.equal(advisory.status, "available");
+});
+
 test("permuting the queue regenerates question paths and source digest", async () => {
-  const original = await needsJoeAdvisory(queue, { apiKey: "test-only", fetchImpl: fakeVendor() });
-  const reversed = await needsJoeAdvisory({ items: [...queue.items].reverse() }, { apiKey: "test-only", fetchImpl: fakeVendor() });
+  const original = await needsJoeAdvisory(queue, { askJev: fakeVendor() });
+  const reversed = await needsJoeAdvisory({ items: [...queue.items].reverse() }, { askJev: fakeVendor() });
   assert.notEqual(original.snapshot_digest, reversed.snapshot_digest);
   assert.deepEqual(reversed.items.map(item => item.human_ref), ["WR-000124", "WR-000123"]);
 });
 
 test("a mismatched class echo abstains for that item", async () => {
-  const advisory = await needsJoeAdvisory(queue, { apiKey: "test-only", fetchImpl: fakeVendor(null, answers => {
+  const advisory = await needsJoeAdvisory(queue, { askJev: fakeVendor(null, answers => {
     answers["item_0_WR-000123_class"].choice = "1|WR-000124|decision_ready";
     return answers;
   }) });
@@ -77,7 +89,7 @@ test("malformed or contradictory Choice distributions abstain", async () => {
     answer => { answer.probabilities = { bogus: 1 }; },
     answer => { answer.probabilities[answer.choice] = 0.2; },
   ]) {
-    const advisory = await needsJoeAdvisory(queue, { apiKey: "test-only", fetchImpl: fakeVendor(null, answers => {
+    const advisory = await needsJoeAdvisory(queue, { askJev: fakeVendor(null, answers => {
       corrupt(answers["item_0_WR-000123_class"]);
       return answers;
     }) });
@@ -87,9 +99,9 @@ test("malformed or contradictory Choice distributions abstain", async () => {
 });
 
 test("vendor outage and wrong answer set leave explicit unavailable advice", async () => {
-  const down = await needsJoeAdvisory(queue, { apiKey: "test-only", fetchImpl: async () => { throw Error("vendor down"); } });
+  const down = await needsJoeAdvisory(queue, { askJev: async () => { throw Error("vendor down"); } });
   assert.equal(down.status, "unavailable");
-  const malformed = await needsJoeAdvisory(queue, { apiKey: "test-only", fetchImpl: fakeVendor(null, answers => {
+  const malformed = await needsJoeAdvisory(queue, { askJev: fakeVendor(null, answers => {
     delete answers["item_0_WR-000123_priority"];
     return answers;
   }) });
@@ -99,7 +111,7 @@ test("vendor outage and wrong answer set leave explicit unavailable advice", asy
 
 test("thin item evidence abstains even when the vendor supplies confident values", async () => {
   const thin = { items: [{ ...queue.items[0], title: "Short", next_human_action: "Review" }] };
-  const advisory = await needsJoeAdvisory(thin, { apiKey: "test-only", fetchImpl: fakeVendor() });
+  const advisory = await needsJoeAdvisory(thin, { askJev: fakeVendor() });
   assert.equal(advisory.status, "partial");
   assert.deepEqual(advisory.items[0], { human_ref: "WR-000123", index: 0,
     judged: false, reason_code: "insufficient_recorded_evidence" });

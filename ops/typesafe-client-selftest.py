@@ -20,6 +20,7 @@ import importlib.util
 import hashlib
 import io
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -66,7 +67,85 @@ SPEND_SPEC = importlib.util.spec_from_file_location(
 class SpendHealthTests(unittest.TestCase):
     def test_canonical_health_invokes_spend_row(self):
         source = (MODULE_PATH.parent.parent / "tools" / "health-check.py").read_text()
-        self.assertIn("jev_spend_health.check_spend()", source)
+        self.assertIn("worker_usage=jev_spend_health.read_worker_usage", source)
+
+    def test_loaded_nightly_chain_runs_the_spend_alarm_and_preflights_its_sources(self):
+        nightly = (MODULE_PATH.parent.parent / "bin" / "nightly.sh").read_text()
+        self.assertTrue('step "Jev daily spend alarm"' in nightly
+                        and './.venv/bin/python tools/health-check.py --section jev-spend' in nightly,
+                        "nightly chain does not invoke the narrow Jev spend alarm")
+        preflight = nightly.split('if [ "${1:-}" = "--preflight" ]; then', 1)[1].split('missing=0', 1)[0]
+        self.assertIn("tools/health-check.py", preflight)
+        self.assertIn("ops/jev_spend_health.py", preflight)
+
+    def test_nightly_alarm_has_a_narrow_exit_status(self):
+        health = (MODULE_PATH.parent.parent / "tools" / "health-check.py").read_text()
+        self.assertIn('"jev-spend"', health)
+        self.assertIn('if CANONICAL_SECTION == "jev-spend":', health)
+        self.assertIn('sys.exit(_spend_module.nightly_exit_status(_spend_line))', health)
+
+    def test_nightly_alarm_fails_closed_when_usage_or_loop_action_is_unknown(self):
+        spend = importlib.util.module_from_spec(SPEND_SPEC)
+        SPEND_SPEC.loader.exec_module(spend)
+        self.assertEqual(spend.nightly_exit_status("OK jev spend — $0.000"), 0)
+        self.assertEqual(spend.nightly_exit_status("WARN jev spend — $0.600"), 0)
+        for line in ("UNKNOWN jev spend — missing usage",
+                     "UNAVAILABLE jev spend — Worker unreachable",
+                     "WARN jev spend — $0.600 · loop action FAILED (RuntimeError)"):
+            self.assertEqual(spend.nightly_exit_status(line), 1)
+
+    def test_unsettled_worker_attempt_keeps_nightly_alarm_unknown(self):
+        spend = importlib.util.module_from_spec(SPEND_SPEC)
+        SPEND_SPEC.loader.exec_module(spend)
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "absent.jsonl"
+            state = Path(d) / "loop.json"
+            now = __import__("datetime").datetime(2026, 9, 28,
+                tzinfo=__import__("datetime").timezone.utc)
+            line = spend.check_spend(log, MODULE_PATH.parent / "config" / "jev-cost-guard.v1.json",
+                state, lambda *_: None, now=now,
+                worker_usage=lambda _day: {"calls": 0, "input_tokens": 0,
+                                            "unknown": 1, "pending_attempts": 1})
+            self.assertIn("1 call or attempt missing usage", line)
+            self.assertEqual(spend.nightly_exit_status(line), 1)
+
+    def test_narrow_health_cli_exits_before_unrelated_checks(self):
+        source_tools = MODULE_PATH.parent.parent / "tools"
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "tools").mkdir()
+            (root / "ops").mkdir()
+            (root / "tools" / "health-check.py").write_text(
+                (source_tools / "health-check.py").read_text())
+            (root / "ops" / "jev_spend_health.py").write_text(
+                "import os\n"
+                "FACTORY_USAGE_LOG = 'factory-log'\n"
+                "def read_worker_usage(day): raise AssertionError('not called')\n"
+                "def check_spend(*, extra_logs, worker_usage):\n"
+                "    assert extra_logs == [FACTORY_USAGE_LOG]\n"
+                "    assert worker_usage is read_worker_usage\n"
+                "    return os.environ['TEST_SPEND_ROW']\n"
+                "def nightly_exit_status(line): return 0 if line.startswith('OK ') else 1\n")
+            for line, expected in (("OK jev spend — $0.000", 0),
+                                   ("UNKNOWN jev spend — missing usage", 1)):
+                result = subprocess.run(
+                    [os.sys.executable, str(root / "tools" / "health-check.py"),
+                     "--section", "jev-spend"],
+                    cwd=root, capture_output=True, text=True,
+                    env={**os.environ, "PYTHONPATH": str(source_tools),
+                         "TEST_SPEND_ROW": line}, timeout=10)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                self.assertEqual(result.stdout.strip(), line)
+            (root / "ops" / "jev_spend_health.py").unlink()
+            missing = subprocess.run(
+                [os.sys.executable, str(root / "tools" / "health-check.py"),
+                 "--section", "jev-spend"],
+                cwd=root, capture_output=True, text=True,
+                env={**os.environ, "PYTHONPATH": str(source_tools)}, timeout=10)
+            self.assertEqual(missing.returncode, 1)
+            for required in ("owner orchestrator", "restore the receipt reader",
+                             "verify the next run", "auto-clear after three healthy runs"):
+                self.assertIn(required, missing.stdout)
 
     def test_daily_spend_warns_and_dedups_one_loop_then_auto_clears(self):
         self.assertTrue(SPEND_SPEC and SPEND_SPEC.loader)
@@ -143,6 +222,56 @@ class SpendHealthTests(unittest.TestCase):
             self.assertNotIn("$0.000", unknown)
             self.assertEqual(events, ["add-loop"])
             self.assertEqual(json.loads(state.read_text())["loop_id"], "warning-1")
+
+    def test_daily_alarm_adds_factory_and_worker_receipts_once(self):
+        spend = importlib.util.module_from_spec(SPEND_SPEC)
+        SPEND_SPEC.loader.exec_module(spend)
+        with tempfile.TemporaryDirectory() as d:
+            local = Path(d) / "local.jsonl"
+            factory = Path(d) / "factory.jsonl"
+            state = Path(d) / "loop.json"
+            events = []
+            day = __import__("datetime").datetime(2026, 9, 28, tzinfo=__import__("datetime").timezone.utc)
+            local.write_text(json.dumps({"ts": "2026-09-28T02:00:00Z", "ok": True,
+                "usage": {"input_tokens": 4_000_000}}) + "\n" +
+                json.dumps({"ts": "2026-09-28T02:01:00Z", "ok": False,
+                "http_status": 200, "schema_valid": False,
+                "usage": {"input_tokens": 1_000_000}}) + "\n")
+            factory.write_text(json.dumps({"ts": "2026-09-28T03:00:00Z", "ok": True,
+                "usage": {"input_tokens": 2_000_000}}) + "\n" +
+                json.dumps({"ts": "2026-09-28T03:01:00Z", "ok": False,
+                "cache_hit": True, "usage": None}) + "\n")
+            def verb(name, payload):
+                events.append(name)
+                return {"ok": True, "loop_id": "spend-warning"}
+            result = spend.check_spend(local, MODULE_PATH.parent / "config" / "jev-cost-guard.v1.json",
+                state, verb, now=day, extra_logs=[factory],
+                worker_usage=lambda _day: {"calls": 1, "input_tokens": 6_000_000, "unknown": 0})
+            self.assertIn("WARN", result)
+            self.assertIn("$0.546", result)
+            self.assertIn("4 calls", result)
+            self.assertEqual(events, ["add-loop"])
+
+    def test_daily_alarm_works_before_local_log_exists(self):
+        spend = importlib.util.module_from_spec(SPEND_SPEC)
+        SPEND_SPEC.loader.exec_module(spend)
+        with tempfile.TemporaryDirectory() as d:
+            local = Path(d) / "absent.jsonl"
+            factory = Path(d) / "factory.jsonl"
+            state = Path(d) / "loop.json"
+            day = __import__("datetime").datetime(2026, 9, 28, tzinfo=__import__("datetime").timezone.utc)
+            factory.write_text(json.dumps({"ts": "2026-09-28T03:00:00Z", "ok": True,
+                "usage": {"input_tokens": 7_000_000}}) + "\n")
+            events = []
+            def verb(name, payload):
+                events.append(name)
+                return {"ok": True, "loop_id": "spend-warning"}
+            result = spend.check_spend(local, MODULE_PATH.parent / "config" / "jev-cost-guard.v1.json",
+                state, verb, now=day, extra_logs=[factory],
+                worker_usage=lambda _day: {"calls": 1, "input_tokens": 6_000_000, "unknown": 0})
+            self.assertIn("WARN", result)
+            self.assertIn("$0.546", result)
+            self.assertEqual(events, ["add-loop"])
 
 
 class LibraryShapeTests(unittest.TestCase):
@@ -407,7 +536,8 @@ class CallReceiptTests(unittest.TestCase):
             log = str(Path(d) / "calls.jsonl")
             with patch.object(client.urllib.request, "urlopen", responder(ANSWER)):
                 client.ask("private prompt", {"q": client.noul("private question")},
-                           api_key="secret", caller="unit-judge", calls_log=log)
+                           api_key="secret", caller="unit-judge", calls_log=log,
+                           cache_path=str(Path(d) / "cache.sqlite3"))
             row = json.loads(Path(log).read_text().splitlines()[0])
         self.assertEqual(row["caller"], "unit-judge")
         self.assertEqual(row["question_kind"], "noul")
@@ -416,6 +546,21 @@ class CallReceiptTests(unittest.TestCase):
         self.assertNotIn("private prompt", json.dumps(row))
         self.assertNotIn("private question", json.dumps(row))
         self.assertNotIn("secret", json.dumps(row))
+
+    def test_default_client_caches_identical_calls_for_every_caller(self):
+        with tempfile.TemporaryDirectory() as d:
+            requests = []
+            cache = str(Path(d) / "cache.sqlite3")
+            log = str(Path(d) / "calls.jsonl")
+            with patch.object(client.urllib.request, "urlopen", responder(ANSWER, requests)):
+                args = {"api_key": "secret", "caller": "direct-model-room",
+                        "cache_path": cache, "calls_log": log}
+                first = client.ask("same state", {"q": client.noul("same question")}, **args)
+                second = client.ask("same state", {"q": client.noul("same question")}, **args)
+            self.assertEqual(len(requests), 1)
+            self.assertEqual(first["usage"]["input_tokens"], 10)
+            self.assertIsNone(second["usage"])
+            self.assertTrue(second["cache_hit"])
 
     def test_invalid_json_attempt_is_logged_without_request_text(self):
         with tempfile.TemporaryDirectory() as d:

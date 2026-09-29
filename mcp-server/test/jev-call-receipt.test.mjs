@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { ToolError, executeRegisteredTool, TOOLS } from "../src/tools.js";
 import { callTool } from "../src/mcp.js";
-import { canonicalJson, canonicalSha256, jevAskBinding, prefetchJevAnswer, sha256Hex }
+import { canonicalJson, canonicalSha256, jevAskBinding, prefetchJevAnswer,
+  reserveJevCallAttempt, sha256Hex }
   from "../src/jev-call-receipt.js";
 
 const AGENT = { id: "10000000-0000-0000-0000-000000000031", slug: "joe", human: true, via: "test" };
@@ -71,8 +72,11 @@ class JevReceiptFake {
       return { rows: row ? [row] : [] };
     }
     if (sql.startsWith("insert into tool_call")) {
-      this.toolCalls.set(params[0], { verb: params[1], actor_id: params[2], request_hash: params[3],
-        response: JSON.parse(params[4]) });
+      this.toolCalls.set(params[0], params.length === 4
+        ? { verb: "ask-jev-attempt", actor_id: params[1], request_hash: params[2],
+          response: JSON.parse(params[3]) }
+        : { verb: params[1], actor_id: params[2], request_hash: params[3],
+          response: JSON.parse(params[4]) });
       return { rows: [] };
     }
     if (sql.includes("ops.record_jev_call_receipt")) {
@@ -224,6 +228,30 @@ test("ask-jev purpose call: records the prefetched answer with the server-derive
   assert.equal(client.rows.length, 1);
 });
 
+test("a billable attempt is settled by the exact committed receipt", async () => {
+  const client = new JevReceiptFake();
+  const answer = { model: "jev-1.14.0", answers: ANSWERS,
+    usage: { input_tokens: 10 },
+    attempt: { key: "attempt-1", receipt_id: "40000000-0000-0000-0000-000000000009" } };
+  const result = await askVia(client, AGENT, askArgs(), fakeJevAsk(answer));
+  const settled = client.toolCalls.get("attempt-1");
+  assert.equal(settled.verb, "ask-jev-attempt");
+  assert.equal(settled.response.receipt_id, answer.attempt.receipt_id);
+  assert.equal(settled.response.settled_by, result.receipt_id);
+});
+
+test("the pre-call receipt records unknown usage through the existing write door", async () => {
+  const client = new JevReceiptFake();
+  const attempt = await reserveJevCallAttempt(client, AGENT, askArgs());
+  assert.match(attempt.key, /^jev-attempt:/);
+  const row = client.rows[0];
+  assert.equal(attempt.receipt_id, row.receipt_id);
+  assert.equal(row.model_answered, "jev-attempt-pending");
+  assert.equal(row.usage, null);
+  assert.equal(row.actor_id, AGENT.id);
+  assert.equal(client.toolCalls.size, 0);
+});
+
 test("ask-jev purpose build_advisory records prompt_sha256 of state.partner_request", async () => {
   const jevAsk = fakeJevAsk();
   const client = new JevReceiptFake();
@@ -244,7 +272,7 @@ test("ask-jev accepts a string state and digests it as a JSON string", async () 
 
 // ── the vendor call happens before the writer transaction ──────────────────
 
-test("callTool asks Jev before it connects the writer pool, and never for an invalid request", async () => {
+test("callTool requires the receipt store before Jev and never calls Jev for invalid input", async () => {
   const realFetch = globalThis.fetch;
   const seen = [];
   globalThis.fetch = async url => {
@@ -252,13 +280,12 @@ test("callTool asks Jev before it connects the writer pool, and never for an inv
     return jsonResponse(200, { model: "jev-1.14.0", answers: ANSWERS });
   };
   try {
-    // No DATABASE_URL_WRITER: the pool cannot connect, so reaching the vendor
-    // at all proves the call came first; the connection failure follows.
+    // No DATABASE_URL_WRITER: the pool cannot connect. No paid call may happen.
     let failure;
     try { await callTool({ TYPESAFE_API_KEY: KEY }, { ...AGENT }, "ask-jev", askArgs(), "full"); }
     catch (e) { failure = e; }
-    assert.ok(failure, "expected the writer connection to fail after the vendor call");
-    assert.deepEqual(seen, ["https://api.typesafe.ai/v1/systemone"]);
+    assert.ok(failure, "expected the writer connection to fail before the vendor call");
+    assert.deepEqual(seen, []);
     seen.length = 0;
     const payload = await rejected(() =>
       callTool({ TYPESAFE_API_KEY: KEY }, { ...AGENT }, "ask-jev", askArgs({ questions: {} }), "full"));
@@ -341,6 +368,78 @@ test("jevAskBinding posts {state, model, questions} with bearer auth and a user 
   assert.match(init.headers["user-agent"], /\S/);
   assert.deepEqual(JSON.parse(init.body), { state: { a: 1 }, model: "jev-latest", questions: QUESTIONS });
   assert.ok(init.signal);
+});
+
+test("byte-identical Worker questions reuse a 60-second answer without billed usage", async () => {
+  const entries = new Map();
+  const cache = {
+    match: async key => entries.get(key.url)?.clone() ?? null,
+    put: async (key, value) => { entries.set(key.url, value.clone()); },
+  };
+  const fetchImpl = fakeFetch([jsonResponse(200, {
+    model: "jev-1.13.0", answers: ANSWERS,
+    usage: { input_tokens: 1200, output_tokens: 80 },
+  })]);
+  const ask = jevAskBinding({ TYPESAFE_API_KEY: KEY }, fetchImpl, { cache });
+  const request = { state: { a: 1 }, model: "jev-latest", questions: QUESTIONS };
+  const first = await ask(request);
+  await ask.cacheAfterCommit(request, first);
+  const second = await ask(request);
+  assert.equal(fetchImpl.calls.length, 1);
+  assert.equal(first.usage.input_tokens, 1200);
+  assert.equal(second.usage, null);
+  assert.equal(second.cache_hit, true);
+  assert.deepEqual(second.answers, first.answers);
+});
+
+test("Worker caches a valid answer even when the vendor omits usage", async () => {
+  const entries = new Map();
+  const cache = {
+    match: async key => entries.get(key.url)?.clone() ?? null,
+    put: async (key, value) => { entries.set(key.url, value.clone()); },
+  };
+  const fetchImpl = fakeFetch([jsonResponse(200, { model: "jev-1.13.0", answers: ANSWERS })]);
+  const ask = jevAskBinding({ TYPESAFE_API_KEY: KEY }, fetchImpl, { cache });
+  const request = { state: { a: 2 }, model: "jev-latest", questions: QUESTIONS };
+  const first = await ask(request);
+  assert.equal(first.usage, null);
+  await ask.cacheAfterCommit(request, first);
+  assert.equal((await ask(request)).cache_hit, true);
+  assert.equal(fetchImpl.calls.length, 1);
+});
+
+test("an unreceipted billable answer is never cached; failed attempt reservation never calls Jev", async () => {
+  const entries = new Map();
+  const cache = {
+    match: async key => entries.get(key.url)?.clone() ?? null,
+    put: async (key, value) => { entries.set(key.url, value.clone()); },
+  };
+  const fetchImpl = fakeFetch([
+    jsonResponse(200, { model: "jev-1.13.0", answers: ANSWERS, usage: { input_tokens: 1200 } }),
+    jsonResponse(200, { model: "jev-1.13.0", answers: ANSWERS, usage: { input_tokens: 1200 } }),
+  ]);
+  let reservations = 0;
+  const ask = jevAskBinding({ TYPESAFE_API_KEY: KEY }, fetchImpl, {
+    cache, reserveAttempt: async () => { reservations++; return {
+      key: `attempt-${reservations}`, receipt_id: `receipt-${reservations}` }; },
+  });
+  const request = { state: { a: 1 }, model: "jev-latest", questions: QUESTIONS };
+  const first = await ask(request);
+  assert.deepEqual(first.attempt, { key: "attempt-1", receipt_id: "receipt-1" });
+  assert.equal(first.cache_hit, undefined);
+  // A receipt transaction failed, so no cache promotion occurred.
+  const retry = await ask(request);
+  assert.equal(retry.cache_hit, undefined);
+  assert.equal(fetchImpl.calls.length, 2);
+  assert.equal(reservations, 2);
+  await ask.cacheAfterCommit(request, retry);
+  assert.equal((await ask(request)).cache_hit, true);
+  assert.equal(fetchImpl.calls.length, 2);
+  const refused = jevAskBinding({ TYPESAFE_API_KEY: KEY }, fetchImpl, {
+    reserveAttempt: async () => { throw new Error("receipt store unavailable"); },
+  });
+  await rejected(() => refused({ state: "other", model: "jev-latest", questions: QUESTIONS }));
+  assert.equal(fetchImpl.calls.length, 2);
 });
 
 test("jevAskBinding retries 429 once inside a 10s total budget", async () => {

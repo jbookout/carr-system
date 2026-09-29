@@ -22,7 +22,8 @@ import { deriveTrustedPrincipalBinding,
   ExactEffectRefusal, SCAC_TRUSTED_PRINCIPAL_READBACK_SQL } from "./scac-exact-effects.js";
 import { scheduleFailureRecord, rpcInternalErrorFailureClass, actorUnresolvedFailureClass, RPC_INTERNAL_ERROR_CODE } from "./trace.js";
 import { gateZeroSeatConnection } from "./gate-zero-seat-connection.v5.js";
-import { jevAskBinding, prefetchJevAnswer } from "./jev-call-receipt.js";
+import { jevAskBinding, prefetchJevAnswer, reserveJevCallAttempt,
+  validateAskJevArgs } from "./jev-call-receipt.js";
 import { foundationAssuranceSeatConnection } from
   "./foundation-assurance-seat-connection.v5.js";
 import { stampedGitSha } from "./build-stamp.js";
@@ -904,24 +905,16 @@ export async function callTool(env, actor, name, args, profile = "full") {
 
   // Writes use the routine writer pool except the two authority operations,
   // which receive a separate DB identity and cannot fall back to writer.
-  // ask-jev: THE VENDOR CALL HAPPENS HERE, BEFORE ANY WRITER CONNECTION OR
-  // TRANSACTION EXISTS, so a slow Jev never holds a pooled connection or an
-  // open transaction. The request is checked first (registry contract, the
-  // chokepoint's coercion, and ask-jev's own validation) so an invalid call
-  // never reaches the vendor. The Worker holds the key; with none bound
-  // nothing is prefetched and the handler refuses jev_proxy_unconfigured.
-  // An upstream failure is carried to the handler rather than thrown here, so
-  // a same-key replay still returns its stored response; on a replay the
-  // fresh answer is simply discarded.
-  let jevPrefetched;
-  if (tool.jevProxy === true) {
-    const ask = jevAskBinding(env);
-    if (ask) {
-      const jevArgs = args || {};
-      await assertRegisteredToolInput(name, tool, jevArgs);
-      coerceArgsToSchema(tool.inputSchema, jevArgs);
-      jevPrefetched = await prefetchJevAnswer(jevArgs, ask);
-    }
+  // A billable Jev call needs a durable attempt before any vendor request.
+  // Cache promotion waits until the receipt transaction commits below.
+  let validatedJevRequest = null;
+  if (tool.jevProxy === true && env?.TYPESAFE_API_KEY) {
+    const jevArgs = args || {};
+    await assertRegisteredToolInput(name, tool, jevArgs);
+    coerceArgsToSchema(tool.inputSchema, jevArgs);
+    const normalized = validateAskJevArgs(jevArgs);
+    validatedJevRequest = { state: normalized.state, model: normalized.model,
+      questions: normalized.questions };
   }
   const connectionString = tool.authorityOnly ? authorityDsnForActor(env, actor) : env.DATABASE_URL_WRITER;
   const pool = new Pool({ connectionString });
@@ -940,13 +933,32 @@ export async function callTool(env, actor, name, args, profile = "full") {
     client.seatConnection = foundationAssuranceSeatConnection(env, Pool);
   if (tool.oracleSeatOnly === true && tool.oracleFamily === "foundation-assurance")
     client.foundationAssuranceRuntime = foundationAssuranceRuntimeBinding(env);
-  // The answer prefetched above, outside the transaction; the handler only
-  // appends the receipt.
-  if (tool.jevProxy === true && jevPrefetched)
-    client.jevPrefetched = jevPrefetched;
+  let jevPrefetched, jevAsk, jevRequest;
+  let jevKeyLocked = false;
   const writerRead = tool.writerConnection === true && !tool.write;
   let readOk = true, readErrorKind = null;
   try {
+    if (tool.jevProxy === true && env?.TYPESAFE_API_KEY) {
+      const jevArgs = args || {};
+      jevRequest = validatedJevRequest;
+      // An envelope replay already has its receipt; do not spend or reserve
+      // another attempt. Serialize the check through commit so concurrent
+      // same-key calls cannot both pay before the envelope replay check.
+      await client.query("select pg_advisory_lock(hashtextextended($1,0))", [jevArgs.idempotency_key]);
+      jevKeyLocked = true;
+      // withEnvelope still checks the full request hash.
+      const prior = await client.query("select 1 from tool_call where idempotency_key=$1", [jevArgs.idempotency_key]);
+      if (!prior.rows.length) {
+        const actorRow = (await client.query("select id from actor where slug=$1", [actor.slug])).rows[0];
+        if (!actorRow?.id)
+          throw new ToolError({ error: "actor_not_provisioned", slug: actor.slug });
+        jevAsk = jevAskBinding(env, fetch, { reserveAttempt: async () => {
+          return reserveJevCallAttempt(client, { ...actor, id: actorRow.id }, jevArgs);
+        } });
+        jevPrefetched = await prefetchJevAnswer(jevArgs, jevAsk);
+        client.jevPrefetched = jevPrefetched;
+      }
+    }
     await client.query(tool.writerConnection && !tool.write ? "begin read only" : "begin");
     const a = await client.query("select id from actor where slug=$1", [actor.slug]);
     // Guarded 2026-08-03. Unguarded, a missing actor row made this a raw
@@ -971,6 +983,8 @@ export async function callTool(env, actor, name, args, profile = "full") {
       tool.authorityOnly ? "carr_authority" : "carr_writer",
       fullActor => executeRegisteredTool(client, fullActor, name, args || {}));
     await client.query("commit");
+    if (jevPrefetched?.ok === true && result?.ok === true)
+      await jevAsk.cacheAfterCommit(jevRequest, jevPrefetched.result);
     return result;
   } catch (e) {
     await client.query("rollback").catch(() => {});
@@ -1004,6 +1018,8 @@ export async function callTool(env, actor, name, args, profile = "full") {
     }
     throw e;
   } finally {
+    if (jevKeyLocked)
+      await client.query("select pg_advisory_unlock(hashtextextended($1,0))", [args.idempotency_key]).catch(() => {});
     client.release();
     // Actor-scoped read doors use a read-only writer transaction. Record their
     // metadata through the same detached audit path as ordinary reader calls;

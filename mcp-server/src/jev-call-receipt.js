@@ -57,6 +57,7 @@ const RETRY_AFTER_DEFAULT_MS = 1000;
 // A retry is only worth making with at least this much budget left after the wait.
 const MIN_ATTEMPT_MS = 1000;
 const MAX_ERROR_BODY_CHARS = 300;
+const JEV_CACHE_SECONDS = 60;
 const MAX_STATE_CHARS = 96000;
 const MAX_QUESTIONS = 64;
 const MAX_SESSION_ID_CHARS = 200;
@@ -143,8 +144,36 @@ export function jevAskBinding(env, fetchImpl = fetch, options = {}) {
   const sleep = options.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
   const now = options.now ?? (() => Date.now());
   const budgetMs = options.budgetMs ?? TOTAL_BUDGET_MS;
-  return async function jevAsk({ state, model, questions }) {
+  const cache = options.cache ?? (typeof caches !== "undefined" ? caches.default : null);
+  const reserveAttempt = options.reserveAttempt;
+  const cacheKeyFor = async body =>
+    new Request(`https://jev-cache-v2.invalid/${await sha256Hex(`${key}\n${body}`)}`);
+  const jevAsk = async function ({ state, model, questions }) {
     const body = JSON.stringify({ state, model, questions });
+    // The Cache API is shared across Worker isolates in a colo. Only the
+    // answer is cached; the key contains digests of the request and account.
+    // A hit has no billable usage and still gets a server receipt as a replay.
+    let cacheKey;
+    if (cache) {
+      cacheKey = await cacheKeyFor(body);
+      try {
+        const hit = await cache.match(cacheKey);
+        if (hit) {
+          const prior = await hit.json();
+          if (isPlainObject(prior) && isPlainObject(prior.answers) &&
+              typeof prior.model === "string" && prior.model.trim())
+            return { model: prior.model, answers: prior.answers, usage: null, cache_hit: true };
+        }
+      } catch { /* A broken cache must not hide the vendor's answer. */ }
+    }
+    let reservedAttempt;
+    if (reserveAttempt) {
+      try { reservedAttempt = await reserveAttempt(); }
+      catch { throw new LeafToolError({ error: "jev_receipt_store_unavailable" }); }
+      if (typeof reservedAttempt?.key !== "string" || !reservedAttempt.key ||
+          typeof reservedAttempt?.receipt_id !== "string" || !reservedAttempt.receipt_id)
+        throw new LeafToolError({ error: "jev_receipt_store_unavailable" });
+    }
     const deadline = now() + budgetMs;
     for (let attempt = 0; ; attempt++) {
       const remaining = deadline - now();
@@ -189,11 +218,13 @@ export function jevAskBinding(env, fetchImpl = fetch, options = {}) {
         if (!isPlainObject(parsed) || !isPlainObject(parsed.answers) || typeof parsed.model !== "string" ||
             parsed.model.trim() === "")
           throw upstreamFailure(response.status, "invalid_answer_shape", "", key);
-        return {
+        const answer = {
           model: parsed.model,
           answers: parsed.answers,
           usage: isPlainObject(parsed.usage) ? parsed.usage : null,
+          ...(reservedAttempt ? { attempt: reservedAttempt } : {}),
         };
+        return answer;
       } catch (error) {
         if (error instanceof LeafToolError) throw error;
         throw upstreamFailure(response?.status ?? null,
@@ -203,6 +234,34 @@ export function jevAskBinding(env, fetchImpl = fetch, options = {}) {
       }
     }
   };
+  // Only the caller that committed the matching receipt may promote an answer.
+  jevAsk.cacheAfterCommit = async (request, answer) => {
+    if (!cache || !answer || answer.cache_hit === true) return;
+    try {
+      const cacheKey = await cacheKeyFor(JSON.stringify(request));
+      await cache.put(cacheKey, new Response(JSON.stringify({
+        model: answer.model, answers: answer.answers,
+      }), { headers: { "cache-control": `max-age=${JEV_CACHE_SECONDS}` } }));
+    } catch { /* A cache failure cannot change a committed receipt. */ }
+  };
+  return jevAsk;
+}
+
+// Existing append-only receipt door doubles as a pre-call attempt ledger.
+// It commits before fetch, so a later receipt failure remains visible as
+// missing usage. The settlement row is written in the final transaction.
+export async function reserveJevCallAttempt(client, actor, args) {
+  const { stateJson, questions, facets, model } = validateAskJevArgs(args);
+  const key = `jev-attempt:${crypto.randomUUID()}`;
+  const row = (await client.query(
+    `select r.receipt_id from ops.record_jev_call_receipt($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) r`,
+    [args.session_id, "call", Object.keys(questions).sort(compareCodePoints), facets,
+      model, "jev-attempt-pending", await sha256Hex(stateJson),
+      await canonicalSha256(questions), await canonicalSha256({}), null,
+      JSON.stringify({}), null, actor.id, actor.slug, key],
+  )).rows[0];
+  if (!row?.receipt_id) throw new LeafToolError({ error: "jev_receipt_store_unavailable" });
+  return { key, receipt_id: row.receipt_id };
 }
 
 function validateSessionId(ToolError, value) {
@@ -317,6 +376,15 @@ export function jevCallReceiptTools({ withEnvelope, ToolError }) {
               actor.id, actor.slug, args.idempotency_key],
           )).rows[0];
           if (!row?.receipt_id) throw new ToolError({ error: "jev_call_receipt_refused" });
+          if (answered.attempt) {
+            await c.query(
+              `insert into tool_call (idempotency_key, verb, actor_id, request_hash, response)
+               values ($1,'ask-jev-attempt',$2,$3,$4)`,
+              [answered.attempt.key, actor.id, await sha256Hex(answered.attempt.key),
+                JSON.stringify({ receipt_id: answered.attempt.receipt_id,
+                  cache_hit: true, settled_by: row.receipt_id })],
+            );
+          }
           return {
             ok: true,
             receipt_id: row.receipt_id,
@@ -326,6 +394,7 @@ export function jevCallReceiptTools({ withEnvelope, ToolError }) {
             model: answered.model,
             answers: answered.answers,
             usage: answered.usage ?? null,
+            cache_hit: answered.cache_hit === true,
             state_sha256: stateSha,
             prompt_sha256: promptSha,
           };
