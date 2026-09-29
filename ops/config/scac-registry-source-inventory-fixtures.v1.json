@@ -72867,6 +72867,38 @@
       "expected_count": 1006,
       "expected_sha256": "e688116ff3a669611fd0e35aad6a6cfc09c86eeed7bbc5aefc017ead7a1fc4dc",
       "reason": "Sponsor-scoped Codex session list from first-hand checkpoint rows; reseal the Codex continuity source and new read contract."
+    },
+    {
+      "version": "v98",
+      "remove": [],
+      "upsert": [
+        {
+          "ingress_key": "external-admin:tools/migrate.py",
+          "ingress_kind": "external_admin",
+          "operation": "tools/migrate.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "tools/migrate.py",
+          "schema_digest": "f57f7dc3ab7707fbfbeb50ee06574a56ed4cbf29e8fd8e3dea7c779d3864f243",
+          "handler_digest": "f57f7dc3ab7707fbfbeb50ee06574a56ed4cbf29e8fd8e3dea7c779d3864f243",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        }
+      ],
+      "expected_count": 1006,
+      "expected_sha256": "86946163b970bbf233e188adf781bfa55f29025d8f196152ae8cff1f3e3b3680",
+      "reason": "Property evidence migration pair changes registered migration runner; v98 seals exact source following v97."
     }
   ],
   "current_source_review": {

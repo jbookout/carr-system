@@ -468,8 +468,8 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0745_doc_suggestions_scac_successor.sql",
     ),
     (
-        "0748_tour_property_evidence.sql",
-        "0749_property_evidence_scac_successor.sql",
+        "0749_tour_property_evidence.sql",
+        "0750_property_evidence_scac_successor.sql",
     ),
 )
 
@@ -583,8 +583,8 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0745_doc_suggestions_scac_successor.sql",
     ),
     (
-        "0748_tour_property_evidence.sql",
-        "0749_property_evidence_scac_successor.sql",
+        "0749_tour_property_evidence.sql",
+        "0750_property_evidence_scac_successor.sql",
     ),
 )
 
