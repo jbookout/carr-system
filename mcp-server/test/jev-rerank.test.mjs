@@ -216,8 +216,11 @@ test("beam refuses edited taxonomy content even when the id and digest are copie
 });
 
 test("taxonomy snapshot titles contain no hostnames", () => {
+  const hostname = /\b[a-z0-9-]+\.(?!(?:md|xlsx)\b)[a-z]{2,}(?:\.[a-z]{2,})*\b/i;
+  assert.match("portal.example.health", hostname);
+  assert.doesNotMatch("brokers.xlsx and notes.md", hostname);
   for (const doc of DOCTRINE_TAXONOMY_SNAPSHOT.documents)
-    assert.doesNotMatch(doc.title, /\b[a-z0-9-]+\.(?:com|net|org|io|ai|co|gov|edu)\b/i, doc.slug);
+    assert.doesNotMatch(doc.title, hostname, doc.slug);
 });
 
 test("flat reranking rejects missing or malformed token usage", async () => {
