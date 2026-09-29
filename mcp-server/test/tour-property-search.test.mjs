@@ -44,9 +44,12 @@ test("specialist search is five-county, facts-only, deterministic, and sanitized
   assert.equal(result.search.items[0].property_id, ids.propertyA);
   assert.equal(result.search.items[0].property_ref, propertyRef);
   assert.deepEqual(result.search.items[0].size, { value: 4200, unit: "SF" });
+  assert.equal(result.search.items[0].source_label, "CARR reviewed property register");
+  assert.equal(result.search.items[0].rights_status, "unknown");
+  assert.equal(result.search.items[0].coordinate_precision, "entrance_verified");
   assert.equal(result.search.cursor, "25");
   assert.equal(result.search.has_more, true);
-  assert.doesNotMatch(JSON.stringify(result), /provider|rights|evidence|verifier|contact|token_digest/);
+  assert.doesNotMatch(JSON.stringify(result), /provider|rights_receipt|evidence|verifier|contact|token_digest/);
   assert.deepEqual(h.calls[0].params.slice(0, 2), ["carr-internal", actor.id]);
   assert.deepEqual(JSON.parse(h.calls[0].params[2]), searchArgs);
 });
