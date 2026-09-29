@@ -248,7 +248,7 @@ class ProgressBoardCLI(unittest.TestCase):
         self.run_board("init", "demo", "--title", "Demo")
         for task_id, status, extra in (
             ("a", "running", []), ("b", "review", []),
-            ("c", "blocked", []), ("d", "failed", []),
+            ("c", "blocked", []), ("d", "failed", ["--reason", "Runner crashed"]),
             ("e", "done", []), ("f", "queued", []),
         ):
             self.run_board("task", "demo", task_id, "--title", task_id, "--status", status, "--executor", "Codex", *extra)
@@ -338,7 +338,7 @@ if (future.hidden) process.exit(4);
         self.assertEqual(parsed.resources, [])
         self.assertNotRegex(html, r"@import|url\(['\"]?https?://|\b(?:fetch|XMLHttpRequest|WebSocket|EventSource|sendBeacon)\s*\(")
 
-    def test_legacy_live_without_evidence_and_done_without_pr_fail_closed(self):
+    def test_legacy_live_without_evidence_with_a_pr_is_not_live(self):
         self.run_board("init", "demo", "--title", "Demo")
         self.run_board("task", "demo", "legacy", "--title", "Legacy", "--status", "done",
                        "--executor", "Codex", "--pr", "42")
@@ -346,12 +346,10 @@ if (future.hidden) process.exit(4);
         state["tasks"]["legacy"]["stage"] = "measured"
         state["tasks"]["legacy"]["status"] = "measured"
         (self.root / "boards" / "demo.json").write_text(json.dumps(state))
-        self.run_board("task", "demo", "plain", "--title", "Plain", "--status", "done",
-                       "--executor", "Codex")
+        self.run_board("render", "demo")
         html = (self.root / "boards" / "demo.html").read_text()
-        self.assertIn("0 completed · 2 remaining", html)
+        self.assertIn("0 completed · 1 remaining", html)
         self.assertNotIn('data-task-id="legacy" data-stage="live"', html)
-        self.assertNotIn('data-task-id="plain" data-stage="merged"', html)
 
     def test_reopening_live_clears_completion(self):
         self.run_board("init", "demo", "--title", "Demo")
@@ -861,6 +859,117 @@ if (future.hidden) process.exit(4);
             BOARD.command_render(args)
         self.assertEqual(events, [("render", "carr-v5"), ("publish", "carr-v5"),
                                   ("poll", "carr-v5")])
+
+
+class CardColumns(unittest.TestCase):
+    """Addition 14: finished cards never sit in Building; retired cards leave the pipeline."""
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tempdir.name)
+        self.env = os.environ.copy()
+        self.env["PROGRESS_BOARD_ROOT"] = str(self.root)
+        self.env["PROGRESS_BOARD_SKIP_GH"] = "1"
+        self.board("init", "demo", "--title", "Demo")
+
+    def tearDown(self):
+        self.tempdir.cleanup()
+
+    def board(self, *args, check=True):
+        return subprocess.run([sys.executable, str(SCRIPT), *args], cwd=REPO, env=self.env,
+                              text=True, capture_output=True, check=check)
+
+    def state(self):
+        return json.loads((self.root / "boards" / "demo.json").read_text())
+
+    def pipeline(self):
+        html = (self.root / "boards" / "demo.html").read_text()
+        return html, html.split('<h2>Delivery pipeline</h2>', 1)[1].split('<h2>Tasks by status</h2>', 1)[0]
+
+    def test_done_without_a_pr_is_live(self):
+        self.board("task", "demo", "doc", "--title", "Write the runbook", "--status", "done",
+                   "--executor", "Codex", "--note", "Shipped as PR #1234 per the thread")
+        task = self.state()["tasks"]["doc"]
+        self.assertEqual(BOARD.task_stage(task), "live")
+        # Stored explicitly so the app, which derives stage itself, agrees.
+        self.assertEqual((task["status"], task["stage"]), ("done", "live"))
+        self.assertTrue(task["evidence"].strip())
+        self.assertTrue(task["completed_at"])
+        # The note names a PR, but nothing is guessed from it.
+        self.assertIsNone(task.get("pr"))
+        html, pipeline = self.pipeline()
+        self.assertIn('data-task-id="doc" data-stage="live"', pipeline)
+        self.assertNotIn('data-stage="build"', pipeline.split('data-task-id="doc"', 1)[1][:40])
+
+    def test_legacy_done_card_without_a_pr_moves_to_live_on_render(self):
+        state = self.state()
+        state["tasks"]["old"] = {"title": "Old", "status": "done", "executor": "Codex",
+                                 "created_at": "2026-09-28T10:00:00+00:00", "updated_at": "2026-09-28T11:00:00+00:00"}
+        (self.root / "boards" / "demo.json").write_text(json.dumps(state))
+        self.board("render", "demo")
+        task = self.state()["tasks"]["old"]
+        self.assertEqual((task["stage"], task["completed_at"]), ("live", "2026-09-28T11:00:00+00:00"))
+        self.assertEqual(task["updated_at"], "2026-09-28T11:00:00+00:00")
+        snapshot = BOARD.board_snapshot(self.state())
+        self.assertEqual(snapshot["tasks"]["old"]["stage"], "live")
+
+    def test_done_with_a_merged_pr_not_yet_released_stays_merged(self):
+        self.board("task", "demo", "fix", "--title", "Fix", "--status", "done", "--executor", "Codex", "--pr", "42")
+        state = self.state()
+        state["tasks"]["fix"]["pr_phase"] = "Merged"
+        (self.root / "boards" / "demo.json").write_text(json.dumps(state))
+        self.board("render", "demo")
+        task = self.state()["tasks"]["fix"]
+        self.assertEqual(BOARD.task_stage(task), "merged")
+        self.assertNotIn("evidence", task)
+        _, pipeline = self.pipeline()
+        self.assertIn('data-task-id="fix" data-stage="merged"', pipeline)
+
+    def test_done_with_an_unmerged_pr_is_never_building(self):
+        self.board("task", "demo", "open", "--title", "Open", "--status", "done", "--executor", "Codex", "--pr", "43")
+        self.assertNotEqual(BOARD.task_stage(self.state()["tasks"]["open"]), "build")
+
+    def test_failed_card_leaves_the_pipeline_and_shows_in_history_with_its_reason(self):
+        self.board("task", "demo", "bad", "--title", "Bad attempt", "--status", "failed", "--executor", "Grok",
+                   "--reason", "Runner crashed on the migration")
+        self.assert_retired("bad", "failed", "Runner crashed on the migration")
+
+    def test_superseded_card_leaves_the_pipeline_and_shows_in_history_with_its_reason(self):
+        self.board("task", "demo", "old-plan", "--title", "Old plan", "--status", "running", "--executor", "Codex",
+                   "--pr", "44")
+        self.board("task", "demo", "old-plan", "--status", "superseded", "--reason", "Replaced by carr-system PR 1420")
+        self.assert_retired("old-plan", "superseded", "Replaced by carr-system PR 1420")
+
+    def test_retiring_a_card_needs_a_reason(self):
+        result = self.board("task", "demo", "x", "--title", "X", "--status", "superseded", "--executor", "Codex",
+                            check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--reason", result.stderr)
+
+    def test_legacy_failed_card_without_a_reason_still_leaves_the_pipeline(self):
+        state = self.state()
+        state["tasks"]["legacy"] = {"title": "Legacy", "status": "failed", "executor": "Codex",
+                                    "note": "CI never went green", "updated_at": "2026-09-28T11:00:00+00:00"}
+        (self.root / "boards" / "demo.json").write_text(json.dumps(state))
+        self.board("render", "demo")
+        self.assert_retired("legacy", "failed", "CI never went green")
+
+    def assert_retired(self, task_id, status, reason):
+        state = self.state()
+        self.assertEqual(state["tasks"][task_id]["status"], status)
+        self.assertTrue(BOARD.is_retired(state["tasks"][task_id]))
+        self.assertEqual(BOARD.retired_reason(state["tasks"][task_id]), reason)
+        html, pipeline = self.pipeline()
+        self.assertNotIn(f'data-task-id="{task_id}"', pipeline)
+        status_groups = html.split('<h2>Tasks by status</h2>', 1)[1].split('<h2>History</h2>', 1)[0]
+        self.assertNotIn(f'data-task-ref="{task_id}"', status_groups)
+        history = html.split('<h2>History</h2>', 1)[1]
+        self.assertIn(f'data-task-ref="{task_id}"', history)
+        self.assertIn(reason, history)
+        snapshot = BOARD.board_snapshot(state)
+        self.assertNotIn(task_id, snapshot["tasks"])
+        self.assertEqual(snapshot["history"][task_id]["reason"], reason)
+        self.assertEqual(snapshot["history"][task_id]["status"], status)
 
 
 if __name__ == "__main__":

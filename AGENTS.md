@@ -222,6 +222,9 @@ script will report every class green having executed none.
 
 For work >5 steps or >30 min, update `out/boards/<project>.html` via
 `tools/progress_board.py` after each step; record Joe questions with defaults.
+A `done` card with no PR is Live (complete); a `done` card with a merged PR
+stays Merged until a verified release. `failed` and `superseded` need
+`--reason` and leave the pipeline for the History list.
 
 ## Git discipline on a shared tree
 

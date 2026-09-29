@@ -24,7 +24,11 @@ from typing import Any
 from urllib.parse import quote, urlsplit
 
 
-STATUSES = ("queued", "running", "review", "blocked", "done", "failed")
+STATUSES = ("queued", "running", "review", "blocked", "done", "failed", "superseded")
+# Failed and superseded cards leave the pipeline: they show only in History,
+# each with its reason.
+RETIRED_STATUSES = ("failed", "superseded")
+DONE_WITHOUT_PR_EVIDENCE = "Complete; no PR (marked done by the orchestrator)"
 PIPELINE_STAGES = ("queued", "build", "review", "ci", "merged", "live")
 PR_STAGES = PIPELINE_STAGES[1:] + ("measured",)
 STAGE_LABELS = {
@@ -41,7 +45,7 @@ STATUS_TO_STAGE = {
     "review": "review",
     "blocked": "review",
     "failed": "ci",
-    "done": "build",
+    "superseded": "ci",
 }
 STUCK_AFTER = timedelta(hours=2)
 HOSTED_BOARD_ORIGIN = "https://app.doctorcre.com"
@@ -166,7 +170,25 @@ def executor_pool(executor: str) -> str:
     return "unassigned"
 
 
+def is_retired(task: dict[str, Any]) -> bool:
+    return task.get("status") in RETIRED_STATUSES
+
+
+def retired_reason(task: dict[str, Any]) -> str:
+    reason = task.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        return reason.strip()
+    if task.get("pr_phase") == "Closed unmerged":
+        return "PR closed without merging"
+    note = task.get("note")
+    return note.strip() if isinstance(note, str) and note.strip() else "No reason recorded"
+
+
 def task_stage(task: dict[str, Any]) -> str:
+    # Live means complete (Joe). A done card with no PR has nothing left to
+    # merge or release. A note that names a PR is never read as one.
+    if task.get("status") == "done" and task.get("pr") is None:
+        return "live"
     requested = task.get("stage")
     if requested == "measured":
         requested = "live"
@@ -176,7 +198,9 @@ def task_stage(task: dict[str, Any]) -> str:
     if requested in PIPELINE_STAGES:
         return requested
     if task.get("status") == "done":
-        return "merged" if task.get("pr") is not None and task.get("pr_phase") == "Merged" else "build"
+        # Merged and waiting on a verified release stays Merged; a PR not yet
+        # merged is still in review. Never back in Building.
+        return "merged" if task.get("pr_phase") == "Merged" else "review"
     if task.get("status") == "measured":
         return "live" if isinstance(evidence, str) and evidence.strip() else "build"
     return STATUS_TO_STAGE.get(task.get("status", "queued"), "queued")
@@ -419,7 +443,9 @@ def local_updated(timestamp: str) -> str:
 
 def render_state(state: dict[str, Any], pr_infos: dict[tuple[str, int], dict[str, Any] | None] | None = None,
                  rendered_at: str | None = None) -> str:
-    tasks = state.get("tasks", {})
+    history = sorted(((task_id, task) for task_id, task in state.get("tasks", {}).items() if is_retired(task)),
+                     key=lambda item: str(item[1].get("updated_at") or ""), reverse=True)
+    tasks = {task_id: task for task_id, task in state.get("tasks", {}).items() if not is_retired(task)}
     render_time = datetime.fromisoformat(rendered_at) if rendered_at else now_utc()
     completed = sorted(((task_id, task) for task_id, task in tasks.items() if task_stage(task) == "live"),
                        key=lambda item: completed_at(item[1]) or datetime.min.replace(tzinfo=timezone.utc),
@@ -434,7 +460,7 @@ def render_state(state: dict[str, Any], pr_infos: dict[tuple[str, int], dict[str
     questions = state.get("questions", {})
     deliverables = state.get("deliverables", [])
     waiting = [(qid, q) for qid, q in questions.items() if not q.get("answer")]
-    stuck = [(task_id, task) for task_id, task in active.items() if is_stuck(task) or task.get("status") == "failed"]
+    stuck = [(task_id, task) for task_id, task in active.items() if is_stuck(task)]
     grouped: dict[str, list[tuple[str, dict[str, Any]]]] = {status: [] for status in STATUSES}
     for task_id, task in active.items():
         grouped.setdefault(task.get("status", "queued"), []).append((task_id, task))
@@ -478,8 +504,21 @@ def render_state(state: dict[str, Any], pr_infos: dict[tuple[str, int], dict[str
     status_sections = "".join(
         f'<section class="status-group status-{esc(status)}"><div class="status-heading"><h3>{esc(status.title())}</h3><span>{len(grouped.get(status, [])):02d}</span></div>'
         f'{"".join(card(task_id, task) for task_id, task in grouped.get(status, [])) or "<p class=\"empty compact\">No tasks</p>"}</section>'
-        for status in STATUSES
+        for status in STATUSES if status not in RETIRED_STATUSES
     )
+    history_cards = "".join(
+        f'<article class="completed-card task-card history-card" data-task-ref="{esc(task_id)}" '
+        f'data-item-key="history:{esc(task_id)}" data-fingerprint="{fingerprint(task)}">'
+        f'<div class="completed-top"><strong>{esc(task.get("title", task_id))}</strong>'
+        f'<span class="stage-chip">{esc(str(task.get("status")).title())}</span>'
+        f'<time datetime="{esc(task.get("updated_at", ""))}">{esc(local_updated(task.get("updated_at", "")))}</time></div>'
+        f'<p class="completed-evidence"><b>REASON</b> {esc(retired_reason(task))}</p>'
+        f'<div class="completed-meta"><span><b>EXECUTOR</b> {esc(task.get("executor", "unassigned"))}</span>'
+        + (f'<span><b>DELIVERY</b> {esc(task_repo(task))} · PR {int(task["pr"])} · {esc(task.get("pr_phase", "status unavailable"))}</span>'
+           if isinstance(task.get("pr"), int) else '<span>No PR</span>')
+        + '</div></article>'
+        for task_id, task in history
+    ) or '<p class="empty"><span class="empty-symbol">◇</span>Nothing failed or superseded.</p>'
 
     completed_cards = "".join(
         f'<article class="completed-card task-card" data-stage="live" data-task-ref="{esc(task_id)}" '
@@ -549,6 +588,8 @@ def render_state(state: dict[str, Any], pr_infos: dict[tuple[str, int], dict[str
         "__TASK_COUNT__": str(len(active)),
         "__STATUSES__": status_sections,
         "__COMPLETED__": completed_cards,
+        "__HISTORY__": history_cards,
+        "__HISTORY_COUNT__": str(len(history)),
         "__COMPLETED_COUNT__": str(len(completed)),
         "__DELIVERABLES__": deliverable_cards,
         "__DELIVERABLE_COUNT__": str(len(deliverables)),
@@ -589,6 +630,7 @@ h1{font-size:clamp(2.35rem,5vw,4.4rem);line-height:1.02;letter-spacing:-.035em;m
 </div>
 <section class="panel pipeline-panel"><div class="panel-head"><h2>Delivery pipeline</h2><span class="count">__TASK_COUNT__ ACTIVE TASKS</span></div><p class="section-caption">Queued → Building → Review → CI → Merged → Live</p>__PIPELINE__<p class="pipeline-legend">Merged = code on main. Live = released where it runs and verified by a measured outcome.</p></section>
 <section class="panel"><div class="panel-head"><h2>Tasks by status</h2><span class="count">__TASK_COUNT__ TOTAL</span></div><div class="status-groups">__STATUSES__</div></section>
+<section class="panel completed-panel history-panel"><div class="panel-head"><h2>History</h2><span class="count">__HISTORY_COUNT__ FAILED OR SUPERSEDED</span></div><div class="completed-list">__HISTORY__</div></section>
 <section class="panel completed-panel"><div class="panel-head"><h2>Completed</h2><span class="count">__COMPLETED_COUNT__ LIVE</span></div><div class="completed-list">__COMPLETED__</div></section>
 <div class="lower-grid">
 <section class="panel"><div class="panel-head"><h2>Latest deliverables</h2><span class="count">__DELIVERABLE_COUNT__ LINKS</span></div>__DELIVERABLES__</section>
@@ -631,11 +673,27 @@ h1{font-size:clamp(2.35rem,5vw,4.4rem);line-height:1.02;letter-spacing:-.035em;m
         page = page.replace(key, value)
     return page
 
+def settle_done_without_pr(task: dict[str, Any]) -> bool:
+    """Store a finished no-PR card as Live, keeping its own times."""
+    if task.get("status") != "done" or task.get("pr") is not None:
+        return False
+    evidence = task.get("evidence")
+    settled = {"stage": "live",
+               "evidence": evidence if isinstance(evidence, str) and evidence.strip() else DONE_WITHOUT_PR_EVIDENCE,
+               "completed_at": task.get("completed_at") or task.get("updated_at") or stamp()}
+    if all(task.get(field) == value for field, value in settled.items()):
+        return False
+    task.update(settled)
+    return True
+
+
 def render(project: str) -> None:
     state = read_state(project)
     pr_infos: dict[tuple[str, int], dict[str, Any] | None] = {}
     changed = False
     for task_id, task in state.get("tasks", {}).items():
+        if settle_done_without_pr(task):
+            changed = True
         if task.get("pr") is None:
             continue
         key = pr_key(task)
@@ -654,7 +712,7 @@ def render(project: str) -> None:
             task["updated_at"] = now_utc().isoformat(timespec="microseconds")
             changed = True
     if changed:
-        state["updated_at"] = max(task["updated_at"] for task in state["tasks"].values())
+        state["updated_at"] = max(str(task.get("updated_at") or "") for task in state["tasks"].values())
         write_json(state)
     board_dir().mkdir(parents=True, exist_ok=True)
     html_path(project).write_text(render_state(state, pr_infos,
@@ -691,7 +749,15 @@ def stable_key(verb: str, args: dict[str, Any]) -> str:
 
 
 def board_snapshot(state: dict[str, Any]) -> dict[str, Any]:
-    return {key: state[key] for key in ("project", "title", "tasks", "deliverables", "updated_at")}
+    snapshot = {key: state[key] for key in ("project", "title", "tasks", "deliverables", "updated_at")}
+    tasks = state.get("tasks", {})
+    snapshot["tasks"] = {task_id: task for task_id, task in tasks.items() if not is_retired(task)}
+    snapshot["history"] = {
+        task_id: {"title": task.get("title", task_id), "status": task.get("status"),
+                  "reason": retired_reason(task), "executor": task.get("executor", "unassigned"),
+                  "pr": task.get("pr"), "repo": task.get("repo"), "updated_at": task.get("updated_at")}
+        for task_id, task in tasks.items() if is_retired(task)}
+    return snapshot
 
 
 def question_revision(question: dict[str, Any], project: str) -> dict[str, Any]:
@@ -922,6 +988,10 @@ def command_task(args: argparse.Namespace) -> None:
         task.pop("completed_at", None)
     if args.health is not None:
         task["health"] = args.health
+    if args.reason is not None:
+        task["reason"] = args.reason.strip()
+    if args.status in RETIRED_STATUSES and not str(task.get("reason") or "").strip():
+        raise SystemExit(f"a {args.status} card needs --reason")
     state["tasks"][args.task_id] = task
     write_and_render(state)
 
@@ -1003,6 +1073,7 @@ def parser() -> argparse.ArgumentParser:
     task.add_argument("--health", choices=("healthy", "question", "blocked"))
     task.add_argument("--note")
     task.add_argument("--evidence")
+    task.add_argument("--reason", help="why a card failed or was superseded; required for those statuses")
     task.set_defaults(func=command_task)
     ask = commands.add_parser("ask")
     ask.add_argument("project")
