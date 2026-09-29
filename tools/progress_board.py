@@ -342,7 +342,8 @@ def blocked_detail(task: dict[str, Any], at: datetime | None = None) -> tuple[st
 def stage_entered_at(task: dict[str, Any]) -> str | None:
     history = task.get("stage_history") or []
     last = history[-1] if history and isinstance(history[-1], dict) else {}
-    value = task.get("stage_entered_at") or last.get("entered_at") or task.get("updated_at") or task.get("created_at")
+    value = (task.get("stage_entered_at") or last.get("entered_at") or last.get("at")
+             or task.get("updated_at") or task.get("created_at"))
     return value if isinstance(value, str) else None
 
 

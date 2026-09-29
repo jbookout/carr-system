@@ -676,6 +676,9 @@ class PullRequestStatus(BoardCase):
         self.assertEqual(BOARD.stage_timer(timed, at), "build 2h 14m")
         self.assertEqual(BOARD.stage_timer({"status": "review", "stage_entered_at": "2026-09-29T11:25:00Z"}, at),
                          "review 35m")
+        legacy = {"status": "review", "updated_at": "2026-09-29T11:59:00Z",
+                  "stage_history": [{"stage": "review", "at": "2026-09-29T11:25:00Z"}]}
+        self.assertEqual(BOARD.stage_timer(legacy, at), "review 35m")
         durations = BOARD.stage_durations({"stage_history": [
             {"stage": "queued", "entered_at": "2026-09-29T10:00:00Z"},
             {"stage": "build", "entered_at": "2026-09-29T10:30:00Z"}]}, at)
