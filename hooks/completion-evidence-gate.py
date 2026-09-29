@@ -228,6 +228,9 @@ WRITE_ACTION_EXACT = {
                                  # a Doc conversation under a compare-and-swap. EXACT for
                                  # the same reason: "rename" covers one verb today, and a
                                  # future rename-shaped read must not inherit the class.
+    "suggest-doc-work",       # B08: stores one source-bound obligation suggestion;
+                              # "suggest" stays exact so future read-like suggestions
+                              # do not inherit write classification.
     "call-verb",             # unknown inner call is conservatively a write
     "cancel-capability-session",  # abandons the open build session on a capability
                               # project and returns that project to ready. A write in

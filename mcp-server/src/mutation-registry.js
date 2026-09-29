@@ -4,6 +4,7 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
+// v96 admits Doc suggestion producer, decision, and correction verbs.
 // v95 admits the permission-scoped Operations schedule read.
 // v94 sealed tenant-scoped progress board answers.
 // v93 sealed the tenant-scoped Industry Events record
@@ -193,7 +194,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v95.generated.js";
+} from "./scac-mutation-registry.v96.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 
