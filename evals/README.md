@@ -13,8 +13,9 @@ its own line:
 no-eval: <surface>: <at least ten words on why a measurement is impossible>
 ```
 
-"Trivial", "docs only" and "n/a" are refused. A line inside an HTML comment or
-a code fence does not count. `ops/check-eval-receipt.py` enforces both paths
+"Trivial", "docs only" and "n/a" are refused. A line inside an HTML comment,
+backtick or tilde code fence, indented code block, or blockquote does not count.
+`ops/check-eval-receipt.py` enforces both paths
 in CI (the `gates` class of `ops/ci.sh`). It reads the body from the
 pull-request event, so edit the body before you push, or push again after.
 
@@ -142,7 +143,10 @@ never decisive), `offline_suite` (`{path, suite_digest}` for an
 
 `verdict.decision` is one of `ship`, `ship_cost_at_parity`, `do_not_merge`,
 `inconclusive`. The check refuses a receipt whose verdict disagrees with its
-own numbers.
+own numbers. A changed surface passes the gate only with `ship` or
+`ship_cost_at_parity`; `do_not_merge` and `inconclusive` are valid recorded
+results but block the pull request, even if its body also has a no-eval line.
+An unreadable or malformed pull-request event also blocks the check.
 
 ## The control behind the rule
 

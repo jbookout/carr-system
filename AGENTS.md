@@ -226,9 +226,10 @@ Any change to a surface registered in `evals/surfaces.json` runs
 line in the PR body. Procedure: `evals/README.md`.
 
 Reviewer checklist on the exact head: `ops/check-eval-receipt.py` passed; each
-receipt was changed in this PR; its verdict matches its numbers (no "ship" on a
-gain inside the noise, no critical dimension regressed); and each no-eval line
-names a real reason a measurement is impossible.
+receipt was changed in this PR; its verdict matches its numbers and authorizes
+shipping (`ship` or `ship_cost_at_parity`, with no critical regression); each
+no-eval line names a real reason a measurement is impossible. An unreadable PR
+event fails the check.
 
 ## Progress board
 

@@ -31,7 +31,10 @@ merge on quality grounds" in its verdict; it may still ship on cost at parity
 when it is cheaper per case.
 
 WHERE IT ENFORCES. In a pull_request run (GITHUB_EVENT_NAME=pull_request and a
-readable GITHUB_EVENT_PATH) a missing receipt or line fails. Anywhere else, the
+readable GITHUB_EVENT_PATH) a missing receipt or line fails; an unreadable PR
+event refuses the check. A changed surface whose receipt says do_not_merge or
+inconclusive also fails, even when that verdict correctly describes its data.
+Anywhere else, the
 pre-push floor and local runs included, there is no pull-request body to read,
 so a missing receipt is reported and does not fail; a MALFORMED receipt, an
 unregistered context-emitting hook, or a broken registry fails everywhere.
@@ -73,7 +76,7 @@ OPTIONAL = {"overall", "offline_suite", "rounds", "notes"}
 MEASURE_FIELDS = {"baseline", "candidate", "delta"}
 PLACEHOLDER_REASONS = re.compile(r"^(n/?a|none|tbd|trivial|minor|docs?( only)?|not needed.*|no change.*|skip.*|-+)$", re.I)
 MIN_REASON_WORDS = 10
-NO_EVAL = re.compile(r"^\s*[-*>]?\s*no-eval:\s*([^:\s]+)\s*:\s*(.*?)\s*$", re.I)
+NO_EVAL = re.compile(r"^ {0,3}(?:[-*] )?no-eval:\s*([^:\s]+)\s*:\s*(.*?)\s*$", re.I)
 CONTEXT_EMITTER = re.compile(r"additionalContext|systemMessage|hookSpecificOutput")
 
 
@@ -228,6 +231,8 @@ def validate_receipt(r: Any, surface: str, root: Path = ROOT) -> list[str]:
             errs.append(f"cases: train {c['train']} + test {c['test']} != total {c['total']}")
         if not _int(c["should_not_fire"], 1):
             errs.append("cases.should_not_fire must be at least 1: an eval with no should-not-fire cases rewards firing on everything")
+        elif _int(c["total"], 1) and c["should_not_fire"] > c["total"]:
+            errs.append("cases.should_not_fire cannot exceed cases.total")
         src = c["sources"]
         if not isinstance(src, list) or not src or not set(src) <= CASE_SOURCES:
             errs.append(f"cases.sources must be a non-empty subset of {sorted(CASE_SOURCES)}")
@@ -384,12 +389,15 @@ def parse_no_eval(body: str | None, known: set[str]) -> tuple[dict[str, str], li
     found: dict[str, str] = {}
     errs: list[str] = []
     text = re.sub(r"<!--.*?-->", "", body or "", flags=re.S)
-    fenced = False
+    fence: tuple[str, int] | None = None
     for line in text.replace("\r\n", "\n").split("\n"):
-        if line.strip().startswith("```"):
-            fenced = not fenced
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        if fence:
+            if marker and marker.group(1)[0] == fence[0] and len(marker.group(1)) >= fence[1] and not marker.group(2).strip():
+                fence = None
             continue
-        if fenced:
+        if marker:
+            fence = (marker.group(1)[0], len(marker.group(1)))
             continue
         m = NO_EVAL.match(line)
         if not m:
@@ -425,9 +433,14 @@ def pr_body_from_event() -> tuple[bool, str]:
         return False, ""
     try:
         event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
-    except (KeyError, OSError, json.JSONDecodeError):
-        return False, ""
-    return True, (event.get("pull_request") or {}).get("body") or ""
+    except (KeyError, OSError, json.JSONDecodeError) as exc:
+        raise GateError(f"cannot read pull-request event: {exc}") from exc
+    if not isinstance(event, dict) or not isinstance(event.get("pull_request"), dict):
+        raise GateError("pull-request event has no pull_request object")
+    body = event["pull_request"].get("body")
+    if body is not None and not isinstance(body, str):
+        raise GateError("pull-request event body must be a string or null")
+    return True, body or ""
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -444,9 +457,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"check-eval-receipt: {exc}", file=sys.stderr)
         return 2
     known = {s["id"] for s in reg["surfaces"]}
-    in_pr, body = pr_body_from_event()
-    if args.pr_body_file:
-        in_pr, body = True, Path(args.pr_body_file).read_text()
+    try:
+        if args.pr_body_file:
+            in_pr, body = True, Path(args.pr_body_file).read_text()
+        else:
+            in_pr, body = pr_body_from_event()
+    except (GateError, OSError) as exc:
+        print(f"check-eval-receipt: {exc}", file=sys.stderr)
+        return 2
 
     failures: list[str] = []
     advisories: list[str] = []
@@ -484,6 +502,10 @@ def main(argv: list[str] | None = None) -> int:
             failures.append(f"{rel}: unreadable: {exc}")
             continue
         failures += [f"{rel}: {e}" for e in validate_receipt(receipt, sid, root)]
+        verdict = receipt.get("verdict") if isinstance(receipt, dict) else None
+        decision = verdict.get("decision") if isinstance(verdict, dict) else None
+        if sid in touched and decision in ("do_not_merge", "inconclusive"):
+            failures.append(f"{rel}: verdict {decision} does not authorize shipping the changed {sid} surface")
 
     for sid, paths in sorted(touched.items()):
         shown = ", ".join(paths[:4]) + (f" (+{len(paths) - 4} more)" if len(paths) > 4 else "")

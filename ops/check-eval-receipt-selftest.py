@@ -276,6 +276,10 @@ class Receipts(unittest.TestCase):
     def test_should_not_fire_and_real_sources_are_required(self):
         r = good_receipt(); r["cases"]["should_not_fire"] = 0
         self.assertTrue(any("should_not_fire" in e for e in self.errors(r)))
+        r = good_receipt(); r["cases"]["should_not_fire"] = 99
+        self.assertTrue(any("should_not_fire" in e and "total" in e for e in self.errors(r)))
+        r = good_receipt(); r["cases"]["should_not_fire"] = r["cases"]["total"]
+        self.assertEqual(self.errors(r), [])
         r = good_receipt(); r["cases"]["sources"] = ["synthesized"]
         self.assertTrue(any("production" in e for e in self.errors(r)))
 
@@ -338,9 +342,25 @@ class NoEvalLines(unittest.TestCase):
 
     def test_lines_in_comments_and_code_fences_do_not_count(self):
         body = (f"<!--\nno-eval: rule-delivery: {self.REASON}\n-->\n"
-                f"```\nno-eval: context-hooks: {self.REASON}\n```\n")
+                f"```\nno-eval: context-hooks: {self.REASON}\n```\n"
+                f"~~~markdown\nno-eval: session-instructions: {self.REASON}\n~~~\n")
         found, errs = cer.parse_no_eval(body, SURFACE_IDS)
         self.assertEqual(found, {})
+
+    def test_longer_fence_does_not_close_on_shorter_marker(self):
+        body = (f"~~~~\n~~~\nno-eval: rule-delivery: {self.REASON}\n~~~~\n"
+                f"no-eval: context-hooks: {self.REASON}\n")
+        found, errs = cer.parse_no_eval(body, SURFACE_IDS)
+        self.assertEqual(errs, [])
+        self.assertEqual(set(found), {"context-hooks"})
+
+    def test_quoted_and_indented_examples_are_not_exemptions(self):
+        body = (f"> no-eval: rule-delivery: {self.REASON}\n"
+                f"    no-eval: context-hooks: {self.REASON}\n"
+                f"- no-eval: session-instructions: {self.REASON}\n")
+        found, errs = cer.parse_no_eval(body, SURFACE_IDS)
+        self.assertEqual(errs, [])
+        self.assertEqual(set(found), {"session-instructions"})
 
 
 class EndToEnd(unittest.TestCase):
@@ -369,13 +389,15 @@ class EndToEnd(unittest.TestCase):
     def git(self, *args):
         subprocess.run(["git", *args], cwd=self.repo, env=self.env, check=True, capture_output=True)
 
-    def run_check(self, body=None, pr=True):
+    def run_check(self, body=None, pr=True, event_text=None, missing_event=False):
         args = [sys.executable, str(ROOT / "ops" / "check-eval-receipt.py"), "--root", str(self.repo), "--base", "base"]
         env = dict(self.env)
         env.pop("GITHUB_EVENT_NAME", None); env.pop("GITHUB_EVENT_PATH", None)
         if pr:
             event = self.repo.parent / "event.json"
-            event.write_text(json.dumps({"pull_request": {"body": body}}))
+            if not missing_event:
+                event.write_text(event_text if event_text is not None else
+                                 json.dumps({"pull_request": {"body": body}}))
             env.update(GITHUB_EVENT_NAME="pull_request", GITHUB_EVENT_PATH=str(event))
         return subprocess.run(args, cwd=self.repo, env=env, capture_output=True, text=True)
 
@@ -399,6 +421,14 @@ class EndToEnd(unittest.TestCase):
         self.commit("AGENTS.md", "boot, changed\n")
         self.assertEqual(self.run_check(None).returncode, 1)
 
+    def test_unreadable_or_malformed_pr_event_fails_closed(self):
+        self.commit("AGENTS.md", "boot, changed\n")
+        for opts in ({"missing_event": True}, {"event_text": "{bad json"},
+                     {"event_text": "{}"}, {"event_text": '{"pull_request": {"body": 12}}'}):
+            out = self.run_check(**opts)
+            self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+            self.assertIn("event", out.stdout + out.stderr)
+
     def test_outside_a_pr_it_is_advisory(self):
         self.commit("AGENTS.md", "boot, changed\n")
         out = self.run_check(pr=False)
@@ -416,6 +446,31 @@ class EndToEnd(unittest.TestCase):
         self.commit("evals/session-instructions/receipt.json", json.dumps(r))
         out = self.run_check("")
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_nonshipping_receipt_cannot_satisfy_a_changed_surface(self):
+        for decision in ("do_not_merge", "inconclusive"):
+            with self.subTest(decision=decision):
+                r = good_receipt(); r["surface"] = "session-instructions"
+                r["verdict"] = {"decision": decision, "statement": "Measured result does not authorize shipping."}
+                self.commit("AGENTS.md", f"boot, changed for {decision}\n")
+                self.commit("evals/session-instructions/receipt.json", json.dumps(r))
+                out = self.run_check(f"no-eval: session-instructions: {NoEvalLines.REASON}")
+                self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+                self.assertIn(decision, out.stdout + out.stderr)
+
+    def test_critical_regression_do_not_merge_receipt_blocks_pr(self):
+        r = good_receipt(); r["surface"] = "session-instructions"
+        r["dimensions"][1] = dimension("should-not-fire-precision", critical=True,
+                                       base=(0.94, 0.89, 0.98), cand=(0.80, 0.74, 0.86),
+                                       delta=(-0.14, -0.20, -0.08), direction="regressed")
+        r["verdict"] = {"decision": "do_not_merge",
+                        "statement": "Blocked: critical dimension should-not-fire-precision regressed."}
+        self.assertEqual(cer.validate_receipt(r, "session-instructions", ROOT), [])
+        self.commit("AGENTS.md", "boot, changed\n")
+        self.commit("evals/session-instructions/receipt.json", json.dumps(r))
+        out = self.run_check("")
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertIn("do_not_merge", out.stdout + out.stderr)
 
     def test_stale_receipt_from_an_earlier_change_does_not_count(self):
         r = good_receipt(); r["surface"] = "session-instructions"
