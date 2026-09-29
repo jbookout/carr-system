@@ -36,7 +36,7 @@ def model_usage_error(models) -> str | None:
 def parse_stream(lines, returncode: int = 0) -> dict:
     """Read one stream ending in exactly one end; never join post-end text."""
     chunks = []
-    end = {}
+    end: dict = {}
     detail = None
     for line in lines:
         if not line.strip():
@@ -97,17 +97,24 @@ def parse_result(stdout: str, returncode: int) -> dict:
     return {"status": "completed", "result": result, "provider_metadata": metadata}
 
 
+def invoke_cli(prompt: str, *, cwd=None, effort=EFFORT, max_turns=MAX_TURNS,
+               writable=False, run=subprocess.run):
+    """The sole model-work invocation, bounded identically for both adapters."""
+    argv = ["grok", "--model", MODEL, "--reasoning-effort", effort,
+            "--max-turns", str(max_turns), "--always-approve",
+            "--sandbox", "workspace" if writable else "read-only",
+            "--output-format", "streaming-json", "--print", prompt]
+    return run(argv, cwd=cwd, capture_output=True, text=True,
+               stdin=subprocess.DEVNULL, timeout=TIMEOUT_S)
+
+
 def run_task(entry: dict, task: str, *, run=subprocess.run) -> dict:
     validate_entry(entry)
     prompt = ("Read-only retrieval or explanation only. Do not call CARR or MCP tools, "
               "read credential/config files, write files, or delegate. Return a bounded "
               "answer with public source URLs when retrieving.\n\n" + task)
-    argv = ["grok", "--model", MODEL, "--reasoning-effort", EFFORT,
-            "--max-turns", str(MAX_TURNS), "--always-approve", "--sandbox", "read-only",
-            "--output-format", "streaming-json", "--print", prompt]
     try:
-        proc = run(argv, cwd=entry.get("cwd"), capture_output=True, text=True,
-                   stdin=subprocess.DEVNULL, timeout=TIMEOUT_S)
+        proc = invoke_cli(prompt, cwd=entry.get("cwd"), run=run)
     except FileNotFoundError:
         return {"status": "failed", "detail": "grok_cli_unavailable"}
     except subprocess.TimeoutExpired:

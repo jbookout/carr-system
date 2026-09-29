@@ -7,6 +7,10 @@ import subprocess
 import tempfile
 import textwrap
 import unittest
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools/room-bridge"))
+import grok_wire
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "bin/grok-run.sh"
@@ -101,6 +105,18 @@ class GrokRunTests(unittest.TestCase):
         self.assertEqual(run.returncode, 4)
         self.assertEqual(receipt["stopReason"], "invalid_stream")
 
+    def test_runner_and_desk_reject_the_same_review_fixtures(self):
+        for fixture in ("mixed-model.ndjson", "lookalike-model.ndjson", "end-then-text.ndjson",
+                        "end-then-error.ndjson", "duplicate-end.ndjson"):
+            with self.subTest(fixture=fixture):
+                shell, _ = self.run_fixture(fixture)
+                raw = (FIXTURES / fixture).read_text()
+                desk = grok_wire.run_task(
+                    {"model": "grok-4.7", "effort": "high", "sandbox": "read-only"}, "test",
+                    run=lambda argv, **kw: subprocess.CompletedProcess(argv, 0, raw, ""))
+                self.assertNotEqual(shell.returncode, 0)
+                self.assertEqual(desk["status"], "failed")
+
     def run_cli(self, *args, installed="1.0.9", latest="1.0.10", auth=True,
                 registry=True, upgrade=True, cli_exit=0):
         with tempfile.TemporaryDirectory(prefix="grok-cli-test-") as directory:
@@ -165,6 +181,23 @@ class GrokRunTests(unittest.TestCase):
                                    "--output-format", "streaming-json", "--print",
                                    "Do not call any CARR or record-layer tool; do not write anything unless asked.\n\nliteral $HOME `x`"])
         self.assertEqual(json.loads(run.stderr)["cli_version"], "1.0.10")
+
+    def test_runner_and_desk_use_the_same_default_invocation(self):
+        shell, calls = self.run_cli("--prompt", "test", installed="1.0.10")
+        self.assertEqual(shell.returncode, 0, shell.stderr)
+        desk_calls = []
+
+        def provider(argv, **kwargs):
+            desk_calls.append((argv, kwargs))
+            return subprocess.CompletedProcess(argv, 0, (FIXTURES / "live-ok.ndjson").read_text(), "")
+
+        desk = grok_wire.run_task(
+            {"model": "grok-4.7", "effort": "high", "sandbox": "read-only"}, "test", run=provider)
+        self.assertEqual(desk["status"], "completed")
+        self.assertEqual(len(desk_calls), 1)
+        self.assertEqual(calls[-1][:-1], desk_calls[0][0][:-1])
+        self.assertTrue(calls[-1][-1].endswith("\n\ntest"))
+        self.assertTrue(desk_calls[0][0][-1].endswith("\n\ntest"))
 
     def test_writable_prompt_file_and_options(self):
         run, calls = self.run_cli("--writable", "--effort", "low", "--max-turns", "3",

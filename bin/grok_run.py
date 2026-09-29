@@ -8,7 +8,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools/room-bridge"))
-from grok_wire import MODEL, parse_stream
+from grok_wire import MODEL, invoke_cli, parse_stream
 
 PREFIX = "Do not call any CARR or record-layer tool; do not write anything unless asked."
 
@@ -102,12 +102,8 @@ def main():
                 output, receipt, code = parse_output(stream, "fixture")
         else:
             cli_version = preflight()
-            result = subprocess.run([
-                "grok", "--model", MODEL, "--reasoning-effort", args.effort,
-                "--max-turns", str(args.max_turns), "--always-approve",
-                "--sandbox", "workspace" if args.writable else "read-only",
-                "--output-format", "streaming-json", "--print", PREFIX + "\n\n" + requested_prompt,
-            ], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+            result = invoke_cli(PREFIX + "\n\n" + requested_prompt, effort=args.effort,
+                                max_turns=args.max_turns, writable=args.writable)
             output, receipt, code = parse_output(result.stdout.splitlines(), cli_version, result.returncode)
         serialized = json.dumps(receipt, sort_keys=True) + "\n"
         if os.environ.get("GROK_RUN_RECEIPT"):
