@@ -1519,7 +1519,9 @@ def _canonical_health():
             _spend_spec = importlib.util.spec_from_file_location("jev_spend_health", _spend_path)
             jev_spend_health = importlib.util.module_from_spec(_spend_spec)
             _spend_spec.loader.exec_module(jev_spend_health)
-            print("  " + jev_spend_health.check_spend())
+            print("  " + jev_spend_health.check_spend(
+                extra_logs=[jev_spend_health.FACTORY_USAGE_LOG],
+                worker_usage=jev_spend_health.read_worker_usage))
         except Exception as exc:
             print(f"  UNAVAILABLE jev spend — {type(exc).__name__}; "
                   "on breach: open/update one dedup loop · owner orchestrator · "

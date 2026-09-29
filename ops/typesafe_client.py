@@ -414,7 +414,7 @@ def _append_call_receipt(questions, facets, result, log_path, *, caller=None,
 def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
         api_key=None, retries=RATE_LIMIT_RETRIES, endpoint=ENDPOINT, opener=None,
         facets=None, calls_log=JEV_CALLS_LOG, deadline=None, caller=None,
-        cache_ttl_seconds=0, cache_path=JUDGE_CACHE_PATH, account=None):
+        cache_ttl_seconds=JUDGE_CACHE_TTL_SECONDS, cache_path=JUDGE_CACHE_PATH, account=None):
     """Evaluate `state` against a map of questions in ONE request.
 
     `state` is a string, or a mapping when the context has several parts —
@@ -443,8 +443,8 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
     `retries=0` turns rate-limit retries off entirely.
 
     `caller` names the invoking code in the usage log; if omitted it is inferred
-    from the immediate caller file. A positive `cache_ttl_seconds` enables the
-    shared on-disk result cache, used by jev_judge with the configured 60s TTL.
+    from the immediate caller file. Every real caller uses the shared 60s
+    on-disk duplicate cache by default; a caller can explicitly pass zero.
     `account` names an account or organization when the caller has one. The
     credential hash also scopes the cache, including when no name is supplied.
     Cache hits return usage=None and cannot count as fresh vendor-call evidence.

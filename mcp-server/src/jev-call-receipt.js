@@ -57,6 +57,7 @@ const RETRY_AFTER_DEFAULT_MS = 1000;
 // A retry is only worth making with at least this much budget left after the wait.
 const MIN_ATTEMPT_MS = 1000;
 const MAX_ERROR_BODY_CHARS = 300;
+const JEV_CACHE_SECONDS = 60;
 const MAX_STATE_CHARS = 96000;
 const MAX_QUESTIONS = 64;
 const MAX_SESSION_ID_CHARS = 200;
@@ -143,8 +144,26 @@ export function jevAskBinding(env, fetchImpl = fetch, options = {}) {
   const sleep = options.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
   const now = options.now ?? (() => Date.now());
   const budgetMs = options.budgetMs ?? TOTAL_BUDGET_MS;
+  const cache = options.cache ?? (typeof caches !== "undefined" ? caches.default : null);
   return async function jevAsk({ state, model, questions }) {
     const body = JSON.stringify({ state, model, questions });
+    // The Cache API is shared across Worker isolates in a colo. Only the
+    // answer is cached; the key contains digests of the request and account.
+    // A hit has no billable usage and still gets a server receipt as a replay.
+    let cacheKey;
+    if (cache) {
+      const digest = await sha256Hex(`${key}\n${body}`);
+      cacheKey = new Request(`https://jev-cache.invalid/${digest}`);
+      try {
+        const hit = await cache.match(cacheKey);
+        if (hit) {
+          const prior = await hit.json();
+          if (isPlainObject(prior) && isPlainObject(prior.answers) &&
+              typeof prior.model === "string" && prior.model.trim())
+            return { model: prior.model, answers: prior.answers, usage: null, cache_hit: true };
+        }
+      } catch { /* A broken cache must not hide the vendor's answer. */ }
+    }
     const deadline = now() + budgetMs;
     for (let attempt = 0; ; attempt++) {
       const remaining = deadline - now();
@@ -189,11 +208,19 @@ export function jevAskBinding(env, fetchImpl = fetch, options = {}) {
         if (!isPlainObject(parsed) || !isPlainObject(parsed.answers) || typeof parsed.model !== "string" ||
             parsed.model.trim() === "")
           throw upstreamFailure(response.status, "invalid_answer_shape", "", key);
-        return {
+        const answer = {
           model: parsed.model,
           answers: parsed.answers,
           usage: isPlainObject(parsed.usage) ? parsed.usage : null,
         };
+        if (cacheKey) {
+          try {
+            await cache.put(cacheKey, new Response(JSON.stringify(answer), {
+              headers: { "cache-control": `max-age=${JEV_CACHE_SECONDS}` },
+            }));
+          } catch { /* The vendor answer and receipt still stand. */ }
+        }
+        return answer;
       } catch (error) {
         if (error instanceof LeafToolError) throw error;
         throw upstreamFailure(response?.status ?? null,
@@ -326,6 +353,7 @@ export function jevCallReceiptTools({ withEnvelope, ToolError }) {
             model: answered.model,
             answers: answered.answers,
             usage: answered.usage ?? null,
+            cache_hit: answered.cache_hit === true,
             state_sha256: stateSha,
             prompt_sha256: promptSha,
           };
