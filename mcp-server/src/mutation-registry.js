@@ -4,7 +4,9 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v95 is the runtime selector for versioned Doc suggestions and corrections.
+// v96 admits Doc suggestion producer, decision, and correction verbs.
+// v95 admits the permission-scoped Operations schedule read.
+// v94 sealed tenant-scoped progress board answers.
 // v93 sealed the tenant-scoped Industry Events record
 // contract. Its 0739 successor chains after incident triage v92 (0737).
 //
@@ -192,7 +194,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v95.generated.js";
+} from "./scac-mutation-registry.v96.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 

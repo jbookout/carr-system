@@ -1,5 +1,5 @@
 -- DoctorCRE B08: one suggestion per explicitly identified obligation.
--- 0743 seals this migration in the same atomic migration group.
+-- 0745 seals this migration in the same atomic migration group.
 create table ops.doc_suggestion (
   id uuid primary key,
   conversation_id uuid not null references ops.doc_conversation(id),
