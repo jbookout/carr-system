@@ -935,43 +935,13 @@ def fake_adviser(_situation):
 
 
 def fake_build_adviser(situation):
-    return {
-        "schema": "jev-build-advisory/v1",
-        "partner_request_sha256": rail.digest(situation),
-        "model": "jev-test-build",
-        "facets": {
-            "architecture_or_design": 0.81,
-            "semantic_creation": 0.84,
-            "diagnosis": 0.12,
-            "verification_selection": 0.67,
-            "evidence_matching": 0.34,
-            "next_action_priority": 0.58,
-        },
-        "guidance": {
-            "extend_existing_seam": 0.88,
-            "prefer_reversible_slice": 0.71,
-            "define_typed_contract_first": 0.84,
-            "gather_more_evidence_before_diagnosis": 0.22,
-            "prefer_behavioral_verification": 0.79,
-            "require_fresh_exact_evidence": 0.66,
-            "prioritize_blocker_removal": 0.45,
-        },
-        "required_actions": [
-            {"facet": facet, "instruction": contract.BUILD_ACTIONS[facet]}
-            for facet in contract.BUILD_ACTIONS
-            if {
-                "architecture_or_design": 0.81,
-                "semantic_creation": 0.84,
-                "diagnosis": 0.12,
-                "verification_selection": 0.67,
-                "evidence_matching": 0.34,
-                "next_action_priority": 0.58,
-            }[facet] >= contract.BUILD_ACTION_THRESHOLD
-        ],
-        "usage": {"input_tokens": 10, "output_tokens": 6},
-        "authority": "required",
-        "deterministic_exclusions": ["authority", "execution", "completion_proof"],
-    }
+    return {"schema": "jev-build-advisory-skipped/v1", "status": "skipped",
+            "reason": "boundary_deferred", "effect": "no_prompt_obligation"}
+
+
+check("default prompt build adviser defers without a Jev call",
+      rail._build_adviser("Inspect the hook configuration read-only.") ==
+      fake_build_adviser(""))
 
 
 semantic_runner = Runner(gen_selector_result(packs=semantic_packs, ids=[semantic_id]))
@@ -992,7 +962,7 @@ check("semantic receipt uses authoritative text and keeps the Jev probability",
       semantic_row["rules"] == [{"id": semantic_id,
                                   "statement": f"binding jit rule {semantic_id}"}]
       and semantic_row["probabilities"] == {semantic_id: 0.91}
-      and semantic_row["build_receipt"]["advisory"]["model"] == "jev-test-build"
+      and semantic_row["build_receipt"]["advisory"]["effect"] == "no_prompt_obligation"
       and semantic_row["build_receipt"]["semantic_rule_delivery"] == "delivered"
       and semantic_row["model_provenance"] == {
           semantic_id: {"ranking_model": "jev-test-ranker",

@@ -596,5 +596,54 @@ class HandoffTests(unittest.TestCase):
         self.assertIn("KeyError", result["pack"])
 
 
+class StopBoundaryBatchTests(unittest.TestCase):
+    def test_failed_test_floor_survives_unavailable_judgment_and_retries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            class Unavailable(FakeJudge):
+                def judge(self, state, questions, **kwargs):
+                    self.calls += 1
+                    raise RuntimeError("offline")
+            judge = Unavailable({})
+            receipt = os.path.join(tmp, "receipt.jsonl")
+            args = ("All tests pass.", {"test_output": "FAILED test_x"}, "",
+                    "change app", "session-unavailable")
+            first = jdc.inspect_stop_boundary(
+                *args, client=FakeClient, judge_module=judge, state_dir=tmp,
+                receipt_path=receipt)
+            second = jdc.inspect_stop_boundary(
+                *args, client=FakeClient, judge_module=judge, state_dir=tmp,
+                receipt_path=receipt)
+            self.assertEqual(judge.calls, 2)
+            self.assertIn("unsupported", [r["verdict"] for r in first])
+            self.assertIn("unavailable", [r["verdict"] for r in second])
+            self.assertEqual([json.loads(line)["status"] for line in
+                              Path(receipt).read_text().splitlines()],
+                             ["unavailable", "unavailable"])
+
+    def test_claim_and_diff_use_one_request_then_skip_unchanged_stop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            judge = FakeJudge({
+                "claims_supported": {"type": "noul", "noul": 0.1},
+                "omitted_failure": {"type": "noul", "noul": 0.9},
+            })
+            diff = "diff --git a/app.py b/app.py\n+print('changed')\n"
+            first = jdc.inspect_stop_boundary(
+                "All tests pass.", {"test_output": "FAILED test_x"}, diff,
+                "change app", "session-1", client=FakeClient, judge_module=judge,
+                state_dir=tmp, receipt_path=os.path.join(tmp, "receipt.jsonl"))
+            self.assertEqual(judge.calls, 1)
+            self.assertIn("claims_supported", judge.last[1])
+            self.assertTrue(any(q.startswith("risk_") for q in judge.last[1]))
+            self.assertIn("unsupported", [r["verdict"] for r in first])
+            second = jdc.inspect_stop_boundary(
+                "All tests pass.", {"test_output": "FAILED test_x"}, diff,
+                "change app", "session-1", client=FakeClient, judge_module=judge,
+                state_dir=tmp, receipt_path=os.path.join(tmp, "receipt.jsonl"))
+            self.assertEqual(judge.calls, 1)
+            self.assertEqual(second, [])
+            row = json.loads(Path(tmp, "receipt.jsonl").read_text().splitlines()[0])
+            self.assertEqual(row["status"], "answered")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -469,8 +469,7 @@
             "reads",
             "tool_calls",
             "scenarios"
-          ],
-          "allow_only": "Every non-allow output is gated behind CARR_JEV_SUPERVISOR=advise; no production wiring sets it, so MODE is always shadow for Claude Code sessions. Forcing advise here would assert behaviour production does not have."
+          ]
         },
         {
           "event": "Stop",
@@ -478,8 +477,7 @@
           "fixtures": [
             "advisories",
             "scenarios"
-          ],
-          "allow_only": "Every non-allow output is gated behind CARR_JEV_SUPERVISOR=advise; no production wiring sets it, so MODE is always shadow for Claude Code sessions. Forcing advise here would assert behaviour production does not have."
+          ]
         }
       ]
     },
@@ -882,7 +880,6 @@
   "lib_helpers": [
     "lib/claude_continuity_config.py",
     "lib/claude_rule_delivery_dedupe.py",
-    "lib/jev_required_actions.py",
     "lib/loadpy.py",
     "lib/local_principal.py",
     "lib/machine_prerequisites.py",

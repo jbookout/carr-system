@@ -55,7 +55,7 @@ SEMANTIC_RECEIPT_KEYS = frozenset({
     "map_digest", "source_digest", "identity", "rule_ids", "rules",
     "probabilities", "model_provenance", "rule_delivery", "build_receipt",
 })
-BUILD_ADVISORY_SCHEMA = "jev-build-advisory/v1"
+BUILD_ADVISORY_SCHEMA = "jev-build-advisory/v2"
 BUILD_ADVISORY_UNAVAILABLE_SCHEMA = "jev-build-advisory-unavailable/v1"
 BUILD_RECEIPT_SCHEMA = "jev-build-turn-receipt/v1"
 BUILD_ADVISORY_FACETS = frozenset({
@@ -64,13 +64,6 @@ BUILD_ADVISORY_FACETS = frozenset({
 })
 BUILD_ADVISORY_KEYS = frozenset({
     "schema", "partner_request_sha256", "model", "facets", "usage",
-    "authority", "deterministic_exclusions", "required_actions", "guidance",
-})
-BUILD_GUIDANCE_KEYS = frozenset({
-    "extend_existing_seam", "prefer_reversible_slice",
-    "define_typed_contract_first", "gather_more_evidence_before_diagnosis",
-    "prefer_behavioral_verification", "require_fresh_exact_evidence",
-    "prioritize_blocker_removal",
 })
 BUILD_ADVISORY_UNAVAILABLE_KEYS = frozenset({
     "schema", "status", "reason", "effect", "instruction",
@@ -83,7 +76,7 @@ BUILD_ADVISORY_UNAVAILABLE_REASONS = frozenset({
 # other machine envelope is not a partner request, so no build advice is
 # asked for it. Measured 2026-09-25: most prompts in a long orchestration
 # session are such envelopes. The skip is its own schema, never "unavailable",
-# and lib/jev_required_actions.py reads it as requiring nothing.
+# and the build receipt carries no prompt-time obligation.
 BUILD_ADVISORY_SKIPPED_SCHEMA = "jev-build-advisory-skipped/v1"
 BUILD_ADVISORY_SKIPPED_KEYS = frozenset({"schema", "status", "reason", "effect"})
 BUILD_RECEIPT_KEYS = frozenset({
@@ -105,33 +98,6 @@ POSTWRITE_RECEIPT_KEYS = frozenset({
     "reviewer_digest", "status", "paths", "findings", "models", "reason",
     "instruction",
 })
-BUILD_ACTION_THRESHOLD = 0.50
-BUILD_ACTIONS = {
-    "architecture_or_design": (
-        "Before choosing an architecture, interface, seam, or data shape, "
-        "formulate the bounded alternatives and use Jev to judge their semantic fit."
-    ),
-    "semantic_creation": (
-        "Use Jev on the meaning and likely behavior of material code or prose; "
-        "for code, also consume the automatic post-write Jev review receipt."
-    ),
-    "diagnosis": (
-        "Before settling on a cause or defect class, ask Jev bounded competing "
-        "diagnostic questions and verify the favored explanation deterministically."
-    ),
-    "verification_selection": (
-        "Use Jev to judge which candidate checks or evidence are relevant and "
-        "proportionate, then let code run and verify the selected checks."
-    ),
-    "evidence_matching": (
-        "Use Jev to judge whether the candidate evidence semantically supports "
-        "the claim; code must still verify identity, freshness, and exact bindings."
-    ),
-    "next_action_priority": (
-        "Use Jev to rank the bounded reasonable next actions by fit, impact, and "
-        "blockage before code applies authority and execution constraints."
-    ),
-}
 CORPUS_RELATIVE = "ops/config/rule-selection-corpus.v1.json"
 SELECTOR_SOURCE_PATHS = (
     "ops/jev_rule_select.py",
@@ -165,13 +131,14 @@ def validate_build_advisory(row: object, *, prompt_sha256: str) -> bool:
     if row.get("schema") == BUILD_ADVISORY_SKIPPED_SCHEMA:
         return (set(row) == BUILD_ADVISORY_SKIPPED_KEYS
                 and row.get("status") == "skipped"
-                and row.get("reason") == "machine_envelope"
-                and row.get("effect") == "no_advice_required")
+                and (row.get("reason"), row.get("effect")) in {
+                    ("machine_envelope", "no_advice_required"),
+                    ("boundary_deferred", "no_prompt_obligation"),
+                })
     if set(row) != BUILD_ADVISORY_KEYS or row.get("schema") != BUILD_ADVISORY_SCHEMA:
         return False
     if (row.get("partner_request_sha256") != prompt_sha256
             or not _nonempty(row.get("model"))
-            or row.get("authority") != "required"
             or not isinstance(row.get("usage"), dict)):
         return False
     facets = row.get("facets")
@@ -182,23 +149,7 @@ def validate_build_advisory(row: object, *, prompt_sha256: str) -> bool:
             return False
     except (TypeError, ValueError):
         return False
-    guidance = row.get("guidance")
-    if not isinstance(guidance, dict) or set(guidance) != BUILD_GUIDANCE_KEYS:
-        return False
-    try:
-        if any(not 0.0 <= float(value) <= 1.0 for value in guidance.values()):
-            return False
-    except (TypeError, ValueError):
-        return False
-    exclusions = row.get("deterministic_exclusions")
-    actions = row.get("required_actions")
-    expected_actions = [
-        {"facet": facet, "instruction": BUILD_ACTIONS[facet]}
-        for facet in BUILD_ACTIONS if float(facets[facet]) >= BUILD_ACTION_THRESHOLD
-    ]
-    return (isinstance(exclusions, list) and bool(exclusions)
-            and all(_nonempty(value) for value in exclusions)
-            and actions == expected_actions)
+    return True
 
 
 def validate_build_receipt(row: object, *, repo: Path) -> bool:

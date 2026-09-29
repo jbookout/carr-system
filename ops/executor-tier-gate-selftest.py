@@ -132,37 +132,13 @@ outs = [subprocess.run([sys.executable, HOOK], input=json.dumps({"tool_name": "A
 check("a fixture run makes no live judgment and is deterministic",
       outs[0] == outs[1] and "JEV'S PICK" not in outs[0], outs)
 
-# ── decision 0b11c89b: required actions must reach the subagent prompt ─────
+# A historical prompt-facet receipt cannot impose a new Agent-prompt gate.
 path = build_advisory_transcript(["architecture_or_design"])
 try:
     r = run({**brief, "model": "haiku"}, "haiku:0.99", transcript_path=path)
-    check("KNOWN-BAD: a required facet missing from the prompt is denied",
-          r and r.get("permissionDecision") == "deny"
-          and "architecture_or_design" in r["permissionDecisionReason"], r)
-
-    named_brief = {**brief, "prompt": brief["prompt"] + "\narchitecture_or_design: judge the seam with Jev."}
-    r = run({**named_brief, "model": "haiku"}, "haiku:0.99", transcript_path=path)
-    check("KNOWN-GOOD: naming the required facet in the prompt is not denied",
-          not (r and r.get("permissionDecision") == "deny"), r)
-
-    na_brief = {**brief, "prompt": brief["prompt"] +
-               "\nJev required actions: not applicable — read-only lookup."}
-    r = run({**na_brief, "model": "haiku"}, "haiku:0.99", transcript_path=path)
-    check("KNOWN-GOOD: an explicit not-applicable line is not denied",
+    check("historical prompt facets do not deny a named executor",
           not (r and r.get("permissionDecision") == "deny"), r)
 finally:
     os.unlink(path)
-
-no_actions_path = build_advisory_transcript([])
-try:
-    r = run({**brief, "model": "haiku"}, "haiku:0.99", transcript_path=no_actions_path)
-    check("an advisory with no required actions is not denied",
-          not (r and r.get("permissionDecision") == "deny"), r)
-finally:
-    os.unlink(no_actions_path)
-
-r = run({**brief, "model": "haiku"}, "haiku:0.99", transcript_path="/nonexistent/path.jsonl")
-check("a missing transcript fails open (no required-actions denial)",
-      not (r and r.get("permissionDecision") == "deny"), r)
 
 print(f"executor-tier-gate-selftest: all {PASS} checks passed")
