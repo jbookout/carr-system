@@ -59,7 +59,7 @@ for (const scenario of ["ready-helper", "hang-helper"]) {
   });
 }
 
-for (const scenario of ["partial", "http-late"]) {
+for (const scenario of ["partial", "http-late", "page-late"]) {
   test(`Chrome discovers a complete port file and ready page after ${scenario} publication without a stderr endpoint`, async (t) => {
     const fake = fakeChrome([scenario]);
     const browser = await launchChrome("fake-chrome", { spawnChrome: fake.spawnChrome, timeoutMs: 1500, pollIntervalMs: 10 });

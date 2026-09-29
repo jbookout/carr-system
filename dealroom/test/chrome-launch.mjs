@@ -65,7 +65,8 @@ async function readyPage(profile, remainingMs) {
     if (!response.ok) throw new Error(`DevTools page probe returned HTTP ${response.status}`);
     const targets = await response.json();
     const target = targets.find((item) => item.type === "page");
-    const url = new URL(target?.webSocketDebuggerUrl);
+    if (!target?.webSocketDebuggerUrl) throw new Error("Chrome page target has not been published");
+    const url = new URL(target.webSocketDebuggerUrl);
     if (url.protocol !== "ws:" || !["localhost", "127.0.0.1"].includes(url.hostname) || Number(url.port) !== port || !url.pathname.startsWith("/devtools/page/")) {
       throw new Error("Chrome did not expose a local page target");
     }
