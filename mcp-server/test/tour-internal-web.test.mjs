@@ -53,6 +53,24 @@ test("internal Tour surface requires an injected authenticated actor and CSRF se
   assert.deepEqual(assets.paths, ["/tours/index.html"]);
 });
 
+test("versioned property evidence read accepts only a property and as-of time in the authenticated session", async () => {
+  const seen = [];
+  const surface = handler({ readPropertyEvidenceFn: async context => {
+    seen.push(context);
+    return { ok: true, data: { schema: "tour-property-evidence.v1", property_id: tourId, facts: {} } };
+  } });
+  const env = { APP_HOST: "app.doctorcre.com", ASSETS: new Assets() };
+  const asOf = "2026-09-29T12:00:00.000Z";
+  const path = `/api/tours/property-evidence/v1?property_id=${tourId}&as_of=${encodeURIComponent(asOf)}`;
+  assert.equal((await surface.fetch(request(path), env, {}, ACTOR, SESSION)).status, 200);
+  assert.deepEqual(seen[0].input, { property_id: tourId, as_of: asOf });
+  assert.deepEqual(seen[0].actor, ACTOR);
+  assert.equal((await surface.fetch(request(`${path}&tenant=other`), env, {}, ACTOR, SESSION)).status, 400);
+  assert.equal((await surface.fetch(request(`/api/tours/property-evidence/v1?property_id=${tourId}&as_of=bad`), env, {}, ACTOR, SESSION)).status, 400);
+  assert.equal((await surface.fetch(request(path), env, {}, undefined, undefined)).status, 401);
+  assert.equal((await surface.fetch(request(path, { method: "POST" }), env, {}, ACTOR, SESSION)).status, 405);
+});
+
 test("exact routes, methods, CSRF, and JSON bodies remain bounded", async () => {
   const surface = handler(); const env = { APP_HOST: "app.doctorcre.com" };
   assert.equal(isTourInternalRequest(request("/tours")), true);

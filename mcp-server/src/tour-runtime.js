@@ -7,6 +7,7 @@ import { ToolError } from "./tool-error.js";
 import { trustedTourRendererResult } from "./tour-artifacts.js";
 import { tourSharingBrowserAccess } from "./tour-sharing.js";
 import { authorizationClassForActor, organizationTenantForActor } from "./identity.js";
+import { readPropertyEvidence } from "./tour-property-evidence.js";
 
 const sharing = tourSharingBrowserAccess({ ToolError });
 
@@ -264,6 +265,9 @@ export function createTourRuntimeAdapters(renderDependencies = {}) {
     readTourFn: async context => ({ ok: true, data: projectTourDetail(await internalRead(context,
       "select ops.read_tour_internal_detail($1::text,$2::uuid,$3::text) as data",
       [organizationTenantForActor(context.actor), context.input.tour_id])) }),
+    readPropertyEvidenceFn: async context => ({ ok: true, data: await withPool(
+      context.env.DATABASE_URL_WRITER, "begin read only", client => readPropertyEvidence(
+        client, organizationTenantForActor(context.actor), context.input.property_id, context.input.as_of)) }),
     createRouteVersionFn: context => invoke(context, "prepare-tour-route-version", {
       ...context.input, base_route_version_id: null,
     }),

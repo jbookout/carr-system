@@ -4,6 +4,7 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
+// v97 seals the rights-filtered property evidence read function's database grant.
 // v96 admits Doc suggestion producer, decision, and correction verbs.
 // v95 admits the permission-scoped Operations schedule read.
 // v94 sealed tenant-scoped progress board answers.
