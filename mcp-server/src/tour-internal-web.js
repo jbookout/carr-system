@@ -15,6 +15,8 @@ const STATIC = new Map([
   ["/tours", "/tours/index.html"],
   ["/tours/app.js", "/tours/app.js"],
   ["/tours/app.css", "/tours/app.css"],
+  ["/tours/property-panel.js", "/tours/property-panel.js"],
+  ["/tours/property-panel.css", "/tours/property-panel.css"],
 ]);
 const METHODS = new Map([
   ["/api/tours/library", "GET"],

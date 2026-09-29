@@ -71,6 +71,21 @@ test("versioned property evidence read accepts only a property and as-of time in
   assert.equal((await surface.fetch(request(path, { method: "POST" }), env, {}, ACTOR, SESSION)).status, 405);
 });
 
+test("property panel module and stylesheet are served through the authenticated Tour asset gate", async () => {
+  const paths = [];
+  const env = { APP_HOST: "app.doctorcre.com", ASSETS: { async fetch(assetRequest) {
+    paths.push(new URL(assetRequest.url).pathname);
+    return new Response("panel asset", { status: 200 });
+  } } };
+  const surface = handler();
+  for (const path of ["/tours/property-panel.js", "/tours/property-panel.css"]) {
+    assert.equal(isTourInternalRequest(request(path)), true);
+    assert.equal((await surface.fetch(request(path), env, {}, ACTOR, SESSION)).status, 200);
+    assert.equal((await surface.fetch(request(path), env, {}, undefined, undefined)).status, 401);
+  }
+  assert.deepEqual(paths, ["/tours/property-panel.js", "/tours/property-panel.css"]);
+});
+
 test("exact routes, methods, CSRF, and JSON bodies remain bounded", async () => {
   const surface = handler(); const env = { APP_HOST: "app.doctorcre.com" };
   assert.equal(isTourInternalRequest(request("/tours")), true);
