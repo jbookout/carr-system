@@ -220,6 +220,124 @@ def score(instructions, levels):
     return {"type": "score", "instructions": instructions, "criteria": levels}
 
 
+# THE FULL DISTRIBUTION, NOT JUST THE PICK (Joe's ruling: code decides, Jev
+# only judges, and thresholds are calibrated per action). A pick and a
+# confidence cannot be calibrated after the fact; the distribution it came from
+# can. These readers turn one typed answer into the distribution over every
+# option, its entropy in bits, and the top option, identically to the Worker's
+# answerDistribution() in mcp-server/src/jev-call-receipt.js — both suites run
+# ops/fixtures/jev-calibration/distribution-vectors.v1.json. Nothing here is a
+# threshold: entropy is recorded so a threshold can later be MEASURED per
+# question family (ops/jev_calibration.py), never assumed.
+#
+# The tolerance is numeric sanity for rounded vendor probabilities (three
+# options at two decimals can miss one by 0.015), not a decision boundary.
+PROBABILITY_SUM_TOLERANCE = 0.02
+MOVING_MODEL_ALIAS = re.compile(r"(?:^|-)latest$")
+
+
+def model_is_pinned(model):
+    """True for an exact model version; false for a moving alias or nothing."""
+    return isinstance(model, str) and bool(model.strip()) and not MOVING_MODEL_ALIAS.search(model.strip())
+
+
+def state_sha256(state):
+    """sha256 of the canonical JSON of the state; equals the Worker's state_sha256."""
+    return _prompt_sha256(state)
+
+
+def entropy_bits(probabilities):
+    """Shannon entropy in bits of an already-normalized probability list."""
+    return -sum(p * math.log2(p) for p in probabilities if p > 0) + 0.0
+
+
+def _probability(value):
+    return (not isinstance(value, bool) and isinstance(value, (int, float))
+            and math.isfinite(value) and 0 <= value <= 1)
+
+
+def answer_distribution(question, answer):
+    """One answer as {type, distribution, distribution_complete,
+    probability_sum, entropy_bits, top, top_probability}.
+
+    `question` may be None (a log row that kept the answers but not the
+    questions); options the answer names are then the whole option set.
+    distribution is None when the vendor returned no probabilities; entropy is
+    None unless every probability is valid and they sum to one within
+    PROBABILITY_SUM_TOLERANCE. Missing offered options count as zero.
+    """
+    question = question if isinstance(question, dict) else {}
+    answer = answer if isinstance(answer, dict) else {}
+    kind = question.get("type") or answer.get("type")
+    distribution = None
+    top = None
+    if kind == "noul":
+        p = answer.get("noul")
+        if _probability(p):
+            distribution = {"true": p, "false": 1 - p}
+    elif kind in ("choice", "score"):
+        raw = answer.get("probabilities")
+        criteria = question.get("criteria")
+        if kind == "choice":
+            offered = (list(criteria) if isinstance(criteria, dict) else
+                       list(question.get("choices") or []))
+            top = answer.get("choice") if isinstance(answer.get("choice"), str) else None
+            if isinstance(raw, dict):
+                keys = offered + [k for k in raw if k not in offered]
+                distribution = {k: raw.get(k, 0) for k in keys}
+        else:
+            levels = criteria if isinstance(criteria, list) else []
+            if isinstance(raw, dict):
+                count = max([len(levels)] + [int(k) + 1 for k in raw
+                                             if isinstance(k, str) and k.isascii() and k.isdigit()])
+                distribution = {}
+                for index in range(count):
+                    level = levels[index] if index < len(levels) else None
+                    value = raw.get(level) if level is not None and level in raw else raw.get(str(index), 0)
+                    distribution[str(index)] = value
+    complete = False
+    total = None
+    entropy = None
+    top_probability = None
+    if distribution is not None:
+        values = list(distribution.values())
+        if values and all(_probability(v) for v in values):
+            total = sum(values)
+            complete = abs(total - 1) <= PROBABILITY_SUM_TOLERANCE
+            if complete and total > 0:
+                entropy = entropy_bits([v / total for v in values])
+            best = max(values)
+            top = next(k for k, v in distribution.items() if v == best)
+            top_probability = best
+    return {"type": kind, "distribution": distribution, "distribution_complete": complete,
+            "probability_sum": total, "entropy_bits": entropy, "top": top,
+            "top_probability": top_probability}
+
+
+def calibration_block(state, questions, result, model_requested):
+    """What a later calibration needs about one call, attached to ask()'s result."""
+    result = result if isinstance(result, dict) else {}
+    answers = result.get("answers") if isinstance(result.get("answers"), dict) else {}
+    questions = questions if isinstance(questions, dict) else {}
+    return {
+        "schema": "carr.jev-calibration.v1",
+        "model_requested": model_requested,
+        "model_answered": result.get("model"),
+        "model_pinned": model_is_pinned(model_requested),
+        "state_sha256": state_sha256(state),
+        "questions": {key: answer_distribution(questions.get(key), answers.get(key))
+                      for key in sorted(answers)},
+    }
+
+
+def _safe_calibration_block(state, questions, result, model_requested):
+    """Recording must never turn a usable judgment into a failed call."""
+    try:
+        return calibration_block(state, questions, result, model_requested)
+    except Exception:
+        return None
+
+
 def _session_id():
     for key in SESSION_ID_ENV_KEYS:
         value = os.environ.get(key)
@@ -363,7 +481,7 @@ def _store_cached_result(path, cache_key, result, ttl):
 
 def _append_call_receipt(questions, facets, result, log_path, *, caller=None,
                          question_kind=None, prompt_sha256=None, ok=True,
-                         cache_hit=False, error=None):
+                         cache_hit=False, error=None, calibration=None):
     """Best-effort, APPEND-ONLY JSONL row, never storing the request or the
     answers, never able to turn a successful ask() into a failure. See
     JEV_CALLS_LOG above.
@@ -377,6 +495,12 @@ def _append_call_receipt(questions, facets, result, log_path, *, caller=None,
     shell write naming this file, and hooks/completion-evidence-gate.py
     records a detection event for any turn whose tool calls name it — this
     function, reached only through ask(), is the one legitimate writer.
+
+    `calibration` is ask()'s calibration_block(). The row keeps only its
+    numbers — entropy and completeness per question, aligned with
+    question_ids_sha256 — plus the state digest and the requested model. The
+    distributions themselves name options, which are caller text, so they stay
+    in the returned result and in jev_judge.record()'s log, never here.
     """
     try:
         answered = result if isinstance(result, dict) else {}
@@ -402,6 +526,16 @@ def _append_call_receipt(questions, facets, result, log_path, *, caller=None,
             "ok": bool(ok and usable and not cache_hit),
             "cache_hit": cache_hit,
         }
+        per_question = (calibration or {}).get("questions") if isinstance(calibration, dict) else None
+        ordered = [per_question.get(qid) or {} for qid in sorted(questions)] if isinstance(per_question, dict) else None
+        row.update({
+            "state_sha256": calibration.get("state_sha256") if per_question is not None else None,
+            "model_requested": calibration.get("model_requested") if per_question is not None else None,
+            "model_pinned": calibration.get("model_pinned") if per_question is not None else None,
+            "entropy_bits": [q.get("entropy_bits") for q in ordered] if ordered is not None else None,
+            "distribution_complete": ([q.get("distribution_complete") is True for q in ordered]
+                                      if ordered is not None else None),
+        })
         if error:
             row["error"] = error
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
@@ -476,9 +610,10 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
     if use_cache:
         hit = _cached_result(cache_path, cache_key)
         if hit is not None:
+            hit["calibration"] = _safe_calibration_block(state, questions, hit, model)
             _append_call_receipt(questions, facets, hit, calls_log, caller=caller,
                                  question_kind=question_kind, prompt_sha256=prompt_sha256,
-                                 ok=False, cache_hit=True)
+                                 ok=False, cache_hit=True, calibration=hit["calibration"])
             return hit
 
     request = urllib.request.Request(
@@ -517,6 +652,8 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
             schema_valid = usable_judgment(result, questions)
             usable = (type(http_status) is int and 200 <= http_status < 300 and
                       schema_valid)
+            calibration = (_safe_calibration_block(state, questions, result, model)
+                           if schema_valid else None)
             # Round-2 fix: only a REAL production call (no opener) writes a
             # receipt. `opener` is the offline selftest/mock path (see the
             # docstring above) — a mock response was never actually seen by
@@ -530,12 +667,16 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
                             "usable": False})
                 _append_call_receipt(questions, facets, receipt, calls_log,
                                      caller=caller, question_kind=question_kind,
-                                     prompt_sha256=prompt_sha256, ok=usable)
+                                     prompt_sha256=prompt_sha256, ok=usable,
+                                     calibration=calibration)
             if not usable:
                 raise TypeSafeError("TypeSafe returned an unusable judgment")
             if use_cache:
                 _store_cached_result(cache_path, cache_key, result,
                                      cache_ttl_seconds)
+            # Attached after caching, so the cache holds the vendor's answer
+            # alone and a hit recomputes the block from it.
+            result["calibration"] = calibration
             return result
         except urllib.error.HTTPError as err:
             if opener is None:

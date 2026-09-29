@@ -171,6 +171,24 @@ def threshold_and_window_cases():
         check("normal 54.9999 percent allows", proc.returncode == 0 and out is None,
               (proc.returncode, out))
 
+        # Sonnet 5.5 (claude-sonnet-5-5) has a 1M window. An unbound id falls
+        # through to the transcript/compact tiers and the gate cannot count it.
+        for model in ("claude-sonnet-5-5", "claude-sonnet-5"):
+            slug = model.replace("claude-", "")
+            t = write_jsonl(root / f"{slug}-low.jsonl",
+                            [usage_row(549_999, model=model)])
+            proc, out = run_hook(root, "Stop", t, session=f"{slug}-low")
+            check(f"{model} 54.9999 percent of a 1M window allows",
+                  proc.returncode == 0 and out is None, (proc.returncode, out))
+            t = write_jsonl(root / f"{slug}-edge.jsonl",
+                            [usage_row(550_000, model=model)])
+            proc, out = run_hook(root, "Stop", t, session=f"{slug}-edge")
+            why = reason(out)
+            check(f"{model} resolves a 1M window by model and refuses at 55 percent",
+                  why and why["signal"]["window"] == 1_000_000
+                  and why["signal"]["window_tier"] == "model"
+                  and why["signal"]["threshold"] == 55, out)
+
         t = write_jsonl(root / "normal-edge.jsonl",
                         [usage_row(550_000, model="claude-opus-4-1")])
         proc, out = run_hook(root, "Stop", t, session="normal-edge")
@@ -3269,6 +3287,10 @@ def exact_head_review_regressions():
 
 def static_contract_cases():
     print("protected contract and explicit exclusions")
+    windows = json.loads(MANIFEST.read_text())["surface_policies"]["claude"]["model_windows"]
+    check("Claude model windows bind Sonnet 5.5 and keep Sonnet 5 for old records",
+          windows.get("claude-sonnet-5-5") == 1_000_000
+          and windows.get("claude-sonnet-5") == 1_000_000, windows)
     hooks = json.loads((REPO / "ops/config/hooks.json").read_text())
     stop = json.dumps(hooks.get("Stop", []))
     post = json.dumps(hooks.get("PostToolUse", []))

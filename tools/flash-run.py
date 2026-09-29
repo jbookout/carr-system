@@ -116,7 +116,14 @@ def sandbox_profile(work, *, reads=(), execs=(), port=None):
     private = sorted({os.path.realpath(p) for p in (
         home, "/private/tmp", "/private/var/folders", "/Users/Shared", "/opt/homebrew/var", "/opt/homebrew/etc",
         "/usr/local/var", "/usr/local/etc", "/etc/ssh", "/Library/Keychains")})
-    allpaths = [*private, *reads, *exec_dirs, *interp_execs, scratch]
+    # Node needs only openssl.cnf, including its resolved file target when symlinked.
+    # Keep this literal exception separate from recursive reads: private/certs stay denied.
+    openssl = sorted({path for p in ("/opt/homebrew/etc/openssl@3/openssl.cnf",
+                                    "/usr/local/etc/openssl@3/openssl.cnf")
+                      if os.path.isfile(p) for path in (p, os.path.realpath(p))})
+    openssl_read = ("(allow file-read* " + " ".join(f'(literal "{p}")' for p in openssl) + ")"
+                    if openssl else "")
+    allpaths = [*private, *reads, *openssl, *exec_dirs, *interp_execs, scratch]
     if any('"' in p or "\\" in p for p in allpaths):
         raise ValueError("path not expressible in a sandbox profile")
     net = f'(allow network-outbound (remote ip "localhost:{port}"))' if port else ""
@@ -124,6 +131,7 @@ def sandbox_profile(work, *, reads=(), execs=(), port=None):
             f"(deny network*){net}"
             "(deny file-read* " + " ".join(f'(subpath "{p}")' for p in private) + ")"
             "(allow file-read* " + " ".join(f'(subpath "{p}")' for p in reads) + ")"
+            + openssl_read +
             "(allow file-read-metadata)"
             "(deny file-write*)"
             f'(allow file-write* (subpath "{work}") (subpath "{scratch}") (literal "/dev/null"))'
