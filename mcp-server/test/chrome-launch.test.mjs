@@ -1,0 +1,101 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { launchChrome } from "../../dealroom/test/chrome-launch.mjs";
+
+const fixture = new URL("./fixtures/chrome-launch-fixture.mjs", import.meta.url);
+function fakeChrome(scenarios) {
+  const calls = [];
+  function spawnChrome(binary, args, options) {
+    const profile = args.find((arg) => arg.startsWith("--user-data-dir=")).split("=").slice(1).join("=");
+    const scenario = scenarios[calls.length] ?? scenarios.at(-1);
+    const child = spawn(process.execPath, [fixture.pathname, profile, scenario], options);
+    calls.push({ binary, args, profile, child });
+    return child;
+  }
+  return { calls, spawnChrome };
+}
+
+for (const scenario of ["partial", "http-late"]) {
+  test(`Chrome discovers a complete port file and ready page after ${scenario} publication without a stderr endpoint`, async (t) => {
+    const fake = fakeChrome([scenario]);
+    const browser = await launchChrome("fake-chrome", { spawnChrome: fake.spawnChrome, timeoutMs: 1500, pollIntervalMs: 10 });
+    t.after(() => browser.close());
+    assert.match(browser.pageWsUrl, /^ws:\/\/127\.0\.0\.1:\d+\/devtools\/page\/fixture$/);
+    assert.equal(fake.calls.length, 1, "readiness races must not relaunch a healthy child");
+  });
+}
+
+for (const scenario of ["exit", "hang"]) {
+  test(`Chrome retries ${scenario} once with a fresh profile after reaping the first process`, async (t) => {
+    const fake = fakeChrome([scenario, "ready"]);
+    const browser = await launchChrome("fake-chrome", { spawnChrome: fake.spawnChrome, timeoutMs: 1500, pollIntervalMs: 10 });
+    t.after(() => browser.close());
+    assert.equal(fake.calls.length, 2);
+    assert.notEqual(fake.calls[0].profile, fake.calls[1].profile);
+    assert.ok(fake.calls[0].child.exitCode !== null || fake.calls[0].child.signalCode !== null);
+    assert.equal(existsSync(fake.calls[0].profile), false);
+    assert.match(browser.attempts[0].diagnostic, new RegExp(`fixture:${scenario}`));
+    assert.ok(browser.startupMs > 0);
+    for (const arg of ["--headless=new", "--no-first-run", "--no-sandbox", "--disable-background-networking", "--remote-debugging-port=0"]) {
+      assert.ok(fake.calls[1].args.includes(arg), arg);
+    }
+    await browser.close();
+    assert.equal(existsSync(fake.calls[1].profile), false);
+  });
+}
+
+test("Chrome fails after two launches with per-attempt stderr, elapsed time and exit status, leaving no profile", async () => {
+  const fake = fakeChrome(["exit", "hang"]);
+  await assert.rejects(launchChrome("fake-chrome", { spawnChrome: fake.spawnChrome, timeoutMs: 1500, pollIntervalMs: 10 }), (error) => {
+    assert.match(error.message, /attempt 1.*code 17/s);
+    assert.match(error.message, /attempt 2.*deadline/s);
+    assert.match(error.message, /fixture:exit/);
+    assert.match(error.message, /fixture:hang/);
+    assert.match(error.message, /elapsed=\d+ms/);
+    return true;
+  });
+  assert.equal(fake.calls.length, 2);
+  assert.ok(fake.calls.every(({ profile, child }) => !existsSync(profile) && (child.exitCode !== null || child.signalCode !== null)));
+});
+
+test("Chrome handles spawn errors within the launch lifecycle", async () => {
+  await assert.rejects(launchChrome("/missing/chromeflake-binary", { timeoutMs: 400 }), /ENOENT/);
+});
+
+test("an exited browser's detached stderr holder cannot hang teardown", async (t) => {
+  const fake = fakeChrome(["inherited-stderr"]);
+  const browser = await launchChrome("fake-chrome", { spawnChrome: fake.spawnChrome, timeoutMs: 1500 });
+  t.after(() => browser.close());
+  const started = performance.now();
+  await browser.close();
+  assert.ok(performance.now() - started < 1000, "teardown waits for the browser, not detached stderr holders");
+  assert.equal(existsSync(fake.calls[0].profile), false);
+});
+
+test("a stalled HTTP probe shares the startup deadline and does not hang the launch", async () => {
+  const fake = fakeChrome(["http-hang", "ready"]);
+  const browser = await launchChrome("fake-chrome", { spawnChrome: fake.spawnChrome, timeoutMs: 1500 });
+  try {
+    assert.equal(fake.calls.length, 2);
+    assert.match(browser.attempts[0].diagnostic, /deadline/);
+  } finally { await browser.close(); }
+});
+
+test("a browser that ignores SIGTERM is killed before the retry", async () => {
+  const fake = fakeChrome(["hang-ignore-term", "ready"]);
+  const browser = await launchChrome("fake-chrome", { spawnChrome: fake.spawnChrome, timeoutMs: 1500 });
+  try {
+    assert.equal(fake.calls[0].child.signalCode, "SIGKILL");
+    assert.equal(existsSync(fake.calls[0].profile), false);
+  } finally { await browser.close(); }
+});
+
+test("simultaneous browser launches use independent profiles and ports", async (t) => {
+  const fake = fakeChrome(["ready", "ready"]);
+  const browsers = await Promise.all([0, 1].map(() => launchChrome("fake-chrome", { spawnChrome: fake.spawnChrome, timeoutMs: 1500 })));
+  t.after(() => Promise.all(browsers.map((browser) => browser.close())));
+  assert.notEqual(fake.calls[0].profile, fake.calls[1].profile);
+  assert.notEqual(browsers[0].pageWsUrl, browsers[1].pageWsUrl);
+});
