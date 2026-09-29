@@ -356,6 +356,24 @@ def stop(payload, run):
         run.do(done.triage_review, diff, task)
 
 
+def fact_boundary(payload, run):
+    """Source-grounded claim check at the completion-report and record-write
+    acknowledgement boundaries (ops/jev_fact_boundary.py). Kept apart from
+    stop() and post_tool_use(): it owns its trigger, retrieval and decision,
+    runs on what budget they leave, and a failure here returns quietly.
+    CARR_JEV_FACT_BOUNDARY=off turns it off alone."""
+    if os.environ.get("CARR_JEV_FACT_BOUNDARY", "on").strip().lower() == "off":
+        return None
+    try:
+        lib = _lib("jev_fact_boundary")
+        boundary = lib.boundary_from_hook(payload)
+    except Exception:
+        return None
+    if not boundary:
+        return None
+    return run.do(lib.check_boundary, boundary, budget_seconds=run.left() - 1.0)
+
+
 def main():
     try:
         payload = json.load(sys.stdin)
@@ -368,10 +386,12 @@ def main():
     try:
         if event == "PostToolUse":
             post_tool_use(payload, run)
+            fact_boundary(payload, run)
         elif event == "Stop":
             if payload.get("stop_hook_active"):
                 return 0
             stop(payload, run)
+            fact_boundary(payload, run)
     except Exception:
         return 0
     if MODE != "advise":
