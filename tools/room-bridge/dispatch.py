@@ -51,6 +51,7 @@ import claude_wire as inject_mod  # noqa: E402  — the Idea 78 wire, see the mo
 import claude_desktop_wire  # noqa: E402 — background supervisor + supported /desktop
 import codex_wire  # noqa: E402  — Codex worked out this protocol, see the module
 import codex_ipc  # noqa: E402  — a thread Codex Desktop holds open, see the module
+import grok_wire  # noqa: E402 — authenticated public retrieval, provider metadata checked
 import flash_wire  # noqa: E402  — the local Flash model as a desk, see the module
 import execution_contract  # noqa: E402 — portable Job Passport v1 seam
 import verb_io  # noqa: E402 — the ONE path to the record layer; see that module
@@ -292,7 +293,7 @@ def dispatch(
     results_path = Path(results_path or DEFAULT_RESULTS)
     entry = registry.resolve(name)          # every refusal happens here
     msg_id = str(uuid.uuid4())
-    if entry["kind"] in ("claude-desktop", "codex-session", "codex-live", "flash-local"):
+    if entry["kind"] in ("claude-desktop", "codex-session", "codex-live", "flash-local", "grok-cli"):
         if not entry.get("model") or not str(entry.get("model")).strip():
             raise DeskError(
                 "unnamed_model_or_effort",
@@ -312,6 +313,8 @@ def dispatch(
         outcome = _to_claude(entry, task, msg_id)
     elif entry["kind"] == "claude-desktop":
         outcome = _to_claude_desktop(entry, task)
+    elif entry["kind"] == "grok-cli":
+        outcome = grok_wire.run_task(entry, task)
     elif entry["kind"] == "flash-local":
         outcome = flash_wire.run_task(task)
     elif entry["kind"] == "codex-live":
