@@ -20,7 +20,7 @@ KNOWN-BAD / KNOWN-GOOD, per the receipt this decision requires:
   · KNOWN-BAD: a turn whose build advisory required a facet, with no Jev call
     and no named refusal in the transcript, reopens the Stop.
   · KNOWN-GOOD: the same turn, with either a real per-facet Jev call receipt
-    (out/jev-calls.jsonl, bound by session and time window) or a named
+    (out/jev-calls.jsonl, bound by dispatching human identity) or a named
     `JEV-REFUSED: <facet> <reason>` line, does not.
   · BYPASS: a bare `echo typesafe_client` or a `grep` of ops/typesafe_client.py
     does NOT satisfy a required facet — the old string-matching bypass.
@@ -192,9 +192,34 @@ def write_jev_calls_file(rows):
     return fh.name
 
 
-def call_row(question_ids=None, facets=None, when=1, session="s1", ok=True):
+def call_row(question_ids=None, facets=None, when=1, session="s1", ok=True, records=None):
     return {"ts": ts(when), "session": session, "question_ids": question_ids or [],
-           "facets": facets or [], "model": "jev-1.13.0", "ok": ok}
+           "facets": facets or [], "model": "jev-1.13.0", "ok": ok,
+           "human_turn_id": human_turn_scope(records if records is not None else [user("")], session).identity}
+
+
+def dispatch_identity_is_required_for_credit():
+    records = [user("design the seam"), build_advisory_attachment(["architecture_or_design"])]
+    scope = human_turn_scope(records, "s1")
+    row = call_row(facets=["architecture_or_design"], records=records)
+    ok = True
+    for label, identity, expected in (("exact owner", scope.identity, []),
+                                     ("legacy absent owner", None, ["architecture_or_design"]),
+                                     ("different owner", "human-turn:v1:other", ["architecture_or_design"])):
+        candidate = {**row, "human_turn_id": identity}
+        if identity is None:
+            candidate.pop("human_turn_id")
+        path = write_jev_calls_file([candidate])
+        try:
+            result = evaluate_turn(scope, path, now=NOW)
+            direct = facets_called_this_turn([candidate], "s1", NOW,
+                ["architecture_or_design"], now=NOW, human_turn_id=scope.identity)
+        finally:
+            os.unlink(path)
+        passed = result["missing"] == expected and direct == (set() if expected else {"architecture_or_design"})
+        print(f"{'PASS' if passed else 'FAIL'}  dispatch binding {label}: missing={result['missing']}")
+        ok = ok and passed
+    return ok
 
 
 def evaluate_required_actions(recs, texts, calls_path, session, written, now=None):
@@ -282,7 +307,8 @@ def lib_facets_called_this_turn_binds_by_session_and_time():
     boundary = NOW
     covered = facets_called_this_turn(
         rows, "s1", boundary,
-        ["architecture_or_design", "semantic_creation", "evidence_matching"])
+        ["architecture_or_design", "semantic_creation", "evidence_matching"],
+        human_turn_id=rows[0]["human_turn_id"])
     ok = covered == {"architecture_or_design"}
     print(f"{'PASS' if ok else 'FAIL'}  lib: a call only counts for the right session and "
           f"inside this turn's time window (got {sorted(covered)})")
@@ -294,7 +320,8 @@ def lib_facets_called_this_turn_per_facet_attribution():
     rows = [call_row(facets=["architecture_or_design"], when=1)]
     covered = facets_called_this_turn(
         rows, "s1", NOW,
-        ["architecture_or_design", "semantic_creation", "verification_selection"])
+        ["architecture_or_design", "semantic_creation", "verification_selection"],
+        human_turn_id=rows[0]["human_turn_id"])
     missing = missing_facets(
         ["architecture_or_design", "semantic_creation", "verification_selection"],
         set(), covered)
@@ -310,7 +337,8 @@ def lib_bypass_bare_call_no_facets_covers_nothing():
     requirement — this is the shape a bare echo/grep would leave in the log
     if someone tried to fake a receipt row."""
     rows = [call_row(question_ids=["q1", "q2"], facets=[], when=1)]
-    covered = facets_called_this_turn(rows, "s1", NOW, ["architecture_or_design"])
+    covered = facets_called_this_turn(rows, "s1", NOW, ["architecture_or_design"],
+                                      human_turn_id=rows[0]["human_turn_id"])
     ok = covered == set()
     print(f"{'PASS' if ok else 'FAIL'}  lib: a call with no matching question id or "
           "facets covers nothing")
@@ -568,7 +596,7 @@ def known_good_real_jev_call_receipt_passes():
                   assistant("Asked Jev; here is the plan.", 2)]
         calls_path = write_jev_calls_file([
             call_row(question_ids=["best_fit"], facets=["architecture_or_design"],
-                    when=1, session=session)])
+                    when=1, session=session, records=records)])
         # Point the gate at OUR calls file, not the real out/jev-calls.jsonl.
         env = {"CARR_JEV_CALLS_LOG_OVERRIDE": calls_path}
         blocked, _ = run_gate(records, session, state, env_extra=env)
@@ -741,7 +769,7 @@ def latch_partial_satisfaction_only_notices_in_the_same_turn():
                     records.append(bash("python3 -c 'from ops.typesafe_client import ask'", -56))
                     with open(calls_path, "w") as fh:
                         fh.write(json.dumps(call_row(
-                            facets=["architecture_or_design"], session=session, when=-55)) + "\n")
+                            facets=["architecture_or_design"], session=session, when=-55, records=records)) + "\n")
                     records.append(assistant("Jev judged the architecture.", -54))
                 second, notice = run_gate(records, session, state, env)
                 third, repeated_notice = run_gate(records, session, state, env)
@@ -988,6 +1016,8 @@ def every_input_is_owned_by_one_human_turn():
                             fh.write("".join(json.dumps(row) + "\n" for row in rows))
                     def verdict(records):
                         return evaluate_turn(human_turn_scope(records, session), calls_path, now=NOW)
+                    for row in calls:
+                        row["human_turn_id"] = human_turn_scope(old, session).identity
                     save_calls(calls)
                     same = verdict(old)
                     first, _ = run_gate(old, session, state, env)
@@ -1010,7 +1040,7 @@ def every_input_is_owned_by_one_human_turn():
                         passed = passed and not partial_block and verify in partial_notice
                         old = partial
                     # Explicitly bound prior calls stay prior even if replayed
-                    # with a newer timestamp; ambiguous legacy seconds earn no credit.
+                    # with a newer timestamp; completion time never changes ownership.
                     if kind == "bound call":
                         calls[-1]["ts"] = ts(0)
                     fresh = [human("N+1", -2 if kind == "same-second call" else -1)]
@@ -1024,17 +1054,29 @@ def every_input_is_owned_by_one_human_turn():
                         if kind == "unavailable post-write review":
                             fresh.append(postwrite_attachment("clear", path, 0))
                     fresh.append(assistant("Here is the next plan.", 0))
-                    save_calls(fresh_calls)
+                    def fresh_bindings(records):
+                        return [{**row, "human_turn_id": human_turn_scope(records, session).identity}
+                                for row in fresh_calls]
+                    save_calls(fresh_bindings(fresh))
                     control = verdict(fresh)
-                    save_calls(calls + fresh_calls)
+                    save_calls(calls + fresh_bindings(old + fresh))
                     later = verdict(old + fresh)
                     if kind != "notification envelope":
                         passed = passed and same["human_turn_id"] != later["human_turn_id"]
                     fields = ("status", "required", "missing", "refused", "unavailable_reason",
-                              "contradicted_refusals", "jev_answered", "credited_receipts")
+                              "contradicted_refusals", "jev_answered")
                     passed = passed and all(later.get(f) == control.get(f) for f in fields)
+                    # The prefix changes record positions, so each independent
+                    # current-call fixture carries its own correct human identity.
+                    for result in (later, control):
+                        passed = passed and all(row["human_turn_id"] == result["human_turn_id"]
+                                                for row in result.get("credited_receipts", []))
+                    def credit_payload(result):
+                        return [{key: value for key, value in row.items() if key != "human_turn_id"}
+                                for row in result.get("credited_receipts", [])]
+                    passed = passed and credit_payload(later) == credit_payload(control)
                     later_block, later_notice = run_gate(old + fresh, session, state, env)
-                    save_calls(fresh_calls)
+                    save_calls(fresh_bindings(fresh))
                     with tempfile.TemporaryDirectory(prefix="jev-matrix-control-") as clean_state:
                         control_block, control_notice = run_gate(fresh, session, clean_state, env)
                     passed = passed and (later_block, later_notice) == (control_block, control_notice)
@@ -1158,17 +1200,21 @@ def replay_ninety_minute_turn_call_counts():
     start to now, bound to the session id, with no duration cap."""
     boundary = datetime.fromisoformat(ts(-5700).replace("Z", "+00:00"))
     now = datetime.fromisoformat(ts(0).replace("Z", "+00:00"))
-    rows = [call_row(facets=["architecture_or_design"], when=-300)]            # minute 90
-    late = facets_called_this_turn(rows, "s1", boundary, ["architecture_or_design"], now=now)
+    rows = [call_row(facets=["architecture_or_design"], when=-300,
+                     records=[real_human_prompt("P1", -5700)])]            # minute 90
+    late = facets_called_this_turn(rows, "s1", boundary, ["architecture_or_design"], now=now, human_turn_id=rows[0]["human_turn_id"])
     other_session = facets_called_this_turn(
         [call_row(facets=["architecture_or_design"], when=-300, session="s2")],
-        "s1", boundary, ["architecture_or_design"], now=now)
+        "s1", boundary, ["architecture_or_design"], now=now,
+        human_turn_id=rows[0]["human_turn_id"])
     before_turn = facets_called_this_turn(
         [call_row(facets=["architecture_or_design"], when=-5800)],
-        "s1", boundary, ["architecture_or_design"], now=now)
+        "s1", boundary, ["architecture_or_design"], now=now,
+        human_turn_id=rows[0]["human_turn_id"])
     after_now = facets_called_this_turn(
         [call_row(facets=["architecture_or_design"], when=600)],
-        "s1", boundary, ["architecture_or_design"], now=now)
+        "s1", boundary, ["architecture_or_design"], now=now,
+        human_turn_id=rows[0]["human_turn_id"])
     recs = [real_human_prompt("P1", -5700),
             real_advisory(["architecture_or_design"], "r-long", -5699),
             assistant("long work", -3000)]
@@ -1265,7 +1311,7 @@ def forge_detection_event_recorded_end_to_end():
     session = f"s-forge-{os.getpid()}"
     log = os.path.join(REPO, "out", "jev-required-actions-gate.jsonl")
     with tempfile.TemporaryDirectory(prefix="jev-required-") as state:
-        calls = write_jev_calls_file([call_row(facets=["diagnosis"], when=1, session=session)])
+        calls = write_jev_calls_file([call_row(facets=["diagnosis"], when=1, session=session, records=[real_human_prompt("P1", 0)])])
         try:
             records = [real_human_prompt("P1", 0),
                        real_advisory(["diagnosis"], "r-forge", 1),
@@ -1351,7 +1397,7 @@ def receipt_unexplained_event_recorded_end_to_end():
     session = f"s-unexplained-{os.getpid()}"
     log = os.path.join(REPO, "out", "jev-required-actions-gate.jsonl")
     with tempfile.TemporaryDirectory(prefix="jev-required-") as state:
-        calls = write_jev_calls_file([call_row(facets=["diagnosis"], when=3, session=session)])
+        calls = write_jev_calls_file([call_row(facets=["diagnosis"], when=3, session=session, records=[real_human_prompt("P1", 0)])])
         try:
             records = [real_human_prompt("P1", 0),
                        real_advisory(["diagnosis"], "r-unexplained", 1),
@@ -1658,8 +1704,201 @@ def false_outage_refusal_does_not_satisfy_when_jev_answered():
     return ok
 
 
+def dispatch_identity_adversarial_rows():
+    """Reviewer comment 5900203942: real ask/writer, evaluator and Stop seams.
+
+    Ported from adversarial.py (sha256 2514b99734e3e6502f7e0ce7fbc02de6f2e1de86fd542d3e82102f28eb845a1d).
+    A barrier lets N+1 arrive while N's production request is still in flight.
+    Cached advisories use real validated cache hits with colliding receipt IDs.
+    """
+    import concurrent.futures
+    import io
+    import threading
+    from pathlib import Path
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    def load(name, relative):
+        spec = importlib.util.spec_from_file_location(name, os.path.join(REPO, relative))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    client = load('dispatch_identity_client', 'ops/typesafe_client.py')
+    adviser = load('dispatch_identity_adviser', 'ops/jev_build_advisory.py')
+    prompt_hook = load('dispatch_identity_prompt', 'hooks/rule-pack-preuse-reselection.py')
+    t = SimpleNamespace(build_advisory_attachment=build_advisory_attachment,
+                        bash=bash, assistant=assistant, run_gate=run_gate)
+    evaluate_required_actions = evaluate_turn
+    BASE = NOW.replace(microsecond=0) - timedelta(seconds=120)
+    FACET = 'architecture_or_design'
+    results = []
+
+    def at(seconds):
+        return (BASE + timedelta(seconds=seconds)).isoformat().replace('+00:00', 'Z')
+
+    def human(pid, seconds, id_variant):
+        rec = {'type':'user', 'timestamp':at(seconds),
+               'message':{'role':'user','content':'design this seam'}}
+        if id_variant != 'absent':
+            rec['promptId'] = 'reused' if id_variant == 'reused' else pid
+        return rec
+
+    class FakeAdvice:
+        calls = 0
+        @staticmethod
+        def noul(instructions, true=None, false=None):
+            return {'type':'noul', 'instructions':instructions}
+        def ask(self, state, questions, **kw):
+            self.calls += 1
+            return {'model':'jev-test', 'usage':{'input_tokens':20,'output_tokens':6},
+                    'answers':{k:{'type':'noul','noul':0.91 if k==FACET else 0.1}
+                               for k in questions}}
+
+    def attachments(session, cached, state):
+        if not cached:
+            return [t.build_advisory_attachment([FACET], receipt_id='uncached-'+str(i)) for i in range(2)]
+        fake = FakeAdvice()
+        cache = str(Path(state)/'advice-cache.json')
+        adviser.advise('design this seam', client=fake, cache_path=cache, now=1000)
+        hits = [adviser.advise('design this seam',client=fake,cache_path=cache,now=x)
+                for x in (1060,1120)]
+        receipts = [prompt_hook._build_receipt({'session_id':session,'prompt':'design this seam'},hit,'delivered') for hit in hits]
+        assert fake.calls==1 and all(h['usage']['cache_hit'] for h in hits)
+        assert receipts[0]['receipt_id']==receipts[1]['receipt_id']
+        return [{'attachment':{'type':'hook_additional_context','content':[json.dumps(r)]}}
+                for r in receipts]
+
+    def invoke_real_ask(session, call_file, completion_time, records, during_request=lambda:None, owner='N'):
+        transcript = str(Path(call_file).with_name('transcript.jsonl'))
+        def save_transcript():
+            Path(transcript).write_text(''.join(json.dumps(rec)+'\n' for rec in records))
+        save_transcript()
+        # Pause after the N request was submitted but before its answer/receipt.
+        started, release = threading.Event(), threading.Event()
+        class Response(io.StringIO):
+            status = 200
+            def __init__(self):
+                super().__init__(json.dumps({'model':'jev-1.13.0',
+                    'answers':{'architecture_or_design':{'type':'noul','noul':0.91}},
+                    'usage':{'input_tokens':20,'output_tokens':6}}))
+        def upstream(request, timeout=None):
+            started.set()
+            assert release.wait(5), 'test barrier timed out'
+            return Response()
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return completion_time
+        with patch.object(client.urllib.request,'urlopen',upstream), patch.object(client,'datetime',Clock), patch.object(client,'_session_id',lambda:session), patch.dict(os.environ, {'CARR_JEV_TRANSCRIPT_PATH':transcript}):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(client.ask, {'request_owner':'human '+owner},
+                    {FACET:client.noul('Review the architecture requested by human '+owner+'.')},
+                    api_key='offline-fixture-credential', cache_ttl_seconds=0,
+                    facets=[FACET], calls_log=call_file, caller='review_substantive')
+                assert started.wait(5)
+                during_request()
+                save_transcript()
+                release.set()
+                future.result(timeout=5)
+        row = json.loads(Path(call_file).read_text().splitlines()[-1])
+        assert row['ok'] is True and not row['cache_hit'] and row['caller']!='jev_build_advisory'
+        # Assertions below test producer ownership, as well as credit/Stop behavior.
+        return row
+
+    def evaluate(records, call_file, session):
+        return evaluate_required_actions(human_turn_scope(records,session),call_file,
+                                         now=BASE+timedelta(seconds=100))
+
+    def late_previous_call(id_variant, cached):
+        with tempfile.TemporaryDirectory(prefix='review-late-call-') as state:
+            session = 'review-late-'+id_variant+'-'+str(cached)
+            call_file = str(Path(state)/'calls.jsonl')
+            old_advice,new_advice = attachments(session,cached,state)
+            old_advice['timestamp'] = at(0.5)
+            new_advice['timestamp'] = at(10.1)
+            old = [human('N',0,id_variant),old_advice,t.bash("python3 -c 'ask_for_human_N()'")]
+            old[-1]['timestamp'] = at(1)
+            fresh = []
+            def next_prompt_arrives():
+                fresh.extend([human('N+1',10,id_variant),new_advice,t.assistant('Here is the next plan.')])
+                fresh[-1]['timestamp'] = at(12)
+            dispatched = list(old)
+            def advance_transcript():
+                next_prompt_arrives()
+                dispatched.extend(fresh)
+            row = invoke_real_ask(session,call_file,BASE+timedelta(seconds=11),dispatched,advance_transcript)
+            # Same physical row correctly satisfies N if no newer human arrived.
+            same = evaluate(old,call_file,session)
+            assert same['missing']==[]
+            full = old+fresh
+            contaminated = evaluate(full,call_file,session)
+            clean = evaluate(full,str(Path(state)/'empty.jsonl'),session)
+            env = {'CARR_JEV_CALLS_LOG_OVERRIDE':call_file}
+            block,notice = t.run_gate(full,session,str(Path(state)/'latch'),env)
+            clean_block,_ = t.run_gate(full,session,str(Path(state)/'clean-latch'),
+                {'CARR_JEV_CALLS_LOG_OVERRIDE':str(Path(state)/'empty.jsonl')})
+            assert clean['missing']==[FACET] and clean_block
+            # A prior call must not pay N+1, even when its completion is later.
+            passed = (contaminated['missing']==[FACET] and block
+                      and contaminated['jev_answered']['receipts_ok']==0
+                      and row.get('human_turn_id')==human_turn_scope(old,session).identity)
+            results.append({'case':'N call completes after N+1 starts','promptId':id_variant,'cached':cached,
+                'expected_pass':passed,'same_turn_missing':same['missing'],
+                'next_missing':contaminated['missing'],'clean_missing':clean['missing'],
+                'next_block':block,'clean_block':clean_block,
+                'next_answered':contaminated['jev_answered']['receipts_ok'],
+                'next_unexplained':len(human_turn_scope(full,session).unexplained(contaminated['credited_receipts'])),
+                'call_row':row})
+
+    def fresh_call_shared_second(id_variant,cached, prior_record_kind):
+        with tempfile.TemporaryDirectory(prefix='review-shared-second-') as state:
+            session='review-shared-'+id_variant+'-'+str(cached)
+            calls=str(Path(state)/'calls.jsonl')
+            old_advice,new_advice=attachments(session,cached,state)
+            # A record in N and the N+1 boundary share one native timestamp.
+            # The new ask starts only after N+1 and finishes 0.8 seconds later.
+            old=[human('N',10 if prior_record_kind=='human' else 0,id_variant),old_advice,t.assistant('Previous plan.')]
+            old[1]['timestamp']=at(10 if prior_record_kind=='human' else 1)
+            old[-1]['timestamp']=at(10)
+            fresh=[human('N+1',10,id_variant),new_advice,t.bash("python3 -c 'ask_for_human_N_plus_1()'"),t.assistant('New plan.')]
+            fresh[2]['timestamp']=at(10.1)
+            new_advice['timestamp']=at(10)
+            fresh[-1]['timestamp']=at(12)
+            full=old+fresh
+            row=invoke_real_ask(session,calls,BASE+timedelta(seconds=10.8),full,owner='N+1')
+            verdict=evaluate(full,calls,session)
+            # Removing the prefix changes the transcript record position in the
+            # identity. Independently dispatch for that control rather than relabel
+            # a real receipt or accidentally assert two distinct identities equal.
+            control_calls=str(Path(state)/'control-calls.jsonl')
+            invoke_real_ask(session,control_calls,BASE+timedelta(seconds=10.8),fresh,owner='N+1')
+            control=evaluate(fresh,control_calls,session)
+            block,_=t.run_gate(full,session,str(Path(state)/'latch'),{'CARR_JEV_CALLS_LOG_OVERRIDE':calls})
+            control_block,_=t.run_gate(fresh,session,str(Path(state)/'clean-latch'),{'CARR_JEV_CALLS_LOG_OVERRIDE':control_calls})
+            assert control['missing']==[] and not control_block
+            passed=(verdict['missing']==[] and not block
+                    and row.get('human_turn_id')==human_turn_scope(full,session).identity)
+            results.append({'case':'fresh N+1 call in shared second','prior_record_kind':prior_record_kind,'promptId':id_variant,'cached':cached,
+                'expected_pass':passed,'next_missing':verdict['missing'],'clean_missing':control['missing'],
+                'next_block':block,'clean_block':control_block,'call_row':row})
+
+    for variant in ('present', 'absent', 'reused'):
+        for cached in (False, True):
+            late_previous_call(variant, cached)
+            for prior in ('human', 'assistant'):
+                fresh_call_shared_second(variant, cached, prior)
+    for row in results:
+        print(('PASS' if row['expected_pass'] else 'FAIL') + '  dispatch identity: ' +
+              json.dumps({key: value for key, value in row.items() if key != 'call_row'}, sort_keys=True))
+    print(f"dispatch identity reviewer rows: {sum(row['expected_pass'] for row in results)}/{len(results)} passed")
+    return all(row['expected_pass'] for row in results)
+
+
 def main():
     outcomes = [
+        dispatch_identity_is_required_for_credit(),
+        dispatch_identity_adversarial_rows(),
         substantive_credit_controls(),
         creation_call_still_requires_postwrite_receipt(),
         unavailable_reason_controls(),
@@ -1819,7 +2058,8 @@ def substantive_credit_controls():
             os.unlink(path)
         passed = result["missing"] == sorted(expected)
         if label == "automatic intake":
-            passed = passed and answered_calls_this_turn([row], "s1", NOW, now=NOW) == [row]
+            passed = passed and answered_calls_this_turn([row], "s1", NOW, now=NOW,
+                                                       human_turn_id=row["human_turn_id"]) == [row]
         ok = ok and passed
         print(f"{'PASS' if passed else 'FAIL'}  action credit: {label}; missing={result['missing']}")
     return ok

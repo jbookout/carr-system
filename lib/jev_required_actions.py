@@ -40,11 +40,12 @@ WHAT COUNTS AS EVIDENCE JEV WAS CALLED — rewritten. The first cut treated any
 Bash command merely naming `typesafe_client` as a call, which a bare `echo
 typesafe_client` or `grep ask ops/typesafe_client.py` satisfies without ever
 reaching the vendor. ops/typesafe_client.py's `ask()` now appends a receipt
-(session, ts, hashed question ids, facets, model, ok) to out/jev-calls.jsonl on every
+(session, human_turn_id, ts, hashed question ids, facets, model, ok) to out/jev-calls.jsonl on every
 SUCCESSFUL response, and this module matches a required facet against that
-file: same session, a timestamp from this turn's start to now, and a
+file: same session and exact dispatching human identity, a sane timestamp, and a
 facet inferred from a question id before logging (or an explicit `facets`
-list on the call) naming the facet. Legacy receipts still carry raw ids. One
+list on the call) naming the facet. Identity-less legacy receipts earn no
+action credit. Some older receipts still carry raw question ids. One
 batched `ask()` still evaluates several facets at once (ops/typesafe_client.py's
 own "ASK TOGETHER" rule) — attribution is per named facet, not automatically
 "any call clears everything".
@@ -75,13 +76,12 @@ BUILD_ADVISORY_SKIPPED_SCHEMA = "jev-build-advisory-skipped/v1"
 MESSAGE_DELIVERY_SCHEMA = "rule-jev-message-delivery/v2"
 POSTWRITE_RECEIPT_SCHEMA = "jev-post-write-review/v2"
 
-# A call counts for this turn when its receipt in out/jev-calls.jsonl is bound
-# to this session id and its timestamp falls between the turn's own boundary
-# (less CALL_CLOCK_SKEW_SECONDS) and NOW (plus the same skew). There is no
+# Ownership comes only from the producer's dispatch-time human_turn_id.
+# Timestamps check clock sanity, never choose a human owner. There is no
 # upper duration cap any more: round 3 (2026-09-24) found 26 of 327 folded
 # real turns ran past 60 minutes, and a real call at minute 90 was rejected by
-# the old fixed 3600-second window. The session id is the binding; the turn
-# boundary is the lower edge; "now" (the Stop time) is the upper edge.
+# the old fixed 3600-second window. One-second receipt precision may round a
+# current call slightly before its human boundary; the skew admits that.
 CALL_CLOCK_SKEW_SECONDS = 5
 
 # Known facet keys (ops/jev_build_advisory.py's FACETS) — used both to parse
@@ -291,10 +291,6 @@ class HumanTurnScope:
         self.identity = ("human-turn:v1:" + hashlib.sha256(json.dumps(
             binding, sort_keys=True).encode()).hexdigest()) if self.records else None
         self.boundary_ts = _record_timestamp(human)
-        # Legacy second-resolution call rows at a shared boundary cannot be
-        # assigned to either prompt reliably. Reject the ambiguous equality.
-        self._shared_second = bool(self.boundary_ts and any(
-            _record_timestamp(rec) == self.boundary_ts for rec in recs[:self.boundary]))
 
     def advisory_receipt(self):
         for i, rec in enumerate(self.records):
@@ -344,7 +340,7 @@ class HumanTurnScope:
         return sorted(paths)
 
     def call_receipts(self, path, now=None):
-        if self.boundary_ts is None or not self.session_id:
+        if not self.identity or not self.session_id:
             return []
         upper = now or datetime.now(timezone.utc)
         owned = []
@@ -352,12 +348,13 @@ class HumanTurnScope:
             if row.get("session") != self.session_id and row.get("session_id") != self.session_id:
                 continue
             bound = row.get("human_turn_id")
-            if bound is not None and bound != self.identity:
+            # Completion time cannot identify who dispatched an async call.
+            # Legacy rows without the producer's dispatch identity earn no
+            # credit, even when their timestamp falls inside this turn.
+            if bound != self.identity:
                 continue
             timestamp = _parse_ts(row.get("ts"))
-            if timestamp is None or timestamp < self.boundary_ts:
-                continue
-            if bound is None and self._shared_second and timestamp == self.boundary_ts:
+            if timestamp is None:
                 continue
             if (timestamp - upper).total_seconds() > CALL_CLOCK_SKEW_SECONDS:
                 continue
@@ -783,26 +780,29 @@ def _call_covers_facet(row, facet):
     return False
 
 
-def facets_called_this_turn(call_rows, session_id, boundary_ts, required, now=None):
+def facets_called_this_turn(call_rows, session_id, boundary_ts, required, now=None,
+                           *, human_turn_id=None):
     """The subset of `required` for which out/jev-calls.jsonl shows a
-    successful call bound to this session, timestamped from this turn's start
-    to `now` (default: the current time), whose question ids (or explicit
-    facets list) name that facet. No upper duration cap — see
+    successful call bound to this session and dispatching human identity,
+    whose question ids (or explicit facets list) name that facet. Missing
+    identity earns no credit. No upper duration cap — see
     CALL_CLOCK_SKEW_SECONDS."""
-    covered, _rows = credited_calls_this_turn(call_rows, session_id, boundary_ts, required, now)
+    covered, _rows = credited_calls_this_turn(call_rows, session_id, boundary_ts, required, now,
+                                             human_turn_id=human_turn_id)
     return covered
 
 
-def answered_calls_this_turn(call_rows, session_id, boundary_ts, now=None):
-    """Every successful (ok true) receipt bound to this session and this turn's
-    window, whatever facets it names: evidence that Jev answered this turn."""
-    if boundary_ts is None or not session_id:
+def answered_calls_this_turn(call_rows, session_id, boundary_ts, now=None, *, human_turn_id=None):
+    """Successful receipts for this exact human owner, whatever their facets."""
+    if not human_turn_id or boundary_ts is None or not session_id:
         return []
     if now is None:
         now = datetime.now(timezone.utc)
     upper = (now - boundary_ts).total_seconds() + CALL_CLOCK_SKEW_SECONDS
     rows = []
     for row in call_rows:
+        if row.get("human_turn_id") != human_turn_id:
+            continue
         if row.get("session") != session_id and row.get("session_id") != session_id:
             continue
         if row.get("ok") is not True:
@@ -816,19 +816,22 @@ def answered_calls_this_turn(call_rows, session_id, boundary_ts, now=None):
     return rows
 
 
-def credited_calls_this_turn(call_rows, session_id, boundary_ts, required, now=None):
+def credited_calls_this_turn(call_rows, session_id, boundary_ts, required, now=None,
+                            *, human_turn_id=None):
     """Credit successful substantive judgments, excluding intake and cache reuse.
 
     Intake still belongs in answered_calls_this_turn: it proves Jev answered,
     but deciding which actions are required does not perform those actions.
     """
-    if not required or boundary_ts is None or not session_id:
+    if not human_turn_id or not required or boundary_ts is None or not session_id:
         return set(), []
     if now is None:
         now = datetime.now(timezone.utc)
     upper = (now - boundary_ts).total_seconds() + CALL_CLOCK_SKEW_SECONDS
     covered, credited = set(), []
     for row in call_rows:
+        if row.get("human_turn_id") != human_turn_id:
+            continue
         if row.get("session") != session_id and row.get("session_id") != session_id:
             continue
         if (row.get("ok") is not True or row.get("cache_hit") is True
@@ -978,7 +981,8 @@ def evaluate_required_actions(turn, jev_calls_path, now=None):
     refusals = refusals_in_texts(turn.assistant_texts())
     call_rows = turn.call_receipts(jev_calls_path, now=now)
     called, credited = credited_calls_this_turn(
-        call_rows, turn.session_id, turn.boundary_ts, required, now=now)
+        call_rows, turn.session_id, turn.boundary_ts, required, now=now,
+        human_turn_id=turn.identity)
     # FALSE-OUTAGE REFUSALS (bypass hunt, PR #1224). A refusal whose every
     # reason claims Jev was unreachable/unavailable/down/402 does not satisfy
     # its facet when this turn shows Jev answering: a successful receipt in
@@ -987,7 +991,8 @@ def evaluate_required_actions(turn, jev_calls_path, now=None):
     # facets come only from a readable advisory). Refusals giving any other
     # reason still count. The facet then stays missing and the gate names the
     # contradiction.
-    answered = answered_calls_this_turn(call_rows, turn.session_id, turn.boundary_ts, now=now)
+    answered = answered_calls_this_turn(call_rows, turn.session_id, turn.boundary_ts, now=now,
+                                       human_turn_id=turn.identity)
     jev_answered = {"advisory_answered": True, "receipts_ok": len(answered)}
     contradicted = sorted(
         facet for facet, reasons in refusals.items()
@@ -1003,5 +1008,5 @@ def evaluate_required_actions(turn, jev_calls_path, now=None):
             "contradicted_refusals": [f for f in contradicted if f in missing],
             "jev_answered": jev_answered,
             "credited_receipts": [
-                {k: row.get(k) for k in ("ts", "session", "facets", "question_ids")}
+                {k: row.get(k) for k in ("ts", "session", "human_turn_id", "facets", "question_ids")}
                 for row in credited]}
