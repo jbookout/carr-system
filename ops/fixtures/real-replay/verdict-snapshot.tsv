@@ -816,8 +816,9 @@ lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch
 loose-work-gate.py	Stop	(all)	counts	allow=87
 map-architecture-gate.py	Stop	(all)	counts	allow=87 announce=1
 map-architecture-gate.py	Stop	scenarios:d4a000000001	announce	MAP ARCHITECTURE GATE — call the live `map-architecture` verb now. Read its two current doctrine sections and machine-contract pointer, then
-model-floor-gate.py	PreToolUse[Bash|mcp__claude-in-chrome__.*]	(all)	counts	allow=322 deny=1
+model-floor-gate.py	PreToolUse[Bash|mcp__claude-in-chrome__.*]	(all)	counts	allow=322 deny=2
 model-floor-gate.py	PreToolUse[Bash|mcp__claude-in-chrome__.*]	scenarios:a1000000002a	deny	MODEL FLOOR — THIS RUN LANDED ON SONNET AND REQUIRES OPUS OR BETTER.
+model-floor-gate.py	PreToolUse[Bash|mcp__claude-in-chrome__.*]	scenarios:a1000000002b	deny	MODEL FLOOR — THIS RUN LANDED ON SONNET AND REQUIRES OPUS OR BETTER.
 one-repo-gate.py	PreToolUse[Write|Edit|MultiEdit]	(all)	counts	allow=72 deny=1
 one-repo-gate.py	PreToolUse[Write|Edit|MultiEdit]	scenarios:b2c2d3e4f5a6	deny	BLOCKED by the CARR one-repo gate: {HOME}/other-repo/script.py
 peer-broadcast-gate.py	PreToolUse[SendMessage]	(all)	counts	allow=2 deny=1
