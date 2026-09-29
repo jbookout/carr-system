@@ -2150,6 +2150,32 @@ class AppLane(Base):
         self.assertEqual(self.fx.slice_marks, [])
         self.assertNotIn("slice_marker", self.fx.records()[-1])
 
+    def test_live_readback_retries_stale_response_and_records_each_payload(self):
+        pipe = self.fx.pipeline(FakeRunner(), cfg=self.cfg())
+        sha = "a" * 40
+        seen = []
+        replies = iter([
+            {"source_commit": "b" * 40, "environment": "production"},
+            {"source_commit": sha, "environment": "production"},
+        ])
+        pipe.http = lambda url: (seen.append(url) or next(replies))
+        pipe.sleep = lambda seconds: seen.append(seconds)
+        pipe.verify_app_live(self.cfg()["app"], sha)
+        self.assertEqual(seen, [self.cfg()["app"]["live_release_url"], 5,
+                                self.cfg()["app"]["live_release_url"]])
+        rows = [json.loads(line) for line in (pipe.run_dir / "app-verify-live.jsonl").read_text().splitlines()]
+        self.assertEqual([row["response"]["source_commit"] for row in rows], ["b" * 40, sha])
+
+    def test_live_readback_failure_preserves_last_response_and_log(self):
+        pipe = self.fx.pipeline(FakeRunner(), cfg=self.cfg())
+        pipe.http = lambda _url: {"source_commit": "c" * 40, "environment": "staging"}
+        pipe.sleep = lambda _seconds: None
+        with self.assertRaises(rp.StepFailed) as caught:
+            pipe.verify_app_live(self.cfg()["app"], "a" * 40, attempts=2)
+        self.assertEqual(caught.exception.step, "app-verify-live")
+        self.assertIn("source_commit=" + "c" * 40, caught.exception.detail)
+        self.assertEqual(len((pipe.run_dir / "app-verify-live.jsonl").read_text().splitlines()), 2)
+
 
 class Robustness(Base):
     def test_unexpected_error_before_any_step_is_recorded_not_burned(self):
