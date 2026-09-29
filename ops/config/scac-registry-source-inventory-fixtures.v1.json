@@ -72879,7 +72879,7 @@
           "effect_class": "audit_side_effect",
           "source_locator": "mcp-server/src/tour-sharing.js",
           "schema_digest": "0bb99e1b6d16d8150d47e8b04bcc4b8e1a76099a738f6934e530fa233467f43a",
-          "source_digest": "942abfb6b4a3fdfb4d5880749ef7404d6f6542a48d6d47a78640561bc080a1f6",
+          "source_digest": "d525de4a8814ec7d4bb97a32e46ca22ad51bd7cfeeeaf2f63a00d7367f119612",
           "write": false,
           "human_only": false,
           "authority_only": false,
@@ -72921,12 +72921,12 @@
       ],
       "row_replacements": {
         "script-entrypoint:ops/scac-mutation-inventory.mjs": {
-          "schema_digest": "92e629a0b7db8df76c3d2b21c2b0fbdd98be262c931d3d478bfdba865ebec753",
-          "handler_digest": "92e629a0b7db8df76c3d2b21c2b0fbdd98be262c931d3d478bfdba865ebec753"
+          "schema_digest": "39774c4ca17e7660af69cb17aace7fa0096a712067b8e5f73d29845eca64d5f1",
+          "handler_digest": "39774c4ca17e7660af69cb17aace7fa0096a712067b8e5f73d29845eca64d5f1"
         }
       },
       "expected_count": 1007,
-      "expected_sha256": "2a31e73cf303af8dcb9ec1890597baf4425a146db7fa0ada6aeef8b19dcdb522",
+      "expected_sha256": "9334a011a3cb2e4e75e26dd199d652a88ba4ae5bb2d6831f591e77b9dec294ee",
       "reason": "Tour client feedback adds one broker-authenticated read verb and binds the atomic migration pair in the registered migration runner. Public writes stay within the opaque browser share boundary; the database catalog successor seals its callable functions."
     }
   ],

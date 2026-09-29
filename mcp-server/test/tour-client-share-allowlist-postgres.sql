@@ -6182,6 +6182,10 @@ begin
   end if;
   v_property_ref:=v_client->'items'->0->>'property_ref';
   v_other_property_ref:='property:public:'||repeat('f',32);
+  v_broker:=ops.read_tour_feedback(v_tenant,v_projection,v_actor,null,100);
+  if v_broker->'items'->0->'shortlisted' is distinct from 'null'::jsonb then
+    raise exception 'no shortlist event must remain unknown: %',v_broker;
+  end if;
   if ops.write_tour_share_shortlist(v_session,v_projection_ref,v_other_property_ref,true,'d0000000-0000-4000-8000-000000000001') is not null
      or ops.write_tour_share_comment(v_session,'projection:public:'||repeat('f',32),v_property_ref,'Wrong Tour','d0000000-0000-4000-8000-000000000002') is not null then
     raise exception 'cross-object feedback write was admitted';
@@ -6210,6 +6214,35 @@ begin
      or ops.read_tour_feedback('wrong-tenant',v_projection,v_actor,null,100) is not null
      or ops.read_tour_feedback(v_tenant,v_projection,'',null,100) is not null then
     raise exception 'client-to-broker feedback readback or tenant denial failed';
+  end if;
+  if ops.write_tour_share_shortlist(v_session,v_projection_ref,v_property_ref,false,'d0000000-0000-4000-8000-000000000007') is null then
+    raise exception 'explicit no shortlist response was refused';
+  end if;
+  v_broker:=ops.read_tour_feedback(v_tenant,v_projection,v_actor,null,100);
+  if v_broker->'items'->0->'shortlisted' is distinct from 'false'::jsonb then
+    raise exception 'explicit no shortlist response was lost: %',v_broker;
+  end if;
+  -- Same-transaction writes share now(). The latest accepted response must
+  -- follow write order even when UUID lexical order points the other way.
+  insert into ops.tour_share_feedback_event(id,organization_tenant_id,projection_id,share_grant_id,property_id,idempotency_key,action,shortlisted,payload_digest)
+  values('ffffffff-ffff-4fff-8fff-ffffffffffff',v_tenant,v_projection,v_old_grant,'b1000000-0000-4000-8000-000000000001',
+    'd0000000-0000-4000-8000-000000000008','shortlist',true,'sha256:'||repeat('1',64));
+  insert into ops.tour_share_feedback_event(id,organization_tenant_id,projection_id,share_grant_id,property_id,idempotency_key,action,shortlisted,payload_digest)
+  values('00000000-0000-4000-8000-000000000000',v_tenant,v_projection,v_old_grant,'b1000000-0000-4000-8000-000000000001',
+    'd0000000-0000-4000-8000-000000000009','shortlist',false,'sha256:'||repeat('2',64));
+  v_broker:=ops.read_tour_feedback(v_tenant,v_projection,v_actor,null,100);
+  if v_broker->'items'->0->'shortlisted' is distinct from 'false'::jsonb then
+    raise exception 'latest equal-timestamp shortlist response was lost: %',v_broker;
+  end if;
+  insert into ops.tour_share_feedback_event(id,organization_tenant_id,projection_id,share_grant_id,property_id,idempotency_key,action,comment,payload_digest)
+  values('ffffffff-ffff-4fff-8fff-fffffffffffe',v_tenant,v_projection,v_old_grant,'b1000000-0000-4000-8000-000000000001',
+    'd0000000-0000-4000-8000-00000000000a','comment','First tied comment','sha256:'||repeat('3',64));
+  insert into ops.tour_share_feedback_event(id,organization_tenant_id,projection_id,share_grant_id,property_id,idempotency_key,action,comment,payload_digest)
+  values('00000000-0000-4000-8000-000000000001',v_tenant,v_projection,v_old_grant,'b1000000-0000-4000-8000-000000000001',
+    'd0000000-0000-4000-8000-00000000000b','comment','Second tied comment','sha256:'||repeat('4',64));
+  v_broker:=ops.read_tour_feedback(v_tenant,v_projection,v_actor,null,100);
+  if v_broker->'items'->0->'comments'->(jsonb_array_length(v_broker->'items'->0->'comments')-1)->>'comment' is distinct from 'Second tied comment' then
+    raise exception 'equal-timestamp comments were not in accepted order: %',v_broker;
   end if;
   v_new_grant:=ops.rotate_tour_share_grant(v_tenant,v_old_grant,v_projection,'sha256:'||repeat('c',64),
     '["view_packet","shortlist","comment"]',now()+interval '1 day','sha256:'||repeat('b',64),v_actor);

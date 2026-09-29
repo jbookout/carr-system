@@ -19073,6 +19073,8 @@ export function renderCodexSessionReadRegistrySql(rows, predecessorSql = null) {
 
 export function renderTourFeedbackRegistrySql(rows, predecessorSql = null) {
   const predecessorPath = "migrations/0748_codex_session_read_scac_successor.sql";
+  const feedbackPath = "migrations/0749_tour_client_feedback.sql";
+  const feedbackDigest = sha256(readFileSync(resolve(REPO_ROOT, feedbackPath), "utf8"));
   const predecessor = predecessorSql ?? readFileSync(resolve(REPO_ROOT, predecessorPath), "utf8");
   const predecessorDigest = "dae5ba853823c17fac2021a4c8e618307f458bd6fd5841727e390bd305fdfa27";
   if (sha256(predecessor) !== predecessorDigest)
@@ -19154,8 +19156,8 @@ export function renderTourFeedbackRegistrySql(rows, predecessorSql = null) {
   const preflight = `do $tour_feedback_v98_preflight$\ndeclare v ops.scac_mutation_registry_version%rowtype; registration jsonb;\nbegin\n` +
     `  if not exists(select 1 from public.schema_migrations where filename='${predecessorPath.split("/").at(-1)}' and sha256='${predecessorDigest}') then\n` +
     `    raise exception 'Tour feedback v98 requires exact applied 0748'; end if;\n` +
-    `  if not exists(select 1 from public.schema_migrations where filename='0749_tour_client_feedback.sql' and sha256='eb771a80465dc5ee1f74e9ea2b688782b41fc3886fd1019896a01a8471a1092f') then\n` +
-    `    raise exception 'Tour feedback v98 requires exact applied 0748'; end if;\n` +
+    `  if not exists(select 1 from public.schema_migrations where filename='${feedbackPath.split("/").at(-1)}' and sha256='${feedbackDigest}') then\n` +
+    `    raise exception 'Tour feedback v98 requires exact applied 0749'; end if;\n` +
     `  select * into v from ops.scac_mutation_registry_version where registry_version='${REGISTRY_V97_VERSION}';\n` +
     `  if v.registry_digest is distinct from '${oldSeal.digest}' or v.entry_count<>${oldSeal.entryCount}\n` +
     `    or v.source_entry_count<>${oldSeal.sourceEntryCount} or v.entry_set_digest is distinct from '${oldEntrySet}'\n` +

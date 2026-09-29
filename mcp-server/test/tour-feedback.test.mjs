@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import { tourSharingBrowserAccess, tourSharingTools } from "../src/tour-sharing.js";
 
@@ -51,6 +52,24 @@ test("client read excludes broker material and broker read is actor/tenant bound
   assert.deepEqual(h.calls.at(-1).params, ["carr-internal", projection, "broker", null, 20]);
 });
 
+test("broker read preserves no shortlist answer, explicit no, and yes", async () => {
+  for (const shortlisted of [null, false, true]) {
+    const client = { async query() { return { rows: [{ feedback: {
+      projection_id: projection,
+      items: [{ property_ref: propertyRef, route_label: "A", shortlisted, comments: [] }],
+    } }] }; } };
+    const tools = tourSharingTools({ ToolError, withEnvelope: async (_c, _a, _v, _x, fn) => fn(), writeEvent: async () => {} });
+    const result = await tools["read-tour-feedback"].handler(client, actor, { projection_id: projection, cursor: null, limit: 20 });
+    assert.equal(result.feedback.items[0].shortlisted, shortlisted);
+  }
+});
+
+test("broker feedback read failure remains unavailable", async () => {
+  const client = { async query() { throw new Error("feedback read unavailable"); } };
+  const tools = tourSharingTools({ ToolError, withEnvelope: async (_c, _a, _v, _x, fn) => fn(), writeEvent: async () => {} });
+  await assert.rejects(tools["read-tour-feedback"].handler(client, actor, { projection_id: projection, cursor: null, limit: 20 }), /feedback read unavailable/);
+});
+
 test("migration binds feedback to sealed current projection, member property, active grant and idempotent request", () => {
   const migration = fs.readFileSync(path.join(root, "migrations/0749_tour_client_feedback.sql"), "utf8");
   for (const name of ["write_tour_share_shortlist", "write_tour_share_comment", "read_tour_share_feedback", "read_tour_feedback"])
@@ -75,4 +94,7 @@ test("Tour feedback successor follows current main without reusing its seal or m
   assert.match(successor, /scac-mutation-registry\.v98/);
   assert.match(runtime, /scac-mutation-registry\.v98/);
   assert.match(selector, /scac-mutation-registry\.v98\.generated\.js/);
+  const migration = fs.readFileSync(path.join(root, "migrations/0749_tour_client_feedback.sql"));
+  const digest = createHash("sha256").update(migration).digest("hex");
+  assert.match(successor, new RegExp(`filename='0749_tour_client_feedback\\.sql' and sha256='${digest}'`));
 });

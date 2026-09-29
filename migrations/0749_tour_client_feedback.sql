@@ -47,6 +47,7 @@ end $$;
 
 create table ops.tour_share_feedback_event (
   id uuid primary key default gen_random_uuid(),
+  event_order bigint generated always as identity unique,
   organization_tenant_id text not null,
   projection_id uuid not null,
   share_grant_id uuid not null,
@@ -66,6 +67,7 @@ create table ops.tour_share_feedback_event (
       or (action='comment' and shortlisted is null and comment is not null and char_length(comment) between 1 and 1000))
 );
 create index tour_share_feedback_projection_idx on ops.tour_share_feedback_event(organization_tenant_id,projection_id,property_id,created_at,id);
+create index tour_share_feedback_shortlist_order_idx on ops.tour_share_feedback_event(organization_tenant_id,projection_id,property_id,event_order desc) where action='shortlist';
 create trigger tour_share_feedback_append_only before update or delete on ops.tour_share_feedback_event
   for each row execute function ops.tour_reject_mutation();
 revoke all on table ops.tour_share_feedback_event from public,carr_reader,carr_writer,carr_jobs,carr_authority;
@@ -159,8 +161,8 @@ returns jsonb language sql stable security definer set search_path=pg_catalog,op
   select jsonb_build_object('projection_id',p.id,'items',coalesce((select jsonb_agg(jsonb_build_object(
     'property_ref','property:public:'||substr(encode(public.digest(m.organization_tenant_id||':'||m.projection_id::text||':'||m.property_id::text,'sha256'),'hex'),1,32),
     'route_label',m.route_label,
-    'shortlisted',coalesce((select e.shortlisted from ops.tour_share_feedback_event e where e.organization_tenant_id=m.organization_tenant_id and e.projection_id=m.projection_id and e.property_id=m.property_id and e.action='shortlist' order by e.created_at desc,e.id desc limit 1),false),
-    'comments',coalesce((select jsonb_agg(jsonb_build_object('comment_ref','comment:public:'||substr(encode(public.digest(e.id::text,'sha256'),'hex'),1,32),'comment',e.comment,'created_at',e.created_at) order by e.created_at,e.id)
+    'shortlisted',(select e.shortlisted from ops.tour_share_feedback_event e where e.organization_tenant_id=m.organization_tenant_id and e.projection_id=m.projection_id and e.property_id=m.property_id and e.action='shortlist' order by e.event_order desc limit 1),
+    'comments',coalesce((select jsonb_agg(jsonb_build_object('comment_ref','comment:public:'||substr(encode(public.digest(e.id::text,'sha256'),'hex'),1,32),'comment',e.comment,'created_at',e.created_at) order by e.event_order)
       from ops.tour_share_feedback_event e where e.organization_tenant_id=m.organization_tenant_id and e.projection_id=m.projection_id and e.property_id=m.property_id and e.action='comment'),'[]'::jsonb)) order by m.route_sequence) from members m),'[]'::jsonb)) from authorized p;
 $$;
 
