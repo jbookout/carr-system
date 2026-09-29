@@ -46,6 +46,7 @@ STATUS_TO_STAGE = {
 STUCK_AFTER = timedelta(hours=2)
 HOSTED_BOARD_ORIGIN = "https://app.doctorcre.com"
 LAUNCHD_BOARD = "carr-v5"
+DEFAULT_PR_REPO = "jbookout/carr-system"
 
 
 def now_utc() -> datetime:
@@ -73,6 +74,20 @@ def safe_asker_ref(value: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}", value):
         raise SystemExit("asker_ref must be a short named session or orchestrator reference")
     return value
+
+
+def safe_repo(value: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*", value):
+        raise SystemExit("repo must be a GitHub owner/repository name")
+    return value
+
+
+def task_repo(task: dict[str, Any]) -> str:
+    return safe_repo(task.get("repo") or DEFAULT_PR_REPO)
+
+
+def pr_key(task: dict[str, Any]) -> tuple[str, int]:
+    return task_repo(task), int(task["pr"])
 
 
 def state_path(project: str) -> Path:
@@ -300,12 +315,13 @@ def checks_summary(payload: dict[str, Any]) -> str:
     return f"{passed} pass · {pending} pending · {failed} fail"
 
 
-def pr_info(number: int) -> dict[str, Any] | None:
+def pr_info(number: int, repo: str) -> dict[str, Any] | None:
     if os.environ.get("PROGRESS_BOARD_SKIP_GH") or shutil.which("gh") is None:
         return None
     try:
         result = subprocess.run(
-            ["gh", "pr", "view", str(number), "--json", "state,isDraft,headRefOid,statusCheckRollup,comments,author"],
+            ["gh", "pr", "view", str(number), "--repo", repo,
+             "--json", "state,isDraft,headRefOid,statusCheckRollup,comments,author"],
             capture_output=True,
             text=True,
             timeout=5,
@@ -401,7 +417,7 @@ def local_updated(timestamp: str) -> str:
         return timestamp
 
 
-def render_state(state: dict[str, Any], pr_infos: dict[str, dict[str, Any] | None] | None = None,
+def render_state(state: dict[str, Any], pr_infos: dict[tuple[str, int], dict[str, Any] | None] | None = None,
                  rendered_at: str | None = None) -> str:
     tasks = state.get("tasks", {})
     render_time = datetime.fromisoformat(rendered_at) if rendered_at else now_utc()
@@ -423,8 +439,8 @@ def render_state(state: dict[str, Any], pr_infos: dict[str, dict[str, Any] | Non
     for task_id, task in active.items():
         grouped.setdefault(task.get("status", "queued"), []).append((task_id, task))
     pools = Counter(executor_pool(task.get("executor", "unassigned")) for task in tasks.values())
-    github_unreachable = any(task.get("pr") is not None and pr_infos.get(task_id) is None
-                             for task_id, task in tasks.items())
+    github_unreachable = any(task.get("pr") is not None and pr_infos.get(pr_key(task)) is None
+                             for task in tasks.values())
     task_change = max((task.get("updated_at") or "" for task in tasks.values()),
                       default=state.get("created_at") or rendered_at)
 
@@ -432,9 +448,9 @@ def render_state(state: dict[str, Any], pr_infos: dict[str, dict[str, Any] | Non
         return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()[:12]
 
     def card(task_id: str, task: dict[str, Any]) -> str:
-        info = pr_infos.get(task_id)
+        info = pr_infos.get(pr_key(task)) if task.get("pr") is not None else None
         pr = task.get("pr")
-        pr_label = (f"PR {pr} · {task.get('pr_phase', str(info.get('state', 'unknown')).title() if info else 'previous status')}"
+        pr_label = (f"{task_repo(task)} · PR {pr} · {task.get('pr_phase', str(info.get('state', 'unknown')).title() if info else 'status unavailable')}"
                     f" · {task.get('pr_checks', checks_summary(info) if info else 'checks unavailable')}") if pr is not None else "No PR"
         note = f'<p class="task-note">{esc(task["note"])}</p>' if task.get("note") else ""
         age = elapsed_text(task.get("updated_at", ""))
@@ -473,7 +489,7 @@ def render_state(state: dict[str, Any], pr_infos: dict[str, dict[str, Any] | Non
         f'{esc(local_updated((completed_at(task) or render_time).isoformat()))}</time></div>'
         f'<p class="completed-evidence"><b>MEASURED</b> {esc(task["evidence"])}</p>'
         f'<div class="completed-meta"><span><b>EXECUTOR</b> {esc(task.get("executor", "unassigned"))}</span>'
-        + (f'<a href="https://github.com/jbookout/carr-system/pull/{int(task["pr"])}">PR {int(task["pr"])} ↗</a>'
+        + (f'<a href="https://github.com/{esc(task_repo(task))}/pull/{int(task["pr"])}">{esc(task_repo(task))} · PR {int(task["pr"])} ↗</a>'
            if isinstance(task.get("pr"), int) and task["pr"] > 0 else '<span>No PR</span>')
         + '</div></article>'
         for task_id, task in completed
@@ -617,13 +633,15 @@ h1{font-size:clamp(2.35rem,5vw,4.4rem);line-height:1.02;letter-spacing:-.035em;m
 
 def render(project: str) -> None:
     state = read_state(project)
-    pr_infos: dict[str, dict[str, Any] | None] = {}
+    pr_infos: dict[tuple[str, int], dict[str, Any] | None] = {}
     changed = False
     for task_id, task in state.get("tasks", {}).items():
         if task.get("pr") is None:
             continue
-        info = pr_info(task["pr"])
-        pr_infos[task_id] = info
+        key = pr_key(task)
+        if key not in pr_infos:
+            pr_infos[key] = pr_info(key[1], key[0])
+        info = pr_infos[key]
         if info is None:
             continue
         status, stage, phase = derived_pr_state(info)
@@ -881,10 +899,16 @@ def command_task(args: argparse.Namespace) -> None:
         "status": args.status or prior.get("status"),
         "executor": args.executor or prior.get("executor"),
         "pr": args.pr if args.pr is not None else prior.get("pr"),
+        "repo": safe_repo(args.repo or prior.get("repo") or DEFAULT_PR_REPO),
         "note": args.note if args.note is not None else prior.get("note"),
         "created_at": prior.get("created_at", task_time),
         "updated_at": task_time,
     })
+    if prior.get("pr") is not None and pr_key(prior) != pr_key(task):
+        for field in ("pr_phase", "pr_checks", "pr_head", "evidence", "completed_at"):
+            task.pop(field, None)
+        task["status"] = args.status or "running"
+        task["stage"] = stage or "build"
     if args.stage:
         task["stage"] = stage
     if stage == "live":
@@ -974,6 +998,7 @@ def parser() -> argparse.ArgumentParser:
     task.add_argument("--status", choices=STATUSES)
     task.add_argument("--executor")
     task.add_argument("--pr", type=int)
+    task.add_argument("--repo")
     task.add_argument("--stage", choices=PR_STAGES)
     task.add_argument("--health", choices=("healthy", "question", "blocked"))
     task.add_argument("--note")
