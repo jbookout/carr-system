@@ -989,10 +989,13 @@ def cmd_ask(a):
             raise ValueError("incomplete answer: " + str(reply.get("finish")))
         answer = reply["result"]
         if a.json_object:
-            value = json.loads(answer)
+            def reject_constant(value):
+                raise ValueError("invalid JSON constant: " + value)
+            value = json.loads(answer, parse_constant=reject_constant)
             if not isinstance(value, dict):
                 raise ValueError("answer is not a JSON object")
-            answer = json.dumps(value, ensure_ascii=False)
+            # A valid numeric spelling such as 1e999 can overflow on parsing.
+            answer = json.dumps(value, ensure_ascii=False, allow_nan=False)
     except (ValueError, KeyError, OSError) as exc:
         print(f"flash-run ask: {exc}", file=sys.stderr)
         return 5

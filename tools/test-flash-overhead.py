@@ -110,6 +110,23 @@ class AskTests(unittest.TestCase):
             self.assertEqual(code, 5)
             self.assertEqual(out, "")
 
+    def test_rejects_nonfinite_json_without_output_or_success_log(self):
+        fr = load("fr", "flash-run.py")
+        for answer in ('{"x":NaN}', '{"x":Infinity}', '{"x":-Infinity}', '{"x":1e999}'):
+            out, err = io.StringIO(), io.StringIO()
+            with self.subTest(answer=answer), patch.object(fr, "ask_turn", return_value={
+                    "status": "completed", "finish": "stop", "result": answer}), \
+                    patch.object(fr, "_append") as log, patch("sys.stdout", out), patch("sys.stderr", err):
+                self.assertEqual(fr.main(["ask", "ping", "--json-object"]), 5)
+                self.assertEqual(out.getvalue(), "")
+                log.assert_not_called()
+
+    def test_json_object_preserves_finite_numbers_and_constant_strings(self):
+        answer = '{"x":1e300,"y":-2.5,"label":"NaN Infinity -Infinity"}'
+        code, out, _, _ = self.invoke({"status": "completed", "finish": "stop", "result": answer}, "--json-object")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out), {"x": 1e300, "y": -2.5, "label": "NaN Infinity -Infinity"})
+
     def test_server_failure_never_prints_an_answer(self):
         code, out, err, _ = self.invoke({"status": "failed", "detail": "no_answer"})
         self.assertEqual(code, 5)

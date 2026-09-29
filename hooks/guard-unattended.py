@@ -664,7 +664,10 @@ SENDER = (r"curl|wget|nc|ncat|netcat|telnet|ftp|sftp|scp|rsync|ssh|httpie|http|h
           r"|links|lynx|w3m|aria2c|axel|fetch")
 SEND_CTX = re.compile(
     r"(?:^|[|;&(){}`\n]|\$\(|&&|\|\||\bsudo\b|\bxargs\b|\benv\b|\btime\b|\bnohup\b|\bdoas\b)"
-    r"\s*(?:[\w./-]*/)?(?:" + SENDER + r")\b",
+    # Shell assignments and env's assignments precede the executable. Without
+    # this, http_proxy=... curl hid the sender from the egress check entirely.
+    r"\s*(?:[A-Za-z_]\w*=(?:[^\s'\"|;&()]+|'[^']*'|\"[^\"]*\")*\s+)*"
+    r"(?:[\w./-]*/)?(?:" + SENDER + r")\b",
     re.I)
 
 # AN INTERPRETER THAT IMPORTS A NETWORK CLIENT IS ALSO A SENDER, and this half is
@@ -679,11 +682,11 @@ NET_CLIENT = re.compile(
     r"|socket\.(?:socket|create_connection)|fetch\()",
     re.I)
 URL_RE = re.compile(r"https?://([A-Za-z0-9._-]+)")
-# Retain the URL authority (including IPv6 and port) for local model sends.
-# Host-only trust would also open local databases, SSH and control planes.
+# Retain the URL authority, including IPv6, for egress checks. Local model
+# calls use tools/flash-run.py ask: its transport pins the origin and refuses
+# proxies and redirects. Arbitrary senders get no loopback URL exception;
+# their flags or environment can rewrite the effective destination.
 SEND_URL_RE = re.compile(r"https?://[^\s'\"<>`\\]+", re.I)
-LOCAL_MODEL_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
-LOCAL_MODEL_PORTS = frozenset({8000, 8596})  # ds4 Flash; local llama-server
 
 # A REMOTE COPY TARGET IS A HOST TOO, and this was a real gap rather than a
 # consequence of the loop #283 change — URL_RE has only ever understood `http://`,
@@ -1302,11 +1305,6 @@ def check(cmd, cwd=None):
             try:
                 target = urlsplit(url)
                 host = (target.hostname or "").lower()
-                if host in LOCAL_MODEL_HOSTS:
-                    if (target.port in LOCAL_MODEL_PORTS
-                            and target.username is None and target.password is None):
-                        continue
-                    return "network send to an unapproved local port — blocked by the CARR unattended guard"
             except ValueError:
                 return "network send to a malformed URL — blocked by the CARR unattended guard"
             if not host_allowlisted(host):
