@@ -50,6 +50,15 @@ the classifier declined; that is working around a denial rather than filing it.
 Read current canonical migration/release state before naming frontier/blocker.
 Dated incidents/WRs are history; source/CI grants no live authority.
 
+## Changes to LLM-steering surfaces ship with an eval
+
+Any change to a surface registered in `evals/surfaces.json` (Jev prompts, rule
+delivery, context hooks, these instruction files and skills, brief templates,
+model and effort routing) runs `/claude-api build-eval`, then
+`/claude-api hillclimb`, and ships with `evals/<surface>/receipt.json`, or a
+reasoned `no-eval: <surface>: <reason>` line in the PR body.
+`ops/check-eval-receipt.py` enforces it in CI. Procedure: `evals/README.md`.
+
 ## Map work has one mandatory front door
 
 For any request to recommend, design, build, revise, review, or publish a map,

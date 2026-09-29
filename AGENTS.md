@@ -218,6 +218,18 @@ both. Run one class while iterating:
 the top of `ops/ci.sh`: under zsh its class loop does not word-split, and the
 script will report every class green having executed none.
 
+## Changes to LLM-steering surfaces ship with an eval
+
+Any change to a surface registered in `evals/surfaces.json` runs
+`/claude-api build-eval`, then `/claude-api hillclimb`, and ships with
+`evals/<surface>/receipt.json`, or a reasoned `no-eval: <surface>: <reason>`
+line in the PR body. Procedure: `evals/README.md`.
+
+Reviewer checklist on the exact head: `ops/check-eval-receipt.py` passed; each
+receipt was changed in this PR; its verdict matches its numbers (no "ship" on a
+gain inside the noise, no critical dimension regressed); and each no-eval line
+names a real reason a measurement is impossible.
+
 ## Progress board
 
 For work >5 steps or >30 min, update `out/boards/<project>.html` via
