@@ -131,7 +131,10 @@ KNOWN_HOSTS = (
     # integrity-checked by npm from hashes already committed to this repo — the
     # lockfile is the review, not the network call.
     "nodejs.org", "registry.npmjs.org",
-    "api.practicecre.com", "api.doctorcre.com", "api.anthropic.com", "console.neon.tech",
+    # DoctorCRE's production app is CARR-owned infrastructure; release checks
+    # and the signed-out progress-board check read this exact host.
+    "api.practicecre.com", "api.doctorcre.com", "app.doctorcre.com",
+    "api.anthropic.com", "console.neon.tech",
     "neon.tech", "cloudflareapi.com", "cloudflare.com", "r2.cloudflarestorage.com",
     "googleapis.com", "github.com", "api.github.com", "hc-ping.com",
     "npiregistry.cms.hhs.gov", "download.cms.gov",
@@ -803,7 +806,15 @@ def derived_hosts():
 
 def host_allowlisted(host):
     """True if host is on the code list OR the record-derived list."""
-    host = (host or "").strip(".").lower()
+    host = (host or "").strip().lower()
+    normalized = host.strip(".")
+    # The app host is a single allowed origin. DNS permits one terminal dot;
+    # retaining the raw host here rejects extra dots and subdomains.
+    if normalized == "app.doctorcre.com":
+        return host in ("app.doctorcre.com", "app.doctorcre.com.")
+    if normalized.endswith(".app.doctorcre.com"):
+        return False
+    host = normalized
     if not host:
         return False
     for k in KNOWN_HOSTS:
@@ -1334,7 +1345,7 @@ def main():
             # where a parser has no single URL to parse).
             try:
                 _p = urlsplit(url if url.startswith(("http://", "https://")) else f"https://{url}")
-                host = (_p.hostname or "").strip(".").lower()
+                host = (_p.hostname or "").lower()
             except Exception:
                 host = ""
             if host and not host_allowlisted(host):
