@@ -20095,7 +20095,7 @@ export function renderGeneratedFrontier() {
       version: REGISTRY_V97_VERSION,
       dbCatalogBaseline: POST_0745_FORWARD_V97_DB_CATALOG_BASELINE,
     });
-  artifacts["migrations/0746_codex_session_read_scac_successor.sql"] =
+  artifacts["migrations/0748_codex_session_read_scac_successor.sql"] =
     renderCodexSessionReadRegistrySql(v97Rows,
       artifacts["migrations/0745_doc_suggestions_scac_successor.sql"]);
 
@@ -21069,7 +21069,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     const runtimePath = resolve(process.argv[3] ||
       "mcp-server/src/scac-mutation-registry.v97.generated.js");
     const migrationPath = resolve(process.argv[4] ||
-      "migrations/0746_codex_session_read_scac_successor.sql");
+      "migrations/0748_codex_session_read_scac_successor.sql");
     const predecessor = readFileSync(resolve(REPO_ROOT,
       "migrations/0745_doc_suggestions_scac_successor.sql"), "utf8");
     await writeFile(runtimePath, renderRuntimeProjection(rows, {

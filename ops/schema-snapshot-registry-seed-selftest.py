@@ -710,7 +710,7 @@ assert "SCAC_VERSION_COUNT=96" in GENERATOR
 assert "SCAC_FULL_SET_SEAL_COUNT=95" in GENERATOR
 assert "ops.scac_mutation_catalog_v96_current()" in GENERATOR
 assert 'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v97"' in RUNTIME_V97
-assert "0746_codex_session_read_scac_successor.sql" in GENERATOR
+assert "0748_codex_session_read_scac_successor.sql" in GENERATOR
 assert "CODEX_SESSION_READ_REGISTRY_APPLIED" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=97" in GENERATOR
 assert "SCAC_VERSION_COUNT=97" in GENERATOR

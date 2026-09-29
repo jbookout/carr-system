@@ -1183,7 +1183,7 @@ if [ "$DOC_SUGGESTIONS_REGISTRY_APPLIED" = t ] && [ "$SCHEDULE_BOARD_REGISTRY_AP
   exit 1
 fi
 CODEX_SESSION_READ_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0746_codex_session_read_scac_successor.sql')" \
+  "select exists (select 1 from schema_migrations where filename='0748_codex_session_read_scac_successor.sql')" \
   2>/dev/null)"
 case "$CODEX_SESSION_READ_REGISTRY_APPLIED" in
   t|f) ;;
