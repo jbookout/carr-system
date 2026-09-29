@@ -21,7 +21,10 @@ KEPT = "kept"
 SOURCE_PATHS = (
     "lib/rule_routes.py", "ops/config/rule-routes.v1.json", "ops/rule-jit-compile.py",
     "ops/config/rule-jit-triggers.v1.json", "ops/fixtures/rule-delivery-eval/cases.v2.json",
-    "evals/rule-delivery/hard_cases.v1.json", "evals/rule-delivery/split.json",
+    "ops/rule-pack-preuse-reselection-selftest.py", "ops/rule-trigger-compile-selftest.py",
+    "evals/rule-delivery/README.md", "evals/rule-delivery/explain.py",
+    "evals/rule-delivery/freeze_split.py", "evals/rule-delivery/hard_cases.v1.json",
+    "evals/rule-delivery/noise.py", "evals/rule-delivery/split.json",
     "evals/rule-delivery/run_eval.py", "evals/rule-delivery/round.sh",
     "evals/rule-delivery/make_report.py", "evals/rule-delivery/selftest.py",
 )
