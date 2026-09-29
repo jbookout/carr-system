@@ -295,7 +295,8 @@ def validate_receipt(r: Any, surface: str, root: Path = ROOT) -> list[str]:
             blockers = kernel.critical_dimension_blockers(kernel_rows)
         except kernel.EvalPortfolioError as exc:
             errs.append(f"dimensions: {exc}")
-    dim_ids = {d.get("dimension_id") for d in dims if isinstance(d, dict)}
+    dim_ids: set[str] = {d["dimension_id"] for d in dims
+                         if isinstance(d, dict) and isinstance(d.get("dimension_id"), str)}
     primary = r["primary_dimension"]
     if primary not in dim_ids:
         errs.append(f"primary_dimension {primary!r} is not one of the measured dimensions")
@@ -315,7 +316,7 @@ def validate_receipt(r: Any, surface: str, root: Path = ROOT) -> list[str]:
         for unknown_dim in sorted(set(ids) - dim_ids):
             errs.append(f"stage {st['stage_id']} names dimension {unknown_dim} that was not measured")
         bound |= set(ids)
-    for unbound in sorted(dim_ids - bound - {None}):
+    for unbound in sorted(dim_ids - bound):
         errs.append(f"dimension {unbound} is not bound to any user-job stage")
 
     cost = r["cost"]
