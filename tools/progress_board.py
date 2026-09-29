@@ -21,7 +21,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 
 STATUSES = ("queued", "running", "review", "blocked", "done", "failed")
@@ -44,6 +44,8 @@ STATUS_TO_STAGE = {
     "done": "build",
 }
 STUCK_AFTER = timedelta(hours=2)
+HOSTED_BOARD_ORIGIN = "https://app.doctorcre.com"
+LAUNCHD_BOARD = "carr-v5"
 
 
 def now_utc() -> datetime:
@@ -65,6 +67,12 @@ def safe_project(project: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", project):
         raise SystemExit("project must contain only letters, numbers, dot, underscore, or hyphen")
     return project
+
+
+def safe_asker_ref(value: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}", value):
+        raise SystemExit("asker_ref must be a short named session or orchestrator reference")
+    return value
 
 
 def state_path(project: str) -> Path:
@@ -529,6 +537,7 @@ def render_state(state: dict[str, Any], pr_infos: dict[str, dict[str, Any] | Non
         "__DELIVERABLES__": deliverable_cards,
         "__DELIVERABLE_COUNT__": str(len(deliverables)),
         "__LEDGER__": "".join(ledger_rows),
+        "__HOSTED_BOARD__": esc(f"{HOSTED_BOARD_ORIGIN}/progress-board?board={quote(safe_project(state['project']), safe='')}"),
     }
     page = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -555,7 +564,7 @@ h1{font-size:clamp(2.35rem,5vw,4.4rem);line-height:1.02;letter-spacing:-.035em;m
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important;scroll-behavior:auto!important}.changed{outline:2px solid var(--orange)}.node-halo{opacity:1!important;transform:none!important}}
 </style></head><body><main class="shell">
 <div class="masthead"><div class="brand"><span class="brand-mark" aria-hidden="true"></span>CARR <span style="color:#789cb9">/</span> SYSTEMS</div><span class="edition">Orchestration · __PROJECT__</span></div>
-<header><div class="eyebrow">Mission control / __PROJECT__</div><h1>__TITLE__</h1><p class="subtitle">Every task, decision, and delivery in one live view.</p></header>
+<header><div class="eyebrow">Mission control / __PROJECT__</div><h1>__TITLE__</h1><p class="subtitle"><a href="__HOSTED_BOARD__">Open the interactive board ↗</a> · This saved copy is read-only when offline.</p></header>
 <div id="stall-banner" class="stall-banner" role="alert" hidden>Board refresh stalled</div>__GITHUB_BANNER__
 <div class="headline" aria-label="Project summary">__HEADLINE__</div>
 <div class="upper-grid">
@@ -640,6 +649,200 @@ def write_and_render(state: dict[str, Any]) -> None:
     render(state["project"])
 
 
+def call_verb(verb: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Use the existing noninteractive local-token route; no model is involved."""
+    repo = Path("/Users/booko/carr-system")
+    result = subprocess.run(
+        [str(repo / "run.sh"), "call", verb, json.dumps(args, sort_keys=True, separators=(",", ":"))],
+        cwd=repo, capture_output=True, text=True, timeout=30, check=False,
+    )
+    if result.returncode:
+        raise RuntimeError(f"{verb} failed: {(result.stderr or result.stdout).strip()[:500]}")
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{verb} returned invalid JSON") from exc
+    if not isinstance(payload, dict) or payload.get("ok") is not True:
+        raise RuntimeError(f"{verb} refused: {payload.get('error', 'unknown result') if isinstance(payload, dict) else 'invalid result'}")
+    return payload
+
+
+def stable_key(verb: str, args: dict[str, Any]) -> str:
+    body = json.dumps([verb, args], sort_keys=True, separators=(",", ":"))
+    return "board-" + hashlib.sha256(body.encode()).hexdigest()
+
+
+def board_snapshot(state: dict[str, Any]) -> dict[str, Any]:
+    return {key: state[key] for key in ("project", "title", "tasks", "deliverables", "updated_at")}
+
+
+def question_revision(question: dict[str, Any], project: str) -> dict[str, Any]:
+    choices = question.get("choices") or []
+    free_text = question.get("free_text")
+    return {
+        "prompt": question["question"].strip(), "choices": choices,
+        "allow_free_text": free_text if isinstance(free_text, bool) else not choices,
+        "default_answer": question["default"].strip() if question.get("default") is not None else None,
+        "asker_ref": safe_asker_ref(question.get("asker_ref") or f"orchestrator:{project}"),
+    }
+
+
+def publish_board(project: str) -> dict[str, int]:
+    state = read_state(project)
+    board = safe_project(project)
+    before = call_verb("read-progress-board", {"board_id": board})
+    remote_snapshot = before.get("snapshot")
+    snapshot = board_snapshot(state)
+    if remote_snapshot is None or remote_snapshot.get("snapshot_json") != snapshot:
+        args = {"board_id": board, "base_version": int(remote_snapshot["version"]) if remote_snapshot else 0,
+                "snapshot": snapshot}
+        call_verb("publish-board-snapshot", {**args, "idempotency_key": stable_key("publish-board-snapshot", args)})
+
+    remote_questions = {q["question_id"]: q for q in before.get("questions", [])}
+    changed = 0
+    for qid, current in state.get("questions", {}).items():
+        revisions = [*current.get("history", []), current]
+        expected_revision = int(current.get("revision") or 1)
+        remote = remote_questions.get(qid)
+        remote_revision = int(remote["revision"]) if remote else 0
+        if remote_revision > expected_revision:
+            raise RuntimeError(f"board question {qid} is newer on the server")
+        for number, revision in enumerate(revisions, start=1):
+            if number <= remote_revision:
+                continue
+            fields = question_revision(revision, board)
+            verb = "ask-board-question" if number == 1 else "revise-board-question"
+            args = {"board_id": board, "question_id": qid, "base_version": number - 1, **fields}
+            call_verb(verb, {**args, "idempotency_key": stable_key(verb, args)})
+            changed += 1
+        if remote_revision == expected_revision and remote:
+            fields = question_revision(current, board)
+            if any(remote.get(key) != value for key, value in fields.items()):
+                raise RuntimeError(f"board question {qid} differs on the server; revise it through ask")
+
+    after = call_verb("read-progress-board", {"board_id": board})
+    sealed = after.get("snapshot") or {}
+    if sealed.get("snapshot_json") != snapshot:
+        raise RuntimeError("published board snapshot did not read back")
+    after_questions = {q["question_id"]: q for q in after.get("questions", [])}
+    for qid, q in state.get("questions", {}).items():
+        remote = after_questions.get(qid)
+        if not remote or int(remote["revision"]) != int(q.get("revision") or 1):
+            raise RuntimeError(f"published board question {qid} did not read back")
+    return {"snapshot_version": int(sealed["version"]), "questions_changed": changed}
+
+
+def answers_path(project: str) -> Path:
+    return board_dir() / f"{safe_project(project)}-answers.jsonl"
+
+
+def read_answer_events(project: str) -> list[dict[str, Any]]:
+    path = answers_path(project)
+    if not path.exists():
+        return []
+    contents = path.read_text(encoding="utf-8")
+    if contents and not contents.endswith("\n"):
+        raise RuntimeError(f"answer inbox has an incomplete trailing line: {path}")
+    return [json.loads(line) for line in contents.splitlines()]
+
+
+def append_answer_event(project: str, event: dict[str, Any]) -> None:
+    path = answers_path(project)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = (json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        if os.write(fd, data) != len(data):
+            raise OSError("short answer inbox write")
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def poll_board_answers(project: str) -> dict[str, int]:
+    state = read_state(project)
+    expected = {(project, qid, int(q.get("revision") or number)):
+                safe_asker_ref(q.get("asker_ref") or f"orchestrator:{project}")
+                for qid, current in state.get("questions", {}).items()
+                for number, q in enumerate([*current.get("history", []), current], start=1)}
+    refs = set(expected.values())
+
+    def require_own_answer(answer: dict[str, Any], asker: str | None = None) -> None:
+        try:
+            key = (answer["board_id"], answer["question_id"], int(answer["question_revision"]))
+            owner = answer["asker_ref"]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError("board answer does not match a local question") from exc
+        if expected.get(key) != owner or (asker is not None and owner != asker):
+            raise RuntimeError("board answer does not match a local question and asker")
+
+    events = read_answer_events(project)
+    seen = {event["answer"]["id"]: event["answer"] for event in events if event.get("kind") == "answer"}
+    for answer in seen.values():
+        require_own_answer(answer)
+    acked = {event["answer_id"] for event in events if event.get("kind") == "ack"}
+    new_count = ack_count = 0
+    for asker in sorted(refs):
+        cursor = max((int(answer["cursor"]) for answer in seen.values() if answer["asker_ref"] == asker), default=0)
+        while True:
+            page = call_verb("read-board-answers", {"after_cursor": cursor, "asker_ref": asker, "limit": 500})
+            rows = page.get("answers", [])
+            for answer in rows:
+                require_own_answer(answer, asker)
+                answer_cursor = int(answer["cursor"])
+                if answer_cursor <= cursor:
+                    raise RuntimeError("board answer cursor did not advance")
+                cursor = answer_cursor
+                if answer["id"] not in seen:
+                    append_answer_event(project, {"kind": "answer", "answer": answer})
+                    seen[answer["id"]] = answer
+                    new_count += 1
+            if len(rows) < 500:
+                break
+
+    for answer in sorted(seen.values(), key=lambda item: int(item["cursor"])):
+        asker = answer["asker_ref"]
+        if answer["id"] in acked or asker not in refs:
+            continue
+        # Live sessions acknowledge for themselves. The orchestrator's durable
+        # inbox is the receiver for finished one-shot sessions and its own asks.
+        if not asker.startswith(("one-shot:", "orchestrator:")):
+            continue
+        if answer.get("status") not in {"Received", "Applied"}:
+            args = {"answer_id": answer["id"], "asker_ref": asker, "base_version": int(answer["version"])}
+            try:
+                receipt = call_verb("acknowledge-board-answer",
+                                    {**args, "idempotency_key": stable_key("acknowledge-board-answer", args)})
+                if receipt.get("answer", {}).get("status") != "Received":
+                    raise RuntimeError("board answer Received did not read back from the write")
+            except RuntimeError:
+                # The server may have committed Received before the local ack
+                # event was fsynced. Re-read that exact cursor before retrying.
+                reread = call_verb("read-board-answers", {
+                    "after_cursor": int(answer["cursor"]) - 1, "asker_ref": asker, "limit": 1,
+                }).get("answers", [])
+                if reread:
+                    require_own_answer(reread[0], asker)
+                if len(reread) != 1 or reread[0].get("id") != answer["id"] or \
+                        reread[0].get("status") not in {"Received", "Applied"}:
+                    raise
+        append_answer_event(project, {"kind": "ack", "answer_id": answer["id"], "asker_ref": asker})
+        ack_count += 1
+    return {"new_answers": new_count, "acknowledged": ack_count}
+
+
+def command_render(args: argparse.Namespace) -> None:
+    render(args.project)
+    if args.publish or args.project == LAUNCHD_BOARD:
+        publish_board(args.project)
+    if args.project == LAUNCHD_BOARD:
+        poll_board_answers(args.project)
+
+
+def command_poll(args: argparse.Namespace) -> None:
+    poll_board_answers(args.project)
+
+
 def command_init(args: argparse.Namespace) -> None:
     path = state_path(args.project)
     if path.exists():
@@ -703,10 +906,31 @@ def command_ask(args: argparse.Namespace) -> None:
     state = read_state(args.project)
     question_time = stamp()
     prior = state.setdefault("questions", {}).get(args.q_id, {})
+    question_text = args.question.strip()
+    default = args.default.strip() if args.default is not None else None
+    if not question_text or not default:
+        raise SystemExit("question and default must be nonempty")
+    choices = args.choice or []
+    if len(choices) > 8 or any(not choice.strip() or len(choice) > 500 for choice in choices) or len(set(choices)) != len(choices):
+        raise SystemExit("provide at most eight distinct, nonempty choices")
+    free_text = args.free_text or not choices
+    if choices and not free_text and default not in choices:
+        raise SystemExit("a choice-only question needs a default among its choices")
+    asker_ref = safe_asker_ref(args.asker_ref or prior.get("asker_ref") or f"orchestrator:{args.project}")
+    revision = int(prior.get("revision") or 1) + 1 if prior else 1
+    history = list(prior.get("history", []))
+    if prior:
+        history.append({key: prior.get(key) for key in
+                        ("question", "default", "choices", "free_text", "asker_ref", "revision")})
     state["questions"][args.q_id] = {
-        "question": args.question,
-        "default": args.default,
-        "answer": prior.get("answer"),
+        "question": question_text,
+        "default": default,
+        "choices": choices,
+        "free_text": free_text,
+        "asker_ref": asker_ref,
+        "revision": revision,
+        "history": history,
+        "answer": None,
         "created_at": prior.get("created_at", question_time),
         "updated_at": question_time,
     }
@@ -760,6 +984,9 @@ def parser() -> argparse.ArgumentParser:
     ask.add_argument("q_id")
     ask.add_argument("--question", required=True)
     ask.add_argument("--default", required=True)
+    ask.add_argument("--asker-ref")
+    ask.add_argument("--choice", action="append")
+    ask.add_argument("--free-text", action="store_true")
     ask.set_defaults(func=command_ask)
     answer = commands.add_parser("answer")
     answer.add_argument("project")
@@ -773,7 +1000,11 @@ def parser() -> argparse.ArgumentParser:
     deliver.set_defaults(func=command_deliver)
     render_cmd = commands.add_parser("render")
     render_cmd.add_argument("project")
-    render_cmd.set_defaults(func=lambda args: render(args.project))
+    render_cmd.add_argument("--publish", action="store_true")
+    render_cmd.set_defaults(func=command_render)
+    poll = commands.add_parser("poll-answers")
+    poll.add_argument("project")
+    poll.set_defaults(func=command_poll)
     return root
 
 
