@@ -37,12 +37,14 @@ function handler(overrides = {}) {
   });
 }
 
-test("reports adapter is limited to the reports origin and scoped read-only routes", async () => {
+test("reports adapter is limited to the reports origin and scoped routes", async () => {
   assert.equal(isReportsRequest(request("/share")), true);
   assert.equal(isReportsRequest(request("/api/share/report")), true);
   assert.equal(isReportsRequest(request("/api/share/map")), true);
-  for (const path of ["/api/share/pdf", "/api/share/comment", "/api/share/reaction", "/sw.js"])
+  for (const path of ["/api/share/pdf", "/api/share/reaction", "/sw.js"])
     assert.equal(isReportsRequest(request(path)), false, path);
+  for (const path of ["/api/share/feedback", "/api/share/shortlist", "/api/share/comment"])
+    assert.equal(isReportsRequest(request(path)), true, path);
   assert.equal(isReportsRequest(new Request("https://app.doctorcre.com/share")), false);
   assert.equal(isReportsHostRequest(request("/mcp")), true);
   assert.equal(isReportsHostRequest(request("/oauth/authorize")), true);
