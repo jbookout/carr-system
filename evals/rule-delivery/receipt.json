@@ -1,0 +1,276 @@
+{
+ "code_sha": "c5702cb5b1e1fe5c9b83909e463cf26847cb6f17",
+ "flow": "rule-delivery",
+ "inputs": {
+  "hard_cases": "abc3a372b4ea3c25bd2b1db10850b3ebf1d5239049711ab3a015df378cd844ff",
+  "v2_cases": "20d0a652e02559241e25a8b40ebb2f700a939c7ef7dc38114d5d7978a559e0f7"
+ },
+ "metrics": {
+  "baseline": {
+   "test": {
+    "cases": 126,
+    "delivered_rules": 492,
+    "events": 251,
+    "expected_rules": 185,
+    "false_per_event": 1.4900398406374502,
+    "false_rules": 374,
+    "hit_rules": 82,
+    "over_cap_events": 32,
+    "owes_cases": 63,
+    "precision": 0.23983739837398374,
+    "recall_macro": 0.37834295334295337,
+    "recall_micro": 0.44324324324324327,
+    "should_not_fire_cases": 63,
+    "sn_any_delivery_cases": 40,
+    "sn_dirty_cases": 40,
+    "sn_false_rules": 105,
+    "tokens_per_event": 637.9611553784861,
+    "tokens_total": 160128.25
+   },
+   "train": {
+    "cases": 212,
+    "delivered_rules": 849,
+    "events": 505,
+    "expected_rules": 398,
+    "false_per_event": 1.3188118811881189,
+    "false_rules": 666,
+    "hit_rules": 133,
+    "over_cap_events": 48,
+    "owes_cases": 129,
+    "precision": 0.21554770318021202,
+    "recall_macro": 0.3032050851818293,
+    "recall_micro": 0.3341708542713568,
+    "should_not_fire_cases": 83,
+    "sn_any_delivery_cases": 40,
+    "sn_dirty_cases": 40,
+    "sn_false_rules": 114,
+    "tokens_per_event": 602.4410891089109,
+    "tokens_total": 304232.75
+   }
+  },
+  "pr1325": {
+   "test": {
+    "cases": 126,
+    "delivered_rules": 421,
+    "events": 251,
+    "expected_rules": 185,
+    "false_per_event": 1.2390438247011952,
+    "false_rules": 311,
+    "hit_rules": 73,
+    "over_cap_events": 28,
+    "owes_cases": 63,
+    "precision": 0.26128266033254155,
+    "recall_macro": 0.3180254930254931,
+    "recall_micro": 0.3945945945945946,
+    "should_not_fire_cases": 63,
+    "sn_any_delivery_cases": 35,
+    "sn_dirty_cases": 35,
+    "sn_false_rules": 92,
+    "tokens_per_event": 520.965139442231,
+    "tokens_total": 130762.25
+   },
+   "train": {
+    "cases": 212,
+    "delivered_rules": 682,
+    "events": 505,
+    "expected_rules": 398,
+    "false_per_event": 1.0257425742574258,
+    "false_rules": 518,
+    "hit_rules": 115,
+    "over_cap_events": 40,
+    "owes_cases": 129,
+    "precision": 0.2404692082111437,
+    "recall_macro": 0.20436787587950367,
+    "recall_micro": 0.2889447236180904,
+    "should_not_fire_cases": 83,
+    "sn_any_delivery_cases": 30,
+    "sn_dirty_cases": 30,
+    "sn_false_rules": 95,
+    "tokens_per_event": 452.0336633663366,
+    "tokens_total": 228277.0
+   }
+  },
+  "v3": {
+   "test": {
+    "cases": 126,
+    "delivered_rules": 428,
+    "events": 251,
+    "expected_rules": 185,
+    "false_per_event": 1.2191235059760956,
+    "false_rules": 306,
+    "hit_rules": 86,
+    "over_cap_events": 27,
+    "owes_cases": 63,
+    "precision": 0.2850467289719626,
+    "recall_macro": 0.4021524771524771,
+    "recall_micro": 0.4648648648648649,
+    "should_not_fire_cases": 63,
+    "sn_any_delivery_cases": 15,
+    "sn_dirty_cases": 15,
+    "sn_false_rules": 44,
+    "tokens_per_event": 521.5717131474104,
+    "tokens_total": 130914.5
+   },
+   "train": {
+    "cases": 212,
+    "delivered_rules": 811,
+    "events": 505,
+    "expected_rules": 398,
+    "false_per_event": 1.2217821782178218,
+    "false_rules": 617,
+    "hit_rules": 144,
+    "over_cap_events": 44,
+    "owes_cases": 129,
+    "precision": 0.23921085080147966,
+    "recall_macro": 0.33744281128002057,
+    "recall_micro": 0.36180904522613067,
+    "should_not_fire_cases": 83,
+    "sn_any_delivery_cases": 24,
+    "sn_dirty_cases": 24,
+    "sn_false_rules": 79,
+    "tokens_per_event": 569.6648514851485,
+    "tokens_total": 287680.75
+   }
+  }
+ },
+ "rounds": [
+  {
+   "change": "path_rule routes do not fire on read-only tools (Read/Grep/Glob/LS)",
+   "decision": "kept",
+   "gate": "KEEP ",
+   "goal": "tokens",
+   "round": 1
+  },
+  {
+   "change": "prompt cue: a brief that opens with an Executor: line delivers c20dc3d5",
+   "decision": "reverted",
+   "gate": "REVERT test recall_micro delta +0.0162 [+0.0000, +0.0375] not clear of zero",
+   "goal": "recall",
+   "round": 2
+  },
+  {
+   "change": "prompt cue: a request for an independent/adversarial review or a Codex review delivers 2b66211d",
+   "decision": "kept",
+   "gate": "KEEP ",
+   "goal": "recall",
+   "round": 3
+  }
+ ],
+ "schema": "rule-delivery-eval-receipt/v1",
+ "shipped_variant": "v3",
+ "shipped_vs_baseline": {
+  "test": {
+   "false_per_event": {
+    "baseline": 1.4900398406374502,
+    "ci95": [
+     -0.40639269406392686,
+     -0.1564885496183206
+    ],
+    "delta": -0.27091633466135456,
+    "shipped": 1.2191235059760956
+   },
+   "false_rules": {
+    "baseline": 374,
+    "ci95": [
+     -99,
+     -41
+    ],
+    "delta": -68,
+    "shipped": 306
+   },
+   "precision": {
+    "baseline": 0.23983739837398374,
+    "ci95": [
+     0.027160493827160487,
+     0.06862062563816951
+    ],
+    "delta": 0.04520933059797885,
+    "shipped": 0.2850467289719626
+   },
+   "recall_micro": {
+    "baseline": 0.44324324324324327,
+    "ci95": [
+     0.0049261083743842304,
+     0.0460526315789474
+    ],
+    "delta": 0.021621621621621623,
+    "shipped": 0.4648648648648649
+   },
+   "sn_false_rules": {
+    "baseline": 105,
+    "ci95": [
+     -91,
+     -34
+    ],
+    "delta": -61,
+    "shipped": 44
+   },
+   "tokens_per_event": {
+    "baseline": 637.9611553784861,
+    "ci95": [
+     -171.6875,
+     -68.7641342756184
+    ],
+    "delta": -116.38944223107569,
+    "shipped": 521.5717131474104
+   }
+  },
+  "train": {
+   "false_per_event": {
+    "baseline": 1.3188118811881189,
+    "ci95": [
+     -0.1522633744855968,
+     -0.050193050193050315
+    ],
+    "delta": -0.09702970297029712,
+    "shipped": 1.2217821782178218
+   },
+   "false_rules": {
+    "baseline": 666,
+    "ci95": [
+     -76,
+     -26
+    ],
+    "delta": -49,
+    "shipped": 617
+   },
+   "precision": {
+    "baseline": 0.21554770318021202,
+    "ci95": [
+     0.014363687493608751,
+     0.03446745526058467
+    ],
+    "delta": 0.023663147621267644,
+    "shipped": 0.23921085080147966
+   },
+   "recall_micro": {
+    "baseline": 0.3341708542713568,
+    "ci95": [
+     0.013129102844638973,
+     0.04557640750670239
+    ],
+    "delta": 0.027638190954773878,
+    "shipped": 0.36180904522613067
+   },
+   "sn_false_rules": {
+    "baseline": 114,
+    "ci95": [
+     -60,
+     -15
+    ],
+    "delta": -35,
+    "shipped": 79
+   },
+   "tokens_per_event": {
+    "baseline": 602.4410891089109,
+    "ci95": [
+     -51.59938524590166,
+     -16.685077519379888
+    ],
+    "delta": -32.77623762376243,
+    "shipped": 569.6648514851485
+   }
+  }
+ },
+ "split_sha256": "10b8aea53e81d3a1c4d57392c2a8861e3e54eafb379420519d24c54dba232565"
+}
