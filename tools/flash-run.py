@@ -116,6 +116,11 @@ def sandbox_profile(work, *, reads=(), execs=(), port=None):
     private = sorted({os.path.realpath(p) for p in (
         home, "/private/tmp", "/private/var/folders", "/Users/Shared", "/opt/homebrew/var", "/opt/homebrew/etc",
         "/usr/local/var", "/usr/local/etc", "/etc/ssh", "/Library/Keychains")})
+    # Node reads Homebrew's OpenSSL config on startup. Open only that config subtree,
+    # including its resolved target when symlinked; sibling service/Postgres state stays private.
+    openssl = {path for p in ("/opt/homebrew/etc/openssl@3", "/usr/local/etc/openssl@3")
+               if os.path.exists(p) for path in (p, os.path.realpath(p))}
+    reads = sorted({*reads, *openssl})
     allpaths = [*private, *reads, *exec_dirs, *interp_execs, scratch]
     if any('"' in p or "\\" in p for p in allpaths):
         raise ValueError("path not expressible in a sandbox profile")

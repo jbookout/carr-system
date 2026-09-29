@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from unittest import SkipTest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location("flash_run", os.path.join(HERE, "flash-run.py"))
@@ -34,6 +35,8 @@ TEMPS: list[str] = []
 def check(name, fn):
     try:
         fn()
+    except SkipTest as exc:
+        print(f"  skip  {name} ({exc})")
     except AssertionError as exc:
         FAILURES.append(f"{name}: {exc}")
         print(f"  FAIL  {name}\n          {exc}")
@@ -62,6 +65,61 @@ def _run(program, work, *, reads=(), execs=(), port=None, timeout=30):
         fh.write(program)
     argv = fr.sandbox_wrap([sys.executable, path], work, reads=reads, execs=execs, port=port)
     return fr.bounded_run(argv, work, timeout)
+
+
+@sandboxed
+def node_can_start_without_opening_other_homebrew_config():
+    node = shutil.which("node")
+    if not node:
+        raise SkipTest("node is absent")
+    work = _work()
+    env = fr._sandbox_env(os.environ, work)
+    sys.path.insert(0, os.path.join(HERE, "room-bridge"))
+    import flash_wire
+    # The desk imports the runner's profile; exercise that route too.
+    runners = (fr, flash_wire._flash_run_module())
+    brew_etc = next((p for p in ("/opt/homebrew/etc", "/usr/local/etc") if os.path.isdir(p)), None)
+    assert brew_etc, "no Homebrew config directory for the private sibling fixture"
+    with tempfile.NamedTemporaryFile(prefix="flash-private-config-", dir=brew_etc) as sibling:
+        sibling.write(b"PRIVATE-CONFIG-STANDIN")
+        sibling.flush()
+        probe = ("try { require('node:fs').readFileSync(process.argv[1]); process.exit(1); } "
+                 "catch (e) { if (!['EPERM', 'EACCES'].includes(e.code)) throw e; }")
+        control = subprocess.run([node, "-e", "require('node:fs').readFileSync(process.argv[1])", sibling.name],
+                                 cwd=work, env=env, capture_output=True, text=True, timeout=30)
+        assert control.returncode == 0, f"unsandboxed sibling control failed: {control.stderr}"
+        for runner in runners:
+            code, out = runner.bounded_run(runner.sandbox_wrap([node, "-e", "0"], work), work, 30, env=env)
+            assert code == 0, f"node startup failed under {runner.__name__}: {code} {out}"
+            code, out = runner.bounded_run(runner.sandbox_wrap([node, "-e", probe, sibling.name], work),
+                                           work, 30, env=env)
+            assert code == 0, f"sibling config was readable under {runner.__name__}: {code} {out}"
+
+
+@sandboxed
+def script_profile_reads_openssl_config_but_keeps_sibling_config_private():
+    spec = importlib.util.spec_from_file_location("flash_script", os.path.join(HERE, "flash-script.py"))
+    assert spec and spec.loader
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
+    configs = [os.path.join(p, "openssl.cnf") for p in
+               ("/opt/homebrew/etc/openssl@3", "/usr/local/etc/openssl@3")
+               if os.path.isfile(os.path.join(p, "openssl.cnf"))]
+    if not configs:
+        raise SkipTest("no installed Homebrew OpenSSL config")
+    work = _work()
+    for config in configs:
+        with tempfile.NamedTemporaryFile(prefix="flash-private-config-", dir=os.path.dirname(os.path.dirname(config))) as sibling:
+            sibling.write(b"PRIVATE-CONFIG-STANDIN")
+            sibling.flush()
+            with open(sibling.name, "rb") as fh:
+                assert fh.read() == b"PRIVATE-CONFIG-STANDIN", "unsandboxed control"
+            prog = (f"open({config!r}, 'rb').read(); print('OPENSSL_READ');\n"
+                    f"try:\n open({sibling.name!r}, 'rb').read()\n"
+                    "except PermissionError:\n print('SIBLING_DENIED')\n")
+            code, out = fr.bounded_run([fr.SANDBOX_EXEC, "-p", script.sandbox_profile(work),
+                                       sys.executable, "-c", prog], work, 30)
+            assert code == 0 and "OPENSSL_READ" in out and "SIBLING_DENIED" in out, out
 
 
 # ── the exploit replay ────────────────────────────────────────────────────────────────────────────────────────
