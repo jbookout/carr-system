@@ -273,3 +273,121 @@ test("work-request-card retains triage readback when a ready request remains que
   assert.equal(card.plan.accepted_at, "2026-08-16T01:00:00Z");
   assert.deepEqual(card.next_human_action, { label: "Plan accepted", effect: "none" }); assert.deepEqual(card.actions, []);
 });
+
+// ---- Jev rerank trial seam (CARR_JEV_RERANK_MODE, default off) ----
+
+const SECOND = { section_id: "30000000-0000-0000-0000-000000000002", doc_slug: "neon-database-sop",
+  section_key: "06-credentials-and-incidents", content_class: "sop",
+  title: "6. Credentials and incidents", snippet: "rotation is four calls, not one", final_score: 0.4,
+  provenance: { policy_id: "lexical-dominant-v1" } };
+
+function rerankFake({ personalFirst = false } = {}) {
+  const db = new IntakeFake();
+  db.personalFirst = personalFirst;
+  const original = db.query.bind(db);
+  db.query = async (text, params = []) => {
+    const sql = text.replace(/\s+/g, " ").trim();
+    if (sql.includes("search_doctrine_situations")) {
+      const result = await original(text, params);
+      result.rows.push(SECOND);
+      return result;
+    }
+    if (sql.includes("work-request-intake:shared-shortlist")) {
+      db.calls.push({ sql, params });
+      // The database, not the caller, decides eligibility: the personal hit
+      // never comes back from this query.
+      return { rows: [
+        { section_id: "30000000-0000-0000-0000-000000000001", current_revision_id: "40000000-0000-0000-0000-000000000001" },
+        { section_id: SECOND.section_id, current_revision_id: "40000000-0000-0000-0000-000000000002" },
+      ] };
+    }
+    return original(text, params);
+  };
+  return db;
+}
+
+function jevPrefers(title, { requests = [] } = {}) {
+  return async request => {
+    requests.push(structuredClone(request));
+    const answers = Object.fromEntries(Object.entries(request.questions).map(([k, q]) =>
+      [k, { type: "noul", noul: q.instructions.includes(`"${title}`) ? 0.92 : 0.1 }]));
+    return { model: "jev-test", answers, usage: { input_tokens: 300, output_tokens: 2 } };
+  };
+}
+
+test("report-problem with the rerank flag off is byte-for-byte the deterministic path", async () => {
+  for (const jevRerank of [undefined, { posture: { enabled: false, mode: "off" }, ask: jevPrefers(SECOND.title) },
+    { posture: { enabled: false, mode: "off", posture: "misconfigured" }, ask: jevPrefers(SECOND.title) }]) {
+    const db = rerankFake();
+    if (jevRerank) db.jevRerank = jevRerank;
+    const result = await executeRegisteredTool(db, { ...ACTOR }, "report-problem", structuredClone(REQUEST));
+    assert.equal(result.source_selection, undefined);
+    assert.equal(db.calls.some(call => call.sql.includes("shared-shortlist")), false);
+    const capture = db.calls.find(call => call.sql.includes("capture_sourced_work_request"));
+    assert.equal(capture.params[4], "30000000-0000-0000-0000-000000000001");
+    assert.equal(capture.params[5], "40000000-0000-0000-0000-000000000001");
+  }
+});
+
+test("report-problem with the flag on binds the reranked section to ITS OWN current revision", async () => {
+  const requests = [];
+  const db = rerankFake({ personalFirst: true });
+  db.jevRerank = { posture: { enabled: true, mode: "noul" }, ask: jevPrefers(SECOND.title, { requests }) };
+  const result = await executeRegisteredTool(db, { ...ACTOR }, "report-problem", structuredClone(REQUEST));
+  assert.equal(requests.length, 1, "one Jev request for the whole shortlist");
+  assert.equal(Object.keys(requests[0].questions).length, 2, "only database-eligible sections are judged");
+  const wire = JSON.stringify(requests[0]);
+  assert.equal(wire.includes("personal"), false, "the personal hit never reaches Jev");
+  assert.equal(wire.includes("40000000-0000-0000-0000-00000000000"), false, "revision ids never reach Jev");
+  const shortlist = db.calls.find(call => call.sql.includes("shared-shortlist"));
+  assert.match(shortlist.sql, /d\.visibility='shared' and s\.status='active' and s\.current_revision_id is not null/);
+  assert.deepEqual(shortlist.params[0], ["30000000-0000-0000-0000-000000000099",
+    "30000000-0000-0000-0000-000000000001", SECOND.section_id]);
+  assert.equal(shortlist.params[1], 10);
+  const capture = db.calls.find(call => call.sql.includes("capture_sourced_work_request"));
+  assert.equal(capture.params[0], "doctrine:neon-database-sop#06-credentials-and-incidents");
+  assert.equal(capture.params[4], SECOND.section_id);
+  assert.equal(capture.params[5], "40000000-0000-0000-0000-000000000002", "exact revision of the chosen row, never the first row's");
+  assert.equal(capture.params.includes(REQUEST.situation), false);
+  assert.deepEqual(result.source_selection, {
+    mode: "noul", judged: true, reason: null, model: "jev-test", requests: 1,
+    shortlist_size: 2, selected_deterministic_rank: 2,
+    ambiguity: { top_rank: 2, second_rank: 1, margin: 0.82, ambiguous: false },
+  });
+});
+
+test("report-problem with the flag on falls back to the first eligible row when Jev fails", async () => {
+  const db = rerankFake();
+  db.jevRerank = { posture: { enabled: true, mode: "score" }, ask: async () => { throw new Error("timeout"); } };
+  const result = await executeRegisteredTool(db, { ...ACTOR }, "report-problem", structuredClone(REQUEST));
+  const capture = db.calls.find(call => call.sql.includes("capture_sourced_work_request"));
+  assert.equal(capture.params[4], "30000000-0000-0000-0000-000000000001");
+  assert.equal(capture.params[5], "40000000-0000-0000-0000-000000000001");
+  assert.equal(result.source_selection.judged, false);
+  assert.equal(result.source_selection.reason, "jev_unavailable");
+  assert.equal(result.source_selection.selected_deterministic_rank, 1);
+});
+
+test("report-problem with the flag on still refuses when no shared current source remains", async () => {
+  const db = rerankFake();
+  const original = db.query.bind(db);
+  db.query = async (text, params) => String(text).includes("shared-shortlist")
+    ? (db.calls.push({ sql: text, params }), { rows: [] }) : original(text, params);
+  let asked = 0;
+  db.jevRerank = { posture: { enabled: true, mode: "noul" }, ask: async () => { asked += 1; } };
+  const out = await rejected(() => executeRegisteredTool(db, { ...ACTOR }, "report-problem", structuredClone(REQUEST)));
+  assert.equal(out.error, "current_situation_source_not_found");
+  assert.equal(asked, 0);
+  assert.equal(db.calls.some(call => call.sql.includes("capture_sourced_work_request")), false);
+});
+
+test("report-problem replay with the flag on returns the stored selection without asking Jev again", async () => {
+  const requests = [];
+  const db = rerankFake();
+  db.jevRerank = { posture: { enabled: true, mode: "noul" }, ask: jevPrefers(SECOND.title, { requests }) };
+  const first = await executeRegisteredTool(db, { ...ACTOR }, "report-problem", structuredClone(REQUEST));
+  const replay = await executeRegisteredTool(db, { ...ACTOR }, "report-problem", structuredClone(REQUEST));
+  assert.equal(requests.length, 1);
+  assert.equal(replay.replayed, true);
+  assert.deepEqual(replay.source_selection, first.source_selection);
+});
