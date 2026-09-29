@@ -8,7 +8,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools/room-bridge"))
-from grok_wire import MODEL, model_usage_error
+from grok_wire import MODEL, parse_stream
 
 PREFIX = "Do not call any CARR or record-layer tool; do not write anything unless asked."
 
@@ -67,24 +67,9 @@ def preflight():
     return version
 
 
-def parse_output(lines, cli_version):
-    chunks = []
-    end = {}
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            event = json.loads(line)
-        except ValueError:
-            end = {"stopReason": "invalid_stream"}
-            break
-        if not isinstance(event, dict):
-            end = {"stopReason": "invalid_stream"}
-            break
-        if event.get("type") == "text" and isinstance(event.get("data"), str):
-            chunks.append(event["data"])
-        elif event.get("type") == "end":
-            end = event
+def parse_output(lines, cli_version, returncode=0):
+    parsed = parse_stream(lines, returncode)
+    end = parsed["end"]
     usage = end.get("modelUsage", {})
     models = sorted(usage) if isinstance(usage, dict) else []
     receipt = {
@@ -92,12 +77,7 @@ def parse_output(lines, cli_version):
         "stopReason": end.get("stopReason"), "num_turns": end.get("num_turns"),
         "cost_usd": end.get("total_cost_usd", end.get("cost_usd")), "cli_version": cli_version,
     }
-    code = 0
-    if receipt["stopReason"] != "end_turn":
-        code = 4
-    elif model_usage_error(usage):
-        code = 5
-    return "".join(chunks), receipt, code
+    return parsed["text"], receipt, parsed["code"]
 
 
 def main():
@@ -128,9 +108,7 @@ def main():
                 "--sandbox", "workspace" if args.writable else "read-only",
                 "--output-format", "streaming-json", "--print", PREFIX + "\n\n" + requested_prompt,
             ], capture_output=True, text=True, stdin=subprocess.DEVNULL)
-            output, receipt, code = parse_output(result.stdout.splitlines(), cli_version)
-            if result.returncode and not code:
-                code = 4
+            output, receipt, code = parse_output(result.stdout.splitlines(), cli_version, result.returncode)
         serialized = json.dumps(receipt, sort_keys=True) + "\n"
         if os.environ.get("GROK_RUN_RECEIPT"):
             Path(os.environ["GROK_RUN_RECEIPT"]).write_text(serialized, encoding="utf-8")

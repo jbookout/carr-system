@@ -33,32 +33,59 @@ def model_usage_error(models) -> str | None:
     return None
 
 
-def parse_result(stdout: str, returncode: int) -> dict:
-    events = []
-    for line in stdout.splitlines():
+def parse_stream(lines, returncode: int = 0) -> dict:
+    """Read one stream ending in exactly one end; never join post-end text."""
+    chunks = []
+    end = {}
+    detail = None
+    for line in lines:
+        if not line.strip():
+            continue
+        if end:
+            detail = "grok_terminal_event_missing_or_failed"
+            break
         try:
             event = json.loads(line)
         except ValueError:
-            continue
-        if isinstance(event, dict):
-            events.append(event)
-    ends = [event for event in events if event.get("type") == "end"]
-    if returncode != 0 or len(ends) != 1 or events[-1].get("type") != "end":
-        return {"status": "failed", "detail": "grok_terminal_event_missing_or_failed"}
-    end = ends[0]
-    models = end.get("modelUsage")
-    model_error = model_usage_error(models)
-    if model_error:
-        return {"status": "failed", "detail": model_error}
-    usage = models[PROVIDER_MODEL]
-    if end.get("stopReason") != "end_turn":
-        return {"status": "failed", "detail": "grok_incomplete_turn"}
-    if any(event.get("type") == "error" for event in events):
-        return {"status": "failed", "detail": "grok_error_event"}
+            detail = "grok_invalid_stream"
+            break
+        if not isinstance(event, dict):
+            detail = "grok_invalid_stream"
+            break
+        if event.get("type") == "error":
+            detail = "grok_error_event"
+            break
+        if event.get("type") == "text":
+            if not isinstance(event.get("data"), str):
+                detail = "grok_invalid_stream"
+                break
+            chunks.append(event["data"])
+        elif event.get("type") == "end":
+            end = event
+    code = 0
+    if detail:
+        end = {**end, "stopReason": "invalid_stream"}
+        code = 4
+    elif returncode != 0 or not end:
+        detail, code = "grok_terminal_event_missing_or_failed", 4
+    elif end.get("stopReason") != "end_turn":
+        detail, code = "grok_incomplete_turn", 4
+    else:
+        detail = model_usage_error(end.get("modelUsage"))
+        if detail:
+            code = 5
+    return {"text": "".join(chunks), "end": end, "detail": detail, "code": code}
+
+
+def parse_result(stdout: str, returncode: int) -> dict:
+    parsed = parse_stream(stdout.splitlines(), returncode)
+    if parsed["code"]:
+        return {"status": "failed", "detail": parsed["detail"]}
+    end = parsed["end"]
+    usage = end["modelUsage"][PROVIDER_MODEL]
     if not all(isinstance(end.get(key), str) and end[key].strip() for key in ("requestId", "sessionId")):
         return {"status": "failed", "detail": "grok_provider_identity_missing"}
-    result = "".join(event["data"] for event in events
-                     if event.get("type") == "text" and isinstance(event.get("data"), str)).strip()
+    result = parsed["text"].strip()
     if not result:
         return {"status": "failed", "detail": "grok_empty_result"}
     # Select metadata explicitly: tool arguments, diagnostics, credentials and

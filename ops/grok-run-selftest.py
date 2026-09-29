@@ -84,6 +84,23 @@ class GrokRunTests(unittest.TestCase):
         self.assertEqual(run.returncode, 4)
         self.assertEqual(receipt["stopReason"], "invalid_stream")
 
+    def test_text_after_end_cannot_certify_completion(self):
+        run, receipt = self.run_fixture("end-then-text.ndjson")
+        self.assertEqual(run.returncode, 4)
+        self.assertEqual(receipt["stopReason"], "invalid_stream")
+        self.assertEqual(run.stdout, "answer\n")
+
+    def test_error_after_end_cannot_certify_completion(self):
+        run, receipt = self.run_fixture("end-then-error.ndjson")
+        self.assertEqual(run.returncode, 4)
+        self.assertEqual(receipt["stopReason"], "invalid_stream")
+        self.assertNotIn("private diagnostic", run.stderr)
+
+    def test_duplicate_ends_cannot_certify_completion(self):
+        run, receipt = self.run_fixture("duplicate-end.ndjson")
+        self.assertEqual(run.returncode, 4)
+        self.assertEqual(receipt["stopReason"], "invalid_stream")
+
     def run_cli(self, *args, installed="1.0.9", latest="1.0.10", auth=True,
                 registry=True, upgrade=True, cli_exit=0):
         with tempfile.TemporaryDirectory(prefix="grok-cli-test-") as directory:
