@@ -1920,30 +1920,35 @@ class Pipeline:
         url = lane_cfg["live_release_url"]
         log = self.run_dir / "app-verify-live.jsonl"
         log.parent.mkdir(parents=True, exist_ok=True)
-        last = None
+        last_response = None
+        last_error = None
         with log.open("w", encoding="utf-8") as output:
             for attempt in range(1, attempts + 1):
                 row = {"attempt": attempt, "request": {"method": "GET", "url": url,
                        "user_agent": "carr-release-pipeline"}}
                 try:
-                    last = self.http(url)
-                    row["response"] = last
+                    response = self.http(url)
+                    last_response = response
+                    last_error = None
+                    row["response"] = response
                 except Exception as exc:  # noqa: BLE001 — record and retry a transient endpoint read
-                    last = None
+                    response = None
+                    last_error = type(exc).__name__
                     row["error"] = f"{type(exc).__name__}: {exc}"
                 output.write(json.dumps(row, sort_keys=True) + "\n")
                 output.flush()
-                if isinstance(last, dict) and last.get("source_commit") == sha \
-                        and last.get("environment") == "production":
+                if isinstance(response, dict) and response.get("source_commit") == sha \
+                        and response.get("environment") == "production":
                     self.out(f"  -> app-verify-live: matched {sha} on read {attempt}; log {log}")
                     return
                 if attempt < attempts:
                     self.sleep(5)
-        source = last.get("source_commit") if isinstance(last, dict) else None
-        environment = last.get("environment") if isinstance(last, dict) else None
+        source = last_response.get("source_commit") if isinstance(last_response, dict) else None
+        environment = last_response.get("environment") if isinstance(last_response, dict) else None
+        error = f" last_read_error={last_error}" if last_error else ""
         raise StepFailed("app-verify-live", 1, str(log),
                          f"/app-release did not serve {sha} after {attempts} reads; "
-                         f"source_commit={source} environment={environment}; log {log}")
+                         f"source_commit={source} environment={environment}{error}; log {log}")
 
     def release_app(self, lane_cfg: dict, repo_dir: Path, base: str, sha: str) -> dict:
         """Same review evidence as the Worker lane; the named required checks

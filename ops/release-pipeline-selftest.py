@@ -2176,6 +2176,23 @@ class AppLane(Base):
         self.assertIn("source_commit=" + "c" * 40, caught.exception.detail)
         self.assertEqual(len((pipe.run_dir / "app-verify-live.jsonl").read_text().splitlines()), 2)
 
+    def test_live_read_error_preserves_prior_observation_in_failure(self):
+        pipe = self.fx.pipeline(FakeRunner(), cfg=self.cfg())
+        reads = iter([{"source_commit": "d" * 40, "environment": "production"}, TimeoutError("edge timeout")])
+        def read(_url):
+            item = next(reads)
+            if isinstance(item, Exception):
+                raise item
+            return item
+        pipe.http = read
+        pipe.sleep = lambda _seconds: None
+        with self.assertRaises(rp.StepFailed) as caught:
+            pipe.verify_app_live(self.cfg()["app"], "a" * 40, attempts=2)
+        self.assertIn("source_commit=" + "d" * 40, caught.exception.detail)
+        self.assertIn("last_read_error=TimeoutError", caught.exception.detail)
+        rows = [json.loads(line) for line in (pipe.run_dir / "app-verify-live.jsonl").read_text().splitlines()]
+        self.assertEqual(rows[1]["error"], "TimeoutError: edge timeout")
+
 
 class Robustness(Base):
     def test_unexpected_error_before_any_step_is_recorded_not_burned(self):
