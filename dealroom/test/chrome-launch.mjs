@@ -29,6 +29,17 @@ function signalChild(child, signal) {
   } catch (error) { if (error.code !== "ESRCH") throw error; }
 }
 
+async function groupStopsWithin(child, ms) {
+  const deadline = performance.now() + ms;
+  for (;;) {
+    try { process.kill(-child.pid, 0); }
+    catch (error) { if (error.code === "ESRCH") return true; throw error; }
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) return false;
+    await wait(Math.min(50, remaining));
+  }
+}
+
 async function removeProfile(profile) {
   // A helper may still be flushing a file as the browser process closes.
   for (let attempt = 0; ; attempt += 1) {
@@ -72,10 +83,15 @@ export async function launchChrome(chrome, { spawnChrome = spawn, timeoutMs = CH
     const close = () => cleanup ??= (async () => {
       if (child) {
         signalChild(child, "SIGTERM");
-        if (!exited && !await settlesWithin(exitPromise, CHROME_STOP_TIMEOUT_MS)) {
+        // A leader's exit says nothing about helpers that share its group.
+        const stopped = process.platform !== "win32" && child.pid
+          ? () => groupStopsWithin(child, CHROME_STOP_TIMEOUT_MS)
+          : () => settlesWithin(exitPromise, CHROME_STOP_TIMEOUT_MS);
+        if (!await stopped()) {
           signalChild(child, "SIGKILL");
-          if (!await settlesWithin(exitPromise, CHROME_STOP_TIMEOUT_MS)) throw new Error("Chrome did not exit after SIGKILL");
+          if (!await stopped()) throw new Error("Chrome process tree did not exit after SIGKILL");
         }
+        if (!await settlesWithin(exitPromise, CHROME_STOP_TIMEOUT_MS)) throw new Error("Chrome did not exit after cleanup");
         // A detached crash reporter can inherit stderr after Chrome exits.
         // Drain briefly for diagnostics, then release our stream reference.
         await settlesWithin(closePromise, 100);

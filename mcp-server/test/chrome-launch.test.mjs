@@ -5,9 +5,10 @@ import { existsSync } from "node:fs";
 import { launchChrome } from "../../dealroom/test/chrome-launch.mjs";
 
 const fixture = new URL("./fixtures/chrome-launch-fixture.mjs", import.meta.url);
-function fakeChrome(scenarios) {
+function fakeChrome(scenarios, beforeSpawn = () => {}) {
   const calls = [];
   function spawnChrome(binary, args, options) {
+    beforeSpawn(calls);
     const profile = args.find((arg) => arg.startsWith("--user-data-dir=")).split("=").slice(1).join("=");
     const scenario = scenarios[calls.length] ?? scenarios.at(-1);
     const child = spawn(process.execPath, [fixture.pathname, profile, scenario], options);
@@ -15,6 +16,47 @@ function fakeChrome(scenarios) {
     return child;
   }
   return { calls, spawnChrome };
+}
+
+function processAlive(pid) {
+  try { process.kill(pid, 0); return true; }
+  catch (error) { if (error.code === "ESRCH") return false; throw error; }
+}
+
+for (const scenario of ["ready-helper", "hang-helper"]) {
+  test(`Chrome reaps a SIGTERM-resistant helper after its leader exits (${scenario})`, { skip: process.platform === "win32" }, async (t) => {
+    let helperPid;
+    const fake = fakeChrome([scenario, "ready"], (calls) => {
+      if (calls.length === 1) {
+        assert.equal(processAlive(helperPid), false, "the owned helper must be gone before retry");
+        assert.equal(existsSync(calls[0].profile), false);
+      }
+    });
+    const spawnChrome = (...args) => {
+      const child = fake.spawnChrome(...args);
+      let stderr = "";
+      child.stderr.on("data", (chunk) => {
+        stderr += chunk;
+        const match = stderr.match(/helper-pid:(\d+)\n/);
+        if (match) helperPid = Number(match[1]);
+      });
+      return child;
+    };
+    t.after(() => {
+      for (const { child } of fake.calls) {
+        try { process.kill(-child.pid, "SIGKILL"); }
+        catch (error) { if (error.code !== "ESRCH") throw error; }
+      }
+    });
+    const browser = await launchChrome("fake-chrome", { spawnChrome, timeoutMs: 1500, pollIntervalMs: 10 });
+    t.after(() => browser.close());
+    assert.ok(helperPid > 0, "fixture published its owned helper PID");
+    await browser.close();
+    assert.equal(processAlive(helperPid), false, "the owned helper must be gone when cleanup returns");
+    assert.equal(existsSync(fake.calls[0].profile), false);
+    assert.equal(fake.calls[0].child.signalCode, "SIGTERM", "the leader exited without SIGKILL");
+    assert.equal(fake.calls.length, scenario === "hang-helper" ? 2 : 1);
+  });
 }
 
 for (const scenario of ["partial", "http-late"]) {

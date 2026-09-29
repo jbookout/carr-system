@@ -12,6 +12,13 @@ if (scenario === "inherited-stderr") {
 }
 if (scenario === "hang-ignore-term") process.on("SIGTERM", () => {});
 if (scenario === "exit") process.exit(17);
+if (scenario.endsWith("helper")) {
+  // Inherit the browser's owned group, but resist graceful shutdown.
+  const helper = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); process.stdout.write('ready'); setInterval(() => {}, 1000)"], { stdio: ["ignore", "pipe", "inherit"] });
+  await new Promise((resolve) => helper.stdout.once("data", resolve));
+  await writeFile(path.join(profile, "helper.pid"), String(helper.pid));
+  process.stderr.write(`helper-pid:${helper.pid}\n`);
+}
 if (scenario.startsWith("hang")) setInterval(() => {}, 1000);
 else {
   let ready = scenario !== "http-late";
