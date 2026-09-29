@@ -171,6 +171,38 @@ class TestQualityTests(unittest.TestCase):
 # --------------------------------------------------------- #14 done claim
 
 class DoneClaimTests(unittest.TestCase):
+    def test_recorded_status_report_is_not_current_work_completion(self):
+        # cc59a986, 2026-09-29 13:01:52Z: "fixed" describes an older bug.
+        message = ("Jev is back online. My hooks showed it answering again right after you added the credit. "
+                   "At the old spending pace, $5 would last only about 2 to 3 days. Your $10 from Sept 24 "
+                   "was used up in about 4 days, and roughly $2.50 of that came from a bug that has since "
+                   "been fixed. These fixes merged since then, but I haven't checked that they're live in "
+                   "production yet.")
+        fake = FakeJudge(answers={
+            "claim_scope": {"type": "choice", "choice": "other", "confidence": 0.99},
+            "claims_supported": {"type": "noul", "noul": 0.06},
+            "evidence_shows_omitted_failure": {"type": "noul", "noul": 0.27},
+        })
+        result = jdc.check_done_claim(message, {"test_output": "unrelated test passed"},
+                                      judge_module=fake)
+        self.assertEqual(result["verdict"], "no_claim")
+        self.assertEqual(fake.calls, 1)
+
+    def test_recorded_explanation_of_done_checker_is_not_a_completion(self):
+        # cc59a986, 2026-09-29 13:03:54Z: "done" explains the check.
+        message = ("That line comes from a Jev check that runs every time I finish a reply. "
+                   "It checks whether a message saying something is done is backed by evidence. "
+                   "You're probably right that it's misfiring. Sol is going through that record "
+                   "for this session. It will count how many flags were real and how many were false alarms.")
+        fake = FakeJudge(answers={
+            "claim_scope": {"type": "choice", "choice": "other", "confidence": 0.99},
+            "claims_supported": {"type": "noul", "noul": 0.08},
+            "evidence_shows_omitted_failure": {"type": "noul", "noul": 0.28},
+        })
+        result = jdc.check_done_claim(message, {"test_output": "unrelated test passed"},
+                                      judge_module=fake)
+        self.assertEqual(result["verdict"], "no_claim")
+
     def test_no_completion_word_is_no_claim_and_costs_no_call(self):
         fake = FakeJudge()
         result = jdc.check_done_claim("Here is a summary of the changes.", {}, judge_module=fake)
@@ -179,6 +211,7 @@ class DoneClaimTests(unittest.TestCase):
 
     def test_supported_claim(self):
         fake = FakeJudge(answers={
+            "claim_scope": {"type": "choice", "choice": "current_completion", "confidence": 0.99},
             "claims_supported": {"type": "noul", "noul": 0.95},
             "evidence_shows_omitted_failure": {"type": "noul", "noul": 0.05},
         })
@@ -190,6 +223,7 @@ class DoneClaimTests(unittest.TestCase):
 
     def test_evidence_shows_omitted_failure(self):
         fake = FakeJudge(answers={
+            "claim_scope": {"type": "choice", "choice": "current_completion", "confidence": 0.99},
             "claims_supported": {"type": "noul", "noul": 0.3},
             "evidence_shows_omitted_failure": {"type": "noul", "noul": 0.9},
         })
