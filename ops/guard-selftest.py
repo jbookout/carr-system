@@ -102,6 +102,38 @@ case("gh pr create carrying the Claude Code attribution link",
           'Generated with [Claude Code](https://claude.com/claude-code)"'), ALLOW)
 case("claude.com read", fetch("https://claude.com/claude-code"), ALLOW)
 
+# DoctorCRE's production app is a fixed CARR-owned domain. Its gated board
+# route must be reachable for a live, unauthenticated sign-in check.
+case("DoctorCRE app production route is allowed",
+     bash("curl -sS -D - -o /dev/null https://app.doctorcre.com/progress-board"), ALLOW)
+case("DoctorCRE app subdomain is blocked",
+     bash("curl https://x.app.doctorcre.com/progress-board"), DENY)
+case("DoctorCRE app prefix lookalike is blocked",
+     bash("curl https://myapp.doctorcre.com/progress-board"), DENY)
+case("DoctorCRE app lookalike remains blocked",
+     bash("curl https://app.doctorcre.com.evil.example/progress-board"), DENY)
+case("DoctorCRE app trailing-dot variant is allowed",
+     bash("curl https://app.doctorcre.com./progress-board"), ALLOW)
+case("DoctorCRE app mixed-case trailing-dot variant is allowed",
+     bash("curl https://App.DoctorCRE.Com./progress-board"), ALLOW)
+case("DoctorCRE app double-dot variant is blocked",
+     bash("curl https://app.doctorcre.com../progress-board"), DENY)
+
+# A long WebFetch URL distinguishes the fixed-host list from open-read, whose
+# URL cap would otherwise hide an incorrectly classified app hostname.
+_APP_LONG_QUERY = "/progress-board?d=" + "x" * 300
+case("WebFetch allows the canonical DoctorCRE app host",
+     fetch("https://app.doctorcre.com" + _APP_LONG_QUERY), ALLOW)
+case("WebFetch allows the DoctorCRE app trailing-dot host",
+     fetch("https://app.doctorcre.com." + _APP_LONG_QUERY), ALLOW)
+case("WebFetch allows the DoctorCRE app mixed-case trailing-dot host",
+     fetch("https://App.DoctorCRE.Com." + _APP_LONG_QUERY), ALLOW)
+for _host in ("x.app.doctorcre.com", "x.app.doctorcre.com.",
+              "myapp.doctorcre.com", "app.doctorcre.com.evil.example",
+              "app.doctorcre.com.evil.example.", "app.doctorcre.com.."):
+    case(f"WebFetch denies DoctorCRE app lookalike {_host}",
+         fetch("https://" + _host + _APP_LONG_QUERY), DENY)
+
 # Joe's own private Tailscale tailnet (tailc8cc93.ts.net), added 2026-09-23 so
 # his Mac Studio's local model server ("flash-next") is reachable from his
 # other devices. host_allowlisted does suffix matching, so the one tailnet
