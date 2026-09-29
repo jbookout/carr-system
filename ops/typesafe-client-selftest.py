@@ -94,6 +94,21 @@ class SpendHealthTests(unittest.TestCase):
                      "WARN jev spend — $0.600 · loop action FAILED (RuntimeError)"):
             self.assertEqual(spend.nightly_exit_status(line), 1)
 
+    def test_unsettled_worker_attempt_keeps_nightly_alarm_unknown(self):
+        spend = importlib.util.module_from_spec(SPEND_SPEC)
+        SPEND_SPEC.loader.exec_module(spend)
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "absent.jsonl"
+            state = Path(d) / "loop.json"
+            now = __import__("datetime").datetime(2026, 9, 28,
+                tzinfo=__import__("datetime").timezone.utc)
+            line = spend.check_spend(log, MODULE_PATH.parent / "config" / "jev-cost-guard.v1.json",
+                state, lambda *_: None, now=now,
+                worker_usage=lambda _day: {"calls": 0, "input_tokens": 0,
+                                            "unknown": 1, "pending_attempts": 1})
+            self.assertIn("1 call or attempt missing usage", line)
+            self.assertEqual(spend.nightly_exit_status(line), 1)
+
     def test_narrow_health_cli_exits_before_unrelated_checks(self):
         source_tools = MODULE_PATH.parent.parent / "tools"
         with tempfile.TemporaryDirectory() as d:

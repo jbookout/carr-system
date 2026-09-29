@@ -162,6 +162,33 @@ def main() -> int:
             other = (make_actor(cur, other_slug), other_slug)
             baseline = integrity(cur)
 
+            # A pre-call attempt remains visible as unknown spend until its
+            # exact receipt is paired. A replay or another actor cannot settle it.
+            set_local_role(cur, "carr_writer")
+            attempt_key = f"jev-attempt:{uuid.uuid4()}"
+            attempt_receipt = record(cur, me, idempotency_key=attempt_key,
+                                     model_answered="jev-attempt-pending", answers=Jsonb({}), usage=None)
+            cur.execute("reset role")
+            pending = integrity(cur)["daily_usage"]
+            if pending["unknown"] != baseline["daily_usage"]["unknown"] + 1 or \
+                    pending["pending_attempts"] != baseline["daily_usage"]["pending_attempts"] + 1:
+                raise RuntimeError(f"unsettled Jev attempt was not visible as unknown spend: {pending}")
+            set_local_role(cur, "carr_writer")
+            completed_receipt = record(cur, me)
+            cur.execute("""insert into public.tool_call
+                 (idempotency_key, verb, actor_id, request_hash, response)
+                 values (%s, 'ask-jev-attempt', %s, %s, %s)""",
+                (attempt_key, me[0], H_STATE,
+                 Jsonb({"receipt_id": str(attempt_receipt[0]), "cache_hit": True,
+                        "settled_by": str(completed_receipt[0])})))
+            cur.execute("reset role")
+            settled = integrity(cur)["daily_usage"]
+            if settled["unknown"] != baseline["daily_usage"]["unknown"] or \
+                    settled["pending_attempts"] != baseline["daily_usage"]["pending_attempts"]:
+                raise RuntimeError(f"settled Jev attempt still counted as unknown: {settled}")
+            # The extra receipt is not part of the historical gate assertions.
+            baseline = integrity(cur)
+
             # 1. The write door, as carr_writer, with the server clock and actor.
             set_local_role(cur, "carr_writer")
             before = cur.execute("select clock_timestamp()").fetchone()

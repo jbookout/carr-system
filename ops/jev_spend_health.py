@@ -161,8 +161,9 @@ def check_spend(log_path=USAGE_LOG, config_path=CONFIG, state_path=LOOP_STATE,
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
             worker_unavailable = True
     amount = tokens * price / 1_000_000
+    missing = f"{unknown} call or attempt{'s' if unknown != 1 else ''} missing usage"
     if (unknown or worker_unavailable) and amount <= threshold:
-        return (f"UNKNOWN jev spend — {unknown} successful calls missing usage"
+        return (f"UNKNOWN jev spend — {missing}"
                 f"; Worker usage {'unavailable' if worker_unavailable else 'read'} "
                 f"({calls} measured calls; warning retained until usage is measurable) "
                 f"· {ACTION}")
@@ -170,7 +171,7 @@ def check_spend(log_path=USAGE_LOG, config_path=CONFIG, state_path=LOOP_STATE,
     line = (f"{status} jev spend — ${amount:.3f} estimated / UTC day "
             f"({calls} calls, {tokens} input tokens; threshold ${threshold:.2f}) · {ACTION}")
     if unknown:
-        line += f" · at least this amount; {unknown} successful calls missing usage"
+        line += f" · at least this amount; {missing}"
     if worker_unavailable:
         line += " · at least this amount; Worker usage unavailable"
     body = (f"Jev estimated recorded spend is ${amount:.3f} on {day} UTC, above "
