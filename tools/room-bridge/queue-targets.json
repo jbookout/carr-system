@@ -45,8 +45,9 @@
     },
     "grok": {
       "enabled": true,
-      "adapter": "hermes",
-      "assignee": "default",
+      "adapter": "desk",
+      "assignee": "desk:grok-desk",
+      "desk": "grok-desk",
       "effective_model": "Grok 4.6",
       "capabilities": ["read"]
     },

@@ -106,9 +106,16 @@ def regions(paths, repo=REPO):
                 line_no = text[:match.start()].count("\n") + 1
                 lo = max(0, line_no - 1 - CONTEXT_BEFORE)
                 hi = min(len(lines), line_no + CONTEXT_AFTER)
-                snippet = "\n".join(lines[lo:hi])[:MAX_REGION_CHARS]
+                full_snippet = "\n".join(lines[lo:hi])
+                snippet = full_snippet[:MAX_REGION_CHARS]
+                start_line = lo + 1
+                end_line = start_line + full_snippet.count("\n")
+                sent_end_line = (end_line if len(snippet) == len(full_snippet) else
+                                 start_line + snippet.count("\n") - 1)
                 found.append({"path": rel, "line": line_no, "kind": kind,
-                              "code": snippet})
+                              "code": snippet, "start_line": start_line,
+                              "end_line": end_line,
+                              "sent_end_line": sent_end_line})
     return _collapse(found)
 
 
