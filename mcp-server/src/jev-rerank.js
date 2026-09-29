@@ -1,9 +1,9 @@
-// Jev reranking trial for doctrine source selection. Default OFF.
+// Offline Jev reranking trial for doctrine source selection. Default OFF.
+// The production report-problem writer does not import or call this module.
 //
 // WHAT THIS CHANGES AND WHAT IT NEVER TOUCHES. Retrieval, visibility and
 // authority stay in code and in the database: the caller hands this module a
-// shortlist that search_doctrine_situations already ranked and that the
-// database already proved shared, active and current. This module only
+// shortlist that search_doctrine_situations already ranked. This module only
 // REORDERS that bounded list. It never adds a candidate, never drops one, and
 // never sees or returns an id the caller did not give it — `order` holds the
 // caller's own objects, so whatever revision binding a row carries travels
@@ -23,7 +23,7 @@
 //           more than one node, paths scored as a sum of log yes-probabilities.
 // Anything else, including an unset flag, is the deterministic order.
 //
-// FAIL OPEN TO THE DETERMINISTIC ORDER. Jev down, a malformed answer, an
+// FALL BACK TO THE DETERMINISTIC ORDER. Jev down, a malformed answer, an
 // unpinned taxonomy: every one returns the order the caller passed in, marked
 // judged:false with a reason. Nothing here throws on a model failure.
 //
@@ -119,10 +119,17 @@ function isProbability(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 }
 
+function validUsage(usage) {
+  return usage && typeof usage === "object" && !Array.isArray(usage) &&
+    Number.isSafeInteger(usage.input_tokens) && usage.input_tokens > 0 &&
+    Number.isSafeInteger(usage.output_tokens) && usage.output_tokens >= 0;
+}
+
 // Returns a map question-key -> relevance in [0, 1], or null when the answer
 // is not exactly one typed, in-range answer per question plus reported usage.
 function readAnswers(questions, result) {
-  if (!result || typeof result !== "object" || typeof result.model !== "string" || !result.model.trim())
+  if (!result || typeof result !== "object" || typeof result.model !== "string" ||
+      !result.model.trim() || !validUsage(result.usage))
     return null;
   const answers = result.answers;
   if (!answers || typeof answers !== "object") return null;
@@ -149,10 +156,8 @@ function readAnswers(questions, result) {
 }
 
 function addUsage(total, usage) {
-  if (!usage || typeof usage !== "object") return total;
-  const input = Number.isInteger(usage.input_tokens) ? usage.input_tokens : 0;
-  const output = Number.isInteger(usage.output_tokens) ? usage.output_tokens : 0;
-  return { input_tokens: (total?.input_tokens || 0) + input, output_tokens: (total?.output_tokens || 0) + output };
+  return { input_tokens: (total?.input_tokens || 0) + usage.input_tokens,
+    output_tokens: (total?.output_tokens || 0) + usage.output_tokens };
 }
 
 function round(value) {
@@ -188,9 +193,10 @@ export async function rerankShortlist({ situation, candidates, variant, askJev, 
   } catch {
     return fallback({ ...result, requests: 1 }, "jev_unavailable");
   }
-  result = { ...result, requests: 1, usage: addUsage(null, answered?.usage) };
+  result = { ...result, requests: 1 };
   const relevance = readAnswers(request.questions, answered);
-  if (!relevance || !answered.usage) return fallback(result, "invalid_jev_answer");
+  if (!relevance) return fallback(result, "invalid_jev_answer");
+  result.usage = addUsage(null, answered.usage);
   const scored = head.map((candidate, i) => ({ candidate, rank: i + 1, relevance: relevance[key(i)] }))
     .sort((a, b) => b.relevance - a.relevance || a.rank - b.rank);
   const scores = scored.map(row => ({ deterministic_rank: row.rank, section_key: row.candidate.section_key ?? null,
@@ -205,13 +211,29 @@ export async function rerankShortlist({ situation, candidates, variant, askJev, 
   };
 }
 
-function pinned(taxonomy) {
+function canonical(value) {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value && typeof value === "object")
+    return `{${Object.keys(value).sort().map(k => `${JSON.stringify(k)}:${canonical(value[k])}`).join(",")}}`;
+  return JSON.stringify(value);
+}
+
+async function pinned(taxonomy) {
   if (!taxonomy || taxonomy.digest !== DOCTRINE_TAXONOMY_DIGEST ||
       taxonomy.snapshot_id !== DOCTRINE_TAXONOMY_SNAPSHOT_ID ||
       !Array.isArray(taxonomy.documents) || !taxonomy.documents.length ||
       !taxonomy.classes || typeof taxonomy.classes !== "object")
     return false;
-  return true;
+  try {
+    const body = { classes: taxonomy.classes,
+      documents: taxonomy.documents.map(d => ({ slug: d.slug, title: d.title, class: d.class })) };
+    const bytes = new TextEncoder().encode(canonical(body));
+    const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+    const hex = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+    return `sha256:${hex}` === DOCTRINE_TAXONOMY_DIGEST;
+  } catch {
+    return false;
+  }
 }
 
 function logp(p) {
@@ -243,9 +265,9 @@ async function scoreLevel(level, nodes, situation, askJev, model, state) {
   nodes.forEach((node, i) => { questions[key(i)] = nodeQuestion(level, node); });
   state.requests += 1;
   const answered = await ask(askJev, { state: { situation: String(situation ?? "") }, questions }, model);
-  state.usage = addUsage(state.usage, answered?.usage);
   const probabilities = readAnswers(questions, answered);
-  if (!probabilities || !answered.usage) throw Object.assign(new Error("invalid"), { reason: "invalid_jev_answer" });
+  if (!probabilities) throw Object.assign(new Error("invalid"), { reason: "invalid_jev_answer" });
+  state.usage = addUsage(state.usage, answered.usage);
   state.model = answered.model;
   return new Map(nodes.map((node, i) => [node.id, node.parentScore + logp(probabilities[key(i)])]));
 }
@@ -258,7 +280,7 @@ export async function beamRerank({ situation, candidates, askJev, taxonomy, k = 
   const all = Array.isArray(candidates) ? candidates : [];
   let result = { ...base("beam", all), taxonomy_snapshot_id: null, unmapped_ranks: [] };
   if (!all.length) return fallback(result, "empty_shortlist");
-  if (!pinned(taxonomy)) return fallback(result, "taxonomy_not_pinned");
+  if (!await pinned(taxonomy)) return fallback(result, "taxonomy_not_pinned");
   result.taxonomy_snapshot_id = taxonomy.snapshot_id;
   const head = all.slice(0, JEV_RERANK_SHORTLIST_MAX);
   const tail = all.slice(JEV_RERANK_SHORTLIST_MAX);

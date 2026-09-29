@@ -2,13 +2,14 @@
 // hierarchical Jev reranker walks: content class -> document -> section.
 // Captured from the live doctrine-index at doctrine generation 1247 on
 // 2026-09-29, shared visibility only, with the two dossier_narrative client
-// documents left out because this repository is public. A new snapshot is a
+// documents left out and hostnames removed from titles because this repository
+// is public. A new snapshot is a
 // new file with a new id and digest; jev-rerank.js refuses any taxonomy whose
 // digest is not the pinned one, and mcp-server/test/jev-rerank.test.mjs
 // recomputes this digest from the content below.
 
 export const DOCTRINE_TAXONOMY_SNAPSHOT_ID = "doctrine-taxonomy.2026-09-29.v1";
-export const DOCTRINE_TAXONOMY_DIGEST = "sha256:8db7c738710bed686aacb3600d2d61def19b30d8fafa37494ba9165e56bafa80";
+export const DOCTRINE_TAXONOMY_DIGEST = "sha256:b6c472314b521c3e6d11fc530c3230ed7e6e37f7ba557496c0d42ed0e6b7d538";
 
 export const DOCTRINE_TAXONOMY_SNAPSHOT = Object.freeze({
   snapshot_id: DOCTRINE_TAXONOMY_SNAPSHOT_ID,
@@ -61,7 +62,7 @@ export const DOCTRINE_TAXONOMY_SNAPSHOT = Object.freeze({
     Object.freeze({ slug: "2026-07-30-syndication-structures-thread", class: "distillation", title: "Nick Huber syndication-structures thread — domain knowledge merge + two advisory/content angles" }),
     Object.freeze({ slug: "2026-07-30-vacca-content-engine-takeaways", class: "distillation", title: "Takeaways from Alex Vacca's Claude Code LinkedIn content engine — six adoptions from a parallel build" }),
     Object.freeze({ slug: "2026-07-30-vectors-explainer-craft", class: "distillation", title: "\"Vectors are all you need\" (497K views) — explainer-craft moves + one quotable law; no system change" }),
-    Object.freeze({ slug: "2026-08-01-doctorcre-domain-mascot", class: "distillation", title: "doctorcre.com domain + \"Doctor Cre\" mascot" }),
+    Object.freeze({ slug: "2026-08-01-doctorcre-domain-mascot", class: "distillation", title: "DoctorCRE domain and mascot" }),
     Object.freeze({ slug: "2026-08-06-always-on-mac-mini-host", class: "distillation", title: "Always-on Mac mini as the system host" }),
     Object.freeze({ slug: "2026-08-07-tenex-metaharness-sdlc-takeaways", class: "distillation", title: "The Tenex MetaHarness essay — one real architectural gap, three partial gaps, four validations, one marketing lateral" }),
     Object.freeze({ slug: "idea-inbox-readme", class: "distillation", title: "Idea Inbox — the phone capture lane (created July 10, 2026)" }),
@@ -281,6 +282,6 @@ export const DOCTRINE_TAXONOMY_SNAPSHOT = Object.freeze({
     Object.freeze({ slug: "twin-system-playbook", class: "sop", title: "Dell's Twin System — Transfer Playbook" }),
     Object.freeze({ slug: "voice-profile", class: "sop", title: "Joe's Voice Profile: the personality layer" }),
     Object.freeze({ slug: "work-request-withdrawal", class: "sop", title: "Withdrawing a Work Request captured in error" }),
-    Object.freeze({ slug: "workflows", class: "sop", title: "CARR Make.com Automation — Workflow Reference" }),
+    Object.freeze({ slug: "workflows", class: "sop", title: "CARR Make Automation — Workflow Reference" }),
   ]),
 });

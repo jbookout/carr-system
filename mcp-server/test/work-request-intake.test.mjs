@@ -329,65 +329,13 @@ test("report-problem with the rerank flag off is byte-for-byte the deterministic
   }
 });
 
-test("report-problem with the flag on binds the reranked section to ITS OWN current revision", async () => {
-  const requests = [];
-  const db = rerankFake({ personalFirst: true });
-  db.jevRerank = { posture: { enabled: true, mode: "noul" }, ask: jevPrefers(SECOND.title, { requests }) };
-  const result = await executeRegisteredTool(db, { ...ACTOR }, "report-problem", structuredClone(REQUEST));
-  assert.equal(requests.length, 1, "one Jev request for the whole shortlist");
-  assert.equal(Object.keys(requests[0].questions).length, 2, "only database-eligible sections are judged");
-  const wire = JSON.stringify(requests[0]);
-  assert.equal(wire.includes("personal"), false, "the personal hit never reaches Jev");
-  assert.equal(wire.includes("40000000-0000-0000-0000-00000000000"), false, "revision ids never reach Jev");
-  const shortlist = db.calls.find(call => call.sql.includes("shared-shortlist"));
-  assert.match(shortlist.sql, /d\.visibility='shared' and s\.status='active' and s\.current_revision_id is not null/);
-  assert.deepEqual(shortlist.params[0], ["30000000-0000-0000-0000-000000000099",
-    "30000000-0000-0000-0000-000000000001", SECOND.section_id]);
-  assert.equal(shortlist.params[1], 10);
-  const capture = db.calls.find(call => call.sql.includes("capture_sourced_work_request"));
-  assert.equal(capture.params[0], "doctrine:neon-database-sop#06-credentials-and-incidents");
-  assert.equal(capture.params[4], SECOND.section_id);
-  assert.equal(capture.params[5], "40000000-0000-0000-0000-000000000002", "exact revision of the chosen row, never the first row's");
-  assert.equal(capture.params.includes(REQUEST.situation), false);
-  assert.deepEqual(result.source_selection, {
-    mode: "noul", judged: true, reason: null, model: "jev-test", requests: 1,
-    shortlist_size: 2, selected_deterministic_rank: 2,
-    ambiguity: { top_rank: 2, second_rank: 1, margin: 0.82, ambiguous: false },
-  });
-});
-
-test("report-problem with the flag on falls back to the first eligible row when Jev fails", async () => {
+test("report-problem never calls optional Jev from its write envelope", async () => {
   const db = rerankFake();
-  db.jevRerank = { posture: { enabled: true, mode: "score" }, ask: async () => { throw new Error("timeout"); } };
+  let asked = 0;
+  db.jevRerank = { posture: { enabled: true, mode: "noul" }, ask: async () => { asked += 1; throw new Error("outside call"); } };
   const result = await executeRegisteredTool(db, { ...ACTOR }, "report-problem", structuredClone(REQUEST));
+  assert.equal(asked, 0);
+  assert.equal(result.source_selection, undefined);
   const capture = db.calls.find(call => call.sql.includes("capture_sourced_work_request"));
   assert.equal(capture.params[4], "30000000-0000-0000-0000-000000000001");
-  assert.equal(capture.params[5], "40000000-0000-0000-0000-000000000001");
-  assert.equal(result.source_selection.judged, false);
-  assert.equal(result.source_selection.reason, "jev_unavailable");
-  assert.equal(result.source_selection.selected_deterministic_rank, 1);
-});
-
-test("report-problem with the flag on still refuses when no shared current source remains", async () => {
-  const db = rerankFake();
-  const original = db.query.bind(db);
-  db.query = async (text, params) => String(text).includes("shared-shortlist")
-    ? (db.calls.push({ sql: text, params }), { rows: [] }) : original(text, params);
-  let asked = 0;
-  db.jevRerank = { posture: { enabled: true, mode: "noul" }, ask: async () => { asked += 1; } };
-  const out = await rejected(() => executeRegisteredTool(db, { ...ACTOR }, "report-problem", structuredClone(REQUEST)));
-  assert.equal(out.error, "current_situation_source_not_found");
-  assert.equal(asked, 0);
-  assert.equal(db.calls.some(call => call.sql.includes("capture_sourced_work_request")), false);
-});
-
-test("report-problem replay with the flag on returns the stored selection without asking Jev again", async () => {
-  const requests = [];
-  const db = rerankFake();
-  db.jevRerank = { posture: { enabled: true, mode: "noul" }, ask: jevPrefers(SECOND.title, { requests }) };
-  const first = await executeRegisteredTool(db, { ...ACTOR }, "report-problem", structuredClone(REQUEST));
-  const replay = await executeRegisteredTool(db, { ...ACTOR }, "report-problem", structuredClone(REQUEST));
-  assert.equal(requests.length, 1);
-  assert.equal(replay.replayed, true);
-  assert.deepEqual(replay.source_selection, first.source_selection);
 });

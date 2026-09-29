@@ -203,6 +203,50 @@ test("beam refuses a taxonomy that is not the pinned snapshot", async () => {
   assert.equal(jev.requests.length, 0);
 });
 
+test("beam refuses edited taxonomy content even when the id and digest are copied", async () => {
+  const forged = structuredClone(DOCTRINE_TAXONOMY_SNAPSHOT);
+  forged.documents[0].title = "An edited title";
+  const jev = fakeJev(() => 0.5);
+  const shortlist = [candidate(1), candidate(2)];
+  const out = await beamRerank({ situation: "x y", candidates: shortlist, askJev: jev.ask, taxonomy: forged });
+  assert.equal(out.judged, false);
+  assert.equal(out.reason, "taxonomy_not_pinned");
+  assert.deepEqual(out.order, shortlist);
+  assert.equal(jev.requests.length, 0);
+});
+
+test("taxonomy snapshot titles contain no hostnames", () => {
+  for (const doc of DOCTRINE_TAXONOMY_SNAPSHOT.documents)
+    assert.doesNotMatch(doc.title, /\b[a-z0-9-]+\.(?:com|net|org|io|ai|co|gov|edu)\b/i, doc.slug);
+});
+
+test("flat reranking rejects missing or malformed token usage", async () => {
+  const shortlist = [candidate(1), candidate(2)];
+  for (const usage of [{}, { input_tokens: 3 }, { output_tokens: 2 },
+    { input_tokens: 0, output_tokens: 0 }, { input_tokens: -1, output_tokens: 2 },
+    { input_tokens: 1.5, output_tokens: 2 }, { input_tokens: "3", output_tokens: 2 }]) {
+    const out = await rerankShortlist({ situation: "x y", candidates: shortlist, variant: "noul",
+      askJev: async () => ({ model: "m", answers: {
+        c00: { type: "noul", noul: 0.1 }, c01: { type: "noul", noul: 0.9 },
+      }, usage }) });
+    assert.equal(out.judged, false, JSON.stringify(usage));
+    assert.equal(out.reason, "invalid_jev_answer");
+    assert.deepEqual(out.order, shortlist);
+  }
+});
+
+test("beam rejects empty token usage at a scored level", async () => {
+  const shortlist = [candidate(1), candidate(2, { doc_slug: "neon-database-sop" })];
+  const out = await beamRerank({ situation: "x y", candidates: shortlist,
+    taxonomy: DOCTRINE_TAXONOMY_SNAPSHOT,
+    askJev: async request => ({ model: "m", usage: {},
+      answers: Object.fromEntries(Object.entries(request.questions).map(([k]) =>
+        [k, { type: "noul", noul: 0.5 }])) }) });
+  assert.equal(out.judged, false);
+  assert.equal(out.reason, "invalid_jev_answer");
+  assert.deepEqual(out.order, shortlist);
+});
+
 test("beam walks class, document, section with K=3, scoring paths in log space", async () => {
   assert.equal(BEAM_WIDTH, 3);
   const docs = [

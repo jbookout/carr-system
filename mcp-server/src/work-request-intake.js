@@ -2,7 +2,6 @@
 // deterministic situation index, capture it, and expose a safe read card. It
 // does not own a lifecycle transition, an executor, or an approval.
 import { searchDoctrineSituations } from "./situation-retrieval.js";
-import { JEV_RERANK_SHORTLIST_MAX, jevRerank } from "./jev-rerank.js";
 import { organizationTenantForActor } from "./identity.js";
 import { deriveRuleDeliverySource, normalizeRuleMapDigest } from "./rule-delivery-source.js";
 
@@ -500,49 +499,6 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
       captured_at: row.captured_at || null, source: sourceProjection(row), ...extra };
   }
 
-  // JEV RERANK TRIAL SEAM, default off. Reached only when the server door
-  // attaches c.jevRerank = { posture, ask, taxonomy } with posture.enabled
-  // (jevRerankPosture(env) over CARR_JEV_RERANK_MODE). Nothing attaches it
-  // today, so production takes the deterministic branch above; the live trial
-  // is the offline harness in evals/retrieval/jev-rerank-eval.mjs. Wiring it
-  // into the Worker owes a receipted ask-jev call made BEFORE the writer
-  // transaction opens, the way mcp.js already prefetches for ask-jev.
-  //
-  // Eligibility is unchanged and stays in the database: the same shared,
-  // active, current filter, in the same retrieval order, bounded to the
-  // shortlist. Jev only reorders those rows; the chosen row's own
-  // current_revision_id is the one captured.
-  async function captureReranked(c, actor, args, hits, rerank) {
-    const eligible = await c.query(
-      `select ranked.section_id, s.current_revision_id
-         from unnest($1::uuid[]) with ordinality as ranked(section_id, ordinal)
-         join doctrine_section s on s.id=ranked.section_id
-         join doctrine_document d on d.id=s.document_id
-        where d.visibility='shared' and s.status='active' and s.current_revision_id is not null
-        order by ranked.ordinal limit $2
-         /* work-request-intake:shared-shortlist */`, [hits.map(hit => hit.section_id), JEV_RERANK_SHORTLIST_MAX]);
-    const shortlist = [];
-    for (const row of eligible.rows) {
-      const hit = hits.find(h => h.section_id === row.section_id);
-      if (!hit || !row.current_revision_id) continue;
-      shortlist.push({ section_id: hit.section_id, doc_slug: hit.doc_slug, section_key: hit.section_key,
-        content_class: hit.content_class, title: hit.title, snippet: hit.snippet, hit, row });
-    }
-    if (!shortlist.length) throw new ToolError({ error: "current_situation_source_not_found" });
-    const outcome = await jevRerank({ mode: rerank.posture.mode, situation: args.situation,
-      candidates: shortlist, askJev: rerank.ask, taxonomy: rerank.taxonomy });
-    // Belt and braces: only an object this function built can be captured.
-    const chosen = shortlist.includes(outcome.order[0]) ? outcome.order[0] : shortlist[0];
-    return captureFromSource(c, actor, args, chosen.hit, chosen.row.current_revision_id, {
-      source_selection: {
-        mode: rerank.posture.mode, judged: outcome.judged, reason: outcome.reason, model: outcome.model,
-        requests: outcome.requests, shortlist_size: shortlist.length,
-        selected_deterministic_rank: shortlist.indexOf(chosen) + 1,
-        ambiguity: outcome.ambiguity,
-      },
-    });
-  }
-
   return {
     "current-work-requests": {
       write: false,
@@ -700,8 +656,6 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
         // ranked source that the database proves is shared, active, and current.
         const hits = retrieval.hits.filter(hit => hit.section_id);
         if (!hits.length) throw new ToolError({ error: "current_situation_source_not_found" });
-        const rerank = c.jevRerank?.posture?.enabled === true ? c.jevRerank : null;
-        if (rerank) return captureReranked(c, actor, args, hits, rerank);
         const shared = await c.query(
           `select ranked.section_id, s.current_revision_id
              from unnest($1::uuid[]) with ordinality as ranked(section_id, ordinal)
