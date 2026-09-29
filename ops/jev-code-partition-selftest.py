@@ -200,6 +200,26 @@ class PartitionText(unittest.TestCase):
 
 
 class DedupeAndPack(unittest.TestCase):
+    def test_distinct_string_literal_whitespace_is_not_deduped(self):
+        files = {"a.py": "def label():\n    return 'a b'\n",
+                 "b.py": "def label():\n    return 'a  b'\n"}
+        regions, stats = part.partition(sorted(files), reader=files.__getitem__)
+        self.assertEqual({r["path"] for r in regions}, {"a.py", "b.py"})
+        self.assertEqual(stats["exact_duplicates"], 0)
+
+    def test_packed_region_sends_every_claimed_source_line(self):
+        shared = "def shared():\n    return 7919\n"
+        source = ("def first():\n    return 104729\n\n" + shared + "\n"
+                  "def last():\n    return 1299709\n")
+        files = {"a.py": shared, "b.py": source}
+        regions, _ = part.partition(sorted(files), reader=files.__getitem__)
+        anchor_line = source.splitlines().index("    return 7919") + 1
+        spanning = [r for r in regions if r["path"] == "b.py"
+                    and r["line"] <= anchor_line <= r["end_line"]]
+        self.assertTrue(spanning, "the packed location claims the middle function")
+        self.assertTrue(any("    return 7919" in r["code"] for r in spanning),
+                        "a claimed line must be present in the code sent to Jev")
+
     def test_exact_repeat_across_files_is_judged_once(self):
         files = {"a.py": PY, "b.py": PY}
         regions, stats = part.partition(sorted(files), reader=files.__getitem__)
@@ -327,6 +347,41 @@ class VerifyEdit(unittest.TestCase):
             self.assertEqual(result["verdict"], "not_verified")
             self.assertIn("error", result)
 
+    def test_tracked_symlink_cannot_overwrite_an_external_file(self):
+        outside = Path(self.tmp.name, "outside.py")
+        outside.write_bytes(self.before)
+        os.unlink(self.target)
+        os.symlink(outside, self.target)
+        subprocess.run(["git", "add", "ops/thing.py"], cwd=self.repo,
+                       env=self.env, check=True, capture_output=True)
+        subprocess.run(["git", "-c", "user.email=t@example.invalid",
+                        "-c", "user.name=t", "commit", "-qm", "symlink fixture"],
+                       cwd=self.repo, env=self.env, check=True, capture_output=True)
+        result = self.verify("def f():\n    return 2\n")
+        self.assertEqual(result["verdict"], "not_verified", result)
+        self.assertIn("error", result)
+        self.assertEqual(outside.read_bytes(), self.before)
+        self.assertLiveTreeUntouched()
+
+    def test_tracked_directory_symlink_cannot_overwrite_an_external_file(self):
+        outside_dir = Path(self.tmp.name, "outside")
+        outside_dir.mkdir()
+        outside = outside_dir / "target.py"
+        outside.write_text("ORIGINAL\n")
+        os.symlink(outside_dir, os.path.join(self.repo, "ops", "linked"))
+        subprocess.run(["git", "add", "ops/linked"], cwd=self.repo,
+                       env=self.env, check=True, capture_output=True)
+        subprocess.run(["git", "-c", "user.email=t@example.invalid",
+                        "-c", "user.name=t", "commit", "-qm", "directory symlink fixture"],
+                       cwd=self.repo, env=self.env, check=True, capture_output=True)
+        result = part.verify_edit({"path": "ops/linked/target.py", "new_text": "CHANGED\n"},
+                                  repo=self.repo, env=self.env,
+                                  checks=lambda _rel, _wt: [("ok", [sys.executable, "-c", "pass"])])
+        self.assertEqual(result["verdict"], "not_verified", result)
+        self.assertIn("error", result)
+        self.assertEqual(outside.read_text(), "ORIGINAL\n")
+        self.assertLiveTreeUntouched()
+
 
 class PilotScoring(unittest.TestCase):
     def items(self):
@@ -392,6 +447,16 @@ class PilotScoring(unittest.TestCase):
 
 
 class Corpus(unittest.TestCase):
+    def test_each_covered_anchor_is_in_code_sent_to_the_judge(self):
+        data, items = pilot.load_corpus()
+        regions, _ = part.partition(sorted({item["path"] for item in items}))
+        for item in items:
+            if item["stale"]:
+                continue
+            for region in pilot.covering(item, regions):
+                self.assertIn(item["anchor"], region["code"].splitlines(),
+                              (item["id"], region["path"], region["line"]))
+
     def test_labels_are_real_questions_and_items_resolve(self):
         data, items = pilot.load_corpus()
         self.assertGreaterEqual(len(items), 30)

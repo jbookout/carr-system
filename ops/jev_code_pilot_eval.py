@@ -102,7 +102,7 @@ def covering(item, regions):
 
 
 def duplicate_rate(regions, digest):
-    """Share of regions that add no new lines: identical normalised text to an
+    """Share of regions that add no new lines: identical text to an
     earlier region anywhere, or at least half their lines already inside an
     earlier region in the same file."""
     if not regions:

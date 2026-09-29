@@ -20,7 +20,7 @@ file into the units a reviewer reads:
 
 Then it dedupes: a partition wholly inside a kept whole-function partition is
 dropped (the judgment already read those lines), and a partition whose
-whitespace-normalised text is identical to one already kept is judged once and
+exact text is identical to one already kept is judged once and
 carries every location in `also_at`. Adjacent small partitions in one file are
 packed into one region up to the size cap, because each region is one request.
 
@@ -45,6 +45,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -84,12 +85,8 @@ def tracked_sources(repo=REPO):
             if f.endswith(SUFFIXES) and not any(p in f for p in EXCLUDE_PARTS)]
 
 
-def normalise(text):
-    return re.sub(r"\s+", " ", text).strip()
-
-
 def digest(text):
-    return hashlib.sha256(normalise(text).encode("utf-8")).hexdigest()
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 # --- spans ---------------------------------------------------------------
@@ -469,7 +466,8 @@ def dedupe(parts):
     return kept, stats
 
 
-def pack(parts, cap=MAX_REGION_CHARS, small=PACK_BELOW_CHARS):
+def pack(parts, cap=MAX_REGION_CHARS, small=PACK_BELOW_CHARS,
+         source_lines=None):
     """Merge runs of small adjacent partitions in one file into one region.
 
     Each region is one request, so twenty three-line helpers in a row cost
@@ -479,14 +477,20 @@ def pack(parts, cap=MAX_REGION_CHARS, small=PACK_BELOW_CHARS):
     out = []
     for p in parts:
         prev = out[-1] if out else None
+        candidate = None
+        if prev and prev["path"] == p["path"] and p["line"] > prev["end_line"]:
+            if source_lines is not None:
+                candidate = _text(source_lines[p["path"]], prev["line"], p["end_line"])
+            elif p["line"] == prev["end_line"] + 1:
+                candidate = prev["code"] + "\n" + p["code"]
         if (prev and prev["path"] == p["path"] and p["chars"] < small
                 and prev["chars"] < cap and p["line"] > prev["end_line"]
-                and prev["chars"] + p["chars"] + 1 <= cap
+                and candidate is not None and len(candidate) <= cap
                 and not prev.get("also_at") and not p.get("also_at")
                 and prev["sent_end_line"] == prev["end_line"]
                 and p["sent_end_line"] == p["end_line"]):
-            prev["code"] = prev["code"] + "\n" + p["code"]
-            prev["chars"] += p["chars"] + 1
+            prev["code"] = candidate
+            prev["chars"] = len(candidate)
             prev["end_line"] = p["end_line"]
             prev["sent_end_line"] = p["sent_end_line"]
             if p["kind"] not in prev["kind"].split("+"):
@@ -501,17 +505,18 @@ def pack(parts, cap=MAX_REGION_CHARS, small=PACK_BELOW_CHARS):
 def partition(paths, repo=REPO, reader=None):
     """Partition, dedupe and pack `paths`. Returns (regions, stats)."""
     read = reader or (lambda rel: _read(os.path.join(repo, rel)))
-    raw, timings, dropped = [], [], {}
+    raw, timings, dropped, source_lines = [], [], {}, {}
     for rel in paths:
         try:
             text = read(rel)
         except OSError:
             continue
+        source_lines[rel] = text.splitlines()
         t0 = time.perf_counter()
         raw.extend(partition_text(rel, text, dropped))
         timings.append(time.perf_counter() - t0)
     kept, stats = dedupe(raw)
-    regions = pack(kept)
+    regions = pack(kept, source_lines=source_lines)
     stats.update(dropped)
     stats.update({"files": len(paths), "regions": len(regions),
                   "partition_seconds_p95": percentile(timings, 95),
@@ -614,6 +619,36 @@ def default_checks(rel, worktree, repo=REPO):
     return checks
 
 
+def _write_edit(worktree, rel, new_text):
+    """Write within the disposable tree without following any path symlink."""
+    parts = rel.split("/")
+    directory = os.open(worktree, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for name in parts[:-1]:
+            try:
+                os.mkdir(name, dir_fd=directory)
+            except FileExistsError:
+                pass
+            child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=directory)
+            os.close(directory)
+            directory = child
+        try:
+            target = os.open(parts[-1], os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                             0o644, dir_fd=directory)
+        except FileExistsError:
+            target = os.open(parts[-1], os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                             dir_fd=directory)
+            if not stat.S_ISREG(os.fstat(target).st_mode):
+                os.close(target)
+                raise OSError("edit target is not a regular file")
+            os.ftruncate(target, 0)
+        with os.fdopen(target, "w", encoding="utf-8") as handle:
+            handle.write(new_text)
+    finally:
+        os.close(directory)
+
+
 def verify_edit(edit, *, repo=REPO, checks=None, env=None, timeout=600):
     """Run the normal checks against a proposed edit. Never applies it.
 
@@ -627,7 +662,8 @@ def verify_edit(edit, *, repo=REPO, checks=None, env=None, timeout=600):
     result = {"path": rel, "verdict": "not_verified", "checks": [],
               "applied_to_live_tree": False}
     if not isinstance(rel, str) or not isinstance(new_text, str) or \
-            os.path.isabs(rel) or ".." in rel.split("/"):
+            os.path.isabs(rel) or any(part in ("", ".", "..")
+                                      for part in rel.split("/")):
         result["error"] = "edit needs a repo-relative path and new_text"
         return result
     env = env or _git_env()
@@ -640,10 +676,11 @@ def verify_edit(edit, *, repo=REPO, checks=None, env=None, timeout=600):
         if add.returncode != 0:
             result["error"] = "worktree: " + (add.stderr or "")[-300:]
             return result
-        target = os.path.join(worktree, rel)
-        os.makedirs(os.path.dirname(target), exist_ok=True)
-        with open(target, "w", encoding="utf-8") as handle:
-            handle.write(new_text)
+        try:
+            _write_edit(worktree, rel, new_text)
+        except OSError as exc:
+            result["error"] = f"edit path is unsafe or unwritable: {type(exc).__name__}"
+            return result
         plan = checks(rel, worktree) if callable(checks) else \
             default_checks(rel, worktree, repo)
         all_ran, all_passed = True, True
