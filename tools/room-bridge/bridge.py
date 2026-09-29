@@ -941,6 +941,7 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
                         include_reply=publishes_sync_reply,
                         retry_protocol_errors=is_flash_local,
                         post_completion=post_sync_completion if publishes_sync_reply else None,
+                        completion_dir=state_path.parent / (state_path.name + ".queue-completions"),
                     )
                     queue_scan_complete = queue_scan_complete and bool(
                         getattr(queue_executor, "last_ready_scan_complete", False))

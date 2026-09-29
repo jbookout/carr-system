@@ -33,7 +33,7 @@ def output(end=None, text="Safe Methods", before=None):
 
 
 class GrokTests(unittest.TestCase):
-    def _run_queued_grok(self, *, fail_post=False):
+    def _run_queued_grok(self, *, fail_post=False, recover_transition=False):
         answer = "Safe methods: https://www.rfc-editor.org/rfc/rfc9110.html#section-9.2.1"
         protocol = 'CARR_QUEUE_RESULT {"v":1,"task_id":"t_grok0001","outcome":"success","summary":"Retrieved RFC."}'
         meta = {"v": 1, "target": "grok", "cap": "read", "finish": "done",
@@ -48,12 +48,27 @@ class GrokTests(unittest.TestCase):
         executor = queue_dispatch.QueueDeskExecutor(catalog=catalog, adapter=adapter)
         service = kanban_adapter.QueueService(catalog=catalog, adapter=adapter)
         posted = []
+        completion_bodies = {}
+
+        if recover_transition:
+            complete = adapter.complete
+
+            def crash_once(*args):
+                adapter.complete = complete
+                raise OSError("terminal transition unavailable")
+            adapter.complete = crash_once
 
         def post(**kw):
             if "queue_completion" in json.loads(kw["body"]):
                 self.assertEqual(adapter.status[card["id"]], "running")
                 if fail_post:
                     raise RuntimeError("room publication unavailable")
+                key = kw["idempotency_key"]
+                if key in completion_bodies:
+                    if completion_bodies[key] != kw["body"]:
+                        raise RuntimeError("key_reuse")
+                    return {"ok": True}
+                completion_bodies[key] = kw["body"]
             posted.append(kw)
             return {"ok": True}
 
@@ -71,14 +86,24 @@ class GrokTests(unittest.TestCase):
                     mock.patch.object(subprocess, "Popen", side_effect=AssertionError("live process denied")), \
                     mock.patch.object(socket.socket, "connect", side_effect=AssertionError("live network denied")), \
                     mock.patch.dict(os.environ, {"CARR_ENGINEERING_DISPATCH_ENABLED": "false"}):
-                summary = bridge.run_once(
-                    registry=reg, state_path=root / "state.json", results_path=root / "results.jsonl",
-                    desk_state_dir=root / "desk-state", read_room=lambda *_a, **_k: {"turns": []},
-                    add_room_turn=post, queue_service=service, queue_executor=executor,
-                    queue_projector=lambda **_k: [], probe_auth=lambda _e: True,
-                    session_probe=lambda *_a, **_k: False, host="test-host",
-                    read_profiles=lambda: [], log=lambda _m: None)
-            row = json.loads((root / "results.jsonl").read_text())
+                def cycle(executor):
+                    return bridge.run_once(
+                        registry=reg, state_path=root / "state.json", results_path=root / "results.jsonl",
+                        desk_state_dir=root / "desk-state", read_room=lambda *_a, **_k: {"turns": []},
+                        add_room_turn=post, queue_service=service, queue_executor=executor,
+                        queue_projector=lambda **_k: [], probe_auth=lambda _e: True,
+                        session_probe=lambda *_a, **_k: False, host="test-host",
+                        read_profiles=lambda: [], log=lambda _m: None)
+                if recover_transition:
+                    with self.assertRaisesRegex(OSError, "terminal transition unavailable"):
+                        cycle(executor)
+                    self.assertEqual(adapter.status[card["id"]], "running")
+                    # Hermes expires the workerless claim. A new process must
+                    # finish the published execution without another model call.
+                    adapter.status[card["id"]] = "ready"
+                    executor = queue_dispatch.QueueDeskExecutor(catalog=catalog, adapter=adapter)
+                summary = cycle(executor)
+            row = json.loads((root / "results.jsonl").read_text().splitlines()[0])
         self.assertEqual(provider.call_count, 1)
         return summary, row, adapter, posted, answer
 
@@ -108,6 +133,17 @@ class GrokTests(unittest.TestCase):
         self.assertFalse(any(c[0] in {"complete", "block", "request_review"} for c in adapter.calls))
         self.assertFalse(any("queue_completion" in json.loads(p["body"]) for p in posted))
         self.assertTrue(any("heartbeat" in json.loads(p["body"]) for p in posted))
+
+    def test_published_completion_survives_terminal_failure_and_bridge_restart(self):
+        summary, row, adapter, posted, answer = self._run_queued_grok(recover_transition=True)
+        self.assertEqual(summary["errors"], [])
+        self.assertEqual(adapter.status["t_grok0001"], "done")
+        completions = [json.loads(p["body"])["queue_completion"] for p in posted
+                       if "queue_completion" in json.loads(p["body"])]
+        self.assertEqual(len(completions), 1)
+        self.assertEqual(completions[0]["reply"], answer)
+        self.assertEqual(completions[0]["dispatch_msg_id"], row["msg_id"])
+        self.assertEqual(completions[0]["provider_metadata"], row["provider_metadata"])
 
     def test_actual_model_comes_from_provider_and_text_is_joined(self):
         result = grok_wire.parse_result(output(before=[{"type": "text", "data": "RFC "}]), 0)
