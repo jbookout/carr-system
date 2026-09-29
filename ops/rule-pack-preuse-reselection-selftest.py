@@ -812,27 +812,44 @@ check("process() returns None (no injection, no selector call) for a non-match",
 
 # Verb match injects: the Agent tool exactly matches the council trigger.
 agent_call = gen_payload(tool="Agent", tool_input={"description": "spawn helper", "prompt": "zzz"})
-check("matched_triggers finds exactly the council verb trigger for an Agent call",
-      [r["trigger_id"] for r in rail.matched_triggers(agent_call)] == [council_row["trigger_id"]])
-agent_runner = Runner(gen_selector_result(packs=council_row["packs"], ids=council_row["rule_ids"]))
+# Rule ede4b241 (cloud model choice) adds a second verb trigger on the same
+# dispatch moment, so an Agent call hits the council trigger AND the model-choice
+# trigger; the council trigger alone still carries its own five rules.
+model_choice_row = next(row for row in TRIGGER_ROWS.values()
+                        if row["kind"] == "verb" and "ede4b241" in row["rule_ids"])
+check("model-choice trigger delivers only rule ede4b241 via delegation-council",
+      model_choice_row["rule_ids"] == ["ede4b241"]
+      and model_choice_row["packs"] == ["delegation-council"])
+check("matched_triggers finds the council and model-choice verb triggers for an Agent call",
+      sorted(r["trigger_id"] for r in rail.matched_triggers(agent_call))
+      == sorted([council_row["trigger_id"], model_choice_row["trigger_id"]]))
+agent_rows = [council_row, model_choice_row]
+agent_packs = sorted({p for r in agent_rows for p in r["packs"]})
+agent_ids = sorted({i for r in agent_rows for i in r["rule_ids"]})
+agent_trigger_ids = sorted(r["trigger_id"] for r in agent_rows)
+agent_runner = Runner(gen_selector_result(packs=agent_packs, ids=agent_ids))
 agent_output = rail.process(agent_call, runner=agent_runner)
 agent_row = json.loads(context(agent_output))
 check("verb-match Agent call fires exactly one selector call",
       len(agent_runner.calls) == 1)
-check("generalized selector call declares the matched trigger's exact packs and rule_ids",
+check("generalized selector call declares the matched triggers' merged packs and rule_ids",
       agent_runner.calls[0][0][0] == [
           str(REPO / "run.sh"), "call", "standing-context",
-          json.dumps({"packs": council_row["packs"], "rule_ids": council_row["rule_ids"]},
+          json.dumps({"packs": agent_packs, "rule_ids": agent_ids},
                      sort_keys=True, separators=(",", ":"))])
 check("generalized receipt uses the new schema and passes its own validator",
       agent_row["schema"] == rail.GENERALIZED_RECEIPT_SCHEMA
       and contract.validate_generalized_receipt(agent_row, repo=REPO))
-check("generalized receipt binds exactly the matched trigger, packs, and rule_ids",
-      agent_row["trigger_ids"] == [council_row["trigger_id"]]
-      and agent_row["packs"] == council_row["packs"]
-      and agent_row["rule_ids"] == council_row["rule_ids"])
+check("generalized receipt binds exactly the matched triggers, packs, and rule_ids",
+      agent_row["trigger_ids"] == agent_trigger_ids
+      and agent_row["packs"] == agent_packs
+      and agent_row["rule_ids"] == agent_ids)
+# The cap lives per trigger in the compiler (lib/rule_delivery_preuse.py,
+# merge_trigger_delivery): an Agent call hits two triggers, so the merged set
+# may exceed one trigger's cap, and each matched trigger must stay inside it.
 check("over-delivery stays inside the compiler's per-trigger cap",
-      len(agent_row["rule_ids"]) <= MAX_PER_TRIGGER)
+      all(len(r["rule_ids"]) <= MAX_PER_TRIGGER for r in agent_rows)
+      and set(agent_row["rule_ids"]) == set(agent_ids))
 check("original scheduled-automation receipt fields are absent from the generalized shape",
       "pack" not in agent_row and "triggers_digest" in agent_row)
 
@@ -846,6 +863,36 @@ write_output = rail.process(
 write_row = json.loads(context(write_output))
 check("path_pattern match delivers exactly the structural extra rule",
       write_row["rule_ids"] == path_row["rule_ids"] and write_row["packs"] == path_row["packs"])
+# Cloud model choice fires on a cloud-session dispatch and stays silent on
+# routine reads, including the read-only calls of the same remote server.
+for dispatch_tool in ("mcp__Claude_Code_Remote__create_session",
+                      "mcp__Claude_Code_Remote__create_trigger"):
+    dispatch_call = gen_payload(tool=dispatch_tool, tool_input={"prompt": "fix the bug", "model": "sonnet"})
+    check(f"{dispatch_tool} hits the model-choice trigger",
+          model_choice_row["trigger_id"]
+          in [r["trigger_id"] for r in rail.matched_triggers(dispatch_call)])
+model_runner = Runner(gen_selector_result(packs=model_choice_row["packs"], ids=model_choice_row["rule_ids"]))
+model_output = rail.process(
+    gen_payload(tool="mcp__Claude_Code_Remote__create_session",
+                tool_input={"prompt": "fix the bug", "model": "sonnet"}), runner=model_runner)
+model_receipt = json.loads(context(model_output))
+check("a cloud-session dispatch delivers rule ede4b241 in one selector call",
+      len(model_runner.calls) == 1 and "ede4b241" in model_receipt["rule_ids"]
+      and model_receipt["trigger_ids"] == [model_choice_row["trigger_id"]], model_receipt)
+for routine_tool, routine_input in (
+        ("Read", {"file_path": "README.md"}), ("Grep", {"pattern": "model"}),
+        ("Glob", {"pattern": "*.py"}), ("Bash", {"command": "git status"}),
+        ("mcp__Claude_Code_Remote__list_sessions", {}),
+        ("mcp__Claude_Code_Remote__get_session", {"session_id": "x"}),
+        ("mcp__Claude_Code_Remote__list_repos", {})):
+    routine_hits = [r["trigger_id"] for r in
+                    rail.matched_triggers(gen_payload(tool=routine_tool, tool_input=routine_input))]
+    check(f"{routine_tool} stays silent for the model-choice trigger",
+          model_choice_row["trigger_id"] not in routine_hits, routine_hits)
+silent_runner = Runner()
+check("a routine Read delivers nothing and makes no selector call",
+      rail.process(gen_payload(tool="Read", tool_input={"file_path": "README.md"}),
+                   runner=silent_runner) is None and silent_runner.calls == [])
 missing_session = gen_payload(tool="Agent", tool_input={"description": "spawn helper", "prompt": "zzz"})
 missing_session["session_id"] = ""
 missing_session_runner = Runner()

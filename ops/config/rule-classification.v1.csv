@@ -176,6 +176,7 @@ e4d965d9,layer0,a,telling a partner something cannot be done
 e65efc68,pack,c,"building any gate, hook, linter, or CI validator"
 e8868cbe,control,d,completion_evidence gate
 eaa31ac5,control,d,completion_evidence gate (delivery claim)
+ede4b241,pack,b,dispatching work to another model or launching a cloud session (model choice)
 ede4c735,pack,b,writing any prospect-visible draft
 eeb3d106,pack,c,building or reviewing any CARR workstation surface
 efbdfb1a,pack,a,"after a non-trivial build works, before shipping"

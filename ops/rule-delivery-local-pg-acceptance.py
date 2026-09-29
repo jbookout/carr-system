@@ -58,6 +58,9 @@ POST_0478_ACTIVATION_DIGEST = "eebfa2d627dfbbc65ae06e623724487158b940c9376cd30db
 # cutover targets. Migration 0483 carries that guarded forward repin.
 POST_0483_ACTIVATION_DIGEST = "784e05273341f5f7c16f96d1f0fb1516d8c605cb3287dec32aa37a1211dd0cb8"
 POST_0554_ACTIVATION_DIGEST = "c6e89d64de575b9c6e39c8c88cd6a32e97e494b381a7ac4433026c4a3fe63c2a"
+# EIGHTH LINK as of 2026-09-29. Rule ede4b241 (cloud model choice) entering the
+# reviewed map moved its digest; migration 0749 carries the guarded forward repin.
+POST_0749_ACTIVATION_DIGEST = "43ac7f513c173114b1723a886baf56a83ec40e7fef8b187ed3dead7d16d90ada"
 ACTIVATION_TO_TEST_REF = (
     "ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; "
     "ops/rule-pack-preuse-reselection-selftest.py"
@@ -133,10 +136,10 @@ def main() -> int:
                       count(*) filter (where map_digest=%s),
                       count(*) filter (where short_id=any(%s))
                  from ops.rule_delivery_activation_target""",
-            (POST_0554_ACTIVATION_DIGEST, sorted(EXPECTED_IDS)),
+            (POST_0749_ACTIVATION_DIGEST, sorted(EXPECTED_IDS)),
         )
         post_migrate = one(cur)
-        check("the real post-migrate state is the exact eight on the 0554 map",
+        check("the real post-migrate state is the exact eight on the 0749 map",
               post_migrate == (len(EXPECTED_IDS), len(EXPECTED_IDS), len(EXPECTED_IDS)),
               str(post_migrate))
 
@@ -449,6 +452,22 @@ def main() -> int:
             (POST_0554_ACTIVATION_DIGEST,),
         )
         check("the post-0554 fixture is the exact eight on the reviewed map",
+              one(cur)[0] == len(EXPECTED_IDS))
+        # EIGHTH LINK: 0749 binds the 210-rule map after rule ede4b241 entered it.
+        cur.execute(
+            """update ops.rule_delivery_activation_target
+                  set map_digest=%s
+                where map_digest=%s""",
+            (POST_0749_ACTIVATION_DIGEST, POST_0554_ACTIVATION_DIGEST),
+        )
+        check("0749 repins exactly the eight post-0554 targets",
+              cur.rowcount == len(EXPECTED_IDS))
+        cur.execute(
+            """select count(*) from ops.rule_delivery_activation_target
+                where map_digest=%s""",
+            (POST_0749_ACTIVATION_DIGEST,),
+        )
+        check("the post-0749 fixture is the exact eight on the reviewed map",
               one(cur)[0] == len(EXPECTED_IDS))
         cur.execute("""insert into actor (slug,kind,display_name) values ('joe','human','Joe')
                        on conflict (slug) do nothing returning id""")

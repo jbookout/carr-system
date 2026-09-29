@@ -153,6 +153,42 @@ check("structural_extra count matches the hand-reviewed list",
       sum(1 for t in bare_doc["triggers"] if t["source"] == "structural_extra")
       == len(compiler.STRUCTURAL_EXTRA_TRIGGERS))
 
+# 9. rule ede4b241 (cloud model choice, taught 2026-09-29): JIT-home, delivered
+# by the delegation-council pack on the moment a session dispatches work to
+# another model or a cloud session, and on nothing else.
+import re
+
+MODEL_CHOICE = "ede4b241"
+routing_rows = [t for t in triggers if MODEL_CHOICE in t["rule_ids"]]
+check("cloud model choice rule ede4b241 is in the enforcement map",
+      MODEL_CHOICE in MAP["rule_controls"] and MODEL_CHOICE in MAP["active_rule_ids"]["shared"])
+check("cloud model choice rule is a JIT-home rule delivered by delegation-council",
+      MODEL_CHOICE in JIT_IDS
+      and MAP["rule_load_layers"].get(MODEL_CHOICE)
+      == {"load_layer": "pack", "packs": ["delegation-council"],
+          "why": MAP["rule_load_layers"].get(MODEL_CHOICE, {}).get("why")})
+check("cloud model choice rule compiles to exactly one seeded verb trigger",
+      len(routing_rows) == 1 and routing_rows[0]["kind"] == "verb"
+      and routing_rows[0]["source"] == "seeded_detector"
+      and routing_rows[0]["packs"] == ["delegation-council"]
+      and routing_rows[0]["rule_ids"] == [MODEL_CHOICE], routing_rows)
+if len(routing_rows) == 1:
+    routing_pattern = re.compile(routing_rows[0]["pattern"])
+    dispatch_verbs = ["Agent", "mcp__Claude_Code_Remote__create_session",
+                      "mcp__Claude_Code_Remote__create_trigger"]
+    routine_verbs = ["Read", "Grep", "Glob", "Bash", "Edit", "Write",
+                     "mcp__Claude_Code_Remote__list_sessions",
+                     "mcp__Claude_Code_Remote__get_session",
+                     "mcp__Claude_Code_Remote__list_repos",
+                     "mcp__Claude_Code_Remote__get_trigger",
+                     "mcp__github__get_file_contents"]
+    check("model-choice trigger matches every dispatch verb",
+          all(routing_pattern.search(v) for v in dispatch_verbs),
+          [v for v in dispatch_verbs if not routing_pattern.search(v)])
+    check("model-choice trigger matches no routine read or edit verb",
+          not any(routing_pattern.search(v) for v in routine_verbs),
+          [v for v in routine_verbs if routing_pattern.search(v)])
+
 if FAILURES:
     print("rule-jit-compile-selftest: FAIL")
     for failure in FAILURES:
