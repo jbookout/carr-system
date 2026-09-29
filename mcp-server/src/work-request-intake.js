@@ -480,6 +480,25 @@ export function actingIdentityProjection(rows) {
 }
 
 export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) {
+  // One capture path for both source selections, so the revision passed here
+  // is always the one the database returned for THIS section in this
+  // transaction.
+  async function captureFromSource(c, actor, args, source, revisionId, extra = {}) {
+    const captured = await c.query(
+      `select * from ops.capture_sourced_work_request($1::text, $2::text, $3::text,
+         $4::jsonb, $5::uuid, $6::uuid, $7::uuid)
+         /* work-request-intake:capture */`,
+      [`doctrine:${source.doc_slug}#${source.section_key}`, args.title.trim(), args.desired_outcome.trim(),
+        JSON.stringify(args.acceptance_criteria), source.section_id, revisionId, args.idempotency_key]);
+    const row = captured.rows[0];
+    if (!row) throw new ToolError({ error: "work_request_capture_refused" });
+    await writeEvent(c, actor, "report-problem", "ops_work_request", row.id, {
+      field: "state", new: { state: "captured", source_ref: `doctrine:${source.doc_slug}#${source.section_key}` }, idempotency_key: args.idempotency_key,
+    });
+    return { ok: true, human_ref: row.ref, state: row.state, version: Number(row.version),
+      captured_at: row.captured_at || null, source: sourceProjection(row), ...extra };
+  }
+
   return {
     "current-work-requests": {
       write: false,
@@ -649,20 +668,7 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
         const source = selected && hits.find(hit => hit.section_id === selected.section_id);
         if (!source || !selected.current_revision_id)
           throw new ToolError({ error: "current_situation_source_not_found" });
-        const revisionId = selected.current_revision_id;
-        const captured = await c.query(
-          `select * from ops.capture_sourced_work_request($1::text, $2::text, $3::text,
-             $4::jsonb, $5::uuid, $6::uuid, $7::uuid)
-             /* work-request-intake:capture */`,
-          [`doctrine:${source.doc_slug}#${source.section_key}`, args.title.trim(), args.desired_outcome.trim(),
-            JSON.stringify(args.acceptance_criteria), source.section_id, revisionId, args.idempotency_key]);
-        const row = captured.rows[0];
-        if (!row) throw new ToolError({ error: "work_request_capture_refused" });
-        await writeEvent(c, actor, "report-problem", "ops_work_request", row.id, {
-          field: "state", new: { state: "captured", source_ref: `doctrine:${source.doc_slug}#${source.section_key}` }, idempotency_key: args.idempotency_key,
-        });
-        return { ok: true, human_ref: row.ref, state: row.state, version: Number(row.version),
-          captured_at: row.captured_at || null, source: sourceProjection(row) };
+        return captureFromSource(c, actor, args, source, selected.current_revision_id);
         });
       },
     },
