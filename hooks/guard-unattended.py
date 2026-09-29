@@ -806,7 +806,14 @@ def derived_hosts():
 
 def host_allowlisted(host):
     """True if host is on the code list OR the record-derived list."""
-    host = (host or "").strip(".").lower()
+    host = (host or "").strip().lower()
+    normalized = host.strip(".")
+    # The app host is a single allowed origin, not a suffix for subdomains.
+    if normalized == "app.doctorcre.com":
+        return host == "app.doctorcre.com"
+    if normalized.endswith(".app.doctorcre.com"):
+        return False
+    host = normalized
     if not host:
         return False
     for k in KNOWN_HOSTS:

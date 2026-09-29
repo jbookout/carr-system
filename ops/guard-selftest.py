@@ -106,8 +106,14 @@ case("claude.com read", fetch("https://claude.com/claude-code"), ALLOW)
 # route must be reachable for a live, unauthenticated sign-in check.
 case("DoctorCRE app production route is allowed",
      bash("curl -sS -D - -o /dev/null https://app.doctorcre.com/progress-board"), ALLOW)
+case("DoctorCRE app subdomain is blocked",
+     bash("curl https://x.app.doctorcre.com/progress-board"), DENY)
+case("DoctorCRE app prefix lookalike is blocked",
+     bash("curl https://myapp.doctorcre.com/progress-board"), DENY)
 case("DoctorCRE app lookalike remains blocked",
      bash("curl https://app.doctorcre.com.evil.example/progress-board"), DENY)
+case("DoctorCRE app trailing-dot variant is blocked",
+     bash("curl https://app.doctorcre.com./progress-board"), DENY)
 
 # Joe's own private Tailscale tailnet (tailc8cc93.ts.net), added 2026-09-23 so
 # his Mac Studio's local model server ("flash-next") is reachable from his
