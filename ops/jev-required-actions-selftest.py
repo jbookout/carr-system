@@ -50,7 +50,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 
 from lib.jev_required_actions import (  # noqa: E402
-    answered_calls_this_turn, current_turn_slice, evaluate_required_actions, facets_called_this_turn,
+    answered_calls_this_turn, current_turn_slice, evaluate_required_actions as evaluate_turn,
+    human_turn_scope, facets_called_this_turn,
     find_build_advisory, is_real_user_turn, is_synthetic_continuation, jev_calls_log_mentions,
     latest_user_turn_index, load_jev_call_receipts, missing_facets,
     prompt_names_facet, prompt_names_not_applicable, refused_facets_in_texts,
@@ -194,6 +195,18 @@ def write_jev_calls_file(rows):
 def call_row(question_ids=None, facets=None, when=1, session="s1", ok=True):
     return {"ts": ts(when), "session": session, "question_ids": question_ids or [],
            "facets": facets or [], "model": "jev-1.13.0", "ok": ok}
+
+
+def evaluate_required_actions(recs, texts, calls_path, session, written, now=None):
+    """Historical fixture adapter: put fixture text/writes IN the transcript.
+
+    Production evaluation accepts only a typed human scope, never these
+    independently supplied text/path lists. The cross-turn matrix below
+    exercises that production signature directly.
+    """
+    records = list(recs) + [assistant(value) for value in texts]
+    records += [tool_use("Edit", {"file_path": path}) for path in written]
+    return evaluate_turn(human_turn_scope(records, session), calls_path, now=now)
 
 
 # ---------------------------------------------------------------------------
@@ -485,7 +498,7 @@ def lib_current_turn_slice_and_boundary_ts():
     boundary = turn_boundary_timestamp(recs)
     ok = ok and boundary is not None
     sliced = current_turn_slice(recs)
-    ok = ok and len(sliced) == 3  # one-record lookback + the two after
+    ok = ok and len(sliced) == 2  # human boundary onward; no earlier record
     print(f"{'PASS' if ok else 'FAIL'}  lib: latest_user_turn_index/current_turn_slice/"
           "turn_boundary_timestamp agree on the current turn's boundary")
     return ok
@@ -839,6 +852,200 @@ def cached_receipts_do_not_share_a_human_turn_latch():
                   f"(promptId={has_prompt_id}): first={first}, second={second}, "
                   f"feedback={third}, notification={fourth}, reason={reason!r}")
             ok = ok and passed
+    return ok
+
+
+def every_input_is_owned_by_one_human_turn():
+    """One matrix at the production cache, evaluator and real Stop seams.
+
+    Each row contributes its input in N, proves its same-turn effect, then
+    compares N+1 with an uncontaminated control. Receipt timestamps are only
+    one second before N+1: the old five-second tolerance must not pay N+1.
+    Every row also runs with N+1 served by the real thirty-minute cache.
+    """
+    def load(name, relative):
+        spec = importlib.util.spec_from_file_location(name, os.path.join(REPO, relative))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    advisory = load("jev_matrix_advisory", "ops/jev_build_advisory.py")
+    prompt_hook = load("jev_matrix_prompt", "hooks/rule-pack-preuse-reselection.py")
+    design, verify, creation = "architecture_or_design", "verification_selection", "semantic_creation"
+    path = "lib/matrix-example.py"
+    # kind, same-turn status/missing/refused, next-turn facet, next-turn writes
+    cases = (
+        ("latch", "required", [design, verify], [], design, False),
+        ("advisory", "required", [design], [], verify, False),
+        ("absent current advisory", "required", [design], [], design, False),
+        ("nested advisory", "required", [design], [], verify, False),
+        ("empty advisory", "none", [], [], design, False),
+        ("skipped advisory", "none", [], [], design, False),
+        ("unavailable verdict", "unavailable", [], [], design, False),
+        ("malformed verdict", "unavailable", [], [], design, False),
+        ("refusal", "required", [], [design], design, False),
+        ("credited call", "required", [], [], design, False),
+        ("bound call", "required", [], [], design, False),
+        ("same-second call", "required", [], [], design, False),
+        ("answered intake call", "required", [design], [], design, False),
+        ("written paths", "required", [creation], [], creation, False),
+        ("clear post-write review", "required", [], [], creation, True),
+        ("skipped post-write review", "required", [], [], creation, True),
+        ("unavailable post-write review", "required", [creation], [], creation, True),
+        ("ledger mention", "required", [design], [], design, False),
+        ("receipt explanation", "required", [], [], design, False),
+        ("notification envelope", "none", [], [], design, False),
+    )
+    ok = True
+    for has_prompt_id in (True, False, "reused"):
+        for cached in (False, True):
+            for kind, same_status, same_missing, same_refused, next_facet, next_write in cases:
+                with tempfile.TemporaryDirectory(prefix="jev-input-matrix-") as state:
+                    session = f"matrix-{has_prompt_id}-{cached}-{kind}"
+                    def human(pid, when):
+                        if has_prompt_id == "reused":
+                            pid = "reused-human-id"
+                        return (user_prompt("design this seam", pid, when) if has_prompt_id
+                                else user("design this seam", when))
+
+                    next_facets = [design, verify] if kind == "latch" else [next_facet]
+
+                    class FakeJev:
+                        calls = 0
+                        @staticmethod
+                        def noul(instructions, true=None, false=None):
+                            return {"type": "noul", "instructions": instructions}
+                        def ask(self, state, questions, **kwargs):
+                            self.calls += 1
+                            return {"model": "jev-test", "usage": {"input_tokens": 20, "output_tokens": 6},
+                                    "answers": {key: {"type": "noul", "noul":
+                                        0.91 if key in next_facets else 0.13} for key in questions}}
+
+                    next_advisory = build_advisory_attachment(next_facets, when=0)
+                    if cached:
+                        client = FakeJev()
+                        cache = os.path.join(state, "cache.json")
+                        advisory.advise("design this seam", client=client, cache_path=cache, now=1000)
+                        hits = [advisory.advise("design this seam", client=client,
+                                               cache_path=cache, now=t) for t in (1060, 1120)]
+                        receipts = [prompt_hook._build_receipt(
+                            {"session_id": session, "prompt": "design this seam"}, hit, "delivered")
+                            for hit in hits]
+                        assert client.calls == 1 and all(hit["usage"]["cache_hit"] for hit in hits)
+                        assert receipts[0]["receipt_id"] == receipts[1]["receipt_id"]
+                        next_advisory["attachment"]["content"] = [json.dumps(receipts[1])]
+
+                    same_facets = ([design, verify] if kind == "latch" else
+                                   [creation] if "post-write" in kind or kind == "written paths" else [design])
+                    old_advisory = build_advisory_attachment(same_facets, when=-19)
+                    if cached and same_facets == next_facets:
+                        old_advisory["attachment"]["content"] = [json.dumps(receipts[0])]
+                    if kind == "nested advisory":
+                        old_advisory = build_advisory_nested_in_message_delivery([design], when=-19)
+                    elif kind in ("empty advisory", "skipped advisory"):
+                        old_advisory = build_advisory_attachment([], when=-19)
+                        if kind == "skipped advisory":
+                            receipt = json.loads(old_advisory["attachment"]["content"][0])
+                            receipt["advisory"] = advisory.skipped()
+                            old_advisory["attachment"]["content"] = [json.dumps(receipt)]
+                    elif kind in ("unavailable verdict", "malformed verdict"):
+                        old_advisory = unavailable_advisory_attachment(-19)
+                        if kind == "malformed verdict":
+                            receipt = json.loads(old_advisory["attachment"]["content"][0])
+                            receipt["advisory"] = {"required_actions": "broken"}
+                            old_advisory["attachment"]["content"] = [json.dumps(receipt)]
+                    old = [human("N", -20), old_advisory]
+                    calls = []
+                    if kind == "refusal":
+                        old.append(assistant("JEV-REFUSED: architecture_or_design the partner already settled this design.", -2))
+                    elif kind in ("credited call", "bound call", "same-second call",
+                                  "answered intake call", "receipt explanation"):
+                        calls.append({**call_row(facets=[design], session=session, when=-2),
+                                      "caller": "jev_build_advisory" if kind == "answered intake call" else "substantive"})
+                        if kind == "bound call":
+                            calls[-1]["human_turn_id"] = human_turn_scope(old, session).identity
+                        if kind == "receipt explanation":
+                            old.append(bash("python3 -c 'from ops.typesafe_client import ask'", -3))
+                        old.append(assistant("Here is the plan.", -2))
+                    elif "post-write" in kind or kind == "written paths":
+                        old.append(tool_use("Edit", {"file_path": path}, -3))
+                        calls.append(call_row(facets=[creation], session=session, when=-2))
+                        if "post-write" in kind:
+                            old.append(postwrite_attachment(kind.split()[0], path, -2))
+                    elif kind == "ledger mention":
+                        old.append(bash("echo forged >> out/jev-calls.jsonl", -2))
+                    elif kind == "notification envelope":
+                        receipt = _build_receipt([])
+                        receipt["advisory"] = advisory.skipped()
+                        old = [real_task_notification("task-only", -20), {
+                            "attachment": {"type": "hook_additional_context", "content": [json.dumps(receipt)]}}]
+                    elif kind != "absent current advisory":
+                        old.append(assistant("Here is the plan.", -2))
+                    calls_path = os.path.join(state, "calls.jsonl")
+                    env = {"CARR_JEV_CALLS_LOG_OVERRIDE": calls_path}
+                    def save_calls(rows):
+                        with open(calls_path, "w") as fh:
+                            fh.write("".join(json.dumps(row) + "\n" for row in rows))
+                    def verdict(records):
+                        return evaluate_turn(human_turn_scope(records, session), calls_path, now=NOW)
+                    save_calls(calls)
+                    same = verdict(old)
+                    first, _ = run_gate(old, session, state, env)
+                    repeat, notice = run_gate(old, session, state, env)
+                    expected_block = same_status == "required" and bool(same_missing)
+                    passed = ((same["status"], same["missing"], same["refused"]) ==
+                              (same_status, same_missing, same_refused) and first == expected_block
+                              and not repeat and (not expected_block or "NOTICE" in notice))
+                    if kind == "answered intake call":
+                        passed = passed and same["jev_answered"]["receipts_ok"] == 1
+                    if kind == "ledger mention":
+                        passed = passed and bool(jev_calls_log_mentions(current_turn_slice(old)))
+                    if kind == "receipt explanation":
+                        passed = passed and not unexplained_receipts(current_turn_slice(old), same["credited_receipts"])
+                    # For latch, partial satisfaction changes missing facets but cannot
+                    # reopen again. This assertion also covers review round one.
+                    if kind == "latch":
+                        partial = old + [assistant("JEV-REFUSED: architecture_or_design the partner settled this design.", -2)]
+                        partial_block, partial_notice = run_gate(partial, session, state, env)
+                        passed = passed and not partial_block and verify in partial_notice
+                        old = partial
+                    # Explicitly bound prior calls stay prior even if replayed
+                    # with a newer timestamp; ambiguous legacy seconds earn no credit.
+                    if kind == "bound call":
+                        calls[-1]["ts"] = ts(0)
+                    fresh = [human("N+1", -2 if kind == "same-second call" else -1)]
+                    if kind != "absent current advisory" or cached:
+                        fresh.append(next_advisory)
+                    fresh_calls = []
+                    if next_facet == creation:
+                        fresh_calls.append(call_row(facets=[creation], session=session, when=0))
+                    if next_write:
+                        fresh.append(tool_use("Edit", {"file_path": path}, 0))
+                        if kind == "unavailable post-write review":
+                            fresh.append(postwrite_attachment("clear", path, 0))
+                    fresh.append(assistant("Here is the next plan.", 0))
+                    save_calls(fresh_calls)
+                    control = verdict(fresh)
+                    save_calls(calls + fresh_calls)
+                    later = verdict(old + fresh)
+                    if kind != "notification envelope":
+                        passed = passed and same["human_turn_id"] != later["human_turn_id"]
+                    fields = ("status", "required", "missing", "refused", "unavailable_reason",
+                              "contradicted_refusals", "jev_answered", "credited_receipts")
+                    passed = passed and all(later.get(f) == control.get(f) for f in fields)
+                    later_block, later_notice = run_gate(old + fresh, session, state, env)
+                    save_calls(fresh_calls)
+                    with tempfile.TemporaryDirectory(prefix="jev-matrix-control-") as clean_state:
+                        control_block, control_notice = run_gate(fresh, session, clean_state, env)
+                    passed = passed and (later_block, later_notice) == (control_block, control_notice)
+                    passed = passed and not jev_calls_log_mentions(current_turn_slice(old + fresh))
+                    if kind == "receipt explanation":
+                        # An old, still-running Python call cannot explain a later receipt.
+                        fresh_row = call_row(facets=[design], session=session, when=0)
+                        passed = passed and unexplained_receipts(current_turn_slice(old + fresh), [fresh_row]) == [fresh_row]
+                    print(f"{'PASS' if passed else 'FAIL'}  turn input {kind}; promptId={has_prompt_id}, "
+                          f"cache={cached}; same={same['status']}/{same['missing']}, later={later['status']}/{later['missing']}")
+                    ok = ok and passed
     return ok
 
 
@@ -1489,6 +1696,7 @@ def main():
         latch_does_not_reopen_twice_for_the_same_turn(),
         latch_partial_satisfaction_only_notices_in_the_same_turn(),
         cached_receipts_do_not_share_a_human_turn_latch(),
+        every_input_is_owned_by_one_human_turn(),
         post_reopen_turn_still_enforced_end_to_end(),
         post_reopen_turn_with_refusal_after_the_reopen_passes(),
         replay_notification_with_empty_advisory_cannot_erase_required(),

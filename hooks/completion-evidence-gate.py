@@ -114,8 +114,7 @@ from stop_latch import (  # noqa: E402
 
 sys.path.insert(0, REPO)
 from lib.jev_required_actions import (  # noqa: E402
-    current_turn_slice, evaluate_required_actions, jev_calls_log_mentions,
-    latest_user_turn_index, unexplained_receipts)
+    evaluate_required_actions, human_turn_scope)
 from lib.transcript_read import load_transcript  # noqa: E402
 
 
@@ -1272,18 +1271,17 @@ def jev_required_actions_check(session, recs):
     # notification, Stop feedback and cross-session message), not this hook's
     # own human_turns() window — that one restarts at a task notification,
     # which would drop a JEV-REFUSED line written before it (round 3).
-    window = current_turn_slice(recs)
-    texts = [text(rec, {"assistant"}) for rec in window]
-    written_paths = sorted({p for rec in window for p in file_paths(*tool(rec))})
-    result = evaluate_required_actions(recs, texts, JEV_CALLS_LOG, session, written_paths)
+    turn = human_turn_scope(recs, session)
+    result = evaluate_required_actions(turn, JEV_CALLS_LOG)
     # FORGERY DETECTION ("detectable, not prevented", decision d47931da).
     # ask() is the only legitimate writer of out/jev-calls.jsonl and never
     # names it in a tool command, so any tool call in this turn that does is
     # recorded as a detection event beside the verdict, with the command.
-    mentions = jev_calls_log_mentions(window)
+    mentions = turn.ledger_mentions()
     if mentions:
         jev_audit({"ts": now(), "session": session, "event": "jev_calls_log_named",
                    "turn_key": result.get("turn_key"),
+                   "human_turn_id": turn.identity,
                    "write_like": any(m["write_like"] for m in mentions),
                    "mentions": mentions[:10]})
     # PROVENANCE BACKSTOP (round 4). The mention check above misses an
@@ -1291,10 +1289,11 @@ def jev_required_actions_check(session, recs):
     # Every receipt credited to this turn must line up with a Python tool
     # call (Bash running python, or an Agent in flight) in the transcript;
     # one that does not is recorded, never blocked.
-    unexplained = unexplained_receipts(recs, result.get("credited_receipts") or [])
+    unexplained = turn.unexplained(result.get("credited_receipts") or [])
     if unexplained:
         jev_audit({"ts": now(), "session": session, "event": "jev_receipt_unexplained",
-                   "turn_key": result.get("turn_key"), "receipts": unexplained[:10]})
+                   "turn_key": result.get("turn_key"), "human_turn_id": turn.identity,
+                   "receipts": unexplained[:10]})
     jev_audit({"ts": now(), "session": session, **result})
     if result["status"] == "unavailable":
         return False, ("JEV DEGRADED — required-action enforcement unavailable "
@@ -1305,13 +1304,9 @@ def jev_required_actions_check(session, recs):
     # the genuine human boundary instead, folding feedback and notifications
     # exactly as the required-action evaluator does. The missing set stays
     # excluded so partial satisfaction cannot mint another intervention.
-    boundary = latest_user_turn_index(recs)
-    prompt_id = recs[boundary].get("promptId") if boundary >= 0 else None
-    human_turn = (f"human-prompt:{prompt_id}" if prompt_id
-                  else f"human-record:{boundary}" if boundary >= 0 else None)
     identity = claim_identity(
         "completion-evidence-gate", JEV_REQUIRED_REASON,
-        [human_turn])
+        [turn.identity])
     missing = ", ".join(result["missing"])
     if latched(session, identity):
         return False, ("JEV REQUIRED ACTIONS NOTICE — this human turn already received "
