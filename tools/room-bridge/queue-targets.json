@@ -48,7 +48,7 @@
       "adapter": "desk",
       "assignee": "desk:grok-desk",
       "desk": "grok-desk",
-      "effective_model": "Grok 4.6",
+      "effective_model": "Grok 4.7",
       "capabilities": ["read"]
     },
     "kimi": {

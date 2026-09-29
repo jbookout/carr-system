@@ -53,7 +53,7 @@ CATALOG: dict = {
             "enabled": True,
             "adapter": "hermes",
             "assignee": "default",
-            "effective_model": "Grok 4.6",
+            "effective_model": "Grok 4.7",
             "capabilities": ["read"],
         },
         "joe": {
