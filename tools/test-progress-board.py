@@ -26,6 +26,69 @@ SPEC.loader.exec_module(BOARD)
 
 
 class ProgressBoardCLI(unittest.TestCase):
+    def test_executor_metadata_parser_handles_legacy_spellings(self):
+        cases = {
+            "gpt-6-sol high (Codex)": ("Codex", "gpt-6-sol", "high"),
+            "codex gpt-6-sol high": ("Codex", "gpt-6-sol", "high"),
+            "Codex gpt-6-sol high x2": ("Codex", "gpt-6-sol", "high"),
+            "orchestrator": ("Anthropic", "Claude Opus 5.5", "unknown"),
+            "Claude Opus 5.5 (orchestrator)": ("Anthropic", "Claude Opus 5.5", "unknown"),
+        }
+        for executor, expected in cases.items():
+            with self.subTest(executor=executor):
+                self.assertEqual(BOARD.executor_metadata(executor), expected)
+
+    def test_cards_render_summary_model_effort_and_orchestrator(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("task", "demo", "codex", "--title", "Build card",
+                       "--summary", "Show the delivery details on each card.",
+                       "--status", "running", "--executor", "gpt-6-sol high (Codex)")
+        self.run_board("task", "demo", "orchestrator", "--title", "Coordinate",
+                       "--summary", "Coordinate the delivery review.",
+                       "--status", "running", "--executor", "orchestrator")
+        html = (self.root / "boards" / "demo.html").read_text()
+        self.assertIn("Show the delivery details on each card.", html)
+        self.assertIn("Coordinate the delivery review.", html)
+        self.assertIn("Codex", html)
+        self.assertIn("gpt-6-sol · high", html)
+        self.assertIn("Anthropic", html)
+        self.assertIn("Claude Opus 5.5 · unknown", html)
+        self.assertIn('id="task-detail"', html)
+        state = self.read_state("demo")
+        self.assertEqual(state["tasks"]["codex"]["provider"], "Codex")
+        self.assertEqual(state["tasks"]["codex"]["model"], "gpt-6-sol")
+        self.assertEqual(state["tasks"]["codex"]["effort"], "high")
+        self.assertEqual(state["tasks"]["codex"]["summary"], "Show the delivery details on each card.")
+
+    def test_explicit_metadata_overrides_executor(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("task", "demo", "a", "--title", "A", "--status", "queued",
+                       "--executor", "orchestrator", "--provider", "Codex",
+                       "--model", "gpt-6-sol", "--effort", "xhigh",
+                       "--summary", "Check the route.")
+        task = self.read_state("demo")["tasks"]["a"]
+        self.assertEqual((task["provider"], task["model"], task["effort"]),
+                         ("Codex", "gpt-6-sol", "xhigh"))
+
+    def test_backfill_uses_pr_title_and_retains_existing_task_history(self):
+        state = {"tasks": {
+            "pr": {"title": "PR 42", "executor": "gpt-6-sol high (Codex)",
+                   "pr": 42, "repo": "jbookout/carr-system", "status": "done",
+                   "stage_history": [{"stage": "review", "at": "earlier"}]},
+            "other": {"title": "Check CRM capture", "executor": "orchestrator",
+                      "status": "running", "note": "Verify that captured mail reaches the CRM."},
+        }}
+        calls = []
+        def lookup(number, repo):
+            calls.append((number, repo))
+            return {"title": "Show model and effort on board cards", "body": "The board now names each model.",
+                    "url": "https://github.com/jbookout/carr-system/pull/42", "headRefOid": "a" * 40}
+        self.assertEqual(BOARD.backfill_state(state, lookup), 2)
+        self.assertEqual(calls, [(42, "jbookout/carr-system")])
+        self.assertEqual(state["tasks"]["pr"]["summary"], "Show model and effort on board cards.")
+        self.assertEqual(state["tasks"]["pr"]["stage_history"], [{"stage": "review", "at": "earlier"}])
+        self.assertEqual(state["tasks"]["other"]["summary"], "Verify that captured mail reaches the CRM.")
+        self.assertEqual(state["tasks"]["other"]["provider"], "Anthropic")
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tempdir.name)

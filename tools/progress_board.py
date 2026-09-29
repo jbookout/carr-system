@@ -166,6 +166,74 @@ def executor_pool(executor: str) -> str:
     return "unassigned"
 
 
+def executor_metadata(executor: str) -> tuple[str, str, str]:
+    """Recover structured identity from legacy executor labels."""
+    value = (executor or "").strip()
+    lower = value.lower()
+    effort_match = re.search(r"\b(low|medium|high|xhigh|max|ultra)\b", lower)
+    effort = effort_match.group(1) if effort_match else "unknown"
+    if "orchestrator" in lower:
+        return "Anthropic", "Claude Opus 5.5", effort
+    gpt = re.search(r"\bgpt-[\w.-]+", value, re.IGNORECASE)
+    if gpt:
+        return "Codex", gpt.group(0).lower(), effort
+    claude = re.search(r"\bclaude\s+(?:opus|sonnet|haiku)\s+[\d.]+", value, re.IGNORECASE)
+    if claude:
+        return "Anthropic", " ".join(part.capitalize() if not part[0].isdigit() else part
+                                       for part in claude.group(0).split()), effort
+    pool = executor_pool(value)
+    provider = {"codex": "Codex", "claude-cloud": "Anthropic", "grok": "xAI",
+                "flash-next": "Google"}.get(pool, "Unknown")
+    return provider, value if value else "unknown", effort
+
+
+def task_identity(task: dict[str, Any]) -> tuple[str, str, str]:
+    derived = executor_metadata(task.get("executor", ""))
+    return (str(task.get("provider") or derived[0]),
+            str(task.get("model") or derived[1]),
+            str(task.get("effort") or derived[2]))
+
+
+def task_summary(task: dict[str, Any]) -> str:
+    summary = str(task.get("summary") or "").strip()
+    if summary:
+        return summary
+    title = str(task.get("title") or "This task").strip().rstrip(".")
+    return title + "."
+
+
+def one_sentence(value: str) -> str:
+    text = re.sub(r"\s+", " ", re.sub(r"(?m)^\s*(?:[-*]\s+|#+\s+)", "", value or "")).strip()
+    text = re.split(r"(?<=[.!?])\s+", text, maxsplit=1)[0].rstrip(".")
+    return text + "." if text else ""
+
+
+def backfill_state(state: dict[str, Any], lookup: Any) -> int:
+    """Fill legacy task metadata without changing recorded status or timestamps."""
+    changed = 0
+    for task in state.get("tasks", {}).values():
+        before = dict(task)
+        provider, model, effort = task_identity(task)
+        task.setdefault("provider", provider)
+        task.setdefault("model", model)
+        task.setdefault("effort", effort)
+        if not task.get("summary"):
+            if task.get("pr") is not None:
+                info = lookup(int(task["pr"]), task_repo(task))
+                if not info or not info.get("title") or not info.get("body"):
+                    raise RuntimeError(f"PR {task['pr']} title/body unavailable for summary backfill")
+                task["summary"] = one_sentence(info["title"])
+            else:
+                task["summary"] = one_sentence(task.get("note") or task.get("title") or "")
+        if not task.get("stage_history"):
+            task["stage_history"] = [{"stage": task_stage(task), "status": task.get("status"),
+                                      "at": task.get("updated_at") or task.get("created_at"),
+                                      "source": "observed snapshot"}]
+        if task != before:
+            changed += 1
+    return changed
+
+
 def task_stage(task: dict[str, Any]) -> str:
     requested = task.get("stage")
     if requested == "measured":
@@ -225,13 +293,14 @@ def pipeline_svg(tasks: dict[str, dict[str, Any]]) -> str:
 
     def node(task_id: str, task: dict[str, Any], stage: str, x: int, y: int, width: int, phone: bool) -> str:
         executor = task.get("executor", "unassigned")
+        provider, model, effort = task_identity(task)
         pool = executor_pool(executor)
         health = task_health(task)
         pulse = pulse_state(task)
         title = str(task.get("title", task_id))
         max_chars = 35 if phone else 16
         lines = textwrap.wrap(title, width=max_chars, break_long_words=True) or [task_id]
-        max_lines = 2 if phone else 3
+        max_lines = 2
         if len(lines) > max_lines:
             lines = lines[:max_lines]
             lines[-1] = lines[-1][: max_chars - 1] + "…"
@@ -240,20 +309,26 @@ def pipeline_svg(tasks: dict[str, dict[str, Any]]) -> str:
             for i, line in enumerate(lines)
         )
         pr = f"PR {task['pr']}" if task.get("pr") is not None else "No PR"
+        summary = task_summary(task)
+        summary_limit = 44 if phone else 26
+        if len(summary) > summary_limit:
+            summary = summary[:summary_limit - 1] + "…"
         halo = f'<circle class="node-halo" cx="{x + 28}" cy="{y + 29}" r="15"/>'
         return (
             f'<g class="pipeline-node node-{health} node-state-{pulse} pulse-{pulse}" data-task-id="{esc(task_id)}" '
-            f'data-stage="{esc(stage)}" data-executor-pool="{esc(pool)}" tabindex="0" '
-            f'aria-label="{esc(title)} · {esc(STAGE_LABELS[stage])} · {esc(pool)} · {esc(pr)}">'
-            f'<rect class="node-shape" x="{x}" y="{y}" width="{width}" height="{84 if phone else 100}" rx="13"/>'
+            f'data-stage="{esc(stage)}" data-executor-pool="{esc(pool)}" tabindex="0" role="button" '
+            f'aria-label="{esc(title)} · {esc(task_summary(task))} · {esc(STAGE_LABELS[stage])} · {esc(provider)} · {esc(model)} · {esc(effort)} · Open details">'
+            f'<rect class="node-shape" x="{x}" y="{y}" width="{width}" height="{110 if phone else 112}" rx="13"/>'
             f'{halo}'
             f'<text class="executor-glyph" x="{x + 28}" y="{y + 33}" text-anchor="middle">{esc(executor_glyph(executor))}</text>'
             f'<text class="node-label">{label}</text>'
-            f'<text class="node-meta" x="{x + 16}" y="{y + (70 if phone else 86)}">{esc(pool.replace("-", " ").upper())} · {esc(pr)}</text>'
+            f'<text class="node-summary" x="{x + 16}" y="{y + 64}">{esc(summary)}</text>'
+            f'<text class="node-meta" x="{x + 16}" y="{y + 83}">{esc(provider)} · {esc(pr)}</text>'
+            f'<text class="node-meta" x="{x + 16}" y="{y + 99}">{esc(model)} · {esc(effort)}</text>'
             '</g>'
         )
 
-    desktop_height = max(216, 104 + max((len(items) for items in columns.values()), default=0) * 112)
+    desktop_height = max(216, 104 + max((len(items) for items in columns.values()), default=0) * 124)
     desk_parts = []
     for i, stage in enumerate(PIPELINE_STAGES):
         x = 8 + i * 202
@@ -263,7 +338,7 @@ def pipeline_svg(tasks: dict[str, dict[str, Any]]) -> str:
             f'<text class="stage-index" x="{x + 14}" y="59">0{i + 1}</text>'
             f'<text class="stage-label" x="{x + 14}" y="82">{STAGE_LABELS[stage]}</text>'
             f'<text class="stage-count" x="{x + 174}" y="58" text-anchor="end">{len(items):02d}</text>'
-            + "".join(node(task_id, task, stage, x + 8, 96 + j * 112, 174, False) for j, (task_id, task) in enumerate(items))
+            + "".join(node(task_id, task, stage, x + 8, 96 + j * 124, 174, False) for j, (task_id, task) in enumerate(items))
             + '</g>'
         )
     connectors = "".join(
@@ -279,13 +354,13 @@ def pipeline_svg(tasks: dict[str, dict[str, Any]]) -> str:
     y = 12
     for i, stage in enumerate(PIPELINE_STAGES):
         items = columns[stage]
-        section_height = 45 + max(len(items), 1) * 94
+        section_height = 45 + max(len(items), 1) * 118
         mobile_parts.append(
             f'<g class="stage" data-stage="{stage}"><rect class="stage-well" x="0" y="{y}" width="360" height="{section_height}" rx="16"/>'
             f'<text class="stage-index" x="18" y="{y + 27}">0{i + 1}</text>'
             f'<text class="stage-label" x="49" y="{y + 29}">{STAGE_LABELS[stage]}</text>'
             f'<text class="stage-count" x="340" y="{y + 27}" text-anchor="end">{len(items):02d}</text>'
-            + ("".join(node(task_id, task, stage, 12, y + 43 + j * 94, 336, True) for j, (task_id, task) in enumerate(items))
+            + ("".join(node(task_id, task, stage, 12, y + 43 + j * 118, 336, True) for j, (task_id, task) in enumerate(items))
                if items else f'<text class="pipeline-empty" x="19" y="{y + 82}">No tasks at this stage</text>')
             + '</g>'
         )
@@ -448,6 +523,7 @@ def render_state(state: dict[str, Any], pr_infos: dict[tuple[str, int], dict[str
         return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()[:12]
 
     def card(task_id: str, task: dict[str, Any]) -> str:
+        provider, model, effort = task_identity(task)
         info = pr_infos.get(pr_key(task)) if task.get("pr") is not None else None
         pr = task.get("pr")
         pr_label = (f"{task_repo(task)} · PR {pr} · {task.get('pr_phase', str(info.get('state', 'unknown')).title() if info else 'status unavailable')}"
@@ -458,12 +534,12 @@ def render_state(state: dict[str, Any], pr_infos: dict[tuple[str, int], dict[str
         marker = "◇" if task.get("status") == "queued" else "!" if state_class == "critical" else "?" if state_class == "attention" else "✓" if state_class == "still" else "↗"
         stage = task_stage(task)
         return (
-            f'<article class="task-card pulse-{state_class}" data-stage="{stage}" data-task-ref="{esc(task_id)}" data-item-key="task:{esc(task_id)}" data-fingerprint="{fingerprint(task)}">'
+            f'<article class="task-card pulse-{state_class}" data-stage="{stage}" data-task-ref="{esc(task_id)}" data-item-key="task:{esc(task_id)}" data-fingerprint="{fingerprint(task)}" role="button" tabindex="0" aria-label="{esc(task.get("title", task_id))}. Open details">'
             f'<div class="task-main"><span class="state-mark" aria-hidden="true">{marker}</span>'
-            f'<div class="task-copy"><strong>{esc(task.get("title", task_id))}</strong><span class="task-id">{esc(task_id)}</span></div>'
+            f'<div class="task-copy"><strong>{esc(task.get("title", task_id))}</strong><span class="task-summary">{esc(task_summary(task))}</span><span class="task-id">{esc(task_id)}</span></div>'
             f'<span class="stage-chip">{STAGE_LABELS[stage]}</span>'
             f'<span class="task-age" data-age-at="{esc(task.get("updated_at", ""))}">{esc(age)}</span></div>'
-            f'<div class="task-data"><span><b>EXECUTOR</b>{esc(task.get("executor", "unassigned"))}</span>'
+            f'<div class="task-data"><span><b>PROVIDER</b>{esc(provider)}</span><span class="task-model">{esc(model)} · {esc(effort)}</span>'
             f'<span><b>DELIVERY</b>{esc(pr_label)}</span></div>{note}</article>'
         )
 
@@ -483,12 +559,13 @@ def render_state(state: dict[str, Any], pr_infos: dict[tuple[str, int], dict[str
 
     completed_cards = "".join(
         f'<article class="completed-card task-card" data-stage="live" data-task-ref="{esc(task_id)}" '
-        f'data-item-key="completed:{esc(task_id)}" data-fingerprint="{fingerprint(task)}">'
+        f'data-item-key="completed:{esc(task_id)}" data-fingerprint="{fingerprint(task)}" role="button" tabindex="0" aria-label="{esc(task.get("title", task_id))}. Open details">'
         f'<div class="completed-top"><strong>{esc(task.get("title", task_id))}</strong><span class="stage-chip">Live</span>'
         f'<time datetime="{esc((completed_at(task) or render_time).isoformat())}">'
         f'{esc(local_updated((completed_at(task) or render_time).isoformat()))}</time></div>'
+        f'<p class="task-summary">{esc(task_summary(task))}</p>'
         f'<p class="completed-evidence"><b>MEASURED</b> {esc(task["evidence"])}</p>'
-        f'<div class="completed-meta"><span><b>EXECUTOR</b> {esc(task.get("executor", "unassigned"))}</span>'
+        f'<div class="completed-meta"><span><b>PROVIDER</b> {esc(task_identity(task)[0])}<small class="task-model">{esc(task_identity(task)[1])} · {esc(task_identity(task)[2])}</small></span>'
         + (f'<a href="https://github.com/{esc(task_repo(task))}/pull/{int(task["pr"])}">{esc(task_repo(task))} · PR {int(task["pr"])} ↗</a>'
            if isinstance(task.get("pr"), int) and task["pr"] > 0 else '<span>No PR</span>')
         + '</div></article>'
@@ -535,6 +612,22 @@ def render_state(state: dict[str, Any], pr_infos: dict[tuple[str, int], dict[str
         f'<span class="headline-clock"><span>Live · refreshed {esc(local_updated(rendered_at))}</span>'
         f'<span class="task-change-clock">Last task change <span class="relative-age" data-age-at="{esc(task_change)}">{esc(elapsed_text(task_change))}</span></span></span>'
     )
+    detail_tasks = {}
+    for task_id, task in tasks.items():
+        provider, model, effort = task_identity(task)
+        related = []
+        for qid, question in questions.items():
+            if qid in task.get("question_ids", []) or (
+                len(task_id) > 5 and task_id in qid
+            ):
+                related.append({"question": question.get("question"), "answer": question.get("answer"),
+                                "default": question.get("default")})
+        detail_tasks[task_id] = {
+            **task, "id": task_id, "stage_label": STAGE_LABELS[task_stage(task)],
+            "provider": provider, "model": model, "effort": effort,
+            "summary": task_summary(task), "related_questions": related,
+        }
+    task_data = json.dumps(detail_tasks, ensure_ascii=False).replace("<", "\\u003c").replace(">", "\\u003e")
     replacements = {
         "__TITLE__": esc(state.get("title", state["project"])),
         "__PROJECT__": esc(state["project"]),
@@ -554,6 +647,7 @@ def render_state(state: dict[str, Any], pr_infos: dict[tuple[str, int], dict[str
         "__DELIVERABLE_COUNT__": str(len(deliverables)),
         "__LEDGER__": "".join(ledger_rows),
         "__HOSTED_BOARD__": esc(f"{HOSTED_BOARD_ORIGIN}/progress-board?board={quote(safe_project(state['project']), safe='')}"),
+        "__TASK_DATA__": task_data,
     }
     page = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -572,6 +666,7 @@ h1{font-size:clamp(2.35rem,5vw,4.4rem);line-height:1.02;letter-spacing:-.035em;m
 .question-card,.task-card,.deliverable,.ledger-row{position:relative;border:1px solid var(--line);border-radius:12px;background:rgba(1,9,19,.47)}.question-card{display:flex;gap:12px;padding:13px 15px;border-color:rgba(251,123,50,.31)}.question-card+.question-card,.task-card+.task-card,.deliverable+.deliverable{margin-top:8px}.question-card strong{display:block;font-size:.94rem}.question-card p{margin:5px 0;color:#cad9e6;font-size:.82rem}.question-card p b{color:var(--orange);font-size:.63rem;letter-spacing:.1em}.question-card time{color:var(--muted);font-size:.7rem}.question-mark{display:grid;place-items:center;flex:0 0 30px;height:30px;border:1px solid var(--orange);border-radius:9px;color:var(--orange);font-weight:800}
 .pipeline-diagram{display:block;width:100%;height:auto;overflow:visible}.pipeline-phone{display:none}.stage-well{fill:rgba(2,13,29,.52);stroke:var(--stage-accent);stroke-width:1.5}.stage-index{font:700 12px -apple-system,sans-serif;letter-spacing:.1em;fill:var(--stage-accent)}.stage-label{font-size:22px;font-weight:800;fill:var(--stage-accent)}.stage-count{font:700 13px -apple-system,sans-serif;fill:var(--muted)}.pipeline-connector{fill:none;stroke:var(--orange);stroke-width:2;stroke-linecap:round;opacity:.72}.node-shape{fill:rgba(10,31,54,.95);stroke:var(--stage-accent);stroke-width:1.15}.node-halo{fill:var(--stage-accent)}.executor-glyph{fill:#03101d;font:800 12px -apple-system,sans-serif}.node-label{fill:var(--ink);font:650 12px -apple-system,sans-serif}.node-meta{fill:#a6bfd2;font:700 9px -apple-system,sans-serif;letter-spacing:.03em}.pipeline-empty{fill:var(--muted);font:13px -apple-system,sans-serif}.stage[data-stage="queued"],.pipeline-node[data-stage="queued"],.task-card[data-stage="queued"]{--stage-accent:var(--stage-queued)}.stage[data-stage="build"],.pipeline-node[data-stage="build"],.task-card[data-stage="build"]{--stage-accent:var(--stage-build)}.stage[data-stage="review"],.pipeline-node[data-stage="review"],.task-card[data-stage="review"]{--stage-accent:var(--stage-review)}.stage[data-stage="ci"],.pipeline-node[data-stage="ci"],.task-card[data-stage="ci"]{--stage-accent:var(--stage-ci)}.stage[data-stage="merged"],.pipeline-node[data-stage="merged"],.task-card[data-stage="merged"]{--stage-accent:var(--stage-merged)}.stage[data-stage="live"],.pipeline-node[data-stage="live"],.task-card[data-stage="live"]{--stage-accent:var(--stage-live)}.pipeline-node:focus .node-shape,.pipeline-node:hover .node-shape{stroke-width:2.5;fill:#173957}.pipeline-node{cursor:default;outline:none}.pipeline-node.linked .node-shape{stroke-width:2.5;fill:#173957}.task-card.linked{border-color:var(--stage-accent);background:rgba(251,123,50,.13)}
 .status-groups{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.status-group{min-width:0}.status-heading{display:flex;justify-content:space-between;align-items:center;gap:10px;border-bottom:1px solid var(--line);padding:3px 0 9px;margin-bottom:10px}.status-heading h3{font-size:.75rem;letter-spacing:.13em;text-transform:uppercase;color:#b4c9d9}.status-heading span{font-family:"Arial Narrow",sans-serif;color:var(--orange);font-weight:800;font-size:1.12rem}.task-card{padding:11px 12px;min-width:0;border-left:3px solid var(--stage-accent)}.task-main{display:flex;align-items:flex-start;gap:9px;flex-wrap:wrap}.task-copy{display:flex;flex-direction:column;min-width:0}.task-copy strong{font-size:.87rem;line-height:1.27}.task-id{color:var(--muted);font-size:.66rem;margin-top:2px}.task-age{margin-left:auto;color:var(--muted);font-size:.64rem;white-space:nowrap}.stage-chip{display:inline-block;border:1px solid var(--stage-accent);border-radius:999px;padding:1px 7px;color:var(--stage-accent);font-size:.67rem;font-weight:800;white-space:nowrap}.state-mark{display:grid;place-items:center;flex:0 0 22px;height:22px;border-radius:7px;color:var(--state-accent);border:1px solid var(--state-accent);font-size:.7rem;font-weight:800}.task-data{display:grid;gap:3px;margin:8px 0 0 31px;font-size:.72rem;color:#c5d7e5}.task-data span{min-width:0;overflow-wrap:anywhere}.task-data b{display:inline-block;margin-right:7px;color:#7595ad;font-size:.57rem;letter-spacing:.08em}.task-note{margin:6px 0 0 31px;color:#a5bbce;font-size:.72rem;overflow-wrap:anywhere}.completed-panel{margin-top:14px}.completed-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.completed-card{margin:0!important}.completed-top{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}.completed-top time{margin-left:auto;color:var(--muted);font-size:.7rem}.completed-evidence{margin:8px 0;color:#d8e8f2;font-size:.8rem}.completed-evidence b,.completed-meta b{color:var(--green);font-size:.63rem;letter-spacing:.08em}.completed-meta{display:flex;justify-content:space-between;gap:8px;font-size:.73rem}.completed-meta a{color:var(--blue)}.pipeline-legend{margin:8px 0 0;color:#afc5d7;font-size:.78rem}
+.task-summary{display:block;margin:3px 0 0;color:#a9bfd2;font-size:.7rem;line-height:1.35}.task-model{display:block;color:#9db6c9;font-size:.68rem}.node-summary{fill:#a9bfd2;font:500 9px -apple-system,sans-serif}.task-card[role=button],.pipeline-node[role=button]{cursor:pointer}.task-card:focus-visible{outline:2px solid var(--blue);outline-offset:2px}#task-detail{width:min(600px,calc(100vw - 24px));max-height:85vh;overflow:auto;padding:25px;border:1px solid rgba(101,186,255,.42);border-radius:17px;color:var(--ink);background:linear-gradient(145deg,#102d4d,#030b19);box-shadow:0 35px 90px #000b}#task-detail::backdrop{background:#000c;backdrop-filter:blur(8px)}#task-detail button{float:right;border:1px solid var(--line);border-radius:50%;width:33px;height:33px;background:#0b2947;color:var(--ink);font-size:21px;cursor:pointer}#task-detail dl{margin:14px 0 0}#task-detail .detail-row{display:grid;grid-template-columns:105px 1fr;gap:12px;padding:9px 0;border-top:1px solid var(--line)}#task-detail dt{color:var(--muted);font-size:.7rem;text-transform:uppercase}#task-detail dd{margin:0;overflow-wrap:anywhere;white-space:pre-wrap;font-size:.84rem}#task-detail a{color:var(--blue)}
 .pulse-healthy{--state-accent:var(--blue)}.pulse-attention{--state-accent:var(--orange)}.pulse-critical{--state-accent:var(--red)}.pulse-still{--state-accent:var(--green)}
 .pipeline-node.pulse-healthy .node-halo{animation:breath 3.5s ease-in-out infinite;transform-box:fill-box;transform-origin:center}.pipeline-node.pulse-attention .node-halo{animation:breath 2s ease-in-out infinite;transform-box:fill-box;transform-origin:center}.pipeline-node.pulse-critical .node-halo{animation:breath 1s ease-in-out infinite;transform-box:fill-box;transform-origin:center}.pulse-healthy.task-card,.pulse-attention.question-card,.pulse-attention.task-card,.pulse-critical.task-card{animation:glow var(--pulse-speed) ease-in-out infinite}.pulse-healthy{--pulse-speed:3.5s}.pulse-attention{--pulse-speed:2s}.pulse-critical{--pulse-speed:1s}@keyframes breath{50%{opacity:.55;transform:scale(.8)}}@keyframes glow{50%{box-shadow:inset 0 0 18px rgba(101,186,255,.085)}}.changed{animation:changed-flash 1s ease-out 1!important}@keyframes changed-flash{0%{background:rgba(251,123,50,.34)}100%{background:rgba(1,9,19,.47)}}
 .lower-grid{display:grid;grid-template-columns:1.2fr .8fr;gap:14px;margin-top:14px}.deliverable{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;font-size:.84rem}.deliverable a{color:var(--ink);font-weight:700;text-decoration:none}.deliverable a:hover{text-decoration:underline;color:var(--orange)}.deliverable a span{margin-left:7px;color:var(--orange)}.deliverable time{color:var(--muted);font-size:.69rem;white-space:nowrap}.ledger-row{display:flex;align-items:center;gap:10px;padding:8px 11px;font-size:.8rem}.ledger-row+.ledger-row{margin-top:6px}.ledger-glyph{display:grid;place-items:center;width:25px;height:25px;border-radius:8px;background:rgba(101,186,255,.14);color:var(--blue);font-size:.7rem;font-weight:800}.ledger-row strong{margin-left:auto;color:var(--blue);font-family:"Arial Narrow",sans-serif;font-size:1.1rem}.ledger-row em{display:block;color:var(--red);font-size:.64rem;font-style:normal;font-weight:800;letter-spacing:.03em}.ledger-violation{border-color:var(--red);background:rgba(255,105,107,.09)}.ledger-violation .ledger-glyph,.ledger-violation strong{color:var(--red)}
@@ -594,8 +689,15 @@ h1{font-size:clamp(2.35rem,5vw,4.4rem);line-height:1.02;letter-spacing:-.035em;m
 <section class="panel"><div class="panel-head"><h2>Latest deliverables</h2><span class="count">__DELIVERABLE_COUNT__ LINKS</span></div>__DELIVERABLES__</section>
 <section class="panel"><div class="panel-head"><h2>Executor ledger</h2><span class="count">5 POOLS</span></div>__LEDGER__</section>
 </div></main>
+<dialog id="task-detail" aria-labelledby="task-detail-title"><form method="dialog"><button aria-label="Close task detail">×</button></form><p class="eyebrow">DELIVERY / TASK</p><h2 id="task-detail-title"></h2><dl id="task-detail-body"></dl></dialog>
+<script type="application/json" id="board-task-data">__TASK_DATA__</script>
 <script>
 (function(){
+  var taskData=JSON.parse(document.getElementById('board-task-data').textContent||'{}');
+  var detail=document.getElementById('task-detail'),detailBody=document.getElementById('task-detail-body');
+  function row(label,value){if(value===undefined||value===null||value==='')return;var item=document.createElement('div');item.className='detail-row';var dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=label;dd.textContent=String(value);item.append(dt,dd);detailBody.append(item)}
+  function taskDetail(id){var task=taskData[id];if(!task)return;document.getElementById('task-detail-title').textContent=task.title||id;detailBody.replaceChildren();row('Summary',task.summary);row('Status',task.status);row('Stage',task.stage_label);row('Provider',task.provider);row('Model',task.model);row('Effort',task.effort);row('Repository',task.repo);row('Review',task.pr_phase);row('CI',task.pr_checks);row('Created',task.created_at);row('Updated',task.updated_at);row('Completed',task.completed_at);row('Note',task.note);row('Evidence',task.evidence);String(task.evidence||'').split(' ').filter(function(part){return part.indexOf('https://')===0||part.indexOf('http://')===0}).forEach(function(raw){try{var url=new URL(raw.replace(/[.)]+$/,''));if(!['http:','https:'].includes(url.protocol))return;var link=document.createElement('a');link.href=url.href;link.textContent=url.href;link.target='_blank';link.rel='noopener noreferrer';var item=document.createElement('div');item.className='detail-row';var dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent='Evidence link';dd.append(link);item.append(dt,dd);detailBody.append(item)}catch(_){}});if(task.pr){var link=document.createElement('a');link.href='https://github.com/'+(task.repo||'jbookout/carr-system')+'/pull/'+Number(task.pr);link.textContent='PR '+task.pr+(task.pr_head?' · '+task.pr_head:'');var item=document.createElement('div');item.className='detail-row';var dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent='Pull request';dd.append(link);item.append(dt,dd);detailBody.append(item)}(task.related_questions||[]).forEach(function(q){row('Question',q.question);row('Answer',q.answer||'Unanswered · '+(q.default||''))});(task.stage_history||[]).forEach(function(h){row('Stage history',(h.stage||'')+' · '+(h.status||'')+' · '+(h.at||''))});detail.showModal()}
+  document.querySelectorAll('[data-task-id],[data-task-ref]').forEach(function(el){function open(event){if(event.type==='keydown'&&event.key!=='Enter'&&event.key!==' ')return;if(event.target.closest&&event.target.closest('a'))return;event.preventDefault();taskDetail(el.dataset.taskId||el.dataset.taskRef)}el.addEventListener('click',open);el.addEventListener('keydown',open)});
   var renderedAt=Date.parse('__RENDERED_AT__');
   function checkStall(){var banner=document.getElementById('stall-banner');var age=Date.now()-renderedAt;banner.hidden=Number.isFinite(age)&&age>=-30000&&age<=360000}
   checkStall();setInterval(checkStall,1000);
@@ -650,8 +752,12 @@ def render(project: str) -> None:
         observed = (("status", status), ("stage", stage), ("pr_phase", phase),
                     ("pr_checks", checks_summary(info)), ("pr_head", info.get("headRefOid") or ""))
         if any(task.get(key) != value for key, value in observed):
+            previous_stage = task_stage(task)
             task.update(observed)
             task["updated_at"] = now_utc().isoformat(timespec="microseconds")
+            if stage != previous_stage:
+                task["stage_history"] = [*task.get("stage_history", []),
+                                         {"stage": stage, "status": status, "at": task["updated_at"]}]
             changed = True
     if changed:
         state["updated_at"] = max(task["updated_at"] for task in state["tasks"].values())
@@ -894,10 +1000,17 @@ def command_task(args: argparse.Namespace) -> None:
     if args.evidence and stage != "live":
         raise SystemExit("--evidence requires --stage live")
     task = dict(prior)
+    executor = args.executor or prior.get("executor")
+    derived_provider, derived_model, derived_effort = executor_metadata(executor)
     task.update({
         "title": args.title or prior.get("title"),
         "status": args.status or prior.get("status"),
-        "executor": args.executor or prior.get("executor"),
+        "executor": executor,
+        "provider": args.provider or (prior.get("provider") if args.executor is None else None) or derived_provider,
+        "model": args.model or (prior.get("model") if args.executor is None else None) or derived_model,
+        "effort": args.effort or (prior.get("effort") if args.executor is None else None) or derived_effort,
+        "summary": (args.summary.strip() if args.summary is not None else prior.get("summary"))
+                   or task_summary({"title": args.title or prior.get("title")}),
         "pr": args.pr if args.pr is not None else prior.get("pr"),
         "repo": safe_repo(args.repo or prior.get("repo") or DEFAULT_PR_REPO),
         "note": args.note if args.note is not None else prior.get("note"),
@@ -922,6 +1035,9 @@ def command_task(args: argparse.Namespace) -> None:
         task.pop("completed_at", None)
     if args.health is not None:
         task["health"] = args.health
+    if task_stage(task) != task_stage(prior) or not prior:
+        task["stage_history"] = [*prior.get("stage_history", []),
+                                 {"stage": task_stage(task), "status": task["status"], "at": task_time}]
     state["tasks"][args.task_id] = task
     write_and_render(state)
 
@@ -997,6 +1113,10 @@ def parser() -> argparse.ArgumentParser:
     task.add_argument("--title")
     task.add_argument("--status", choices=STATUSES)
     task.add_argument("--executor")
+    task.add_argument("--provider")
+    task.add_argument("--model")
+    task.add_argument("--effort")
+    task.add_argument("--summary")
     task.add_argument("--pr", type=int)
     task.add_argument("--repo")
     task.add_argument("--stage", choices=PR_STAGES)
