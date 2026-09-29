@@ -50,13 +50,18 @@ const CONTROL_SQL = `
     left join lateral (
       select id,state,ended_at,scheduled_for,attempt
         from ops.job where definition_key=d.key and definition_version=d.version
-         and mode='live' and state in ('succeeded','failed','timed_out','cancelled','dead_lettered')
+         and mode='live' and state in ('succeeded','failed','timed_out','cancelled','dead_lettered','skipped')
        order by ended_at desc,id desc limit 1
     ) last on true
     left join lateral (
       select receipt_ref from ops.job_receipt
        where job_id=last.id and attempt=last.attempt
-         and kind in ('completion','failure','dead_letter')
+         and ((last.state='succeeded' and kind='completion')
+           or (last.state='failed' and kind='failure')
+           or (last.state='timed_out' and kind in ('timeout','failure'))
+           or (last.state='cancelled' and kind='override')
+           or (last.state='dead_lettered' and kind='dead_letter')
+           or (last.state='skipped' and kind='skipped'))
        order by created_at desc,id desc limit 1
     ) receipt on true
     left join lateral (

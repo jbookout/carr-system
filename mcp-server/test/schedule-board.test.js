@@ -106,3 +106,44 @@ test("receipt-backed control-plane failures demand attention even without a queu
   assert.equal(unverified.jobs[0].state, "unknown");
   assert.equal(unverified.overall_state, "unknown");
 });
+
+test("control-plane query reads every terminal job and its matching immutable receipt", async () => {
+  const queries = [];
+  const client = { query: async (sql) => {
+    queries.push(sql);
+    return { rows: [] };
+  } };
+  await scheduleBoardTools()["schedule-board"].handler(client, actor, {}, { now: () => now });
+  const controlSql = queries.find((sql) => sql.includes("from ops.job_definition"));
+  assert.ok(controlSql);
+  const terminalStates = controlSql.match(/mode='live' and state in \(([^)]+)\)/)?.[1]
+    .match(/'[^']+'/g)?.map((value) => value.slice(1, -1));
+  assert.deepEqual(new Set(terminalStates), new Set([
+    "succeeded", "failed", "timed_out", "cancelled", "dead_lettered", "skipped",
+  ]));
+  const stateKinds = Object.fromEntries([...controlSql.matchAll(
+    /last\.state='([^']+)' and kind(?:='([^']+)'| in \(([^)]+)\))/g,
+  )].map((match) => [match[1], match[2] ? [match[2]]
+    : match[3].match(/'[^']+'/g).map((value) => value.slice(1, -1))]));
+  assert.deepEqual(stateKinds, {
+    succeeded: ["completion"], failed: ["failure"],
+    timed_out: ["timeout", "failure"], cancelled: ["override"],
+    dead_lettered: ["dead_letter"], skipped: ["skipped"],
+  });
+});
+
+test("a newer receipt-backed skip replaces an older success without claiming health", async () => {
+  const control = {
+    key: "daily-review", version: 1, enabled: true,
+    recurrence: { cron: "0 7 * * *", timezone: "America/Chicago" },
+    last_state: "skipped", last_at: "2026-09-28T07:00:00.000Z",
+    last_receipt_ref: "skipped:daily-review:2",
+    next_due_at: "2026-09-29T07:00:00.000Z",
+  };
+  const client = { query: async (sql) => ({ rows: sql.includes("ops.service") ? [] : [control] }) };
+  const result = await scheduleBoardTools()["schedule-board"].handler(client, actor, {}, { now: () => now });
+  assert.equal(result.jobs[0].last_run.state, "skipped");
+  assert.equal(result.jobs[0].last_run.receipt_ref, "skipped:daily-review:2");
+  assert.equal(result.jobs[0].state, "unknown");
+  assert.equal(result.overall_state, "unknown");
+});
