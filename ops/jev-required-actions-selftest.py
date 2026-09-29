@@ -39,6 +39,7 @@ RUNNING IT. No database, no network, no production access:
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import subprocess
 import sys
@@ -757,6 +758,90 @@ def latch_partial_satisfaction_only_notices_in_the_same_turn():
     return ok
 
 
+def cached_receipts_do_not_share_a_human_turn_latch():
+    """PR 1422 comment 5899158887: two production cache hits collide,
+    but each human prompt still receives exactly one Stop intervention."""
+    def load(name, relative):
+        spec = importlib.util.spec_from_file_location(name, os.path.join(REPO, relative))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    advisory = load("jev_cached_turn_advisory", "ops/jev_build_advisory.py")
+    prompt_hook = load("jev_cached_turn_receipt", "hooks/rule-pack-preuse-reselection.py")
+
+    class FakeJev:
+        calls = 0
+
+        @staticmethod
+        def noul(instructions, true=None, false=None):
+            return {"type": "noul", "instructions": instructions}
+
+        def ask(self, state, questions, **kwargs):
+            self.calls += 1
+            return {"model": "jev-test", "usage": {"input_tokens": 20, "output_tokens": 6},
+                    "answers": {key: {"type": "noul", "noul": 0.91 if key in
+                        {"architecture_or_design", "verification_selection"} else 0.13}
+                        for key in questions}}
+
+    ok = True
+    for has_prompt_id in (True, False):
+        with tempfile.TemporaryDirectory(prefix="jev-cached-turn-") as state:
+            session = f"jev-cached-turn-{has_prompt_id}"
+            prompt = "design the seam and select verification"
+            payload = {"session_id": session, "prompt": prompt}
+            client = FakeJev()
+            cache_path = os.path.join(state, "advisory-cache.json")
+            advisory.advise(prompt, client=client, cache_path=cache_path, now=1000)
+            hits = [advisory.advise(prompt, client=client, cache_path=cache_path, now=at)
+                    for at in (1060, 1120)]
+            receipts = [prompt_hook._build_receipt(payload, hit, "delivered") for hit in hits]
+            assert client.calls == 1 and all(hit["usage"]["cache_hit"] for hit in hits)
+            assert receipts[0]["receipt_id"] == receipts[1]["receipt_id"]
+
+            def attachment(receipt, when):
+                return {"timestamp": ts(when), "attachment": {
+                    "type": "hook_additional_context", "content": [json.dumps(receipt)]}}
+
+            def human(pid, when):
+                return user_prompt(prompt, pid, when) if has_prompt_id else user(prompt, when)
+
+            records = [human("human-p2", -60), attachment(receipts[0], -59),
+                       assistant("Here is the plan.", -58)]
+            first, _ = run_gate(records, session, state)
+            records += [human("human-p3", -30), attachment(receipts[1], -29), assistant(
+                "JEV-REFUSED: architecture_or_design the partner already settled "
+                "the architecture in the prompt.", -28)]
+            boundary = latest_user_turn_index(records)
+            second, reason = run_gate(records, session, state)
+            feedback = stop_feedback("human-p3", -27)
+            notification = real_task_notification("notification", -25)
+            if not has_prompt_id:
+                feedback.pop("promptId")
+                notification.pop("promptId")
+            records += [feedback, assistant("Still selecting checks.", -26)]
+            third, notice = run_gate(records, session, state)
+            records += [notification,
+                        build_advisory_attachment([], "notification-receipt", -24),
+                        assistant("Notification received.", -23)]
+            fourth, repeated_notice = run_gate(records, session, state)
+            settled = records + [assistant(
+                "JEV-REFUSED: verification_selection the prompt already names "
+                "the exact required checks.", -22)]
+            satisfied, satisfied_notice = run_gate(settled, session, state)
+            passed = (boundary == 3 and first and second
+                      and "verification_selection" in reason
+                      and not third and not fourth
+                      and "verification_selection" in notice and repeated_notice == notice
+                      and latest_user_turn_index(records) == boundary
+                      and not satisfied and not satisfied_notice)
+            print(f"{'PASS' if passed else 'FAIL'}  cached human turns "
+                  f"(promptId={has_prompt_id}): first={first}, second={second}, "
+                  f"feedback={third}, notification={fourth}, reason={reason!r}")
+            ok = ok and passed
+    return ok
+
+
 # ---------------------------------------------------------------------------
 # round 3 (2026-09-24, third Opus review of PR #1224): real-data replay
 #
@@ -1403,6 +1488,7 @@ def main():
         latch_is_per_turn_not_per_session(),
         latch_does_not_reopen_twice_for_the_same_turn(),
         latch_partial_satisfaction_only_notices_in_the_same_turn(),
+        cached_receipts_do_not_share_a_human_turn_latch(),
         post_reopen_turn_still_enforced_end_to_end(),
         post_reopen_turn_with_refusal_after_the_reopen_passes(),
         replay_notification_with_empty_advisory_cannot_erase_required(),

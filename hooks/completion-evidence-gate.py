@@ -115,7 +115,7 @@ from stop_latch import (  # noqa: E402
 sys.path.insert(0, REPO)
 from lib.jev_required_actions import (  # noqa: E402
     current_turn_slice, evaluate_required_actions, jev_calls_log_mentions,
-    unexplained_receipts)
+    latest_user_turn_index, unexplained_receipts)
 from lib.transcript_read import load_transcript  # noqa: E402
 
 
@@ -1301,15 +1301,17 @@ def jev_required_actions_check(session, recs):
                        f"({result['unavailable_reason']}); continuing without action credit."), None
     if result["status"] != "required" or not result["missing"]:
         return False, "", None
-    # LATCHED PER TURN, NOT PER SESSION: the identity includes this turn's own
-    # build-advisory receipt id (or prompt hash), which is unique per turn, so
-    # a LATER turn still reopens. The missing set is deliberately excluded:
-    # partial satisfaction must not mint a second intervention in this turn.
-    # stop_latch's own identity/latch machinery is reused unchanged — only the
-    # token set fed into it is turn-scoped now.
+    # The advisory cache can reuse a receipt across human prompts. Latch on
+    # the genuine human boundary instead, folding feedback and notifications
+    # exactly as the required-action evaluator does. The missing set stays
+    # excluded so partial satisfaction cannot mint another intervention.
+    boundary = latest_user_turn_index(recs)
+    prompt_id = recs[boundary].get("promptId") if boundary >= 0 else None
+    human_turn = (f"human-prompt:{prompt_id}" if prompt_id
+                  else f"human-record:{boundary}" if boundary >= 0 else None)
     identity = claim_identity(
         "completion-evidence-gate", JEV_REQUIRED_REASON,
-        [result.get("turn_key") or session])
+        [human_turn])
     missing = ", ".join(result["missing"])
     if latched(session, identity):
         return False, ("JEV REQUIRED ACTIONS NOTICE — this human turn already received "

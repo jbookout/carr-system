@@ -306,7 +306,7 @@ def latest_user_turn_index(recs):
     if not runs:
         idx = -1
         for i, rec in enumerate(recs):
-            if is_real_user_turn(rec):
+            if is_real_user_turn(rec) and not is_synthetic_continuation(rec):
                 idx = i
         return idx
     boundary = runs[-1]["start"]
@@ -914,9 +914,9 @@ def evaluate_required_actions(recs, window_texts, jev_calls_path, session_id, wr
     `missing` (possibly empty) lists the facets neither refused nor covered
     by a per-facet Jev call this turn, PLUS (folded in under the
     "semantic_creation" name) a receipt gap on a turn that wrote code.
-    `turn_key` is a value unique to THIS turn's advisory (its receipt id, or
-    its prompt hash) for callers that need a per-turn latch identity rather
-    than a per-session one.
+    `turn_key` identifies the advisory (its receipt id, or prompt hash).
+    Cached advisories can reuse it across human prompts; a per-turn latch
+    must use the genuine human boundary from latest_user_turn_index instead.
     """
     turn_slice = current_turn_slice(recs)
     required, turn_key = turn_required_facets(recs)
