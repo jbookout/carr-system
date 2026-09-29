@@ -46,6 +46,7 @@ STATUS_TO_STAGE = {
 STUCK_AFTER = timedelta(hours=2)
 HOSTED_BOARD_ORIGIN = "https://app.doctorcre.com"
 LAUNCHD_BOARD = "carr-v5"
+DEFAULT_PR_REPO = "jbookout/carr-system"
 
 
 def now_utc() -> datetime:
@@ -67,6 +68,16 @@ def safe_project(project: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", project):
         raise SystemExit("project must contain only letters, numbers, dot, underscore, or hyphen")
     return project
+
+
+def safe_pr_repo(repo: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+        raise SystemExit("--pr-repo must be a GitHub owner/repository")
+    return repo
+
+
+def task_pr_repo(task: dict[str, Any]) -> str:
+    return safe_pr_repo(task.get("pr_repo") or DEFAULT_PR_REPO)
 
 
 def safe_asker_ref(value: str) -> str:
@@ -300,12 +311,12 @@ def checks_summary(payload: dict[str, Any]) -> str:
     return f"{passed} pass · {pending} pending · {failed} fail"
 
 
-def pr_info(number: int) -> dict[str, Any] | None:
+def pr_info(number: int, repo: str = DEFAULT_PR_REPO) -> dict[str, Any] | None:
     if os.environ.get("PROGRESS_BOARD_SKIP_GH") or shutil.which("gh") is None:
         return None
     try:
         result = subprocess.run(
-            ["gh", "pr", "view", str(number), "--json", "state,isDraft,headRefOid,statusCheckRollup,comments,author"],
+            ["gh", "pr", "view", str(number), "-R", safe_pr_repo(repo), "--json", "state,isDraft,headRefOid,statusCheckRollup,comments,author"],
             capture_output=True,
             text=True,
             timeout=5,
@@ -473,7 +484,7 @@ def render_state(state: dict[str, Any], pr_infos: dict[str, dict[str, Any] | Non
         f'{esc(local_updated((completed_at(task) or render_time).isoformat()))}</time></div>'
         f'<p class="completed-evidence"><b>MEASURED</b> {esc(task["evidence"])}</p>'
         f'<div class="completed-meta"><span><b>EXECUTOR</b> {esc(task.get("executor", "unassigned"))}</span>'
-        + (f'<a href="https://github.com/jbookout/carr-system/pull/{int(task["pr"])}">PR {int(task["pr"])} ↗</a>'
+        + (f'<a href="https://github.com/{esc(task_pr_repo(task))}/pull/{int(task["pr"])}">PR {int(task["pr"])} ↗</a>'
            if isinstance(task.get("pr"), int) and task["pr"] > 0 else '<span>No PR</span>')
         + '</div></article>'
         for task_id, task in completed
@@ -622,7 +633,7 @@ def render(project: str) -> None:
     for task_id, task in state.get("tasks", {}).items():
         if task.get("pr") is None:
             continue
-        info = pr_info(task["pr"])
+        info = pr_info(task["pr"], task_pr_repo(task))
         pr_infos[task_id] = info
         if info is None:
             continue
@@ -881,6 +892,7 @@ def command_task(args: argparse.Namespace) -> None:
         "status": args.status or prior.get("status"),
         "executor": args.executor or prior.get("executor"),
         "pr": args.pr if args.pr is not None else prior.get("pr"),
+        "pr_repo": safe_pr_repo(args.pr_repo) if args.pr_repo else prior.get("pr_repo", DEFAULT_PR_REPO),
         "note": args.note if args.note is not None else prior.get("note"),
         "created_at": prior.get("created_at", task_time),
         "updated_at": task_time,
@@ -974,6 +986,7 @@ def parser() -> argparse.ArgumentParser:
     task.add_argument("--status", choices=STATUSES)
     task.add_argument("--executor")
     task.add_argument("--pr", type=int)
+    task.add_argument("--pr-repo")
     task.add_argument("--stage", choices=PR_STAGES)
     task.add_argument("--health", choices=("healthy", "question", "blocked"))
     task.add_argument("--note")

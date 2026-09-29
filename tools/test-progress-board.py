@@ -521,6 +521,31 @@ if (future.hidden) process.exit(4);
         self.assertEqual(task["stage"], "live")
         self.assertEqual(task["completed_at"], completed_at)
 
+    def test_cross_repository_pr_reads_and_links_its_own_repository(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("task", "demo", "app", "--title", "Resource dashboard",
+                       "--status", "review", "--executor", "Codex", "--pr", "86",
+                       "--pr-repo", "jbookout/doctorcre-app")
+        self.env.pop("PROGRESS_BOARD_SKIP_GH")
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        gh = bin_dir / "gh"
+        gh.write_text("#!/usr/bin/env python3\nimport json, sys\n"
+                      "repo = sys.argv[sys.argv.index('-R') + 1] if '-R' in sys.argv else ''\n"
+                      "print(json.dumps({'state': 'OPEN' if repo == 'jbookout/doctorcre-app' else 'MERGED', "
+                      "'isDraft': False, 'headRefOid': 'a' * 40, 'author': {'login': 'builder'}, "
+                      "'statusCheckRollup': [{'conclusion': 'SUCCESS', 'status': 'COMPLETED'}], 'comments': []}))\n")
+        gh.chmod(0o755)
+        self.env["PATH"] = str(bin_dir) + os.pathsep + self.env["PATH"]
+        self.run_board("render", "demo")
+        task = self.read_state("demo")["tasks"]["app"]
+        self.assertEqual((task["status"], task["stage"], task["pr_phase"]),
+                         ("review", "review", "Awaiting review"))
+        self.run_board("task", "demo", "app", "--stage", "live",
+                       "--evidence", "App release verified")
+        html = (self.root / "boards" / "demo.html").read_text()
+        self.assertIn('href="https://github.com/jbookout/doctorcre-app/pull/86"', html)
+
     def test_stage_palette_is_shared_by_nodes_columns_and_status_chips(self):
         self.run_board("init", "demo", "--title", "Demo")
         for stage in ("queued", "build", "review", "ci", "merged", "live"):
