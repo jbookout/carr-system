@@ -225,6 +225,9 @@ class JoinTests(unittest.TestCase):
                     and c["consequence_class"] == "commit_warning")
         self.assertEqual(cell["calibration_split"]["probability_edges"], [0.2])
         self.assertAlmostEqual(cell["held_out"]["probability_bands"][0]["mean_selected_probability"], 0.2)
+        rendered = cal.format_report(report)
+        self.assertIn("by selected probability", rendered)
+        self.assertIn("mean_p=0.200 gap=-0.800", rendered)
 
     def test_unlabeled_and_unfamilied_judgments_are_counted_not_dropped_silently(self):
         judgments = [noul_row("j1", "s1", 0.9), noul_row("j2", "s2", 0.9, family=None)]

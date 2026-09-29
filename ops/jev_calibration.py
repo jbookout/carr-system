@@ -713,13 +713,14 @@ def format_report(report_doc):
         lines.append(f"   held-out validated {held['validated']}: accuracy {_fmt(held['accuracy'])}, "
                      f"ECE {_fmt(held['expected_calibration_error'])}; unvalidated accuracy "
                      f"{_fmt(cell['unvalidated']['accuracy'])} (never used for a threshold)")
-        for label, key in (("entropy bits", "entropy_bands"), ("top probability", "probability_bands")):
+        for label, key in (("entropy bits", "entropy_bands"),
+                           ("selected probability", "probability_bands")):
             lines.append(f"   by {label}:")
             for band in held[key]:
                 lines.append(f"     ({_fmt(band['lower_exclusive'])}, {_fmt(band['upper_inclusive'])}] "
                              f"n={band['n']} acc={_fmt(band['accuracy'])} "
                              f"[{_fmt(band['accuracy_lower'])}, {_fmt(band['accuracy_upper'])}] "
-                             f"mean_p={_fmt(band['mean_top_probability'])} gap={_fmt(band['gap'])}")
+                             f"mean_p={_fmt(band['mean_selected_probability'])} gap={_fmt(band['gap'])}")
         proposal = cell["proposal"]
         if proposal["status"] == "proposed":
             lines.append(f"   PROPOSED band: entropy <= {proposal['max_entropy_bits']} bits on "
