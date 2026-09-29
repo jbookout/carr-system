@@ -1,5 +1,7 @@
 {
- "code_sha": "c5702cb5b1e1fe5c9b83909e463cf26847cb6f17",
+ "code_sha": "a7e384cae2eac46c7a25825b6bfe01fb3f00b1df",
+ "evaluation_note": "Historical rounds v1-v3 consulted the test split for keep/revert. Their test intervals are descriptive and are not untouched-holdout evidence.",
+ "evaluation_status": "exploratory_test_used_for_candidate_selection",
  "flow": "rule-delivery",
  "inputs": {
   "hard_cases": "abc3a372b4ea3c25bd2b1db10850b3ebf1d5239049711ab3a015df378cd844ff",
@@ -38,7 +40,7 @@
     "over_cap_events": 48,
     "owes_cases": 129,
     "precision": 0.21554770318021202,
-    "recall_macro": 0.3032050851818293,
+    "recall_macro": 0.30320508518182937,
     "recall_micro": 0.3341708542713568,
     "should_not_fire_cases": 83,
     "sn_any_delivery_cases": 40,
@@ -60,7 +62,7 @@
     "over_cap_events": 28,
     "owes_cases": 63,
     "precision": 0.26128266033254155,
-    "recall_macro": 0.3180254930254931,
+    "recall_macro": 0.31802549302549304,
     "recall_micro": 0.3945945945945946,
     "should_not_fire_cases": 63,
     "sn_any_delivery_cases": 35,
@@ -80,7 +82,7 @@
     "over_cap_events": 40,
     "owes_cases": 129,
     "precision": 0.2404692082111437,
-    "recall_macro": 0.20436787587950367,
+    "recall_macro": 0.20436787587950378,
     "recall_micro": 0.2889447236180904,
     "should_not_fire_cases": 83,
     "sn_any_delivery_cases": 30,
@@ -93,23 +95,23 @@
   "v3": {
    "test": {
     "cases": 126,
-    "delivered_rules": 428,
+    "delivered_rules": 430,
     "events": 251,
     "expected_rules": 185,
-    "false_per_event": 1.2191235059760956,
-    "false_rules": 306,
+    "false_per_event": 1.2270916334661355,
+    "false_rules": 308,
     "hit_rules": 86,
     "over_cap_events": 27,
     "owes_cases": 63,
-    "precision": 0.2850467289719626,
-    "recall_macro": 0.4021524771524771,
+    "precision": 0.2837209302325581,
+    "recall_macro": 0.40215247715247715,
     "recall_micro": 0.4648648648648649,
     "should_not_fire_cases": 63,
     "sn_any_delivery_cases": 15,
     "sn_dirty_cases": 15,
     "sn_false_rules": 44,
-    "tokens_per_event": 521.5717131474104,
-    "tokens_total": 130914.5
+    "tokens_per_event": 530.906374501992,
+    "tokens_total": 133257.5
    },
    "train": {
     "cases": 212,
@@ -163,29 +165,29 @@
    "false_per_event": {
     "baseline": 1.4900398406374502,
     "ci95": [
-     -0.40639269406392686,
-     -0.1564885496183206
+     -0.39676113360323884,
+     -0.15139442231075706
     ],
-    "delta": -0.27091633466135456,
-    "shipped": 1.2191235059760956
+    "delta": -0.26294820717131473,
+    "shipped": 1.2270916334661355
    },
    "false_rules": {
     "baseline": 374,
     "ci95": [
-     -99,
-     -41
+     -97,
+     -39
     ],
-    "delta": -68,
-    "shipped": 306
+    "delta": -66,
+    "shipped": 308
    },
    "precision": {
     "baseline": 0.23983739837398374,
     "ci95": [
-     0.027160493827160487,
-     0.06862062563816951
+     0.026167849016195954,
+     0.06659881174994675
     ],
-    "delta": 0.04520933059797885,
-    "shipped": 0.2850467289719626
+    "delta": 0.04388353185857438,
+    "shipped": 0.2837209302325581
    },
    "recall_micro": {
     "baseline": 0.44324324324324327,
@@ -208,11 +210,11 @@
    "tokens_per_event": {
     "baseline": 637.9611553784861,
     "ci95": [
-     -171.6875,
-     -68.7641342756184
+     -160.89495798319325,
+     -60.48498233215554
     ],
-    "delta": -116.38944223107569,
-    "shipped": 521.5717131474104
+    "delta": -107.05478087649408,
+    "shipped": 530.906374501992
    }
   },
   "train": {
@@ -271,6 +273,25 @@
     "shipped": 569.6648514851485
    }
   }
+ },
+ "source_manifest": {
+  "evals/rule-delivery/README.md": "09b46602adf39338326b34c5a2526234443fb7659bf5f1949368dcf9751b1547",
+  "evals/rule-delivery/explain.py": "d6bece9fba01b5e30f544e53c4fcfcb3bc22cf1645d3e30c2ee4b2ef21cc6ce7",
+  "evals/rule-delivery/freeze_split.py": "15cd4ad48030915d2ab5bbdb1cd6d74a0fa5f7c15c2de3fd48ddb1500d2cd54b",
+  "evals/rule-delivery/hard_cases.v1.json": "abc3a372b4ea3c25bd2b1db10850b3ebf1d5239049711ab3a015df378cd844ff",
+  "evals/rule-delivery/make_report.py": "12504b35ada3cea8d019aa22342bb8b0c8195a2f8348b81454e8347d30c5ae26",
+  "evals/rule-delivery/noise.py": "ae4963b8632bf1ec1081a75f526cf402d84676a12bd7def8c01d12fb044be147",
+  "evals/rule-delivery/round.sh": "052ea63d4ccfa90dec130d0885956e9d4612f1466f3e6be3c786add505dcb0e2",
+  "evals/rule-delivery/run_eval.py": "8e1acfe717a87e4609fc3cee183122bd29d285541ca7459108ccd70e4157bbac",
+  "evals/rule-delivery/selftest.py": "999603289e8bc1aed438e7337ad5e0e937ccea2517638a8ba35a19c76be10b85",
+  "evals/rule-delivery/split.json": "488e6f868fa5de794331610a5102e5b340de4a88b5d4f4b432ea3c3405a6eac8",
+  "lib/rule_routes.py": "d6967b34398074cdcb0595863ff849138ddbaa983eed4e9388b29dc499b5ee0c",
+  "ops/config/rule-jit-triggers.v1.json": "8cfe14f3081a301994b21b2a6c021c58bb7d0f6a2387ece1cabe1fab3472e56e",
+  "ops/config/rule-routes.v1.json": "883433ad02bef4c6137b85bc204d4bfbc8553a00b6bfd4d5076fd8e4f8e1f6da",
+  "ops/fixtures/rule-delivery-eval/cases.v2.json": "20d0a652e02559241e25a8b40ebb2f700a939c7ef7dc38114d5d7978a559e0f7",
+  "ops/rule-jit-compile.py": "2eb77551ddc1d49b73e5f91e7beefd2e8af345996a2aab5ea7218294c7b15f20",
+  "ops/rule-pack-preuse-reselection-selftest.py": "4b80c54244f784c2a461a6ef340c476a7ccfad7888c88bd4b54e6be8ae433c9f",
+  "ops/rule-trigger-compile-selftest.py": "e40839bd1b4ca6c503115f179be2ce2b5453ccb483d9b892a4930e76dd0a2294"
  },
  "split_sha256": "10b8aea53e81d3a1c4d57392c2a8861e3e54eafb379420519d24c54dba232565"
 }
