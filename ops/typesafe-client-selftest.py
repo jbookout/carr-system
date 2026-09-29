@@ -20,6 +20,7 @@ import importlib.util
 import hashlib
 import io
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -67,6 +68,59 @@ class SpendHealthTests(unittest.TestCase):
     def test_canonical_health_invokes_spend_row(self):
         source = (MODULE_PATH.parent.parent / "tools" / "health-check.py").read_text()
         self.assertIn("worker_usage=jev_spend_health.read_worker_usage", source)
+
+    def test_loaded_nightly_chain_runs_the_spend_alarm_and_preflights_its_sources(self):
+        nightly = (MODULE_PATH.parent.parent / "bin" / "nightly.sh").read_text()
+        self.assertTrue('step "Jev daily spend alarm"' in nightly
+                        and './.venv/bin/python tools/health-check.py --section jev-spend' in nightly,
+                        "nightly chain does not invoke the narrow Jev spend alarm")
+        preflight = nightly.split('if [ "${1:-}" = "--preflight" ]; then', 1)[1].split('missing=0', 1)[0]
+        self.assertIn("tools/health-check.py", preflight)
+        self.assertIn("ops/jev_spend_health.py", preflight)
+
+    def test_nightly_alarm_has_a_narrow_exit_status(self):
+        health = (MODULE_PATH.parent.parent / "tools" / "health-check.py").read_text()
+        self.assertIn('"jev-spend"', health)
+        self.assertIn('if CANONICAL_SECTION == "jev-spend":', health)
+        self.assertIn('sys.exit(_spend_module.nightly_exit_status(_spend_line))', health)
+
+    def test_nightly_alarm_fails_closed_when_usage_or_loop_action_is_unknown(self):
+        spend = importlib.util.module_from_spec(SPEND_SPEC)
+        SPEND_SPEC.loader.exec_module(spend)
+        self.assertEqual(spend.nightly_exit_status("OK jev spend — $0.000"), 0)
+        self.assertEqual(spend.nightly_exit_status("WARN jev spend — $0.600"), 0)
+        for line in ("UNKNOWN jev spend — missing usage",
+                     "UNAVAILABLE jev spend — Worker unreachable",
+                     "WARN jev spend — $0.600 · loop action FAILED (RuntimeError)"):
+            self.assertEqual(spend.nightly_exit_status(line), 1)
+
+    def test_narrow_health_cli_exits_before_unrelated_checks(self):
+        source_tools = MODULE_PATH.parent.parent / "tools"
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "tools").mkdir()
+            (root / "ops").mkdir()
+            (root / "tools" / "health-check.py").write_text(
+                (source_tools / "health-check.py").read_text())
+            (root / "ops" / "jev_spend_health.py").write_text(
+                "import os\n"
+                "FACTORY_USAGE_LOG = 'factory-log'\n"
+                "def read_worker_usage(day): raise AssertionError('not called')\n"
+                "def check_spend(*, extra_logs, worker_usage):\n"
+                "    assert extra_logs == [FACTORY_USAGE_LOG]\n"
+                "    assert worker_usage is read_worker_usage\n"
+                "    return os.environ['TEST_SPEND_ROW']\n"
+                "def nightly_exit_status(line): return 0 if line.startswith('OK ') else 1\n")
+            for line, expected in (("OK jev spend — $0.000", 0),
+                                   ("UNKNOWN jev spend — missing usage", 1)):
+                result = subprocess.run(
+                    [os.sys.executable, str(root / "tools" / "health-check.py"),
+                     "--section", "jev-spend"],
+                    cwd=root, capture_output=True, text=True,
+                    env={**os.environ, "PYTHONPATH": str(source_tools),
+                         "TEST_SPEND_ROW": line}, timeout=10)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                self.assertEqual(result.stdout.strip(), line)
 
     def test_daily_spend_warns_and_dedups_one_loop_then_auto_clears(self):
         self.assertTrue(SPEND_SPEC and SPEND_SPEC.loader)

@@ -124,6 +124,14 @@ def read_worker_usage(day):
     return row
 
 
+def nightly_exit_status(line):
+    """Fail the scheduled step when its receipt or response is incomplete."""
+    return 0 if line.startswith(("OK jev spend", "WARN jev spend")) and not any(
+        marker in line for marker in
+        ("missing usage", "Worker usage unavailable", "loop action FAILED")
+    ) else 1
+
+
 def check_spend(log_path=USAGE_LOG, config_path=CONFIG, state_path=LOOP_STATE,
                 run_verb=_run_verb, *, now=None, extra_logs=(), worker_usage=None):
     """Return one health row, with the bound action in the row itself."""

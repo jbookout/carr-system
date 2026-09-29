@@ -106,8 +106,8 @@ def _reader_args(argv):
         # A parent shell may carry this old ambient variable.  Normal health must
         # not pass it to any child or let a child silently choose a Drive reader.
         os.environ.pop("CARR_VAULT", None)
-    if section not in ("all", "exports", "jobs", "registry", "credentials"):
-        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials")
+    if section not in ("all", "exports", "jobs", "registry", "credentials", "jev-spend"):
+        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials|jev-spend")
     if fixture and recovery:
         raise SystemExit("health-check: --fixture is for hermetic canonical tests only")
     return recovery, reason, vault, section, fixture, findings_json, rest
@@ -116,6 +116,28 @@ def _reader_args(argv):
 RECOVERY_MODE, RECOVERY_REASON, VAULT, CANONICAL_SECTION, CANONICAL_FIXTURE, FINDINGS_JSON_PATH, \
     _READER_REST = _reader_args(sys.argv[1:])
 sys.argv[1:] = _READER_REST
+
+
+def _jev_spend_row():
+    """Use the same receipt reader and response loop for manual and nightly health."""
+    spend_path = os.path.join(REPO_ROOT, "ops", "jev_spend_health.py")
+    spend_spec = importlib.util.spec_from_file_location("jev_spend_health", spend_path)
+    jev_spend_health = importlib.util.module_from_spec(spend_spec)
+    spend_spec.loader.exec_module(jev_spend_health)
+    return jev_spend_health, jev_spend_health.check_spend(
+        extra_logs=[jev_spend_health.FACTORY_USAGE_LOG],
+        worker_usage=jev_spend_health.read_worker_usage)
+
+
+if CANONICAL_SECTION == "jev-spend":
+    try:
+        _spend_module, _spend_line = _jev_spend_row()
+    except Exception as exc:
+        print(f"UNAVAILABLE jev spend — {type(exc).__name__}; "
+              "on breach: inspect usage receipt sources and restore the reader")
+        sys.exit(1)
+    print(_spend_line)
+    sys.exit(_spend_module.nightly_exit_status(_spend_line))
 
 # ── scheduler register (added 2026-08-02) ────────────────────────────────────
 # A TASK THAT HAS NEVER REACHED ITS FIRST WINDOW LOOKS EXACTLY LIKE A TASK THAT IS
@@ -1515,13 +1537,8 @@ def _canonical_health():
         # The source log is canonical across worktrees. The row carries its
         # response action on both OK and WARN, and the helper owns one loop.
         try:
-            _spend_path = os.path.join(REPO_ROOT, "ops", "jev_spend_health.py")
-            _spend_spec = importlib.util.spec_from_file_location("jev_spend_health", _spend_path)
-            jev_spend_health = importlib.util.module_from_spec(_spend_spec)
-            _spend_spec.loader.exec_module(jev_spend_health)
-            print("  " + jev_spend_health.check_spend(
-                extra_logs=[jev_spend_health.FACTORY_USAGE_LOG],
-                worker_usage=jev_spend_health.read_worker_usage))
+            _, _spend_line = _jev_spend_row()
+            print("  " + _spend_line)
         except Exception as exc:
             print(f"  UNAVAILABLE jev spend — {type(exc).__name__}; "
                   "on breach: open/update one dedup loop · owner orchestrator · "
