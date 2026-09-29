@@ -450,7 +450,7 @@ def render_state(state: dict[str, Any], pr_infos: dict[tuple[str, int], dict[str
     def card(task_id: str, task: dict[str, Any]) -> str:
         info = pr_infos.get(pr_key(task)) if task.get("pr") is not None else None
         pr = task.get("pr")
-        pr_label = (f"{task_repo(task)} · PR {pr} · {task.get('pr_phase', str(info.get('state', 'unknown')).title() if info else 'previous status')}"
+        pr_label = (f"{task_repo(task)} · PR {pr} · {task.get('pr_phase', str(info.get('state', 'unknown')).title() if info else 'status unavailable')}"
                     f" · {task.get('pr_checks', checks_summary(info) if info else 'checks unavailable')}") if pr is not None else "No PR"
         note = f'<p class="task-note">{esc(task["note"])}</p>' if task.get("note") else ""
         age = elapsed_text(task.get("updated_at", ""))
@@ -904,6 +904,11 @@ def command_task(args: argparse.Namespace) -> None:
         "created_at": prior.get("created_at", task_time),
         "updated_at": task_time,
     })
+    if prior.get("pr") is not None and pr_key(prior) != pr_key(task):
+        for field in ("pr_phase", "pr_checks", "pr_head", "evidence", "completed_at"):
+            task.pop(field, None)
+        task["status"] = args.status or "running"
+        task["stage"] = stage or "build"
     if args.stage:
         task["stage"] = stage
     if stage == "live":
