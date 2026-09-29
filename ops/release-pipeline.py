@@ -178,6 +178,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import urllib.request
 import uuid
 from pathlib import Path
@@ -698,6 +699,7 @@ class Pipeline:
         self.env = env if env is not None else child_env()
         self.github_factory = github or (lambda repo_name: GitHub(repo_name, self.env))
         self.http = http
+        self.sleep = time.sleep
         self.call_verb = call_verb or self._call_verb
         self.slice_marker = slice_marker or self._run_slice_marker
         self.today = today or dt.date.today().isoformat()
@@ -1909,6 +1911,45 @@ class Pipeline:
         self.out(f"  -> schema-supersede: closed {closed} as superseded by #{new_num}")
         return closed
 
+    def verify_app_live(self, lane_cfg: dict, sha: str, *, attempts: int = 12) -> None:
+        """Read the configured public endpoint until it serves the promoted SHA.
+
+        Keep every observed payload: a failed release must show what the
+        verifier actually received, including any transient read failure.
+        """
+        url = lane_cfg["live_release_url"]
+        log = self.run_dir / "app-verify-live.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        last_response = None
+        last_error = None
+        with log.open("w", encoding="utf-8") as output:
+            for attempt in range(1, attempts + 1):
+                row = {"attempt": attempt, "request": {"method": "GET", "url": url,
+                       "user_agent": "carr-release-pipeline"}}
+                try:
+                    response = self.http(url)
+                    last_response = response
+                    last_error = None
+                    row["response"] = response
+                except Exception as exc:  # noqa: BLE001 — record and retry a transient endpoint read
+                    response = None
+                    last_error = type(exc).__name__
+                    row["error"] = f"{type(exc).__name__}: {exc}"
+                output.write(json.dumps(row, sort_keys=True) + "\n")
+                output.flush()
+                if isinstance(response, dict) and response.get("source_commit") == sha \
+                        and response.get("environment") == "production":
+                    self.out(f"  -> app-verify-live: matched {sha} on read {attempt}; log {log}")
+                    return
+                if attempt < attempts:
+                    self.sleep(5)
+        source = last_response.get("source_commit") if isinstance(last_response, dict) else None
+        environment = last_response.get("environment") if isinstance(last_response, dict) else None
+        error = f" last_read_error={last_error}" if last_error else ""
+        raise StepFailed("app-verify-live", 1, str(log),
+                         f"/app-release did not serve {sha} after {attempts} reads; "
+                         f"source_commit={source} environment={environment}{error}; log {log}")
+
     def release_app(self, lane_cfg: dict, repo_dir: Path, base: str, sha: str) -> dict:
         """Same review evidence as the Worker lane; the named required checks
         must be PRESENT and green (an empty check list is not a pass)."""
@@ -1937,9 +1978,7 @@ class Pipeline:
         if self.dry_run:
             self.out(f"  [dry-run] GET {lane_cfg['live_release_url']} and require source_commit == {sha}")
         else:
-            live = self.http(lane_cfg["live_release_url"])
-            if live.get("source_commit") != sha or live.get("environment") != "production":
-                raise StepFailed("app-verify-live", 1, "", "/app-release does not serve the released SHA")
+            self.verify_app_live(lane_cfg, sha)
             self.remove_worktrees()
         head = rev.get("head") or {}
         return {"run_dir": str(self.run_dir), "prs": rev["prs"], "pre_pipeline_prs": rev["pre_pipeline_prs"],
