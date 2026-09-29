@@ -131,6 +131,28 @@ def load_registry(path: Path) -> dict[str, Any]:
         raise GateError(f"cannot read registry {path}: {exc}") from exc
 
 
+def enforced_registry(base: dict[str, Any] | None, head: dict[str, Any]) -> dict[str, Any]:
+    """The registry a pull request is judged by: it can widen coverage, never narrow it.
+
+    Surfaces and globs are the union of the merge base and the head; an exclude
+    counts only when both sides carry it. A pull request that drops a glob, drops a
+    surface or adds an exclude is still held to the base's coverage for its own
+    changes; the narrower registry binds the next pull request after it merges.
+    """
+    if base is None:
+        return head
+    merged: dict[str, list[str]] = {}
+    for s in [*base["surfaces"], *head["surfaces"]]:
+        globs = merged.setdefault(s["id"], [])
+        globs += [g for g in s["globs"] if g not in globs]
+    head_ex = set(head.get("exclude_globs", []))
+    return {
+        "schema_version": 1,
+        "surfaces": [{"id": sid, "globs": globs} for sid, globs in merged.items()],
+        "exclude_globs": [g for g in base.get("exclude_globs", []) if g in head_ex],
+    }
+
+
 def surfaces_for(path: str, reg: dict[str, Any]) -> list[str]:
     if path.startswith("evals/"):
         return []  # the procedure, the registry and the receipts are not steering text
@@ -420,12 +442,32 @@ def git(root: Path, *args: str) -> tuple[int, str]:
     return p.returncode, (p.stdout or "").strip()
 
 
-def changed_paths(root: Path, base: str) -> list[str] | None:
+def merge_base(root: Path, base: str) -> str | None:
     rc, mb = git(root, "merge-base", "HEAD", base)
-    if rc != 0 or not mb:
+    return mb if rc == 0 and mb else None
+
+
+def changed_paths(root: Path, base: str) -> list[str] | None:
+    mb = merge_base(root, base)
+    if mb is None:
         return None
     rc, out = git(root, "diff", "--name-only", f"{mb}..HEAD")
     return None if rc != 0 else [p for p in out.splitlines() if p]
+
+
+def base_registry(root: Path, mb: str) -> dict[str, Any] | None:
+    """The registry at the merge base, or None when the base predates it."""
+    rel = "evals/surfaces.json"
+    rc, _ = git(root, "cat-file", "-e", f"{mb}:{rel}")
+    if rc != 0:
+        return None
+    rc, text = git(root, "show", f"{mb}:{rel}")
+    if rc != 0:
+        raise GateError(f"cannot read {rel} at the merge base {mb}")
+    try:
+        return validate_registry(json.loads(text))
+    except json.JSONDecodeError as exc:
+        raise GateError(f"cannot read {rel} at the merge base {mb}: {exc}") from exc
 
 
 def pr_body_from_event() -> tuple[bool, str]:
@@ -480,9 +522,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"check-eval-receipt: {msg}; nothing to judge here")
         changed = []
 
+    judged = reg
+    mb = merge_base(root, args.base) if changed else None
+    if mb is not None:
+        try:
+            judged = enforced_registry(base_registry(root, mb), reg)
+        except GateError as exc:
+            print(f"check-eval-receipt: {exc}", file=sys.stderr)
+            return 2
+    known |= {s["id"] for s in judged["surfaces"]}
+
     touched: dict[str, list[str]] = {}
     for path in changed:
-        for sid in surfaces_for(path, reg):
+        for sid in surfaces_for(path, judged):
             touched.setdefault(sid, []).append(path)
     receipts_changed = {p.split("/")[1] for p in changed
                         if re.fullmatch(r"evals/[^/]+/receipt\.json", p)}

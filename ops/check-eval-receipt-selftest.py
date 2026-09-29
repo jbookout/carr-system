@@ -417,6 +417,47 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
         self.assertIn("session-instructions", out.stdout + out.stderr)
 
+    def _shrink_registry(self, mutate):
+        reg = json.loads((self.repo / "evals" / "surfaces.json").read_text())
+        mutate(reg)
+        return json.dumps(reg, indent=2) + "\n"
+
+    def test_dropping_a_glob_in_the_same_pr_does_not_exempt_the_file(self):
+        def drop(reg):
+            for s in reg["surfaces"]:
+                s["globs"] = [g for g in s["globs"] if "AGENTS.md" not in g] or ["nowhere/never"]
+        self.commit("evals/surfaces.json", self._shrink_registry(drop))
+        self.commit("AGENTS.md", "boot, changed\n")
+        out = self.run_check("Just a tweak.")
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertIn("session-instructions", out.stdout + out.stderr)
+
+    def test_dropping_a_whole_surface_in_the_same_pr_does_not_exempt_it(self):
+        def drop(reg):
+            reg["surfaces"] = [s for s in reg["surfaces"] if s["id"] != "session-instructions"]
+        self.commit("evals/surfaces.json", self._shrink_registry(drop))
+        self.commit("AGENTS.md", "boot, changed\n")
+        out = self.run_check("Just a tweak.")
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertIn("session-instructions", out.stdout + out.stderr)
+
+    def test_adding_an_exclude_in_the_same_pr_does_not_exempt_the_file(self):
+        self.commit("evals/surfaces.json",
+                    self._shrink_registry(lambda reg: reg.setdefault("exclude_globs", []).append("AGENTS.md")))
+        self.commit("AGENTS.md", "boot, changed\n")
+        out = self.run_check("Just a tweak.")
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertIn("session-instructions", out.stdout + out.stderr)
+
+    def test_a_surface_added_in_the_same_pr_is_enforced(self):
+        def add(reg):
+            reg["surfaces"].append({"id": "new-surface", "globs": ["README.md"]})
+        self.commit("evals/surfaces.json", self._shrink_registry(add))
+        self.commit("README.md", "changed\n")
+        out = self.run_check("Just a tweak.")
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertIn("new-surface", out.stdout + out.stderr)
+
     def test_null_pr_body_is_treated_as_empty(self):
         self.commit("AGENTS.md", "boot, changed\n")
         self.assertEqual(self.run_check(None).returncode, 1)

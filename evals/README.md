@@ -160,9 +160,12 @@ The check is registered for approve-rule as control `eval_receipt`
 
 ## Registering a surface
 
-Add globs to `evals/surfaces.json`. A hook that emits `additionalContext`,
-`systemMessage` or `hookSpecificOutput` must be matched there or the check
-fails. Anything you were unsure about goes in `unsure` with a reason, so the
+Add globs to `evals/surfaces.json`. A pull request is judged by the union of the
+registry at its merge base and at its head, and an exclude counts only when
+both carry it, so dropping a glob, dropping a surface or adding an exclude
+narrows coverage only for pull requests that come after it merges. A hook
+that emits `additionalContext`, `systemMessage` or `hookSpecificOutput` must be
+matched there or the check fails. Anything you were unsure about goes in `unsure` with a reason, so the
 next person can decide.
 
 Rule text and doctrine that change through record-layer verbs never pass
