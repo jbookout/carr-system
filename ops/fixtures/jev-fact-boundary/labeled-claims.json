@@ -148,7 +148,7 @@
       "boundary": "record_write",
       "tool_name": "Bash",
       "tool_input": {"command": "./run.sh call add-deal-note '{\"idempotency_key\":\"9a2e\",\"deal_id\":\"d-1\",\"note\":\"Every write needs a fresh idempotency_key and must also carry a partner signature.\"}'"},
-      "tool_response": {"stdout": "{\"ok\":true,\"id\":\"n-1\"}", "stderr": "", "interrupted": false},
+      "tool_response": {"stdout": "{\"ok\":true,\"id\":\"n-1\"}", "stderr": "", "exit_code": 0, "interrupted": false},
       "expected_claims": [
         {"text": "Every write needs a fresh idempotency_key and must also carry a partner signature.", "type": "doctrine_rule", "gold": "unsupported"}
       ],

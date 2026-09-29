@@ -285,7 +285,7 @@ def permitted_passages(hits, sections, terms):
         if section is None:
             dropped.append({"ref": ref, "reason": "section_unreadable"})
             continue
-        if section.get("status") not in (None, "active"):
+        if section.get("status") != "active":
             dropped.append({"ref": ref, "reason": f"status_{section.get('status')}"})
             continue
         if section.get("visibility") == "personal":
@@ -601,6 +601,14 @@ def _acknowledged(response):
     return isinstance(obj, dict) and "error" not in obj and obj.get("ok", True) is not False
 
 
+def _bash_exited_successfully(response):
+    if not isinstance(response, dict):
+        return False
+    codes = [response[key] for key in ("exit_code", "exitCode", "returncode", "code")
+             if key in response]
+    return bool(codes) and all(type(code) is int and code == 0 for code in codes)
+
+
 def _claim_text(value, key=""):
     if key in SKIP_KEYS or key.endswith(SKIP_SUFFIXES):
         return []
@@ -637,6 +645,8 @@ def record_write(tool_name, tool_input, tool_response):
             except ValueError:
                 args = None
     if not verb or not isinstance(args, dict) or not str(args.get("idempotency_key") or "").strip():
+        return None
+    if tool_name == "Bash" and not _bash_exited_successfully(tool_response):
         return None
     if not _acknowledged(tool_response):
         return None
