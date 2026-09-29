@@ -516,7 +516,7 @@ def deliver(name: str, entry: dict, seat: str, queued_turn: dict, *, state: dict
         )
         return {"desk": name, "outcome": "delivered_async"}
 
-    if kind in ("codex-session", "codex-live", "flash-local"):
+    if kind in ("codex-session", "codex-live", "flash-local", "grok-cli"):
         # Only a codex-session desk can sit on a thread Codex Desktop holds, and
         # this conversational path is the one caller that waits for nothing back,
         # so it alone opts into the Desktop route (see dispatch._to_codex).
@@ -528,6 +528,14 @@ def deliver(name: str, entry: dict, seat: str, queued_turn: dict, *, state: dict
             # thread (codex_ipc) and the session answers there, like a claude desk.
             return {"desk": name, "outcome": "delivered_live"}
         if status == "completed":
+            if kind == "grok-cli":
+                add_room_turn(body=json.dumps({"grok_execution": {
+                    "desk": name, "source_msg_id": queued_turn["msg_id"],
+                    "source_seq": queued_turn["seq"],
+                    "dispatch_msg_id": row["msg_id"],
+                    **row["provider_metadata"],
+                }}, separators=(",", ":")), seat="hermes", kind="receipt",
+                    msg_id=str(uuid.uuid4()))
             add_room_turn(body=(row.get("result") or "").strip() or "(empty reply)",
                           seat=seat, kind="turn", msg_id=str(uuid.uuid4()))
             return {"desk": name, "outcome": "replied_sync"}
@@ -580,6 +588,8 @@ def heartbeat_body(desk_entries: dict, cursor: int, cycle_at: str,
             "last_seen": entry.get("last_seen"),
             "auth": entry.get("last_auth") if isinstance(entry.get("last_auth"), bool) else None,
             "profile": entry.get("profile") if isinstance(entry.get("profile"), str) else None,
+            **({"model": entry.get("model"), "effort": entry.get("effort")}
+               if entry.get("kind") == "grok-cli" else {}),
         }
         for name, entry in sorted(desk_entries.items())
     ]

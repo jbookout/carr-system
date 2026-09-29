@@ -144,7 +144,9 @@ class QueueDispatchTests(unittest.TestCase):
     def test_repository_catalog_keeps_profiles_mapped_and_ox_budget_gated(self):
         catalog = kanban_adapter.load_catalog()
         targets = catalog["targets"]
-        self.assertEqual(targets["grok"]["assignee"], "default")
+        self.assertEqual(targets["grok"]["assignee"], "desk:grok-desk")
+        self.assertEqual(targets["grok"]["adapter"], "desk")
+        self.assertEqual(targets["grok"]["desk"], "grok-desk")
         self.assertEqual(targets["kimi"]["assignee"], "designer")
         self.assertEqual(targets["deepseek"]["assignee"], "reviewer")
         self.assertEqual(targets["ox-alpha"]["assignee"], "builder")
