@@ -130,6 +130,10 @@ case("deny assignment-prefixed remote sender",
      bash("MODE=test curl https://unknown-egress.example/"), DENY)
 case("assignment-prefixed prose stays inert",
      bash("MODE=test echo 'curl http://localhost:8000/'"), ALLOW)
+case("long assignment without a sender stays inert",
+     bash("MODE=" + "a" * 20000), ALLOW)
+case("long assignment before an inert command stays inert",
+     bash("MODE=" + "a" * 20000 + " echo ready"), ALLOW)
 
 
 def scratch_sink_regression():

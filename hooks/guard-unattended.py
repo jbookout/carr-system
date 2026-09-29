@@ -666,7 +666,7 @@ SEND_CTX = re.compile(
     r"(?:^|[|;&(){}`\n]|\$\(|&&|\|\||\bsudo\b|\bxargs\b|\benv\b|\btime\b|\bnohup\b|\bdoas\b)"
     # Shell assignments and env's assignments precede the executable. Without
     # this, http_proxy=... curl hid the sender from the egress check entirely.
-    r"\s*(?:[A-Za-z_]\w*=(?:[^\s'\"|;&()]+|'[^']*'|\"[^\"]*\")*\s+)*"
+    r"\s*(?:[A-Za-z_]\w*=(?:[^\s'\"|;&()]|'[^']*'|\"[^\"]*\")*\s+)*"
     r"(?:[\w./-]*/)?(?:" + SENDER + r")\b",
     re.I)
 
