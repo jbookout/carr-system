@@ -1,14 +1,14 @@
 {
  "counts": {
-  "jev_compiled_triggers": 118,
+  "jev_compiled_triggers": 119,
   "pack_fallback_triggers": 7,
   "seeded_detector_rule_ids": 51,
   "seeded_detector_triggers": 15,
   "structural_extra_triggers": 2,
-  "triggers": 148
+  "triggers": 149
  },
  "generated_from": {
-  "jev_triggers_sha256": "fe5a1593d9c602327ecd986158c5f77c31d704f8695f0952e81d15552a20ca9d",
+  "jev_triggers_sha256": "cb644e0c73eb0ae68cc9ad56fb89f5654c678fce1985e422f4297f1e6a9e622f",
   "map_sha256": "43ac7f513c173114b1723a886baf56a83ec40e7fef8b187ed3dead7d16d90ada",
   "triage_sha256": "61976718a46b0c94a49a7e9251ecbc9ed85eb429135633ad8cebbadcbed8391c"
  },
@@ -1278,6 +1278,19 @@
    ],
    "source": "jev_compiled",
    "trigger_id": "50d5f24099f8"
+  },
+  {
+   "kind": "prompt_regex",
+   "negative_pattern": "\\bstaffing\\s+model\\b",
+   "packs": [
+    "delegation-council"
+   ],
+   "pattern": "\\bmodel\\s+choice\\b|\\bwork's\\s+shape\\b|\\bcloud\\s+model\\b|\\bcloud\\s+pick\\b|\\bpick\\s+model\\b|\\bbatches\\b",
+   "rule_ids": [
+    "ede4b241"
+   ],
+   "source": "jev_compiled",
+   "trigger_id": "7f7cac8d1070"
   },
   {
    "kind": "prompt_regex",
