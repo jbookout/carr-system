@@ -144,6 +144,16 @@ never decisive), `offline_suite` (`{path, suite_digest}` for an
 `inconclusive`. The check refuses a receipt whose verdict disagrees with its
 own numbers.
 
+## The control behind the rule
+
+The check is registered for approve-rule as control `eval_receipt`
+(`deny_gate`), the carrying control for rule
+6cbaa63a-be57-4c2e-955f-4ea7b5c0405d. It is declared under
+`controls_absent_from_the_map` in
+`ops/config/control-enforcement-classes.v1.json`, compiled by
+`ops/sync_control_catalog.py`, and seeded by
+`migrations/0753_eval_receipt_control.sql`.
+
 ## Registering a surface
 
 Add globs to `evals/surfaces.json`. A hook that emits `additionalContext`,

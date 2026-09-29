@@ -439,5 +439,80 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(self.run_check("").returncode, 1)
 
 
+CONTROL_KEY = "eval_receipt"
+RULE_ID = "6cbaa63a-be57-4c2e-955f-4ea7b5c0405d"
+MIGRATION = ROOT / "migrations" / "0753_eval_receipt_control.sql"
+
+_SYNC_SPEC = importlib.util.spec_from_file_location("sync_control_catalog", ROOT / "ops" / "sync_control_catalog.py")
+assert _SYNC_SPEC and _SYNC_SPEC.loader
+sync = importlib.util.module_from_spec(_SYNC_SPEC)
+_SYNC_SPEC.loader.exec_module(sync)
+
+
+class ControlRegistration(unittest.TestCase):
+    """Rule 6cbaa63a names 'eval_receipt CI check' as its carrying control.
+
+    approve-rule accepts a control only when ops.enforcement_control_catalog
+    carries it installed and verified, in a class that can enforce (deny_gate,
+    stop_gate, schema, transactional_schema). The catalog is compiled from the
+    repository's declarations by ops/sync_control_catalog.py and seeded by a
+    migration rendered from the same compiler.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.rows = {r["control_key"]: r for r in sync.compile_catalog()}
+
+    def test_the_control_is_declared_and_compiles_as_installed(self):
+        row = self.rows.get(CONTROL_KEY)
+        self.assertIsNotNone(row, f"{CONTROL_KEY} is not declared")
+        self.assertTrue(row["installed"], row["not_installed_reason"])
+
+    def test_it_is_a_class_approve_rule_accepts(self):
+        self.assertIn(self.rows[CONTROL_KEY]["enforcement_class"],
+                      {"deny_gate", "stop_gate", "schema", "transactional_schema"})
+
+    def test_it_names_this_check_and_this_selftest(self):
+        row = self.rows[CONTROL_KEY]
+        self.assertIn("ops/check-eval-receipt.py", row["implementation_ref"].split("; "))
+        self.assertIn("ops/check-eval-receipt-selftest.py", row["test_ref"].split("; "))
+
+    def test_the_declaration_names_the_rule_it_carries(self):
+        side = json.loads((ROOT / "ops" / "config" / "control-enforcement-classes.v1.json").read_text())
+        entry = side["controls_absent_from_the_map"][CONTROL_KEY]
+        self.assertIn(RULE_ID, entry.get("_note", ""))
+
+    def test_the_enforcement_map_is_not_touched(self):
+        # audits/guidance-situation-curation-review.v1.json pins the map by
+        # sha256 while that review is still proposed; declaring the control
+        # beside the map is the route that keeps the pin true.
+        review = json.loads((ROOT / "audits" / "guidance-situation-curation-review.v1.json").read_text())
+        pinned = next(i["sha256"] for i in _walk(review)
+                      if isinstance(i, dict) and i.get("path") == "ops/config/rule-enforcement-map.json")
+        import hashlib
+        actual = hashlib.sha256((ROOT / "ops" / "config" / "rule-enforcement-map.json").read_bytes()).hexdigest()
+        self.assertEqual(actual, pinned)
+
+    def test_the_seed_migration_is_exactly_the_compiler_output(self):
+        text = MIGRATION.read_text()
+        self.assertIn(sync.render_control_upsert_sql(self.rows[CONTROL_KEY]), text)
+        self.assertNotRegex(text, r"(?im)^\s*(begin|commit)\s*;")  # the runner owns the transaction
+
+    def test_the_migration_slot_is_not_shared(self):
+        slot = MIGRATION.name[:4]
+        same = [p.name for p in (ROOT / "migrations").glob(f"{slot}*.sql")]
+        self.assertEqual(same, [MIGRATION.name])
+
+
+def _walk(value):
+    if isinstance(value, dict):
+        yield value
+        for v in value.values():
+            yield from _walk(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from _walk(v)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
