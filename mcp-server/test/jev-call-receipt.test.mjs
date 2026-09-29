@@ -67,6 +67,15 @@ class JevReceiptFake {
   async query(text, params = []) {
     const sql = text.replace(/\s+/g, " ").trim();
     this.calls.push({ sql, params });
+    if (["begin", "commit", "rollback"].includes(sql)) return { rows: [] };
+    if (sql.startsWith("update tool_call set response")) {
+      const call = this.toolCalls.get(params[0]);
+      if (!call || call.verb !== "ask-jev-attempt" || call.actor_id !== params[1] ||
+          call.response.receipt_id !== params[2] || call.response.cache_hit !== false)
+        return { rows: [] };
+      call.response = JSON.parse(params[3]);
+      return { rows: [{ idempotency_key: params[0] }] };
+    }
     if (sql.startsWith("select pg_advisory_xact_lock")) return { rows: [{}] };
     if (sql.startsWith("select request_hash, response")) {
       const row = this.toolCalls.get(params[0]);
@@ -120,7 +129,11 @@ class JevReceiptFake {
       } }] };
     }
     if (sql.startsWith("select ops.jev_call_receipt_integrity")) {
-      const orphans = this.rows.filter(row => !this.credited(row));
+      const orphans = this.rows.filter(row => {
+        const call = this.toolCalls.get(row.idempotency_key);
+        return !call || call.actor_id !== row.actor_id || call.response?.receipt_id !== row.receipt_id ||
+          call.verb !== (row.model_answered === "jev-attempt-pending" ? "ask-jev-attempt" : "ask-jev");
+      });
       const triggers = Object.entries(this.triggers).map(([name, tgenabled]) =>
         ({ name, tgenabled, enabled: ["O", "A"].includes(tgenabled) }));
       return { rows: [{ result: {
@@ -282,6 +295,8 @@ test("a billable attempt is settled by the exact committed receipt", async () =>
   const answer = { model: "jev-1.14.0", answers: ANSWERS,
     usage: { input_tokens: 10 },
     attempt: { key: "attempt-1", receipt_id: "40000000-0000-0000-0000-000000000009" } };
+  client.toolCalls.set(answer.attempt.key, { verb: "ask-jev-attempt", actor_id: AGENT.id,
+    response: { receipt_id: answer.attempt.receipt_id, cache_hit: false } });
   const result = await askVia(client, AGENT, askArgs(), fakeJevAsk(answer));
   const settled = client.toolCalls.get("attempt-1");
   assert.equal(settled.verb, "ask-jev-attempt");
@@ -298,7 +313,13 @@ test("the pre-call receipt records unknown usage through the existing write door
   assert.equal(row.model_answered, "jev-attempt-pending");
   assert.equal(row.usage, null);
   assert.equal(row.actor_id, AGENT.id);
-  assert.equal(client.toolCalls.size, 0);
+  const pending = client.toolCalls.get(attempt.key);
+  assert.equal(pending?.verb, "ask-jev-attempt");
+  assert.equal(pending.response.receipt_id, row.receipt_id);
+  assert.equal(pending.response.cache_hit, false);
+  assert.equal(pending.response.settled_by, undefined);
+  assert.ok(client.calls.some(call => call.sql === "begin"));
+  assert.ok(client.calls.some(call => call.sql === "commit"));
 });
 
 test("ask-jev purpose build_advisory records prompt_sha256 of state.partner_request", async () => {
@@ -659,4 +680,51 @@ test("read-jev-call-receipt-integrity flags uncredited receipts and a disabled t
   const payload = await rejected(() =>
     executeRegisteredTool(client, AGENT, "read-jev-call-receipt-integrity", { extra: 1 }));
   assert.equal(payload.error, "unregistered_operation_fields");
+});
+
+test("attempt reservation rolls back if its ledger write fails", async () => {
+  const calls = [];
+  const client = { query: async sql => {
+    calls.push(sql);
+    if (sql.includes("record_jev_call_receipt")) return { rows: [{ receipt_id: "attempt-row" }] };
+    if (sql.includes("insert into tool_call")) throw new Error("ledger unavailable");
+    return { rows: [] };
+  } };
+  await assert.rejects(reserveJevCallAttempt(client, AGENT, askArgs()), /ledger unavailable/);
+  assert.equal(calls[0], "begin");
+  assert.equal(calls.at(-1), "rollback");
+  assert.ok(!calls.includes("commit"));
+});
+
+test("settlement refuses a ledger belonging to another actor or receipt", async () => {
+  for (const wrong of [{ actor_id: OTHER.id }, { receipt_id: "other-receipt" }]) {
+    const client = new JevReceiptFake();
+    const attempt = { key: "attempt-mismatch", receipt_id: "pending-receipt" };
+    client.toolCalls.set(attempt.key, { verb: "ask-jev-attempt", actor_id: wrong.actor_id ?? AGENT.id,
+      response: { receipt_id: wrong.receipt_id ?? attempt.receipt_id, cache_hit: false } });
+    const error = await rejected(() => askVia(client, AGENT, askArgs(),
+      fakeJevAsk({ model: "jev-1.14.0", answers: ANSWERS, attempt })));
+    assert.equal(error.error, "jev_attempt_settlement_mismatch");
+    assert.equal(client.toolCalls.get(attempt.key).response.cache_hit, false);
+  }
+});
+
+test("upstream rejection leaves a linked pending attempt without crediting an answer", async () => {
+  const client = new JevReceiptFake();
+  const args = askArgs();
+  const fetchImpl = fakeFetch([jsonResponse(422, { error: "missing criteria" })]);
+  const ask = jevAskBinding({ TYPESAFE_API_KEY: KEY }, fetchImpl, {
+    cache: null, reserveAttempt: () => reserveJevCallAttempt(client, AGENT, args),
+  });
+  const answer = await prefetchJevAnswer(args, ask);
+  assert.equal(answer.ok, false);
+  assert.equal(answer.error.error, "jev_upstream_failed");
+  assert.equal(client.rows.length, 1);
+  const audit = await executeRegisteredTool(client, AGENT, "read-jev-call-receipt-integrity", {});
+  assert.equal(audit.receipts_without_tool_call.count, 0);
+  const read = await executeRegisteredTool(client, AGENT, "read-jev-call-receipts", {
+    session_id: args.session_id,
+  });
+  assert.deepEqual(read.receipts, []);
+  assert.equal(client.toolCalls.get(client.rows[0].idempotency_key).response.cache_hit, false);
 });

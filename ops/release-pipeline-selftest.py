@@ -2314,6 +2314,33 @@ class Robustness(Base):
 
 
 class Blockers(Base):
+    def test_health_blocker_names_the_authorized_repair_lane(self):
+        args = rp.blocker_loop("health_baseline_hard_error", "Jev receipt integrity is broken")
+        self.assertEqual(args["blocker"], "other_lane")
+        self.assertEqual(args["owner"], "Claude")
+        self.assertIn("release-repair lane", args["blocker_detail"])
+
+    def test_credential_blocker_names_the_decider_for_the_live_verb_gate(self):
+        args = rp.blocker_loop("NEON_API_KEY", "NEON_API_KEY is absent from db.env")
+        result = subprocess.run(["node", "--input-type=module", "-e",
+            "import {needsDecider} from './mcp-server/src/verb-gate-checks.js'; "
+            "console.log(JSON.stringify(needsDecider(JSON.parse(process.argv[1]))));",
+            json.dumps(args)], cwd=str(HERE.parent), capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(result.stdout), False)
+
+    def test_call_verb_preserves_multiline_error_and_both_streams(self):
+        pipe = self.fx.pipeline(FakeRunner())
+        failed = subprocess.CompletedProcess([], 1, stdout="request refused\n",
+            stderr='local-verb identity\nTOOL ERROR {\n  "error": "capability_no_decider",\n'
+                   '  "dsn": "postgres://user:secret@example.invalid/db"\n}\n')  # ci-secret-scan: allow (redaction fixture)
+        with mock.patch.object(rp.subprocess, "run", return_value=failed):
+            ok, detail = pipe._call_verb("add-loop", {})
+        self.assertFalse(ok)
+        self.assertIn("capability_no_decider", detail)
+        self.assertIn("request refused", detail)
+        self.assertNotIn("user:secret", detail)
+        self.assertIn("[REDACTED]", detail)
+
     def test_missing_credential_files_one_loop_once(self):
         self.fx.commit({"mcp-server/src/a.js": "1"})
         (self.fx.cred / "db.env").write_text("CARR_DB_JOBS_URL='v'\n")

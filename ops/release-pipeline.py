@@ -185,6 +185,8 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO))
+from lib.secret_redaction import redact_text, sensitive_env_values  # noqa: E402
 CONFIG_PATH = REPO / "ops" / "config" / "release-pipeline.v1.json"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -675,9 +677,13 @@ def queue_turn(lane: str, sha: str, step: str, rc: int, log: str, record_path: s
 
 
 def blocker_loop(capability: str, detail: str) -> dict:
+    health_repair = capability in {"health_baseline_hard_error", "health_baseline_stalled"}
+    blocker_detail = (f"The authorized release-repair lane must restore and verify the health baseline: {detail}"
+                      if health_repair else
+                      f"Joe is the provisioning decider for the named unattended credential: {detail}")
     return {"idempotency_key": str(uuid.uuid5(ROOM_NAMESPACE, "release-pipeline-blocker:" + capability)),
-            "kind": "open_loop", "owner": "Joe", "domain": "system", "marker": "none",
-            "blocker": "capability", "blocker_detail": detail,
+            "kind": "open_loop", "owner": "Claude" if health_repair else "Joe", "domain": "system", "marker": "none",
+            "blocker": "other_lane" if health_repair else "capability", "blocker_detail": blocker_detail,
             "body": (f"The scripted release pipeline (ops/release-pipeline.py) cannot run "
                      f"unattended: {detail}. It stops at that step every tick until this "
                      f"exists; nothing is released meanwhile."),
@@ -726,8 +732,11 @@ class Pipeline:
         except Exception as exc:  # noqa: BLE001 — a failed filing is reported, not raised
             return False, f"{type(exc).__name__}: {exc}"
         if proc.returncode != 0:
-            tail = (proc.stderr or proc.stdout or "").strip().splitlines()
-            return False, f"run.sh call {verb} exit {proc.returncode}: {tail[-1] if tail else ''}"
+            # TOOL ERROR is multiline JSON; its last line is only `}`.
+            # Keep both streams so a stderr identity banner cannot hide stdout.
+            detail = "\n".join(part.strip() for part in (proc.stderr, proc.stdout) if part and part.strip())
+            detail = redact_text(detail, known_secrets=sensitive_env_values(self.env))
+            return False, f"run.sh call {verb} exit {proc.returncode}: {detail[:4000]}"
         try:
             return True, json.loads(proc.stdout)
         except ValueError:
