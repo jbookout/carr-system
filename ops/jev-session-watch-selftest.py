@@ -773,6 +773,22 @@ class TranscriptHelperTests(unittest.TestCase):
 
 
 class BoundaryBatchTests(unittest.TestCase):
+    def test_replacing_existing_function_is_not_duplicate_creation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = FakeClient({})
+            with mock.patch.object(watch, "_git_grep_candidates", return_value=[
+                    {"path": "src.py", "line": 8, "name": "existing_fn",
+                     "signature": "def existing_fn():"}]), mock.patch.object(
+                    watch, "_shortlist_tests", return_value=[]):
+                out = watch.inspect_tool_event(
+                    "Edit", {"file_path": os.path.join(tmp, "src.py"),
+                             "new_string": "def existing_fn(): pass"},
+                    "updated", None, "edit existing function", tmp,
+                    client=client, judge_module=FakeJudge(),
+                    receipt_path=os.path.join(tmp, "receipt.jsonl"))
+            self.assertEqual(client.calls, [])
+            self.assertEqual(out, [])
+
     def test_failed_test_and_injection_share_one_request_and_keep_safety_floor(self):
         with tempfile.TemporaryDirectory() as tmp:
             client = FakeClient({

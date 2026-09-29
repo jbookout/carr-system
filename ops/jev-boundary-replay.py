@@ -172,13 +172,14 @@ def log_row_hashes(paths):
     return found
 
 
-def labeled_replay():
+def labeled_replay(*, verify_sources=True):
     fixture = json.loads(FIXTURE.read_text())
     assert fixture["schema"] == "jev-boundary-calibration/v1"
-    hashes = log_row_hashes(fixture["source_logs"])
+    hashes = log_row_hashes(fixture["source_logs"]) if verify_sources else None
     rows = []
     for case in fixture["cases"]:
-        assert (case["source_log"], case["source_row_sha256"]) in hashes, case["id"]
+        if hashes is not None:
+            assert (case["source_log"], case["source_row_sha256"]) in hashes, case["id"]
         with tempfile.TemporaryDirectory() as tmp:
             before = evaluate_case(case, old=True, temp_dir=tmp)
             after = evaluate_case(case, old=False, temp_dir=tmp)
@@ -264,8 +265,10 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--output", default="-")
     args = p.parse_args()
-    rows = labeled_replay()
-    spend = spend_replay()
+    fixture = json.loads(FIXTURE.read_text())
+    have_logs = all((REPO / path).exists() for path in fixture["source_logs"])
+    rows = labeled_replay(verify_sources=have_logs)
+    spend = spend_replay() if have_logs else {}
     totals = {side: {
         "detections": sum(row[side]["detected"] for row in rows),
         "false_positives": sum(row[side]["false_positives"] for row in rows),
@@ -274,6 +277,7 @@ def main():
     } for side in ("before", "after")}
     result = {"schema":"jev-boundary-replay-result/v1", "model":"jev-1.13.0",
               "labeled":rows, "labeled_totals": totals, "spend":spend,
+              "recorded_logs_available": have_logs,
               "limits":"Spend projection removes prompt intake only; log rows lack raw tool correlation, so batch and throttle savings are not credited."}
     body = json.dumps(result, sort_keys=True, indent=2)
     if args.output == "-": print(body)

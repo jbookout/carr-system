@@ -1272,7 +1272,11 @@ def inspect_tool_event(tool_name, tool_input, output, exit_code, task_text, repo
         state["changed_path"] = rel[:300]
         functions = re.findall(r"^\s*(?:async\s+)?(?:def|function)\s+([A-Za-z_]\w*)\s*\(", added, re.M)
         if functions:
-            candidates = _git_grep_candidates(_name_tokens(functions[0]), repo_root)[:6]
+            # A replacement Edit naturally finds the function already present
+            # at its own path. Only other definitions are duplicate candidates.
+            candidates = [item for item in _git_grep_candidates(
+                _name_tokens(functions[0]), repo_root)
+                if not (item["path"] == rel and item["name"] == functions[0])][:6]
             if candidates:
                 triggers.append("duplicate_function")
                 state["new_function"] = functions[0]
