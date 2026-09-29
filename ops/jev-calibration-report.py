@@ -27,6 +27,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 SPEC = importlib.util.spec_from_file_location("jev_calibration", HERE / "jev_calibration.py")
+assert SPEC and SPEC.loader
 cal = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(cal)
 
