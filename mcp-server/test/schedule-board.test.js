@@ -77,3 +77,32 @@ test("a control-plane result needs a completion receipt, and shared principals c
   await assert.rejects(read(client, { slug: "probe", human: false }, {}, { now: () => now }),
     /schedule_board_requires_partner_scope/);
 });
+
+test("receipt-backed control-plane failures demand attention even without a queued due time", async () => {
+  const control = {
+    key: "daily-review", version: 1, enabled: true,
+    recurrence: { cron: "0 7 * * *", timezone: "America/Chicago" },
+    last_at: "2026-09-28T07:00:00.000Z", next_due_at: null,
+    last_receipt_ref: "job:daily-review:failure",
+  };
+  const client = { query: async (sql) => ({ rows: sql.includes("ops.service") ? [] : [control] }) };
+  const read = scheduleBoardTools()["schedule-board"].handler;
+  for (const lastState of ["failed", "timed_out", "dead_lettered"]) {
+    for (const due of [null, "2026-09-29T07:00:00.000Z", "2026-09-27T07:00:00.000Z"]) {
+      control.last_state = lastState;
+      control.next_due_at = due;
+      const result = await read(client, actor, {}, { now: () => now });
+      assert.equal(result.jobs[0].last_run.state, lastState);
+      assert.equal(result.jobs[0].state, "failed", `${lastState} with due ${due}`);
+      assert.equal(result.jobs[0].freshness, due
+        ? Date.parse(due) < Date.parse(now) ? "stale" : "fresh" : "unknown");
+      assert.equal(result.overall_state, "attention", `${lastState} with due ${due}`);
+    }
+  }
+  control.last_receipt_ref = null;
+  control.next_due_at = null;
+  const unverified = await read(client, actor, {}, { now: () => now });
+  assert.equal(unverified.jobs[0].last_run, null);
+  assert.equal(unverified.jobs[0].state, "unknown");
+  assert.equal(unverified.overall_state, "unknown");
+});

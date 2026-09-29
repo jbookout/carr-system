@@ -83,6 +83,7 @@ const iso = (value) => {
   return Number.isFinite(date.getTime()) ? date.toISOString() : null;
 };
 const actions = () => ({ pause: false, run: false, stop: false });
+const CONTROL_FAILURE_STATES = new Set(["failed", "timed_out", "dead_lettered"]);
 const validSeconds = (value) => Number.isInteger(Number(value)) && Number(value) > 0;
 const recurrenceLabel = (value) => {
   const cron = typeof value?.cron === "string" ? value.cron.trim() : "";
@@ -131,15 +132,16 @@ function controlJob(row, nowMs) {
   const lastRun = at && receipt
     ? { state: row.last_state || "unknown", at, receipt_ref: receipt } : null;
   const due = row.enabled ? iso(row.next_due_at) : null;
+  const overdue = due !== null && Date.parse(due) < nowMs;
   let state = "unknown";
   if (!row.enabled) state = "paused";
   else if (row.active_state === "running") state = "running";
-  else if (row.last_state === "failed" && lastRun) state = "failed";
-  else if (due && Date.parse(due) < nowMs) state = "missed";
+  else if (lastRun && CONTROL_FAILURE_STATES.has(lastRun.state)) state = "failed";
+  else if (overdue) state = "missed";
   else if (due && lastRun?.state === "succeeded") state = "healthy";
   return {
     key: row.key, name: row.key.replaceAll(/[._-]/g, " "), owner: "control-plane",
-    state, freshness: due ? (state === "missed" ? "stale" : "fresh") : "unknown",
+    state, freshness: due ? (overdue ? "stale" : "fresh") : "unknown",
     schedule: recurrenceLabel(row.recurrence),
     last_run: lastRun, next_due_at: due,
     next_due_basis: due ? "queued_job" : null,
