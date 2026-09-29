@@ -597,6 +597,39 @@ class HandoffTests(unittest.TestCase):
 
 
 class StopBoundaryBatchTests(unittest.TestCase):
+    def test_historical_completion_mention_does_not_create_done_obligation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            judge = FakeJudge({
+                "claim_scope": {"type": "choice", "choice": "other", "confidence": 0.98},
+                "claims_supported": {"type": "noul", "noul": 0.1},
+                "omitted_failure": {"type": "noul", "noul": 0.9},
+            })
+            results = jdc.inspect_stop_boundary(
+                "The earlier repair was complete; I am still investigating this change.",
+                {"test_output": "FAILED test_x"}, "", "investigate app", "session-history",
+                client=FakeClient, judge_module=judge, state_dir=tmp,
+                receipt_path=os.path.join(tmp, "receipt.jsonl"))
+            self.assertEqual(judge.calls, 1)
+            self.assertIn("claim_scope", judge.last[1])
+            self.assertFalse(any(row["check"] == "done_claim" for row in results))
+
+    def test_current_claim_with_truncated_failed_history_is_uncertain(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            judge = FakeJudge({
+                "claim_scope": {"type": "choice", "choice": "current_completion", "confidence": 0.98},
+                "claims_supported": {"type": "noul", "noul": 0.99},
+                "omitted_failure": {"type": "noul", "noul": 0.01},
+            })
+            results = jdc.inspect_stop_boundary(
+                "The repair is complete.",
+                {"test_history_truncated": True, "test_failure_count": 1,
+                 "test_history": "Some earlier runs omitted", "test_exit_code": 0},
+                "", "repair app", "session-truncated", client=FakeClient,
+                judge_module=judge, state_dir=tmp,
+                receipt_path=os.path.join(tmp, "receipt.jsonl"))
+            done = next(row for row in results if row["check"] == "done_claim")
+            self.assertEqual(done["verdict"], "uncertain")
+
     def test_failed_test_floor_survives_unavailable_judgment_and_retries(self):
         with tempfile.TemporaryDirectory() as tmp:
             class Unavailable(FakeJudge):
@@ -623,6 +656,7 @@ class StopBoundaryBatchTests(unittest.TestCase):
     def test_claim_and_diff_use_one_request_then_skip_unchanged_stop(self):
         with tempfile.TemporaryDirectory() as tmp:
             judge = FakeJudge({
+                "claim_scope": {"type": "choice", "choice": "current_completion", "confidence": 0.98},
                 "claims_supported": {"type": "noul", "noul": 0.1},
                 "omitted_failure": {"type": "noul", "noul": 0.9},
             })

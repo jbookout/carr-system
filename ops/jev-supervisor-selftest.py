@@ -93,6 +93,7 @@ class FakeLibs:
             return []
         def inspect_stop_boundary(*args, **kwargs):
             self.calls.append("inspect_stop_boundary")
+            self.done_evidence = args[1]
             return [result("check_done_claim", self.verdicts.get("check_done_claim", "ok"),
                            "advice from check_done_claim")]
         ns.inspect_tool_event = inspect_tool_event
