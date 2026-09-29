@@ -118,17 +118,50 @@ select 'WR-000112 Doc conversation store: append authority-only, read writer-bou
 do $b08_suggestion_flow$
 declare v_actor uuid; v_conversation uuid; v_rent uuid; v_insurance uuid;
         v_result jsonb; v_cards jsonb; v_draft text := 'Insurance is due next month.';
+        v_key uuid := gen_random_uuid(); v_empty uuid; v_scan_key uuid := gen_random_uuid();
 begin
   perform set_config('carr.acting_actor_slug', 'joe', true);
   perform set_config('carr.verified_human_actor_slug', 'joe', true);
   select id into v_actor from public.actor where slug='joe';
   insert into ops.doc_conversation(title,created_by_actor)
+    values('B08 coverage proof',v_actor) returning id into v_empty;
+  if ops.list_doc_suggestions(v_empty,false)->'coverage'->>'state'<>'unknown' then
+    raise exception 'B08 unscanned empty conversation claimed verified coverage'; end if;
+  perform ops.append_doc_conversation_turn(v_empty,'human','No follow-up is needed.',gen_random_uuid(),gen_random_uuid());
+  v_result:=ops.complete_doc_suggestion_scan(v_empty,0,v_scan_key);
+  if v_result->>'ok'<>'true' or
+     ops.list_doc_suggestions(v_empty,false)->'coverage'->>'state'<>'complete' or
+     ops.list_doc_suggestions(v_empty,false)->'coverage'->>'empty_state'<>'verified_empty' or
+     jsonb_array_length(ops.list_doc_suggestions(v_empty,false)->'suggestions')<>0 then
+    raise exception 'B08 producer verified-empty coverage missing: %',v_result; end if;
+  if ops.complete_doc_suggestion_scan(v_empty,0,v_scan_key)->>'deduplicated'<>'true' then
+    raise exception 'B08 exact scan replay was not deduplicated'; end if;
+  perform ops.append_doc_conversation_turn(v_empty,'human','Check this too.',gen_random_uuid(),gen_random_uuid());
+  if ops.list_doc_suggestions(v_empty,false)->'coverage'->>'state'<>'unknown' then
+    raise exception 'B08 new turn did not stale producer coverage'; end if;
+  if ops.list_doc_suggestions(v_empty,false)->'coverage'->>'empty_state'<>'unknown' then
+    raise exception 'B08 stale empty state was reported as verified'; end if;
+  if ops.complete_doc_suggestion_scan(v_empty,0,gen_random_uuid())->>'reason_id'<>'scan_head_conflict' then
+    raise exception 'B08 stale producer scan was accepted'; end if;
+  if ops.complete_doc_suggestion_scan(v_empty,1,v_scan_key)->>'reason_id'<>'idempotency_key_reuse' then
+    raise exception 'B08 changed scan replay was accepted'; end if;
+  insert into ops.doc_conversation(title,created_by_actor)
     values('B08 distinct obligations proof',v_actor) returning id into v_conversation;
   perform ops.append_doc_conversation_turn(v_conversation,'human',
     'Rent and insurance each need review.',gen_random_uuid(),gen_random_uuid());
   v_result:=ops.suggest_doc_work(v_conversation,0,'rent','Review the terms',null,
-    '{"term":"rent"}'::jsonb,gen_random_uuid());
+    '{"term":"rent"}'::jsonb,v_key);
   v_rent:=(v_result->>'suggestion_id')::uuid;
+  if ops.suggest_doc_work(v_conversation,0,'rent','Review the terms',null,
+      '{"term":"rent"}'::jsonb,v_key)->>'deduplicated'<>'true' then
+    raise exception 'B08 exact suggestion replay was not deduplicated'; end if;
+  if ops.suggest_doc_work(v_conversation,0,'rent','Changed polish',null,
+      '{"term":"rent"}'::jsonb,v_key)->>'reason_id'<>'idempotency_key_reuse' or
+     ops.suggest_doc_work(v_conversation,0,'rent','Review the terms','uncertain',
+      '{"term":"rent"}'::jsonb,v_key)->>'reason_id'<>'idempotency_key_reuse' or
+     ops.suggest_doc_work(v_conversation,0,'rent','Review the terms',null,
+      '{"term":"other"}'::jsonb,v_key)->>'reason_id'<>'idempotency_key_reuse' then
+    raise exception 'B08 changed suggestion replay was accepted'; end if;
   v_result:=ops.suggest_doc_work(v_conversation,0,'insurance','Review the terms',null,
     '{"term":"insurance"}'::jsonb,gen_random_uuid());
   v_insurance:=(v_result->>'suggestion_id')::uuid;
@@ -155,6 +188,11 @@ begin
     '{"term":"rent","deadline":"new"}'::jsonb,gen_random_uuid());
   if jsonb_array_length(ops.list_doc_suggestions(v_conversation,false)->'suggestions')<>2 then
     raise exception 'B08 material change did not reopen dismissal'; end if;
+  if ops.suggest_doc_work(v_conversation,0,'rent','Review the terms',null,
+      '{"term":"rent"}'::jsonb,v_key)->>'deduplicated'<>'true' or
+     ops.suggest_doc_work(v_conversation,0,'rent','Review the new deadline',null,
+      '{"term":"rent","deadline":"new"}'::jsonb,v_key)->>'reason_id'<>'idempotency_key_reuse' then
+    raise exception 'B08 replay did not bind the original request after a later version'; end if;
   v_result:=ops.propose_doc_correction(v_rent,1,v_draft,v_conversation,2,gen_random_uuid());
   if v_result->>'reason_id'<>'version_conflict' or v_result->'current'->>'polished_text'<>'Review the new deadline' then
     raise exception 'B08 stale correction lost current record: %',v_result; end if;

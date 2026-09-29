@@ -24,11 +24,18 @@ create table ops.doc_suggestion (
 create table ops.doc_suggestion_contribution (
   idempotency_key uuid primary key,
   suggestion_id uuid not null references ops.doc_suggestion(id),
+  request jsonb not null,
   source_sequence integer not null,
   original_text text not null,
   contributor text not null,
   at timestamptz not null,
   unique(suggestion_id,source_sequence)
+);
+create table ops.doc_suggestion_scan (
+  idempotency_key uuid primary key,
+  conversation_id uuid not null references ops.doc_conversation(id),
+  through_sequence integer not null check (through_sequence>=-1),
+  completed_at timestamptz not null default now()
 );
 create table ops.doc_suggestion_decision (
   idempotency_key uuid primary key,
@@ -62,13 +69,16 @@ create or replace function ops.suggest_doc_work(p_conversation uuid,p_sequence i
 returns jsonb language plpgsql security definer set search_path=pg_catalog,ops,public as $$
 declare v_turn ops.doc_conversation_turn%rowtype; v_row ops.doc_suggestion%rowtype;
         v_existing ops.doc_suggestion_contribution%rowtype; v_changed boolean;
+        v_request jsonb;
 begin
+  v_request:=jsonb_build_object('conversation_id',p_conversation,'source_sequence',p_sequence,
+    'obligation_key',p_obligation_key,'polished_text',p_polished,
+    'uncertainty',p_uncertainty,'material_facts',p_material);
   select * into v_existing from ops.doc_suggestion_contribution where idempotency_key=p_key;
   if v_existing.idempotency_key is not null then
-    select * into v_row from ops.doc_suggestion where id=v_existing.suggestion_id;
-    if v_row.conversation_id<>p_conversation or v_existing.source_sequence<>p_sequence
-       or v_row.obligation_key<>p_obligation_key then
+    if v_existing.request is distinct from v_request then
       return jsonb_build_object('ok',false,'reason_id','idempotency_key_reuse'); end if;
+    select * into v_row from ops.doc_suggestion where id=v_existing.suggestion_id;
     return jsonb_build_object('ok',true,'deduplicated',true,'suggestion_id',v_row.id,
       'version',v_row.version,'material_version',v_row.material_version);
   end if;
@@ -102,16 +112,40 @@ begin
       work_ref=case when v_changed then null else work_ref end
       where id=v_row.id returning * into v_row;
   end if;
-  insert into ops.doc_suggestion_contribution(idempotency_key,suggestion_id,source_sequence,
+  insert into ops.doc_suggestion_contribution(idempotency_key,suggestion_id,request,source_sequence,
     original_text,contributor,at)
-  values(p_key,v_row.id,p_sequence,v_turn.body,v_turn.origin_actor,v_turn.at);
+  values(p_key,v_row.id,v_request,p_sequence,v_turn.body,v_turn.origin_actor,v_turn.at);
   return jsonb_build_object('ok',true,'deduplicated',false,'suggestion_id',v_row.id,
     'version',v_row.version,'material_version',v_row.material_version);
 end $$;
 
+create or replace function ops.complete_doc_suggestion_scan(p_conversation uuid,
+  p_through_sequence integer,p_key uuid)
+returns jsonb language plpgsql security definer set search_path=pg_catalog,ops,public as $$
+declare v_prior ops.doc_suggestion_scan%rowtype; v_head integer;
+begin
+  select * into v_prior from ops.doc_suggestion_scan where idempotency_key=p_key;
+  if v_prior.idempotency_key is not null then
+    if v_prior.conversation_id is distinct from p_conversation or
+       v_prior.through_sequence is distinct from p_through_sequence then
+      return jsonb_build_object('ok',false,'reason_id','idempotency_key_reuse'); end if;
+    return jsonb_build_object('ok',true,'deduplicated',true,'through_sequence',v_prior.through_sequence);
+  end if;
+  perform 1 from ops.doc_conversation where id=p_conversation for update;
+  if not found then return jsonb_build_object('ok',false,'reason_id','doc_conversation_not_found'); end if;
+  select coalesce(max(sequence),-1) into v_head from ops.doc_conversation_turn
+    where conversation_id=p_conversation;
+  if p_through_sequence is distinct from v_head then
+    return jsonb_build_object('ok',false,'reason_id','scan_head_conflict','current_sequence',v_head); end if;
+  insert into ops.doc_suggestion_scan(idempotency_key,conversation_id,through_sequence)
+    values(p_key,p_conversation,p_through_sequence);
+  return jsonb_build_object('ok',true,'deduplicated',false,'through_sequence',v_head);
+end $$;
+
 create or replace function ops.list_doc_suggestions(p_conversation uuid,p_include_parked boolean)
 returns jsonb language plpgsql stable security definer set search_path=pg_catalog,ops,public as $$
-declare v_actor uuid; v_rows jsonb;
+declare v_actor uuid; v_rows jsonb; v_head integer; v_scanned integer;
+        v_total integer; v_coverage jsonb;
 begin
   v_actor:=ops.portfolio_writer_actor_id();
   if p_conversation is not null and not ops.doc_suggestion_visible(p_conversation,v_actor) then
@@ -133,7 +167,22 @@ begin
         or (d.disposition='snoozed' and (d.snoozed_material_version is distinct from d.material_version
           or d.snoozed_until<=current_date)))
     order by d.suggested_at desc,d.id limit 100) s;
-  return jsonb_build_object('ok',true,'suggestions',v_rows,'as_of',now());
+  if p_conversation is null then
+    v_coverage:=jsonb_build_object('state','unknown','reason_id','conversation_scope_required');
+  else
+    select coalesce(max(sequence),-1) into v_head from ops.doc_conversation_turn
+      where conversation_id=p_conversation;
+    select max(through_sequence) into v_scanned from ops.doc_suggestion_scan
+      where conversation_id=p_conversation;
+    select count(*) into v_total from ops.doc_suggestion where conversation_id=p_conversation;
+    v_coverage:=jsonb_build_object('state',case when v_scanned=v_head then 'complete' else 'unknown' end,
+      'latest_sequence',v_head,'scanned_through',v_scanned,
+      'empty_state',case when jsonb_array_length(v_rows)>0 then 'not_empty'
+        when v_scanned is distinct from v_head then 'unknown'
+        when v_total>0 then 'filtered'
+        else 'verified_empty' end);
+  end if;
+  return jsonb_build_object('ok',true,'suggestions',v_rows,'coverage',v_coverage,'as_of',now());
 end $$;
 
 create or replace function ops.decide_doc_suggestion(p_id uuid,p_base integer,p_choice text,
@@ -219,26 +268,30 @@ create or replace function ops.doc_suggestion_history_immutable() returns trigge
 language plpgsql as $$ begin raise exception 'Doc suggestion history is immutable'; end $$;
 create trigger doc_suggestion_contribution_immutable before update or delete on ops.doc_suggestion_contribution
   for each row execute function ops.doc_suggestion_history_immutable();
+create trigger doc_suggestion_scan_immutable before update or delete on ops.doc_suggestion_scan
+  for each row execute function ops.doc_suggestion_history_immutable();
 create trigger doc_suggestion_decision_immutable before update or delete on ops.doc_suggestion_decision
   for each row execute function ops.doc_suggestion_history_immutable();
 create trigger doc_correction_proposal_immutable before update or delete on ops.doc_correction_proposal
   for each row execute function ops.doc_suggestion_history_immutable();
 
 do $$ declare t text; begin
-  foreach t in array array['doc_suggestion','doc_suggestion_contribution','doc_suggestion_decision','doc_correction_proposal'] loop
+  foreach t in array array['doc_suggestion','doc_suggestion_contribution','doc_suggestion_scan','doc_suggestion_decision','doc_correction_proposal'] loop
     execute format('create trigger scac_reference_monitor_guard_row before insert or update or delete on ops.%I for each row execute function ops.scac_reference_monitor_guard()',t);
     execute format('create trigger scac_reference_monitor_guard_truncate before truncate on ops.%I for each statement execute function ops.scac_reference_monitor_guard()',t);
   end loop;
 end $$;
-revoke all on ops.doc_suggestion,ops.doc_suggestion_contribution,ops.doc_suggestion_decision,
+revoke all on ops.doc_suggestion,ops.doc_suggestion_contribution,ops.doc_suggestion_scan,ops.doc_suggestion_decision,
   ops.doc_correction_proposal from public,carr_reader,carr_writer,carr_jobs,carr_authority;
 revoke all on function ops.doc_suggestion_visible(uuid,uuid),
   ops.suggest_doc_work(uuid,integer,text,text,text,jsonb,uuid),
+  ops.complete_doc_suggestion_scan(uuid,integer,uuid),
   ops.list_doc_suggestions(uuid,boolean),
   ops.decide_doc_suggestion(uuid,integer,text,date,text,uuid),
   ops.propose_doc_correction(uuid,integer,text,uuid,integer,uuid)
   from public,carr_reader,carr_writer,carr_jobs,carr_authority;
 grant execute on function ops.suggest_doc_work(uuid,integer,text,text,text,jsonb,uuid) to carr_authority;
+grant execute on function ops.complete_doc_suggestion_scan(uuid,integer,uuid) to carr_authority;
 grant execute on function ops.list_doc_suggestions(uuid,boolean) to carr_writer,carr_authority;
 grant execute on function ops.decide_doc_suggestion(uuid,integer,text,date,text,uuid),
   ops.propose_doc_correction(uuid,integer,text,uuid,integer,uuid) to carr_writer,carr_authority;

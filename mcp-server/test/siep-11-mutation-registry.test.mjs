@@ -491,9 +491,9 @@ test("reviewed MCP inventory is an exact immutable projection of the assembled r
   // V5-RW02's safe-stop run store (0733) adds the autonomy-counter read, the
   // run-outcome writer and the human-only consent-revocation writer.
   // Incident triage (0737) adds one bounded write.
-  // Doc suggestions add one read and three versioned producer/decision writes.
-  assert.equal(rows.length, 382);
-  assert.equal(rows.filter(row => row.write).length, 275);
+  // Doc suggestions add one read and four versioned producer/decision writes.
+  assert.equal(rows.length, 383);
+  assert.equal(rows.filter(row => row.write).length, 276);
   assert.equal(rows.filter(row => !row.write).length, 107);
   assert.deepEqual(rows.map(row => row.operation), Object.keys(TOOLS).sort());
   assert.equal(Object.isFrozen(TOOLS), true);

@@ -10,7 +10,7 @@ const tools = docSuggestionTools({
 
 test('suggestion contracts close caller authority fields and separate read, producer and human decisions', () => {
   const names = Object.keys(tools).sort();
-  assert.deepEqual(names, ['decide-doc-suggestion', 'list-doc-suggestions', 'propose-doc-correction', 'suggest-doc-work']);
+  assert.deepEqual(names, ['complete-doc-suggestion-scan', 'decide-doc-suggestion', 'list-doc-suggestions', 'propose-doc-correction', 'suggest-doc-work']);
   for (const [name, tool] of Object.entries(tools)) {
     assert.equal(tool.inputSchema.additionalProperties, false, name);
     for (const forbidden of ['actor', 'contributor', 'source_at', 'original_text', 'status']) {
@@ -18,6 +18,8 @@ test('suggestion contracts close caller authority fields and separate read, prod
     }
   }
   assert.equal(tools['suggest-doc-work'].authorityOnly, true);
+  assert.equal(tools['complete-doc-suggestion-scan'].authorityOnly, true);
+  assert.equal(tools['complete-doc-suggestion-scan'].write, true);
   assert.equal(tools['list-doc-suggestions'].writerConnection, true);
   assert.equal(tools['list-doc-suggestions'].write, undefined);
   for (const name of ['decide-doc-suggestion', 'propose-doc-correction']) {

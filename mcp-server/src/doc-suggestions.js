@@ -9,6 +9,26 @@ export function docSuggestionTools({ withEnvelope, writeEvent, ToolError }) {
     return value;
   };
   return {
+    'complete-doc-suggestion-scan': {
+      write: true, authorityOnly: true,
+      description: 'Record that the Doc producer examined every turn through the current conversation head. A later turn makes that coverage unknown until scanned again.',
+      inputSchema: { type: 'object', additionalProperties: false, properties: {
+        idempotency_key: { type: 'string' }, conversation_id: { type: 'string' },
+        through_sequence: { type: 'integer' },
+      }, required: ['idempotency_key','conversation_id','through_sequence'] },
+      handler: (c, actor, args) => withEnvelope(c, actor, 'complete-doc-suggestion-scan', args, async () => {
+        if (!valid(args.idempotency_key) || !valid(args.conversation_id)
+          || !Number.isInteger(args.through_sequence) || args.through_sequence < -1)
+          throw new ToolError({ error: 'doc_suggestion_scan_input_invalid' });
+        const found = await c.query('select ops.complete_doc_suggestion_scan($1::uuid,$2::integer,$3::uuid) as result',
+          [args.conversation_id,args.through_sequence,args.idempotency_key]);
+        const value = result(found.rows[0]?.result, 'doc_suggestion_scan_refused');
+        if (!value.deduplicated) await writeEvent(c, actor, 'complete-doc-suggestion-scan',
+          'doc_conversation', args.conversation_id,
+          { new: { through_sequence: value.through_sequence }, idempotency_key: args.idempotency_key });
+        return value;
+      }),
+    },
     'suggest-doc-work': {
       write: true, authorityOnly: true,
       description: 'Suggest one obligation from a recorded Doc turn. Exact matching material facts preserve a dismissal; changed facts reopen it. Each contribution keeps its original words and source time.',
@@ -34,7 +54,7 @@ export function docSuggestionTools({ withEnvelope, writeEvent, ToolError }) {
     },
     'list-doc-suggestions': {
       writerConnection: true,
-      description: 'Read Doc suggestions visible to the signed-in partner, with each original contribution and current version. No actor field is accepted.',
+      description: 'Read Doc suggestions visible to the signed-in partner, with each original contribution, current version, and producer coverage state. No actor field is accepted.',
       inputSchema: { type: 'object', additionalProperties: false, properties: {
         conversation_id: { type: 'string' }, include_parked: { type: 'boolean' },
       } },

@@ -72616,6 +72616,29 @@
           "classification_authorizing": false
         },
         {
+          "ingress_key": "mcp-tool:complete-doc-suggestion-scan",
+          "ingress_kind": "mcp_tool",
+          "operation": "complete-doc-suggestion-scan",
+          "effect_class": "administrative_mutation",
+          "source_locator": "mcp-server/src/doc-suggestions.js",
+          "schema_digest": "b001ec53c7eccb5299011413a43e4bf0adb6dca50ffc5b289b02a4fe21c74ce0",
+          "source_digest": "279ddc27b7fedb5ac9394448463f458e11c926d9fe96030269ca69e8446d9a02",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "server_verified_partner_authority",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.database",
+          "delegates_to": [],
+          "request_shape": "closed_top_level_schema",
+          "idempotency_mode": "operation_principal_manifest_bound",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "application_default_deny",
+          "owner_package": "11",
+          "implementation_state": "source_guarded_not_deployed",
+          "classification_authorizing": false
+        },
+        {
           "ingress_key": "mcp-tool:decide-doc-suggestion",
           "ingress_kind": "mcp_tool",
           "operation": "decide-doc-suggestion",
@@ -72708,8 +72731,8 @@
           "classification_authorizing": false
         }
       ],
-      "expected_count": 1003,
-      "expected_sha256": "7df7574c25f03b7b1bde32137428d05f694b9751dad558512321e3006d812993",
+      "expected_count": 1004,
+      "expected_sha256": "9f6420f94831b71480e1cc8eb28b6c87a0f93a6e8ee7a09d0a532dff1d5eb98d",
       "reason": "DoctorCRE B08 admits four versioned Doc suggestion verbs and reseals the migration runner atomic 0742/0743 pair. Distinct obligations remain separate in the record layer."
     }
   ],

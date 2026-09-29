@@ -1921,7 +1921,7 @@ export const POST_0740_FORWARD_V94_DB_CATALOG_BASELINE = Object.freeze({
 export const POST_0742_FORWARD_V95_DB_CATALOG_BASELINE = Object.freeze({
   ...POST_0740_FORWARD_V94_DB_CATALOG_BASELINE,
   projection_version: "scac-db-catalog-projection.v95",
-  secdef_execute: { count: 1157, digest: "sha256:320b79fcd90e5a87997625cf7a07d515a973783c927d6a47919b96f760782bad" },
+  secdef_execute: { count: 1158, digest: "sha256:d3ae57fa4189505661a8036334c4df2bc875dfacaa4a1313169f52df90b5877f" },
 });
 
 export const JOB_DEFINITION_BASELINE = Object.freeze({
@@ -18834,7 +18834,7 @@ export function renderDocSuggestionsRegistrySql(rows, predecessorSql = null) {
   const preflight = `do $doc_suggestions_v95_preflight$\ndeclare v ops.scac_mutation_registry_version%rowtype; registration jsonb;\nbegin\n` +
     `  if not exists(select 1 from public.schema_migrations where filename='${predecessorPath.split("/").at(-1)}' and sha256='${predecessorDigest}') then\n` +
     `    raise exception 'Doc suggestions v95 requires exact applied 0741'; end if;\n` +
-    `  if not exists(select 1 from public.schema_migrations where filename='0742_doc_suggestions.sql' and sha256='ebc199ce63131f90f018685bc71aa41a6031a9e7f88ef8b08f5ad414d5e87025') then\n` +
+    `  if not exists(select 1 from public.schema_migrations where filename='0742_doc_suggestions.sql' and sha256='fad82b3c52081bd8cd0e6dc9b03cb657e796d7b6cc1ce7cf5d4d412f9ef11a21') then\n` +
     `    raise exception 'Doc suggestions v95 requires exact applied 0742'; end if;\n` +
     `  select * into v from ops.scac_mutation_registry_version where registry_version='${REGISTRY_V94_VERSION}';\n` +
     `  if v.registry_digest is distinct from '${oldSeal.digest}' or v.entry_count<>${oldSeal.entryCount}\n` +
