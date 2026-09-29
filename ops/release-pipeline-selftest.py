@@ -1967,9 +1967,10 @@ class CanaryAndCI(Base):
 class ReleaseTarget(Base):
     """The Worker ships up to the NEWEST green-canary commit, not HEAD.
 
-    main-canary runs ~20 minutes with cancel-in-progress while merges land
-    every 10-20 minutes, so HEAD's own run is nearly always in progress or
-    cancelled; demanding HEAD itself be green starved the lane."""
+    main-canary runs ~20 minutes while merges can land every 10-20 minutes.
+    Running canaries finish, but HEAD may still be pending or in progress and
+    older pending runs may be replaced; demanding HEAD itself be green can
+    starve the lane."""
 
     GREEN, RED = ("completed", "success"), ("completed", "failure")
 

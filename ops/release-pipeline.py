@@ -1307,9 +1307,10 @@ class Pipeline:
     def release_target(self, gh: Any, lane_cfg: dict, base: str, head: str) -> str:
         """The newest first-parent commit in base..head the Worker may ship.
 
-        main-canary runs ~20 minutes with cancel-in-progress while merges land
-        every 10-20 minutes, so HEAD's own run is nearly always in progress or
-        cancelled. Requiring HEAD itself to be green starved the lane; instead
+        main-canary runs ~20 minutes while merges can land every 10-20 minutes,
+        so HEAD's own run may be pending or in progress. Running canaries now
+        finish; older pending runs can still be replaced. Requiring HEAD itself
+        to be green can starve the lane; instead
         walk back from HEAD and ship the NEWEST commit whose own canary
         concluded success. The canary judges the whole tree at its commit, so:
           - a commit with no run, a run in progress, or a cancelled/skipped run
