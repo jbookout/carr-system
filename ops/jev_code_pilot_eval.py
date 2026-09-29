@@ -84,15 +84,21 @@ def span(region, context_before=None):
     carry end_line; a regex-scanner region is `line` minus its context,
     through as many lines as its (possibly truncated) code holds."""
     if "end_line" in region:
-        return region["line"], region["end_line"]
+        return region.get("start_line", region["line"]), region["end_line"]
     before = 14 if context_before is None else context_before
     start = max(1, region["line"] - before)
     return start, start + region["code"].count("\n")
 
 
 def covering(item, regions):
-    return [r for r in regions if r["path"] == item["path"]
-            and span(r)[0] <= item["line"] <= span(r)[1]]
+    def contains(location):
+        start, end = span(location)
+        return (location["path"] == item["path"]
+                and start <= item["line"] <= end
+                and item["line"] <= location.get("sent_end_line", end))
+
+    return [r for r in regions if contains(r) or any(
+        contains(location) for location in r.get("also_at_spans", ()))]
 
 
 def duplicate_rate(regions, digest):
@@ -238,7 +244,7 @@ def live_report(corpus_path=CORPUS, *, client=None, api_key=None, workers=4):
     data, items = load_corpus(corpus_path)
     paths = sorted({i["path"] for i in items})
     report = offline_report(corpus_path, whole_tree=False)
-    report["judged"] = {"status": "measured"}
+    report["judged"] = {"status": "not_measured"}
     cache = {}
     for name, (regions, _stats) in generators(paths, jcr, part).items():
         todo = [r for r in regions if (r["path"], r["code"]) not in cache]
@@ -247,14 +253,28 @@ def live_report(corpus_path=CORPUS, *, client=None, api_key=None, workers=4):
         results = [dict(r, **{k: cache[(r["path"], r["code"])][k]
                               for k in ("scores", "usage", "seconds")}) for r in regions]
         tokens = [usage_tokens(r["usage"]) for r in results]
+        errors = sum("_error" in (r["scores"] or {}) for r in results)
+        accuracy = judged(items, results, jcr.REPORT_AT)
+        status = ("not_measured" if not results or errors == len(results) else
+                  "incomplete" if errors else "measured")
+        if status != "measured":
+            accuracy.update({"tp": None, "fp": None, "fn": None, "tn": None,
+                             "precision": None, "recall": None, "per_question": None})
         report["judged"][name] = {
-            **judged(items, results, jcr.REPORT_AT),
+            **accuracy, "status": status,
             "requests": len(results),
             "request_seconds_p95": part.percentile([r["seconds"] for r in results], 95),
             "vendor_tokens_total": (sum(t for t in tokens if t is not None)
                                     if any(t is not None for t in tokens) else None),
             "vendor_tokens_reported_for": sum(t is not None for t in tokens),
-            "errors": sum("_error" in (r["scores"] or {}) for r in results)}
+            "errors": errors}
+    statuses = [report["judged"][name]["status"]
+                for name in ("regex_scanner", "structural_partition")]
+    report["judged"]["status"] = ("measured" if all(s == "measured" for s in statuses)
+                                  else "not_measured" if all(s == "not_measured" for s in statuses)
+                                  else "incomplete")
+    if report["judged"]["status"] != "measured":
+        report["judged"]["reason"] = "one or more judge requests failed or no regions were sent"
     return report
 
 
@@ -274,12 +294,12 @@ def render(report):
             out.append(f"  {name:<22} {g['regions']:>7}  {_pct(g['duplicate_rate']):>8}"
                        f"  {g['estimated_tokens']:>10}  {_pct(cov) if 'coverage' in g else '-':>15}")
     j = report["judged"]
-    if j.get("status") != "measured":
+    if j.get("status") == "not_measured" and "regex_scanner" not in j:
         out.append(f"judged precision/recall: not measured ({j.get('reason')})")
     else:
         for name in ("regex_scanner", "structural_partition"):
             g = j[name]
-            out.append(f"{name}: precision {_pct(g['precision'])} recall {_pct(g['recall'])}"
+            out.append(f"{name}: {g['status']} precision {_pct(g['precision'])} recall {_pct(g['recall'])}"
                        f" p95 {g['request_seconds_p95']}s vendor tokens {g['vendor_tokens_total']}"
                        f" errors {g['errors']}")
     return "\n".join(out)

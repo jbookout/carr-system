@@ -207,6 +207,37 @@ class DedupeAndPack(unittest.TestCase):
         self.assertTrue(all(r["path"] == "a.py" for r in regions))
         self.assertTrue(any(r.get("also_at") for r in regions), "the twin location is kept")
 
+    def test_repeated_location_keeps_its_own_full_line_bounds(self):
+        source = "def shared():\n    return 7\n"
+        regions, _ = part.partition(["a.py", "b.py"],
+                                    reader={"a.py": source, "b.py": source}.__getitem__)
+        self.assertEqual(len(regions), 1)
+        item = {"id": "repeat", "path": "b.py", "line": 2, "stale": False,
+                "labels": {"failure_leaves_no_trace": True}}
+        self.assertEqual(pilot.coverage([item], regions)["positives_sent"], 1)
+        scored = [dict(regions[0], scores={"failure_leaves_no_trace": 0.9})]
+        self.assertEqual(pilot.judged([item], scored, 0.55)["tp"], 1)
+
+    def test_truncated_physical_line_is_not_scored_as_fully_sent(self):
+        source = "VALUE = '" + "x" * (part.MAX_REGION_CHARS + 100) + "'\n"
+        regions, _ = part.partition(["long.py"], reader={"long.py": source}.__getitem__)
+        self.assertTrue(regions)
+        self.assertTrue(all(len(r["code"]) <= part.MAX_REGION_CHARS for r in regions))
+        item = {"id": "long", "path": "long.py", "line": 1, "stale": False,
+                "labels": {"failure_leaves_no_trace": True}}
+        self.assertEqual(pilot.coverage([item], regions)["positives_sent"], 0)
+        scored = [dict(r, scores={"failure_leaves_no_trace": 0.9}) for r in regions]
+        self.assertEqual(pilot.judged([item], scored, 0.55)["tp"], 0)
+
+    def test_truncated_repeat_does_not_hide_a_complete_variant(self):
+        files = {"a.py": "VALUE" + " " * (part.MAX_REGION_CHARS + 10) + "= 7\n",
+                 "b.py": "VALUE = 7\n"}
+        regions, _ = part.partition(sorted(files), reader=files.__getitem__)
+        self.assertEqual(len(regions), 2, "a partial reading cannot stand in for the full text")
+        item = {"id": "complete", "path": "b.py", "line": 1, "stale": False,
+                "labels": {"failure_leaves_no_trace": True}}
+        self.assertEqual(pilot.coverage([item], regions)["positives_sent"], 1)
+
     def test_small_neighbours_pack_under_the_cap_and_never_across_files(self):
         small = "\n\n".join(f"def helper_{i}(value):\n    return value + {i} * 7919\n"
                             for i in range(150))
@@ -318,6 +349,16 @@ class PilotScoring(unittest.TestCase):
         region = {"path": "f.py", "line": 30, "code": "\n".join(["x"] * 25)}
         self.assertEqual(pilot.span(region), (16, 40))
 
+    def test_regex_scanner_does_not_claim_a_truncated_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = 'VALUE = str(value or "")' + " " * (review.MAX_REGION_CHARS + 100)
+            Path(tmp, "long.py").write_text(source + "\n")
+            regions = review.regions(["long.py"], repo=tmp)
+        self.assertTrue(regions)
+        item = {"id": "regex-long", "path": "long.py", "line": 1,
+                "stale": False, "labels": {"truthy_coercion_bug": True}}
+        self.assertEqual(pilot.coverage([item], regions)["positives_sent"], 0)
+
     def test_judged_precision_recall_and_uncovered_is_a_no(self):
         results = [{"path": "f.py", "line": 5, "end_line": 20, "code": "",
                     "scores": {"failure_leaves_no_trace": 0.9, "swallow_is_wrong_here": 0.8}},
@@ -390,6 +431,36 @@ class Corpus(unittest.TestCase):
             self.assertEqual(judged[name]["vendor_tokens_total"], 108 * judged[name]["requests"])
         distinct = {(r["region"]["path"], r["region"]["code"]) for r, _q in client.calls}
         self.assertEqual(len(client.calls), len(distinct), "no region is judged twice")
+
+    def test_all_failed_live_requests_are_not_reported_as_measured(self):
+        class DownClient(FakeClient):
+            def ask(self, state, questions, timeout=None, api_key=None):
+                self.calls.append((state, questions))
+                raise RuntimeError("vendor down")
+
+        report = pilot.live_report(client=DownClient(), workers=2)
+        self.assertEqual(report["judged"]["status"], "not_measured")
+        for name in ("regex_scanner", "structural_partition"):
+            row = report["judged"][name]
+            self.assertEqual(row["errors"], row["requests"])
+            self.assertIsNone(row["precision"])
+            self.assertIsNone(row["recall"])
+
+    def test_partial_live_failure_does_not_publish_full_run_accuracy(self):
+        class FlakyClient(FakeClient):
+            def ask(self, state, questions, timeout=None, api_key=None):
+                if not self.calls:
+                    self.calls.append((state, questions))
+                    raise RuntimeError("first request failed")
+                return super().ask(state, questions, timeout=timeout, api_key=api_key)
+
+        report = pilot.live_report(client=FlakyClient(), workers=1)
+        self.assertNotEqual(report["judged"]["status"], "measured")
+        for name in ("regex_scanner", "structural_partition"):
+            row = report["judged"][name]
+            if row["errors"]:
+                self.assertIsNone(row["precision"])
+                self.assertIsNone(row["recall"])
 
     def test_committed_snapshot_is_labelled_offline(self):
         snap = json.loads((REPO / "ops/fixtures/jev-code-review-pilot/offline-report.v1.json")

@@ -314,9 +314,12 @@ def trivial(code):
 
 def _part(path, kind, start, end, lines):
     code = _text(lines, start, end)
+    sent = code[:MAX_REGION_CHARS]
+    sent_end_line = (end if len(sent) == len(code) else
+                     start + sent.count("\n") - 1)
     return {"path": path, "line": start, "end_line": end, "kind": kind,
-            "code": code[:MAX_REGION_CHARS], "digest": digest(code),
-            "chars": len(code)}
+            "code": sent, "digest": digest(code),
+            "chars": len(sent), "sent_end_line": sent_end_line}
 
 
 def partition_text(path, text, stats=None):
@@ -448,13 +451,19 @@ def dedupe(parts):
                 for s, e in whole_by_path.get(p["path"], ())):
             stats["contained"] += 1
             continue
-        twin = by_digest.get(p["digest"])
+        fully_sent = p["sent_end_line"] == p["end_line"]
+        twin = by_digest.get(p["digest"]) if fully_sent else None
         if twin is not None:
             twin.setdefault("also_at", []).append(f'{p["path"]}:{p["line"]}')
+            twin.setdefault("also_at_spans", []).append({
+                "path": p["path"], "line": p["line"],
+                "end_line": p["end_line"],
+                "sent_end_line": p["sent_end_line"]})
             stats["exact_duplicates"] += 1
             continue
         p = dict(p)
-        by_digest[p["digest"]] = p
+        if fully_sent:
+            by_digest[p["digest"]] = p
         kept.append(p)
     stats["kept"] = len(kept)
     return kept, stats
@@ -473,10 +482,13 @@ def pack(parts, cap=MAX_REGION_CHARS, small=PACK_BELOW_CHARS):
         if (prev and prev["path"] == p["path"] and p["chars"] < small
                 and prev["chars"] < cap and p["line"] > prev["end_line"]
                 and prev["chars"] + p["chars"] + 1 <= cap
-                and not prev.get("also_at") and not p.get("also_at")):
+                and not prev.get("also_at") and not p.get("also_at")
+                and prev["sent_end_line"] == prev["end_line"]
+                and p["sent_end_line"] == p["end_line"]):
             prev["code"] = prev["code"] + "\n" + p["code"]
             prev["chars"] += p["chars"] + 1
             prev["end_line"] = p["end_line"]
+            prev["sent_end_line"] = p["sent_end_line"]
             if p["kind"] not in prev["kind"].split("+"):
                 prev["kind"] += "+" + p["kind"]
             prev["digest"] = digest(prev["code"])
