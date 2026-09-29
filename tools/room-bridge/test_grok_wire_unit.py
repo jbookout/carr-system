@@ -2,6 +2,8 @@
 
 import copy
 import json
+import os
+import socket
 import subprocess
 import tempfile
 import unittest
@@ -14,6 +16,9 @@ import desks
 import dispatch
 import grok_desk
 import grok_wire
+import kanban_adapter
+import queue_dispatch
+from test_queue_dispatch_unit import FakeAdapter
 
 ENTRY = {"kind": "grok-cli", "model": "grok-4.7", "effort": "high",
          "sandbox": "read-only", "cwd": "/tmp"}
@@ -28,6 +33,82 @@ def output(end=None, text="Safe Methods", before=None):
 
 
 class GrokTests(unittest.TestCase):
+    def _run_queued_grok(self, *, fail_post=False):
+        answer = "Safe methods: https://www.rfc-editor.org/rfc/rfc9110.html#section-9.2.1"
+        protocol = 'CARR_QUEUE_RESULT {"v":1,"task_id":"t_grok0001","outcome":"success","summary":"Retrieved RFC."}'
+        meta = {"v": 1, "target": "grok", "cap": "read", "finish": "done",
+                "source_seq": 42, "source_msg_id": "source-message"}
+        card = {"id": "t_grok0001", "status": "ready", "assignee": "desk:grok-desk",
+                "created_at": 1, "title": "Retrieve RFC",
+                "body": f"[CARR_QUEUE_META {json.dumps(meta)}]\nRetrieve safe methods."}
+        catalog = kanban_adapter.load_catalog()
+        adapter = FakeAdapter([card])
+        adapter.reconcile_disabled_targets = lambda _catalog: {
+            "scanned": 0, "blocked": [], "diagnostics": []}
+        executor = queue_dispatch.QueueDeskExecutor(catalog=catalog, adapter=adapter)
+        service = kanban_adapter.QueueService(catalog=catalog, adapter=adapter)
+        posted = []
+
+        def post(**kw):
+            if "queue_completion" in json.loads(kw["body"]):
+                self.assertEqual(adapter.status[card["id"]], "running")
+                if fail_post:
+                    raise RuntimeError("room publication unavailable")
+            posted.append(kw)
+            return {"ok": True}
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            reg = desks.Registry(root / "desks.json")
+            grok_desk.install(reg, str(root))
+            # Exercise the real parser, dispatch, executor and bridge. Only the
+            # provider process and external room/Hermes boundaries are fake.
+            provider = mock.Mock(return_value=subprocess.CompletedProcess(
+                [], 0, output(text=answer + "\n" + protocol), ""))
+            run_task = grok_wire.run_task
+            with mock.patch.object(grok_wire, "run_task", side_effect=
+                    lambda entry, task: run_task(entry, task, run=provider)), \
+                    mock.patch.object(subprocess, "Popen", side_effect=AssertionError("live process denied")), \
+                    mock.patch.object(socket.socket, "connect", side_effect=AssertionError("live network denied")), \
+                    mock.patch.dict(os.environ, {"CARR_ENGINEERING_DISPATCH_ENABLED": "false"}):
+                summary = bridge.run_once(
+                    registry=reg, state_path=root / "state.json", results_path=root / "results.jsonl",
+                    desk_state_dir=root / "desk-state", read_room=lambda *_a, **_k: {"turns": []},
+                    add_room_turn=post, queue_service=service, queue_executor=executor,
+                    queue_projector=lambda **_k: [], probe_auth=lambda _e: True,
+                    session_probe=lambda *_a, **_k: False, host="test-host",
+                    read_profiles=lambda: [], log=lambda _m: None)
+            row = json.loads((root / "results.jsonl").read_text())
+        self.assertEqual(provider.call_count, 1)
+        return summary, row, adapter, posted, answer
+
+    def test_queued_result_is_published_with_provider_binding_before_done(self):
+        summary, row, adapter, posted, answer = self._run_queued_grok()
+        self.assertEqual(summary["errors"], [])
+        completions = [p for p in posted if "queue_completion" in json.loads(p["body"])]
+        self.assertEqual(len(completions), 1)
+        callback = json.loads(completions[0]["body"])["queue_completion"]
+        self.assertEqual(callback["reply"], answer)
+        self.assertEqual(callback["provider_metadata"], {
+            "requested_model": "grok-4.7", "actual_model": "grok-4.7-build",
+            "effort": "high", "request_id": "provider-request",
+            "session_id": "provider-session", "model_calls": 1,
+            "cost_usd": 0.01, "stop_reason": "end_turn"})
+        self.assertEqual(callback["dispatch_msg_id"], row["msg_id"])
+        self.assertEqual((callback["source_msg_id"], callback["source_seq"]), ("source-message", 42))
+        self.assertEqual(completions[0]["idempotency_key"], "queue-completion:t_grok0001")
+        self.assertEqual(adapter.status["t_grok0001"], "done")
+
+    def test_queued_publication_failure_keeps_the_claim_nonterminal(self):
+        summary, _row, adapter, posted, _answer = self._run_queued_grok(fail_post=True)
+        self.assertEqual(summary["errors"], [{
+            "desk": "grok-desk", "error": "queue_completion_post_failed",
+            "detail": "room publication unavailable"}])
+        self.assertEqual(adapter.status["t_grok0001"], "running")
+        self.assertFalse(any(c[0] in {"complete", "block", "request_review"} for c in adapter.calls))
+        self.assertFalse(any("queue_completion" in json.loads(p["body"]) for p in posted))
+        self.assertTrue(any("heartbeat" in json.loads(p["body"]) for p in posted))
+
     def test_actual_model_comes_from_provider_and_text_is_joined(self):
         result = grok_wire.parse_result(output(before=[{"type": "text", "data": "RFC "}]), 0)
         self.assertEqual(result["result"], "RFC Safe Methods")

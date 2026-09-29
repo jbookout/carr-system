@@ -204,10 +204,9 @@ def _bounded_reply(raw_result: str) -> str:
     removes secrets/PII from the model's own text; it is the desk's reply verbatim,
     just with the protocol line removed and a length bound applied.
 
-    Used only for the flash-local desk (see completion_payload's include_reply):
-    flash has no MCP tools of its own, so unlike a codex-session or claude-session
-    desk it cannot post its own answer into the room while doing the task. This is
-    the one place that answer can still reach the room.
+    Used for synchronous desks without MCP tools (Flash and Grok). They cannot
+    post their own answers into the room while doing the task; this callback
+    carries those answers.
     """
     if not isinstance(raw_result, str):
         return "(empty reply)"
@@ -449,7 +448,17 @@ class QueueDeskExecutor:
         raw_result = row.get("result")
         pending = {"kanban_task_id": task_id, "target": target_alias, "finish": parsed["meta"]["finish"],
                    "cap": parsed["meta"]["cap"], "source_seq": parsed["meta"]["source_seq"],
-                   "source_msg_id": parsed["meta"]["source_msg_id"]}
+                   "source_msg_id": parsed["meta"]["source_msg_id"],
+                   "dispatch_msg_id": row.get("msg_id")}
+        if include_reply and isinstance(row.get("provider_metadata"), dict):
+            # The wire validates provider identity. Keep only its declared
+            # receipt fields; arbitrary provider diagnostics never enter the room.
+            pending["provider_metadata"] = {
+                key: row["provider_metadata"][key] for key in (
+                    "requested_model", "actual_model", "effort", "request_id",
+                    "session_id", "model_calls", "cost_usd", "stop_reason")
+                if key in row["provider_metadata"]
+            }
         clean_result = raw_result if isinstance(raw_result, str) else ""
         if post_completion is not None:
             return self.finish_pending_posted(
@@ -465,11 +474,11 @@ class QueueDeskExecutor:
     def completion_payload(pending: dict, raw_result: str, *, include_reply: bool = False) -> dict:
         """Return the bounded callback contract.
 
-        Never return model prose — EXCEPT when ``include_reply`` is set, which only the
-        flash-local desk path sets (see start()/finish_pending()). A codex-session or
-        claude-session desk has its own MCP tools and posts its own reply into the room
+        Never return model prose — EXCEPT when ``include_reply`` is set by the
+        synchronous Flash/Grok desk paths (see start()/finish_pending()). A
+        codex-session or claude-session desk has its own MCP tools and posts its own reply into the room
         as part of doing the task, so the "never return model prose" rule holds for it
-        unchanged; flash-local has no tools, so its reply would otherwise be lost, and
+        unchanged; Flash/Grok have no tools, so their replies would otherwise be lost.
         ``include_reply`` is the one bounded exception carrying it back — its
         protocol result line stripped and truncated (_bounded_reply), not redacted.
         """
@@ -510,6 +519,10 @@ class QueueDeskExecutor:
             }
         if include_reply:
             callback["reply"] = _bounded_reply(raw_result)
+            if isinstance(pending.get("dispatch_msg_id"), str):
+                callback["dispatch_msg_id"] = pending["dispatch_msg_id"]
+            if isinstance(pending.get("provider_metadata"), dict):
+                callback["provider_metadata"] = pending["provider_metadata"]
         return {"queue_completion": callback}
 
     def finish_pending(self, pending: dict, raw_result: str, *, include_reply: bool = False,
@@ -525,7 +538,7 @@ class QueueDeskExecutor:
         """Like finish_pending, but posts the room completion callback BEFORE any Hermes
         terminal transition, never after.
 
-        Only the synchronous flash-local path (start()) needs this. An async desk's
+        Synchronous desks without MCP tools (start()) need this. An async desk's
         completion carries persisted "pending" state (state.py) across bridge cycles,
         so if posting failed there after Hermes was already marked terminal, the next
         cycle's handle_pending() would call finish_pending() again and retry the SAME

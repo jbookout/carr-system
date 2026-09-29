@@ -550,19 +550,20 @@ class QueueDispatchTests(unittest.TestCase):
     def test_bridge_posts_flash_locals_synchronous_completion_to_the_room(self):
         """flash-local completes inline in queue_executor.start() rather than through
         the pending/handle_pending path (finding 1): pins that run_once actually posts
-        that completion, gated to flash-local only, instead of leaving it unposted.
+        that completion instead of leaving it unposted.
         As of PR #1254 round 2 (finding 3), the post happens INSIDE start(), via the
         post_completion hook, before Hermes is marked terminal — not after start()
         returns — so this pins the wiring that makes that possible instead of a
         post-hoc call."""
         source = inspect.getsource(bridge.run_once)
         self.assertIn('entry.get("kind") == "flash-local"', source)
-        self.assertIn("include_reply=is_flash_local", source)
-        self.assertIn("def post_flash_completion(completion: dict) -> None:", source)
+        self.assertIn('entry.get("kind") in {"flash-local", "grok-cli"}', source)
+        self.assertIn("include_reply=publishes_sync_reply", source)
+        self.assertIn("def post_sync_completion(completion: dict) -> None:", source)
         self.assertIn("completion, add_room_turn=add_room_turn, seat=post_seat)", source)
         self.assertIn("raise QueueCompletionPostFailed(str(exc)) from exc", source)
-        self.assertIn("post_completion=post_flash_completion if is_flash_local else None", source)
-        self.assertLess(source.index("def post_flash_completion"),
+        self.assertIn("post_completion=post_sync_completion if publishes_sync_reply else None", source)
+        self.assertLess(source.index("def post_sync_completion"),
                         source.index("queue_outcome = queue_executor.start"))
 
     def test_dead_socket_waits_without_claim_dispatch_or_retry_then_blocks_once(self):
