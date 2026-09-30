@@ -34,8 +34,9 @@ def model_usage_error(models) -> str | None:
 
 
 def parse_stream(lines, returncode: int = 0) -> dict:
-    """Read one stream ending in exactly one end; never join post-end text."""
+    """Keep the final assistant message in a stream with exactly one end."""
     chunks = []
+    final_chunks = []
     end: dict = {}
     detail = None
     for line in lines:
@@ -60,6 +61,13 @@ def parse_stream(lines, returncode: int = 0) -> dict:
                 detail = "grok_invalid_stream"
                 break
             chunks.append(event["data"])
+        elif event.get("type") == "usage":
+            # A response boundary saves its chunks, including an explicitly
+            # identified empty response. Older streams omit messageId, so text
+            # also establishes a boundary. Accounting alone cannot erase it.
+            if chunks or event.get("messageId"):
+                final_chunks = chunks
+                chunks = []
         elif event.get("type") == "end":
             end = event
     code = 0
@@ -74,7 +82,7 @@ def parse_stream(lines, returncode: int = 0) -> dict:
         detail = model_usage_error(end.get("modelUsage"))
         if detail:
             code = 5
-    return {"text": "".join(chunks), "end": end, "detail": detail, "code": code}
+    return {"text": "".join(chunks or final_chunks), "end": end, "detail": detail, "code": code}
 
 
 def parse_result(stdout: str, returncode: int) -> dict:
@@ -98,14 +106,14 @@ def parse_result(stdout: str, returncode: int) -> dict:
 
 
 def invoke_cli(prompt: str, *, cwd=None, effort=EFFORT, max_turns=MAX_TURNS,
-               writable=False, run=subprocess.run):
-    """The sole model-work invocation, bounded identically for both adapters."""
+               writable=False, timeout_seconds=TIMEOUT_S, run=subprocess.run):
+    """The sole model-work invocation; the desk retains its 180-second default."""
     argv = ["grok", "--model", MODEL, "--reasoning-effort", effort,
             "--max-turns", str(max_turns), "--always-approve",
             "--sandbox", "workspace" if writable else "read-only",
             "--output-format", "streaming-json", "--print", prompt]
     return run(argv, cwd=cwd, capture_output=True, text=True,
-               stdin=subprocess.DEVNULL, timeout=TIMEOUT_S)
+               stdin=subprocess.DEVNULL, timeout=timeout_seconds)
 
 
 def run_task(entry: dict, task: str, *, run=subprocess.run) -> dict:
