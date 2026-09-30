@@ -40,6 +40,7 @@ import sys
 import tempfile
 import uuid
 from pathlib import Path
+from unittest import mock
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(REPO, "pipelines"))
@@ -492,6 +493,229 @@ def test_flatten_round_trip():
         check("flatten refuses a review whose findings is not a list", True)
 
 
+# ── 7. PR 1449 cross-family review fixes ────────────────────────────────
+
+class RawPost(PostRecorder):
+    """Like PostRecorder, but disposition posts answer with a raw MCP body
+    chosen by the test, to exercise error, empty and partial receipts."""
+
+    def __init__(self, disposition_body):
+        super().__init__()
+        self.disposition_body = disposition_body
+
+    def __call__(self, argv, **kwargs):
+        body = json.loads(argv[argv.index("-d") + 1])
+        args = body["params"]["arguments"]
+        if args.get("kind") != ledger.DISPOSITION_KIND:
+            return super().__call__(argv, **kwargs)
+        self.calls.append(args)
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(self.disposition_body), stderr="")
+
+
+def run_process(req, reviews_by_backend):
+    """process_request end to end with every reviewer and every Worker call
+    stubbed. reviews_by_backend maps backend name -> the review it returns."""
+    post = PostRecorder()
+    specs = {b: fake_spec(r) for b, r in reviews_by_backend.items()}
+    orig = rcr.run_one_reviewer
+
+    def wrapped(backend, rq, prompt, cwd, **_kw):
+        return orig(backend, rq, prompt, cwd, subprocess_runner=fake_proc, post_runner=post)
+
+    os.environ["CARR_MCP_REVIEW_TOKEN_CODEX"] = "fake-codex-token-for-test"
+    os.environ["CARR_MCP_REVIEW_TOKEN_GROK"] = "fake-grok-token-for-test"
+    with tempfile.TemporaryDirectory() as d, \
+            mock.patch.dict(rcr.BACKENDS, specs), \
+            mock.patch.object(rcr, "worktree_add", lambda sha, rid: Path(d)), \
+            mock.patch.object(rcr, "worktree_remove", lambda rid: None), \
+            mock.patch.object(rcr, "run_one_reviewer", wrapped):
+        path = Path(d) / f"{req['request_id']}.json"
+        path.write_text(json.dumps(req))
+        try:
+            rc = rcr.process_request(path)
+        except Exception as e:  # noqa: BLE001 — the finding under test is exactly an escape
+            return f"raised {type(e).__name__}: {e}", None, post
+        sc = Path(str(path) + ".status.json")
+        sidecar = json.loads(sc.read_text()) if sc.exists() else None
+    return rc, sidecar, post
+
+
+def three_way_review(**overrides):
+    review = {
+        "summary": "s", "findings": [],
+        "prior_finding_dispositions": [
+            {"id": "P1", "classification": "fixed", "evidence": "guard added at x.py:12"},
+            {"id": "P2", "classification": "still_present", "evidence": "loop at x.py:40"},
+            {"id": "P3", "classification": "not_applicable", "evidence": "log never written"},
+        ],
+    }
+    review.update(overrides)
+    return review
+
+
+def test_review_fixes():
+    print("\n[7] PR 1449 review findings")
+
+    # F1 — the runner loads by file path with pipelines/ NOT on sys.path,
+    # exactly as ops/codex-hook-smoke-selftest.py does.
+    code = ("import importlib.util, sys; "
+            "spec = importlib.util.spec_from_file_location('rcr_by_path', "
+            f"{os.path.join(REPO, 'pipelines', 'run_codex_review.py')!r}); "
+            "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); "
+            "print('LOADED', hasattr(m, 'render_contract_prompt'))")
+    r = subprocess.run([sys.executable, "-I", "-c", code], cwd="/", capture_output=True, text=True)
+    check("F1 runner imports when loaded by file path (no pipelines/ on sys.path)",
+          r.returncode == 0 and "LOADED True" in r.stdout, (r.stderr or r.stdout)[-300:])
+
+    req = pr_request()
+    rcr.validate_request(req)
+
+    # F2 — a malformed id fails ONE reviewer; later reviewers still run and
+    # the sidecar records both.
+    for bad in ([], {}):
+        review = three_way_review()
+        review["prior_finding_dispositions"][0]["id"] = bad
+        try:
+            outcome, _ = run_reviewer(req, review)
+            check(f"F2 id {bad!r} fails the reviewer instead of raising",
+                  outcome["status"] == "failed", str(outcome)[:300])
+        except Exception as e:  # noqa: BLE001
+            check(f"F2 id {bad!r} fails the reviewer instead of raising", False, repr(e))
+    bad_review = three_way_review()
+    bad_review["prior_finding_dispositions"][0]["id"] = []
+    rc, sidecar, _ = run_process(pr_request(reviewers=["codex", "grok"]),
+                                 {"codex": bad_review, "grok": three_way_review()})
+    check("F2 malformed id in the first reviewer: request still completes with a sidecar",
+          sidecar is not None and rc == rcr.EX_FAIL, str(rc))
+    if sidecar:
+        revs = sidecar["detail"]["reviewers"]
+        check("F2 the second reviewer still ran and succeeded",
+              revs.get("grok", {}).get("status") == "ok" and revs.get("codex", {}).get("status") == "failed",
+              json.dumps({k: v.get("status") for k, v in revs.items()}))
+    with mock.patch.object(ledger, "reconcile_dispositions", side_effect=RuntimeError("boom")):
+        try:
+            outcome, _ = run_reviewer(req, three_way_review())
+            check("F2 an unexpected reconciliation error is contained as a failed outcome",
+                  outcome["status"] == "failed" and "boom" in outcome.get("reason", ""), str(outcome)[:300])
+        except Exception as e:  # noqa: BLE001
+            check("F2 an unexpected reconciliation error is contained as a failed outcome", False, repr(e))
+
+    # F3 — contradictory duplicates for P1 must not close P1.
+    dup = three_way_review()
+    dup["prior_finding_dispositions"].append(
+        {"id": "P1", "classification": "still_present", "evidence": "guard missing at x.py:12"})
+    outcome, post = run_reviewer(req, dup)
+    p1_rows = [c for c in disp_calls(post) if c["value"]["prior"]["title"] == "Missing null check"]
+    check("F3 contradictory duplicate classifications record NO disposition for that finding",
+          p1_rows == [], str([c["value"]["disposition"] for c in p1_rows]))
+    check("F3 the other findings' valid classifications are still recorded",
+          len(disp_calls(post)) == 2, str(post.kinds()))
+    check("F3 the reviewer is failed and the problem names P1", outcome["status"] == "failed"
+          and any(p.startswith("P1") for p in outcome.get("carry_forward_problems", [])))
+
+    # F4 — resolution is order-independent, the unresolved outcome wins at the
+    # same head, and a newer head beats an older round whatever the append order.
+    def row(disp, commit, reason=None):
+        v = {"disposition": disp, "commit_sha": commit,
+             "prior": {"flag_id": FLAG_A, "index": 0}}
+        if reason:
+            v["reason"] = reason
+        return v
+
+    order = ["def5678", "abc1234"]
+    key = (FLAG_A, 0)
+    same_head = [row("still_present", "abc1234"), row("fixed", "abc1234"),
+                 row("dismissed", "abc1234", "not applicable: x")]
+    import itertools
+    results_same = {ledger.resolve_ledger_dispositions(list(p), order)[key]["disposition"]
+                    for p in itertools.permutations(same_head)}
+    check("F4 reviewers disagreeing at the same head: still_present wins in every order",
+          results_same == {"still_present"}, str(results_same))
+    closed_only = [row("fixed", "abc1234"), row("dismissed", "abc1234", "not applicable: y"),
+                   row("accepted_risk", "abc1234", "owner accepts")]
+    results_closed = {ledger.resolve_ledger_dispositions(list(p), order)[key]["disposition"]
+                      for p in itertools.permutations(closed_only)}
+    check("F4 closing dispositions disagreeing: one deterministic, most conservative winner",
+          results_closed == {"accepted_risk"}, str(results_closed))
+    stale = [row("fixed", "abc1234"), row("still_present", "def5678")]
+    results_stale = {ledger.resolve_ledger_dispositions(list(p), order)[key]["disposition"]
+                     for p in itertools.permutations(stale)}
+    check("F4 a delayed row from an older round never overrides the newer head",
+          results_stale == {"fixed"}, str(results_stale))
+    try:
+        ledger.resolve_ledger_dispositions([row("fixed", "fff0000")], order)
+        check("F4 a row from a commit outside the PR's order fails visibly", False, "accepted")
+    except ledger.CarryForwardError:
+        check("F4 a row from a commit outside the PR's order fails visibly", True)
+
+    fixed_r = three_way_review()
+    still_r = three_way_review()
+    still_r["prior_finding_dispositions"][0]["classification"] = "still_present"
+    resolutions = []
+    for reviewers in (["codex", "grok"], ["grok", "codex"]):
+        rq = pr_request(reviewers=reviewers)
+        rc, sidecar, _ = run_process(rq, {"codex": fixed_r, "grok": still_r})
+        resolutions.append((sidecar or {}).get("detail", {}).get("carry_forward_resolution"))
+    check("F4 reviewer order permuted: the request's resolution is identical",
+          resolutions[0] is not None and resolutions[0] == resolutions[1], str(resolutions))
+    p1 = [x for x in (resolutions[0] or []) if x.get("flag_id") == FLAG_A and x.get("index") == 0]
+    check("F4 P1 resolves still_present when one reviewer says fixed and one says still_present",
+          p1 and p1[0]["disposition"] == "still_present", str(p1))
+
+    # F5 — each prior finding's commit_sha is shape-checked.
+    for bad_sha in ("", "d", "def5678-not-a-sha"):
+        expect_request_error(f"F5 prior finding commit_sha {bad_sha!r} is refused",
+                             pr_request(priors=[prior(commit_sha=bad_sha)]), "commit_sha")
+
+    # F6 — only canonical UUID spellings are accepted.
+    expect_request_error("F6 hyphenless flag_id is refused",
+                         pr_request(priors=[prior(), prior(flag_id=FLAG_A.replace("-", ""), index=0)]),
+                         "flag_id")
+    expect_request_error("F6 uppercase flag_id is refused",
+                         pr_request(priors=[prior(flag_id=FLAG_A.upper())]), "flag_id")
+
+    # F7 — zero open findings still rejects unsolicited classifications.
+    closed_req = pr_request(priors=[prior(ledger_disposition={"disposition": "fixed"})])
+    rcr.validate_request(closed_req)
+    outcome, post = run_reviewer(closed_req, {"summary": "s", "findings": [],
+                                               "prior_finding_dispositions": [
+                                                   {"id": "P1", "classification": "fixed", "evidence": "e"}]})
+    check("F7 unsolicited classification with zero open findings fails visibly",
+          outcome["status"] == "failed" and disp_calls(post) == [], str(outcome)[:300])
+    outcome, _ = run_reviewer(closed_req, {"summary": "s", "findings": [],
+                                            "prior_finding_dispositions": []})
+    check("F7 the clean zero-open case (empty array) stays ok", outcome["status"] == "ok")
+
+    # F8 — error, empty and partial MCP receipts are not persisted dispositions.
+    def envelope(inner_text=None, is_error=False, content=True):
+        res = {"isError": is_error} if is_error else {}
+        if content:
+            res["content"] = [{"type": "text", "text": inner_text}]
+        return {"jsonrpc": "2.0", "id": 1, "result": res}
+
+    bad_bodies = {
+        "result.isError with text Denied": envelope("Denied", is_error=True),
+        "inner text {}": envelope("{}"),
+        "no content at all": envelope(content=False),
+        "flag_id not a uuid": envelope(json.dumps({"ok": True, "flag_id": "nope"})),
+        "ok false": envelope(json.dumps({"ok": False, "flag_id": str(uuid.uuid4())})),
+    }
+    for label, body in bad_bodies.items():
+        outcome, _ = run_reviewer(req, three_way_review(), post=RawPost(body))
+        posted = [d for d in outcome.get("dispositions", []) if d.get("posted")]
+        check(f"F8 {label}: disposition not counted as recorded, reviewer failed",
+              outcome["status"] == "failed" and posted == [], str(outcome.get("dispositions"))[:300])
+
+    # Non-blocking — incident_ref is carried when given, absent otherwise.
+    p = req["prior_findings"][0]
+    with_ref = ledger.build_disposition_payload(req, p, "still_present", None, "e", "codex",
+                                                incident_ref="INC-0042")
+    without = ledger.build_disposition_payload(req, p, "still_present", None, "e", "codex")
+    check("incident_ref is preserved in value when given",
+          with_ref["value"].get("incident_ref") == "INC-0042")
+    check("incident_ref is absent when not given", "incident_ref" not in without["value"])
+
+
 def main():
     print("test-review-findings-ledger.py — offline suite (no live calls)")
     test_backward_compat()
@@ -500,7 +724,8 @@ def main():
     test_disposition_payload()
     test_runner_carry_forward()
     test_flatten_round_trip()
-    failed = [r for r in results if not r[1]]
+    test_review_fixes()
+    failed =[r for r in results if not r[1]]
     print(f"\npassed {len(results) - len(failed)} · failed {len(failed)} · total {len(results)}")
     if failed:
         print("\nFAILURES:")

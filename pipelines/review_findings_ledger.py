@@ -19,8 +19,10 @@ b_append_disposition_row at 1.0, read source -> r1_inline_in_request at 0.93):
       value names the prior finding (flag_id + index + commit). record-finding
       already documents this use: "Set disputed/superseded when filing against
       an earlier finding." No new verb, schema change, migration or deploy.
-      The latest disposition row per (prior flag_id, index) is the finding's
-      current state.
+      The finding's current state is computed from the SET of its rows by
+      resolve_ledger_dispositions(): newest reviewed head wins, and at the
+      same head the most conservative disposition wins. Append order never
+      decides it.
   (c) a new verb or migration: not needed for storage.
 
 THE READ SIDE. No deployed verb reads v_code_finding or any record_flag value,
@@ -39,8 +41,9 @@ THE PRIOR-FINDING SHAPE (one entry per finding, not per review row):
   severity            REQUIRED blocker | major | minor | nit
   detail, location    optional strings (location may be null)
   reviewer            optional string: which seat raised it
-  ledger_disposition  optional {disposition, reason}: the latest disposition
-                      already on the record. fixed, dismissed and accepted_risk
+  ledger_disposition  optional {disposition, reason}: the finding's EFFECTIVE
+                      disposition on the record, as resolve_ledger_dispositions()
+                      computes it. fixed, dismissed and accepted_risk
                       are CLOSED — the finding is not re-raised and not
                       re-recorded. still_present (or absent) is OPEN.
 
@@ -165,12 +168,24 @@ def validate_carry_forward(req: dict) -> None:
         where = f"prior_findings[{i}]"
         if not isinstance(p, dict):
             raise CarryForwardError(f"{where} must be an object")
+        # ONE spelling per finding identity: the canonical lowercase hyphenated
+        # form str(uuid.UUID(x)) produces. Accepting other spellings would let
+        # the same finding pass duplicate detection twice as P1 and P2.
+        fid = p.get("flag_id")
         try:
-            uuid.UUID(str(p.get("flag_id")))
-        except (ValueError, TypeError):
-            raise CarryForwardError(f"{where}.flag_id is not a uuid: {p.get('flag_id')!r}")
+            canonical = str(uuid.UUID(fid)) if isinstance(fid, str) else None
+        except ValueError:
+            canonical = None
+        if canonical is None:
+            raise CarryForwardError(f"{where}.flag_id is not a uuid: {fid!r}")
+        if fid != canonical:
+            raise CarryForwardError(
+                f"{where}.flag_id must be the canonical lowercase hyphenated uuid {canonical!r}, "
+                f"got {fid!r}")
         sha = p.get("commit_sha")
-        if not isinstance(sha, str) or not any(_same_commit(sha, c) for c in commits):
+        if not isinstance(sha, str) or not SHA_RE.fullmatch(sha):
+            raise CarryForwardError(f"{where}.commit_sha is not a sha: {sha!r}")
+        if not any(_same_commit(sha, c) for c in commits):
             raise CarryForwardError(f"{where}.commit_sha {sha!r} is not one of prior_commits")
         idx = p.get("index")
         if isinstance(idx, bool) or not isinstance(idx, int) or idx < 0:
@@ -269,26 +284,36 @@ def prompt_rules(req: dict) -> str:
 
 def build_disposition_payload(req: dict, prior: dict, disposition: str,
                               reason: Optional[str], evidence: Optional[str],
-                              backend: str, actor_slug: Optional[str] = None) -> dict:
+                              backend: str, actor_slug: Optional[str] = None,
+                              incident_ref: Optional[str] = None) -> dict:
     """Pure function: the record-finding arguments for ONE disposition of ONE
-    prior finding. Refuses (DispositionError) a value outside the vocabulary
-    and a dismissed/accepted_risk without a reason.
+    prior finding. Refuses (DispositionError) a value outside the vocabulary,
+    a dismissed/accepted_risk without a reason, and a blank incident_ref.
 
     INCIDENT BACK-LINK (section 15: "an incident links back to any finding
     that predicted it"). No link verb joins an incident to a record_flag row:
     open-incident's related_kind is run | deployment | work_request | defect |
     decision, and record-evidence-subject-link belongs to the CRE lifecycle
-    store. So the link is carried by the existing verbs, in two halves: (1)
-    open-incident's `observed` text names the predicting finding as
-    "record flag <flag_id> #<index>"; (2) a record-finding row filed against
-    the same commit, kind code_review_disposition, carries that finding's
-    flag_id and index in value.prior and the incident ref in value.incident_ref.
-    Both are append-only rows readers can join; no new incident tooling."""
+    store. So the link is a MANUAL two-step recipe over existing verbs. The
+    runner never files it on its own, because it never knows about incidents:
+      1. open-incident with `observed` naming the predicting finding, e.g.
+         "predicted by record flag aaaaaaaa-0000-4000-8000-000000000001 #0".
+      2. record-finding with the arguments this function returns when called
+         with incident_ref, e.g.
+           build_disposition_payload(req, prior, "still_present", None,
+               "the null deref in INC-0042 is this finding", "claude",
+               actor_slug="claude-orchestrator", incident_ref="INC-0042")
+         which stores value.incident_ref = "INC-0042" beside value.prior
+         {flag_id, index}. The row is filed under the filer's own identity.
+    Both halves are append-only rows readers can join; no new incident
+    tooling."""
     if disposition not in DISPOSITIONS:
         raise DispositionError(
             f"disposition must be one of {', '.join(DISPOSITIONS)}, got {disposition!r}")
     if disposition in REASON_REQUIRED and not _nonblank(reason):
         raise DispositionError(f"{disposition} requires a non-empty reason")
+    if incident_ref is not None and not _nonblank(incident_ref):
+        raise DispositionError("incident_ref, when given, must be a non-empty string")
     slug = actor_slug or f"{backend}-reviewer"
     current = req["evidence"]["commit_sha"]
     value = {
@@ -311,6 +336,8 @@ def build_disposition_payload(req: dict, prior: dict, disposition: str,
     }
     if isinstance(reason, str) and reason.strip():
         value["reason"] = reason.strip()
+    if isinstance(incident_ref, str) and incident_ref.strip():
+        value["incident_ref"] = incident_ref.strip()
     return {
         "idempotency_key": str(uuid.uuid4()),
         "subject": f"commit:{current}",
@@ -328,28 +355,53 @@ def reconcile_dispositions(opens: list[dict], review: dict) -> tuple[list[dict],
     {"id", "prior", "disposition", "reason", "evidence"}; every open finding
     the reviewer did not validly classify, and every entry that names an id
     never sent, becomes a problem. A non-empty problems list fails the
-    reviewer visibly; the valid entries are still recorded."""
+    reviewer visibly; the valid entries are still recorded.
+
+    CONTRADICTIONS NEVER CLOSE A FINDING. Every id that appears in more than
+    one entry is found in a first pass, before any entry is accepted, and that
+    id gets NO disposition at all (it stays open for the next round), whatever
+    the entries say. Other ids' valid classifications are kept.
+
+    ZERO OPEN IS NOT A FREE PASS. With nothing sent, an absent or empty array
+    is clean; any non-empty array is unsolicited output and a problem."""
     problems: list[str] = []
     accepted: list[dict] = []
+    entries = review.get("prior_finding_dispositions") if isinstance(review, dict) else None
     if not opens:
+        if isinstance(entries, list) and entries:
+            problems.append(f"prior_finding_dispositions has {len(entries)} entr(y/ies) but no "
+                            f"prior finding was sent for classification")
+        elif entries is not None and not isinstance(entries, list):
+            problems.append("prior_finding_dispositions is present but not an array")
         return accepted, problems
     by_id = {o["id"]: o for o in opens}
-    entries = review.get("prior_finding_dispositions") if isinstance(review, dict) else None
     if not isinstance(entries, list):
         return accepted, [f"{o['id']} unclassified: review has no prior_finding_dispositions array"
                           for o in opens]
+    counts: dict[str, int] = {}
+    for e in entries:
+        if isinstance(e, dict) and isinstance(e.get("id"), str):
+            counts[e["id"]] = counts.get(e["id"], 0) + 1
+    duplicated = {pid for pid, k in counts.items() if k > 1 and pid in by_id}
+    for dup_id in sorted(duplicated):
+        problems.append(f"{dup_id} classified {counts[dup_id]} times; no disposition recorded "
+                        f"for it, it stays open")
     classified = set()
-    reported = set()  # ids already named by a problem, matched exactly (never by substring)
+    reported = set(duplicated)  # ids already named by a problem, matched exactly (never by substring)
     for n, e in enumerate(entries):
         if not isinstance(e, dict):
             problems.append(f"prior_finding_dispositions[{n}] is not an object")
             continue
         pid = e.get("id")
+        # Type-check BEFORE any lookup: an unhashable id ([] or {}) must fail
+        # this reviewer, never raise out of the request.
+        if not isinstance(pid, str):
+            problems.append(f"prior_finding_dispositions[{n}] has a non-string id {pid!r}")
+            continue
         if pid not in by_id:
             problems.append(f"prior_finding_dispositions[{n}] names id {pid!r}, which was never sent")
             continue
-        if pid in classified:
-            problems.append(f"{pid} classified more than once")
+        if pid in duplicated:
             continue
         cls = e.get("classification")
         if cls not in REVIEWER_CLASSIFICATIONS:
@@ -371,6 +423,60 @@ def reconcile_dispositions(opens: list[dict], review: dict) -> tuple[list[dict],
         if o["id"] not in classified and o["id"] not in reported:
             problems.append(f"{o['id']} unclassified: the reviewer returned no disposition for it")
     return accepted, problems
+
+
+# ── effective state: the resolution policy for disposition rows ─────────
+#
+# Append order is NOT a resolution policy: two reviewers on the same commit
+# write rows in whatever order they happen to finish, and a delayed older
+# round can land after a newer one. So the effective disposition of one prior
+# finding is computed from the SET of its rows, never from their order:
+#
+#   1. Keep only the rows filed at the NEWEST reviewed head among them, by the
+#      PR's commit order (oldest -> newest). A row from an older round never
+#      overrides a newer head, whenever it arrived.
+#   2. Among the rows at that head, the MOST CONSERVATIVE disposition wins —
+#      the one claiming the least remediation:
+#        still_present  (nothing resolved; the finding stays OPEN)
+#        accepted_risk  (real, knowingly kept, not remediated)
+#        dismissed      (argued not to apply, not remediated)
+#        fixed          (claims the code changed to resolve it)
+#      So any reviewer still seeing the problem keeps it open.
+#   3. Ties on disposition break on the reason text, so the chosen reason is
+#      deterministic too.
+CONSERVATISM_RANK = {"still_present": 0, "accepted_risk": 1, "dismissed": 2, "fixed": 3}
+
+
+def resolve_ledger_dispositions(rows: list[dict], commit_order: list[str]) -> dict:
+    """rows: disposition row values ({disposition, reason?, commit_sha,
+    prior: {flag_id, index}}). commit_order: the PR's reviewed commits, oldest
+    first, including the current head. Returns {(flag_id, index): {disposition,
+    reason, commit_sha}} per the policy above. A row whose commit is not in
+    commit_order, or whose disposition is outside the vocabulary, fails
+    visibly (CarryForwardError) rather than being guessed at."""
+    def position(sha) -> int:
+        for i, c in enumerate(commit_order):
+            if isinstance(sha, str) and SHA_RE.fullmatch(sha) and _same_commit(sha, c):
+                return i
+        raise CarryForwardError(f"disposition row commit {sha!r} is not in the PR's commit order")
+
+    grouped: dict[tuple, list[tuple[int, dict]]] = {}
+    for n, r in enumerate(rows):
+        if not isinstance(r, dict) or not isinstance(r.get("prior"), dict):
+            raise CarryForwardError(f"disposition row {n} has no prior object")
+        if r.get("disposition") not in CONSERVATISM_RANK:
+            raise CarryForwardError(f"disposition row {n} has disposition {r.get('disposition')!r}")
+        key = (str(r["prior"].get("flag_id")).lower(), r["prior"].get("index"))
+        grouped.setdefault(key, []).append((position(r.get("commit_sha")), r))
+
+    resolved = {}
+    for key, items in grouped.items():
+        head = max(pos for pos, _ in items)
+        at_head = [r for pos, r in items if pos == head]
+        best = min(at_head, key=lambda r: (CONSERVATISM_RANK[r["disposition"]], r.get("reason") or ""))
+        resolved[key] = {"disposition": best["disposition"], "reason": best.get("reason"),
+                         "commit_sha": best["commit_sha"]}
+    return resolved
 
 
 def flatten_review_findings(flag_id: str, commit_sha: str, reviewer: str, review: dict) -> list[dict]:

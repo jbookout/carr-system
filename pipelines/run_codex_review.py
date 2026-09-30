@@ -210,7 +210,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
-import review_findings_ledger as ledger
+# The sibling helper must import however this file is loaded: as a script
+# (pipelines/ is already sys.path[0]), by the test suites (which add it), AND
+# by file path through importlib.util.spec_from_file_location, which adds
+# nothing — ops/codex-hook-smoke-selftest.py loads it that way.
+_PIPELINES_DIR = str(Path(__file__).resolve().parent)
+if _PIPELINES_DIR not in sys.path:
+    sys.path.insert(0, _PIPELINES_DIR)
+import review_findings_ledger as ledger  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 REVIEW_COUNCIL_DIR = REPO / "out" / "review-council"
@@ -936,8 +943,15 @@ def post_finding(finding_args: dict, url: str = CARR_MCP_URL,
         body = json.loads(result.stdout)
     except json.JSONDecodeError:
         return False, {"error": "non_json_response", "raw": (result.stdout or "")[:500]}
+    if not isinstance(body, dict):
+        return False, {"error": "non_object_response", "raw": (result.stdout or "")[:500]}
     if "error" in body:
         return False, {"error": "rpc_error", "detail": body["error"]}
+    # An MCP tool error arrives as result.isError with a plain-text message
+    # (e.g. "Denied"), not as a JSON-RPC error. It is a refusal, never a
+    # success, whatever the text parses to.
+    if isinstance(body.get("result"), dict) and body["result"].get("isError"):
+        return False, {"error": "verb_error", "detail": body["result"]}
     content = body.get("result", {}).get("content", [])
     text = content[0]["text"] if content else "{}"
     try:
@@ -1087,7 +1101,33 @@ def run_one_reviewer(backend: str, req: dict, prompt: str, cwd: Path,
         f"(flag_id={resp.get('flag_id')}, subject={resp.get('subject_id')})")
     if not ledger.is_active(req):
         return {"status": "ok", "finding_response": resp, "meta": meta}
-    return _record_dispositions(req, backend, review_result, resp, meta, post_runner)
+    # Contained like every other per-reviewer failure: malformed reviewer
+    # output, or any bug in reconciliation, fails THIS reviewer and never
+    # escapes to stop the next reviewer or the status sidecar.
+    try:
+        return _record_dispositions(req, backend, review_result, resp, meta, post_runner)
+    except Exception as e:  # noqa: BLE001 — per-reviewer boundary, reported, never swallowed
+        log(f"FAIL  request={request_id} reviewer={backend} — carry-forward raised "
+            f"{type(e).__name__}: {e}")
+        return {"status": "failed", "finding_response": resp, "meta": meta,
+                "reason": f"carry-forward raised {type(e).__name__}: {e}",
+                "dispositions": [], "carry_forward_problems": [f"raised {type(e).__name__}: {e}"]}
+
+
+def _valid_finding_receipt(resp) -> bool:
+    """A disposition counts as recorded only on a structurally valid
+    record-finding receipt: ok is literally true and flag_id is a uuid. An
+    error envelope, an empty object, or a partial answer is not a receipt."""
+    if not isinstance(resp, dict) or resp.get("ok") is not True:
+        return False
+    fid = resp.get("flag_id")
+    if not isinstance(fid, str):
+        return False
+    try:
+        uuid.UUID(fid)
+    except ValueError:
+        return False
+    return True
 
 
 def _record_dispositions(req: dict, backend: str, review_result: dict, resp: dict,
@@ -1102,10 +1142,12 @@ def _record_dispositions(req: dict, backend: str, review_result: dict, resp: dic
     rather than silently vanishing.
 
     INCIDENT BACK-LINK: no link verb joins an incident to a finding
-    (open-incident's related_kind has no 'finding'). The link is written with
-    existing verbs — the incident's `observed` text names "record flag
-    <flag_id> #<index>", and a code_review_disposition row on that commit
-    carries value.incident_ref. See build_disposition_payload."""
+    (open-incident's related_kind has no 'finding'), and this runner never
+    files one — it knows nothing about incidents. The link is a MANUAL
+    two-step recipe over existing verbs, with a worked example in
+    build_disposition_payload's docstring: open-incident whose `observed`
+    names "record flag <flag_id> #<index>", then a code_review_disposition
+    row built with incident_ref=..., which stores value.incident_ref."""
     request_id = req["request_id"]
     opens = ledger.open_prior_findings(req)
     accepted, problems = ledger.reconcile_dispositions(opens, review_result)
@@ -1116,8 +1158,11 @@ def _record_dispositions(req: dict, backend: str, review_result: dict, resp: dic
         args = ledger.build_disposition_payload(req, a["prior"], a["disposition"], a["reason"],
                                                 a["evidence"], backend, actor_slug=slug)
         ok, dresp = post_finding(args, token=token, backend=backend, runner=post_runner)
+        if ok and not _valid_finding_receipt(dresp):
+            ok, dresp = False, {"error": "invalid_receipt", "detail": dresp}
         written.append({"id": a["id"], "prior_flag_id": a["prior"]["flag_id"],
                         "prior_index": a["prior"]["index"], "disposition": a["disposition"],
+                        "reason": a["reason"], "commit_sha": req["evidence"]["commit_sha"],
                         "posted": ok, "flag_id": dresp.get("flag_id") if ok else None,
                         **({} if ok else {"post_response": dresp})})
         if not ok:
@@ -1205,8 +1250,33 @@ def process_request(request_path: Path) -> int:
     else:
         overall_status, exit_code = "done", EX_OK
 
-    write_status_sidecar(request_path, overall_status, {"reviewers": outcomes})
+    detail: dict = {"reviewers": outcomes}
+    if ledger.is_active(req):
+        detail["carry_forward_resolution"] = _carry_forward_resolution(req, outcomes)
+    write_status_sidecar(request_path, overall_status, detail)
     return exit_code
+
+
+def _carry_forward_resolution(req: dict, outcomes: dict) -> list:
+    """The effective disposition of each prior finding after this request,
+    from the rows every reviewer ACTUALLY recorded, resolved by the ledger's
+    order-independent policy (newest head wins; at one head the most
+    conservative disposition wins). Reviewer order in the request cannot
+    change it. Sorted so the sidecar is byte-stable."""
+    rows = []
+    for outcome in outcomes.values():
+        for d in outcome.get("dispositions") or []:
+            if d.get("posted"):
+                rows.append({"disposition": d["disposition"], "reason": d.get("reason"),
+                             "commit_sha": d["commit_sha"],
+                             "prior": {"flag_id": d["prior_flag_id"], "index": d["prior_index"]}})
+    order = list(req["prior_commits"]) + [req["evidence"]["commit_sha"]]
+    try:
+        resolved = ledger.resolve_ledger_dispositions(rows, order)
+    except ledger.CarryForwardError as e:
+        log(f"FAIL  request={req['request_id']} — carry-forward resolution: {e}")
+        return [{"error": str(e)}]
+    return [{"flag_id": k[0], "index": k[1], **v} for k, v in sorted(resolved.items())]
 
 
 def main(argv=None) -> int:
