@@ -10,6 +10,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from lib import dot_relay as relay
+sys.path.insert(0, str(ROOT / "ops"))
+from git_env import fixture_env
 
 
 class AllowlistTests(unittest.TestCase):
@@ -156,7 +158,8 @@ class RelayTests(unittest.TestCase):
     def test_git_discovery_refuses_enclosing_and_linked_external_repositories(self):
         import subprocess
         def git(*args):
-            subprocess.run(["git", *args], cwd=self.root, check=True, capture_output=True)
+            subprocess.run(["git", *args], cwd=self.root, env=fixture_env(),
+                           check=True, capture_output=True)
         git("init", "-q", str(self.root))
         (self.root / "outside.txt").write_text("outside approved roots")
         git("add", "outside.txt")
