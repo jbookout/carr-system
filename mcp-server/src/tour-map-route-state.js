@@ -127,6 +127,8 @@ function normalizePoint(point, path) {
     latitude: finite(point.latitude, -90, 90, `${path}.latitude`),
     longitude: finite(point.longitude, -180, 180, `${path}.longitude`),
     label: isText(point.label) ? point.label : null,
+    ...Object.fromEntries(["position_role", "precision_class", "source_ref"]
+      .filter(key => Object.hasOwn(point, key)).map(key => [key, clone(point[key], `${path}.${key}`)])),
   };
 }
 
@@ -194,6 +196,9 @@ export function buildRouteVersionState(route, options = {}) {
     tour_id: text(route.tour_id, "tour_id"),
     projection_id: route.projection_id,
     route_version: route.route_version,
+    route_version_id: route.route_version_id ?? null,
+    canonical_dataset_version: route.canonical_dataset_version ?? null,
+    component_registry_version: route.component_registry_version ?? null,
     route: {
       stops,
       start_point: normalizePoint(route.start_point, "start_point"),
@@ -231,7 +236,9 @@ function receiptProblem(state, receipt) {
     return ["promotion_receipt_not_approved", "The map promotion receipt is not an approval."];
   }
   if (receipt.tour_id !== state.tour_id || receipt.projection_id !== state.projection_id
-    || receipt.route_version !== state.route_version) {
+    || receipt.route_version !== state.route_version
+    || ["route_version_id", "canonical_dataset_version", "component_registry_version"]
+      .some(key => !isText(state[key]) || receipt[key] !== state[key])) {
     return ["promotion_receipt_unbound", "The promotion receipt does not cover this Tour, projection and route version."];
   }
   const checks = receipt.required_checks;
@@ -294,6 +301,8 @@ export function projectRoute(state, { prefersReducedMotion = false, promotion_re
     route_sequence: stop.route_sequence,
     title: stop.title,
     locked_state: stop.locked_state,
+    dwell_minutes: stop.dwell_minutes,
+    buffer_minutes: stop.buffer_minutes,
     appointment: windowOf(stop),
     display: pin.display,
     precision_label: pin.precision_label,
@@ -433,13 +442,16 @@ function assertPosition(position, path) {
   }
   try {
     finite(position[0], -180, 180, `${path}[0]`); finite(position[1], -90, 90, `${path}[1]`);
+    if (position.length === 3 && (typeof position[2] !== "number" || !Number.isFinite(position[2]))) {
+      fail("invalid_geometry", `${path}[2] must be a finite altitude`);
+    }
   } catch { fail("invalid_geometry", `${path} holds an unusable coordinate`); }
 }
 
 function assertPolygon(rings, path) {
-  if (!Array.isArray(rings) || rings.length < 1) fail("invalid_geometry", `${path} needs at least one ring`);
+  if (!Array.isArray(rings) || rings.length < 1 || Object.keys(rings).length !== rings.length) fail("invalid_geometry", `${path} needs complete rings`);
   rings.forEach((ring, index) => {
-    if (!Array.isArray(ring) || ring.length < 4) fail("invalid_geometry", `${path}[${index}] needs at least four positions`);
+    if (!Array.isArray(ring) || ring.length < 4 || Object.keys(ring).length !== ring.length) fail("invalid_geometry", `${path}[${index}] needs at least four complete positions`);
     ring.forEach((position, at) => assertPosition(position, `${path}[${index}][${at}]`));
     const first = ring[0]; const last = ring[ring.length - 1];
     if (first[0] !== last[0] || first[1] !== last[1]) fail("invalid_geometry", `${path}[${index}] must be closed`);
@@ -450,7 +462,7 @@ function assertGeometry(geometry) {
   if (!isObject(geometry)) fail("invalid_geometry", "geometry must be a GeoJSON Polygon or MultiPolygon");
   if (geometry.type === "Polygon") return assertPolygon(geometry.coordinates, "geometry.coordinates");
   if (geometry.type === "MultiPolygon") {
-    if (!Array.isArray(geometry.coordinates) || geometry.coordinates.length < 1) {
+    if (!Array.isArray(geometry.coordinates) || geometry.coordinates.length < 1 || Object.keys(geometry.coordinates).length !== geometry.coordinates.length) {
       fail("invalid_geometry", "a MultiPolygon needs at least one polygon");
     }
     return geometry.coordinates.forEach((rings, index) => assertPolygon(rings, `geometry.coordinates[${index}]`));
@@ -563,7 +575,11 @@ export function applyRouteVersion(state, route) {
     drawn_geometry: structuredClone(state.drawn_geometry),
     version_mapping: mapping,
     lineage: [...structuredClone(state.lineage ?? []), {
-      from_route_version: state.route_version, to_route_version: next.route_version, mapping: structuredClone(mapping),
+      tour_id: state.tour_id,
+      from_route_version: state.route_version, to_route_version: next.route_version,
+      from_projection_id: state.projection_id, to_projection_id: next.projection_id,
+      from_route_version_id: state.route_version_id, to_route_version_id: next.route_version_id,
+      mapping: structuredClone(mapping),
     }],
   };
   const previousCurrent = state.current_route_stop_id
@@ -601,7 +617,8 @@ export function buildNativeNavLink(state, request) {
   return {
     ...base, available: true, platform, travel_mode: travelMode, link,
     return_state: {
-      tour_id: state.tour_id, route_stop_id: stop.route_stop_id, property_id: stop.property_id,
+      tour_id: state.tour_id, projection_id: state.projection_id, route_version_id: state.route_version_id,
+      route_stop_id: stop.route_stop_id, property_id: stop.property_id,
       route_version: state.route_version, user_ref: request.user_ref,
       generated_at: new Date(generated).toISOString(), expires_at: new Date(generated + RETURN_TTL_MS).toISOString(),
     },
@@ -618,7 +635,7 @@ export function buildReturnState(handoff) {
 
 function validMarker(marker) {
   return isObject(marker)
-    && ["tour_id", "route_stop_id", "property_id", "user_ref"].every(key => isText(marker[key]))
+    && ["tour_id", "projection_id", "route_version_id", "route_stop_id", "property_id", "user_ref"].every(key => isText(marker[key]))
     && Number.isSafeInteger(marker.route_version) && marker.route_version >= 1
     && Number.isFinite(Date.parse(marker.generated_at)) && Number.isFinite(Date.parse(marker.expires_at));
 }
@@ -638,20 +655,35 @@ export function resolveReturn(state, marker, { now, user_ref = null } = {}) {
   if (!(Date.parse(now) < Date.parse(marker.expires_at))) return refuse("return_expired");
   if (marker.route_version > state.route_version) return refuse("return_version_future");
   let stopId = marker.route_stop_id;
+  let projectionId = marker.projection_id;
+  let routeVersionId = marker.route_version_id;
   let note = null;
   if (marker.route_version < state.route_version) {
     let version = marker.route_version;
     while (version < state.route_version) {
-      const step = (state.lineage ?? []).find(item => item.from_route_version === version);
-      if (!step) return refuse("return_version_unbound");
-      const entry = step.mapping.find(item => item.old_route_stop_id === stopId && item.property_id === marker.property_id);
-      if (!entry || entry.disposition === "removed" || !entry.new_route_stop_id) return refuse("return_stop_removed");
+      const steps = (state.lineage ?? []).filter(item => item.tour_id === state.tour_id
+        && item.from_route_version === version && item.from_projection_id === projectionId
+        && item.from_route_version_id === routeVersionId);
+      if (steps.length !== 1) return refuse("return_version_unbound");
+      const step = steps[0];
+      if (!Number.isSafeInteger(step.to_route_version) || step.to_route_version <= version
+        || step.to_route_version > state.route_version || !isText(step.to_projection_id)
+        || !isText(step.to_route_version_id) || !Array.isArray(step.mapping)) return refuse("return_version_unbound");
+      const entries = step.mapping.filter(item => item.old_route_stop_id === stopId && item.property_id === marker.property_id
+        && item.old_route_version === version && item.new_route_version === step.to_route_version);
+      if (entries.length !== 1) return refuse("return_version_unbound");
+      const entry = entries[0];
+      if (entry.disposition === "removed") return refuse("return_stop_removed");
+      if (!["unchanged", "resequenced"].includes(entry.disposition) || !isText(entry.new_route_stop_id)) return refuse("return_version_unbound");
       stopId = entry.new_route_stop_id;
+      projectionId = step.to_projection_id;
+      routeVersionId = step.to_route_version_id;
       version = step.to_route_version;
     }
     if (version !== state.route_version) return refuse("return_version_unbound");
     note = "route_version_changed";
   }
+  if (projectionId !== state.projection_id || routeVersionId !== state.route_version_id) return refuse("return_version_unbound");
   const stop = state.route.stops.find(item => item.route_stop_id === stopId && item.property_id === marker.property_id);
   if (!stop) return refuse(note ? "return_stop_removed" : "return_marker_mismatch");
   return {
@@ -674,7 +706,9 @@ export function renderOrderedListHtml(projection) {
       : ` <span class="tour-nav-withheld">Navigation not available: ${esc(item.native_navigation.reason)}</span>`;
     return `<li data-route-stop-id="${esc(item.route_stop_id)}"${item.current ? ' aria-current="step"' : ""}>`
       + `<strong>${esc(item.label)}</strong> ${esc(item.title)}`
-      + (offline && offline.address_line ? `, ${esc(offline.address_line)}` : "") + notice + when + nav + "</li>";
+      + (offline && offline.address_line ? `, ${esc(offline.address_line)}` : "")
+      + ` <span class="tour-durations">${esc(item.dwell_minutes ?? "unknown")} min dwell; ${esc(item.buffer_minutes ?? "unknown")} min buffer</span>`
+      + notice + when + nav + "</li>";
   });
   return `<ol class="tour-stop-list" aria-label="Tour stops in visit order">${items.join("")}</ol>`;
 }
@@ -683,6 +717,6 @@ export function renderOrderedListHtml(projection) {
 export function renderRouteEndpointsHtml(projection) {
   const { start_point: start, end_point: end } = projection.route_endpoints;
   const part = (name, point) => (point
-    ? `<dt>${name}</dt><dd>${esc(point.label ?? "Unnamed point")} (${esc(point.latitude)}, ${esc(point.longitude)})</dd>` : "");
+    ? `<dt>${name}</dt><dd>${esc(point.label ?? point.source_ref ?? "Unnamed point")} (${esc(point.latitude)}, ${esc(point.longitude)})</dd>` : "");
   return `<dl class="tour-route-endpoints">${part("Start", start)}${part("End", end)}</dl>`;
 }

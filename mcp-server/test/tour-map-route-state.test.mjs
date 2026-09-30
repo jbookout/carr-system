@@ -32,6 +32,8 @@ function route(overrides = {}) {
     tour_id: "tour-synthetic-1",
     projection_id: "proj-synthetic-1",
     route_version: 3,
+    route_version_id: `route-version-${overrides.route_version ?? 3}`,
+    canonical_dataset_version: "dataset-1", component_registry_version: "components-1",
     stops: [
       { route_stop_id: "rs-a", property_id: "prop-a", route_sequence: 1, route_label: "A", locked_state: "locked",
         dwell_minutes: 30, buffer_minutes: 10, title: "Synthetic Clinic One", address_line: "100 Example Way",
@@ -56,7 +58,10 @@ const CHECKS = [
 ];
 const receipt = (overrides = {}) => ({
   decision: "approved", promotion_receipt_id: "rcpt-1", tour_id: "tour-synthetic-1",
-  projection_id: "proj-synthetic-1", route_version: 3, provider_rights_receipt_ids: ["prr-1"],
+  projection_id: "proj-synthetic-1", route_version: 3,
+  route_version_id: `route-version-${overrides.route_version ?? 3}`,
+  canonical_dataset_version: "dataset-1", component_registry_version: "components-1",
+  provider_rights_receipt_ids: ["prr-1"],
   required_checks: Object.fromEntries(CHECKS.map(key => [key, true])),
   mobile_test_evidence: { status: "passed" }, native_navigation_test_evidence: { status: "passed" },
   offline_test_evidence: { status: "passed" },
@@ -718,4 +723,68 @@ test("the measurement script exits nonzero on malformed constraint data", async 
   const result = await run(file);
   assert.notEqual(result.code, 0);
   assert.match(result.stderr, /invalid_(duration|locked_state)/);
+});
+
+
+test("finding 1 supplement: promotion retains exact canonical route dataset and component bindings", () => {
+  const state = tourState();
+  assert.equal(nav(state, "rs-a").available, true);
+  for (const field of ["route_version_id", "canonical_dataset_version", "component_registry_version"]) {
+    for (const value of [undefined, "other"]) {
+      assert.equal(nav(state, "rs-a", { promotion_receipt: receipt({ [field]: value }) }).available, false, field);
+    }
+    assert.equal(nav(tourState({ [field]: undefined }), "rs-a").available, false, `missing state ${field}`);
+  }
+});
+
+
+test("finding 3 supplement: return lineage binds projections and strictly advancing unique steps", () => {
+  const prior = tourState();
+  const marker = buildReturnState(nav(prior, "rs-a"));
+  assert.equal(back(tourState({ projection_id: "other-projection" }), marker).ok, false);
+  const nextRoute = route({ route_version: 4, projection_id: "projection-4" });
+  const next = applyRouteVersion(prior, nextRoute).state;
+  const latest = applyRouteVersion(next, route({ route_version: 5, projection_id: "projection-5" })).state;
+  assert.equal(back(latest, marker).ok, true);
+  for (const field of ["from_projection_id", "from_route_version_id", "tour_id"]) {
+    const broken = structuredClone(latest); broken.lineage[0][field] = "foreign";
+    assert.equal(back(broken, marker).ok, false, field);
+  }
+  for (const version of [undefined, 3, 999]) {
+    const broken = structuredClone(latest); broken.lineage[0].to_route_version = version;
+    assert.equal(back(broken, marker).ok, false);
+  }
+  const duplicate = structuredClone(latest); duplicate.lineage.push(structuredClone(duplicate.lineage[0]));
+  assert.equal(back(duplicate, marker).ok, false);
+});
+
+
+test("finding 8 supplement: canonical endpoint provenance and list durations round trip", () => {
+  const point = { latitude: 30.5, longitude: -88.1, position_role: "start", precision_class: "surveyed", source_ref: "synthetic-start" };
+  const data = route({ start_point: point, end_point: { ...point, position_role: "end", source_ref: "synthetic-end" } });
+  const state = buildRouteVersionState(data, { selected_property_id: "prop-a" });
+  for (const key of ["position_role", "precision_class", "source_ref"]) assert.equal(state.route.start_point[key], point[key]);
+  point.source_ref = "mutated";
+  assert.equal(state.route.start_point.source_ref, "synthetic-start");
+  const projection = projectRoute(state);
+  assert.equal(projection.list[0].dwell_minutes, 30); assert.equal(projection.list[0].buffer_minutes, 10);
+  assert.match(renderRouteEndpointsHtml(projection), /synthetic-start/);
+  assert.match(renderRouteEndpointsHtml(projection), /synthetic-end/);
+  assert.match(renderOrderedListHtml(projection), /30 min dwell/);
+  assert.match(renderOrderedListHtml(projection), /10 min buffer/);
+});
+
+
+test("finding 9 supplement: sparse rings and nonnumeric altitude cannot become accepted geometry", () => {
+  const state = tourState(); const before = structuredClone(state);
+  const ring = [[0, 0], [0, 1], [1, 1], [0, 0]];
+  const sparse = new Array(4);
+  const cases = [
+    { type: "Polygon", coordinates: [sparse] },
+    ...[undefined, "high", NaN, Infinity].map(altitude => ({ type: "Polygon", coordinates: [ring.map(p => [...p, altitude])] })),
+  ];
+  for (const geometry of cases) {
+    assert.throws(() => reduceMapEvent(state, { type: "draw_result", route_version: 3, geometry }), /invalid_geometry/);
+    assert.deepEqual(state, before);
+  }
 });
