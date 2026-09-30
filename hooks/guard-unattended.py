@@ -806,6 +806,56 @@ def _executable_identity(word, cwd):
     return name, any(identity == digest(candidate) for candidate in candidates)
 
 
+def _shell_substitutions(text):
+    """Extract active $(...) and backticks; single-quoted bytes stay data."""
+    bodies, quote, index = [], "", 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and quote != "'":
+            index += 2
+            continue
+        if quote == "'":
+            if char == "'":
+                quote = ""
+            index += 1
+            continue
+        if char == "'" and not quote:
+            quote = "'"
+        elif char == '"':
+            quote = "" if quote == '"' else '"'
+        elif char == "`" or text.startswith("$(", index):
+            backtick = char == "`"
+            start = index + (1 if backtick else 2)
+            cursor, depth, inner_quote = start, 1, ""
+            while cursor < len(text):
+                current = text[cursor]
+                if current == "\\" and inner_quote != "'":
+                    cursor += 2
+                    continue
+                if backtick:
+                    if current == "`":
+                        break
+                elif inner_quote:
+                    if current == inner_quote:
+                        inner_quote = ""
+                elif current in {"'", '"'}:
+                    inner_quote = current
+                elif current == "(":
+                    depth += 1
+                elif current == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                cursor += 1
+            if cursor >= len(text):
+                raise ValueError("unterminated command substitution")
+            bodies.append(text[start:cursor])
+            index = cursor + 1
+            continue
+        index += 1
+    return bodies
+
+
 def shell_send_analysis(cmd, cwd):
     """Return (refusal, sender) without interpreting or executing shell text.
 
@@ -815,7 +865,14 @@ def shell_send_analysis(cmd, cwd):
     so the hook's older outer allow-on-error handler cannot waive this check.
     """
     try:
-        lexer = shlex.shlex(strip_inert_text(cmd, strip_prose=False), posix=True,
+        scanned = strip_inert_text(cmd, strip_prose=False)
+        substitution_sender = False
+        for body in _shell_substitutions(scanned):
+            reason, sends = shell_send_analysis(body, cwd)
+            if reason:
+                return reason, True
+            substitution_sender = substitution_sender or sends
+        lexer = shlex.shlex(scanned, posix=True,
                             punctuation_chars=";|&()<>\n")
         lexer.whitespace = " \t\r"
         lexer.whitespace_split = True
@@ -830,14 +887,15 @@ def shell_send_analysis(cmd, cwd):
                 segment.append(token)
         if segment:
             segments.append(segment)
-        sender = False
+        sender = substitution_sender
         variables = {}
         effective_cwd = cwd or os.getcwd()
         for args in segments:
             redirects = [word for word in args if word.startswith("<<")]
             redirect_tokens = {"<", ">", ">>", "<<", "<<<", "<<-", ">&", "<&", "&>", "&>>"}
             index = 0
-            # Redirections may precede the executable, including <<EOF sh.
+            # Shell control words, redirections and assignments may precede
+            # the executable, even after another prefix (then command eval).
             while index < len(args):
                 word = args[index]
                 if word.isdigit() and index + 1 < len(args) and args[index + 1] in redirect_tokens:
@@ -845,14 +903,15 @@ def shell_send_analysis(cmd, cwd):
                     word = args[index]
                 if word in redirect_tokens:
                     index += 2
+                    continue
                 elif re.match(r"^[A-Za-z_]\w*=", word):
                     key, value = word.split("=", 1)
                     variables[key] = value
                     index += 1
-                else:
-                    break
-            while index < len(args):
-                word = args[index]
+                    continue
+                if word in {"if", "elif", "then", "else", "do", "while", "until", "!", "{", "}"}:
+                    index += 1
+                    continue
                 variable = re.fullmatch(r"\$(?:([A-Za-z_]\w*)|\{([A-Za-z_]\w*)\})", word)
                 if variable:
                     word = variables.get(variable.group(1) or variable.group(2), word)

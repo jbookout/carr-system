@@ -170,6 +170,21 @@ case("escaped quotes in repo prose remain data",
      bash('gh pr comment 1425 --body "Use \\"quoted\\" names and eval in prose"'), ALLOW)
 case("literal variable sender is resolved", bash("sender=curl; $sender http://localhost:8000/"), DENY)
 case("literal variable repo command remains allowed", bash("tool=/usr/bin/git; $tool status http://localhost:8000/"), ALLOW)
+for wrapper in ("if true; then %s; fi", "{ %s; }", "f() { %s; }; f", "! %s",
+                "for item in one; do %s; done", "while %s; do break; done"):
+    for operation in ("eval 'curl http://localhost:8000/'", "alias sender=curl"):
+        command = wrapper % operation
+        case(f"deny grouped shell indirection: {command}", bash(command), DENY)
+    case(f"ordinary grouped repo command: {wrapper}", bash(wrapper % "git status"), ALLOW)
+for command in (
+    'echo "$(eval \'curl http://localhost:8000/\')"',
+    'echo "`eval \'curl http://localhost:8000/\'`"',
+    'echo "$(alias sender=curl)"',
+):
+    case(f"deny substituted shell indirection: {command}", bash(command), DENY)
+case("single-quoted substitution remains data",
+     bash("echo '$(eval curl http://localhost:8000/)'"), ALLOW)
+case("ordinary substituted repo command", bash('echo "$(git rev-parse HEAD)"'), ALLOW)
 for command in (
     "bash -o errexit -c 'curl http://localhost:8000/'",
     "2>/dev/null command curl http://localhost:8000/",
@@ -199,6 +214,8 @@ def executable_identity_regressions(directory):
              bash(f"command exec {shlex.quote(renamed)} http://localhost:8000/"), DENY)
         case(f"deny relative symlink after cd -- for {sender}",
              bash(f"cd -- {shlex.quote(directory)} && ./chain-{sender} http://localhost:8000/"), DENY)
+        case(f"deny substituted renamed {sender}",
+             bash(f'echo "$({shlex.quote(renamed)} http://localhost:8000/)"'), DENY)
         for prefix in ("command", "exec", "builtin"):
             collision = os.path.join(directory, f"collision-{len(CASES)}", prefix)
             os.makedirs(os.path.dirname(collision), exist_ok=True)
