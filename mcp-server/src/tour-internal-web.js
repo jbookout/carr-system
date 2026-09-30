@@ -142,12 +142,15 @@ const POINT_ROLES = new Set(["entrance", "driveway", "parking_access", "start", 
 const PRECISIONS = new Set(["unknown", "approximate", "parcel", "building", "address", "entrance", "surveyed"]);
 function text(value, max) { return typeof value === "string" && value.trim().length > 0 && value.trim().length <= max; }
 function boundedInt(value, min, max) { return Number.isInteger(value) && value >= min && value <= max; }
+// Same privacy-bearing reference policy as tour-domain.js point(); a reference the domain
+// will always refuse is a 400 here, never a retryable outage.
+const PRIVATE_REFERENCE = /(contact|phone|email|internal|client|@)/i;
 // The verb re-validates every field; this only stops malformed bodies at the door.
 function validPoint(value, role) {
   return exact(value, ["latitude", "longitude", "position_role", "precision_class", "source_ref"]) && value.position_role === role && POINT_ROLES.has(role) &&
     typeof value.latitude === "number" && Number.isFinite(value.latitude) && value.latitude >= -90 && value.latitude <= 90 &&
     typeof value.longitude === "number" && Number.isFinite(value.longitude) && value.longitude >= -180 && value.longitude <= 180 &&
-    PRECISIONS.has(value.precision_class) && text(value.source_ref, 240);
+    PRECISIONS.has(value.precision_class) && text(value.source_ref, 500) && !PRIVATE_REFERENCE.test(value.source_ref.trim());
 }
 function validCreate(v) {
   return exact(v, ["idempotency_key", "tour_name", "subject_type", "subject_id", "canonical_dataset_version", "start_point", "end_point"]) &&
@@ -269,8 +272,9 @@ export function tourFailureRecord(pathname, status, error, data) {
   return record;
 }
 function safeFailure(result, pathname, error, report) {
-  const status = [403, 404, 409].includes(result?.status) ? result.status : 503;
+  const status = [400, 403, 404, 409].includes(result?.status) ? result.status : 503;
   if (typeof report === "function") { try { report(tourFailureRecord(pathname, status, error, result?.data)); } catch {} }
+  if (status === 400) return json({ error: "invalid_request" }, 400);
   return json({ error: status === 403 ? "forbidden" : status === 404 ? "not_found" : status === 409 ? "conflict" : "tour_unavailable" }, status);
 }
 const CONFLICT_MESSAGES = new Set([
@@ -281,11 +285,22 @@ const CONFLICT_MESSAGES = new Set([
   "cheat sheet restore refuses unavailable or stale revision",
   "tour selection refuses stale version",
   "route stop cannot alter an accepted route version",
+  "route transition cannot alter an accepted route version",
+  // Precondition refusals: the editor's view of the route is out of date or incomplete, so reload.
+  "route version base is invalid",
+  "route acceptance requires at least one active stop",
+  "route acceptance requires an explicit transition for every new route stop",
+  "route acceptance requires an explicit disposition for every prior route stop",
 ]);
+// Typed domain refusals raised before any write: retrying the same input can never succeed.
+const VALIDATION_CODES = new Set(["tour_input_invalid", "tour_input_unknown_field", "tour_point_invalid", "tour_stop_state_invalid",
+  "tour_appointment_invalid", "tour_transition_invalid", "tour_provider_tuple_invalid", "tour_routing_request_invalid",
+  "caller_authority_field_forbidden"]);
 function dependencyFailure(error) {
   const code = typeof error?.payload?.error === "string" ? error.payload.error : "";
   const message = typeof error?.message === "string" ? error.message : "";
-  return { status: code === "tour_selection_cart_not_found" ? 404 : code === "version_conflict" || CONFLICT_MESSAGES.has(message) ? 409 : 503 };
+  if (VALIDATION_CODES.has(code)) return { status: 400 };
+  return { status: code === "tour_selection_cart_not_found" ? 404 : code === "version_conflict" || code === "key_reuse" || CONFLICT_MESSAGES.has(message) ? 409 : 503 };
 }
 async function staticAsset(env, request, pathname) {
   if (!env?.ASSETS?.fetch) return json({ error: "not_found" }, 404);
