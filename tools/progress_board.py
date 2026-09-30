@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
+from urllib.request import Request, urlopen
 
 
 STATUSES = ("queued", "running", "review", "blocked", "done", "failed")
@@ -47,6 +48,10 @@ STUCK_AFTER = timedelta(hours=2)
 HOSTED_BOARD_ORIGIN = "https://app.doctorcre.com"
 LAUNCHD_BOARD = "carr-v5"
 DEFAULT_PR_REPO = "jbookout/carr-system"
+RELEASE_TARGETS = {
+    DEFAULT_PR_REPO: (Path(__file__).resolve().parents[1], "https://api.doctorcre.com/release"),
+    "jbookout/doctorcre-app": (Path.home() / "doctorcre-app", "https://app.doctorcre.com/app-release"),
+}
 
 
 def now_utc() -> datetime:
@@ -321,7 +326,7 @@ def pr_info(number: int, repo: str) -> dict[str, Any] | None:
     try:
         result = subprocess.run(
             ["gh", "pr", "view", str(number), "--repo", repo,
-             "--json", "state,isDraft,headRefOid,statusCheckRollup,comments,author"],
+             "--json", "state,isDraft,headRefOid,mergeCommit,statusCheckRollup,comments,author"],
             capture_output=True,
             text=True,
             timeout=5,
@@ -631,9 +636,52 @@ h1{font-size:clamp(2.35rem,5vw,4.4rem);line-height:1.02;letter-spacing:-.035em;m
         page = page.replace(key, value)
     return page
 
+def deployed_release(repo: str) -> tuple[Path, str, str] | None:
+    """Read where this repository runs. Pipeline cursors and main are not deployment proof."""
+    target = RELEASE_TARGETS.get(repo)
+    if target is None:
+        return None
+    root, url = target
+    try:
+        with urlopen(Request(url, headers={"User-Agent": "carr-progress-board"}), timeout=5) as response:
+            live = json.load(response)
+        if not isinstance(live, dict):
+            return None
+        if repo == DEFAULT_PR_REPO:
+            if live.get("ok") is not True or (live.get("env") or {}).get("value") != "production":
+                return None
+            sha = (live.get("git_sha") or {}).get("value")
+        else:
+            if live.get("service") != "doctorcre-app" or live.get("environment") != "production":
+                return None
+            sha = live.get("source_commit")
+        if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
+            return None
+        return root, sha, url
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def deployment_evidence(info: dict[str, Any], release: tuple[Path, str, str] | None) -> str | None:
+    merge = info.get("mergeCommit")
+    commit = merge.get("oid") if isinstance(merge, dict) else None
+    if release is None or not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        return None
+    root, sha, url = release
+    try:
+        result = subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor", commit, sha],
+                                capture_output=True, timeout=5, check=False)
+        if result.returncode == 0:
+            return f"GET {url} observed production source {sha}; merged commit {commit} is an ancestor; verified {stamp()}"
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
+
+
 def render(project: str) -> None:
     state = read_state(project)
     pr_infos: dict[tuple[str, int], dict[str, Any] | None] = {}
+    releases: dict[str, tuple[Path, str, str] | None] = {}
     changed = False
     for task_id, task in state.get("tasks", {}).items():
         if task.get("pr") is None:
@@ -647,6 +695,14 @@ def render(project: str) -> None:
         status, stage, phase = derived_pr_state(info)
         if task_stage(task) == "live":
             status, stage = "done", "live"
+        elif stage == "merged":
+            if key[0] not in releases:
+                releases[key[0]] = deployed_release(key[0])
+            evidence = deployment_evidence(info, releases[key[0]])
+            if evidence:
+                stage = "live"
+                task["evidence"] = evidence
+                task["completed_at"] = stamp()
         observed = (("status", status), ("stage", stage), ("pr_phase", phase),
                     ("pr_checks", checks_summary(info)), ("pr_head", info.get("headRefOid") or ""))
         if any(task.get(key) != value for key, value in observed):

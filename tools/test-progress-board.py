@@ -26,6 +26,87 @@ SPEC.loader.exec_module(BOARD)
 
 
 class ProgressBoardCLI(unittest.TestCase):
+    def test_render_advances_only_deployed_merge_commits_in_each_repository(self):
+        sys.path.insert(0, str(REPO / "ops"))
+        from git_env import fixture_env
+        git_env = fixture_env()
+        source = self.root / "source"
+        source.mkdir()
+        def git(*args):
+            return subprocess.run(["git", "-C", str(source), *args], env=git_env,
+                                  capture_output=True, text=True, check=True).stdout.strip()
+        git("init")
+        git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+            "commit", "--allow-empty", "-m", "Released")
+        released = git("rev-parse", "HEAD")
+        git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+            "commit", "--allow-empty", "-m", "Unreleased")
+        newer = git("rev-parse", "HEAD")
+        for repo, identity in (
+            ("jbookout/carr-system", {"ok": True, "env": {"value": "production"},
+                                      "git_sha": {"value": released}}),
+            ("jbookout/doctorcre-app", {"service": "doctorcre-app", "environment": "production",
+                                       "source_commit": released}),
+        ):
+            with self.subTest(repo=repo):
+                project = repo.split("/")[1]
+                self.run_board("init", project, "--title", "Demo")
+                for task_id, number in (("deployed", 1), ("future", 2)):
+                    self.run_board("task", project, task_id, "--title", task_id,
+                                   "--status", "done", "--executor", "codex",
+                                   "--pr", str(number), "--repo", repo, "--stage", "merged")
+                def info(number, _repo):
+                    return {"state": "MERGED", "headRefOid": "f" * 40,
+                            "mergeCommit": {"oid": released if number == 1 else newer}}
+                from unittest.mock import MagicMock
+                response = MagicMock()
+                response.__enter__.return_value.read.return_value = json.dumps(identity).encode()
+                with patch.dict(os.environ, self.env), patch.object(BOARD, "pr_info", info), \
+                     patch.object(BOARD, "RELEASE_TARGETS", {repo: (source, "https://example.invalid/release")}, create=True), \
+                     patch.object(BOARD, "urlopen", return_value=response):
+                    BOARD.render(project)
+                tasks = self.read_state(project)["tasks"]
+                self.assertEqual(tasks["deployed"]["stage"], "live")
+                self.assertIn(released, tasks["deployed"]["evidence"])
+                self.assertEqual(tasks["future"]["stage"], "merged")
+                self.assertNotIn("evidence", tasks["future"])
+                remote = {"snapshot": None}
+                def call(verb, args):
+                    if verb == "publish-board-snapshot":
+                        self.assertEqual(args["base_version"], 0)
+                        remote["snapshot"] = {"version": 1, "snapshot_json": args["snapshot"]}
+                    return {"ok": True, "questions": [], **remote}
+                with patch.dict(os.environ, self.env), patch.object(BOARD, "call_verb", call):
+                    BOARD.publish_board(project)
+                published = remote["snapshot"]["snapshot_json"]["tasks"]
+                self.assertEqual(published["deployed"]["stage"], "live")
+                self.assertEqual(published["future"]["stage"], "merged")
+
+    def test_render_keeps_merged_when_production_identity_cannot_be_proven(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("task", "demo", "pending", "--title", "Pending",
+                       "--status", "done", "--executor", "codex", "--pr", "1", "--stage", "merged")
+        from unittest.mock import MagicMock
+        cases = [
+            {"ok": True, "env": {"value": "staging"}, "git_sha": {"value": "a" * 40}},
+            {"ok": True, "env": {"value": "production"}, "git_sha": {"value": "abc"}},
+            {"ok": True, "env": [], "git_sha": "malformed"},
+            ["malformed"],
+            OSError("unavailable"),
+        ]
+        for identity in cases:
+            with self.subTest(identity=identity):
+                response = MagicMock()
+                response.__enter__.return_value.read.return_value = json.dumps(identity, default=str).encode()
+                kwargs = {"side_effect": identity} if isinstance(identity, Exception) else {"return_value": response}
+                with patch.dict(os.environ, self.env), \
+                     patch.object(BOARD, "pr_info", return_value={"state": "MERGED", "mergeCommit": {"oid": "a" * 40}}), \
+                     patch.object(BOARD, "urlopen", **kwargs):
+                    BOARD.render("demo")
+                task = self.read_state("demo")["tasks"]["pending"]
+                self.assertEqual(task["stage"], "merged")
+                self.assertNotIn("evidence", task)
+
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tempdir.name)
