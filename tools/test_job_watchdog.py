@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -13,10 +14,43 @@ FIXTURES = ROOT / "tools/fixtures/job-watchdog"
 
 
 class ReplayTests(unittest.TestCase):
-    def test_tonights_stdin_hangs(self):
+    def test_fixtures_have_only_synthetic_name_vocabulary(self):
+        # No record-layer access or client-name literals. Unknown name-like
+        # words form the denylist relative to this closed synthetic vocabulary.
+        synthetic_set = {
+            "REVIEW: BLOCKED", "REVIEW: APPROVED", "Reviewed-SHA",
+            "Reading additional input from stdin...",
+            "parse error: synthetic queue", "synthetic fixture",
+            "SUCCESS", "COMPLETED", "FAILURE", "MERGEABLE", "CONFLICTING",
+            "UNKNOWN", "DIRTY", "CLEAN", "APPROVED", "CHANGES_REQUESTED",
+        }
+        allowed = set(re.findall(r"[A-Z][a-z]+", " ".join(synthetic_set)))
+
+        def denylist(text):
+            return set(re.findall(r"\b[A-Z][a-z]+\b", text)) - allowed
+
+        # Prove that the scanner catches client-like strings without embedding
+        # a real client identity or deriving a list from business records.
+        self.assertTrue(denylist("Invented Dental C-000"))
+        for path in sorted(FIXTURES.rglob("*")):
+            if path.is_file():
+                with self.subTest(fixture=path.name):
+                    self.assertFalse(bool(denylist(path.read_text())),
+                                     "fixture has name-like words outside the synthetic set")
+                    if path.name.startswith("pr-"):
+                        row = json.loads(path.read_text())
+                        self.assertEqual(set(row), {"number", "headRefOid", "updatedAt",
+                                                   "comments", "commits", "isDraft",
+                                                   "mergeable", "statusCheckRollup"})
+                        for comment in row["comments"]:
+                            self.assertEqual(set(comment), {"body", "createdAt"})
+                            self.assertRegex(comment["body"],
+                                             r"\AREVIEW: (?:BLOCKED|APPROVED)\nReviewed-SHA: [0-9a-f]{40}\Z")
+
+    def test_synthetic_stdin_hangs(self):
         import job_watchdog as w
         config = w.load_config(ROOT / "ops/config/job-watchdog.json")
-        for name in ("rv-1423.log", "src10.log"):
+        for name in ("stdin-a.log", "stdin-b.log"):
             with self.subTest(name=name):
                 facts = {"jobs": [{"id": name, "card": name, "alive": True,
                          "start": 1000, "limit": 3600, "log_mtime": 1990,
@@ -27,16 +61,16 @@ class ReplayTests(unittest.TestCase):
         import job_watchdog as w
         config = w.load_config(ROOT / "ops/config/job-watchdog.json")
         prs = [dict(json.loads((FIXTURES / f"pr-{n}.json").read_text()),
-                    repo="jbookout/doctorcre-app") for n in range(95, 101)]
+                    repo="jbookout/doctorcre-app") for n in range(1, 7)]
         found = w.detect({"prs": prs, "queue": "", "logs": [
             {"path": "queue.log", "type": "queue", "mtime": 2000000000,
              "tail": (FIXTURES / "queue.log").read_text()}]}, config, 2000000000)
         blocked = {f["pr"] for f in found if f["kind"] == "pr_blocked_review"}
-        self.assertEqual(blocked, {95, 96, 97, 99, 100})
+        self.assertEqual(blocked, {1, 2, 3, 5, 6})
         self.assertIn("queue_error", {f["kind"] for f in found})
-        # PR98 is approved and green, but GitHub reports UNKNOWN mergeability.
+        # Synthetic PR4 is approved and green, but GitHub reports UNKNOWN mergeability.
         # It must not be queued until a fresh mergeability read can establish it.
-        self.assertFalse(any(f.get("pr") == 98 for f in found))
+        self.assertFalse(any(f.get("pr") == 4 for f in found))
 
     def test_clean_fixture_has_no_findings(self):
         import job_watchdog as w
@@ -247,6 +281,32 @@ class StateTests(unittest.TestCase):
             self.assertIn("--fresh", dispatch)
             self.assertIn("REVIEW: BLOCKED", dispatch[dispatch.index("send") + 2])
             self.assertIn("--stream-output", dispatch)
+
+    def test_detected_credential_waits_never_restart(self):
+        import job_watchdog as w
+        c = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        c["actions"]["file_defects"] = False
+        for tail in ("Waiting for authentication...\nauthentication required",
+                     "Waiting for authentication...", "token expired"):
+            with self.subTest(tail=tail), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                effects = w.Effects(root, c)
+                # Boundary fake: any process recovery is a failing effect.
+                def forbidden(action, row):
+                    self.fail("credential wait attempted recovery: " + action)
+                effects.act = forbidden
+                job = {"id": "credentials", "card": "credentials", "alive": True,
+                       "start": 1000, "limit": 999, "log_mtime": 1000,
+                       "log_tail": tail}
+                found = w.detect({"jobs": [job]}, c, 2000)
+                self.assertTrue(found)
+                self.assertTrue(all(f["needs_joe"] == "credentials" for f in found))
+                self.assertTrue(all(tail in f["reason"] for f in found))
+                w.reconcile(root, c, found, effects, 2000)
+                self.assertEqual(w.read_latest(root / c["paths"]["actions"]), {})
+                state = json.loads((root / "out/boards/carr-v5.json").read_text())
+                self.assertEqual(state["tasks"]["credentials"]["lane"], "needs-joe")
+                self.assertEqual(state["tasks"]["credentials"]["status"], "blocked")
 
     def test_credentials_stay_blocked_in_needs_joe_lane(self):
         import job_watchdog as w

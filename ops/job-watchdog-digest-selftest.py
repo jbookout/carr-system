@@ -30,7 +30,14 @@ class HookTests(unittest.TestCase):
     def test_launchd_cadence_is_config_projection(self):
         config = json.loads((ROOT / "ops/config/job-watchdog.json").read_text())
         plist = plistlib.loads((ROOT / "ops/launchd/com.carr.job-watchdog.plist").read_bytes())
-        self.assertEqual(plist["StartInterval"], config["thresholds"]["scan_seconds"])
+        result = subprocess.run([sys.executable, "-m", "lib.launchd_calendar", "audit",
+                                 "ops/launchd/com.carr.job-watchdog.plist"],
+                                cwd=ROOT, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("StartInterval", plist)
+        # Two-minute cadence covers the entire hour exactly once.
+        self.assertEqual(plist["StartCalendarInterval"],
+                         [{"Minute": minute} for minute in range(0, 60, 2)])
         self.assertEqual(plist["ProgramArguments"][-1], "scan")
         self.assertIn("{{REPO}}/bin/run-scheduled.sh", plist["ProgramArguments"])
         services = json.loads((ROOT / "ops/config/services.json").read_text())

@@ -66,7 +66,7 @@
   ],
   "queue_error_patterns": ["NONGREEN", "parse error", "MERGE NOT ON MAIN"],
   "needs_joe_patterns": {
-    "credentials": ["authentication required", "not logged in", "bad credentials", "token expired", "login required"],
+    "credentials": ["waiting for authentication", "authentication required", "not logged in", "bad credentials", "token expired", "login required"],
     "money": ["payment required", "billing approval required"],
     "client-facing": ["client-facing approval required", "external send approval required"]
   },
