@@ -661,6 +661,33 @@ class ReleaseAbandonFixture(unittest.TestCase):
         self.assertIs(raised.exception, error)
         self.assertFalse(data.parent.exists())
 
+    def test_cli_reports_retained_cluster_after_failed_shutdown(self):
+        run = subprocess.run
+        observed = {}
+        stderr = io.StringIO()
+
+        def fail_stop(args, **kwargs):
+            if Path(args[0]).name == "pg_ctl" and args[-1] == "stop":
+                observed.update(data=Path(args[args.index("-D") + 1]), args=args, kwargs=kwargs)
+                return subprocess.CompletedProcess(args, 1, "", "injected stop failure")
+            return run(args, **kwargs)
+
+        try:
+            with patch.dict(os.environ, {"CARR_CI_DATABASE_URL": "host=127.0.0.1"}), \
+                 patch.object(tempfile, "tempdir", "/tmp"), \
+                 patch.object(subprocess, "run", side_effect=fail_stop), \
+                 patch.object(self.abandon, "legacy_approval_receipt_refusal"), \
+                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+                self.assertEqual(self.abandon.main(), 1)
+            self.assertTrue(observed["data"].exists())
+            self.assertIn(str(observed["data"].parent), stderr.getvalue())
+            self.assertIn(str(observed["data"].parent / "postgres.log"), stderr.getvalue())
+        finally:
+            if observed:
+                stopped = run(observed["args"], **observed["kwargs"])
+                self.assertEqual(stopped.returncode, 0, stopped.stderr)
+                shutil.rmtree(observed["data"].parent)
+
 
 if __name__ == "__main__":
     unittest.main()

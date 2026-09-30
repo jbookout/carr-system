@@ -203,9 +203,13 @@ def isolated_ci_database(base_dsn: str) -> Iterator[str]:
                     raise RuntimeError("disposable PostgreSQL shutdown was not verified")
                 shutdown_verified = True
             except Exception as exc:
-                raise RuntimeError(
+                message = (
                     f"release-abandon teardown failed; cluster retained at {root}; "
-                    f"log: {root / 'postgres.log'}") from exc
+                    f"log: {root / 'postgres.log'}")
+                # The CLI catches fixture exceptions. Emit only our owned paths,
+                # so its generic refusal cannot hide the recovery location.
+                print(message, file=sys.stderr)
+                raise RuntimeError(message) from exc
     finally:
         if shutdown_verified:
             shutil.rmtree(directory)
