@@ -43,6 +43,33 @@ function handler(overrides = {}) {
 const postHeaders = { origin: ORIGIN, "sec-fetch-site": "same-origin", "content-type": "application/json", "x-carr-csrf": SESSION.csrfToken };
 const issueBody = { projection_id: projectionId, token_digest: digest, permission_scopes: ["view_packet"], expires_at: "2027-01-02T03:04:05.000Z", receipt_digest: digest, idempotency_key: grantId };
 
+test("property evidence, property search, and selection cart coexist behind the authenticated Tour adapter", async () => {
+  const seen = [];
+  const capture = seam => async context => {
+    seen.push({ seam, ...context });
+    return { ok: true, data: { available: true } };
+  };
+  const surface = handler({
+    readPropertyEvidenceFn: capture("evidence"), searchTourPropertiesFn: capture("search"),
+    readTourSelectionCartFn: capture("cart-read"), appendTourSelectionCartVersionFn: capture("cart-write"),
+  });
+  const env = { APP_HOST: "app.doctorcre.com" };
+  const calls = [
+    ["evidence", `/api/tours/property-evidence/v1?property_id=${tourId}&as_of=2026-09-29T12%3A00%3A00.000Z`, {}],
+    ["search", "/api/tours/properties/search", { method: "POST", headers: postHeaders, body: JSON.stringify({ query: "medical", bounds: null, filters: {}, cursor: null, page_size: 20 }) }],
+    ["cart-read", `/api/tours/selection-cart?tour_id=${tourId}`, {}],
+    ["cart-write", "/api/tours/selection-cart", { method: "POST", headers: postHeaders, body: JSON.stringify({ tour_id: tourId, base_selection_version_id: null, expected_selection_version: 0, property_ids: [stopA], selection_digest: digest, idempotency_key: grantId }) }],
+  ];
+  for (const [seam, path, options] of calls) {
+    assert.equal(isTourInternalRequest(request(path, options)), true, seam);
+    assert.equal((await surface.fetch(request(path, options), env, {}, ACTOR, SESSION)).status, 200, seam);
+    assert.equal(seen.at(-1).seam, seam);
+    assert.deepEqual(seen.at(-1).actor, ACTOR);
+    assert.equal((await surface.fetch(request(path, options), env, {}, undefined, undefined)).status, 401, seam);
+  }
+  assert.deepEqual(seen.map(call => call.seam), calls.map(([seam]) => seam));
+});
+
 test("internal Tour surface requires an injected authenticated actor and CSRF session", async () => {
   const surface = handler(); const assets = new Assets();
   for (const args of [[undefined, undefined], [ACTOR, undefined], [{}, SESSION]]) {
