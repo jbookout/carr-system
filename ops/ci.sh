@@ -780,13 +780,18 @@ PYEOF
   # kind again: repository files only. It fails when an active rule has no
   # delivery route, a corpus rule is missing from ops/config/rule-routes.v1.json,
   # or a trigger names a verb, tool or gate that cannot fire.
+  # check-eval-receipt JOINED 2026-09-29 (eval-gate): a change to a surface
+  # registered in evals/surfaces.json carries evals/<surface>/receipt.json or a
+  # reasoned no-eval line in the PR body. Enforced only in a pull_request run,
+  # where GITHUB_EVENT_PATH carries the body; elsewhere a missing receipt is
+  # advisory and a malformed one still fails. Procedure: evals/README.md.
   for inv in enforcement-coverage-check audit-queue-freshness-check map-row-evidence-check \
              rule-enforcement-map-check rule-load-layer-check rule-classification-parity-check \
              reachability-check selftest-git-isolation-check \
              drive-dependency-inventory drive-retirement-readiness-gate \
              mechanism-doctrine-gate scheduler-cutover-coverage-gate \
              boot-budget-check core-rule-ids-check rule-route-coverage \
-             rule-boot-classes-check; do
+             rule-boot-classes-check check-eval-receipt; do
     [ -f "ops/$inv.py" ] || continue
     run_quiet "$LOGDIR/gate-$inv.log" "$PY" "ops/$inv.py" \
       || { inherited_abort "$inv" "$PY" "ops/$inv.py"
