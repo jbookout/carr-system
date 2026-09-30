@@ -437,6 +437,25 @@ class DotReader(unittest.TestCase):
                 dot.execute("delete from public.dot_fixture")
 
 
+    def test_release_abandon_fixture_isolates_cluster_roles(self):
+        spec = importlib.util.spec_from_file_location("release_abandon", ROOT / "ops/release-abandon-selftest.py")
+        abandon = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(abandon)
+        password = secrets.token_urlsafe(32)
+        with psycopg.connect(**self.owner_args, autocommit=True) as owner:
+            owner.execute(sql.SQL("alter role carr_ci password {}").format(sql.Literal(password)))
+        base = psycopg.conninfo.make_conninfo(host="127.0.0.1", port=self.port,
+            user="carr_ci", password=password, dbname=self.owner_args["dbname"])
+        with abandon.isolated_ci_database(base) as isolated:
+            with psycopg.connect(isolated, autocommit=True) as fixture:
+                self.assertEqual(fixture.execute("select count(*) from pg_roles where rolname='dot_reader'").fetchone(), (0,),
+                                 "sibling databases share roles; the release fixture requires its own cluster")
+                fixture.execute("create role release_abandon_role_isolation_probe")
+            with psycopg.connect(**self.owner_args, autocommit=True) as base_db:
+                self.assertEqual(base_db.execute("select count(*) from pg_roles where rolname='release_abandon_role_isolation_probe'").fetchone(), (0,))
+        with psycopg.connect(**self.owner_args, autocommit=True) as base_db:
+            self.assertEqual(base_db.execute("select rolcanlogin from pg_roles where rolname='dot_reader'").fetchone(), (True,))
+
     def test_snapshot_role_preamble_reconstructs_passwordless_login(self):
         exporter = (ROOT / "bin/schema-snapshot.sh").read_text()
         blocks = []
