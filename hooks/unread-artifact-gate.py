@@ -143,10 +143,12 @@ def asserted_paths(prose):
     return found
 
 
-def known_paths(records):
+def known_paths(records, cwd=None):
     """Every repository-relative identity this session READ or WROTE."""
     known = set()
+    cwd = cwd or os.getcwd()
     for rec in records:
+        record_cwd = rec.get('cwd') or cwd
         message = rec.get("message") or {}
         content = message.get("content")
         if not isinstance(content, list):
@@ -161,19 +163,37 @@ def known_paths(records):
             if name in READ_TOOLS or name in WRITE_TOOLS:
                 path = ti.get("file_path") or ti.get("filePath") or ""
                 if path:
-                    known.add(artifact_path(path))
+                    known.add(artifact_path(path, ti.get('cwd') or record_cwd))
             elif name == "Bash":
                 command = ti.get("command") or ""
                 if SHELL_READ.search(command):
-                    for hit in PATH.finditer(command):
-                        known.add(artifact_path(hit.group(1)))
+                    from cmd_text import shell_tokens, shell_operands, SHELL_BOUNDARIES
+                    try:
+                        words, _ = shell_operands(shell_tokens(command))
+                    except ValueError:
+                        continue
+                    shell_cwd = ti.get('workdir') or ti.get('cwd') or record_cwd
+                    segments, segment = [], []
+                    for token in words + [';']:
+                        if token in SHELL_BOUNDARIES:
+                            segments.append(segment)
+                            segment = []
+                        else:
+                            segment.append(token)
+                    for words in segments:
+                        if not words:
+                            continue
+                        if words[0] == 'cd' and len(words) == 2:
+                            shell_cwd = artifact_path(words[1], shell_cwd)
+                        elif SHELL_READ.search(' '.join(words)):
+                            for word in words[1:]:
+                                if not word.startswith('-') and (PATH.fullmatch(word) or PATH.fullmatch('local/' + word)):
+                                    known.add(artifact_path(word, shell_cwd))
     return known
 
 
-def artifact_path(path):
-    if os.path.isabs(path):
-        return os.path.relpath(os.path.normpath(path), REPO)
-    return os.path.normpath(path)
+def artifact_path(path, cwd=None):
+    return os.path.normpath(os.path.join(cwd or os.getcwd(), path))
 
 
 
@@ -212,8 +232,9 @@ def main():
         if not claims:
             sys.exit(0)
 
-        known = known_paths(records)
-        unread = [c for c in claims if artifact_path(c) not in known]
+        cwd = payload.get('cwd') or payload.get('working_directory') or os.getcwd()
+        known = known_paths(records, cwd)
+        unread = [c for c in claims if artifact_path(c, cwd) not in known]
         if not unread:
             sys.exit(0)
 

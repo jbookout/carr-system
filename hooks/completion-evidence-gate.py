@@ -515,12 +515,20 @@ def payload_is_carr(payload, recs):
 
 def tool(rec):
     payload = rec.get("payload")
-    if isinstance(payload, dict) and payload.get("type") == "custom_tool_call":
+    if isinstance(payload, dict) and payload.get("type") in {"custom_tool_call", "function_call"}:
         name = str(payload.get("name", ""))
         # Codex records nested MCP calls inside a custom `exec` input.  Keep
         # direct MCP names intact too, for a future/runtime spelling that
         # writes them directly.
-        return (name if name.startswith("mcp__") else "functions." + name), payload.get("input")
+        value = payload.get("input")
+        if payload.get('type') == 'function_call':
+            value = payload.get('arguments')
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except ValueError:
+                    pass
+        return (name if name.startswith(("mcp__", "functions.")) else "functions." + name), value
     msg = rec.get("message") or rec
     content = msg.get("content")
     if isinstance(content, list):
@@ -593,7 +601,7 @@ def mutation(name, value):
 def verification(name, value):
     if name in VERIFY_TOOLS:
         return True
-    if name in {"Bash", "functions.exec"} and VERIFY_COMMAND.search(command(value)):
+    if name in {"Bash", "functions.exec", "functions.exec_command"} and VERIFY_COMMAND.search(command(value)):
         return True
     # A visible CARR read after an embedded CARR write is fresh evidence even
     # when Codex's outer custom call remains named only `functions.exec`.
@@ -1142,11 +1150,78 @@ def write_verb_names(window):
     return names
 
 
+def _call_id(rec):
+    payload = rec.get('payload') or {}
+    if payload.get('type') in {'custom_tool_call', 'function_call'}:
+        return payload.get('call_id')
+    content = message(rec).get('content')
+    for block in content if isinstance(content, list) else []:
+        if isinstance(block, dict) and block.get('type') == 'tool_use':
+            return block.get('id')
+    return None
+
+
+def _result_success(value):
+    """A paired result must be terminal; running, timeout and errors never count."""
+    if isinstance(value, str):
+        if re.search(r'Script running|session ID|timed?\s*out|timeout|Process exited with code [1-9]', value, re.I):
+            return False
+        if value.startswith('Script completed') and '\nOutput:\n' in value:
+            output = value.split('\nOutput:\n', 1)[1].strip()
+            decoder = json.JSONDecoder()
+            statuses = []
+            try:
+                while output:
+                    item, end = decoder.raw_decode(output)
+                    statuses.append(_result_success(item))
+                    output = output[end:].strip()
+            except ValueError:
+                return False
+            return bool(statuses) and all(statuses)
+        try:
+            return _result_success(json.loads(value))
+        except ValueError:
+            # Native exec's terminal text wrapper and Claude read/test results.
+            return bool(value.strip())
+    if isinstance(value, list):
+        return bool(value) and all(_result_success(item) for item in value)
+    if isinstance(value, dict):
+        if value.get('is_error') or value.get('isError') or value.get('error') or value.get('ok') is False:
+            return False
+        if 'exit_code' in value:
+            return value['exit_code'] == 0 and not value.get('session_id')
+        if value.get('session_id') or value.get('cell_id'):
+            return False
+        if value.get('type') == 'text':
+            return _result_success(value.get('text', ''))
+        if 'output' in value:
+            return _result_success(value['output'])
+        if 'content' in value:
+            return _result_success(value['content'])
+        return bool(value)
+    return False
+
+
+def _completed_calls(recs):
+    results = {}
+    for rec in recs:
+        epoch = rec['_epoch']
+        payload = rec.get('payload') or {}
+        if payload.get('call_id') and payload.get('type') in {'custom_tool_call_output', 'function_call_output'}:
+            results[payload.get('call_id')] = (epoch, not payload.get('is_error') and _result_success(payload.get('output')))
+        content = message(rec).get('content')
+        for block in content if isinstance(content, list) else []:
+            if isinstance(block, dict) and block.get('type') == 'tool_result' and block.get('tool_use_id'):
+                results[block.get('tool_use_id')] = (epoch, not block.get('is_error') and _result_success(block.get('content')))
+    return results
+
+
 def evaluate(recs, ledger=None):
     # A message may contain several tool calls. Preserve every operation as
     # its own ordered record so all receipt and mutation readers see it.
     expanded = []
-    for rec in recs:
+    for epoch, original in enumerate(recs):
+        rec = {**original, '_epoch': epoch}
         msg = rec.get("message")
         blocks = msg.get("content") if isinstance(msg, dict) else None
         if isinstance(blocks, list) and sum(isinstance(b, dict) and b.get("type") == "tool_use" for b in blocks) > 1:
@@ -1216,22 +1291,18 @@ def evaluate(recs, ledger=None):
     if not tracked:
         return False, "no tracked mutation"
 
-    latest = max(mutation_at + [idx for idx, rec in enumerate(window)
-                                if file_paths(*tool(rec))])
-    failed_calls = set()
-    for rec in window:
-        content = message(rec).get("content")
-        for block in content if isinstance(content, list) else []:
-            if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("is_error"):
-                failed_calls.add(block.get("tool_use_id"))
-    def successful_verification(rec):
-        if not verification(*tool(rec)):
-            return False
-        content = message(rec).get("content")
-        return not any(isinstance(b, dict) and b.get("type") == "tool_use"
-                       and b.get("id") in failed_calls
-                       for b in content if isinstance(content, list)) if isinstance(content, list) else True
-    verified = any(successful_verification(rec) for rec in window[latest + 1:])
+    completions = _completed_calls(window)
+    changes = [rec for rec in window if mutation(*tool(rec)) or file_paths(*tool(rec))]
+    # Invocation order inside one assistant array is concurrency, not execution
+    # order. Each mutation needs a terminal result before verification starts.
+    change_results = [completions.get(_call_id(rec)) for rec in changes]
+    mutations_complete = all(item is not None and item[1] for item in change_results)
+    latest_finish = max((item[0] for item in change_results if item is not None), default=-1)
+    verified = mutations_complete and any(
+        verification(*tool(rec)) and rec['_epoch'] > latest_finish
+        and (completed := completions.get(_call_id(rec))) is not None
+        and completed[0] > rec['_epoch'] and completed[1]
+        for rec in window)
 
     # THE CLAUSE LAYER. No word in `final` is required to reach this: a session
     # that mutated against an order and closed on a clause with no receipt is

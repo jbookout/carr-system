@@ -753,11 +753,17 @@ def is_sql_context(cmd):
 def hosts_in(cmd):
     """Every host this command could reach: URL hosts plus remote-copy targets."""
     hosts = []
-    for url in re.findall(r'https?://[^\s\'"<>]+', cmd):
-        try:
-            hosts.append(urlsplit(url).hostname or "invalid-url")
-        except ValueError:
-            hosts.append("invalid-url")
+    from cmd_text import shell_tokens
+    try:
+        tokens = shell_tokens(cmd)
+    except ValueError:
+        tokens = re.split(r'[\s;&|]', cmd)
+    for token in tokens:
+        for url in re.findall(r'https?://[^\s\'"<>]+', token, re.I):
+            try:
+                hosts.append(urlsplit(url).hostname or "invalid-url")
+            except ValueError:
+                hosts.append("invalid-url")
     return hosts + REMOTE_TARGET_RE.findall(cmd)
 
 
@@ -951,28 +957,42 @@ def log(msg):
 
 
 def in_safe_zone(cmd):
-    # Newlines end shell commands; shlex otherwise discards them as whitespace.
-    # Preserve quoted newlines and escaped characters as part of their tokens.
-    cmd = re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"|\\.|\n",
-                 lambda m: ";" if m.group(0) == "\n" else m.group(0), cmd)
+    from cmd_text import shell_tokens, shell_operands, SHELL_BOUNDARIES
     try:
-        lexer = shlex.shlex(cmd, posix=True, punctuation_chars=";&|<>")
-        lexer.whitespace_split = True
-        tokens = list(lexer)
+        tokens, _ = shell_operands(shell_tokens(cmd))
     except ValueError:
         return False
     targets = []
-    deleting = False
-    for token in tokens:
-        if token in (";", "&&", "||", "|", "&"):
-            deleting = False
-        elif os.path.basename(token) in ("rm", "srm"):
-            deleting = True
-        elif deleting and not token.startswith("-"):
-            if "$" in token or "`" in token or ".." in token.split("/"):
-                return False
-            targets.append(token)
+    segments, segment = [], []
+    for token in tokens + [';']:
+        if token in SHELL_BOUNDARIES:
+            if segment:
+                segments.append(segment)
+            segment = []
+        else:
+            segment.append(token)
+    for words in segments:
+        while words and (words[0] in {'sudo', 'command', 'env'} or re.match(r'^\w+=', words[0])):
+            words = words[1:]
+        if not words:
+            continue
+        executable = os.path.basename(words[0])
+        if executable in {'rm', 'srm'}:
+            targets.extend(token for token in words[1:] if not token.startswith('-'))
+        elif executable == 'find' and '-delete' in words:
+            if any(token in {'-exec', '-execdir', '-ok', '-okdir'} for token in words):
+                return False  # executable predicates cannot establish a safe cleanup
+            roots = []
+            for token in words[1:]:
+                if token.startswith('-') or token in {'(', '!', ')'}:
+                    break
+                roots.append(token)
+            if not roots:
+                return False  # find defaults to an unbound working directory
+            targets.extend(roots)
     def safe_target(target):
+        if '$' in target or '`' in target or '..' in target.split('/'):
+            return False
         parts = target.split("/")
         for zone in SAFE_ZONES:
             if zone.startswith("/"):

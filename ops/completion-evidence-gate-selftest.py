@@ -38,6 +38,7 @@ RUNNING IT. No database, no network, no production access:
 from __future__ import annotations
 
 import importlib.util
+import itertools
 import json
 import os
 import subprocess
@@ -60,9 +61,12 @@ def assistant(text):
     return {"type": "assistant", "message": {"role": "assistant", "content": text}}
 
 
+CALL_IDS = itertools.count()
+
+
 def tool(name, value=None):
     return {"type": "assistant", "message": {"content": [
-        {"type": "tool_use", "name": name, "input": value or {}}
+        {"type": "tool_use", "id": f"fixture-{next(CALL_IDS)}", "name": name, "input": value or {}}
     ]}}
 
 
@@ -85,7 +89,7 @@ def codex_wrapper(value):
 
 def codex_tool(name, value):
     return {"type": "response_item", "payload": {
-        "type": "custom_tool_call", "name": name, "input": value,
+        "type": "custom_tool_call", "call_id": f"fixture-{next(CALL_IDS)}", "name": name, "input": value,
     }}
 
 
@@ -95,6 +99,29 @@ def codex_assistant(value):
             {"type": "output_text", "text": value},
         ],
     }}
+
+
+def completed_fixture(records):
+    """Expand legacy sequential fixtures into paired terminal-success events.
+
+    These fixtures exercise completed work, rather than the pending/failed and
+    concurrent boundaries covered separately in the Dot regression suite.
+    """
+    expanded = []
+    for record in records:
+        expanded.append(record)
+        payload = record.get('payload') or {}
+        if payload.get('type') == 'custom_tool_call':
+            expanded.append({'type':'response_item', 'payload':{
+                'type':'custom_tool_call_output', 'call_id':payload['call_id'],
+                'output':json.dumps({'exit_code':0, 'output':'fixture completed'})}})
+        content = (record.get('message') or {}).get('content')
+        for block in content if isinstance(content, list) else []:
+            if block.get('type') == 'tool_use' and str(block.get('id','')).startswith('fixture-'):
+                expanded.append({'type':'user','message':{'content':[{
+                    'type':'tool_result','tool_use_id':block['id'], 'is_error':False,
+                    'content':'fixture completed successfully'}]}})
+    return expanded
 
 
 CASES = [
@@ -495,7 +522,7 @@ def dual_precision():
              ("an unbuilt COUNT is not an absence claim", metric)]
     outcomes = []
     for name, recs in cases:
-        got, reason = mod.evaluate(recs)
+        got, reason = mod.evaluate(completed_fixture(recs))
         outcomes.append(not got)
         print(f"{'PASS' if not got else 'FAIL'}  {name} ({reason})")
     return all(outcomes)
@@ -534,7 +561,7 @@ def floor_preserved():
     for name, recs, expected in CASES:
         if not expected:
             continue
-        got, _ = mod.evaluate(recs)
+        got, _ = mod.evaluate(completed_fixture(recs))
         outcomes.append(got)
         if not got:
             print(f"FAIL  widening silenced an original fire: {name}")
@@ -730,7 +757,7 @@ def real_hook_case(kind, non_carr=False):
     else:
         records = [user("reconcile"), tool("mcp__carr__update-deal"), assistant("Done.")]
     with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as fh:
-        for row in records:
+        for row in completed_fixture(records):
             fh.write(json.dumps(row) + "\n")
         path = fh.name
     try:
@@ -815,7 +842,7 @@ def latch_cases():
 
     def fires(records, session, state, name):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as fh:
-            for row in records:
+            for row in completed_fixture(records):
                 fh.write(json.dumps(row) + "\n")
             path = fh.name
         try:
@@ -968,7 +995,7 @@ def latch_cases():
 def main():
     outcomes = []
     for name, recs, expected in CASES:
-        got, reason = mod.evaluate(recs)
+        got, reason = mod.evaluate(completed_fixture(recs))
         ok = got == expected
         outcomes.append(ok)
         print(f"{'PASS' if ok else 'FAIL'}  {name}: {got} ({reason})")
@@ -981,7 +1008,7 @@ def main():
     print(f"{'PASS' if non_carr else 'FAIL'}  non-CARR cwd is out of scope")
     outcomes.append(checkout_scope_is_clone_name_independent())
     for name, recs, expected, reason_part in CLAUSE_CASES + DUAL_CASES:
-        got, reason = mod.evaluate(recs)
+        got, reason = mod.evaluate(completed_fixture(recs))
         ok = got == expected and (not expected or reason_part in reason)
         outcomes.append(ok)
         print(f"{'PASS' if ok else 'FAIL'}  {name}: {got} ({reason})")

@@ -73,6 +73,7 @@ import sys
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from cmd_text import shell_tokens, shell_operands, SHELL_BOUNDARIES
 try:                                    # telemetry only — never load-bearing
     import hook_meter
     LOG = hook_meter.guard_log_path(REPO)
@@ -187,11 +188,6 @@ def embedded_targets(code):
 def extract_targets(command):
     """Every path this command plausibly WRITES. Order is not significant."""
     targets = []
-    def shell_tokens(text):
-        lexer = shlex.shlex(text, posix=True, punctuation_chars=";&|<>")
-        lexer.whitespace_split = True
-        lexer.commenters = ""
-        return list(lexer)
     try:
         tokens = shell_tokens(command)
     except ValueError:
@@ -205,6 +201,11 @@ def extract_targets(command):
             except ValueError:
                 continue
 
+    try:
+        tokens, redirect_targets = shell_operands(tokens)
+        targets.extend(redirect_targets)
+    except ValueError:
+        pass  # retain the conservative scan of malformed redirection tokens
     index = 0
     while index < len(tokens):
         token = tokens[index]
@@ -222,7 +223,7 @@ def extract_targets(command):
                 continue
 
         end = next((j for j in range(index + 1, len(tokens))
-                    if tokens[j] in (";", "&&", "||", "|", "&", ">", ">>", "<", "<<")), len(tokens))
+                    if tokens[j] in SHELL_BOUNDARIES), len(tokens))
         remainder = tokens[index + 1:end]
         base = os.path.basename(token)
         if base == "tee":

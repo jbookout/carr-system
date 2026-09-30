@@ -190,24 +190,42 @@ def _run(cmd, cwd, timeout):
 def _grade_impl(task, code, workdir, timeout):
     """Run a candidate implementation against the task's hidden `test` source."""
     lang = task.get("lang", "py")
+    # A fresh, separate result channel belongs to the hidden harness. Candidate
+    # stdout is diagnostic only, including when the candidate exits early.
+    receipt_dir = tempfile.TemporaryDirectory(prefix='scorecard-harness-')
+    receipt_path = os.path.join(receipt_dir.name, 'completion.json')
     if lang == "js":
         with open(os.path.join(workdir, "solution.js"), "w", encoding="utf-8") as handle:
             handle.write(code)
-        src = _JS_HEADER + task["test"] + _JS_FOOTER
+        receipt = '\nrequire("fs").writeFileSync(' + json.dumps(receipt_path) + ', JSON.stringify({completed:true, total:__n, passed:__n-__fails.length}));\n'
+        src = _JS_HEADER + task["test"] + receipt + _JS_FOOTER
         with open(os.path.join(workdir, "test_hidden.js"), "w", encoding="utf-8") as handle:
             handle.write(src)
         rc, out = _run(["node", "test_hidden.js"], workdir, timeout)
     else:
         with open(os.path.join(workdir, "solution.py"), "w", encoding="utf-8") as handle:
             handle.write(code)
-        src = _PY_HEADER + "from solution import *\n" + task["test"] + _PY_FOOTER
+        receipt = '\nwith _grade_open(' + repr(receipt_path) + ', "w") as _grade_handle:\n    _grade_json.dump({"completed":True, "total":_n[0], "passed":_n[0]-len(_fails)}, _grade_handle)\n'
+        imports = ('import json as _grade_json\n_grade_open = open\n'
+                   'import solution as _grade_solution\n'
+                   'globals().update({k:v for k,v in vars(_grade_solution).items() '
+                   'if not k.startswith("_") and k not in {"check", "raises", "sys"}})\n')
+        src = _PY_HEADER + imports + task["test"] + receipt + _PY_FOOTER
         with open(os.path.join(workdir, "test_hidden.py"), "w", encoding="utf-8") as handle:
             handle.write(src)
         rc, out = _run([sys.executable, "test_hidden.py"], workdir, timeout)
-    scoreline = next((line for line in out.splitlines() if line.startswith("PASSED")), None)
-    completed = re.fullmatch(r"PASSED (\d+)/(\d+)", scoreline or "")
-    passed = (rc == 0 and completed is not None and
-              int(completed[2]) > 0 and completed[1] == completed[2])
+    try:
+        with open(receipt_path, encoding='utf-8') as handle:
+            completed = json.load(handle)
+    except (OSError, ValueError):
+        completed = {}
+    finally:
+        receipt_dir.cleanup()
+    total, count = completed.get('total'), completed.get('passed')
+    valid = (completed.get('completed') is True and type(total) is int
+             and type(count) is int and total > 0 and 0 <= count <= total)
+    scoreline = f'PASSED {count}/{total}' if valid else None
+    passed = rc == 0 and valid and count == total
     return {"pass": passed, "rc": rc, "subtests": scoreline or "no-score (crash/import error)",
             "detail": out}
 

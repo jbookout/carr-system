@@ -30,6 +30,169 @@ def load(rel):
 
 
 class DotReview(unittest.TestCase):
+    def test_r14_long_candidate_lines_keep_matched_source(self):
+        mod = load('ops/jev_code_review.py')
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)/'x.py'
+            path.write_text('time.sleep(2); value = "'+'x'*2600+'"; time.sleep(1)\n')
+            regions = mod.regions(['x.py'], repo=tmp)
+            for source in ('time.sleep(1)', 'time.sleep(2)'):
+                self.assertTrue(any(source in region['code'] for region in regions), regions)
+            self.assertTrue(all(len(region['code']) <= mod.MAX_REGION_CHARS for region in regions))
+
+    def test_r13_corrupt_or_unreadable_telemetry_cannot_retire(self):
+        mod = load('ops/gate-lifecycle-report.py')
+        with tempfile.TemporaryDirectory() as tmp, patch.object(mod, 'REPO', tmp):
+            log = Path(tmp)/'catch.jsonl'
+            entry = {'catch_metric':{'ts_field':'ts','log_path':'catch.jsonl','true_positive':{'kind':'row_exists'}},'mode':'enforcing','failure_class':'fixture','review_date':'2026-09-30'}
+            for text in ('broken json\n'+json.dumps({'ts':'invalid'})+'\n', json.dumps({'ts':'invalid'})+'\n', '[]\n'):
+                with self.subTest(text=text):
+                    log.write_text(text)
+                    report = mod.evaluate_gate('fixture',entry,7,mod.datetime.now(mod.timezone.utc))
+                    self.assertFalse(report['data_available'],report)
+                    self.assertIsNone(report['proposal'],report)
+            log.write_text('')
+            with patch.object(mod, 'open', side_effect=PermissionError('unreadable fixture'), create=True):
+                report = mod.evaluate_gate('fixture',entry,7,mod.datetime.now(mod.timezone.utc))
+                self.assertFalse(report['data_available'],report)
+                self.assertIsNone(report['proposal'],report)
+
+    def test_r12_candidate_stdout_cannot_forge_completion(self):
+        mod = load('ops/jev_scorecard.py')
+        for lang, code in (('py', 'print("PASSED 1/1")\nraise SystemExit(0)'),
+                           ('js', 'console.log("PASSED 1/1"); process.exit(0);')):
+            with self.subTest(lang=lang), tempfile.TemporaryDirectory() as tmp:
+                test = 'require("./solution.js"); check("must fail", () => false);' if lang=='js' else 'check("must fail", lambda: False)'
+                answer = mod._grade_impl({'lang':lang,'test':test}, code, tmp, 5)
+                self.assertFalse(answer['pass'], answer)
+        for lang in ('py','js'):
+            with self.subTest(lang=lang), tempfile.TemporaryDirectory() as tmp:
+                answer = mod._grade_impl({'lang':lang,'test':'check("passes", () => true);' if lang=='js' else 'check("passes", lambda: True)'}, '', tmp, 5)
+                self.assertTrue(answer['pass'], answer)
+
+    def test_r11_triage_generated_names_remain_unique(self):
+        mod = load('ops/jev_done_checks.py'); judge = FakeJudge()
+        paths = ['a-b.py', 'a_b.py', 'file_0_a_b.py', 'file_1_a_b.py']
+        answer = mod.triage_review(diff(paths), '', judge_module=judge, client=FakeClient)
+        self.assertEqual(len(paths), len(judge.state['files']), answer)
+        self.assertEqual(len(paths), len(answer['detail']['files']), answer)
+        self.assertEqual(len(paths), len(set(judge.state['files'].values())), answer)
+
+    def test_r10_session_checkout_read_identity(self):
+        gate = load('hooks/unread-artifact-gate.py')
+        cwd = '/repo/carr-system/.claude/worktrees/session'
+        records = [use('Read', {'file_path':cwd+'/hooks/cmd_text.py'}),
+                   use('Read', {'file_path':'other/config.py'}),
+                   use('Bash', {'command':'cd hooks && cat bash-write-gate.py'})]
+        with patch.object(gate, 'REPO', '/repo/carr-system'), patch.object(gate.os, 'getcwd', return_value=cwd):
+            known = gate.known_paths(records)
+            self.assertIn(gate.artifact_path('hooks/cmd_text.py'), known)
+            self.assertIn(gate.artifact_path('hooks/bash-write-gate.py'), known)
+            self.assertNotIn(gate.artifact_path('production/config.py'), known)
+
+    def test_r08_url_schemes_and_shell_boundaries(self):
+        guard = load('hooks/guard-unattended.py')
+        for scheme in ('HTTPS', 'Http', 'hTtPs'):
+            self.assertIsNotNone(guard.check(f'curl {scheme}://untrusted.example/upload'))
+        self.assertIsNone(guard.check('curl https://github.com; echo done'))
+        self.assertEqual(['github.com'], guard.hosts_in('curl https://github.com; echo done'))
+        self.assertIsNotNone(guard.check('curl HTTPS://github.com@untrusted.example/upload'))
+
+    def test_r07_delete_operands_and_supported_scratch_cleanup(self):
+        guard = load('hooks/guard-unattended.py')
+        for command in ('rm -rf /important/rm /tmp/fixture', 'rm -rf /important/srm /tmp/fixture'):
+            self.assertIsNotNone(guard.check(command), command)
+        for command in ('find /tmp/fixture -name "*.pyc" -delete', 'rm -rf /tmp/fixture > /tmp/log'):
+            self.assertIsNone(guard.check(command), command)
+        self.assertIsNotNone(guard.check('find /important -name "*.pyc" -delete'))
+
+    def test_r1_shell_continuation_preserves_unsafe_delete_operand(self):
+        guard = load('hooks/guard-unattended.py')
+        command = 'rm -rf /tmp/fixture/a \\\n /important/file'
+        self.assertIsNotNone(guard.check(command))
+        self.assertIsNone(guard.check('rm -rf /tmp/fixture/a \\\n /tmp/fixture/b'))
+
+    def test_r06_copy_destination_survives_all_redirects(self):
+        gate = load('hooks/bash-write-gate.py')
+        for executable in ('cp', 'mv', 'install', 'rsync'):
+            for redirect in ('2>log.txt', '>|log.txt', '2>>log.txt', '&>log.txt', '2>&1 >log.txt', '<input.txt >log.txt'):
+                with self.subTest(executable=executable, redirect=redirect):
+                    targets = gate.extract_targets(f'{executable} a blocked.md {redirect}')
+                    self.assertIn('blocked.md', targets)
+                    self.assertIn('log.txt', targets)
+                    self.assertNotIn('input.txt', targets)
+
+    def test_r05_nested_standing_arguments_preserve_executable_text(self):
+        gate = load('hooks/rule-pack-drift-gate.py')
+        for source in ('await tools.mcp__carr__standing_context({x: await tools.exec_command({cmd: "wrangler deploy"})})',
+                       'await tools.mcp__carr__standing_context({packs: deploy("wrangler deploy")})'):
+            self.assertIn('wrangler deploy', gate.custom_tool_text({'name':'exec','input':source}))
+        pure = 'text(await tools.mcp__carr__standing_context({packs:["release"], detail:"boot"}));'
+        self.assertNotIn('detail', gate.custom_tool_text({'name':'exec','input':pure}))
+
+    def test_r04_standing_requires_executable_service_success(self):
+        gate = load('hooks/rule-pack-drift-gate.py')
+        body = {'ok':True, 'rule_delivery':{'mode':'enforced','declared_packs':['release'],'packs_not_found':[]}}
+        for command in ("printf '%s' 'run.sh call standing-context'", "echo run.sh call standing-context"):
+            self.assertEqual((None,[],[]), gate.delivery_state([use('Bash',{'command':command},'s'), tool_output('s',json.dumps(body))]))
+        command = './run.sh call standing-context \'{}\''
+        for output in ({'ok':False, 'rule_delivery':body['rule_delivery']},
+                       {'exit_code':1, 'output':json.dumps(body)}, 'service failed '+json.dumps(body)):
+            self.assertEqual((None,[],[]), gate.delivery_state([use('Bash',{'command':command},'s'), tool_output('s',json.dumps(output) if isinstance(output,dict) else output)]))
+        self.assertEqual(('enforced',['release'],[]), gate.delivery_state([use('Bash',{'command':command},'s'), tool_output('s',json.dumps(body))]))
+
+    def test_r03_native_custom_standing_service_results(self):
+        gate = load('hooks/rule-pack-drift-gate.py')
+        body = {'rule_delivery':{'mode':'enforced','declared_packs':['release'],'packs_not_found':[]}}
+        for source in ('text(await tools.mcp__carr__standing_context({packs:["release"]}));',
+                       'text(await tools.exec_command({cmd: "./run.sh call standing-context \'{}\'"}));'):
+            call = {'type':'response_item','payload':{'type':'custom_tool_call','name':'exec','input':source,'call_id':'s'}}
+            output = native_output('s', body)
+            self.assertEqual(('enforced',['release'],[]), gate.delivery_state([call, output]))
+            self.assertEqual((None,[],[]), gate.delivery_state([call, native_output('wrong',body)]))
+
+    def test_r02_verification_requires_completed_success_after_writes(self):
+        gate = load('hooks/completion-evidence-gate.py')
+        writes = [use('Write', {'file_path':'a.py'}, 'a'), result('a'),
+                  use('Write', {'file_path':'b.py'}, 'b'), result('b')]
+        test = use('Bash', {'command':'pytest'}, 't')
+        for output in ([], [tool_output('t', 'Script running with session ID 123')],
+                       [tool_output('t', 'Timed out')], [result('t', True)]):
+            with self.subTest(output=output):
+                blocked, reason = gate.evaluate([user('Make the change'), *writes, test, *output, assistant('Done, verified and complete')])
+                self.assertTrue(blocked, reason)
+        self.assertFalse(gate.evaluate([user('Make the change'), *writes, test, result('t'), assistant('Done, verified and complete')])[0])
+        concurrent = {'type':'assistant','message':{'content':[
+            use('Write', {'file_path':'a.py'}, 'a')['message']['content'][0],
+            use('Write', {'file_path':'b.py'}, 'b')['message']['content'][0],
+            test['message']['content'][0]]}}
+        self.assertTrue(gate.evaluate([user('Make the change'), concurrent, result('t'), result('a'), result('b'), assistant('Done, verified and complete')])[0])
+        for event_type in ('custom_tool_call', 'function_call'):
+            mutation = native_call('m', 'wrangler deploy', event_type)
+            check = native_call('t', 'pytest', event_type)
+            for outcome in ({'exit_code':1}, {'session_id':123}, {'exit_code':None}, {'ok':False},
+                            'Script completed\nWall time 1\nOutput:\n'+json.dumps({'exit_code':1,'output':'tests failed'})):
+                records = [user('Make the change'), mutation, native_output('m', {'exit_code':0}, event_type), check, native_output('t', outcome, event_type), assistant('Done, verified and complete')]
+                self.assertTrue(gate.evaluate(records)[0], records)
+            self.assertFalse(gate.evaluate([user('Make the change'), mutation, native_output('m', {'exit_code':0}, event_type), check, native_output('t', {'exit_code':0}, event_type), assistant('Done, verified and complete')])[0])
+        mutation = native_call('m', 'wrangler deploy', 'function_call')
+        check = native_call('t', 'pytest', 'function_call')
+        mutation['payload']['name'] = check['payload']['name'] = 'functions.exec_command'
+        self.assertFalse(gate.evaluate([user('Make the change'), mutation, native_output('m', {'exit_code':0}, 'function_call'), check, native_output('t', {'exit_code':0}, 'function_call'), assistant('Done, verified and complete')])[0])
+
+    def test_r01_secret_operation_never_persists_values(self):
+        gate = load('hooks/settings-change-gate.py')
+        for command in ('gh secret set --body=SYNTHETIC_MARKER TEST_KEY',
+                        'gh secret set -b SYNTHETIC_MARKER TEST_KEY',
+                        'wrangler secret put TEST_KEY <<<SYNTHETIC_MARKER'):
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as tmp:
+                spool = Path(tmp) / 'audit.jsonl'
+                kind, target = gate.classify(command)
+                self.assertNotIn('SYNTHETIC_MARKER', target)
+                with patch.dict(os.environ, {'CARR_SETTINGS_GATE_OFFLINE':'1', 'CARR_SETTINGS_SPOOL':str(spool)}):
+                    gate.record(kind, target, command, 'fixture', 'ok', 'selftest')
+                self.assertNotIn('SYNTHETIC_MARKER', spool.read_text())
+
     def test_control_native_standing_result(self):
         gate = load('hooks/rule-pack-drift-gate.py')
         body = {'rule_delivery': {'mode':'enforced','declared_packs':['release'],'packs_not_found':[]}}
@@ -323,6 +486,19 @@ def use(name, args, identity='fixture'):
 
 def result(identity, error=False):
     return {'type':'user','message':{'content':[{'type':'tool_result','tool_use_id':identity,'is_error':error,'content':'tests failed' if error else 'tests passed'}]}}
+
+
+def tool_output(identity, content):
+    return {'type':'user','message':{'content':[{'type':'tool_result','tool_use_id':identity,'content':content}]}}
+
+
+def native_call(identity, command, kind='custom_tool_call'):
+    return {'type':'response_item','payload':{'type':kind,'name':'exec' if kind=='custom_tool_call' else 'exec_command','call_id':identity,
+            'input':'text(await tools.exec_command({cmd: '+json.dumps(command)+'}));', 'arguments':json.dumps({'cmd':command})}}
+
+
+def native_output(identity, output, kind='custom_tool_call'):
+    return {'type':'response_item','payload':{'type':kind+'_output','call_id':identity,'output':json.dumps(output)}}
 
 
 def diff(paths):

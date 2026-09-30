@@ -110,15 +110,26 @@ def regions(paths, repo=REPO):
                 while len(full_snippet) > MAX_REGION_CHARS and lo < line_no - 1:
                     lo += 1
                     full_snippet = "\n".join(lines[lo:hi])
-                snippet = full_snippet[:MAX_REGION_CHARS]
-                start_line = lo + 1
+                region_start = sum(len(line) + 1 for line in lines[:lo])
+                region_end = region_start + len(full_snippet)
+                # A match can sit beyond the cap on its own line. Move the
+                # bounded character window around its columns, preserving the
+                # matched source rather than only the beginning of that line.
+                snippet_start = region_start
+                if match.end() > region_start + MAX_REGION_CHARS:
+                    snippet_start = max(region_start, match.start() - (MAX_REGION_CHARS - (match.end() - match.start())) // 2)
+                snippet_end = min(region_end, snippet_start + MAX_REGION_CHARS)
+                snippet = text[snippet_start:snippet_end]
+                start_line = text[:snippet_start].count('\n') + 1
                 end_line = start_line + full_snippet.count("\n")
                 sent_end_line = (end_line if len(snippet) == len(full_snippet) else
                                  start_line + snippet.count("\n") - 1)
                 found.append({"path": rel, "line": line_no, "kind": kind,
                               "code": snippet, "start_line": start_line,
                               "end_line": end_line,
-                              "sent_end_line": sent_end_line})
+                              "sent_end_line": sent_end_line,
+                              "start_offset": snippet_start, "end_offset": snippet_end,
+                              "match_start": match.start(), "match_end": match.end()})
     return _collapse(found)
 
 
@@ -140,6 +151,8 @@ def _collapse(found, window=CONTEXT_BEFORE + CONTEXT_AFTER):
         for item in items:
             if (current and item["line"] - current["line"] <= window
                     and current["start_line"] <= item["start_line"]
+                    and current.get('start_offset', 0) <= item.get('match_start', 0)
+                    and item.get('match_end', 0) <= current.get('end_offset', float('inf'))
                     and item["sent_end_line"] <= current["sent_end_line"]):
                 if item["kind"] not in current["kind"].split("+"):
                     current["kind"] += "+" + item["kind"]

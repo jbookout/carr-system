@@ -472,9 +472,19 @@ def triage_review(diff_text, task_text, *, client=None, judge_module=None,
             jj = judge_module or _sibling("jev_judge")
             tsc = client or jj._client()
             safe_ids = [_safe_id(path) for path in to_judge]
-            keys = {path: (_safe_id(path) if safe_ids.count(_safe_id(path)) == 1
-                           else f"file_{index}_{_safe_id(path)}")
-                    for index, path in enumerate(to_judge)}
+            reserved = set(safe_ids)
+            used, keys = set(), {}
+            for index, path in enumerate(to_judge):
+                safe = _safe_id(path)
+                key = safe
+                if safe_ids.count(safe) > 1:
+                    key = f'file_{index}_{safe}'
+                    suffix = 0
+                    while key in reserved or key in used:
+                        suffix += 1
+                        key = f'file_{index}_{safe}_{suffix}'
+                keys[path] = key
+                used.add(key)
             questions = {
                 keys[path]: tsc.score(
                     f"{RISK_RUBRIC} The change is to path {path!r}, shown in "
