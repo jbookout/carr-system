@@ -88,6 +88,61 @@ class RoutingTests(unittest.TestCase):
 
 
 class EvaluationTests(unittest.TestCase):
+    def test_score_alias_collisions_and_shadowed_invalid_values_are_not_evidence(self):
+        ev = load("paired_eval")
+        request = {"state": "code", "model": "jev-1.13.0", "questions": {
+            "q": {"type": "score", "criteria": ["low", "high"]}}}
+        corpus = ev.freeze([{"receipt_id": "score-aliases", "request": request,
+                             "request_sha256": ev.digest(request), "work_class": "system_work",
+                             "gold": {"q": "1"}}])
+        probabilities = [
+            {"0": value, "1": 0, "low": 0, "high": 1}
+            for value in (-1, "invalid", True, float("nan"), float("inf"), 2)
+        ] + [
+            {"0": 1, "1": 0, "low": 0, "high": 1},
+            {"0": 0, "1": 1, "low": 0, "high": 1},
+            {"low": 0, "high": 1, "0": -1, "1": 0},
+        ]
+        for raw in probabilities:
+            with self.subTest(probabilities=raw):
+                def answer(*args, **kwargs):
+                    return {"model": "offline-provider", "answers": {"q": {
+                        "type": "score", "score": 1, "confidence": 1,
+                        "probabilities": raw}}, "usage": {"input_tokens": 1, "output_tokens": 1}}
+                report = ev.run(corpus, answer, answer)
+                self.assertEqual(report["status"], "incomplete")
+                self.assertEqual(report["paired_successes"], 0)
+                self.assertIsNone(report["agreement"])
+                for provider in report["providers"].values():
+                    self.assertEqual(provider["errors"], 1)
+                    self.assertEqual(provider["successes"], 0)
+                    self.assertEqual(provider["labelled_questions"], 0)
+                    self.assertIsNone(provider["brier"])
+                    self.assertIsNone(provider["ece"])
+
+    def test_unique_score_aliases_preserve_calibration_and_provider_response(self):
+        ev = load("paired_eval")
+        request = {"state": "code", "model": "jev-1.13.0", "questions": {
+            "q": {"type": "score", "criteria": ["low", "high"]}}}
+        corpus = ev.freeze([{"receipt_id": "unique-aliases", "request": request,
+                             "request_sha256": ev.digest(request), "work_class": "system_work",
+                             "gold": {"q": "1"}}])
+        for raw in ({"0": .25, "1": .75}, {"low": .25, "high": .75},
+                    {"0": .25, "high": .75}, {"low": .25, "1": .75}, {"high": 1}):
+            with self.subTest(probabilities=raw):
+                response = {"model": "offline-provider", "answers": {"q": {
+                    "type": "score", "score": 1, "confidence": 1, "probabilities": raw}},
+                    "usage": {"input_tokens": 1, "output_tokens": 1}}
+                report = ev.run(corpus, lambda *a, **k: response, lambda *a, **k: response)
+                self.assertEqual(report["status"], "complete")
+                self.assertEqual(report["agreement"], 1)
+                for provider in report["providers"].values():
+                    self.assertEqual(provider["errors"], 0)
+                    self.assertAlmostEqual(provider["brier"], 0 if raw == {"high": 1} else .125)
+                    self.assertAlmostEqual(provider["ece"], 0 if raw == {"high": 1} else .25)
+                self.assertEqual(response["answers"]["q"]["probabilities"], raw)
+                self.assertEqual(report["rows"][0]["answers"], response["answers"])
+
     def test_out_of_domain_probability_support_never_counts_as_paired_evidence(self):
         ev = load("paired_eval")
         cases = [

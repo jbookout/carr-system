@@ -73,6 +73,40 @@ def percentile(values, q):
     return sorted(values)[max(0, math.ceil(q * len(values)) - 1)] if values else None
 
 
+def evaluation_distribution(ts, question, answer):
+    """Validate supplied mass before resolving aliases into the metric domain."""
+    kind = question["type"]
+    if kind in ("choice", "score"):
+        raw = answer.get("probabilities")
+        if not isinstance(raw, dict):
+            raise ValueError("missing probability distribution")
+        if any(type(value) not in (int, float) or not math.isfinite(value) or
+               not 0 <= value <= 1 for value in raw.values()):
+            raise ValueError("invalid supplied probability")
+        if kind == "choice":
+            if not set(raw) <= offered_labels(question):
+                raise ValueError("probability support outside requested criteria")
+        else:
+            aliases = {}
+            for index, label in enumerate(question["criteria"]):
+                for key in (str(index), label):
+                    aliases.setdefault(key, set()).add(str(index))
+            canonical = {}
+            for key, value in raw.items():
+                targets = aliases.get(key, set())
+                if len(targets) != 1:
+                    raise ValueError("unknown or ambiguous Score probability key")
+                target = next(iter(targets))
+                if target in canonical:
+                    raise ValueError("duplicate Score probability aliases")
+                canonical[target] = value
+            # The legacy formatter prefers text labels. Give it only canonical
+            # labels so a supplied numeric alias can never be shadowed again.
+            question = {**question, "criteria": [str(i) for i in range(len(question["criteria"]))]}
+            answer = {**answer, "probabilities": canonical}
+    return ts.answer_distribution(question, answer)
+
+
 def run(corpus, jev, decisions, *, rates=None, repeats=1, clock=time.perf_counter):
     """Both adapters receive identical independent copies, in alternating order.
 
@@ -107,17 +141,7 @@ def run(corpus, jev, decisions, *, rates=None, repeats=1, clock=time.perf_counte
                     elapsed = max(0, (clock() - started) * 1000)
                     if not ts.usable_judgment(result, request["questions"]):
                         raise ValueError("invalid typed judgment or unmeasured usage")
-                    for qid, question in request["questions"].items():
-                        kind = question["type"]
-                        if kind in ("choice", "score"):
-                            criteria = question["criteria"]
-                            support = offered_labels(question)
-                            if kind == "score":
-                                support.update(criteria)
-                            raw = result["answers"][qid].get("probabilities")
-                            if not isinstance(raw, dict) or not set(raw) <= support:
-                                raise ValueError("probability support outside requested criteria")
-                    distributions = {qid: ts.answer_distribution(q, result["answers"][qid])
+                    distributions = {qid: evaluation_distribution(ts, q, result["answers"][qid])
                                      for qid, q in request["questions"].items()}
                     if not all(d["distribution_complete"] for d in distributions.values()):
                         raise ValueError("incomplete probability distribution")
