@@ -309,7 +309,7 @@ def build_disposition_payload(req: dict, prior: dict, disposition: str,
         "request_id": req.get("request_id"),
         "carry_forward_contract": CARRY_FORWARD_VERSION,
     }
-    if _nonblank(reason):
+    if isinstance(reason, str) and reason.strip():
         value["reason"] = reason.strip()
     return {
         "idempotency_key": str(uuid.uuid4()),
@@ -358,7 +358,7 @@ def reconcile_dispositions(opens: list[dict], review: dict) -> tuple[list[dict],
             reported.add(pid)
             continue
         evidence = e.get("evidence")
-        if not _nonblank(evidence):
+        if not isinstance(evidence, str) or not evidence.strip():
             problems.append(f"{pid} classified {cls} with no evidence")
             reported.add(pid)
             continue
