@@ -30,6 +30,7 @@ function handler(overrides = {}) {
   const success = async () => ({ ok: true, data: { saved: true } });
   return createTourInternalWebHandler({
     listToursFn: async () => ({ ok: true, data: { tours: [] } }), readTourFn: async () => ({ ok: true, data: { id: tourId } }),
+    searchTourPropertiesFn: success, readTourSelectionCartFn: success, appendTourSelectionCartVersionFn: success,
     createRouteVersionFn: success, reorderRouteStopsFn: success, acceptRouteVersionFn: success,
     autosaveCheatSheetFn: success, restoreCheatSheetFn: success, createProjectionFn: success,
     readProjectionCandidatesFn: success, sealProjectionFn: success,
@@ -42,6 +43,68 @@ function handler(overrides = {}) {
 }
 const postHeaders = { origin: ORIGIN, "sec-fetch-site": "same-origin", "content-type": "application/json", "x-carr-csrf": SESSION.csrfToken };
 const issueBody = { projection_id: projectionId, token_digest: digest, permission_scopes: ["view_packet"], expires_at: "2027-01-02T03:04:05.000Z", receipt_digest: digest, idempotency_key: grantId };
+const searchBody = { query: null, counties: ["Escambia"], property_types: [], min_square_feet: null,
+  max_square_feet: null, availability: [], entrance_verified: null, public_projection_ready: null,
+  photos_available: null, sort: "updated_desc", cursor: null, limit: 25 };
+
+test("authenticated property search and versioned cart keep exact tenant-safe contracts", async () => {
+  const calls = [];
+  const surface = handler({
+    searchTourPropertiesFn: async context => { calls.push(["search", context]); return { ok: true, data: { search: { items: [] } } }; },
+    readTourSelectionCartFn: async context => { calls.push(["read", context]); return { ok: true, data: { cart: { tour_id: tourId, property_ids: [] } } }; },
+    appendTourSelectionCartVersionFn: async context => { calls.push(["append", context]); return { ok: true, data: { selection_version_id: routeId } }; },
+  });
+  const env = { APP_HOST: "app.doctorcre.com" };
+  const search = await surface.fetch(request("/api/tours/properties/search", { method: "POST", headers: postHeaders, body: JSON.stringify(searchBody) }), env, {}, ACTOR, SESSION);
+  assert.equal(search.status, 200);
+  assert.deepEqual((await search.json()).data.search.items, []);
+  const read = await surface.fetch(request(`/api/tours/selection-cart?tour_id=${tourId}`), env, {}, ACTOR, SESSION);
+  assert.equal(read.status, 200);
+  assert.deepEqual((await read.json()).data.cart.property_ids, []);
+  const payload = { tour_id: tourId, base_selection_version_id: null, expected_selection_version: 0,
+    property_ids: [stopA, stopB], selection_digest: digest, idempotency_key: grantId };
+  const append = await surface.fetch(request("/api/tours/selection-cart", { method: "POST", headers: postHeaders, body: JSON.stringify(payload) }), env, {}, ACTOR, SESSION);
+  assert.equal(append.status, 200);
+  assert.deepEqual(calls.map(([name, context]) => [name, context.input]), [["search", searchBody], ["read", { tour_id: tourId }], ["append", payload]]);
+  assert.ok(calls.every(([, context]) => context.actor === ACTOR && context.input.actor === undefined));
+  for (const bad of [{ ...searchBody, counties: ["Leon"] }, { ...searchBody, tenant: "other" },
+    { ...searchBody, min_square_feet: 9000, max_square_feet: 1000 }]) {
+    assert.equal((await surface.fetch(request("/api/tours/properties/search", { method: "POST", headers: postHeaders, body: JSON.stringify(bad) }), env, {}, ACTOR, SESSION)).status, 400);
+  }
+  for (const bad of [{ ...payload, property_ids: [stopA, stopA] }, { ...payload, actor_id: "other" },
+    { ...payload, selection_digest: "bad" }]) {
+    assert.equal((await surface.fetch(request("/api/tours/selection-cart", { method: "POST", headers: postHeaders, body: JSON.stringify(bad) }), env, {}, ACTOR, SESSION)).status, 400);
+  }
+  assert.equal((await surface.fetch(request(`/api/tours/selection-cart?tour_id=${tourId}&tenant=other`), env, {}, ACTOR, SESSION)).status, 400);
+  assert.equal((await surface.fetch(request("/api/tours/properties/search", { method: "POST", headers: { ...postHeaders, "x-carr-csrf": "wrong" }, body: JSON.stringify(searchBody) }), env, {}, ACTOR, SESSION)).status, 403);
+});
+
+test("property evidence, property search, and selection cart coexist behind the authenticated Tour adapter", async () => {
+  const seen = [];
+  const capture = seam => async context => {
+    seen.push({ seam, ...context });
+    return { ok: true, data: { available: true } };
+  };
+  const surface = handler({
+    readPropertyEvidenceFn: capture("evidence"), searchTourPropertiesFn: capture("search"),
+    readTourSelectionCartFn: capture("cart-read"), appendTourSelectionCartVersionFn: capture("cart-write"),
+  });
+  const env = { APP_HOST: "app.doctorcre.com" };
+  const calls = [
+    ["evidence", `/api/tours/property-evidence/v1?property_id=${tourId}&as_of=2026-09-29T12%3A00%3A00.000Z`, {}],
+    ["search", "/api/tours/properties/search", { method: "POST", headers: postHeaders, body: JSON.stringify({ query: "medical", counties: [], property_types: [], min_square_feet: null, max_square_feet: null, availability: [], entrance_verified: null, public_projection_ready: null, photos_available: null, sort: "address_asc", cursor: null, limit: 20 }) }],
+    ["cart-read", `/api/tours/selection-cart?tour_id=${tourId}`, {}],
+    ["cart-write", "/api/tours/selection-cart", { method: "POST", headers: postHeaders, body: JSON.stringify({ tour_id: tourId, base_selection_version_id: null, expected_selection_version: 0, property_ids: [stopA], selection_digest: digest, idempotency_key: grantId }) }],
+  ];
+  for (const [seam, path, options] of calls) {
+    assert.equal(isTourInternalRequest(request(path, options)), true, seam);
+    assert.equal((await surface.fetch(request(path, options), env, {}, ACTOR, SESSION)).status, 200, seam);
+    assert.equal(seen.at(-1).seam, seam);
+    assert.deepEqual(seen.at(-1).actor, ACTOR);
+    assert.equal((await surface.fetch(request(path, options), env, {}, undefined, undefined)).status, 401, seam);
+  }
+  assert.deepEqual(seen.map(call => call.seam), calls.map(([seam]) => seam));
+});
 
 test("internal Tour surface requires an injected authenticated actor and CSRF session", async () => {
   const surface = handler(); const assets = new Assets();
@@ -51,6 +114,39 @@ test("internal Tour surface requires an injected authenticated actor and CSRF se
   }
   assert.equal((await surface.fetch(request("/tours"), { APP_HOST: "app.doctorcre.com", ASSETS: assets }, {}, ACTOR, SESSION)).status, 200);
   assert.deepEqual(assets.paths, ["/tours/index.html"]);
+});
+
+test("versioned property evidence read accepts only a property and as-of time in the authenticated session", async () => {
+  const seen = [];
+  const surface = handler({ readPropertyEvidenceFn: async context => {
+    seen.push(context);
+    return { ok: true, data: { schema: "tour-property-evidence.v1", property_id: tourId, facts: {} } };
+  } });
+  const env = { APP_HOST: "app.doctorcre.com", ASSETS: new Assets() };
+  const asOf = "2026-09-29T12:00:00.000Z";
+  const path = `/api/tours/property-evidence/v1?property_id=${tourId}&as_of=${encodeURIComponent(asOf)}`;
+  assert.equal((await surface.fetch(request(path), env, {}, ACTOR, SESSION)).status, 200);
+  assert.deepEqual(seen[0].input, { property_id: tourId, as_of: asOf });
+  assert.deepEqual(seen[0].actor, ACTOR);
+  assert.equal((await surface.fetch(request(`${path}&tenant=other`), env, {}, ACTOR, SESSION)).status, 400);
+  assert.equal((await surface.fetch(request(`/api/tours/property-evidence/v1?property_id=${tourId}&as_of=bad`), env, {}, ACTOR, SESSION)).status, 400);
+  assert.equal((await surface.fetch(request(path), env, {}, undefined, undefined)).status, 401);
+  assert.equal((await surface.fetch(request(path, { method: "POST" }), env, {}, ACTOR, SESSION)).status, 405);
+});
+
+test("property panel module and stylesheet are served through the authenticated Tour asset gate", async () => {
+  const paths = [];
+  const env = { APP_HOST: "app.doctorcre.com", ASSETS: { async fetch(assetRequest) {
+    paths.push(new URL(assetRequest.url).pathname);
+    return new Response("panel asset", { status: 200 });
+  } } };
+  const surface = handler();
+  for (const path of ["/tours/property-panel.js", "/tours/property-panel.css"]) {
+    assert.equal(isTourInternalRequest(request(path)), true);
+    assert.equal((await surface.fetch(request(path), env, {}, ACTOR, SESSION)).status, 200);
+    assert.equal((await surface.fetch(request(path), env, {}, undefined, undefined)).status, 401);
+  }
+  assert.deepEqual(paths, ["/tours/property-panel.js", "/tours/property-panel.css"]);
 });
 
 test("exact routes, methods, CSRF, and JSON bodies remain bounded", async () => {

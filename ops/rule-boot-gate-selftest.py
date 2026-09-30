@@ -29,8 +29,11 @@ PLANTED MUTANTS. The same cases are re-run against copies of the gate with
 one defect planted each; every mutant must turn at least one case red (see
 MUTANTS below).
 """
+import contextlib
+import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -62,9 +65,46 @@ class Case:
             json.dump({"ok": True, "rule_boot": self.boot(1)}, fh)
         self.env["CARR_RULE_BOOT_FETCH_STUB"] = path
 
+    def stub_sized(self, digest, pages):
+        """A stub whose pages carry real-looking text and the boot's total_chars
+        (the sum of every page's text length, as rule-boot.js serves it)."""
+        self.sized = True
+        self.stub(digest, pages)
+
+    def page_text(self, page):
+        return f"page {page} " + "rule text — " * (40 + page)
+
     def boot(self, page, digest=None, pages=None):
-        return {"schema": "carr-rule-boot/v1", "digest": f"sha256:{(digest or self.digest) * 8}",
+        body = {"schema": "carr-rule-boot/v1", "digest": f"sha256:{(digest or self.digest) * 8}",
                 "page": page, "pages_total": pages or self.pages, "text": "x"}
+        if getattr(self, "sized", False):
+            total = pages or self.pages
+            body["text"] = self.page_text(page)
+            body["total_chars"] = sum(len(self.page_text(p)) for p in range(1, total + 1))
+        return body
+
+    def fetch_cmd(self, command, page, cwd=REPO, agent=None, stdout=None, answer="boot", boot=None):
+        """A Bash boot fetch in any shell form: PreToolUse, then PostToolUse whose
+        stdout is the page JSON passed through `stdout` (what the pipe printed)."""
+        args = {"command": command}
+        pre = self.call("Bash", args, agent=agent, cwd=cwd)
+        if answer is None:
+            return pre, None
+        payload = {"hook_event_name": "PostToolUse", "session_id": SESSION, "cwd": cwd,
+                   "tool_name": "Bash", "tool_input": args}
+        if agent:
+            payload["agent_id"] = agent
+        if answer == "boot":
+            body = json.dumps({"ok": True, "rule_boot": boot or self.boot(page)})
+            payload["tool_response"] = {"stdout": stdout(body) if stdout else body, "stderr": "",
+                                        "interrupted": False}
+        else:
+            payload.update(hook_event_name="PostToolUseFailure", error=answer)
+        return pre, self.hook(payload)
+
+    def holds(self, agent=None):
+        folder = os.path.join(self.state, SESSION, "fetched", agent or "main")
+        return [n for _r, _d, files in os.walk(folder) for n in files if re.fullmatch(r"d\d+-.*", n)]
 
     def disk_full(self):
         """Every write under the state directory raises ENOSPC from now on."""
@@ -74,17 +114,51 @@ class Case:
             fh.write(FAULT_SITECUSTOMIZE)
         self.env["PYTHONPATH"] = folder
 
+    def subprocess_only(self):
+        """The disk-full fault lives in a sitecustomize that only a fresh
+        interpreter loads, so those cases keep a real process per call."""
+        return "PYTHONPATH" in self.env
+
     def arm(self, source="startup"):
+        if not self.subprocess_only():
+            with InProcess(self) as (_hook, lib):
+                return lib.arm_session(SESSION, source) + "\n"
         code = ("import sys; sys.path.insert(0, sys.argv[1]); "
                 "from lib.rule_boot_gate import arm_session; print(arm_session(sys.argv[2], sys.argv[3]))")
         return subprocess.run([sys.executable, "-c", code, self.tree, SESSION, source],
                               capture_output=True, text=True, env=self.env, timeout=30).stdout
 
     def hook(self, payload):
-        out = subprocess.run([sys.executable, os.path.join(self.tree, "hooks", "rule-boot-gate.py")],
-                             input=json.dumps(payload), capture_output=True, text=True,
-                             env=self.env, timeout=30).stdout.strip()
+        if self.subprocess_only():
+            out = subprocess.run([sys.executable, os.path.join(self.tree, "hooks", "rule-boot-gate.py")],
+                                 input=json.dumps(payload), capture_output=True, text=True,
+                                 env=self.env, timeout=30).stdout.strip()
+        else:
+            with InProcess(self) as (hook, _lib):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    sys.stdin = io.StringIO(json.dumps(payload))
+                    try:
+                        hook.main()
+                    finally:
+                        sys.stdin = sys.__stdin__
+                out = buf.getvalue().strip()
         return json.loads(out)["hookSpecificOutput"] if out else None
+
+    def hooks_parallel(self, payloads):
+        """Run the hook for every payload at once (a model's parallel batch)."""
+        procs = [subprocess.Popen([sys.executable, os.path.join(self.tree, "hooks", "rule-boot-gate.py")],
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  text=True, env=self.env) for _ in payloads]
+        for proc, payload in zip(procs, payloads):
+            proc.stdin.write(json.dumps(payload))
+            proc.stdin.close()
+        outs = []
+        for proc in procs:
+            out = proc.stdout.read().strip()
+            proc.wait(timeout=30)
+            outs.append(json.loads(out)["hookSpecificOutput"] if out else None)
+        return outs
 
     def call(self, tool, tool_input=None, agent=None, cwd=REPO, agent_type=None):
         payload = {"hook_event_name": "PreToolUse", "session_id": SESSION, "cwd": cwd,
@@ -123,6 +197,64 @@ class Case:
             payload.update(hook_event_name="PostToolUseFailure",
                            error="could not reach the deployed Worker: fetch failed")
         return pre, self.hook(payload)
+
+
+_LOADED: dict = {}
+_ENV_KEYS = ("CARR_RULE_BOOT_STATE_DIR", "CARR_HOOK_GUARD_LOG", "CARR_RULE_BOOT_FETCH_STUB")
+
+
+def _load(tree):
+    """The tree's own hooks/rule-boot-gate.py and lib/rule_boot_gate.py, loaded
+    once per tree (a mutant tree gets its own mutated lib)."""
+    if tree not in _LOADED:
+        import importlib.util
+        import types
+        tag = f"_rbg_{len(_LOADED)}"
+        lspec = importlib.util.spec_from_file_location(f"{tag}_lib", os.path.join(tree, "lib", "rule_boot_gate.py"))
+        lib = importlib.util.module_from_spec(lspec)
+        lspec.loader.exec_module(lib)
+        hspec = importlib.util.spec_from_file_location(f"{tag}_hook", os.path.join(tree, "hooks", "rule-boot-gate.py"))
+        hook = importlib.util.module_from_spec(hspec)
+        hspec.loader.exec_module(hook)
+        _LOADED[tree] = (hook, lib, types.ModuleType("lib"))
+    return _LOADED[tree]
+
+
+class InProcess:
+    """Run the tree's real hook main() in this interpreter, under the case's
+    environment, with `from lib.rule_boot_gate import ...` resolving to that
+    tree's lib. It replaces one interpreter start per hook call (the selftest
+    ran ~337s that way, past CI's per-script cap), not the code under test."""
+
+    def __init__(self, case):
+        self.case = case
+
+    def __enter__(self):
+        hook, lib, pkg = _load(self.case.tree)
+        self.saved_env = {k: os.environ.get(k) for k in _ENV_KEYS}
+        for k in _ENV_KEYS:
+            if self.case.env.get(k) is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = self.case.env[k]
+        hook.LOG = self.case.env["CARR_HOOK_GUARD_LOG"]
+        self.saved_mods = {k: sys.modules.get(k) for k in ("lib", "lib.rule_boot_gate")}
+        pkg.rule_boot_gate = lib
+        sys.modules["lib"], sys.modules["lib.rule_boot_gate"] = pkg, lib
+        return hook, lib
+
+    def __exit__(self, *exc):
+        for k, v in self.saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        for k, v in self.saved_mods.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+        return False
 
 
 FAULT_SITECUSTOMIZE = """
@@ -504,6 +636,275 @@ def case_answer_parsing(c):
     assert json.loads(out) == ["unsupported", "failed", "boot", "failed", "failed", "out_of_range"], out
 
 
+# --- fetch recognition (defect seen live 2026-09-27): a fetch is recognised by
+# what it does. The absolute form, `cd <repo> && ./run.sh`, a harmless output
+# pipe and a parallel batch are all fetches and never holds; a page counts as
+# read only when its answer carries the matching digest, page and text; and once
+# every page is read the RULES UNREAD advisory stops.
+
+def boot_arg(page):
+    return f"'{{\"detail\":\"boot\",\"page\":{page}}}'"
+
+
+def abs_cmd(page):
+    return f"{RUN_SH} call standing-context {boot_arg(page)}"
+
+
+PY_FORMAT = "python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), indent=2))'"
+
+
+def indent2(body):
+    return json.dumps(json.loads(body), indent=2)
+
+
+def case_absolute_form(c):
+    c.stub_sized("a", pages=3)
+    c.arm()
+    for p in (1, 2, 3):
+        pre, post = c.fetch_cmd(abs_cmd(p), p, cwd="/tmp")
+        assert not denied(pre), f"absolute form from another cwd is a fetch: {pre}"
+        assert not notice(post), f"a real page is silent: {post}"
+    assert c.call(*READ) is None, "every page read through the absolute form: allowed silently"
+    assert not c.holds(), f"no fetch may count as a hold: {c.holds()}"
+
+
+def case_cd_then_run_sh(c):
+    c.stub_sized("a", pages=2)
+    c.arm()
+    for p in (1, 2):
+        pre, _ = c.fetch_cmd(f"cd {REPO} && ./run.sh call standing-context {boot_arg(p)}", p, cwd="/tmp")
+        assert not denied(pre), f"cd <repo> && ./run.sh is a fetch: {pre}"
+    assert c.call(*READ) is None and not c.holds(), c.holds()
+    # Anything chained after the fetch, or a cd that does not reach this repo's run.sh, is not a fetch.
+    refused = [f"cd {REPO} && ./run.sh call standing-context {boot_arg(1)} && echo hi",
+               f"cd {REPO}; ./run.sh call standing-context {boot_arg(1)}",
+               f"cd /tmp && ./run.sh call standing-context {boot_arg(1)}",
+               f"cd {REPO} && cd . && ./run.sh call standing-context {boot_arg(1)}",
+               f"cd .. && ./run.sh call standing-context {boot_arg(1)}",
+               f"cd {REPO} && ./run.sh call standing-context {boot_arg(1)} || true",
+               f"cd {REPO} && ./run.sh call standing-context {boot_arg(1)} & echo x",
+               f"cd {REPO} && run.sh call standing-context {boot_arg(1)}"]
+    for i, cmd in enumerate(refused):
+        assert denied(c.call("Bash", {"command": cmd}, agent=f"cd-{i}", cwd="/tmp")), f"not a fetch: {cmd}"
+
+
+def case_piped_formatter(c):
+    c.stub_sized("a", pages=5)
+    c.arm()
+    pipes = [(f"{abs_cmd(1)} | {PY_FORMAT}", indent2),
+             (f"{abs_cmd(2)} 2>&1 | jq .", indent2),
+             (f"{abs_cmd(3)} | jq -r .rule_boot", lambda b: json.dumps(json.loads(b)["rule_boot"], indent=2)),
+             (f"{abs_cmd(4)} | head -n 4000", None),
+             (f"{abs_cmd(5)} </dev/null | python3 -m json.tool", indent2)]
+    for p, (cmd, out) in enumerate(pipes, start=1):
+        pre, post = c.fetch_cmd(cmd, p, stdout=out)
+        assert not denied(pre), f"a harmless pipe keeps it a fetch: {cmd}: {pre}"
+        assert not notice(post), f"{cmd}: {post}"
+    assert c.call(*READ) is None and not c.holds(), c.holds()
+    # A pipe that keeps only the text proves nothing: not read, but not an outage either.
+    c2 = Case(c.tree, tempfile.mkdtemp(dir=c.work))
+    c2.stub_sized("a", pages=1)
+    c2.arm()
+    pre, post = c2.fetch_cmd(f"{abs_cmd(1)} | jq -r .rule_boot.text", 1,
+                             stdout=lambda b: json.loads(b)["rule_boot"]["text"])
+    assert not denied(pre) and "does not count" in notice(post), post
+    r = c2.call(*READ)
+    assert denied(r) and "UNAVAILABLE" not in r["permissionDecisionReason"], f"held, not unlocked: {r}"
+    assert "1 came back without the whole page" in r["permissionDecisionReason"], r
+    # It answered, so the never-answered grace does not read it as an outage later.
+    for root, _dirs, files in os.walk(os.path.join(c2.state, SESSION, "fetched", "main")):
+        for name in files:
+            os.utime(os.path.join(root, name), (1, 1))
+    r = c2.call(*READ)
+    assert denied(r) and "UNAVAILABLE" not in r["permissionDecisionReason"], f"answered is not unanswered: {r}"
+    # A formatter failing downstream of the fetch is not proof the store is down.
+    c2.fetch_cmd(f"{abs_cmd(1)} | {PY_FORMAT}", 1, answer="Exit code 1\njson.decoder.JSONDecodeError")
+    r = c2.call(*READ)
+    assert denied(r) and "UNAVAILABLE" not in r["permissionDecisionReason"], r
+    # Pipes that run, write or fabricate anything are not fetches.
+    refused = [f"{abs_cmd(1)} | sh", f"{abs_cmd(1)} | bash -c 'id'", f"{abs_cmd(1)} | tee /tmp/x",
+               f"{abs_cmd(1)} > /tmp/x", f"{abs_cmd(1)} | xargs rm",
+               f"{abs_cmd(1)} | python3 -c 'import os; os.system(\"id\")'",
+               f"{abs_cmd(1)} | python3 -c 'print(open(\"/etc/hosts\").read())'",
+               f"{abs_cmd(1)} | python3 -c '__import__(\"os\")'",
+               f"{abs_cmd(1)} | python3 -c 'import json,sys; d=json.load(sys.stdin); d[\"rule_boot\"][\"page\"]=2; print(json.dumps(d))'",
+               f"{abs_cmd(1)} | python3 -c 'print(\"{{\\\"rule_boot\\\": 1}}\")'",
+               f"{abs_cmd(1)} | python3 /tmp/evil.py",
+               # Rewriting the text while keeping the JSON (review of #1343, nit 2).
+               f"{abs_cmd(1)} | python3 -c 'import sys; print(\"maybe\".join(sys.stdin.read().split(\"NEVER\")))'",
+               f"{abs_cmd(1)} | python3 -c 'import sys; print(sys.stdin.read().lower())'",
+               # A character loop can rewrite text without a string method and keep
+               # the boot page's JSON, digest, and length intact.
+               f"{abs_cmd(1)} | python3 -c 'import sys\nfor ch in sys.stdin.read(): print(\"X\" if ch == \"N\" else ch, end=\"\")'",
+               # Even straight-line reads can replace one byte while preserving
+               # the boot page's length and claimed digest.
+               f"{abs_cmd(1)} | python3 -c 'import sys; print(sys.stdin.read(169), end=\"\"); sys.stdin.read(1); print(\"X\", end=\"\"); print(sys.stdin.read(), end=\"\")'",
+               f"{abs_cmd(1)} | jq env", f"{abs_cmd(1)} | jq '{{rule_boot:{{digest:\"sha256:x\"}}}}'",
+               f"{abs_cmd(1)} | jq -n '\"x\"'", f"{abs_cmd(1)} | jq . /etc/hosts",
+               f"{abs_cmd(1)} | head -n 5 /etc/hosts", f"{abs_cmd(1)} | cat /etc/hosts",
+               f"{abs_cmd(1)} | jq . $(id)", f"{abs_cmd(1)} | jq `id`",
+               f"{RUN_SH} call standing-context \"$(id)\""]
+    for i, cmd in enumerate(refused):
+        assert denied(c.call("Bash", {"command": cmd}, agent=f"pipe-{i}")), f"not a harmless pipe: {cmd}"
+    # A Python filter imports json from its working directory, so it runs only
+    # from a checkout root of this repo (review of #1343, nit 1).
+    for i, (cmd, cwd) in enumerate([(f"{abs_cmd(1)} | {PY_FORMAT}", "/tmp"),
+                                    (f"cd /tmp && {abs_cmd(1)} | python3 -m json.tool", REPO),
+                                    (f"{abs_cmd(1)} | {PY_FORMAT}", os.path.join(REPO, "ops"))]):
+        assert denied(c.call("Bash", {"command": cmd}, agent=f"pycwd-{i}", cwd=cwd)), f"python off-root: {cmd} @ {cwd}"
+    assert not denied(c.call("Bash", {"command": f"{abs_cmd(1)} | jq ."}, agent="jq-tmp", cwd="/tmp")), \
+        "jq imports nothing from the cwd: any cwd"
+    assert not denied(c.call("Bash", {"command": f"cd {REPO} && ./run.sh call standing-context {boot_arg(1)} | {PY_FORMAT}"},
+                             agent="py-root", cwd="/tmp")), "python after cd to the repo root is fine"
+
+
+def case_parallel_batch(c):
+    """Seven page fetches sent at once, as a model batches them: every PreToolUse
+    runs before any tool, then every PostToolUse, each set concurrently."""
+    c.stub_sized("a", pages=7)
+    c.arm()
+    forms = [abs_cmd(1), f"{abs_cmd(2)} | {PY_FORMAT}", f"cd {REPO} && ./run.sh call standing-context {boot_arg(3)}",
+             f"./run.sh call standing-context {boot_arg(4)}", f"{abs_cmd(5)} | jq .", abs_cmd(6), abs_cmd(7)]
+    pres, posts = [], []
+    for p, cmd in enumerate(forms, start=1):
+        pres.append({"hook_event_name": "PreToolUse", "session_id": SESSION, "cwd": REPO,
+                     "tool_name": "Bash", "tool_input": {"command": cmd}})
+        body = json.dumps({"ok": True, "rule_boot": c.boot(p)})
+        posts.append({**pres[-1], "hook_event_name": "PostToolUse",
+                      "tool_response": {"stdout": indent2(body) if "|" in cmd else body, "stderr": ""}})
+    for r in c.hooks_parallel(pres):
+        assert not denied(r), f"a batched fetch was held: {r}"
+    c.hooks_parallel(posts)
+    assert not c.holds(), f"batched fetches counted as holds: {c.holds()}"
+    assert c.call(*READ) is None, "all seven pages read in one batch: allowed silently"
+
+
+def case_all_pages_clear_advisory(c):
+    """The live defect: the cap is reached, then every page is read; the
+    RULES UNREAD advisory must stop."""
+    c.stub_sized("a", pages=7)
+    c.arm()
+    for _ in range(3):
+        assert denied(c.call(*READ))
+    assert "RULES UNREAD" in notice(c.call(*READ))
+    for p in range(1, 8):
+        c.fetch_cmd(f"{abs_cmd(p)} | {PY_FORMAT}", p, stdout=indent2)
+    for _ in range(3):
+        r = c.call(*READ)
+        assert r is None, f"every page read: no advisory any more: {r}"
+
+
+def case_three_mcp_prefixes(c):
+    c.stub_sized("a", pages=2)
+    c.arm()
+    for i, prefix in enumerate(("mcp__carr__", "mcp__claude_ai_CARR_Record_Layer__",
+                                "mcp__b36e17b6-7e3b-4e65-b890-21f21d538440__")):
+        agent = f"mcp-{i}"
+        for p in (1, 2):
+            tool, args = prefix + "standing-context", {"detail": "boot", "page": p}
+            assert not denied(c.call(tool, args, agent=agent))
+            c.hook({"hook_event_name": "PostToolUse", "session_id": SESSION, "cwd": REPO, "agent_id": agent,
+                    "tool_name": tool, "tool_input": args,
+                    "tool_response": [{"type": "text", "text": json.dumps({"ok": True, "rule_boot": c.boot(p)})}]})
+        assert c.call(*READ, agent=agent) is None, f"{prefix} pages read"
+
+
+def case_connector_after_compaction(c):
+    """Coordinator's report 2026-09-27: connector fetches, including after a
+    compaction, and piped Bash fetches. Reads made before a compaction do not
+    survive it (the context lost them), and the hold says so; connector
+    fetches made after it unlock the context."""
+    conn = "mcp__b36e17b6-7e3b-4e65-b890-21f21d538440__standing-context"
+    c.stub_sized("a", pages=7)
+    c.arm()
+
+    def connector(p):
+        args = {"detail": "boot", "page": p}
+        assert not denied(c.call(conn, args)), f"connector fetch {p} held"
+        c.hook({"hook_event_name": "PostToolUse", "session_id": SESSION, "cwd": REPO, "tool_name": conn,
+                "tool_input": args,
+                "tool_response": [{"type": "text", "text": json.dumps({"ok": True, "rule_boot": c.boot(p)})}]})
+
+    for p in range(1, 8):
+        connector(p)
+    assert c.call(*READ) is None, "seven connector pages read: allowed"
+    c.arm("compact")
+    r = c.call(*READ)
+    assert denied(r) and "compact" in r["permissionDecisionReason"], f"held, saying why: {r}"
+    for p in range(1, 8):
+        connector(p)
+    assert c.call(*READ) is None, "connector pages read after the compaction: allowed"
+    # Piped Bash fetches after another compaction, including head that keeps the whole page.
+    c.arm("compact")
+    for p in range(1, 8):
+        tail = "| head -n 100000" if p % 2 else "| jq ."
+        pre, _ = c.fetch_cmd(f"{abs_cmd(p)} {tail}", p, stdout=indent2 if "jq" in tail else None)
+        assert not denied(pre), f"piped fetch {p} held: {pre}"
+    assert c.call(*READ) is None, "piped pages read after the compaction: allowed"
+    assert len(c.holds()) == 1, f"only the deliberate READ above was a hold, no fetch: {c.holds()}"
+
+
+def case_confirm_needs_the_real_page(c):
+    """Loopholes in what counts as read."""
+    # Without total_chars (an older Worker) the page check stands alone.
+    c0 = Case(c.tree, tempfile.mkdtemp(dir=c.work))
+    c0.stub("a", pages=2)
+    c0.arm()
+    c0.fetch_cmd(abs_cmd(1), 1)
+    c0.fetch_cmd(abs_cmd(2), 2, boot=c0.boot(1))
+    assert denied(c0.call(*READ)), "an answer for page 1 does not read page 2"
+    no_text = {k: v for k, v in c0.boot(2).items() if k != "text"}
+    c0.fetch_cmd(abs_cmd(2), 2, boot=no_text)
+    assert denied(c0.call(*READ)), "a page without its text is not read"
+    c0.fetch_cmd(abs_cmd(2), 2)
+    assert c0.call(*READ) is None
+    c.stub_sized("a", pages=2)
+    c.arm()
+    c.fetch_cmd(abs_cmd(1), 1)
+    c.fetch_cmd(abs_cmd(2), 2, boot=c.boot(1))
+    assert denied(c.call(*READ)), "an answer for page 1 does not read page 2"
+    # Text cut short: every page 'confirmed', but the lengths do not add up to the boot.
+    short = {**c.boot(2), "text": c.page_text(2)[:10]}
+    c.fetch_cmd(abs_cmd(2), 2, boot=short)
+    r = c.call(*READ)
+    assert denied(r) and "length" in r["permissionDecisionReason"], f"short text must not complete: {r}"
+    c.fetch_cmd(abs_cmd(2), 2)
+    assert c.call(*READ) is None, "the whole page read: complete"
+
+
+def case_same_checkout_worktree(c):
+    """run.sh in the main checkout or any worktree of it is this repo's run.sh,
+    whichever of them the hook itself was loaded from; a lookalike is not."""
+    root = c.work
+    main, wt, fake = (os.path.join(root, n) for n in ("main", "wt", "fake"))
+    os.makedirs(os.path.join(main, ".git", "worktrees", "wt"))
+    for d in (wt, fake):
+        os.makedirs(d)
+    for d in (main, wt, fake):
+        with open(os.path.join(d, "run.sh"), "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\n")
+    gd = os.path.join(main, ".git", "worktrees", "wt")
+    with open(os.path.join(gd, "commondir"), "w", encoding="utf-8") as fh:
+        fh.write("../..\n")
+    with open(os.path.join(gd, "gitdir"), "w", encoding="utf-8") as fh:
+        fh.write(os.path.join(wt, ".git") + "\n")
+    with open(os.path.join(wt, ".git"), "w", encoding="utf-8") as fh:
+        fh.write(f"gitdir: {gd}\n")
+    # A lookalike points into the same .git but git's back-reference names another folder.
+    with open(os.path.join(fake, ".git"), "w", encoding="utf-8") as fh:
+        fh.write(f"gitdir: {gd}\n")
+    code = ("import sys, json; sys.path.insert(0, sys.argv[1]); import lib.rule_boot_gate as g; "
+            "out = []\nfor repo, cand in json.loads(sys.argv[2]):\n    g.REPO = repo\n"
+            "    out.append(g.classify('Bash', {'command': cand + \" call standing-context '{\\\"detail\\\":\\\"boot\\\",\\\"page\\\":1}'\"}, '/tmp')[0])\n"
+            "print(json.dumps(out))")
+    pairs = [[main, os.path.join(wt, "run.sh")], [wt, os.path.join(main, "run.sh")],
+             [wt, os.path.join(wt, "run.sh")], [main, os.path.join(fake, "run.sh")],
+             [wt, os.path.join(fake, "run.sh")]]
+    out = subprocess.run([sys.executable, "-c", code, c.tree, json.dumps(pairs)],
+                         capture_output=True, text=True, timeout=30)
+    assert json.loads(out.stdout or "null") == ["fetch", "fetch", "fetch", "other", "other"], out.stdout + out.stderr
+
+
 CASES = [case_deny_cap, case_outage_after_good_arm, case_out_of_range_not_outage,
          case_mid_session_digest_change, case_foreign_mcp_prefix, case_toolless_subagent,
          case_not_deployed_distinct, case_state_unwritable_armed, case_disk_full_armed,
@@ -511,7 +912,11 @@ CASES = [case_deny_cap, case_outage_after_good_arm, case_out_of_range_not_outage
          case_notice_short_after_first,
          case_unreachable_no_deadlock, case_fetch_never_denied, case_deny_before_allow_after,
          case_digest_change_rearms, case_rearm_on_compact, case_subagent_path,
-         case_answer_parsing]
+         case_answer_parsing,
+         case_absolute_form, case_cd_then_run_sh, case_piped_formatter, case_parallel_batch,
+         case_all_pages_clear_advisory, case_three_mcp_prefixes, case_connector_after_compaction,
+         case_confirm_needs_the_real_page,
+         case_same_checkout_worktree]
 
 
 def run_all(tree):
@@ -595,9 +1000,9 @@ MUTANTS = {
                                  '    if False:\n        return "allow", STATE_UNWRITABLE_NOTICE.format(why=why)\n    return "deny", reason')],
     "no-deny-cap": [('    if held >= DENY_CAP:', '    if False:')],
     "out-of-range-read-as-outage": [('        if _OUT_OF_RANGE in text:', '        if False:')],
-    "failed-sticky": [('    if not missing:\n        return "allow", None\n    if "failed" in names:',
-                       '    if not missing and "failed" not in names:\n        return "allow", None\n    if "failed" in names:'),
-                      ('        for stale in ("failed", "unsupported"):', '        for stale in ():')],
+    "failed-sticky": [('        if not _short_text(folder, arm):\n            return "allow", None',
+                       '        if not _short_text(folder, arm) and "failed" not in names:\n            return "allow", None'),
+                      ('        for stale in ("failed", "unsupported", f"u{page}"):', '        for stale in ():')],
     "notice-every-call": [('    if f"shown-{name}" in _markers(folder):', '    if False:')],
     "toolless-denied": [('    if _toolless(payload):', '    if False:')],
     "outage-needs-every-page": [('    if "failed" in names:\n        return "allow", _notice(folder, "unavailable"',
@@ -608,6 +1013,24 @@ MUTANTS = {
     "any-mcp-prefix": [('def _carr_verb(name):\n    for prefix in CARR_MCP_PREFIXES:',
                         'def _carr_verb(name):\n    m = re.match(r"^mcp__.+__([a-z][a-z0-9-]*)$", name)\n'
                         '    return m.group(1) if m else None\n    for prefix in CARR_MCP_PREFIXES:')],
+    # Fetch recognition (2026-09-27).
+    "pipe-failure-read-as-outage": [('    if not direct and answer != "boot":\n        answer = "inconclusive"',
+                                     '    if False:\n        answer = "inconclusive"')],
+    "any-answer-confirms-the-page": [('    if answer == "boot" and not _is_page(boot, page):',
+                                      '    if False:')],
+    "no-length-check": [('    if want < 1:\n        return False', '    if True:\n        return False')],
+    "any-filter-harmless": [('def _harmless_filter(stage):\n', 'def _harmless_filter(stage):\n    return True\n')],
+    "any-python-code": [('            return args[1] == _PY_JSON_PRETTY', '            return True')],
+    "any-jq-filter": [('    if flt is None:\n        return True\n    pos = 0', '    if True:\n        return True\n    pos = 0')],
+    "lookalike-worktree": [('    if os.path.realpath(os.path.join(gitdir, back)) != os.path.realpath(dotgit):\n        return None',
+                            '    if False:\n        return None')],
+    "worktree-refuses-main-checkout": [('        return bool(mine) and _git_common_dir(os.path.dirname(real)) == mine',
+                                        '        return False')],
+    "unreadable-page-read-as-outage": [('        if p in attempted and f"u{p}" not in names:', '        if p in attempted:')],
+    "cd-form-refused": [('        base, tokens = target, tokens[3:]', '        return None')],
+    "compaction-hold-silent": [('    if not agent_id and not confirmed and source in ("compact", "resume", "clear"):',
+                                '    if False:')],
+    "python-any-cwd": [('    if uses_python and not _is_checkout_root(base):', '    if False:')],
 }
 
 

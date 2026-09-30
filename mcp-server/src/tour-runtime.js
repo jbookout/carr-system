@@ -7,6 +7,7 @@ import { ToolError } from "./tool-error.js";
 import { trustedTourRendererResult } from "./tour-artifacts.js";
 import { tourSharingBrowserAccess } from "./tour-sharing.js";
 import { authorizationClassForActor, organizationTenantForActor } from "./identity.js";
+import { readPropertyEvidence } from "./tour-property-evidence.js";
 
 const sharing = tourSharingBrowserAccess({ ToolError });
 
@@ -259,11 +260,17 @@ export async function runTourPdfRender(context, dependencies = {}) {
 // production passes nothing.
 export function createTourRuntimeAdapters(renderDependencies = {}) {
   return {
+    searchTourPropertiesFn: context => invoke(context, "search-tour-properties", context.input),
+    readTourSelectionCartFn: context => invoke(context, "read-tour-selection-cart", context.input),
+    appendTourSelectionCartVersionFn: context => invoke(context, "append-tour-selection-cart-version", context.input),
     listToursFn: async context => ({ ok: true, data: projectTourLibrary(await internalRead(context,
       "select ops.list_tour_library($1::text,$2::text) as data", [organizationTenantForActor(context.actor)])) }),
     readTourFn: async context => ({ ok: true, data: projectTourDetail(await internalRead(context,
       "select ops.read_tour_internal_detail($1::text,$2::uuid,$3::text) as data",
       [organizationTenantForActor(context.actor), context.input.tour_id])) }),
+    readPropertyEvidenceFn: async context => ({ ok: true, data: await withPool(
+      context.env.DATABASE_URL_WRITER, "begin read only", client => readPropertyEvidence(
+        client, organizationTenantForActor(context.actor), context.input.property_id, context.input.as_of)) }),
     createRouteVersionFn: context => invoke(context, "prepare-tour-route-version", {
       ...context.input, base_route_version_id: null,
     }),
@@ -306,6 +313,7 @@ export function createTourRuntimeAdapters(renderDependencies = {}) {
     issueShareGrantFn: context => invoke(context, "issue-tour-share-grant", context.input),
     rotateShareGrantFn: context => invoke(context, "rotate-tour-share-grant", context.input),
     revokeShareGrantFn: context => invoke(context, "revoke-tour-share-grant", context.input),
+    readFeedbackFn: context => invoke(context, "read-tour-feedback", { projection_id: context.input.projection_id, cursor: null, limit: 100 }),
     renderPdfFn: context => runTourPdfRender(context, renderDependencies),
     readPdfRenderFn: async context => invoke(context, "read-tour-pdf-render", context.input),
     reviewPdfFn: async context => invoke(context, "record-tour-pdf-human-review", context.input),
@@ -319,7 +327,13 @@ export function createTourRuntimeAdapters(renderDependencies = {}) {
 }
 
 async function publicAccess({ env }, transaction, fn) {
-  return withPool(env.DATABASE_URL_WRITER, transaction, fn);
+  try {
+    return await withPool(env.DATABASE_URL_WRITER, transaction, fn);
+  } catch (error) {
+    if (error instanceof ToolError && error.payload?.error === "tour_share_access_refused")
+      return { ok: false, status: 404 };
+    throw error;
+  }
 }
 
 export function createReportsRuntimeAdapters() {
@@ -341,6 +355,21 @@ export function createReportsRuntimeAdapters() {
       publicAccess({ env }, "begin read only", async client => {
         const result = await sharing.readMap(client, { session_digest: sessionDigest });
         return result.ok ? { ok: true, data: result.map } : { ok: false, status: 404 };
+      }),
+    readFeedbackFn: async ({ env, sessionDigest }) =>
+      publicAccess({ env }, "begin read only", async client => {
+        const result = await sharing.readFeedback(client, { session_digest: sessionDigest });
+        return result.ok ? { ok: true, data: result.feedback } : { ok: false, status: 404 };
+      }),
+    shortlistFn: async ({ env, sessionDigest, projection_ref, property_ref, shortlisted, idempotency_key }) =>
+      publicAccess({ env }, "begin", async client => {
+        const result = await sharing.shortlist(client, { session_digest: sessionDigest, projection_ref, property_ref, shortlisted, idempotency_key });
+        return result.ok ? { ok: true, data: result.feedback } : { ok: false, status: 404 };
+      }),
+    commentFn: async ({ env, sessionDigest, projection_ref, property_ref, comment, idempotency_key }) =>
+      publicAccess({ env }, "begin", async client => {
+        const result = await sharing.comment(client, { session_digest: sessionDigest, projection_ref, property_ref, comment, idempotency_key });
+        return result.ok ? { ok: true, data: result.feedback } : { ok: false, status: 404 };
       }),
   };
 }

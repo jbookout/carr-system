@@ -10,6 +10,7 @@ import io
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import threading
@@ -183,6 +184,22 @@ check("receipt carries every dynamic member and full binding text",
       and [item["id"] for item in row["rules"]] == EXPECTED_IDS
       and all(item["statement"].startswith("binding scheduled rule") for item in row["rules"]),
       row.get("rules"))
+
+# Claude persists additionalContext over 10,000 characters behind a preview.
+# A full receipt beyond that limit is a false delivery claim: the model only
+# sees the preview, while Stop telemetry may credit every scheduled rule.
+oversize_response = selector_result()
+oversize_response["shared_rules"][0]["statement"] = "binding scheduled rule " + "x" * 12_000
+oversize_output = rail.process(payload(), runner=Runner(oversize_response))
+oversize_text = context(oversize_output)
+check("oversize scheduled rail stays within the visible context budget",
+      rail.rule_routes.within_cap(oversize_text), len(oversize_text))
+check("oversize scheduled rail names every undelivered rule without a receipt",
+      oversize_text.startswith("RULE PACK PREUSE DELIVERY TOO LARGE")
+      and "NOT delivered" in oversize_text
+      and all(short in oversize_text for short in EXPECTED_IDS)
+      and "rule-delivery-preuse-reselection/v1" not in oversize_text,
+      oversize_text[:160])
 
 dell_output = rail.process(
     payload(), runner=Runner(selector_result(agent="dell-local", sponsor="dell")))
@@ -431,7 +448,7 @@ claude_rows = [group for group in claude["PreToolUse"]
 codex_rows = [group for group in codex["PreToolUse"]
               if any(command in hook.get("command", "") for hook in group.get("hooks", []))]
 CLAUDE_MATCHER = "Bash|Write|Edit|MultiEdit|Agent|WebFetch|WebSearch|Artifact|AskUserQuestion|mcp__.*"
-CODEX_MATCHER = r"^(Bash|functions\.exec|Write|Edit|MultiEdit|Agent|WebFetch|WebSearch|mcp__.*)$"
+CODEX_MATCHER = ".*"  # Codex local tools use canonical names, including apply_patch.
 check("Claude wiring is exact and unique, widened for the generalized rail (S9)",
       len(claude_rows) == 1 and claude_rows[0]["matcher"] == CLAUDE_MATCHER)
 check("Codex wiring is exact and unique, widened for the generalized rail (S9)",
@@ -1055,14 +1072,55 @@ check("already-loaded layer0 rules are not redelivered but build advice remains"
       and layer0_runner.calls == [])
 
 failed_semantic_output = rail.process(
-    prompt_payload(), runner=Runner(returncode=1, stderr="token=SUPER-SECRET"),
+    prompt_payload(client="codex"),
+    runner=Runner(returncode=1, stderr="token=SUPER-SECRET"),
     adviser=fake_adviser, build_adviser=fake_build_adviser)
 failed_build_receipt = json.loads(context(failed_semantic_output))
 check("semantic rule failure preserves a validated visible build receipt",
       failed_build_receipt["schema"] == contract.BUILD_RECEIPT_SCHEMA
       and failed_build_receipt["semantic_rule_delivery"] == "failed"
+      and failed_build_receipt["client"] == "codex"
+      and failed_build_receipt["turn_id"] == "turn-prompt"
+      and failed_build_receipt["failure_stage"] == "selector_call"
+      and failed_build_receipt["failure_reason"] == "nonzero"
       and contract.validate_build_receipt(failed_build_receipt, repo=REPO)
       and "SUPER-SECRET" not in context(failed_semantic_output))
+
+for name, runner, stage, reason in (
+        ("timeout", Runner(error=subprocess.TimeoutExpired("secret-command", 1)),
+         "selector_call", "timeout"),
+        ("not-ok", Runner(result={"ok": False, "detail": "SUPER-SECRET"}),
+         "selector_call", "not_ok"),
+        ("invalid-store-response", Runner(result=gen_selector_result(
+            packs=semantic_packs, ids=[], mode="shadow")),
+         "selector_response", "invalid_data")):
+    output = rail.process(prompt_payload(client="codex"), runner=runner,
+                          adviser=fake_adviser, build_adviser=fake_build_adviser)
+    row = json.loads(context(output))
+    check("Codex semantic failure classifies " + name + " without exception text",
+          row["failure_stage"] == stage and row["failure_reason"] == reason
+          and contract.validate_build_receipt(row, repo=REPO)
+          and "SUPER-SECRET" not in context(output)
+          and "secret-command" not in context(output))
+
+def fail_adviser(_situation):
+    raise RuntimeError("SUPER-SECRET")
+
+adviser_failed = json.loads(context(rail.process(
+    prompt_payload(client="codex"), runner=Runner(), adviser=fail_adviser,
+    build_adviser=fake_build_adviser)))
+check("semantic adviser failures carry a redacted stage and reason",
+      adviser_failed["failure_stage"] == "semantic_adviser"
+      and adviser_failed["failure_reason"] == "invalid_data"
+      and "SUPER-SECRET" not in json.dumps(adviser_failed))
+
+for wrong_stage, wrong_reason in (("unbounded-secret", "nonzero"),
+                                  ("selector_call", "unbounded-secret")):
+    tampered = dict(failed_build_receipt, failure_stage=wrong_stage,
+                    failure_reason=wrong_reason)
+    tampered["receipt_id"] = contract.receipt_id(tampered)
+    check("unrecognized failure taxonomy is rejected",
+          not contract.validate_build_receipt(tampered, repo=REPO))
 
 # The verdict cache is keyed on the hook payload's OWN session id — never the
 # environment, never a shared default — so the default adviser must carry it.
@@ -1209,6 +1267,16 @@ check("the trigger table with prompt_regex rows still loads for the PreToolUse r
 # A background-task notification gets the real advisory's skip, not a Jev
 # call, and the receipt it rides on still validates and requires nothing.
 build_module = load("jev_build_advisory_hooktest", REPO / "ops/jev_build_advisory.py")
+def billing_build_adviser(_prompt):
+    raise build_module.AdvisoryUnavailable("billing_exhausted")
+
+billing_output = rail.process(prompt_payload(client="codex"), runner=Runner(),
+                              adviser=lambda _t: [], build_adviser=billing_build_adviser)
+billing_row = json.loads(context(billing_output))
+check("Codex build receipt names billing exhaustion without a provider body",
+      billing_row["advisory"]["reason"] == "billing_exhausted"
+      and "Joe must add credits" in billing_row["advisory"]["instruction"]
+      and contract.validate_build_receipt(billing_row, repo=REPO))
 notification = ("<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n"
                 "<summary>Agent \"x\" finished</summary>\n</task-notification>")
 skip_output = rail.process(prompt_payload(prompt=notification), runner=Runner(),
@@ -1311,9 +1379,34 @@ with tempfile.TemporaryDirectory() as route_tmp:
         ci_ids = set(routed_for("Edit", {"file_path": str(REPO / "ops/ci.sh")}))
         check("an edit to ops/ci.sh routes the CI-check rules",
               {"e65efc68", "bd4a6d22"} <= ci_ids, sorted(ci_ids))
+        # A path route is a WRITE-moment route: reading a file binds no
+        # build-time rule (evals/rule-delivery: routine reads received rules).
+        hooks_glob = {"kind": "path_rule", "path_globs": ["*hooks/*.py"]}
+        review_route = {"kind": "path_rule", "path_globs": ["*.html"], "read_only": True}
+        check("a CARR page read keeps review-time path rules",
+              routes_lib.route_matches(review_route, "Read", {"file_path": str(REPO / "dealroom/public/index.html")}))
+        review_ids = set(routed_for("Read", {"file_path": str(REPO / "dealroom/public/index.html")}))
+        check("an actual CARR page read delivers the visual review rules",
+              {"67580c28", "9293d609", "b7ec8f3b"} <= review_ids, sorted(review_ids))
+        for reader, args in (("Read", {"file_path": str(REPO / "hooks/x-gate.py")}),
+                             ("Grep", {"pattern": "x", "path": str(REPO / "hooks/x-gate.py")}),
+                             ("Glob", {"pattern": "*.py", "path": str(REPO / "hooks/x-gate.py")})):
+            check(f"a {reader} under hooks/ does not match a path_rule route",
+                  not routes_lib.route_matches(hooks_glob, reader, args))
+        for writer, args in (("Write", {"file_path": str(REPO / "hooks/x-gate.py"), "content": ""}),
+                             ("Edit", {"file_path": str(REPO / "hooks/x-gate.py")}),
+                             ("MultiEdit", {"file_path": str(REPO / "hooks/x-gate.py")}),
+                             ("NotebookEdit", {"notebook_path": str(REPO / "hooks/x-gate.py")}),
+                             ("Bash", {"path": str(REPO / "hooks/x-gate.py")})):
+            check(f"a {writer} under hooks/ still matches a path_rule route",
+                  routes_lib.route_matches(hooks_glob, writer, args))
+        check("an apply_patch header path still matches a path_rule route",
+              routes_lib.route_matches(hooks_glob, "apply_patch", {"command":
+                  "*** Begin Patch\n*** Add File: hooks/x-gate.py\n+x\n*** End Patch"}))
         path_rules = rules_routed_by(lambda r: r["kind"] == "path_rule")
-        check("every path_rule route carries only globs",
-              bool(all(set(r) == {"kind", "path_globs"} for e in ROUTES["rules"].values()
+        check("every path_rule route carries globs and an optional read policy",
+              bool(all(set(r) in ({"kind", "path_globs"}, {"kind", "path_globs", "read_only"})
+                       and r.get("read_only", True) is True for e in ROUTES["rules"].values()
                        for r in e["routes"] if r["kind"] == "path_rule") and path_rules))
 
         # Connector glob: the mail draft tool on any server segment.

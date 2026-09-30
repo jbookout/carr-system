@@ -32,6 +32,7 @@ import json
 import os
 import re
 import time
+import unicodedata
 from pathlib import Path
 
 ROUTES_RELATIVE = "ops/config/rule-routes.v1.json"
@@ -47,6 +48,11 @@ ROUTE_KINDS = frozenset({"boot", "trigger", "path_rule", "gate", "duplicate"})
 TRIGGER_KEYS = ("tools", "verbs", "bash_patterns")
 ENTRY_KEYS = frozenset({"moment", "routes", "no_trigger_reason", "note"})
 PATH_INPUT_KEYS = ("file_path", "path", "notebook_path")
+# Built-in tools that only look. A path_rule route is a write-moment route (the
+# moments name building, editing and committing), so a call that merely reads a
+# matching path is not that moment. evals/rule-delivery measured routine reads
+# receiving rules through these globs. Every other tool keeps matching.
+READ_ONLY_TOOLS = frozenset({"Read", "Grep", "Glob", "LS", "NotebookRead"})
 BASH_TOOLS = frozenset({"Bash", "functions.exec"})
 
 # Tool names a route may name. Built-ins are Claude Code's own tools; the
@@ -223,7 +229,9 @@ def call_verbs(tool_name: str, tool_input: object) -> set[str]:
     if tool_name.startswith("mcp__") and "__" in tool_name[5:]:
         verb = tool_name.rsplit("__", 1)[1]
         verbs.add(verb)
-        if verb == "call-verb" and isinstance(tool_input, dict):
+        if tool_name.startswith(("mcp__carr__", "mcp__carr_records__")):
+            verbs.add(verb.replace("_", "-"))
+        if verb.replace("_", "-") == "call-verb" and isinstance(tool_input, dict):
             inner = tool_input.get("verb")
             if isinstance(inner, str) and inner.strip():
                 verbs.add(inner.strip())
@@ -235,11 +243,41 @@ def call_verbs(tool_name: str, tool_input: object) -> set[str]:
     return verbs
 
 
+def _trim_patch_space(value: str) -> str:
+    """Match the patch tool's Unicode White_Space trim, excluding Python's FS–US."""
+    def is_space(char: str) -> bool:
+        return char in "\t\n\v\f\r\x85" or unicodedata.category(char) in {"Zs", "Zl", "Zp"}
+
+    start, end = 0, len(value)
+    while start < end and is_space(value[start]):
+        start += 1
+    while end > start and is_space(value[end - 1]):
+        end -= 1
+    return value[start:end]
+
+
 def call_paths(tool_input: object) -> list[str]:
     if not isinstance(tool_input, dict):
         return []
-    return [tool_input[key] for key in PATH_INPUT_KEYS
-            if isinstance(tool_input.get(key), str) and tool_input[key].strip()]
+    paths = [tool_input[key] for key in PATH_INPUT_KEYS
+             if isinstance(tool_input.get(key), str) and tool_input[key].strip()]
+    # Codex's canonical apply_patch input has one command string rather than
+    # Claude's file_path. The patch headers are the paths the tool will touch.
+    command = tool_input.get("command")
+    if not isinstance(command, str):
+        return paths
+    # apply_patch accepts surrounding blank space and CRLF envelopes. Parse
+    # the same normalized boundary rather than rejecting a valid patch.
+    command = _trim_patch_space(command.replace("\r\n", "\n"))
+    # The patch tool trims Unicode whitespace on each marker line. Inspect only
+    # the first line so a prose or heredoc wrapper cannot expose inner headers.
+    marker = _trim_patch_space(command.partition("\n")[0])
+    if marker == "*** Begin Patch" and "\n" in command:
+        paths.extend(match.group(1).strip() for match in re.finditer(
+            r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", command, re.M))
+        paths.extend(match.group(1).strip() for match in re.finditer(
+            r"^\*\*\* Move to: (.+)$", command, re.M))
+    return paths
 
 
 class RouteShapeError(ValueError):
@@ -267,6 +305,11 @@ def route_matches(route: dict, tool_name: str, tool_input: object,
         globs = _strings(route, "path_globs")
         if not globs:
             raise RouteShapeError("path_globs")
+        read_only = route.get("read_only", False)
+        if not isinstance(read_only, bool):
+            raise RouteShapeError("read_only")
+        if tool_name in READ_ONLY_TOOLS and not read_only:
+            return False
         paths = call_paths(tool_input)
         return any(fnmatch.fnmatch(path, pattern) for pattern in globs for path in paths)
     if kind != "trigger":
@@ -274,8 +317,11 @@ def route_matches(route: dict, tool_name: str, tool_input: object,
     tools = _strings(route, "tools")
     route_verbs = _strings(route, "verbs")
     patterns = _strings(route, "bash_patterns")
+    names = {tool_name}
+    if tool_name == "apply_patch":
+        names.update(("Write", "Edit", "MultiEdit"))
     for tool in tools:
-        if fnmatch.fnmatchcase(tool_name, tool):
+        if any(fnmatch.fnmatchcase(name, tool) for name in names):
             return True
     verbs = call_verbs(tool_name, tool_input) if verbs is None else verbs
     if verbs & set(route_verbs):

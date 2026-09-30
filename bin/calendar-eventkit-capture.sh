@@ -152,10 +152,9 @@ SCANNED="$(printf '%s' "$RUN_LOG" | sed -n 's/.*events scanned: \([0-9]*\).*/\1/
 echo "calendar-capture: read OK — ${SCANNED:-?} events scanned"
 
 # ---------------------------------------------------------------- 2. the match
-# The matcher's stderr is KEPT, not discarded. The first launchd fire of this
-# job failed with "the matcher did not complete" and nothing else, because this
-# line sent the reason to /dev/null — a job reporting a failure it has already
-# thrown away, which is the same shape as answering emptily instead of refusing.
+# Keep matcher stderr in local scratch for failure-class detection. The first
+# launchd fire discarded it and lost the diagnosis; printing it into the job log
+# would expose attendee data. Only fixed aggregate messages leave this script.
 MATCH_JSON="$OUTPUT_ROOT/calendar-touch-proposals.json"
 MATCH_ERR="$OUTPUT_ROOT/calendar-matcher.err"
 INTAKE_EVIDENCE="$OUTPUT_ROOT/calendar-intake-evidence.json"
@@ -181,7 +180,6 @@ else
 fi
 if [ "$MATCH_STATUS" -ne 0 ]; then
   echo "calendar-capture: FAIL the matcher did not complete" >&2
-  sed 's/^/    /' "$MATCH_ERR" >&2
   # The matcher reads the local Calendar database directly, which is a SEPARATE
   # macOS permission from the EventKit read above: Full Disk Access, granted to
   # the responsible process. A launchd agent's responsible process is not the
@@ -203,20 +201,8 @@ if [ "$CANARY" -eq 1 ]; then
   exec "$PY" "$REPO/tools/calendar-canary-result.py" --proposals "$MATCH_JSON"
 fi
 
-# An address that does not resolve in the record is not a successful capture.
-# It starts a deterministic intake: local-mail search, research, then an
-# evidence-backed record result.  Until the intake worker supplies all three
-# receipts, this run refuses completion instead of silently treating an unknown
-# attendee as a harmless calendar row.  --dry-run remains read-only and prints
-# candidates without requiring (or creating) evidence.
-if [ "$DRY" -ne 1 ]; then
-  if ! "$PY" "$REPO/tools/calendar-intake-gate.py" \
-          --proposals "$MATCH_JSON" --evidence "$INTAKE_EVIDENCE"; then
-    echo "calendar-capture: REFUSE unmatched attendee intake is incomplete; no successful completion receipt" >&2
-    exit 78
-  fi
-fi
-
+# Exact matches have their own evidence and deterministic idempotency keys.
+# Process them even when a separate unknown attendee still requires intake.
 "$PY" - "$MATCH_JSON" "$DRY" "$DAYS" "${SCANNED:-0}" "$RECEIPT_SAFE" <<'PYEOF'
 import json, subprocess, sys, pathlib
 path, dry, days, scanned, receipt_safe = (sys.argv[1], sys.argv[2] == "1", sys.argv[3],
@@ -226,7 +212,7 @@ c = d["counts"]
 print(f"calendar-capture: window {days}d — {c['emails']} attendee address(es): "
       f"{c['exact']} exact, {c['domain']} domain-only, {c['unknown']} unknown")
 
-if not receipt_safe:
+if dry and not receipt_safe:
     for u in d["unknown"]:
         print(f"  research candidate  {u['email']}  (last seen {u['last_seen']})")
     for m in d["domain"]:
@@ -270,14 +256,42 @@ for e in d["exact"]:
     })
     r = subprocess.run(["./run.sh", "call", "log-activity", args],
                        capture_output=True, text=True)
-    ok = '"ok": true' in r.stdout or '"ok":true' in r.stdout
-    print(f"  {'logged touch  ' if ok else 'FAILED to log '} {e['ref']}  via {e['email']}")
+    # local-verb emits one JSON value on stdout; diagnostics stay on stderr.
+    # Nested success, malformed output, and failed processes cannot acknowledge
+    # this activity. Keep every raw response out of persisted capture logs.
+    try:
+        response = json.loads(r.stdout)
+    except json.JSONDecodeError:
+        response = None
+    ok = (r.returncode == 0 and isinstance(response, dict)
+          and response.get("ok") is True)
+    print("  logged exact touch" if ok else "  FAILED to log exact touch")
     if not ok:
         failed += 1
-        print("    " + (r.stdout or r.stderr).strip().replace("\n", "\n    ")[:400])
     else:
         written += 1
 print(f"calendar-capture: source=eventkit mode=live scanned={scanned} exact={c['exact']} "
       f"domain={c['domain']} unknown={c['unknown']} writes={written} failed={failed}")
 sys.exit(1 if failed else 0)
 PYEOF
+CAPTURE_STATUS=$?
+
+# An address that does not resolve in the record is not a successful capture.
+# It starts a deterministic intake: local-mail search, research, then an
+# evidence-backed record result.  Until the intake worker supplies all three
+# receipts, this run refuses completion.  --dry-run remains read-only and
+# prints candidates without requiring (or creating) evidence.
+INTAKE_STATUS=0
+if [ "$DRY" -ne 1 ]; then
+  "$PY" "$REPO/tools/calendar-intake-gate.py" \
+          --proposals "$MATCH_JSON" --evidence "$INTAKE_EVIDENCE" \
+          --aggregate-only || INTAKE_STATUS=$?
+fi
+if [ "$CAPTURE_STATUS" -ne 0 ]; then
+  echo "calendar-capture: FAIL one or more exact touches were not logged" >&2
+  exit "$CAPTURE_STATUS"
+fi
+if [ "$INTAKE_STATUS" -ne 0 ]; then
+  echo "calendar-capture: REFUSE unmatched attendee intake is incomplete; no successful completion receipt" >&2
+  exit 78
+fi

@@ -453,6 +453,28 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0733_salesforce_rw02_safe_stop_run_store.sql",
         "0734_salesforce_rw02_safe_stop_scac_successor.sql",
     ),
+    # The industry events table changes the measured catalog. Its v92 seal
+    # must commit with the domain migration so no intermediate catalog leaks.
+    (
+        "0738_industry_events.sql",
+        "0739_industry_events_scac_successor.sql",
+    ),
+    (
+        "0740_board_answers.sql",
+        "0741_board_answers_scac_successor.sql",
+    ),
+    (
+        "0744_doc_suggestions.sql",
+        "0745_doc_suggestions_scac_successor.sql",
+    ),
+    (
+        "0749_tour_client_feedback.sql",
+        "0750_tour_client_feedback_scac_successor.sql",
+    ),
+    (
+        "0754_tour_property_evidence.sql",
+        "0755_property_evidence_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -551,6 +573,26 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0733_salesforce_rw02_safe_stop_run_store.sql",
         "0734_salesforce_rw02_safe_stop_scac_successor.sql",
+    ),
+    (
+        "0738_industry_events.sql",
+        "0739_industry_events_scac_successor.sql",
+    ),
+    (
+        "0740_board_answers.sql",
+        "0741_board_answers_scac_successor.sql",
+    ),
+    (
+        "0744_doc_suggestions.sql",
+        "0745_doc_suggestions_scac_successor.sql",
+    ),
+    (
+        "0749_tour_client_feedback.sql",
+        "0750_tour_client_feedback_scac_successor.sql",
+    ),
+    (
+        "0754_tour_property_evidence.sql",
+        "0755_property_evidence_scac_successor.sql",
     ),
 )
 

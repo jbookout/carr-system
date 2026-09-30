@@ -8,8 +8,9 @@ source-owned rules as additional context, and leaves the original tool input
 untouched.  Any failure remains visible to Stop telemetry and never blocks.
 
 GENERALIZED (WR-000019 slice S9). The paragraph above describes the ORIGINAL
-rail exactly as it shipped, and that rail's logic, receipt schema and tests
-are untouched below — proven, single-pack, single-shape, left alone. This
+single-pack, single-shape rail. Its full receipt contract remains when it fits
+the visible hook context cap; an oversized receipt yields a short not-delivered
+notice so a file preview cannot masquerade as rule delivery. This
 file now also drives a SECOND, more general rail off the declarative
 compiled trigger table, ops/config/rule-jit-triggers.v1.json
 (ops/rule-jit-compile.py is its only writer): an MCP verb call, a Bash
@@ -47,8 +48,8 @@ MCP tool, the call-verb passthrough, or `run.sh call`), a Bash command
 pattern, or a path glob. On a PreToolUse call that hits any route, the rules
 it hits are UNIONED with the compiled table's rows, fetched through the same
 standing-context door in ONE call, and injected as a third receipt
-(ROUTE_RECEIPT_SCHEMA). What exists today is kept: a call no route hits takes
-the generalized rail above unchanged, and the scheduled rail is untouched.
+(ROUTE_RECEIPT_SCHEMA). A call no route hits takes the generalized rail above
+unchanged, and the scheduled rail retains its exact-match precedence.
 Two properties the route rail adds. It dedupes PER RULE PER SESSION: a rule
 delivered in full is not re-injected for the same tool within 30 minutes, and
 a different tool delivers it again. And it FITS THE CAP: Claude Code persists
@@ -128,7 +129,6 @@ SEMANTIC_FAILURE_CONTEXT = (
     "The partner message was not blocked or rewritten; no semantic rule was "
     "treated as loaded."
 )
-PATH_INPUT_KEYS = ("file_path", "path", "notebook_path")
 # typesafe_client's state guard is 96k characters. Leave headroom for JSON
 # structure and reject above it rather than judging only a prompt's edges while
 # issuing a receipt that appears to cover the whole message.
@@ -165,10 +165,9 @@ def _extract_command(tool_input: object) -> str | None:
 
 
 def _extract_paths(tool_input: object) -> list[str]:
-    if not isinstance(tool_input, dict):
-        return []
-    return [tool_input[key] for key in PATH_INPUT_KEYS
-            if isinstance(tool_input.get(key), str) and tool_input[key].strip()]
+    # Share the Codex apply_patch and ordinary file-path parser with the
+    # declarative route rail. A patch's Move to destination binds too.
+    return rule_routes.call_paths(tool_input)
 
 
 def _serialized_payload(tool_name: str, tool_input: object) -> str:
@@ -186,7 +185,12 @@ def _row_matches(tool_name: str, tool_input: object, row: dict) -> bool:
         return False
     try:
         if kind == "verb":
-            return re.search(pattern, tool_name) is not None
+            if re.search(pattern, tool_name):
+                return True
+            if tool_name.startswith(("mcp__carr__", "mcp__carr_records__")):
+                prefix, verb = tool_name.rsplit("__", 1)
+                return re.search(pattern, prefix + "__" + verb.replace("_", "-")) is not None
+            return False
         if kind == "bash_family":
             if tool_name not in {"Bash", "functions.exec"}:
                 return False
@@ -341,6 +345,19 @@ def _deduped_context(payload: dict, receipt: dict) -> dict | None:
     return _context(text)
 
 
+def _scheduled_oversize_notice(ids: list[str]) -> str:
+    # The original receipt contract credits the pack only when every rule is
+    # present in full. Claude hides oversized additionalContext behind a file
+    # preview, so a partial receipt would falsely certify delivery.
+    return (
+        "RULE PACK PREUSE DELIVERY TOO LARGE: scheduled-automation rules were "
+        "NOT delivered. The full receipt exceeds the visible hook context cap. "
+        "The tool call was not blocked or changed. Before acting, fetch these "
+        "rules with standing-context rule_ids in batches and read their full "
+        "text: " + ", ".join(ids) + "."
+    )
+
+
 # ---------------------------------------------------------------------------
 # GENERALIZED RAIL (WR-000019 slice S9) — same shape as the four functions
 # above, parameterized over the compiled trigger table's (trigger_ids, packs,
@@ -353,6 +370,14 @@ def _generalized_selector_args(packs: list[str], ids: list[str]) -> str:
     return canonical({"packs": packs, "rule_ids": ids}).decode("utf-8")
 
 
+class SelectorError(RuntimeError):
+    """A fixed, non-sensitive reason for a failed standing-context call."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
 def _run_generalized_selector(packs: list[str], ids: list[str], runner: Callable) -> dict:
     command = [str(REPO / "run.sh"), "call", "standing-context",
                _generalized_selector_args(packs, ids)]
@@ -360,13 +385,13 @@ def _run_generalized_selector(packs: list[str], ids: list[str], runner: Callable
     result = runner(command, cwd=str(REPO), capture_output=True, text=True,
                     timeout=timeout, check=False, env=_selector_environment())
     if result.returncode != 0:
-        raise RuntimeError("selector returned nonzero")
+        raise SelectorError("nonzero")
     try:
         response = json.loads(result.stdout)
     except (TypeError, ValueError) as exc:
-        raise RuntimeError("selector returned malformed JSON") from exc
+        raise SelectorError("invalid_json") from exc
     if not isinstance(response, dict) or response.get("ok") is not True:
-        raise RuntimeError("selector response was not ok")
+        raise SelectorError("not_ok")
     return response
 
 
@@ -455,19 +480,20 @@ def _build_adviser(situation: str) -> dict:
     return module.advise(situation)
 
 
-def _build_unavailable() -> dict:
+def _build_unavailable(error: Exception | None = None) -> dict:
     path = REPO / "ops/jev_build_advisory.py"
     spec = importlib.util.spec_from_file_location("jev_build_advisory_unavailable", path)
     if spec is None or spec.loader is None:
         return {
             "schema": "jev-build-advisory-unavailable/v1",
             "status": "unavailable",
+            "reason": "unknown",
             "effect": "visible_advisory_abstention",
             "instruction": "Jev build-time intake was unavailable; qualified judgment remains explicit and uncredited.",
         }
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.unavailable()
+    return module.unavailable(module.failure_reason(error) if error else "unknown")
 
 
 def _semantic_receipt(payload: dict, response: dict, selected: list[dict],
@@ -516,7 +542,9 @@ def _semantic_receipt(payload: dict, response: dict, selected: list[dict],
     return row
 
 
-def _build_receipt(payload: dict, advisory: dict, status: str) -> dict:
+def _build_receipt(payload: dict, advisory: dict, status: str,
+                   failure_stage: str | None = None,
+                   failure_reason: str | None = None) -> dict:
     client = _client(payload)
     row = {
         "schema": BUILD_RECEIPT_SCHEMA,
@@ -533,6 +561,9 @@ def _build_receipt(payload: dict, advisory: dict, status: str) -> dict:
         "semantic_rule_delivery": status,
         "advisory": advisory,
     }
+    if status == "failed":
+        row["failure_stage"] = failure_stage
+        row["failure_reason"] = failure_reason
     row["receipt_id"] = receipt_id(row)
     if not validate_build_receipt(row, repo=REPO):
         raise RuntimeError("build receipt failed local validation")
@@ -554,13 +585,15 @@ def _process_prompt(payload: dict, runner: Callable,
         build = (build_adviser or _build_adviser)(prompt)
         if not isinstance(build, dict):
             raise RuntimeError("build adviser returned malformed advice")
-    except Exception:
-        build = _build_unavailable()
+    except Exception as exc:
+        build = _build_unavailable(exc)
+    failure_stage = "semantic_adviser"
     try:
         selected = (adviser(prompt) if adviser is not None
                     else _semantic_adviser(prompt, payload["session_id"]))
         if not isinstance(selected, list):
             raise RuntimeError("semantic selector returned malformed advice")
+        failure_stage = "candidate_selection"
         candidate_ids: list[str] = []
         for row in selected:
             candidate_id = row.get("id")
@@ -574,13 +607,25 @@ def _process_prompt(payload: dict, runner: Callable,
         selected = [by_id[short] for short in ids]
         if any(row.get("probability") is None for row in selected):
             raise RuntimeError("semantic selector omitted probability")
+        failure_stage = "selector_call"
         response = _run_generalized_selector(packs, ids, runner)
+        failure_stage = "selector_response"
+        _validate_generalized_selector(response, packs, ids)
+        failure_stage = "receipt_assembly"
         build_receipt = _build_receipt(payload, build, "delivered")
         receipt = _semantic_receipt(
             payload, response, selected, packs, ids, build_receipt)
         return _context(canonical(receipt).decode("utf-8"), "UserPromptSubmit")
-    except Exception:
-        receipt = _build_receipt(payload, build, "failed")
+    except Exception as exc:
+        if isinstance(exc, SelectorError):
+            failure_reason = exc.reason
+        elif isinstance(exc, subprocess.TimeoutExpired):
+            failure_reason = "timeout"
+        elif isinstance(exc, (RuntimeError, TypeError, ValueError, KeyError)):
+            failure_reason = "invalid_data"
+        else:
+            failure_reason = "exception"
+        receipt = _build_receipt(payload, build, "failed", failure_stage, failure_reason)
         return _context(canonical(receipt).decode("utf-8"), "UserPromptSubmit")
 
 
@@ -728,11 +773,17 @@ def process(payload: dict, *, runner: Callable = subprocess.run,
     if payload.get("hook_event_name") == "UserPromptSubmit":
         return _process_prompt(payload, runner, adviser, build_adviser)
     if _matches(payload):
-        # THE ORIGINAL RAIL, untouched: exact shape, exact pack, exact receipt.
+        # Keep the original receipt when it is visible in full. An oversized
+        # receipt is not delivery: Claude persists it and shows a preview.
         try:
             ids = scheduled_rule_ids()
             response = _run_selector(ids, runner)
-            return _deduped_context(payload, _receipt(payload, response, ids))
+            row = _receipt(payload, response, ids)
+            if not rule_routes.within_cap(canonical(row).decode("utf-8")):
+                notice = _scheduled_oversize_notice(ids)
+                return _context(notice if rule_routes.within_cap(notice)
+                                else rule_routes.notice_too_large(ids))
+            return _deduped_context(payload, row)
         except Exception:
             # Never surface provider/auth/network exception text: it may contain a
             # bearer, URL, or local path.  The fixed category is enough for Stop to

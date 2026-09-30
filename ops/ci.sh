@@ -780,13 +780,18 @@ PYEOF
   # kind again: repository files only. It fails when an active rule has no
   # delivery route, a corpus rule is missing from ops/config/rule-routes.v1.json,
   # or a trigger names a verb, tool or gate that cannot fire.
+  # check-eval-receipt JOINED 2026-09-29 (eval-gate): a change to a surface
+  # registered in evals/surfaces.json carries evals/<surface>/receipt.json or a
+  # reasoned no-eval line in the PR body. Enforced only in a pull_request run,
+  # where GITHUB_EVENT_PATH carries the body; elsewhere a missing receipt is
+  # advisory and a malformed one still fails. Procedure: evals/README.md.
   for inv in enforcement-coverage-check audit-queue-freshness-check map-row-evidence-check \
              rule-enforcement-map-check rule-load-layer-check rule-classification-parity-check \
              reachability-check selftest-git-isolation-check \
              drive-dependency-inventory drive-retirement-readiness-gate \
              mechanism-doctrine-gate scheduler-cutover-coverage-gate \
              boot-budget-check core-rule-ids-check rule-route-coverage \
-             rule-boot-classes-check; do
+             rule-boot-classes-check check-eval-receipt; do
     [ -f "ops/$inv.py" ] || continue
     run_quiet "$LOGDIR/gate-$inv.log" "$PY" "ops/$inv.py" \
       || { inherited_abort "$inv" "$PY" "ops/$inv.py"
@@ -1527,6 +1532,37 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
          -f mcp-server/test/r03-notifications-postgres.sql; then
       tail -30 "$LOGDIR/r03-notifications-postgres.log" >&2
       bad migration "the R03 notification mint, recipient and status proof failed"
+      return
+    fi
+  fi
+
+  # V5-R03 action-needed producer: recipient routing, recovery standing,
+  # deferred exclusion and replay dedupe in a rolled-back transaction.
+  if [ -f mcp-server/test/r03-loop-queue-postgres.sql ]; then
+    if ! run_quiet "$LOGDIR/r03-loop-queue-postgres.log" \
+         "$psql_bin" -X -v ON_ERROR_STOP=1 -P format=csv -d "$dsn" \
+         -f mcp-server/test/r03-loop-queue-postgres.sql; then
+      tail -30 "$LOGDIR/r03-loop-queue-postgres.log" >&2
+      bad migration "the R03 loop producer and dedupe proof failed"
+      return
+    fi
+    if ! awk -F, '
+      $0=="r03_recovered_health" { phase=1; next }
+      $0=="r03_actor_mismatch_health" { phase=2; next }
+      $1=="joe" && phase==1 {
+        recovered=($2==3 && $3==3 && $4==3 && $6==0 && $7==0 &&
+                   $8==0 && $9==1 && $10==0 && index($15,"No open")==1)
+        phase=0
+      }
+      $1=="joe" && phase==2 {
+        mismatch=($2==4 && $3==3 && $4==3 && $6==1 && $7==1 &&
+                  $8==1 && $9==1 && $10==0 && index($15,"On missing")==1)
+        phase=0
+      }
+      END { exit !(recovered && mismatch) }
+    ' "$LOGDIR/r03-loop-queue-postgres.log"; then
+      tail -30 "$LOGDIR/r03-loop-queue-postgres.log" >&2
+      bad migration "R03 standing report conflates historical and unresolved failures"
       return
     fi
   fi

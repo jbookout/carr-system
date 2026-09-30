@@ -73,7 +73,11 @@ BUILD_GUIDANCE_KEYS = frozenset({
     "prioritize_blocker_removal",
 })
 BUILD_ADVISORY_UNAVAILABLE_KEYS = frozenset({
-    "schema", "status", "effect", "instruction",
+    "schema", "status", "reason", "effect", "instruction",
+})
+BUILD_ADVISORY_UNAVAILABLE_REASONS = frozenset({
+    "billing_exhausted", "auth_failed", "rate_limited", "timeout", "network",
+    "server_5xx", "unknown",
 })
 # A background-task notification, cross-session message, Stop-hook reopen or
 # other machine envelope is not a partner request, so no build advice is
@@ -86,6 +90,13 @@ BUILD_RECEIPT_KEYS = frozenset({
     "schema", "receipt_id", "client", "session_id", "turn_id",
     "prompt_sha256", "adviser_digest", "configuration_digest",
     "source_digest", "semantic_rule_delivery", "advisory",
+})
+BUILD_FAILURE_STAGES = frozenset({
+    "semantic_adviser", "candidate_selection", "selector_call",
+    "selector_response", "receipt_assembly",
+})
+BUILD_FAILURE_REASONS = frozenset({
+    "timeout", "nonzero", "invalid_json", "not_ok", "invalid_data", "exception",
 })
 POSTWRITE_RECEIPT_SCHEMA = "jev-post-write-review/v2"
 POSTWRITE_RECEIPT_KEYS = frozenset({
@@ -148,6 +159,7 @@ def validate_build_advisory(row: object, *, prompt_sha256: str) -> bool:
     if row.get("schema") == BUILD_ADVISORY_UNAVAILABLE_SCHEMA:
         return (set(row) == BUILD_ADVISORY_UNAVAILABLE_KEYS
                 and row.get("status") == "unavailable"
+                and row.get("reason") in BUILD_ADVISORY_UNAVAILABLE_REASONS
                 and row.get("effect") == "visible_advisory_abstention"
                 and _nonempty(row.get("instruction")))
     if row.get("schema") == BUILD_ADVISORY_SKIPPED_SCHEMA:
@@ -191,7 +203,9 @@ def validate_build_advisory(row: object, *, prompt_sha256: str) -> bool:
 
 def validate_build_receipt(row: object, *, repo: Path) -> bool:
     """Validate the turn-bound build receipt even when no semantic rule binds."""
-    if not isinstance(row, dict) or set(row) != BUILD_RECEIPT_KEYS:
+    if not isinstance(row, dict) or set(row) not in {
+            BUILD_RECEIPT_KEYS,
+            BUILD_RECEIPT_KEYS | {"failure_stage", "failure_reason"}}:
         return False
     if row.get("schema") != BUILD_RECEIPT_SCHEMA:
         return False
@@ -207,6 +221,11 @@ def validate_build_receipt(row: object, *, repo: Path) -> bool:
         return False
     if row.get("semantic_rule_delivery") not in {
             "delivered", "not_applicable", "failed", "not_attempted_oversize"}:
+        return False
+    has_failure = "failure_stage" in row
+    if has_failure and (row["semantic_rule_delivery"] != "failed"
+                        or row["failure_stage"] not in BUILD_FAILURE_STAGES
+                        or row["failure_reason"] not in BUILD_FAILURE_REASONS):
         return False
     expected_config = digest({
         relative: file_sha256(repo / relative)

@@ -88,8 +88,37 @@ LATEST comment carrying a verdict (first line APPROVE-marker or BLOCK-marker,
 config review_markers/block_markers) from a trusted author (author_association
 OWNER/MEMBER/COLLABORATOR, or a configured login) decides; it must be APPROVE;
 and it must carry exactly one `Reviewed-SHA: <40-hex>` line equal to the PR's
-head SHA (no dates: an exact SHA is the only freshness proof). Worker lane
-also: every PR in the batch that touches a release path has a green `ops/ci.sh
+head SHA (no dates: an exact SHA is the only freshness proof).
+
+FIX-FORWARD, the one exception to "must be APPROVE", and only for a BLOCK
+verdict (never a missing or stale review). A merged PR B whose latest trusted
+verdict is BLOCK has defective code on main; a fresh APPROVE on B's defective
+head is exactly what must never be posted to get past it. Instead B may be in a
+released batch ONLY if ALL of these hold:
+  1. a LATER first-parent commit of the SAME batch, so at or before the release
+     target, is exactly PR F's merge commit (GitHub's merge_commit_sha for F),
+     and B is its ancestor in git;
+  2. F's DECIDING approval (the same exact or main-merge-only rule above, so a
+     marker on an older approval, on a non-verdict comment or on an untrusted
+     comment never counts) carries `Fixes-Forward: #<B's PR number>` in a
+     contiguous authority header immediately after first-line APPROVE and
+     second-line Reviewed-SHA. One number per line; multiple consecutive
+     lines can name multiple blocked PRs. Later prose and examples never count;
+  3. the release target is at or after F's merge commit (re-checked in git),
+     and every path F changed still has F's exact blob and mode at the target.
+     A later revert or rewrite of any F path fails this; a later PR that
+     carries the fix forward again needs its own marker and passes this check.
+A target between B and F therefore stays a review_blocked hold: the defective
+commit can never ship alone, only in the same atomic release as its fix. B's
+BLOCK verdict is left as it is, B is never listed as approved, and its release
+paths still need green CI. The run record (and the dry-run output) carries
+`fix_forwards`: the blocked PR and its commit on main, the BLOCK comment URL,
+the fixing PR and its merge commit, the fixing approval's Reviewed-SHA and URL.
+Both lanes read review evidence through the same code, so the rule is the same
+for the app lane. The reviewer of F is the one who attests
+that F fixes B, so the marker goes on F's independent approval, nowhere else.
+
+Worker lane also: every PR in the batch that touches a release path has a green `ops/ci.sh
 --strict` (and secret-class) CI run. The Worker releases up to the NEWEST
 first-parent commit whose own main canary concluded success (plus any
 canary-ignored commits directly above it), not necessarily HEAD: commits whose
@@ -149,12 +178,15 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO))
+from lib.secret_redaction import redact_text, sensitive_env_values  # noqa: E402
 CONFIG_PATH = REPO / "ops" / "config" / "release-pipeline.v1.json"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -442,7 +474,7 @@ def _glob_regex(glob: str) -> "re.Pattern[str]":
 
 
 def _glob_hit(path: str, glob: str) -> bool:
-    return bool(_glob_regex(glob).match(path))
+    return bool(_glob_regex(glob).fullmatch(path))
 
 
 def classify(paths: Iterable[str], lane_cfg: dict) -> tuple[bool, list[str]]:
@@ -453,8 +485,7 @@ def classify(paths: Iterable[str], lane_cfg: dict) -> tuple[bool, list[str]]:
     ignore = lane_cfg.get("non_release_globs") or []
     hits = []
     for p in paths:
-        p = p.strip()
-        if not p:
+        if p == "":
             continue
         if prefixes is not None and not any(p == x.rstrip("/") or p.startswith(x) for x in prefixes):
             continue
@@ -506,7 +537,18 @@ def trusted_commenter(comment: dict, cfg: dict) -> bool:
     return assoc in allowed or (bool(login) and login in logins)
 
 
-REVIEWED_SHA_RE = re.compile(r"^\s*Reviewed-SHA:\s*([0-9a-f]{40})\s*$", re.M)
+REVIEWED_SHA_LINE_RE = re.compile(r"Reviewed-SHA: ([0-9a-f]{40})")
+
+
+def reviewed_header_sha(body: str) -> str | None:
+    """Only a literal first-line APPROVE and second-line SHA authorize release."""
+    lines = [line.removesuffix("\r") for line in (body or "").split("\n")]
+    if len(lines) < 2 or lines[0] != "APPROVE":
+        return None
+    second = REVIEWED_SHA_LINE_RE.fullmatch(lines[1])
+    if second is None or any("reviewed-sha:" in line.lower() for line in lines[2:]):
+        return None
+    return second.group(1)
 
 
 def approval_of(comments: list[dict], cfg: dict, head_sha: str,
@@ -522,7 +564,8 @@ def approval_of(comments: list[dict], cfg: dict, head_sha: str,
     plus nothing but merges of main (what `gh pr update-branch` adds after a
     review); covers() returns the reason otherwise, and the approval is stale."""
     last = _latest_approval(comments, cfg)
-    reviewed = REVIEWED_SHA_RE.findall(str(last.get("body") or ""))
+    header_sha = reviewed_header_sha(str(last.get("body") or ""))
+    reviewed = [header_sha] if header_sha else []
     if head_sha and reviewed == [head_sha]:
         return last, "exact", head_sha
     why = "no main-merge rule available"
@@ -540,14 +583,49 @@ def latest_verdict(comments: list[dict], cfg: dict, head_sha: str) -> dict:
     return approval_of(comments, cfg, head_sha)[0]
 
 
-def _latest_approval(comments: list[dict], cfg: dict) -> dict:
+def deciding_verdict(comments: list[dict], cfg: dict) -> dict | None:
+    """The LATEST trusted comment that carries a verdict, or None."""
     carrying = [c for c in comments if trusted_commenter(c, cfg) and verdict(c.get("body", ""), cfg)]
     if not carrying:
+        return None
+    return max(carrying, key=lambda c: (str(c.get("created_at") or ""), int(c.get("id") or 0)))
+
+
+def _latest_approval(comments: list[dict], cfg: dict) -> dict:
+    last = deciding_verdict(comments, cfg)
+    if last is None:
         raise Blocked("no_independent_review", "no trusted comment carries a review verdict")
-    last = max(carrying, key=lambda c: (str(c.get("created_at") or ""), int(c.get("id") or 0)))
     if verdict(last.get("body", ""), cfg) != "approve":
         raise Blocked("review_blocked", f"the latest review verdict is BLOCK ({last.get('html_url')})")
     return last
+
+
+FIXES_FORWARD_RE = re.compile(r"^Fixes-Forward:[ \t]*#([1-9][0-9]*)[ \t]*$")
+
+
+def fixes_forward(approval: dict, reviewed_sha: str) -> set[int]:
+    """Read only consecutive authority-header markers after exact APPROVE and
+    Reviewed-SHA lines. The first prose, blank, or example line ends the
+    header. This narrow grammar makes Markdown/HTML rendering irrelevant:
+    a marker later in a quoted, fenced, code-span, or HTML example cannot
+    confer release authority. CRLF is tolerated. The caller passes only the
+    deciding approval returned by approval_of()."""
+    # Split on LF only. Python's splitlines() treats U+2028 and several other
+    # Unicode separators as line breaks even though approval_of()'s reviewed
+    # SHA matcher and GitHub's comment text do not. All authority lines must
+    # be literal LF/CRLF lines and line two must name the SHA that was accepted.
+    lines = [line.removesuffix("\r") for line in str(approval.get("body") or "").split("\n")]
+    if len(lines) < 3 or lines[0] != "APPROVE":
+        return set()
+    if reviewed_header_sha(str(approval.get("body") or "")) != reviewed_sha:
+        return set()
+    found: set[int] = set()
+    for line in lines[2:]:
+        m = FIXES_FORWARD_RE.match(line)
+        if not m:
+            break
+        found.add(int(m.group(1)))
+    return found
 
 
 def evidence_ref_from_url(url: str) -> str:
@@ -599,9 +677,13 @@ def queue_turn(lane: str, sha: str, step: str, rc: int, log: str, record_path: s
 
 
 def blocker_loop(capability: str, detail: str) -> dict:
+    health_repair = capability in {"health_baseline_hard_error", "health_baseline_stalled"}
+    blocker_detail = (f"The authorized release-repair lane must restore and verify the health baseline: {detail}"
+                      if health_repair else
+                      f"Joe is the provisioning decider for the named unattended credential: {detail}")
     return {"idempotency_key": str(uuid.uuid5(ROOM_NAMESPACE, "release-pipeline-blocker:" + capability)),
-            "kind": "open_loop", "owner": "Joe", "domain": "system", "marker": "none",
-            "blocker": "capability", "blocker_detail": detail,
+            "kind": "open_loop", "owner": "Claude" if health_repair else "Joe", "domain": "system", "marker": "none",
+            "blocker": "other_lane" if health_repair else "capability", "blocker_detail": blocker_detail,
             "body": (f"The scripted release pipeline (ops/release-pipeline.py) cannot run "
                      f"unattended: {detail}. It stops at that step every tick until this "
                      f"exists; nothing is released meanwhile."),
@@ -623,6 +705,7 @@ class Pipeline:
         self.env = env if env is not None else child_env()
         self.github_factory = github or (lambda repo_name: GitHub(repo_name, self.env))
         self.http = http
+        self.sleep = time.sleep
         self.call_verb = call_verb or self._call_verb
         self.slice_marker = slice_marker or self._run_slice_marker
         self.today = today or dt.date.today().isoformat()
@@ -649,8 +732,11 @@ class Pipeline:
         except Exception as exc:  # noqa: BLE001 — a failed filing is reported, not raised
             return False, f"{type(exc).__name__}: {exc}"
         if proc.returncode != 0:
-            tail = (proc.stderr or proc.stdout or "").strip().splitlines()
-            return False, f"run.sh call {verb} exit {proc.returncode}: {tail[-1] if tail else ''}"
+            # TOOL ERROR is multiline JSON; its last line is only `}`.
+            # Keep both streams so a stderr identity banner cannot hide stdout.
+            detail = "\n".join(part.strip() for part in (proc.stderr, proc.stdout) if part and part.strip())
+            detail = redact_text(detail, known_secrets=sensitive_env_values(self.env))
+            return False, f"run.sh call {verb} exit {proc.returncode}: {detail[:4000]}"
         try:
             return True, json.loads(proc.stdout)
         except ValueError:
@@ -686,12 +772,22 @@ class Pipeline:
         self.out(f"  -> slice-marker: {outcome}")
         return outcome
 
-    def git(self, *args: str, cwd: Path | None = None) -> str:
+    def git(self, *args: str, cwd: Path | None = None, trim_output: bool = True) -> str:
         proc = subprocess.run(["git", "-C", str(cwd or self.repo), *args], env=self.env,
-                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300)
+                              stdin=subprocess.DEVNULL, capture_output=True, timeout=300)
         if proc.returncode != 0:
-            raise StepFailed(f"git {args[0]}", proc.returncode, "", (proc.stderr or "").strip()[:300])
-        return proc.stdout.strip()
+            raise StepFailed(f"git {args[0]}", proc.returncode, "", os.fsdecode(proc.stderr).strip()[:300])
+        # fsdecode preserves filename bytes via surrogateescape. text=True
+        # applies universal-newline conversion and would corrupt CR/CRLF names
+        # in the NUL-delimited path list used by change_present().
+        output = os.fsdecode(proc.stdout)
+        return output.strip() if trim_output else output
+
+    def changed_paths(self, before: str, after: str, *, cwd: Path | None = None) -> list[str]:
+        """Exact Git path names for release, CI and review decisions."""
+        output = self.git("diff", "--no-renames", "--name-only", "-z", before, after,
+                          cwd=cwd, trim_output=False)
+        return [path for path in output.split("\0") if path]
 
     def step(self, name: str, argv: list[str], cwd: Path, *, timeout: int = 3600,
              env: dict[str, str] | None = None) -> Result:
@@ -991,19 +1087,25 @@ class Pipeline:
         pre_pipeline: list[int] = []
         release_prs: list[dict] = []
         head: dict | None = None
-        for commit in self.batch_commits(repo_dir, base, sha):
+        # FIX-FORWARD. A PR whose latest trusted verdict is BLOCK is not a hold
+        # by itself if a LATER commit of THIS batch fixes it (see
+        # resolve_fix_forwards); it is parked here and decided after the walk.
+        blocked: list[dict] = []
+        fixers: list[dict] = []
+        commits = self.batch_commits(repo_dir, base, sha)   # newest first
+        for position, commit in enumerate(commits):
             pr = gh.pr_for_commit(commit)
             if pr is None:
                 raise Blocked("no_pull_request", f"{commit[:12]} reached main without a merged pull request")
             number, head_sha = int(pr["number"]), str(pr["head"]["sha"])
             parent = self.git("rev-parse", f"{commit}^1", cwd=repo_dir)
-            touches, _ = classify(self.git("diff", "--name-only", parent, commit, cwd=repo_dir).splitlines(),
-                                  lane_cfg)
+            touches, _ = classify(self.changed_paths(parent, commit, cwd=repo_dir), lane_cfg)
             approval: dict | None
             rule = reviewed_sha = ""
+            comments = gh.comments(number)   # read ONCE: the verdict and the BLOCK link come from one snapshot
             try:
                 approval, rule, reviewed_sha = approval_of(
-                    gh.comments(number), lane_cfg, head_sha,
+                    comments, lane_cfg, head_sha,
                     # called synchronously inside this iteration, so the closure sees this commit's values
                     covers=lambda r: self.main_merge_only(repo_dir, number, r, head_sha, commit))
             except Blocked as b:
@@ -1012,22 +1114,102 @@ class Pipeline:
                         and str(pr.get("merged_at") or "") < cutover):
                     pre_pipeline.append(number)
                     approval = None
+                elif b.reason == "review_blocked":
+                    block = deciding_verdict(comments, lane_cfg) or {}
+                    blocked.append({"pr": number, "commit": commit, "position": position,
+                                    "url": str(block.get("html_url") or ""), "detail": b.detail})
+                    approval = None
                 else:
                     raise Blocked(b.reason, f"PR #{number} ({commit[:12]}): {b.detail}")
             if approval is not None:
                 reviewed.append(number)
                 reviews.append({"pr": number, "rule": rule, "reviewed_sha": reviewed_sha, "head_sha": head_sha})
+                fixers.append({"pr": number, "commit": commit, "position": position,
+                               "merge_commit_sha": str(pr.get("merge_commit_sha") or ""),
+                               "fixes": fixes_forward(approval, reviewed_sha), "reviewed_sha": reviewed_sha,
+                               "url": str(approval.get("html_url") or "")})
             if touches:
                 release_prs.append({"pr": number, "head_sha": head_sha})
             if commit == sha and approval is not None:
                 head = {"pr": number, "head_sha": head_sha, "url": str(approval.get("html_url") or ""),
                         "event": events.get(commit) or {}, "rule": rule, "reviewed_sha": reviewed_sha}
+        fix_forwards = self.resolve_fix_forwards(repo_dir, sha, blocked, fixers)
         if head is None:
             raise Blocked("no_independent_review", f"the head commit {sha[:12]} has no approval")
         return {"head": head, "prs": reviewed, "pre_pipeline_prs": pre_pipeline, "release_prs": release_prs,
-                "reviews": reviews,
+                "reviews": reviews, "fix_forwards": fix_forwards,
                 "verifier": choose_verifier(lane_cfg, head["event"]),
                 "verifier_evidence": evidence_ref_from_url(head["url"])}
+
+    def resolve_fix_forwards(self, repo_dir: Path, sha: str, blocked: list[dict],
+                             fixers: list[dict]) -> list[dict]:
+        """Each BLOCKED commit B of the batch base..sha ships only with its fix,
+        else the whole batch is a review_blocked hold. ALL of these must hold:
+          1. a LATER first-parent commit of the SAME batch (so at or before the
+             release target `sha`) is EXACTLY PR F's merge_commit_sha as
+             GitHub reports it; `blocked`/`fixers` carry each commit's
+             position in the newest-first batch, so "later" is a smaller
+             position, never a date, and git re-checks that B is an ancestor
+             of F's merge commit;
+          2. F's DECIDING approval, the one approval_of() accepted under the
+             exact or main-merge-only rule, carries the line
+             `Fixes-Forward: #<B's PR number>` (fixes_forward());
+          3. the target is at or after F's merge commit (re-checked in git),
+             and F's change is still PRESENT at the target (change_present):
+             a later revert of F, or a later rewrite of F's lines, drops F as
+             the fixer unless that later PR carries its own marker.
+        B is bound by its commit on main and the PR GitHub maps it to; F by
+        its merge_commit_sha, its PR number and its approval's Reviewed-SHA.
+        The first unfixed B raises; nothing is shipped partially.
+        A target between B and F never contains F, so it holds: the defective
+        commit can never ship alone. B's BLOCK verdict is never rewritten or
+        re-approved; B is not added to the approved PR list."""
+        out: list[dict] = []
+        for b in blocked:
+            candidates = [f for f in sorted(fixers, key=lambda f: -f["position"])
+                          if f["position"] < b["position"] and b["pr"] in f["fixes"]
+                          and f["merge_commit_sha"] == f["commit"]]
+            fix = None
+            for cand in candidates:
+                try:
+                    self.git("merge-base", "--is-ancestor", cand["commit"], sha, cwd=repo_dir)
+                    self.git("merge-base", "--is-ancestor", b["commit"], cand["commit"], cwd=repo_dir)
+                except StepFailed:
+                    continue
+                if self.change_present(repo_dir, cand["commit"], sha):
+                    fix = cand
+                    break
+            if fix is None:
+                why = (f"the change of fixing PR(s) {', '.join('#' + str(c['pr']) for c in candidates)} "
+                       f"is no longer present at the target (reverted or rewritten since); a later PR "
+                       f"that carries the fix needs its own `Fixes-Forward: #{b['pr']}`"
+                       if candidates else
+                       f"no later PR in this batch at or before the target {sha[:12]} has a deciding "
+                       f"approval carrying `Fixes-Forward: #{b['pr']}`")
+                raise Blocked("review_blocked", f"PR #{b['pr']} ({b['commit'][:12]}): {b['detail']}; {why}")
+            out.append({"blocked_pr": b["pr"], "blocked_commit": b["commit"], "block_url": b["url"],
+                        "fixing_pr": fix["pr"], "fixing_commit": fix["commit"],
+                        "fixing_reviewed_sha": fix["reviewed_sha"], "fixing_approval_url": fix["url"]})
+            self.out(f"  fix-forward: PR #{b['pr']} ({b['commit'][:12]}) is BLOCKED and ships only with "
+                     f"its fix PR #{fix['pr']} ({fix['commit'][:12]}), approval {fix['url']}")
+        return out
+
+    def change_present(self, repo_dir: Path, fix: str, target: str) -> bool:
+        """Require every path touched by the attested fix to match its blob
+        and mode at the target. A partial revert or later edit needs a fresh
+        reviewed Fixes-Forward marker, even if another fix path remains."""
+        try:
+            # Keep -z output intact: trimming would corrupt a leading-space
+            # filename. The later diff must treat every name literally, since
+            # a filename may itself begin with Git's pathspec-magic syntax.
+            paths = self.changed_paths(f"{fix}^1", fix, cwd=repo_dir)
+            if not paths:
+                return False
+            self.git("--literal-pathspecs", "diff", "--quiet", fix, target, "--", *paths,
+                     cwd=repo_dir)
+            return True
+        except StepFailed:
+            return False
 
     def main_merge_only(self, repo_dir: Path, number: int, reviewed: str, head: str,
                         merged: str) -> str | None:
@@ -1062,7 +1244,7 @@ class Pipeline:
                 return False
 
         def names(a: str, b: str) -> set[str]:
-            return {x for x in self.git("diff", "--name-only", a, b, cwd=repo_dir).splitlines() if x.strip()}
+            return set(self.changed_paths(a, b, cwd=repo_dir))
 
         if not (have(reviewed) and have(head)):
             with contextlib.suppress(StepFailed):   # squash merges leave H off main: fetch the PR head
@@ -1102,7 +1284,7 @@ class Pipeline:
             parent = self.git("rev-parse", f"{commit}^1")
         except StepFailed:      # a root commit: nothing to call ignored
             return False
-        paths = [p for p in self.git("diff", "--name-only", parent, commit).splitlines() if p.strip()]
+        paths = self.changed_paths(parent, commit)
         ignore = lane_cfg.get("canary_ignored_globs") or []
         return bool(paths) and all(any(_glob_hit(p, g) for g in ignore) for p in paths)
 
@@ -1125,9 +1307,10 @@ class Pipeline:
     def release_target(self, gh: Any, lane_cfg: dict, base: str, head: str) -> str:
         """The newest first-parent commit in base..head the Worker may ship.
 
-        main-canary runs ~20 minutes with cancel-in-progress while merges land
-        every 10-20 minutes, so HEAD's own run is nearly always in progress or
-        cancelled. Requiring HEAD itself to be green starved the lane; instead
+        main-canary runs ~20 minutes while merges can land every 10-20 minutes,
+        so HEAD's own run may be pending or in progress. Running canaries now
+        finish; older pending runs can still be replaced. Requiring HEAD itself
+        to be green can starve the lane; instead
         walk back from HEAD and ship the NEWEST commit whose own canary
         concluded success. The canary judges the whole tree at its commit, so:
           - a commit with no run, a run in progress, or a cancelled/skipped run
@@ -1209,7 +1392,7 @@ class Pipeline:
         run_id = self.ci_run(gh, lane_cfg, head["pr"], head["head_sha"])
         repo_name = lane_cfg["github_repo"]
         return {"pr": head["pr"], "prs": rev["prs"], "pre_pipeline_prs": rev["pre_pipeline_prs"],
-                "reviews": rev["reviews"], "review_rule": head["rule"],
+                "reviews": rev["reviews"], "fix_forwards": rev["fix_forwards"], "review_rule": head["rule"],
                 "reviewed_sha": head["reviewed_sha"], "pr_head_sha": head["head_sha"],
                 "verifier": rev["verifier"], "verifier_evidence": rev["verifier_evidence"],
                 "test_evidence": f"github-actions:{repo_name}/runs/{run_id}#{lane_cfg['test_evidence_label']}",
@@ -1359,8 +1542,7 @@ class Pipeline:
                 self.git("merge-base", "--is-ancestor", base, sha, cwd=repo_dir)
             except StepFailed:
                 raise Blocked("history_diverged", f"released {base[:12]} is not an ancestor of main {sha[:12]}")
-            if lane == "worker" and classify(self.git("diff", "--name-only", base, sha, cwd=repo_dir)
-                                             .splitlines(), lane_cfg)[0]:
+            if lane == "worker" and classify(self.changed_paths(base, sha, cwd=repo_dir), lane_cfg)[0]:
                 # From here on `sha` is the RELEASE TARGET, the newest green
                 # canary commit, not HEAD: review, CI, upload, live readback and
                 # the state/record rows all name it. A doc/test-only batch needs
@@ -1377,7 +1559,7 @@ class Pipeline:
                              f"{failed[:12]} ({lane_state.get('failed_step')}); waiting for a green "
                              "fix-forward")
                     return 0
-            changed = self.git("diff", "--name-only", base, sha, cwd=repo_dir).splitlines()
+            changed = self.changed_paths(base, sha, cwd=repo_dir)
             needed, hits = classify(changed, lane_cfg)
             self.out(f"release-pipeline[{lane}]: batch {base[:12]}..{sha[:12]}: "
                      f"{len(changed)} path(s), {len(hits)} release path(s)")
@@ -1650,6 +1832,7 @@ class Pipeline:
         return {"release_key": key, "provider_version_id": version, "migrations_applied": pending,
                 "do_migration": self.do_migration,
                 "pr": ev["pr"], "prs": ev["prs"], "reviews": ev.get("reviews", []),
+                "fix_forwards": ev.get("fix_forwards", []),
                 "review_rule": ev.get("review_rule"), "reviewed_sha": ev.get("reviewed_sha"),
                 "pr_head_sha": ev.get("pr_head_sha"), "verifier": ev["verifier"],
                 "verifier_evidence": ev["verifier_evidence"], "test_evidence": ev["test_evidence"],
@@ -1738,6 +1921,45 @@ class Pipeline:
         self.out(f"  -> schema-supersede: closed {closed} as superseded by #{new_num}")
         return closed
 
+    def verify_app_live(self, lane_cfg: dict, sha: str, *, attempts: int = 12) -> None:
+        """Read the configured public endpoint until it serves the promoted SHA.
+
+        Keep every observed payload: a failed release must show what the
+        verifier actually received, including any transient read failure.
+        """
+        url = lane_cfg["live_release_url"]
+        log = self.run_dir / "app-verify-live.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        last_response = None
+        last_error = None
+        with log.open("w", encoding="utf-8") as output:
+            for attempt in range(1, attempts + 1):
+                row = {"attempt": attempt, "request": {"method": "GET", "url": url,
+                       "user_agent": "carr-release-pipeline"}}
+                try:
+                    response = self.http(url)
+                    last_response = response
+                    last_error = None
+                    row["response"] = response
+                except Exception as exc:  # noqa: BLE001 — record and retry a transient endpoint read
+                    response = None
+                    last_error = type(exc).__name__
+                    row["error"] = f"{type(exc).__name__}: {exc}"
+                output.write(json.dumps(row, sort_keys=True) + "\n")
+                output.flush()
+                if isinstance(response, dict) and response.get("source_commit") == sha \
+                        and response.get("environment") == "production":
+                    self.out(f"  -> app-verify-live: matched {sha} on read {attempt}; log {log}")
+                    return
+                if attempt < attempts:
+                    self.sleep(5)
+        source = last_response.get("source_commit") if isinstance(last_response, dict) else None
+        environment = last_response.get("environment") if isinstance(last_response, dict) else None
+        error = f" last_read_error={last_error}" if last_error else ""
+        raise StepFailed("app-verify-live", 1, str(log),
+                         f"/app-release did not serve {sha} after {attempts} reads; "
+                         f"source_commit={source} environment={environment}{error}; log {log}")
+
     def release_app(self, lane_cfg: dict, repo_dir: Path, base: str, sha: str) -> dict:
         """Same review evidence as the Worker lane; the named required checks
         must be PRESENT and green (an empty check list is not a pass)."""
@@ -1766,13 +1988,12 @@ class Pipeline:
         if self.dry_run:
             self.out(f"  [dry-run] GET {lane_cfg['live_release_url']} and require source_commit == {sha}")
         else:
-            live = self.http(lane_cfg["live_release_url"])
-            if live.get("source_commit") != sha or live.get("environment") != "production":
-                raise StepFailed("app-verify-live", 1, "", "/app-release does not serve the released SHA")
+            self.verify_app_live(lane_cfg, sha)
             self.remove_worktrees()
         head = rev.get("head") or {}
         return {"run_dir": str(self.run_dir), "prs": rev["prs"], "pre_pipeline_prs": rev["pre_pipeline_prs"],
-                "reviews": rev.get("reviews", []), "review_rule": head.get("rule"),
+                "reviews": rev.get("reviews", []), "fix_forwards": rev.get("fix_forwards", []),
+                "review_rule": head.get("rule"),
                 "reviewed_sha": head.get("reviewed_sha"), "pr_head_sha": head.get("head_sha"),
                 "review_evidence": rev["verifier_evidence"]}
 

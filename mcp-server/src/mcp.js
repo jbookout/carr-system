@@ -22,7 +22,9 @@ import { deriveTrustedPrincipalBinding,
   ExactEffectRefusal, SCAC_TRUSTED_PRINCIPAL_READBACK_SQL } from "./scac-exact-effects.js";
 import { scheduleFailureRecord, rpcInternalErrorFailureClass, actorUnresolvedFailureClass, RPC_INTERNAL_ERROR_CODE } from "./trace.js";
 import { gateZeroSeatConnection } from "./gate-zero-seat-connection.v5.js";
-import { jevAskBinding, prefetchJevAnswer } from "./jev-call-receipt.js";
+import { providerFor as judgeProviderFor } from "./judge-provider.js";
+import { jevAskBinding, prefetchJevAnswer, reserveJevCallAttempt,
+  validateAskJevArgs } from "./jev-call-receipt.js";
 import { foundationAssuranceSeatConnection } from
   "./foundation-assurance-seat-connection.v5.js";
 import { stampedGitSha } from "./build-stamp.js";
@@ -311,10 +313,10 @@ export const PROFILES = {
     // least likely to have a human beside it. It is additive and keyed, it
     // de-dupes onto an open fingerprint rather than growing the pile, and it
     // structurally cannot touch the columns that close an incident — closing is
-    // partner authority (close-incident is humanOnly and refuses anything that
-    // is not Joe or Dell), so the widest thing this profile can do with the
-    // operational ledger is say truthfully that something broke.
-    "open-incident",
+    // partner authority (close-incident is humanOnly). Triage may advance only
+    // detected -> triaged with a next action and provisional impact; it cannot
+    // set severity, root cause, recovery evidence, or a closed state.
+    "open-incident", "triage-incident",
   ]),
 
   // AWAY MODE, added 2026-08-03 on Joe's ruling. The scheduled CEO session that
@@ -349,7 +351,7 @@ export const PROFILES = {
     // everything capture holds
     "log-activity", "stamp-touch", "add-loop", "update-loop",
     "set-next-action", "complete-action", "add-critical-date", "record-finding",
-    "record-signal", "record-branch-evidence", "record-defect", "open-incident",
+    "record-signal", "record-branch-evidence", "record-defect", "open-incident", "triage-incident",
     // plus: close what it opened, advance the book, draft, and keep the record honest
     "close-loop", "update-deal", "add-premises", "record-counter",
     "prepare-document", "update-document-status",
@@ -678,6 +680,16 @@ export async function recordReadCall(insertFn, actor, verb, ok, errorKind) {
   }
 }
 
+// Actor-scoped read doors use a read-only writer transaction and bypass the
+// ordinary reader branch. Schedule their identity-only audit after that
+// transaction; never classify a mutating writer call as a read.
+export function scheduleWriterReadCall(tool, actor, verb, ok, errorKind, waitUntil, insertFn) {
+  if (tool?.writerConnection !== true || tool.write ||
+      typeof waitUntil !== "function" || typeof insertFn !== "function") return false;
+  waitUntil(recordReadCall(insertFn, actor, verb, ok, errorKind));
+  return true;
+}
+
 // Authority operations have a separate, human-principal-bound database
 // connection. The scoped variables permit Joe and Dell to have distinct DB
 // login identities. The unscoped value is deliberately Joe-only: letting a
@@ -729,7 +741,7 @@ export async function executeWithTrustedPrincipal(actor, readback, requiredBundl
 
 // Exported for deterministic no-network identity-gate tests. It remains the
 // single normal dispatcher path; callers receive no additional route or grant.
-export async function callTool(env, actor, name, args, profile = "full") {
+export async function callTool(env, actor, name, args, profile = "full", judgeWorkClass = "system_work") {
   const personalScope = personalScopeForActor(actor);
   if (personalScope.status === "error") {
     throw new ToolError({ error: personalScope.error,
@@ -894,24 +906,16 @@ export async function callTool(env, actor, name, args, profile = "full") {
 
   // Writes use the routine writer pool except the two authority operations,
   // which receive a separate DB identity and cannot fall back to writer.
-  // ask-jev: THE VENDOR CALL HAPPENS HERE, BEFORE ANY WRITER CONNECTION OR
-  // TRANSACTION EXISTS, so a slow Jev never holds a pooled connection or an
-  // open transaction. The request is checked first (registry contract, the
-  // chokepoint's coercion, and ask-jev's own validation) so an invalid call
-  // never reaches the vendor. The Worker holds the key; with none bound
-  // nothing is prefetched and the handler refuses jev_proxy_unconfigured.
-  // An upstream failure is carried to the handler rather than thrown here, so
-  // a same-key replay still returns its stored response; on a replay the
-  // fresh answer is simply discarded.
-  let jevPrefetched;
-  if (tool.jevProxy === true) {
-    const ask = jevAskBinding(env);
-    if (ask) {
-      const jevArgs = args || {};
-      await assertRegisteredToolInput(name, tool, jevArgs);
-      coerceArgsToSchema(tool.inputSchema, jevArgs);
-      jevPrefetched = await prefetchJevAnswer(jevArgs, ask);
-    }
+  // A billable Jev call needs a durable attempt before any vendor request.
+  // Cache promotion waits until the receipt transaction commits below.
+  let validatedJevRequest = null;
+  if (tool.jevProxy === true && env?.TYPESAFE_API_KEY) {
+    const jevArgs = args || {};
+    await assertRegisteredToolInput(name, tool, jevArgs);
+    coerceArgsToSchema(tool.inputSchema, jevArgs);
+    const normalized = validateAskJevArgs(jevArgs);
+    validatedJevRequest = { state: normalized.state, model: normalized.model,
+      questions: normalized.questions };
   }
   const connectionString = tool.authorityOnly ? authorityDsnForActor(env, actor) : env.DATABASE_URL_WRITER;
   const pool = new Pool({ connectionString });
@@ -930,11 +934,32 @@ export async function callTool(env, actor, name, args, profile = "full") {
     client.seatConnection = foundationAssuranceSeatConnection(env, Pool);
   if (tool.oracleSeatOnly === true && tool.oracleFamily === "foundation-assurance")
     client.foundationAssuranceRuntime = foundationAssuranceRuntimeBinding(env);
-  // The answer prefetched above, outside the transaction; the handler only
-  // appends the receipt.
-  if (tool.jevProxy === true && jevPrefetched)
-    client.jevPrefetched = jevPrefetched;
+  let jevPrefetched, jevAsk, jevRequest;
+  let jevKeyLocked = false;
+  const writerRead = tool.writerConnection === true && !tool.write;
+  let readOk = true, readErrorKind = null;
   try {
+    if (tool.jevProxy === true && (env?.TYPESAFE_API_KEY || judgeProviderFor(judgeWorkClass) === "decisions")) {
+      const jevArgs = args || {};
+      jevRequest = validatedJevRequest;
+      // An envelope replay already has its receipt; do not spend or reserve
+      // another attempt. Serialize the check through commit so concurrent
+      // same-key calls cannot both pay before the envelope replay check.
+      await client.query("select pg_advisory_lock(hashtextextended($1,0))", [jevArgs.idempotency_key]);
+      jevKeyLocked = true;
+      // withEnvelope still checks the full request hash.
+      const prior = await client.query("select 1 from tool_call where idempotency_key=$1", [jevArgs.idempotency_key]);
+      if (!prior.rows.length) {
+        const actorRow = (await client.query("select id from actor where slug=$1", [actor.slug])).rows[0];
+        if (!actorRow?.id)
+          throw new ToolError({ error: "actor_not_provisioned", slug: actor.slug });
+        jevAsk = jevAskBinding(env, fetch, { reserveAttempt: async () => {
+          return reserveJevCallAttempt(client, { ...actor, id: actorRow.id }, jevArgs);
+        } });
+        jevPrefetched = await prefetchJevAnswer(jevArgs, jevAsk, judgeWorkClass);
+        client.jevPrefetched = jevPrefetched;
+      }
+    }
     await client.query(tool.writerConnection && !tool.write ? "begin read only" : "begin");
     const a = await client.query("select id from actor where slug=$1", [actor.slug]);
     // Guarded 2026-08-03. Unguarded, a missing actor row made this a raw
@@ -959,9 +984,16 @@ export async function callTool(env, actor, name, args, profile = "full") {
       tool.authorityOnly ? "carr_authority" : "carr_writer",
       fullActor => executeRegisteredTool(client, fullActor, name, args || {}));
     await client.query("commit");
+    if (jevPrefetched?.ok === true && result?.ok === true)
+      await jevAsk.cacheAfterCommit(jevRequest, jevPrefetched.result);
     return result;
   } catch (e) {
     await client.query("rollback").catch(() => {});
+    if (writerRead) {
+      readOk = false;
+      readErrorKind = e instanceof ToolError
+        ? String(e.payload?.error || "tool_error").slice(0, 64) : "internal_error";
+    }
     // TRANSLATE THE DATABASE'S REFUSAL HERE, WHERE THE CONNECTION IS STILL
     // OPEN. pgConstraintError has existed and been tested since 2026-08-21 and
     // until now had no production caller at all: every check, foreign-key,
@@ -978,11 +1010,26 @@ export async function callTool(env, actor, name, args, profile = "full") {
     // By the time the RPC handler's catch sees this, the pool is closed.
     if (!(e instanceof ToolError)) {
       const refusal = pgConstraintError(e);
-      if (refusal) throw await describeConstraint(client, refusal);
+      if (refusal) {
+        const failure = await describeConstraint(client, refusal);
+        if (writerRead && failure instanceof ToolError)
+          readErrorKind = String(failure.payload?.error || "tool_error").slice(0, 64);
+        throw failure;
+      }
     }
     throw e;
   } finally {
+    if (jevKeyLocked)
+      await client.query("select pg_advisory_unlock(hashtextextended($1,0))", [args.idempotency_key]).catch(() => {});
     client.release();
+    // Actor-scoped read doors use a read-only writer transaction. Record their
+    // metadata through the same detached audit path as ordinary reader calls;
+    // the transaction has already ended, so this cannot change its answer.
+    if (writerRead && env?.DATABASE_URL_WRITER) {
+      const insertFn = (text, params) => neon(env.DATABASE_URL_WRITER).query(text, params);
+      scheduleWriterReadCall(tool, actor, name, readOk, readErrorKind,
+        env.ctx?.waitUntil?.bind(env.ctx), insertFn);
+    }
     env.ctx?.waitUntil?.(pool.end());
   }
 }

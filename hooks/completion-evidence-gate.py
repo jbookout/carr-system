@@ -192,6 +192,11 @@ WRITE_ACTION_PREFIXES = {
     "update", "write",
 }
 WRITE_ACTION_EXACT = {
+    "acknowledge-board-answer",  # durable Received receipt for a board answer
+    "answer-board-question",      # human partner records a durable answer
+    "ask-board-question",         # opens a named question on the board
+    "publish-board-snapshot",     # publishes the signed-in board view
+    "revise-board-question",      # preserves the prior question revision
     "acknowledge-notification",  # writes ops.notification_read: a durable per-recipient
                                  # receipt a session could report as "I cleared that".
                                  # EXACT rather than a prefix for adjudicate's reason --
@@ -223,6 +228,9 @@ WRITE_ACTION_EXACT = {
                                  # a Doc conversation under a compare-and-swap. EXACT for
                                  # the same reason: "rename" covers one verb today, and a
                                  # future rename-shaped read must not inherit the class.
+    "suggest-doc-work",       # B08: stores one source-bound obligation suggestion;
+                              # "suggest" stays exact so future read-like suggestions
+                              # do not inherit write classification.
     "call-verb",             # unknown inner call is conservatively a write
     "cancel-capability-session",  # abandons the open build session on a capability
                               # project and returns that project to ready. A write in

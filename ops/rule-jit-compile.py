@@ -202,6 +202,16 @@ PROMPT_CUE_TRIGGERS: tuple[dict[str, Any], ...] = (
         "packs": ["joe-comms"],
         "rule_ids": ["49533583", "c66dc739"],
     },
+    # A request for a verifier: "independent review", "adversarial review",
+    # "a Codex review". Rule 2b66211d binds the moment a checker is asked for
+    # (it must get fresh context, not the maker's conversation).
+    # evals/rule-delivery round 3.
+    {
+        "pattern": (r"\b(?:independent|adversarial)\s+(?:read-only\s+)?(?:review(?:er)?|"
+                    r"verif\w+|check|pass)\b|\b(?:codex|grok)\s+review\b"),
+        "packs": ["delegation-council"],
+        "rule_ids": ["2b66211d"],
+    },
 )
 
 
