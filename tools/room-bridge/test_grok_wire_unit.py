@@ -174,6 +174,30 @@ class GrokTests(unittest.TestCase):
             {"type": "usage", "usage": {"output_tokens": 2}}, END])
         self.assertEqual(grok_wire.parse_result(raw, 0)["result"], "Final answer")
 
+    def test_accounting_after_response_boundary_preserves_completed_answer(self):
+        for boundary in ({"messageId": "response", "stopReason": "end_turn"}, {}):
+            with self.subTest(boundary=boundary):
+                raw = "\n".join(json.dumps(e) for e in [
+                    {"type": "text", "data": "Final answer"},
+                    {"type": "usage", **boundary, "usage": {"output_tokens": 2}},
+                    {"type": "usage", "usage": {"output_tokens": 2}},
+                    {"type": "usage", "usage": {"output_tokens": 2}}, END])
+                parsed = grok_wire.parse_stream(raw.splitlines())
+                self.assertEqual(parsed["code"], 0)
+                self.assertEqual(parsed["text"], "Final answer")
+                result = grok_wire.parse_result(raw, 0)
+                self.assertEqual(result["status"], "completed")
+                self.assertEqual(result["result"], "Final answer")
+
+    def test_explicit_empty_response_does_not_reuse_an_earlier_answer(self):
+        raw = "\n".join(json.dumps(e) for e in [
+            {"type": "text", "data": "Earlier answer"},
+            {"type": "usage", "messageId": "earlier"},
+            {"type": "usage", "messageId": "empty-final", "stopReason": "end_turn"},
+            {"type": "usage", "usage": {"output_tokens": 0}}, END])
+        self.assertEqual(grok_wire.parse_result(raw, 0),
+                         {"status": "failed", "detail": "grok_empty_result"})
+
     def test_refuses_absent_mismatched_mixed_and_incomplete_metadata(self):
         for models in (None, {}, {"grok-4.6": {"modelCalls": 1}},
                        {**END["modelUsage"], "grok-4.7-build-fast": {"modelCalls": 1}}):

@@ -75,6 +75,19 @@ class GrokRunTests(unittest.TestCase):
         self.assertEqual(run.returncode, 4)
         self.assertEqual(receipt["stopReason"], "cancelled")
 
+    def test_accounting_after_completed_response_preserves_runner_and_desk_answer(self):
+        run, receipt = self.run_fixture("accounting-after-response.ndjson")
+        self.assertEqual(run.returncode, 0)
+        self.assertEqual(run.stdout, "Final answer\n")
+        self.assertEqual(receipt["stopReason"], "end_turn")
+        self.assertEqual(receipt["actual_models"], ["grok-4.7-build"])
+        desk = grok_wire.run_task(
+            {"model": "grok-4.7", "effort": "high", "sandbox": "read-only"}, "test",
+            run=lambda argv, **kw: subprocess.CompletedProcess(
+                argv, 0, (FIXTURES / "accounting-after-response.ndjson").read_text(), ""))
+        self.assertEqual(desk["status"], "completed")
+        self.assertEqual(desk["result"], "Final answer")
+
     def test_wrong_model_refuses_substitution(self):
         run, receipt = self.run_fixture("wrong-model.ndjson")
         self.assertEqual(run.returncode, 5)

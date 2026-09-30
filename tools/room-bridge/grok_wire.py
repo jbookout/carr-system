@@ -62,10 +62,12 @@ def parse_stream(lines, returncode: int = 0) -> dict:
                 break
             chunks.append(event["data"])
         elif event.get("type") == "usage":
-            # Grok emits usage after each model turn, including intermediate
-            # answers. Keep all chunks within that turn, then start a new one.
-            final_chunks = chunks
-            chunks = []
+            # A response boundary saves its chunks, including an explicitly
+            # identified empty response. Older streams omit messageId, so text
+            # also establishes a boundary. Accounting alone cannot erase it.
+            if chunks or event.get("messageId"):
+                final_chunks = chunks
+                chunks = []
         elif event.get("type") == "end":
             end = event
     code = 0
