@@ -365,6 +365,30 @@ def cost_curve_gate(portfolio: Any) -> list[dict[str, Any]]:
     return output
 
 
+def critical_dimension_blockers(dimension_results: Any) -> list[str]:
+    """Name every critical dimension that blocks, whatever any overall score did.
+
+    The same no-aggregate rule the portfolio applies, exposed for callers that
+    hold dimension rows but not a whole portfolio (ops/check-eval-receipt.py,
+    the LLM-steering eval receipt). A critical dimension blocks when it failed,
+    was blocked, or regressed against baseline. Rows are validated against
+    DIMENSION_FIELDS; extra measurement fields are the caller's to strip.
+    """
+    if not isinstance(dimension_results, list) or not dimension_results:
+        raise EvalPortfolioError("eval result needs named dimensions, not an aggregate")
+    blockers, seen = [], set()
+    for raw in dimension_results:
+        row = _exact(raw, DIMENSION_FIELDS, "eval dimension result"); _id(row["dimension_id"], "eval dimension id")
+        if row["dimension_id"] in seen: raise EvalPortfolioError("eval dimensions cannot duplicate")
+        seen.add(row["dimension_id"]); _outcome(row["status"], "eval dimension status")
+        if not isinstance(row["critical"], bool): raise EvalPortfolioError("eval dimension critical flag is invalid")
+        if row["direction_vs_baseline"] not in DIRECTIONS: raise EvalPortfolioError("eval dimension direction is invalid")
+        _refs(row["evidence_refs"], "eval dimension evidence_refs")
+        if row["critical"] and (row["status"] in {"failed", "blocked"} or row["direction_vs_baseline"] == "regressed"):
+            blockers.append(row["dimension_id"])
+    return blockers
+
+
 def _active_case(value: dict[str, Any], case: dict[str, Any]) -> bool:
     """Return whether a case has current accepted golden-set membership.
 
