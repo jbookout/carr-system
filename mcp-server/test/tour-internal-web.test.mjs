@@ -197,8 +197,8 @@ test("static shell has no raw-token persistence/logging and stays in dealroom/to
   assert.match(js, /state\.cheatDirty \? "Unsaved changes"/);
   assert.match(js, /#cheat-content"\)\.addEventListener\("input"/);
   assert.match(js, /if \(!state\.cheatDirty \|\| state\.cheatDraftTourId !== tour\.id\)/);
-  assert.doesNotMatch(html, /value="(?:download_pdf|comment|react)"/);
-  assert.match(html, /future governed scope amendment/);
+  assert.doesNotMatch(html, /value="(?:download_pdf|react)"/);
+  assert.match(html, /Shortlist and Comment let the client mark preferred properties/);
   assert.match(css, /#002F6C/); assert.match(css, /#F57F29/);
   for (const source of [js, handlerSource]) { assert.doesNotMatch(source, /localStorage|sessionStorage|indexedDB|console\.(?:log|warn|error)/); }
   assert.doesNotMatch(handlerSource, /\/api\/v1/);
