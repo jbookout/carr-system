@@ -7,6 +7,8 @@ import unittest
 import tempfile
 import os
 import io
+import subprocess
+import importlib.util
 from unittest.mock import patch
 from pathlib import Path
 
@@ -15,6 +17,100 @@ sys.path.insert(0, str(ROOT))
 
 
 class GoldCorpusTests(unittest.TestCase):
+    def test_historical_drive_literals_are_classified_as_judge_test_fixtures(self):
+        spec = importlib.util.spec_from_file_location("judge_drive_inventory", ROOT / "ops/drive-dependency-inventory.py")
+        inventory = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = inventory
+        spec.loader.exec_module(inventory)
+        entries = json.loads((ROOT / "ops/config/drive-dependencies.v1.json").read_text())["entries"]
+        for name in ("system-work-gold.v1.json", "source-projections.v1.json"):
+            ref = inventory.Reference("ops/fixtures/judge-provider/" + name, 1, "CARR_VAULT", "{{VAULT}}", "historical source excerpt")
+            matches = [e for e in entries if inventory.matches(e, ref)]
+            self.assertEqual([e["class"] for e in matches], ["test_fixture"])
+
+    def test_frozen_source_projections_match_original_code_and_intake_calls(self):
+        import hashlib
+        from tools.judge.corpus import redact
+        projection = json.loads((ROOT / "ops/fixtures/judge-provider/source-projections.v1.json").read_text())
+        for locator, item in projection["pilot"].items():
+            with self.subTest(locator=locator):
+                ref = item["source"]
+                raw = subprocess.check_output(["git", "show", ref["revision"] + ":" + ref["path"]], cwd=ROOT)
+                self.assertEqual(hashlib.sha256(raw).hexdigest(), ref["sha256"])
+                lines = raw.decode().splitlines()
+                lo, hi = ref["lines"]
+                expected = redact({"region": {"path": ref["path"], "code": "\n".join(lines[lo-1:hi])},
+                                   "module_context": "\n".join(lines[:35])})
+                self.assertEqual(item["state"], expected)
+        spec = importlib.util.spec_from_file_location("intake_source_assertions", ROOT / "ops/jev-intake-selftest.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        seen = []
+        original = module.FakeClient.ask
+        def observe(client, state, questions, **options):
+            seen.append({"state": state, "questions": questions, "model": "jev-1.13.0"})
+            return original(client, state, questions, **options)
+        judge = module.intake._judge()
+        with patch.object(module.FakeClient, "ask", observe), patch.object(module.intake, "_judge", return_value=judge), patch.object(judge, "record"):
+            for locator, request in projection["intake"].items():
+                with self.subTest(locator=locator):
+                    cls, method = locator.split(".")
+                    before = len(seen)
+                    getattr(getattr(module, cls)(method), method)()
+                    self.assertEqual(len(seen), before + 1)
+                    self.assertEqual(seen[-1], request)
+
+    def test_source_scenario_cannot_cross_splits_under_a_new_group_or_rule(self):
+        from tools.judge.corpus import validate
+        from tools.judge.paired_eval import digest
+        corpus = json.loads((ROOT / "ops/fixtures/judge-provider/system-work-gold.v1.json").read_text())
+        first, second = copy.deepcopy(corpus["cases"][:2])
+        self.assertNotEqual(first["request"]["state"]["rule"], second["request"]["state"]["rule"])
+        second.update(split="final", group="renamed-source-family")
+        cases = [first, second]
+        with self.assertRaisesRegex(ValueError, "split leakage"):
+            validate({"schema": corpus["schema"], "cases": cases, "corpus_sha256": digest(cases)}, source_root=ROOT)
+
+    def test_rehashed_unrelated_requests_cannot_borrow_source_gold(self):
+        from tools.judge.corpus import validate
+        from tools.judge.paired_eval import digest
+        original = json.loads((ROOT / "ops/fixtures/judge-provider/system-work-gold.v1.json").read_text())
+        representatives = {}
+        for case in original["cases"]:
+            representatives.setdefault(case["source_ref"]["path"], case)
+        for source, case in representatives.items():
+            for field in ("state", "questions"):
+                with self.subTest(source=source, field=field):
+                    bad = copy.deepcopy(case)
+                    if field == "state":
+                        bad["request"][field] = {"turn": "unrelated request", "rule": "unrelated rule"}
+                    else:
+                        qid = next(iter(bad["request"][field]))
+                        bad["request"][field][qid]["instructions"] = "Judge an unrelated property."
+                    bad["request_sha256"] = digest(bad["request"])
+                    candidate = {"schema": original["schema"], "cases": [bad], "corpus_sha256": digest([bad])}
+                    with self.assertRaisesRegex(ValueError, "source request"):
+                        validate(candidate, source_root=ROOT)
+
+    def test_redacted_carry_fixture_preserves_replay_identity_and_announcement(self):
+        from tools.judge.corpus import redact
+        from ops.business_data_patterns import REPLAY_SESSION_ID
+        corpus = json.loads((ROOT / "ops/fixtures/judge-provider/system-work-gold.v1.json").read_text())
+        case = next(c for c in corpus["cases"] if c["receipt_id"] == "replay-scenario:b2d3e4f5a6b7:3")
+        source = json.loads((ROOT / case["source_ref"]["path"]).read_text().splitlines()[3])
+        for seed in (redact(source["out_files"]), case["request"]["state"]["input"]["out_files"]):
+            with tempfile.TemporaryDirectory() as tmp:
+                for rel, note in seed.items():
+                    path = Path(tmp) / "out" / rel
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(note)
+                result = subprocess.run([sys.executable, str(ROOT / "hooks/chat-lint-carryover.py")],
+                    input=json.dumps({"session_id": REPLAY_SESSION_ID}), text=True, capture_output=True,
+                    env={**os.environ, "CARR_REPO_ROOT": tmp}, check=True)
+                self.assertTrue(result.stdout, "transformed seed lost the carry-note announcement")
+                self.assertEqual(json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"],
+                                 "Keep replies to one paragraph unless asked for more detail.")
+
     def test_committed_corpus_is_complete_labelled_and_replayable(self):
         from tools.judge.corpus import load_corpus
         corpus = load_corpus(ROOT / "ops/fixtures/judge-provider/system-work-gold.v1.json")
@@ -94,6 +190,24 @@ class GoldCorpusTests(unittest.TestCase):
 
 
 class CaptureTests(unittest.TestCase):
+    def test_missing_roster_capture_preserves_hook_refusal_streams(self):
+        from tools.judge import interface
+        from ops import business_data_patterns as privacy
+        def refuse(*args, **kwargs):
+            print("gate refuses the scoped action", file=sys.stderr)
+            return {"decision": "deny"}
+        with tempfile.TemporaryDirectory() as tmp:
+            for switch in ("0", "1", None):
+                with self.subTest(switch=switch):
+                    env = {"CI": "", "GITHUB_ACTIONS": "", "CARR_JUDGE_CAPTURE_PATH": str(Path(tmp) / "traffic.jsonl")}
+                    if switch is not None:
+                        env["CARR_JUDGE_CAPTURE"] = switch
+                    err, out = io.StringIO(), io.StringIO()
+                    with patch.dict(os.environ, env, clear=True), patch.object(privacy, "roster", return_value=None), patch("sys.stderr", err), patch("sys.stdout", out):
+                        self.assertEqual(interface.ask("review", {"q": {"type": "noul"}}, jev=refuse), {"decision": "deny"})
+                    self.assertEqual(err.getvalue(), "gate refuses the scoped action\n")
+                    self.assertEqual(out.getvalue(), "")
+
     def test_seam_captures_redacted_frozen_inputs_without_changing_response(self):
         from tools.judge import interface
         from tools.judge.paired_eval import freeze, digest
@@ -137,7 +251,10 @@ class CaptureTests(unittest.TestCase):
             err = io.StringIO()
             with patch.dict(os.environ, {"CARR_JUDGE_CAPTURE": "1", "CARR_JUDGE_CAPTURE_PATH": tmp}), patch.object(privacy, "roster", return_value=privacy.Roster(["Synthetic Subject"])), patch("sys.stderr", err):
                 self.assertEqual(interface.ask("review", {"q": {"type": "noul"}}, jev=lambda *a, **k: {"ok": True}), {"ok": True})
-            self.assertIn("capture skipped", err.getvalue())
+            self.assertEqual(err.getvalue(), "")
+            diagnostics = Path(tmp).with_name(Path(tmp).name + ".diagnostics.jsonl")
+            self.assertEqual(json.loads(diagnostics.read_text())["status"], "append_failed")
+            diagnostics.unlink()
 
 
 if __name__ == "__main__":

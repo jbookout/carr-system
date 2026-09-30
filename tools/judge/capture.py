@@ -3,13 +3,12 @@
 CARR_JUDGE_CAPTURE=0 disables; 1 explicitly enables, including in CI. With no
 setting, local calls capture and CI calls do not. A readable local client
 roster is required. Output defaults to out/judge-corpus/traffic.redacted.jsonl
-in this checkout. Capture failures emit a constant diagnostic and never change
+in this checkout. Capture failures append constant-only sidecar diagnostics and never change
 judge behavior. These are unlabelled traffic, not eval gold or audit authority.
 """
 import fcntl
 import json
 import os
-import sys
 import time
 import uuid
 from pathlib import Path
@@ -19,6 +18,25 @@ from tools.judge.corpus import redact
 from tools.judge.paired_eval import digest
 
 DEFAULT_PATH = Path(__file__).resolve().parents[2] / "out/judge-corpus/traffic.redacted.jsonl"
+
+
+def diagnostic(status):
+    """Keep telemetry off hook stdout/stderr, which carry refusal decisions.
+
+    Only an enumerated status and timestamp reach this best-effort sidecar;
+    an unavailable sidecar cannot change the judge or its output streams.
+    """
+    try:
+        sink = Path(os.environ.get("CARR_JUDGE_CAPTURE_PATH") or DEFAULT_PATH)
+        path = sink.with_name(sink.name + ".diagnostics.jsonl")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(descriptor, "a", encoding="utf-8") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX)
+            stream.write(json.dumps({"schema": "carr-judge-capture-diagnostic/v1",
+                                     "status": status, "recorded_at_unix": time.time()}) + "\n")
+    except Exception:
+        pass
 
 
 def enabled(work_class):
@@ -46,7 +64,7 @@ def prepare(state, questions, *, model, caller, provider, work_class):
                 "purpose": redact(caller or "unspecified"), "provider": provider,
                 "redaction": "business-data-patterns/v1+local-roster", "origin": "live_seam_capture"}
     except Exception:
-        print("judge corpus capture skipped: privacy preparation failed", file=sys.stderr)
+        diagnostic("privacy_preparation_failed")
         return None
 
 
@@ -65,4 +83,4 @@ def append(receipt, *, failed=False):
             stream.write(json.dumps(receipt, separators=(",", ":"), ensure_ascii=False) + "\n")
             stream.flush()
     except Exception:
-        print("judge corpus capture skipped: append failed", file=sys.stderr)
+        diagnostic("append_failed")

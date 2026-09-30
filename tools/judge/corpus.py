@@ -48,6 +48,8 @@ def redact(value):
                 return "[synthetic_private_text]"
         for kind, pattern in privacy.PATTERNS.items():
             def replace(match):
+                if kind == "uuid" and match.group(0).lower() in privacy.ALLOWED_UUIDS:
+                    return match.group(0)
                 key = (kind, match.group(0))
                 if key not in replacements:
                     replacements[key] = f"[synthetic_{kind}_{len(replacements) + 1}]"
@@ -94,7 +96,7 @@ def validate(corpus, *, source_root=None):
     frozen = freeze(cases)
     if corpus.get("corpus_sha256") != frozen["corpus_sha256"]:
         raise ValueError("corpus digest mismatch")
-    groups, inputs = {}, {}
+    groups, inputs, sources = {}, {}, {}
     for case in cases:
         if case.get("split") not in {"dev", "final"}:
             raise ValueError("invalid split")
@@ -141,7 +143,10 @@ def validate(corpus, *, source_root=None):
             else:
                 raise ValueError("unknown question shape")
         if source_root is not None:
-            verify_source_gold(case, source_root)
+            family = verify_source_gold(case, source_root)
+            if family in sources and sources[family] != case["split"]:
+                raise ValueError("split leakage: authenticated source scenario crosses splits")
+            sources[family] = case["split"]
         if privacy.scan_value(case):
             raise ValueError("private content in corpus")
     return corpus
@@ -151,6 +156,7 @@ def validate(corpus, *, source_root=None):
 def verify_source_gold(case, root):
     """Authenticate the assertion, not merely the existence of its file."""
     ref = case["source_ref"]
+    row = None
     path = Path(root) / ref["path"]
     locator = ref["locator"]
     if ref["path"].endswith("adjudications.v2.jsonl"):
@@ -164,6 +170,7 @@ def verify_source_gold(case, root):
         original = next(item for item in inputs if item["id"] == row["case"])
         if row.get("case_binding") != adjudication_case_binding(original):
             raise ValueError("source adjudication input binding mismatch")
+        family = (ref["path"], row["case"])
     elif ref["path"].endswith("gate-scenarios.jsonl"):
         line = int(locator.split(";", 1)[0].split(":", 1)[1])
         row = json.loads(path.read_text().splitlines()[line - 1])
@@ -173,9 +180,11 @@ def verify_source_gold(case, root):
         kind = case["request"]["questions"]["intervention"]["type"]
         expected = {"intervention": verdict if kind == "choice" else
                     {"allow": 0, "announce": 1, "deny": 2, "reopen": 2}[verdict]}
+        family = (ref["path"], row["gate"])
     elif ref["path"].endswith("jev-code-review-pilot/corpus.v1.json"):
         row = next(item for item in json.loads(path.read_text())["items"] if item["id"] == locator)
         expected = row["labels"]
+        family = (ref["path"], row["path"])
     elif ref["path"].endswith("jev-intake-selftest.py"):
         levels = {"PickEffortTests.test_high_needs_both_a_high_score_and_high_confidence": 2,
                   "PickEffortTests.test_moderate_score_is_medium": 1,
@@ -196,16 +205,78 @@ def verify_source_gold(case, root):
             raise ValueError("unknown asserted intake scenario")
         if "def " + locator.split(".")[-1] not in path.read_text():
             raise ValueError("missing source assertion")
+        family = (ref["path"], locator.split(".", 1)[0])
     else:
         raise ValueError("unsupported gold source")
     if case["gold"] != expected:
         raise ValueError("source gold does not match corpus label")
-    for field in ("input_ref", "contract_ref", "inventory_ref", "replay_ref", "replay_manifest_ref"):
+    for field in ("input_ref", "contract_ref", "inventory_ref", "replay_ref", "replay_manifest_ref", "projection_ref"):
         if field in case:
             extra = case[field]
             bound = (Path(root) / extra["path"]).resolve()
             if not bound.is_relative_to(Path(root).resolve()) or hashlib.sha256(bound.read_bytes()).hexdigest() != extra["sha256"]:
                 raise ValueError("source input digest mismatch")
+    if case["request"] != source_request(case, root, row):
+        raise ValueError("source request does not match authenticated transformation")
+    return family
+
+
+def source_request(case, root, row=None):
+    """Bind evaluated inputs to an authenticated, reviewed source projection.
+
+    Projections freeze rule text, question contracts, and redacted historical
+    code excerpts unavailable in an archive. They are source artifacts, not
+    caller hashes or provider answers. Turns and replay inputs are reconstructed
+    from their original assertions. Changing a projection requires source review.
+    """
+    ref = case.get("projection_ref", {})
+    if (case.get("transformation") != "source-projection/v1" or
+            ref.get("path") != "ops/fixtures/judge-provider/source-projections.v1.json" or
+            ref.get("locator") != case["source_ref"]["locator"]):
+        raise ValueError("source request lacks declared projection")
+    projection = json.loads((Path(root) / ref["path"]).read_text())
+    if projection.get("schema") != "carr-judge-source-projections/v1":
+        raise ValueError("source request projection schema mismatch")
+    source = case["source_ref"]["path"]
+    if source.endswith("adjudications.v2.jsonl"):
+        original = next(x for x in json.loads((Path(root) / case["input_ref"]["path"]).read_text())["cases"]
+                        if x["id"] == row["case"])
+        if case["input_ref"]["locator"] != original["id"]:
+            raise ValueError("source request input locator mismatch")
+        rule = projection["rules"].get(row["rule"] + ":" + case["rule_sha256"])
+        if rule is None:
+            raise ValueError("source request rule snapshot mismatch")
+        state = redact({"turn": {"prompt": original["prompt"], "tool_calls": original.get("tool_calls", [])}})
+        state["rule"] = rule
+        questions = projection["questions"]["binding"]
+    elif source.endswith("gate-scenarios.jsonl"):
+        contract = case["contract_ref"]
+        if contract["path"] != "hooks/" + row["gate"]:
+            raise ValueError("source request gate contract mismatch")
+        replay = json.loads((Path(root) / case["replay_manifest_ref"]["path"]).read_text())
+        environment = copy.deepcopy(projection["replay_environment"])
+        environment["clock_utc"] = row.get("clock", replay["pinned_utc"])
+        environment["default_turn_prompt"] = replay["turn_prompt"]
+        environment["env"] = row.get("env", {})
+        inputs = {k: v for k, v in row.items() if k not in {"id", "gate", "matcher", "expect", "why", "clock", "clock_label"}}
+        state = redact({"gate_contract": (Path(root) / contract["path"]).read_text(),
+                        "event": row["event"], "input": inputs, "replay_environment": environment})
+        kind = case["request"]["questions"]["intervention"]["type"]
+        questions = projection["questions"]["intervention-" + kind]
+    elif source.endswith("jev-code-review-pilot/corpus.v1.json"):
+        frozen = projection["pilot"][row["id"]]
+        if (frozen["source"] != case["frozen_source_ref"] or
+                frozen["source"]["path"] != row["path"] or
+                frozen["source"]["revision"] != json.loads((Path(root) / source).read_text())["pinned_commit"]):
+            raise ValueError("source request historical code binding mismatch")
+        state = frozen["state"]
+        questions = {qid: projection["questions"]["pilot"][qid] for qid in row["labels"]}
+    else:
+        request = projection["intake"].get(case["source_ref"]["locator"])
+        if request is None:
+            raise ValueError("source request intake projection mismatch")
+        return request
+    return {"state": state, "questions": questions, "model": "jev-1.13.0"}
 
 
 def load_corpus(path, *, split=None, source_root=None):

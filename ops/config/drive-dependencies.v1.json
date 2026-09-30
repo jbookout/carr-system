@@ -629,6 +629,8 @@
         "ops/learning-credential-boundary-selftest.py",
         "ops/learning-monthly-credential-selftest.py",
         "ops/rule-enforcement-map-selftest.py",
+        "ops/fixtures/judge-provider/system-work-gold.v1.json",
+        "ops/fixtures/judge-provider/source-projections.v1.json",
         "workspace/test/**"
       ],
       "path_pattern": "{{VAULT}}/**",
