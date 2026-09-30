@@ -108,8 +108,14 @@ def regions(paths, repo=REPO):
                 match_end_line = text[:match.end() - 1].count("\n") + 1
                 hi = min(len(lines), max(match_end_line, line_no + CONTEXT_AFTER))
                 full_snippet = "\n".join(lines[lo:hi])
-                while len(full_snippet) > MAX_REGION_CHARS and lo < line_no - 1:
-                    lo += 1
+                # Remove only surrounding context; preserve every matched line.
+                anchor = line_no - 1
+                while len(full_snippet) > MAX_REGION_CHARS and (lo < anchor or hi > match_end_line):
+                    if lo < anchor and (hi <= match_end_line or
+                                        anchor - lo >= hi - match_end_line):
+                        lo += 1
+                    else:
+                        hi -= 1
                     full_snippet = "\n".join(lines[lo:hi])
                 region_start = sum(len(line) + 1 for line in lines[:lo])
                 region_end = region_start + len(full_snippet)

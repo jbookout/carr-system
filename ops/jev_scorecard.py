@@ -281,38 +281,102 @@ for _name in _json.loads(_worker.stdout.readline()):
     globals()[_name] = _function
 sys.modules["solution"] = _solution_proxy
 '''
-_JS_WORKER = '''
-const fs = require('fs');
-function readLine() {
-  const byte = Buffer.alloc(1); let line = '';
-  while (fs.readSync(0, byte, 0, 1) > 0) {
-    if (byte[0] === 10) return line;
-    line += byte.toString();
+# Shared graph transport keeps caller-owned objects observable without loading
+# candidate code into the assertion-owning grader. Both ends use the same codec.
+_JS_CODEC = '''
+const _rpcFs = require('fs');
+function readLine(fd) {
+  const byte = Buffer.alloc(1); const bytes = [];
+  while (_rpcFs.readSync(fd, byte, 0, 1) > 0) {
+    if (byte[0] === 10) return Buffer.from(bytes).toString('utf8');
+    bytes.push(byte[0]);
   }
   return null;
 }
+function pack(value, refs, prefix) {
+  const known = new Map([...refs].map(([key, value]) => [value, key]));
+  const nodes = {}; const pending = []; let next = 0;
+  function atom(value) {
+    if (value === undefined) return ['undefined'];
+    if (value === null || typeof value !== 'object') {
+      if (typeof value === 'function' || typeof value === 'symbol') throw new TypeError('unsupported RPC value');
+      if (typeof value === 'bigint') return ['bigint', String(value)];
+      if (typeof value === 'number' && (!Number.isFinite(value) || Object.is(value, -0))) return ['number', Object.is(value, -0) ? '-0' : String(value)];
+      return ['scalar', value];
+    }
+    let key = known.get(value);
+    if (key === undefined) {
+      do { key = prefix + next++; } while (refs.has(key));
+      known.set(value, key); refs.set(key, value);
+    }
+    if (!Object.hasOwn(nodes, key)) { nodes[key] = null; pending.push([key, value]); }
+    return ['ref', key];
+  }
+  const root = atom(value);
+  while (pending.length) {
+    const [key, value] = pending.pop();
+    nodes[key] = [Array.isArray(value) ? 'array' : 'object',
+      Object.keys(value).map(name => [name, atom(value[name])]),
+      Array.isArray(value) ? value.length : null];
+  }
+  return {root, nodes};
+}
+function unpack(graph, refs) {
+  const nodes = Object.entries(graph.nodes);
+  function atom(value) {
+    if (value[0] === 'ref') {
+      if (!refs.has(value[1])) throw new Error('unknown RPC reference');
+      return refs.get(value[1]);
+    }
+    if (value[0] === 'undefined') return undefined;
+    if (value[0] === 'bigint') return BigInt(value[1]);
+    if (value[0] === 'number') return Number(value[1]);
+    if (value[0] === 'scalar') return value[1];
+    throw new Error('invalid RPC value');
+  }
+  // Allocate all nodes before linking them, retaining existing caller identity.
+  for (const [key, node] of nodes) {
+    if (!refs.has(key)) refs.set(key, node[0] === 'array' ? [] : {});
+  }
+  for (const [key, [kind, items, length]] of nodes) {
+    const target = refs.get(key);
+    const names = new Set(items.map(([name]) => name));
+    for (const name of Object.keys(target)) if (!names.has(name)) delete target[name];
+    if (kind === 'array' && target.length !== length) target.length = length;
+    for (const [name, value] of items) {
+      const resolved = atom(value);
+      // Do not rewrite unchanged properties, including frozen input objects.
+      if (!Object.hasOwn(target, name) || !Object.is(target[name], resolved))
+        Object.defineProperty(target, name,
+          {value:resolved, writable:true, enumerable:true, configurable:true});
+    }
+  }
+  return atom(graph.root);
+}
+'''
+_JS_WORKER = _JS_CODEC + '''
+const fs = require('fs');
 console.log = console.error = () => {};
 const sol = require('./solution.js');
 fs.writeSync(1, JSON.stringify({ready:true}) + '\\n');
-for (let line; (line = readLine()) !== null;) {
+for (let line; (line = readLine(0)) !== null;) {
   const input = JSON.parse(line);
-  try {
-    const value = sol[input.name](...input.args);
-    fs.writeSync(1, JSON.stringify({value}) + '\\n');
-  } catch (e) { fs.writeSync(1, JSON.stringify({error:String(e.message || e)}) + '\\n'); }
+  const refs = new Map(); const args = unpack(input.args, refs);
+  let value, error;
+  try { value = sol[input.name](...args); }
+  catch (e) { error = String((e && e.message) || e); }
+  // Include updates after exceptions and for aliases detached from the arguments.
+  fs.writeSync(1, JSON.stringify({graph:pack([args, value, ...refs.values()], refs, 'result:'), error}) + '\\n');
 }
 '''
-_JS_PROXY = '''
+_JS_PROXY = _JS_CODEC + '''
 const _child = require('child_process').spawn(process.execPath, ['-e', WORKER_SOURCE], {stdio:['pipe','pipe','ignore']});
 const _fs = require('fs');
 _child.stdin._handle.setBlocking(true); _child.stdout._handle.setBlocking(true);
 function _reply() {
-  const byte = Buffer.alloc(1); let line = '';
-  while (_fs.readSync(_child.stdout._handle.fd, byte, 0, 1) > 0) {
-    if (byte[0] === 10) return JSON.parse(line);
-    line += byte.toString();
-  }
-  throw new Error('candidate exited without a value');
+  const line = readLine(_child.stdout._handle.fd);
+  if (line === null) throw new Error('candidate exited without a value');
+  return JSON.parse(line);
 }
 if (_reply().ready !== true) throw new Error('candidate did not initialize');
 const _nativeRequire = require;
@@ -320,10 +384,12 @@ const _solutionPath = _nativeRequire.resolve('./solution.js');
 require = name => {
   if (_nativeRequire.resolve(name) !== _solutionPath) return _nativeRequire(name);
   return new Proxy({}, {get:(_, method) => (...args) => {
-    _fs.writeSync(_child.stdin._handle.fd, JSON.stringify({name:method, args}) + '\\n');
+    const refs = new Map();
+    _fs.writeSync(_child.stdin._handle.fd, JSON.stringify({name:method, args:pack(args, refs, 'input:')}) + '\\n');
     const reply = _reply();
-    if (reply.error) throw new Error(reply.error);
-    return reply.value;
+    const result = unpack(reply.graph, refs);
+    if (reply.error !== undefined) throw new Error(reply.error);
+    return result[1];
   }});
 };
 '''

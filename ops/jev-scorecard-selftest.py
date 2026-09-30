@@ -171,6 +171,71 @@ check("input unchanged", lambda: data == [2, 1])
         self.assertIn('FAIL input unchanged', result['detail'])
         self.assertTrue(sc.grade_candidate(task, 'def sort_values(data):\n    return sorted(data)\n')['pass'])
 
+    def test_javascript_hidden_assertions_observe_candidate_input_mutations(self):
+        task = {'lang':'js', 'test':'''const {sort_values} = require("./solution.js");
+const data = [2, 1];
+check("result", () => JSON.stringify(sort_values(data)) === '[1,2]');
+check("input unchanged", () => JSON.stringify(data) === '[2,1]');
+'''}
+        result = sc.grade_candidate(task, 'module.exports = {sort_values:data => data.sort()};')
+        self.assertFalse(result['pass'], result)
+        self.assertEqual(result['subtests'], 'PASSED 1/2')
+        self.assertIn('FAIL input unchanged', result['detail'])
+        control = sc.grade_candidate(task, 'module.exports = {sort_values:data => [...data].sort()};')
+        self.assertTrue(control['pass'], control)
+
+    def test_javascript_argument_aliases_mutations_and_result_identity(self):
+        task = {'lang':'js', 'test':'''const {mutate, identity, reject} = require("./solution.js");
+const child = {value:1}; const data = [child, child]; const held = data[0];
+check("input identity", () => identity(data) === data);
+check("aliases", () => mutate(data, child) === child);
+check("nested update", () => held.value === 2 && data[0] === held && data[1] === held);
+check("new nested object", () => data[2] === held.added && held.added.value === 3);
+check("exception", () => raises(() => reject(child)));
+check("mutation before exception", () => held.value === 4);
+const cycle = {}; cycle.self = cycle;
+check("cycle", () => identity(cycle) === cycle && cycle.self === cycle);
+'''}
+        code = '''module.exports = {
+  identity:data => data,
+  mutate:(data, child) => {
+    if (data[0] !== child || data[1] !== child) throw new Error('lost alias');
+    child.value = 2; child.added = {value:3}; data.push(child.added); return child;
+  },
+  reject:child => { child.value = 4; throw new Error('fixture'); }
+};'''
+        result = sc.grade_candidate(task, code)
+        self.assertTrue(result['pass'], result)
+
+    def test_javascript_frozen_inputs_and_detached_alias_updates(self):
+        task = {'lang':'js', 'test':'''const {identity, detach} = require("./solution.js");
+const frozen = Object.freeze({value:1});
+check("frozen identity", () => identity(frozen) === frozen);
+const held = {value:1}; const data = [held];
+check("detach", () => detach(data) === 7);
+check("removed input", () => data.length === 0);
+check("detached update", () => held.value === 2);
+'''}
+        code = 'module.exports = {identity:x => x, detach:data => {data[0].value = 2; data.pop(); return 7;}};'
+        result = sc.grade_candidate(task, code)
+        self.assertTrue(result['pass'], result)
+
+    def test_javascript_non_ascii_arguments_keep_their_codepoints(self):
+        task = {'lang':'js', 'test':'''const {codepoints} = require("./solution.js");
+check("codepoints", () => JSON.stringify(codepoints("é漢😀")) === '[233,28450,128512]');
+'''}
+        result = sc.grade_candidate(task, 'module.exports = {codepoints:s => [...s].map(c => c.codePointAt(0))};')
+        self.assertTrue(result['pass'], result)
+
+    def test_javascript_non_ascii_returns_and_errors_keep_their_codepoints(self):
+        task = {'lang':'js', 'test':'''const {text, reject} = require("./solution.js");
+check("return", () => text() === "é漢😀");
+check("error", () => { try { reject(); } catch (e) { return e.message === "é漢😀"; } return false; });
+'''}
+        code = 'module.exports = {text:() => "é漢😀", reject:() => {throw new Error("é漢😀");}};'
+        result = sc.grade_candidate(task, code)
+        self.assertTrue(result['pass'], result)
+
     def test_javascript_candidate_state_persists_between_assertions(self):
         task = {'lang':'js', 'test':'''const {next} = require("./solution.js");
 check("first", () => next() === 1);
