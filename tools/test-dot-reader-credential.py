@@ -53,9 +53,17 @@ class CredentialTests(unittest.TestCase):
         from psycopg import OperationalError
         material = secrets.token_urlsafe(32)
         output = io.StringIO()
-        with patch.object(rotate, "_dot_reader_action", side_effect=OperationalError(material)):
-            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
-                self.assertEqual(rotate.dot_reader_action(revoke=False), 1)
+        with tempfile.TemporaryDirectory() as directory:
+            env_path = str(Path(directory) / "db.env")
+            # Exercise the production lock without touching the user's config.
+            with patch.object(rotate.credential, "ENV_PATH", env_path), \
+                    patch.object(rotate, "_dot_reader_action", side_effect=OperationalError(material)) as action:
+                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                    self.assertEqual(rotate.dot_reader_action(revoke=False), 1)
+                action.assert_called_once_with(revoke=False)
+            lock = Path(env_path + ".rotate-credential.lock")
+            self.assertEqual(stat.S_IMODE(lock.stat().st_mode), 0o600)
+        self.assertIn("operation not confirmed", output.getvalue())
         self.assertNotIn(material, output.getvalue())
 
 
