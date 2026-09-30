@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+# doctrine: engineering-workflow-sop
+"""Warn, never block, when a change set is too big or too mixed to review well.
+
+engineering-workflow-sop section 15, "Small incremental changes: the soft
+threshold": a PR over 300 changed lines or 5 files outside generated paths, or
+one that mixes a refactor with a behavior change, gets a decomposition warning
+at the pre-push floor. Warning, not block, until the weekly numbers show what
+the distribution actually is.
+
+  * The numbers are the escalation router's own (ops/jev_intake.py
+    ROUTE_MAX_DIFF_LINES and ROUTE_MAX_FILES), imported, never copied, so a
+    rebase of the threshold happens in one place.
+  * Changed lines are added plus deleted, from `git diff -M --numstat` over the
+    range (default origin/main...HEAD). A binary file counts as a file with no
+    lines.
+  * Paths in DECOMPOSITION_EXCLUDED_PATHS are left out of both counts: nobody
+    reviews a lockfile line by line. Migrations are NEVER left out, whatever
+    their name, because a migration is the change most worth reading.
+  * The refactor-mix signal is a predicate, not a judgment: the range holds at
+    least one near-pure rename (git similarity >= NEAR_PURE_RENAME) AND some
+    other content edit outside the excluded paths. Moves land best alone.
+  * It prints nothing when the change set is within the standard, and a short
+    stderr block when it is not. It ALWAYS exits 0 and swallows every failure
+    inside itself: it is a reporter, not a gate, and the hook discards its exit
+    status anyway.
+"""
+from __future__ import annotations
+
+import importlib.util
+import os
+import subprocess
+import sys
+from dataclasses import dataclass, field
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+# THE EXCLUSION LIST, in one place and in data form so a later shared
+# review-tier map in ops/config/ can take it over row for row. Each row is
+# (label, match kind, value):
+#   basename  the file's name equals value
+#   suffix    the path ends with value
+#   contains  the file's name contains value
+#   segment   some directory in the path equals value
+#   prefix    the path starts with value
+#   exact     the path equals value
+DECOMPOSITION_EXCLUDED_PATHS: tuple[tuple[str, str, str], ...] = (
+    ("lockfile", "basename", "package-lock.json"),
+    ("lockfile", "basename", "npm-shrinkwrap.json"),
+    ("lockfile", "basename", "pnpm-lock.yaml"),
+    ("lockfile", "suffix", "-lock.json"),
+    ("lockfile", "suffix", ".lock"),
+    ("generated", "contains", ".generated."),
+    ("generated", "exact", "db/schema.sql"),
+    ("minified", "suffix", ".min.js"),
+    ("minified", "suffix", ".min.mjs"),
+    ("minified", "suffix", ".min.css"),
+    ("dependency", "segment", "node_modules"),
+    ("vendored", "segment", "vendor"),
+    ("run output", "prefix", "out/"),
+)
+# Checked before the list above and wins over it.
+NEVER_EXCLUDED_SEGMENTS: tuple[str, ...] = ("migrations",)
+
+NEAR_PURE_RENAME = 90   # git rename similarity, percent
+TOP_FILES = 5
+
+
+def thresholds() -> tuple[int, int]:
+    """(max changed lines, max files), read from the escalation router."""
+    spec = importlib.util.spec_from_file_location(
+        "jev_intake_thresholds", os.path.join(HERE, "jev_intake.py"))
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.ROUTE_MAX_DIFF_LINES, module.ROUTE_MAX_FILES
+
+
+def is_excluded(path: str) -> str | None:
+    """The exclusion label that applies to path, or None when it counts."""
+    parts = path.split("/")
+    if any(p in NEVER_EXCLUDED_SEGMENTS for p in parts[:-1]):
+        return None
+    name = parts[-1]
+    for label, kind, value in DECOMPOSITION_EXCLUDED_PATHS:
+        if ((kind == "basename" and name == value)
+                or (kind == "suffix" and path.endswith(value))
+                or (kind == "contains" and value in name)
+                or (kind == "segment" and value in parts[:-1])
+                or (kind == "prefix" and path.startswith(value))
+                or (kind == "exact" and path == value)):
+            return label
+    return None
+
+
+@dataclass
+class Change:
+    path: str
+    lines: int
+    status: str             # git's letter: A, M, D, R, C, T
+    similarity: int = 0     # rename/copy similarity, percent
+
+
+@dataclass
+class Report:
+    lines: int
+    files: int
+    max_lines: int
+    max_files: int
+    mixed: bool
+    top: list[Change] = field(default_factory=list)
+
+    @property
+    def over_lines(self) -> bool:
+        return self.lines > self.max_lines
+
+    @property
+    def over_files(self) -> bool:
+        return self.files > self.max_files
+
+    @property
+    def warn(self) -> bool:
+        return self.over_lines or self.over_files or self.mixed
+
+
+def _git_z(repo: str, *args: str) -> list[str]:
+    out = subprocess.run(
+        ["git", "diff", "--no-color", "--no-ext-diff", "-M", "-z", *args],
+        cwd=repo, capture_output=True, check=True, timeout=60).stdout
+    return out.decode("utf-8", "replace").split("\0")
+
+
+def changed_files(repo: str, rng: str) -> list[Change]:
+    """Every file the range changes, keyed by its new path."""
+    status: dict[str, tuple[str, int]] = {}
+    tok = _git_z(repo, "--name-status", rng)
+    i = 0
+    while i < len(tok) and tok[i]:
+        code = tok[i]
+        letter = code[0]
+        if letter in "RC":
+            status[tok[i + 2]] = (letter, int(code[1:] or 0))
+            i += 3
+        else:
+            status[tok[i + 1]] = (letter, 0)
+            i += 2
+    changes: list[Change] = []
+    tok = _git_z(repo, "--numstat", rng)
+    i = 0
+    while i < len(tok) and tok[i]:
+        added, deleted, path = tok[i].split("\t", 2)
+        if path == "":      # rename/copy: the old and new paths follow
+            path = tok[i + 2]
+            i += 3
+        else:
+            i += 1
+        lines = (int(added) if added.isdigit() else 0) + (int(deleted) if deleted.isdigit() else 0)
+        letter, similarity = status.get(path, ("M", 0))
+        changes.append(Change(path, lines, letter, similarity))
+    return changes
+
+
+def assess(changes: list[Change], max_lines: int, max_files: int) -> Report:
+    counted = [c for c in changes if is_excluded(c.path) is None]
+    moves = [c for c in counted if c.status == "R" and c.similarity >= NEAR_PURE_RENAME]
+    edits = [c for c in counted if c not in moves and (c.lines > 0 or c.status in "AD")]
+    top = sorted((c for c in counted if c.lines), key=lambda c: (-c.lines, c.path))[:TOP_FILES]
+    return Report(lines=sum(c.lines for c in counted), files=len(counted),
+                  max_lines=max_lines, max_files=max_files,
+                  mixed=bool(moves) and bool(edits), top=top)
+
+
+def render(r: Report) -> str:
+    out = ["", "  pre-push NOTE (warning only, the push continues): this change set is "
+               "hard to review in one piece."]
+    if r.over_lines or r.over_files:
+        out.append(f"    {r.lines} changed lines (threshold {r.max_lines}) across {r.files} "
+                   f"files (threshold {r.max_files}), generated and vendored paths left out")
+    if r.mixed:
+        out.append("    mixes moves with edits; consider splitting")
+    if r.top:
+        out.append("    largest by lines changed:")
+        out.extend(f"      {c.lines:>6}  {c.path}" for c in r.top)
+    out.append("  Split by concern: renames and moves alone first, then each behavior change "
+               "under the thresholds\n  (engineering-workflow-sop section 15, small "
+               "incremental changes).")
+    out.append("")
+    return "\n".join(out)
+
+
+def main(argv: list[str]) -> int:
+    try:
+        rng = argv[1] if len(argv) > 1 else "origin/main...HEAD"
+        repo = argv[2] if len(argv) > 2 else os.getcwd()
+        max_lines, max_files = thresholds()
+        report = assess(changed_files(repo, rng), max_lines, max_files)
+        if report.warn:
+            print(render(report), file=sys.stderr)
+    except Exception:  # noqa: BLE001 - advisory only; it must never affect a push
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
