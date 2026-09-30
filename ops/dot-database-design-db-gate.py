@@ -26,6 +26,7 @@ class DatabaseDesign(unittest.TestCase):
         host=psycopg.conninfo.conninfo_to_dict(dsn).get('host')
         if host not in {'127.0.0.1','localhost','::1'}:
             raise RuntimeError('DOT_DATABASE_URL must name a disposable loopback database')
+        self.dsn = dsn
         self.c = psycopg.connect(dsn)
         self.c.execute("set local carr.acting_actor_slug='joe'; set local carr.verified_human_actor_slug='joe'; set local carr.organization_tenant_id='carr-internal'")
         self.actor = self.one("select id from public.actor where slug='joe'")
@@ -318,14 +319,14 @@ class DatabaseDesign(unittest.TestCase):
         self.assertEqual(scans, [], [{k:n.get(k) for k in ['Node Type','Relation Name','Rows Removed by Filter','Actual Rows']} for n in scans])
 
     def isolated_race_database(self):
-        dsn=self.c.info.dsn
+        dsn=self.dsn
         self.c.rollback(); self.c.close()
         with psycopg.connect(dsn, autocommit=True) as admin:
             name='dot_race_'+uuid.uuid4().hex
             from psycopg import sql
             admin.execute(sql.SQL('create database {} template {}').format(sql.Identifier(name),sql.Identifier(admin.info.dbname)))
-        self.c=psycopg.connect(psycopg.conninfo.make_conninfo(dsn,dbname=name))
-        self.race_dsn=self.c.info.dsn
+        self.race_dsn=psycopg.conninfo.make_conninfo(dsn,dbname=name)
+        self.c=psycopg.connect(self.race_dsn)
         self.c.execute("set carr.acting_actor_slug='joe'; set carr.verified_human_actor_slug='joe'; set carr.organization_tenant_id='carr-internal'")
 
     def overlap(self, first_sql, first_args, second_sql, second_args):
