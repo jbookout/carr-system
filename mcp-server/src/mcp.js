@@ -22,6 +22,7 @@ import { deriveTrustedPrincipalBinding,
   ExactEffectRefusal, SCAC_TRUSTED_PRINCIPAL_READBACK_SQL } from "./scac-exact-effects.js";
 import { scheduleFailureRecord, rpcInternalErrorFailureClass, actorUnresolvedFailureClass, RPC_INTERNAL_ERROR_CODE } from "./trace.js";
 import { gateZeroSeatConnection } from "./gate-zero-seat-connection.v5.js";
+import { providerFor as judgeProviderFor } from "./judge-provider.js";
 import { jevAskBinding, prefetchJevAnswer, reserveJevCallAttempt,
   validateAskJevArgs } from "./jev-call-receipt.js";
 import { foundationAssuranceSeatConnection } from
@@ -740,7 +741,7 @@ export async function executeWithTrustedPrincipal(actor, readback, requiredBundl
 
 // Exported for deterministic no-network identity-gate tests. It remains the
 // single normal dispatcher path; callers receive no additional route or grant.
-export async function callTool(env, actor, name, args, profile = "full") {
+export async function callTool(env, actor, name, args, profile = "full", judgeWorkClass = "system_work") {
   const personalScope = personalScopeForActor(actor);
   if (personalScope.status === "error") {
     throw new ToolError({ error: personalScope.error,
@@ -938,7 +939,7 @@ export async function callTool(env, actor, name, args, profile = "full") {
   const writerRead = tool.writerConnection === true && !tool.write;
   let readOk = true, readErrorKind = null;
   try {
-    if (tool.jevProxy === true && env?.TYPESAFE_API_KEY) {
+    if (tool.jevProxy === true && (env?.TYPESAFE_API_KEY || judgeProviderFor(judgeWorkClass) === "decisions")) {
       const jevArgs = args || {};
       jevRequest = validatedJevRequest;
       // An envelope replay already has its receipt; do not spend or reserve
@@ -955,7 +956,7 @@ export async function callTool(env, actor, name, args, profile = "full") {
         jevAsk = jevAskBinding(env, fetch, { reserveAttempt: async () => {
           return reserveJevCallAttempt(client, { ...actor, id: actorRow.id }, jevArgs);
         } });
-        jevPrefetched = await prefetchJevAnswer(jevArgs, jevAsk);
+        jevPrefetched = await prefetchJevAnswer(jevArgs, jevAsk, judgeWorkClass);
         client.jevPrefetched = jevPrefetched;
       }
     }

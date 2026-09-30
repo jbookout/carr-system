@@ -59,6 +59,7 @@ KNOWN_HOSTS in hooks/guard-unattended.py.
 """
 
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -74,6 +75,11 @@ from datetime import datetime, timezone
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 KEY_PATH = os.path.expanduser("~/.config/carr/typesafe.env")
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_judge_spec = importlib.util.spec_from_file_location(
+    "carr_judge_interface", os.path.join(REPO, "tools", "judge", "interface.py"))
+assert _judge_spec and _judge_spec.loader
+JUDGE = importlib.util.module_from_spec(_judge_spec)
+_judge_spec.loader.exec_module(JUDGE)
 
 
 def _canonical_repo_root(fallback):
@@ -548,7 +554,27 @@ def _append_call_receipt(questions, facets, result, log_path, *, caller=None,
 def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
         api_key=None, retries=RATE_LIMIT_RETRIES, endpoint=ENDPOINT, opener=None,
         facets=None, calls_log=JEV_CALLS_LOG, deadline=None, caller=None,
-        cache_ttl_seconds=JUDGE_CACHE_TTL_SECONDS, cache_path=JUDGE_CACHE_PATH, account=None):
+        cache_ttl_seconds=JUDGE_CACHE_TTL_SECONDS, cache_path=JUDGE_CACHE_PATH, account=None,
+        work_class="system_work"):
+    """Compatibility entrypoint: all existing callers cross the class switch.
+
+    The original transport retains its wire, retry, cache and receipt contract.
+    Runtime consumers explicitly pass app_runtime, which cannot use Decisions.
+    """
+    try:
+        return JUDGE.ask(state, questions, jev=_ask_jev, work_class=work_class,
+                         model=model, timeout=timeout, api_key=api_key, retries=retries,
+                         endpoint=endpoint, opener=opener, facets=facets, calls_log=calls_log,
+                         deadline=deadline, caller=caller or _caller_name(),
+                         cache_ttl_seconds=cache_ttl_seconds, cache_path=cache_path, account=account)
+    except JUDGE.JudgeUnavailable as exc:
+        raise TypeSafeError(str(exc)) from None
+
+
+def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
+             api_key=None, retries=RATE_LIMIT_RETRIES, endpoint=ENDPOINT, opener=None,
+             facets=None, calls_log=JEV_CALLS_LOG, deadline=None, caller=None,
+             cache_ttl_seconds=JUDGE_CACHE_TTL_SECONDS, cache_path=JUDGE_CACHE_PATH, account=None):
     """Evaluate `state` against a map of questions in ONE request.
 
     `state` is a string, or a mapping when the context has several parts —
