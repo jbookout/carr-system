@@ -74,6 +74,7 @@ GENERATOR = os.path.join(REPO, "bin", "schema-snapshot.sh")
 # Keep this mapping explicit so a production-truth pre-release snapshot does not
 # pretend a pending bundle already has privileges.
 ROLE_GRANT_MIGRATIONS = {
+    "dot_reader": "0756_dot_reader.sql",
     "carr_calendar_prebrief_jobs": "0229_calendar_prebrief_projection.sql",
     "carr_calendar_prebrief_canary_jobs": "0229_calendar_prebrief_projection.sql",
     "carr_calendar_prebrief_attestors": "0229_calendar_prebrief_projection.sql",
@@ -91,7 +92,7 @@ APP_ROLES = ["carr_reader", "carr_writer", "carr_jobs", "carr_exporter",
              "carr_program5_forward_fix_verifiers",
              "carr_renewal_source_attestors",
              "carr_gate_zero_producer", "carr_foundation_assurance_oracle",
-             "carr_ownership_issuer"]
+             "carr_ownership_issuer", "dot_reader"]
 MEMBERSHIP_ONLY = ["neondb_owner", "carr_ownership_issuer_g1",
                    "carr_ownership_issuer_g2"]
 
