@@ -46,12 +46,14 @@ def receipt_source_matches(receipt=None):
     commit = receipt.get("code_sha", "")
     if not isinstance(commit, str) or len(commit) != 40:
         return False
-    if receipt.get("source_manifest") != source_manifest():
+    if not isinstance(receipt.get("source_manifest"), dict) or set(receipt["source_manifest"]) != set(SOURCE_PATHS):
         return False
-    ancestor = subprocess.run(["git", "merge-base", "--is-ancestor", commit, "HEAD"],
-                              cwd=REPO, capture_output=True)
-    if ancestor.returncode:
+    runtime = {p: h for p, h in receipt.get("source_manifest", {}).items()
+               if not p.startswith("evals/rule-delivery/")}
+    if any(sha(os.path.join(REPO, p)) != h for p, h in runtime.items()):
         return False
+    # Squash delivery need not retain the experiment commit as an ancestor.
+    # Every pinned blob below must still resolve and match that original SHA.
     for path, expected in receipt["source_manifest"].items():
         blob = subprocess.run(["git", "show", f"{commit}:{path}"], cwd=REPO,
                               capture_output=True)
@@ -107,6 +109,7 @@ def main():
     parser.add_argument("--best", required=True, help="variant name of the code state shipped")
     parser.add_argument("--builder", default=None)
     args = parser.parse_args()
+    parser.error("historical cases were used for selection; preserve this report and collect a fresh frozen final cohort through evals/rule-delivery/freeze_split.py")
     rounds = ledger()
     kept = [r for r in rounds if r["decision"] == KEPT]
     best_round = max([r["round"] for r in kept] or [0])

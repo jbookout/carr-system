@@ -51,6 +51,7 @@ import importlib.util
 import json
 import math
 import os
+import eval_split as E
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -65,7 +66,7 @@ BANDS_SCHEMA = "carr.jev-calibrated-bands.v1"
 OUTCOME_SOURCES = ("review_verdict", "test_result", "human_correction")
 # Which validated label wins when several exist for one judgment question.
 LABEL_PRECEDENCE = ("human_correction", "fixture", "test_result", "review_verdict")
-SPLITS = ("calibration", "held_out")
+SPLITS = ("calibration", "held_out")  # both are development selection, never final
 LABEL_STATUSES = ("validated", "unvalidated")
 QUESTION_TYPES = ("noul", "choice", "score")
 POOLED = "*"
@@ -227,7 +228,7 @@ def validate_fixture(doc):
         elif item["gold_source_available"] and not item.get("gold_source"):
             errors.append(f"{where}: gold_source_available needs a gold_source")
         if item.get("split") not in SPLITS:
-            errors.append(f"{where}: split must be calibration or held_out")
+            errors.append(f"{where}: split must be calibration or held_out; final is forbidden for tuning")
         judgment = item.get("judgment")
         if judgment is not None and (not isinstance(judgment, dict)
                                      or not isinstance(judgment.get("distribution"), dict)):
@@ -653,6 +654,7 @@ def _cell(family, consequence_class, units, targets, bins, z):
     return cell
 
 
+@E.guarded_tuning
 def report(units, *, targets=None, bins=4, z=1.96):
     """Per family and consequence class, with pooled cells shown and refused."""
     targets = dict(targets or {})
@@ -665,6 +667,7 @@ def report(units, *, targets=None, bins=4, z=1.96):
             groups.setdefault(key, []).append(unit)
     order = sorted(groups, key=lambda k: (k[0] == POOLED, k[0], k[1] == POOLED, k[1]))
     return {"schema": "carr.jev-calibration-report.v1", "targets": targets, "bins": bins,
+            "split_provenance": E.development_provenance(units, "calibration/held_out selection"),
             "z": z, "cells": [_cell(f, c, groups[(f, c)], targets, bins, z) for f, c in order]}
 
 

@@ -1,5 +1,11 @@
 # Rule-delivery eval
 
+Historical experiment: train/test were both used in selection. Preserve its
+receipt and runs as exploratory evidence. Fresh final claims follow the
+three-way procedure in `../README.md`; the legacy report writer refuses
+regeneration. Set `CARR_EVAL_SPLIT` to a fresh frozen manifest for tuning.
+The new runner defaults to train and never loads final via its tuning loader.
+
 Measures the deterministic half of CARR rule delivery: which taught rules the
 trigger and pack layer puts in front of a session at each prompt and each tool
 call, with the Jev judgment switched off. It is the "skill triggering" case:

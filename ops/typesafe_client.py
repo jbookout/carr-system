@@ -7,6 +7,25 @@ else: a yes/no probability (noul), a pick-one over a defined set (choice), and
 a position on ordered levels (score). Code owns the workflow; the model supplies
 the semantic judgment where ordinary code has none.
 
+JEV QUESTION AUTHORING REFERENCE (read before editing questions)
+Source: https://docs.typesafe.ai/agent-skill and its official primitive guides:
+https://docs.typesafe.ai/primitives/choice · /primitives/noul · /primitives/score.
+Choice: competing labels; include a no-match option when nothing may fit.
+Noul: independent yes/no propositions. `noul` is P(yes): zero means no,
+one means yes, and near 0.5 means uncertain, with no separate confidence.
+Match polarity: true describes yes to the written question; false describes
+no. For "Does this violate policy?", true means a violation, not compliance.
+Score: one dimension with concrete, ordered levels, lowest first. Each level
+stands alone; the result is a probability-weighted level position, not exact
+arithmetic. Keep questions and thresholds together for review.
+Batch independent questions about the same state in one ask. They cannot see
+each other's answers. Make another request only when an answer changes the
+evidence or options. Put the meaning in instructions and criteria, since IDs
+are not sent to the model. Supply named state fields and source evidence.
+Validate thresholds on development cases; consume final evidence once after
+selection. Preserve this client's existing credential resolution and model pins.
+This reference requires no plugin, SDK installation or second key path.
+
 THIS FILE IS A LIBRARY ON PURPOSE. It carries no shebang and no main guard, and
 it must never gain either. A .py file with either becomes a registered script
 entrypoint in the sealed source inventory — see isScriptEntrypoint() in

@@ -44,6 +44,8 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, REPO)
+sys.path.insert(0, os.path.join(REPO, "ops"))
+import eval_split as E  # noqa: E402
 
 V2_CASES = os.path.join(REPO, "ops", "fixtures", "rule-delivery-eval", "cases.v2.json")
 HARD_CASES = os.path.join(HERE, "hard_cases.v1.json")
@@ -72,6 +74,10 @@ def load_cases(split=None):
     disputed, kind, note}. v2 cases keep the split the repo fixed on
     2026-09-27 (ops/rule_gold_label.assign_splits); hard cases are split by
     hash of their id above."""
+    if os.environ.get("CARR_EVAL_SPLIT"):
+        return E.load_partition(os.environ["CARR_EVAL_SPLIT"], split or "train")
+    if split == "final":
+        raise E.SplitError("historical exposed cases cannot produce a final score")
     ev = _load(os.path.join(REPO, "ops", "rule_delivery_eval.py"), "rde_cases")
     cases = []
     for case in ev.load_cases(V2_CASES):
@@ -272,6 +278,7 @@ def grade(world, case, events):
             "over_cap_events": sum(1 for ev in events if ev["overflow"])}
 
 
+@E.guarded_tuning
 def run(split, variant, out_dir=None):
     world = World()
     rows = []
@@ -434,7 +441,7 @@ def load_run(variant, split=None):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--variant", default="baseline")
-    parser.add_argument("--split", default="all", choices=("train", "test", "all"))
+    parser.add_argument("--split", default="train", choices=("train", "development", "test", "all"))
     parser.add_argument("--compare", nargs=2, metavar=("BASE", "NEW"))
     parser.add_argument("--print", action="store_true", help="print the summary only; write nothing")
     parser.add_argument("--verdict", nargs=3, metavar=("BASE", "NEW", "GOAL"),

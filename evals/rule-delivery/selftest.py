@@ -64,6 +64,8 @@ def main():
         forged = json.load(handle)
     check("receipt discloses contaminated historical holdout",
           forged.get("evaluation_status") == "exploratory_test_used_for_candidate_selection")
+    empty_manifest = {**forged, "source_manifest": {}}
+    check("historical receipt requires every pinned source path", not M.receipt_source_matches(empty_manifest))
     forged["source_manifest"]["lib/rule_routes.py"] = "0" * 64
     check("receipt rejects changed shipped source", not M.receipt_source_matches(forged))
     before = snapshot()

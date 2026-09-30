@@ -60,6 +60,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "ops"))
 sys.path.insert(0, str(ROOT / "tools" / "room-bridge"))
 import ai_eval  # noqa: E402  (also puts room-bridge on the path)
+import eval_split  # noqa: E402
 import evaluation_kernel as kernel  # noqa: E402
 import execution_contract as contract  # noqa: E402
 
@@ -244,13 +245,13 @@ def validate_receipt(r: Any, surface: str, root: Path = ROOT) -> list[str]:
             errs.append(str(exc))
 
     c = r["cases"]
-    if not isinstance(c, dict) or not {"total", "train", "test", "should_not_fire", "sources"} <= set(c):
-        errs.append("cases must carry total, train, test, should_not_fire, sources")
+    if not isinstance(c, dict) or not {"total", "train", "development", "final", "should_not_fire", "sources"} <= set(c):
+        errs.append("cases must carry total, train, development, final, should_not_fire, sources")
     else:
-        if not (_int(c["total"], 1) and _int(c["train"], 0) and _int(c["test"], 1)):
-            errs.append("cases: total and test must be positive integers, train a non-negative integer")
-        elif c["train"] + c["test"] != c["total"]:
-            errs.append(f"cases: train {c['train']} + test {c['test']} != total {c['total']}")
+        if not (_int(c["total"], 1) and _int(c["train"], 1) and _int(c["development"], 1) and _int(c["final"], 1)):
+            errs.append("cases: train, development and final must be positive integers")
+        elif sum(c[p] for p in eval_split.PARTITIONS) != c["total"]:
+            errs.append("cases: train + development + final != total")
         if not _int(c["should_not_fire"], 1):
             errs.append("cases.should_not_fire must be at least 1: an eval with no should-not-fire cases rewards firing on everything")
         elif _int(c["total"], 1) and c["should_not_fire"] > c["total"]:
@@ -266,6 +267,16 @@ def validate_receipt(r: Any, surface: str, root: Path = ROOT) -> list[str]:
         errs.append("split.method must name how train and test were drawn")
     elif s.get("sealed_test") is not True:
         errs.append("split.sealed_test must be true: the test split's transcripts are never read while proposing changes")
+    if isinstance(s, dict):
+        provenance = s.get("provenance")
+        errs.extend(eval_split.provenance_errors(provenance, root))
+        if isinstance(provenance, dict) and isinstance(c, dict):
+            if provenance.get("counts") != {p: c.get(p) for p in eval_split.PARTITIONS}:
+                errs.append("split provenance must match receipt case counts")
+            if isinstance(a, dict) and provenance.get("model") != a.get("model_id"):
+                errs.append("split provenance model must match receipt adapter")
+            if isinstance(a, dict) and provenance.get("candidate_digest") != a.get("configuration_fingerprint"):
+                errs.append("split provenance must bind the measured candidate configuration")
     if not _int(r["repeats"], 1):
         errs.append("repeats must be a positive integer")
 

@@ -32,6 +32,7 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { withTuningAccess } from "../tuning-access.mjs";
 
 import {
   JEV_RERANK_MODEL, JEV_RERANK_SHORTLIST_MAX, buildFlatRerankRequest, jevRerank, rerankCandidateText,
@@ -49,7 +50,10 @@ const CHARS_PER_TOKEN = 3;
 const NOT_A_FALLBACK = new Set(["single_candidate", "flag_off", "empty_shortlist"]);
 
 export function loadFixture(path = FIXTURE_PATH) {
-  return JSON.parse(readFileSync(path, "utf8"));
+  const fixture = JSON.parse(readFileSync(path, "utf8"));
+  if (fixture.cases.some(c => ["final", "final_test"].includes(c.split)))
+    throw new Error("final cases cannot enter rerank variant selection");
+  return fixture;
 }
 
 function price() {
@@ -244,7 +248,8 @@ export function estimateVariant({ fixture, variant, taxonomy = DOCTRINE_TAXONOMY
 }
 
 function parseArgs(args) {
-  const opts = { live: false, replay: null, variants: [...VARIANTS], model: JEV_RERANK_MODEL, out: null };
+  const opts = { live: false, replay: null, variants: [...VARIANTS], model: JEV_RERANK_MODEL, out: null,
+    splitManifest: null, partition: "development" };
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
     if (arg === "--live") opts.live = true;
@@ -252,10 +257,13 @@ function parseArgs(args) {
     else if (arg === "--variants") opts.variants = String(args[++i]).split(",").filter(Boolean);
     else if (arg === "--model") opts.model = args[++i];
     else if (arg === "--out") opts.out = args[++i];
+    else if (arg === "--split-manifest") opts.splitManifest = args[++i];
+    else if (arg === "--partition") opts.partition = args[++i];
     else throw new Error(`unknown argument: ${arg}`);
   }
   for (const v of opts.variants) if (!VARIANTS.includes(v)) throw new Error(`unknown variant: ${v}`);
   if (opts.live && opts.replay) throw new Error("--live and --replay are exclusive");
+  if (!["train", "development"].includes(opts.partition)) throw new Error("final partition forbidden during variant selection");
   return opts;
 }
 
@@ -265,9 +273,25 @@ export async function main(args = [], {
   writeReport = (path, body) => { mkdirSync(dirname(resolve(REPO, path)), { recursive: true });
     writeFileSync(resolve(REPO, path), body); },
   fixturePath = FIXTURE_PATH,
+  tuningFixture = null,
 } = {}) {
   const opts = parseArgs(args);
-  const fixture = loadFixture(fixturePath);
+  if (opts.splitManifest && !tuningFixture) {
+    const manifestPath = resolve(REPO, opts.splitManifest);
+    const run = spawn("python3", [resolve(REPO, "evals/rule-delivery/freeze_split.py"), "load", manifestPath, opts.partition],
+      { cwd: REPO, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+    if (run.status !== 0) throw new Error(`invalid split: ${run.stderr}`);
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    // Only the existing fixed TypeSafe bridge may spawn while tuning. It reads
+    // the client/key, not case files, and receives development state on stdin.
+    const credentialCode = "import sys\nsys.path.insert(0, 'ops')\nimport typesafe_client\ntypesafe_client.read_api_key()";
+    return withTuningAccess([resolve(dirname(manifestPath), manifest.partitions.final.path),
+      ...manifest.blocked_sources], () => main(args, { stdout, spawn, writeReport, fixturePath,
+      tuningFixture: { suite_id: manifest.source, doctrine_generation: null,
+        cases: JSON.parse(run.stdout), split_manifest_digest: manifest.digest } }),
+    [["python3", ["-c", PYTHON_BRIDGE]], ["python3", ["-c", credentialCode]]]);
+  }
+  const fixture = tuningFixture || loadFixture(fixturePath);
   const measured = opts.live || opts.replay;
   const recording = {};
   let askJev = null;
@@ -279,6 +303,9 @@ export async function main(args = [], {
 
   const report = {
     schema: "carr-jev-rerank-eval-v1",
+    split_provenance: { evaluation_use: "development_only", final_score_eligible: false,
+      manifest_digest: fixture.split_manifest_digest ?? null,
+      dataset_digest: `sha256:${createHash("sha256").update(canonical(fixture.cases)).digest("hex")}` },
     suite_id: fixture.suite_id,
     doctrine_generation: fixture.doctrine_generation,
     taxonomy_snapshot_id: DOCTRINE_TAXONOMY_SNAPSHOT.snapshot_id,

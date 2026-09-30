@@ -64,21 +64,34 @@ Nothing here is a second evaluation system; extend the kernel, not this file.
    cases at 2 repeats is about 14 points. Decide the smallest gain you would act
    on, then size cases and repeats so the noise floor sits below it. If it
    cannot, the receipt can report but cannot ship.
-7. **Seal the test split.** Draw train and test at random, stratified by the
-   first tag. Only train transcripts are read while proposing changes. The test
-   split is scored every round and is the headline, and nobody opens its
-   transcripts.
-8. **One attributable change per round.** Each round changes one thing, names
-   it in `change`, and can be tied to a behaviour that moved. If train rose and
-   test did not, revert.
+7. **Freeze train, development and final before tuning.** Use
+   `evals/rule-delivery/freeze_split.py freeze` with a fresh cohort, source-group IDs, a seed,
+   source provenance and an exposure ledger. It writes separate files plus a
+   hashed manifest, refuses duplicate content and cross-split source groups,
+   and refuses existing bundles and previously exposed cases. Keep final files
+   and the original mixed source outside the tuning workspace. Only manifest
+   metadata may be committed; it contains IDs and content hashes, no labels or
+   transcripts. `evals/split-uses.json` inventories existing scored collections.
+   Their old test/held_out names mean development or regression, not final.
+8. **Select variants on development only.** Run Python tuning through
+   `evals/rule-delivery/freeze_split.py tune`; it blocks reads of final and mixed source files,
+   checks resolved paths and file identities, and fails even if the tuner catches
+   the denial. Unmonitored child/native execution is refused. The rerank runner
+   uses `--split-manifest` and `--partition train|development` with the matching
+   Node guard; only its fixed existing TypeSafe bridge may spawn. One change
+   per round; record the reason for keep/revert from development results.
 9. **Never paste failures into prompts.** Fix the behaviour the failing cases
    share. Copying a failing case's text into the prompt is overfitting with
    extra steps, and the sealed split exists to catch it.
 10. **After two stalled rounds, bucket the failures.** Sort what is left into
     artifact gap, grader disagreement, structural, and variance before spending
     another round. Most stalls are not artifact gaps.
-11. **Report test against baseline, per dimension, with confidence
-    intervals.** Every dimension gets its own baseline, candidate and paired
+11. **Consume final once after selection, per dimension, with confidence
+    intervals.** `eval_split.final_evaluation()` persists an exclusive final lock
+    binding baseline, candidate configuration digest, harness digest, model and
+    clean tuning access audit BEFORE opening final cases. An interrupted or failed
+    final attempt consumes the cohort: verify its lock; never auto-retry or select
+    another candidate on those cases. Every dimension gets its own baseline, candidate and paired
     delta interval. A critical dimension that fails or regresses blocks, even
     if the primary dimension and any overall number rose. When the primary
     delta interval contains zero the verdict says "do not merge on quality
@@ -109,9 +122,10 @@ surface. A receipt carried over from an earlier change does not count.
     "model_id": "...", "native_session_ref": "...",
     "configuration_fingerprint": "sha256:<64 hex>"
   },
-  "cases": {"total": 80, "train": 40, "test": 40, "should_not_fire": 16,
+  "cases": {"total": 80, "train": 48, "development": 16, "final": 16, "should_not_fire": 16,
             "sources": ["production_trace", "human_judged_hard_case"]},
-  "split": {"method": "random, stratified by first tag", "seed": 11, "sealed_test": true},
+  "split": {"method": "seeded shuffle of independent source groups", "seed": 11,
+            "sealed_test": true, "provenance": "use the object returned by final_evaluation; see below"},
   "repeats": 3,
   "grader": {"kind": "programmatic",
              "validation": {"graded_twice": true, "agreement": 0.98,
@@ -135,7 +149,7 @@ surface. A receipt carried over from an earlier change does not count.
 }
 ```
 
-Scores are test-split numbers in [0, 1]. `direction_vs_baseline` must agree
+Scores are final-partition numbers in [0, 1]. `direction_vs_baseline` must agree
 with the delta interval: `improved` when it sits above zero, `regressed` below,
 `equivalent` when it contains zero. Optional fields: `overall` (reported,
 never decisive), `offline_suite` (`{path, suite_digest}` for an
@@ -147,6 +161,23 @@ own numbers. A changed surface passes the gate only with `ship` or
 `ship_cost_at_parity`; `do_not_merge` and `inconclusive` are valid recorded
 results but block the pull request, even if its body also has a no-eval line.
 An unreadable or malformed pull-request event also blocks the check.
+
+The example provenance placeholder above is explanatory and cannot pass CI.
+Use the object returned by `eval_split.final_evaluation`: manifest path/digest,
+partition counts and file digests, final lock path/digest, baseline, candidate,
+harness and model bindings. Copy the manifest and final-lock metadata to the
+receipt directory and replace their paths with repository-relative paths;
+never commit final case files. The check authenticates both metadata artifacts,
+disjoint IDs/content/source groups, their digest bindings, a completed clean
+tuning audit, and the receipt's case counts, model and candidate fingerprint.
+A boolean `sealed_test` alone cannot pass. Final labels and transcripts stay
+unavailable to tuning. The guards provide detectable integrity in supported
+Python/Node runs; they are not an OS sandbox against a hostile source rewrite.
+
+The Jev authoring reference is in `ops/typesafe_client.py`, the client every
+question author already reads. It is distilled from TypeSafe's official
+[agent guide](https://docs.typesafe.ai/agent-skill) and linked primitive pages;
+it adds no plugin, runtime or credential path.
 
 ## The control behind the rule
 
