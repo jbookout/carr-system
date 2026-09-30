@@ -41,6 +41,11 @@ TRIAGE_HIGH_FLOOR_TIER = 3
 SECURITY_LENS_TIER = 2
 
 
+def _is_tier(value) -> bool:
+    """An int tier; a bool is refused even though True == 1 in Python."""
+    return type(value) is int and value in TIERS
+
+
 def validate(doc) -> list[str]:
     """Problems with a map document; empty means well formed."""
     problems = []
@@ -51,7 +56,7 @@ def validate(doc) -> list[str]:
     for key in ("purpose", "provenance"):
         if not isinstance(doc.get(key), str) or not doc[key].strip():
             problems.append(f"{key} missing")
-    if doc.get("default_tier") not in TIERS:
+    if not _is_tier(doc.get("default_tier")):
         problems.append("default_tier must be 1, 2 or 3")
 
     def check_rows(name, rows, tiered):
@@ -79,7 +84,7 @@ def validate(doc) -> list[str]:
             if not isinstance(row.get("why"), str) or not row["why"].strip():
                 problems.append(f"{where}: why missing")
             if tiered:
-                if row.get("tier") not in TIERS:
+                if not _is_tier(row.get("tier")):
                     problems.append(f"{where}: tier must be 1, 2 or 3")
                 if row.get("class") not in CLASSES:
                     problems.append(f"{where}: class must be one of {CLASSES}")

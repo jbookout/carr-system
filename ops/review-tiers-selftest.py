@@ -235,6 +235,79 @@ class ConsistencyTests(unittest.TestCase):
         self.assertEqual(sync.check(), [])
 
 
+class LensFaultTests(unittest.TestCase):
+    """A review-tier map that cannot be imported, read or validated must ARM
+    the security lens and record the fault, never quietly disarm it (council
+    review of PR 1450, finding 1). The git-error fallback is unchanged."""
+
+    SENSITIVE = ["mcp-server/src/identity.js"]
+
+    def _lens_with_reader(self, reader_factory):
+        logged = []
+        fake_git = types.SimpleNamespace(returncode=0, stdout="".join(p + "\n" for p in self.SENSITIVE), stderr="")
+        original_run, original_reader, original_log = rcr.subprocess.run, rcr._review_tiers, rcr.log
+        rcr.subprocess.run = lambda *a, **k: fake_git
+        rcr._review_tiers = reader_factory
+        rcr.log = logged.append
+        try:
+            return rcr.security_lens_if_triggered("0" * 40), logged
+        finally:
+            rcr.subprocess.run, rcr._review_tiers, rcr.log = original_run, original_reader, original_log
+
+    def _reader_reading(self, text):
+        """The real reader, with load() pointed at a scratch map holding `text`
+        (None: the map file is missing)."""
+        def factory():
+            module = _load("review_tiers_fault", "lib/review_tiers.py")
+            path = os.path.join(os.environ.get("TMPDIR", "/tmp"), f"review-tiers-fault-{os.getpid()}.json")
+            if text is None:
+                path += ".missing"
+            else:
+                Path(path).write_text(text)
+            module.load = lambda p=path: json.loads(Path(p).read_text())
+            module._map.cache_clear()
+            return module
+        return factory
+
+    def assert_armed_and_recorded(self, factory):
+        lens, logged = self._lens_with_reader(factory)
+        self.assertEqual(lens, rcr.SECURITY_LENS)
+        self.assertTrue(any("review-tier map" in line and "ARMED" in line for line in logged), logged)
+
+    def test_valid_map_still_arms_normally(self):
+        lens, logged = self._lens_with_reader(rcr._review_tiers)
+        self.assertEqual(lens, rcr.SECURITY_LENS)
+        self.assertFalse(any("review-tier map" in line for line in logged), logged)
+
+    def test_missing_map_file_arms_the_lens(self):
+        self.assert_armed_and_recorded(self._reader_reading(None))
+
+    def test_truncated_json_arms_the_lens(self):
+        self.assert_armed_and_recorded(self._reader_reading("{"))
+
+    def test_empty_object_arms_the_lens(self):
+        self.assert_armed_and_recorded(self._reader_reading("{}"))
+
+    def test_schema_invalid_map_arms_the_lens(self):
+        bad = rt.load()
+        bad["rules"][0]["tier"] = 9
+        self.assert_armed_and_recorded(self._reader_reading(json.dumps(bad)))
+
+    def test_reader_import_failure_arms_the_lens(self):
+        def broken():
+            raise ImportError("lib/review_tiers.py")
+        self.assert_armed_and_recorded(broken)
+
+    def test_git_error_fallback_is_unchanged(self):
+        fake_git = types.SimpleNamespace(returncode=128, stdout="", stderr="bad object")
+        original = rcr.subprocess.run
+        rcr.subprocess.run = lambda *a, **k: fake_git
+        try:
+            self.assertIsNone(rcr.security_lens_if_triggered("0" * 40))
+        finally:
+            rcr.subprocess.run = original
+
+
 class MapContentTests(unittest.TestCase):
     def test_migrations_are_never_noise(self):
         for path in ("migrations/0001_init.sql", "migrations/node_modules/x.js",
@@ -289,6 +362,13 @@ class MapContentTests(unittest.TestCase):
         dup = json.loads(json.dumps(good))
         dup["rules"].append(dict(dup["rules"][0]))
         self.assertTrue(rt.validate(dup))
+        # True == 1 in Python: a boolean must not pass as a tier.
+        bool_default = json.loads(json.dumps(good))
+        bool_default["default_tier"] = True
+        self.assertTrue(rt.validate(bool_default))
+        bool_rule = json.loads(json.dumps(good))
+        bool_rule["rules"][0]["tier"] = True
+        self.assertTrue(rt.validate(bool_rule))
 
 
 class NonBlockingTests(unittest.TestCase):

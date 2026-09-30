@@ -546,10 +546,19 @@ def security_lens_if_triggered(commit_sha: str) -> Optional[str]:
             log(f"security-lens trigger check failed (git rc={out.returncode}); lens not armed")
             return None
         changed = [l.strip() for l in out.stdout.splitlines() if l.strip()]
-        tiers = _review_tiers()
-        if tiers.tier_for_paths(changed) >= tiers.SECURITY_LENS_TIER:
+        if not changed:
+            return None
+        # A map that cannot be imported, read or validated ARMS the lens: an
+        # unreadable map must never lower review. The fault is logged and the
+        # review keeps running.
+        try:
+            tiers = _review_tiers()
+            armed = tiers.tier_for_paths(changed) >= tiers.SECURITY_LENS_TIER
+        except Exception as e:  # noqa: BLE001 — fail toward more review
+            log(f"review-tier map unreadable ({type(e).__name__}: {str(e)[:200]}); "
+                "security lens ARMED conservatively")
             return SECURITY_LENS
-        return None
+        return SECURITY_LENS if armed else None
     except Exception as e:  # noqa: BLE001 — fail open by design, but say so
         log(f"security-lens trigger check errored ({type(e).__name__}); lens not armed")
         return None
