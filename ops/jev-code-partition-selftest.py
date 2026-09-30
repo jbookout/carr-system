@@ -122,6 +122,23 @@ JS = textwrap.dedent('''\
     ''')
 
 
+class TrackedSources(unittest.TestCase):
+    def test_git_inventory_preserves_unicode_and_newline_paths(self):
+        names = ['café.js', 'λ.py', 'two\nlines.mjs', 'plain.js']
+        with tempfile.TemporaryDirectory() as tmp:
+            env = fixture_env()
+            subprocess.run(['git', 'init', '-q', tmp], env=env, check=True)
+            subprocess.run(['git', 'config', 'core.quotePath', 'true'], cwd=tmp, env=env, check=True)
+            for name in names + ['ignored.txt', 'node_modules/dependency.js']:
+                target = Path(tmp, name)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text('const x = 1;\n')
+                subprocess.run(['git', 'add', '--', name], cwd=tmp, env=env, check=True)
+            for scanner in (review, part):
+                with self.subTest(scanner=scanner.__name__):
+                    self.assertEqual(set(scanner.tracked_sources(tmp)), set(names))
+
+
 class PythonSpans(unittest.TestCase):
     def test_functions_methods_nested_and_handlers(self):
         spans = part.python_spans(PY)
@@ -138,6 +155,13 @@ class PythonSpans(unittest.TestCase):
 
 
 class JsSpans(unittest.TestCase):
+    def test_escaped_newline_in_quoted_string_counts_toward_span(self):
+        for quote in ('"', "'"):
+            for newline in ('\n', '\r\n'):
+                source = f'const s = {quote}a\\{newline}b{quote};\nfunction f() {{\n  return 7;\n}}\n'
+                with self.subTest(quote=quote, newline=newline):
+                    self.assertEqual(part.js_spans(source), [("function", 3, 5)])
+
     def test_braces_in_strings_templates_regex_and_comments_are_skipped(self):
         spans = part.js_spans(JS)
         self.assertIsNotNone(spans, "the scanner must balance this file")
@@ -155,6 +179,35 @@ class JsSpans(unittest.TestCase):
 
 
 class PartitionText(unittest.TestCase):
+    def test_single_overlong_handler_line_is_retained_with_truthful_coverage(self):
+        text = 'try:\n    x()\nexcept Exception: recovered = "' + 'a' * 3000 + '"\n'
+        parts = part.partition_text('handler.py', text)
+        handlers = [p for p in parts if 'except_block' in p['kind']]
+        self.assertEqual(len(handlers), 1)
+        self.assertTrue(handlers[0]['code'].startswith('except Exception:'))
+        self.assertLess(handlers[0]['sent_end_line'], 3)
+        self.assertLessEqual(handlers[0]['chars'], part.MAX_REGION_CHARS)
+
+    def test_long_handler_slices_keep_header_and_every_body_line(self):
+        prefix = ''.join(f'value_{i} = {i}\n' for i in range(12)) + 'try:\n    x()\n'
+        header = 'except Exception:'
+        body = [f'    recovered_{i} = {i}' for i in range(200)]
+        text = prefix + header + '\n' + '\n'.join(body) + '\n'
+        parts = part.partition_text('handler.py', text)
+        handlers = [p for p in parts if 'except_block' in p['kind']]
+        self.assertGreater(len(handlers), 1)
+        self.assertEqual(handlers[0]['line'], 15)
+        self.assertTrue(all(p['code'].splitlines()[0] == header for p in handlers))
+        sent = [line for p in handlers for line in p['code'].splitlines()[1:]]
+        self.assertEqual(sent, body)
+        self.assertTrue(all(p['chars'] <= part.MAX_REGION_CHARS for p in parts))
+        for p in parts:
+            if 'except_block' not in p['kind']:
+                self.assertFalse(set(p['code'].splitlines()) & set(body))
+        regions, _ = part.partition(['handler.py'], reader=lambda _: text)
+        self.assertTrue(all(p['code'].splitlines()[0] == header
+                            for p in regions if 'except_block' in p['kind']))
+
     def test_python_file_is_covered_without_overlap(self):
         stats = {}
         parts = part.partition_text("x.py", PY, stats)
@@ -273,6 +326,59 @@ class DedupeAndPack(unittest.TestCase):
 
 
 class Review(unittest.TestCase):
+    def test_nearby_candidates_split_when_union_exceeds_cap(self):
+        source = 'time.sleep(1)\n' + ('#' + 'a' * 200 + '\n') * 19 + 'v = str(value or "")\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, 'scan.py').write_text(source)
+            regions = review.regions(['scan.py'], repo=tmp)
+        self.assertEqual(len(regions), 2)
+        sent = [line for region in regions for line in region['code'].splitlines()]
+        self.assertIn('time.sleep(1)', sent)
+        self.assertIn('v = str(value or "")', sent)
+        self.assertTrue(all(len(r['code']) <= review.MAX_REGION_CHARS for r in regions))
+
+    def test_non_swallowing_handlers_and_ordinary_coercion_stay_quiet(self):
+        source = 'try:\n    risky()\nexcept Exception:\n    raise\nresult = str(value)\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, 'scan.py').write_text(source)
+            self.assertEqual(review.regions(['scan.py'], repo=tmp), [])
+
+    def test_merged_context_preserves_trailing_blank_lines(self):
+        source = 'time.sleep(1)\nv = str(value or "")\n\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, 'scan.py').write_text(source)
+            regions = review.regions(['scan.py'], repo=tmp)
+        self.assertEqual(len(regions), 1)
+        self.assertEqual(regions[0]['code'], source.rstrip('\n') + '\n')
+        self.assertEqual(regions[0]['sent_end_line'], 3)
+
+    def test_bare_except_pass_is_a_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "scan.py").write_text('try:\n    risky()\nexcept:\n    pass\n')
+            regions = review.regions(["scan.py"], repo=tmp)
+        self.assertEqual(len(regions), 1)
+        self.assertEqual(regions[0]["kind"], "swallowed_failure")
+        self.assertIn('except:', regions[0]["code"].splitlines())
+
+    def test_large_preceding_context_keeps_flagged_statement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "scan.py").write_text('#' + 'a' * 2700 + '\ntime.sleep(1)\n')
+            regions = review.regions(["scan.py"], repo=tmp)
+        self.assertEqual(len(regions), 1)
+        self.assertIn('time.sleep(1)', regions[0]["code"].splitlines())
+        self.assertEqual((regions[0]["start_line"], regions[0]["sent_end_line"]), (2, 2))
+        self.assertLessEqual(len(regions[0]["code"]), review.MAX_REGION_CHARS)
+
+    def test_nearby_candidates_send_both_flagged_lines(self):
+        source = 'time.sleep(1)\n' + 'x = 1\n' * 19 + 'v = str(value or "")\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "scan.py").write_text(source)
+            regions = review.regions(["scan.py"], repo=tmp)
+        self.assertEqual(len(regions), 1)
+        self.assertIn('time.sleep(1)', regions[0]["code"].splitlines())
+        self.assertIn('v = str(value or "")', regions[0]["code"].splitlines())
+        self.assertEqual((regions[0]["start_line"], regions[0]["sent_end_line"]), (1, 21))
+
     def test_one_request_per_region_with_every_question(self):
         regions, _ = part.partition(["x.py"], reader={"x.py": PY}.__getitem__)
         client = FakeClient(value=0.7)

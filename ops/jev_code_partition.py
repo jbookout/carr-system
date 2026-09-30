@@ -79,9 +79,9 @@ def _load(name, rel):
 
 
 def tracked_sources(repo=REPO):
-    out = subprocess.run(["git", "ls-files"], capture_output=True, text=True,
+    out = subprocess.run(["git", "ls-files", "-z"], capture_output=True, text=True,
                          cwd=repo, timeout=120).stdout
-    return [f for f in out.splitlines()
+    return [f for f in out.split("\0")
             if f.endswith(SUFFIXES) and not any(p in f for p in EXCLUDE_PARTS)]
 
 
@@ -181,7 +181,11 @@ def js_spans(text):
         if c in "'\"":
             j = i + 1
             while j < n and text[j] != c and text[j] != "\n":
-                j += 2 if text[j] == "\\" else 1
+                if text[j] == "\\":
+                    j += 3 if text[j + 1:j + 3] == "\r\n" else 2
+                else:
+                    j += 1
+            line += text.count("\n", i, j + 1)
             i = j + 1
             last_sig = c
             continue
@@ -319,6 +323,35 @@ def _part(path, kind, start, end, lines):
             "chars": len(sent), "sent_end_line": sent_end_line}
 
 
+def _handler_parts(path, start, end, lines):
+    """Slice a long handler, repeating its header as context on body slices.
+
+    Later slices retain their body line range; context_line identifies the
+    repeated header without claiming the intervening body was sent again.
+    """
+    if start == end:
+        return [_part(path, "except_block", start, end, lines)]
+    header = lines[start - 1]
+    cap = max(1, MAX_REGION_CHARS - len(header) - 1)
+    out = []
+    for a, b in _slices(lines, start + 1, end, cap=cap):
+        if a == start + 1:
+            first = _part(path, "except_block", start, b, lines)
+            first["context_line"] = start
+            out.append(first)
+            continue
+        body = _text(lines, a, b)
+        code = header + "\n" + body
+        sent = code[:MAX_REGION_CHARS]
+        sent_body = sent[len(header) + 1:]
+        out.append({"path": path, "line": a, "end_line": b,
+                    "kind": "except_block", "code": sent, "digest": digest(code),
+                    "chars": len(sent), "context_line": start,
+                    "sent_end_line": b if len(sent) == len(code) else
+                                     a + sent_body.count("\n") - 1})
+    return out
+
+
 def partition_text(path, text, stats=None):
     """Every partition of one file, before cross-file dedupe. `stats`, when
     given, counts what was left out or folded and why, so nothing is dropped
@@ -330,7 +363,8 @@ def partition_text(path, text, stats=None):
     An except handler is not cut out separately when a partition already
     carries all of it; that partition's kind gains "+except_block" instead,
     so the judgment is told what is inside. Only a handler that straddles a
-    slice boundary gets its own region, with the lines above it.
+    slice boundary gets its own region. Long handlers are sliced separately,
+    with their header repeated so every body slice keeps the failure context.
     """
     stats = stats if stats is not None else {}
     lines = text.splitlines()
@@ -346,6 +380,11 @@ def partition_text(path, text, stats=None):
 
     def fits(s, e):
         return len(_text(lines, s, e)) <= MAX_REGION_CHARS
+
+    long_except = set()
+    for s, e in excepts:
+        if not fits(s, e):
+            long_except.update(range(s, e + 1))
 
     whole = [(s, e) for s, e in functions if fits(s, e)]
     outer = [(s, e) for s, e in whole
@@ -388,11 +427,11 @@ def partition_text(path, text, stats=None):
         if fits(s, e) or any((os_, oe) != (s, e) and os_ <= s and e <= oe
                              and not fits(os_, oe) for os_, oe in functions):
             continue       # fits, or an enclosing long function slices it
-        for lo, hi in _uncovered_runs(s, e, lambda a, _b: covered_by_whole[a]):
+        for lo, hi in _uncovered_runs(s, e, lambda a, _b: covered_by_whole[a] or a in long_except):
             for a, b in _slices(lines, lo, hi):
                 parts.append(_part(path, "function_part", a, b, lines))
     # Module-level code outside every function, a new slice at each comment run.
-    for lo, hi in _uncovered_runs(1, len(lines), lambda a, _b: in_function[a]):
+    for lo, hi in _uncovered_runs(1, len(lines), lambda a, _b: in_function[a] or a in long_except):
         cuts = sorted(c for c in breaks if lo < c <= hi)
         for run_lo, run_hi in zip([lo] + cuts, [c - 1 for c in cuts] + [hi]):
             for a, b in _slices(lines, run_lo, run_hi):
@@ -401,6 +440,9 @@ def partition_text(path, text, stats=None):
                     parts.append(_part(path, kind, a, b, lines))
     # Except handlers: fold into the partition that carries them whole.
     for s, e in excepts:
+        if not fits(s, e):
+            parts.extend(_handler_parts(path, s, e, lines))
+            continue
         home = next((p for p in parts if p["line"] <= s and e <= p["end_line"]), None)
         if home is not None:
             if "except_block" not in home["kind"].split("+"):
@@ -408,7 +450,7 @@ def partition_text(path, text, stats=None):
             stats["except_folded"] = stats.get("except_folded", 0) + 1
             continue
         lo = max(1, s - EXCEPT_CONTEXT_BEFORE)
-        a, b = _slices(lines, lo, e)[0] if not fits(lo, e) else (lo, e)
+        a, b = (lo, e) if fits(lo, e) else (s, e)
         parts.append(_part(path, "except_block", a, b, lines))
     kept = [p for p in parts if not trivial(p["code"])]
     stats["trivial"] = stats.get("trivial", 0) + len(parts) - len(kept)
@@ -487,6 +529,7 @@ def pack(parts, cap=MAX_REGION_CHARS, small=PACK_BELOW_CHARS,
                 and prev["chars"] < cap and p["line"] > prev["end_line"]
                 and candidate is not None and len(candidate) <= cap
                 and not prev.get("also_at") and not p.get("also_at")
+                and "context_line" not in prev and "context_line" not in p
                 and prev["sent_end_line"] == prev["end_line"]
                 and p["sent_end_line"] == p["end_line"]):
             prev["code"] = candidate
