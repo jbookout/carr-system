@@ -15,10 +15,13 @@ const STATIC = new Map([
   ["/tours", "/tours/index.html"],
   ["/tours/app.js", "/tours/app.js"],
   ["/tours/app.css", "/tours/app.css"],
+  ["/tours/property-panel.js", "/tours/property-panel.js"],
+  ["/tours/property-panel.css", "/tours/property-panel.css"],
 ]);
 const METHODS = new Map([
   ["/api/tours/library", "GET"],
   ["/api/tours/detail", "GET"],
+  ["/api/tours/property-evidence/v1", "GET"],
   ["/api/tours/properties/search", "POST"],
   ["/api/tours/selection-cart", "GET, POST"],
   ["/api/tours/route-version", "POST"],
@@ -152,6 +155,7 @@ const SEAMS = {
   "/api/tours/selection-cart": "readTourSelectionCartFn",
   "/api/tours/library": "listToursFn",
   "/api/tours/detail": "readTourFn",
+  "/api/tours/property-evidence/v1": "readPropertyEvidenceFn",
   "/api/tours/route-version": "createRouteVersionFn",
   "/api/tours/route-reorder": "reorderRouteStopsFn",
   "/api/tours/route-accept": "acceptRouteVersionFn",
@@ -243,6 +247,11 @@ async function api(request, env, ctx, actor, session, dependencies, pathname) {
     if (pathname === "/api/tours/detail" || pathname === "/api/tours/selection-cart") {
       if ([...url.searchParams.keys()].length !== 1 || !validId(url.searchParams.get("tour_id"))) return json({ error: "invalid_request" }, 400);
       input = { tour_id: url.searchParams.get("tour_id") };
+    } else if (pathname === "/api/tours/property-evidence/v1") {
+      const keys = [...url.searchParams.keys()].sort();
+      if (keys.join(",") !== "as_of,property_id" || !validId(url.searchParams.get("property_id")) || !iso(url.searchParams.get("as_of")))
+        return json({ error: "invalid_request" }, 400);
+      input = { property_id: url.searchParams.get("property_id"), as_of: url.searchParams.get("as_of") };
     } else if (pathname === "/api/tours/projection/candidates" || pathname === "/api/tours/feedback") {
       if ([...url.searchParams.keys()].length !== 1 || !validId(url.searchParams.get("projection_id"))) return json({ error: "invalid_request" }, 400);
       input = { projection_id: url.searchParams.get("projection_id") };
