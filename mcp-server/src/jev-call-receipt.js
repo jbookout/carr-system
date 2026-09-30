@@ -45,6 +45,7 @@
 // string before it can reach a ToolError.
 
 import { ToolError as LeafToolError } from "./tool-error.js";
+import { judgeBinding, providerFor } from "./judge-provider.js";
 
 const ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 const USER_AGENT = "carr-worker-jev-proxy/1.0";
@@ -415,10 +416,11 @@ export function validateAskJevArgs(args, ToolError = LeafToolError) {
 // Validation failures throw; an upstream failure is returned (not thrown) so
 // the handler can raise it inside the envelope, where a same-key replay still
 // returns the stored response instead.
-export async function prefetchJevAnswer(args, ask) {
+export async function prefetchJevAnswer(args, ask, workClass = "system_work") {
   const { state, model, questions } = validateAskJevArgs(args);
+  providerFor(workClass);
   try {
-    return { ok: true, result: await ask({ state, model, questions }) };
+    return { ok: true, result: await judgeBinding(ask, workClass)({ state, model, questions }) };
   } catch (error) {
     if (error instanceof LeafToolError) return { ok: false, error: error.payload };
     return { ok: false, error: { error: "jev_upstream_failed", status: null, reason: "network" } };
