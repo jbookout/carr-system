@@ -1,4 +1,4 @@
-"""Implementation of grok-run.sh; stdout contains only joined Grok text."""
+"""Implementation of grok-run.sh; stdout contains only the final Grok message."""
 import argparse
 import json
 import os
@@ -8,7 +8,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools/room-bridge"))
-from grok_wire import MODEL, invoke_cli, parse_stream
+from grok_wire import MODEL, TIMEOUT_S, invoke_cli, parse_stream
 
 PREFIX = "Do not call any CARR or record-layer tool; do not write anything unless asked."
 
@@ -87,6 +87,8 @@ def main():
         "GROK_RUN_FAKE_NDJSON replays a fixture without calling Grok/npm."))
     parser.add_argument("--effort", choices=("low", "medium", "high"), default="high")
     parser.add_argument("--max-turns", type=int, default=60)
+    parser.add_argument("--timeout-seconds", type=int, default=int(TIMEOUT_S),
+                        help="model invocation timeout in seconds (1-1800; default: 180)")
     parser.add_argument("--writable", action="store_true")
     prompt = parser.add_mutually_exclusive_group(required=True)
     prompt.add_argument("--prompt")
@@ -94,6 +96,8 @@ def main():
     args = parser.parse_args()
     if args.max_turns < 1:
         parser.error("--max-turns must be a positive integer")
+    if not 1 <= args.timeout_seconds <= 1800:
+        parser.error("--timeout-seconds must be between 1 and 1800")
     try:
         requested_prompt = args.prompt_file.read_text(encoding="utf-8") if args.prompt_file else args.prompt
         fixture = os.environ.get("GROK_RUN_FAKE_NDJSON")
@@ -103,7 +107,8 @@ def main():
         else:
             cli_version = preflight()
             result = invoke_cli(PREFIX + "\n\n" + requested_prompt, effort=args.effort,
-                                max_turns=args.max_turns, writable=args.writable)
+                                max_turns=args.max_turns, writable=args.writable,
+                                timeout_seconds=args.timeout_seconds)
             output, receipt, code = parse_output(result.stdout.splitlines(), cli_version, result.returncode)
         serialized = json.dumps(receipt, sort_keys=True) + "\n"
         if os.environ.get("GROK_RUN_RECEIPT"):

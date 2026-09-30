@@ -151,6 +151,29 @@ class GrokTests(unittest.TestCase):
         self.assertEqual(result["provider_metadata"]["actual_model"], "grok-4.7-build")
         self.assertEqual(result["provider_metadata"]["request_id"], "provider-request")
 
+    def test_recorded_turns_return_only_the_final_assistant_message(self):
+        fixture = Path(__file__).resolve().parents[2] / "ops/fixtures/grok-run/live-ok.ndjson"
+        result = grok_wire.parse_result(fixture.read_text(), 0)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["result"], "OK")
+
+    def test_final_message_keeps_chunks_and_intentional_repeated_text(self):
+        raw = output(text="Final Final", before=[
+            {"type": "text", "data": "Earlier answer"},
+            {"type": "usage", "usage": {"output_tokens": 2}},
+            {"type": "available_commands", "tools": []},
+            {"type": "thought", "data": "Private reasoning"},
+            {"type": "text", "data": "Final chunk: "},
+        ])
+        result = grok_wire.parse_result(raw, 0)
+        self.assertEqual(result["result"], "Final chunk: Final Final")
+
+    def test_usage_after_final_text_does_not_erase_the_answer(self):
+        raw = "\n".join(json.dumps(e) for e in [
+            {"type": "text", "data": "Final answer"},
+            {"type": "usage", "usage": {"output_tokens": 2}}, END])
+        self.assertEqual(grok_wire.parse_result(raw, 0)["result"], "Final answer")
+
     def test_refuses_absent_mismatched_mixed_and_incomplete_metadata(self):
         for models in (None, {}, {"grok-4.6": {"modelCalls": 1}},
                        {**END["modelUsage"], "grok-4.7-build-fast": {"modelCalls": 1}}):
