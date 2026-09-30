@@ -187,6 +187,12 @@ function fakeDomain() {
     }),
     appendRouteStopTransitionFn: async ({ input }) => once(input, () => {
       if (route(input.new_route_version_id).accepted) refuse("route transition cannot alter an accepted route version");
+      // Same guards as append_tour_route_stop_transition (0429:155-157).
+      const [o, n] = [db.stops.get(input.old_route_stop_id), db.stops.get(input.new_route_stop_id)];
+      const both = ["unchanged", "reordered"].includes(input.disposition) || (["held", "excluded"].includes(input.disposition) && n);
+      if (both && o.property_id !== n.property_id) refuse("route transition property identity mismatch");
+      if (input.disposition === "unchanged" && o.route_sequence !== n.route_sequence) refuse("unchanged route transition requires the same sequence");
+      if (input.disposition === "reordered" && o.route_sequence === n.route_sequence) refuse("reordered route transition requires a sequence change");
       db.transitions.push(input); return { route_stop_transition_id: uid() };
     }),
     acceptRouteVersionFn: async ({ input }) => once(input, () => {
@@ -237,7 +243,7 @@ test("lifecycle: create (route 1 exists) -> stops -> transitions -> accept -> re
   await send(s, "/api/tours/route-stop-transition", { idempotency_key: k(22), old_route_version_id: null, new_route_version_id: first.id, old_route_stop_id: null, new_route_stop_id: stopIds[0], disposition: "added" }, 409);
   // Revised draft: every prior stop needs an explicit disposition before acceptance.
   const draft = (await data(await send(s, "/api/tours/route-draft", { ...draftBody, route_version: 2, base_route_version_id: first.id, expected_route_version: 1, idempotency_key: k(23) }))).route_version_id;
-  const moved = (await data(await send(s, "/api/tours/route-stop", { ...rows[0], idempotency_key: k(24), route_version_id: draft, route_sequence: 1, route_label: "Moved" }))).route_stop_id;
+  const moved = (await data(await send(s, "/api/tours/route-stop", { ...rows[0], idempotency_key: k(24), route_version_id: draft, route_sequence: 2, route_label: "Moved" }))).route_stop_id;
   await send(s, "/api/tours/route-stop-transition", { idempotency_key: k(25), old_route_version_id: first.id, new_route_version_id: draft, old_route_stop_id: stopIds[0], new_route_stop_id: moved, disposition: "reordered" });
   await send(s, "/api/tours/route-accept", { route_version_id: draft, expected_prior_route_version: 1, acceptance_digest: digest, idempotency_key: k(26) }, 409);
   await send(s, "/api/tours/route-stop-transition", { idempotency_key: k(27), old_route_version_id: first.id, new_route_version_id: draft, old_route_stop_id: stopIds[1], new_route_stop_id: null, disposition: "removed" });
@@ -251,6 +257,25 @@ test("lifecycle: create (route 1 exists) -> stops -> transitions -> accept -> re
   assert.equal(reloaded.route_version, 2);
   assert.equal(reloaded.deal_phase, "none", "assembly never touches an Assignment or Deal phase");
   assert.equal(db.transitions.length, 6, "every order change, hold, exclusion and removal has its own transition");
+});
+
+test("a reorder that keeps the sequence, or an unchanged that moves it, is refused as 400 and never recorded", async () => {
+  const { db, seams } = fakeDomain();
+  const s = createTourInternalWebHandler(seams);
+  await send(s, "/api/tours/create", { ...createBody, idempotency_key: k(1) });
+  const first = (await detail(s)).routes[0];
+  const a = (await data(await send(s, "/api/tours/route-stop", { ...stopBody, idempotency_key: k(2), route_version_id: first.id, route_sequence: 1 }))).route_stop_id;
+  await send(s, "/api/tours/route-stop-transition", { idempotency_key: k(3), old_route_version_id: null, new_route_version_id: first.id, old_route_stop_id: null, new_route_stop_id: a, disposition: "added" });
+  await send(s, "/api/tours/route-accept", { route_version_id: first.id, expected_prior_route_version: 0, acceptance_digest: digest, idempotency_key: k(4) });
+  const draft = (await data(await send(s, "/api/tours/route-draft", { ...draftBody, route_version: 2, base_route_version_id: first.id, expected_route_version: 1, idempotency_key: k(5) }))).route_version_id;
+  const same = (await data(await send(s, "/api/tours/route-stop", { ...stopBody, idempotency_key: k(6), route_version_id: draft, route_sequence: 1 }))).route_stop_id;
+  const moved = (await data(await send(s, "/api/tours/route-stop", { ...stopBody, idempotency_key: k(7), route_version_id: draft, route_sequence: 2 }))).route_stop_id;
+  const link = (n, disposition, to) => ({ idempotency_key: k(n), old_route_version_id: first.id, new_route_version_id: draft, old_route_stop_id: a, new_route_stop_id: to, disposition });
+  await send(s, "/api/tours/route-stop-transition", link(8, "reordered", same), 400);
+  await send(s, "/api/tours/route-stop-transition", link(9, "unchanged", moved), 400);
+  assert.equal(db.transitions.filter(t => t.new_route_version_id === draft).length, 0);
+  await send(s, "/api/tours/route-stop-transition", link(10, "unchanged", same));
+  await send(s, "/api/tours/route-stop-transition", link(11, "reordered", moved));
 });
 
 test("a key replayed with a changed payload is refused, and an identical replay returns the original result", async () => {

@@ -296,10 +296,17 @@ const CONFLICT_MESSAGES = new Set([
 const VALIDATION_CODES = new Set(["tour_input_invalid", "tour_input_unknown_field", "tour_point_invalid", "tour_stop_state_invalid",
   "tour_appointment_invalid", "tour_transition_invalid", "tour_provider_tuple_invalid", "tour_routing_request_invalid",
   "caller_authority_field_forbidden"]);
+// Deterministic SQL refusals of a transition's shape: the same input can never succeed.
+const VALIDATION_MESSAGES = new Set([
+  "reordered route transition requires a sequence change",
+  "unchanged route transition requires the same sequence",
+  "route transition property identity mismatch",
+  "merged route transition requires explicit property identity lineage",
+]);
 function dependencyFailure(error) {
   const code = typeof error?.payload?.error === "string" ? error.payload.error : "";
   const message = typeof error?.message === "string" ? error.message : "";
-  if (VALIDATION_CODES.has(code)) return { status: 400 };
+  if (VALIDATION_CODES.has(code) || VALIDATION_MESSAGES.has(message)) return { status: 400 };
   return { status: code === "tour_selection_cart_not_found" ? 404 : code === "version_conflict" || code === "key_reuse" || CONFLICT_MESSAGES.has(message) ? 409 : 503 };
 }
 async function staticAsset(env, request, pathname) {
