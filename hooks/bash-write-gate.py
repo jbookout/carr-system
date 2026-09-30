@@ -73,6 +73,7 @@ import sys
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from cmd_text import shell_tokens, shell_operands, SHELL_BOUNDARIES
 try:                                    # telemetry only — never load-bearing
     import hook_meter
     LOG = hook_meter.guard_log_path(REPO)
@@ -188,7 +189,7 @@ def extract_targets(command):
     """Every path this command plausibly WRITES. Order is not significant."""
     targets = []
     try:
-        tokens = shlex.split(command, comments=False, posix=True)
+        tokens = shell_tokens(command)
     except ValueError:
         # Unbalanced quotes — usually a heredoc body. Fall back to line-wise
         # parsing so `cat > f <<EOF` is still seen, and accept that a heredoc
@@ -196,10 +197,15 @@ def extract_targets(command):
         tokens = []
         for line in command.splitlines():
             try:
-                tokens.extend(shlex.split(line, comments=False, posix=True))
+                tokens.extend(shell_tokens(line))
             except ValueError:
                 continue
 
+    try:
+        tokens, redirect_targets = shell_operands(tokens)
+        targets.extend(redirect_targets)
+    except ValueError:
+        pass  # retain the conservative scan of malformed redirection tokens
     index = 0
     while index < len(tokens):
         token = tokens[index]
@@ -216,9 +222,12 @@ def extract_targets(command):
                 index += 1
                 continue
 
+        end = next((j for j in range(index + 1, len(tokens))
+                    if tokens[j] in SHELL_BOUNDARIES), len(tokens))
+        remainder = tokens[index + 1:end]
         base = os.path.basename(token)
         if base == "tee":
-            for candidate in tokens[index + 1:]:
+            for candidate in remainder:
                 if candidate.startswith("-"):
                     continue
                 if REDIRECT.match(candidate) or candidate in ("|", "&&", ";"):
@@ -226,17 +235,17 @@ def extract_targets(command):
                 targets.append(candidate)
         elif base == "sed" and any(t == "-i" or t.startswith("-i") for t in
                                    tokens[index + 1:index + 4]):
-            for candidate in tokens[index + 1:]:
+            for candidate in remainder:
                 if candidate.startswith("-") or REDIRECT.match(candidate):
                     continue
                 targets.append(candidate)
         elif base in ("cp", "mv", "install", "rsync"):
-            tail = [t for t in tokens[index + 1:]
+            tail = [t for t in remainder
                     if not t.startswith("-") and not REDIRECT.match(t)]
             if len(tail) >= 2:
                 targets.append(tail[-1])
         elif base in ("truncate", "touch"):
-            for candidate in tokens[index + 1:]:
+            for candidate in remainder:
                 if not candidate.startswith("-"):
                     targets.append(candidate)
         elif token.startswith("of="):

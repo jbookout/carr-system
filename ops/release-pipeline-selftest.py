@@ -1967,9 +1967,10 @@ class CanaryAndCI(Base):
 class ReleaseTarget(Base):
     """The Worker ships up to the NEWEST green-canary commit, not HEAD.
 
-    main-canary runs ~20 minutes with cancel-in-progress while merges land
-    every 10-20 minutes, so HEAD's own run is nearly always in progress or
-    cancelled; demanding HEAD itself be green starved the lane."""
+    main-canary runs ~20 minutes while merges can land every 10-20 minutes.
+    Running canaries finish, but HEAD may still be pending or in progress and
+    older pending runs may be replaced; demanding HEAD itself be green can
+    starve the lane."""
 
     GREEN, RED = ("completed", "success"), ("completed", "failure")
 
@@ -2314,6 +2315,57 @@ class Robustness(Base):
 
 
 class Blockers(Base):
+    def test_health_blocker_names_the_authorized_repair_lane(self):
+        args = rp.blocker_loop("health_baseline_hard_error", "Jev receipt integrity is broken")
+        self.assertEqual(args["blocker"], "other_lane")
+        self.assertEqual(args["owner"], "Claude")
+        self.assertIn("release-repair lane", args["blocker_detail"])
+
+    def test_credential_blocker_names_the_decider_for_the_live_verb_gate(self):
+        args = rp.blocker_loop("NEON_API_KEY", "NEON_API_KEY is absent from db.env")
+        result = subprocess.run(["node", "--input-type=module", "-e",
+            "import {needsDecider} from './mcp-server/src/verb-gate-checks.js'; "
+            "console.log(JSON.stringify(needsDecider(JSON.parse(process.argv[1]))));",
+            json.dumps(args)], cwd=str(HERE.parent), capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(result.stdout), False)
+
+    def test_call_verb_preserves_multiline_error_and_both_streams(self):
+        pipe = self.fx.pipeline(FakeRunner())
+        failed = subprocess.CompletedProcess([], 1, stdout="request refused\n",
+            stderr='local-verb identity\nTOOL ERROR {\n  "error": "capability_no_decider",\n'
+                   '  "dsn": "postgres://user:secret@example.invalid/db"\n}\n')  # ci-secret-scan: allow (redaction fixture)
+        with mock.patch.object(rp.subprocess, "run", return_value=failed):
+            ok, detail = pipe._call_verb("add-loop", {})
+        self.assertFalse(ok)
+        self.assertIn("capability_no_decider", detail)
+        self.assertIn("request refused", detail)
+        self.assertNotIn("user:secret", detail)
+        self.assertIn("[REDACTED]", detail)
+
+    def test_call_verb_preserves_plaintext_identifiers_without_exposing_credentials(self):
+        pipe = self.fx.pipeline(FakeRunner())
+        sha = "cd23702fe8c6f94a6b43f1ae2cebc3f6ed61bd82"
+        receipt = "aa870010-f2c7-4a02-9994-9c141eed5200"
+        known_secret = "12345678-1234-1234-1234-123456789abc"
+        pipe.env["RUNNER_TOKEN"] = known_secret
+        stderr = (f"Source SHA mismatch: {sha}\nreceipt_id={receipt}\n"
+                  f"receipt_id={known_secret}\n"
+                  f"TOKEN={sha}\nPASSWORD={receipt}\n"
+                  "receipt_id=ghp_syntheticfixture12345678901234567890\n"  # ci-secret-scan: allow (synthetic redaction fixture)
+                  "dsn=postgres://user:secret@example.invalid/db\n")  # ci-secret-scan: allow (synthetic redaction fixture)
+        failed = subprocess.CompletedProcess([], 1, stdout="request refused\n", stderr=stderr)
+        with mock.patch.object(rp.subprocess, "run", return_value=failed):
+            ok, detail = pipe._call_verb("add-loop", {})
+        self.assertFalse(ok)
+        self.assertIn(f"Source SHA mismatch: {sha}", detail)
+        self.assertIn(f"receipt_id={receipt}", detail)
+        self.assertIn("request refused", detail)
+        self.assertNotIn(known_secret, detail)
+        self.assertNotIn(f"TOKEN={sha}", detail)
+        self.assertNotIn(f"PASSWORD={receipt}", detail)
+        self.assertNotIn("ghp_syntheticfixture", detail)
+        self.assertNotIn("user:secret", detail)
+
     def test_missing_credential_files_one_loop_once(self):
         self.fx.commit({"mcp-server/src/a.js": "1"})
         (self.fx.cred / "db.env").write_text("CARR_DB_JOBS_URL='v'\n")
