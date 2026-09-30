@@ -307,6 +307,56 @@ class StateTests(unittest.TestCase):
                 self.assertEqual(state["tasks"]["credentials"]["lane"], "needs-joe")
                 self.assertEqual(state["tasks"]["credentials"]["status"], "blocked")
 
+    def test_credential_escalation_reaches_production_record_gate(self):
+        import job_watchdog as w
+        from unittest.mock import patch
+        c = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        self.assertTrue(c["actions"]["file_defects"])
+        probe = """
+          import {executeRegisteredTool} from './mcp-server/src/tools.js';
+          import fs from 'node:fs';
+          const payload = JSON.parse(fs.readFileSync(0, 'utf8'));
+          let queried = false;
+          const client = {query: async () => {
+            queried = true; throw new Error('test database boundary');
+          }};
+          try {
+            await executeRegisteredTool(client,
+              {slug:'joe', human:true, kind:'human', via:'break-glass/local-verb'},
+              'add-loop', payload);
+          } catch (error) {
+            console.log(JSON.stringify({queried, refusal:error.payload || error.message}));
+          }
+        """
+        payloads = []
+        def record_boundary(argv, config, cwd=None):
+            self.assertEqual(argv[1:3], ["call", "add-loop"])
+            payload = json.loads(argv[3])
+            result = subprocess.run(["node", "--input-type=module", "-e", probe],
+                                    cwd=ROOT, input=json.dumps(payload),
+                                    capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            observed = json.loads(result.stdout)
+            self.assertTrue(observed["queried"], observed)
+            payloads.append(payload)
+            return json.dumps({"ok": True, "loop_id": "synthetic-loop"})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            effects = w.Effects(root, c)
+            effects.act = lambda *args: self.fail("credential escalation attempted recovery")
+            job = {"id": "credential-record", "card": "credential-record", "alive": True,
+                   "start": 1000, "limit": 3600, "log_mtime": 1990,
+                   "log_tail": "Waiting for authentication...\nauthentication required"}
+            found = w.detect({"jobs": [job]}, c, 2000)
+            with patch.object(w, "command", side_effect=record_boundary):
+                result = w.reconcile(root, c, found, effects, 2000)
+                self.assertFalse(any(f["kind"] == "record_error" for f in result), result)
+                w.reconcile(root, c, found, effects, 2001)
+            self.assertEqual(len(payloads), 1, "successful escalation must not be retried")
+            self.assertEqual(payloads[0]["blocker"], "capability")
+            self.assertEqual(payloads[0]["marker"], "none")
+            self.assertTrue(w.read_latest(root / c["paths"]["findings"])[found[0]["key"]]["reported"])
+
     def test_credentials_stay_blocked_in_needs_joe_lane(self):
         import job_watchdog as w
         c = w.load_config(ROOT / "ops/config/job-watchdog.json")
@@ -320,6 +370,68 @@ class StateTests(unittest.TestCase):
             self.assertEqual(state["tasks"]["credential"]["status"], "blocked")
             self.assertEqual(state["tasks"]["credential"]["lane"], "needs-joe")
             self.assertIn("Needs Joe", (root / "out/boards/carr-v5.html").read_text())
+
+    def test_recovery_reconciles_watchdog_owned_board_state(self):
+        import job_watchdog as w
+        c = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        c["actions"]["file_defects"] = False
+        c["actions"]["job_hang"] = "report"
+        for mode in ("created", "collection", "existing", "other-finding", "external-update", "incomplete"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                effects = w.Effects(root, c)
+                card = "shared-card"
+                if mode == "existing":
+                    w.board_task(root, c, card, "executor", "running", "Original work in progress")
+                f = w.finding("job_hang", "synthetic-job", "Waiting for authentication...", c, card=card)
+                if mode == "collection":
+                    f = w.detect({"errors": [{"source": "synthetic-source", "reason": "evidence unavailable"}]}, c, 100)[0]
+                    card = effects.card(f)
+                other = w.finding("job_over_limit", "synthetic-job", "another active failure", c, card=card)
+                found = [f, other] if mode == "other-finding" else [f]
+                w.reconcile(root, c, found, effects, 100)
+                board = root / "out/boards/carr-v5.json"
+                self.assertEqual(json.loads(board.read_text())["tasks"][card]["status"], "blocked")
+                if mode == "external-update":
+                    w.board_task(root, c, card, "executor", "review", "New executor evidence")
+                remaining = [f] if mode == "other-finding" else []
+                w.reconcile(root, c, remaining, effects, 200, complete=mode != "incomplete")
+                w.reconcile(root, c, remaining, effects, 300, complete=mode != "incomplete")
+                task = json.loads(board.read_text())["tasks"][card]
+                if mode == "other-finding":
+                    self.assertEqual(task["status"], "blocked")
+                    self.assertEqual(task["lane"], "needs-joe")
+                    self.assertIn(f["reason"], task["note"])
+                    self.assertNotIn(other["reason"], task["note"])
+                elif mode == "incomplete":
+                    self.assertEqual(task["status"], "blocked")
+                else:
+                    self.assertEqual(task["status"], {"created":"done", "collection":"done", "existing":"running", "external-update":"review"}[mode])
+                    self.assertEqual(task["health"], "healthy")
+                    self.assertIsNone(task["lane"])
+                    self.assertNotIn(f["reason"], task["note"])
+                    self.assertNotIn("Next action:", task["note"])
+                    if mode == "existing":
+                        self.assertEqual(task["note"], "Original work in progress")
+                    if mode == "external-update":
+                        self.assertEqual(task["note"], "New executor evidence")
+
+    def test_reopened_finding_restores_the_new_board_owner_state(self):
+        import job_watchdog as w
+        c = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        c["actions"]["file_defects"] = False
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            effects = w.Effects(root, c)
+            f = w.finding("collection_error", "synthetic-source", "evidence unavailable", c, card="reopened")
+            w.reconcile(root, c, [f], effects, 100)
+            w.reconcile(root, c, [], effects, 200)
+            w.board_task(root, c, "reopened", "executor", "review", "New verification in progress")
+            w.reconcile(root, c, [f], effects, 300)
+            w.reconcile(root, c, [], effects, 400)
+            task = json.loads((root / "out/boards/carr-v5.json").read_text())["tasks"]["reopened"]
+            self.assertEqual(task["status"], "review")
+            self.assertEqual(task["note"], "New verification in progress")
 
     def test_fixer_and_enqueue_are_once_per_head_and_findings_clear(self):
         import job_watchdog as w
