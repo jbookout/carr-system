@@ -11,3 +11,10 @@ test('database privilege repairs bind a new frontier without rewriting applied h
   assert.match(sql,/exact applied 0757/);
   assert.doesNotMatch(sql,/scac-mutation-registry\.v100/);
 });
+
+test('local registry gates pin v101 to its released v99 predecessor', () => {
+  const gate = fs.readFileSync(new URL('../../ops/siep18-reference-monitor-local-pg-gate.py', import.meta.url), 'utf8');
+  assert.match(gate, /LIVE_REGISTRY_VERSION = "scac-mutation-registry.v101"/);
+  assert.match(gate, /SEALED_PREDECESSOR_ORDINAL = 99/);
+  assert.match(gate, /LIVE_REGISTRY_VERSIONS = /);
+});

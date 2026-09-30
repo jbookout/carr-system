@@ -1485,6 +1485,7 @@ $0 ~ /^CREATE POLICY [a-z_][a-z0-9_]* ON [a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]* FOR 
   split($0, words, " ")
   emit_carr_backup_policy(words[3], words[5])
   if (words[5] == "ops.work_request") carr_backup_policy_seen = 1
+  if (words[5] == "public.memory_item") carr_backup_memory_policy_seen = 1
   next
 }
 $0 == "-- Name: work_request; Type: ROW SECURITY; Schema: ops; Owner: -" && !carr_backup_policy_seen {
@@ -1496,6 +1497,16 @@ $0 == "-- Name: work_request; Type: ROW SECURITY; Schema: ops; Owner: -" && !car
   print ""
   print "--"
   carr_backup_policy_seen = 1
+}
+$0 == "-- Name: memory_item; Type: ROW SECURITY; Schema: public; Owner: -" && !carr_backup_memory_policy_seen {
+  print "-- Name: memory_item carr_backup_full_read_memory_item; Type: POLICY; Schema: public; Owner: -"
+  print "--"
+  print ""
+  emit_carr_backup_policy("carr_backup_full_read_memory_item", "public.memory_item")
+  print ""
+  print ""
+  print "--"
+  carr_backup_memory_policy_seen = 1
 }
 { print }
 ' "$SCHEMA_BODY" >> "$TMP"; then

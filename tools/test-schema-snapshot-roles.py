@@ -111,6 +111,10 @@ def main():
             expected_preamble + "\n\n\n" + conditional.group("body").strip()
             if conditional and conditional_gate else None
         )
+    dot_preamble = re.search(r"cat >> \"\$TMP\" <<'DOT_READER_ROLES'\n(.*?)\nDOT_READER_ROLES", generator, re.S)
+    dot_in_ledger = re.search(r"^0756_dot_reader\.sql\t[0-9a-f]{64}\t", sql, re.M)
+    if expected_preamble is not None and dot_in_ledger:
+        expected_preamble = expected_preamble + "\n" + dot_preamble.group(1).strip() if dot_preamble else None
     preamble_end = sql.find("--\n-- PostgreSQL database dump")
     check("the snapshot generator carries the exact checked-in role preamble",
           expected_preamble is not None and preamble_end > 0
