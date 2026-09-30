@@ -17,13 +17,21 @@ stub Tailscale binary so no test touches the real daemon:
 from __future__ import annotations
 
 import importlib.util
+import ast
+import json
 import os
 import plistlib
 import stat
 import subprocess
 import sys
 import tempfile
+import time
+import signal
 from pathlib import Path
+from unittest.mock import Mock
+from typing import Any
+from contextlib import redirect_stdout
+from io import StringIO
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "bin" / "tailscale-up.sh"
@@ -64,18 +72,78 @@ def stub(root: Path, status_out: str, status_rc: int) -> tuple[Path, Path]:
 
 
 # ---- 1. classification and the health row ---------------------------------
-RUNNING = "100.64.0.1   studio   joe@   macOS   -\n100.64.0.2   macbook  joe@   macOS   -"
+health_tree = ast.parse((REPO / "tools/health-check.py").read_text())
+# Exercise the import boundary without running the health script's live reads.
+loader_function = next((n for n in health_tree.body if isinstance(n, ast.FunctionDef)
+                        and n.name == "_tailscale_row"), None)
+loader_block = loader_function or next(n for n in health_tree.body
+    if isinstance(n, ast.Try) and "tailscale_health" in ast.unparse(n))
+for invalid_spec in (None, Mock(loader=None)):
+    util = Mock()
+    util.spec_from_file_location.return_value = invalid_spec
+    ns: dict[str, Any] = {"importlib": Mock(util=util), "os": os, "REPO_ROOT": str(REPO), "rc": 0}
+    exec(compile(ast.Module(body=[loader_block], type_ignores=[]), "health-import", "exec"), ns)
+    if loader_function:
+        try:
+            ns["_tailscale_row"]()
+        except ImportError:
+            pass
+    check("unavailable spec/loader is checked before module creation",
+          not util.module_from_spec.called)
 
-s, _ = th.classify("Tailscale is stopped.", 1)
+RUNNING = json.dumps({"BackendState": "Running", "Self": {"TailscaleIPs": ["100.64.0.1"]}, "Peer": {}})
+
+for bad in ("", "arbitrary", "[]", "{}", '{"BackendState":"Starting"}',
+            '{"BackendState":"Running"}', '{"BackendState":"Running","Self":{}}'):
+    state, summary = th.classify(bad, 0)
+    check("empty/malformed/Starting data cannot clear health", state != "running", bad)
+    check("unready state renders failed", th.health_row(status=state, summary=summary)[1])
+
+for output, code, expected in ((json.dumps({"BackendState": "Stopped"}), 1, True),
+                                (json.dumps({"BackendState": "NeedsLogin"}), 1, True), ("unreadable", 1, True),
+                                (RUNNING, 0, False)):
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        fake, _ = stub(root, output, code)
+        fixture = root / "snapshot.json"
+        fixture.write_text('{"errors": []}')
+        findings = root / "findings.json"
+        result = subprocess.run([sys.executable, str(REPO / "tools/health-check.py"),
+            "--section", "tailscale", "--fixture", str(fixture),
+            "--findings-json", str(findings)], capture_output=True, text=True,
+            env={**os.environ, "TAILSCALE_BIN": str(fake)}, timeout=30)
+        rows = json.loads(findings.read_text())["findings"] if findings.exists() else []
+        check("ordinary health visits Tailscale", "tailscale" in result.stdout, result.stderr)
+        check("ordinary health exit reflects node state", result.returncode == int(expected))
+        check("ordinary health preserves finding schema", len(rows) == int(expected) and
+            all(r["key"] == "tailscale" and r["subject"] == "local-node" and r["hard_error"]
+                and r["count"] == 1 and not r["time_rolling"] for r in rows), rows)
+        # Also execute the exact canonical branch with the default 'all'
+        # selection, isolating unrelated sections that have live DB readers.
+        canonical = next(n for n in health_tree.body if isinstance(n, ast.FunctionDef)
+                         and n.name == "_canonical_health")
+        branches = [n for n in canonical.body if isinstance(n, ast.If)
+                    and "_tailscale_row" in ast.unparse(n)]
+        default_ns: dict[str, Any] = {"CANONICAL_SECTION": "all", "rc": 0,
+                                     "_FINDINGS": [], "_tailscale_row": lambda: th.row(str(fake))}
+        recorders = [n for n in health_tree.body if isinstance(n, ast.FunctionDef)
+                     and n.name in ("_canonical_finding", "_red")]
+        with redirect_stdout(StringIO()):
+            exec(compile(ast.Module(body=recorders + branches, type_ignores=[]),
+                         "health-default-selection", "exec"), default_ns)
+        check("default all-sections health visits the same detector", len(branches) == 1 and
+              default_ns["rc"] == int(expected) and len(default_ns["_FINDINGS"]) == int(expected))
+
+s, _ = th.classify(json.dumps({"BackendState": "Stopped"}), 1)
 check("stopped status classifies as stopped", s == "stopped", s)
 s, _ = th.classify(RUNNING, 0)
-check("peer list classifies as running", s == "running", s)
-s, _ = th.classify("Logged out.\nLog in at: <auth link>", 1)
+check("local Running backend with no peers classifies as running", s == "running", s)
+s, _ = th.classify(json.dumps({"BackendState": "NeedsLogin"}), 1)
 check("logged-out status classifies as logged_out", s == "logged_out", s)
 s, _ = th.classify("failed to connect to local Tailscale service", 1)
 check("any other nonzero status classifies as error", s == "error", s)
 
-line, failed = th.health_row(status="stopped", summary="Tailscale is stopped.")
+line, failed = th.health_row(status="stopped", summary=json.dumps({"BackendState": "Stopped"}))
 check("stopped row FAILS the health run", failed is True)
 check("stopped row is marked red", line.lstrip().startswith("✗✗"), line)
 check("stopped row prints its bound action inline", "on breach:" in line, line)
@@ -87,14 +155,14 @@ line, failed = th.health_row(status="running", summary="2 peers")
 check("running row passes", failed is False and line.lstrip().startswith("OK"), line)
 check("running row still prints its bound action", "on breach:" in line, line)
 
-line, failed = th.health_row(status="logged_out", summary="Logged out.")
+line, failed = th.health_row(status="logged_out", summary=json.dumps({"BackendState": "NeedsLogin"}))
 check("logged-out row FAILS (SSH is just as cut off)", failed is True, line)
 
 line, failed = th.health_row(status="absent", summary="")
 check("absent app is a visible skip, not a failure", failed is False and "not installed" in line, line)
 
 with tempfile.TemporaryDirectory() as d:
-    fake, _ = stub(Path(d), "Tailscale is stopped.", 1)
+    fake, _ = stub(Path(d), json.dumps({"BackendState": "Stopped"}), 1)
     line, failed = th.row(binary=str(fake))
     check("row() runs the binary and fails on stopped", failed is True and "stopped" in line, line)
     fake, _ = stub(Path(d), RUNNING, 0)
@@ -114,17 +182,22 @@ def run_script(status_out: str, status_rc: int) -> tuple[int, list[str], str]:
         return p.returncode, [c for c in calls if c], p.stdout + p.stderr
 
 
-rc, calls, out = run_script("Tailscale is stopped.", 1)
+rc, calls, out = run_script(json.dumps({"BackendState": "Stopped"}), 1)
 check("stopped: script runs `up`", any(c.startswith("up") for c in calls), calls)
-check("stopped: `up` carries a timeout so it cannot hang",
-      any("--timeout" in c for c in calls if c.startswith("up")), calls)
+check("stopped: bare `up` preserves existing preferences",
+      [c for c in calls if c.startswith("up")] == ["up"], calls)
 check("stopped: script exits 0 after up", rc == 0, out)
 
 rc, calls, out = run_script(RUNNING, 0)
 check("running: script does NOT run `up` (idempotent)", not any(c.startswith("up") for c in calls), calls)
 check("running: script exits 0", rc == 0, out)
 
-rc, calls, out = run_script("Logged out.", 1)
+for bad in ("", "arbitrary", '{"BackendState":"Starting"}'):
+    rc, calls, out = run_script(bad, 0)
+    check("invalid/Starting status cannot report already running", rc != 0 and
+          "already running" not in out and not any(c.startswith("up") for c in calls), out)
+
+rc, calls, out = run_script(json.dumps({"BackendState": "NeedsLogin"}), 1)
 check("logged out: script does NOT run `up` (would wait on a browser)",
       not any(c.startswith("up") for c in calls), calls)
 check("logged out: script exits nonzero so the log shows it", rc != 0, out)
@@ -135,6 +208,64 @@ with tempfile.TemporaryDirectory() as d:
     check("absent app: script exits 0 without error", p.returncode == 0, p.stdout + p.stderr)
 
 # ---- 3. the LaunchAgent definition ----------------------------------------
+def recovery_probe(mode: str) -> tuple[int, list[list[str]], str, float]:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        log = root / "calls.jsonl"
+        fake = root / "Tailscale"
+        fake.write_text(f'''#!{sys.executable}
+import sys,json,time
+with open({str(log)!r}, 'a') as f: f.write(json.dumps(sys.argv[1:])+'\\n')
+if sys.argv[1] == 'status':
+    if {mode!r} == 'status-stall': time.sleep(60)
+    if {mode!r} == 'retry': sys.exit(7)
+    if {mode!r} == 'diagnostic':
+        print('password=synthetic-sensitive-payload https://private.example.test/value')
+        sys.exit(7)
+    print(json.dumps({{"BackendState":"Stopped"}}))
+    sys.exit(1)
+if {mode!r} == 'up-stall': time.sleep(60)
+if {mode!r} == 'preferences' and sys.argv[1:] != ['up']:
+    print('non-default DNS/login-server/exit-node settings require bare up', file=sys.stderr)
+    sys.exit(1)
+if {mode!r} == 'auth':
+    print('Log in at: https://login.tailscale.com/a/synthetic-auth-value')
+    print('password=synthetic-sensitive-payload', file=sys.stderr)
+    sys.exit(7)
+sys.exit(0)
+''')
+        fake.chmod(0o700)
+        command = ("import sys; sys.path.insert(0,sys.argv[1]); from tailscale_health import recover; "
+                   "sys.exit(recover(sys.argv[2],status_timeout=.15,up_timeout=.15,retry_delay=.01))")
+        before = time.monotonic()
+        proc = subprocess.Popen([sys.executable, "-c", command, str(REPO / "ops"), str(fake)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+        try:
+            out, err = proc.communicate(timeout=3)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            out, err = proc.communicate()
+        calls = [json.loads(l) for l in log.read_text().splitlines()] if log.exists() else []
+        return proc.returncode, calls, out + err, time.monotonic() - before
+
+for mode in ("status-stall", "up-stall"):
+    rc, calls_json, out, elapsed = recovery_probe(mode)
+    check(f"{mode}: CLI watchdog preserves timeout failure", rc == 124 and "timed out" in out, out)
+    check(f"{mode}: recovery has a wall-clock bound", elapsed < 2, elapsed)
+rc, calls_json, out, elapsed = recovery_probe("retry")
+check("retry exhaustion stops after six status attempts", len(calls_json) == 6, calls_json)
+check("retry exhaustion retains failure status", rc == 7, out)
+for mode in ("auth", "diagnostic"):
+    rc, calls_json, out, elapsed = recovery_probe(mode)
+    check(f"{mode}: failure code survives output redaction", rc == 7, out)
+    check(f"{mode}: no CLI URLs or sensitive diagnostics reach log streams",
+          all(s not in out for s in ("https://", "password=", "synthetic-sensitive-payload")), out)
+    if mode == "auth":
+        check("status-to-up sign-in race reports authentication required", "authentication required" in out, out)
+rc, calls_json, out, elapsed = recovery_probe("preferences")
+check("non-default DNS/login-server/exit-node recovery succeeds", rc == 0, out)
+check("recovery preserves settings by invoking only bare up", [c for c in calls_json if c[0] == "up"] == [["up"]], calls_json)
+
 check("plist exists in ops/launchd", PLIST.exists())
 if PLIST.exists():
     d = plistlib.loads(PLIST.read_bytes())
@@ -149,6 +280,10 @@ if PLIST.exists():
 check("agent is primary-only (the Studio is the hub)", "com.carr.tailscale-up.plist" in cac.PRIMARY_ONLY)
 check("agent is not definition-only (the normal install path loads it)",
       "com.carr.tailscale-up.plist" not in cac.DEFINITION_ONLY)
+services = json.loads((REPO / "ops/config/services.json").read_text())["services"]
+owners = [s for s in services if any(e.get("deploy_mechanism") ==
+    "ops/launchd/com.carr.tailscale-up.plist" for e in s.get("environments", []))]
+check("live agent has exactly one service catalog owner", len(owners) == 1, owners)
 
 print(f"tailscale-health-selftest: {'FAIL ' + str(len(FAILS)) if FAILS else 'all passed'}")
 sys.exit(1 if FAILS else 0)
