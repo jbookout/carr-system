@@ -951,6 +951,10 @@ def log(msg):
 
 
 def in_safe_zone(cmd):
+    # Newlines end shell commands; shlex otherwise discards them as whitespace.
+    # Preserve quoted newlines and escaped characters as part of their tokens.
+    cmd = re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"|\\.|\n",
+                 lambda m: ";" if m.group(0) == "\n" else m.group(0), cmd)
     try:
         lexer = shlex.shlex(cmd, posix=True, punctuation_chars=";&|<>")
         lexer.whitespace_split = True
@@ -1072,8 +1076,13 @@ def force_push_to_named_side_branch(cmd):
     # Stopping at the boundary is what keeps this honest: only THIS command's
     # arguments are read, so nothing chained after it can dress up its target.
     words = []
+    # shlex separates an IO number from its operator (2, >&, 1). Remove only
+    # unquoted numbers adjacent to a redirect; `2 >` and `'2'>` are arguments.
+    remainder = re.sub(
+        r"'[^']*'|\"(?:\\.|[^\"\\])*\"|\\.|(?<!\S)\d+(?=[<>])",
+        lambda m: "" if m.group(0).isdigit() else m.group(0), text[match.end():])
     try:
-        lexer = shlex.shlex(text[match.end():], posix=True, punctuation_chars=";&|<>")
+        lexer = shlex.shlex(remainder, posix=True, punctuation_chars=";&|<>")
         lexer.whitespace_split = True
         tokens = list(lexer)
     except ValueError:
