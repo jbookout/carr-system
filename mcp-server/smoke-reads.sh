@@ -290,7 +290,7 @@ else
 fi
 
 # --- ORDER 18: the intro graph is reachable under the READER role ---------------
-# The probe queries a real vendor (V-BNK-013) who introduced C-155, a real
+# The probe queries a real vendor (V-BNK-013) who introduced C-900019, a real
 # client. WR-000049: both names are externalized to smoke-reads.local.env
 # (SMOKE_GRAPH_VENDOR_QUERY, SMOKE_GRAPH_CLIENT_SURNAME; see the fixture note
 # near the top) — a counterparty person's name is a client-side record too, and
@@ -312,14 +312,14 @@ else
 fi
 
 # --- ORDER 32: the multi-hop half, and the probe is a REAL two-hop chain --------
-# V-ATT-009's Links names V-BNK-013; V-BNK-013's Links names C-155, the same
+# V-ATT-009's Links names V-BNK-013; V-BNK-013's Links names C-900019, the same
 # real client as above. Neither row names the other end, so a response to
-# target C-155 containing V-ATT-009's name (SMOKE_GRAPH_TWO_HOP_NAME, local
+# target C-900019 containing V-ATT-009's name (SMOKE_GRAPH_TWO_HOP_NAME, local
 # fixture) can only have come from the recursive walk joining two separate
 # edges. If the traversal ever breaks, this goes red. (The refs stay tracked.)
 if [ -n "${SMOKE_GRAPH_CLIENT_SURNAME:-}" ] && [ -n "${SMOKE_GRAPH_TWO_HOP_NAME:-}" ]; then
   check "who-do-we-know: the two-hop V-ATT-009 -> V-BNK-013 -> client path" \
-        who-do-we-know '{"target":"C-155"}' "$SMOKE_GRAPH_TWO_HOP_NAME" '\\"hops\\":2'
+        who-do-we-know '{"target":"C-900019"}' "$SMOKE_GRAPH_TWO_HOP_NAME" '\\"hops\\":2'
 else
   echo
   echo "  SKIP  graph probe (who-do-we-know two-hop) — no smoke-reads.local.env"
@@ -450,7 +450,7 @@ check "source-attribution: lanes answer incl. the unattributed reconciler" \
 
 # --- ORDER 34: links[] on log-activity — the auto-edge capture path ------------
 # FROZEN probe (fixed key + args, same rule as the two probes above: edit
-# nothing, ever). The edge V-BNK-013 -> C-155 'intro' already exists in
+# nothing, ever). The edge V-BNK-013 -> C-900019 'intro' already exists in
 # production (ORDER 32's proven chain), so this exercises ref resolution +
 # kind validation + the conflict path (existing:true) without ever growing the
 # graph. Rep 1 may insert the one fixture activity row; every later rep replays.
@@ -469,7 +469,7 @@ if [ "$PROBE_MODE" -eq 1 ]; then
 else
 _l_ok=1; _l_why=""
 for i in $(seq 1 "$REPS"); do
-  call log-activity '{"idempotency_key":"smoke-links-probe-permanent","ref":"V-BNK-013","kind":"note","summary":"smoke links probe — edge already exists, replayed for ever after","links":[{"from_ref":"V-BNK-013","to_ref":"C-155","kind":"intro"}]}'
+  call log-activity '{"idempotency_key":"smoke-links-probe-permanent","ref":"V-BNK-013","kind":"note","summary":"smoke links probe — edge already exists, replayed for ever after","links":[{"from_ref":"V-BNK-013","to_ref":"C-900019","kind":"intro"}]}'
   if echo "$RESULT" | grep -q '"error"'; then _l_ok=0; _l_why="transport/protocol error"; break; fi
   if echo "$RESULT" | grep -q '"isError":true'; then _l_ok=0; _l_why="verb returned isError (ref resolution under carr_writer?)"; break; fi
   if ! echo "$RESULT" | grep -q '\\"ok\\":true'; then _l_ok=0; _l_why="no ok:true in the envelope response"; break; fi
@@ -540,9 +540,9 @@ fi
 # plumbing check, not a data assertion." That is a reasonable contract and it is
 # also exactly how a real bug survived roughly forty migrations.
 #
-# THE BUG. Ask `find` for "Henry Schein" and it answered a lead named Henry — a
-# trigram hit on one word of the query — while 17 real Henry Schein party rows
-# sat in the table untouched. `who-do-we-know "Henry Schein"` went further and
+# THE BUG. Ask `find` for "Example Organization 25" and it answered a lead named Henry — a
+# trigram hit on one word of the query — while 17 real Example Organization 25 party rows
+# sat in the table untouched. `who-do-we-know "Example Organization 25"` went further and
 # replied "No record and no graph node matches that name", which is not a miss,
 # it is a false statement about the book. Root cause was in 0016 and inherited
 # unchanged all the way to 0056: every branch of v_ref_index reached party
@@ -564,7 +564,7 @@ fi
 #
 # FIXTURE DURABILITY. Nothing here depends on a count that grows, a date, a
 # stage, or a row anybody edits in the normal course of work:
-#   · 'Henry Schein' — the reported defect itself, a supplier org nobody owns.
+#   · 'Example Organization 25' — the reported defect itself, a supplier org nobody owns.
 #   · the merged-client fixture (SMOKE_MERGED_* in smoke-reads.local.env,
 #     WR-000049 — real name/refs are not tracked) — a completed merge. A merge
 #     is permanent and the tombstone is kept on purpose (the 0016 posture, so a
@@ -614,7 +614,7 @@ echo "--- negative-answer probes: a WRONG answer must fail, not just a dead verb
 # goes red. CAP_ORG carries that decision to the second probe so the two cannot
 # disagree about whether the feature exists.
 CAP_ORG=1
-call find '{"query":"Henry Schein"}'
+call find '{"query":"Example Organization 25"}'
 if ! echo "$RESULT" | grep -q '\\"organizations\\"'; then
   CAP_ORG=0
   echo "  SKIP  org visibility — this Worker has no \"organizations\" block in its find response."
@@ -624,21 +624,21 @@ if ! echo "$RESULT" | grep -q '\\"organizations\\"'; then
 fi
 
 if [ "$CAP_ORG" -eq 1 ]; then
-  # The reported defect, asserted directly. 'Henry Schein' must come back, and
+  # The reported defect, asserted directly. 'Example Organization 25' must come back, and
   # the organizations block must not be empty — an empty block with a trigram
   # hit on 'Henry' in parties is precisely the original wrong answer wearing the
   # new response shape. The 17-row count is deliberately NOT asserted: the right
   # fix for 17 duplicate supplier rows is to merge them, and a probe that goes
   # red when someone cleans up the data is a probe that teaches people to delete
   # probes.
-  refute "find 'Henry Schein' surfaces the ORG, not a trigram hit on 'Henry'" \
-         find '{"query":"Henry Schein"}' '\\"organizations\\":\[\]' 'Henry Schein'
+  refute "find 'Example Organization 25' surfaces the ORG, not a trigram hit on 'Henry'" \
+         find '{"query":"Example Organization 25"}' '\\"organizations\\":\[\]' 'Example Organization 25'
 
   # The false-absence half, and the worse of the two symptoms. This verb used to
   # answer "No record and no graph node matches that name" for an org carrying
   # 17 live rows. That sentence must never appear for a name the book holds.
-  refute "who-do-we-know 'Henry Schein' does NOT claim absence" \
-         who-do-we-know '{"target":"Henry Schein"}' 'No record and no graph node matches' \
+  refute "who-do-we-know 'Example Organization 25' does NOT claim absence" \
+         who-do-we-know '{"target":"Example Organization 25"}' 'No record and no graph node matches' \
          '\\"matching_records\\"'
 fi
 
@@ -651,7 +651,7 @@ check "who-do-we-know DOES claim absence for a name nobody carries" \
       who-do-we-know '{"target":"Qwertzuiop Vraxmandel"}' 'No record and no graph node matches'
 
 # THE SAME SHAPE ON `find`: a query with no answer must return NO answer. The
-# original defect was not that find missed Henry Schein, it was that find
+# original defect was not that find missed Example Organization 25, it was that find
 # offered an unrelated human in its place and the caller had no way to tell.
 # Empty is the correct answer to an unanswerable query, and asserting it is the
 # only thing that stops a near-miss from being dressed up as a hit.
@@ -664,8 +664,7 @@ check "find returns EMPTY for a name nobody carries (no trigram near-miss)" \
 # near the top of this file). Both the survivor and the tombstone must come
 # back, and the merged flag must be present — a merge that removes the old ref
 # from `find` silently breaks every note, email and document that still cites
-# it, and it does it in the same "the record simply isn't there" way the Henry
-# Schein bug did. Asserting BOTH refs is the point: the survivor alone would
+# it, and it does it in the same "the record simply isn't there" way the Example Organization d21c02ee bug did. Asserting BOTH refs is the point: the survivor alone would
 # pass a lookup while the pointer that makes the merge navigable had been lost.
 if [ -n "${SMOKE_MERGED_CLIENT_QUERY:-}" ] && [ -n "${SMOKE_MERGED_TOMBSTONE_REF:-}" ] \
     && [ -n "${SMOKE_MERGED_SURVIVOR_REF:-}" ]; then
@@ -684,7 +683,7 @@ fi
 # LOOP #132 — A TOMBSTONE IS NOT A DUPLICATE, AND IT IS NEVER A TARGET
 #
 # THE BUG THE PROBES ABOVE COULD NOT CATCH, and it is worth being precise about
-# why, because the answer is the whole design of this section. The Henry Schein
+# why, because the answer is the whole design of this section. The Example Organization 25
 # probe above deliberately does NOT assert the row count: "the right fix for 17
 # duplicate supplier rows is to merge them, and a probe that goes red when
 # someone cleans up the data is a probe that teaches people to delete probes."
@@ -714,7 +713,7 @@ fi
 CAP_SPLIT=0
 if [ "$CAP_ORG" -eq 1 ]; then
   CAP_SPLIT=1
-  call find '{"query":"Henry Schein"}'
+  call find '{"query":"Example Organization 25"}'
   if echo "$RESULT" | grep -q '\\"duplicate_rows\\"'; then
     CAP_SPLIT=0
     echo
@@ -728,25 +727,24 @@ if [ "$CAP_SPLIT" -eq 1 ]; then
   # The reported defect, asserted as a number. The blended key must be GONE — not
   # merely accompanied by better ones, because a caller reading the old key would
   # still be reading the wrong answer.
-  refute "find 'Henry Schein': one LIVE org row, and no blended duplicate count" \
-         find '{"query":"Henry Schein"}' '\\"duplicate_rows\\"' '\\"live_rows\\":1'
+  refute "find 'Example Organization 25': one LIVE org row, and no blended duplicate count" \
+         find '{"query":"Example Organization 25"}' '\\"duplicate_rows\\"' '\\"live_rows\\":1'
   # …and the tombstones are still counted rather than deleted from the answer.
   # Paired with the zero-side probe below: together they prove retired_aliases is
   # read from the data and is not a constant in either direction.
   # SCOPED 2026-08-14 (Program 3 triage). This forbade the string
   # \"retired_aliases\":0 ANYWHERE in the payload, which was only ever correct
-  # while "Henry Schein" matched exactly one org row. A second live org row,
-  # "Henry Schein, Inc." (live_rows:1, refs:[null], no tombstones), now matches
+  # while "Example Organization 25" matched exactly one org row. A second live org row,
+  # "Example Organization 25, Inc." (live_rows:1, refs:[null], no tombstones), now matches
   # the same query and legitimately carries retired_aliases:0 — so the suite
-  # failed on a TRUE answer. The forbidden pattern is anchored to the Henry
-  # Schein object itself: [^}]* cannot cross the object boundary, and the
-  # trailing \", after Schein excludes "Henry Schein, Inc." (whose name has a
+  # failed on a TRUE answer. The forbidden pattern is anchored to the Example Organization d21c02ee object itself: [^}]* cannot cross the object boundary, and the
+  # trailing \", after Schein excludes "Example Organization 25, Inc." (whose name has a
   # bare comma there, not an escaped quote). The required side asserts a real
   # P- tombstone is listed rather than a specific count, because the count grows
   # with every merge and a hardcoded 16 would just be tomorrow's false failure.
   refute "…and its retired aliases are counted, not dropped" \
-         find '{"query":"Henry Schein"}' \
-         '\\"name\\":\\"Henry Schein\\",[^}]*\\"retired_aliases\\":0' '\\"retired_refs\\":\[\\"P-'
+         find '{"query":"Example Organization 25"}' \
+         '\\"name\\":\\"Example Organization 25\\",[^}]*\\"retired_aliases\\":0' '\\"retired_refs\\":\[\\"P-'
   check  "…and retired_aliases really reads 0 for an org that has no tombstones" \
          find '{"query":"1st Med Transitions"}' '\\"retired_aliases\\":0' '1st Med Transitions'
 
@@ -789,8 +787,8 @@ if [ "$CAP_SPLIT" -eq 1 ]; then
     echo "        (or the SMOKE_ORG_MERGE_* vars); needs a real merged org's name and"
     echo "        refs. Not a failure: see the fixture note near the top."
   fi
-  refute "who-do-we-know 'Henry Schein' names the survivor and never a tombstone" \
-         who-do-we-know '{"target":"Henry Schein"}' 'P-0099' 'P-0055'
+  refute "who-do-we-know 'Example Organization 25' names the survivor and never a tombstone" \
+         who-do-we-know '{"target":"Example Organization 25"}' 'P-900028' 'P-900027'
   # Refusing to OFFER a tombstone must not mean pretending it is not there.
   if [ -n "${SMOKE_ORG_MERGE_NAME:-}" ] && [ -n "${SMOKE_ORG_MERGE_TOMBSTONE_COUNT:-}" ]; then
     check  "…and it still says how many retired aliases it declined to offer" \
@@ -807,7 +805,7 @@ fi
 # LOOP #133 — AN EDGE THAT CANNOT BE WALKED MUST BE REPORTED, NOT DROPPED
 #
 # v_party_graph holds 31 edges; seven have a NULL ref on one endpoint and six of
-# those seven are Joe's own `can_introduce` edges, because Joe is party P-1084
+# those seven are Joe's own `can_introduce` edges, because Joe is party P-900050
 # with no client/lead/vendor row and therefore no business ref. WHO_EDGES filters
 # NULL endpoints out of the walk, correctly — the walker keys on refs — but the
 # verb then answered as though the relationship did not exist. Asking who reaches
@@ -838,13 +836,13 @@ if [ "$CAP_UNWALK" -eq 1 ]; then
   # side needs a node that is genuinely in the graph, genuinely has a path, and
   # genuinely has nothing blocked.
   #
-  # FIXTURE MOVED C-155 -> V-BNK-013, 2026-08-14 (Program 3 triage). C-155 stopped
+  # FIXTURE MOVED C-900019 -> V-BNK-013, 2026-08-14 (Program 3 triage). C-900019 stopped
   # being a valid zero-side the moment the ternary Joe->client 'introduced' edge
   # was recorded (the shape migration 0051 defined, from = us): Joe is party
-  # P-1084 with no business ref, so that edge has from_ref null and lands in
-  # C-155's unwalkable_edges. The verb REPORTING it is loop #133 working exactly
+  # P-900050 with no business ref, so that edge has from_ref null and lands in
+  # C-900019's unwalkable_edges. The verb REPORTING it is loop #133 working exactly
   # as designed — the suite was failing on correct behaviour, and the fixture's
-  # premise ("C-155 has nothing blocked"), not the system, is what expired.
+  # premise ("C-900019 has nothing blocked"), not the system, is what expired.
   # V-BNK-013 is in_graph with one walkable path and an empty list.
   # If this check ever fails, read it as "someone recorded a ref-less edge into
   # V-BNK-013" and re-verify the premise before touching the verb.

@@ -597,7 +597,7 @@
    }
   },
   "3b0cd546": {
-   "always_on_probability": 0.13,
+   "always_on_probability": 0.1,
    "id": "3b0cd546",
    "mode": "triggered",
    "model": "jev-1.13.0",
@@ -606,16 +606,18 @@
    "packs": [
     "vendor-intros"
    ],
-   "statement_sha256": "01ce463c86aef79515a2626b076fa3277d09cc199f631c7af1f04a8e53512c93",
+   "statement_sha256": "f31e5501a5a7cadf5951122ee39ee3f40f7d0ef440dfa74d1101c69fcb8c1ef0",
    "triggers": {
     "commands": {},
     "keywords": {
-     "banks competing": 0.55,
-     "block named": 0.51,
-     "broker patterson": 0.59,
-     "name-dropping": 0.62,
-     "named-rivalry": 0.66,
-     "patterson": 0.67
+     "banks competing": 0.51,
+     "block named": 0.53,
+     "broker patterson": 0.64,
+     "competing healthcare": 0.51,
+     "name-dropping": 0.65,
+     "named-rivalry": 0.69,
+     "patterson": 0.71,
+     "rivalry": 0.51
     },
     "paths": {},
     "tools": {},
@@ -1022,33 +1024,31 @@
    }
   },
   "5d44d3f3": {
-   "always_on_probability": 0.06,
+   "always_on_probability": 0.05,
    "id": "5d44d3f3",
    "mode": "triggered",
    "model": "jev-1.13.0",
    "negatives": {
-    "gets tier": 0.71
+    "gets tier": 0.68
    },
    "no_cue_probability": 0.14,
    "packs": [
     "records-intake"
    ],
-   "statement_sha256": "53bd861e5b21c99ad9212063f6627083995854470a2dfcbf9a4f6765e2593f67",
+   "statement_sha256": "9b6aa78ffc83d2f661ad1558ba671d2d94ca81a9449da992fde6634ef9bc86fa",
    "triggers": {
     "commands": {},
     "keywords": {
-     "already system": 0.5,
-     "backfill": 0.75,
-     "c-112": 0.51,
-     "gets open-source": 0.63,
-     "harborline pelvic therapy (fka bayline pelvic floor)": 0.54,
-     "intake": 0.56,
-     "nppes": 0.5,
-     "open-source": 0.55,
-     "open-source verification": 0.71,
-     "stamp": 0.63,
-     "unverified": 0.59,
-     "verification backfill": 0.81,
+     "backfill": 0.74,
+     "c-900002": 0.62,
+     "gets open-source": 0.62,
+     "harborline pelvic therapy (fka bayline pelvic floor)": 0.58,
+     "intake": 0.53,
+     "open-source": 0.52,
+     "open-source verification": 0.74,
+     "stamp": 0.64,
+     "unverified": 0.56,
+     "verification backfill": 0.8,
      "verification stamp": 0.71
     },
     "paths": {},
@@ -1625,7 +1625,7 @@
    }
   },
   "83b9a362": {
-   "always_on_probability": 0.08,
+   "always_on_probability": 0.09,
    "id": "83b9a362",
    "mode": "triggered",
    "model": "jev-1.13.0",
@@ -1634,14 +1634,14 @@
    "packs": [
     "vendor-intros"
    ],
-   "statement_sha256": "595399fe5e5d9f1d3ea4b61217ca883894ebeda2ad2c047dfcb72c4ac56271b1",
+   "statement_sha256": "22965b0b295251524bb311e2c67f7713f56fdc096697da833b1247d1167ca4b1",
    "triggers": {
     "commands": {},
     "keywords": {
-     "avoid gets": 0.64,
-     "caveat": 0.51,
+     "avoid gets": 0.68,
+     "caveat": 0.5,
      "confirm this pairing logic": 0.74,
-     "suggest caveat": 0.7
+     "suggest caveat": 0.71
     },
     "paths": {},
     "tools": {},

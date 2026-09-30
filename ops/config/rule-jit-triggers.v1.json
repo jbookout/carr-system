@@ -8,7 +8,7 @@
   "triggers": 147
  },
  "generated_from": {
-  "jev_triggers_sha256": "fe5a1593d9c602327ecd986158c5f77c31d704f8695f0952e81d15552a20ca9d",
+  "jev_triggers_sha256": "ebade265070de015d6622c89b6c70560b902ecb3e73585867999b8284ea99320",
   "map_sha256": "c6e89d64de575b9c6e39c8c88cd6a32e97e494b381a7ac4433026c4a3fe63c2a",
   "triage_sha256": "2b2a18859cc64dc2da00d7eece2768667ac92859e5d5af0bb54e30b527670876"
  },
@@ -736,18 +736,6 @@
   },
   {
    "kind": "prompt_regex",
-   "packs": [
-    "vendor-intros"
-   ],
-   "pattern": "\\bbroker\\s+patterson\\b|\\bbanks\\s+competing\\b|\\bname\\-dropping\\b|\\bnamed\\-rivalry\\b|\\bblock\\s+named\\b|\\bpatterson\\b",
-   "rule_ids": [
-    "3b0cd546"
-   ],
-   "source": "jev_compiled",
-   "trigger_id": "a728c5185171"
-  },
-  {
-   "kind": "prompt_regex",
    "negative_pattern": "\\bnot\\-top\\-of\\-mind\\s+category\\b",
    "packs": [
     "vendor-intros"
@@ -823,6 +811,18 @@
    ],
    "source": "jev_compiled",
    "trigger_id": "13ce48f21698"
+  },
+  {
+   "kind": "prompt_regex",
+   "packs": [
+    "vendor-intros"
+   ],
+   "pattern": "\\bcompeting\\s+healthcare\\b|\\bbroker\\s+patterson\\b|\\bbanks\\s+competing\\b|\\bname\\-dropping\\b|\\bnamed\\-rivalry\\b|\\bblock\\s+named\\b|\\bpatterson\\b|\\brivalry\\b",
+   "rule_ids": [
+    "3b0cd546"
+   ],
+   "source": "jev_compiled",
+   "trigger_id": "2a2a88b66736"
   },
   {
    "kind": "prompt_regex",
@@ -1119,12 +1119,12 @@
    "packs": [
     "records-intake"
    ],
-   "pattern": "\\bharborline\\s+pelvic\\s+therapy\\s+\\(fka\\s+bayline\\s+pelvic\\s+floor\\)|\\bopen\\-source\\s+verification\\b|\\bverification\\s+backfill\\b|\\bverification\\s+stamp\\b|\\bgets\\s+open\\-source\\b|\\balready\\s+system\\b|\\bopen\\-source\\b|\\bunverified\\b|\\bbackfill\\b|\\bintake\\b|\\bc\\-112\\b|\\bnppes\\b|\\bstamp\\b",
+   "pattern": "\\bharborline\\s+pelvic\\s+therapy\\s+\\(fka\\s+bayline\\s+pelvic\\s+floor\\)|\\bopen\\-source\\s+verification\\b|\\bverification\\s+backfill\\b|\\bverification\\s+stamp\\b|\\bgets\\s+open\\-source\\b|\\bopen\\-source\\b|\\bunverified\\b|\\bbackfill\\b|\\bc\\-900002\\b|\\bintake\\b|\\bstamp\\b",
    "rule_ids": [
     "5d44d3f3"
    ],
    "source": "jev_compiled",
-   "trigger_id": "5b4755adc6ee"
+   "trigger_id": "210e97cb233c"
   },
   {
    "kind": "prompt_regex",
