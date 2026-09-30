@@ -246,6 +246,14 @@ case "$CANONICAL_OWNERSHIP_ACTIVATION_APPLIED" in
   *) echo "schema-snapshot: could not read the canonical-ownership activation ledger state" >&2; exit 1 ;;
 esac
 
+DOT_READER_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0756_dot_reader.sql')" \
+  2>/dev/null)"
+case "$DOT_READER_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the Dot login ledger state" >&2; exit 1 ;;
+esac
+
 RULE_DELIVERY_CUTOVER_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0317_atomic_rule_delivery_cutover.sql')" \
   2>/dev/null)"
@@ -1416,6 +1424,26 @@ end $carr_ownership_issuer_roles$;
 CANONICAL_OWNERSHIP_ROLES
 fi
 
+# Pending 0756 owns creation. After release, restore a passwordless login
+# before pg_dump's role-bound read policies. Never reactivate an existing role.
+if [ "$DOT_READER_APPLIED" = t ]; then
+cat >> "$TMP" <<'DOT_READER_ROLES'
+do $dot_snapshot_role$
+begin
+  if not exists (select 1 from pg_roles where rolname='dot_reader') then
+    create role dot_reader login noinherit nosuperuser nocreatedb nocreaterole
+      noreplication nobypassrls connection limit 2;
+    if current_user <> 'neondb_owner' then
+      grant dot_reader to neondb_owner with admin true, inherit false, set false;
+      execute format('revoke dot_reader from %I',current_user);
+    end if;
+    alter role dot_reader set statement_timeout='30s';
+    alter role dot_reader set lock_timeout='5s';
+  end if;
+end $dot_snapshot_role$;
+DOT_READER_ROLES
+fi
+
 # Keep the raw dump separate so pg_dump's exit status cannot be hidden behind a
 # filter pipeline. Production has an externally provisioned carr_backup login,
 # so pg_dump renders 0475's role-conditional policy as an unconditional CREATE
@@ -1547,7 +1575,7 @@ with app(rolname) as (
          ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver'),
          ('carr_program5_forward_fix_verifiers'),
          ('carr_renewal_source_attestors'), ('carr_gate_zero_producer'),
-         ('carr_foundation_assurance_oracle'), ('carr_ownership_issuer')
+         ('carr_foundation_assurance_oracle'), ('carr_ownership_issuer'), ('dot_reader')
 )
 select format('grant %s on schema %s to %s;',
               string_agg(distinct lower(a.privilege_type), ', '
@@ -1566,7 +1594,7 @@ with app(rolname) as (
          ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver'),
          ('carr_program5_forward_fix_verifiers'),
          ('carr_renewal_source_attestors'), ('carr_gate_zero_producer'),
-         ('carr_foundation_assurance_oracle'), ('carr_ownership_issuer')
+         ('carr_foundation_assurance_oracle'), ('carr_ownership_issuer'), ('dot_reader')
 )
 select format('grant %s on %s %s.%s to %s;',
               string_agg(distinct lower(a.privilege_type), ', '
@@ -1587,7 +1615,7 @@ with app(rolname) as (
          ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver'),
          ('carr_program5_forward_fix_verifiers'),
          ('carr_renewal_source_attestors'), ('carr_gate_zero_producer'),
-         ('carr_foundation_assurance_oracle'), ('carr_ownership_issuer')
+         ('carr_foundation_assurance_oracle'), ('carr_ownership_issuer'), ('dot_reader')
 )
 select format('grant %s (%s) on table %s.%s to %s;',
               lower(a.privilege_type),
@@ -1609,7 +1637,7 @@ with app(rolname) as (
          ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver'),
          ('carr_program5_forward_fix_verifiers'),
          ('carr_renewal_source_attestors'), ('carr_gate_zero_producer'),
-         ('carr_foundation_assurance_oracle'), ('carr_ownership_issuer')
+         ('carr_foundation_assurance_oracle'), ('carr_ownership_issuer'), ('dot_reader')
 )
 select format('grant execute on function %s.%s(%s) to %s;',
               n.nspname, p.proname,
@@ -1628,7 +1656,7 @@ with app(rolname) as (
          ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver'),
          ('carr_program5_forward_fix_verifiers'),
          ('carr_renewal_source_attestors'), ('carr_gate_zero_producer'),
-         ('carr_foundation_assurance_oracle'), ('carr_ownership_issuer')
+         ('carr_foundation_assurance_oracle'), ('carr_ownership_issuer'), ('dot_reader')
 ), membership_member(rolname) as (
   select rolname from app
   union all values ('neondb_owner'), ('carr_ownership_issuer_g1'), ('carr_ownership_issuer_g2')
@@ -1689,6 +1717,70 @@ fi
 if ! "$PG_DUMP" --data-only --no-owner --no-acl --table=schema_migrations >> "$TMP"; then
   echo "schema-snapshot: could not dump the applied-migration ledger — nothing written" >&2
   exit 1
+fi
+
+# Database ACLs and creator defaults are outside pg_dump --no-acl. Keep this
+# outside the closed CARR GRANTS grammar, after its ledger dump boundary.
+if [ "$DOT_READER_APPLIED" = t ]; then
+# Object/schema/function ACLs have already been replayed from the source.
+# Reconstruct only the remaining database ACLs and observed creator defaults;
+# never reapply 0756's initial blanket policy over an authorized narrowing.
+if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 >> "$TMP" <<'DOT_READER_STATE'
+select 'do $dot_snapshot_grants$ begin';
+select format('execute format(%L,current_database());',
+              format('revoke %s on database %%I from %s;',privilege,grantee))
+  from (values ('connect','public'),('create','public'),('temporary','public'),
+               ('connect','dot_reader')) reset(privilege,grantee);
+select format('execute format(%L,current_database());',
+              format('grant %s on database %%I to %s%s;',lower(a.privilege_type),
+                     case when a.grantee=0 then 'public' else 'dot_reader' end,
+                     case when a.is_grantable then ' with grant option' else '' end))
+  from pg_database d cross join lateral aclexplode(coalesce(d.datacl,acldefault('d',d.datdba))) a
+ where d.datname=current_database()
+   and (a.grantee=0 or (a.grantee='dot_reader'::regrole and a.privilege_type='CONNECT'));
+select format('revoke create on schema %I from public;',n.nspname)
+  from pg_namespace n where n.nspname in ('public','ops');
+select format('grant create on schema %I to public;',n.nspname)
+  from pg_namespace n cross join lateral aclexplode(coalesce(n.nspacl,acldefault('n',n.nspowner))) a
+ where n.nspname in ('public','ops') and a.grantee=0 and a.privilege_type='CREATE';
+
+-- pg_dump omits default ACLs under --no-acl. Preserve schema-specific absence
+-- as absence and replay grants only where the catalog actually carries them.
+-- Source connection-owner defaults follow the dump's owner remapping; other
+-- creators retain their explicit, already-declared role identity.
+select format('alter default privileges%s%s grant %s on %s to dot_reader%s;',
+              case when d.defaclrole=current_user::regrole then ''
+                   else format(' for role %I',r.rolname) end,
+              case when d.defaclnamespace=0 then '' else format(' in schema %I',n.nspname) end,
+              lower(a.privilege_type),
+              case d.defaclobjtype when 'r' then 'tables' when 'S' then 'sequences' when 'f' then 'functions' end,
+              case when a.is_grantable then ' with grant option' else '' end)
+  from pg_default_acl d join pg_roles r on r.oid=d.defaclrole
+  left join pg_namespace n on n.oid=d.defaclnamespace
+  cross join lateral aclexplode(d.defaclacl) a
+ where a.grantee='dot_reader'::regrole and d.defaclobjtype in ('r','S','f')
+   and (d.defaclnamespace=0 or n.nspname in ('public','ops')) order by 1;
+select format('alter default privileges%s revoke execute on functions from public;',
+              case when d.defaclrole=current_user::regrole then ''
+                   else format(' for role %I',r.rolname) end)
+  from pg_default_acl d join pg_roles r on r.oid=d.defaclrole
+ where d.defaclobjtype='f' and d.defaclnamespace=0
+   and not exists(select 1 from aclexplode(d.defaclacl) a
+                  where a.grantee=0 and a.privilege_type='EXECUTE');
+select format('alter default privileges%s in schema %I grant execute on functions to public;',
+              case when d.defaclrole=current_user::regrole then ''
+                   else format(' for role %I',r.rolname) end,n.nspname)
+  from pg_default_acl d join pg_roles r on r.oid=d.defaclrole
+  join pg_namespace n on n.oid=d.defaclnamespace
+  cross join lateral aclexplode(d.defaclacl) a
+ where d.defaclobjtype='f' and n.nspname in ('public','ops')
+   and a.grantee=0 and a.privilege_type='EXECUTE';
+select 'end $dot_snapshot_grants$;';
+DOT_READER_STATE
+then
+  echo "schema-snapshot: could not read Dot authorization state — nothing written" >&2
+  exit 1
+fi
 fi
 
 # REFERENCE VOCABULARY IS A THIRD CATEGORY, and leaving it out made the first
