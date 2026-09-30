@@ -88,6 +88,60 @@ class RoutingTests(unittest.TestCase):
 
 
 class EvaluationTests(unittest.TestCase):
+    def test_out_of_domain_probability_support_never_counts_as_paired_evidence(self):
+        ev = load("paired_eval")
+        cases = [
+            ({"type": "choice", "criteria": {"a": "fits", "b": "misses"}},
+             {"type": "choice", "choice": "a", "confidence": 1}, "outside", "a"),
+            ({"type": "score", "criteria": ["low", "high"]},
+             {"type": "score", "score": 1, "confidence": 1}, "99", "1"),
+        ]
+        for question, selected, outside, valid_gold in cases:
+            for gold in (None, valid_gold):
+                for probabilities in ({outside: 1}, {valid_gold: 1, outside: 0}):
+                    with self.subTest(kind=question["type"], gold=gold, probabilities=probabilities):
+                        request = {"state": "code", "model": "jev-1.13.0", "questions": {"q": question}}
+                        receipt = {"receipt_id": "bad-support", "request": request,
+                                   "request_sha256": ev.digest(request), "work_class": "system_work",
+                                   "gold": {} if gold is None else {"q": gold}}
+                        def answer(*args, **kwargs):
+                            return {"model": "offline-provider", "answers": {
+                                "q": {**selected, "probabilities": probabilities}},
+                                "usage": {"input_tokens": 1, "output_tokens": 1}}
+                        report = ev.run(ev.freeze([receipt]), answer, answer)
+                        self.assertEqual(report["status"], "incomplete")
+                        self.assertEqual(report["paired_successes"], 0)
+                        self.assertEqual(report["paired_questions"], 0)
+                        self.assertIsNone(report["agreement"])
+                        for provider in report["providers"].values():
+                            self.assertEqual(provider["errors"], 1)
+                            self.assertEqual(provider["successes"], 0)
+                            self.assertEqual(provider["labelled_questions"], 0)
+                            self.assertIsNone(provider["brier"])
+                            self.assertIsNone(provider["ece"])
+
+    def test_gold_outside_original_question_domain_is_rejected_before_provider_calls(self):
+        ev = load("paired_eval")
+        cases = [
+            ({"type": "choice", "criteria": {"a": "fits", "b": "misses"}}, "q", "outside"),
+            ({"type": "score", "criteria": ["low", "high"]}, "q", "99"),
+            ({"type": "noul"}, "q", "outside"),
+            ({"type": "noul"}, "unasked", True),
+        ]
+        for question, qid, gold in cases:
+            with self.subTest(kind=question["type"], qid=qid, gold=gold):
+                request = {"state": "code", "model": "jev-1.13.0", "questions": {"q": question}}
+                receipt = {"receipt_id": "bad-gold", "request": request,
+                           "request_sha256": ev.digest(request), "work_class": "system_work",
+                           "gold": {qid: gold}}
+                calls = []
+                def provider(*args, **kwargs):
+                    calls.append(args)
+                    raise AssertionError("invalid corpus must not reach a provider")
+                with self.assertRaisesRegex(ValueError, "gold.*requested"):
+                    ev.run(ev.freeze([receipt]), provider, provider)
+                self.assertEqual(calls, [])
+
     def test_frozen_real_receipt_binds_inputs_to_worker_receipt_and_is_replayable(self):
         ev = load("paired_eval")
         receipts = json.loads((ROOT / "ops/fixtures/judge-provider/frozen-receipts.v1.json").read_text())

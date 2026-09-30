@@ -30,6 +30,18 @@ def _client():
     return module
 
 
+def offered_labels(question):
+    """Canonical metric labels derived only from the requested answer domain."""
+    kind = question.get("type")
+    if kind == "noul":
+        return {"true", "false"}
+    if kind == "choice":
+        return set(question.get("criteria", {}))
+    if kind == "score":
+        return {str(i) for i in range(len(question.get("criteria", [])))}
+    return set()
+
+
 def freeze(receipts):
     cases, seen = [], set()
     for receipt in receipts:
@@ -42,6 +54,10 @@ def freeze(receipts):
             raise ValueError("paired evaluation accepts system_work only; runtime is pinned")
         if receipt.get("request_sha256") != digest(request):
             raise ValueError("frozen input digest mismatch")
+        for qid, gold in receipt.get("gold", {}).items():
+            target = str(gold).lower() if isinstance(gold, bool) else str(gold)
+            if target not in offered_labels(request["questions"].get(qid, {})):
+                raise ValueError("gold label outside requested answer domain")
         rid = receipt.get("receipt_id")
         if not isinstance(rid, str) or not rid or rid in seen:
             raise ValueError("receipt id missing or duplicated")
@@ -91,6 +107,16 @@ def run(corpus, jev, decisions, *, rates=None, repeats=1, clock=time.perf_counte
                     elapsed = max(0, (clock() - started) * 1000)
                     if not ts.usable_judgment(result, request["questions"]):
                         raise ValueError("invalid typed judgment or unmeasured usage")
+                    for qid, question in request["questions"].items():
+                        kind = question["type"]
+                        if kind in ("choice", "score"):
+                            criteria = question["criteria"]
+                            support = offered_labels(question)
+                            if kind == "score":
+                                support.update(criteria)
+                            raw = result["answers"][qid].get("probabilities")
+                            if not isinstance(raw, dict) or not set(raw) <= support:
+                                raise ValueError("probability support outside requested criteria")
                     distributions = {qid: ts.answer_distribution(q, result["answers"][qid])
                                      for qid, q in request["questions"].items()}
                     if not all(d["distribution_complete"] for d in distributions.values()):
