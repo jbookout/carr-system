@@ -11,6 +11,7 @@ import io
 import json
 import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -590,47 +591,33 @@ class PullRequestStatus(BoardCase):
         self.assertEqual(task["stage"], "live")
         self.assertEqual(task["completed_at"], completed_at)
 
-    def test_merged_card_goes_live_automatically_once_in_a_verified_release(self):
-        self.start()
-        merged = {**self.VALID, "state": "MERGED", "comments": [], "mergeCommit": {"oid": SHA_M}}
-        self.fake_gh({"view": merged})
-        self.run_board("render", "demo")
-        task = self.read_state("demo")["tasks"]["a"]
-        self.assertEqual((task["stage"], task["merge_sha"]), ("merged", SHA_M))
-        # A release that does not contain the merge keeps it merged-not-live.
-        self.shipped("worker", "9" * 40, ts="2026-09-29T10:00:00+00:00")
-        older = f"repos/jbookout/carr-system/compare/{'9' * 40}...{SHA_M}"
-        compare = f"repos/jbookout/carr-system/compare/{SHA_R}...{SHA_M}"
-        self.set_fixture({"view": merged, "compare": {older: "ahead", compare: "behind"}})
-        self.run_board("render", "demo")
-        self.assertEqual(self.read_state("demo")["tasks"]["a"]["stage"], "merged")
-        # The app lane's releases never count for a carr-system merge.
-        self.shipped("app", SHA_M)
-        self.run_board("render", "demo")
-        self.assertEqual(self.read_state("demo")["tasks"]["a"]["stage"], "merged")
-        # Once a verified worker release contains the merge commit, it is Live.
-        self.shipped("worker", SHA_R, ts="2026-09-29T12:00:00+00:00")
-        self.run_board("render", "demo")
-        task = self.read_state("demo")["tasks"]["a"]
-        self.assertEqual((task["status"], task["stage"]), ("done", "live"))
-        self.assertIn(SHA_M[:12], task["evidence"])
-        self.assertIn(SHA_R[:12], task["evidence"])
-        self.assertIn("verified worker release", task["evidence"])
-        self.assertTrue(task["completed_at"])
-        self.assertEqual(task["stage_history"][-1]["stage"], "live")
-        # The ancestry answer is cached; a later render does not ask again.
-        calls = len([c for c in self.gh_calls() if c[0] == "api"])
-        self.run_board("render", "demo")
-        self.assertEqual(len([c for c in self.gh_calls() if c[0] == "api"]), calls)
-
-    def test_exact_release_sha_needs_no_compare(self):
+    def test_a_verified_release_alone_never_completes_a_project_card(self):
+        # #1439: a project card completes from a release only for a declared
+        # worker/app delivery target, from the production source readback.
         self.start()
         merged = {**self.VALID, "state": "MERGED", "comments": [], "mergeCommit": {"oid": SHA_M}}
         self.fake_gh({"view": merged})
         self.shipped("worker", SHA_M)
         self.run_board("render", "demo")
-        self.assertEqual(self.read_state("demo")["tasks"]["a"]["stage"], "live")
+        task = self.read_state("demo")["tasks"]["a"]
+        self.assertEqual((task["stage"], task["merge_sha"]), ("merged", SHA_M))
+        self.assertNotIn("evidence", task)
+        self.assertIn("no delivery target recorded", task["release_wait"])
+        self.run_board("task", "demo", "a", "--delivery-target", "workstation")
+        self.run_board("render", "demo")
+        task = self.read_state("demo")["tasks"]["a"]
+        self.assertEqual(task["stage"], "merged")
+        self.assertIn("the workstation delivery target", task["release_wait"])
         self.assertEqual([c for c in self.gh_calls() if c[0] == "api"], [])
+
+    def test_all_repos_card_in_an_exact_release_needs_no_compare(self):
+        card = {"status": "done", "stage": "merged", "merge_sha": SHA_M, "pr": 7, "repo": "jbookout/carr-system"}
+        release = {"sha": SHA_M, "lane": "worker", "ts": "2026-09-29T12:00:00+00:00", "source": "releases.jsonl"}
+        with patch.object(BOARD, "latest_release", return_value=release), \
+             patch.object(BOARD, "compare_status", side_effect=AssertionError("compare called")):
+            self.assertTrue(BOARD.auto_live(card, "jbookout/carr-system", iso(), ["mcp-server/src/a.js"]))
+        self.assertEqual(card["stage"], "live")
+        self.assertIn("verified worker release", card["evidence"])
 
     def test_latest_verified_release_comes_from_shipped_rows_then_live_probe(self):
         releases = self.root / "releases.jsonl"
@@ -656,24 +643,32 @@ class PullRequestStatus(BoardCase):
         self.assertEqual(wait, "release pipeline blocked (canary_pending): main canary has not finished on 333333333333")
 
     def test_merged_card_not_yet_released_shows_waiting_on_release_with_pipeline_reason(self):
-        self.start()
+        self.start(extra=["--delivery-target", "worker"])
         merged = {**self.VALID, "state": "MERGED", "comments": [], "mergeCommit": {"oid": SHA_M}}
-        compare = f"repos/jbookout/carr-system/compare/{SHA_R}...{SHA_M}"
-        self.fake_gh({"view": merged, "compare": {compare: "ahead"}})
         self.shipped("worker", SHA_R, ts="2026-09-29T08:00:00+00:00")
         with open(self.root / "releases.jsonl", "a") as fh:
             fh.write(json.dumps({"ts": "2026-09-29T09:00:00+00:00", "lane": "worker", "sha": "3" * 40,
                                  "status": "failed", "step": "canary", "detail": "canary pending"}) + "\n")
-        self.run_board("render", "demo")
+        evidence = {"value": None}
+        with patch.dict(os.environ, self.env), \
+             patch.object(BOARD, "fetch_pr", return_value=(merged, None)), \
+             patch.object(BOARD, "deployed_release", return_value=None), \
+             patch.object(BOARD, "deployment_evidence", lambda info, release: evidence["value"]):
+            BOARD.RELEASE_CACHE.clear()
+            BOARD.render("demo")
+            task = self.read_state("demo")["tasks"]["a"]
+            self.assertEqual(task["stage"], "merged")
+            self.assertEqual(task["release_wait"],
+                             "production does not show this change yet; release pipeline failed at canary: canary pending")
+            # Once the production readback shows it, the wait note goes away.
+            evidence["value"] = f"GET https://example.invalid/release observed production source {SHA_M}"
+            BOARD.render("demo")
+        BOARD.RELEASE_CACHE.clear()
         task = self.read_state("demo")["tasks"]["a"]
-        self.assertEqual(task["stage"], "merged")
-        self.assertEqual(task["release_wait"], "release pipeline failed at canary: canary pending")
-        # Once live, the wait note goes away.
-        self.shipped("worker", SHA_M, ts="2026-09-29T11:00:00+00:00")
-        self.run_board("render", "demo")
-        task = self.read_state("demo")["tasks"]["a"]
-        self.assertEqual(task["stage"], "live")
+        self.assertEqual((task["status"], task["stage"]), ("done", "live"))
+        self.assertIn(SHA_M, task["evidence"])
         self.assertNotIn("release_wait", task)
+        self.assertEqual(task["stage_history"][-1]["stage"], "live")
 
     def test_stage_changes_record_history_and_the_timer_reads_stage_entered_at(self):
         self.run_board("init", "demo", "--title", "Demo")
@@ -763,11 +758,12 @@ class GitHubSync(BoardCase):
                 detail = BOARD.blocked_detail(task)
                 self.assertEqual(detail[0] if detail else None, reason)
                 self.assertEqual(task["stage_history"][-1]["stage"], stage)
-        # Verified release: the addition-6 auto-live path runs on the same sync.
+        # A verified release alone never completes a project card (#1439):
+        # the same sync names what it is waiting for.
         self.shipped("worker", SHA_M)
         task, _ = self.sync({**self.OPEN, "state": "MERGED", "mergeCommit": {"oid": SHA_M}})
-        self.assertEqual((task["status"], task["stage"]), ("done", "live"))
-        self.assertIn("verified worker release", task["evidence"])
+        self.assertEqual((task["status"], task["stage"]), ("done", "merged"))
+        self.assertIn("no delivery target recorded", task["release_wait"])
 
     def test_legacy_commit_statuses_do_not_void_the_sync(self):
         self.start()
@@ -1544,30 +1540,37 @@ class ReviewRound1420(BoardCase):
 
     # 6 ── Live only for what the lane deploys
     def test_6_a_release_does_not_make_undeployed_local_changes_live(self):
+        # Project cards: only a declared worker/app target completes from a
+        # release (#1439); a local tool or LaunchAgent declares workstation.
         self.run_board("init", "demo", "--title", "Demo")
-        self.run_board("task", "demo", "a", "--title", "A", "--status", "running", "--executor", "Codex", "--pr", "42")
-        merged = {**self.OPEN, "state": "MERGED", "mergeCommit": {"oid": SHA_M}}
+        self.run_board("task", "demo", "a", "--title", "A", "--status", "running", "--executor", "Codex",
+                       "--pr", "42", "--delivery-target", "workstation")
+        merged = {**self.OPEN, "state": "MERGED", "mergeCommit": {"oid": SHA_M},
+                  "files": [{"path": "tools/progress_board.py"}], "changedFiles": 1}
         self.shipped("worker", SHA_M)
+        self.fake_gh({"view": merged})
+        self.run_board("render", "demo")
+        task = self.read_state("demo")["tasks"]["a"]
+        self.assertEqual(task["stage"], "merged")
+        self.assertIn("measured evidence", task["release_wait"])
+        self.assertNotIn("evidence", task)
+        # All-repos cards carry no delivery target: the lane must deploy every
+        # path the PR changed.
+        release = {"sha": SHA_M, "lane": "worker", "ts": "2026-09-29T12:00:00+00:00", "source": "releases.jsonl"}
         for files, stage, wait in (
                 (["tools/progress_board.py", "ops/launchd/com.carr.x.plist"], "merged", "outside the worker release paths"),
                 (None, "merged", "changed-file list"),
                 (["docs/runbook.md"], "merged", "outside the worker release paths"),
                 (["mcp-server/src/board-answers.js", "mcp-server/test/x.test.mjs", "mcp-server/README.md"], "live", None)):
             with self.subTest(files=files):
-                view = dict(merged)
-                if files is None:
-                    view.pop("files")
-                    view.pop("changedFiles")
-                else:
-                    view.update(files=[{"path": f} for f in files], changedFiles=len(files))
-                self.fake_gh({"view": view})
-                self.run_board("render", "demo")
-                task = self.read_state("demo")["tasks"]["a"]
-                self.assertEqual(task["stage"], stage)
+                card = {"status": "done", "stage": "merged", "merge_sha": SHA_M, "pr": 7, "repo": "jbookout/carr-system"}
+                with patch.dict(os.environ, self.env), patch.object(BOARD, "latest_release", return_value=release):
+                    BOARD.auto_live(card, "jbookout/carr-system", iso(), files)
+                self.assertEqual(card["stage"], stage)
                 if wait:
-                    self.assertIn(wait, task["release_wait"])
-                    self.assertIn("operational receipt", task["release_wait"])
-                    self.assertNotIn("evidence", task)
+                    self.assertIn(wait, card["release_wait"])
+                    self.assertIn("operational receipt", card["release_wait"])
+                    self.assertNotIn("evidence", card)
         truncated = {**merged, "files": [{"path": "mcp-server/src/a.js"}], "changedFiles": 150}
         self.assertIsNone(BOARD.changed_paths(truncated))
 
@@ -1658,6 +1661,237 @@ class ReviewRound1420(BoardCase):
         self.assertTrue((self.root / "boards" / "demo.json").exists(), "the local state is kept")
         result = self.run_board("note", "demo", "--text", "x")
         self.assertIn("not published", result.stderr)
+
+
+def merged_view(oid):
+    """A complete merged PR as gh reports it, merged at `oid`."""
+    return {"state": "MERGED", "isDraft": False, "headRefOid": "f" * 40, "author": {"login": "builder"},
+            "statusCheckRollup": [], "comments": [], "mergeCommit": {"oid": oid},
+            "files": [{"path": "feature"}], "changedFiles": 1}
+
+
+class DeliveryTargetRelease(BoardCase):
+    """#1439: a project card completes from the production release readback only
+    for the delivery target that release deploys."""
+
+    def test_partial_http_failures_keep_merged_and_finish_publish_poll_in_both_lanes(self):
+        from argparse import Namespace
+        from http.client import IncompleteRead, BadStatusLine
+        from unittest.mock import MagicMock
+        self.run_board("init", BOARD.LAUNCHD_BOARD, "--title", "Scheduled")
+        for repo, target in BOARD.AUTOMATIC_DELIVERY_TARGETS.items():
+            for error in (IncompleteRead(b"partial", 10), BadStatusLine("invalid")):
+                with self.subTest(repo=repo, error=type(error).__name__), patch.dict(os.environ, self.env):
+                    state = BOARD.read_state(BOARD.LAUNCHD_BOARD)
+                    state["tasks"] = {"fix": {"title": "Feature", "repo": repo, "pr": 1,
+                        "status": "done", "stage": "merged", "delivery_target": target,
+                        "executor": "codex", "updated_at": BOARD.stamp()}}
+                    BOARD.write_json(state)
+                    response = MagicMock()
+                    response.__enter__.return_value.read.side_effect = error
+                    kwargs = {"return_value": response} if isinstance(error, IncompleteRead) else {"side_effect": error}
+                    with patch.object(BOARD, "urlopen", **kwargs), \
+                         patch.object(BOARD, "fetch_pr", return_value=(merged_view("a" * 40), None)), \
+                         patch.object(BOARD, "publish_board") as publish, \
+                         patch.object(BOARD, "poll_board_answers") as poll:
+                        BOARD.command_render(Namespace(project=BOARD.LAUNCHD_BOARD, publish=True))
+                        publish.assert_called_once_with(BOARD.LAUNCHD_BOARD)
+                        poll.assert_called_once_with(BOARD.LAUNCHD_BOARD)
+                    task = BOARD.read_state(BOARD.LAUNCHD_BOARD)["tasks"]["fix"]
+                    self.assertEqual(task["stage"], "merged")
+                    self.assertNotIn("completed_at", task)
+                    self.assertNotIn("evidence", task)
+                    # The static page is retired; the board is the published snapshot.
+                    self.assertFalse((self.root / "boards" / f"{BOARD.LAUNCHD_BOARD}.html").exists())
+
+    def test_reverted_change_stays_merged_before_first_release_in_both_lanes(self):
+        sys.path.insert(0, str(REPO / "ops"))
+        from git_env import fixture_env
+        source = self.root / "source"
+        source.mkdir()
+        def git(*args):
+            return subprocess.run(["git", "-C", str(source), *args], env=fixture_env(),
+                                  capture_output=True, text=True, check=True).stdout.strip()
+        git("init")
+        git("config", "user.name", "Fixture")
+        git("config", "user.email", "fixture@example.invalid")
+        (source / "feature").write_text("off\n")
+        git("add", "feature")
+        git("commit", "-m", "Baseline")
+        (source / "feature").write_text("on\n")
+        git("add", "feature")
+        git("commit", "-m", "Fix")
+        fix = git("rev-parse", "HEAD")
+        git("revert", "--no-edit", fix)
+        deployed = git("rev-parse", "HEAD")
+        self.assertEqual((source / "feature").read_text(), "off\n")
+        self.run_board("init", "demo", "--title", "Demo")
+        for repo, target in BOARD.AUTOMATIC_DELIVERY_TARGETS.items():
+            with self.subTest(repo=repo), patch.dict(os.environ, self.env):
+                state = BOARD.read_state("demo")
+                state["tasks"] = {"fix": {"title": "Feature", "repo": repo, "pr": 1,
+                    "status": "done", "stage": "merged", "delivery_target": target,
+                    "executor": "codex", "updated_at": BOARD.stamp()}}
+                BOARD.write_json(state)
+                with patch.object(BOARD, "fetch_pr", return_value=(merged_view(fix), None)), \
+                     patch.object(BOARD, "deployed_release", return_value=(source, deployed, "https://example.invalid/release")):
+                    BOARD.render("demo")
+                task = BOARD.read_state("demo")["tasks"]["fix"]
+                self.assertEqual(task["stage"], "merged")
+                self.assertNotIn("completed_at", task)
+                self.assertNotIn("evidence", task)
+
+    def test_worker_release_does_not_complete_other_or_unspecified_targets(self):
+        sys.path.insert(0, str(REPO / "ops"))
+        from git_env import fixture_env
+        source = self.root / "source"
+        source.mkdir()
+        def git(*args):
+            return subprocess.run(["git", "-C", str(source), *args], env=fixture_env(),
+                                  capture_output=True, text=True, check=True).stdout.strip()
+        git("init")
+        (source / "feature").write_text("on\n")
+        git("add", "feature")
+        git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+            "commit", "-m", "Feature")
+        sha = git("rev-parse", "HEAD")
+        self.run_board("init", "demo", "--title", "Demo")
+        from unittest.mock import MagicMock
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps({
+            "ok": True, "env": {"value": "production"}, "git_sha": {"value": sha},
+            "schema": {"available": False}}).encode()
+        for target in (None, "workstation", "database", "app", "manual"):
+            with self.subTest(target=target), patch.dict(os.environ, self.env):
+                state = BOARD.read_state("demo")
+                state["tasks"] = {"install": {"title": "Install hook", "status": "done",
+                    "stage": "merged", "pr": 1, "executor": "codex", "updated_at": BOARD.stamp(),
+                    "delivery_target": target}}
+                BOARD.write_json(state)
+                with patch.object(BOARD, "RELEASE_TARGETS", {BOARD.DEFAULT_PR_REPO: (source, "https://example.invalid/release")}), \
+                     patch.object(BOARD, "urlopen", return_value=response), \
+                     patch.object(BOARD, "fetch_pr", return_value=(merged_view(sha), None)):
+                    BOARD.render("demo")
+                task = BOARD.read_state("demo")["tasks"]["install"]
+                self.assertEqual(task["stage"], "merged")
+                self.assertNotIn("completed_at", task)
+                self.assertNotIn("evidence", task)
+
+    def test_installed_copy_uses_checkout_independent_of_executable(self):
+        source = self.root / "carr-system"
+        source.mkdir()
+        sys.path.insert(0, str(REPO / "ops"))
+        from git_env import fixture_env
+        def git(*args):
+            return subprocess.run(["git", "-C", str(source), *args], env=fixture_env(),
+                                  capture_output=True, text=True, check=True).stdout.strip()
+        git("init")
+        (source / "feature").write_text("on\n")
+        git("add", "feature")
+        git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+            "commit", "-m", "Feature")
+        sha = git("rev-parse", "HEAD")
+        installed = self.root / "support" / "carr-progress-board" / "progress_board.py"
+        installed.parent.mkdir(parents=True)
+        shutil.copyfile(SCRIPT, installed)
+        spec = importlib.util.spec_from_file_location("installed_board", installed)
+        module = importlib.util.module_from_spec(spec)
+        from unittest.mock import MagicMock
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps({
+            "ok": True, "env": {"value": "production"}, "git_sha": {"value": sha}}).encode()
+        with patch.dict(os.environ, {"HOME": str(self.root)}):
+            spec.loader.exec_module(module)
+            with patch.object(module, "urlopen", return_value=response):
+                release = module.deployed_release(module.DEFAULT_PR_REPO)
+        self.assertEqual(release[0], source)
+        self.assertIsNotNone(module.deployment_evidence({"mergeCommit": {"oid": sha}}, release))
+
+    def test_render_advances_only_deployed_merge_commits_in_each_repository(self):
+        sys.path.insert(0, str(REPO / "ops"))
+        from git_env import fixture_env
+        git_env = fixture_env()
+        source = self.root / "source"
+        source.mkdir()
+        def git(*args):
+            return subprocess.run(["git", "-C", str(source), *args], env=git_env,
+                                  capture_output=True, text=True, check=True).stdout.strip()
+        git("init")
+        (source / "feature").write_text("on\n")
+        git("add", "feature")
+        git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+            "commit", "-m", "Released")
+        released = git("rev-parse", "HEAD")
+        (source / "future").write_text("pending\n")
+        git("add", "future")
+        git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+            "commit", "-m", "Unreleased")
+        newer = git("rev-parse", "HEAD")
+        for repo, identity in (
+            ("jbookout/carr-system", {"ok": True, "env": {"value": "production"},
+                                      "git_sha": {"value": released}}),
+            ("jbookout/doctorcre-app", {"service": "doctorcre-app", "environment": "production",
+                                       "source_commit": released}),
+        ):
+            with self.subTest(repo=repo):
+                project = repo.split("/")[1]
+                self.run_board("init", project, "--title", "Demo")
+                for task_id, number in (("deployed", 1), ("future", 2)):
+                    self.run_board("task", project, task_id, "--title", task_id,
+                                   "--status", "done", "--executor", "codex",
+                                   "--pr", str(number), "--repo", repo, "--stage", "merged",
+                                   "--delivery-target", "worker" if repo == BOARD.DEFAULT_PR_REPO else "app")
+                def info(number, _repo):
+                    return merged_view(released if number == 1 else newer), None
+                from unittest.mock import MagicMock
+                response = MagicMock()
+                response.__enter__.return_value.read.return_value = json.dumps(identity).encode()
+                with patch.dict(os.environ, self.env), patch.object(BOARD, "fetch_pr", info), \
+                     patch.object(BOARD, "RELEASE_TARGETS", {repo: (source, "https://example.invalid/release")}, create=True), \
+                     patch.object(BOARD, "urlopen", return_value=response):
+                    BOARD.render(project)
+                tasks = self.read_state(project)["tasks"]
+                self.assertEqual(tasks["deployed"]["stage"], "live")
+                self.assertIn(released, tasks["deployed"]["evidence"])
+                self.assertEqual(tasks["future"]["stage"], "merged")
+                self.assertNotIn("evidence", tasks["future"])
+                remote = {"snapshot": None}
+                def call(verb, args):
+                    if verb == "publish-board-snapshot":
+                        self.assertEqual(args["base_version"], 0)
+                        remote["snapshot"] = {"version": 1, "snapshot_json": args["snapshot"]}
+                    return {"ok": True, "questions": [], **remote}
+                with patch.dict(os.environ, self.env), patch.object(BOARD, "call_verb", call):
+                    BOARD.publish_board(project)
+                published = remote["snapshot"]["snapshot_json"]["tasks"]
+                self.assertEqual(published["deployed"]["stage"], "live")
+                self.assertEqual(published["future"]["stage"], "merged")
+
+    def test_render_keeps_merged_when_production_identity_cannot_be_proven(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("task", "demo", "pending", "--title", "Pending",
+                       "--status", "done", "--executor", "codex", "--pr", "1", "--stage", "merged",
+                       "--delivery-target", "worker")
+        from unittest.mock import MagicMock
+        cases = [
+            {"ok": True, "env": {"value": "staging"}, "git_sha": {"value": "a" * 40}},
+            {"ok": True, "env": {"value": "production"}, "git_sha": {"value": "abc"}},
+            {"ok": True, "env": [], "git_sha": "malformed"},
+            ["malformed"],
+            OSError("unavailable"),
+        ]
+        for identity in cases:
+            with self.subTest(identity=identity):
+                response = MagicMock()
+                response.__enter__.return_value.read.return_value = json.dumps(identity, default=str).encode()
+                kwargs = {"side_effect": identity} if isinstance(identity, Exception) else {"return_value": response}
+                with patch.dict(os.environ, self.env), \
+                     patch.object(BOARD, "fetch_pr", return_value=(merged_view("a" * 40), None)), \
+                     patch.object(BOARD, "urlopen", **kwargs):
+                    BOARD.render("demo")
+                task = self.read_state("demo")["tasks"]["pending"]
+                self.assertEqual(task["stage"], "merged")
+                self.assertNotIn("evidence", task)
 
 
 if __name__ == "__main__":

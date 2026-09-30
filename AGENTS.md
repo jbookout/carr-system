@@ -244,10 +244,13 @@ publish exits nonzero with the local state kept and names the retry
 and says so. There is no static HTML copy. The launchd job runs
 `ops/progress-board-render.sh` from the canonical checkout, which binds
 `CARR_REPO_ROOT` and the repo's `.venv` Python; never run an extracted copy.
-A `done` card with no PR is Live (complete); a `done` card with a merged PR
-stays Merged until a verified release of a lane that deploys every path it
-changed; anything else (a local tool, a LaunchAgent) needs `--stage live
---evidence` naming its operational receipt. `failed` and `superseded` need
+A `done` card with no PR is Live (complete). A project card with a merged PR
+stays Merged until production shows it: only `--delivery-target worker`
+(carr-system) or `app` (doctorcre-app) completes from the release readback;
+any other target, or none (a local tool, a LaunchAgent), needs `--stage live
+--evidence` naming its operational receipt. An all-repos card goes Live once
+a verified release of a lane that deploys every path it changed contains its
+merge commit. `failed` and `superseded` need
 `--reason` and leave the pipeline for the History list.
 
 ## Git discipline on a shared tree

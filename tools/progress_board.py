@@ -25,9 +25,11 @@ import sys
 import tempfile
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from http.client import HTTPException
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Iterator
+from urllib.request import Request, urlopen
 
 
 STATUSES = ("queued", "running", "review", "blocked", "done", "failed", "superseded")
@@ -102,6 +104,15 @@ PHASE_BLOCKS = {
     "Merge conflict": ("Merge conflict with the base branch", "Merge the base branch and resolve the conflict"),
     "Changes requested": ("A reviewer requested changes", "Address the requested changes and re-request review"),
     "Closed unmerged": ("PR closed without merging", "Decide: reopen, replace, or retire the task"),
+}
+
+RELEASE_TARGETS = {
+    DEFAULT_PR_REPO: (Path.home() / "carr-system", "https://api.doctorcre.com/release"),
+    "jbookout/doctorcre-app": (Path.home() / "doctorcre-app", "https://app.doctorcre.com/app-release"),
+}
+AUTOMATIC_DELIVERY_TARGETS = {
+    DEFAULT_PR_REPO: "worker",
+    "jbookout/doctorcre-app": "app",
 }
 
 
@@ -1035,6 +1046,37 @@ def auto_live(task: dict[str, Any], repo: str, at: str, paths: list[str] | None)
     return False
 
 
+def delivered_live(task: dict[str, Any], repo: str, at: str, evidence: str | None) -> bool:
+    """Move a project card from Merged to Live only when its declared delivery
+    target is the one this repository's release deploys (worker or app) and
+    the production source readback shows the change. Any other target, or
+    none, waits for measured evidence (task --stage live --evidence)."""
+    if task_stage(task) != "merged":
+        return False
+    target = task.get("delivery_target")
+    automatic = AUTOMATIC_DELIVERY_TARGETS.get(repo)
+    if automatic and target == automatic and evidence:
+        prior = task_stage(task)
+        task.update({"status": "done", "stage": "live", "completed_at": at, "updated_at": at,
+                     "evidence": evidence})
+        task.pop("release_wait", None)
+        record_stage(task, at, prior)
+        normalize_task(task)
+        return True
+    if automatic and target == automatic:
+        wait = f"production does not show this change yet; {release_wait_reason(repo)}"
+    elif target:
+        wait = (f"a release does not complete the {target} delivery target; "
+                "it needs measured evidence (task --stage live --evidence)")
+    else:
+        wait = ("no delivery target recorded; set --delivery-target (worker or app complete from the "
+                "release readback) or record measured evidence (task --stage live --evidence)")
+    if task.get("release_wait") != wait:
+        task["release_wait"] = wait
+        return True
+    return False
+
+
 # ── the system-wide board ────────────────────────────────────────────────────
 
 def branch_executor(branch: str, author: str) -> str:
@@ -1286,6 +1328,61 @@ def settle_done_without_pr(task: dict[str, Any]) -> bool:
     return True
 
 
+def deployed_release(repo: str) -> tuple[Path, str, str] | None:
+    """Read where this repository runs. Pipeline cursors and main are not deployment proof."""
+    target = RELEASE_TARGETS.get(repo)
+    if target is None:
+        return None
+    root, url = target
+    try:
+        with urlopen(Request(url, headers={"User-Agent": "carr-progress-board"}), timeout=5) as response:
+            live = json.load(response)
+        if not isinstance(live, dict):
+            return None
+        if repo == DEFAULT_PR_REPO:
+            if live.get("ok") is not True or (live.get("env") or {}).get("value") != "production":
+                return None
+            sha = (live.get("git_sha") or {}).get("value")
+        else:
+            if live.get("service") != "doctorcre-app" or live.get("environment") != "production":
+                return None
+            sha = live.get("source_commit")
+        if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
+            return None
+        return root, sha, url
+    except (OSError, ValueError, AttributeError, HTTPException):
+        return None
+
+
+def deployment_evidence(info: dict[str, Any], release: tuple[Path, str, str] | None) -> str | None:
+    merge = info.get("mergeCommit")
+    commit = merge.get("oid") if isinstance(merge, dict) else None
+    if release is None or not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        return None
+    root, sha, url = release
+    try:
+        result = subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor", commit, sha],
+                                capture_output=True, timeout=5, check=False)
+        if result.returncode == 0:
+            paths = subprocess.run(["git", "-C", str(root), "show", "--format=", "--name-only", "-z",
+                                    "--diff-merges=first-parent", commit],
+                                   capture_output=True, timeout=5, check=True).stdout.split(b"\0")
+            # Initial completion needs the delivered change still present. If
+            # later edits affect these files, leave completion to measured proof.
+            changed_paths = [os.fsdecode(path) for path in paths if path]
+            if not changed_paths:
+                return None
+            delivered = subprocess.run(["git", "-C", str(root), "diff", "--quiet", "--no-ext-diff",
+                                        "--no-textconv", commit, sha, "--",
+                                        *[f":(literal){path}" for path in changed_paths]],
+                                       capture_output=True, timeout=5, check=False)
+            if delivered.returncode == 0:
+                return f"GET {url} observed production source {sha}; merged commit {commit} is an ancestor and its changed files match the deployed tree; verified {stamp()}"
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
+
+
 def render(project: str) -> None:
     """Sync every PR card from GitHub, refresh release and health facts, and
     write the JSON. GitHub is read first, without the board lock; the result
@@ -1297,14 +1394,27 @@ def render(project: str) -> None:
     if project == ALL_REPOS_BOARD:
         build_all_repos()
         return
-    keys = {pr_key(task) for task in read_state(project).get("tasks", {}).values() if task.get("pr") is not None}
+    tasks = read_state(project).get("tasks", {}).values()
+    keys = {pr_key(task) for task in tasks if task.get("pr") is not None}
     fetched = {key: fetch_pr(key[1], key[0]) for key in sorted(keys)}
+    # Every network and git read happens here, before the lock: the release
+    # readback for cards whose delivery target a release completes, and the
+    # pipeline's reason for the rest.
+    targeted = {pr_key(task) for task in tasks if task.get("pr") is not None
+                and task.get("delivery_target") == AUTOMATIC_DELIVERY_TARGETS.get(pr_key(task)[0])}
+    releases: dict[str, tuple[Path, str, str] | None] = {}
+    evidence: dict[tuple[str, int], str | None] = {}
     for key, (info, _) in fetched.items():
-        if info is not None and info.get("state") == "MERGED":
-            latest_release(key[0])  # any live probe happens before the lock
+        if info is None or info.get("state") != "MERGED":
+            continue
+        latest_release(key[0])
+        if key in targeted:
+            if key[0] not in releases:
+                releases[key[0]] = deployed_release(key[0])
+            evidence[key] = deployment_evidence(info, releases[key[0]])
     with board_lock(project):
         state = read_state(project)
-        if apply_sync(state, fetched):
+        if apply_sync(state, fetched, evidence):
             state["updated_at"] = max((str(task.get("updated_at") or "") for task in state["tasks"].values()),
                                       default=state.get("updated_at"))
             write_json(state)
@@ -1313,7 +1423,8 @@ def render(project: str) -> None:
 
 
 def apply_sync(state: dict[str, Any],
-               fetched: dict[tuple[str, int], tuple[dict[str, Any] | None, str | None]]) -> bool:
+               fetched: dict[tuple[str, int], tuple[dict[str, Any] | None, str | None]],
+               evidence: dict[tuple[str, int], str | None] | None = None) -> bool:
     changed = False
     failed: list[dict[str, str]] = []
     synced = 0
@@ -1337,7 +1448,7 @@ def apply_sync(state: dict[str, Any],
         synced += 1
         if sync_pr_task(task, info, at):
             changed = True
-        if auto_live(task, task_repo(task), at, changed_paths(info)):
+        if delivered_live(task, task_repo(task), at, (evidence or {}).get(key)):
             changed = True
     if fetched and not os.environ.get("PROGRESS_BOARD_SKIP_GH"):
         raw_sync = state.get("github_sync")
@@ -1705,6 +1816,8 @@ def update_task(state: dict[str, Any], args: argparse.Namespace) -> None:
     if args.evidence and stage != "live":
         raise SystemExit("--evidence requires --stage live")
     task = dict(prior)
+    if args.delivery_target is not None:
+        task["delivery_target"] = args.delivery_target
     executor = args.executor or prior.get("executor")
     derived = executor_metadata(executor)
     new_executor = args.executor is not None
@@ -1864,6 +1977,8 @@ def parser() -> argparse.ArgumentParser:
     task.add_argument("--next-action", dest="next_action", help="what unblocks it (required with blocked)")
     task.add_argument("--note")
     task.add_argument("--evidence")
+    task.add_argument("--delivery-target", choices=("worker", "app", "workstation", "database", "manual"),
+                      help="Matching worker/app targets may complete from release readback; other targets require measured --evidence")
     task.set_defaults(func=command_task)
     ask = commands.add_parser("ask")
     ask.add_argument("project")
