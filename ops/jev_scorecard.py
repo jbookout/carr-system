@@ -44,6 +44,7 @@ import importlib.util
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -179,33 +180,265 @@ def _chat(messages, *, endpoint, model, temperature, reasoning_effort, max_token
     return {"content": msg.get("content") or "", "usage": resp.get("usage", {}), "error": None}
 
 
-def _run(cmd, cwd, timeout):
+# Candidate code never runs in the process that evaluates hidden assertions.
+# The worker protocol carries values/exceptions, never assertion counts or a
+# completion verdict. JSON tagged containers preserve tuple keys and identity
+# without deserializing candidate-controlled pickle into the grader.
+_PY_CODEC = '''
+def _pack(v, refs, prefix="input:"):
+    nodes, pending = {}, []
+    def atom(x):
+        if x is None or type(x) in (bool, int, float, str): return ["scalar", x]
+        if type(x) not in (list, tuple, dict): raise TypeError("unsupported RPC value")
+        token = prefix + str(id(x)); refs[token] = x
+        if token not in nodes:
+            nodes[token] = None; pending.append((token, x))
+        return ["ref", token]
+    root = atom(v)
+    while pending:
+        token, x = pending.pop()
+        if type(x) is dict: nodes[token] = ["dict", [[atom(k), atom(i)] for k,i in x.items()]]
+        else: nodes[token] = ["tuple" if type(x) is tuple else "list", [atom(i) for i in x]]
+    return ["graph", root, nodes]
+def _unpack(v, refs):
+    kind = v[0]
+    if kind == "scalar": return v[1]
+    if kind == "ref": return refs[v[1]]
+    if kind != "graph": raise ValueError("invalid RPC value")
+    nodes = v[2]
+    tuples = {}
+    for key, (kind, items) in nodes.items():
+        if kind == "tuple": tuples[key] = items
+        else: refs[key] = [] if kind == "list" else {}
+    while tuples:
+        ready = [key for key, items in tuples.items() if all(x[0] != "ref" or x[1] in refs for x in items)]
+        if not ready: raise ValueError("invalid tuple references")
+        for key in ready: refs[key] = tuple(_unpack(x, refs) for x in tuples.pop(key))
+    for key, (kind, items) in nodes.items():
+        if kind == "list": refs[key].extend(_unpack(x, refs) for x in items)
+        elif kind == "dict": refs[key].update((_unpack(k, refs), _unpack(x, refs)) for k,x in items)
+    return _unpack(v[1], refs)
+'''
+_PY_WORKER = '''
+import sys, json, contextlib, io
+''' + _PY_CODEC + '''
+_input, _output = sys.stdin, sys.stdout
+sys.stdout = sys.stderr = io.StringIO()
+import solution
+_exports = {k:v for k,v in vars(solution).items() if not k.startswith("_") and callable(v) and k not in {"check", "raises", "sys"}}
+_objects = {}
+def _returned(value, refs):
+    original = next((k for k,v in refs.items() if v is value), None)
+    if original is not None: return ["ref", original]
+    if value is None or type(value) in (bool,int,float,str,list,tuple,dict): return _pack(value, {}, "result:")
+    key = str(id(value)); _objects[key] = value
+    return ["object", key]
+_output.write(json.dumps(list(_exports)) + "\\n"); _output.flush()
+for line in _input:
+    refs = {}
     try:
-        result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
-        return result.returncode, (result.stdout + result.stderr)[-3000:]
+        req = json.loads(line)
+        args = _unpack(req["args"], refs); kwargs = _unpack(req["kwargs"], refs)
+        fn = _exports[req["name"]] if req["object"] is None else getattr(_objects[req["object"]], req["name"])
+        value = fn(*args, **kwargs)
+        response = {"value":_returned(value, refs)}
+    except BaseException as exc:
+        response = {"error":type(exc).__name__, "message":str(exc)}
+    response["updates"] = [[k, "list", [_returned(x, refs) for x in v]] if type(v) is list else
+        [k, "dict", [[_returned(a, refs), _returned(b, refs)] for a,b in v.items()]]
+        for k,v in refs.items() if type(v) in (list,dict)]
+    _output.write(json.dumps(response) + "\\n"); _output.flush()
+'''
+_PY_PROXY = '''
+import subprocess as _subprocess, json as _json, builtins as _builtins, types as _types
+''' + _PY_CODEC + '''
+_worker = _subprocess.Popen([sys.executable, "-c", WORKER_SOURCE], stdin=_subprocess.PIPE, stdout=_subprocess.PIPE, stderr=_subprocess.DEVNULL, text=True)
+def _rpc(name, args, kwargs, obj=None):
+    refs = {}
+    request = {"name":name, "object":obj, "args":_pack(args, refs), "kwargs":_pack(kwargs, refs)}
+    _worker.stdin.write(_json.dumps(request) + "\\n"); _worker.stdin.flush()
+    response = _json.loads(_worker.stdout.readline())
+    for key, kind, items in response.get("updates", []):
+        target = refs[key]
+        if kind == "list": target[:] = [_unpack(x, refs) for x in items]
+        elif kind == "dict":
+            values = {_unpack(k, refs):_unpack(v, refs) for k,v in items}
+            target.clear(); target.update(values)
+    if "error" in response:
+        kind = getattr(_builtins, response["error"], RuntimeError)
+        if not isinstance(kind, type) or not issubclass(kind, BaseException): kind = RuntimeError
+        raise kind(response.get("message", "candidate exception"))
+    value = response["value"]
+    return _Remote(value[1]) if value[0] == "object" else _unpack(value, refs)
+class _Remote:
+    def __init__(self, key): self.key = key
+    def __getattr__(self, name): return lambda *args, **kwargs: _rpc(name, args, kwargs, self.key)
+def _export(name): return lambda *args, **kwargs: _rpc(name, args, kwargs)
+_solution_proxy = _types.ModuleType("solution")
+for _name in _json.loads(_worker.stdout.readline()):
+    _function = _export(_name)
+    setattr(_solution_proxy, _name, _function)
+    globals()[_name] = _function
+sys.modules["solution"] = _solution_proxy
+'''
+# Shared graph transport keeps caller-owned objects observable without loading
+# candidate code into the assertion-owning grader. Both ends use the same codec.
+_JS_CODEC = '''
+const _rpcFs = require('fs');
+function readLine(fd) {
+  const byte = Buffer.alloc(1); const bytes = [];
+  while (_rpcFs.readSync(fd, byte, 0, 1) > 0) {
+    if (byte[0] === 10) return Buffer.from(bytes).toString('utf8');
+    bytes.push(byte[0]);
+  }
+  return null;
+}
+function pack(value, refs, prefix) {
+  const known = new Map([...refs].map(([key, value]) => [value, key]));
+  const nodes = {}; const pending = []; let next = 0;
+  function atom(value) {
+    if (value === undefined) return ['undefined'];
+    if (value === null || typeof value !== 'object') {
+      if (typeof value === 'function' || typeof value === 'symbol') throw new TypeError('unsupported RPC value');
+      if (typeof value === 'bigint') return ['bigint', String(value)];
+      if (typeof value === 'number' && (!Number.isFinite(value) || Object.is(value, -0))) return ['number', Object.is(value, -0) ? '-0' : String(value)];
+      return ['scalar', value];
+    }
+    let key = known.get(value);
+    if (key === undefined) {
+      do { key = prefix + next++; } while (refs.has(key));
+      known.set(value, key); refs.set(key, value);
+    }
+    if (!Object.hasOwn(nodes, key)) { nodes[key] = null; pending.push([key, value]); }
+    return ['ref', key];
+  }
+  const root = atom(value);
+  while (pending.length) {
+    const [key, value] = pending.pop();
+    nodes[key] = [Array.isArray(value) ? 'array' : 'object',
+      Object.keys(value).map(name => [name, atom(value[name])]),
+      Array.isArray(value) ? value.length : null];
+  }
+  return {root, nodes};
+}
+function unpack(graph, refs) {
+  const nodes = Object.entries(graph.nodes);
+  function atom(value) {
+    if (value[0] === 'ref') {
+      if (!refs.has(value[1])) throw new Error('unknown RPC reference');
+      return refs.get(value[1]);
+    }
+    if (value[0] === 'undefined') return undefined;
+    if (value[0] === 'bigint') return BigInt(value[1]);
+    if (value[0] === 'number') return Number(value[1]);
+    if (value[0] === 'scalar') return value[1];
+    throw new Error('invalid RPC value');
+  }
+  // Allocate all nodes before linking them, retaining existing caller identity.
+  for (const [key, node] of nodes) {
+    if (!refs.has(key)) refs.set(key, node[0] === 'array' ? [] : {});
+  }
+  for (const [key, [kind, items, length]] of nodes) {
+    const target = refs.get(key);
+    const names = new Set(items.map(([name]) => name));
+    for (const name of Object.keys(target)) if (!names.has(name)) delete target[name];
+    if (kind === 'array' && target.length !== length) target.length = length;
+    for (const [name, value] of items) {
+      const resolved = atom(value);
+      // Do not rewrite unchanged properties, including frozen input objects.
+      if (!Object.hasOwn(target, name) || !Object.is(target[name], resolved))
+        Object.defineProperty(target, name,
+          {value:resolved, writable:true, enumerable:true, configurable:true});
+    }
+  }
+  return atom(graph.root);
+}
+'''
+_JS_WORKER = _JS_CODEC + '''
+const fs = require('fs');
+console.log = console.error = () => {};
+const sol = require('./solution.js');
+fs.writeSync(1, JSON.stringify({ready:true}) + '\\n');
+for (let line; (line = readLine(0)) !== null;) {
+  const input = JSON.parse(line);
+  const refs = new Map(); const args = unpack(input.args, refs);
+  let value, error;
+  try { value = sol[input.name](...args); }
+  catch (e) { error = String((e && e.message) || e); }
+  // Include updates after exceptions and for aliases detached from the arguments.
+  fs.writeSync(1, JSON.stringify({graph:pack([args, value, ...refs.values()], refs, 'result:'), error}) + '\\n');
+}
+'''
+_JS_PROXY = _JS_CODEC + '''
+const _child = require('child_process').spawn(process.execPath, ['-e', WORKER_SOURCE], {stdio:['pipe','pipe','ignore']});
+const _fs = require('fs');
+_child.stdin._handle.setBlocking(true); _child.stdout._handle.setBlocking(true);
+function _reply() {
+  const line = readLine(_child.stdout._handle.fd);
+  if (line === null) throw new Error('candidate exited without a value');
+  return JSON.parse(line);
+}
+if (_reply().ready !== true) throw new Error('candidate did not initialize');
+const _nativeRequire = require;
+const _solutionPath = _nativeRequire.resolve('./solution.js');
+require = name => {
+  if (_nativeRequire.resolve(name) !== _solutionPath) return _nativeRequire(name);
+  return new Proxy({}, {get:(_, method) => (...args) => {
+    const refs = new Map();
+    _fs.writeSync(_child.stdin._handle.fd, JSON.stringify({name:method, args:pack(args, refs, 'input:')}) + '\\n');
+    const reply = _reply();
+    const result = unpack(reply.graph, refs);
+    if (reply.error !== undefined) throw new Error(reply.error);
+    return result[1];
+  }});
+};
+'''
+
+
+def _run(cmd, cwd, timeout, source=None):
+    process = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               text=True, start_new_session=True)
+    try:
+        stdout, stderr = process.communicate(source, timeout=timeout)
+        return process.returncode, (stdout + stderr)[-3000:]
     except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.communicate()
         return -9, "TIMEOUT"
 
 
 def _grade_impl(task, code, workdir, timeout):
     """Run a candidate implementation against the task's hidden `test` source."""
     lang = task.get("lang", "py")
+    # Hidden source goes over stdin to the trusted grader, never into a file
+    # shared with candidate code. Only this grader evaluates/counts assertions.
     if lang == "js":
         with open(os.path.join(workdir, "solution.js"), "w", encoding="utf-8") as handle:
             handle.write(code)
-        src = _JS_HEADER + task["test"] + _JS_FOOTER
-        with open(os.path.join(workdir, "test_hidden.js"), "w", encoding="utf-8") as handle:
-            handle.write(src)
-        rc, out = _run(["node", "test_hidden.js"], workdir, timeout)
+        footer = '\n_child.kill(); console.log(JSON.stringify({completed:true,total:__n,passed:__n-__fails.length}));\n'
+        src = ('const WORKER_SOURCE = ' + json.dumps(_JS_WORKER) + ';\n' + _JS_HEADER + _JS_PROXY + task["test"] + footer + _JS_FOOTER)
+        rc, out = _run(["node"], workdir, timeout, src)
     else:
         with open(os.path.join(workdir, "solution.py"), "w", encoding="utf-8") as handle:
             handle.write(code)
-        src = _PY_HEADER + "from solution import *\n" + task["test"] + _PY_FOOTER
-        with open(os.path.join(workdir, "test_hidden.py"), "w", encoding="utf-8") as handle:
-            handle.write(src)
-        rc, out = _run([sys.executable, "test_hidden.py"], workdir, timeout)
-    scoreline = next((line for line in out.splitlines() if line.startswith("PASSED")), None)
-    return {"pass": rc == 0, "rc": rc, "subtests": scoreline or "no-score (crash/import error)",
+        footer = '\nprint(_json.dumps({"completed":True,"total":_n[0],"passed":_n[0]-len(_fails)}))\n_worker.terminate()\n_worker.wait()\n'
+        src = ('WORKER_SOURCE = ' + repr(_PY_WORKER) + '\n' + _PY_HEADER + _PY_PROXY + task["test"] + footer + _PY_FOOTER)
+        rc, out = _run([sys.executable, "-"], workdir, timeout, src)
+    completed = {}
+    for line in out.splitlines():
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(item, dict) and item.get('completed') is True:
+            completed = item
+    total, count = completed.get('total'), completed.get('passed')
+    valid = (completed.get('completed') is True and type(total) is int
+             and type(count) is int and total > 0 and 0 <= count <= total)
+    scoreline = f'PASSED {count}/{total}' if valid else None
+    passed = rc == 0 and valid and count == total
+    return {"pass": passed, "rc": rc, "subtests": scoreline or "no-score (crash/import error)",
             "detail": out}
 
 
