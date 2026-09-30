@@ -19,6 +19,7 @@ import sys
 import textwrap
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+from http.client import HTTPException
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
@@ -49,8 +50,12 @@ HOSTED_BOARD_ORIGIN = "https://app.doctorcre.com"
 LAUNCHD_BOARD = "carr-v5"
 DEFAULT_PR_REPO = "jbookout/carr-system"
 RELEASE_TARGETS = {
-    DEFAULT_PR_REPO: (Path(__file__).resolve().parents[1], "https://api.doctorcre.com/release"),
+    DEFAULT_PR_REPO: (Path.home() / "carr-system", "https://api.doctorcre.com/release"),
     "jbookout/doctorcre-app": (Path.home() / "doctorcre-app", "https://app.doctorcre.com/app-release"),
+}
+AUTOMATIC_DELIVERY_TARGETS = {
+    DEFAULT_PR_REPO: "worker",
+    "jbookout/doctorcre-app": "app",
 }
 
 
@@ -658,7 +663,7 @@ def deployed_release(repo: str) -> tuple[Path, str, str] | None:
         if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
             return None
         return root, sha, url
-    except (OSError, ValueError, AttributeError):
+    except (OSError, ValueError, AttributeError, HTTPException):
         return None
 
 
@@ -672,7 +677,20 @@ def deployment_evidence(info: dict[str, Any], release: tuple[Path, str, str] | N
         result = subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor", commit, sha],
                                 capture_output=True, timeout=5, check=False)
         if result.returncode == 0:
-            return f"GET {url} observed production source {sha}; merged commit {commit} is an ancestor; verified {stamp()}"
+            paths = subprocess.run(["git", "-C", str(root), "show", "--format=", "--name-only", "-z",
+                                    "--diff-merges=first-parent", commit],
+                                   capture_output=True, timeout=5, check=True).stdout.split(b"\0")
+            # Initial completion needs the delivered change still present. If
+            # later edits affect these files, leave completion to measured proof.
+            changed_paths = [os.fsdecode(path) for path in paths if path]
+            if not changed_paths:
+                return None
+            delivered = subprocess.run(["git", "-C", str(root), "diff", "--quiet", "--no-ext-diff",
+                                        "--no-textconv", commit, sha, "--",
+                                        *[f":(literal){path}" for path in changed_paths]],
+                                       capture_output=True, timeout=5, check=False)
+            if delivered.returncode == 0:
+                return f"GET {url} observed production source {sha}; merged commit {commit} is an ancestor and its changed files match the deployed tree; verified {stamp()}"
     except (OSError, subprocess.SubprocessError):
         pass
     return None
@@ -695,7 +713,8 @@ def render(project: str) -> None:
         status, stage, phase = derived_pr_state(info)
         if task_stage(task) == "live":
             status, stage = "done", "live"
-        elif stage == "merged":
+        elif stage == "merged" and task.get("delivery_target") == AUTOMATIC_DELIVERY_TARGETS.get(key[0]) \
+                and key[0] in AUTOMATIC_DELIVERY_TARGETS:
             if key[0] not in releases:
                 releases[key[0]] = deployed_release(key[0])
             evidence = deployment_evidence(info, releases[key[0]])
@@ -950,6 +969,8 @@ def command_task(args: argparse.Namespace) -> None:
     if args.evidence and stage != "live":
         raise SystemExit("--evidence requires --stage live")
     task = dict(prior)
+    if args.delivery_target is not None:
+        task["delivery_target"] = args.delivery_target
     task.update({
         "title": args.title or prior.get("title"),
         "status": args.status or prior.get("status"),
@@ -1059,6 +1080,8 @@ def parser() -> argparse.ArgumentParser:
     task.add_argument("--health", choices=("healthy", "question", "blocked"))
     task.add_argument("--note")
     task.add_argument("--evidence")
+    task.add_argument("--delivery-target", choices=("worker", "app", "workstation", "database", "manual"),
+                      help="Matching worker/app targets may complete from release readback; other targets require measured --evidence")
     task.set_defaults(func=command_task)
     ask = commands.add_parser("ask")
     ask.add_argument("project")

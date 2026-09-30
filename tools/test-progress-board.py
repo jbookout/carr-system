@@ -26,6 +26,138 @@ SPEC.loader.exec_module(BOARD)
 
 
 class ProgressBoardCLI(unittest.TestCase):
+    def test_partial_http_failures_keep_merged_and_finish_publish_poll_in_both_lanes(self):
+        from argparse import Namespace
+        from http.client import IncompleteRead, BadStatusLine
+        from unittest.mock import MagicMock
+        self.run_board("init", BOARD.LAUNCHD_BOARD, "--title", "Scheduled")
+        for repo, target in BOARD.AUTOMATIC_DELIVERY_TARGETS.items():
+            for error in (IncompleteRead(b"partial", 10), BadStatusLine("invalid")):
+                with self.subTest(repo=repo, error=type(error).__name__), patch.dict(os.environ, self.env):
+                    state = BOARD.read_state(BOARD.LAUNCHD_BOARD)
+                    state["tasks"] = {"fix": {"title": "Feature", "repo": repo, "pr": 1,
+                        "status": "done", "stage": "merged", "delivery_target": target,
+                        "executor": "codex", "updated_at": BOARD.stamp()}}
+                    BOARD.write_json(state)
+                    response = MagicMock()
+                    response.__enter__.return_value.read.side_effect = error
+                    kwargs = {"return_value": response} if isinstance(error, IncompleteRead) else {"side_effect": error}
+                    with patch.object(BOARD, "urlopen", **kwargs), \
+                         patch.object(BOARD, "pr_info", return_value={"state": "MERGED", "mergeCommit": {"oid": "a" * 40}}), \
+                         patch.object(BOARD, "publish_board") as publish, \
+                         patch.object(BOARD, "poll_board_answers") as poll:
+                        BOARD.command_render(Namespace(project=BOARD.LAUNCHD_BOARD, publish=True))
+                        publish.assert_called_once_with(BOARD.LAUNCHD_BOARD)
+                        poll.assert_called_once_with(BOARD.LAUNCHD_BOARD)
+                    task = BOARD.read_state(BOARD.LAUNCHD_BOARD)["tasks"]["fix"]
+                    self.assertEqual(task["stage"], "merged")
+                    self.assertNotIn("completed_at", task)
+                    self.assertNotIn("evidence", task)
+                    self.assertTrue((self.root / "boards" / f"{BOARD.LAUNCHD_BOARD}.html").exists())
+
+    def test_reverted_change_stays_merged_before_first_release_in_both_lanes(self):
+        sys.path.insert(0, str(REPO / "ops"))
+        from git_env import fixture_env
+        source = self.root / "source"
+        source.mkdir()
+        def git(*args):
+            return subprocess.run(["git", "-C", str(source), *args], env=fixture_env(),
+                                  capture_output=True, text=True, check=True).stdout.strip()
+        git("init")
+        git("config", "user.name", "Fixture")
+        git("config", "user.email", "fixture@example.invalid")
+        (source / "feature").write_text("off\n")
+        git("add", "feature")
+        git("commit", "-m", "Baseline")
+        (source / "feature").write_text("on\n")
+        git("add", "feature")
+        git("commit", "-m", "Fix")
+        fix = git("rev-parse", "HEAD")
+        git("revert", "--no-edit", fix)
+        deployed = git("rev-parse", "HEAD")
+        self.assertEqual((source / "feature").read_text(), "off\n")
+        self.run_board("init", "demo", "--title", "Demo")
+        for repo, target in BOARD.AUTOMATIC_DELIVERY_TARGETS.items():
+            with self.subTest(repo=repo), patch.dict(os.environ, self.env):
+                state = BOARD.read_state("demo")
+                state["tasks"] = {"fix": {"title": "Feature", "repo": repo, "pr": 1,
+                    "status": "done", "stage": "merged", "delivery_target": target,
+                    "executor": "codex", "updated_at": BOARD.stamp()}}
+                BOARD.write_json(state)
+                with patch.object(BOARD, "pr_info", return_value={"state": "MERGED", "mergeCommit": {"oid": fix}}), \
+                     patch.object(BOARD, "deployed_release", return_value=(source, deployed, "https://example.invalid/release")):
+                    BOARD.render("demo")
+                task = BOARD.read_state("demo")["tasks"]["fix"]
+                self.assertEqual(task["stage"], "merged")
+                self.assertNotIn("completed_at", task)
+                self.assertNotIn("evidence", task)
+
+    def test_worker_release_does_not_complete_other_or_unspecified_targets(self):
+        sys.path.insert(0, str(REPO / "ops"))
+        from git_env import fixture_env
+        source = self.root / "source"
+        source.mkdir()
+        def git(*args):
+            return subprocess.run(["git", "-C", str(source), *args], env=fixture_env(),
+                                  capture_output=True, text=True, check=True).stdout.strip()
+        git("init")
+        (source / "feature").write_text("on\n")
+        git("add", "feature")
+        git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+            "commit", "-m", "Feature")
+        sha = git("rev-parse", "HEAD")
+        self.run_board("init", "demo", "--title", "Demo")
+        from unittest.mock import MagicMock
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps({
+            "ok": True, "env": {"value": "production"}, "git_sha": {"value": sha},
+            "schema": {"available": False}}).encode()
+        for target in (None, "workstation", "database", "app", "manual"):
+            with self.subTest(target=target), patch.dict(os.environ, self.env):
+                state = BOARD.read_state("demo")
+                state["tasks"] = {"install": {"title": "Install hook", "status": "done",
+                    "stage": "merged", "pr": 1, "executor": "codex", "updated_at": BOARD.stamp(),
+                    "delivery_target": target}}
+                BOARD.write_json(state)
+                with patch.object(BOARD, "RELEASE_TARGETS", {BOARD.DEFAULT_PR_REPO: (source, "https://example.invalid/release")}), \
+                     patch.object(BOARD, "urlopen", return_value=response), \
+                     patch.object(BOARD, "pr_info", return_value={"state": "MERGED", "mergeCommit": {"oid": sha}}):
+                    BOARD.render("demo")
+                task = BOARD.read_state("demo")["tasks"]["install"]
+                self.assertEqual(task["stage"], "merged")
+                self.assertNotIn("completed_at", task)
+                self.assertNotIn("evidence", task)
+
+    def test_installed_copy_uses_checkout_independent_of_executable(self):
+        source = self.root / "carr-system"
+        source.mkdir()
+        sys.path.insert(0, str(REPO / "ops"))
+        from git_env import fixture_env
+        def git(*args):
+            return subprocess.run(["git", "-C", str(source), *args], env=fixture_env(),
+                                  capture_output=True, text=True, check=True).stdout.strip()
+        git("init")
+        (source / "feature").write_text("on\n")
+        git("add", "feature")
+        git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+            "commit", "-m", "Feature")
+        sha = git("rev-parse", "HEAD")
+        installed = self.root / "support" / "carr-progress-board" / "progress_board.py"
+        installed.parent.mkdir(parents=True)
+        shutil.copyfile(SCRIPT, installed)
+        spec = importlib.util.spec_from_file_location("installed_board", installed)
+        module = importlib.util.module_from_spec(spec)
+        from unittest.mock import MagicMock
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps({
+            "ok": True, "env": {"value": "production"}, "git_sha": {"value": sha}}).encode()
+        with patch.dict(os.environ, {"HOME": str(self.root)}):
+            spec.loader.exec_module(module)
+            with patch.object(module, "urlopen", return_value=response):
+                release = module.deployed_release(module.DEFAULT_PR_REPO)
+        self.assertEqual(release[0], source)
+        self.assertIsNotNone(module.deployment_evidence({"mergeCommit": {"oid": sha}}, release))
+
     def test_render_advances_only_deployed_merge_commits_in_each_repository(self):
         sys.path.insert(0, str(REPO / "ops"))
         from git_env import fixture_env
@@ -36,11 +168,15 @@ class ProgressBoardCLI(unittest.TestCase):
             return subprocess.run(["git", "-C", str(source), *args], env=git_env,
                                   capture_output=True, text=True, check=True).stdout.strip()
         git("init")
+        (source / "feature").write_text("on\n")
+        git("add", "feature")
         git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
-            "commit", "--allow-empty", "-m", "Released")
+            "commit", "-m", "Released")
         released = git("rev-parse", "HEAD")
+        (source / "future").write_text("pending\n")
+        git("add", "future")
         git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
-            "commit", "--allow-empty", "-m", "Unreleased")
+            "commit", "-m", "Unreleased")
         newer = git("rev-parse", "HEAD")
         for repo, identity in (
             ("jbookout/carr-system", {"ok": True, "env": {"value": "production"},
@@ -54,7 +190,8 @@ class ProgressBoardCLI(unittest.TestCase):
                 for task_id, number in (("deployed", 1), ("future", 2)):
                     self.run_board("task", project, task_id, "--title", task_id,
                                    "--status", "done", "--executor", "codex",
-                                   "--pr", str(number), "--repo", repo, "--stage", "merged")
+                                   "--pr", str(number), "--repo", repo, "--stage", "merged",
+                                   "--delivery-target", "worker" if repo == BOARD.DEFAULT_PR_REPO else "app")
                 def info(number, _repo):
                     return {"state": "MERGED", "headRefOid": "f" * 40,
                             "mergeCommit": {"oid": released if number == 1 else newer}}
@@ -85,7 +222,8 @@ class ProgressBoardCLI(unittest.TestCase):
     def test_render_keeps_merged_when_production_identity_cannot_be_proven(self):
         self.run_board("init", "demo", "--title", "Demo")
         self.run_board("task", "demo", "pending", "--title", "Pending",
-                       "--status", "done", "--executor", "codex", "--pr", "1", "--stage", "merged")
+                       "--status", "done", "--executor", "codex", "--pr", "1", "--stage", "merged",
+                       "--delivery-target", "worker")
         from unittest.mock import MagicMock
         cases = [
             {"ok": True, "env": {"value": "staging"}, "git_sha": {"value": "a" * 40}},
