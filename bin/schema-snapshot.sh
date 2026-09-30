@@ -1226,6 +1226,18 @@ if [ "$PROPERTY_EVIDENCE_REGISTRY_APPLIED" = t ] && [ "$TOUR_FEEDBACK_REGISTRY_A
   exit 1
 fi
 
+DOT_DATABASE_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0758_dot_database_design_scac_successor.sql')" \
+  2>/dev/null)"
+case "$DOT_DATABASE_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read database design v101 ledger state" >&2; exit 1 ;;
+esac
+if [ "$DOT_DATABASE_REGISTRY_APPLIED" = t ] && [ "$PROPERTY_EVIDENCE_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: database design v101 requires v99 predecessor" >&2
+  exit 1
+fi
+
 # WR-000117. 0530 is the registry successor half of the atomic (0529,0530)
 # group, so probing the SUCCESSOR and not the domain migration is what says the
 # v34 registry surface exists. A snapshot taken between the two would be taken
@@ -3020,6 +3032,17 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                                        SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v98'"
                                        SCAC_FULL_SET_SEAL_COUNT=98
                                        SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v99_current()"
+                                     if [ "$DOT_DATABASE_REGISTRY_APPLIED" = t ]; then
+                                       SCAC_CURRENT_NUMBER=101
+                                       SCAC_VERSION_COUNT=100
+                                       SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v101'")"
+                                       SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v101'")"
+                                       SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v101.generated.js"
+                                       SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v101'"
+                                       SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v99'"
+                                       SCAC_FULL_SET_SEAL_COUNT=99
+                                       SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v101_current()"
+                                     fi
                                      fi
                                      fi
                                      fi
@@ -3506,16 +3529,18 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
   SCAC_FULL_SET_SQL="$(node -e '
     const fs=require("fs"); const seals=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
     const count=Number(process.argv[2]); const current=Number(process.argv[3]);
-    const allKeys=Array.from({length:current},(_,i)=>`scac-mutation-registry.v${i+1}`);
+    // Exact supported versions, including an ordinal reserved by an open PR.
+    const allKeys=process.argv[4].match(/scac-mutation-registry[.]v[0-9]+/g)||[];
     const keys=allKeys.slice(0,count);
-    if (Object.keys(seals).sort().join("|")!==allKeys.sort().join("|") ||
+    if (Object.keys(seals).sort().join("|")!==[...allKeys].sort().join("|") ||
         !Number.isInteger(count) || !Number.isInteger(current) ||
-        count<9 || count>=current || current<10 ||
+        count<9 || allKeys.length!==count+1 || current<10 ||
+        allKeys.at(-1)!==`scac-mutation-registry.v${current}` ||
         allKeys.some(key=>!/^sha256:[0-9a-f]{64}$/.test(seals[key]))) process.exit(2);
     const quote=String.fromCharCode(39);
     const literal=value=>quote+String(value).replaceAll(quote,quote+quote)+quote;
     process.stdout.write(keys.map(key=>`(${literal(key)},${literal(seals[key])})`).join(","));
-  ' "$SCAC_FULL_SET_SEALS" "$SCAC_FULL_SET_SEAL_COUNT" "$SCAC_CURRENT_NUMBER")" || {
+  ' "$SCAC_FULL_SET_SEALS" "$SCAC_FULL_SET_SEAL_COUNT" "$SCAC_CURRENT_NUMBER" "$SCAC_VERSION_ARRAY")" || {
     echo "schema-snapshot: immutable SCAC full-entry-set seals are unavailable or malformed" >&2; exit 1
   }
   # WHAT THIS CHECK ASKS, AND WHAT IT DELIBERATELY DOES NOT. Every comparison

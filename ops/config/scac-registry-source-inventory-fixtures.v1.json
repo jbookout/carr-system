@@ -72960,6 +72960,38 @@
       "expected_count": 1007,
       "expected_sha256": "13d95f8aa10a7d40af510ecd30f2be5a51d396e29544d03be1f1bdb6a83e9953",
       "reason": "Property evidence read frontier after immutable Tour feedback v98; exact reviewed current source inventory and atomic migration contract."
+    },
+    {
+      "version": "v101",
+      "remove": [],
+      "upsert": [
+        {
+          "ingress_key": "external-admin:tools/migrate.py",
+          "ingress_kind": "external_admin",
+          "operation": "tools/migrate.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "tools/migrate.py",
+          "schema_digest": "9c0f0fdb589b703401873357b2653a4f0d59c6768d33d85fe2e520da2ac3d465",
+          "handler_digest": "9c0f0fdb589b703401873357b2653a4f0d59c6768d33d85fe2e520da2ac3d465",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        }
+      ],
+      "expected_count": 1007,
+      "expected_sha256": "e037446c3e71a23224d929f1f71ae0c55c8b2310f89bb9d79295afd361fb39f9",
+      "reason": "Database privilege repairs bind the changed atomic migration groups in tools/migrate.py; v100 is reserved by the open watchdog PR. Other authority contracts remain those of v99."
     }
   ],
   "current_source_review": {
