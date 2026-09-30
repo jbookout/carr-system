@@ -79,12 +79,13 @@ def detect(facts, config, now):
             found.append(finding("job_dead", subject, "registered PID is dead or changed without an exit record", config, **fields))
             continue
         tail = job.get("log_tail", "")
+        evidence = "\nLog evidence: " + tail if tail else ""
         if any(re.search(p, tail) for p in config["hang_patterns"]):
-            found.append(finding("job_hang", subject, "interactive hang signature in log tail", config, **fields))
+            found.append(finding("job_hang", subject, "interactive hang signature in log tail" + evidence, config, **fields))
         elif now - epoch(job.get("log_mtime", job["start"])) >= t["silent_seconds"]:
-            found.append(finding("job_silent", subject, "log silent for at least the configured limit", config, **fields))
+            found.append(finding("job_silent", subject, "log silent for at least the configured limit" + evidence, config, **fields))
         if now - epoch(job["start"]) >= job["limit"]:
-            found.append(finding("job_over_limit", subject, "registered run exceeded its time limit", config, **fields))
+            found.append(finding("job_over_limit", subject, "registered run exceeded its time limit" + evidence, config, **fields))
     queue = {tuple(line.split()[:3]) for line in facts.get("queue", "").splitlines() if len(line.split()) >= 3}
     for pr in facts.get("prs", []):
         repo, number, head = pr["repo"], pr["number"], pr["headRefOid"]

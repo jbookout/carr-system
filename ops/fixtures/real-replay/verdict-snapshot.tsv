@@ -738,6 +738,7 @@ guard-unattended.py	PreToolUse[Bash|WebFetch]	scenarios:5c0000000005	deny	recurs
 guard-unattended.py	PreToolUse[Bash|WebFetch]	tool_calls:f53afacc66e2	deny	WebFetch to a non-standard port (#) on a host outside KNOWN_HOSTS — blocked by the CARR guard.
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	(all)	counts	allow=441
 jev-supervisor.py	Stop	(all)	counts	allow=87
+job-watchdog-digest.py	UserPromptSubmit	(all)	counts	allow=6
 ledger-sweep.py	Stop	(all)	counts	allow=87 announce=1
 ledger-sweep.py	Stop	scenarios:c3f6a7b8c9d0	announce	LEDGER SWEEP — the partner's last turn matched triggers # · OVERRULED A RECOMMENDATION; # · RULED ON HOW SOMETHING IS STRUCTURED from rule <
 lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	(all)	counts	announce=72

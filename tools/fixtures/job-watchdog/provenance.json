@@ -1,22 +1,4 @@
-[
-  {
-    "fixture": "rv-1423.log",
-    "source": "/private/tmp/claude-501/-Users-booko-carr-system/cc59a986-2fb1-445d-a055-bcbb0f0da0e2/scratchpad/rv-1423/log.txt",
-    "sha256": "d8e53660bd151f669924c99dcfa98eabba4bb333b74f0471ec224c1c269b8266",
-    "extraction": "standalone stdin prompt lines",
-    "lines": 1
-  },
-  {
-    "fixture": "src10.log",
-    "source": "/private/tmp/claude-501/-Users-booko-carr-system/cc59a986-2fb1-445d-a055-bcbb0f0da0e2/scratchpad/src10/codex-log.txt",
-    "sha256": "1aa26269eb1cc57f86b235a03cda53c004edb5b1e9fc99d4da4f00843293d721",
-    "extraction": "standalone stdin prompt lines",
-    "lines": 1
-  },
-  {
-    "fixture": "queue.log",
-    "source": "/private/tmp/claude-501/-Users-booko-carr-system/cc59a986-2fb1-445d-a055-bcbb0f0da0e2/scratchpad/merge-queue.log",
-    "sha256": "7c654acf791a6d47f1bde45ea3123dd28e0fdbe9bbfab05af354909a415c4c80",
-    "extraction": "first parse error line"
-  }
-]
+{
+  "kind": "synthetic",
+  "fixtures": "classifier-only facts; no record-layer inputs"
+}
