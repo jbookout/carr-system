@@ -24,8 +24,10 @@ the other. That division is the whole lesson of the incident above.
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -135,6 +137,76 @@ case("long assignment without a sender stays inert",
 case("long assignment before an inert command stays inert",
      bash("MODE=" + "a" * 20000 + " echo ready"), ALLOW)
 
+# The adversarial re-review at dda25ef9: shell interpretation must not hide a
+# sender from the hook. These commands are evaluated, never sent remotely.
+for command in (
+    "eval 'curl http://localhost:8000/'",
+    "bash <<< 'curl http://localhost:8000/'",
+    "alias sender=curl; eval 'sender http://localhost:8000/'",
+    "python3 tools/flash-run.py ask --help && eval 'curl http://localhost:8000/'",
+    "command curl http://localhost:8000/",
+    "eval 'echo safe'", "alias harmless=echo",
+    "env -i curl http://localhost:8000/",
+):
+    case(f"deny review indirection: {command}", bash(command), DENY)
+for shell in ("bash", "sh", "zsh", "/bin/bash", "/bin/sh", "/bin/zsh"):
+    for command in (
+        f"{shell} -c 'curl http://localhost:8000/'",
+        f"{shell} -lc 'echo https://api.doctorcre.com/'",
+        f"{shell} -c 'cu\"\"rl http://localhost:8000/'",
+        f"{shell} <<< 'echo inert'",
+        f"{shell} <<'EOF'\necho inert\nEOF",
+        f"<<EOF {shell}\necho inert\nEOF",
+    ):
+        case(f"deny interpreted shell input: {command}", bash(command), DENY)
+    case(f"ordinary {shell} -c repo command", bash(f"{shell} -c 'git status'"), ALLOW)
+for prefix in ("command", "exec", "builtin", "command exec", "exec command", "command -p", "exec -a sender", "exec -ca sender"):
+    case(f"deny resolved prefix {prefix}", bash(f"{prefix} curl http://localhost:8000/"), DENY)
+    case(f"ordinary resolved prefix {prefix}", bash(f"{prefix} git status"), ALLOW)
+case("quoted command names remain data", bash("echo 'eval alias bash <<< curl http://localhost:8000/'"), ALLOW)
+case("quoted ask command remains data", bash("python3 tools/flash-run.py ask 'eval curl http://localhost:8000/'"), ALLOW)
+case("python heredoc remains repo input", bash("python3 <<'EOF'\nprint('hello')\nEOF"), ALLOW)
+case("escaped quotes in repo prose remain data",
+     bash('gh pr comment 1425 --body "Use \\"quoted\\" names and eval in prose"'), ALLOW)
+case("literal variable sender is resolved", bash("sender=curl; $sender http://localhost:8000/"), DENY)
+case("literal variable repo command remains allowed", bash("tool=/usr/bin/git; $tool status http://localhost:8000/"), ALLOW)
+for command in (
+    "bash -o errexit -c 'curl http://localhost:8000/'",
+    "2>/dev/null command curl http://localhost:8000/",
+    "2>/dev/null bash <<< 'curl http://localhost:8000/'",
+    "2>&1 eval 'curl http://localhost:8000/'",
+):
+    case(f"deny option/redirection indirection: {command}", bash(command), DENY)
+
+
+def executable_identity_regressions(directory):
+    """Keep the path fixtures alive until the real hook processes each case."""
+    for sender in ("curl", "wget", "nc"):
+        executable = shutil.which(sender)
+        if not executable:
+            continue  # wget is optional on macOS; Linux CI exercises it.
+        link = os.path.join(directory, f"link-{sender}")
+        chain = os.path.join(directory, f"chain-{sender}")
+        renamed = os.path.join(directory, f"renamed-{sender}")
+        os.symlink(executable, link)
+        os.symlink(link, chain)
+        shutil.copyfile(os.path.realpath(executable), renamed)
+        os.chmod(renamed, 0o755)
+        for path in (executable, os.path.realpath(executable), link, chain, renamed):
+            case(f"deny {sender} executable identity {path}",
+                 bash(f"{shlex.quote(path)} http://localhost:8000/"), DENY)
+        case(f"deny prefixed renamed {sender}",
+             bash(f"command exec {shlex.quote(renamed)} http://localhost:8000/"), DENY)
+        case(f"deny relative symlink after cd -- for {sender}",
+             bash(f"cd -- {shlex.quote(directory)} && ./chain-{sender} http://localhost:8000/"), DENY)
+        for prefix in ("command", "exec", "builtin"):
+            collision = os.path.join(directory, f"collision-{len(CASES)}", prefix)
+            os.makedirs(os.path.dirname(collision), exist_ok=True)
+            shutil.copyfile(os.path.realpath(executable), collision)
+            os.chmod(collision, 0o755)
+            case(f"deny {sender} copy named {prefix}",
+                 bash(f"{shlex.quote(collision)} http://localhost:8000/"), DENY)
+
 
 def scratch_sink_regression():
     """Prove URL port 8000 can reach another port, then demand hook denial."""
@@ -160,6 +232,17 @@ def scratch_sink_regression():
             if result.returncode != 0 or result.stdout != "SCRATCH_SINK" or hits != ["/proof"]:
                 raise AssertionError(f"scratch-sink reproduction failed: {result.returncode}, {hits}")
             case("deny live scratch-sink destination rewrite", bash(shlex.join(argv)), DENY)
+            sender = shlex.join(argv)
+            for command in (
+                "eval " + shlex.quote(sender),
+                "bash <<< " + shlex.quote(sender),
+                "alias sender=curl; eval " + shlex.quote("sender " + shlex.join(argv[1:])),
+                "python3 tools/flash-run.py ask --help && eval " + shlex.quote(sender),
+                "bash -c " + shlex.quote(sender),
+                "command " + sender, "exec " + sender, "builtin " + sender,
+                'MODE="$(echo inert)" ' + sender,
+            ):
+                case(f"deny scratch-sink indirection {command}", bash(command), DENY)
         finally:
             server.shutdown()
             thread.join(timeout=5)
@@ -727,7 +810,7 @@ for _cmd in (
     case(f"replay sample: {_cmd!r} is allowed", bash(_cmd, cwd=WORKTREE), ALLOW)
 
 
-def main():
+def run_cases():
     scratch_sink_regression()
     verbose = "-v" in sys.argv[1:]
     fails = []
@@ -750,6 +833,12 @@ def main():
         print("FAILED: " + "; ".join(fails))
         return 1
     return 0
+
+
+def main():
+    with tempfile.TemporaryDirectory(prefix="guard-sender-") as directory:
+        executable_identity_regressions(directory)
+        return run_cases()
 
 
 if __name__ == "__main__":

@@ -64,9 +64,11 @@ _DASH_M_RE = re.compile(
     r"\s+(?:'[^']*'|\"[^\"]*\")")
 
 
-def strip_inert_text(cmd):
+def strip_inert_text(cmd, *, strip_prose=True):
     """Return `cmd` with heredoc bodies and quoted messages replaced.
 
+    Tokenizing callers set strip_prose=False to preserve quoted argument
+    boundaries; regex callers retain the original prose-stripping behavior.
     The replacement keeps the opener and the delimiter line, so anything AFTER
     the heredoc is still scanned — only the body between the markers is inert.
     """
@@ -82,4 +84,4 @@ def strip_inert_text(cmd):
         if end is None:
             continue  # unterminated — scan the whole thing rather than guess
         out = "\n".join(lines[:start + 1] + lines[end:])
-    return _DASH_M_RE.sub("-m <message>", out)
+    return _DASH_M_RE.sub("-m <message>", out) if strip_prose else out

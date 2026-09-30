@@ -45,9 +45,11 @@ DISABLE FAST: remove the hooks block from settings.json, or `chmod -x` this file
 import json
 from datetime import datetime, timezone
 import ipaddress
+import hashlib
 import os
 import re
 import shlex
+import shutil
 import sys
 from urllib.parse import urlsplit
 
@@ -772,6 +774,143 @@ def is_send_context(cmd):
     """
     return bool(SEND_CTX.search(cmd) or NET_CLIENT.search(cmd))
 
+
+def _executable_identity(word, cwd):
+    """Resolve links and renamed copies of installed curl/wget/nc binaries.
+
+    No executable is run. A name alone cannot identify a copied sender; compare
+    bytes with the installed senders after the cheaper size comparison.
+    """
+    path = (os.path.join(cwd, os.path.expanduser(word)) if "/" in word
+            else shutil.which(word))
+    if not path:
+        return os.path.basename(word), False
+    path = os.path.realpath(path, strict=os.path.lexists(path))
+    name = os.path.basename(path)
+    if re.fullmatch(SENDER, name, re.I):
+        return name, True
+    if not os.path.isfile(path):
+        return name, False
+    size = os.stat(path).st_size
+    candidates = {shutil.which(sender) for sender in ("curl", "wget", "nc")}
+    candidates.update(f"/usr/bin/{sender}" for sender in ("curl", "wget", "nc"))
+    candidates.discard(None)
+    candidates = [candidate for candidate in candidates
+                  if os.path.isfile(candidate) and os.stat(candidate).st_size == size]
+    if not candidates:
+        return name, False
+    def digest(filename):
+        with open(filename, "rb") as handle:
+            return hashlib.file_digest(handle, "sha256").digest()
+    identity = digest(path)
+    return name, any(identity == digest(candidate) for candidate in candidates)
+
+
+def shell_send_analysis(cmd, cwd):
+    """Return (refusal, sender) without interpreting or executing shell text.
+
+    Quotes remain argument boundaries. Only command positions activate eval,
+    alias, prefixes or shell input checks; quoted questions and repo heredocs
+    remain data. Ambiguous interpretation/identity failures refuse locally,
+    so the hook's older outer allow-on-error handler cannot waive this check.
+    """
+    try:
+        lexer = shlex.shlex(strip_inert_text(cmd, strip_prose=False), posix=True,
+                            punctuation_chars=";|&()<>\n")
+        lexer.whitespace = " \t\r"
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+        segments, segment = [], []
+        for token in tokens:
+            if token and all(char in ";|&()\n" for char in token):
+                if segment:
+                    segments.append(segment)
+                segment = []
+            else:
+                segment.append(token)
+        if segment:
+            segments.append(segment)
+        sender = False
+        variables = {}
+        effective_cwd = cwd or os.getcwd()
+        for args in segments:
+            redirects = [word for word in args if word.startswith("<<")]
+            redirect_tokens = {"<", ">", ">>", "<<", "<<<", "<<-", ">&", "<&", "&>", "&>>"}
+            index = 0
+            # Redirections may precede the executable, including <<EOF sh.
+            while index < len(args):
+                word = args[index]
+                if word.isdigit() and index + 1 < len(args) and args[index + 1] in redirect_tokens:
+                    index += 1
+                    word = args[index]
+                if word in redirect_tokens:
+                    index += 2
+                elif re.match(r"^[A-Za-z_]\w*=", word):
+                    key, value = word.split("=", 1)
+                    variables[key] = value
+                    index += 1
+                else:
+                    break
+            while index < len(args):
+                word = args[index]
+                variable = re.fullmatch(r"\$(?:([A-Za-z_]\w*)|\{([A-Za-z_]\w*)\})", word)
+                if variable:
+                    word = variables.get(variable.group(1) or variable.group(2), word)
+                name, sends = _executable_identity(word, effective_cwd)
+                # A copied sender named "exec" is an executable, not a shell
+                # prefix. Its byte identity wins over the renamed basename.
+                if sends or name not in {"command", "exec", "builtin", "env", "sudo", "doas",
+                                "time", "nohup", "xargs"}:
+                    break
+                index += 1
+                while index < len(args):
+                    if name == "exec" and re.fullmatch(r"-[cl]*a", args[index]):
+                        index += 2  # argv[0] spelling is not executable identity.
+                    elif args[index].startswith("-") or re.match(r"^[A-Za-z_]\w*=", args[index]):
+                        index += 1
+                    else:
+                        break
+            if index >= len(args):
+                continue
+            if name in {"eval", "alias"}:
+                return f"shell {name} indirection — blocked by the CARR unattended guard", True
+            sender = sender or sends
+            if name in {"bash", "sh", "zsh", "dash", "ksh"}:
+                if redirects:
+                    return "interpreted shell input — blocked by the CARR unattended guard", True
+                offset = index + 1
+                while offset < len(args):
+                    argument = args[offset]
+                    if argument == "--":
+                        break
+                    if argument in {"-o", "+o", "-O", "+O"}:
+                        offset += 2
+                        continue
+                    if argument.startswith("-") and not argument.startswith("--") and "c" in argument:
+                        script = args[offset + 1] if offset + 1 < len(args) else ""
+                        nested_reason, nested_sender = shell_send_analysis(script, effective_cwd)
+                        if (not script or "$" in script or "`" in script or nested_reason
+                                or nested_sender or re.search(r"\b(?:" + SENDER + r")\b", script, re.I)
+                                or re.search(r"[A-Za-z][A-Za-z0-9+.-]*://", script)
+                                or NET_CLIENT.search(script)):
+                            return "shell -c sender or unresolved input — blocked by the CARR unattended guard", True
+                        break
+                    if not argument.startswith("-"):
+                        break
+                    offset += 1
+            if name == "cd" and index + 1 < len(args):
+                directory_index = index + 1
+                while directory_index < len(args) and args[directory_index] in {"--", "-L", "-P"}:
+                    directory_index += 1
+                if directory_index < len(args):
+                    effective_cwd = _resolve_dir(args[directory_index], effective_cwd)
+            if ("$" in word or "`" in word) and SEND_URL_RE.search(cmd):
+                return "unresolved sender executable — blocked by the CARR unattended guard", True
+        return None, sender
+    except Exception as exc:
+        return (f"unresolved shell command ({type(exc).__name__}) — blocked by the CARR unattended guard",
+                True)
+
 # ── THE DERIVED HOST LIST (2026-08-09, the "B" half of Joe's "build A and B") ─
 #
 # KNOWN_HOSTS above is trust as CODE, which is right for infrastructure and wrong
@@ -1264,6 +1403,10 @@ def check(cmd, cwd=None):
     if cmd.strip() in ALLOW_EXACT:
         return None
 
+    reason, resolved_sender = shell_send_analysis(cmd, cwd)
+    if reason:
+        return reason
+
     reason = broad_add_reason(cmd, cwd)
     if reason:
         return reason
@@ -1300,7 +1443,7 @@ def check(cmd, cwd=None):
                 continue
             return f"{label} — blocked by the CARR unattended guard"
 
-    if is_send_context(cmd):
+    if resolved_sender or is_send_context(cmd):
         for url in SEND_URL_RE.findall(cmd):
             try:
                 target = urlsplit(url)
