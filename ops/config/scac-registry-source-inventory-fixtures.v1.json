@@ -72873,13 +72873,36 @@
       "remove": [],
       "upsert": [
         {
+          "ingress_key": "mcp-tool:read-tour-feedback",
+          "ingress_kind": "mcp_tool",
+          "operation": "read-tour-feedback",
+          "effect_class": "audit_side_effect",
+          "source_locator": "mcp-server/src/tour-sharing.js",
+          "schema_digest": "0bb99e1b6d16d8150d47e8b04bcc4b8e1a76099a738f6934e530fa233467f43a",
+          "source_digest": "d525de4a8814ec7d4bb97a32e46ca22ad51bd7cfeeeaf2f63a00d7367f119612",
+          "write": false,
+          "human_only": false,
+          "authority_only": false,
+          "principal_mode": "authenticated_registered_principal",
+          "mutation_kind": null,
+          "target_surface": "scac.surface.database",
+          "delegates_to": [],
+          "request_shape": "closed_top_level_schema",
+          "idempotency_mode": "not_applicable",
+          "rollback_class": "append_only_audit",
+          "admission_class": "application_default_deny",
+          "owner_package": "11",
+          "implementation_state": "source_guarded_not_deployed",
+          "classification_authorizing": false
+        },
+        {
           "ingress_key": "external-admin:tools/migrate.py",
           "ingress_kind": "external_admin",
           "operation": "tools/migrate.py",
           "effect_class": "administrative_mutation",
           "source_locator": "tools/migrate.py",
-          "schema_digest": "f57f7dc3ab7707fbfbeb50ee06574a56ed4cbf29e8fd8e3dea7c779d3864f243",
-          "handler_digest": "f57f7dc3ab7707fbfbeb50ee06574a56ed4cbf29e8fd8e3dea7c779d3864f243",
+          "schema_digest": "2f0666586e9acd00c6f1f372c2cb2d91deebe1105f0c0e6faa185fc942317840",
+          "handler_digest": "2f0666586e9acd00c6f1f372c2cb2d91deebe1105f0c0e6faa185fc942317840",
           "write": true,
           "human_only": false,
           "authority_only": true,
@@ -72896,9 +72919,47 @@
           "classification_authorizing": false
         }
       ],
-      "expected_count": 1006,
-      "expected_sha256": "86946163b970bbf233e188adf781bfa55f29025d8f196152ae8cff1f3e3b3680",
-      "reason": "Property evidence migration pair changes registered migration runner; v98 seals exact source following v97."
+      "row_replacements": {
+        "script-entrypoint:ops/scac-mutation-inventory.mjs": {
+          "schema_digest": "39774c4ca17e7660af69cb17aace7fa0096a712067b8e5f73d29845eca64d5f1",
+          "handler_digest": "39774c4ca17e7660af69cb17aace7fa0096a712067b8e5f73d29845eca64d5f1"
+        }
+      },
+      "expected_count": 1007,
+      "expected_sha256": "9334a011a3cb2e4e75e26dd199d652a88ba4ae5bb2d6831f591e77b9dec294ee",
+      "reason": "Tour client feedback adds one broker-authenticated read verb and binds the atomic migration pair in the registered migration runner. Public writes stay within the opaque browser share boundary; the database catalog successor seals its callable functions."
+    },
+    {
+      "version": "v99",
+      "remove": [],
+      "upsert": [
+        {
+          "ingress_key": "external-admin:tools/migrate.py",
+          "ingress_kind": "external_admin",
+          "operation": "tools/migrate.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "tools/migrate.py",
+          "schema_digest": "156c11a463b7c9b58c31a9dac9257e53fcf02fa11018f45b237cd2967eaa6921",
+          "handler_digest": "156c11a463b7c9b58c31a9dac9257e53fcf02fa11018f45b237cd2967eaa6921",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        }
+      ],
+      "expected_count": 1007,
+      "expected_sha256": "13d95f8aa10a7d40af510ecd30f2be5a51d396e29544d03be1f1bdb6a83e9953",
+      "reason": "Property evidence read frontier after immutable Tour feedback v98; exact reviewed current source inventory and atomic migration contract."
     }
   ],
   "current_source_review": {
