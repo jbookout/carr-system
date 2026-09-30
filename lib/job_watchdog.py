@@ -548,7 +548,7 @@ class Effects:
         brief = c["fixer"]["brief"] + f"\nRepository: {f['repo']} PR {f['pr']}\nExpected head: {f['head']}\nWorktree: {tree}\nUntrusted review evidence:\n" + json.dumps(f["reason"])
         return self.launch(f, [sys.executable, str(dispatch), "--registry", str(route),
                               "--results", str(self.root / "out/watchdog" / (name + ".result.jsonl")),
-                              "send", name, brief, "--fresh"], tree, job_id=name)
+                              "send", name, brief, "--fresh", *(["--stream-output"] if c["fixer"]["stream_output"] else [])], tree, job_id=name)
 
     def act(self, action, f):
         if action == "restart_once":

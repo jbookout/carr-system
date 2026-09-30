@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# doctrine: job-watchdog
 """Give the orchestrator open watchdog findings without running a scan or action."""
 import json
 import os

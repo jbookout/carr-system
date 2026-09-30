@@ -81,6 +81,43 @@ class ReplayTests(unittest.TestCase):
 
 
 class RunnerTests(unittest.TestCase):
+    def test_model_room_streams_progress_before_completion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / "codex"
+            executable.write_text("#!" + sys.executable + "\nimport sys,time,json\nfrom pathlib import Path\n"
+                                  "assert sys.stdin.read() == ''\n"
+                                  "print(json.dumps({'type':'thread.started','thread_id':'fixture-thread'}), flush=True)\n"
+                                  "time.sleep(1)\n"
+                                  "Path(sys.argv[sys.argv.index('-o')+1]).write_text('fixture result')\n")
+            executable.chmod(0o755)
+            dispatch = ROOT / "tools/room-bridge/dispatch.py"
+            registry = root / "desk.json"
+            env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"])
+            registration = subprocess.run([sys.executable, str(dispatch), "--registry", str(registry),
+                                           "register", "fixture", "--kind", "codex-session", "--model", "gpt-6.1-sol",
+                                           "--effort", "high", "--sandbox", "workspace-write", "--cwd", directory],
+                                          env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True)
+            self.assertEqual(registration.returncode, 0, registration.stderr)
+            log = root / "log"
+            with log.open("w") as output:
+                proc = subprocess.Popen([sys.executable, str(dispatch), "--registry", str(registry),
+                                         "--results", str(root / "results.jsonl"), "send", "fixture", "fixture",
+                                         "--fresh", "--stream-output"], env=env, stdin=subprocess.DEVNULL,
+                                        stdout=output, stderr=subprocess.STDOUT)
+                try:
+                    deadline = time.monotonic() + 3
+                    while "thread.started" not in log.read_text() and proc.poll() is None and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    self.assertIn("thread.started", log.read_text())
+                    self.assertIsNone(proc.poll(), "progress must be visible before completion")
+                    self.assertEqual(proc.wait(timeout=5), 0)
+                finally:
+                    if proc.poll() is None:
+                        proc.kill()
+                    proc.wait()
+            self.assertEqual(json.loads((root / "results.jsonl").read_text())["status"], "completed")
+
     def test_clean_scan_cli_completes_without_effects(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -207,7 +244,8 @@ class StateTests(unittest.TestCase):
             dispatch = launch.call_args.args[1]
             self.assertIn("send", dispatch)
             self.assertIn("--fresh", dispatch)
-            self.assertIn("REVIEW: BLOCKED", dispatch[-2])
+            self.assertIn("REVIEW: BLOCKED", dispatch[dispatch.index("send") + 2])
+            self.assertIn("--stream-output", dispatch)
 
     def test_credentials_stay_blocked_in_needs_joe_lane(self):
         import job_watchdog as w
