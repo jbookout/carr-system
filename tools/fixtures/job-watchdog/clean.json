@@ -1,0 +1,7 @@
+{
+  "jobs": [{"id": "ok", "alive": true, "start": 1900, "limit": 3600, "log_mtime": 1999, "log_tail": "working"}],
+  "prs": [],
+  "logs": [],
+  "branches": [],
+  "queue": ""
+}

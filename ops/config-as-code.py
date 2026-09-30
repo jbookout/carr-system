@@ -285,6 +285,7 @@ PRIMARY_ONLY = {
     "com.carr.delivery-cadence-a05-sweep.plist",
     "com.carr.nightly-exports-daytime-retry.plist",
     "com.carr.timebomb-audit.plist",
+    "com.carr.job-watchdog.plist",
 }
 
 

@@ -3299,16 +3299,13 @@ test("job definitions and live DB capabilities have exact reviewed baselines", (
 
 test("GitHub and launchd workflow entrances bind exact triggers, permissions, and delegates", () => {
   const workflows = workflowDefinitionInventory();
-  // 39, not 38: #1241 added com.carr.nightly-exports-daytime-retry.plist (the
-  // OneDrive-wake daytime retry job), a real deployed launchd entrance.
-  // 40, not 39: V5-A05 adds com.carr.delivery-cadence-a05-sweep.plist, the
-  // daily 07:00 cadence sweep, a deployed launchd entrance.
-  // 41, not 40: session-trace-archive adds com.carr.session-trace-archive.plist,
-  // the nightly local archive of CARR-scoped agent session transcripts, a
-  // deployed launchd entrance.
-  assert.equal(workflows.length, 41);
+  const githubPaths = fs.readdirSync(new URL("../../.github/workflows/", import.meta.url))
+    .filter(name => /\.ya?ml$/.test(name)).map(name => `.github/workflows/${name}`);
+  const launchdPaths = fs.readdirSync(new URL("../../ops/launchd/", import.meta.url))
+    .filter(name => name.endsWith(".plist")).map(name => `ops/launchd/${name}`);
+  assert.deepEqual(workflows.map(row => row.source_locator).sort(), [...githubPaths, ...launchdPaths].sort());
   const github = workflows.filter(row => row.source_locator.startsWith(".github/workflows/"));
-  assert.equal(github.length, 7);
+  assert.equal(github.length, githubPaths.length);
   assert.equal(github.every(row => row.ingress_kind === "workflow_entrypoint" &&
     row.trigger_contract_digest && row.permissions_contract_digest && row.classification_authorizing === false), true);
   const automerge = workflows.find(row => row.source_locator === ".github/workflows/automerge-pilot.yml");
@@ -3318,10 +3315,10 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
   const dbAcceptance = workflows.find(row => row.source_locator === ".github/workflows/db-acceptance.yml");
   assert.equal(dbAcceptance.delegates_to.includes("script:ops/local-pg-ci.py"), true);
   const launchd = workflows.filter(row => row.source_locator.startsWith("ops/launchd/"));
-  // 32, not 31 — same #1241 addition as above.
-  // 33, not 32 -- the same V5-A05 sweep plist.
-  // 34, not 33 -- the same session-trace-archive addition as above.
-  assert.equal(launchd.length, 34);
+  assert.equal(launchd.length, launchdPaths.length);
+  const watchdog = launchd.find(row => row.launchd_label === "com.carr.job-watchdog");
+  assert.equal(watchdog.delegates_to.includes("script:tools/job-watchdog.py"), true);
+  assert.equal(watchdog.physical_authority_refs.includes("ops.service_environment:job-watchdog:production"), true);
   // Every agent is fully identified and carries SOME physical authority ref;
   // only a DEPLOYED agent's is a service environment. Collapsing those two into
   // one clause is what would let a definition-only agent either slip through
@@ -3334,10 +3331,11 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
   assert.equal(deployedLaunchd.length, launchd.length - 2);
   assert.equal(deployedLaunchd.every(row =>
     row.physical_authority_refs.some(ref => ref.startsWith("ops.service_environment:"))), true);
-  // 31, not 30 — same #1241 addition: one new deployed plist, one new
-  // ops.service_environment: ref (its "production" environment).
+  const declaredServices = JSON.parse(fs.readFileSync(new URL("../../ops/config/services.json", import.meta.url), "utf8"));
+  const declaredEnvironments = declaredServices.services.flatMap(service => service.environments)
+    .filter(environment => launchdPaths.includes(environment.deploy_mechanism));
   assert.equal(launchd.flatMap(row => row.physical_authority_refs)
-    .filter(ref => ref.startsWith("ops.service_environment:")).length, 33);
+    .filter(ref => ref.startsWith("ops.service_environment:")).length, declaredEnvironments.length);
   assert.equal(launchd.find(row => row.launchd_label === "com.carr.rules-refresh")
     .physical_authority_refs.includes("ops.service_environment:rules-refresh:production"), true);
   // The definition-only agent carries an explicit non-deployed authority ref in

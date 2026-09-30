@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Cadence is a checked projection of ops/config/job-watchdog.json.
+       Source definition only in this delivery; no live settings installation.
+       Reads the dated run ledger; failures survive in the findings and record layer. -->
+  <key>Label</key><string>com.carr.job-watchdog</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>{{REPO}}/bin/run-scheduled.sh</string>
+    <string>job-watchdog</string>
+    <string>launchd.run</string>
+    <string>{{REPO}}/.venv/bin/python</string>
+    <string>{{REPO}}/tools/job-watchdog.py</string>
+    <string>scan</string>
+  </array>
+  <key>WorkingDirectory</key><string>{{REPO}}</string>
+  <key>StartInterval</key><integer>120</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>{{REPO}}/out/job-watchdog.log</string>
+  <key>StandardErrorPath</key><string>{{REPO}}/out/job-watchdog.log</string>
+</dict>
+</plist>
