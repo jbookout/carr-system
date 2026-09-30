@@ -24,7 +24,7 @@ from typing import Any
 from urllib.parse import quote, urlsplit
 
 
-STATUSES = ("queued", "running", "review", "blocked", "done", "failed")
+STATUSES = ("queued", "running", "review", "blocked", "question-for-orchestrator", "done", "failed")
 PIPELINE_STAGES = ("queued", "build", "review", "ci", "merged", "live")
 PR_STAGES = PIPELINE_STAGES[1:] + ("measured",)
 STAGE_LABELS = {
@@ -40,6 +40,7 @@ STATUS_TO_STAGE = {
     "running": "build",
     "review": "review",
     "blocked": "review",
+    "question-for-orchestrator": "review",
     "failed": "ci",
     "done": "build",
 }
@@ -435,7 +436,9 @@ def render_state(state: dict[str, Any], pr_infos: dict[tuple[str, int], dict[str
     deliverables = state.get("deliverables", [])
     waiting = [(qid, q) for qid, q in questions.items() if not q.get("answer")]
     stuck = [(task_id, task) for task_id, task in active.items() if is_stuck(task) or task.get("status") == "failed"]
-    lanes = STATUSES + (("needs-joe",) if any(t.get("lane") == "needs-joe" for t in active.values()) else ())
+    lanes = tuple(s for s in STATUSES if s != "question-for-orchestrator" or
+                  any(t.get("status") == s for t in active.values()))
+    lanes += (("needs-joe",) if any(t.get("lane") == "needs-joe" for t in active.values()) else ())
     grouped: dict[str, list[tuple[str, dict[str, Any]]]] = {status: [] for status in lanes}
     for task_id, task in active.items():
         grouped.setdefault(task.get("lane") or task.get("status", "queued"), []).append((task_id, task))
@@ -477,7 +480,7 @@ def render_state(state: dict[str, Any], pr_infos: dict[tuple[str, int], dict[str
     ) or '<p class="empty"><span class="empty-symbol">✓</span>No questions are waiting on Joe.</p>'
     stuck_cards = "".join(card(task_id, task) for task_id, task in stuck) or '<p class="empty"><span class="empty-symbol">✓</span>Nothing is stuck.</p>'
     status_sections = "".join(
-        f'<section class="status-group status-{esc(status)}"><div class="status-heading"><h3>{esc("Needs Joe" if status == "needs-joe" else status.title())}</h3><span>{len(grouped.get(status, [])):02d}</span></div>'
+        f'<section class="status-group status-{esc(status)}"><div class="status-heading"><h3>{esc("Needs Joe" if status == "needs-joe" else status.replace("-", " ").title())}</h3><span>{len(grouped.get(status, [])):02d}</span></div>'
         f'{"".join(card(task_id, task) for task_id, task in grouped.get(status, [])) or "<p class=\"empty compact\">No tasks</p>"}</section>'
         for status in lanes
     )

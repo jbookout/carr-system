@@ -126,6 +126,7 @@ class RunnerTests(unittest.TestCase):
             executable.write_text("#!/bin/sh\nprintf '[[]]\\n'\n")
             executable.chmod(0o755)
             config = json.loads((ROOT / "ops/config/job-watchdog.json").read_text())
+            config["vendor_release_watches"] = []  # Offline clean-scan fixture.
             config["paths"]["merge_queue"] = "queue.txt"
             config["paths"]["queue_logs"] = []
             config["actions"]["file_defects"] = False
