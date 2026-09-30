@@ -726,8 +726,11 @@ assert "SCAC_CURRENT_NUMBER=98" in GENERATOR
 assert "SCAC_VERSION_COUNT=98" in GENERATOR
 assert "SCAC_FULL_SET_SEAL_COUNT=97" in GENERATOR
 assert "ops.scac_mutation_catalog_v98_current()" in GENERATOR
-assert "0754_job_watchdog_scac_successor.sql" in GENERATOR
-assert "JOB_WATCHDOG_REGISTRY_APPLIED" in GENERATOR
+assert 'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v99"' in (
+    ROOT / "mcp-server" / "src" / "scac-mutation-registry.v99.generated.js"
+).read_text(encoding="utf-8")
+assert "0755_property_evidence_scac_successor.sql" in GENERATOR
+assert "PROPERTY_EVIDENCE_REGISTRY_APPLIED" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=99" in GENERATOR
 assert "SCAC_VERSION_COUNT=99" in GENERATOR
 assert "SCAC_FULL_SET_SEAL_COUNT=98" in GENERATOR

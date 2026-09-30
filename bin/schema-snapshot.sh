@@ -1206,15 +1206,15 @@ if [ "$TOUR_FEEDBACK_REGISTRY_APPLIED" = t ] && [ "$CODEX_SESSION_READ_REGISTRY_
   exit 1
 fi
 
-JOB_WATCHDOG_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0754_job_watchdog_scac_successor.sql')" \
+PROPERTY_EVIDENCE_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0755_property_evidence_scac_successor.sql')" \
   2>/dev/null)"
-case "$JOB_WATCHDOG_REGISTRY_APPLIED" in
+case "$PROPERTY_EVIDENCE_REGISTRY_APPLIED" in
   t|f) ;;
-  *) echo "schema-snapshot: could not read Job watchdog v99 registry ledger state" >&2; exit 1 ;;
+  *) echo "schema-snapshot: could not read property evidence v99 registry ledger state" >&2; exit 1 ;;
 esac
-if [ "$JOB_WATCHDOG_REGISTRY_APPLIED" = t ] && [ "$TOUR_FEEDBACK_REGISTRY_APPLIED" != t ]; then
-  echo "schema-snapshot: Job watchdog v99 is applied without v98 predecessor" >&2
+if [ "$PROPERTY_EVIDENCE_REGISTRY_APPLIED" = t ] && [ "$TOUR_FEEDBACK_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: property evidence v99 is applied without v98 predecessor" >&2
   exit 1
 fi
 
@@ -2918,8 +2918,7 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                                        SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v97'"
                                        SCAC_FULL_SET_SEAL_COUNT=97
                                        SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v98_current()"
-
-                                     if [ "$JOB_WATCHDOG_REGISTRY_APPLIED" = t ]; then
+                                     if [ "$PROPERTY_EVIDENCE_REGISTRY_APPLIED" = t ]; then
                                        SCAC_CURRENT_NUMBER=99
                                        SCAC_VERSION_COUNT=99
                                        SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v99'")"

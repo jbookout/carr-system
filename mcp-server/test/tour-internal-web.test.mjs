@@ -79,6 +79,33 @@ test("authenticated property search and versioned cart keep exact tenant-safe co
   assert.equal((await surface.fetch(request("/api/tours/properties/search", { method: "POST", headers: { ...postHeaders, "x-carr-csrf": "wrong" }, body: JSON.stringify(searchBody) }), env, {}, ACTOR, SESSION)).status, 403);
 });
 
+test("property evidence, property search, and selection cart coexist behind the authenticated Tour adapter", async () => {
+  const seen = [];
+  const capture = seam => async context => {
+    seen.push({ seam, ...context });
+    return { ok: true, data: { available: true } };
+  };
+  const surface = handler({
+    readPropertyEvidenceFn: capture("evidence"), searchTourPropertiesFn: capture("search"),
+    readTourSelectionCartFn: capture("cart-read"), appendTourSelectionCartVersionFn: capture("cart-write"),
+  });
+  const env = { APP_HOST: "app.doctorcre.com" };
+  const calls = [
+    ["evidence", `/api/tours/property-evidence/v1?property_id=${tourId}&as_of=2026-09-29T12%3A00%3A00.000Z`, {}],
+    ["search", "/api/tours/properties/search", { method: "POST", headers: postHeaders, body: JSON.stringify({ query: "medical", counties: [], property_types: [], min_square_feet: null, max_square_feet: null, availability: [], entrance_verified: null, public_projection_ready: null, photos_available: null, sort: "address_asc", cursor: null, limit: 20 }) }],
+    ["cart-read", `/api/tours/selection-cart?tour_id=${tourId}`, {}],
+    ["cart-write", "/api/tours/selection-cart", { method: "POST", headers: postHeaders, body: JSON.stringify({ tour_id: tourId, base_selection_version_id: null, expected_selection_version: 0, property_ids: [stopA], selection_digest: digest, idempotency_key: grantId }) }],
+  ];
+  for (const [seam, path, options] of calls) {
+    assert.equal(isTourInternalRequest(request(path, options)), true, seam);
+    assert.equal((await surface.fetch(request(path, options), env, {}, ACTOR, SESSION)).status, 200, seam);
+    assert.equal(seen.at(-1).seam, seam);
+    assert.deepEqual(seen.at(-1).actor, ACTOR);
+    assert.equal((await surface.fetch(request(path, options), env, {}, undefined, undefined)).status, 401, seam);
+  }
+  assert.deepEqual(seen.map(call => call.seam), calls.map(([seam]) => seam));
+});
+
 test("internal Tour surface requires an injected authenticated actor and CSRF session", async () => {
   const surface = handler(); const assets = new Assets();
   for (const args of [[undefined, undefined], [ACTOR, undefined], [{}, SESSION]]) {
@@ -87,6 +114,39 @@ test("internal Tour surface requires an injected authenticated actor and CSRF se
   }
   assert.equal((await surface.fetch(request("/tours"), { APP_HOST: "app.doctorcre.com", ASSETS: assets }, {}, ACTOR, SESSION)).status, 200);
   assert.deepEqual(assets.paths, ["/tours/index.html"]);
+});
+
+test("versioned property evidence read accepts only a property and as-of time in the authenticated session", async () => {
+  const seen = [];
+  const surface = handler({ readPropertyEvidenceFn: async context => {
+    seen.push(context);
+    return { ok: true, data: { schema: "tour-property-evidence.v1", property_id: tourId, facts: {} } };
+  } });
+  const env = { APP_HOST: "app.doctorcre.com", ASSETS: new Assets() };
+  const asOf = "2026-09-29T12:00:00.000Z";
+  const path = `/api/tours/property-evidence/v1?property_id=${tourId}&as_of=${encodeURIComponent(asOf)}`;
+  assert.equal((await surface.fetch(request(path), env, {}, ACTOR, SESSION)).status, 200);
+  assert.deepEqual(seen[0].input, { property_id: tourId, as_of: asOf });
+  assert.deepEqual(seen[0].actor, ACTOR);
+  assert.equal((await surface.fetch(request(`${path}&tenant=other`), env, {}, ACTOR, SESSION)).status, 400);
+  assert.equal((await surface.fetch(request(`/api/tours/property-evidence/v1?property_id=${tourId}&as_of=bad`), env, {}, ACTOR, SESSION)).status, 400);
+  assert.equal((await surface.fetch(request(path), env, {}, undefined, undefined)).status, 401);
+  assert.equal((await surface.fetch(request(path, { method: "POST" }), env, {}, ACTOR, SESSION)).status, 405);
+});
+
+test("property panel module and stylesheet are served through the authenticated Tour asset gate", async () => {
+  const paths = [];
+  const env = { APP_HOST: "app.doctorcre.com", ASSETS: { async fetch(assetRequest) {
+    paths.push(new URL(assetRequest.url).pathname);
+    return new Response("panel asset", { status: 200 });
+  } } };
+  const surface = handler();
+  for (const path of ["/tours/property-panel.js", "/tours/property-panel.css"]) {
+    assert.equal(isTourInternalRequest(request(path)), true);
+    assert.equal((await surface.fetch(request(path), env, {}, ACTOR, SESSION)).status, 200);
+    assert.equal((await surface.fetch(request(path), env, {}, undefined, undefined)).status, 401);
+  }
+  assert.deepEqual(paths, ["/tours/property-panel.js", "/tours/property-panel.css"]);
 });
 
 test("exact routes, methods, CSRF, and JSON bodies remain bounded", async () => {

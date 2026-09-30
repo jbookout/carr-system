@@ -1951,11 +1951,11 @@ export const POST_0749_FORWARD_V98_DB_CATALOG_BASELINE = Object.freeze({
   secdef_execute: { count: 1176, digest: "sha256:3e08954f38f95b451ac795bf5105ace3187598560ee73345fdb01600e3da7e5c" },
 });
 
-// Job watchdog launchd authority successor, measured on disposable PostgreSQL.
+// Measured on disposable PostgreSQL 17 for the property-evidence successor.
 export const POST_0754_FORWARD_V99_DB_CATALOG_BASELINE = Object.freeze({
   ...POST_0749_FORWARD_V98_DB_CATALOG_BASELINE,
   projection_version: "scac-db-catalog-projection.v99",
-  secdef_execute: { count: 1180, digest: "sha256:b50607120f67fa932e91c0ffd3bdefad3053411e0656e07a6904f0ef3f2a7687" },
+  secdef_execute: { count: 1182, digest: "sha256:781edb2b7cdf4ec37f4326fbff7af2e10227e78b65396f8a87710a9391e15d1b" },
 });
 
 export const JOB_DEFINITION_BASELINE = Object.freeze({
@@ -19181,7 +19181,7 @@ export function renderTourFeedbackRegistrySql(rows, predecessorSql = null) {
 }
 
 
-export function renderJobWatchdogRegistrySql(rows, predecessorSql = null) {
+export function renderPropertyEvidenceRegistrySql(rows, predecessorSql = null) {
   const predecessorPath = "migrations/0750_tour_client_feedback_scac_successor.sql";
   const predecessor = predecessorSql ?? readFileSync(resolve(REPO_ROOT, predecessorPath), "utf8");
   const predecessorDigest = "fa860d4acb86c1bba531b5000f9ff735d0e9631e77d812ed1156137e19740880";
@@ -19203,15 +19203,15 @@ export function renderJobWatchdogRegistrySql(rows, predecessorSql = null) {
   const start = predecessor.indexOf("\ndrop trigger scac_mutation_registry_version_sealed");
   if (start < 0) throw new Error("v99 predecessor DDL boundary missing");
   let sql = predecessor.slice(start + 1)
-    .replaceAll("$tour_feedback_v98", "$job_watchdog_v99")
+    .replaceAll("$tour_feedback_v98", "$property_evidence_v99")
     .replaceAll("scac-mutation-registry.v98", "scac-mutation-registry.v99")
     .replaceAll("scac-db-catalog-projection.v98", "scac-db-catalog-projection.v99")
     .replaceAll("_v98", "_v99")
     .replaceAll("v97_current", "v98_current")
     .replaceAll("v97_live_at_seal", "v98_live_at_seal")
     .replaceAll("snapshot_v97", "snapshot_v98")
-    .replaceAll("Tour feedback", "Job watchdog")
-    .replaceAll("Job watchdog v98 seed", "Job watchdog v99 seed")
+    .replaceAll("Tour feedback", "Property evidence")
+    .replaceAll("Property evidence v98 seed", "Property evidence v99 seed")
     .replaceAll(oldSeal.digest, newSeal.digest)
     .replaceAll(oldEntrySet, newEntrySet)
     .replaceAll(oldCatalog.replaceAll("v98", "v99"), newCatalog)
@@ -19256,27 +19256,28 @@ export function renderJobWatchdogRegistrySql(rows, predecessorSql = null) {
     ["     or not ops.scac_mutation_registry_v99_seal_available()",
       "     or not ops.scac_mutation_registry_v98_seal_available()\n     or not ops.scac_mutation_registry_v99_seal_available()", "final seal history"],
   ]) sql = replaceExactlyOnce(sql, before, after, `v99 ${label}`);
-  const seedStart = sql.indexOf("$job_watchdog_v99_source$[");
-  const seedEnd = sql.indexOf("]$job_watchdog_v99_source$", seedStart);
+  const seedStart = sql.indexOf("$property_evidence_v99_source$[");
+  const seedEnd = sql.indexOf("]$property_evidence_v99_source$", seedStart);
   if (seedStart < 0 || seedEnd < 0) throw new Error("v99 source seed boundary missing");
   const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
-  sql = `${sql.slice(0, seedStart)}$job_watchdog_v99_source$${seed}$job_watchdog_v99_source$${sql.slice(seedEnd + "]$job_watchdog_v99_source$".length)}`;
-  const preflight = `do $job_watchdog_v99_preflight$\ndeclare v ops.scac_mutation_registry_version%rowtype; registration jsonb;\nbegin\n` +
+  sql = `${sql.slice(0, seedStart)}$property_evidence_v99_source$${seed}$property_evidence_v99_source$${sql.slice(seedEnd + "]$property_evidence_v99_source$".length)}`;
+  const preflight = `do $property_evidence_v99_preflight$\ndeclare v ops.scac_mutation_registry_version%rowtype; registration jsonb;\nbegin\n` +
     `  if not exists(select 1 from public.schema_migrations where filename='${predecessorPath.split("/").at(-1)}' and sha256='${predecessorDigest}') then\n` +
-    `    raise exception 'Job watchdog v99 requires exact applied 0750'; end if;\n` +
+    `    raise exception 'Property evidence v99 requires exact applied 0750'; end if;\n` +
+    `  if not exists(select 1 from public.schema_migrations where filename='0754_tour_property_evidence.sql' and sha256='39be0815d5bc35f985559ef0bd3343ea8ff592003630ac848a726ea4a46028f5') then\n` +
+    `    raise exception 'Property evidence v99 requires exact applied 0754'; end if;\n` +
     `  select * into v from ops.scac_mutation_registry_version where registry_version='${REGISTRY_V98_VERSION}';\n` +
     `  if v.registry_digest is distinct from '${oldSeal.digest}' or v.entry_count<>${oldSeal.entryCount}\n` +
     `    or v.source_entry_count<>${oldSeal.sourceEntryCount} or v.entry_set_digest is distinct from '${oldEntrySet}'\n` +
     `    or v.catalog_projection is distinct from '${oldCatalog}'::jsonb then\n` +
-    `    raise exception 'Job watchdog v98 predecessor seal drifted'; end if;\n` +
-    `  registration:=ops.scac_mutation_registration_v98('${oldSeal.digest}','mcp-tool:codex-checkpoint');\n` +
+    `    raise exception 'Property evidence v98 predecessor seal drifted'; end if;\n` +
+    `  registration:=ops.scac_mutation_registration_v98('${oldSeal.digest}','mcp-tool:codex-read-recovery');\n` +
     `  if coalesce((registration->>'registered')::boolean,false) is not true then\n` +
-    `    raise exception 'Job watchdog v98 predecessor entry drifted'; end if;\n` +
-    `end $job_watchdog_v99_preflight$;\n\n`;
+    `    raise exception 'Property evidence v98 predecessor entry drifted'; end if;\n` +
+    `end $property_evidence_v99_preflight$;\n\n`;
   return `-- GENERATED by ops/scac-mutation-inventory.mjs. Review; never hand-edit.\n` +
     preflight + sql;
 }
-
 
 export function renderGeneratedFrontier() {
   // Refuse before the expensive v2-v20 predecessor cascade: this frontier ends
@@ -20331,8 +20332,8 @@ export function renderGeneratedFrontier() {
       version: REGISTRY_V99_VERSION,
       dbCatalogBaseline: POST_0754_FORWARD_V99_DB_CATALOG_BASELINE,
     });
-  artifacts["migrations/0754_job_watchdog_scac_successor.sql"] =
-    renderJobWatchdogRegistrySql(v99Rows,
+  artifacts["migrations/0755_property_evidence_scac_successor.sql"] =
+    renderPropertyEvidenceRegistrySql(v99Rows,
       artifacts["migrations/0750_tour_client_feedback_scac_successor.sql"]);
 
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
@@ -21327,6 +21328,20 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
       dbCatalogBaseline: POST_0749_FORWARD_V98_DB_CATALOG_BASELINE,
     }));
     await writeFile(migrationPath, renderTourFeedbackRegistrySql(rows, predecessor));
+    process.stdout.write(`${runtimePath}\n${migrationPath}\n`);
+  } else if (process.argv[2] === "--write-property-evidence-frontier") {
+    const rows = frozenInventory(REGISTRY_V99_VERSION);
+    const runtimePath = resolve(process.argv[3] ||
+      "mcp-server/src/scac-mutation-registry.v99.generated.js");
+    const migrationPath = resolve(process.argv[4] ||
+      "migrations/0755_property_evidence_scac_successor.sql");
+    const predecessor = readFileSync(resolve(REPO_ROOT,
+      "migrations/0750_tour_client_feedback_scac_successor.sql"), "utf8");
+    await writeFile(runtimePath, renderRuntimeProjection(rows, {
+      version: REGISTRY_V99_VERSION,
+      dbCatalogBaseline: POST_0754_FORWARD_V99_DB_CATALOG_BASELINE,
+    }));
+    await writeFile(migrationPath, renderPropertyEvidenceRegistrySql(rows, predecessor));
     process.stdout.write(`${runtimePath}\n${migrationPath}\n`);
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools(), REGISTRY_V99_VERSION);
