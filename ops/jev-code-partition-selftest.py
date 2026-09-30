@@ -124,7 +124,8 @@ JS = textwrap.dedent('''\
 
 class TrackedSources(unittest.TestCase):
     def test_git_inventory_preserves_unicode_and_newline_paths(self):
-        names = ['café.js', 'λ.py', 'two\nlines.mjs', 'plain.js']
+        names = ['café.js', 'λ.py', 'two\nlines.mjs', 'a\rb.py',
+                 'a\r\nb.py', 'plain.js']
         with tempfile.TemporaryDirectory() as tmp:
             env = fixture_env()
             subprocess.run(['git', 'init', '-q', tmp], env=env, check=True)
@@ -179,6 +180,40 @@ class JsSpans(unittest.TestCase):
 
 
 class PartitionText(unittest.TestCase):
+    def test_multiline_python_handler_keeps_complete_header_through_partition(self):
+        header = 'except (\n    ValueError,\n    OSError,\n):'
+        body = [f'    recovered_{i} = {i}' for i in range(200)]
+        source = 'try:\n    work()\n' + header + '\n' + '\n'.join(body) + '\n'
+        regions, _ = part.partition(['x.py'], reader=lambda _: source)
+        handlers = [r for r in regions if 'except_block' in r['kind']]
+        self.assertGreater(len(handlers), 1)
+        self.assertTrue(all(r['code'].startswith(header + '\n') for r in handlers))
+        self.assertEqual([line for r in handlers for line in r['code'][len(header)+1:].splitlines()], body)
+        self.assertTrue(all(r['chars'] <= part.MAX_REGION_CHARS for r in handlers))
+        self.assertTrue(all(r['sent_end_line'] == r['end_line'] for r in handlers))
+
+    def test_multiline_js_catch_keeps_complete_binding_through_partition(self):
+        header = 'catch (\n  err\n) {'
+        body = [f'  recovered_{i} = handle(err, {i});' for i in range(200)] + ['}']
+        source = 'try {\n  work();\n}\n' + header + '\n' + '\n'.join(body) + '\n'
+        regions, _ = part.partition(['x.js'], reader=lambda _: source)
+        handlers = [r for r in regions if 'except_block' in r['kind']]
+        self.assertGreater(len(handlers), 1)
+        self.assertTrue(all(r['code'].startswith(header + '\n') for r in handlers))
+        self.assertEqual([line for r in handlers for line in r['code'][len(header)+1:].splitlines()], body)
+        self.assertTrue(all(r['chars'] <= part.MAX_REGION_CHARS for r in handlers))
+        self.assertTrue(all(r['sent_end_line'] == r['end_line'] for r in handlers))
+
+    def test_oversized_handler_header_preserves_body_through_partition(self):
+        source = 'try:\n    work()\nexcept Exception: #' + 'a' * 2700 + '\n    recover()\n    record_failure()\n'
+        regions, _ = part.partition(['x.py'], reader=lambda _: source)
+        sent = [line for region in regions for line in region['code'].splitlines()]
+        self.assertIn('    recover()', sent)
+        self.assertIn('    record_failure()', sent)
+        self.assertTrue(all(len(region['code']) <= part.MAX_REGION_CHARS for region in regions))
+        bodies = [r for r in regions if '    recover()' in r['code']]
+        self.assertTrue(all(r['sent_end_line'] == r['end_line'] for r in bodies))
+
     def test_single_overlong_handler_line_is_retained_with_truthful_coverage(self):
         text = 'try:\n    x()\nexcept Exception: recovered = "' + 'a' * 3000 + '"\n'
         parts = part.partition_text('handler.py', text)
@@ -326,6 +361,19 @@ class DedupeAndPack(unittest.TestCase):
 
 
 class Review(unittest.TestCase):
+    def test_context_trimming_preserves_entire_multiline_signature(self):
+        source = '#' + 'x' * 2700 + '\nif os.path.exists("x"):\n    # intervening context\n    with open("x") as f:\n        consume(f.read())\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, 'x.py').write_text(source)
+            regions = review.regions(['x.py'], repo=tmp)
+        self.assertEqual(len(regions), 1)
+        self.assertEqual(regions[0]['kind'], 'check_then_use')
+        self.assertIn('if os.path.exists("x"):', regions[0]['code'].splitlines())
+        self.assertIn('    with open("x") as f:', regions[0]['code'].splitlines())
+        self.assertLessEqual(len(regions[0]['code']), review.MAX_REGION_CHARS)
+        self.assertEqual(regions[0]['start_line'], 2)
+        self.assertGreaterEqual(regions[0]['sent_end_line'], 4)
+
     def test_nearby_candidates_split_when_union_exceeds_cap(self):
         source = 'time.sleep(1)\n' + ('#' + 'a' * 200 + '\n') * 19 + 'v = str(value or "")\n'
         with tempfile.TemporaryDirectory() as tmp:

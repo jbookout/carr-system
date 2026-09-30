@@ -86,9 +86,9 @@ SIGNATURES = (
 
 
 def tracked_sources(repo=REPO, suffixes=(".py", ".mjs", ".js")):
-    out = subprocess.run(["git", "ls-files", "-z"], capture_output=True, text=True,
+    out = subprocess.run(["git", "ls-files", "-z"], capture_output=True,
                          cwd=repo, timeout=120).stdout
-    return [f for f in out.split("\0")
+    return [f for f in map(os.fsdecode, out.split(b"\0"))
             if f.endswith(suffixes) and not f.startswith("node_modules")]
 
 
@@ -105,12 +105,14 @@ def regions(paths, repo=REPO):
             for match in pattern.finditer(text):
                 line_no = text[:match.start()].count("\n") + 1
                 lo = max(0, line_no - 1 - CONTEXT_BEFORE)
-                hi = min(len(lines), line_no + CONTEXT_AFTER)
+                match_end_line = text[:match.end() - 1].count("\n") + 1
+                hi = min(len(lines), max(match_end_line, line_no + CONTEXT_AFTER))
                 full_snippet = "\n".join(lines[lo:hi])
-                # Remove the farthest context first; never trim past the anchor.
+                # Remove only surrounding context; preserve every matched line.
                 anchor = line_no - 1
-                while len(full_snippet) > MAX_REGION_CHARS and (lo < anchor or hi > anchor + 1):
-                    if anchor - lo >= hi - anchor - 1 and lo < anchor:
+                while len(full_snippet) > MAX_REGION_CHARS and (lo < anchor or hi > match_end_line):
+                    if lo < anchor and (hi <= match_end_line or
+                                        anchor - lo >= hi - match_end_line):
                         lo += 1
                     else:
                         hi -= 1

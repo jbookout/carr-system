@@ -40,6 +40,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import importlib.util
+import io
 import json
 import math
 import os
@@ -50,6 +51,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tokenize
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -79,9 +81,9 @@ def _load(name, rel):
 
 
 def tracked_sources(repo=REPO):
-    out = subprocess.run(["git", "ls-files", "-z"], capture_output=True, text=True,
+    out = subprocess.run(["git", "ls-files", "-z"], capture_output=True,
                          cwd=repo, timeout=120).stdout
-    return [f for f in out.split("\0")
+    return [f for f in map(os.fsdecode, out.split(b"\0"))
             if f.endswith(SUFFIXES) and not any(p in f for p in EXCLUDE_PARTS)]
 
 
@@ -94,7 +96,7 @@ def digest(text):
 # A span is (kind, start_line, end_line), 1-based and inclusive. The two
 # parsers only produce spans; cutting, packing and dedupe are shared.
 
-def python_spans(text):
+def python_spans(text, handler_headers=None):
     """Functions (including methods and nested defs) and except handlers."""
     try:
         tree = ast.parse(text)
@@ -107,6 +109,13 @@ def python_spans(text):
             spans.append(("function", start, node.end_lineno))
         elif isinstance(node, ast.ExceptHandler):
             spans.append(("except_block", node.lineno, node.end_lineno))
+            if handler_headers is not None:
+                # NL inside parentheses/explicit continuations is not NEWLINE.
+                # The first logical NEWLINE terminates the complete header.
+                tail = "\n".join(text.splitlines()[node.lineno - 1:])
+                tokens = tokenize.generate_tokens(io.StringIO(tail).readline)
+                header_end = next(t.start[0] for t in tokens if t.type == tokenize.NEWLINE)
+                handler_headers[(node.lineno, node.end_lineno)] = node.lineno + header_end - 1
     return spans
 
 
@@ -120,7 +129,7 @@ _JS_FUNCTION = re.compile(
 _REGEX_PRECEDERS = set("(,=:[!&|?{};+-*%<>~^")
 
 
-def js_spans(text):
+def js_spans(text, handler_headers=None):
     """Functions and catch blocks from a brace scan that skips strings,
     comments, template literals and regex literals.
 
@@ -130,7 +139,7 @@ def js_spans(text):
     falls back to long spans, so a scanner miss costs structure, not coverage.
     """
     spans = []
-    stack = []                      # (kind or None, start_line) per open brace
+    stack = []                  # (kind or None, start_line, header_end_line)
     modes = []                      # template-literal nesting: brace depth at ${
     line = 1
     i, n = 0, len(text)
@@ -232,7 +241,7 @@ def js_spans(text):
             continue
         if c == "{":
             kind = classify(i)
-            stack.append((kind, header_line(i) if kind else line))
+            stack.append((kind, header_line(i) if kind else line, line))
             header_start = i + 1
             last_sig = c
             last_word = ""
@@ -241,9 +250,11 @@ def js_spans(text):
         if c == "}":
             if not stack:
                 return None
-            kind, start = stack.pop()
+            kind, start, header_end = stack.pop()
             if kind:
                 spans.append((kind, start, line))
+                if kind == "except_block" and handler_headers is not None:
+                    handler_headers[(start, line)] = header_end
             header_start = i + 1
             last_sig = c
             last_word = ""
@@ -323,19 +334,25 @@ def _part(path, kind, start, end, lines):
             "chars": len(sent), "sent_end_line": sent_end_line}
 
 
-def _handler_parts(path, start, end, lines):
+def _handler_parts(path, start, end, lines, header_end):
     """Slice a long handler, repeating its header as context on body slices.
 
     Later slices retain their body line range; context_line identifies the
     repeated header without claiming the intervening body was sent again.
     """
-    if start == end:
+    if header_end == end:
         return [_part(path, "except_block", start, end, lines)]
-    header = lines[start - 1]
-    cap = max(1, MAX_REGION_CHARS - len(header) - 1)
-    out = []
-    for a, b in _slices(lines, start + 1, end, cap=cap):
-        if a == start + 1:
+    full_header = _text(lines, start, header_end)
+    # Oversized context gets its own truthful source region. Repeating only a
+    # bounded prefix leaves room for body text on every subsequent slice.
+    body_room = min(MAX_REGION_CHARS // 2,
+                    max(len(line) + 1 for line in lines[header_end:end]))
+    header = full_header[:MAX_REGION_CHARS - body_room - 1]
+    cap = MAX_REGION_CHARS - len(header) - 1
+    out = ([] if header == full_header else
+           [_part(path, "except_block", start, header_end, lines)])
+    for a, b in _slices(lines, header_end + 1, end, cap=cap):
+        if a == header_end + 1 and header == full_header:
             first = _part(path, "except_block", start, b, lines)
             first["context_line"] = start
             out.append(first)
@@ -371,7 +388,9 @@ def partition_text(path, text, stats=None):
     if not lines:
         return []
     suffix = os.path.splitext(path)[1]
-    spans = python_spans(text) if suffix == ".py" else js_spans(text)
+    handler_headers = {}
+    spans = (python_spans(text, handler_headers) if suffix == ".py" else
+             js_spans(text, handler_headers))
     if spans is None:
         stats["unparsed_files"] = stats.get("unparsed_files", 0) + 1
     spans = spans or []
@@ -441,7 +460,7 @@ def partition_text(path, text, stats=None):
     # Except handlers: fold into the partition that carries them whole.
     for s, e in excepts:
         if not fits(s, e):
-            parts.extend(_handler_parts(path, s, e, lines))
+            parts.extend(_handler_parts(path, s, e, lines, handler_headers[(s, e)]))
             continue
         home = next((p for p in parts if p["line"] <= s and e <= p["end_line"]), None)
         if home is not None:
