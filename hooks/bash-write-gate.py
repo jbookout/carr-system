@@ -187,8 +187,13 @@ def embedded_targets(code):
 def extract_targets(command):
     """Every path this command plausibly WRITES. Order is not significant."""
     targets = []
+    def shell_tokens(text):
+        lexer = shlex.shlex(text, posix=True, punctuation_chars=";&|<>")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        return list(lexer)
     try:
-        tokens = shlex.split(command, comments=False, posix=True)
+        tokens = shell_tokens(command)
     except ValueError:
         # Unbalanced quotes — usually a heredoc body. Fall back to line-wise
         # parsing so `cat > f <<EOF` is still seen, and accept that a heredoc
@@ -196,7 +201,7 @@ def extract_targets(command):
         tokens = []
         for line in command.splitlines():
             try:
-                tokens.extend(shlex.split(line, comments=False, posix=True))
+                tokens.extend(shell_tokens(line))
             except ValueError:
                 continue
 
@@ -216,9 +221,12 @@ def extract_targets(command):
                 index += 1
                 continue
 
+        end = next((j for j in range(index + 1, len(tokens))
+                    if tokens[j] in (";", "&&", "||", "|", "&", ">", ">>", "<", "<<")), len(tokens))
+        remainder = tokens[index + 1:end]
         base = os.path.basename(token)
         if base == "tee":
-            for candidate in tokens[index + 1:]:
+            for candidate in remainder:
                 if candidate.startswith("-"):
                     continue
                 if REDIRECT.match(candidate) or candidate in ("|", "&&", ";"):
@@ -226,17 +234,17 @@ def extract_targets(command):
                 targets.append(candidate)
         elif base == "sed" and any(t == "-i" or t.startswith("-i") for t in
                                    tokens[index + 1:index + 4]):
-            for candidate in tokens[index + 1:]:
+            for candidate in remainder:
                 if candidate.startswith("-") or REDIRECT.match(candidate):
                     continue
                 targets.append(candidate)
         elif base in ("cp", "mv", "install", "rsync"):
-            tail = [t for t in tokens[index + 1:]
+            tail = [t for t in remainder
                     if not t.startswith("-") and not REDIRECT.match(t)]
             if len(tail) >= 2:
                 targets.append(tail[-1])
         elif base in ("truncate", "touch"):
-            for candidate in tokens[index + 1:]:
+            for candidate in remainder:
                 if not candidate.startswith("-"):
                     targets.append(candidate)
         elif token.startswith("of="):

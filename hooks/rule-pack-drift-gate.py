@@ -563,11 +563,39 @@ def delivery_state(records):
         if found is None:
             if "rule_delivery" not in serialized(record):
                 continue
-            found = _find_delivery(record)
+            found = standing_result_delivery(record, records[:index])
         if found:
             mode, packs, omit = found
             declared.update(packs)
     return mode, sorted(declared), omit
+
+
+def standing_result_delivery(record, prior):
+    """Credit service results only when tied to a standing-context call."""
+    calls = set()
+    for previous in prior:
+        message = previous.get("message") or {}
+        content = message.get("content")
+        for block in content if isinstance(content, list) else []:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            name = str(block.get("name", ""))
+            arguments = serialized(block.get("input"))
+            if "standing-context" in name or "standing_context" in name or (
+                    name == "Bash" and re.search(r"\brun\.sh\s+call\s+standing-context\b", arguments)):
+                calls.add(block.get("id"))
+    message = record.get("message") or {}
+    content = message.get("content")
+    for block in content if isinstance(content, list) else []:
+        if (isinstance(block, dict) and block.get("type") == "tool_result"
+                and block.get("tool_use_id") in calls and not block.get("is_error")):
+            return _find_delivery(block.get("content"))
+    payload = record.get("payload") or {}
+    if (record.get("type") == "event_msg" and payload.get("type") == "mcp_tool_call_end"
+            and ("standing_context" in serialized(payload.get("tool_name", ""))
+                 or "standing-context" in serialized(payload.get("tool_name", "")))):
+        return _find_delivery(payload.get("result"))
+    return None
 
 
 def _find_delivery(value):
@@ -733,7 +761,7 @@ def custom_tool_text(payload):
     raw = payload.get("input")
     if not isinstance(raw, str):
         return "\n".join((name, serialized(raw)))
-    if "mcp__carr__standing_context" in raw or "mcp__carr__standing-context" in raw:
+    if re.fullmatch(r"\s*(?:text\()?\s*(?:await\s+)?tools\.mcp__carr__standing[_-]context\([^;]*\)\)?;?\s*", raw):
         # This call establishes delivery state; its surface/tier/detail routing
         # metadata is not observed domain work. Keep the call and declared pack
         # names visible while excluding those fixed transport arguments.

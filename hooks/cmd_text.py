@@ -81,5 +81,14 @@ def strip_inert_text(cmd):
                     if lines[j].strip() == delim), None)
         if end is None:
             continue  # unterminated — scan the whole thing rather than guess
+        body = "\n".join(lines[start + 1:end])
+        if not m.group(1) and ("$(" in body or "`" in body):
+            continue  # unquoted heredocs execute substitutions
         out = "\n".join(lines[:start + 1] + lines[end:])
-    return _DASH_M_RE.sub("-m <message>", out)
+    def scrub(match):
+        argument = match.group(0)
+        quoted = argument.split(None, 1)[1]
+        if quoted.startswith('"') and ("$(" in quoted or "`" in quoted):
+            return argument
+        return "-m <message>"
+    return _DASH_M_RE.sub(scrub, out)

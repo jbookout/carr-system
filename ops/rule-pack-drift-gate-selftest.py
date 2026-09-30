@@ -137,7 +137,7 @@ def codex_standing_context_result(mode: str, declared: list[str], omit: list[str
                                           "declared_packs": declared,
                                           "map_digest": MAP_DIGEST,
                                           "would_omit": omit}}
-    return {"type": "event_msg", "payload": {"type": "mcp_tool_call_end",
+    return {"type": "event_msg", "payload": {"type": "mcp_tool_call_end", "tool_name": "mcp__carr__standing_context",
             "result": {"Ok": {"content": [
                 {"type": "text", "text": json.dumps(body)}]}}}}
 
@@ -1069,3 +1069,7 @@ else:
     print("rule-pack-drift-gate-selftest: all hermetic cases passed; "
           "pinned host-evidence replays NOT audited "
           "(run with --verify-host-evidence on the evidence-owning machine)")
+
+# Independently reproduced Dot cases share the offline behavioral fixtures.
+import runpy as _dot_runpy
+_dot_runpy.run_path(str(__import__("pathlib").Path(__file__).with_name("dot-review-selftest.py")))["run_regressions"](['test_b26', 'test_b27'])

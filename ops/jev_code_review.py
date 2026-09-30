@@ -65,7 +65,7 @@ def _client():
 
 SIGNATURES = (
     ("swallowed_failure",
-     re.compile(r"except\s+(?:Exception|BaseException|:)[^\n]*:\n\s+(?:pass|return\b[^\n]*)\n")),
+     re.compile(r"except(?:\s+(?:Exception|BaseException)[^\n]*)?\s*:\n\s+(?:pass|return\b[^\n]*)\n")),
     # Only the shape that actually bites: a coercion carrying its own default.
     # str(x) alone is 2,770 places and nearly all of them are printing; str(x
     # or "") is the one that turns None into the truthy string "None" while
@@ -86,9 +86,9 @@ SIGNATURES = (
 
 
 def tracked_sources(repo=REPO, suffixes=(".py", ".mjs", ".js")):
-    out = subprocess.run(["git", "ls-files"], capture_output=True, text=True,
+    out = subprocess.run(["git", "ls-files", "-z"], capture_output=True, text=True,
                          cwd=repo, timeout=120).stdout
-    return [f for f in out.splitlines()
+    return [f for f in out.split("\0")
             if f.endswith(suffixes) and not f.startswith("node_modules")]
 
 
@@ -107,6 +107,9 @@ def regions(paths, repo=REPO):
                 lo = max(0, line_no - 1 - CONTEXT_BEFORE)
                 hi = min(len(lines), line_no + CONTEXT_AFTER)
                 full_snippet = "\n".join(lines[lo:hi])
+                while len(full_snippet) > MAX_REGION_CHARS and lo < line_no - 1:
+                    lo += 1
+                    full_snippet = "\n".join(lines[lo:hi])
                 snippet = full_snippet[:MAX_REGION_CHARS]
                 start_line = lo + 1
                 end_line = start_line + full_snippet.count("\n")
@@ -135,7 +138,9 @@ def _collapse(found, window=CONTEXT_BEFORE + CONTEXT_AFTER):
         items.sort(key=lambda i: i["line"])
         current = None
         for item in items:
-            if current and item["line"] - current["line"] <= window:
+            if (current and item["line"] - current["line"] <= window
+                    and current["start_line"] <= item["start_line"]
+                    and item["sent_end_line"] <= current["sent_end_line"]):
                 if item["kind"] not in current["kind"].split("+"):
                     current["kind"] += "+" + item["kind"]
                 continue

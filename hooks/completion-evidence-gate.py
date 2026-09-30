@@ -1143,6 +1143,18 @@ def write_verb_names(window):
 
 
 def evaluate(recs, ledger=None):
+    # A message may contain several tool calls. Preserve every operation as
+    # its own ordered record so all receipt and mutation readers see it.
+    expanded = []
+    for rec in recs:
+        msg = rec.get("message")
+        blocks = msg.get("content") if isinstance(msg, dict) else None
+        if isinstance(blocks, list) and sum(isinstance(b, dict) and b.get("type") == "tool_use" for b in blocks) > 1:
+            for block in blocks:
+                expanded.append({**rec, "message": {**msg, "content": [block]}})
+        else:
+            expanded.append(rec)
+    recs = expanded
     """Block when an ordered clause has no receipt, or a close denies one it holds.
 
     THE LEDGER OUT-PARAMETER carries what the latch needs and nothing else, so
@@ -1206,7 +1218,20 @@ def evaluate(recs, ledger=None):
 
     latest = max(mutation_at + [idx for idx, rec in enumerate(window)
                                 if file_paths(*tool(rec))])
-    verified = any(verification(*tool(rec)) for rec in window[latest + 1:])
+    failed_calls = set()
+    for rec in window:
+        content = message(rec).get("content")
+        for block in content if isinstance(content, list) else []:
+            if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("is_error"):
+                failed_calls.add(block.get("tool_use_id"))
+    def successful_verification(rec):
+        if not verification(*tool(rec)):
+            return False
+        content = message(rec).get("content")
+        return not any(isinstance(b, dict) and b.get("type") == "tool_use"
+                       and b.get("id") in failed_calls
+                       for b in content if isinstance(content, list)) if isinstance(content, list) else True
+    verified = any(successful_verification(rec) for rec in window[latest + 1:])
 
     # THE CLAUSE LAYER. No word in `final` is required to reach this: a session
     # that mutated against an order and closed on a clause with no receipt is

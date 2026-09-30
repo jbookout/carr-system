@@ -256,7 +256,9 @@ def windows_back(now, days, count):
 def evaluate_gate(gate, entry, days, now):
     metric = entry["catch_metric"]
     ts_field = metric.get("ts_field")
-    data_available = ts_field is not None
+    log_path = os.path.join(REPO, metric["log_path"])
+    data_available = (ts_field is not None and
+                      any(os.path.isfile(path) for path in (log_path, log_path + ".1")))
     result = {
         "gate": gate,
         "mode": entry["mode"],

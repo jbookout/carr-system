@@ -79,9 +79,9 @@ def _load(name, rel):
 
 
 def tracked_sources(repo=REPO):
-    out = subprocess.run(["git", "ls-files"], capture_output=True, text=True,
+    out = subprocess.run(["git", "ls-files", "-z"], capture_output=True, text=True,
                          cwd=repo, timeout=120).stdout
-    return [f for f in out.splitlines()
+    return [f for f in out.split("\0")
             if f.endswith(SUFFIXES) and not any(p in f for p in EXCLUDE_PARTS)]
 
 
@@ -182,6 +182,7 @@ def js_spans(text):
             j = i + 1
             while j < n and text[j] != c and text[j] != "\n":
                 j += 2 if text[j] == "\\" else 1
+            line += text.count("\n", i, min(j + 1, n))
             i = j + 1
             last_sig = c
             continue
@@ -408,8 +409,10 @@ def partition_text(path, text, stats=None):
             stats["except_folded"] = stats.get("except_folded", 0) + 1
             continue
         lo = max(1, s - EXCEPT_CONTEXT_BEFORE)
-        a, b = _slices(lines, lo, e)[0] if not fits(lo, e) else (lo, e)
-        parts.append(_part(path, "except_block", a, b, lines))
+        if not fits(lo, e):
+            lo = s  # discard optional context before slicing the handler itself
+        for a, b in _slices(lines, lo, e):
+            parts.append(_part(path, "except_block", a, b, lines))
     kept = [p for p in parts if not trivial(p["code"])]
     stats["trivial"] = stats.get("trivial", 0) + len(parts) - len(kept)
     kept.sort(key=lambda p: (p["line"], p["end_line"]))

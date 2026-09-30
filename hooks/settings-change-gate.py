@@ -220,6 +220,10 @@ def record(kind: str, target: str, command: str, reason: str,
     """Write the change to the record layer, and to a local spool if that fails.
     NEVER raises into the caller: the change has already happened, and refusing
     to acknowledge it would make the gate the thing that hides history."""
+    # Secrets may arrive in an inline --body/-b, an API field, or stdin.
+    # Persist only the invocation identity for secret-setting commands.
+    if re.search(r"\bgh\s+secret\s+set\b|/secrets(?:/|\b)", command, re.I):
+        command = "gh secret set " + target + " <value redacted>"
     row = {
         "recorded_at": datetime.now(timezone.utc).isoformat(),
         "kind": kind,

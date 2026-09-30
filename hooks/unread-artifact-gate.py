@@ -144,9 +144,7 @@ def asserted_paths(prose):
 
 
 def known_paths(records):
-    """Every path this session READ or WROTE. Basenames, for loose matching:
-    a reply usually writes a repo-relative path while a tool call carries an
-    absolute one, and a basename comparison is the honest common denominator."""
+    """Every repository-relative identity this session READ or WROTE."""
     known = set()
     for rec in records:
         message = rec.get("message") or {}
@@ -163,13 +161,19 @@ def known_paths(records):
             if name in READ_TOOLS or name in WRITE_TOOLS:
                 path = ti.get("file_path") or ti.get("filePath") or ""
                 if path:
-                    known.add(os.path.basename(path))
+                    known.add(artifact_path(path))
             elif name == "Bash":
                 command = ti.get("command") or ""
                 if SHELL_READ.search(command):
                     for hit in PATH.finditer(command):
-                        known.add(os.path.basename(hit.group(1)))
+                        known.add(artifact_path(hit.group(1)))
     return known
+
+
+def artifact_path(path):
+    if os.path.isabs(path):
+        return os.path.relpath(os.path.normpath(path), REPO)
+    return os.path.normpath(path)
 
 
 
@@ -209,7 +213,7 @@ def main():
             sys.exit(0)
 
         known = known_paths(records)
-        unread = [c for c in claims if os.path.basename(c) not in known]
+        unread = [c for c in claims if artifact_path(c) not in known]
         if not unread:
             sys.exit(0)
 

@@ -458,20 +458,23 @@ def triage_review(diff_text, task_text, *, client=None, judge_module=None,
         files = split_diff_by_file(diff_text)
         if not files:
             return _result(check_id, "not_triggered", detail={"reason": "empty diff"})
-        files = dict(list(files.items())[:MAX_TRIAGE_FILES])
-
         results = {}
         to_judge = {}
         for path, chunk in files.items():
             if RISKY_PATH.search(path):
                 results[path] = {"risk": "high", "source": "deterministic_floor"}
-            else:
+            elif len(to_judge) < MAX_TRIAGE_FILES:
                 to_judge[path] = chunk
+            else:
+                results[path] = {"risk": "high", "source": "unreviewed_overflow"}
 
         if to_judge:
             jj = judge_module or _sibling("jev_judge")
             tsc = client or jj._client()
-            keys = {path: _safe_id(path) for path in to_judge}
+            safe_ids = [_safe_id(path) for path in to_judge]
+            keys = {path: (_safe_id(path) if safe_ids.count(_safe_id(path)) == 1
+                           else f"file_{index}_{_safe_id(path)}")
+                    for index, path in enumerate(to_judge)}
             questions = {
                 keys[path]: tsc.score(
                     f"{RISK_RUBRIC} The change is to path {path!r}, shown in "

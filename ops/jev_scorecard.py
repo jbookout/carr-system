@@ -205,7 +205,10 @@ def _grade_impl(task, code, workdir, timeout):
             handle.write(src)
         rc, out = _run([sys.executable, "test_hidden.py"], workdir, timeout)
     scoreline = next((line for line in out.splitlines() if line.startswith("PASSED")), None)
-    return {"pass": rc == 0, "rc": rc, "subtests": scoreline or "no-score (crash/import error)",
+    completed = re.fullmatch(r"PASSED (\d+)/(\d+)", scoreline or "")
+    passed = (rc == 0 and completed is not None and
+              int(completed[2]) > 0 and completed[1] == completed[2])
+    return {"pass": passed, "rc": rc, "subtests": scoreline or "no-score (crash/import error)",
             "detail": out}
 
 

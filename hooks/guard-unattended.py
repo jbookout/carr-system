@@ -628,8 +628,8 @@ RULES = [
     # 4. destructive SQL
     (re.compile(r"\bdrop\s+(table|schema|database|view|index)\b", re.I), "DROP"),
     (re.compile(r"\btruncate\s+(table\s+)?\w", re.I), "TRUNCATE"),
-    (re.compile(r"\bdelete\s+from\s+\w+\s*(;|$)", re.I), "unqualified DELETE"),
-    (re.compile(r"\bupdate\s+\w+\s+set\b(?![\s\S]*\bwhere\b)", re.I), "unqualified UPDATE"),
+    (re.compile(r'\bdelete\s+from\s+(?:[\w".]+)\s*(;|$)', re.I), "unqualified DELETE"),
+    (re.compile(r'\bupdate\s+[\w".]+\s+set\b(?![^;]*\bwhere\b)', re.I), "unqualified UPDATE"),
 ]
 
 # ── IS THIS COMMAND ACTUALLY SENDING? (loop #283, fixed 2026-08-13) ───────────
@@ -752,7 +752,13 @@ def is_sql_context(cmd):
 
 def hosts_in(cmd):
     """Every host this command could reach: URL hosts plus remote-copy targets."""
-    return URL_RE.findall(cmd) + REMOTE_TARGET_RE.findall(cmd)
+    hosts = []
+    for url in re.findall(r'https?://[^\s\'"<>]+', cmd):
+        try:
+            hosts.append(urlsplit(url).hostname or "invalid-url")
+        except ValueError:
+            hosts.append("invalid-url")
+    return hosts + REMOTE_TARGET_RE.findall(cmd)
 
 
 def is_send_context(cmd):
@@ -945,7 +951,36 @@ def log(msg):
 
 
 def in_safe_zone(cmd):
-    return any(z in cmd for z in SAFE_ZONES)
+    try:
+        lexer = shlex.shlex(cmd, posix=True, punctuation_chars=";&|<>")
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return False
+    targets = []
+    deleting = False
+    for token in tokens:
+        if token in (";", "&&", "||", "|", "&"):
+            deleting = False
+        elif os.path.basename(token) in ("rm", "srm"):
+            deleting = True
+        elif deleting and not token.startswith("-"):
+            if "$" in token or "`" in token or ".." in token.split("/"):
+                return False
+            targets.append(token)
+    def safe_target(target):
+        parts = target.split("/")
+        for zone in SAFE_ZONES:
+            if zone.startswith("/"):
+                if target.startswith(zone):
+                    return True
+            else:
+                zone_parts = zone.rstrip("/").split("/")
+                if any(parts[i:i + len(zone_parts)] == zone_parts
+                       for i in range(len(parts))):
+                    return True
+        return False
+    return bool(targets) and all(safe_target(target) for target in targets)
 
 
 # ── Rebasing your own branch in place ────────────────────────────────────────
@@ -1037,7 +1072,13 @@ def force_push_to_named_side_branch(cmd):
     # Stopping at the boundary is what keeps this honest: only THIS command's
     # arguments are read, so nothing chained after it can dress up its target.
     words = []
-    for token in text[match.end():].split():
+    try:
+        lexer = shlex.shlex(text[match.end():], posix=True, punctuation_chars=";&|<>")
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return False
+    for token in tokens:
         if _SEPARATOR.match(token) or _REDIRECT.match(token):
             break             # this command's arguments end here
         if token.startswith("-"):
