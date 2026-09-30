@@ -18,6 +18,8 @@ import contextlib
 import io
 import re
 import ast
+import hashlib
+import sys
 
 import psycopg
 from psycopg import sql
@@ -47,20 +49,49 @@ class DotReader(unittest.TestCase):
             cls.port = probe.getsockname()[1]
         cls.run_pg([cls.bin.initdb, "-D", cls.data, "-U", "carr_ci",
                     "--auth-local=trust", "--auth-host=scram-sha-256", "--encoding=UTF8", "--no-locale"])
+        hba = cls.data / "pg_hba.conf"
+        hba.write_text("host carr_ci carr_ci 127.0.0.1/32 trust\n" + hba.read_text())
         cls.run_pg([cls.bin.pg_ctl, "-D", cls.data, "-l", Path(cls.tmp.name) / "pg.log",
-                    "-o", f"-h 127.0.0.1 -k {cls.tmp.name} -p {cls.port}", "-w", "start"])
+                    "-o", f"-h 127.0.0.1 -k {cls.tmp.name} -p {cls.port} -c fsync=off -c synchronous_commit=off -c full_page_writes=off", "-w", "start"])
         cls.addClassCleanup(cls.run_pg, [cls.bin.pg_ctl, "-D", cls.data, "-m", "immediate", "-w", "stop"])
         cls.owner_args = dict(host=cls.tmp.name, port=cls.port, user="carr_ci", dbname="postgres")
+        if os.environ.get("CARR_DOT_REPO_SCHEMA") == "1":
+            with psycopg.connect(**cls.owner_args, autocommit=True) as owner:
+                owner.execute("create database carr_ci")
+            cls.owner_args["dbname"] = "carr_ci"
         with psycopg.connect(**cls.owner_args, autocommit=True) as owner:
             if os.environ.get("CARR_DOT_REPO_SCHEMA") == "1":
                 owner.execute("create role neondb_owner")
                 # psql understands the snapshot's meta-commands. No credentials
                 # are on argv: this owned Unix socket authenticates locally.
                 cls.run_pg([cls.bin.psql, "-h", cls.tmp.name, "-p", str(cls.port),
-                            "-U", "carr_ci", "-d", "postgres", "-v", "ON_ERROR_STOP=1",
-                            "-q", "-f", ROOT / "db/schema.sql"])
+                            "-U", "carr_ci", "-d", cls.owner_args["dbname"], "-v", "ON_ERROR_STOP=1",
+                            "-q", "-1", "-f", ROOT / "db/schema.sql"])
+                pending = subprocess.run([sys.executable, str(ROOT / "tools/migrate.py"),
+                    "--apply", "--yes", "--through", "0755_property_evidence_scac_successor.sql"],
+                    env={**os.environ, "DATABASE_URL": f"postgres://carr_ci@127.0.0.1:{cls.port}/carr_ci"},
+                    capture_output=True, text=True, timeout=180)
+                if pending.returncode:
+                    raise RuntimeError("full-schema pending migration setup failed: " + pending.stderr[-2000:])
             else:
                 owner.execute("create schema ops; create role carr_writer; create role neondb_owner")
+                owner.execute("""
+                    create function ops.completion_runtime_tenant() returns text
+                    language plpgsql stable as $$ begin
+                      if nullif(current_setting('carr.organization_tenant_id',true),'') is null then
+                        raise exception 'completion register requires a server-derived tenant';
+                      end if;
+                      return current_setting('carr.organization_tenant_id');
+                    end $$;
+                    revoke execute on function ops.completion_runtime_tenant() from public;
+                    create table ops.dot_completion_fixture(organization_tenant_id text);
+                    insert into ops.dot_completion_fixture values ('tenant-a'),('tenant-b');
+                    create view ops.completion_current_observation as select * from ops.dot_completion_fixture
+                      where organization_tenant_id=ops.completion_runtime_tenant();
+                    create view ops.completion_dimension_matrix as select * from ops.dot_completion_fixture s
+                      where s.organization_tenant_id=ops.completion_runtime_tenant();
+                    create view ops.completion_projection as select * from ops.completion_dimension_matrix;
+                """)
                 # Model the two legacy PUBLIC-executable write doors. The
                 # full-schema run exercises their production definitions.
                 owner.execute("""
@@ -84,6 +115,9 @@ class DotReader(unittest.TestCase):
                 owner.execute("alter schema ops owner to neondb_owner")
                 owner.execute("alter function ops.engineering_register_slice_plan(text,jsonb,text,uuid) owner to neondb_owner")
                 owner.execute("alter function ops.issue_execution_envelope_v1(text,text,uuid) owner to neondb_owner")
+                owner.execute("alter function ops.completion_runtime_tenant() owner to neondb_owner")
+                for relation in ("dot_completion_fixture", "completion_current_observation", "completion_dimension_matrix", "completion_projection"):
+                    owner.execute(sql.SQL("alter table ops.{} owner to neondb_owner").format(sql.Identifier(relation)))
                 owner.execute("set role neondb_owner")
             owner.execute("""
                 create table public.dot_fixture (id int primary key, sponsor text, scope text);
@@ -104,6 +138,9 @@ class DotReader(unittest.TestCase):
             """)
             cls.temp_before = owner.execute("select has_database_privilege('app_reader',current_database(),'TEMP')").fetchone()[0]
             owner.execute(MIGRATION.read_text())
+            if os.environ.get("CARR_DOT_REPO_SCHEMA") == "1":
+                owner.execute("insert into schema_migrations(filename,sha256) values (%s,%s)",
+                              (MIGRATION.name, hashlib.sha256(MIGRATION.read_bytes()).hexdigest()))
             owner.execute("reset role")
             # Only the fixture sets a password. It stays in memory and never
             # reaches a source file, command argument or test output.
@@ -125,6 +162,7 @@ class DotReader(unittest.TestCase):
                       from public.actor where slug in ('dot-fixture-a','dot-fixture-b');
                 """)
 
+
     @classmethod
     def run_pg(cls, args):
         result = subprocess.run([str(x) for x in args], capture_output=True, text=True, timeout=45)
@@ -133,7 +171,7 @@ class DotReader(unittest.TestCase):
 
     def connect(self):
         return psycopg.connect(host="127.0.0.1", port=self.port, user="dot_reader",
-                               password=self.password, dbname="postgres", autocommit=True)
+                               password=self.password, dbname=self.owner_args["dbname"], autocommit=True)
 
     def test_reads_all_sponsors_and_personal_scope(self):
         with self.connect() as dot:
@@ -183,6 +221,61 @@ class DotReader(unittest.TestCase):
         with psycopg.connect(**self.owner_args) as owner:
             self.assertFalse(owner.execute("select has_table_privilege('app_reader','public.dot_fixture','SELECT')").fetchone()[0])
 
+    def test_current_views_execute_with_all_tenant_reviewer_behavior(self):
+        if os.environ.get("CARR_DOT_REPO_SCHEMA") == "1":
+            with psycopg.connect(**self.owner_args, autocommit=True) as owner:
+                sys.path.insert(0, str(ROOT / "ops"))
+                spec = importlib.util.spec_from_file_location("dot_completion_seed", ROOT / "ops/completion-register-schema-local-pg-gate.py")
+                seed = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(seed)
+                for tenant in ("tenant-a", "tenant-b"):
+                    owner.execute("select set_config('carr.organization_tenant_id',%s,false)", (tenant,))
+                    with owner.cursor() as cur:
+                        cur.execute("""insert into ops.completion_policy
+                            (policy_key,policy_version,capability_class,required_dimensions,
+                             default_freshness,state_precedence,effective_at,policy_digest)
+                            values (%s,1,'fixture',%s,interval '1 day',%s,
+                                    now()-interval '1 day',null) returning organization_tenant_id""",
+                            ("dot-policy-" + tenant, list(seed.DIMENSIONS), list(seed.PRECEDENCE)))
+                        if cur.fetchone() != (tenant,):
+                            raise AssertionError("completion fixture must derive the requested tenant")
+                        seed.complete_subject(cur, "dot-review-" + tenant)
+        with psycopg.connect(**self.owner_args) as owner:
+            views = owner.execute("""select n.nspname,c.relname from pg_class c
+                join pg_namespace n on n.oid=c.relnamespace
+                where n.nspname in ('public','ops') and c.relkind='v' order by 1,2""").fetchall()
+        with self.connect() as dot:
+            for schema, view in views:
+                with self.subTest(view=f"{schema}.{view}"):
+                    dot.execute(sql.SQL("select * from {}.{} limit 1").format(sql.Identifier(schema), sql.Identifier(view))).fetchall()
+            for tenant in (None, "tenant-a"):
+                if tenant:
+                    dot.execute("set carr.organization_tenant_id='tenant-a'")
+                for view in ("completion_current_observation", "completion_dimension_matrix", "completion_projection"):
+                    self.assertEqual(dot.execute(sql.SQL("select distinct organization_tenant_id from ops.{} order by 1").format(sql.Identifier(view))).fetchall(), [("tenant-a",), ("tenant-b",)])
+        # Existing callers retain the server-derived tenant requirement.
+        with psycopg.connect(**self.owner_args, autocommit=True) as owner:
+            owner.execute("grant usage on schema ops to app_reader")
+            owner.execute("grant execute on function ops.completion_runtime_tenant() to app_reader")
+            owner.execute("grant select on ops.completion_current_observation to app_reader")
+            owner.execute("set session authorization app_reader")
+            try:
+                with self.assertRaisesRegex(psycopg.Error, "server-derived tenant"):
+                    owner.execute("select ops.completion_runtime_tenant()")
+                owner.execute("set carr.organization_tenant_id='tenant-a'")
+                self.assertEqual(owner.execute("select distinct organization_tenant_id from ops.completion_current_observation").fetchall(), [("tenant-a",)])
+            finally:
+                owner.execute("reset session authorization")
+            if os.environ.get("CARR_DOT_REPO_SCHEMA") == "1":
+                # Only the disposable fixture administrator bypasses immutable
+                # row triggers to remove its synthetic data after the read test.
+                owner.execute("set session_replication_role=replica")
+                try:
+                    for table in ("completion_observation", "completion_receipt", "completion_subject", "completion_policy"):
+                        owner.execute(sql.SQL("delete from ops.{} where organization_tenant_id in ('tenant-a','tenant-b')").format(sql.Identifier(table)))
+                finally:
+                    owner.execute("set session_replication_role=origin")
+
     def test_limits_isolation_and_full_catalog_coverage(self):
         with self.connect() as dot:
             self.assertEqual(dot.execute("show statement_timeout").fetchone(), ("30s",))
@@ -203,6 +296,68 @@ class DotReader(unittest.TestCase):
                     and p.polcmd='*' and p.polpermissive and 'dot_reader'::regrole=any(p.polroles)
                   and pg_get_expr(p.polqual,p.polrelid)='true')""").fetchone(), (0,))
 
+    def test_ambient_column_sequence_and_grant_option_drift_refused(self):
+        tree = ast.parse((ROOT / "tools/dot-reader-access.py").read_text())
+        queries = [node.value for node in ast.walk(tree) if isinstance(node, ast.Constant)
+                   and isinstance(node.value, str) and "effective" not in node.value
+                   and "not has_database_privilege" in node.value]
+        self.assertEqual(len(queries), 1)
+        proof = MIGRATION.read_text().split("do $dot_reader_proof$", 1)[1]
+        proof = "do $dot_reader_proof$" + proof
+        with psycopg.connect(**self.owner_args, autocommit=True) as owner:
+            for grant, revoke, mutation in (
+                ("grant update(scope) on public.dot_fixture to public",
+                 "revoke update(scope) on public.dot_fixture from public",
+                 "update public.dot_fixture set scope=scope where id=1"),
+                ("grant usage on sequence public.dot_fixture_seq to public",
+                 "revoke usage on sequence public.dot_fixture_seq from public",
+                 "select nextval('public.dot_fixture_seq')"),
+                ("grant update on sequence public.dot_fixture_seq to public",
+                 "revoke update on sequence public.dot_fixture_seq from public",
+                 "select setval('public.dot_fixture_seq',50)"),
+                ("grant select on public.dot_fixture to dot_reader with grant option",
+                 "revoke grant option for select on public.dot_fixture from dot_reader", None),
+                ("grant select(scope) on public.dot_fixture to dot_reader with grant option",
+                 "revoke select(scope) on public.dot_fixture from dot_reader", None),
+                ("grant select on sequence public.dot_fixture_seq to dot_reader with grant option",
+                 "revoke grant option for select on sequence public.dot_fixture_seq from dot_reader", None),
+            ):
+                with self.subTest(grant=grant):
+                    try:
+                        owner.execute(grant)
+                        if mutation:
+                            with self.connect() as dot:
+                                dot.execute(mutation)
+                        self.assertEqual(owner.execute(queries[0]).fetchone(), (False,))
+                        with self.assertRaisesRegex(psycopg.Error, "effective privilege boundary failed"):
+                            owner.execute(proof)
+                    finally:
+                        owner.execute(revoke)
+            # The migration must also refuse pre-existing PUBLIC privileges,
+            # rather than silently stripping unrelated callers' authorization.
+            owner.execute("alter role dot_reader rename to dot_existing_fixture")
+            try:
+                for grant, revoke in (
+                    ("grant update(scope) on public.dot_fixture to public",
+                     "revoke update(scope) on public.dot_fixture from public"),
+                    ("grant usage,update on sequence public.dot_fixture_seq to public",
+                     "revoke usage,update on sequence public.dot_fixture_seq from public"),
+                ):
+                    try:
+                        owner.execute(grant)
+                        with self.assertRaisesRegex(psycopg.Error, "effective privilege boundary failed"):
+                            with owner.transaction():
+                                for schema, table in owner.execute("""select n.nspname,c.relname
+                                    from pg_policy p join pg_class c on c.oid=p.polrelid
+                                    join pg_namespace n on n.oid=c.relnamespace
+                                    where p.polname='dot_reader_full_read'""").fetchall():
+                                    owner.execute(sql.SQL("drop policy dot_reader_full_read on {}.{}").format(sql.Identifier(schema), sql.Identifier(table)))
+                                owner.execute(MIGRATION.read_text())
+                    finally:
+                        owner.execute(revoke)
+            finally:
+                owner.execute("alter role dot_existing_fixture rename to dot_reader")
+
     def test_provision_resume_and_revoke_on_disposable_database(self):
         spec = importlib.util.spec_from_file_location("dot_access", ROOT / "tools/dot-reader-access.py")
         access = importlib.util.module_from_spec(spec)
@@ -210,7 +365,7 @@ class DotReader(unittest.TestCase):
         owner_password = secrets.token_urlsafe(32)
         with psycopg.connect(**self.owner_args, autocommit=True) as owner:
             owner.execute(sql.SQL("alter role carr_ci password {}").format(sql.Literal(owner_password)))
-        owner_uri = urlunsplit(("postgresql", f"carr_ci:{quote(owner_password)}@127.0.0.1:{self.port}", "/postgres", "sslmode=require", ""))
+        owner_uri = urlunsplit(("postgresql", f"carr_ci:{quote(owner_password)}@127.0.0.1:{self.port}", "/" + self.owner_args["dbname"], "sslmode=require", ""))
         original_connect = psycopg.connect
 
         def local_connect(uri, **kwargs):
@@ -249,13 +404,24 @@ class DotReader(unittest.TestCase):
         with original_connect(**self.owner_args, autocommit=True) as owner:
             owner.execute(sql.SQL("alter role dot_reader login password {}").format(sql.Literal(self.password)))
 
-    def test_future_write_upgrade_needs_only_one_grant(self):
+    def test_documented_future_write_upgrade_supports_generated_ids(self):
+        spec = importlib.util.spec_from_file_location("dot_upgrade", ROOT / "tools/dot-reader-access.py")
+        access = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(access)
+        upgrade = re.findall(r"^  (GRANT .*;)$", access.__doc__, re.M)
+        self.assertTrue(upgrade, "the documented future transition must be executable")
         with psycopg.connect(**self.owner_args, autocommit=True) as owner:
+            if os.environ.get("CARR_DOT_MANAGED_OWNER") == "1":
+                owner.execute("set role neondb_owner")
+            owner.execute("create table public.dot_generated_id (id serial primary key)")
+            owner.execute("reset role")
             try:
-                owner.execute("grant insert,update,delete on all tables in schema public,ops to dot_reader")
+                for statement in upgrade:
+                    owner.execute(statement)
                 with self.connect() as dot:
                     dot.execute("begin")
                     try:
+                        self.assertEqual(dot.execute("insert into public.dot_generated_id default values returning id").fetchone(), (1,))
                         for schema in ("public", "ops"):
                             dot.execute(sql.SQL("insert into {}.dot_fixture values (99,'sponsor_b','personal')").format(sql.Identifier(schema)))
                             dot.execute(sql.SQL("update {}.dot_fixture set scope='shared' where id=99").format(sql.Identifier(schema)))
@@ -264,15 +430,17 @@ class DotReader(unittest.TestCase):
                         dot.execute("rollback")
             finally:
                 owner.execute("revoke insert,update,delete on all tables in schema public,ops from dot_reader")
+                owner.execute("revoke usage,update on all sequences in schema public,ops from dot_reader")
+                owner.execute("drop table public.dot_generated_id")
         with self.connect() as dot:
             with self.assertRaises(psycopg.errors.InsufficientPrivilege):
                 dot.execute("delete from public.dot_fixture")
 
 
-    def test_snapshot_reconstructs_passwordless_role_and_future_read_grants(self):
+    def test_snapshot_role_preamble_reconstructs_passwordless_login(self):
         exporter = (ROOT / "bin/schema-snapshot.sh").read_text()
         blocks = []
-        for marker in ("DOT_READER_ROLES", "DOT_READER_GRANTS"):
+        for marker in ("DOT_READER_ROLES",):
             match = re.search(r"cat >> \"\$TMP\" <<'" + marker + r"'\n(.*?)\n" + marker, exporter, re.S)
             self.assertIsNotNone(match, "snapshot must reconstruct the released Dot role")
             blocks.append(match.group(1))
@@ -284,15 +452,87 @@ class DotReader(unittest.TestCase):
                 for block in blocks:
                     owner.execute(block)
                 self.assertEqual(owner.execute("select rolpassword is null,rolcanlogin,rolconnlimit,rolinherit,rolbypassrls from pg_authid where rolname='dot_reader'").fetchone(), (True, True, 2, False, False))
-                owner.execute("create table public.dot_snapshot_future (id int); insert into public.dot_snapshot_future values (11)")
-                owner.execute("set role dot_reader")
-                self.assertEqual(owner.execute("select id from public.dot_snapshot_future").fetchall(), [(11,)])
-                with self.assertRaises(psycopg.errors.InsufficientPrivilege):
-                    owner.execute("create temp table dot_snapshot_nope (id int)")
             finally:
                 owner.execute("reset role")
                 owner.execute("drop owned by dot_reader; drop role dot_reader")
                 owner.execute("alter role dot_existing_fixture rename to dot_reader")
+
+    @unittest.skipUnless(os.environ.get("CARR_DOT_REPO_SCHEMA") == "1", "requires complete snapshot source")
+    def test_complete_post_release_snapshot_passes_grant_validator(self):
+        candidate = self.complete_snapshot()
+        result = subprocess.run([sys.executable, str(ROOT / "tools/test-schema-snapshot-grants.py"),
+            "--snapshot", str(candidate)], capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout[-4000:] + result.stderr[-1000:])
+        original = candidate.read_text()
+        membership = "grant dot_reader to neondb_owner with admin true, inherit false, set false;"
+        self.assertIn(membership, original)
+        for unsafe in (
+            membership.replace("inherit false", "inherit true"),
+            membership.replace("set false", "set true"),
+            membership.replace("neondb_owner", "app_reader"),
+            "grant select on table public.actor to neondb_owner;",
+        ):
+            with self.subTest(unsafe=unsafe):
+                altered = Path(self.tmp.name) / "unsafe-membership.sql"
+                altered.write_text(original.replace(membership, unsafe))
+                result = subprocess.run([sys.executable, str(ROOT / "tools/test-schema-snapshot-grants.py"),
+                    "--snapshot", str(altered)], capture_output=True, text=True, timeout=30)
+                self.assertNotEqual(result.returncode, 0, "widening guard must retain unsafe shape refusal")
+
+    def complete_snapshot(self):
+        candidate = Path(self.tmp.name) / "post-release.sql"
+        if candidate.exists():
+            return candidate
+        with psycopg.connect(**self.owner_args, autocommit=True) as owner:
+            owner.execute("create table public.dot_narrow_acl(id int)")
+            owner.execute("revoke select on public.dot_narrow_acl from dot_reader")
+            owner.execute("alter default privileges in schema ops revoke select on tables from dot_reader")
+            owner.execute("alter default privileges in schema ops revoke select on sequences from dot_reader")
+            self.assertEqual(owner.execute("select has_table_privilege('dot_reader','public.dot_narrow_acl','SELECT')").fetchone(), (False,))
+            try:
+                result = subprocess.run([str(ROOT / "bin/schema-snapshot.sh"),
+                    "--from-disposable-local", f"postgres://carr_ci@127.0.0.1:{self.port}/carr_ci",
+                    "--output-candidate", str(candidate)], capture_output=True, text=True, timeout=180)
+                self.assertEqual(result.returncode, 0, result.stdout[-1000:] + result.stderr[-3000:])
+            finally:
+                owner.execute("grant select on public.dot_narrow_acl to dot_reader")
+                owner.execute("alter default privileges in schema ops grant select on tables to dot_reader")
+                owner.execute("alter default privileges in schema ops grant select on sequences to dot_reader")
+        return candidate
+
+    @unittest.skipUnless(os.environ.get("CARR_DOT_REPO_SCHEMA") == "1", "requires complete snapshot source")
+    def test_complete_restore_preserves_narrowed_acl_and_defaults(self):
+        candidate = self.complete_snapshot()
+        with tempfile.TemporaryDirectory(prefix="dot-independent-restore-") as directory:
+            data = Path(directory) / "data"
+            with socket.socket() as probe:
+                probe.bind(("127.0.0.1",0))
+                port = probe.getsockname()[1]
+            self.run_pg([self.bin.initdb, "-D", data, "-U", "carr_ci", "--auth-local=trust",
+                         "--auth-host=scram-sha-256", "--encoding=UTF8", "--no-locale"])
+            self.run_pg([self.bin.pg_ctl, "-D", data, "-l", Path(directory)/"pg.log", "-o",
+                         f"-h 127.0.0.1 -k {directory} -p {port} -c fsync=off -c synchronous_commit=off -c full_page_writes=off", "-w", "start"])
+            try:
+                args = dict(host=directory, port=port, user="carr_ci", dbname="postgres")
+                with psycopg.connect(**args, autocommit=True) as owner:
+                    owner.execute("create role neondb_owner")
+                self.run_pg([self.bin.psql, "-h", directory, "-p", str(port), "-U", "carr_ci",
+                             "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-q", "-1", "-f", candidate])
+                with psycopg.connect(**args, autocommit=True) as owner:
+                    self.assertEqual(owner.execute("select rolpassword is null,rolcanlogin,rolconnlimit from pg_authid where rolname='dot_reader'").fetchone(), (True, True, 2))
+                    self.assertEqual(owner.execute("select has_table_privilege('dot_reader','public.dot_narrow_acl','SELECT')").fetchone(), (False,))
+                    owner.execute("create table ops.dot_restored_future(id int); create sequence ops.dot_restored_seq")
+                    owner.execute("create table public.dot_restored_future(id int)")
+                    self.assertEqual(owner.execute("select has_table_privilege('dot_reader','ops.dot_restored_future','SELECT'),has_sequence_privilege('dot_reader','ops.dot_restored_seq','SELECT'),has_table_privilege('dot_reader','public.dot_restored_future','SELECT')").fetchone(), (False, False, True))
+                with psycopg.connect(**{**args,"user":"dot_reader"}, autocommit=True) as dot:
+                    with self.assertRaises(psycopg.errors.InsufficientPrivilege):
+                        dot.execute("create temp table dot_restore_nope(id int)")
+                    for table in ("public.dot_narrow_acl", "ops.dot_restored_future"):
+                        with self.assertRaises(psycopg.errors.InsufficientPrivilege):
+                            dot.execute(sql.SQL("select * from {}").format(sql.Identifier(*table.split('.'))))
+                    dot.execute("select * from public.dot_restored_future").fetchall()
+            finally:
+                self.run_pg([self.bin.pg_ctl,"-D",data,"-m","immediate","-w","stop"])
 
     @unittest.skipUnless(os.environ.get("CARR_DOT_REPO_SCHEMA") == "1", "requires assurance functions from the full schema")
     def test_assurance_gate_accepts_only_dot_select_exception(self):

@@ -360,10 +360,16 @@ def main(argv):
     # or neondb_owner, on membership lines only. Anything else means some
     # other principal's production ACLs were swept into a tracked file.
     allowed = set(APP_ROLES)
+    dot_applied = bool(re.search(r"^0756_dot_reader\.sql\t", sql, re.M))
+    # This administrative membership is part of the released role preamble,
+    # never an object ACL or a generally permitted option-bearing membership.
+    dot_admin = "grant dot_reader to neondb_owner with admin true, inherit false, set false;"
     membership = re.compile(
         rf"grant ({'|'.join(APP_ROLES)}) to ({'|'.join(APP_ROLES + MEMBERSHIP_ONLY)});")
     strays = []
     for _, ln in grant_lines:
+        if dot_applied and ln == dot_admin:
+            continue
         if membership.fullmatch(ln):
             continue
         m = re.search(r"\bto ([a-z0-9_, ]+);", ln)
@@ -378,7 +384,9 @@ def main(argv):
     last_create = max((i for i, ln in enumerate(lines)
                        if re.match(r"\s*CREATE (TABLE|.*VIEW|SEQUENCE|FUNCTION)\b", ln)),
                       default=None)
-    first_grant = grant_lines[0][0] if grant_lines else None
+    object_grants = [(i, ln) for i, ln in grant_lines
+                     if not (dot_applied and ln == dot_admin)]
+    first_grant = object_grants[0][0] if object_grants else None
     check("every grant follows the structure it attaches to",
           first_grant is not None and last_create is not None
           and first_grant > last_create,

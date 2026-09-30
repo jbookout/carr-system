@@ -17,10 +17,14 @@ Revoke (disables LOGIN, clears password, terminates sessions, tombstones files):
 
 The schema changes ship only through the migration/release pipeline. These
 commands set or revoke the password after release; neither applies migrations.
-To authorize writes later, a forward migration can use one privilege grant:
+To authorize writes later, a forward migration needs table DML and sequence
+mutation grants together (serial/identity inserts call nextval):
   GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public, ops TO dot_reader;
+  GRANT USAGE, UPDATE ON ALL SEQUENCES IN SCHEMA public, ops TO dot_reader;
 The role's RLS policy already permits all sponsor rows; table privileges enforce
-read-only today. Future write defaults remain an explicit release choice.
+read-only today, including sequence mutation. Future write defaults remain an
+explicit release choice. New RLS tables also need an explicit Dot policy;
+SELECT defaults alone do not confer all-row visibility.
 """
 import argparse
 import importlib.util
@@ -130,7 +134,15 @@ def _dot_reader_action(*, revoke: bool) -> int:
           and not exists(select 1 from pg_class c join pg_namespace n on n.oid=c.relnamespace
             where n.nspname in ('public','ops') and c.relkind in ('r','p','v','m','f')
               and (not has_table_privilege('dot_reader',c.oid,'SELECT')
-                or has_table_privilege('dot_reader',c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')))
+                or has_table_privilege('dot_reader',c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER,MAINTAIN,SELECT WITH GRANT OPTION')
+             or has_any_column_privilege('dot_reader',c.oid,'INSERT,UPDATE,REFERENCES,SELECT WITH GRANT OPTION')))
+          and not exists(select 1 from pg_class c join pg_namespace n on n.oid=c.relnamespace
+            where n.nspname in ('public','ops') and c.relkind='S'
+              and case when c.relkind='S' then has_sequence_privilege('dot_reader',c.oid,'USAGE,UPDATE,SELECT WITH GRANT OPTION') else false end)
+          and not has_database_privilege('dot_reader',current_database(),'CONNECT WITH GRANT OPTION')
+          and not exists(select 1 from pg_namespace where has_schema_privilege('dot_reader',oid,'USAGE WITH GRANT OPTION'))
+          and not exists(select 1 from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+            where n.nspname in ('public','ops') and has_function_privilege('dot_reader',p.oid,'EXECUTE WITH GRANT OPTION'))
         """).fetchone()
         if boundary != (True,):
             sys.exit("dot_reader: effective read-only boundary drifted; nothing changed")

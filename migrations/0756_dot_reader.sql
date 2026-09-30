@@ -50,8 +50,8 @@ begin
     select n.nspname,c.relname from pg_class c join pg_namespace n on n.oid=c.relnamespace
     where n.nspname in ('public','ops') and c.relkind in ('r','p') and c.relrowsecurity
   loop
-    -- Table ACLs enforce read-only today. ALL keeps a later one-line DML
-    -- GRANT sufficient without a second change to sponsor row visibility.
+    -- Table and sequence ACLs enforce read-only today. ALL lets a later
+    -- table-DML plus sequence-mutation upgrade retain sponsor visibility.
     execute format('create policy dot_reader_full_read on %I.%I for all to dot_reader using (true) with check (true)',
                    relation.nspname,relation.relname);
   end loop;
@@ -82,6 +82,28 @@ begin
   alter default privileges revoke execute on functions from public;
 end $dot_function_boundary$;
 
+-- Completion's human/runtime callers remain tenant scoped. Dot reviews all
+-- tenants, even with no tenant setting, just as it reads the underlying tables.
+-- CASE prevents evaluating the required-tenant helper for this exact login.
+do $dot_completion_views$
+declare view_name text; definition text; adjusted text;
+begin
+  if to_regprocedure('ops.completion_runtime_tenant()') is null then
+    raise exception 'Dot completion tenant helper is missing';
+  end if;
+  grant execute on function ops.completion_runtime_tenant() to dot_reader;
+  foreach view_name in array array['completion_current_observation','completion_dimension_matrix'] loop
+    definition := pg_get_viewdef(format('ops.%I',view_name)::regclass, true);
+    adjusted := regexp_replace(definition,
+      '([a-z_][a-z0-9_]*\.)?organization_tenant_id = ops\.completion_runtime_tenant\(\)',
+      'CASE WHEN session_user = ''dot_reader'' THEN true ELSE \& END', 'g');
+    if adjusted = definition then
+      raise exception 'Dot completion view tenant predicate not found: %',view_name;
+    end if;
+    execute format('create or replace view ops.%I as %s',view_name,adjusted);
+  end loop;
+end $dot_completion_views$;
+
 comment on role dot_reader is
   'Dedicated external data-quality review login. SELECT all public+ops tables/views, '
   'including every sponsor and personal-scope row. No service membership, ownership, '
@@ -98,7 +120,15 @@ begin
     or exists(select 1 from pg_class c join pg_namespace n on n.oid=c.relnamespace
       where n.nspname in ('public','ops') and c.relkind in ('r','p','v','m','f')
         and (not has_table_privilege('dot_reader',c.oid,'SELECT')
-             or has_table_privilege('dot_reader',c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')))
+             or has_table_privilege('dot_reader',c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER,MAINTAIN,SELECT WITH GRANT OPTION')
+             or has_any_column_privilege('dot_reader',c.oid,'INSERT,UPDATE,REFERENCES,SELECT WITH GRANT OPTION')))
+    or exists(select 1 from pg_class c join pg_namespace n on n.oid=c.relnamespace
+      where n.nspname in ('public','ops') and c.relkind='S'
+        and case when c.relkind='S' then has_sequence_privilege('dot_reader',c.oid,'USAGE,UPDATE,SELECT WITH GRANT OPTION') else false end)
+    or has_database_privilege('dot_reader',current_database(),'CONNECT WITH GRANT OPTION')
+    or exists(select 1 from pg_namespace where has_schema_privilege('dot_reader',oid,'USAGE WITH GRANT OPTION'))
+    or exists(select 1 from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+      where n.nspname in ('public','ops') and has_function_privilege('dot_reader',p.oid,'EXECUTE WITH GRANT OPTION'))
   then
     raise exception 'dot_reader effective privilege boundary failed';
   end if;
