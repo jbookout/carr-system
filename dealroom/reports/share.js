@@ -9,6 +9,12 @@
     ? globalThis.__CARR_TOUR_TAKE_SHARE_TOKEN__() : "";
   let reportProperties = new globalThis.Map();
   let mapInstance = null;
+  // Client feedback (shortlist and comment). The projection ref comes only from
+  // the feedback read; a property gets controls only if that read lists it.
+  let feedback = null;
+  const shortlisted = new globalThis.Map();
+  const pendingKeys = new globalThis.Map();
+  const inFlight = new globalThis.Set();
 
   function setStatus(message) { status.textContent = message; }
 
@@ -37,6 +43,92 @@
     return parts.length ? parts.join(" · ") : fallback;
   }
 
+  async function send(path, body) {
+    const response = await fetch(path, {
+      method: "POST", credentials: "same-origin",
+      headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+    return response.status;
+  }
+
+  // One idempotency key per unsent action. A dropped connection or a 5xx keeps
+  // the key, so the retry replays the same write; any answer that settles the
+  // action (saved or refused) drops it so the next action gets a fresh key.
+  async function submitFeedback(kind, propertyRef, value) {
+    if (!feedback || !feedback.refs.has(propertyRef)) return "refused";
+    const signature = `${kind}|${propertyRef}|${value}`;
+    if (inFlight.has(signature)) return "busy";
+    inFlight.add(signature);
+    const key = pendingKeys.get(signature) || crypto.randomUUID();
+    pendingKeys.set(signature, key);
+    const body = kind === "shortlist"
+      ? { projection_ref: feedback.projectionRef, property_ref: propertyRef, shortlisted: value, idempotency_key: key }
+      : { projection_ref: feedback.projectionRef, property_ref: propertyRef, comment: value, idempotency_key: key };
+    try {
+      const code = await send(`/api/share/${kind}`, body);
+      if (code === 200) { pendingKeys.delete(signature); return "saved"; }
+      if (code >= 500) return "retry";
+      pendingKeys.delete(signature);
+      if (code === 401 || code === 403 || code === 404) { feedback = null; return "unavailable"; }
+      return "refused";
+    } catch { return "retry"; }
+    finally { inFlight.delete(signature); }
+  }
+
+  function feedbackControls(propertyRef, note) {
+    const box = document.createElement("div");
+    box.className = "feedback";
+    const say = message => { note.textContent = message; };
+    const outcome = {
+      saved: "Saved.", retry: "Not saved yet. Try again.", busy: "Still saving…",
+      unavailable: "This link is no longer active. Ask your broker for a new one.", refused: "That could not be saved.",
+    };
+    if (feedback.scopes.has("shortlist")) {
+      const pick = document.createElement("button");
+      pick.type = "button";
+      pick.className = "shortlist-toggle";
+      const paint = () => {
+        const on = shortlisted.get(propertyRef) === true;
+        pick.setAttribute("aria-pressed", String(on));
+        pick.textContent = on ? "Shortlisted" : "Add to shortlist";
+      };
+      paint();
+      pick.addEventListener("click", async () => {
+        const wanted = shortlisted.get(propertyRef) !== true;
+        const result = await submitFeedback("shortlist", propertyRef, wanted);
+        if (result === "saved") { shortlisted.set(propertyRef, wanted); paint(); }
+        say(outcome[result]);
+        if (result === "unavailable") disableFeedback();
+      });
+      box.append(pick);
+    }
+    if (feedback.scopes.has("comment")) {
+      const field = document.createElement("textarea");
+      field.className = "comment-field";
+      field.maxLength = 1000;
+      field.rows = 2;
+      field.setAttribute("aria-label", "Comment for your broker on this property");
+      const post = document.createElement("button");
+      post.type = "button";
+      post.className = "comment-send";
+      post.textContent = "Send comment";
+      post.addEventListener("click", async () => {
+        const comment = field.value.trim();
+        if (!comment) { say("Write a comment first."); return; }
+        const result = await submitFeedback("comment", propertyRef, comment);
+        if (result === "saved") field.value = "";
+        say(outcome[result]);
+        if (result === "unavailable") disableFeedback();
+      });
+      box.append(field, post);
+    }
+    return box;
+  }
+
+  function disableFeedback() {
+    for (const control of list.querySelectorAll(".feedback")) control.remove();
+  }
+
   function render(report) {
     const items = Array.isArray(report?.stops) ? report.stops :
       (Array.isArray(report?.items) ? report.items : (Array.isArray(report?.properties) ? report.properties : []));
@@ -58,6 +150,12 @@
       const detail = document.createElement("p");
       detail.textContent = text(item.summary, text(item.status, propertyAddress(item, "Details available in the packet.")));
       row.append(route, heading, detail);
+      if (feedback && feedback.refs.has(item.property_ref)) {
+        const note = document.createElement("p");
+        note.className = "status feedback-note";
+        note.setAttribute("role", "status");
+        row.append(feedbackControls(item.property_ref, note), note);
+      }
       list.append(row);
     }
     if (!properties.length) list.textContent = "No properties are available in this report.";
@@ -119,8 +217,20 @@
     return payload.data || {};
   }
 
+  async function fetchFeedback() {
+    const payload = await request("/api/share/feedback");
+    const data = payload.data || {};
+    const scopes = new globalThis.Set((Array.isArray(data.permission_scopes) ? data.permission_scopes : [])
+      .filter(scope => scope === "shortlist" || scope === "comment"));
+    const refs = new globalThis.Set((Array.isArray(data.items) ? data.items : []).map(item => item?.property_ref).filter(validPropertyRef));
+    if (typeof data.projection_ref !== "string" || !/^projection:public:[A-Za-z0-9_-]{16,128}$/.test(data.projection_ref) || !scopes.size || !refs.size) return null;
+    return { projectionRef: data.projection_ref, scopes, refs };
+  }
+
   async function loadTour() {
     try {
+      // Feedback is optional: a packet-only or map-only grant simply has none.
+      feedback = await fetchFeedback().catch(() => null);
       // Packet and map are independently scoped. Fetch both, then render in a
       // stable order so a valid map-only or packet-only grant still opens.
       const [reportResult, mapResult] = await Promise.allSettled([fetchReport(), fetchMap()]);
