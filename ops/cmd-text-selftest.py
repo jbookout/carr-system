@@ -72,6 +72,17 @@ def load():
 mod = load()
 strip = mod.strip_inert_text
 
+# A tokenizing caller needs the shell's quoted argument boundaries intact,
+# while still removing non-shell heredoc payloads.
+quoted = 'gh pr comment 12 --body "Use \\"quoted\\" names"'
+try:
+    check("tokenizing mode preserves quoted prose", strip(quoted, strip_prose=False) == quoted)
+    heredoc = "python3 <<'EOF'\nprint(\"an unmatched quote: '\")\nEOF"
+    check("tokenizing mode still removes heredoc payload",
+          "print(" not in strip(heredoc, strip_prose=False))
+except TypeError:
+    check("tokenizing mode exists", False)
+
 # A command string is "carried" if a dangerous fragment SURVIVES stripping,
 # meaning the gate will still scan and refuse it.
 def survives(cmd, fragment):

