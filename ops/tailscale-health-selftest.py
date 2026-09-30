@@ -122,11 +122,11 @@ for output, code, expected in ((json.dumps({"BackendState": "Stopped"}), 1, True
         # selection, isolating unrelated sections that have live DB readers.
         canonical = next(n for n in health_tree.body if isinstance(n, ast.FunctionDef)
                          and n.name == "_canonical_health")
-        branches = [n for n in canonical.body if isinstance(n, ast.If)
+        branches: list[ast.stmt] = [n for n in canonical.body if isinstance(n, ast.If)
                     and "_tailscale_row" in ast.unparse(n)]
         default_ns: dict[str, Any] = {"CANONICAL_SECTION": "all", "rc": 0,
                                      "_FINDINGS": [], "_tailscale_row": lambda: th.row(str(fake))}
-        recorders = [n for n in health_tree.body if isinstance(n, ast.FunctionDef)
+        recorders: list[ast.stmt] = [n for n in health_tree.body if isinstance(n, ast.FunctionDef)
                      and n.name in ("_canonical_finding", "_red")]
         with redirect_stdout(StringIO()):
             exec(compile(ast.Module(body=recorders + branches, type_ignores=[]),
