@@ -235,12 +235,19 @@ event fails the check.
 
 For work >5 steps or >30 min, update the board via `tools/progress_board.py`
 after each step; record Joe questions with defaults, and give a blocked task
-`--reason` and `--next-action`. The tool writes `out/boards/<project>.json` and
-publishes it; the only board UI is https://app.doctorcre.com/progress-board
-(`?board=<project>`, or `?board=all-repos` for every jbookout PR). There is no
-static HTML copy. The launchd job runs `ops/progress-board-render.sh`.
+`--reason` and `--next-action`. Every `init`, `task`, `ask`, `answer`,
+`deliver` and `note` writes `out/boards/<project>.json` under a per-board lock
+and publishes it; the only board UI is https://app.doctorcre.com/progress-board
+(`?board=<project>`, or `?board=all-repos` for every jbookout PR). A failed
+publish exits nonzero with the local state kept and names the retry
+(`render <project> --publish`); `PROGRESS_BOARD_LOCAL_ONLY=1` skips publishing
+and says so. There is no static HTML copy. The launchd job runs
+`ops/progress-board-render.sh` from the canonical checkout, which binds
+`CARR_REPO_ROOT` and the repo's `.venv` Python; never run an extracted copy.
 A `done` card with no PR is Live (complete); a `done` card with a merged PR
-stays Merged until a verified release. `failed` and `superseded` need
+stays Merged until a verified release of a lane that deploys every path it
+changed; anything else (a local tool, a LaunchAgent) needs `--stage live
+--evidence` naming its operational receipt. `failed` and `superseded` need
 `--reason` and leave the pipeline for the History list.
 
 ## Git discipline on a shared tree

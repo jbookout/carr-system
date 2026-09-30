@@ -8,5 +8,11 @@ set -euo pipefail
 # launchd's PATH is /usr/bin:/bin:/usr/sbin:/sbin; gh lives in Homebrew. Without
 # this every PR card silently stopped syncing from GitHub.
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-cd "$(dirname "$0")/.."
-exec python3 tools/progress_board.py render carr-v5 --publish
+# Run from this checkout, never from an extracted copy: the tool reads the
+# release lanes, the review rules and ./run.sh from CARR_REPO_ROOT.
+root="$(cd "$(dirname "$0")/.." && pwd -P)"
+export CARR_REPO_ROOT="$root"
+cd "$root"
+python="$root/.venv/bin/python"
+[ -x "$python" ] || python="$(command -v python3)"
+exec "$python" tools/progress_board.py render carr-v5 --publish

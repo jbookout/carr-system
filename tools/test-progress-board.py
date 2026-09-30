@@ -54,7 +54,8 @@ elif args[:2] == ["pr", "list"]:
     repo = value("--repo")
     if repo in fixture.get("fail", []):
         sys.exit(1)
-    print(json.dumps(fixture.get(value("--state"), {}).get(repo, [])))
+    rows = fixture.get(value("--state"), {}).get(repo, [])
+    print(json.dumps(rows[:int(value("--limit") or 30)]))
 elif args[0] == "api":
     path = args[1]
     status = fixture.get("compare", {}).get(path)
@@ -83,6 +84,9 @@ class BoardCase(unittest.TestCase):
         self.env["PROGRESS_BOARD_SKIP_GH"] = "1"
         self.env["PROGRESS_BOARD_SKIP_PROBE"] = "1"
         self.env["PROGRESS_BOARD_RELEASES"] = str(self.root / "releases.jsonl")
+        # Mutations publish to the app board; unit tests stay local unless a
+        # test spies on the publication itself.
+        self.env["PROGRESS_BOARD_LOCAL_ONLY"] = "1"
         self.fixture = self.root / "gh.json"
         self.gh_log = self.root / "gh.log"
 
@@ -164,7 +168,8 @@ class ProgressBoardCLI(BoardCase):
         self.run_board("task", "demo", "a", "--title", "A", "--status", "running", "--executor", "Codex")
         self.run_board("render", "demo")
         self.assertFalse(leftover.exists(), "render removes the retired static copy")
-        self.assertEqual(sorted(p.name for p in (self.root / "boards").iterdir()), ["demo.json"])
+        self.assertEqual(sorted(p.name for p in (self.root / "boards").iterdir()
+                                if p.suffix in {".json", ".html", ".tmp"}), ["demo.json"])
         help_text = self.run_board("--help").stdout
         self.assertNotIn(".html", help_text)
 
@@ -193,7 +198,8 @@ class ProgressBoardCLI(BoardCase):
         self.assertEqual(snapshot["schema"], "carr-progress-board.v2")
         self.assertEqual(snapshot["kind"], "project")
         self.assertEqual(set(snapshot), {"schema", "kind", "project", "title", "tasks", "deliverables",
-                                         "notes", "decisions", "ledger", "repos", "history", "updated_at"})
+                                         "notes", "decisions", "ledger", "repos", "history", "updated_at",
+                                         "github_sync", "omitted"})
         self.assertEqual(snapshot["tasks"]["a"]["provider"], "Codex")
         self.assertEqual(snapshot["tasks"]["a"]["model"], "gpt-6-sol")
         self.assertEqual(snapshot["tasks"]["a"]["effort"], "high")
@@ -334,8 +340,11 @@ class ProgressBoardCLI(BoardCase):
             "gpt-6-sol high (Codex)": ("Codex", "gpt-6-sol", "high"),
             "codex gpt-6-sol high": ("Codex", "gpt-6-sol", "high"),
             "Codex gpt-6-sol high x2": ("Codex", "gpt-6-sol", "high"),
-            "orchestrator": ("Anthropic", "Claude Opus 5.5", "unknown"),
+            # A seat name is not model evidence; an explicit model always wins.
+            "orchestrator": ("Unknown", "unknown", "unknown"),
             "Claude Opus 5.5 (orchestrator)": ("Anthropic", "Claude Opus 5.5", "unknown"),
+            "gpt-6-sol high (orchestrator)": ("Codex", "gpt-6-sol", "high"),
+            "Claude Sonnet 4.5 high (orchestrator)": ("Anthropic", "Claude Sonnet 4.5", "high"),
             "grok 4.7 medium": ("xAI", "grok 4.7 medium", "medium"),
         }
         for executor, expected in cases.items():
@@ -412,6 +421,7 @@ class PullRequestStatus(BoardCase):
         "state": "OPEN", "isDraft": False, "headRefOid": SHA_A,
         "author": {"login": "builder"},
         "statusCheckRollup": [{"conclusion": "SUCCESS", "status": "COMPLETED"}],
+        "files": [{"path": "mcp-server/src/board-answers.js"}], "changedFiles": 1,
         "comments": [{"author": {"login": "reviewer"}, "authorAssociation": "COLLABORATOR",
                       "body": "APPROVE\nReviewed-SHA: " + SHA_A, "createdAt": "2026-09-28T10:00:00Z"}],
     }
@@ -463,7 +473,7 @@ class PullRequestStatus(BoardCase):
         self.assertEqual(self.read_state("demo")["github_sync"]["failed"][0]["error"],
                          "gh returned a malformed PR payload")
 
-    def test_review_readiness_requires_independent_trusted_latest_verdict(self):
+    def test_review_readiness_follows_the_trusted_latest_exact_head_verdict(self):
         self.start()
         self.fake_gh({})
         base = {k: v for k, v in self.VALID.items() if k != "comments"}
@@ -472,7 +482,9 @@ class PullRequestStatus(BoardCase):
             return {"author": {"login": login}, "authorAssociation": association, "body": body, "createdAt": created}
         approve = "APPROVE\nReviewed-SHA: " + SHA_A + "\n"
         cases = [
-            ([comment("builder", "OWNER", approve, "2026-09-28T10:00:00Z")], "Awaiting review"),
+            # Every session posts as the owner account (release-pipeline.v1.json
+            # _review_evidence), so the maker's own account carries a verdict.
+            ([comment("builder", "OWNER", approve, "2026-09-28T10:00:00Z")], "Ready to merge"),
             ([comment("outsider", "NONE", approve, "2026-09-28T10:00:00Z")], "Awaiting review"),
             ([comment("reviewer", "COLLABORATOR", approve, "2026-09-28T10:00:00Z")], "Ready to merge"),
             ([comment("reviewer", "COLLABORATOR", approve, "2026-09-28T10:00:00Z"),
@@ -713,6 +725,7 @@ class GitHubSync(BoardCase):
         "state": "OPEN", "isDraft": False, "headRefOid": SHA_A, "author": {"login": "builder"},
         "statusCheckRollup": [{"name": "unit", "conclusion": "SUCCESS", "status": "COMPLETED"}],
         "comments": [], "reviewDecision": "REVIEW_REQUIRED", "mergeable": "MERGEABLE",
+        "files": [{"path": "mcp-server/src/board-answers.js"}], "changedFiles": 1,
     }
 
     def start(self, *extra):
@@ -867,7 +880,8 @@ class AllRepositoriesBoard(BoardCase):
                 "author": {"login": "jbookout"}, "headRefName": f"claude/branch-{number}",
                 "headRefOid": f"{number:040d}", "isDraft": False, "createdAt": iso(timedelta(hours=2)),
                 "updatedAt": iso(timedelta(minutes=5)), "mergeable": "MERGEABLE", "reviewDecision": "",
-                "statusCheckRollup": [{"conclusion": "SUCCESS", "status": "COMPLETED"}],
+                "statusCheckRollup": [{"conclusion": "SUCCESS", "status": "COMPLETED"}], "comments": [],
+                "files": [{"path": "mcp-server/src/index.js"}], "changedFiles": 1,
                 "url": f"https://github.com/jbookout/x/pull/{number}"}
         base.update(fields)
         return base
@@ -993,10 +1007,11 @@ class AllRepositoriesBoard(BoardCase):
                                       "evidence": "e" * 200, "repo": "jbookout/carr-system", "pr": n,
                                       "completed_at": f"2026-09-{1 + n % 28:02d}T00:00:00Z"} for n in range(600)}
         tasks["carr-system-open"] = {"title": "Open", "status": "running", "stage": "build", "repo": "jbookout/carr-system", "pr": 9999}
-        trimmed = BOARD.fit_snapshot_tasks(tasks)
-        self.assertIn("carr-system-open", trimmed)
-        self.assertLess(len(json.dumps(trimmed)), BOARD.SNAPSHOT_BUDGET)
-        self.assertLess(len(trimmed), len(tasks))
+        snapshot = BOARD.board_snapshot({"project": "all-repos", "kind": "all-repos", "tasks": tasks})
+        self.assertIn("carr-system-open", snapshot["tasks"])
+        self.assertLessEqual(BOARD.snapshot_size(snapshot), BOARD.SNAPSHOT_LIMIT)
+        self.assertLess(len(snapshot["tasks"]), len(tasks))
+        self.assertEqual(snapshot["omitted"]["live"], len(tasks) - len(snapshot["tasks"]))
 
     def test_render_publish_builds_and_publishes_the_system_board(self):
         events = []
@@ -1201,6 +1216,7 @@ class CardColumns(unittest.TestCase):
         self.env = os.environ.copy()
         self.env["PROGRESS_BOARD_ROOT"] = str(self.root)
         self.env["PROGRESS_BOARD_SKIP_GH"] = "1"
+        self.env["PROGRESS_BOARD_LOCAL_ONLY"] = "1"
         self.board("init", "demo", "--title", "Demo")
 
     def tearDown(self):
@@ -1287,6 +1303,361 @@ class CardColumns(unittest.TestCase):
         self.assertNotIn(task_id, snapshot["tasks"])
         self.assertEqual(snapshot["history"][task_id]["reason"], reason)
         self.assertEqual(snapshot["history"][task_id]["status"], status)
+
+
+
+def load_release_pipeline():
+    spec = importlib.util.spec_from_file_location("board_test_release_pipeline", REPO / "ops" / "release-pipeline.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class ReviewRound1420(BoardCase):
+    """jbookout/carr-system#1420 review findings 1-11, each reproduced."""
+
+    OPEN = GitHubSync.OPEN
+    pr = AllRepositoriesBoard.pr
+
+    def spy(self):
+        calls = []
+        remote = {"snapshot": None, "questions": []}
+
+        def caller(verb, args):
+            calls.append(verb)
+            if verb == "read-progress-board":
+                return {"ok": True, **copy.deepcopy(remote)}
+            if verb == "publish-board-snapshot":
+                version = (remote["snapshot"] or {}).get("version", 0) + 1
+                remote["snapshot"] = {"version": version, "snapshot_json": args["snapshot"]}
+                return {"ok": True, "snapshot": remote["snapshot"]}
+            raise AssertionError(verb)
+        return calls, remote, caller
+
+    def in_process(self, **extra):
+        env = {"PROGRESS_BOARD_ROOT": str(self.root), "PROGRESS_BOARD_SKIP_PROBE": "1",
+               "PROGRESS_BOARD_RELEASES": str(self.root / "releases.jsonl"), **extra}
+        return patch.dict(os.environ, env)
+
+    # 1 ── concurrent writers
+    def test_1_overlapping_writes_use_their_own_temporary_files(self):
+        real_replace = os.replace
+        nested = []
+
+        def replace(src, dst):
+            if not nested:
+                nested.append(True)
+                BOARD.write_json({"project": "demo", "title": "B", "tasks": {}})
+            real_replace(src, dst)
+        with self.in_process(), patch.object(BOARD.os, "replace", replace):
+            BOARD.write_json({"project": "demo", "title": "A", "tasks": {}})
+        self.assertEqual(self.read_state("demo")["title"], "A")
+        self.assertEqual([p.name for p in (self.root / "boards").iterdir() if p.suffix == ".tmp"], [])
+
+    def test_1_a_note_written_while_render_reads_github_survives(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("task", "demo", "a", "--title", "A", "--status", "running", "--executor", "Codex", "--pr", "42")
+        wrote = []
+
+        def fetch(number, repo):
+            if not wrote:
+                wrote.append(True)
+                BOARD.main(["note", "demo", "--text", "written while GitHub was being read"])
+            return copy.deepcopy(self.OPEN), None
+        with self.in_process(PROGRESS_BOARD_LOCAL_ONLY="1", PROGRESS_BOARD_SKIP_GH=""), \
+             patch.object(BOARD, "fetch_pr", fetch), patch("sys.stderr", new_callable=io.StringIO):
+            BOARD.render("demo")
+        state = self.read_state("demo")
+        self.assertEqual(state["notes"][0]["text"], "written while GitHub was being read")
+        self.assertEqual(state["tasks"]["a"]["pr_phase"], "Awaiting review")
+
+    def test_1_parallel_mutations_and_inits_are_serialized(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        procs = [subprocess.Popen([sys.executable, str(SCRIPT), "note", "demo", "--text", f"note {n}"],
+                                  cwd=REPO, env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                 for n in range(8)]
+        self.assertEqual([proc.wait() for proc in procs], [0] * 8)
+        self.assertEqual(sorted(note["text"] for note in self.read_state("demo")["notes"]),
+                         sorted(f"note {n}" for n in range(8)))
+        inits = [subprocess.Popen([sys.executable, str(SCRIPT), "init", "race", "--title", f"T{n}"],
+                                  cwd=REPO, env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                 for n in range(6)]
+        codes = [proc.wait() for proc in inits]
+        self.assertEqual(codes.count(0), 1, codes)
+        winner = codes.index(0)
+        self.assertEqual(self.read_state("race")["title"], f"T{winner}")
+
+    # 2 ── complete enumeration
+    def test_2_every_recent_merged_pr_is_listed_with_true_counts(self):
+        merged = [self.pr(n, mergedAt=iso(timedelta(hours=1)), mergeCommit={"oid": f"{n:040x}"})
+                  for n in range(1, 230)]
+        self.fake_gh({"repos": [], "open": {}, "merged": {"jbookout/carr-system": merged}})
+        self.run_board("render", "all-repos")
+        state = self.read_state("all-repos")
+        self.assertEqual(len([k for k in state["tasks"] if k.startswith("carr-system-")]), 229)
+        row = next(r for r in state["repos"] if r["repo"] == "jbookout/carr-system")
+        self.assertEqual((row["open"], row["merged"]), (0, 229))
+
+    def test_2_a_list_that_fills_the_cap_is_an_incomplete_read(self):
+        rows = [{"number": n} for n in range(8)]
+        with patch.object(BOARD, "PR_LIST_LIMIT", 2), patch.object(BOARD, "PR_LIST_MAX", 4), \
+             patch.object(BOARD, "gh_json", lambda args, timeout=30: rows[:int(args[args.index("--limit") + 1])]):
+            with self.assertRaisesRegex(RuntimeError, "incomplete"):
+                BOARD.list_prs("jbookout/carr-system", "open", "number")
+        with patch.object(BOARD, "PR_LIST_LIMIT", 2), patch.object(BOARD, "PR_LIST_MAX", 16), \
+             patch.object(BOARD, "gh_json", lambda args, timeout=30: rows[:int(args[args.index("--limit") + 1])]):
+            self.assertEqual(len(BOARD.list_prs("jbookout/carr-system", "open", "number")), 8)
+
+    # 3 ── the whole payload fits the server contract
+    def test_3_the_complete_snapshot_is_measured_and_fitted(self):
+        tasks = {f"t{n}": {"title": "T" * 200, "summary": "S" * 160, "evidence": "E" * 200, "status": "done",
+                           "stage": "live", "executor": "Codex gpt-6-sol high", "updated_at": "2026-09-29T00:00:00Z",
+                           "completed_at": f"2026-09-{1 + n % 28:02d}T00:00:00Z",
+                           "stage_history": [{"stage": "live", "entered_at": "2026-09-29T00:00:00Z"}]}
+                 for n in range(225)}
+        state = {"project": "demo", "tasks": tasks,
+                 "notes": [{"text": "N" * 2000, "created_at": "2026-09-29T00:00:00Z"}] * 50}
+        snapshot = BOARD.board_snapshot(state)
+        text = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
+        self.assertLessEqual(len(text.encode("utf-16-le")) // 2, 262144)
+        self.assertGreater(snapshot["omitted"]["live"], 0)
+        self.assertEqual(len(snapshot["notes"]), 50)
+        self.assertEqual(BOARD.snapshot_size({"t": "✦😀"}), len('{"t":"✦"}') + 2)
+
+    def test_3_a_board_that_cannot_fit_is_refused_not_published(self):
+        tasks = {f"t{n}": {"title": "T" * 1000, "status": "running", "executor": "Codex",
+                           "updated_at": "2026-09-29T00:00:00Z"} for n in range(300)}
+        with self.assertRaises(BOARD.SnapshotTooLarge):
+            BOARD.board_snapshot({"project": "demo", "tasks": tasks})
+        self.run_board("init", "demo", "--title", "Demo")
+        state = self.read_state("demo")
+        state["tasks"] = tasks
+        self.write_state("demo", state)
+        calls, _, caller = self.spy()
+        with self.in_process(), patch.object(BOARD, "call_verb", caller):
+            with self.assertRaises(BOARD.SnapshotTooLarge):
+                BOARD.publish_board("demo")
+        self.assertNotIn("publish-board-snapshot", calls)
+
+    # 4 ── one review interpretation, shared with the release pipeline
+    def test_4_same_account_and_review_blocked_verdicts_count_on_project_cards(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("task", "demo", "a", "--title", "A", "--status", "running", "--executor", "Codex", "--pr", "42")
+        self.fake_gh({})
+
+        def comment(body):
+            return {"author": {"login": "builder"}, "authorAssociation": "OWNER", "body": body,
+                    "createdAt": "2026-09-30T10:00:00Z"}
+        for body in ("BLOCK\nReviewed-SHA: " + SHA_A, "REVIEW: BLOCKED\nReviewed-SHA: " + SHA_A + "\n\n1. finding"):
+            with self.subTest(body=body.splitlines()[0]):
+                self.set_fixture({"view": {**self.OPEN, "comments": [comment(body)]}})
+                self.run_board("render", "demo")
+                task = self.read_state("demo")["tasks"]["a"]
+                self.assertEqual((task["pr_phase"], task["review_verdict"]), ("Review blocked", "BLOCK"))
+        self.set_fixture({"view": {**self.OPEN, "comments": [comment("APPROVE\nReviewed-SHA: " + SHA_A)]}})
+        self.run_board("render", "demo")
+        task = self.read_state("demo")["tasks"]["a"]
+        self.assertEqual((task["pr_phase"], task["review_verdict"]), ("Ready to merge", "APPROVE"))
+
+    def test_4_all_repos_cards_read_review_comments(self):
+        block = {"author": {"login": "jbookout"}, "authorAssociation": "OWNER",
+                 "body": "REVIEW: BLOCKED\nReviewed-SHA: " + f"{1:040d}", "createdAt": "2026-09-30T10:00:00Z"}
+        approve = {**block, "body": "APPROVE\nReviewed-SHA: " + f"{2:040d}"}
+        self.fake_gh({"repos": [], "merged": {},
+                      "open": {"jbookout/carr-system": [self.pr(1, comments=[block]), self.pr(2, comments=[approve])]}})
+        self.run_board("render", "all-repos")
+        tasks = self.read_state("all-repos")["tasks"]
+        self.assertEqual((tasks["carr-system-1"]["pr_phase"], tasks["carr-system-1"]["review_verdict"]),
+                         ("Review blocked", "BLOCK"))
+        self.assertEqual((tasks["carr-system-2"]["pr_phase"], tasks["carr-system-2"]["review_verdict"]),
+                         ("Ready to merge", "APPROVE"))
+        open_call = next(c for c in self.gh_calls() if c[:2] == ["pr", "list"] and "open" in c)
+        self.assertIn("comments", open_call[open_call.index("--json") + 1].split(","))
+
+    def test_4_board_and_release_pipeline_agree_on_every_verdict_shape(self):
+        pipeline = load_release_pipeline()
+        cfg = json.loads((REPO / "ops" / "config" / "release-pipeline.v1.json").read_text())["worker"]
+        bodies = ["APPROVE\nReviewed-SHA: " + SHA_A, "APPROVE\nReviewed-SHA: " + "b" * 40, "APPROVE",
+                  "BLOCK\nNeeds work", "REVIEW: BLOCKED\nReviewed-SHA: " + SHA_A, "Independent review: pass",
+                  "independent review: FAIL", "Looks fine to me", "APPROVE\nReviewed-SHA: " + SHA_A + "\nReviewed-SHA: " + SHA_A]
+        for association in ("OWNER", "NONE"):
+            for body in bodies:
+                with self.subTest(association=association, body=body):
+                    comments = [{"author": {"login": "someone"}, "authorAssociation": association, "body": body,
+                                 "createdAt": "2026-09-30T10:00:00Z"}]
+                    rest = [{"user": {"login": "someone"}, "author_association": association, "body": body,
+                             "created_at": "2026-09-30T10:00:00Z", "id": 1}]
+                    last = pipeline.deciding_verdict(rest, cfg)
+                    if last is None:
+                        expected = "Not recorded"
+                    elif pipeline.verdict(last["body"], cfg) == "block":
+                        expected = "BLOCK"
+                    else:
+                        expected = "APPROVE" if pipeline.reviewed_header_sha(last["body"]) == SHA_A else "Not recorded"
+                    self.assertEqual(BOARD.review_verdict({"headRefOid": SHA_A, "comments": comments},
+                                                          "jbookout/carr-system"), expected)
+        self.assertEqual(pipeline.verdict("REVIEW: BLOCKED", cfg), "block")
+
+    # 5 ── the scheduled job runs from the repository
+    def test_5_the_wrapper_binds_the_repository_root_and_its_interpreter(self):
+        repo = self.root / "repo"
+        (repo / "ops").mkdir(parents=True)
+        (repo / "tools").mkdir()
+        (repo / ".venv" / "bin").mkdir(parents=True)
+        wrapper = repo / "ops" / "progress-board-render.sh"
+        wrapper.write_text(LAUNCHD_SCRIPT.read_text())
+        wrapper.chmod(0o755)
+        record = self.root / "invocation.json"
+        python = repo / ".venv" / "bin" / "python"
+        python.write_text("#!/bin/sh\nexec " + sys.executable + " - \"$@\" <<'PY'\n"
+                          "import json, os, sys\n"
+                          f"open({str(record)!r}, 'w').write(json.dumps({{'argv': sys.argv[1:], 'cwd': os.getcwd(), "
+                          "'root': os.environ.get('CARR_REPO_ROOT'), 'path': os.environ['PATH']}))\n"
+                          "PY\n")
+        python.chmod(0o755)
+        subprocess.run([str(wrapper)], cwd="/", env={"PATH": "/usr/bin:/bin", "HOME": str(self.root)},
+                       check=True, capture_output=True, text=True)
+        seen = json.loads(record.read_text())
+        self.assertEqual(seen["argv"], ["tools/progress_board.py", "render", "carr-v5", "--publish"])
+        self.assertEqual(Path(seen["cwd"]).resolve(), repo.resolve())
+        self.assertEqual(Path(seen["root"]).resolve(), repo.resolve())
+        self.assertIn("/opt/homebrew/bin", seen["path"])
+        self.assertNotIn("cp ", LAUNCHD_SCRIPT.read_text())
+
+    def test_5_an_extracted_copy_reads_release_lanes_from_the_bound_root_or_says_it_cannot(self):
+        copy_dir = self.root / "extracted" / "tools"
+        copy_dir.mkdir(parents=True)
+        (copy_dir / "progress_board.py").write_text(SCRIPT.read_text())
+        probe = ("import importlib.util, sys\n"
+                 f"s = importlib.util.spec_from_file_location('b', {str(copy_dir / 'progress_board.py')!r})\n"
+                 "m = importlib.util.module_from_spec(s); s.loader.exec_module(m)\n"
+                 "print(sorted(m.release_lanes()))\n")
+        bound = subprocess.run([sys.executable, "-c", probe], env={**self.env, "CARR_REPO_ROOT": str(REPO)},
+                               capture_output=True, text=True, check=True)
+        self.assertEqual(bound.stdout.strip(), "['app', 'worker']")
+        env = {k: v for k, v in self.env.items() if k != "CARR_REPO_ROOT"}
+        unbound = subprocess.run([sys.executable, "-c", probe], env=env, capture_output=True, text=True, check=True)
+        self.assertEqual(unbound.stdout.strip(), "[]")
+        self.assertIn("release pipeline config unreadable", unbound.stderr)
+
+    # 6 ── Live only for what the lane deploys
+    def test_6_a_release_does_not_make_undeployed_local_changes_live(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("task", "demo", "a", "--title", "A", "--status", "running", "--executor", "Codex", "--pr", "42")
+        merged = {**self.OPEN, "state": "MERGED", "mergeCommit": {"oid": SHA_M}}
+        self.shipped("worker", SHA_M)
+        for files, stage, wait in (
+                (["tools/progress_board.py", "ops/launchd/com.carr.x.plist"], "merged", "outside the worker release paths"),
+                (None, "merged", "changed-file list"),
+                (["docs/runbook.md"], "merged", "outside the worker release paths"),
+                (["mcp-server/src/board-answers.js", "mcp-server/test/x.test.mjs", "mcp-server/README.md"], "live", None)):
+            with self.subTest(files=files):
+                view = dict(merged)
+                if files is None:
+                    view.pop("files")
+                    view.pop("changedFiles")
+                else:
+                    view.update(files=[{"path": f} for f in files], changedFiles=len(files))
+                self.fake_gh({"view": view})
+                self.run_board("render", "demo")
+                task = self.read_state("demo")["tasks"]["a"]
+                self.assertEqual(task["stage"], stage)
+                if wait:
+                    self.assertIn(wait, task["release_wait"])
+                    self.assertIn("operational receipt", task["release_wait"])
+                    self.assertNotIn("evidence", task)
+        truncated = {**merged, "files": [{"path": "mcp-server/src/a.js"}], "changedFiles": 150}
+        self.assertIsNone(BOARD.changed_paths(truncated))
+
+    # 7 ── malformed list rows are a failed read
+    def test_7_malformed_rows_keep_the_previous_cards_and_report_the_error(self):
+        fixture = AllRepositoriesBoard.fixture_all(self)
+        self.fake_gh(fixture)
+        self.run_board("render", "all-repos")
+        before = {k: v for k, v in self.read_state("all-repos")["tasks"].items() if k.startswith("carr-system-")}
+        self.set_fixture({**fixture, "open": {**fixture["open"], "jbookout/carr-system": [{}]},
+                          "merged": {"jbookout/carr-system": [{}]}})
+        self.run_board("render", "all-repos")
+        state = self.read_state("all-repos")
+        self.assertEqual({k: v for k, v in state["tasks"].items() if k.startswith("carr-system-")}, before)
+        row = next(r for r in state["repos"] if r["repo"] == "jbookout/carr-system")
+        self.assertIn("malformed", row["error"])
+        self.assertEqual((row["open"], row["merged"]), (6, 2))
+        self.assertIn("jbookout/carr-system", [f["repo"] for f in state["github_sync"]["failed"]])
+
+    # 8 ── a malformed probe is unknown evidence
+    def test_8_a_malformed_release_probe_leaves_the_release_unverified(self):
+        probes = [{"git_sha": "a" * 40}, {"git_sha": {"value": 7}}, {"git_sha": {"value": "not-a-sha"}}, None]
+        for payload in probes:
+            with self.subTest(payload=payload), patch.dict(os.environ, {"PROGRESS_BOARD_RELEASES": str(self.root / "none")}), \
+                 patch.object(BOARD, "probe_json", lambda url: payload), patch("sys.stderr", new_callable=io.StringIO):
+                os.environ.pop("PROGRESS_BOARD_SKIP_PROBE", None)
+                BOARD.RELEASE_CACHE.clear()
+                BOARD.RELEASE_ERRORS.clear()
+                self.assertIsNone(BOARD.latest_release("jbookout/carr-system"))
+                self.assertIn("release probe", BOARD.release_wait_reason("jbookout/carr-system"))
+        BOARD.RELEASE_CACHE.clear()
+        BOARD.RELEASE_ERRORS.clear()
+        with patch.dict(os.environ, {"PROGRESS_BOARD_RELEASES": str(self.root / "none")}), \
+             patch.object(BOARD, "probe_json", lambda url: {"environment": "production", "source_commit": 5}):
+            os.environ.pop("PROGRESS_BOARD_SKIP_PROBE", None)
+            self.assertIsNone(BOARD.latest_release("jbookout/doctorcre-app"))
+        BOARD.RELEASE_CACHE.clear()
+        BOARD.RELEASE_ERRORS.clear()
+
+    # 10 ── the snapshot says whether GitHub facts are fresh
+    def test_10_a_github_outage_and_recovery_are_published(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("task", "demo", "a", "--title", "A", "--status", "running", "--executor", "Codex", "--pr", "42")
+        self.fake_gh({"view": {**self.OPEN, "comments": [{"author": {"login": "r"}, "authorAssociation": "OWNER",
+                                                            "body": "APPROVE\nReviewed-SHA: " + SHA_A,
+                                                            "createdAt": "2026-09-30T10:00:00Z"}]}})
+        self.run_board("render", "demo")
+        good = BOARD.board_snapshot(self.read_state("demo"))["github_sync"]
+        self.assertEqual(good["failed"], [])
+        self.assertEqual(good["last_verified_at"], good["checked_at"])
+        self.set_fixture({})
+        self.run_board("render", "demo")
+        snapshot = BOARD.board_snapshot(self.read_state("demo"))
+        down = snapshot["github_sync"]
+        self.assertEqual(snapshot["tasks"]["a"]["pr_phase"], "Ready to merge", "prior facts are kept")
+        self.assertEqual([f["card"] for f in down["failed"]], ["a"])
+        self.assertGreater(down["checked_at"], good["checked_at"])
+        self.assertEqual(down["last_verified_at"], good["last_verified_at"])
+        self.set_fixture({"view": self.OPEN})
+        self.run_board("render", "demo")
+        back = BOARD.board_snapshot(self.read_state("demo"))["github_sync"]
+        self.assertEqual(back["failed"], [])
+        self.assertEqual(back["last_verified_at"], back["checked_at"])
+
+    # 11 ── every mutation reaches the app board
+    def test_11_mutations_publish_to_the_app_board(self):
+        calls, remote, caller = self.spy()
+        with self.in_process(PROGRESS_BOARD_SKIP_GH="1", PROGRESS_BOARD_LOCAL_ONLY=""), \
+             patch.object(BOARD, "call_verb", caller):
+            BOARD.main(["init", "demo", "--title", "Demo"])
+            self.assertEqual(calls.count("publish-board-snapshot"), 1)
+            BOARD.main(["task", "demo", "a", "--title", "A", "--status", "running", "--executor", "Codex"])
+            BOARD.main(["note", "demo", "--text", "Visible in the app"])
+        self.assertEqual(calls.count("publish-board-snapshot"), 3)
+        published = remote["snapshot"]["snapshot_json"]
+        self.assertEqual(published["tasks"]["a"]["title"], "A")
+        self.assertEqual(published["notes"][0]["text"], "Visible in the app")
+
+    def test_11_a_failed_publication_is_loud_and_local_only_says_so(self):
+        def refuse(verb, args):
+            raise RuntimeError("read-progress-board failed: server unreachable")
+        with self.in_process(PROGRESS_BOARD_SKIP_GH="1", PROGRESS_BOARD_LOCAL_ONLY=""), \
+             patch.object(BOARD, "call_verb", refuse):
+            with self.assertRaises(SystemExit) as raised:
+                BOARD.main(["init", "demo", "--title", "Demo"])
+        self.assertIn("not published", str(raised.exception))
+        self.assertIn("render demo --publish", str(raised.exception))
+        self.assertTrue((self.root / "boards" / "demo.json").exists(), "the local state is kept")
+        result = self.run_board("note", "demo", "--text", "x")
+        self.assertIn("not published", result.stderr)
 
 
 if __name__ == "__main__":

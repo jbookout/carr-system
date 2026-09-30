@@ -12,17 +12,22 @@ all-repos board is built here from gh data on every publish.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from types import ModuleType
+from typing import Any, Callable, Iterator
 
 
 STATUSES = ("queued", "running", "review", "blocked", "done", "failed", "superseded")
@@ -55,18 +60,28 @@ STALE_AFTER = timedelta(hours=6)
 LAUNCHD_BOARD = "carr-v5"
 DEFAULT_PR_REPO = "jbookout/carr-system"
 SNAPSHOT_SCHEMA = "carr-progress-board.v2"
-# The server refuses snapshots over 262144 bytes; tasks get most of it.
-SNAPSHOT_BUDGET = 200_000
+# publish-board-snapshot refuses JSON.stringify(snapshot).length > 262144
+# (mcp-server/src/board-answers.js): compact JSON, counted in UTF-16 units.
+SNAPSHOT_LIMIT = 262144
 
 ALL_REPOS_BOARD = "all-repos"
 GITHUB_OWNER = "jbookout"
 CORE_REPOS = ("jbookout/carr-system", "jbookout/doctorcre-app", "jbookout/software-factory")
 RECENT_MERGED = timedelta(days=7)
 OPEN_PR_FIELDS = ("number,title,body,author,headRefName,headRefOid,isDraft,createdAt,updatedAt,"
-                  "statusCheckRollup,mergeable,reviewDecision,url")
-MERGED_PR_FIELDS = "number,title,body,author,headRefName,headRefOid,createdAt,updatedAt,mergedAt,mergeCommit,url"
+                  "statusCheckRollup,mergeable,reviewDecision,comments,url")
+MERGED_PR_FIELDS = ("number,title,body,author,headRefName,headRefOid,createdAt,updatedAt,mergedAt,mergeCommit,"
+                    "files,changedFiles,url")
+# gh pr list pages internally up to --limit. A list that fills the limit may
+# be cut short, so it is re-read with a larger one; past the ceiling the read
+# is incomplete and fails like any other unreadable repository.
+PR_LIST_LIMIT = 1000
+PR_LIST_MAX = 16000
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+# The repository this tool reads its release config, review rules and verbs
+# from. The launchd wrapper binds it explicitly, so a copy of the tool run from
+# anywhere else still reads the canonical checkout.
+REPO_ROOT = Path(os.environ.get("CARR_REPO_ROOT") or Path(__file__).resolve().parents[1]).expanduser().resolve()
 RELEASE_CONFIG = REPO_ROOT / "ops" / "config" / "release-pipeline.v1.json"
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 
@@ -173,12 +188,58 @@ def read_state(project: str) -> dict[str, Any]:
         raise SystemExit(f"invalid board JSON {path}: {exc}")
 
 
+def temp_file(path: Path, text: str) -> Path:
+    """A private, fully written sibling of path: every writer has its own."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        Path(name).unlink(missing_ok=True)
+        raise
+    return Path(name)
+
+
+def atomic_write(path: Path, text: str) -> None:
+    tmp = temp_file(path, text)
+    try:
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def write_json(state: dict[str, Any]) -> None:
-    board_dir().mkdir(parents=True, exist_ok=True)
+    atomic_write(state_path(state["project"]), json.dumps(state, indent=2, sort_keys=False) + "\n")
+
+
+def create_json(state: dict[str, Any]) -> None:
+    """Write a new board, refusing if one appeared first (link is exclusive)."""
     path = state_path(state["project"])
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(state, indent=2, sort_keys=False) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    tmp = temp_file(path, json.dumps(state, indent=2, sort_keys=False) + "\n")
+    try:
+        os.link(tmp, path)
+    except FileExistsError:
+        raise SystemExit(f"board already exists: {state['project']}")
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+@contextlib.contextmanager
+def board_lock(project: str) -> Iterator[None]:
+    """One transaction at a time per board: read, change and write under an
+    exclusive lock. Never held across a GitHub read, and never nested."""
+    path = board_dir() / f"{safe_project(project)}.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def is_stuck(task: dict[str, Any], at: datetime | None = None) -> bool:
@@ -236,8 +297,8 @@ def executor_metadata(executor: str | None) -> tuple[str, str, str]:
     lower = value.lower()
     effort_match = re.search(r"\b(low|medium|high|xhigh|max|ultra)\b", lower)
     effort = effort_match.group(1) if effort_match else "unknown"
-    if "orchestrator" in lower:
-        return "Anthropic", "Claude Opus 5.5", effort
+    # Explicit model evidence first; a seat name ("orchestrator") says who
+    # dispatched the work, not which model did it.
     gpt = re.search(r"\bgpt-[\w.-]+", value, re.IGNORECASE)
     if gpt:
         return "Codex", gpt.group(0).lower(), effort
@@ -245,6 +306,8 @@ def executor_metadata(executor: str | None) -> tuple[str, str, str]:
     if claude:
         return "Anthropic", " ".join(part.capitalize() if not part[0].isdigit() else part
                                      for part in claude.group(0).split()), effort
+    if "orchestrator" in lower:
+        return "Unknown", "unknown", effort
     provider = {"codex": "Codex", "claude-cloud": "Anthropic", "grok": "xAI",
                 "flash-next": "Google"}.get(executor_pool(value), "Unknown")
     return provider, value or "unknown", effort
@@ -514,7 +577,8 @@ def gh_json(args: list[str], timeout: int = 30) -> Any:
         raise RuntimeError(f"gh {' '.join(args[:2])} returned invalid JSON") from exc
 
 
-PR_VIEW_FIELDS = "state,isDraft,headRefOid,statusCheckRollup,comments,author,mergeCommit,reviewDecision,mergeable"
+PR_VIEW_FIELDS = ("state,isDraft,headRefOid,statusCheckRollup,comments,author,mergeCommit,reviewDecision,mergeable,"
+                  "files,changedFiles")
 
 
 def valid_check(check: Any) -> bool:
@@ -559,24 +623,63 @@ def validated_pr(payload: Any) -> dict[str, Any] | None:
         return None
     if not all(valid_check(check) for check in checks):
         return None
-    comments = payload.get("comments")
-    if not isinstance(comments, list):
+    if not valid_comments(payload.get("comments")):
         return None
-    for comment in comments:
-        if not isinstance(comment, dict):
-            return None
-        commenter = comment.get("author")
-        if (not isinstance(commenter, dict) or not isinstance(commenter.get("login"), str)
-                or not all(isinstance(comment.get(field), str)
-                           for field in ("authorAssociation", "body", "createdAt"))):
-            return None
     merge = payload.get("mergeCommit")
     if merge is not None and not (isinstance(merge, dict) and isinstance(merge.get("oid"), str)):
         return None
     for field in ("reviewDecision", "mergeable"):
         if payload.get(field) is not None and not isinstance(payload[field], str):
             return None
+    if not valid_files(payload, required=False):
+        return None
     return payload
+
+
+def valid_comments(comments: Any) -> bool:
+    if not isinstance(comments, list):
+        return False
+    for comment in comments:
+        if not isinstance(comment, dict):
+            return False
+        commenter = comment.get("author")
+        if (not isinstance(commenter, dict) or not isinstance(commenter.get("login"), str)
+                or not all(isinstance(comment.get(field), str)
+                           for field in ("authorAssociation", "body", "createdAt"))):
+            return False
+    return True
+
+
+def valid_files(payload: dict[str, Any], required: bool) -> bool:
+    files, count = payload.get("files"), payload.get("changedFiles")
+    if files is None and count is None:
+        return not required
+    return (isinstance(files, list) and isinstance(count, int) and not isinstance(count, bool)
+            and all(isinstance(entry, dict) and isinstance(entry.get("path"), str) for entry in files))
+
+
+def valid_list_row(pr: Any, merged: bool) -> bool:
+    """Every field a card is built from, with its type. One bad row fails the
+    whole repository read, so a partial answer never replaces good cards."""
+    if not isinstance(pr, dict) or not isinstance(pr.get("number"), int) or isinstance(pr.get("number"), bool):
+        return False
+    if not all(isinstance(pr.get(field), str) for field in ("title", "headRefName", "headRefOid", "url", "createdAt")):
+        return False
+    if pr.get("updatedAt") is not None and not isinstance(pr["updatedAt"], str):
+        return False
+    if pr.get("body") is not None and not isinstance(pr["body"], str):
+        return False
+    author = pr.get("author")
+    if author is not None and not (isinstance(author, dict) and isinstance(author.get("login"), str)):
+        return False
+    if merged:
+        merge = pr.get("mergeCommit")
+        return (isinstance(pr.get("mergedAt"), str) and valid_files(pr, required=True)
+                and (merge is None or (isinstance(merge, dict) and isinstance(merge.get("oid"), str))))
+    checks = pr.get("statusCheckRollup")
+    return (isinstance(pr.get("isDraft"), bool) and isinstance(checks, list) and all(valid_check(c) for c in checks)
+            and valid_comments(pr.get("comments"))
+            and all(pr.get(field) is None or isinstance(pr[field], str) for field in ("mergeable", "reviewDecision")))
 
 
 def merge_sha(payload: dict[str, Any]) -> str | None:
@@ -585,36 +688,82 @@ def merge_sha(payload: dict[str, Any]) -> str | None:
     return oid if SHA_RE.fullmatch(oid) else None
 
 
-def latest_verdict(payload: dict[str, Any]) -> list[str] | None:
-    """Lines of the latest APPROVE/BLOCK comment from a trusted non-author."""
-    maker = str((payload.get("author") or {}).get("login") or "").lower()
-    if not maker:
-        return None
-    verdicts = []
-    for index, comment in enumerate(payload.get("comments") or []):
-        commenter = comment.get("author") or {}
-        login = str(commenter.get("login") or "").lower() if isinstance(commenter, dict) else ""
-        association = str(comment.get("authorAssociation") or "").upper()
-        lines = str(comment.get("body") or "").splitlines()
-        if (login and login != maker and association in {"OWNER", "MEMBER", "COLLABORATOR"}
-                and lines and lines[0] in {"APPROVE", "BLOCK"}):
-            verdicts.append((str(comment.get("createdAt") or ""), index, lines))
-    return max(verdicts)[2] if verdicts else None
+# ── review evidence ──────────────────────────────────────────────────────────
+# One interpretation, the release pipeline's own (ops/release-pipeline.py):
+# the LATEST verdict-carrying comment from a trusted author decides; BLOCK
+# markers block; an approval counts only as a literal APPROVE whose
+# Reviewed-SHA is the exact PR head. Every session posts through the owner
+# account, so authorship by the PR's own account is not disqualifying.
+
+_PIPELINE: ModuleType | None = None
 
 
-def approves_head(lines: list[str], head: str) -> bool:
-    return (re.fullmatch(r"[0-9a-f]{40}", head) is not None and len(lines) >= 2
-            and lines[1] == f"Reviewed-SHA: {head}"
-            and not any("reviewed-sha:" in line.lower() for line in lines[2:]))
+def release_pipeline() -> ModuleType:
+    global _PIPELINE
+    if _PIPELINE is None:
+        path = REPO_ROOT / "ops" / "release-pipeline.py"
+        spec = importlib.util.spec_from_file_location("carr_release_pipeline", path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"release pipeline unavailable at {path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        _PIPELINE = module
+    return _PIPELINE
 
 
-def review_verdict(payload: dict[str, Any]) -> str:
-    lines = latest_verdict(payload)
-    if not lines:
+_CONFIG: dict[str, Any] | None = None
+
+
+def release_config() -> dict[str, Any]:
+    global _CONFIG
+    if _CONFIG is None:
+        try:
+            loaded = json.loads(RELEASE_CONFIG.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            log(f"release pipeline config unreadable at {RELEASE_CONFIG} ({exc}); "
+                "review rules and auto-live are unavailable")
+            loaded = {}
+        _CONFIG = loaded if isinstance(loaded, dict) else {}
+    return _CONFIG
+
+
+def lane_config(repo: str) -> tuple[str, dict[str, Any]] | None:
+    for lane in ("worker", "app"):
+        entry = release_config().get(lane)
+        if isinstance(entry, dict) and entry.get("github_repo") == repo:
+            return lane, entry
+    return None
+
+
+def review_rules(repo: str) -> dict[str, Any]:
+    """The repository's lane review rules; a repo with no lane uses the
+    worker's, the pipeline's reference contract."""
+    found = lane_config(repo)
+    if found:
+        return found[1]
+    worker = release_config().get("worker")
+    if not isinstance(worker, dict):
+        raise RuntimeError("release pipeline review rules unavailable")
+    return worker
+
+
+def review_verdict(payload: dict[str, Any], repo: str = DEFAULT_PR_REPO) -> str:
+    """BLOCK, APPROVE (exact head), or Not recorded."""
+    pipeline = release_pipeline()
+    rules = review_rules(repo)
+    comments = [{"body": str(c.get("body") or ""), "author_association": c.get("authorAssociation"),
+                 "user": {"login": (c.get("author") or {}).get("login")}, "created_at": c.get("createdAt"),
+                 "id": index}
+                for index, c in enumerate(payload.get("comments") or []) if isinstance(c, dict)]
+    last = pipeline.deciding_verdict(comments, rules)
+    if last is None:
         return "Not recorded"
-    if lines[0] == "BLOCK":
+    if pipeline.verdict(last["body"], rules) == "block":
         return "BLOCK"
-    return "APPROVE" if approves_head(lines, str(payload.get("headRefOid") or "").lower()) else "Not recorded"
+    head = str(payload.get("headRefOid") or "").lower()
+    return "APPROVE" if SHA_RE.fullmatch(head) and pipeline.reviewed_header_sha(last["body"]) == head \
+        else "Not recorded"
 
 
 FAILING_CHECKS = {"FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"}
@@ -632,7 +781,7 @@ def failing_check_names(payload: dict[str, Any]) -> list[str]:
             for check in checks if check_outcome(check) in FAILING_CHECKS]
 
 
-def derived_pr_state(payload: dict[str, Any]) -> tuple[str, str, str]:
+def derived_pr_state(payload: dict[str, Any], repo: str = DEFAULT_PR_REPO) -> tuple[str, str, str]:
     """GitHub's view of a PR as (status, stage, phase). Draft is build; open
     with checks running is CI; failing checks, a conflict, changes requested
     or a BLOCK verdict are blocked; everything else waits on review."""
@@ -653,10 +802,10 @@ def derived_pr_state(payload: dict[str, Any]) -> tuple[str, str, str]:
         return "blocked", "review", "Changes requested"
     if any(check_outcome(check) not in PASSING_CHECKS for check in checks):
         return "running", "ci", "CI"
-    lines = latest_verdict(payload)
-    if lines and lines[0] == "BLOCK":
+    verdict = review_verdict(payload, repo)
+    if verdict == "BLOCK":
         return "blocked", "review", "Review blocked"
-    if lines and approves_head(lines, str(payload.get("headRefOid") or "").lower()):
+    if verdict == "APPROVE":
         return "review", "review", "Ready to merge"
     if str(payload.get("reviewDecision") or "").upper() == "APPROVED":
         return "review", "review", "Approved"
@@ -677,13 +826,12 @@ def derived_block(payload: dict[str, Any], phase: str) -> tuple[str, str] | None
 # SHA the live release endpoint serves.
 
 RELEASE_CACHE: dict[str, Any] = {}
+# Why the live release probe could not verify a repository's release.
+RELEASE_ERRORS: dict[str, str] = {}
 
 
 def release_lanes() -> dict[str, dict[str, str]]:
-    try:
-        config = json.loads(RELEASE_CONFIG.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+    config = release_config()
     lanes = {}
     for lane in ("worker", "app"):
         entry = config.get(lane)
@@ -715,6 +863,21 @@ def release_rows(repo: str) -> list[dict[str, Any]]:
     return sorted(rows, key=lambda row: str(row.get("ts") or ""))
 
 
+def probe_sha(lane: str, payload: dict[str, Any]) -> str | None:
+    """The released SHA a probe reports; None for a non-production app;
+    ValueError for any other shape."""
+    if lane == "worker":
+        field = payload.get("git_sha")
+        value = field.get("value") if isinstance(field, dict) else None
+    else:
+        if payload.get("environment") != "production":
+            return None
+        value = payload.get("source_commit")
+    if not isinstance(value, str) or not SHA_RE.fullmatch(value.lower()):
+        raise ValueError(f"the {lane} release probe returned an invalid release shape")
+    return value.lower()
+
+
 def probe_json(url: str) -> dict[str, Any] | None:
     try:
         request = urllib.request.Request(url, headers={"User-Agent": "carr-progress-board"})
@@ -739,12 +902,17 @@ def latest_release(repo: str) -> dict[str, Any] | None:
         for lane, entry in release_lanes().items():
             if entry["repo"] != repo or not entry["url"].startswith("https://"):
                 continue
-            payload = probe_json(entry["url"]) or {}
-            if lane == "worker":
-                sha = str((payload.get("git_sha") or {}).get("value") or "").lower()
-            else:
-                sha = str(payload.get("source_commit") or "").lower() if payload.get("environment") == "production" else ""
-            if SHA_RE.fullmatch(sha):
+            payload = probe_json(entry["url"])
+            if payload is None:
+                RELEASE_ERRORS[repo] = f"the {lane} release probe was unreachable"
+                continue
+            try:
+                sha = probe_sha(lane, payload)
+            except ValueError as exc:
+                RELEASE_ERRORS[repo] = str(exc)
+                log(f"{repo}: {exc}; release left unverified")
+                continue
+            if sha:
                 release = {"sha": sha, "lane": lane, "ts": None, "source": "live probe"}
                 break
     RELEASE_CACHE[repo] = release
@@ -771,6 +939,8 @@ def release_wait_reason(repo: str) -> str:
     release = latest_release(repo)
     if release:
         return f"waiting for the next release after {release['sha'][:12]}"
+    if repo in RELEASE_ERRORS:
+        return f"release unverified: {RELEASE_ERRORS[repo]} (release probe)"
     return "no verified release recorded yet"
 
 
@@ -798,15 +968,54 @@ def compare_status(repo: str, base: str, head: str) -> str | None:
         return None
     cache = cache if isinstance(cache, dict) else {}
     cache[key] = status
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(cache, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+    atomic_write(path, json.dumps(cache, indent=1, sort_keys=True) + "\n")
     return status
 
 
-def auto_live(task: dict[str, Any], repo: str, at: str) -> bool:
-    """Move a merged card to Live once its merge commit is released."""
+def changed_paths(payload: dict[str, Any]) -> list[str] | None:
+    """The PR's complete changed-file list, or None if gh gave less."""
+    if not valid_files(payload, required=True):
+        return None
+    paths = [str(entry["path"]) for entry in payload["files"]]
+    return paths if len(paths) == payload["changedFiles"] and all(paths) else None
+
+
+def release_scope_gap(repo: str, paths: list[str] | None) -> str | None:
+    """None when the repository's release lane deploys every runtime path the
+    PR changed; otherwise why a release cannot certify it. Doc and test paths
+    the lane declares non-release carry no runtime."""
+    if paths is None:
+        return "the PR's changed-file list is unavailable or incomplete"
+    found = lane_config(repo)
+    if found is None:
+        return f"{repo} has no release lane"
+    lane, entry = found
+    prefixes = entry.get("release_paths")
+    ignore = entry.get("non_release_globs") or []
+    hit = release_pipeline()._glob_hit
+    outside = [path for path in paths
+               if prefixes is not None and not any(path == x.rstrip("/") or path.startswith(x) for x in prefixes)
+               and not any(hit(path, glob) for glob in ignore)]
+    if outside:
+        shown = ", ".join(outside[:3]) + (f" and {len(outside) - 3} more" if len(outside) > 3 else "")
+        return f"changes outside the {lane} release paths ({shown})"
+    return None
+
+
+def auto_live(task: dict[str, Any], repo: str, at: str, paths: list[str] | None) -> bool:
+    """Move a merged card to Live once its merge commit is in a verified
+    release of a lane that deploys everything the PR changed. Anything else
+    (a local tool, a LaunchAgent) waits for an operational receipt."""
     merge = str(task.get("merge_sha") or "")
     if task_stage(task) != "merged" or not SHA_RE.fullmatch(merge):
+        return False
+    gap = release_scope_gap(repo, paths)
+    if gap:
+        wait = (f"{gap}; a release cannot make it Live, it needs an operational receipt "
+                "(task --stage live --evidence)")
+        if task.get("release_wait") != wait:
+            task["release_wait"] = wait
+            return True
         return False
     release = latest_release(repo)
     if release and (release["sha"] == merge or compare_status(repo, release["sha"], merge) in {"behind", "identical"}):
@@ -841,8 +1050,8 @@ def branch_executor(branch: str, author: str) -> str:
     return author or "unassigned"
 
 
-def open_pr_state(pr: dict[str, Any]) -> tuple[str, str, str]:
-    return derived_pr_state({**pr, "state": "OPEN", "comments": []})
+def open_pr_state(repo: str, pr: dict[str, Any]) -> tuple[str, str, str]:
+    return derived_pr_state({**pr, "state": "OPEN"}, repo)
 
 
 def pr_card(repo: str, pr: dict[str, Any], merged: bool) -> dict[str, Any]:
@@ -851,8 +1060,8 @@ def pr_card(repo: str, pr: dict[str, Any], merged: bool) -> dict[str, Any]:
     if merged:
         status, stage, phase = "done", "merged", "Merged"
     else:
-        status, stage, phase = open_pr_state(pr)
-    card = {
+        status, stage, phase = open_pr_state(repo, pr)
+    card: dict[str, Any] = {
         "title": str(pr.get("title") or f"PR {pr.get('number')}")[:200],
         "summary": pr_summary(pr.get("body")),
         "repo": repo, "pr": int(pr["number"]),
@@ -864,6 +1073,7 @@ def pr_card(repo: str, pr: dict[str, Any], merged: bool) -> dict[str, Any]:
     }
     if not merged and isinstance(pr.get("statusCheckRollup"), list):
         card["pr_checks"] = checks_summary(pr)
+        card["review_verdict"] = review_verdict(pr, repo)
     block = derived_block(pr, phase) if status == "blocked" else None
     if block:
         card.update({"blocked_reason": block[0], "next_action": block[1], "blocked_source": "github"})
@@ -885,56 +1095,91 @@ def list_repositories(prior: list[str]) -> list[str]:
     return [*CORE_REPOS, *extra]
 
 
-def fit_snapshot_tasks(tasks: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Drop the oldest Live cards until the tasks fit the snapshot budget."""
-    kept = dict(tasks)
-    live = sorted((key for key, task in kept.items() if task_stage(task) == "live"),
-                  key=lambda key: str(kept[key].get("completed_at") or kept[key].get("updated_at") or ""))
-    while live and len(json.dumps(kept)) >= SNAPSHOT_BUDGET:
-        # Drop in batches so a very large board does not re-serialise per card.
-        for key in live[: max(1, len(live) // 10)]:
-            kept.pop(key, None)
-        live = live[max(1, len(live) // 10):]
-    return kept
+def list_prs(repo: str, state: str, fields: str, search: str | None = None) -> list[Any]:
+    """Every matching PR, or RuntimeError: never a silently truncated list."""
+    limit = PR_LIST_LIMIT
+    while True:
+        args = ["pr", "list", "--repo", repo, "--state", state, "--limit", str(limit), "--json", fields]
+        if search:
+            args[6:6] = ["--search", search]
+        rows = gh_json(args, timeout=120)
+        if not isinstance(rows, list):
+            raise RuntimeError("gh pr list did not return a list")
+        if len(rows) < limit:
+            return rows
+        if limit >= PR_LIST_MAX:
+            raise RuntimeError(f"{repo} has at least {limit} {state} PRs; the list would be incomplete")
+        limit = min(limit * 4, PR_LIST_MAX)
+
+
+def read_repository(repo: str, since: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    open_prs = list_prs(repo, "open", OPEN_PR_FIELDS)
+    merged_prs = list_prs(repo, "merged", MERGED_PR_FIELDS, f"merged:>={since}")
+    for merged, rows in ((False, open_prs), (True, merged_prs)):
+        for index, pr in enumerate(rows):
+            if not valid_list_row(pr, merged):
+                label = f"#{pr['number']}" if isinstance(pr, dict) and isinstance(pr.get("number"), int) else f"row {index}"
+                raise RuntimeError(f"gh pr list returned a malformed {'merged' if merged else 'open'} PR ({label})")
+    return open_prs, merged_prs
+
+
+def read_json_file(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 def build_all_repos() -> dict[str, Any]:
-    """Rebuild the all-repos board from gh. A repo that cannot be read keeps
-    its previous cards; when none can be read nothing is written."""
+    """Rebuild the all-repos board from gh. A repo that cannot be read, or
+    returns a malformed or incomplete list, keeps its previous cards and
+    names the error; when none can be read nothing is written. gh is read
+    before the board lock is taken; the merge into the board happens under it."""
     if not gh_available():
         raise RuntimeError("gh CLI unavailable; the all-repos board was not rebuilt")
     path = state_path(ALL_REPOS_BOARD)
-    try:
-        prior = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        prior = {}
-    prior_tasks = prior.get("tasks") if isinstance(prior.get("tasks"), dict) else {}
-    prior_repos = [str(row.get("repo")) for row in prior.get("repos") or [] if isinstance(row, dict)]
-    at = stamp()
+    unlocked = read_json_file(path)
+    prior_repos = [str(row.get("repo")) for row in unlocked.get("repos") or [] if isinstance(row, dict)]
     since = (now_utc() - RECENT_MERGED).date().isoformat()
-    tasks: dict[str, dict[str, Any]] = {}
-    rows = []
-    read_any = False
+    reads: dict[str, tuple[list[dict[str, Any]], list[dict[str, Any]]] | str] = {}
     for repo in list_repositories(prior_repos):
         try:
-            open_prs = gh_json(["pr", "list", "--repo", repo, "--state", "open", "--limit", "100",
-                                "--json", OPEN_PR_FIELDS])
-            merged_prs = gh_json(["pr", "list", "--repo", repo, "--state", "merged", "--search", f"merged:>={since}",
-                                  "--limit", "50", "--json", MERGED_PR_FIELDS])
-            if not isinstance(open_prs, list) or not isinstance(merged_prs, list):
-                raise RuntimeError("gh pr list did not return a list")
+            reads[repo] = read_repository(repo, since)
         except RuntimeError as exc:
+            reads[repo] = str(exc)[:200]
+    if all(isinstance(result, str) for result in reads.values()):
+        raise RuntimeError("no repository could be read from gh; the all-repos board was not rebuilt")
+    for repo, result in reads.items():
+        if not isinstance(result, str):
+            latest_release(repo)  # any live probe happens before the lock
+    with board_lock(ALL_REPOS_BOARD):
+        prior = read_json_file(path)
+        state = assemble_all_repos(prior, reads)
+        write_json(state)
+    return state
+
+
+def assemble_all_repos(prior: dict[str, Any],
+                       reads: dict[str, tuple[list[dict[str, Any]], list[dict[str, Any]]] | str]) -> dict[str, Any]:
+    raw_tasks = prior.get("tasks")
+    prior_tasks: dict[str, Any] = raw_tasks if isinstance(raw_tasks, dict) else {}
+    at = stamp()
+    tasks: dict[str, dict[str, Any]] = {}
+    rows = []
+    failed = []
+    for repo, result in reads.items():
+        if isinstance(result, str):
             kept = {key: task for key, task in prior_tasks.items() if task.get("repo") == repo}
             tasks.update(kept)
             rows.append({"repo": repo, "open": sum(task_stage(t) not in {"merged", "live"} for t in kept.values()),
                          "merged": sum(task_stage(t) in {"merged", "live"} for t in kept.values()),
-                         "error": str(exc)[:200]})
+                         "error": result})
+            failed.append({"repo": repo, "error": result})
             continue
-        read_any = True
+        open_prs, merged_prs = result
         for merged, prs in ((False, open_prs), (True, merged_prs)):
             for pr in prs:
-                if not isinstance(pr, dict) or not isinstance(pr.get("number"), int):
-                    continue
                 key = card_key(repo, pr["number"])
                 card = pr_card(repo, pr, merged)
                 previous = prior_tasks.get(key) or {}
@@ -950,19 +1195,19 @@ def build_all_repos() -> dict[str, Any]:
                     entered = card.get("merged_at") if merged else card.get("updated_at")
                     record_stage(card, str(entered or at), None)
                 normalize_task(card)
-                auto_live(card, repo, at)
+                auto_live(card, repo, at, changed_paths(pr) if merged else None)
                 tasks[key] = card
         rows.append({"repo": repo, "open": len(open_prs), "merged": len(merged_prs)})
-    if not read_any:
-        raise RuntimeError("no repository could be read from gh; the all-repos board was not rebuilt")
-    state = {
+    raw_sync = prior.get("github_sync")
+    previous_sync: dict[str, Any] = raw_sync if isinstance(raw_sync, dict) else {}
+    return {
         "version": 2, "project": ALL_REPOS_BOARD, "title": "All repositories", "kind": "all-repos",
         "created_at": prior.get("created_at") or at,
         "updated_at": max((str(t.get("updated_at") or "") for t in tasks.values()), default=at) or at,
-        "tasks": fit_snapshot_tasks(tasks), "questions": {}, "deliverables": [], "notes": [], "repos": rows,
+        "tasks": tasks, "questions": {}, "deliverables": [], "notes": [], "repos": rows,
+        "github_sync": {"checked_at": at, "failed": failed,
+                        "last_verified_at": at if not failed else previous_sync.get("last_verified_at")},
     }
-    write_json(state)
-    return state
 
 
 # ── project boards ───────────────────────────────────────────────────────────
@@ -990,7 +1235,7 @@ def manual_block_holds(task: dict[str, Any], info: dict[str, Any], derived_statu
 
 def sync_pr_task(task: dict[str, Any], info: dict[str, Any], at: str) -> bool:
     """Bring one PR card to GitHub's state. Returns True if anything changed."""
-    status, stage, phase = derived_pr_state(info)
+    status, stage, phase = derived_pr_state(info, task_repo(task))
     floor = task.get("manual_stage")
     current = task_stage(task)
     if current == "live":
@@ -1010,7 +1255,7 @@ def sync_pr_task(task: dict[str, Any], info: dict[str, Any], at: str) -> bool:
     if target["blocked_source"] != "manual":
         target["blocked_head"] = None
     facts: dict[str, Any] = {"pr_checks": checks_summary(info), "pr_head": info.get("headRefOid") or "",
-                             "review_verdict": review_verdict(info)}
+                             "review_verdict": review_verdict(info, task_repo(task))}
     if merge_sha(info):
         facts["merge_sha"] = merge_sha(info)
     stamped = any(task.get(field) != target.get(field) for field in DERIVED_STATE)
@@ -1043,14 +1288,32 @@ def settle_done_without_pr(task: dict[str, Any]) -> bool:
 
 def render(project: str) -> None:
     """Sync every PR card from GitHub, refresh release and health facts, and
-    write the JSON. A gh failure never stops the run: it is logged, recorded
-    under github_sync, and the card keeps its last known state. The name is
-    kept for the launchd job; nothing here renders a page."""
+    write the JSON. GitHub is read first, without the board lock; the result
+    is applied to a fresh read under the lock, so a note or task written
+    meanwhile is kept. A gh failure never stops the run: the card keeps its
+    last known state and github_sync names the failure, when it was checked
+    and when every card was last verified. The name is kept for the launchd
+    job; nothing here renders a page."""
     if project == ALL_REPOS_BOARD:
         build_all_repos()
         return
-    state = read_state(project)
-    fetched: dict[tuple[str, int], tuple[dict[str, Any] | None, str | None]] = {}
+    keys = {pr_key(task) for task in read_state(project).get("tasks", {}).values() if task.get("pr") is not None}
+    fetched = {key: fetch_pr(key[1], key[0]) for key in sorted(keys)}
+    for key, (info, _) in fetched.items():
+        if info is not None and info.get("state") == "MERGED":
+            latest_release(key[0])  # any live probe happens before the lock
+    with board_lock(project):
+        state = read_state(project)
+        if apply_sync(state, fetched):
+            state["updated_at"] = max((str(task.get("updated_at") or "") for task in state["tasks"].values()),
+                                      default=state.get("updated_at"))
+            write_json(state)
+    # The retired static page: never leave a stale copy to be mistaken for a board.
+    (board_dir() / f"{safe_project(project)}.html").unlink(missing_ok=True)
+
+
+def apply_sync(state: dict[str, Any],
+               fetched: dict[tuple[str, int], tuple[dict[str, Any] | None, str | None]]) -> bool:
     changed = False
     failed: list[dict[str, str]] = []
     synced = 0
@@ -1064,7 +1327,7 @@ def render(project: str) -> None:
             continue
         key = pr_key(task)
         if key not in fetched:
-            fetched[key] = fetch_pr(key[1], key[0])
+            continue  # added after GitHub was read; the next run syncs it
         info, error = fetched[key]
         if info is None:
             label = f"{key[0].split('/', 1)[1]}#{key[1]}"
@@ -1074,30 +1337,49 @@ def render(project: str) -> None:
         synced += 1
         if sync_pr_task(task, info, at):
             changed = True
-        if auto_live(task, task_repo(task), at):
+        if auto_live(task, task_repo(task), at, changed_paths(info)):
             changed = True
     if fetched and not os.environ.get("PROGRESS_BOARD_SKIP_GH"):
-        report = {"at": at, "synced": synced, "failed": failed}
-        previous = state.get("github_sync") or {}
-        if (previous.get("synced"), previous.get("failed")) != (synced, failed) or changed:
-            state["github_sync"] = report
-            changed = True
-    if changed:
-        state["updated_at"] = max(str(task.get("updated_at") or "") for task in state["tasks"].values())
+        raw_sync = state.get("github_sync")
+        previous: dict[str, Any] = raw_sync if isinstance(raw_sync, dict) else {}
+        state["github_sync"] = {"checked_at": at, "synced": synced, "failed": failed,
+                                "last_verified_at": at if not failed else previous.get("last_verified_at")}
+        changed = True
+    return changed
+
+
+def local_only() -> bool:
+    return bool(os.environ.get("PROGRESS_BOARD_LOCAL_ONLY"))
+
+
+def refresh_and_publish(project: str) -> None:
+    """Every mutation reaches the app board, the only board UI. A failed
+    publication is loud: the local state is kept and the retry is named."""
+    render(project)
+    if local_only():
+        log(f"{project}: saved locally; not published to the app board (PROGRESS_BOARD_LOCAL_ONLY is set)")
+        return
+    try:
+        publish_board(project)
+    except RuntimeError as exc:
+        raise SystemExit(f"progress-board: {project} saved locally but not published to the app board: {exc}. "
+                         f"Retry: tools/progress_board.py render {project} --publish")
+
+
+def mutate(project: str, change: Callable[[dict[str, Any]], None]) -> None:
+    """Read, change and write one board as a single locked transaction, then
+    refresh and publish it."""
+    with board_lock(project):
+        state = read_state(project)
+        change(state)
+        state["updated_at"] = stamp()
         write_json(state)
-    # The retired static page: never leave a stale copy to be mistaken for a board.
-    (board_dir() / f"{safe_project(project)}.html").unlink(missing_ok=True)
-
-
-def write_and_render(state: dict[str, Any]) -> None:
-    state["updated_at"] = stamp()
-    write_json(state)
-    render(state["project"])
+    refresh_and_publish(project)
 
 
 def call_verb(verb: str, args: dict[str, Any]) -> dict[str, Any]:
     """Use the existing noninteractive local-token route; no model is involved."""
-    repo = Path("/Users/booko/carr-system")
+    repo = REPO_ROOT
     result = subprocess.run(
         [str(repo / "run.sh"), "call", verb, json.dumps(args, sort_keys=True, separators=(",", ":"))],
         cwd=repo, capture_output=True, text=True, timeout=30, check=False,
@@ -1120,9 +1402,51 @@ def stable_key(verb: str, args: dict[str, Any]) -> str:
 
 
 
+class SnapshotTooLarge(RuntimeError):
+    """The board's untrimmable content alone exceeds the server limit."""
+
+
+def snapshot_size(snapshot: dict[str, Any]) -> int:
+    """JSON.stringify(snapshot).length, as publish-board-snapshot measures it."""
+    text = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
+    return len(text.encode("utf-16-le")) // 2
+
+
+def fit_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Trim until the whole payload fits: oldest Live cards first, then oldest
+    Merged cards, then the oldest History rows. Everything in flight, notes,
+    decisions and the ledger are never dropped; if they alone are too large
+    the snapshot is refused rather than published short."""
+    tasks, history = snapshot["tasks"], snapshot["history"]
+
+    def age(task: dict[str, Any]) -> str:
+        return str(task.get("completed_at") or task.get("merged_at") or task.get("updated_at") or "")
+    order = [("live", "tasks", key) for key in sorted(
+                 (k for k, t in tasks.items() if task_stage(t) == "live"), key=lambda k: (age(tasks[k]), k))]
+    order += [("merged", "tasks", key) for key in sorted(
+                 (k for k, t in tasks.items() if task_stage(t) == "merged"), key=lambda k: (age(tasks[k]), k))]
+    order += [("history", "history", key) for key in sorted(
+                 history, key=lambda k: (str(history[k].get("updated_at") or ""), k))]
+    size = snapshot_size(snapshot)
+    index = 0
+    while size > SNAPSHOT_LIMIT and index < len(order):
+        freed, excess = 0, size - SNAPSHOT_LIMIT
+        while freed < excess and index < len(order):
+            kind, section, key = order[index]
+            index += 1
+            entry = snapshot[section].pop(key)
+            freed += snapshot_size({key: entry}) - 1
+            snapshot["omitted"][kind] += 1
+        size = snapshot_size(snapshot)
+    if size > SNAPSHOT_LIMIT:
+        raise SnapshotTooLarge(f"board {snapshot.get('project')} snapshot is {size} characters after trimming "
+                               f"every Live, Merged and History entry; the server limit is {SNAPSHOT_LIMIT}")
+    return snapshot
+
+
 def board_snapshot(state: dict[str, Any]) -> dict[str, Any]:
-    """The versioned data contract the app page renders. Deterministic, so an
-    unchanged board is never republished."""
+    """The versioned data contract the app page renders. Deterministic for a
+    given state, and always within the server's size limit."""
     tasks = {}
     all_tasks = state.get("tasks") or {}
     for task_id, task in all_tasks.items():
@@ -1135,12 +1459,12 @@ def board_snapshot(state: dict[str, Any]) -> dict[str, Any]:
          "answered_at": q.get("answered_at") or q.get("updated_at")}
         for qid, q in (state.get("questions") or {}).items() if q.get("answer")
     ]
-    return {
+    return fit_snapshot({
         "schema": SNAPSHOT_SCHEMA,
         "kind": state.get("kind") or "project",
         "project": state["project"],
         "title": state.get("title") or state["project"],
-        "tasks": fit_snapshot_tasks(tasks),
+        "tasks": tasks,
         "history": {
             task_id: {"title": task.get("title", task_id), "status": task.get("status"),
                       "reason": retired_reason(task), "executor": task.get("executor", "unassigned"),
@@ -1149,10 +1473,14 @@ def board_snapshot(state: dict[str, Any]) -> dict[str, Any]:
         "deliverables": list(state.get("deliverables") or [])[:24],
         "notes": list(state.get("notes") or [])[:50],
         "decisions": decisions,
-        "ledger": executor_ledger(state.get("tasks") or {}),
+        "ledger": executor_ledger(all_tasks),
         "repos": list(state.get("repos") or []),
+        # When GitHub facts were last checked and verified, and what failed:
+        # a card kept from before an outage is never shown as fresh.
+        "github_sync": state.get("github_sync"),
+        "omitted": {"live": 0, "merged": 0, "history": 0},
         "updated_at": state.get("updated_at"),
-    }
+    })
 
 
 def question_revision(question: dict[str, Any], project: str) -> dict[str, Any]:
@@ -1342,9 +1670,6 @@ def command_poll(args: argparse.Namespace) -> None:
 def command_init(args: argparse.Namespace) -> None:
     if args.project == ALL_REPOS_BOARD:
         raise SystemExit("all-repos is built from gh by render; it has no init")
-    path = state_path(args.project)
-    if path.exists():
-        raise SystemExit(f"board already exists: {args.project}")
     created = stamp()
     state = {
         "version": 2,
@@ -1358,12 +1683,16 @@ def command_init(args: argparse.Namespace) -> None:
         "deliverables": [],
         "notes": [],
     }
-    write_json(state)
-    render(args.project)
+    with board_lock(args.project):
+        create_json(state)
+    refresh_and_publish(args.project)
 
 
 def command_task(args: argparse.Namespace) -> None:
-    state = read_state(args.project)
+    mutate(args.project, lambda state: update_task(state, args))
+
+
+def update_task(state: dict[str, Any], args: argparse.Namespace) -> None:
     task_time = stamp()
     prior = state.setdefault("tasks", {}).get(args.task_id, {})
     if not prior and not all((args.title, args.status, args.executor)):
@@ -1438,11 +1767,13 @@ def command_task(args: argparse.Namespace) -> None:
     if task.get("status") in RETIRED_STATUSES and not str(task.get("reason") or "").strip():
         raise SystemExit(f"a {task.get('status')} card needs --reason")
     state["tasks"][args.task_id] = task
-    write_and_render(state)
 
 
 def command_ask(args: argparse.Namespace) -> None:
-    state = read_state(args.project)
+    mutate(args.project, lambda state: ask_question(state, args))
+
+
+def ask_question(state: dict[str, Any], args: argparse.Namespace) -> None:
     question_time = stamp()
     prior = state.setdefault("questions", {}).get(args.q_id, {})
     question_text = args.question.strip()
@@ -1473,41 +1804,39 @@ def command_ask(args: argparse.Namespace) -> None:
         "created_at": prior.get("created_at", question_time),
         "updated_at": question_time,
     }
-    write_and_render(state)
 
 
 def command_answer(args: argparse.Namespace) -> None:
-    state = read_state(args.project)
-    question = state.setdefault("questions", {}).get(args.q_id)
-    if question is None:
-        raise SystemExit(f"question does not exist: {args.q_id}")
     answer = args.answer
     if answer is None:
         answer = sys.stdin.readline().strip()
     if not answer:
         raise SystemExit("answer must be provided on stdin or with --answer")
-    question["answer"] = answer
-    question["answered_at"] = question["updated_at"] = stamp()
-    write_and_render(state)
+
+    def record(state: dict[str, Any]) -> None:
+        question = state.setdefault("questions", {}).get(args.q_id)
+        if question is None:
+            raise SystemExit(f"question does not exist: {args.q_id}")
+        question["answer"] = answer
+        question["answered_at"] = question["updated_at"] = stamp()
+    mutate(args.project, record)
 
 
 def command_deliver(args: argparse.Namespace) -> None:
-    state = read_state(args.project)
-    state.setdefault("deliverables", []).insert(
-        0, {"title": args.title, "link": args.link, "created_at": stamp()}
-    )
-    write_and_render(state)
+    mutate(args.project, lambda state: state.setdefault("deliverables", []).insert(
+        0, {"title": args.title, "link": args.link, "created_at": stamp()}))
 
 
 def command_note(args: argparse.Namespace) -> None:
-    state = read_state(args.project)
     text = args.text.strip()
     if not text:
         raise SystemExit("a note needs text")
-    notes = state.setdefault("notes", [])
-    notes.insert(0, {"text": text[:2000], "created_at": stamp()})
-    del notes[50:]
-    write_and_render(state)
+
+    def add(state: dict[str, Any]) -> None:
+        notes = state.setdefault("notes", [])
+        notes.insert(0, {"text": text[:2000], "created_at": stamp()})
+        del notes[50:]
+    mutate(args.project, add)
 
 
 def parser() -> argparse.ArgumentParser:
