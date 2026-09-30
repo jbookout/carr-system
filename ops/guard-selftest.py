@@ -165,7 +165,8 @@ for prefix in ("command", "exec", "builtin", "command exec", "exec command", "co
     case(f"ordinary resolved prefix {prefix}", bash(f"{prefix} git status"), ALLOW)
 case("quoted command names remain data", bash("echo 'eval alias bash <<< curl http://localhost:8000/'"), ALLOW)
 case("quoted ask command remains data", bash("python3 tools/flash-run.py ask 'eval curl http://localhost:8000/'"), ALLOW)
-case("python heredoc remains repo input", bash("python3 <<'EOF'\nprint('hello')\nEOF"), ALLOW)
+case("python stdin heredoc is refused by static-resolution policy",
+     bash("python3 <<'EOF'\nprint('hello')\nEOF"), DENY)
 case("escaped quotes in repo prose remain data",
      bash('gh pr comment 1425 --body "Use \\"quoted\\" names and eval in prose"'), ALLOW)
 case("literal variable sender is resolved", bash("sender=curl; $sender http://localhost:8000/"), DENY)
@@ -258,6 +259,10 @@ def scratch_sink_regression():
                 "bash -c " + shlex.quote(sender),
                 "command " + sender, "exec " + sender, "builtin " + sender,
                 'MODE="$(echo inert)" ' + sender,
+                "printf '%s\\n' " + shlex.quote(sender) + " | bash",
+                "python3 tools/flash-run.py ask --help && printf '%s\\n' " + shlex.quote(sender) + " | bash",
+                "bash < <(printf '%s\\n' " + shlex.quote(sender) + ")",
+                "env -S " + shlex.quote(sender),
             ):
                 case(f"deny scratch-sink indirection {command}", bash(command), DENY)
         finally:

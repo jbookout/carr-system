@@ -33,10 +33,10 @@ a script does internally. `nightly.sh` runs git, pg_dump and R2 uploads inside
 itself and this gate never sees them. That is the correct scope: the threat model
 is a session taking a destructive action, not the reviewed scripts in this repo.
 
-FAILS OPEN, ON PURPOSE. Any internal error allows the call. A gate that wedges
-the 2am chain costs more than the marginal safety of failing closed, on a
-single-operator machine that is not a hostile environment. Every allow-on-error
-is logged so a silently-degraded gate is still discoverable.
+FAILS CLOSED. Executed text must be statically resolvable. Opaque interpreter
+input, dynamic execution, malformed syntax and internal analysis errors refuse
+with exit 2. Literal reviewed script files remain the sanctioned execution seam;
+this hook does not claim to analyze their contents.
 
 DISABLE FAST: remove the hooks block from settings.json, or `chmod -x` this file
 (a non-executable hook errors, and this gate fails open).
@@ -806,24 +806,85 @@ def _executable_identity(word, cwd):
     return name, any(identity == digest(candidate) for candidate in candidates)
 
 
-def _shell_substitutions(text):
-    """Extract active $(...) and backticks; single-quoted bytes stay data."""
-    bodies, quote, index = [], "", 0
+class _ShellWord(str):
+    """A word retains whether the shell expands it, independently of its value."""
+    def __new__(cls, value, dynamic=False, quoted=False):
+        word = super().__new__(cls, value)
+        word.dynamic, word.quoted = dynamic, quoted
+        return word
+
+
+def _execution_tokens(text):
+    """Bounded lexer: retain operators, expansion provenance and heredoc input.
+
+    Never execute text to resolve it. Unsupported operators and incomplete
+    quoting/substitution/redirection raise; callers turn every exception into
+    refusal. Heredoc bytes are data only after an exact delimiter is found.
+    """
+    tokens, substitutions, pending = [], [], []
+    value, quote, dynamic, quoted, started = "", "", False, False, False
+    index = 0
+    operators = ("<<<", "<<-", "&>>", ">>", "<<", ">&", "<&", "&>",
+                 "&&", "||", "|&", ";", "|", "&", "(", ")", "<", ">", "\n")
+
+    def flush():
+        nonlocal value, dynamic, quoted, started
+        if started:
+            word = _ShellWord(value, dynamic, quoted)
+            if tokens and not isinstance(tokens[-1], _ShellWord) and tokens[-1] in {"<<", "<<-"}:
+                if dynamic or not value:
+                    raise ValueError("unresolved heredoc delimiter")
+                pending.append((word, tokens[-1] == "<<-"))
+            tokens.append(word)
+        value, dynamic, quoted, started = "", False, False, False
+
     while index < len(text):
         char = text[index]
         if char == "\\" and quote != "'":
+            if index + 1 >= len(text):
+                raise ValueError("trailing escape")
+            following = text[index + 1]
+            # Inside double quotes a backslash only escapes these characters.
+            if quote == '"' and following not in '$`"\\\n':
+                value += "\\"
+                started = True
+                index += 1
+                continue
+            if following != "\n":
+                value += following
+                started = True
             index += 2
             continue
         if quote == "'":
-            if char == "'":
+            if char == quote:
                 quote = ""
+            else:
+                value += char
             index += 1
             continue
-        if char == "'" and not quote:
-            quote = "'"
-        elif char == '"':
-            quote = "" if quote == '"' else '"'
-        elif char == "`" or text.startswith("$(", index):
+        if char in {"'", '"'} and (not quote or char == quote):
+            quote = "" if quote else char
+            started, quoted = True, True
+            index += 1
+            continue
+        if not quote and text[index:index + 2] in {"<(", ">("}:
+            raise ValueError("process substitution is unresolved executable input")
+        if not quote and char in "@+?!*" and text[index + 1:index + 2] == "(":
+            raise ValueError("unsupported shell expansion grammar")
+        if not quote and text.startswith("((", index):
+            raise ValueError("arithmetic execution is outside the static grammar")
+        if text.startswith("$((", index):
+            raise ValueError("arithmetic expansion is outside the static grammar")
+        if text.startswith("${", index):
+            end = text.find("}", index + 2)
+            if end < 0 or not re.fullmatch(r"[A-Za-z_]\w*", text[index + 2:end]):
+                raise ValueError("unsupported parameter expansion grammar")
+            value += text[index:end + 1]
+            dynamic, started = True, True
+            index = end + 1
+            continue
+        if char == "`" or text.startswith("$(", index):
+            # Extract one balanced substitution, recursively inspected below.
             backtick = char == "`"
             start = index + (1 if backtick else 2)
             cursor, depth, inner_quote = start, 1, ""
@@ -832,28 +893,70 @@ def _shell_substitutions(text):
                 if current == "\\" and inner_quote != "'":
                     cursor += 2
                     continue
-                if backtick:
-                    if current == "`":
-                        break
-                elif inner_quote:
-                    if current == inner_quote:
-                        inner_quote = ""
-                elif current in {"'", '"'}:
-                    inner_quote = current
-                elif current == "(":
-                    depth += 1
-                elif current == ")":
-                    depth -= 1
-                    if depth == 0:
-                        break
+                if backtick and current == "`":
+                    break
+                if not backtick:
+                    if inner_quote:
+                        if current == inner_quote:
+                            inner_quote = ""
+                    elif current in {"'", '"'}:
+                        inner_quote = current
+                    elif current == "(":
+                        depth += 1
+                    elif current == ")":
+                        depth -= 1
+                        if depth == 0:
+                            break
                 cursor += 1
             if cursor >= len(text):
                 raise ValueError("unterminated command substitution")
-            bodies.append(text[start:cursor])
+            substitutions.append(text[start:cursor])
+            value += "__shell_substitution__"
+            dynamic, started = True, True
             index = cursor + 1
             continue
+        if char == "$":
+            dynamic = True
+        if not quote and char in "*?[":
+            dynamic = True
+        if not quote and char == "#" and not started:
+            newline = text.find("\n", index)
+            index = len(text) if newline < 0 else newline
+            continue
+        if not quote and char in " \t\r":
+            flush()
+            index += 1
+            continue
+        if not quote and char in ";|&()<>\n":
+            flush()
+            operator = next(op for op in operators if text.startswith(op, index))
+            tokens.append(operator)
+            index += len(operator)
+            if operator == "\n" and pending:
+                for delimiter, tabs in pending:
+                    end = index
+                    while end < len(text):
+                        newline = text.find("\n", end)
+                        stop = len(text) if newline < 0 else newline
+                        line = text[end:stop]
+                        if (line.lstrip("\t") if tabs else line) == delimiter:
+                            body = text[index:end]
+                            if not delimiter.quoted and ("$(" in body or "`" in body):
+                                raise ValueError("expanded heredoc execution is unresolved")
+                            index = stop + (newline >= 0)
+                            break
+                        end = stop + 1
+                    else:
+                        raise ValueError("unterminated heredoc")
+                pending = []
+            continue
+        value += char
+        started = True
         index += 1
-    return bodies
+    if quote or pending:
+        raise ValueError("unterminated quote or heredoc")
+    flush()
+    return tokens, substitutions
 
 
 def shell_send_analysis(cmd, cwd):
@@ -865,106 +968,246 @@ def shell_send_analysis(cmd, cwd):
     so the hook's older outer allow-on-error handler cannot waive this check.
     """
     try:
-        scanned = strip_inert_text(cmd, strip_prose=False)
+        tokens, substitutions = _execution_tokens(cmd)
         substitution_sender = False
-        for body in _shell_substitutions(scanned):
+        for body in substitutions:
             reason, sends = shell_send_analysis(body, cwd)
             if reason:
                 return reason, True
             substitution_sender = substitution_sender or sends
-        lexer = shlex.shlex(scanned, posix=True,
-                            punctuation_chars=";|&()<>\n")
-        lexer.whitespace = " \t\r"
-        lexer.whitespace_split = True
-        tokens = list(lexer)
-        segments, segment = [], []
+        segments, segment, piped, depth, needs_command = [], [], False, 0, False
+        previous, straightline = None, True
         for token in tokens:
-            if token and all(char in ";|&()\n" for char in token):
+            if not isinstance(token, _ShellWord) and token in {";", "|", "|&", "&", "&&", "||", "(", ")", "\n"}:
                 if segment:
-                    segments.append(segment)
+                    segments.append((segment, piped, straightline and depth == 0))
+                if token == "(":
+                    depth += 1
+                elif token == ")":
+                    depth -= 1
+                    if depth < 0:
+                        raise ValueError("unmatched closing group")
+                elif token != "\n" and needs_command and not segment:
+                    raise ValueError("missing command between operators")
+                if token == ";" and previous == ";":
+                    raise ValueError("unsupported case operator")
+                needs_command = token in {"|", "|&", "&&", "||"}
+                piped = token in {"|", "|&"}
+                straightline = token not in {"|", "|&", "&&", "||", "&", "(", ")"}
                 segment = []
             else:
                 segment.append(token)
+            previous = token
+        if depth or needs_command and not segment:
+            raise ValueError("incomplete command or group")
         if segment:
-            segments.append(segment)
+            segments.append((segment, piped, straightline and depth == 0))
         sender = substitution_sender
         variables = {}
         effective_cwd = cwd or os.getcwd()
-        for args in segments:
-            redirects = [word for word in args if word.startswith("<<")]
+        shells = {"bash", "sh", "zsh", "dash", "ksh", "fish"}
+        interpreters = shells | {"python", "python3", "node", "perl", "ruby", "php"}
+        prefixes = {"command", "exec", "builtin", "env", "sudo", "doas", "time", "nohup", "xargs", "parallel"}
+        for args, piped, straightline in segments:
             redirect_tokens = {"<", ">", ">>", "<<", "<<<", "<<-", ">&", "<&", "&>", "&>>"}
+            redirects, clean, offset = [], [], 0
+            while offset < len(args):
+                token = args[offset]
+                if token.isdigit() and offset + 1 < len(args) and args[offset + 1] in redirect_tokens:
+                    offset += 1
+                    token = args[offset]
+                if not isinstance(token, _ShellWord) and token in redirect_tokens:
+                    if offset + 1 >= len(args) or not isinstance(args[offset + 1], _ShellWord):
+                        raise ValueError("missing redirection target")
+                    redirects.append((token, args[offset + 1]))
+                    offset += 2
+                else:
+                    clean.append(token)
+                    offset += 1
+            args = clean
             index = 0
+            wrappers = []
+            assignments = {}
+            if not straightline or any(word in {"if", "elif", "then", "else", "do", "while", "until", "for", "!", "{", "}"} for word in args):
+                variables.clear()
+                straightline = False
             # Shell control words, redirections and assignments may precede
             # the executable, even after another prefix (then command eval).
             while index < len(args):
                 word = args[index]
-                if word.isdigit() and index + 1 < len(args) and args[index + 1] in redirect_tokens:
-                    index += 1
-                    word = args[index]
-                if word in redirect_tokens:
-                    index += 2
-                    continue
-                elif re.match(r"^[A-Za-z_]\w*=", word):
+                if re.match(r"^[A-Za-z_]\w*=", word):
                     key, value = word.split("=", 1)
-                    variables[key] = value
+                    assignments[key] = None if word.dynamic else value
                     index += 1
                     continue
                 if word in {"if", "elif", "then", "else", "do", "while", "until", "!", "{", "}"}:
                     index += 1
                     continue
                 variable = re.fullmatch(r"\$(?:([A-Za-z_]\w*)|\{([A-Za-z_]\w*)\})", word)
-                if variable:
-                    word = variables.get(variable.group(1) or variable.group(2), word)
+                if word.dynamic:
+                    resolved = variables.get(variable.group(1) or variable.group(2)) if variable else None
+                    if not resolved or "exec" in wrappers:
+                        raise ValueError("unresolved executable expansion")
+                    word = resolved
                 name, sends = _executable_identity(word, effective_cwd)
+                if re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", name):
+                    name = "python3"
                 # A copied sender named "exec" is an executable, not a shell
                 # prefix. Its byte identity wins over the renamed basename.
-                if sends or name not in {"command", "exec", "builtin", "env", "sudo", "doas",
-                                "time", "nohup", "xargs"}:
+                if sends or name not in prefixes:
                     break
+                wrappers.append(name)
                 index += 1
                 while index < len(args):
-                    if name == "exec" and re.fullmatch(r"-[cl]*a", args[index]):
-                        index += 2  # argv[0] spelling is not executable identity.
-                    elif args[index].startswith("-") or re.match(r"^[A-Za-z_]\w*=", args[index]):
+                    option = args[index]
+                    if option.dynamic:
+                        raise ValueError("unresolved execution option")
+                    if name == "env" and (option.startswith("--split-string") or
+                            option.startswith("-") and not option.startswith("--") and "S" in option):
+                        raise ValueError("env split-string executable text")
+                    # Execution-prefix options have a bounded arity contract.
+                    # Unknown flags cannot be skipped: their next word might
+                    # be a value rather than the executable we must inspect.
+                    value_options = {
+                        "exec": {"-a"}, "env": {"-u", "--unset", "-C", "--chdir"},
+                        "sudo": {"-u", "-g"}, "doas": {"-u"},
+                        "xargs": {"-I", "-J", "-n", "-P", "-s", "-L", "-E", "-d"},
+                        "parallel": {"-I", "-j", "--jobs", "--colsep", "-n", "-N"},
+                    }
+                    has_value = (option in value_options.get(name, set()) or
+                                 name == "exec" and re.fullmatch(r"-[cl]*a", option))
+                    if has_value:
+                        if index + 1 >= len(args) or args[index + 1].dynamic:
+                            raise ValueError("unresolved execution option value")
+                        if name == "env" and option in {"-C", "--chdir"}:
+                            effective_cwd = _resolve_dir(args[index + 1], effective_cwd)
+                        index += 2
+                    elif re.match(r"^[A-Za-z_]\w*=", option):
+                        if name != "env":
+                            raise ValueError("unsupported prefix assignment")
+                        index += 1
+                    elif option.startswith("-"):
+                        simple_options = {
+                            "command": {"-p", "-v", "-V", "--"}, "builtin": {"--"},
+                            "exec": {"-c", "-l", "-cl", "-lc", "--"},
+                            "env": {"-i", "--ignore-environment", "-0", "--null", "-v", "--debug", "--"},
+                            "sudo": {"-n", "-E", "-H", "-k", "-K", "-S", "--"},
+                            "doas": {"-n", "--"}, "time": {"-p", "--"}, "nohup": {"--"},
+                            "xargs": {"-0", "-r", "-t", "-p", "-x", "--null", "--no-run-if-empty", "--verbose", "--"},
+                            "parallel": {"--", "--keep-order", "-k"},
+                        }
+                        attached = name == "xargs" and re.fullmatch(r"-[IJnPsLEd].+", option)
+                        if option not in simple_options.get(name, set()) and not attached:
+                            raise ValueError("unsupported execution prefix option")
                         index += 1
                     else:
                         break
             if index >= len(args):
+                if "parallel" in wrappers:
+                    raise ValueError("parallel stdin executable text")
+                # Only a standalone, unconditional assignment establishes an
+                # executable word. Prefix assignments expand against the old
+                # environment; control flow and subshells establish no fact.
+                variables = assignments if straightline and not wrappers else {}
                 continue
+            # Any intervening command may mutate variables (read/unset/source
+            # or a function). Do not carry guessed values across execution.
+            variables.clear()
+            if name in {"source", "."}:
+                if index + 1 >= len(args) or args[index + 1].dynamic:
+                    raise ValueError("unresolved sourced code")
+                path = os.path.realpath(os.path.join(effective_cwd, args[index + 1]))
+                if not path.startswith(os.path.join(REPO, "bin") + os.sep) or not os.path.isfile(path):
+                    raise ValueError("source outside literal sanctioned script path")
+            if name in {"case", "esac", "select", "coproc", "function", "repeat", "foreach", "switch", "begin", "end", "[[", "(("}:
+                raise ValueError("unsupported shell execution grammar")
             if name in {"eval", "alias"}:
                 return f"shell {name} indirection — blocked by the CARR unattended guard", True
             sender = sender or sends
-            if name in {"bash", "sh", "zsh", "dash", "ksh"}:
-                if redirects:
-                    return "interpreted shell input — blocked by the CARR unattended guard", True
+            if name in interpreters:
+                if any(wrapper in {"xargs", "parallel"} for wrapper in wrappers):
+                    raise ValueError("argument-fed interpreter execution")
                 offset = index + 1
+                script_file, inline = None, False
                 while offset < len(args):
                     argument = args[offset]
+                    if argument == "-":
+                        script_file = argument
+                        break
                     if argument == "--":
+                        script_file = args[offset + 1] if offset + 1 < len(args) else None
                         break
                     if argument in {"-o", "+o", "-O", "+O"}:
+                        if name not in shells or offset + 1 >= len(args) or args[offset + 1].dynamic:
+                            raise ValueError("unresolved interpreter option")
                         offset += 2
                         continue
-                    if argument.startswith("-") and not argument.startswith("--") and "c" in argument:
+                    value_options = {"python3": {"-W", "-X"}, "ruby": {"-I", "-F"},
+                                     "perl": {"-I", "-F"}, "php": {"-d", "--define"}}
+                    if argument in value_options.get(name, set()):
+                        if offset + 1 >= len(args) or args[offset + 1].dynamic:
+                            raise ValueError("unresolved interpreter option")
+                        offset += 2
+                        continue
+                    code_flag = (argument == "-c" or name in shells and argument.startswith("-") and
+                                 not argument.startswith("--") and "c" in argument or
+                                 name not in shells and argument in {"-e", "--eval", "--print", "-p", "-r"})
+                    if code_flag:
                         script = args[offset + 1] if offset + 1 < len(args) else ""
+                        if not script or script.dynamic:
+                            raise ValueError("unresolved inline interpreter code")
+                        inline = True
+                        if name not in shells:
+                            break
                         nested_reason, nested_sender = shell_send_analysis(script, effective_cwd)
-                        if (not script or "$" in script or "`" in script or nested_reason
+                        if ("$" in script or "`" in script or nested_reason
                                 or nested_sender or re.search(r"\b(?:" + SENDER + r")\b", script, re.I)
                                 or re.search(r"[A-Za-z][A-Za-z0-9+.-]*://", script)
                                 or NET_CLIENT.search(script)):
                             return "shell -c sender or unresolved input — blocked by the CARR unattended guard", True
                         break
                     if not argument.startswith("-"):
+                        script_file = argument
                         break
+                    # Option arity is part of the execution contract. Guessing
+                    # that every flag has no value mistakes an option's value
+                    # for a script file, silently converting stdin into data.
+                    simple_options = {
+                        "python3": {"-b", "-bb", "-B", "-d", "-E", "-i", "-I", "-O", "-OO", "-P", "-q", "-s", "-S", "-u", "-v", "-V", "-x", "-h", "--help", "--version"},
+                        "node": {"--test", "--check", "--no-warnings", "--help", "--version"},
+                        "ruby": {"-w", "-n", "-p", "--help", "--version"},
+                        "perl": {"-w", "-T", "-t", "-n", "--help", "--version"},
+                        "php": {"-n", "-q", "-a", "-s", "-l", "--help", "--version"},
+                    }
+                    if name == "fish":
+                        known = argument in {"-i", "-l", "-n", "--no-config", "--login", "--interactive", "--private"}
+                    elif name in shells:
+                        known = (re.fullmatch(r"-[abefhiklmnprstuvxBCEHPT]+", argument) or
+                                 argument in {"--noprofile", "--norc", "--login", "--posix"})
+                    else:
+                        known = (argument in simple_options.get(name, set()) or
+                                 name in {"perl", "ruby"} and re.fullmatch(r"-[npwi]+(?:\..*)?", argument))
+                    if argument.dynamic or not known:
+                        raise ValueError("unsupported interpreter option")
                     offset += 1
+                if script_file is not None and script_file.dynamic:
+                    raise ValueError("unresolved interpreter script path")
+                if script_file is not None and (str(script_file) == "/dev/stdin" or str(script_file).startswith("/dev/fd/")):
+                    raise ValueError("interpreter descriptor input is unresolved code")
+                if not inline and (script_file is None or script_file == "-"):
+                    # No script file means stdin is executable text, even when
+                    # a pipe/redirect is absent (the ambient input is unknown).
+                    raise ValueError("interpreter stdin is unresolved executable text")
+                if any(op in {"<<", "<<-", "<<<"} for op, _ in redirects):
+                    raise ValueError("interpreter heredoc/here-string input")
             if name == "cd" and index + 1 < len(args):
                 directory_index = index + 1
                 while directory_index < len(args) and args[directory_index] in {"--", "-L", "-P"}:
                     directory_index += 1
                 if directory_index < len(args):
+                    if args[directory_index].dynamic:
+                        raise ValueError("unresolved execution directory")
                     effective_cwd = _resolve_dir(args[directory_index], effective_cwd)
-            if ("$" in word or "`" in word) and SEND_URL_RE.search(cmd):
-                return "unresolved sender executable — blocked by the CARR unattended guard", True
         return None, sender
     except Exception as exc:
         return (f"unresolved shell command ({type(exc).__name__}) — blocked by the CARR unattended guard",
@@ -1539,9 +1782,10 @@ def check(cmd, cwd=None):
 def main():
     try:
         payload = json.load(sys.stdin)
-    except Exception as exc:                       # fail OPEN
-        log(f"ALLOW(parse-error) {exc}")
-        sys.exit(0)
+    except Exception as exc:                       # fail CLOSED
+        log(f"DENY(parse-error) {exc}")
+        print("unparseable hook input — blocked by the CARR unattended guard", file=sys.stderr)
+        sys.exit(2)
 
     try:
         tool = payload.get("tool_name") or payload.get("toolName") or ""
@@ -1701,9 +1945,11 @@ def main():
             print(reason, file=sys.stderr)
             sys.exit(2)
         sys.exit(0)
-    except Exception as exc:                       # fail OPEN
-        log(f"ALLOW(internal-error) {exc}")
-        sys.exit(0)
+    except Exception as exc:                       # fail CLOSED
+        log(f"DENY(internal-error) {exc}")
+        print(f"unresolved tool command ({type(exc).__name__}) — blocked by the CARR unattended guard",
+              file=sys.stderr)
+        sys.exit(2)
 
 
 if __name__ == "__main__":
