@@ -6,10 +6,14 @@ allowances are imported as a table so every allowance stays under regression
 coverage. Interpreter stdin is an intentional tightening of the old contract.
 """
 import importlib.util
+import json
 import os
+from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 
 spec = importlib.util.spec_from_file_location(
     "guard_cases", os.path.join(os.path.dirname(__file__), "guard-selftest.py"))
@@ -104,6 +108,79 @@ MUST_ALLOW.extend(("sanctioned static command", cases.bash(command)) for command
 
 def main():
     failures = []
+    identity_total = 0
+    # Synthetic executable fixtures pin installed/versioned spelling on every
+    # host. The hook inspects these paths; no interpreter or payload is run.
+    with tempfile.TemporaryDirectory(prefix="guard-identities-") as scratch:
+        for installed, versioned in (
+            ("ruby", "ruby3.3"), ("php", "php8.3"), ("node", "node22"),
+            ("nodejs", "nodejs22"), ("perl", "perl5.40"),
+            ("python3", "python3.13"), ("bash", "bash5.2"),
+            ("zsh", "zsh5.9"), ("dash", "dash0.5.12"),
+            ("ksh", "ksh93"), ("fish", "fish3.7"),
+        ):
+            directory = Path(scratch) / installed
+            directory.mkdir()
+            target = directory / versioned
+            target.write_text("#!/bin/sh\nexit 0\n")
+            target.chmod(0o755)
+            alias = directory / installed
+            alias.symlink_to(target)
+            for executable in (versioned, shlex.quote(str(target)), shlex.quote(str(alias))):
+                for command in (
+                    f"printf 'echo harmless' | {executable}",
+                    f"{executable} < out/code",
+                    f"{executable} <<'EOF'\necho harmless\nEOF",
+                    f"{executable} <<'EOF'\ncurl --noproxy '*' --connect-to "
+                    "127.0.0.1:8000:127.0.0.1:61078 http://127.0.0.1:8000/proof\nEOF",
+                ):
+                    identity_total += 1
+                    code, error = cases.run(cases.bash(command, cwd=cases.REPO))
+                    if code != cases.DENY:
+                        failures.append(f"must-refuse versioned interpreter: {command!r}: exit {code}: {error}")
+                # A named file remains a supported static interpreter command.
+                identity_total += 1
+                code, error = cases.run(cases.bash(f"{executable} out/script", cwd=cases.REPO))
+                if code != cases.ALLOW:
+                    failures.append(f"must-allow versioned script file: {executable}: exit {code}: {error}")
+        # Command/env PATH prefixes must not let an innocent installed name
+        # select a different executable than the hook inspected.
+        sender_dir = Path(scratch) / "senders"
+        sender_dir.mkdir()
+        (sender_dir / "git").symlink_to(shutil.which("curl") or "/usr/bin/curl")
+        path = shlex.quote(str(sender_dir) + os.pathsep + "/usr/bin:/bin")
+        payload = ("git --silent --show-error --max-time 3 --noproxy '*' "
+                   "--connect-to 127.0.0.1:8000:127.0.0.1:61078 "
+                   "http://127.0.0.1:8000/proof")
+        for command in (
+            f"PATH={path} {payload}", f"env PATH={path} {payload}",
+            f"PATH={path} command {payload}", f"env -i PATH={path} {payload}",
+            f"PATH={path}; {payload}", f"export PATH={path}; {payload}",
+            f"export PATH; {payload}", f"unset PATH; {payload}",
+            f"env -u PATH {payload}", f"declare -x PATH={path}; {payload}",
+            f"python3 tools/flash-run.py ask --help && env PATH={path} {payload}",
+            f"PATH={path} git status", "PATH=$NEW_PATH git status",
+            "PATH+=/tmp git status", "export PATH+=/tmp; git status",
+            "typeset -x path=/tmp; git status", "path=/tmp git status",
+            "export PATH[1]=/tmp; git status",
+        ):
+            identity_total += 1
+            code, error = cases.run(cases.bash(command, cwd=cases.REPO))
+            if code != cases.DENY:
+                failures.append(f"must-refuse executable search mutation: {command!r}: exit {code}: {error}")
+        # env -i and command -p select the system search path rather than the
+        # hook's PATH. A shadowed interpreter must still receive stdin checks.
+        (sender_dir / "ruby").symlink_to(shutil.which("git") or "/usr/bin/git")
+        for command in ("env -i ruby < out/code", "command -p ruby < out/code",
+                        "env -i sh -c 'ruby < out/code'"):
+            identity_total += 1
+            result = subprocess.run(
+                [sys.executable, cases.GUARD],
+                input=json.dumps(cases.bash(command, cwd=cases.REPO)),
+                text=True, capture_output=True, timeout=20,
+                env={**os.environ, "PATH": str(sender_dir) + os.pathsep + os.environ.get("PATH", "")})
+            if result.returncode != cases.DENY:
+                failures.append(f"must-refuse system-path interpreter stdin: {command!r}: exit {result.returncode}")
     for raw in ("{", "null", "[]"):
         result = subprocess.run([sys.executable, cases.GUARD], input=raw,
                                 text=True, capture_output=True, timeout=20)
@@ -119,7 +196,7 @@ def main():
             failures.append(f"must-allow {name}: exit {code}: {error}")
     for failure in failures:
         print(failure)
-    total = len(MUST_REFUSE) + len(MUST_ALLOW) + 3
+    total = len(MUST_REFUSE) + len(MUST_ALLOW) + 3 + identity_total
     print(f"static-resolution: {total - len(failures)}/{total} passed")
     return bool(failures)
 

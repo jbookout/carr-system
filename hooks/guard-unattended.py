@@ -775,14 +775,14 @@ def is_send_context(cmd):
     return bool(SEND_CTX.search(cmd) or NET_CLIENT.search(cmd))
 
 
-def _executable_identity(word, cwd):
+def _executable_identity(word, cwd, search_path=None):
     """Resolve links and renamed copies of installed curl/wget/nc binaries.
 
     No executable is run. A name alone cannot identify a copied sender; compare
     bytes with the installed senders after the cheaper size comparison.
     """
     path = (os.path.join(cwd, os.path.expanduser(word)) if "/" in word
-            else shutil.which(word))
+            else shutil.which(word, path=search_path))
     if not path:
         return os.path.basename(word), False
     path = os.path.realpath(path, strict=os.path.lexists(path))
@@ -959,7 +959,7 @@ def _execution_tokens(text):
     return tokens, substitutions
 
 
-def shell_send_analysis(cmd, cwd):
+def shell_send_analysis(cmd, cwd, inherited_path=None):
     """Return (refusal, sender) without interpreting or executing shell text.
 
     Quotes remain argument boundaries. Only command positions activate eval,
@@ -971,7 +971,7 @@ def shell_send_analysis(cmd, cwd):
         tokens, substitutions = _execution_tokens(cmd)
         substitution_sender = False
         for body in substitutions:
-            reason, sends = shell_send_analysis(body, cwd)
+            reason, sends = shell_send_analysis(body, cwd, inherited_path)
             if reason:
                 return reason, True
             substitution_sender = substitution_sender or sends
@@ -1009,6 +1009,8 @@ def shell_send_analysis(cmd, cwd):
         interpreters = shells | {"python", "python3", "node", "perl", "ruby", "php"}
         prefixes = {"command", "exec", "builtin", "env", "sudo", "doas", "time", "nohup", "xargs", "parallel"}
         for args, piped, straightline in segments:
+            search_path = inherited_path
+            child_path = inherited_path
             redirect_tokens = {"<", ">", ">>", "<<", "<<<", "<<-", ">&", "<&", "&>", "&>>"}
             redirects, clean, offset = [], [], 0
             while offset < len(args):
@@ -1035,8 +1037,10 @@ def shell_send_analysis(cmd, cwd):
             # the executable, even after another prefix (then command eval).
             while index < len(args):
                 word = args[index]
-                if re.match(r"^[A-Za-z_]\w*=", word):
+                if re.match(r"^[A-Za-z_]\w*\+?=", word):
                     key, value = word.split("=", 1)
+                    if key.rstrip("+") in {"PATH", "path"}:
+                        raise ValueError("explicit executable search path mutation")
                     assignments[key] = None if word.dynamic else value
                     index += 1
                     continue
@@ -1049,9 +1053,16 @@ def shell_send_analysis(cmd, cwd):
                     if not resolved or "exec" in wrappers:
                         raise ValueError("unresolved executable expansion")
                     word = resolved
-                name, sends = _executable_identity(word, effective_cwd)
-                if re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", name):
-                    name = "python3"
+                name, sends = _executable_identity(word, effective_cwd, search_path)
+                # Installed names can resolve to versioned executables (e.g.
+                # ruby -> ruby3.3 on Linux). Apply the same interpreter input
+                # contract to direct paths and symlinks on every host.
+                interpreter = re.fullmatch(
+                    r"(python|nodejs|node|perl|ruby|php|bash|sh|zsh|dash|ksh|fish)"
+                    r"(?:-?\d+(?:\.\d+)*)?", name)
+                if interpreter:
+                    name = {"python": "python3", "nodejs": "node"}.get(
+                        interpreter.group(1), interpreter.group(1))
                 # A copied sender named "exec" is an executable, not a shell
                 # prefix. Its byte identity wins over the renamed basename.
                 if sends or name not in prefixes:
@@ -1081,10 +1092,14 @@ def shell_send_analysis(cmd, cwd):
                             raise ValueError("unresolved execution option value")
                         if name == "env" and option in {"-C", "--chdir"}:
                             effective_cwd = _resolve_dir(args[index + 1], effective_cwd)
+                        if name == "env" and option in {"-u", "--unset"} and args[index + 1] == "PATH":
+                            raise ValueError("explicit executable search path removal")
                         index += 2
                     elif re.match(r"^[A-Za-z_]\w*=", option):
                         if name != "env":
                             raise ValueError("unsupported prefix assignment")
+                        if option.split("=", 1)[0] == "PATH":
+                            raise ValueError("explicit env executable search path mutation")
                         index += 1
                     elif option.startswith("-"):
                         simple_options = {
@@ -1099,6 +1114,13 @@ def shell_send_analysis(cmd, cwd):
                         attached = name == "xargs" and re.fullmatch(r"-[IJnPsLEd].+", option)
                         if option not in simple_options.get(name, set()) and not attached:
                             raise ValueError("unsupported execution prefix option")
+                        # These prefixes select the platform's default search
+                        # path, independently of the hook's inherited PATH.
+                        if (name == "env" and option in {"-i", "--ignore-environment"} or
+                                name == "command" and option == "-p"):
+                            search_path = os.confstr("CS_PATH") or os.defpath
+                            if name == "env":
+                                child_path = search_path
                         index += 1
                     else:
                         break
@@ -1113,6 +1135,11 @@ def shell_send_analysis(cmd, cwd):
             # Any intervening command may mutate variables (read/unset/source
             # or a function). Do not carry guessed values across execution.
             variables.clear()
+            if name in {"export", "unset", "declare", "typeset", "local", "readonly"}:
+                for argument in args[index + 1:]:
+                    if (re.match(r"^(?:PATH|path)(?:$|=|\+=|\[)", argument) or
+                            argument.dynamic and "=" not in argument):
+                        raise ValueError("shell executable search path mutation")
             if name in {"source", "."}:
                 if index + 1 >= len(args) or args[index + 1].dynamic:
                     raise ValueError("unresolved sourced code")
@@ -1159,7 +1186,7 @@ def shell_send_analysis(cmd, cwd):
                         inline = True
                         if name not in shells:
                             break
-                        nested_reason, nested_sender = shell_send_analysis(script, effective_cwd)
+                        nested_reason, nested_sender = shell_send_analysis(script, effective_cwd, child_path)
                         if ("$" in script or "`" in script or nested_reason
                                 or nested_sender or re.search(r"\b(?:" + SENDER + r")\b", script, re.I)
                                 or re.search(r"[A-Za-z][A-Za-z0-9+.-]*://", script)
