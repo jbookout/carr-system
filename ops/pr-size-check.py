@@ -99,6 +99,24 @@ class Change:
     lines: int
     status: str             # git's letter: A, M, D, R, C, T
     similarity: int = 0     # rename/copy similarity, percent
+    old_path: str = ""      # the source side of a rename or copy
+    binary: bool = False    # numstat printed "-": content changed, lines unknown
+
+    @property
+    def counted(self) -> bool:
+        """Left out only when EVERY path it touches is excluded.
+
+        A rename is judged on both sides, so moving a migration into vendor/
+        still counts (is_excluded never excludes a migration), and so does
+        moving ordinary source into an excluded directory.
+        """
+        sides = [self.path] + ([self.old_path] if self.old_path else [])
+        return any(is_excluded(p) is None for p in sides)
+
+    @property
+    def content_edit(self) -> bool:
+        """Changed bytes, not only a mode bit: lines, a binary change, an add or a delete."""
+        return self.lines > 0 or self.binary or self.status in "AD"
 
 
 @dataclass
@@ -125,7 +143,7 @@ class Report:
 
 def _git_z(repo: str, *args: str) -> list[str]:
     out = subprocess.run(
-        ["git", "diff", "--no-color", "--no-ext-diff", "-M", "-z", *args],
+        ["git", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "-M", "-z", *args],
         cwd=repo, capture_output=True, check=True, timeout=60).stdout
     return out.decode("utf-8", "replace").split("\0")
 
@@ -149,21 +167,23 @@ def changed_files(repo: str, rng: str) -> list[Change]:
     i = 0
     while i < len(tok) and tok[i]:
         added, deleted, path = tok[i].split("\t", 2)
+        old_path = ""
         if path == "":      # rename/copy: the old and new paths follow
-            path = tok[i + 2]
+            old_path, path = tok[i + 1], tok[i + 2]
             i += 3
         else:
             i += 1
+        binary = added == "-" and deleted == "-"
         lines = (int(added) if added.isdigit() else 0) + (int(deleted) if deleted.isdigit() else 0)
         letter, similarity = status.get(path, ("M", 0))
-        changes.append(Change(path, lines, letter, similarity))
+        changes.append(Change(path, lines, letter, similarity, old_path, binary))
     return changes
 
 
 def assess(changes: list[Change], max_lines: int, max_files: int) -> Report:
-    counted = [c for c in changes if is_excluded(c.path) is None]
+    counted = [c for c in changes if c.counted]
     moves = [c for c in counted if c.status == "R" and c.similarity >= NEAR_PURE_RENAME]
-    edits = [c for c in counted if c not in moves and (c.lines > 0 or c.status in "AD")]
+    edits = [c for c in counted if c not in moves and c.content_edit]
     top = sorted((c for c in counted if c.lines), key=lambda c: (-c.lines, c.path))[:TOP_FILES]
     return Report(lines=sum(c.lines for c in counted), files=len(counted),
                   max_lines=max_lines, max_files=max_files,

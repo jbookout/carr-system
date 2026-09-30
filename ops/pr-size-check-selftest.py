@@ -13,8 +13,11 @@ for `origin/main...HEAD`. It proves:
   * a change made only of lockfiles, generated registries, minified assets,
     node_modules, vendor and out/ paths is silent;
   * a migration is never excluded, even one whose name looks generated;
+  * a rename is judged on BOTH sides: migrations moved into vendor/ still
+    count, and only a rename whose two sides are both excluded is left out;
   * a near-pure rename plus a separate content edit prints the mix line, and a
-    pure rename alone does not;
+    pure rename alone does not; a binary modification or addition is a content
+    edit, and a mode-only change is not;
   * the thresholds are the escalation router's own constants, not a copy;
   * the exit code is 0 in every case, including a range git cannot resolve;
   * the pre-push hook runs the note before any top-level exit, strips Git's
@@ -111,17 +114,24 @@ with tempfile.TemporaryDirectory(prefix="pr-size-check-") as tmp:
     write(repo, "lib/big.py", 200, "big")
     write(repo, "lib/other.py", 20, "other")
     write(repo, "lib/a.py", 10, "a")
+    write(repo, "lib/tool.sh", 3, "tool")
+    write(repo, "vendor/keep.js", 40, "keep")
+    (repo / "lib" / "bin.dat").write_bytes(b"\0before")
+    for i in range(LIMIT_FILES + 1):
+        write(repo, f"migrations/{i:04d}_m.sql", 2, f"m{i}")
     git(repo, "add", "-A")
     git(repo, "commit", "-q", "-m", "base")
 
-    rc, text = case(repo, "small", lambda r: (write(r, "lib/a.py", 15, "a2"),
-                                              write(r, "lib/new.py", 5)))
+    def small(r: Path) -> None:
+        write(r, "lib/a.py", 15, "a2")
+        write(r, "lib/new.py", 5)
+    rc, text = case(repo, "small", small)
     checks.append(("under both thresholds: silent, exit 0", rc == 0 and text == ""))
 
     def at_threshold(r: Path) -> None:
-        per = LIMIT_LINES // LIMIT_FILES
+        per, extra = divmod(LIMIT_LINES, LIMIT_FILES)
         for i in range(LIMIT_FILES):
-            write(r, f"edge/f{i}.py", per)
+            write(r, f"edge/f{i}.py", per + (extra if i == 0 else 0))
     rc, text = case(repo, "edge", at_threshold)
     checks.append((f"exactly {LIMIT_LINES} lines in {LIMIT_FILES} files: silent (over, not at)",
                    rc == 0 and text == ""))
@@ -169,6 +179,42 @@ with tempfile.TemporaryDirectory(prefix="pr-size-check-") as tmp:
     rc, text = case(repo, "mix", move_and_edit)
     checks.append(("a near-pure rename plus a separate edit: prints the mix line",
                    rc == 0 and "mixes moves with edits; consider splitting" in text))
+
+    def migrations_into_vendor(r: Path) -> None:
+        for i in range(LIMIT_FILES + 1):
+            git(r, "mv", f"migrations/{i:04d}_m.sql", f"vendor/{i:04d}_m.sql")
+    rc, text = case(repo, "migrations-to-vendor", migrations_into_vendor)
+    checks.append(("migrations renamed into an excluded directory still count (either side)",
+                   rc == 0 and f"{LIMIT_FILES + 1} files" in text))
+
+    def vendor_to_vendor(r: Path) -> None:
+        (r / "third_party" / "vendor").mkdir(parents=True, exist_ok=True)
+        git(r, "mv", "vendor/keep.js", "third_party/vendor/keep.js")
+        write(r, "lib/other.py", 21, "other")
+    rc, text = case(repo, "vendor-to-vendor", vendor_to_vendor)
+    checks.append(("a rename with BOTH sides excluded is left out (no mix line)",
+                   rc == 0 and text == ""))
+
+    def move_and_binary_edit(r: Path) -> None:
+        move(r)
+        (r / "lib" / "bin.dat").write_bytes(b"\0after")
+    rc, text = case(repo, "mix-binary-edit", move_and_binary_edit)
+    checks.append(("a near-pure rename plus a binary content edit: prints the mix line",
+                   rc == 0 and "mixes moves with edits; consider splitting" in text))
+
+    def move_and_binary_add(r: Path) -> None:
+        move(r)
+        (r / "lib" / "new.bin").write_bytes(b"\0new")
+    rc, text = case(repo, "mix-binary-add", move_and_binary_add)
+    checks.append(("a near-pure rename plus a binary addition: prints the mix line",
+                   rc == 0 and "mixes moves with edits; consider splitting" in text))
+
+    def move_and_mode_only(r: Path) -> None:
+        move(r)
+        os.chmod(r / "lib" / "tool.sh", 0o755)
+    rc, text = case(repo, "mode-only", move_and_mode_only)
+    checks.append(("a near-pure rename plus a mode-only change: silent (mode is not content)",
+                   rc == 0 and text == ""))
 
     rc, text = run(repo, "no-such-ref...main")
     checks.append(("an unresolvable range: exit 0, nothing printed", rc == 0 and text == ""))
