@@ -25,7 +25,11 @@ from pathlib import Path
 from typing import Any
 
 
-STATUSES = ("queued", "running", "review", "blocked", "done", "failed")
+STATUSES = ("queued", "running", "review", "blocked", "done", "failed", "superseded")
+# Failed and superseded cards leave the pipeline: they show only in History,
+# each with its reason.
+RETIRED_STATUSES = ("failed", "superseded")
+DONE_WITHOUT_PR_EVIDENCE = "Complete; no PR (marked done by the orchestrator)"
 PIPELINE_STAGES = ("queued", "build", "review", "ci", "merged", "live")
 PR_STAGES = PIPELINE_STAGES[1:] + ("measured",)
 STAGE_LABELS = {
@@ -42,7 +46,7 @@ STATUS_TO_STAGE = {
     "review": "review",
     "blocked": "review",
     "failed": "ci",
-    "done": "build",
+    "superseded": "ci",
 }
 # In flight: a card that should keep moving. Stale applies only to these.
 IN_FLIGHT = frozenset({"running", "review", "blocked"})
@@ -274,7 +278,25 @@ def executor_ledger(tasks: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     return rows
 
 
+def is_retired(task: dict[str, Any]) -> bool:
+    return task.get("status") in RETIRED_STATUSES
+
+
+def retired_reason(task: dict[str, Any]) -> str:
+    reason = task.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        return reason.strip()
+    if task.get("pr_phase") == "Closed unmerged":
+        return "PR closed without merging"
+    note = task.get("note")
+    return note.strip() if isinstance(note, str) and note.strip() else "No reason recorded"
+
+
 def task_stage(task: dict[str, Any]) -> str:
+    # Live means complete (Joe). A done card with no PR has nothing left to
+    # merge or release. A note that names a PR is never read as one.
+    if task.get("status") == "done" and task.get("pr") is None:
+        return "live"
     requested = task.get("stage")
     if requested == "measured":
         requested = "live"
@@ -284,7 +306,9 @@ def task_stage(task: dict[str, Any]) -> str:
     if requested in PIPELINE_STAGES:
         return requested
     if task.get("status") == "done":
-        return "merged" if task.get("pr") is not None and task.get("pr_phase") == "Merged" else "build"
+        # Merged and waiting on a verified release stays Merged; a PR not yet
+        # merged is still in review. Never back in Building.
+        return "merged" if task.get("pr_phase") == "Merged" else "review"
     if task.get("status") == "measured":
         return "live" if isinstance(evidence, str) and evidence.strip() else "build"
     return STATUS_TO_STAGE.get(task.get("status", "queued"), "queued")
@@ -1003,6 +1027,20 @@ def sync_pr_task(task: dict[str, Any], info: dict[str, Any], at: str) -> bool:
     return json.dumps(task, sort_keys=True) != before
 
 
+def settle_done_without_pr(task: dict[str, Any]) -> bool:
+    """Store a finished no-PR card as Live, keeping its own times."""
+    if task.get("status") != "done" or task.get("pr") is not None:
+        return False
+    evidence = task.get("evidence")
+    settled = {"stage": "live",
+               "evidence": evidence if isinstance(evidence, str) and evidence.strip() else DONE_WITHOUT_PR_EVIDENCE,
+               "completed_at": task.get("completed_at") or task.get("updated_at") or stamp()}
+    if all(task.get(field) == value for field, value in settled.items()):
+        return False
+    task.update(settled)
+    return True
+
+
 def render(project: str) -> None:
     """Sync every PR card from GitHub, refresh release and health facts, and
     write the JSON. A gh failure never stops the run: it is logged, recorded
@@ -1018,6 +1056,8 @@ def render(project: str) -> None:
     synced = 0
     at = now_utc().isoformat(timespec="microseconds")
     for task_id, task in state.get("tasks", {}).items():
+        if settle_done_without_pr(task):
+            changed = True
         if normalize_task(task):
             changed = True
         if task.get("pr") is None:
@@ -1084,7 +1124,10 @@ def board_snapshot(state: dict[str, Any]) -> dict[str, Any]:
     """The versioned data contract the app page renders. Deterministic, so an
     unchanged board is never republished."""
     tasks = {}
-    for task_id, task in (state.get("tasks") or {}).items():
+    all_tasks = state.get("tasks") or {}
+    for task_id, task in all_tasks.items():
+        if is_retired(task):
+            continue
         provider, model, effort = task_identity(task)
         tasks[task_id] = {**task, "provider": provider, "model": model, "effort": effort}
     decisions = [
@@ -1098,6 +1141,11 @@ def board_snapshot(state: dict[str, Any]) -> dict[str, Any]:
         "project": state["project"],
         "title": state.get("title") or state["project"],
         "tasks": fit_snapshot_tasks(tasks),
+        "history": {
+            task_id: {"title": task.get("title", task_id), "status": task.get("status"),
+                      "reason": retired_reason(task), "executor": task.get("executor", "unassigned"),
+                      "pr": task.get("pr"), "repo": task.get("repo"), "updated_at": task.get("updated_at")}
+            for task_id, task in all_tasks.items() if is_retired(task)},
         "deliverables": list(state.get("deliverables") or [])[:24],
         "notes": list(state.get("notes") or [])[:50],
         "decisions": decisions,
@@ -1367,7 +1415,10 @@ def command_task(args: argparse.Namespace) -> None:
     if args.health is not None:
         task["health"] = args.health
     if args.reason is not None:
-        task["blocked_reason"] = args.reason.strip()
+        if args.status in RETIRED_STATUSES or (args.status is None and is_retired(task)):
+            task["reason"] = args.reason.strip()
+        else:
+            task["blocked_reason"] = args.reason.strip()
     if args.next_action is not None:
         task["next_action"] = args.next_action.strip()
     normalize_task(task)
@@ -1384,6 +1435,8 @@ def command_task(args: argparse.Namespace) -> None:
         for field in ("blocked_reason", "next_action", "blocked_source", "blocked_head"):
             task.pop(field, None)
     record_stage(task, task_time, task_stage(prior) if prior else None)
+    if task.get("status") in RETIRED_STATUSES and not str(task.get("reason") or "").strip():
+        raise SystemExit(f"a {task.get('status')} card needs --reason")
     state["tasks"][args.task_id] = task
     write_and_render(state)
 
@@ -1478,7 +1531,7 @@ def parser() -> argparse.ArgumentParser:
     task.add_argument("--repo")
     task.add_argument("--stage", choices=PR_STAGES)
     task.add_argument("--health", choices=("healthy", "question", "blocked"))
-    task.add_argument("--reason", help="why the task is blocked (required with blocked)")
+    task.add_argument("--reason", help="why the task is blocked (required with blocked), or why it failed or was superseded (required for those)")
     task.add_argument("--next-action", dest="next_action", help="what unblocks it (required with blocked)")
     task.add_argument("--note")
     task.add_argument("--evidence")

@@ -239,6 +239,9 @@ after each step; record Joe questions with defaults, and give a blocked task
 publishes it; the only board UI is https://app.doctorcre.com/progress-board
 (`?board=<project>`, or `?board=all-repos` for every jbookout PR). There is no
 static HTML copy. The launchd job runs `ops/progress-board-render.sh`.
+A `done` card with no PR is Live (complete); a `done` card with a merged PR
+stays Merged until a verified release. `failed` and `superseded` need
+`--reason` and leave the pipeline for the History list.
 
 ## Git discipline on a shared tree
 
