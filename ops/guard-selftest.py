@@ -102,6 +102,14 @@ case("gh pr create carrying the Claude Code attribution link",
           'Generated with [Claude Code](https://claude.com/claude-code)"'), ALLOW)
 case("claude.com read", fetch("https://claude.com/claude-code"), ALLOW)
 
+# Official OpenAI documentation is also carried as inert text in agent briefs.
+for host in ("openai.com", "developers.openai.com", "platform.openai.com"):
+    url = f"https://{host}/api/reference/decisions"
+    case(f"OpenAI documentation {host}", bash(f"curl {url}"), ALLOW)
+    case(f"OpenAI documentation brief {host}",
+         bash(f"gh pr create --body 'Read {url} when evaluating Decisions'"), ALLOW)
+    case(f"OpenAI lookalike {host}", bash(f"curl https://{host}.evil.invalid/docs"), DENY)
+
 # DoctorCRE's production app is a fixed CARR-owned domain. Its gated board
 # route must be reachable for a live, unauthenticated sign-in check.
 case("DoctorCRE app production route is allowed",

@@ -154,6 +154,8 @@ KNOWN_HOSTS = (
     # strip the link, which quietly drops the attribution it exists to give.
     "arxiv.org", "anthropic.com", "claude.com", "humanlayer.dev", "mem0.ai",
     "langchain.com", "emergentmind.com",
+    # Official vendor announcements and developer/API documentation.
+    "openai.com", "developers.openai.com", "platform.openai.com",
     # TypeSafe, added 2026-09-17 on Joe's ruling. docs.typesafe.ai is the
     # documentation host and is a plain research read like the row above it;
     # api.typesafe.ai is the inference endpoint for Jev, a model that takes text

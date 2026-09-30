@@ -1,5 +1,25 @@
 {
   "schema_version": 1,
+  "vendor_release_watches": [
+    {
+      "id": "openai-decisions",
+      "match": "decisions",
+      "finding_kind": "decisions_docs_live",
+      "card": "decisions-docs-live",
+      "interval_seconds": 3600,
+      "timeout_seconds": 20,
+      "max_bytes": 2097152,
+      "sources": [
+        "https://developers.openai.com/api/reference/llms.txt",
+        "https://openai.com/index/devday-2026-recap/"
+      ],
+      "reference_prefixes": [
+        "https://developers.openai.com/api/reference/",
+        "https://platform.openai.com/docs/api-reference/"
+      ],
+      "next_action": "Orchestrator: evaluate the published Decisions contract and key readiness before switching the provider."
+    }
+  ],
   "thresholds": {
     "scan_seconds": 120,
     "scan_grace_seconds": 300,
@@ -30,6 +50,7 @@
     "actions": "out/watchdog/actions.jsonl",
     "scan_lock": "out/watchdog/scan.lock",
     "scan_ledger": "out/watchdog/runs.jsonl",
+    "vendor_release_ledger": "out/watchdog/vendor-releases.jsonl",
     "merge_queue": "/private/tmp/claude-501/-Users-booko-carr-system/cc59a986-2fb1-445d-a055-bcbb0f0da0e2/scratchpad/merge-queue.txt",
     "queue_logs": [
       "/private/tmp/claude-501/-Users-booko-carr-system/cc59a986-2fb1-445d-a055-bcbb0f0da0e2/scratchpad/merge-queue.log",
@@ -75,7 +96,8 @@
     "collection_error": "Restore the named evidence source; retained findings remain open.",
     "action_error": "Verify the recorded action intent and any process before retrying.",
     "record_error": "Restore record-layer access and retry the same idempotency key.",
-    "board_error": "Restore progress-board reporting and replay the finding."
+    "board_error": "Restore progress-board reporting and replay the finding.",
+    "vendor_release_fetch_error": "Orchestrator: restore access to the named vendor source; the next hourly fetch clears this error on success."
   },
   "fixer": {
     "model": "gpt-6.1-sol",

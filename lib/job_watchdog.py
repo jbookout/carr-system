@@ -13,7 +13,10 @@ import sys
 import time
 import uuid
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import urljoin, urlsplit
+from urllib.request import Request, urlopen
 
 SOURCE = Path(__file__).resolve().parents[1]
 
@@ -28,6 +31,18 @@ def load_config(path):
     for action in config["actions"].values():
         if isinstance(action, str) and action not in {"restart_once", "fix_once", "enqueue", "report"}:
             raise ValueError("unknown watchdog action")
+    ids = set()
+    for watch in config.get("vendor_release_watches", []):
+        if watch["id"] in ids or not watch["match"] or not watch["sources"] or not watch["reference_prefixes"]:
+            raise ValueError("invalid vendor release watch")
+        ids.add(watch["id"])
+        for key in ("interval_seconds", "timeout_seconds", "max_bytes"):
+            if not isinstance(watch[key], (int, float)) or watch[key] <= 0:
+                raise ValueError(f"invalid vendor release {key}")
+        for url in watch["sources"] + watch["reference_prefixes"]:
+            parts = urlsplit(url)
+            if parts.scheme != "https" or not parts.hostname or parts.username or parts.password:
+                raise ValueError("vendor release sources must be public HTTPS URLs")
     return config
 
 
@@ -47,6 +62,131 @@ def finding(kind, subject, reason, config, **fields):
                       if any(p in reason.lower() for p in patterns)), None)
     return {"key": key, "kind": kind, "subject": subject, "reason": reason,
             "next_action": config["next_actions"][kind], "owner": "orchestrator", "needs_joe": needs_joe, **fields}
+
+
+def _read_document(url, timeout, max_bytes):
+    """Size-bounded transport, run only in the deadline-owned HTTP child."""
+    request = Request(url, headers={"User-Agent": "CARR-vendor-release-watch/1"})
+    with urlopen(request, timeout=timeout) as response:
+        body = response.read(int(max_bytes) + 1)
+        if len(body) > max_bytes:
+            raise ValueError("vendor document exceeds configured size limit")
+        return body.decode("utf-8")
+
+
+def fetch_document(url, timeout, max_bytes):
+    """Bound the whole fetch, including DNS, redirects, headers and body reads."""
+    deadline = time.monotonic() + timeout
+    # Socket timeouts measure inactivity. A separate process lets the caller
+    # stop even a DNS lookup or slow-drip read, including from a worker thread.
+    script = """
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from job_watchdog import _read_document
+try:
+    result = {'text': _read_document(sys.argv[2], float(sys.argv[3]), int(sys.argv[4]))}
+except Exception as exc:
+    result = {'error': str(exc), 'value_error': isinstance(exc, ValueError)}
+print(json.dumps(result))
+"""
+    with subprocess.Popen([sys.executable, "-c", script, str(SOURCE / "lib"),
+                           url, str(timeout), str(int(max_bytes))],
+                          stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE) as proc:
+        try:
+            output, error = proc.communicate(timeout=max(0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()  # Reap the owned child before releasing the scan lock.
+            raise TimeoutError("vendor document exceeded elapsed fetch deadline") from None
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+        if time.monotonic() >= deadline:
+            raise TimeoutError("vendor document exceeded elapsed fetch deadline")
+        if proc.returncode:
+            raise OSError("vendor HTTP child failed: " + error.decode("utf-8", errors="replace"))
+    result = json.loads(output)
+    if "error" in result:
+        raise (ValueError if result["value_error"] else OSError)(result["error"])
+    return result["text"]
+
+
+class ReferenceLinks(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.links = []
+        self.href = None
+        self.label = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "a":
+            self.href = dict(attrs).get("href")
+            self.label = []
+
+    def handle_data(self, data):
+        if self.href:
+            self.label.append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "a" and self.href:
+            self.links.append(("".join(self.label), self.href))
+            self.href = None
+
+
+def release_reference_urls(text, source, watch):
+    parser = ReferenceLinks()
+    parser.feed(text)
+    links = parser.links + re.findall(r"\[([^\]]+)\]\(([^\s)]+)\)", text)
+    links += [("", url) for url in re.findall(r'https?://[^\s<>"\')]+', text)]
+    urls = set()
+    for label, href in links:
+        url = urljoin(source, href).rstrip(".,;")
+        if (watch["match"].lower() in (label + " " + url).lower()
+                and any(url.startswith(prefix) for prefix in watch["reference_prefixes"])):
+            urls.add(url)
+    return sorted(urls)
+
+
+def vendor_release_findings(root, config, now, *, fetch=None):
+    """Called under the scan lock. Cache hourly reads and retry unreported findings."""
+    watches = config.get("vendor_release_watches", [])
+    if not watches:
+        return []
+    fetch = fetch or fetch_document
+    ledger = path_at(root, config["paths"]["vendor_release_ledger"])
+    states = read_latest(ledger)
+    previous = read_latest(path_at(root, config["paths"]["findings"]))
+    found = []
+    for watch in watches:
+        state = states.get(watch["id"], {})
+        if not state or now - state["checked_at"] >= watch["interval_seconds"]:
+            urls, errors = set(), []
+            for source in watch["sources"]:
+                try:
+                    text = fetch(source, watch["timeout_seconds"], watch["max_bytes"])
+                    urls.update(release_reference_urls(text, source, watch))
+                except Exception as exc:
+                    errors.append({"url": source, "reason": source + ": " + str(exc)})
+            # A partial read cannot establish the complete reference URL set.
+            state = {"key": watch["id"], "checked_at": now, "urls": sorted(urls), "errors": errors}
+            append(ledger, state)
+        for error in state["errors"]:
+            found.append(finding("vendor_release_fetch_error", watch["id"] + ":" + error["url"],
+                                 error["reason"], config, url=error["url"]))
+        if state["errors"] or not state["urls"]:
+            continue
+        signature = hashlib.sha256(json.dumps(state["urls"]).encode()).hexdigest()
+        key = watch["finding_kind"] + ":" + watch["id"] + ":" + signature
+        if previous.get(key, {}).get("reported"):
+            continue
+        found.append({"key": key, "kind": watch["finding_kind"], "subject": watch["id"] + ":" + signature,
+                      "reason": "Vendor API reference published: " + ", ".join(state["urls"]),
+                      "url": state["urls"][0], "urls": state["urls"], "card": watch["card"],
+                      "owner": "orchestrator", "needs_joe": None, "permanent": True,
+                      "board_status": "question-for-orchestrator", "next_action": watch["next_action"]})
+    return found
 
 
 def reviewed_head(comment):
@@ -224,7 +364,7 @@ def board_task(root, config, card, executor, status, note, project=None, pr=None
         prior = json.loads(board.read_text()).get("tasks", {}).get(card, {})
         argv = [sys.executable, str(SOURCE / "tools/progress_board.py"), "task", project, card,
                 "--title", prior.get("title", card), "--executor", prior.get("executor", executor) if executor == "orchestrator" else executor, "--status", status,
-                "--health", "blocked" if status == "blocked" else "healthy", "--note", note]
+                "--health", "question" if status == "question-for-orchestrator" else "blocked" if status == "blocked" else "healthy", "--note", note]
         argv.extend(["--lane", config["needs_joe_lane"] if needs_joe else "status"])
         if pr is not None:
             argv.extend(["--pr", str(pr), "--repo", repo])
@@ -292,7 +432,7 @@ def run_job(root, config, card, executor, minutes, argv):
     return code
 
 
-def reconcile(root, config, found, effects, now, complete=True):
+def reconcile(root, config, found, effects, now, complete=True, *, clear_kinds=None):
     """Called under the scan lock. Persist intent before each non-repeatable effect."""
     findings_path = path_at(root, config["paths"]["findings"])
     actions_path = path_at(root, config["paths"]["actions"])
@@ -302,13 +442,22 @@ def reconcile(root, config, found, effects, now, complete=True):
     extras = []
     for key, f in current.items():
         prior = previous.get(key, {})
-        row = {**f, "first_seen": prior.get("first_seen", stamp(now)), "cleared_at": None}
+        first_seen = stamp(now) if prior.get("cleared_at") else prior.get("first_seen", stamp(now))
+        row = {**f, "first_seen": first_seen, "cleared_at": None}
+        if f["kind"] == "vendor_release_fetch_error":
+            new_incident = not prior or bool(prior.get("cleared_at"))
+            legacy_key = "job-watchdog:" + hashlib.sha256(f["key"].encode()).hexdigest()
+            incident_key = "job-watchdog:" + hashlib.sha256((f["key"] + ":" + first_seen).encode()).hexdigest()
+            row.update(loop_id=None if new_incident else prior.get("loop_id"),
+                       loop_idempotency_key=incident_key if new_incident else prior.get("loop_idempotency_key", legacy_key),
+                       reported=False if new_incident else prior.get("reported", False))
         if not prior or prior.get("cleared_at") or prior.get("reason") != f["reason"]:
             append(findings_path, row)
         # Failed reporting is retried with the SAME record-layer idempotency key.
         if not prior.get("reported") or prior.get("cleared_at"):
             try:
-                effects.report(row)
+                result = effects.report(row) or {}
+                row.update({k: result[k] for k in ("loop_id", "loop_idempotency_key") if k in result})
                 row["reported"] = True
                 append(findings_path, row)
             except Exception as exc:
@@ -351,8 +500,20 @@ def reconcile(root, config, found, effects, now, complete=True):
     # Evidence-source failures cannot prove an old condition has cleared.
     if complete and not any(f["kind"] == "collection_error" for f in found):
         for key, prior in previous.items():
-            if key not in current and not prior.get("cleared_at"):
-                append(findings_path, {**prior, "cleared_at": stamp(now)})
+            pending_recovery = prior["kind"] == "vendor_release_fetch_error" and not prior.get("recovery_reported")
+            if (key not in current and (not prior.get("cleared_at") or pending_recovery) and not prior.get("permanent")
+                    and (clear_kinds is None or prior["kind"] in clear_kinds)):
+                if prior["kind"] == "vendor_release_fetch_error":
+                    try:
+                        effects.resolve(prior)
+                    except Exception as exc:
+                        row = {**prior, "cleared_at": None, "recovery_error": str(exc)}
+                        append(findings_path, row)
+                        current[key] = {**row, "reason": "Vendor fetch recovered; recovery reporting failed: " + str(exc),
+                                        "next_action": "Retry watchdog recovery reporting; inspect the board or record-layer error."}
+                        continue  # Keep recovery pending until every visible effect succeeds.
+                append(findings_path, {**prior, "cleared_at": prior.get("cleared_at") or stamp(now),
+                                       "recovery_reported": True, "recovery_error": None})
     return list(current.values())
 
 
@@ -447,23 +608,55 @@ class Effects:
     def report(self, f):
         c = self.config
         card = f.get("card") or "wd-" + hashlib.sha256(f["subject"].encode()).hexdigest()[:16]
-        board_task(self.root, c, card, "orchestrator", "blocked",
+        board_task(self.root, c, card, "orchestrator", f.get("board_status", "blocked"),
                    f["reason"] + "\nNext action: " + f["next_action"], pr=f.get("pr"), repo=f.get("repo"), needs_joe=bool(f.get("needs_joe")))
         if c["actions"]["file_defects"] and f["kind"] != "pr_ready":
-            digest_key = hashlib.sha256(f["key"].encode()).hexdigest()
-            payload = {"idempotency_key": "job-watchdog:" + digest_key,
+            # Retries share a key; a recurrence after recovery is a new loop.
+            key = f.get("loop_idempotency_key") or "job-watchdog:" + hashlib.sha256(f["key"].encode()).hexdigest()
+            return self._file_defect(f, key)
+        return {"ok": True}
+
+    def _record(self, verb, payload):
+        result = command([str(SOURCE / "run.sh"), "call", verb, json.dumps(payload)], self.config)
+        # run.sh emits an identity banner before JSON; read the response itself.
+        return json.loads(result[result.find("{"):])
+
+    def _file_defect(self, f, key):
+        payload = {"idempotency_key": key,
                        "kind": "open_loop", "owner": "orchestrator", "domain": "system",
                        "body": f["reason"] + "\nNext action: " + f["next_action"],
                        "source_note": "job watchdog: " + f["subject"],
-                       "marker": "decision" if f.get("needs_joe") else "none",
+                       "marker": "decision" if f.get("needs_joe") or f.get("board_status") == "question-for-orchestrator" else "none",
                        "blocker": "capability" if f.get("needs_joe") == "credentials" else "ruling" if f.get("needs_joe") else "other_lane",
                        "blocker_detail": f["reason"] if f.get("needs_joe") else "Orchestrator's named executor or queue repair: " + f["subject"]}
-            result = command([str(SOURCE / "run.sh"), "call", "add-loop", json.dumps(payload)], c)
-            # run.sh emits an identity banner before JSON; validate the response itself.
-            start = result.find("{")
-            response = json.loads(result[start:])
-            if response.get("ok") is not True or not response.get("loop_id"):
-                raise RuntimeError("record layer refused watchdog defect: " + str(response))
+        response = self._record("add-loop", payload)
+        if response.get("ok") is not True or not response.get("loop_id"):
+            raise RuntimeError("record layer refused watchdog defect: " + str(response))
+        return {"ok": True, "loop_id": response["loop_id"], "loop_idempotency_key": key}
+
+    def resolve(self, f):
+        loop_id = f.get("loop_id")
+        if not loop_id and self.config["actions"]["file_defects"]:
+            # Upgrade an active pre-recovery ledger using its original filing
+            # key. Replaying add-loop reads the same durable loop, not a new one.
+            key = f.get("loop_idempotency_key") or "job-watchdog:" + hashlib.sha256(f["key"].encode()).hexdigest()
+            loop_id = self._file_defect(f, key)["loop_id"]
+        if loop_id:
+            loop = self._record("read-loop", {"loop_id": loop_id})
+            if (loop.get("loop_id") != loop_id or not isinstance(loop.get("version"), int)
+                    or loop.get("status") not in {"open", "done", "dropped"}):
+                raise RuntimeError("record layer refused watchdog recovery read: " + str(loop))
+            if loop["status"] == "open":
+                response = self._record("close-loop", {
+                    "idempotency_key": "job-watchdog:recovered:" + hashlib.sha256(loop_id.encode()).hexdigest(),
+                    "loop_id": loop_id, "base_version": loop["version"], "resolution": "done",
+                    "outcome": "Vendor fetch recovered: " + f["url"] + "; successful configured fetch cleared the source error.",
+                })
+                if response.get("ok") is not True:
+                    raise RuntimeError("record layer refused watchdog recovery close: " + str(response))
+        card = f.get("card") or "wd-" + hashlib.sha256(f["subject"].encode()).hexdigest()[:16]
+        board_task(self.root, self.config, card, "orchestrator", "done",
+                   "Vendor fetch recovered: " + f["url"] + "\nNext action: continue the configured vendor watch.")
         return {"ok": True}
 
     def launch(self, f, argv, cwd, *, job_id, restart_count=0, root_id=None):
@@ -577,21 +770,24 @@ def digest(root, config):
     return "\n".join(lines)
 
 
-def scan(root, config, config_path=None):
+def scan(root, config, config_path=None, *, vendor_only=False):
     try:
         with locked(path_at(root, config["paths"]["scan_lock"]), blocking=False):
             now = time.time()
             ledger = path_at(root, config["paths"]["scan_ledger"])
             prior_runs = read_latest(ledger)
-            append(ledger, {"key": "scan", "status": "started", "at": stamp(now),
-                            "previous_status": prior_runs.get("scan", {}).get("status")})
+            scan_key = "vendor-watch" if vendor_only else "scan"
+            append(ledger, {"key": scan_key, "status": "started", "at": stamp(now),
+                            "previous_status": prior_runs.get(scan_key, {}).get("status")})
             effects = Effects(root, config)
             effects.config_path = Path(config_path or SOURCE / "ops/config/job-watchdog.json").resolve()
-            facts = collect(root, config)
-            found = reconcile(root, config, detect(facts, config, now), effects, now)
-            append(ledger, {"key": "scan", "status": "completed", "at": stamp(),
+            facts = {"errors": []} if vendor_only else collect(root, config)
+            candidates = detect(facts, config, now) + vendor_release_findings(root, config, now)
+            found = reconcile(root, config, candidates, effects, now,
+                              clear_kinds={"vendor_release_fetch_error"} if vendor_only else None)
+            append(ledger, {"key": scan_key, "status": "completed", "at": stamp(),
                             "findings": len(found), "collection_errors": len(facts["errors"])})
             print(digest(root, config))
-            return 1 if facts["errors"] or any(f["kind"] in {"action_error", "record_error"} for f in found) else 0
+            return 1 if facts["errors"] or any(f["kind"] in {"action_error", "record_error", "vendor_release_fetch_error"} for f in found) else 0
     except BlockingIOError:
         return 0  # Another scan owns the entire interval's effects.

@@ -21,6 +21,7 @@ def main():
     run.add_argument("minutes", type=float)
     run.add_argument("argv", nargs=argparse.REMAINDER)
     commands.add_parser("scan")
+    commands.add_parser("vendor-watch", help="Run only the hourly vendor release checks; no agent actions")
     commands.add_parser("digest")
     args = parser.parse_args()
     config = watchdog.load_config(args.config)
@@ -34,7 +35,7 @@ def main():
     if args.mode == "digest":
         print(watchdog.digest(root, config))
         return 0
-    return watchdog.scan(root, config, args.config)
+    return watchdog.scan(root, config, args.config, vendor_only=args.mode == "vendor-watch")
 
 
 if __name__ == "__main__":
