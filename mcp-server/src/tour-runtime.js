@@ -271,6 +271,14 @@ export function createTourRuntimeAdapters(renderDependencies = {}) {
     readPropertyEvidenceFn: async context => ({ ok: true, data: await withPool(
       context.env.DATABASE_URL_WRITER, "begin read only", client => readPropertyEvidence(
         client, organizationTenantForActor(context.actor), context.input.property_id, context.input.as_of)) }),
+    createTourFn: context => invoke(context, "create-tour-domain", context.input),
+    // A draft version is always manual: provider routing needs a rights receipt this surface never holds.
+    openRouteDraftFn: context => invoke(context, "append-tour-route-version", {
+      ...context.input, routing_source: "manual", routing_provider: null, routing_policy_key: null,
+      routing_rights_receipt_id: null, routing_request: {}, routing_response_digest: null,
+    }),
+    appendRouteStopFn: context => invoke(context, "append-tour-route-stop", context.input),
+    appendRouteStopTransitionFn: context => invoke(context, "append-tour-route-stop-transition", context.input),
     createRouteVersionFn: context => invoke(context, "prepare-tour-route-version", {
       ...context.input, base_route_version_id: null,
     }),
