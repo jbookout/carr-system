@@ -2341,6 +2341,30 @@ class Blockers(Base):
         self.assertNotIn("user:secret", detail)
         self.assertIn("[REDACTED]", detail)
 
+    def test_call_verb_preserves_plaintext_identifiers_without_exposing_credentials(self):
+        pipe = self.fx.pipeline(FakeRunner())
+        sha = "cd23702fe8c6f94a6b43f1ae2cebc3f6ed61bd82"
+        receipt = "aa870010-f2c7-4a02-9994-9c141eed5200"
+        known_secret = "12345678-1234-1234-1234-123456789abc"
+        pipe.env["RUNNER_TOKEN"] = known_secret
+        stderr = (f"Source SHA mismatch: {sha}\nreceipt_id={receipt}\n"
+                  f"receipt_id={known_secret}\n"
+                  f"TOKEN={sha}\nPASSWORD={receipt}\n"
+                  "receipt_id=ghp_syntheticfixture12345678901234567890\n"  # ci-secret-scan: allow (synthetic redaction fixture)
+                  "dsn=postgres://user:secret@example.invalid/db\n")  # ci-secret-scan: allow (synthetic redaction fixture)
+        failed = subprocess.CompletedProcess([], 1, stdout="request refused\n", stderr=stderr)
+        with mock.patch.object(rp.subprocess, "run", return_value=failed):
+            ok, detail = pipe._call_verb("add-loop", {})
+        self.assertFalse(ok)
+        self.assertIn(f"Source SHA mismatch: {sha}", detail)
+        self.assertIn(f"receipt_id={receipt}", detail)
+        self.assertIn("request refused", detail)
+        self.assertNotIn(known_secret, detail)
+        self.assertNotIn(f"TOKEN={sha}", detail)
+        self.assertNotIn(f"PASSWORD={receipt}", detail)
+        self.assertNotIn("ghp_syntheticfixture", detail)
+        self.assertNotIn("user:secret", detail)
+
     def test_missing_credential_files_one_loop_once(self):
         self.fx.commit({"mcp-server/src/a.js": "1"})
         (self.fx.cred / "db.env").write_text("CARR_DB_JOBS_URL='v'\n")
