@@ -23,6 +23,7 @@ class ReplayTests(unittest.TestCase):
             "parse error: synthetic queue", "synthetic fixture",
             "SUCCESS", "COMPLETED", "FAILURE", "MERGEABLE", "CONFLICTING",
             "UNKNOWN", "DIRTY", "CLEAN", "APPROVED", "CHANGES_REQUESTED",
+            "Service Unavailable", "Responses", "Decisions", "Synthetic",
         }
         allowed = set(re.findall(r"[A-Z][a-z]+", " ".join(synthetic_set)))
 
