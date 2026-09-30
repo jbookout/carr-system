@@ -1759,9 +1759,9 @@ test("v33 seals the notification preference pair and preserves v32", () => {
   // The complete generated frontier includes Codex session read v97;
   // 0527 remains handwritten and does not move that count.
   assert.equal(Object.keys(renderGeneratedFrontier())
-    .filter(path => path.startsWith("migrations/")).length, 105);
+    .filter(path => path.startsWith("migrations/")).length, 106);
   assert.equal(Object.keys(renderGeneratedFrontier())
-    .filter(path => path.startsWith("mcp-server/src/")).length, 96);
+    .filter(path => path.startsWith("mcp-server/src/")).length, 97);
 });
 
 test("v34 seals the session identity read pair and preserves v33", () => {
@@ -3019,11 +3019,11 @@ test("the complete source-only frontier is byte-reproducible from frozen inputs"
   assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
   const paths = assertGeneratedFrontierMatchesCommitted();
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
-  assert.equal(migrations.length, 105);
+  assert.equal(migrations.length, 106);
   assert.deepEqual(migrations.map(path => path.match(/migrations\/(\d{4})_/)[1]),
-    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545", "0547", "0548", "0549", "0550", "0551", "0552", "0553", "0555", "0557", "0558", "0559", "0560", "0561", "0562", "0563", "0564", "0566", "0567", "0568", "0569", "0570", "0572", "0576", "0578", "0581", "0582", "0584", "0585", "0588", "0589", "0600", "0603", "0609", "0614", "0618", "0625", "0627", "0629", "0701", "0705", "0707", "0709", "0718", "0720", "0722", "0723", "0725", "0727", "0730", "0731", "0734", "0737", "0739", "0741", "0743", "0745", "0748", "0750", "0755"]);
-  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 96);
-  assert.equal(paths.length, 201);
+    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545", "0547", "0548", "0549", "0550", "0551", "0552", "0553", "0555", "0557", "0558", "0559", "0560", "0561", "0562", "0563", "0564", "0566", "0567", "0568", "0569", "0570", "0572", "0576", "0578", "0581", "0582", "0584", "0585", "0588", "0589", "0600", "0603", "0609", "0614", "0618", "0625", "0627", "0629", "0701", "0705", "0707", "0709", "0718", "0720", "0722", "0723", "0725", "0727", "0730", "0731", "0734", "0737", "0739", "0741", "0743", "0745", "0748", "0750", "0755", "0756"]);
+  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 97);
+  assert.equal(paths.length, 203);
   // 0502 IS DELIBERATELY ABSENT FROM THIS LIST. It is a hand-authored domain
   // migration under its own review, not a generated artifact, so nothing here
   // reproduces it byte for byte and it must not appear among the frontier's
@@ -3301,16 +3301,13 @@ test("job definitions and live DB capabilities have exact reviewed baselines", (
 
 test("GitHub and launchd workflow entrances bind exact triggers, permissions, and delegates", () => {
   const workflows = workflowDefinitionInventory();
-  // 39, not 38: #1241 added com.carr.nightly-exports-daytime-retry.plist (the
-  // OneDrive-wake daytime retry job), a real deployed launchd entrance.
-  // 40, not 39: V5-A05 adds com.carr.delivery-cadence-a05-sweep.plist, the
-  // daily 07:00 cadence sweep, a deployed launchd entrance.
-  // 41, not 40: session-trace-archive adds com.carr.session-trace-archive.plist,
-  // the nightly local archive of CARR-scoped agent session transcripts, a
-  // deployed launchd entrance.
-  assert.equal(workflows.length, 41);
+  const githubPaths = fs.readdirSync(new URL("../../.github/workflows/", import.meta.url))
+    .filter(name => /\.ya?ml$/.test(name)).map(name => `.github/workflows/${name}`);
+  const launchdPaths = fs.readdirSync(new URL("../../ops/launchd/", import.meta.url))
+    .filter(name => name.endsWith(".plist")).map(name => `ops/launchd/${name}`);
+  assert.deepEqual(workflows.map(row => row.source_locator).sort(), [...githubPaths, ...launchdPaths].sort());
   const github = workflows.filter(row => row.source_locator.startsWith(".github/workflows/"));
-  assert.equal(github.length, 7);
+  assert.equal(github.length, githubPaths.length);
   assert.equal(github.every(row => row.ingress_kind === "workflow_entrypoint" &&
     row.trigger_contract_digest && row.permissions_contract_digest && row.classification_authorizing === false), true);
   const automerge = workflows.find(row => row.source_locator === ".github/workflows/automerge-pilot.yml");
@@ -3320,10 +3317,10 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
   const dbAcceptance = workflows.find(row => row.source_locator === ".github/workflows/db-acceptance.yml");
   assert.equal(dbAcceptance.delegates_to.includes("script:ops/local-pg-ci.py"), true);
   const launchd = workflows.filter(row => row.source_locator.startsWith("ops/launchd/"));
-  // 32, not 31 — same #1241 addition as above.
-  // 33, not 32 -- the same V5-A05 sweep plist.
-  // 34, not 33 -- the same session-trace-archive addition as above.
-  assert.equal(launchd.length, 34);
+  assert.equal(launchd.length, launchdPaths.length);
+  const watchdog = launchd.find(row => row.launchd_label === "com.carr.job-watchdog");
+  assert.equal(watchdog.delegates_to.includes("script:tools/job-watchdog.py"), true);
+  assert.equal(watchdog.physical_authority_refs.includes("ops.service_environment:job-watchdog:production"), true);
   // Every agent is fully identified and carries SOME physical authority ref;
   // only a DEPLOYED agent's is a service environment. Collapsing those two into
   // one clause is what would let a definition-only agent either slip through
@@ -3336,10 +3333,11 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
   assert.equal(deployedLaunchd.length, launchd.length - 2);
   assert.equal(deployedLaunchd.every(row =>
     row.physical_authority_refs.some(ref => ref.startsWith("ops.service_environment:"))), true);
-  // 31, not 30 — same #1241 addition: one new deployed plist, one new
-  // ops.service_environment: ref (its "production" environment).
+  const declaredServices = JSON.parse(fs.readFileSync(new URL("../../ops/config/services.json", import.meta.url), "utf8"));
+  const declaredEnvironments = declaredServices.services.flatMap(service => service.environments)
+    .filter(environment => launchdPaths.includes(environment.deploy_mechanism));
   assert.equal(launchd.flatMap(row => row.physical_authority_refs)
-    .filter(ref => ref.startsWith("ops.service_environment:")).length, 33);
+    .filter(ref => ref.startsWith("ops.service_environment:")).length, declaredEnvironments.length);
   assert.equal(launchd.find(row => row.launchd_label === "com.carr.rules-refresh")
     .physical_authority_refs.includes("ops.service_environment:rules-refresh:production"), true);
   // The definition-only agent carries an explicit non-deployed authority ref in
@@ -3505,4 +3503,21 @@ test("the bound MCP fields are exactly what the runtime admission check compares
   const actual = body.slice(body.indexOf("const actual = {"), body.indexOf("};"));
   const compared = [...actual.matchAll(/^\s+([a-z_]+):/gm)].map(match => match[1]).sort();
   assert.deepEqual(compared, MCP_TOOL_BOUND_FIELDS.filter(field => field !== "ingress_key").sort());
+});
+
+test("watchdog forward registry admits its physical launchd authority and preserves history", async () => {
+  const inventory = await import("../../ops/scac-mutation-inventory.mjs");
+  assert.equal(typeof inventory.renderJobWatchdogRegistrySql, "function");
+  const rows = inventory.frozenInventory("scac-mutation-registry.v100");
+  assert.equal(inventory.frozenInventory("scac-mutation-registry.v99").some(row => row.launchd_label === "com.carr.job-watchdog"), false);
+  const watchdog = rows.find(row => row.source_locator === "ops/launchd/com.carr.job-watchdog.plist");
+  assert.deepEqual(watchdog.physical_authority_refs, ["ops.service_environment:job-watchdog:production"]);
+  assert.equal(watchdog.delegates_to.includes("script:tools/job-watchdog.py"), true);
+  assert.equal(inventory.assertCurrentSourceInventoryMatchesFixture(TOOLS, "scac-mutation-registry.v100"), true);
+  const sql = inventory.renderJobWatchdogRegistrySql(rows);
+  assert.equal(sql, fs.readFileSync(fileURLToPath(new URL("../../migrations/0756_job_watchdog_scac_successor.sql", import.meta.url)), "utf8"));
+  assert.match(sql, /scac_mutation_registration_v100/);
+  assert.match(sql, /scac_mutation_registry_v99_seal_available\(\)/);
+  assert.match(sql, /scac_mutation_registry_v100_seal_available\(\)/);
+  assert.match(sql, /0755_property_evidence_scac_successor.sql/);
 });

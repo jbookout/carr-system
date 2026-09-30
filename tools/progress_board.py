@@ -435,9 +435,10 @@ def render_state(state: dict[str, Any], pr_infos: dict[tuple[str, int], dict[str
     deliverables = state.get("deliverables", [])
     waiting = [(qid, q) for qid, q in questions.items() if not q.get("answer")]
     stuck = [(task_id, task) for task_id, task in active.items() if is_stuck(task) or task.get("status") == "failed"]
-    grouped: dict[str, list[tuple[str, dict[str, Any]]]] = {status: [] for status in STATUSES}
+    lanes = STATUSES + (("needs-joe",) if any(t.get("lane") == "needs-joe" for t in active.values()) else ())
+    grouped: dict[str, list[tuple[str, dict[str, Any]]]] = {status: [] for status in lanes}
     for task_id, task in active.items():
-        grouped.setdefault(task.get("status", "queued"), []).append((task_id, task))
+        grouped.setdefault(task.get("lane") or task.get("status", "queued"), []).append((task_id, task))
     pools = Counter(executor_pool(task.get("executor", "unassigned")) for task in tasks.values())
     github_unreachable = any(task.get("pr") is not None and pr_infos.get(pr_key(task)) is None
                              for task in tasks.values())
@@ -476,9 +477,9 @@ def render_state(state: dict[str, Any], pr_infos: dict[tuple[str, int], dict[str
     ) or '<p class="empty"><span class="empty-symbol">✓</span>No questions are waiting on Joe.</p>'
     stuck_cards = "".join(card(task_id, task) for task_id, task in stuck) or '<p class="empty"><span class="empty-symbol">✓</span>Nothing is stuck.</p>'
     status_sections = "".join(
-        f'<section class="status-group status-{esc(status)}"><div class="status-heading"><h3>{esc(status.title())}</h3><span>{len(grouped.get(status, [])):02d}</span></div>'
+        f'<section class="status-group status-{esc(status)}"><div class="status-heading"><h3>{esc("Needs Joe" if status == "needs-joe" else status.title())}</h3><span>{len(grouped.get(status, [])):02d}</span></div>'
         f'{"".join(card(task_id, task) for task_id, task in grouped.get(status, [])) or "<p class=\"empty compact\">No tasks</p>"}</section>'
-        for status in STATUSES
+        for status in lanes
     )
 
     completed_cards = "".join(
@@ -922,6 +923,8 @@ def command_task(args: argparse.Namespace) -> None:
         task.pop("completed_at", None)
     if args.health is not None:
         task["health"] = args.health
+    if args.lane is not None:
+        task["lane"] = None if args.lane == "status" else args.lane
     state["tasks"][args.task_id] = task
     write_and_render(state)
 
@@ -1001,6 +1004,7 @@ def parser() -> argparse.ArgumentParser:
     task.add_argument("--repo")
     task.add_argument("--stage", choices=PR_STAGES)
     task.add_argument("--health", choices=("healthy", "question", "blocked"))
+    task.add_argument("--lane", choices=("status", "needs-joe"))
     task.add_argument("--note")
     task.add_argument("--evidence")
     task.set_defaults(func=command_task)
