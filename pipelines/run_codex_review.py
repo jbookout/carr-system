@@ -502,17 +502,22 @@ def find_grok_binary() -> tuple[Optional[str], list[str]]:
 # 4. the review-contract prompt (ONE versioned string, every reviewer)
 # ---------------------------------------------------------------------------
 
-# Paths whose change means the commit touches the trust surface: the Worker's
-# auth doors and verb layer, the hooks that enforce write policy, migrations
-# (grants live there), and the Worker's deploy config. Prefix match on the
-# repo-relative path.
-SECURITY_SENSITIVE_PATHS = (
-    "mcp-server/src/",
-    "mcp-server/wrangler.toml",
-    "hooks/",
-    "migrations/",
-    "bin/",
-)
+# Which paths arm the lens is decided by the one review-tier map
+# (ops/config/review-tiers.v1.json, engineering-workflow-sop section 15), read
+# through lib/review_tiers.py: a commit whose highest tier reaches
+# SECURITY_LENS_TIER (tier 2) touches the trust surface. The map holds every
+# prefix this file used to list (mcp-server/src/, mcp-server/wrangler.toml,
+# hooks/, migrations/, bin/) at tier 2 or above.
+def _review_tiers():
+    import importlib.util  # local: this edit stays inside the lens trigger
+    spec = importlib.util.spec_from_file_location(
+        "review_tiers", str(REPO / "lib" / "review_tiers.py"))
+    if spec is None or spec.loader is None:
+        raise ImportError("lib/review_tiers.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
 
 SECURITY_LENS = (
     "SECURITY (auto-armed: this commit touches auth, grants, hooks, or "
@@ -541,7 +546,8 @@ def security_lens_if_triggered(commit_sha: str) -> Optional[str]:
             log(f"security-lens trigger check failed (git rc={out.returncode}); lens not armed")
             return None
         changed = [l.strip() for l in out.stdout.splitlines() if l.strip()]
-        if any(f.startswith(p) for f in changed for p in SECURITY_SENSITIVE_PATHS):
+        tiers = _review_tiers()
+        if tiers.tier_for_paths(changed) >= tiers.SECURITY_LENS_TIER:
             return SECURITY_LENS
         return None
     except Exception as e:  # noqa: BLE001 — fail open by design, but say so
