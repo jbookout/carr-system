@@ -30,6 +30,15 @@ def load(rel):
 
 
 class DotReview(unittest.TestCase):
+    def test_control_native_standing_result(self):
+        gate = load('hooks/rule-pack-drift-gate.py')
+        body = {'rule_delivery': {'mode':'enforced','declared_packs':['release'],'packs_not_found':[]}}
+        event = {'type':'event_msg','payload':{'type':'mcp_tool_call_end','invocation':{'tool':'standing_context'},'result':{'Ok':body}}}
+        self.assertEqual(['release'], gate.delivery_state([event])[1])
+        call = {'type':'response_item','payload':{'type':'function_call','name':'mcp__carr__standing_context','call_id':'standing-fixture'}}
+        output = {'type':'response_item','payload':{'type':'function_call_output','call_id':'standing-fixture','output':json.dumps(body)}}
+        self.assertEqual(['release'], gate.delivery_state([call, output])[1])
+
     def test_control_single_quoted_prose(self):
         mod = load('hooks/cmd_text.py')
         self.assertNotIn('git reset', mod.strip_inert_text('echo --title \'"$(git reset --hard)"\''))

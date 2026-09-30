@@ -1072,4 +1072,4 @@ else:
 
 # Independently reproduced Dot cases share the offline behavioral fixtures.
 import runpy as _dot_runpy
-_dot_runpy.run_path(str(__import__("pathlib").Path(__file__).with_name("dot-review-selftest.py")))["run_regressions"](['test_b26', 'test_b27'])
+_dot_runpy.run_path(str(__import__("pathlib").Path(__file__).with_name("dot-review-selftest.py")))["run_regressions"](['test_b26', 'test_b27', 'test_control_native'])

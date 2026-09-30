@@ -574,6 +574,11 @@ def standing_result_delivery(record, prior):
     """Credit service results only when tied to a standing-context call."""
     calls = set()
     for previous in prior:
+        native = previous.get("payload") or {}
+        if (previous.get("type") == "response_item" and native.get("type") == "function_call"
+                and ("standing_context" in str(native.get("name", ""))
+                     or "standing-context" in str(native.get("name", "")))):
+            calls.add(native.get("call_id"))
         message = previous.get("message") or {}
         content = message.get("content")
         for block in content if isinstance(content, list) else []:
@@ -591,9 +596,14 @@ def standing_result_delivery(record, prior):
                 and block.get("tool_use_id") in calls and not block.get("is_error")):
             return _find_delivery(block.get("content"))
     payload = record.get("payload") or {}
+    if (record.get("type") == "response_item" and payload.get("type") == "function_call_output"
+            and payload.get("call_id") in calls and not payload.get("is_error")):
+        return _find_delivery(payload.get("output"))
+    invocation = payload.get("invocation") or {}
+    native_name = payload.get("tool_name") or invocation.get("tool", "")
     if (record.get("type") == "event_msg" and payload.get("type") == "mcp_tool_call_end"
-            and ("standing_context" in serialized(payload.get("tool_name", ""))
-                 or "standing-context" in serialized(payload.get("tool_name", "")))):
+            and ("standing_context" in str(native_name) or "standing-context" in str(native_name))
+            and not payload.get("is_error") and "Err" not in (payload.get("result") or {})):
         return _find_delivery(payload.get("result"))
     return None
 
