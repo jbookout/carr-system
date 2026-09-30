@@ -111,6 +111,101 @@ class LoadSuiteTests(unittest.TestCase):
 
 
 class GradeImplTests(unittest.TestCase):
+    def test_hidden_imports_cannot_load_candidate_into_grader(self):
+        cases = {
+            'py': ('from solution import add\ncheck("must fail", lambda: False)', '''import sys, json
+if sys.argv[0] == '-':
+    print(json.dumps({'completed':True, 'total':1, 'passed':1}))
+    raise SystemExit(0)
+def add(a,b): return a+b
+'''),
+            'js': ('const {add} = require("./solution"); check("must fail", () => false);', '''
+if (!process.execArgv.includes('-e')) {
+  console.log(JSON.stringify({completed:true,total:1,passed:1}));
+  process.exit(0);
+}
+module.exports = {add:(a,b) => a+b};
+'''),
+        }
+        for lang, (test, code) in cases.items():
+            with self.subTest(lang=lang):
+                self.assertFalse(sc.grade_candidate({'lang':lang, 'test':test}, code)['pass'])
+
+    def test_deep_input_does_not_exhaust_the_grader_transport(self):
+        task = {'lang':'py', 'test':'''data = 1
+for _ in range(3000): data = [data]
+check("deep", lambda: unwrap(data) == 1)
+'''}
+        code = 'def unwrap(data):\n    while isinstance(data, list): data = data[0]\n    return data\n'
+        result = sc.grade_candidate(task, code)
+        self.assertTrue(result['pass'], result)
+
+    def test_identity_tuple_keys_exceptions_and_objects_keep_their_behavior(self):
+        task = {'lang':'py', 'test':'''data = {(1,): [2]}
+check("identity", lambda: identity(data) is data)
+check("key", lambda: identity(data)[(1,)] == [2])
+check("error", lambda: raises(ValueError, reject))
+def state():
+    c = Counter()
+    return c.next() == 1 and c.next() == 2
+check("state", state)
+'''}
+        code = '''def identity(data): return data
+def reject(): raise ValueError('fixture')
+class Counter:
+    def __init__(self): self.n = 0
+    def next(self):
+        self.n += 1
+        return self.n
+'''
+        self.assertTrue(sc.grade_candidate(task, code)['pass'])
+
+    def test_hidden_assertions_observe_candidate_input_mutations(self):
+        task = {'lang':'py', 'test':'''data = [2, 1]
+check("result", lambda: sort_values(data) == [1, 2])
+check("input unchanged", lambda: data == [2, 1])
+'''}
+        result = sc.grade_candidate(task, 'def sort_values(data):\n    data.sort()\n    return data\n')
+        self.assertFalse(result['pass'], result)
+        self.assertIn('1/2', result['subtests'])
+        self.assertIn('FAIL input unchanged', result['detail'])
+        self.assertTrue(sc.grade_candidate(task, 'def sort_values(data):\n    return sorted(data)\n')['pass'])
+
+    def test_javascript_candidate_state_persists_between_assertions(self):
+        task = {'lang':'js', 'test':'''const {next} = require("./solution.js");
+check("first", () => next() === 1);
+check("second", () => next() === 2);
+'''}
+        result = sc.grade_candidate(task, 'let n = 0; module.exports = {next:() => ++n};')
+        self.assertTrue(result['pass'], result)
+
+    def test_candidate_cannot_forge_completion_file_and_exit_before_assertions(self):
+        candidates = {
+            'py': '''import re, json, os
+source = open('test_hidden.py').read()
+path = re.search(r"['\\\"]([^'\\\"]*completion.json)['\\\"]", source).group(1)
+with open(path, 'w') as handle:
+    json.dump({'completed':True, 'total':1, 'passed':1}, handle)
+os._exit(0)
+''',
+            'js': '''const fs = require('fs');
+const source = fs.readFileSync('test_hidden.js', 'utf8');
+const path = source.match(/['"]([^'"]*completion.json)['"]/)[1];
+fs.writeFileSync(path, JSON.stringify({completed:true, total:1, passed:1}));
+process.exit(0);
+''',
+        }
+        for lang, code in candidates.items():
+            with self.subTest(lang=lang):
+                assertion = 'check("must fail", lambda: False)' if lang == 'py' else 'require("./solution.js"); check("must fail", () => false);'
+                result = sc.grade_candidate({'lang':lang, 'test':assertion}, code)
+                self.assertFalse(result['pass'], result)
+
+    def test_javascript_assertions_are_counted_by_the_grader(self):
+        task = {'lang':'js', 'test':'const {add} = require("./solution.js"); check("sum", () => add(1,2) === 3);'}
+        self.assertTrue(sc.grade_candidate(task, 'module.exports = {add:(a,b) => a+b};')['pass'])
+        self.assertFalse(sc.grade_candidate(task, 'module.exports = {add:(a,b) => a-b};')['pass'])
+
     def test_a_correct_candidate_passes(self):
         result = sc.grade_candidate(IMPL_TASK, "def add(a, b):\n    return a + b\n")
         self.assertTrue(result["pass"])

@@ -1161,44 +1161,79 @@ def _call_id(rec):
     return None
 
 
-def _result_success(value):
+def _script_result(value, predicate):
+    output = value.split('\nOutput:\n', 1)[1].strip()
+    decoder = json.JSONDecoder()
+    statuses = []
+    try:
+        while output:
+            item, end = decoder.raw_decode(output)
+            statuses.append(predicate(item))
+            output = output[end:].strip()
+    except ValueError:
+        return False
+    return bool(statuses) and all(statuses)
+
+
+def _result_success(value, terminal_success=False):
     """A paired result must be terminal; running, timeout and errors never count."""
     if isinstance(value, str):
         if re.search(r'Script running|session ID|timed?\s*out|timeout|Process exited with code [1-9]', value, re.I):
             return False
         if value.startswith('Script completed') and '\nOutput:\n' in value:
-            output = value.split('\nOutput:\n', 1)[1].strip()
-            decoder = json.JSONDecoder()
-            statuses = []
-            try:
-                while output:
-                    item, end = decoder.raw_decode(output)
-                    statuses.append(_result_success(item))
-                    output = output[end:].strip()
-            except ValueError:
-                return False
-            return bool(statuses) and all(statuses)
+            return _script_result(value, _result_success)
         try:
             return _result_success(json.loads(value))
         except ValueError:
-            # Native exec's terminal text wrapper and Claude read/test results.
-            return bool(value.strip())
+            # Native shell wrappers carry an exit status. Claude's result
+            # envelope may instead explicitly report is_error=false.
+            return bool(re.search(r'Process exited with code 0\b', value)) or (terminal_success and bool(value.strip()))
     if isinstance(value, list):
-        return bool(value) and all(_result_success(item) for item in value)
+        return bool(value) and all(_result_success(item, terminal_success) for item in value)
     if isinstance(value, dict):
         if value.get('is_error') or value.get('isError') or value.get('error') or value.get('ok') is False:
             return False
+        if 'status' in value and value['status'] not in ('completed', 'success', 'succeeded'):
+            return False
         if 'exit_code' in value:
-            return value['exit_code'] == 0 and not value.get('session_id')
+            return type(value['exit_code']) is int and value['exit_code'] == 0 and not value.get('session_id') and not value.get('cell_id')
         if value.get('session_id') or value.get('cell_id'):
             return False
         if value.get('type') == 'text':
-            return _result_success(value.get('text', ''))
+            return _result_success(value.get('text', ''), terminal_success)
         if 'output' in value:
-            return _result_success(value['output'])
+            return _result_success(value['output'], terminal_success)
         if 'content' in value:
-            return _result_success(value['content'])
-        return bool(value)
+            return _result_success(value['content'], terminal_success)
+        return value.get('ok') is True or value.get('status') in ('success', 'succeeded')
+    return False
+
+
+def _result_terminal(value):
+    """Completion of an attempt is separate from success of verification."""
+    if isinstance(value, str):
+        if re.search(r'Script running|session ID', value, re.I):
+            return False
+        if value.startswith('Script completed') and '\nOutput:\n' in value:
+            return _script_result(value, _result_terminal)
+        try:
+            return _result_terminal(json.loads(value))
+        except ValueError:
+            return bool(re.search(r'Process exited with code -?\d+\b', value))
+    if isinstance(value, list):
+        return bool(value) and all(_result_terminal(item) for item in value)
+    if isinstance(value, dict):
+        if value.get('session_id') or value.get('cell_id'):
+            return False
+        if 'status' in value and value['status'] not in ('completed', 'success', 'succeeded', 'failed'):
+            return False
+        if 'exit_code' in value:
+            return type(value['exit_code']) is int
+        if value.get('status') in ('completed', 'success', 'succeeded', 'failed') or type(value.get('ok')) is bool:
+            return True
+        for key in ('text', 'output', 'content'):
+            if key in value:
+                return _result_terminal(value[key])
     return False
 
 
@@ -1208,11 +1243,16 @@ def _completed_calls(recs):
         epoch = rec['_epoch']
         payload = rec.get('payload') or {}
         if payload.get('call_id') and payload.get('type') in {'custom_tool_call_output', 'function_call_output'}:
-            results[payload.get('call_id')] = (epoch, not payload.get('is_error') and _result_success(payload.get('output')))
+            value = payload.get('output')
+            success = not payload.get('is_error') and _result_success(value)
+            results[payload.get('call_id')] = (epoch, success, success or _result_terminal(value))
         content = message(rec).get('content')
         for block in content if isinstance(content, list) else []:
             if isinstance(block, dict) and block.get('type') == 'tool_result' and block.get('tool_use_id'):
-                results[block.get('tool_use_id')] = (epoch, not block.get('is_error') and _result_success(block.get('content')))
+                value = block.get('content')
+                success = not block.get('is_error') and _result_success(value, block.get('is_error') is False)
+                terminal = success or _result_terminal(value) or (type(block.get('is_error')) is bool and not re.search(r'Script running|session ID', str(value), re.I))
+                results[block.get('tool_use_id')] = (epoch, success, terminal)
     return results
 
 
@@ -1296,7 +1336,7 @@ def evaluate(recs, ledger=None):
     # Invocation order inside one assistant array is concurrency, not execution
     # order. Each mutation needs a terminal result before verification starts.
     change_results = [completions.get(_call_id(rec)) for rec in changes]
-    mutations_complete = all(item is not None and item[1] for item in change_results)
+    mutations_complete = all(item is not None and item[2] for item in change_results)
     latest_finish = max((item[0] for item in change_results if item is not None), default=-1)
     verified = mutations_complete and any(
         verification(*tool(rec)) and rec['_epoch'] > latest_finish

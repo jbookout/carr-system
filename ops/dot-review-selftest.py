@@ -30,6 +30,42 @@ def load(rel):
 
 
 class DotReview(unittest.TestCase):
+    def test_r2_native_failed_exec_wrapper_is_a_finished_attempt(self):
+        gate = load('hooks/completion-evidence-gate.py')
+        outcome = 'Script completed\nWall time 1\nOutput:\n'+json.dumps({'exit_code':1, 'output':'write failed'})
+        records = [user('Make the change'), native_call('failed', 'wrangler deploy'), native_output('failed', outcome),
+                   native_call('retry', 'wrangler deploy'), native_output('retry', {'exit_code':0}),
+                   native_call('t', 'pytest'), native_output('t', {'exit_code':0}), assistant('Done, verified and complete')]
+        self.assertFalse(gate.evaluate(records)[0])
+
+    def test_r2_repaired_failed_write_allows_later_verification(self):
+        gate = load('hooks/completion-evidence-gate.py')
+        records = [user('Make the change'), use('Write', {'file_path':'a.py'}, 'failed'), result('failed', True),
+                   use('Write', {'file_path':'a.py'}, 'retry'), result('retry'),
+                   use('Write', {'file_path':'b.py'}, 'b'), result('b'),
+                   use('Bash', {'command':'pytest'}, 't'), result('t'), assistant('Done, verified and complete')]
+        self.assertFalse(gate.evaluate(records)[0])
+        for outcome in ({'exit_code':1}, {'exit_code':0}, {'session_id':123}, {'unknown':'value'}):
+            native = [user('Make the change'), native_call('failed', 'wrangler deploy'),
+                      native_output('failed', outcome), native_call('retry', 'wrangler deploy'),
+                      native_output('retry', {'exit_code':0}), native_call('t', 'pytest'),
+                      native_output('t', {'exit_code':0}), assistant('Done, verified and complete')]
+            self.assertEqual(outcome.get('exit_code') is None, gate.evaluate(native)[0], outcome)
+
+    def test_r02_unknown_or_unsuccessful_results_cannot_verify(self):
+        gate = load('hooks/completion-evidence-gate.py')
+        for kind in ('custom_tool_call', 'function_call'):
+            for outcome in ({'status':'running'}, {'status':'failed'}, {'output':'tests failed'},
+                            {'status':'completed'}, {'status':[]},
+                            {'unrecognized':'value'}, 'arbitrary nonempty text',
+                            {'exit_code':False}, {'exit_code':0, 'status':'running'},
+                            {'exit_code':0, 'status':'failed'}):
+                with self.subTest(kind=kind, outcome=outcome):
+                    records = [user('Make the change'), native_call('m', 'wrangler deploy', kind),
+                               native_output('m', {'exit_code':0}, kind), native_call('t', 'pytest', kind),
+                               native_output('t', outcome, kind), assistant('Done, verified and complete')]
+                    self.assertTrue(gate.evaluate(records)[0], outcome)
+
     def test_r14_long_candidate_lines_keep_matched_source(self):
         mod = load('ops/jev_code_review.py')
         with tempfile.TemporaryDirectory() as tmp:
@@ -461,7 +497,8 @@ class DotReview(unittest.TestCase):
         for rel in ('ops/jev_code_review.py', 'ops/jev_code_partition.py'):
             mod = load(rel)
             def listing(argv, **kwargs):
-                return subprocess.CompletedProcess(argv, 0, stdout=('café.py\0' if '-z' in argv else '"caf\\303\\251.py"\n'))
+                output = 'café.py\0' if '-z' in argv else '"caf\\303\\251.py"\n'
+                return subprocess.CompletedProcess(argv, 0, stdout=output if kwargs.get('text') else os.fsencode(output))
             with patch.object(mod.subprocess, 'run', side_effect=listing):
                 self.assertEqual(['café.py'], mod.tracked_sources())
 
