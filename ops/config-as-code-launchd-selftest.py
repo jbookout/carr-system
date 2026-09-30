@@ -6,11 +6,13 @@ import contextlib
 import hashlib
 import importlib.util
 import io
+import json
 import os
 import plistlib
 import signal
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -219,10 +221,22 @@ def check_and_install_cases() -> list[bool]:
         "PREREQUISITE_CHECK")}
     real_run = mod.subprocess.run
     launchctl_calls: list[list[str]] = []
+    loaded_paths: dict[str, str] = {}
 
     def stub_run(args, *a, **k):
         if args and os.path.basename(str(args[0])) == "launchctl":
             launchctl_calls.append(list(args))
+            if args[1] == "print":
+                label = args[2].rsplit("/", 1)[-1]
+                if label in loaded_paths:
+                    return SimpleNamespace(returncode=0,
+                                           stdout=f"path = {loaded_paths[label]}\n", stderr="")
+                return SimpleNamespace(returncode=113, stdout="",
+                                       stderr=f'Could not find service "{label}" in domain for user gui: 501')
+            if args[1] == "unload":
+                loaded_paths.pop(Path(args[-1]).stem, None)
+            if args[1] == "load":
+                loaded_paths[Path(args[-1]).stem] = args[-1]
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         return real_run(args, *a, **k)
 
@@ -288,6 +302,16 @@ def check_and_install_cases() -> list[bool]:
                 and "com.carr.good.plist (SCHEDULE REFUSED)" not in text,
                 (check_rc, text[:800]),
             ))
+            pending = agents / "com.carr.good.plist.pending-reload"
+            pending.write_text("synthetic interrupted reload\n", encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()) as pending_out:
+                pending_rc = mod.cmd_check()
+            out.append(check(
+                "cmd_check reports a pending launchd reload even when plist bytes match",
+                pending_rc == 1
+                and "com.carr.good.plist (PENDING RELOAD)" in pending_out.getvalue(),
+                (pending_rc, pending_out.getvalue()[:800]),
+            ))
     finally:
         mod.subprocess.run = real_run
         for name, value in saved.items():
@@ -337,13 +361,147 @@ def smoke_job_refusal_cases() -> list[bool]:
     return out
 
 
+def failed_reload_retry_cases() -> list[bool]:
+    """Two installer processes share disk and launchd state across a failed load."""
+    with tempfile.TemporaryDirectory(prefix="carr-launchd-retry-") as tmp:
+        root = Path(tmp)
+        label = "com.carr.retry-proof"
+        dest = root / f"{label}.plist"
+        desired = root / "desired.plist"
+        state_path = root / "launchd-state.json"
+        dest.write_text(plist(label, "/usr/bin/false"), encoding="utf-8")
+        desired.write_text(plist(label, "/usr/bin/true"), encoding="utf-8")
+        state_path.write_text(json.dumps({
+            "loaded": True, "program": "/usr/bin/false",
+            "fail_unload_once": True, "last_unload_failed": False,
+        }), encoding="utf-8")
+        fake = root / "launchctl"
+        fake.write_text("""#!/usr/bin/env python3
+import json, os, plistlib, sys
+from pathlib import Path
+state_path = Path(os.environ['CARR_FAKE_LAUNCHD_STATE'])
+state = json.loads(state_path.read_text())
+args = sys.argv[1:]
+label = os.environ['CARR_FAKE_LAUNCHD_LABEL']
+dest = os.environ['CARR_FAKE_LAUNCHD_DEST']
+if args[0] == 'print':
+    if not state['loaded']:
+        print(f'Could not find service "{label}" in domain for user gui: 501', file=sys.stderr)
+        sys.exit(113)
+    print(f'path = {dest}\\nprogram = {state["program"]}')
+    sys.exit(0)
+if args[0] == 'unload':
+    if state['fail_unload_once']:
+        state['fail_unload_once'] = False
+        state['last_unload_failed'] = True
+        state_path.write_text(json.dumps(state))
+        sys.exit(5)
+    state['loaded'] = False
+    state['last_unload_failed'] = False
+elif args[0] == 'load':
+    if state['last_unload_failed']:
+        state['last_unload_failed'] = False
+        state_path.write_text(json.dumps(state))
+        sys.exit(5)
+    if state.get('suppress_register_once'):
+        state['suppress_register_once'] = False
+        state_path.write_text(json.dumps(state))
+        sys.exit(0)
+    state['loaded'] = True
+    state['program'] = plistlib.loads(Path(dest).read_bytes())['ProgramArguments'][0]
+else:
+    sys.exit(64)
+state_path.write_text(json.dumps(state))
+""", encoding="utf-8")
+        fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+        install = """import importlib.util, pathlib, sys
+spec = importlib.util.spec_from_file_location('config_as_code_retry', sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+dest = pathlib.Path(sys.argv[2])
+body = pathlib.Path(sys.argv[3]).read_text()
+print('OUTCOME:', mod.install_launchd_plist(dest.name, str(dest), body,
+                                          dest.read_text() == body))
+"""
+        env = dict(os.environ, PATH=f"{root}{os.pathsep}{os.environ['PATH']}",
+                   CARR_FAKE_LAUNCHD_STATE=str(state_path),
+                   CARR_FAKE_LAUNCHD_LABEL=label,
+                   CARR_FAKE_LAUNCHD_DEST=str(dest),
+                   PYTHONDONTWRITEBYTECODE="1")
+        argv = [sys.executable, "-c", install, str(REPO / "ops" / "config-as-code.py"),
+                str(dest), str(desired)]
+        first = subprocess.run(argv, cwd=REPO, env=env, capture_output=True, text=True)
+        after_first = json.loads(state_path.read_text())
+        first_ok = (first.returncode == 0 and "OUTCOME: failed" in first.stdout
+                    and after_first["loaded"] and after_first["program"] == "/usr/bin/false"
+                    and dest.read_text() == desired.read_text()
+                    and (root / f"{label}.plist.pending-reload").exists())
+        second = subprocess.run(argv, cwd=REPO, env=env, capture_output=True, text=True)
+        after_second = json.loads(state_path.read_text())
+        second_ok = (second.returncode == 0 and "OUTCOME: loaded" in second.stdout
+                     and "OUTCOME: kept" not in second.stdout
+                     and after_second["loaded"]
+                     and after_second["program"] == "/usr/bin/true"
+                     and not (root / f"{label}.plist.pending-reload").exists())
+        dest.write_text(plist(label, "/usr/bin/false"), encoding="utf-8")
+        state_path.write_text(json.dumps({
+            "loaded": True, "program": "/usr/bin/false",
+            "fail_unload_once": False, "last_unload_failed": False,
+            "suppress_register_once": True,
+        }), encoding="utf-8")
+        false_success = subprocess.run(argv, cwd=REPO, env=env,
+                                       capture_output=True, text=True)
+        after_false_success = json.loads(state_path.read_text())
+        unverified_ok = (false_success.returncode == 0
+                         and "OUTCOME: failed" in false_success.stdout
+                         and not after_false_success["loaded"]
+                         and (root / f"{label}.plist.pending-reload").exists())
+        verified_retry = subprocess.run(argv, cwd=REPO, env=env,
+                                        capture_output=True, text=True)
+        after_verified_retry = json.loads(state_path.read_text())
+        verified_ok = (verified_retry.returncode == 0
+                       and "OUTCOME: loaded" in verified_retry.stdout
+                       and after_verified_retry["loaded"]
+                       and after_verified_retry["program"] == "/usr/bin/true"
+                       and not (root / f"{label}.plist.pending-reload").exists())
+        return [
+            check("failed changed-plist reload leaves old loaded definition and new disk bytes",
+                  first_ok, (first.stdout, first.stderr, after_first)),
+            check("fresh installer process retries the pending reload instead of keeping old definition",
+                  second_ok, (second.stdout, second.stderr, after_second)),
+            check("load success without launchd registration retains pending state",
+                  unverified_ok, (false_success.stdout, false_success.stderr,
+                                  after_false_success)),
+            check("fresh installer process clears pending state only after verified registration",
+                  verified_ok, (verified_retry.stdout, verified_retry.stderr,
+                                after_verified_retry)),
+        ]
+
+
 def main() -> int:
     original_run = mod.subprocess.run
     original_active = os.environ.get(mod.ACTIVE_LAUNCHD_LABEL_ENV)
     calls: list[list[str]] = []
+    loaded_paths: dict[str, str] = {}
+    print_error = ""
 
     def fake_run(args, *unused_args, **unused_kwargs):
         calls.append(list(args))
+        if args[1] == "unload":
+            loaded_paths.pop(Path(args[-1]).stem, None)
+        if args[1] == "load":
+            loaded_paths[Path(args[-1]).stem] = args[-1]
+        if args[1] == "print":
+            if print_error:
+                return SimpleNamespace(returncode=1, stdout="", stderr=print_error)
+            label = args[2].rsplit("/", 1)[-1]
+            if label not in loaded_paths:
+                return SimpleNamespace(
+                    returncode=113, stdout="",
+                    stderr=f'Could not find service "{label}" in domain for user gui: 501',
+                )
+            return SimpleNamespace(returncode=0,
+                                   stdout=f"path = {loaded_paths[label]}\n", stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     cases: list[bool] = []
@@ -424,18 +582,117 @@ def main() -> int:
             ))
 
             other_dest.write_text(desired_other, encoding="utf-8")
+            loaded_paths[other_label] = str(other_dest)
             calls.clear()
-            with contextlib.redirect_stdout(io.StringIO()):
+            with contextlib.redirect_stdout(io.StringIO()) as kept_out:
                 other = mod.install_launchd_plist(
                     other_dest.name, str(other_dest), desired_other, True
                 )
             cases.append(check(
-                "active fleet install still unloads and loads every other plist",
-                other == "loaded"
-                and [call[:2] for call in calls]
-                == [["launchctl", "unload"], ["launchctl", "load"]],
-                (other, calls),
+                "unchanged loaded other job remains loaded without a reload",
+                other == "kept" and calls == [
+                    ["launchctl", "print", f"gui/{os.getuid()}/{other_label}"]
+                ] and other_dest.read_text(encoding="utf-8") == desired_other
+                and "kept loaded" in kept_out.getvalue(),
+                (other, calls, kept_out.getvalue()),
             ))
+
+            loaded_paths[other_label] = str(root / "foreign.plist")
+            calls.clear()
+            with contextlib.redirect_stdout(io.StringIO()) as foreign_out:
+                foreign = mod.install_launchd_plist(
+                    other_dest.name, str(other_dest), desired_other, True
+                )
+            cases.append(check(
+                "same label loaded from a foreign path is not silently accepted",
+                foreign == "failed" and calls == [
+                    ["launchctl", "print", f"gui/{os.getuid()}/{other_label}"]
+                ] and other_dest.read_text(encoding="utf-8") == desired_other
+                and "INSPECT FAILED" in foreign_out.getvalue(),
+                (foreign, calls, foreign_out.getvalue()),
+            ))
+
+            pending = Path(str(other_dest) + ".pending-reload")
+            other_dest.write_text(plist(other_label, "/usr/bin/false"), encoding="utf-8")
+            calls.clear()
+            with contextlib.redirect_stdout(io.StringIO()):
+                changed_foreign = mod.install_launchd_plist(
+                    other_dest.name, str(other_dest), desired_other, False
+                )
+            cases.append(check(
+                "changed plist refuses foreign registration before touching disk",
+                changed_foreign == "failed" and calls == [
+                    ["launchctl", "print", f"gui/{os.getuid()}/{other_label}"]
+                ] and other_dest.read_text(encoding="utf-8")
+                == plist(other_label, "/usr/bin/false") and not pending.exists(),
+                (changed_foreign, calls),
+            ))
+
+            other_dest.write_text(desired_other, encoding="utf-8")
+            pending.write_text("synthetic pending reload\n", encoding="utf-8")
+            calls.clear()
+            with contextlib.redirect_stdout(io.StringIO()):
+                pending_foreign = mod.install_launchd_plist(
+                    other_dest.name, str(other_dest), desired_other, True
+                )
+            cases.append(check(
+                "pending retry refuses foreign registration before touching marker or job",
+                pending_foreign == "failed" and calls == [
+                    ["launchctl", "print", f"gui/{os.getuid()}/{other_label}"]
+                ] and other_dest.read_text(encoding="utf-8") == desired_other
+                and pending.read_text(encoding="utf-8") == "synthetic pending reload\n",
+                (pending_foreign, calls),
+            ))
+
+            pending.write_text("synthetic pending reload\n", encoding="utf-8")
+            print_error = "Operation not permitted"
+            calls.clear()
+            with contextlib.redirect_stdout(io.StringIO()):
+                pending_ambiguous = mod.install_launchd_plist(
+                    other_dest.name, str(other_dest), desired_other, True
+                )
+            cases.append(check(
+                "pending retry refuses ambiguous inspection before touching marker or job",
+                pending_ambiguous == "failed" and calls == [
+                    ["launchctl", "print", f"gui/{os.getuid()}/{other_label}"]
+                ] and other_dest.read_text(encoding="utf-8") == desired_other
+                and pending.read_text(encoding="utf-8") == "synthetic pending reload\n",
+                (pending_ambiguous, calls),
+            ))
+            print_error = ""
+            pending.unlink()
+
+            loaded_paths.pop(other_label, None)
+            calls.clear()
+            with contextlib.redirect_stdout(io.StringIO()):
+                absent = mod.install_launchd_plist(
+                    other_dest.name, str(other_dest), desired_other, True
+                )
+            cases.append(check(
+                "unchanged absent job is loaded",
+                absent == "loaded" and [call[:2] for call in calls]
+                == [["launchctl", "print"], ["launchctl", "unload"],
+                    ["launchctl", "print"], ["launchctl", "load"],
+                    ["launchctl", "print"]]
+                and other_dest.read_text(encoding="utf-8") == desired_other,
+                (absent, calls),
+            ))
+
+            print_error = "Operation not permitted"
+            calls.clear()
+            with contextlib.redirect_stdout(io.StringIO()) as error_out:
+                ambiguous = mod.install_launchd_plist(
+                    other_dest.name, str(other_dest), desired_other, True
+                )
+            cases.append(check(
+                "ambiguous launchctl inspection refuses without altering the job",
+                ambiguous == "failed" and calls == [
+                    ["launchctl", "print", f"gui/{os.getuid()}/{other_label}"]
+                ] and other_dest.read_text(encoding="utf-8") == desired_other
+                and "INSPECT FAILED" in error_out.getvalue(),
+                (ambiguous, calls, error_out.getvalue()),
+            ))
+            print_error = ""
 
             os.environ.pop(mod.ACTIVE_LAUNCHD_LABEL_ENV, None)
             calls.clear()
@@ -447,7 +704,9 @@ def main() -> int:
                 "external install renders and reloads the changed fleet plist",
                 external == "loaded"
                 and [call[:2] for call in calls]
-                == [["launchctl", "unload"], ["launchctl", "load"]]
+                == [["launchctl", "print"], ["launchctl", "unload"],
+                    ["launchctl", "print"],
+                    ["launchctl", "load"], ["launchctl", "print"]]
                 and fleet_dest.read_text(encoding="utf-8") == desired_fleet,
                 (external, calls),
             ))
@@ -531,6 +790,7 @@ def main() -> int:
             mod.refused_launchd_templates(str(repo)),
         ))
     cases.extend(smoke_job_refusal_cases())
+    cases.extend(failed_reload_retry_cases())
     cases.extend(handoff_script_cases())
     cases.extend(check_and_install_cases())
     cases.append(check(
