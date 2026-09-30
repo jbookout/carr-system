@@ -285,5 +285,30 @@ owners = [s for s in services if any(e.get("deploy_mechanism") ==
     "ops/launchd/com.carr.tailscale-up.plist" for e in s.get("environments", []))]
 check("live agent has exactly one service catalog owner", len(owners) == 1, owners)
 
+# Launchd rows remain auditable historical evidence, but no longer require a
+# registry successor on each source edit. The DB gate must use its sealed
+# service catalog while separately verifying today's source closure.
+sys.path.insert(0, str(REPO / "ops"))
+db_spec = importlib.util.spec_from_file_location("siep11_gate_ts",
+    REPO / "ops/siep11-mutation-registry-local-pg-gate.py")
+assert db_spec and db_spec.loader
+db_gate = importlib.util.module_from_spec(db_spec)
+db_spec.loader.exec_module(db_gate)
+sealed_catalog = getattr(db_gate, "sealed_service_launchd", None)
+check("DB seal has an independent historical service catalog", callable(sealed_catalog))
+if callable(sealed_catalog):
+    historical_services = sealed_catalog("scac-mutation-registry.v99")
+    check("new live agent does not rewrite historical DB service authority",
+          all(row[0] != "tailscale-up" for row in historical_services), historical_services)
+    check("historical catalog retains deployed service authority",
+          ("rules-refresh", "production", "ops/launchd/com.carr.rules-refresh.plist")
+          in historical_services)
+    try:
+        sealed_catalog("scac-mutation-registry.unreviewed")
+    except (ValueError, subprocess.CalledProcessError):
+        check("unreviewed historical catalog version refuses", True)
+    else:
+        check("unreviewed historical catalog version refuses", False)
+
 print(f"tailscale-health-selftest: {'FAIL ' + str(len(FAILS)) if FAILS else 'all passed'}")
 sys.exit(1 if FAILS else 0)

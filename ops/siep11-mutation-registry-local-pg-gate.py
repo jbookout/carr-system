@@ -9,6 +9,7 @@ import os
 import json
 import sys
 import threading
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -81,6 +82,44 @@ def refusal(cur, query: str, params: tuple, fragment: str) -> None:
     raise RuntimeError(f"expected refusal containing {fragment!r}")
 
 
+def sealed_service_launchd(registry_version: str) -> list[tuple[str, str, str]]:
+    """Check live source closure and read the selected seal's frozen catalog.
+
+    Decision 05e144eb exempts launchd source edits from registry resealing.
+    Comparing an immutable database snapshot with today's catalog would demand
+    a successor anyway. Keep exact DB parity against its independent fixture;
+    workflowDefinitionInventory still refuses missing/duplicate live owners.
+    """
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", """
+        import { frozenInventory, workflowDefinitionInventory }
+          from './ops/scac-mutation-inventory.mjs';
+        workflowDefinitionInventory();
+        const mappings = frozenInventory(process.argv[1]).flatMap(row =>
+          (row.physical_authority_refs || []).filter(ref =>
+            ref.startsWith('ops.service_environment:')).map(ref => {
+              const parts = ref.split(':');
+              if (parts.length !== 3 || !parts[1] || !parts[2])
+                throw new Error('malformed frozen service authority');
+              return [parts[1], parts[2], row.source_locator];
+            }));
+        process.stdout.write(JSON.stringify(mappings));
+        """, registry_version],
+        cwd=REPO, capture_output=True, text=True, timeout=30, check=True,
+    )
+    rows = json.loads(result.stdout)
+    if not isinstance(rows, list) or not rows or any(
+        not isinstance(row, list) or len(row) != 3
+        or any(not isinstance(value, str) or not value for value in row)
+        for row in rows
+    ):
+        raise ValueError("malformed sealed launchd service catalog")
+    mappings = sorted(tuple(row) for row in rows)
+    if len(mappings) != len(set(mappings)):
+        raise ValueError("duplicate sealed launchd service mapping")
+    return mappings
+
+
 def validate_launchd_authority_refs(
     cur, registry_version: str, expected_launchd: list[tuple],
     expected_service_launchd: list[tuple[str, str, str]],
@@ -108,13 +147,13 @@ def validate_launchd_authority_refs(
     ).fetchall()]
     expected_active_service_launchd = [(*row, False) for row in expected_service_launchd]
     if actual_service_launchd != expected_active_service_launchd:
-        raise RuntimeError("launchd service environments do not exactly match the active checked-in catalog")
+        raise RuntimeError("launchd service environments do not exactly match the sealed service catalog")
     expected_service_refs = sorted(
         (path, f"ops.service_environment:{service_key}:{environment}")
         for service_key, environment, path in expected_service_launchd
     )
     if sorted((source_locator, ref) for _, source_locator, ref in service_refs) != expected_service_refs:
-        raise RuntimeError("launchd service authority refs do not exactly cover checked-in service environments")
+        raise RuntimeError("launchd service authority refs do not exactly cover sealed service environments")
     actual_launchd = [tuple(row) for row in cur.execute(
         """select surface_id,workflow_key,workflow_version,locator,repo_plist_relpath,
                   installed_plist_name,program_arguments,plist_sha256,schedule_sha256,timezone
@@ -135,15 +174,6 @@ def main() -> int:
         validate_incident_work_request_same_key_serialization(dsn)
         registry = json.loads((REPO / "ops/config/control-plane-scheduler-cutover.v1.json").read_text(encoding="utf-8"))
         manifest = json.loads((REPO / "ops/config/control-plane-workflows.v1.json").read_text(encoding="utf-8"))
-        services = json.loads((REPO / "ops/config/services.json").read_text(encoding="utf-8"))
-        expected_service_launchd = sorted(
-            (str(service["key"]), str(environment["environment"]), str(environment["deploy_mechanism"]))
-            for service in services["services"]
-            for environment in service.get("environments", [])
-            if isinstance(environment.get("deploy_mechanism"), str)
-            and environment["deploy_mechanism"].startswith("ops/launchd/")
-            and environment["deploy_mechanism"].endswith(".plist")
-        )
         expected_launchd = sorted(
             (row[2], row[0], row[1], row[3], row[4], row[5], json.loads(row[6]), row[7], row[8], row[9])
             for row in scheduler_launchd_rows(registry, manifest=manifest, repo=REPO)
@@ -176,6 +206,7 @@ def main() -> int:
             ).fetchone()
             digest = version[0]
             runtime_version = successor[0] if successor is not None else "scac-mutation-registry.v1"
+            expected_service_launchd = sealed_service_launchd(runtime_version)
             if runtime_version not in {"scac-mutation-registry.v2", "scac-mutation-registry.v3", "scac-mutation-registry.v4", "scac-mutation-registry.v5", "scac-mutation-registry.v6", "scac-mutation-registry.v7", "scac-mutation-registry.v8", "scac-mutation-registry.v9", "scac-mutation-registry.v10", "scac-mutation-registry.v11", "scac-mutation-registry.v12", "scac-mutation-registry.v13", "scac-mutation-registry.v14", "scac-mutation-registry.v15", "scac-mutation-registry.v16", "scac-mutation-registry.v17", "scac-mutation-registry.v18", "scac-mutation-registry.v19", "scac-mutation-registry.v20", "scac-mutation-registry.v21", "scac-mutation-registry.v22", "scac-mutation-registry.v23", "scac-mutation-registry.v24", "scac-mutation-registry.v25", "scac-mutation-registry.v26", "scac-mutation-registry.v27", "scac-mutation-registry.v28", "scac-mutation-registry.v29", "scac-mutation-registry.v30", "scac-mutation-registry.v31", "scac-mutation-registry.v32", "scac-mutation-registry.v33", "scac-mutation-registry.v34", "scac-mutation-registry.v35", "scac-mutation-registry.v36", "scac-mutation-registry.v37", "scac-mutation-registry.v38", "scac-mutation-registry.v39", "scac-mutation-registry.v40", "scac-mutation-registry.v41", "scac-mutation-registry.v42", "scac-mutation-registry.v43", "scac-mutation-registry.v44", "scac-mutation-registry.v45", "scac-mutation-registry.v46", "scac-mutation-registry.v47", "scac-mutation-registry.v48", "scac-mutation-registry.v49", "scac-mutation-registry.v50", "scac-mutation-registry.v51", "scac-mutation-registry.v52", "scac-mutation-registry.v53", "scac-mutation-registry.v54", "scac-mutation-registry.v55", "scac-mutation-registry.v56", "scac-mutation-registry.v57", "scac-mutation-registry.v58", "scac-mutation-registry.v59", "scac-mutation-registry.v60", "scac-mutation-registry.v61", "scac-mutation-registry.v62", "scac-mutation-registry.v63", "scac-mutation-registry.v64", "scac-mutation-registry.v65", "scac-mutation-registry.v66", "scac-mutation-registry.v67", "scac-mutation-registry.v68", "scac-mutation-registry.v69", "scac-mutation-registry.v70", "scac-mutation-registry.v71", "scac-mutation-registry.v72", "scac-mutation-registry.v73", "scac-mutation-registry.v74", "scac-mutation-registry.v75", "scac-mutation-registry.v76", "scac-mutation-registry.v77", "scac-mutation-registry.v78", "scac-mutation-registry.v79", "scac-mutation-registry.v80", "scac-mutation-registry.v81", "scac-mutation-registry.v82", "scac-mutation-registry.v83", "scac-mutation-registry.v84", "scac-mutation-registry.v85", "scac-mutation-registry.v86", "scac-mutation-registry.v87", "scac-mutation-registry.v88", "scac-mutation-registry.v89", "scac-mutation-registry.v90", "scac-mutation-registry.v91", "scac-mutation-registry.v92", "scac-mutation-registry.v93", "scac-mutation-registry.v94", "scac-mutation-registry.v95", "scac-mutation-registry.v96", "scac-mutation-registry.v97", "scac-mutation-registry.v98", "scac-mutation-registry.v99"}:
                 raise RuntimeError(f"unsupported live successor {runtime_version!r}")
             # A successor may only ADD a seal. Whatever version is live, the one
