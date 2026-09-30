@@ -37,6 +37,7 @@ import os
 import subprocess
 import sys
 import socket
+import shutil
 import tempfile
 from contextlib import contextmanager
 from collections.abc import Iterator
@@ -172,7 +173,9 @@ def isolated_ci_database(base_dsn: str) -> Iterator[str]:
         if result.returncode:
             raise RuntimeError("release-abandon disposable PostgreSQL step failed: " + Path(str(args[0])).name)
 
-    with tempfile.TemporaryDirectory(prefix="release-abandon-") as directory:
+    directory = tempfile.mkdtemp(prefix="release-abandon-")
+    shutdown_verified = False
+    try:
         root = Path(directory)
         data = root / "data"
         with socket.socket() as probe:
@@ -182,15 +185,30 @@ def isolated_ci_database(base_dsn: str) -> Iterator[str]:
                  "--encoding=UTF8", "--no-locale"])
         try:
             checked([binaries.pg_ctl, "-D", data, "-l", root / "postgres.log",
-                     "-o", f"-h 127.0.0.1 -k {directory} -p {port} -c fsync=off", "-w", "start"])
+                     "-o", f"-h 127.0.0.1 -p {port} -c unix_socket_directories= -c fsync=off", "-w", "start"])
             dsn = psycopg.conninfo.make_conninfo(host="127.0.0.1", port=port,
                                                 user="carr_ci", dbname="postgres")
             with psycopg.connect(dsn, autocommit=True) as connection:
                 connection.execute("create role neondb_owner")
             yield dsn
         finally:
-            if (data / "postmaster.pid").exists():
-                checked([binaries.pg_ctl, "-D", data, "-m", "immediate", "-w", "stop"])
+            try:
+                if (data / "postmaster.pid").exists():
+                    checked([binaries.pg_ctl, "-D", data, "-m", "immediate", "-w", "stop"])
+                status = subprocess.run([str(binaries.pg_ctl), "-D", str(data), "status"],
+                                        env=env, capture_output=True, text=True, timeout=60)
+                # pg_ctl documents 3 as "server is not running". A successful
+                # stop alone does not authorize deleting recovery/diagnostic files.
+                if status.returncode != 3:
+                    raise RuntimeError("disposable PostgreSQL shutdown was not verified")
+                shutdown_verified = True
+            except Exception as exc:
+                raise RuntimeError(
+                    f"release-abandon teardown failed; cluster retained at {root}; "
+                    f"log: {root / 'postgres.log'}") from exc
+    finally:
+        if shutdown_verified:
+            shutil.rmtree(directory)
 
 
 def _cases(dsn: str) -> None:
