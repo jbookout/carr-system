@@ -2898,6 +2898,24 @@ except Exception as e:
     print(f"  ⚠︎ {'egress guard':<18} selftest failed ({type(e).__name__}: {e})")
     rc = 1
 
+# TAILSCALE (WR-000178). After the 2026-09-30 macOS reboot the Studio's Tailscale
+# stayed "stopped" for ~6h and SSH to the MacBook was cut off with nothing
+# reporting it. The row reads `Tailscale status` itself and FAILS on stopped or
+# logged out; its bound fix is the com.carr.tailscale-up login agent.
+try:
+    _ts_spec = importlib.util.spec_from_file_location(
+        "tailscale_health", os.path.join(REPO_ROOT, "ops", "tailscale_health.py"))
+    _ts = importlib.util.module_from_spec(_ts_spec)
+    _ts_spec.loader.exec_module(_ts)
+    _ts_line, _ts_failed = _ts.row()
+    print(_ts_line)
+    if _ts_failed:
+        rc = 1
+except Exception as e:
+    print(f"  ⚠︎ {'tailscale':<18} check failed ({type(e).__name__}: {e}) · on breach: "
+          f"run .venv/bin/python ops/tailscale_health.py by hand")
+    rc = 1
+
 # A THIRD INDEPENDENT ROW (2026-08-10, loop #231). The egress row above proves
 # the guard still denies network and render writes. It says nothing about whether
 # the GATES THEMSELVES are still protected, which is a separate claim that was
