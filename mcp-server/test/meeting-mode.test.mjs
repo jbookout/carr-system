@@ -676,7 +676,7 @@ test("DB: another tenant sees nothing, and the doors are granted to the writer b
     // table owner (carr_ci in this lane), which is not a runtime role. Login
     // roles are checked alongside the bundles because a grant reaches them by
     // membership.
-    const tables = await admin.query(`select array_agg(distinct c.relname order by c.relname) as tables,
+    const tables = await admin.query(`select array_agg(distinct c.relname::text order by c.relname::text) as tables,
         count(*) filter (where has_table_privilege(r.rolname, c.oid, p))::int as n
       from pg_class c
       cross join (select rolname from pg_roles where rolname in
@@ -685,7 +685,7 @@ test("DB: another tenant sees nothing, and the doors are granted to the writer b
       where c.relnamespace='ops'::regnamespace and c.relname like 'meeting%' and c.relkind='r'`);
     assert.deepEqual(tables.rows[0].tables, [
       "meeting", "meeting_action", "meeting_action_decision_request", "meeting_action_revision",
-      "meeting_dispatch", "meeting_note", "meeting_stream",
+      "meeting_note", "meeting_processing_lease", "meeting_stream",
     ], "every meeting table, including the decision request ledger, is checked");
     assert.equal(tables.rows[0].n, 0, "no runtime role may touch a meeting row directly");
   } finally {
