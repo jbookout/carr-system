@@ -164,6 +164,8 @@ def allowed(command, cwd, repo, scratch_roots=()):
 def run_command(command, cwd, repo, scratch_roots=(), *, timeout=60, known_secrets=()):
     """Run argv with an isolated environment; kill the process group at limits."""
     refused = {"allowed": False, "exit": None, "bytes": 0, "output": "held for orchestrator"}
+    repo, cwd = Path(repo).resolve(), Path(cwd).resolve()
+    scratch_roots = tuple(Path(p).resolve() for p in scratch_roots)
     spec = command_spec(command, str(cwd), str(repo), tuple(map(str, scratch_roots)))
     if spec is None:
         return refused
@@ -198,6 +200,30 @@ def run_command(command, cwd, repo, scratch_roots=(), *, timeout=60, known_secre
     environment = {"PATH": system_path, "LANG": "C.UTF-8", "GIT_TERMINAL_PROMPT": "0",
                    "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
                    "PYTHONNOUSERSITE": "1", "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"}
+    if tool == "git":
+        # Git's effective worktree and administrative paths are independent of
+        # cwd. Discover with the same disabled hooks/config, then pin the result.
+        verb_index = next(i for i, value in enumerate(argv) if value in
+                          ("fetch", "status", "log", "show", "diff", "ls-files", "grep"))
+        prefix = argv[:verb_index]
+        try:
+            discovery = subprocess.run(prefix + ["rev-parse", "--show-toplevel", "--absolute-git-dir", "--git-common-dir"],
+                                       cwd=workdir, env=environment, stdin=subprocess.DEVNULL,
+                                       capture_output=True, timeout=timeout, check=True)
+            locations = discovery.stdout.decode().splitlines()
+            if len(locations) != 3:
+                return refused
+            top, gitdir, common = (Path(value) if Path(value).is_absolute() else workdir / value
+                                  for value in locations)
+            top, gitdir, common = top.resolve(), gitdir.resolve(), common.resolve()
+            if not all(_within(path, roots) for path in (top, gitdir, common, (common / "objects").resolve())):
+                return refused
+            if not _within(workdir, (top,)) or (common / "objects/info/alternates").exists():
+                return refused
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return refused
+        argv[verb_index:verb_index] = ["--git-dir=" + str(gitdir), "--work-tree=" + str(top)]
+        environment["GIT_COMMON_DIR"] = str(common)
     captured = bytearray()
     count = 0
     exit_code = None
@@ -248,16 +274,33 @@ def run_command(command, cwd, repo, scratch_roots=(), *, timeout=60, known_secre
     return {"allowed": True, "exit": exit_code, "bytes": count, "output": text}
 
 
+def _sync_directory(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def _private_dir(path):
     path = Path(path)
+    missing = []
+    parent = path
+    while not parent.exists():
+        missing.append(parent)
+        parent = parent.parent
     path.mkdir(parents=True, mode=0o700, exist_ok=True)
     if path.is_symlink() or path.stat().st_uid != os.getuid() or path.stat().st_mode & 0o077:
         raise ValueError("state directory must be owned by the current user and mode 700")
+    # Persist each new directory and the parent entry that makes it reachable.
+    for created in reversed(missing):
+        _sync_directory(created)
+        _sync_directory(created.parent)
     return path
 
 
 def _write_json(path, value):
-    # Atomic checkpoint; fail closed on symlinks. Data never lives in the repo.
+    # Atomic, crash-durable checkpoint; fail closed on symlinks.
     temporary = path.with_suffix(".tmp")
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "w") as handle:
@@ -265,6 +308,7 @@ def _write_json(path, value):
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temporary, path)
+    _sync_directory(path.parent)
 
 
 def _append(path, value):
@@ -309,7 +353,7 @@ class Relay:
         if _within(self.state_dir.resolve(), (self.repo,)):
             raise ValueError("state must live outside the repository")
         self.sender = sender
-        self.scratch_roots = tuple(map(Path, scratch_roots))
+        self.scratch_roots = tuple(Path(p).resolve() for p in scratch_roots)
         self.secrets = tuple(known_secrets)
         self.binding = {"sender": sender, "channel": getattr(transport, "channel", ""),
                         "repo": str(self.repo), "cwd": str(self.cwd), "scratch_roots": list(map(str, self.scratch_roots))}
@@ -339,16 +383,19 @@ class Relay:
             state = json.loads(state_file.read_text()) if state_file.exists() else {"commands": {}, "messages": [], "binding": self.binding}
             if state.get("binding") != self.binding:
                 raise ValueError("thread state binding changed")
+            if state.get("posting_pending"):
+                raise ValueError("interrupted post requires reconciliation")
             if state.get("finished"):
                 return True
             messages = self.transport.replies(thread)
-            for message in sorted(messages, key=lambda m: m.get("ts", "")):
-                ts = message.get("ts", "")
-                if ts == thread or ts in state["messages"]:
+            _validate_messages(messages)
+            for message in sorted(messages, key=lambda m: m["ts"]):
+                ts = message["ts"]
+                if ts == thread or ts in state["messages"] or ts in state.get("outgoing", []):
                     continue
                 if self.sender not in (message.get("user"), message.get("bot_id")) or message.get("edited") or message.get("subtype") not in (None, "bot_message"):
                     continue
-                commands, report = _protocol(message.get("text", ""))
+                commands, report = _protocol(message["text"])
                 if commands and not execute:
                     continue  # watch does not consume requests needed by relay
                 for i, command in enumerate(commands):
@@ -367,9 +414,16 @@ class Relay:
                         _append(directory / "pending.jsonl", row)
                         output = "held for orchestrator"
                     else:
-                        # Plain text and escaping prevent output from forging requests.
+                        # Output remains data; its posted identity is excluded below.
                         output = f"mac-result: exit={result['exit']} bytes={result['bytes']}\n" + result["output"]
-                    self.transport.post(output, thread)
+                    # An ambiguous post must stop history processing on restart.
+                    state["posting_pending"] = key
+                    _write_json(state_file, state)
+                    posted_ts = self.transport.post(output, thread)
+                    if not isinstance(posted_ts, str) or not re.fullmatch(r"[0-9]{1,20}\.[0-9]{1,10}", posted_ts):
+                        raise SlackError("Slack post timestamp invalid")
+                    state.setdefault("outgoing", []).append(posted_ts)
+                    del state["posting_pending"]
                     state["commands"][key] = "done"
                     _write_json(state_file, state)
                 if report is not None:
@@ -379,12 +433,13 @@ class Relay:
                         handle.write(report)
                         handle.flush()
                         os.fsync(handle.fileno())
-                    state["finished"] = True
+                    state["report_observed"] = True
                 state["messages"].append(ts)
                 _write_json(state_file, state)
-                if state.get("finished"):
-                    return True
-            return False
+            if execute and state.get("report_observed"):
+                state["finished"] = True
+                _write_json(state_file, state)
+            return bool(state.get("report_observed"))
 
 
 class SlackError(Exception):
@@ -392,6 +447,28 @@ class SlackError(Exception):
         super().__init__(message)
         self.retry_after = retry_after
         self.transient = transient
+
+
+def _validate_messages(messages):
+    """Validate the whole snapshot before a relay can claim any work."""
+    if not isinstance(messages, list):
+        raise SlackError("Slack thread response invalid")
+    seen = set()
+    for message in messages:
+        if not isinstance(message, dict):
+            raise SlackError("Slack message invalid")
+        ts, text = message.get("ts"), message.get("text")
+        if (not isinstance(ts, str) or not re.fullmatch(r"[0-9]{1,20}\.[0-9]{1,10}", ts)
+                or not isinstance(text, str) or ts in seen):
+            raise SlackError("Slack message invalid")
+        seen.add(ts)
+        identities = [message[key] for key in ("user", "bot_id") if key in message]
+        if not identities or any(not isinstance(value, str) or not value for value in identities):
+            raise SlackError("Slack message identity invalid")
+        if message.get("subtype") is not None and not isinstance(message["subtype"], str):
+            raise SlackError("Slack message subtype invalid")
+        if message.get("edited") is not None and not isinstance(message["edited"], dict):
+            raise SlackError("Slack message edit invalid")
 
 
 def _retry_after(headers):
@@ -422,6 +499,7 @@ class SlackTransport:
                 self.client = WebClient(token=token, timeout=20, retry_handlers=[], logger=logger)
 
     def _call(self, method, payload):
+        import http.client
         import urllib.error
         import urllib.parse
         import urllib.request
@@ -451,7 +529,7 @@ class SlackTransport:
             exc.close()
             raise SlackError("Slack HTTP request failed", retry_after=_retry_after(headers) if code == 429 else 0,
                              transient=not write and (code == 429 or code >= 500)) from None
-        except (urllib.error.URLError, TimeoutError, OSError):
+        except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException):
             raise SlackError("Slack network request failed", transient=not write) from None
         except (ValueError, TypeError):
             raise SlackError("Slack response invalid") from None
@@ -464,7 +542,7 @@ class SlackTransport:
             headers = getattr(response, "headers", {}) or {}
             raise SlackError("Slack SDK request failed", retry_after=_retry_after(headers) if status == 429 else 0,
                              transient=not write and (status == 429 or status >= 500)) from None
-        if not isinstance(response, dict) or not response.get("ok"):
+        if not isinstance(response, dict) or response.get("ok") is not True:
             rate_limited = isinstance(response, dict) and response.get("error") == "ratelimited"
             raise SlackError("Slack API request refused", retry_after=30 if rate_limited else 0,
                              transient=not write and rate_limited)
@@ -491,11 +569,20 @@ class SlackTransport:
             page = response.get("messages")
             if not isinstance(page, list) or any(not isinstance(m, dict) for m in page):
                 raise SlackError("Slack thread response invalid")
+            _validate_messages(page)
             messages.extend(page)
-            cursor = (response.get("response_metadata") or {}).get("next_cursor", "").strip()
+            metadata = response.get("response_metadata", {})
+            has_more = response.get("has_more", False)
+            if not isinstance(metadata, dict) or not isinstance(has_more, bool):
+                raise SlackError("Slack pagination response invalid")
+            cursor = metadata.get("next_cursor", "")
+            if not isinstance(cursor, str):
+                raise SlackError("Slack pagination cursor invalid")
+            cursor = cursor.strip()
             if not cursor:
                 if response.get("has_more"):
                     raise SlackError("Slack pagination cursor missing")
+                _validate_messages(messages)
                 return messages
             if cursor in seen:
                 raise SlackError("Slack pagination cursor repeated")
@@ -574,7 +661,7 @@ def main(argv=None, *, repo=None, transport_factory=SlackTransport):
             if args.scratch and args.cwd:
                 raise ValueError("choose cwd or scratch")
             if args.scratch:
-                cwd = Path(tempfile.mkdtemp(prefix="dot-relay-"))
+                cwd = Path(tempfile.mkdtemp(prefix="dot-relay-")).resolve()
                 scratch = (cwd,)
             elif args.cwd:
                 cwd = args.cwd.expanduser().resolve()

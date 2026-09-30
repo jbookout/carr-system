@@ -40,10 +40,14 @@ PROTOCOL:
   options, path traversal, hidden paths, escapes and substitutions are held.
   Test scripts execute repository code; this is an argv/path boundary, not an
   OS sandbox. It assumes the checked-out source and git origin are trusted.
+  Git's discovered worktree and administrative directories must stay inside
+  approved roots; an external linked worktree or enclosing repository is held.
   Output is redacted, limited to 150 lines / 12000 bytes, and posted as plain
   text in-thread. Each command times out after 60s; exit 124 denotes timeout,
   125 output limit. Refused/interrupted requests post "held for orchestrator".
   A line DOT-REPORT-END outside any fence saves that reply's report and exits 0.
+  Watch saves a report without consuming commands needed by a later relay.
+  Outgoing message timestamps are persisted and excluded from inbound control.
 
 STATE:
   ~/.local/state/dot-relay/<thread-ts>/ contains job.json, state.json,
@@ -53,6 +57,7 @@ STATE:
   A lock prevents concurrent execution. Durable claims prevent replay after
   interruption; inspect pending.jsonl before requesting a NEW command. Posts
   have no automatic write retry: reconcile an ambiguous send against Slack.
+  An interrupted result post also stops resume until private state is reconciled.
   Never commit local state, reports, credentials or live message contents.
 
 API references:
