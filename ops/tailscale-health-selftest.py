@@ -309,6 +309,30 @@ if callable(sealed_catalog):
         check("unreviewed historical catalog version refuses", True)
     else:
         check("unreviewed historical catalog version refuses", False)
+    historical = [("old", "production", "ops/launchd/old.plist")]
+    live = historical + [("new", "production", "ops/launchd/new.plist")]
+    for fault in (None, "historical_ref", "live_path"):
+        authority = [("launchd-workflow:old", "ops/launchd/old.plist",
+                      "ops.service_environment:old:production")]
+        actual_services = [(*row, False) for row in live]
+        if fault == "historical_ref":
+            authority = [(authority[0][0], authority[0][1],
+                          "ops.service_environment:forged:production")]
+        if fault == "live_path":
+            actual_services[-1] = ("new", "production", "ops/launchd/wrong.plist", False)
+        cursor = Mock()
+        cursor.execute.side_effect = [
+            Mock(fetchall=Mock(return_value=authority)),
+            Mock(fetchall=Mock(return_value=actual_services)),
+            Mock(fetchall=Mock(return_value=[])),
+        ]
+        try:
+            db_gate.validate_launchd_authority_refs(cursor, "scac-mutation-registry.v99",
+                                                  [], live, historical)
+        except RuntimeError:
+            check(f"DB parity refuses {fault}", fault is not None)
+        else:
+            check("new live service coexists with unchanged historical seal", fault is None)
 
 print(f"tailscale-health-selftest: {'FAIL ' + str(len(FAILS)) if FAILS else 'all passed'}")
 sys.exit(1 if FAILS else 0)
