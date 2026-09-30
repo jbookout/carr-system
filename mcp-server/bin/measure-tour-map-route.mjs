@@ -3,11 +3,13 @@
 //
 //   node mcp-server/bin/measure-tour-map-route.mjs <route.json> [--receipt <receipt.json>]
 //
-// <route.json> is { tour_id, route_version, stops: [...] } as read from the live
+// <route.json> is { tour_id, projection_id, route_version, stops: [...] } as read from the live
 // record layer by someone holding a key. The script reads no network and writes
 // nothing: it reports map/list/story/offline order parity, which stops are
-// downgraded, and which would get a native navigation link. Exit 1 on a parity
-// failure or malformed input.
+// downgraded, and which would get a native navigation link (the receipt must
+// be bound to the route's tour, projection and version and carry the full passed
+// evidence set). Exit 1 on a parity failure or malformed input, including
+// malformed durations, lock states, appointments and endpoints.
 import { readFile } from "node:fs/promises";
 import {
   buildRouteVersionState, checkParity, projectRoute, buildNativeNavLink,
@@ -29,7 +31,7 @@ try {
   const stops = projection.list.map(item => {
     const nav = buildNativeNavLink(state, {
       route_stop_id: item.route_stop_id, platform: "apple_maps", travel_mode: "driving",
-      promotion_receipt: receipt, now: new Date().toISOString(),
+      promotion_receipt: receipt, now: new Date().toISOString(), user_ref: "measurement-run",
     });
     return { label: item.label, display: item.display, navigation: nav.available ? "available" : nav.reason_code };
   });

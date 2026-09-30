@@ -11,10 +11,12 @@
 //   * only a human-approved entrance, driveway or parking-access position gets a
 //     native navigation link; centroids, geocoder candidates and unreviewed pins
 //     are visibly downgraded and their link is withheld;
-//   * no navigation link without an approved promotion receipt for this route
-//     version. The receipt is READ elsewhere (a retrieval adapter is still owed,
-//     see V5_J301_PROMOTION_RECEIPT_RETRIEVAL_SEAM); this module only checks the
-//     receipt object it is handed and never issues one;
+//   * no navigation link without an approved promotion receipt bound to this exact
+//     Tour, projection and route version, carrying the full passed evidence set.
+//     The receipt is READ elsewhere (a retrieval adapter is still owed, see
+//     V5_J301_PROMOTION_RECEIPT_RETRIEVAL_SEAM, and it must also supply tour_id,
+//     which the stored receipt payload does not carry today). This module only
+//     checks the receipt object it is handed and never issues or authenticates one;
 //   * an ordered list stays usable with no tiles.
 //
 // Nothing here calls a provider, a verb or the network.
@@ -29,6 +31,22 @@ export const NAV_TRAVEL_MODES = Object.freeze(["driving", "walking"]);
 const NAVIGABLE_ROLES = Object.freeze(["entrance", "driveway", "parking_access"]);
 const NAVIGABLE_PRECISION = Object.freeze(["entrance", "surveyed"]);
 const RETURN_TTL_MS = 12 * 60 * 60 * 1000;
+const MAX_MINUTES = 1440;
+// The same eleven checks record-tour-map-promotion-receipt requires for an approval.
+const REQUIRED_CHECKS = Object.freeze([
+  "canonical_address_and_coordinate_review",
+  "claims_and_layers_have_source_as_of_rights_and_review_state",
+  "deterministic_rebuild_from_canonical_record",
+  "exact_native_navigation_handoff",
+  "locked_appointments_dwell_and_buffers_preserved",
+  "map_list_route_offline_order_parity",
+  "no_unresolved_route_critical_unknown_or_conflict",
+  "optional_context_layers_progressively_disclosed",
+  "ordered_offline_itinerary_verified",
+  "phone_and_ipad_interaction_test",
+  "provider_terms_attribution_expiry_and_cost_gate_passed",
+]);
+const EVIDENCE_FIELDS = Object.freeze(["mobile_test_evidence", "native_navigation_test_evidence", "offline_test_evidence"]);
 
 export class RouteStateError extends Error {
   constructor(code, message, detail) {
@@ -48,8 +66,11 @@ function deepFreeze(value) {
   return value;
 }
 
+const isObject = value => value !== null && typeof value === "object" && !Array.isArray(value);
+const isText = value => typeof value === "string" && value.trim().length > 0;
+
 function text(value, path) {
-  if (typeof value !== "string" || !value.trim()) fail("invalid_shape", `${path} must be a non-empty string`);
+  if (!isText(value)) fail("invalid_shape", `${path} must be a non-empty string`);
   return value;
 }
 
@@ -58,6 +79,25 @@ function finite(value, min, max, path) {
     fail("invalid_coordinate", `${path} must be a number between ${min} and ${max}`);
   }
   return value;
+}
+
+function minutes(value, path) {
+  if (value === undefined || value === null) return null; // a deliberate unknown
+  if (!Number.isInteger(value) || value < 0 || value > MAX_MINUTES) {
+    fail("invalid_duration", `${path} must be a whole number of minutes from 0 to ${MAX_MINUTES}, or null when unknown`);
+  }
+  return value;
+}
+
+function timestamp(value, path) {
+  if (!isText(value) || !/^\d{4}-\d{2}-\d{2}T/.test(value) || !Number.isFinite(Date.parse(value))) {
+    fail("invalid_appointment", `${path} must be an ISO timestamp`);
+  }
+  return value;
+}
+
+function clone(value, path) {
+  try { return structuredClone(value); } catch { return fail("invalid_shape", `${path} must be plain data`); }
 }
 
 /** Decide how a pin may be shown and whether it may drive native navigation. */
@@ -80,11 +120,34 @@ export function classifyPin(position) {
   return { navigable: false, display: "downgraded", precision_label: "Approximate location", reason: why };
 }
 
+function normalizePoint(point, path) {
+  if (point === undefined || point === null) return null;
+  if (!isObject(point)) fail("invalid_shape", `${path} must be an object`);
+  return {
+    latitude: finite(point.latitude, -90, 90, `${path}.latitude`),
+    longitude: finite(point.longitude, -180, 180, `${path}.longitude`),
+    label: isText(point.label) ? point.label : null,
+  };
+}
+
 function normalizeStop(stop, index) {
   const path = `stops[${index}]`;
-  if (!stop || typeof stop !== "object") fail("invalid_shape", `${path} must be an object`);
+  if (!isObject(stop)) fail("invalid_shape", `${path} must be an object`);
   if (!Number.isSafeInteger(stop.route_sequence) || stop.route_sequence < 1) {
     fail("invalid_route_sequence", `${path}.route_sequence must be a positive integer`);
+  }
+  if (stop.locked_state !== "locked" && stop.locked_state !== "flexible") {
+    fail("invalid_locked_state", `${path}.locked_state must be "locked" or "flexible"`);
+  }
+  const hasStart = stop.appointment_start !== undefined && stop.appointment_start !== null;
+  const hasEnd = stop.appointment_end !== undefined && stop.appointment_end !== null;
+  let appointment = null;
+  if (hasStart !== hasEnd) fail("invalid_appointment", `${path} needs both appointment_start and appointment_end`);
+  if (hasStart) {
+    const start = timestamp(stop.appointment_start, `${path}.appointment_start`);
+    const end = timestamp(stop.appointment_end, `${path}.appointment_end`);
+    if (Date.parse(end) <= Date.parse(start)) fail("invalid_appointment", `${path} appointment must end after it starts`);
+    appointment = { start, end };
   }
   const position = stop.position ? {
     latitude: finite(stop.position.latitude, -90, 90, `${path}.position.latitude`),
@@ -99,9 +162,10 @@ function normalizeStop(stop, index) {
     property_id: text(stop.property_id, `${path}.property_id`),
     route_sequence: stop.route_sequence,
     route_label: text(stop.route_label, `${path}.route_label`),
-    locked_state: stop.locked_state === "locked" ? "locked" : "flexible",
-    dwell_minutes: Number.isFinite(stop.dwell_minutes) ? stop.dwell_minutes : null,
-    buffer_minutes: Number.isFinite(stop.buffer_minutes) ? stop.buffer_minutes : null,
+    locked_state: stop.locked_state,
+    dwell_minutes: minutes(stop.dwell_minutes, `${path}.dwell_minutes`),
+    buffer_minutes: minutes(stop.buffer_minutes, `${path}.buffer_minutes`),
+    appointment,
     title: text(stop.title, `${path}.title`),
     address_line: typeof stop.address_line === "string" ? stop.address_line : "",
     position,
@@ -110,10 +174,11 @@ function normalizeStop(stop, index) {
 
 /** Build the one canonical state. Everything else is derived from `state.route`. */
 export function buildRouteVersionState(route, options = {}) {
-  if (!route || typeof route !== "object") fail("invalid_shape", "route must be an object");
+  if (!isObject(route)) fail("invalid_shape", "route must be an object");
   if (!Number.isSafeInteger(route.route_version) || route.route_version < 1) {
     fail("invalid_route_version", "route_version must be a positive integer");
   }
+  if (!isText(route.projection_id)) fail("invalid_projection_id", "projection_id is required to bind a promotion receipt");
   if (!Array.isArray(route.stops)) fail("invalid_shape", "route.stops must be an array");
   const stops = route.stops.map(normalizeStop).sort((a, b) => a.route_sequence - b.route_sequence);
   for (const field of ["route_sequence", "property_id", "route_stop_id"]) {
@@ -127,8 +192,13 @@ export function buildRouteVersionState(route, options = {}) {
   const selected = options.selected_property_id ?? null;
   return {
     tour_id: text(route.tour_id, "tour_id"),
+    projection_id: route.projection_id,
     route_version: route.route_version,
-    route: { stops },
+    route: {
+      stops,
+      start_point: normalizePoint(route.start_point, "start_point"),
+      end_point: normalizePoint(route.end_point, "end_point"),
+    },
     mode,
     selected_property_id: selected !== null && known.has(selected) ? selected : null,
     current_route_stop_id: null,
@@ -136,6 +206,7 @@ export function buildRouteVersionState(route, options = {}) {
     filters: {},
     sliders: {},
     drawn_geometry: null,
+    lineage: [],
   };
 }
 
@@ -152,20 +223,56 @@ export function cameraPlan({ prefersReducedMotion = false } = {}) {
     : { animate: true, duration_ms: 600, method: "flyTo" };
 }
 
-function navigationStatus(stop, pin) {
-  return pin.navigable
-    ? { available: true, reason: null }
-    : { available: false, reason_code: "pin_not_entrance_approved", reason: pin.reason };
+function receiptProblem(state, receipt) {
+  if (!isObject(receipt)) {
+    return ["promotion_receipt_missing", "No approved map promotion receipt was supplied."];
+  }
+  if (receipt.decision !== "approved") {
+    return ["promotion_receipt_not_approved", "The map promotion receipt is not an approval."];
+  }
+  if (receipt.tour_id !== state.tour_id || receipt.projection_id !== state.projection_id
+    || receipt.route_version !== state.route_version) {
+    return ["promotion_receipt_unbound", "The promotion receipt does not cover this Tour, projection and route version."];
+  }
+  const checks = receipt.required_checks;
+  const complete = isText(receipt.promotion_receipt_id)
+    && Array.isArray(receipt.provider_rights_receipt_ids) && receipt.provider_rights_receipt_ids.length > 0
+    && receipt.provider_rights_receipt_ids.every(isText)
+    && isObject(checks) && REQUIRED_CHECKS.every(key => checks[key] === true)
+    && EVIDENCE_FIELDS.every(key => isObject(receipt[key]) && receipt[key].status === "passed");
+  if (!complete) {
+    return ["promotion_receipt_incomplete", "The promotion receipt lacks the verified evidence a navigation handoff needs."];
+  }
+  return null;
 }
 
+/**
+ * The ONE predicate for "may this stop hand off to native navigation". The list
+ * row, the card, the HTML and buildNativeNavLink all read it, so they cannot
+ * disagree about whether Navigate is enabled or why it is not.
+ */
+export function handoffEligibility(state, stop, { promotion_receipt = null, user_ref = null } = {}) {
+  const pin = classifyPin(stop.position);
+  if (!pin.navigable) return { available: false, reason_code: "pin_not_entrance_approved", reason: pin.reason };
+  const problem = receiptProblem(state, promotion_receipt);
+  if (problem) return { available: false, reason_code: problem[0], reason: problem[1] };
+  if (!isText(user_ref)) {
+    return { available: false, reason_code: "user_binding_missing", reason: "A signed-in user is required to hand off navigation." };
+  }
+  return { available: true, reason_code: null, reason: null };
+}
+
+const windowOf = stop => (stop.appointment ? { ...stop.appointment } : null);
+
 /** Derive every surface from the one route version. */
-export function projectRoute(state, { prefersReducedMotion = false } = {}) {
+export function projectRoute(state, { prefersReducedMotion = false, promotion_receipt = null, user_ref = null } = {}) {
   const selectedStop = state.route.stops.find(stop => stop.property_id === state.selected_property_id) ?? null;
-  const rows = state.route.stops.map(stop => {
-    const pin = classifyPin(stop.position);
-    const current = stop.route_stop_id === state.current_route_stop_id;
-    return { stop, pin, current };
-  });
+  const rows = state.route.stops.map(stop => ({
+    stop,
+    pin: classifyPin(stop.position),
+    current: stop.route_stop_id === state.current_route_stop_id,
+    navigation: handoffEligibility(state, stop, { promotion_receipt, user_ref }),
+  }));
   const markers = rows.map(({ stop, pin, current }) => ({
     route_stop_id: stop.route_stop_id,
     property_id: stop.property_id,
@@ -180,21 +287,24 @@ export function projectRoute(state, { prefersReducedMotion = false } = {}) {
     current,
     accessible_name: `Stop ${stop.route_label}, ${stop.title}, ${stop.locked_state} stop, ${pin.precision_label}`,
   }));
-  const list = rows.map(({ stop, pin, current }) => ({
+  const list = rows.map(({ stop, pin, current, navigation }) => ({
     route_stop_id: stop.route_stop_id,
     property_id: stop.property_id,
     label: stop.route_label,
     route_sequence: stop.route_sequence,
     title: stop.title,
     locked_state: stop.locked_state,
+    appointment: windowOf(stop),
     display: pin.display,
     precision_label: pin.precision_label,
     selected: stop.property_id === state.selected_property_id,
     current,
-    native_navigation: navigationStatus(stop, pin),
+    pin_eligible: pin.navigable,
+    native_navigation: { ...navigation },
   }));
   const storySections = rows.map(({ stop, current }) => ({
     route_stop_id: stop.route_stop_id,
+    property_id: stop.property_id,
     label: stop.route_label,
     route_sequence: stop.route_sequence,
     title: stop.title,
@@ -202,10 +312,13 @@ export function projectRoute(state, { prefersReducedMotion = false } = {}) {
   }));
   const offline = rows.map(({ stop, pin }) => ({
     route_stop_id: stop.route_stop_id,
+    property_id: stop.property_id,
     label: stop.route_label,
     route_sequence: stop.route_sequence,
     title: stop.title,
     address_line: stop.address_line,
+    locked_state: stop.locked_state,
+    appointment: windowOf(stop),
     dwell_minutes: stop.dwell_minutes,
     buffer_minutes: stop.buffer_minutes,
     display: pin.display,
@@ -213,32 +326,33 @@ export function projectRoute(state, { prefersReducedMotion = false } = {}) {
       ? { latitude: stop.position.latitude, longitude: stop.position.longitude, basis: "approved_access_point" }
       : null,
   }));
-  const card = selectedStop ? (() => {
-    const pin = classifyPin(selectedStop.position);
-    return {
-      route_stop_id: selectedStop.route_stop_id,
-      property_id: selectedStop.property_id,
-      label: selectedStop.route_label,
-      route_sequence: selectedStop.route_sequence,
-      title: selectedStop.title,
-      address_line: selectedStop.address_line,
-      locked_state: selectedStop.locked_state,
-      dwell_minutes: selectedStop.dwell_minutes,
-      buffer_minutes: selectedStop.buffer_minutes,
-      display: pin.display,
-      precision_label: pin.precision_label,
-      native_navigation: navigationStatus(selectedStop, pin),
-    };
-  })() : null;
-  const next = rows.find(({ stop }) => state.current_route_stop_id === null
-    ? false : stop.route_sequence > (stopById(state, state.current_route_stop_id).route_sequence));
+  const selectedRow = rows.find(({ stop }) => stop === selectedStop);
+  const card = selectedRow ? {
+    route_stop_id: selectedStop.route_stop_id,
+    property_id: selectedStop.property_id,
+    label: selectedStop.route_label,
+    route_sequence: selectedStop.route_sequence,
+    title: selectedStop.title,
+    address_line: selectedStop.address_line,
+    locked_state: selectedStop.locked_state,
+    appointment: windowOf(selectedStop),
+    dwell_minutes: selectedStop.dwell_minutes,
+    buffer_minutes: selectedStop.buffer_minutes,
+    display: selectedRow.pin.display,
+    precision_label: selectedRow.pin.precision_label,
+    native_navigation: { ...selectedRow.navigation },
+  } : null;
+  const currentStop = state.current_route_stop_id === null ? null : stopById(state, state.current_route_stop_id);
+  const next = currentStop ? rows.find(({ stop }) => stop.route_sequence > currentStop.route_sequence) : null;
   return deepFreeze({
     tour_id: state.tour_id,
+    projection_id: state.projection_id,
     route_version: state.route_version,
     mode: state.mode,
     markers, list, card,
     story_sections: storySections,
     offline_itinerary: offline,
+    route_endpoints: { start_point: state.route.start_point, end_point: state.route.end_point },
     next_stop_id: next ? next.stop.route_stop_id : null,
     exclusions: rows.filter(({ pin }) => !pin.navigable).map(({ stop, pin }) => ({
       route_stop_id: stop.route_stop_id, display: pin.display, reason: pin.reason,
@@ -247,38 +361,118 @@ export function projectRoute(state, { prefersReducedMotion = false } = {}) {
   });
 }
 
-/** Prove marker, list, story section and offline order agree; name any that do not. */
+const tuple = item => JSON.stringify([item.route_sequence, item.route_stop_id, item.property_id, item.label]);
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+/** Prove every surface agrees on order, identity, selection and navigation; name any that does not. */
 export function checkParity(projection) {
-  const reference = projection.markers.map(item => `${item.route_sequence}:${item.route_stop_id}:${item.label}`);
-  const surfaces = {
-    list: projection.list, story_sections: projection.story_sections, offline_itinerary: projection.offline_itinerary,
-  };
   const divergences = [];
-  for (const [surface, items] of Object.entries(surfaces)) {
-    const seen = items.map(item => `${item.route_sequence}:${item.route_stop_id}:${item.label}`);
-    if (seen.length !== reference.length || seen.some((value, index) => value !== reference[index])) {
-      divergences.push({ surface, expected: reference, actual: seen });
-    }
+  const flag = (surface, expected, actual) => divergences.push({ surface, expected, actual });
+  const reference = projection.markers.map(tuple);
+  for (const surface of ["list", "story_sections", "offline_itinerary"]) {
+    const seen = projection[surface].map(tuple);
+    if (!same(seen, reference)) flag(surface, reference, seen);
   }
   const sequences = projection.markers.map(item => item.route_sequence);
   if (sequences.some((value, index) => index > 0 && value <= sequences[index - 1])) {
-    divergences.push({ surface: "markers", expected: "strictly ascending route_sequence", actual: sequences });
+    flag("markers", "strictly ascending route_sequence", sequences);
+  }
+  // Fields the list repeats from the markers.
+  for (const field of ["selected", "current", "display"]) {
+    const a = projection.markers.map(item => item[field]);
+    const b = projection.list.map(item => item[field]);
+    if (!same(a, b)) flag(`list.${field}`, a, b);
+  }
+  const active = projection.story_sections.map(item => item.active);
+  const current = projection.markers.map(item => item.current);
+  if (!same(active, current)) flag("story_sections.active", current, active);
+  for (const [field, fromList] of [["title", projection.list], ["title", projection.story_sections]]) {
+    const a = projection.offline_itinerary.map(item => item[field]);
+    const b = fromList.map(item => item[field]);
+    if (!same(a, b)) flag(`${field} across surfaces`, a, b);
+  }
+  if (!same(projection.offline_itinerary.map(item => item.appointment), projection.list.map(item => item.appointment))) {
+    flag("appointment", projection.list.map(item => item.appointment), projection.offline_itinerary.map(item => item.appointment));
+  }
+  // The card must be the selected stop, and only the selected stop.
+  const selected = projection.markers.filter(item => item.selected);
+  if (selected.length > 1) flag("markers.selected", "at most one", selected.length);
+  if (selected.length === 1 && !projection.card) flag("card", "a card for the selected stop", null);
+  if (selected.length === 0 && projection.card) flag("card", "no card without a selected stop", projection.card.route_stop_id);
+  if (projection.card && selected.length === 1) {
+    const marker = selected[0];
+    const row = projection.list.find(item => item.route_stop_id === projection.card.route_stop_id);
+    const wanted = [marker.route_sequence, marker.route_stop_id, marker.property_id, marker.label];
+    const got = [projection.card.route_sequence, projection.card.route_stop_id, projection.card.property_id, projection.card.label];
+    if (!same(wanted, got)) flag("card", wanted, got);
+    if (!row) {
+      flag("card", "a matching list row", null);
+    } else {
+      if (projection.card.title !== row.title) flag("card.title", row.title, projection.card.title);
+      if (!same(projection.card.native_navigation, row.native_navigation)) {
+        flag("card.native_navigation", row.native_navigation, projection.card.native_navigation);
+      }
+      if (!same(projection.card.appointment, row.appointment)) flag("card.appointment", row.appointment, projection.card.appointment);
+    }
   }
   return { ok: divergences.length === 0, divergences };
 }
 
 function assertBounds(bounds) {
   if (!Array.isArray(bounds) || bounds.length !== 4) fail("invalid_bounds", "bounds must be [west,south,east,north]");
-  finite(bounds[0], -180, 180, "bounds.west"); finite(bounds[1], -90, 90, "bounds.south");
-  finite(bounds[2], -180, 180, "bounds.east"); finite(bounds[3], -90, 90, "bounds.north");
+  const [west, south, east, north] = bounds;
+  finite(west, -180, 180, "bounds.west"); finite(south, -90, 90, "bounds.south");
+  finite(east, -180, 180, "bounds.east"); finite(north, -90, 90, "bounds.north");
+  // Longitude may wrap across the antimeridian (west > east); latitude may not be reversed.
+  if (south >= north) fail("invalid_bounds", "bounds.south must be below bounds.north");
+}
+
+function assertPosition(position, path) {
+  if (!Array.isArray(position) || position.length < 2 || position.length > 3) {
+    fail("invalid_geometry", `${path} must be a [longitude, latitude] position`);
+  }
+  try {
+    finite(position[0], -180, 180, `${path}[0]`); finite(position[1], -90, 90, `${path}[1]`);
+  } catch { fail("invalid_geometry", `${path} holds an unusable coordinate`); }
+}
+
+function assertPolygon(rings, path) {
+  if (!Array.isArray(rings) || rings.length < 1) fail("invalid_geometry", `${path} needs at least one ring`);
+  rings.forEach((ring, index) => {
+    if (!Array.isArray(ring) || ring.length < 4) fail("invalid_geometry", `${path}[${index}] needs at least four positions`);
+    ring.forEach((position, at) => assertPosition(position, `${path}[${index}][${at}]`));
+    const first = ring[0]; const last = ring[ring.length - 1];
+    if (first[0] !== last[0] || first[1] !== last[1]) fail("invalid_geometry", `${path}[${index}] must be closed`);
+  });
+}
+
+function assertGeometry(geometry) {
+  if (!isObject(geometry)) fail("invalid_geometry", "geometry must be a GeoJSON Polygon or MultiPolygon");
+  if (geometry.type === "Polygon") return assertPolygon(geometry.coordinates, "geometry.coordinates");
+  if (geometry.type === "MultiPolygon") {
+    if (!Array.isArray(geometry.coordinates) || geometry.coordinates.length < 1) {
+      fail("invalid_geometry", "a MultiPolygon needs at least one polygon");
+    }
+    return geometry.coordinates.forEach((rings, index) => assertPolygon(rings, `geometry.coordinates[${index}]`));
+  }
+  return fail("invalid_geometry", "geometry must be a GeoJSON Polygon or MultiPolygon");
+}
+
+function assertSliderValue(value) {
+  const ok = (typeof value === "number" && Number.isFinite(value))
+    || typeof value === "boolean" || (typeof value === "string" && value.length > 0 && value.length <= 200);
+  if (!ok) fail("invalid_slider_value", "slider value must be a finite number, boolean or short string");
+  return value;
 }
 
 /**
  * Typed events in, next state out. The effects record says the map instance is
  * kept: nothing here asks a caller to remount, rebuild or discard camera state.
+ * Accepted payloads are copied, so later mutation of an event cannot change
+ * state. A refused event throws before any state is returned.
  */
 export function reduceMapEvent(state, event) {
-  if (!event || typeof event !== "object" || !MAP_EVENT_TYPES.includes(event.type)) {
+  if (!isObject(event) || !MAP_EVENT_TYPES.includes(event.type)) {
     fail("unknown_event", `"${event && event.type}" is not a registered map event`);
   }
   if (event.route_version !== state.route_version) {
@@ -305,17 +499,15 @@ export function reduceMapEvent(state, event) {
       break;
     }
     case "filter_state":
-      if (!event.filters || typeof event.filters !== "object" || Array.isArray(event.filters)) {
-        fail("invalid_shape", "filters must be an object");
-      }
-      next.filters = { ...event.filters };
+      if (!isObject(event.filters)) fail("invalid_shape", "filters must be an object");
+      next.filters = clone(event.filters, "filters");
       break;
     case "slider_state":
-      next.sliders = { ...next.sliders, [text(event.name, "name")]: event.value };
+      next.sliders = { ...next.sliders, [text(event.name, "name")]: assertSliderValue(event.value) };
       break;
     case "draw_result":
-      if (!event.geometry || typeof event.geometry !== "object") fail("invalid_shape", "geometry must be an object");
-      next.drawn_geometry = structuredClone(event.geometry);
+      assertGeometry(event.geometry);
+      next.drawn_geometry = clone(event.geometry, "geometry");
       break;
     case "route_stop_change": {
       if (state.mode !== "tour") fail("tour_mode_required", "route progress only moves in Tour mode");
@@ -370,6 +562,9 @@ export function applyRouteVersion(state, route) {
     sliders: structuredClone(state.sliders),
     drawn_geometry: structuredClone(state.drawn_geometry),
     version_mapping: mapping,
+    lineage: [...structuredClone(state.lineage ?? []), {
+      from_route_version: state.route_version, to_route_version: next.route_version, mapping: structuredClone(mapping),
+    }],
   };
   const previousCurrent = state.current_route_stop_id
     ? state.route.stops.find(stop => stop.route_stop_id === state.current_route_stop_id) : null;
@@ -393,14 +588,10 @@ export function buildNativeNavLink(state, request) {
       ? { latitude: stop.position.latitude, longitude: stop.position.longitude, basis: "approved_access_point" } : null,
   };
   const base = { route_stop_id: stop.route_stop_id, route_version: state.route_version, fallback };
-  if (!pin.navigable) {
-    return { ...base, available: false, reason_code: "pin_not_entrance_approved", reason: pin.reason };
-  }
-  const receipt = request.promotion_receipt;
-  if (!receipt || receipt.decision !== "approved" || receipt.route_version !== state.route_version) {
-    return { ...base, available: false, reason_code: "promotion_receipt_missing_or_stale",
-      reason: "No approved map promotion receipt covers this route version." };
-  }
+  const eligibility = handoffEligibility(state, stop, {
+    promotion_receipt: request.promotion_receipt, user_ref: request.user_ref,
+  });
+  if (!eligibility.available) return { ...base, available: false, reason_code: eligibility.reason_code, reason: eligibility.reason };
   const { latitude, longitude } = stop.position;
   const link = platform === "apple_maps"
     ? `https://maps.apple.com/?daddr=${latitude},${longitude}&dirflg=${travelMode === "walking" ? "w" : "d"}`
@@ -411,7 +602,7 @@ export function buildNativeNavLink(state, request) {
     ...base, available: true, platform, travel_mode: travelMode, link,
     return_state: {
       tour_id: state.tour_id, route_stop_id: stop.route_stop_id, property_id: stop.property_id,
-      route_version: state.route_version, user_ref: request.user_ref ?? null,
+      route_version: state.route_version, user_ref: request.user_ref,
       generated_at: new Date(generated).toISOString(), expires_at: new Date(generated + RETURN_TTL_MS).toISOString(),
     },
   };
@@ -425,21 +616,44 @@ export function buildReturnState(handoff) {
   return structuredClone(handoff.return_state);
 }
 
-/** On return, restore the exact stop, or say why not and fall back to the ordered list. */
+function validMarker(marker) {
+  return isObject(marker)
+    && ["tour_id", "route_stop_id", "property_id", "user_ref"].every(key => isText(marker[key]))
+    && Number.isSafeInteger(marker.route_version) && marker.route_version >= 1
+    && Number.isFinite(Date.parse(marker.generated_at)) && Number.isFinite(Date.parse(marker.expires_at));
+}
+
+/**
+ * On return, restore the exact stop, or say why not and fall back to the ordered
+ * list. A marker from an earlier route version is followed only through the
+ * recorded stop transitions in `state.lineage`; a stop that was removed is never
+ * guessed back from its property identity. The marker itself is not signed here:
+ * server-side signing of the return token is still owed.
+ */
 export function resolveReturn(state, marker, { now, user_ref = null } = {}) {
-  const refuse = (reason_code) => ({ ok: false, reason_code, fallback: "ordered_list" });
+  const refuse = code => ({ ok: false, reason_code: code, fallback: "ordered_list" });
+  if (!validMarker(marker)) return refuse("return_marker_invalid");
   if (marker.tour_id !== state.tour_id) return refuse("return_tour_mismatch");
-  if (marker.user_ref !== null && marker.user_ref !== user_ref) return refuse("return_user_mismatch");
+  if (!isText(user_ref) || marker.user_ref !== user_ref) return refuse("return_user_mismatch");
   if (!(Date.parse(now) < Date.parse(marker.expires_at))) return refuse("return_expired");
-  let stop = null;
+  if (marker.route_version > state.route_version) return refuse("return_version_future");
+  let stopId = marker.route_stop_id;
   let note = null;
-  if (marker.route_version === state.route_version) {
-    stop = state.route.stops.find(item => item.route_stop_id === marker.route_stop_id) ?? null;
-  } else {
-    stop = state.route.stops.find(item => item.property_id === marker.property_id) ?? null;
+  if (marker.route_version < state.route_version) {
+    let version = marker.route_version;
+    while (version < state.route_version) {
+      const step = (state.lineage ?? []).find(item => item.from_route_version === version);
+      if (!step) return refuse("return_version_unbound");
+      const entry = step.mapping.find(item => item.old_route_stop_id === stopId && item.property_id === marker.property_id);
+      if (!entry || entry.disposition === "removed" || !entry.new_route_stop_id) return refuse("return_stop_removed");
+      stopId = entry.new_route_stop_id;
+      version = step.to_route_version;
+    }
+    if (version !== state.route_version) return refuse("return_version_unbound");
     note = "route_version_changed";
   }
-  if (!stop) return refuse("return_stop_removed");
+  const stop = state.route.stops.find(item => item.route_stop_id === stopId && item.property_id === marker.property_id);
+  if (!stop) return refuse(note ? "return_stop_removed" : "return_marker_mismatch");
   return {
     ok: true, route_stop_id: stop.route_stop_id, note,
     state: { ...structuredClone(state), mode: "tour", current_route_stop_id: stop.route_stop_id, selected_property_id: stop.property_id },
@@ -454,10 +668,21 @@ export function renderOrderedListHtml(projection) {
   const items = projection.list.map(item => {
     const offline = projection.offline_itinerary.find(entry => entry.route_stop_id === item.route_stop_id);
     const notice = item.display === "verified" ? "" : ` <span class="tour-pin-note">${esc(item.precision_label)}</span>`;
-    const nav = item.native_navigation.available ? "" : ` <span class="tour-nav-withheld">Navigation not available: ${esc(item.native_navigation.reason)}</span>`;
+    const when = item.appointment
+      ? ` <span class="tour-appointment">Appointment ${esc(item.appointment.start)} to ${esc(item.appointment.end)}</span>` : "";
+    const nav = item.native_navigation.available ? ""
+      : ` <span class="tour-nav-withheld">Navigation not available: ${esc(item.native_navigation.reason)}</span>`;
     return `<li data-route-stop-id="${esc(item.route_stop_id)}"${item.current ? ' aria-current="step"' : ""}>`
       + `<strong>${esc(item.label)}</strong> ${esc(item.title)}`
-      + (offline && offline.address_line ? `, ${esc(offline.address_line)}` : "") + notice + nav + "</li>";
+      + (offline && offline.address_line ? `, ${esc(offline.address_line)}` : "") + notice + when + nav + "</li>";
   });
   return `<ol class="tour-stop-list" aria-label="Tour stops in visit order">${items.join("")}</ol>`;
+}
+
+/** Start and end assumptions for the same ordered list, kept out of the stop count. */
+export function renderRouteEndpointsHtml(projection) {
+  const { start_point: start, end_point: end } = projection.route_endpoints;
+  const part = (name, point) => (point
+    ? `<dt>${name}</dt><dd>${esc(point.label ?? "Unnamed point")} (${esc(point.latitude)}, ${esc(point.longitude)})</dd>` : "");
+  return `<dl class="tour-route-endpoints">${part("Start", start)}${part("End", end)}</dl>`;
 }
