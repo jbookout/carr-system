@@ -24,6 +24,10 @@ const METHODS = new Map([
   ["/api/tours/property-evidence/v1", "GET"],
   ["/api/tours/properties/search", "POST"],
   ["/api/tours/selection-cart", "GET, POST"],
+  ["/api/tours/create", "POST"],
+  ["/api/tours/route-draft", "POST"],
+  ["/api/tours/route-stop", "POST"],
+  ["/api/tours/route-stop-transition", "POST"],
   ["/api/tours/route-version", "POST"],
   ["/api/tours/route-reorder", "POST"],
   ["/api/tours/route-accept", "POST"],
@@ -130,7 +134,63 @@ function validContent(value) {
   catch { return false; }
 }
 
+const SUBJECT_TYPES = new Set(["client", "work"]);
+const STOP_STATES = new Set(["active", "held", "excluded"]);
+const ACCESS_STATUS = new Set(["unknown", "candidate", "approved", "excluded"]);
+const DISPOSITIONS = new Set(["unchanged", "reordered", "removed", "held", "excluded", "merged", "added"]);
+const POINT_ROLES = new Set(["entrance", "driveway", "parking_access", "start", "end"]);
+const PRECISIONS = new Set(["unknown", "approximate", "parcel", "building", "address", "entrance", "surveyed"]);
+function text(value, max) { return typeof value === "string" && value.trim().length > 0 && value.trim().length <= max; }
+function boundedInt(value, min, max) { return Number.isInteger(value) && value >= min && value <= max; }
+// The verb re-validates every field; this only stops malformed bodies at the door.
+function validPoint(value, role) {
+  return exact(value, ["latitude", "longitude", "position_role", "precision_class", "source_ref"]) && value.position_role === role && POINT_ROLES.has(role) &&
+    typeof value.latitude === "number" && Number.isFinite(value.latitude) && value.latitude >= -90 && value.latitude <= 90 &&
+    typeof value.longitude === "number" && Number.isFinite(value.longitude) && value.longitude >= -180 && value.longitude <= 180 &&
+    PRECISIONS.has(value.precision_class) && text(value.source_ref, 240);
+}
+function validCreate(v) {
+  return exact(v, ["idempotency_key", "tour_name", "subject_type", "subject_id", "canonical_dataset_version", "start_point", "end_point"]) &&
+    validId(v.idempotency_key) && text(v.tour_name, 240) && SUBJECT_TYPES.has(v.subject_type) &&
+    typeof v.subject_id === "string" && /^[A-Za-z0-9._:-]{1,200}$/.test(v.subject_id) && text(v.canonical_dataset_version, 240) &&
+    validPoint(v.start_point, "start") && validPoint(v.end_point, "end");
+}
+function validRouteDraft(v) {
+  return exact(v, ["idempotency_key", "tour_id", "route_version", "base_route_version_id", "expected_route_version", "start_point", "end_point"]) &&
+    validId(v.idempotency_key) && validId(v.tour_id) && boundedInt(v.route_version, 1, 2147483647) && validId(v.base_route_version_id) &&
+    boundedInt(v.expected_route_version, 0, 2147483647) && validPoint(v.start_point, "start") && validPoint(v.end_point, "end");
+}
+function validRouteStop(v) {
+  if (!exact(v, ["idempotency_key", "route_version_id", "property_id", "route_sequence", "route_label", "stop_state", "appointment_start", "appointment_end",
+    "locked_appointment", "dwell_minutes", "buffer_minutes", "access_coordinate_status", "assertion_set_digest"])) return false;
+  if (!validId(v.idempotency_key) || !validId(v.route_version_id) || !validId(v.property_id) || !STOP_STATES.has(v.stop_state)) return false;
+  const active = v.stop_state === "active";
+  // The label is presentation only; the property ID is never derived from or compared to it.
+  if (active ? !(boundedInt(v.route_sequence, 1, 2147483647) && typeof v.route_label === "string" && /^[A-Za-z0-9._ -]{1,80}$/.test(v.route_label.trim()))
+    : !(v.route_sequence === null && v.route_label === null)) return false;
+  const hasStart = v.appointment_start !== null, hasEnd = v.appointment_end !== null;
+  if (hasStart !== hasEnd || (hasStart && (!iso(v.appointment_start) || !iso(v.appointment_end) || Date.parse(v.appointment_end) < Date.parse(v.appointment_start)))) return false;
+  return typeof v.locked_appointment === "boolean" && (!v.locked_appointment || hasStart) &&
+    boundedInt(v.dwell_minutes, 0, 1440) && boundedInt(v.buffer_minutes, 0, 1440) &&
+    ACCESS_STATUS.has(v.access_coordinate_status) && validDigest(v.assertion_set_digest);
+}
+function validRouteStopTransition(v) {
+  if (!exact(v, ["idempotency_key", "old_route_version_id", "new_route_version_id", "old_route_stop_id", "new_route_stop_id", "disposition"]) ||
+    !validId(v.idempotency_key) || !validId(v.new_route_version_id) || !DISPOSITIONS.has(v.disposition)) return false;
+  const [ov, os, ns] = [v.old_route_version_id, v.old_route_stop_id, v.new_route_stop_id];
+  if (![ov, os, ns].every(item => item === null || validId(item))) return false;
+  const d = v.disposition;
+  if (d === "added") return ov === null && os === null && ns !== null;
+  if (d === "removed") return ov !== null && os !== null && ns === null;
+  if (d === "held" || d === "excluded") return ov !== null && os !== null;
+  return ov !== null && os !== null && ns !== null;
+}
+
 const VALID = {
+  "/api/tours/create": validCreate,
+  "/api/tours/route-draft": validRouteDraft,
+  "/api/tours/route-stop": validRouteStop,
+  "/api/tours/route-stop-transition": validRouteStopTransition,
   "/api/tours/properties/search": validSearch,
   "/api/tours/selection-cart": (v) => exact(v, ["tour_id", "base_selection_version_id", "expected_selection_version", "property_ids", "selection_digest", "idempotency_key"]) &&
     validId(v.tour_id) && (v.base_selection_version_id === null || validId(v.base_selection_version_id)) &&
@@ -156,6 +216,10 @@ const SEAMS = {
   "/api/tours/library": "listToursFn",
   "/api/tours/detail": "readTourFn",
   "/api/tours/property-evidence/v1": "readPropertyEvidenceFn",
+  "/api/tours/create": "createTourFn",
+  "/api/tours/route-draft": "openRouteDraftFn",
+  "/api/tours/route-stop": "appendRouteStopFn",
+  "/api/tours/route-stop-transition": "appendRouteStopTransitionFn",
   "/api/tours/route-version": "createRouteVersionFn",
   "/api/tours/route-reorder": "reorderRouteStopsFn",
   "/api/tours/route-accept": "acceptRouteVersionFn",
@@ -216,6 +280,7 @@ const CONFLICT_MESSAGES = new Set([
   "cheat sheet revision refuses concurrent or stale version",
   "cheat sheet restore refuses unavailable or stale revision",
   "tour selection refuses stale version",
+  "route stop cannot alter an accepted route version",
 ]);
 function dependencyFailure(error) {
   const code = typeof error?.payload?.error === "string" ? error.payload.error : "";
