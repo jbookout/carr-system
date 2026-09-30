@@ -163,6 +163,22 @@ Top-level fields:
                        reviewer's CLI call (not a combined budget — Codex
                        timing out does not shorten Grok's own budget).
 
+Optional CARRY-FORWARD fields (engineering-workflow-sop section 15, the
+continuous loop and the findings ledger). ABSENT = the request behaves exactly
+as it did before they existed: same prompt byte-for-byte, same one row per
+reviewer. Their full shape and rules live in pipelines/review_findings_ledger.py
+(validate_carry_forward), not restated here:
+  pr                   object {number, branch} — at least one. Turns
+                       carry-forward on; needs kind="code".
+  prior_commits        array of shas, REQUIRED with pr. Earlier commits of the
+                       same PR; never the commit under review.
+  prior_findings       array, REQUIRED with pr (may be empty). One entry per
+                       earlier finding, naming the record-layer flag_id of the
+                       review row it sits in. Open ones go into every
+                       reviewer's prompt; each reviewer classifies each one and
+                       the runner records one code_review_disposition row per
+                       open finding under that reviewer's own bearer.
+
 A request missing a required field, or with kind/reviewers/evidence shaped
 wrong, fails schema validation — see validate_request(). Malformed requests
 are not guessable-fixed; they fail loud, in the log, in the exit code, and
@@ -193,6 +209,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
+
+import review_findings_ledger as ledger
 
 REPO = Path(__file__).resolve().parent.parent
 REVIEW_COUNCIL_DIR = REPO / "out" / "review-council"
@@ -293,6 +311,13 @@ def validate_request(req: dict) -> None:
 
     if not isinstance(req["timeout_minutes"], (int, float)) or req["timeout_minutes"] <= 0:
         raise RequestError("timeout_minutes must be a positive number")
+
+    # Carry-forward fields are optional; when present, malformed prior data
+    # fails the whole request here, visibly, before any reviewer runs.
+    try:
+        ledger.validate_carry_forward(req)
+    except ledger.CarryForwardError as e:
+        raise RequestError(str(e))
 
 
 def load_request(path: Path) -> dict:
@@ -596,7 +621,7 @@ you could not determine it from what you can see:
 EVIDENCE POINTERS:
 {evidence_block}
 
-OUTPUT CONTRACT — respond with EXACTLY ONE JSON object and nothing else
+{ledger.prompt_prior_block(req)}OUTPUT CONTRACT — respond with EXACTLY ONE JSON object and nothing else
 (no markdown fences, no prose before or after it). Shape:
 {{
   "summary": "one paragraph, plain language",
@@ -617,7 +642,7 @@ OUTPUT CONTRACT — respond with EXACTLY ONE JSON object and nothing else
   ],
   "could_not_assess": [
     "anything you were asked to review but could not reach or evaluate, stated plainly"
-  ]
+  ]{ledger.prompt_contract_field(req)}
 }}
 
 ABSENCE MUST BE VISIBLE. If findings is empty, that means you looked and found
@@ -626,7 +651,7 @@ file outside the checkout, a runtime behavior you cannot execute, a record you
 cannot query), it MUST appear in could_not_assess rather than being silently
 omitted. An empty could_not_assess list is itself a claim — that you assessed
 everything you were asked to — so only leave it empty if that is true.
-"""
+{ledger.prompt_rules(req)}"""
 
 
 # ---- per-backend command builders --------------------------------------
@@ -964,6 +989,17 @@ def write_status_sidecar(request_path: Path, status: str, detail: dict) -> None:
 
 def _meta(req: dict, backend: str, binary_path: str, started_at: datetime,
           finished_at: datetime, completion_status: str) -> dict:
+    meta = _base_meta(req, backend, binary_path, started_at, finished_at, completion_status)
+    if ledger.is_active(req):
+        # Only on a carry-forward request, so a no-PR row is unchanged. This is
+        # what lets a later round find this row by PR identity.
+        meta["pr"] = req["pr"]
+        meta["prior_commits"] = req["prior_commits"]
+    return meta
+
+
+def _base_meta(req: dict, backend: str, binary_path: str, started_at: datetime,
+               finished_at: datetime, completion_status: str) -> dict:
     return {
         "reviewer": backend,
         "actor_slug": ACTOR_SLUG_BY_BACKEND.get(backend, f"{backend}-reviewer"),
@@ -1049,7 +1085,52 @@ def run_one_reviewer(backend: str, req: dict, prompt: str, cwd: Path,
 
     log(f"OK    request={request_id} reviewer={backend} — finding recorded "
         f"(flag_id={resp.get('flag_id')}, subject={resp.get('subject_id')})")
-    return {"status": "ok", "finding_response": resp, "meta": meta}
+    if not ledger.is_active(req):
+        return {"status": "ok", "finding_response": resp, "meta": meta}
+    return _record_dispositions(req, backend, review_result, resp, meta, post_runner)
+
+
+def _record_dispositions(req: dict, backend: str, review_result: dict, resp: dict,
+                         meta: dict, post_runner: Callable) -> dict:
+    """CARRY-FORWARD RECORD WRITE. One record-finding row per open prior
+    finding, kind code_review_disposition, under THIS reviewer's own bearer
+    (append-only; see review_findings_ledger's module docstring for why a new
+    row rather than an update). Closed prior findings were never sent and are
+    never re-recorded. Any prior finding this reviewer failed to classify
+    validly, and any refused write, makes the reviewer's outcome "failed" so
+    the request lands in failed/ — the finding stays open for the next round
+    rather than silently vanishing.
+
+    INCIDENT BACK-LINK: no link verb joins an incident to a finding
+    (open-incident's related_kind has no 'finding'). The link is written with
+    existing verbs — the incident's `observed` text names "record flag
+    <flag_id> #<index>", and a code_review_disposition row on that commit
+    carries value.incident_ref. See build_disposition_payload."""
+    request_id = req["request_id"]
+    opens = ledger.open_prior_findings(req)
+    accepted, problems = ledger.reconcile_dispositions(opens, review_result)
+    slug = ACTOR_SLUG_BY_BACKEND.get(backend, f"{backend}-reviewer")
+    token = read_review_token(backend)
+    written = []
+    for a in accepted:
+        args = ledger.build_disposition_payload(req, a["prior"], a["disposition"], a["reason"],
+                                                a["evidence"], backend, actor_slug=slug)
+        ok, dresp = post_finding(args, token=token, backend=backend, runner=post_runner)
+        written.append({"id": a["id"], "prior_flag_id": a["prior"]["flag_id"],
+                        "prior_index": a["prior"]["index"], "disposition": a["disposition"],
+                        "posted": ok, "flag_id": dresp.get("flag_id") if ok else None,
+                        **({} if ok else {"post_response": dresp})})
+        if not ok:
+            problems.append(f"{a['id']} {a['disposition']} disposition not recorded: {dresp}")
+    for p in problems:
+        log(f"FAIL  request={request_id} reviewer={backend} — carry-forward: {p}")
+    log(f"{'FAIL' if problems else 'OK  '}  request={request_id} reviewer={backend} — "
+        f"{sum(1 for w in written if w['posted'])}/{len(opens)} prior finding dispositions recorded")
+    outcome = {"status": "failed" if problems else "ok", "finding_response": resp, "meta": meta,
+               "dispositions": written, "carry_forward_problems": problems}
+    if problems:
+        outcome["reason"] = "carry-forward incomplete: " + "; ".join(problems)
+    return outcome
 
 
 def process_request(request_path: Path) -> int:
