@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { TOOLS } from '../src/tools.js';
+import { TOOLS, executeRegisteredTool } from '../src/tools.js';
 
 const key = 'ac000000-0000-4000-8000-000000000001';
 const partner = slug => ({ id: slug === 'joe' ? 'a1' : 'a2', slug, human: true, via: 'oauth-google' });
@@ -34,6 +34,16 @@ function store({ unavailable = null, populated = false } = {}) {
   }});
   return { c, seen, later: () => { now = '2026-10-01T13:00:00.000Z'; } };
 }
+
+test('registered dispatch admits catch-up reads and acknowledgement replay', async () => {
+  const s = store({ populated: true });
+  const actor = partner('joe');
+  assert.equal((await executeRegisteredTool(s.c('joe'), actor, 'whats-new', {})).state, 'ready');
+  const args = { mark_seen: true, idempotency_key: key };
+  const first = await executeRegisteredTool(s.c('joe'), actor, 'whats-new', args);
+  assert.equal(first.marked_seen, true);
+  assert.deepEqual(await executeRegisteredTool(s.c('joe'), actor, 'whats-new', args), { replayed: true, ...first });
+});
 
 test('first read uses 24 hours and never advances either partner watermark', async () => {
   const s = store();
@@ -109,4 +119,25 @@ test('identity is not selectable and acknowledgement needs a retry key', async (
   for (const args of [{ partner: 'dell' }, { since: '2026-01-01' }, { mark_seen: true }, { mark_seen: 'true' }])
     await assert.rejects(TOOLS['whats-new'].handler(store().c('joe'), partner('joe'), args));
   await assert.rejects(TOOLS['whats-new'].handler(store().c('joe'), { slug: 'codex', human: false }, {}));
+});
+
+test('malformed source items isolate the whole section and prevent acknowledgement', async () => {
+  for (const malformed of [{ text: '   ' }, { at: 'invalid timestamp' }, { ref: null }, { ref: 42 }]) {
+    const s = store({ populated: true });
+    const c = s.c('joe'), query = c.query;
+    c.query = async (sql, p) => {
+      const value = await query(sql, p);
+      if (sql.includes('ops.whats_new_section') && p[0] === 'next_actions') {
+        value.rows[0].result.items.push({ ...value.rows[0].result.items[0], ...malformed });
+      }
+      return value;
+    };
+    const r = await TOOLS['whats-new'].handler(c, partner('joe'), { mark_seen: true, idempotency_key: key });
+    assert.equal(r.sections.next_actions.state, 'unavailable');
+    assert.equal(r.sections.next_actions.items.length, 0);
+    assert.equal(r.sections.deal_changes.state, 'ready');
+    assert.equal(r.groups.flatMap(g => g.items).some(i => i.section === 'next_actions'), false);
+    assert.equal(r.marked_seen, false);
+    assert.equal(s.seen.size, 0);
+  }
 });

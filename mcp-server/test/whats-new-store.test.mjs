@@ -5,7 +5,7 @@ import { readFileSync, mkdtempSync, mkdirSync, renameSync, existsSync } from 'no
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
-import { TOOLS } from '../src/tools.js';
+import { TOOLS, executeRegisteredTool } from '../src/tools.js';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 let bin;
@@ -38,7 +38,7 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
     const authorityFunction = schema.match(/CREATE FUNCTION ops.authority_login_slug\([^\n]+\)[\s\S]*?\n\$\$;/)?.[0];
     assert.ok(authorityFunction);
     await c.query(authorityFunction);
-    for (const name of ['public.actor','public.party','public.client','public.lead','public.deal','public.deal_participant','public.event','public.activity','public.next_action','public.critical_date','public.tool_call','ops.release','ops.release_slice_member','ops.doc_conversation','ops.doc_conversation_grant','ops.doc_conversation_turn','ops.doc_suggestion','ops.doc_suggestion_scan']) {
+    for (const name of ['public.actor','public.party','public.client','public.lead','public.vendor','public.deal','public.deal_participant','public.event','public.activity','public.next_action','public.critical_date','public.tool_call','ops.release','ops.release_slice_member','ops.doc_conversation','ops.doc_conversation_grant','ops.doc_conversation_turn','ops.doc_suggestion','ops.doc_suggestion_scan']) {
       const table = schema.match(new RegExp(`CREATE TABLE ${name.replaceAll('.','\\.')} \\([\\s\\S]*?\\n\\);`))?.[0];
       assert.ok(table, name);
       await c.query(table);
@@ -51,8 +51,14 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
     assert.ok(releaseFunction);
     await c.query(releaseFunction);
     await c.query('grant execute on function ops.list_shipped_releases(timestamptz) to carr_writer; grant select,insert on public.tool_call to carr_writer; alter table public.tool_call add primary key(idempotency_key);');
+    const touchFunction = schema.match(/CREATE FUNCTION public.trg_touch_row\(\)[\s\S]*?end \$\$;/)?.[0];
+    assert.ok(touchFunction);
+    await c.query(touchFunction);
+    await c.query('create trigger next_action_touch before update on public.next_action for each row execute function public.trg_touch_row();');
+    await c.query("create view public.v_ref_index as select 'client'::text subject_type,id subject_id from public.client; grant select on public.v_ref_index to carr_writer; grant select,update on public.next_action to carr_writer; grant insert on public.event to carr_writer;");
     await c.query('create function ops.doc_suggestion_visible(uuid,uuid) returns boolean language sql as $$ select exists(select 1 from ops.doc_conversation c where c.id=$1 and c.created_by_actor=$2) $$;');
     await c.query(migration);
+    await c.query(readFileSync(path.join(root,'migrations/0766_doc_whats_new_repair.sql'),'utf8'));
     await c.query("insert into actor(id,slug,display_name,kind,active) values ($1,'joe','Partner A','human',true),($2,'dell','Partner B','human',true)",[uuid(1),uuid(2)]);
     const identity = async slug => {
       await c.query('reset role');
@@ -71,7 +77,7 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
     const actor = { id:uuid(1),slug:'joe',human:true,via:'oauth-google' };
     const invoke = async args => {
       await c.query('begin');
-      try { const r=await TOOLS['whats-new'].handler(c,actor,args); await c.query('commit'); return r; }
+      try { const r=await executeRegisteredTool(c,actor,'whats-new',args); await c.query('commit'); return r; }
       catch(e) { await c.query('rollback'); throw e; }
     };
     const ack = { mark_seen:true,idempotency_key:uuid(50) };
@@ -101,6 +107,19 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
       for (const item of s.items) { assert.ok(item.ref); assert.ok(item.text); }
     }
     assert.match((await section('partner_activity',next)).items[0].text,/Partner B/);
+    await c.query('reset role');
+    await c.query("insert into vendor(id,party_id,category,created_by,updated_by) values($1,$2,'synthetic',$3,$3)", [uuid(61),uuid(3),uuid(1)]);
+    for (const [column, id, group] of [['lead_id',uuid(6),'lead'],['client_id',uuid(4),'client'],['vendor_id',uuid(61),'vendor']]) {
+      await c.query(`insert into activity(id,occurred_at,actor_id,kind,summary,${column}) values($1,now(),$2,'call',$3,$4)`, [uuid(62+['lead','client','vendor'].indexOf(group)),uuid(2),`Synthetic ${group} summary`,id]);
+    }
+    await identity('joe');
+    const touches = await section('partner_activity',await context());
+    for (const [type,id] of [['lead',uuid(6)],['client',uuid(4)],['vendor',uuid(61)]]) {
+      const item = touches.items.find(i => i.group_ref === `${type}:${id}`);
+      assert.ok(item, `${type} activity must retain its subject context`);
+      assert.match(item.text,new RegExp(`Partner B: Synthetic ${type} summary`));
+      assert.equal(item.group_name,'Synthetic Practice');
+    }
     assert.deepEqual(await invoke(ack),{ replayed:true,...lost },'new data never replaces a lost-response replay');
     await c.query('reset role');
     await c.query("insert into ops.release(service_id,release_key,environment,state,git_sha,maker_actor,source_kind,source_ref,artifact_digest,dependency_lock_digest,test_evidence_ref,security_evidence_ref,maker_verification_ref,plan_hash,readiness_receipt_id,ready_at,ended_at) values($1,'synthetic-release','production','complete',$2,'fixture','operator','synthetic','synthetic','synthetic','synthetic','synthetic','synthetic','synthetic',$3,now(),now())",[uuid(31),'1'.repeat(40),uuid(32)]);
@@ -147,6 +166,54 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
     await late.query('commit');
     const afterCommit = await section('deal_changes',await context());
     assert.ok(afterCommit.items.some(i => i.ref === `event:${uuid(12)}`),'late commit must not fall behind the timestamp watermark');
+    // An unseen creation survives a later tuple rewrite before catch-up.
+    await late.query('begin');
+    await late.query("insert into lead(id,registry_ref,party_id,stage,created_by,updated_by,owner_id) values($1,'L-LATE',$2,'new',$3,$3,$3)", [uuid(60),uuid(3),uuid(1)]);
+    const beforeLeadCommit = await context();
+    await c.query('select ops.mark_whats_new_seen($1,$2)', [beforeLeadCommit.high_water,beforeLeadCommit.snapshot]);
+    await late.query('commit');
+    await late.query("update lead set stage='contacted',updated_at=clock_timestamp() where id=$1", [uuid(60)]);
+    const lateLeads = await section('new_leads',await context());
+    assert.ok(lateLeads.items.some(i => i.ref === 'L-LATE'), 'late creation must survive a later update');
+    const consumed = await context();
+    await c.query('select ops.mark_whats_new_seen($1,$2)', [consumed.high_water,consumed.snapshot]);
+    await late.query("update lead set updated_at=clock_timestamp() where id=$1", [uuid(60)]);
+    assert.equal((await section('new_leads',await context())).items.some(i => i.ref === 'L-LATE'),false, 'an already seen lead update is not a new creation');
+    await c.query('reset role');
+    await c.query("insert into next_action(id,subject_type,subject_id,owner_id,description,created_by,updated_by) values($1,'client',$2,$3,'Complete synthetic client work',$3,$3)",[uuid(70),uuid(4),uuid(1)]);
+    await identity('joe');
+    const beforeCompletion = await context();
+    await c.query('select ops.mark_whats_new_seen($1,$2)',[beforeCompletion.high_water,beforeCompletion.snapshot]);
+    await c.query('begin');
+    const completed = await executeRegisteredTool(c,actor,'complete-action',{ref:uuid(4),idempotency_key:uuid(71)});
+    await c.query('commit');
+    assert.equal(completed.count,1);
+    const completionAnswer = await invoke({});
+    assert.ok(completionAnswer.sections.next_actions.items.some(i => i.ref === `next-action:${uuid(70)}` && i.sentence.includes('was completed')));
+    const completedSeen = await context();
+    await c.query('select ops.mark_whats_new_seen($1,$2)',[completedSeen.high_water,completedSeen.snapshot]);
+    for (const status of ['done','dropped']) {
+      await c.query('reset role');
+      await c.query('update next_action set status=$1,updated_at=clock_timestamp() where id=$2',[status,uuid(10)]);
+      await identity('joe');
+      const actions = await section('next_actions',await context());
+      assert.ok(actions.items.some(i => i.ref === `next-action:${uuid(10)}` && i.text.includes(status === 'done' ? 'completed' : 'dropped')),status);
+      assert.ok(actions.items.every(i => !i.text.includes(' is due ')), 'closed work must not sound pending');
+      const seen = await context();
+      await c.query('select ops.mark_whats_new_seen($1,$2)',[seen.high_water,seen.snapshot]);
+      assert.equal((await section('next_actions',await context())).state,'empty','acknowledged closure is not repeated');
+    }
+    for (const status of ['passed','cleared']) {
+      await c.query('reset role');
+      await c.query('update critical_date set status=$1,updated_at=clock_timestamp() where id=$2',[status,uuid(11)]);
+      await identity('joe');
+      const dates = await section('critical_dates',await context());
+      assert.ok(dates.items.some(i => i.ref === `critical-date:${uuid(11)}` && i.text.includes(status)),status);
+      assert.ok(dates.items.every(i => !i.text.includes(' due ')), 'closed date must not sound pending');
+      const seen = await context();
+      await c.query('select ops.mark_whats_new_seen($1,$2)',[seen.high_water,seen.snapshot]);
+      assert.equal((await section('critical_dates',await context())).state,'empty');
+    }
   } finally {
     for (const c of clients) await c.end();
     if (running) execFileSync(path.join(bin,'pg_ctl'), ['-D',dir,'-m','fast','-w','stop'], { stdio:'pipe' });

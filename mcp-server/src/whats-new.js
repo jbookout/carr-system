@@ -49,7 +49,20 @@ export function whatsNewTools({ withEnvelope, executeRegisteredTool, ToolError }
                 || !Array.isArray(section.items)
                 || (section.state === 'ready' && !section.items.length)
                 || (section.state === 'empty' && section.items.length)) throw new Error('source shape');
-              sections[name] = section;
+              // Stage the complete rendered source before publishing any of it.
+              // Invalid items share the SQL source's rollback/failure boundary.
+              const items = section.items.map(item => {
+                if (typeof item?.ref !== 'string' || !item.ref.trim()
+                  || typeof item.at !== 'string' || !Number.isFinite(Date.parse(item.at))
+                  || typeof item.text !== 'string' || !sentence(item.text)
+                  || (item.group_ref != null && (typeof item.group_ref !== 'string' || !item.group_ref.trim()))
+                  || (item.group_name != null && (typeof item.group_name !== 'string' || !item.group_name.trim())))
+                  throw new Error('source item');
+                return { section: name, ref: item.ref, at: item.at,
+                  sentence: `${sentence(item.text)} (${item.ref}).`,
+                  group_ref: item.group_ref || 'other', group_name: item.group_name || 'Other changes' };
+              });
+              sections[name] = { ...section, items };
             } catch {
               await c.query('rollback to savepoint whats_new_source');
               sections[name] = { state: 'unavailable', reason: 'source_unavailable', items: [] };
@@ -61,12 +74,9 @@ export function whatsNewTools({ withEnvelope, executeRegisteredTool, ToolError }
           for (const [section, value] of Object.entries(sections)) {
             const items = [];
             for (const item of value.items) {
-              if (!item.ref || !Number.isFinite(Date.parse(item.at)) || !sentence(item.text))
-                throw new ToolError({ error: 'whats_new_source_invalid' });
-              const ref = item.group_ref || 'other';
-              if (!groups.has(ref)) groups.set(ref, { ref, name: item.group_name || 'Other changes', items: [] });
-              const rendered = { section, ref: item.ref, at: item.at,
-                sentence: `${sentence(item.text)} (${item.ref}).` };
+              const ref = item.group_ref;
+              if (!groups.has(ref)) groups.set(ref, { ref, name: item.group_name, items: [] });
+              const { group_ref, group_name, ...rendered } = item;
               groups.get(ref).items.push(rendered);
               items.push(rendered);
             }
