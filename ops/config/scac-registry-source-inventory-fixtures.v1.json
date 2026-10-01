@@ -72960,6 +72960,61 @@
       "expected_count": 1007,
       "expected_sha256": "13d95f8aa10a7d40af510ecd30f2be5a51d396e29544d03be1f1bdb6a83e9953",
       "reason": "Property evidence read frontier after immutable Tour feedback v98; exact reviewed current source inventory and atomic migration contract."
+    },
+    {
+      "version": "v100",
+      "remove": [],
+      "upsert": [
+        {
+          "ingress_key": "external-admin:tools/migrate.py",
+          "ingress_kind": "external_admin",
+          "operation": "tools/migrate.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "tools/migrate.py",
+          "schema_digest": "9c937b21fbf584109fa84accf38a13954a683ac2760af864b70e7b221927cc66",
+          "handler_digest": "9c937b21fbf584109fa84accf38a13954a683ac2760af864b70e7b221927cc66",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "mcp-tool:list-progress-boards",
+          "ingress_kind": "mcp_tool",
+          "operation": "list-progress-boards",
+          "effect_class": "audit_side_effect",
+          "source_locator": "mcp-server/src/board-answers.js",
+          "schema_digest": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa",
+          "source_digest": "44177f1fb2a6f1c4eff4ccce4e0835f30cf17d34fe85507a83db0dff90d1c421",
+          "write": false,
+          "human_only": false,
+          "authority_only": false,
+          "principal_mode": "authenticated_registered_principal",
+          "mutation_kind": null,
+          "target_surface": "scac.surface.database",
+          "delegates_to": [],
+          "request_shape": "closed_top_level_schema",
+          "idempotency_mode": "not_applicable",
+          "rollback_class": "append_only_audit",
+          "admission_class": "application_default_deny",
+          "owner_package": "11",
+          "implementation_state": "source_guarded_not_deployed",
+          "classification_authorizing": false
+        }
+      ],
+      "expected_count": 1008,
+      "expected_sha256": "c52212732b1cace66fe48d6444473dcd0c5fff322c64c6e934978cb16e6ded66",
+      "reason": "Progress directory adds a read-only tenant and authenticated sponsor scoped MCP contract. Existing board reads and database grants are unchanged."
     }
   ],
   "current_source_review": {
