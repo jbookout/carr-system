@@ -61,8 +61,11 @@ test("confirm-merge executes against the current activity schema", async t => {
     const refView = schema.match(/CREATE VIEW public\.v_ref_index AS\n.*?;\n/s);
     assert.ok(refView, "current schema must define v_ref_index");
     await db.query(refView[0]);
+    const graphView = schema.match(/CREATE VIEW public\.v_party_graph AS\n.*?;\n/s);
+    assert.ok(graphView, "current schema must define v_party_graph");
+    await db.query(graphView[0]);
 
-    async function fixture(fn) {
+    async function fixture(fn, { committed = false } = {}) {
       await db.query("begin");
       try {
         for (const [id, date] of [[survivor, "2020-01-01"], [loser, "2021-01-01"], [unrelated, "2022-01-01"]])
@@ -71,14 +74,116 @@ test("confirm-merge executes against the current activity schema", async t => {
         for (const [n, id] of [[1, survivor], [2, loser], [3, unrelated]])
           await db.query(`insert into client (id,party_id,roster_ref,created_by,updated_by)
             values ($1,$2,$3,$4,$4)`, [role(n), id, `C-90000${n}`, actor.id]);
+        if (committed) await db.query("commit");
         await fn();
-      } finally { await db.query("rollback"); }
+      } finally {
+        await db.query("rollback");
+        if (committed) await db.query(`truncate ${tables.join(", ")}`);
+      }
     }
     async function activity(refs) {
       await db.query(`insert into activity (occurred_at,actor_id,kind,summary,client_id,lead_id,vendor_id)
         values (now(),$1,'note','Synthetic activity',$2,$3,$4)`, [actor.id, ...refs]);
     }
     const merge = extra => TOOLS["confirm-merge"].handler(db, actor, { ...options, ...extra });
+
+    for (const endpoint of ["from", "to", "via"]) {
+      await t.test(`graph attachments on the losing ${endpoint} endpoint refuse without stranding refs`, () => fixture(async () => {
+        // The loser can be either graph end or the third-party broker.
+        const ends = endpoint === "from" ? [loser, unrelated, survivor]
+          : endpoint === "to" ? [unrelated, loser, survivor] : [survivor, unrelated, loser];
+        await db.query(`insert into party_link (from_party,to_party,via_party,kind,note,source,created_by)
+          values ($1,$2,$3,'knows','Synthetic graph evidence','synthetic',$4)`, [...ends, actor.id]);
+        await activity([role(1), null, null]);
+        const before = (await db.query("select * from v_party_graph order by from_ref,to_ref")).rows;
+        const links = (await db.query("select * from party_link order by id")).rows;
+        assert.ok(before.every(edge => edge.from_ref && edge.to_ref));
+        await assert.rejects(() => executeRegisteredTool(db, actor, "confirm-merge", options),
+          error => error.payload?.error === "merge_graph_attachments_require_resolution"
+            && error.payload.party_id === loser && error.payload.count === 1);
+        assert.deepEqual((await db.query("select * from v_party_graph order by from_ref,to_ref")).rows, before);
+        assert.deepEqual((await db.query("select * from party_link order by id")).rows, links);
+        assert.equal((await db.query("select party_id from client where id=$1", [role(2)])).rows[0].party_id, loser);
+        assert.equal((await db.query("select merged_into from party where id=$1", [loser])).rows[0].merged_into, null);
+        assert.equal(Number((await db.query("select count(*) from event")).rows[0].count), 0);
+        assert.equal(Number((await db.query("select count(*) from tool_call")).rows[0].count), 0);
+      }));
+    }
+
+    for (const retiredSide of ["survivor", "loser"]) {
+      await t.test(`a sequential merge refuses a retired UUID ${retiredSide}`, () => fixture(async () => {
+        await db.query("delete from client");
+        assert.equal((await merge({ survivor_party: survivor, merged_party: loser })).ok, true);
+        await assert.rejects(() => merge({
+          idempotency_key: "synthetic-retired-endpoint",
+          survivor_party: retiredSide === "survivor" ? loser : unrelated,
+          merged_party: retiredSide === "survivor" ? unrelated : loser,
+        }), error => error.payload?.error === "party_already_merged");
+        assert.equal((await db.query("select merged_into from party where id=$1", [unrelated])).rows[0].merged_into, null);
+        assert.equal((await db.query("select merged_into from party where id=$1", [loser])).rows[0].merged_into, survivor);
+        assert.equal(Number((await db.query("select count(*) from event where verb='confirm-merge'")).rows[0].count), 1);
+      }));
+    }
+
+    await t.test("overlapping reverse merges cannot retire both endpoints", { timeout: 10000 }, () => fixture(async () => {
+      const first = new pg.Client({ host: socket, port, user: "carr_fixture", database: "postgres" });
+      const second = new pg.Client({ host: socket, port, user: "carr_fixture", database: "postgres" });
+      await first.connect();
+      await second.connect();
+      let resume;
+      const paused = new Promise(resolve => { resume = resolve; });
+      let metricsRead;
+      const ready = new Promise(resolve => { metricsRead = resolve; });
+      const wrapped = { query: async (sql, params) => {
+        const result = await first.query(sql, params);
+        if (sql.includes("merge_survivorship")) { metricsRead(); await paused; }
+        return result;
+      } };
+      let firstCall, secondCall;
+      try {
+        await first.query("begin");
+        await second.query("begin");
+        const pid = (await second.query("select pg_backend_pid() as pid")).rows[0].pid;
+        firstCall = executeRegisteredTool(wrapped, actor, "confirm-merge", options);
+        await ready;
+        // Change the winner after T1 read its score, exactly as in the review.
+        await second.query(`insert into activity (occurred_at,actor_id,kind,summary,client_id)
+          values (now(),$1,'note','Synthetic interleaving activity',$2)`, [actor.id, role(2)]);
+        let settled = false;
+        secondCall = executeRegisteredTool(second, actor, "confirm-merge", {
+          ...options, idempotency_key: "synthetic-reverse-merge",
+          survivor_party: loser, merged_party: survivor,
+        }).then(result => ({ result }), error => ({ error })).then(outcome => { settled = true; return outcome; });
+        // Observe the PostgreSQL wait, rather than assuming a sleep means blocked.
+        const deadline = Date.now() + 3000;
+        let waiting = false;
+        while (!settled && Date.now() < deadline) {
+          waiting = (await db.query("select wait_event_type from pg_stat_activity where pid=$1", [pid]))
+            .rows[0]?.wait_event_type === "Lock";
+          if (waiting) break;
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        assert.equal(waiting, true, "reverse merge must wait for the first merge's endpoint locks");
+        resume();
+        assert.equal((await firstCall).ok, true);
+        await first.query("commit");
+        const reverse = await secondCall;
+        assert.equal(reverse.error?.payload?.error, "party_already_merged");
+        await second.query("rollback");
+        const rows = (await db.query("select id,merged_into from party order by id")).rows;
+        assert.equal(rows.find(row => row.id === survivor).merged_into, null);
+        assert.equal(rows.find(row => row.id === loser).merged_into, survivor);
+        assert.equal(Number((await db.query("select count(*) from event where verb='confirm-merge'")).rows[0].count), 1);
+      } finally {
+        resume();
+        if (firstCall) await firstCall.catch(() => {});
+        await first.query("rollback");
+        if (secondCall) await secondCall;
+        await second.query("rollback");
+        await first.end();
+        await second.end();
+      }
+    }, { committed: true }));
 
     await t.test("client refs merge and keep activity attached through moved roles", () => fixture(async () => {
       await activity([role(1), null, null]);

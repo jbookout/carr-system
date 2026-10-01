@@ -5345,6 +5345,23 @@ export const TOOLS = {
         throw new ToolError({ error: "match_basis_required",
           hint: "state the corroborating signal that established this duplicate; a name alone is never a merge basis" });
 
+      // Serialize overlapping merges before reading scores or moving roles.
+      // A stable UUID order also keeps reverse calls from deadlocking. The
+      // caller's transaction holds these locks through the mutation and event.
+      const endpoints = await c.query(
+        `/* merge_live_endpoints */
+         select id, merged_into from party where id = any($1::uuid[])
+          order by id for update`, [[surv.partyId, merg.partyId]]);
+      if (endpoints.rows.length !== 2)
+        throw new ToolError({ error: "merge_survivorship_unavailable",
+          hint: "both party rows must be readable before a merge can run" });
+      for (const endpoint of endpoints.rows) {
+        if (endpoint.merged_into)
+          throw new ToolError({ error: "party_already_merged", party_id: endpoint.id,
+            merged_into: endpoint.merged_into,
+            hint: "read the live party and confirm the duplicate pair again before merging" });
+      }
+
       // The human confirms THAT this pair is a duplicate. Code decides WHICH
       // row survives, with the rule's exact precedence, so a human cannot
       // accidentally retire the more-cited or better-evidenced record.
@@ -5382,6 +5399,15 @@ export const TOOLS = {
          union all select 'deal_participant', count(*)::int from deal_participant where party_id=$1
          union all select 'record_flag', count(*)::int from record_flag where subject_type='party' and subject_id=$1
          union all select 'child_party', count(*)::int from party where org_id=$1`, [merg.partyId]);
+
+      // Moving role rows cannot preserve graph endpoints or the broker. Until
+      // an attachment-preserving merge handles duplicate and self edges, refuse
+      // this pair before any write instead of retiring a still-cited party.
+      const graphCount = sweep.rows.find(row => row.attachment === "party_link")?.count;
+      if (Number(graphCount) > 0)
+        throw new ToolError({ error: "merge_graph_attachments_require_resolution",
+          party_id: merg.partyId, count: Number(graphCount),
+          hint: "the losing party has introduction links; preserve their endpoints and broker before confirming this merge" });
 
       // JOE'S RULING, in his words: "Okafor is a client now duh. everyone starts
       // as a lead." A lead record and a client record for the same person are
