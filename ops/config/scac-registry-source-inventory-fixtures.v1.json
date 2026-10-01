@@ -72960,6 +72960,38 @@
       "expected_count": 1007,
       "expected_sha256": "13d95f8aa10a7d40af510ecd30f2be5a51d396e29544d03be1f1bdb6a83e9953",
       "reason": "Property evidence read frontier after immutable Tour feedback v98; exact reviewed current source inventory and atomic migration contract."
+    },
+    {
+      "version": "v100",
+      "upsert": [
+        {
+          "ingress_key": "external-admin:tools/migrate.py",
+          "ingress_kind": "external_admin",
+          "operation": "tools/migrate.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "tools/migrate.py",
+          "schema_digest": "4669f13ee5345c6a7bcae098f71c17b1465467d8390c5e217abe221d31ba44d1",
+          "handler_digest": "4669f13ee5345c6a7bcae098f71c17b1465467d8390c5e217abe221d31ba44d1",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        }
+      ],
+      "remove": [],
+      "expected_count": 1007,
+      "expected_sha256": "611163ba21c8149c1ed13082d3cdaedcdf434224c5f51649ee74834df542d233",
+      "reason": "Hardening retains the v99 ingress set and binds the migration runner after it gains the atomic 0760–0762 delivery group."
     }
   ],
   "current_source_review": {

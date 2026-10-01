@@ -475,6 +475,13 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0754_tour_property_evidence.sql",
         "0755_property_evidence_scac_successor.sql",
     ),
+    # Hardening changes sealed proconfig/ACL metadata. The current successor
+    # must be visible before the deferred policy-epoch trigger settles.
+    (
+        "0760_dot_security_definer_hardening.sql",
+        "0761_completion_tenant_security_barriers.sql",
+        "0762_dot_hardening_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
