@@ -1231,6 +1231,10 @@ step "calendar archive (both partners' feeds)"       ./bin/archive-calendar.sh
 # machine is a side effect no capture is worth.
 step "mail capture (extract + match, writes nothing)" ./bin/mail-capture.sh
 
+# Consume canonical local contact activities. The Worker records stage evidence
+# and prepares human-send-only drafts; this step has no mail send operation.
+step "lead stages (evidence and approval drafts)" python3 ./bin/lead-stage-job.py
+
 # Added 2026-08-12 (Joe's go, "put settings in the repo"): mirror the Claude Code
 # permission surface — the three settings.json files carrying the allow list, the
 # hook wiring, and the autoMode clearances — into claude-tree/settings/. Those

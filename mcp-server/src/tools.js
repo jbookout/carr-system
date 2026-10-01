@@ -30,6 +30,7 @@ import { claudeContinuityTools } from "./claude-continuity.js";
 import { incidentTools } from "./incident.js";
 import { evidenceActivationTools } from "./evidence-activation.js";
 import { resourceObservationTools } from "./resource-observation.v5.js";
+import { leadAutomationTools } from "./lead-automation.js";
 import { jevCallReceiptTools } from "./jev-call-receipt.js";
 import { workflowCutoverTools } from "./workflow-cutover.v5.js";
 import { engineeringRuntimeTools } from "./engineering-runtime.js";
@@ -3264,6 +3265,7 @@ export const TOOLS = {
           order by sort,slug`)).rows;
       const leads = (await c.query(
         `select id,registry_ref,name,specialty,city,county,state,lane,stage,
+                (select party_id from lead where lead.id=v_lead_board.id) as party_id,
                 stage_label,stage_sort,score,segment,suppressed,est_lease_event,
                 event_confidence,last_touch,next_action_date,owner,owner_label,
                 base_version,created_at,updated_at
@@ -8613,6 +8615,7 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "evidence-activation": "mcp-server/src/evidence-activation.js",
   "resource-observation": "mcp-server/src/resource-observation.v5.js",
   "jev-call-receipt": "mcp-server/src/jev-call-receipt.js",
+  "lead-automation": "mcp-server/src/lead-automation.js",
   "workflow-cutover": "mcp-server/src/workflow-cutover.v5.js",
   "memory": "mcp-server/src/memory.js",
   "codex-continuity": "mcp-server/src/codex-continuity.js",
@@ -9726,6 +9729,7 @@ registerTools(resourceObservationTools({ withEnvelope, ToolError }), "resource-o
 // server-timestamped receipt (migration 0587) before returning the answers, so
 // Jev gates credit only rows the gated model could not forge locally. See
 // src/jev-call-receipt.js.
+registerTools(leadAutomationTools({ withEnvelope, writeEvent, ToolError }), "lead-automation");
 registerTools(jevCallReceiptTools({ withEnvelope, ToolError }), "jev-call-receipt");
 // DoctorCRE V5-R02: workflow cutover, caller migration and retirement
 // readiness. Composes accept-workflow / disable-legacy-schedule rather than
