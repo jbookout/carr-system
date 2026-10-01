@@ -161,7 +161,7 @@ def _to_codex(
     # Desktop thread on every retry (PR #1345 review). "delivered_live" says the
     # answer arrives in the session's own window and nowhere a caller can wait on.
     if live_desktop and thread and codex_ipc.thread_owner(thread) is not None:
-        live = codex_ipc.start_turn(thread, task)
+        live = codex_ipc.start_turn(thread, task, approval_policy="never")
         if live.get("status") != "not_live":
             status = "delivered_live" if live.get("status") == "delivered" else live.get("status")
             return {"resumed": True, **live, "status": status, "thread_id": thread}

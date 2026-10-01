@@ -106,11 +106,23 @@ class DeskFirstTurnTests(unittest.TestCase):
         client = Mock()
         client.owner.return_value = "fixture-owner"
         client.request.return_value = {"resultType": "success"}
-        with patch.object(dispatch.codex_ipc, "_open", return_value=client):
-            dispatch.codex_ipc.start_turn("fixture-thread", "Synthetic task")
+        with patch.object(dispatch.codex_ipc, "_open", return_value=client), \
+             patch.object(dispatch.codex_ipc, "thread_owner", return_value="fixture-owner"):
+            dispatch._to_codex({"thread_id": "fixture-thread"}, "Synthetic task", env={}, live_desktop=True)
         request = client.request.call_args.args[1]["turnStart"]["request"]
         self.assertEqual(request["approvalPolicy"], "never")
         self.assertEqual(request["input"][0]["text"], INSTRUCTION + "\n\nSynthetic task")
+
+    def test_non_desk_desktop_messages_keep_their_original_posture(self):
+        from unittest.mock import Mock
+        client = Mock()
+        client.owner.return_value = "fixture-owner"
+        client.request.return_value = {"resultType": "success"}
+        with patch.object(dispatch.codex_ipc, "_open", return_value=client):
+            dispatch.codex_ipc.start_turn("fixture-thread", "Synthetic ordinary session message")
+        request = client.request.call_args.args[1]["turnStart"]["request"]
+        self.assertNotIn("approvalPolicy", request)
+        self.assertEqual(request["input"][0]["text"], "Synthetic ordinary session message")
 
     def test_background_default_and_explicit_modes_include_instruction(self):
         sid = "12345678-1234-4123-8123-123456789abc"

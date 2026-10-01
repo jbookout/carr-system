@@ -167,7 +167,7 @@ def _text_input(text: str) -> list[dict]:
 
 
 def start_turn(thread_id: str, text: str, *, socket_path: str | None = None,
-               timeout: float = 15.0) -> dict:
+               timeout: float = 15.0, approval_policy: str | None = None) -> dict:
     """Start one turn carrying `text` in the Desktop window that owns the thread.
 
     Returns {"status": "delivered"|"not_live"|"failed", "thread_id", "mode",
@@ -175,8 +175,10 @@ def start_turn(thread_id: str, text: str, *, socket_path: str | None = None,
     the text is steered into the running turn instead, which is what a person
     typing into that window mid-turn gets.
     """
-    from desks import desk_prompt
-    text = desk_prompt(text)
+    # Ordinary session messages preserve the Desktop owner's posture. Desk
+    # dispatch explicitly supplies never and its already-instructed prompt.
+    if approval_policy not in (None, "never"):
+        raise ValueError("desk approval policy must be never; ask the orchestrator")
     base = {"thread_id": thread_id}
     client = _open(socket_path, timeout)
     if client is None:
@@ -188,7 +190,7 @@ def start_turn(thread_id: str, text: str, *, socket_path: str | None = None,
         started = client.request("thread-follower-start-turn", {
             "conversationId": thread_id,
             "turnStart": {"request": {"threadId": thread_id, "input": _text_input(text),
-                                      "approvalPolicy": "never"},
+                                      **({"approvalPolicy": "never"} if approval_policy else {})},
                           "context": {}},
         }, target=owner)
         if started.get("resultType") == "success":
