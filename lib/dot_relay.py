@@ -320,7 +320,7 @@ def _append(path, value):
 
 
 def _protocol(text):
-    """Return requests and report; marker counts only outside fenced blocks."""
+    """Return requests and report; accept an end-marker suffix outside fences."""
     commands, report_lines = [], []
     fence = None
     finished = False
@@ -331,9 +331,14 @@ def _protocol(text):
             continue
         if fence == "mac-run" and line.strip():
             commands.append(line.strip())
-        if fence is None and line == "DOT-REPORT-END":
-            finished = True
-            break
+        if fence is None:
+            marker = re.search(r"(?:^|\s)DOT-REPORT-END(?: [A-Za-z0-9-]{1,12})?$", line.rstrip())
+            if marker:
+                prefix = line[:marker.start()].rstrip()
+                if prefix:
+                    report_lines.append(prefix)
+                finished = True
+                break
         report_lines.append(line)
     return commands, "\n".join(report_lines).strip() + "\n" if finished else None
 
