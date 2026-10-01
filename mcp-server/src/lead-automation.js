@@ -92,7 +92,10 @@ const LEADS_SQL = `select l.*, (p.merged_into is not null or p.deleted_at is not
     order by e.recorded_at desc,e.id desc limit 1),l.created_at) as stage_since
   from lead l join party p on p.id=l.party_id order by l.id`;
 const ACTIVITIES_SQL = `select a.* from activity a join lead l on l.id=a.lead_id
-  where a.source in ('mail_ingest','local_mail','calendar','calendar_ingest') order by a.occurred_at,a.id`;
+  where a.source in ('mail_ingest','local_mail','calendar','calendar_ingest')
+    and not exists(select 1 from lead_stage_move m where m.lead_id=l.id
+      and m.from_stage=l.stage and m.activity_id=a.id and m.status='applied')
+  order by a.occurred_at,a.id`;
 const DRAFTS_SQL = `select * from lead_contact_draft order by created_at,id`;
 
 export function leadAutomationTools({ withEnvelope, writeEvent, ToolError }) {

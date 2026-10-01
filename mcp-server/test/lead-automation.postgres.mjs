@@ -81,6 +81,22 @@ try {
   const conflict=await tools['advance-leads'].handler(c,actor,{});
   equal(conflict.moves.filter(m=>m.lead_id===lead),[]);
   equal((await c.query('select stage from lead where id=$1',[lead])).rows[0].stage,'new');
+  // A later exact reply must still qualify a reset lead. The oldest reply has
+  // already supplied this transition and must not starve the fresh candidate.
+  const fresh=await tools['record-lead-contact'].handler(c,actor,{...contact,
+    native_ref:'local-mail:reset-fresh-reply',occurred_at:now.toISOString()});
+  const freshPreview=(await tools['lead-stage-preview'].handler(c)).moves.filter(m=>m.lead_id===lead);
+  equal(freshPreview.map(m=>m.activity_id),[fresh.activity_id]);
+  const freshDryRun=await tools['advance-leads'].handler(c,actor,{dry_run:true});
+  equal(freshDryRun.moves.filter(m=>m.lead_id===lead),freshPreview);
+  equal((await c.query('select stage from lead where id=$1',[lead])).rows[0].stage,'new');
+  const freshAdvance=await tools['advance-leads'].handler(c,actor,{});
+  equal(freshAdvance.moves.filter(m=>m.lead_id===lead),freshPreview);
+  equal((await c.query('select stage from lead where id=$1',[lead])).rows[0].stage,'qualified');
+  equal((await c.query("select count(*)::int n from lead_stage_move where lead_id=$1 and from_stage='new' and to_stage='qualified' and status='applied'",[lead])).rows[0].n,2);
+  await c.query("update lead set stage='new' where id=$1",[lead]);
+  equal((await tools['advance-leads'].handler(c,actor,{})).moves.filter(m=>m.lead_id===lead),[]);
+  equal((await c.query('select stage from lead where id=$1',[lead])).rows[0].stage,'new');
   // A weak proposal must not consume the evidence forever. The same local
   // contact becomes sufficient once the lease event is verified.
   const weakLead=randomUUID(),weakRef='L-SYNTH-'+randomUUID();
