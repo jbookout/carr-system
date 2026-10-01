@@ -1,7 +1,7 @@
 // Synthetic SQL evaluation support, imported by tests. No production DSN or writes.
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, renameSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, renameSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -14,7 +14,13 @@ export const fixture = JSON.parse(readFileSync(fixturePath, "utf8"));
 export const fixtureDigest = createHash("sha256").update(readFileSync(fixturePath)).digest("hex");
 
 function binary(name) {
-  for (const dir of ["/opt/homebrew/opt/postgresql@17/bin", "/usr/lib/postgresql/17/bin", ...(process.env.PATH || "").split(":")])
+  // Debian/Ubuntu install server binaries outside PATH. The unit runner has
+  // a packaged server but only the gates runner explicitly installs version 17.
+  const linuxRoot = "/usr/lib/postgresql";
+  const installed = existsSync(linuxRoot) ? readdirSync(linuxRoot)
+    .filter(version => /^\d+$/.test(version) && Number(version) >= 14)
+    .sort((a,b) => Number(b)-Number(a)).map(version => join(linuxRoot,version,"bin")) : [];
+  for (const dir of ["/opt/homebrew/opt/postgresql@17/bin", ...installed, ...(process.env.PATH || "").split(":")])
     if (existsSync(join(dir, name)) && existsSync(join(dir, "postgres"))) return join(dir, name);
   throw new Error(`PostgreSQL test prerequisite missing: ${name}`);
 }
