@@ -209,6 +209,13 @@ with tempfile.TemporaryDirectory(prefix="pr-size-check-") as tmp:
     checks.append(("a near-pure rename plus a binary addition: prints the mix line",
                    rc == 0 and "mixes moves with edits; consider splitting" in text))
 
+    def move_and_binary_mode_only(r: Path) -> None:
+        move(r)
+        os.chmod(r / "lib" / "bin.dat", 0o755)
+    rc, text = case(repo, "binary-mode-only", move_and_binary_mode_only)
+    checks.append(("a near-pure rename plus a chmod-only change on a BINARY file: silent",
+                   rc == 0 and text == ""))
+
     def move_and_mode_only(r: Path) -> None:
         move(r)
         os.chmod(r / "lib" / "tool.sh", 0o755)

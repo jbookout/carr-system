@@ -100,7 +100,8 @@ class Change:
     status: str             # git's letter: A, M, D, R, C, T
     similarity: int = 0     # rename/copy similarity, percent
     old_path: str = ""      # the source side of a rename or copy
-    binary: bool = False    # numstat printed "-": content changed, lines unknown
+    binary: bool = False    # numstat printed "-": lines unknown (git prints it even for a mode-only change)
+    blob_changed: bool = True   # the old and new blob ids differ
 
     @property
     def counted(self) -> bool:
@@ -115,8 +116,13 @@ class Change:
 
     @property
     def content_edit(self) -> bool:
-        """Changed bytes, not only a mode bit: lines, a binary change, an add or a delete."""
-        return self.lines > 0 or self.binary or self.status in "AD"
+        """Changed bytes, not only a mode bit: lines, a binary change, an add or a delete.
+
+        A binary marker counts only when the blob itself changed: git prints
+        "-" "-" for a binary file whose only change is its mode.
+        """
+        return (self.lines > 0 or self.status in "AD"
+                or (self.binary and self.blob_changed))
 
 
 @dataclass
@@ -150,17 +156,19 @@ def _git_z(repo: str, *args: str) -> list[str]:
 
 def changed_files(repo: str, rng: str) -> list[Change]:
     """Every file the range changes, keyed by its new path."""
-    status: dict[str, tuple[str, int]] = {}
-    tok = _git_z(repo, "--name-status", rng)
+    # --raw: ":<old mode> <new mode> <old blob> <new blob> <status>", then the
+    # path(s). The blob ids separate a content change from a mode-only one.
+    status: dict[str, tuple[str, int, bool]] = {}
+    tok = _git_z(repo, "--raw", "--no-abbrev", rng)
     i = 0
     while i < len(tok) and tok[i]:
-        code = tok[i]
+        _old_mode, _new_mode, old_blob, new_blob, code = tok[i].lstrip(":").split(" ")
         letter = code[0]
         if letter in "RC":
-            status[tok[i + 2]] = (letter, int(code[1:] or 0))
+            status[tok[i + 2]] = (letter, int(code[1:] or 0), old_blob != new_blob)
             i += 3
         else:
-            status[tok[i + 1]] = (letter, 0)
+            status[tok[i + 1]] = (letter, 0, old_blob != new_blob)
             i += 2
     changes: list[Change] = []
     tok = _git_z(repo, "--numstat", rng)
@@ -175,8 +183,8 @@ def changed_files(repo: str, rng: str) -> list[Change]:
             i += 1
         binary = added == "-" and deleted == "-"
         lines = (int(added) if added.isdigit() else 0) + (int(deleted) if deleted.isdigit() else 0)
-        letter, similarity = status.get(path, ("M", 0))
-        changes.append(Change(path, lines, letter, similarity, old_path, binary))
+        letter, similarity, blob_changed = status.get(path, ("M", 0, True))
+        changes.append(Change(path, lines, letter, similarity, old_path, binary, blob_changed))
     return changes
 
 
