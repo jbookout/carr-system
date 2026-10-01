@@ -80,7 +80,7 @@ def fail(message: str) -> int:
 
 def fingerprint(dsn: str) -> str:
     with psycopg.connect(dsn) as conn:
-        return conn.execute(FINGERPRINT).fetchone()[0]
+        return conn.execute(FINGERPRINT).fetchall()[0][0]
 
 
 def run_batch(dsn: str) -> tuple[int, float, str]:
@@ -112,8 +112,8 @@ def main() -> int:
         # mcp-server/test/definer-hardening-catalog-postgres.sql uses, plus a
         # synthetic valid epoch chain, so the batch commits through the real
         # refresh path and validates a production-scale epoch table.
-        if conn.execute("select count(*) from ops.scac_policy_epoch").fetchone()[0] == 0:
-            if conn.execute("select count(*) from public.rule").fetchone()[0] == 0:
+        if conn.execute("select count(*) from ops.scac_policy_epoch").fetchall()[0][0] == 0:
+            if conn.execute("select count(*) from public.rule").fetchall()[0][0] == 0:
                 conn.execute(
                     """insert into public.actor(id,slug,kind,display_name) values
                          ('31000000-0000-4000-8000-000000000001','rehearsal-fixture','human','Rehearsal fixture')""")
@@ -136,7 +136,7 @@ def main() -> int:
             # content under new epoch numbers, so the next refresh sees an
             # unchanged source and the chain stays valid.
             conn.commit()
-            if conn.execute("select count(*) from ops.scac_policy_epoch").fetchone()[0] != 1:
+            if conn.execute("select count(*) from ops.scac_policy_epoch").fetchall()[0][0] != 1:
                 return fail("the fixture projection did not bootstrap exactly one policy epoch")
             conn.execute(
                 """insert into ops.scac_policy_epoch(epoch,epoch_digest,previous_epoch,previous_epoch_digest,
@@ -160,7 +160,7 @@ def main() -> int:
                       (select count(*) from ops.scac_policy_epoch),
                       (select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace
                         where p.prosecdef and n.nspname in ('public','ops'))"""
-        ).fetchone()
+        ).fetchall()[0]
     print(f"rehearsal scale: {sizes[0]} registry versions, {sizes[1]} registry entries, "
           f"{sizes[2]} policy epochs, {sizes[3]} SECURITY DEFINER routines")
 
@@ -170,7 +170,7 @@ def main() -> int:
     blocker = psycopg.connect(dsn)
     blocker.execute("select count(*) from ops.scac_mutation_registry_version").fetchone()
     code, blocked_seconds, output = run_batch(dsn)
-    blocker_alive = blocker.execute("select count(*) from ops.scac_mutation_registry_entry").fetchone()[0] == sizes[1]
+    blocker_alive = blocker.execute("select count(*) from ops.scac_mutation_registry_entry").fetchall()[0][0] == sizes[1]
     blocker.rollback()
     blocker.close()
     if code == 0:
@@ -210,14 +210,14 @@ def main() -> int:
         live = conn.execute(
             """select registry_version from ops.scac_mutation_registry_version
                 order by regexp_replace(registry_version,'^.*[.]v','','')::integer desc limit 1"""
-        ).fetchone()[0]
-        current = conn.execute("select ops.scac_mutation_catalog_v101_current()").fetchone()[0]
+        ).fetchall()[0][0]
+        current = conn.execute("select ops.scac_mutation_catalog_v101_current()").fetchall()[0][0]
         unpinned = conn.execute(
             """select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace
                 where p.prosecdef and n.nspname in ('public','ops')
                   and not exists (select 1 from unnest(p.proconfig) s
                                    where s like 'search_path=%' and s like '%pg_temp')"""
-        ).fetchone()[0]
+        ).fetchall()[0][0]
     if ledger != set(BATCH) or live != "scac-mutation-registry.v101" or current is not True or unpinned:
         return fail(f"retry left an unexpected state: ledger={sorted(ledger)} live={live} "
                     f"catalog_current={current} unpinned_definers={unpinned}")

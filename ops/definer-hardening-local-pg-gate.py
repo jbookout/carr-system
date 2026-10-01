@@ -164,6 +164,7 @@ def siep11_gate():
         "siep11_mutation_registry_local_pg_gate",
         REPO / "ops/siep11-mutation-registry-local-pg-gate.py",
     )
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.path.insert(0, str(REPO / "ops"))
     spec.loader.exec_module(module)
@@ -204,16 +205,16 @@ def main() -> int:
             live = cur.execute(
                 """select registry_version from ops.scac_mutation_registry_version
                     order by regexp_replace(registry_version,'^.*[.]v','','')::integer desc limit 1"""
-            ).fetchone()[0]
+            ).fetchall()[0][0]
             siep11_gate().require_supported_successor(live)
             ordinal = int(live.rsplit(".v", 1)[1])
-            if cur.execute(f"select ops.scac_mutation_catalog_v{ordinal}_current()").fetchone()[0] is not True:
+            if cur.execute(f"select ops.scac_mutation_catalog_v{ordinal}_current()").fetchall()[0][0] is not True:
                 raise RuntimeError(f"live catalog no longer matches the {live} seal")
             invalid = [
                 version for (version,) in cur.execute(
                     "select registry_version from ops.scac_mutation_registry_version order by 1"
                 ).fetchall()
-                if cur.execute("select ops.scac_mutation_registry_seal_valid(%s)", (version,)).fetchone()[0]
+                if cur.execute("select ops.scac_mutation_registry_seal_valid(%s)", (version,)).fetchall()[0][0]
                 is not True
             ]
             if invalid:

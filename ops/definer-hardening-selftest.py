@@ -26,6 +26,7 @@ sys.path.insert(0, str(REPO / "ops"))
 
 def load(name: str, relative: str):
     spec = importlib.util.spec_from_file_location(name, REPO / relative)
+    assert spec is not None and spec.loader is not None, relative
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -34,7 +35,7 @@ def load(name: str, relative: str):
 GATE = load("definer_hardening_local_pg_gate", "ops/definer-hardening-local-pg-gate.py")
 
 
-class FakeCatalog(GATE.Catalog):
+class FakeCatalog(GATE.Catalog):  # type: ignore[name-defined,misc]
     def __init__(self):  # noqa: D401 - no database
         self.relations = {"actor": {"public"}, "memory_item": {"public"},
                           "rule": {"public", "ops"}, "pg_class": {"pg_catalog"}}
