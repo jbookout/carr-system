@@ -9,8 +9,14 @@ function store({ unavailable = null, populated = false } = {}) {
   let now = '2026-10-01T12:00:00.000Z';
   const c = slug => ({ query: async (sql, p = []) => {
     if (/savepoint|advisory/.test(sql)) return { rows: [] };
-    if (sql.includes('select request_hash, response from tool_call')) return { rows: envelopes.has(p[0]) ? [envelopes.get(p[0])] : [] };
-    if (sql.includes('insert into tool_call')) { envelopes.set(p[0], { request_hash: p[3], response: JSON.parse(p[4]) }); return { rows: [] }; }
+    if (/^\s*select\b/i.test(sql) && /\bfrom\s+tool_call\b/i.test(sql)) return { rows: envelopes.has(p[0]) ? [envelopes.get(p[0])] : [] };
+    if (sql.includes('insert into tool_call')) {
+      const columns = sql.match(/insert into tool_call\s*\(([^)]+)\)/i)[1].split(',').map(s => s.trim());
+      const row = Object.fromEntries(columns.map((name,i) => [name,p[i]]));
+      row.response = JSON.parse(row.response);
+      envelopes.set(row.idempotency_key,row);
+      return { rows: [] };
+    }
     if (sql.includes('ops.whats_new_context')) return { rows: [{ result: { ok: true, since: seen.get(slug) || new Date(Date.parse(now)-86400000).toISOString(), high_water: now, snapshot: '100:100:', previous_snapshot: null, first_call: !seen.has(slug) } }] };
     if (sql.includes('ops.whats_new_section')) {
       if (p[0] === unavailable) throw new Error('synthetic private error');
