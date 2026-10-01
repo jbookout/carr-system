@@ -192,6 +192,7 @@ WRITE_ACTION_PREFIXES = {
     "update", "write",
 }
 WRITE_ACTION_EXACT = {
+    "whats-new",  # explicit mark_seen persists the authenticated partner's watermark
     "acknowledge-board-answer",  # durable Received receipt for a board answer
     "answer-board-question",      # human partner records a durable answer
     "ask-board-question",         # opens a named question on the board

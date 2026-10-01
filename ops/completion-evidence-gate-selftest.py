@@ -719,8 +719,8 @@ def doc_conversation_write_door_classification():
     would turn both of them into writes and fail this case.
     """
     positives = ["create-doc-conversation", "share-doc-conversation",
-                 "rename-doc-conversation"]
-    negatives = ["read-doc-conversation", "share-preview", "rename-preview"]
+                 "rename-doc-conversation", "whats-new"]
+    negatives = ["read-doc-conversation", "share-preview", "rename-preview", "whats-new-preview"]
     missing = [action for action in positives if not mod.is_write_action(action)]
     false_writes = [action for action in negatives if mod.is_write_action(action)]
     ok = not missing and not false_writes

@@ -478,6 +478,11 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0757_progress_directory_scac_successor.sql",
     ),
+    (
+        "0765_doc_whats_new.sql",
+        "0766_doc_whats_new_repair.sql",
+        "0767_doc_whats_new_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -599,6 +604,11 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     ),
     (
         "0757_progress_directory_scac_successor.sql",
+    ),
+    (
+        "0765_doc_whats_new.sql",
+        "0766_doc_whats_new_repair.sql",
+        "0767_doc_whats_new_scac_successor.sql",
     ),
 )
 
