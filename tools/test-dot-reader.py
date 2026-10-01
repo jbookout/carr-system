@@ -20,6 +20,9 @@ import re
 import ast
 import hashlib
 import sys
+import signal
+import shutil
+import time
 
 import psycopg
 from psycopg import sql
@@ -437,6 +440,25 @@ class DotReader(unittest.TestCase):
                 dot.execute("delete from public.dot_fixture")
 
 
+    def test_release_abandon_fixture_isolates_cluster_roles(self):
+        spec = importlib.util.spec_from_file_location("release_abandon", ROOT / "ops/release-abandon-selftest.py")
+        abandon = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(abandon)
+        password = secrets.token_urlsafe(32)
+        with psycopg.connect(**self.owner_args, autocommit=True) as owner:
+            owner.execute(sql.SQL("alter role carr_ci password {}").format(sql.Literal(password)))
+        base = psycopg.conninfo.make_conninfo(host="127.0.0.1", port=self.port,
+            user="carr_ci", password=password, dbname=self.owner_args["dbname"])
+        with abandon.isolated_ci_database(base) as isolated:
+            with psycopg.connect(isolated, autocommit=True) as fixture:
+                self.assertEqual(fixture.execute("select count(*) from pg_roles where rolname='dot_reader'").fetchone(), (0,),
+                                 "sibling databases share roles; the release fixture requires its own cluster")
+                fixture.execute("create role release_abandon_role_isolation_probe")
+            with psycopg.connect(**self.owner_args, autocommit=True) as base_db:
+                self.assertEqual(base_db.execute("select count(*) from pg_roles where rolname='release_abandon_role_isolation_probe'").fetchone(), (0,))
+        with psycopg.connect(**self.owner_args, autocommit=True) as base_db:
+            self.assertEqual(base_db.execute("select rolcanlogin from pg_roles where rolname='dot_reader'").fetchone(), (True,))
+
     def test_snapshot_role_preamble_reconstructs_passwordless_login(self):
         exporter = (ROOT / "bin/schema-snapshot.sh").read_text()
         blocks = []
@@ -564,6 +586,107 @@ class DotReader(unittest.TestCase):
                 self.assertEqual(owner.execute(queries[0]).fetchone(), (True,))
             finally:
                 owner.execute("drop table ops.assurance_dot_acl_fixture")
+
+
+class ReleaseAbandonFixture(unittest.TestCase):
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location("release_abandon", ROOT / "ops/release-abandon-selftest.py")
+        self.abandon = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.abandon)
+
+    def test_tcp_fixture_accepts_spaced_and_long_temporary_roots(self):
+        for prefix in ("review space ", "review-" + "x" * 100):
+            with self.subTest(prefix=prefix), tempfile.TemporaryDirectory(prefix=prefix, dir="/tmp") as parent:
+                with patch.object(tempfile, "tempdir", parent):
+                    with self.abandon.isolated_ci_database("host=127.0.0.1") as dsn:
+                        with psycopg.connect(dsn) as connection:
+                            self.assertEqual(connection.execute("select 1").fetchone(), (1,))
+                            data = Path(connection.execute("show data_directory").fetchone()[0])
+                            self.assertEqual(connection.execute("show unix_socket_directories").fetchone(), ("",))
+                        self.assertEqual(data.parent.parent, Path(parent))
+                    self.assertFalse(data.parent.exists(), "verified shutdown removes the cluster")
+
+    def test_failed_shutdown_retains_live_cluster_and_reports_location(self):
+        run = subprocess.run
+        for failure in ("nonzero", "timeout", "success_but_live"):
+            with self.subTest(failure=failure):
+                observed = {}
+
+                def fail_stop(args, **kwargs):
+                    if Path(args[0]).name == "pg_ctl" and args[-1] == "stop":
+                        data = Path(args[args.index("-D") + 1])
+                        observed.update(data=data, pid=int((data / "postmaster.pid").read_text().splitlines()[0]), args=args, kwargs=kwargs)
+                        if failure == "timeout":
+                            raise subprocess.TimeoutExpired(args, 60)
+                        return subprocess.CompletedProcess(args, 0 if failure == "success_but_live" else 1,
+                                                           "", "injected stop failure")
+                    return run(args, **kwargs)
+
+                try:
+                    with patch.object(tempfile, "tempdir", "/tmp"), patch.object(subprocess, "run", side_effect=fail_stop):
+                        with self.assertRaises((RuntimeError, subprocess.TimeoutExpired)) as raised:
+                            with self.abandon.isolated_ci_database("host=127.0.0.1") as dsn:
+                                with psycopg.connect(dsn) as connection:
+                                    self.assertEqual(connection.execute("select 1").fetchone(), (1,))
+                    os.kill(observed["pid"], 0)
+                    self.assertTrue(observed["data"].exists(), "failed shutdown must retain a live cluster's data")
+                    self.assertTrue((observed["data"].parent / "postgres.log").exists())
+                    self.assertIn(str(observed["data"].parent), str(raised.exception))
+                finally:
+                    if observed:
+                        # Only this test's freshly observed disposable postmaster.
+                        if observed["data"].exists():
+                            stopped = run(observed["args"], **observed["kwargs"])
+                            self.assertEqual(stopped.returncode, 0, stopped.stderr)
+                        else:
+                            os.kill(observed["pid"], signal.SIGINT)
+                        deadline = time.monotonic() + 10
+                        while True:
+                            try:
+                                os.kill(observed["pid"], 0)
+                            except ProcessLookupError:
+                                break
+                            self.assertLess(time.monotonic(), deadline, "test postmaster did not stop")
+                            time.sleep(0.05)
+                        if observed["data"].parent.exists():
+                            shutil.rmtree(observed["data"].parent)
+
+    def test_body_exception_propagates_after_verified_shutdown(self):
+        error = ValueError("fixture body failure")
+        with self.assertRaises(ValueError) as raised:
+            with self.abandon.isolated_ci_database("host=127.0.0.1") as dsn:
+                with psycopg.connect(dsn) as connection:
+                    data = Path(connection.execute("show data_directory").fetchone()[0])
+                raise error
+        self.assertIs(raised.exception, error)
+        self.assertFalse(data.parent.exists())
+
+    def test_cli_reports_retained_cluster_after_failed_shutdown(self):
+        run = subprocess.run
+        observed = {}
+        stderr = io.StringIO()
+
+        def fail_stop(args, **kwargs):
+            if Path(args[0]).name == "pg_ctl" and args[-1] == "stop":
+                observed.update(data=Path(args[args.index("-D") + 1]), args=args, kwargs=kwargs)
+                return subprocess.CompletedProcess(args, 1, "", "injected stop failure")
+            return run(args, **kwargs)
+
+        try:
+            with patch.dict(os.environ, {"CARR_CI_DATABASE_URL": "host=127.0.0.1"}), \
+                 patch.object(tempfile, "tempdir", "/tmp"), \
+                 patch.object(subprocess, "run", side_effect=fail_stop), \
+                 patch.object(self.abandon, "legacy_approval_receipt_refusal"), \
+                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+                self.assertEqual(self.abandon.main(), 1)
+            self.assertTrue(observed["data"].exists())
+            self.assertIn(str(observed["data"].parent), stderr.getvalue())
+            self.assertIn(str(observed["data"].parent / "postgres.log"), stderr.getvalue())
+        finally:
+            if observed:
+                stopped = run(observed["args"], **observed["kwargs"])
+                self.assertEqual(stopped.returncode, 0, stopped.stderr)
+                shutil.rmtree(observed["data"].parent)
 
 
 if __name__ == "__main__":
