@@ -29,6 +29,7 @@ A codex-exec run is synchronous, so its line carries the actual result.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import re
@@ -298,7 +299,10 @@ def dispatch(
     results_path = Path(results_path or DEFAULT_RESULTS)
     entry = registry.resolve(name)          # every refusal happens here
     original_task = task
-    task = desks.desk_prompt(task)
+    # The background wire validates the original task before adding its own
+    # instruction. Prepending here would turn a blank task into valid work.
+    if entry["kind"] != "claude-desktop":
+        task = desks.desk_prompt(task)
     msg_id = str(uuid.uuid4())
     if entry["kind"] in ("claude-desktop", "codex-session", "codex-live", "flash-local", "grok-cli"):
         if not entry.get("model") or not str(entry.get("model")).strip():
@@ -451,6 +455,39 @@ def _read_pid(pid_file: Path) -> int | None:
         return None
 
 
+def _send_seed(fifo: Path, seed: str, pid: int, deadline: float) -> None:
+    """Bound both FIFO open and backpressure by the startup deadline."""
+    payload = (json.dumps({"type": "user", "message": {
+        "role": "user", "content": desks.desk_prompt(seed)}}) + "\n").encode()
+    fd = None
+    try:
+        while time.monotonic() < deadline:
+            if not _alive(pid):
+                raise DeskError("desk_failed_to_start", "the desk exited while accepting its seed")
+            if fd is None:
+                try:
+                    fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+                except OSError as exc:
+                    if exc.errno != errno.ENXIO:
+                        raise
+                    time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+                    continue
+            try:
+                written = os.write(fd, payload)
+            except BlockingIOError:
+                time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+                continue
+            payload = payload[written:]
+            if not payload:
+                return
+        raise DeskError("desk_failed_to_start", "the desk did not accept its seed within the startup deadline")
+    except OSError as exc:
+        raise DeskError("desk_failed_to_start", "the desk seed input became unavailable") from exc
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
 def desk_start(
     name: str,
     registry: Registry | None = None,
@@ -548,10 +585,14 @@ def desk_start(
         raise DeskError("desk_failed_to_start",
                         f"nothing bound {sock} within {BIND_TIMEOUT_S:.0f}s")
 
+    if proc.poll() is not None or not _alive(proc.pid):
+        raise DeskError("desk_failed_to_start", "the session exited after binding its socket")
+    # An unseeded desk has no pending turn. The instruction rides on its
+    # first dispatched task, avoiding an unrelated bootstrap result racing
+    # with bridge.deliver's first task log offset.
+    if seed:
+        _send_seed(fifo, seed, proc.pid, deadline)
     registry.register(name, "claude-session", socket=str(sock))
-    with fifo.open("w") as fh:
-        fh.write(json.dumps(
-            {"type": "user", "message": {"role": "user", "content": desks.desk_prompt(seed or "")}}) + "\n")
 
     return {"name": name, "socket": str(sock), "pid": proc.pid, "log": str(log),
             "already_running": False}

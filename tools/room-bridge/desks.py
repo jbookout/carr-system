@@ -66,6 +66,12 @@ DESK_INSTRUCTION = (
 
 def desk_prompt(task: str) -> str:
     """Carry the fixed instruction on first turns and every resumed task."""
+    if task.startswith("[Hermes queue "):
+        # Queue identity/provenance occupy fixed header positions. Decorate
+        # the body, after the header separator, so Flash still reads them.
+        headers, separator, body = task.partition("\n\n")
+        if separator:
+            return headers + separator + desk_prompt(body)
     if task == DESK_INSTRUCTION or task.startswith(DESK_INSTRUCTION + "\n\n"):
         return task
     return DESK_INSTRUCTION + ("\n\n" + task if task else "")
@@ -87,13 +93,13 @@ class DeskError(Exception):
 
 
 def dispatched_permission_mode(value: object = None) -> str:
-    """Omission means dontAsk; wider noninteractive modes require opt-in."""
+    """Dispatched work denies permission needs instead of prompting a human."""
     mode = "dontAsk" if value is None else value
-    if mode not in ("dontAsk", "auto", "acceptEdits"):
+    if mode != "dontAsk":
         raise DeskError(
             "unsafe_permission_mode",
             f"dispatched desk permission mode {mode!r} is refused: use dontAsk "
-            "(default), or explicitly register auto/acceptEdits. Approvals and "
+            "(default). auto and acceptEdits can still prompt. Approvals and "
             "permission needs belong to the orchestrator; never ask Joe.",
         )
     return str(mode)

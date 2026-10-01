@@ -150,8 +150,8 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--effort", default=None, choices=list(desks.EFFORT_CHOICES))
     r.add_argument("--cwd", default=None)
     r.add_argument("--permission-mode", default=None,
-                   help="dispatched desks: dontAsk by default; auto/acceptEdits require explicit opt-in; "
-                        "other modes are refused and permission needs go to the orchestrator")
+                   help="dispatched desks use dontAsk only; other modes are refused and "
+                        "permission needs go to the orchestrator")
     r.add_argument("--seat", default=None, help="the room seat this desk speaks for")
     r.add_argument("--room-listen", default=None, choices=list(registry_ext.ROOM_LISTEN_MODES),
                    help="'mention': hear people's turns, and other desks only when @seat-mentioned")
