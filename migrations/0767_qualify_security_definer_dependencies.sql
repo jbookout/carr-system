@@ -1,8 +1,8 @@
--- 0765_qualify_security_definer_dependencies.sql
+-- 0767_qualify_security_definer_dependencies.sql
 -- Forward fix for the Dot's database-hardening review, finding 2 ("every
 -- object is qualified" is not satisfied).
 --
--- 0760 pinned every public/ops SECURITY DEFINER search_path with pg_temp last,
+-- 0764 pinned every public/ops SECURITY DEFINER search_path with pg_temp last,
 -- which stops temporary-object substitution. It deliberately preserved bodies,
 -- so 52 definers still named application tables, row types and helper
 -- routines (actor, rule, memory_item%rowtype, digest(), similarity(),
@@ -18,7 +18,7 @@
 -- (which covers ACLs, configs and owners, not bodies) stays current and no
 -- registry successor is owed.
 --
--- Generated from the 0762 catalog on a disposable loopback database by the
+-- Generated from the 0766 catalog on a disposable loopback database by the
 -- audit in ops/definer-hardening-local-pg-gate.py (path-aware resolver), then
 -- checked: re-auditing the edited bodies finds nothing, and the gate runs
 -- against the migrated database in CI. Never hand-edit an applied copy;
@@ -3608,6 +3608,6 @@ begin
     end if;
   end loop;
   if cardinality(missing) > 0 then
-    raise exception '0765 FAILED: qualified definer lost its identity, SECURITY DEFINER or pinned path: %', missing;
+    raise exception '0767 FAILED: qualified definer lost its identity, SECURITY DEFINER or pinned path: %', missing;
   end if;
 end $qualified_definers$;

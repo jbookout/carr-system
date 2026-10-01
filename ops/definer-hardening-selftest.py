@@ -8,7 +8,7 @@ Paired with ops/definer-hardening-local-pg-gate.py. Needs no database:
     comments, literals, qualified names, CTEs and pg_catalog built-ins, and
     the path resolver binds a name the way the routine's own path would;
   * the temporary-object substitution fixture's legacy routine is the exact
-    0617 body and path, so its positive control attacks the real pre-0760
+    0617 body and path, so its positive control attacks the real pre-0764
     shape and not an invented one.
 """
 

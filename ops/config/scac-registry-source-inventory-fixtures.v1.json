@@ -73026,8 +73026,8 @@
           "operation": "tools/migrate.py",
           "effect_class": "administrative_mutation",
           "source_locator": "tools/migrate.py",
-          "schema_digest": "cb29635146979d4b9feb9a3720db54fef3a03cd5170227e8e17b1af55c825095",
-          "handler_digest": "cb29635146979d4b9feb9a3720db54fef3a03cd5170227e8e17b1af55c825095",
+          "schema_digest": "98449cb29a9273431e3a8220ed057dcdfb5ce21952a12112027fc6332298f22b",
+          "handler_digest": "98449cb29a9273431e3a8220ed057dcdfb5ce21952a12112027fc6332298f22b",
           "write": true,
           "human_only": false,
           "authority_only": true,
@@ -73045,7 +73045,7 @@
         }
       ],
       "expected_count": 1008,
-      "expected_sha256": "e73dcc86e7c045b1dbf0cca9381ecb620f404ce430e3c6d45cc6210ca09add33",
+      "expected_sha256": "a041604c37eac99b7dd32e1c6919cada1aa9d11608437f31f8f6a2a7a52681a9",
       "reason": "Definer hardening preserves the published Progress directory predecessor and reseals the atomic migration runner."
     }
   ],

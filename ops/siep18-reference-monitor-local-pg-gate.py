@@ -21,7 +21,7 @@ from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connec
 
 REPO = Path(__file__).resolve().parents[1]
 
-# 0762 installs definer hardening v101 and retains published Progress directory v100.
+# 0766 installs definer hardening v101 and retains published Progress directory v100.
 # Both are pinned: an unreviewed frontier or a rewritten predecessor must fail closed.
 LIVE_REGISTRY_VERSION = "scac-mutation-registry.v101"
 LIVE_REGISTRY_ORDINAL = 101
@@ -32,10 +32,10 @@ SEALED_PREDECESSOR_DIGEST = (
 )
 SEALED_PREDECESSOR_ENTRY_COUNTS = (2516, 1008)
 SEALED_PREDECESSOR_MIGRATION = (
-    "migrations/0757_progress_directory_scac_successor.sql"
+    "migrations/0763_progress_directory_scac_successor.sql"
 )
 LIVE_REGISTRY_MIGRATION = (
-    "migrations/0762_dot_hardening_scac_successor.sql"
+    "migrations/0766_dot_hardening_scac_successor.sql"
 )
 
 LIVE_CATALOG_CURRENT_FN = f"ops.scac_mutation_catalog_v{LIVE_REGISTRY_ORDINAL}_current()"

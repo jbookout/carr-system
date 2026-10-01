@@ -1227,7 +1227,7 @@ if [ "$PROPERTY_EVIDENCE_REGISTRY_APPLIED" = t ] && [ "$TOUR_FEEDBACK_REGISTRY_A
 fi
 
 PROGRESS_DIRECTORY_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0757_progress_directory_scac_successor.sql')" \
+  "select exists (select 1 from schema_migrations where filename='0763_progress_directory_scac_successor.sql')" \
   2>/dev/null)"
 case "$PROGRESS_DIRECTORY_REGISTRY_APPLIED" in
   t|f) ;;
@@ -1239,7 +1239,7 @@ if [ "$PROGRESS_DIRECTORY_REGISTRY_APPLIED" = t ] && [ "$PROPERTY_EVIDENCE_REGIS
 fi
 
 DEFINER_HARDENING_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0762_dot_hardening_scac_successor.sql')" \
+  "select exists (select 1 from schema_migrations where filename='0766_dot_hardening_scac_successor.sql')" \
   2>/dev/null)"
 case "$DEFINER_HARDENING_REGISTRY_APPLIED" in
   t|f) ;;

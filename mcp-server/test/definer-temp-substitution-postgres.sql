@@ -1,8 +1,8 @@
--- Temporary-object substitution regression for a real pre-0760 definer.
+-- Temporary-object substitution regression for a real pre-0764 definer.
 --
 -- ops.v5_a05_assurance_cadence_batch is granted to carr_reader and promises
 -- that a reader-scoped caller cannot aim it at another partner (0617). Before
--- 0760 its path was `pg_catalog, ops, public` with no pg_temp entry, so
+-- 0764 its path was `pg_catalog, ops, public` with no pg_temp entry, so
 -- PostgreSQL searched the caller's temporary schema FIRST for its unqualified
 -- `actor` and `signal_event` relations. A caller with only TEMP and EXECUTE
 -- could then redirect "joe" to another partner's id and forge the joined
@@ -13,8 +13,8 @@
 -- definer-hardening-regressions.py -- MUST still be exploitable here, which
 -- proves the hostile objects below are a real attack and not a no-op.
 -- Part 2 (the regression): the installed routine, called with the SAME hostile
--- objects, must return only joe's own (empty) batch. Against a pre-0760
--- database Part 2 fails; against 0760 + 0765 it passes.
+-- objects, must return only joe's own (empty) batch. Against a pre-0764
+-- database Part 2 fails; against 0764 + 0767 it passes.
 --
 -- Fixture role: a synthetic NOLOGIN role holding only schema USAGE on ops,
 -- database TEMP (PostgreSQL grants TEMP to PUBLIC by default) and EXECUTE on
@@ -101,13 +101,13 @@ do $$begin
   end if;
 end$$;
 
--- Part 1: the pre-0760 shape is exploitable.
+-- Part 1: the pre-0764 shape is exploitable.
 do $$
 declare leaked jsonb := pg_temp.legacy_v5_a05_assurance_cadence_batch('joe');
 begin
   if leaked->0->>'notification_id' is distinct from '41000000-0000-4000-8000-000000000001'
      or leaked->0->>'reason_id' is distinct from 'attacker-forged' then
-    raise exception 'positive control failed: the pre-0760 shape did not resolve attacker TEMP objects (got %)',leaked;
+    raise exception 'positive control failed: the pre-0764 shape did not resolve attacker TEMP objects (got %)',leaked;
   end if;
 end$$;
 

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# ci: runs-outside-ci — needs a database still at the pre-0760 ledger (origin/main's db/schema.sql plus 0749-0759 applied); the branch snapshot CI loads has already absorbed 0760-0762, so CI has no pending batch to rehearse
+# ci: runs-outside-ci — needs a database still at the pre-0764 ledger (origin/main's db/schema.sql plus 0749-0763 applied); the branch snapshot CI loads has already absorbed 0764-0766, so CI has no pending batch to rehearse
 # doctrine: runbook
-"""Two-connection lock-contention rehearsal for the 0760/0761/0762 batch.
+"""Two-connection lock-contention rehearsal for the 0764/0765/0766 batch.
 
 The definer hardening applies as ONE transaction (tools/migrate.py
-ATOMIC_MIGRATION_GROUPS): 0760 rewrites function metadata, 0761 adds view
-barriers, 0762 drops and recreates registry constraints and triggers and seals
-v101. 0762's ALTER TABLE and DROP TRIGGER take ACCESS EXCLUSIVE locks on the
+ATOMIC_MIGRATION_GROUPS): 0764 rewrites function metadata, 0765 adds view
+barriers, 0766 drops and recreates registry constraints and triggers and seals
+v101. 0766's ALTER TABLE and DROP TRIGGER take ACCESS EXCLUSIVE locks on the
 registry tables, and every lock is held until the whole batch commits.
 
 This rehearsal answers the four production-apply questions on a disposable
@@ -45,9 +45,9 @@ from psycopg.conninfo import conninfo_to_dict
 
 REPO = Path(__file__).resolve().parents[1]
 BATCH = (
-    "0760_dot_security_definer_hardening.sql",
-    "0761_completion_tenant_security_barriers.sql",
-    "0762_dot_hardening_scac_successor.sql",
+    "0764_dot_security_definer_hardening.sql",
+    "0765_completion_tenant_security_barriers.sql",
+    "0766_dot_hardening_scac_successor.sql",
 )
 FINGERPRINT = """
 select md5(string_agg(line, E'\\n' order by line)) from (
@@ -96,17 +96,17 @@ def run_batch(dsn: str) -> tuple[int, float, str]:
 def main() -> int:
     dsn = os.environ.get("CARR_LOCAL_PG_DSN", "")
     if not dsn:
-        return fail("CARR_LOCAL_PG_DSN is required (a disposable loopback database at the pre-0760 ledger)")
+        return fail("CARR_LOCAL_PG_DSN is required (a disposable loopback database at the pre-0764 ledger)")
     info = conninfo_to_dict(dsn)
     if info.get("host") not in ("127.0.0.1", "localhost") or "password" in info:
         return fail("refusing a non-loopback or credentialed DSN; this rehearsal applies migrations")
 
     with psycopg.connect(dsn) as conn:
         applied = {row[0] for row in conn.execute("select filename from public.schema_migrations")}
-        if "0759_tour_reviewed_route_digest.sql" not in applied or applied & set(BATCH):
-            return fail("database must have 0759 applied and 0760-0762 pending")
+        if "0763_progress_directory_scac_successor.sql" not in applied or applied & set(BATCH):
+            return fail("database must have 0763 applied and 0764-0766 pending")
         # A snapshot-built database has no rules and no policy epochs, so the
-        # deferred epoch refresh never runs at commit and 0762's re-validated
+        # deferred epoch refresh never runs at commit and 0766's re-validated
         # epoch constraint scans nothing. Production has both. Seed, in this
         # disposable database only, the same one-rule coherent projection
         # mcp-server/test/definer-hardening-catalog-postgres.sql uses, plus a

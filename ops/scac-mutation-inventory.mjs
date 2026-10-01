@@ -1967,9 +1967,9 @@ export const PROGRESS_DIRECTORY_V100_DB_CATALOG_BASELINE = Object.freeze({
   secdef_execute: { count: 1186, digest: "sha256:4b6898a3748969f0b33cdc6f78231f981912e04914cedda091904efc34ddcedb" },
 });
 
-// Measured on disposable PG17 after 0760 and the pinned v100 registration
+// Measured on disposable PG17 after 0764 and the pinned v100 registration
 // grants. Source ingresses are unchanged; the atomic migration runner reseals.
-export const POST_0760_FORWARD_V101_DB_CATALOG_BASELINE = Object.freeze({
+export const POST_0764_FORWARD_V101_DB_CATALOG_BASELINE = Object.freeze({
   ...PROGRESS_DIRECTORY_V100_DB_CATALOG_BASELINE,
   projection_version: "scac-db-catalog-projection.v101",
   secdef_execute: { count: 1186, digest: "sha256:e264b7a35751f83ba1059638523fe9a5f4351acfc488340a10f4648703184b2c" },
@@ -20459,17 +20459,17 @@ export function renderGeneratedFrontier() {
       version: REGISTRY_V100_VERSION,
       dbCatalogBaseline: PROGRESS_DIRECTORY_V100_DB_CATALOG_BASELINE,
     });
-  artifacts["migrations/0757_progress_directory_scac_successor.sql"] =
+  artifacts["migrations/0763_progress_directory_scac_successor.sql"] =
     renderProgressDirectoryRegistrySql(v100Rows,
       artifacts["migrations/0755_property_evidence_scac_successor.sql"]);
 
   const v101Rows = frozenInventory(REGISTRY_V101_VERSION);
   artifacts["mcp-server/src/scac-mutation-registry.v101.generated.js"] =
     renderRuntimeProjection(v101Rows, { version: REGISTRY_V101_VERSION,
-      dbCatalogBaseline: POST_0760_FORWARD_V101_DB_CATALOG_BASELINE });
-  artifacts["migrations/0762_dot_hardening_scac_successor.sql"] =
+      dbCatalogBaseline: POST_0764_FORWARD_V101_DB_CATALOG_BASELINE });
+  artifacts["migrations/0766_dot_hardening_scac_successor.sql"] =
     renderDefinerHardeningRegistrySql(v101Rows,
-      artifacts["migrations/0757_progress_directory_scac_successor.sql"]);
+      artifacts["migrations/0763_progress_directory_scac_successor.sql"]);
 
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
@@ -20480,21 +20480,21 @@ export function renderGeneratedFrontier() {
 
 export function renderDefinerHardeningRegistrySql(rows, predecessorSql = null) {
   const predecessor = predecessorSql ?? readFileSync(resolve(REPO_ROOT,
-    "migrations/0757_progress_directory_scac_successor.sql"), "utf8");
+    "migrations/0763_progress_directory_scac_successor.sql"), "utf8");
   const predecessorDigest = "e681ae7a57fc115e2526ee8d433905b55a632af6c9d41e8a7fec7e484d31afa2";
   if (sha256(predecessor) !== predecessorDigest)
     throw new Error("v101 predecessor migration pin drifted");
   const oldSeal = registrySeal(REGISTRY_V100_VERSION,
     frozenInventory(REGISTRY_V100_VERSION), PROGRESS_DIRECTORY_V100_DB_CATALOG_BASELINE);
   const newSeal = registrySeal(REGISTRY_V101_VERSION, rows,
-    POST_0760_FORWARD_V101_DB_CATALOG_BASELINE);
+    POST_0764_FORWARD_V101_DB_CATALOG_BASELINE);
   const entrySets = JSON.parse(readFileSync(FULL_ENTRY_SET_SEALS_PATH, "utf8"));
   const oldEntrySet = entrySets[REGISTRY_V100_VERSION];
   const newEntrySet = entrySets[REGISTRY_V101_VERSION];
   if (!/^sha256:[0-9a-f]{64}$/.test(newEntrySet ?? ""))
     throw new Error("v101 entry-set fixture malformed");
   const oldCatalog = JSON.stringify(PROGRESS_DIRECTORY_V100_DB_CATALOG_BASELINE);
-  const newCatalog = JSON.stringify(POST_0760_FORWARD_V101_DB_CATALOG_BASELINE);
+  const newCatalog = JSON.stringify(POST_0764_FORWARD_V101_DB_CATALOG_BASELINE);
   const start = predecessor.indexOf("drop trigger scac_mutation_registry_version_sealed");
   if (start < 0) throw new Error("v101 predecessor DDL boundary missing");
   let sql = predecessor.slice(start)
@@ -20512,7 +20512,7 @@ export function renderDefinerHardeningRegistrySql(rows, predecessorSql = null) {
     .replaceAll(`,${oldSeal.entryCount},${oldSeal.sourceEntryCount},`,
       `,${newSeal.entryCount},${newSeal.sourceEntryCount},`)
     .replaceAll(`observed_count<>${PROGRESS_DIRECTORY_V100_DB_CATALOG_BASELINE.secdef_execute.count}`,
-      `observed_count<>${POST_0760_FORWARD_V101_DB_CATALOG_BASELINE.secdef_execute.count}`)
+      `observed_count<>${POST_0764_FORWARD_V101_DB_CATALOG_BASELINE.secdef_execute.count}`)
     .replaceAll("Progress directory v100", "Definer hardening v101");
   // Only the live v100 catalog becomes historical. Earlier declarations and
   // their sealed digests remain byte-identical in this forward successor.
@@ -20549,7 +20549,7 @@ export function renderDefinerHardeningRegistrySql(rows, predecessorSql = null) {
   ]) sql = replaceExactlyOnce(sql, before, after, `v101 ${label}`);
   sql = sql.replaceAll(
     `observed_digest<>'${PROGRESS_DIRECTORY_V100_DB_CATALOG_BASELINE.secdef_execute.digest}'`,
-    `observed_digest<>'${POST_0760_FORWARD_V101_DB_CATALOG_BASELINE.secdef_execute.digest}'`);
+    `observed_digest<>'${POST_0764_FORWARD_V101_DB_CATALOG_BASELINE.secdef_execute.digest}'`);
   // Reuse sealed source contracts, replacing only the migration runner whose
   // atomic group changed. Refuse an unexpected source expansion here.
   const oldRows = frozenInventory(REGISTRY_V100_VERSION);
@@ -20572,9 +20572,9 @@ export function renderDefinerHardeningRegistrySql(rows, predecessorSql = null) {
     "where registry_version='scac-mutation-registry.v101' and ingress_key='external-admin:tools/migrate.py';\n\n" + sql.slice(seedEnd);
   sql = sql.replace(/(security definer set search_path=[^\n]+) as \$fn\$/g, "$1,pg_temp as $fn$");
   const bindings = [
-    ["0757_progress_directory_scac_successor.sql", predecessorDigest],
-    ["0760_dot_security_definer_hardening.sql", "bfc7d0546ed77ea97d07213e88722e843de5cad4298b9cf4c8470cecf9431b37"],
-    ["0761_completion_tenant_security_barriers.sql", "0ea21b3190a6940bd7b4b350d703eb7ea99d78fd9583249ea563c1ecf9021dc1"],
+    ["0763_progress_directory_scac_successor.sql", predecessorDigest],
+    ["0764_dot_security_definer_hardening.sql", "bfc7d0546ed77ea97d07213e88722e843de5cad4298b9cf4c8470cecf9431b37"],
+    ["0765_completion_tenant_security_barriers.sql", "0ea21b3190a6940bd7b4b350d703eb7ea99d78fd9583249ea563c1ecf9021dc1"],
   ];
   const preflight = "do $definer_hardening_v101_preflight$\nbegin\n" +
     bindings.map(([name, digest]) =>
@@ -21591,15 +21591,15 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     await writeFile(resolve("mcp-server/src/scac-mutation-registry.v100.generated.js"),
       renderRuntimeProjection(rows, { version: REGISTRY_V100_VERSION,
         dbCatalogBaseline: PROGRESS_DIRECTORY_V100_DB_CATALOG_BASELINE }));
-    await writeFile(resolve("migrations/0757_progress_directory_scac_successor.sql"),
+    await writeFile(resolve("migrations/0763_progress_directory_scac_successor.sql"),
       renderProgressDirectoryRegistrySql(rows));
     process.stdout.write("Progress directory v100 frontier generated\n");
   } else if (process.argv[2] === "--write-definer-hardening-frontier") {
     const rows = frozenInventory(REGISTRY_V101_VERSION);
     await writeFile(resolve("mcp-server/src/scac-mutation-registry.v101.generated.js"),
       renderRuntimeProjection(rows, { version: REGISTRY_V101_VERSION,
-        dbCatalogBaseline: POST_0760_FORWARD_V101_DB_CATALOG_BASELINE }));
-    await writeFile(resolve("migrations/0762_dot_hardening_scac_successor.sql"),
+        dbCatalogBaseline: POST_0764_FORWARD_V101_DB_CATALOG_BASELINE }));
+    await writeFile(resolve("migrations/0766_dot_hardening_scac_successor.sql"),
       renderDefinerHardeningRegistrySql(rows));
     process.stdout.write("Definer hardening v101 frontier generated\n");
   } else if (process.argv[2] === "--check-source-inventory-frontier") {

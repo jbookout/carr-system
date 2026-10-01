@@ -476,13 +476,13 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0755_property_evidence_scac_successor.sql",
     ),
     (
-        "0757_progress_directory_scac_successor.sql",
+        "0763_progress_directory_scac_successor.sql",
     ),
     # Harden metadata and install its successor before deferred epoch checks.
     (
-        "0760_dot_security_definer_hardening.sql",
-        "0761_completion_tenant_security_barriers.sql",
-        "0762_dot_hardening_scac_successor.sql",
+        "0764_dot_security_definer_hardening.sql",
+        "0765_completion_tenant_security_barriers.sql",
+        "0766_dot_hardening_scac_successor.sql",
     ),
 )
 
@@ -604,13 +604,13 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0755_property_evidence_scac_successor.sql",
     ),
     (
-        "0757_progress_directory_scac_successor.sql",
+        "0763_progress_directory_scac_successor.sql",
     ),
     # Harden metadata and install its successor before deferred epoch checks.
     (
-        "0760_dot_security_definer_hardening.sql",
-        "0761_completion_tenant_security_barriers.sql",
-        "0762_dot_hardening_scac_successor.sql",
+        "0764_dot_security_definer_hardening.sql",
+        "0765_completion_tenant_security_barriers.sql",
+        "0766_dot_hardening_scac_successor.sql",
     ),
 )
 
