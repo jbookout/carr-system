@@ -187,10 +187,13 @@ def _chat(messages, *, endpoint, model, temperature, reasoning_effort, max_token
 _PY_CODEC = '''
 def _pack(v, refs, prefix="input:"):
     nodes, pending = {}, []
+    known = {id(x): key for key, x in refs.items()}
     def atom(x):
         if x is None or type(x) in (bool, int, float, str): return ["scalar", x]
         if type(x) not in (list, tuple, dict): raise TypeError("unsupported RPC value")
-        token = prefix + str(id(x)); refs[token] = x
+        token = known.get(id(x))
+        if token is None:
+            token = prefix + str(id(x)); refs[token] = x; known[id(x)] = token
         if token not in nodes:
             nodes[token] = None; pending.append((token, x))
         return ["ref", token]
@@ -208,6 +211,7 @@ def _unpack(v, refs):
     nodes = v[2]
     tuples = {}
     for key, (kind, items) in nodes.items():
+        if key in refs: continue
         if kind == "tuple": tuples[key] = items
         else: refs[key] = [] if kind == "list" else {}
     while tuples:
@@ -215,8 +219,10 @@ def _unpack(v, refs):
         if not ready: raise ValueError("invalid tuple references")
         for key in ready: refs[key] = tuple(_unpack(x, refs) for x in tuples.pop(key))
     for key, (kind, items) in nodes.items():
-        if kind == "list": refs[key].extend(_unpack(x, refs) for x in items)
-        elif kind == "dict": refs[key].update((_unpack(k, refs), _unpack(x, refs)) for k,x in items)
+        if kind == "list": refs[key][:] = [_unpack(x, refs) for x in items]
+        elif kind == "dict":
+            values = {_unpack(k, refs): _unpack(x, refs) for k,x in items}
+            refs[key].clear(); refs[key].update(values)
     return _unpack(v[1], refs)
 '''
 _PY_WORKER = '''
@@ -230,7 +236,7 @@ _objects = {}
 def _returned(value, refs):
     original = next((k for k,v in refs.items() if v is value), None)
     if original is not None: return ["ref", original]
-    if value is None or type(value) in (bool,int,float,str,list,tuple,dict): return _pack(value, {}, "result:")
+    if value is None or type(value) in (bool,int,float,str,list,tuple,dict): return _pack(value, refs, "result:")
     key = str(id(value)); _objects[key] = value
     return ["object", key]
 _output.write(json.dumps(list(_exports)) + "\\n"); _output.flush()
@@ -241,11 +247,13 @@ for line in _input:
         args = _unpack(req["args"], refs); kwargs = _unpack(req["kwargs"], refs)
         fn = _exports[req["name"]] if req["object"] is None else getattr(_objects[req["object"]], req["name"])
         value = fn(*args, **kwargs)
-        response = {"value":_returned(value, refs)}
+        returned_refs = dict(refs)
+        response = {"value":_returned(value, returned_refs)}
     except BaseException as exc:
+        returned_refs = dict(refs)
         response = {"error":type(exc).__name__, "message":str(exc)}
-    response["updates"] = [[k, "list", [_returned(x, refs) for x in v]] if type(v) is list else
-        [k, "dict", [[_returned(a, refs), _returned(b, refs)] for a,b in v.items()]]
+    response["updates"] = [[k, "list", [_returned(x, returned_refs) for x in v]] if type(v) is list else
+        [k, "dict", [[_returned(a, returned_refs), _returned(b, returned_refs)] for a,b in v.items()]]
         for k,v in refs.items() if type(v) in (list,dict)]
     _output.write(json.dumps(response) + "\\n"); _output.flush()
 '''
@@ -258,6 +266,9 @@ def _rpc(name, args, kwargs, obj=None):
     request = {"name":name, "object":obj, "args":_pack(args, refs), "kwargs":_pack(kwargs, refs)}
     _worker.stdin.write(_json.dumps(request) + "\\n"); _worker.stdin.flush()
     response = _json.loads(_worker.stdout.readline())
+    # Return graphs can introduce nodes referenced by the following updates.
+    value = response.get("value")
+    result = (_Remote(value[1]) if value[0] == "object" else _unpack(value, refs)) if value is not None else None
     for key, kind, items in response.get("updates", []):
         target = refs[key]
         if kind == "list": target[:] = [_unpack(x, refs) for x in items]
@@ -268,8 +279,7 @@ def _rpc(name, args, kwargs, obj=None):
         kind = getattr(_builtins, response["error"], RuntimeError)
         if not isinstance(kind, type) or not issubclass(kind, BaseException): kind = RuntimeError
         raise kind(response.get("message", "candidate exception"))
-    value = response["value"]
-    return _Remote(value[1]) if value[0] == "object" else _unpack(value, refs)
+    return result
 class _Remote:
     def __init__(self, key): self.key = key
     def __getattr__(self, name): return lambda *args, **kwargs: _rpc(name, args, kwargs, self.key)

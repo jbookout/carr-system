@@ -139,6 +139,22 @@ class TrackedSources(unittest.TestCase):
                 with self.subTest(scanner=scanner.__name__):
                     self.assertEqual(set(scanner.tracked_sources(tmp)), set(names))
 
+    def test_noise_comes_from_the_review_tier_map(self):
+        # ops/config/review-tiers.v1.json: generated registries, vendored and
+        # minified code are noise; migrations are never noise.
+        kept = ['src/app.js', 'migrations/node_modules/keep.js', 'migrations/0001_fix.py']
+        noise = ['mcp-server/src/scac-mutation-registry.v9.generated.js', 'lib/vendor/x.js',
+                 'static/app.min.js', 'node_modules/dep.js']
+        with tempfile.TemporaryDirectory() as tmp:
+            env = fixture_env()
+            subprocess.run(['git', 'init', '-q', tmp], env=env, check=True)
+            for name in kept + noise:
+                target = Path(tmp, name)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text('const x = 1;\n')
+                subprocess.run(['git', 'add', '--', name], cwd=tmp, env=env, check=True)
+            self.assertEqual(set(part.tracked_sources(tmp)), set(kept))
+
 
 class PythonSpans(unittest.TestCase):
     def test_functions_methods_nested_and_handlers(self):

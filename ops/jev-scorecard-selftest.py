@@ -111,6 +111,44 @@ class LoadSuiteTests(unittest.TestCase):
 
 
 class GradeImplTests(unittest.TestCase):
+    def test_python_returned_containers_preserve_caller_owned_aliases(self):
+        task = {'lang': 'py', 'test': '''data = [1]
+check("nested caller identity", lambda: wrap(data)[0] is data)
+'''}
+        result = sc.grade_candidate(task, 'def wrap(data): return [data]\n')
+        self.assertTrue(result['pass'], result)
+        copied = sc.grade_candidate(task, 'def wrap(data): return [list(data)]\n')
+        self.assertFalse(copied['pass'], copied)
+
+    def test_python_positional_and_keyword_arguments_share_identity(self):
+        task = {'lang': 'py', 'test': '''data = [1]
+check("argument identity", lambda: same(data, b=data))
+'''}
+        result = sc.grade_candidate(task, 'def same(a, *, b): return a is b\n')
+        self.assertTrue(result['pass'], result)
+
+    def test_python_aliases_span_returned_values_and_input_updates(self):
+        task = {'lang': 'py', 'test': '''child = {"value": 1}
+data = [child, child]
+result = mutate(data, child=child)
+check("returned caller alias", lambda: result[0] is child)
+check("input aliases", lambda: data[0] is child and data[1] is child)
+check("new shared alias", lambda: result[1] is child["added"] and data[2] is result[1])
+check("new value", lambda: result[1]["value"] == 3)
+check("tuple alias", lambda: result[2][0] is child)
+cycle = []; cycle.append(cycle)
+check("cycle", lambda: wrap(cycle)[0] is cycle and cycle[0] is cycle)
+'''}
+        code = '''def wrap(data): return [data]
+def mutate(data, *, child):
+    if data[0] is not child or data[1] is not child: raise ValueError("lost alias")
+    child["added"] = {"value": 3}
+    data.append(child["added"])
+    return [child, child["added"], (child,)]
+'''
+        result = sc.grade_candidate(task, code)
+        self.assertTrue(result['pass'], result)
+
     def test_hidden_imports_cannot_load_candidate_into_grader(self):
         cases = {
             'py': ('from solution import add\ncheck("must fail", lambda: False)', '''import sys, json
