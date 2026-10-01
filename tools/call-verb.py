@@ -14,6 +14,10 @@ Usage:
       DEPLOYED WORKER (production, always — there is no other database behind
       it). This is what every ordinary call should use.
 
+  ./run.sh call <verb> -
+      Read JSON arguments from stdin, for multi-page content too large for argv.
+      The existing HTTPS client reads stdin; this wrapper never handles tokens.
+
   ./run.sh call --reason "why" <verb> '<json args>'
       BREAK-GLASS (Phase 1, 2026-08-13, decision 97e76a2f): requires
       CARR_BREAK_GLASS=1 in the environment too (both together, same envelope
