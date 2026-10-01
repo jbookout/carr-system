@@ -10,6 +10,21 @@ const point = role => ({ latitude: 30.4451, longitude: -87.1893, position_role: 
 const providerRequest = { travel_mode: "driving", optimize_waypoint_order: true, waypoint_count: 2, departure_at: null, request_digest: digest("a") };
 function harness() { const calls=[],events=[],envelopes=[]; const c={async query(sql,params){calls.push({sql,params});if(sql.includes("create_tour_domain"))return{rows:[{tour_id:ids.tour}]};if(sql.includes("prepare_tour_route_version"))return{rows:[{route_version_id:ids.route}]};if(sql.includes("append_tour_route_version"))return{rows:[{route_version_id:ids.route}]};if(sql.includes("append_tour_route_stop_transition"))return{rows:[{route_stop_transition_id:ids.transition}]};if(sql.includes("append_tour_route_stop"))return{rows:[{route_stop_id:ids.stop}]};if(sql.includes("accept_tour_route_version"))return{rows:[{route_version_acceptance_id:ids.acceptance}]};if(sql.includes("append_tour_cheat_sheet_revision"))return{rows:[{cheat_sheet_revision_id:ids.cheat}]};if(sql.includes("restore_tour_cheat_sheet_revision"))return{rows:[{cheat_sheet_revision_id:ids.restore}]};throw new Error(sql)}};const withEnvelope=async(client,a,verb,args,fn)=>{assert.equal(client,c);assert.equal(a,actor);assert.equal(args.idempotency_key,key);envelopes.push({verb,args});return fn()};return {c,calls,events,envelopes,tools:tourDomainTools({withEnvelope,writeEvent:async(...e)=>events.push(e),ToolError})}; }
 
+test("route appointment offsets round-trip through the domain without losing microseconds", async () => {
+  const h = harness();
+  const stop = { idempotency_key: key, route_version_id: ids.route, property_id: ids.property,
+    route_sequence: 1, route_label: "A", stop_state: "active",
+    appointment_start: "2026-10-01T09:00:00.123456-05:00", appointment_end: "2026-10-01T09:30:00.123456-05:00",
+    locked_appointment: true, dwell_minutes: 20, buffer_minutes: 5,
+    access_coordinate_status: "approved", assertion_set_digest: digest("c") };
+  await h.tools["append-tour-route-stop"].handler(h.c, actor, stop);
+  assert.deepEqual(h.calls.at(-1).params.slice(6, 8), [stop.appointment_start, stop.appointment_end]);
+  for (const value of ["2026-02-30T14:00:00+00:00", "2026-10-01T14:00:00", "2026-10-01T14:00:00+24:00", "2026-10-01T14:00:00-05:60"]) {
+    await assert.rejects(h.tools["append-tour-route-stop"].handler(h.c, actor,
+      { ...stop, appointment_start: value }), e => e.payload?.error === "tour_input_invalid");
+  }
+});
+
 test("writes use all exact revised SQL seams, derived tenancy, and never leak internal request or cheat-sheet content", async () => {
   const h=harness();
   assert.deepEqual(Object.keys(h.tools).sort(),["accept-tour-route-version","append-tour-cheat-sheet-revision","append-tour-route-stop","append-tour-route-stop-transition","append-tour-route-version","create-tour-domain","prepare-tour-route-version","restore-tour-cheat-sheet-revision"]);

@@ -1,5 +1,5 @@
 import { organizationTenantForActor } from "./identity.js";
-import { requiredTimestamp } from "./tour-operations-contract.js";
+import { validRouteTimestamp } from "./tour-route-timestamp.js";
 
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,DIGEST=/^sha256:[0-9a-f]{64}$/;
 const AUTH=new Set(["tenant","tenant_id","organization_tenant_id","actor","actor_id","reviewer","identity","authorization","authorization_class","sponsor","human_slug"]);
@@ -10,7 +10,7 @@ function fields(a,allowed,E){const k=a&&typeof a==="object"&&!Array.isArray(a)?O
 function text(v,f,E,n=false,max=1000){if(n&&(v==null))return null;if(typeof v!=="string"||!v.trim()||v.trim().length>max)fail(E,{error:"tour_input_invalid",field:f});return v.trim();}
 function uuid(v,f,E,n=false){if(n&&v==null)return null;const x=text(v,f,E);if(!UUID.test(x))fail(E,{error:"tour_input_invalid",field:f});return x;}
 function digest(v,f,E,n=false){if(n&&v==null)return null;const x=text(v,f,E);if(!DIGEST.test(x))fail(E,{error:"tour_input_invalid",field:f});return x;}
-function time(v,f,E,n=false){if(n&&v==null)return null;const x=text(v,f,E);if(!requiredTimestamp(x))fail(E,{error:"tour_input_invalid",field:f});return x;}
+function time(v,f,E,n=false){if(n&&v==null)return null;const x=text(v,f,E);if(!validRouteTimestamp(x))fail(E,{error:"tour_input_invalid",field:f});return x;}
 function integer(v,f,min,max,E,n=false){if(n&&v==null)return null;if(!Number.isInteger(v)||v<min||v>max)fail(E,{error:"tour_input_invalid",field:f});return v;}
 function one(v,f,set,E){if(!set.has(v))fail(E,{error:"tour_input_invalid",field:f});return v;}
 function tenant(actor,E){if(!actor||typeof actor.id!=="string"||!actor.id.trim())fail(E,{error:"tour_actor_context_required"});const t=organizationTenantForActor(actor);if(typeof t!=="string"||!t)fail(E,{error:"tour_tenant_context_required"});return t;}

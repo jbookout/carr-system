@@ -47,6 +47,28 @@ const searchBody = { query: null, counties: ["Escambia"], property_types: [], mi
   max_square_feet: null, availability: [], entrance_verified: null, public_projection_ready: null,
   photos_available: null, sort: "updated_desc", cursor: null, limit: 25 };
 
+test("revised route save accepts unchanged PostgreSQL appointment timestamps", async () => {
+  const calls = [];
+  const surface = handler({ appendRouteStopFn: async context => {
+    calls.push(context.input); return { ok: true, data: { route_stop_id: stopA } };
+  } });
+  for (const [start, end] of [
+    ["2026-10-01T14:00:00+00:00", "2026-10-01T14:30:00+00:00"],
+    ["2026-10-01T09:00:00.123456-05:00", "2026-10-01T09:30:00.123456-05:00"],
+    ["2026-10-02T00:00:00+10:00", "2026-10-02T00:30:00+10:00"],
+  ]) {
+    const body = { idempotency_key: routeId, route_version_id: routeId, property_id: stopA,
+      route_sequence: 1, route_label: "A", stop_state: "active", appointment_start: start,
+      appointment_end: end, locked_appointment: true, dwell_minutes: 20, buffer_minutes: 5,
+      access_coordinate_status: "approved", assertion_set_digest: digest };
+    const response = await surface.fetch(request("/api/tours/route-stop", {
+      method: "POST", headers: postHeaders, body: JSON.stringify(body),
+    }), { APP_HOST: "app.doctorcre.com" }, {}, ACTOR, SESSION);
+    assert.equal(response.status, 200, await response.text());
+    assert.deepEqual(calls.at(-1), body, "preserve the instant and PostgreSQL microseconds");
+  }
+});
+
 test("authenticated property search and versioned cart keep exact tenant-safe contracts", async () => {
   const calls = [];
   const surface = handler({
@@ -222,6 +244,7 @@ test("known optimistic races remain conflicts rather than service outages", asyn
     "tour route preparation refuses stale state",
     "route version refuses concurrent or stale route state",
     "route acceptance refuses concurrent or stale route state",
+    "route acceptance refuses changed draft contents",
     "cheat sheet revision refuses concurrent or stale version",
     "cheat sheet restore refuses unavailable or stale revision",
     "tour selection refuses stale version",
