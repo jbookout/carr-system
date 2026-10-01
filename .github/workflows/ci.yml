@@ -198,7 +198,9 @@ jobs:
           python -m pip install -r requirements.lock
 
       - name: Install Node dependencies
-        run: npm --prefix mcp-server ci
+        run: |
+          npm --prefix mcp-server ci
+          npm --prefix practice-plugin ci
 
       - name: Install zsh
         # bin/review-council-runner.sh has a #!/bin/zsh shebang and its test
