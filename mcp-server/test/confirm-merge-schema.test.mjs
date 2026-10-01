@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, renameSync } from "no
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
-import { TOOLS } from "../src/tools.js";
+import { TOOLS, executeRegisteredTool } from "../src/tools.js";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const schema = readFileSync(path.join(root, "db/schema.sql"), "utf8");
@@ -85,7 +85,7 @@ test("confirm-merge executes against the current activity schema", async t => {
       await activity([role(1), null, null]);
       await activity([role(2), null, null]);
       await activity([role(3), null, null]);
-      const result = await merge();
+      const result = await executeRegisteredTool(db, actor, "confirm-merge", options);
       assert.equal(result.ok, true);
       assert.deepEqual(result.roles_moved, { client: 1 });
       assert.equal(result.orphan_sweep.find(row => row.attachment === "activity").count, 1);

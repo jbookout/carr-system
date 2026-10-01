@@ -5305,6 +5305,7 @@ export const TOOLS = {
 
   "confirm-merge": {
     write: true,
+    humanOnly: true,
     description: "HUMAN-confirmed merge of two duplicate parties: sets merged_into on the loser so it becomes a pointer to the survivor. Only after a human has looked at both records — the Hovanian rule means nothing auto-merges, ever.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, survivor_party: { type: "string" }, merged_party: { type: "string" },
@@ -8473,10 +8474,15 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
   // The registry-wide test covers every present and future humanOnly verb.
   if (tool.humanOnly === true) {
     const actorClass = authorizationClassForActor(actor);
-    if (actorClass !== "verified_partner" && !canExercisePartnerAuthority(actor))
+    // Identity merges require the human caller even when a machine holds
+    // sponsor-scoped partner authority. Other partner-authority verbs retain
+    // their existing native/local agent route.
+    if (actorClass !== "verified_partner" &&
+        (name === "confirm-merge" || !canExercisePartnerAuthority(actor)))
       throw new ToolError({ error: "human_only_verb_requires_verified_partner",
         verb: name, actor_class: actorClass,
-        hint: "this verb records a partner-authority act and requires either the verified partner " +
+        hint: name === "confirm-merge" ? "confirm-merge requires a verified human partner; machine identities cannot confirm identity merges." :
+              "this verb records a partner-authority act and requires either the verified partner " +
               "or a server-verified native/local agent bound to that partner's sponsor-scoped " +
               "authority connection." });
   }
