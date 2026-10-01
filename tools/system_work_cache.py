@@ -44,11 +44,12 @@ def collect_github(now, read=github_json, suggestions=None):
             for pr in prs:
                 pr_heads.append({'repository':repo,'branch':pr['head']['ref']})
                 pr_work_refs.update(re.findall(r'WR-\d+',pr.get('body') or ''))
-                if pr.get('state','open') != 'open': continue
+                completed = bool(pr.get('merged_at'))
+                if pr.get('state','open') != 'open' and not completed: continue
                 items.append({'id': f"{repo}:pr:{pr['number']}", 'kind':'pull_request','title':pr['title'],
-                    'state':'open', 'opened_at':pr['created_at'],
-                    'last_activity_at':pr['updated_at'], 'owner':None,'version':None,
-                    'completed':False,'cancelled':False,'link':pr['html_url'],
+                    'state':'merged' if completed else 'open', 'opened_at':pr['created_at'],
+                    'last_activity_at':pr.get('merged_at') or pr['updated_at'], 'owner':None,'version':None,
+                    'completed':completed,'cancelled':False,'link':pr['html_url'],
                     'branch':pr['head']['ref'],'work_refs':sorted(set(re.findall(r'WR-\d+',pr.get('body') or ''))),'identity':{}})
             pages = read(['api',f'repos/{repo}/branches?per_page=100','--paginate','--slurp'])
             for branch in [b for page in pages for b in page]:
@@ -67,7 +68,7 @@ def collect_github(now, read=github_json, suggestions=None):
         except (OSError, ValueError, KeyError, subprocess.SubprocessError):
             coverage.append({'repository':repo,'complete':False,'reason':'github_read_failed'})
     return {'schema':'system-work-external.v1','observed_at':now.isoformat(),
-            'complete':all(c['complete'] for c in coverage),'coverage':coverage,'pr_heads':pr_heads,'pr_work_refs':sorted(pr_work_refs),'items':items}
+            'complete':all(c['complete'] for c in coverage),'completed_pr_history':True,'coverage':coverage,'pr_heads':pr_heads,'pr_work_refs':sorted(pr_work_refs),'items':items}
 
 
 def unfinished_briefs(root, pr_heads):
@@ -101,7 +102,7 @@ def cached_github(path, report_path=None, now=None, read=github_json):
     try:
         cache=json.loads(path.read_text())
         date=datetime.fromisoformat(cache['observed_at'].replace('Z','+00:00'))
-        if cache.get('schema')=='system-work-external.v1' and timedelta(0)<=now-date<timedelta(minutes=15): return cache
+        if cache.get('schema')=='system-work-external.v1' and cache.get('completed_pr_history') and timedelta(0)<=now-date<timedelta(minutes=15): return cache
     except (OSError, ValueError, KeyError): pass
     suggestions={}
     if report_path and Path(report_path).is_file(): suggestions=dot_suggestions(Path(report_path).read_text())

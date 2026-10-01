@@ -189,7 +189,8 @@ export async function readSystemWorkCensus({client,actor,correlationId,now=()=>n
     (!r.personal_to||r.personal_to===sponsor)&&!r.cancelled&&(!text||`${r.title} ${r.id}`.toLowerCase().includes(text.toLowerCase())));
   const valid=all.map(r=>normalized(r,{source,kind},at)).filter(Boolean).filter(r=>r.age>=age);
   items.push(...valid.filter(r=>!cursor||cmp({kind:cursor.kind,id:cursor.id,opened_at:cursor.date,last_activity_at:cursor.date},r,live)<0));
-  coverage.push({kind,source_ref:source,state:!cacheFresh?'unavailable':kind==='builder_brief_file'||live?'partial':'complete',reason:!cacheFresh?'github_cache_missing_stale_or_incomplete':kind==='builder_brief_file'?'unstructured_brief_pr_relationships':live?'cache_contains_open_github_work_only':null,count_total:cacheFresh?valid.length:null,observed_at:cache?.observed_at??null});
+  const historyMissing=live&&kind==='pull_request'&&cache?.completed_pr_history!==true;
+  coverage.push({kind,source_ref:source,state:!cacheFresh?'unavailable':kind==='builder_brief_file'||historyMissing?'partial':'complete',reason:!cacheFresh?'github_cache_missing_stale_or_incomplete':kind==='builder_brief_file'?'unstructured_brief_pr_relationships':historyMissing?'cache_contains_open_github_work_only':null,count_total:cacheFresh?valid.length:null,observed_at:cache?.observed_at??null});
  }
  items.sort((a,b)=>cmp(a,b,live));const page=items.slice(0,limit);
  for(const c of coverage){c.count_returned=page.filter(r=>r.kind===c.kind).length;if(!Number.isFinite(c.count_total)){c.count_total=null;if(c.state==='complete'){c.state='partial';c.reason='count_unavailable';}}}

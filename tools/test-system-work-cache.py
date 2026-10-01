@@ -26,6 +26,20 @@ class CacheTests(unittest.TestCase):
    self.assertEqual(first,second)
   def fail(_):raise OSError('offline')
   self.assertFalse(cache.collect_github(NOW,fail)['complete'])
+ def test_completed_pr_history_retains_old_merges_and_excludes_closed_unmerged(self):
+  def read(args):
+   rows=self.read(args)
+   if '/pulls?' in args[1]:
+    merged={**rows[0][0],'number':2,'state':'closed','merged_at':'2026-09-02T00:00:00Z'}
+    closed={**rows[0][0],'number':3,'state':'closed','merged_at':None}
+    return [[*rows[0],merged,closed]]
+   return rows
+  result=cache.collect_github(NOW,read)
+  self.assertTrue(result['completed_pr_history'])
+  live=[item for item in result['items'] if item['completed']]
+  self.assertEqual(len(live),2)
+  self.assertTrue(all(item['state']=='merged' and item['last_activity_at']=='2026-09-02T00:00:00Z' for item in live))
+  self.assertFalse(any(item['id'].endswith(':pr:3') for item in result['items']))
  def test_builder_brief_with_pr_is_excluded_and_no_body_cached(self):
   with tempfile.TemporaryDirectory() as d:
    p=Path(d)/'brief-synthetic.txt';p.write_text('ROLE: builder\nREPOS: carr-system\nBRANCH: synthetic\n')

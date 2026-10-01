@@ -60,6 +60,14 @@ test('Live query is independent of unfinished pages and sorts by latest activity
  const r=await read(fixture({live:true}),{live_library:true});assert.equal(r.items.length,19);
  assert.ok(r.items.every(i=>i.completed&&i.available_triage_actions.length===0));
 });
+test('Live GitHub coverage requires authenticated completed history in the cache',async()=>{
+ const client=fixture({live:true}),query=client.query;
+ client.query=async (...args)=>{const result=await query(...args);if(args[0].includes('as cache'))result.rows[0].cache.completed_pr_history=true;return result;};
+ const result=await read(client,{live_library:true,kinds:'pull_request'});
+ assert.equal(result.items.length,1);assert.equal(result.census_complete,true);
+ const old=await read(fixture({live:true}),{live_library:true,kinds:'pull_request'});
+ assert.equal(old.census_complete,false);assert.equal(old.coverage[0].reason,'cache_contains_open_github_work_only');
+});
 test('actions name source verbs, preserve typed identity and version semantics',()=>{
  const item={kind:'loop',identity:{loop_id:'synthetic-id',kind:'idea'},state:'open'};
  const actions=systemWorkActions(item);assert.deepEqual(actions.map(a=>a.verb),['close-loop','update-loop','update-loop']);
