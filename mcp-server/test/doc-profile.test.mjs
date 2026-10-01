@@ -11,6 +11,7 @@ const READS = ["catch-me-up", "today-triage", "find", "find-and-catch-up",
   "lead-board", "schedule-board", "search-tour-properties", "read-doctrine",
   "search-doctrine", "recall-memory"];
 const WRITES = ["add-deal-note", "log-activity", "set-next-step", "add-critical-date", "log-capture"];
+const ACKNOWLEDGEMENTS = ['whats-new'];
 const actor = () => authenticatedIdentity.connectionForGrant({ slug: "joe" });
 async function rpc(path, method, params) {
   const request = new Request(`https://synthetic.example${path}`, {
@@ -22,7 +23,7 @@ async function rpc(path, method, params) {
 
 test("Doc HTTP discovery exposes exactly the curated brokerage tools", async () => {
   const { result } = await rpc("/doc/mcp?profile=full", "tools/list");
-  assert.deepEqual(result.tools.map(t => t.name).sort(), [...READS, ...WRITES].sort());
+  assert.deepEqual(result.tools.map(t => t.name).sort(), [...READS, ...WRITES, ...ACKNOWLEDGEMENTS].sort());
   for (const t of result.tools) {
     assert.equal(t.annotations.readOnlyHint, READS.includes(t.name), t.name);
     assert.equal(t.annotations.readOnlyHint, !TOOLS[t.name].write,
@@ -144,10 +145,13 @@ test("the original /mcp discovery and initialization contract stays unchanged", 
     assert.equal(tool.description, TOOLS[tool.name].description);
     assert.deepEqual(tool.inputSchema, TOOLS[tool.name].inputSchema);
     assert.deepEqual(tool.annotations, {
-      readOnlyHint: !TOOLS[tool.name].write, destructiveHint: Boolean(TOOLS[tool.name].write),
+      readOnlyHint: !TOOLS[tool.name].write, destructiveHint: TOOLS[tool.name].destructiveHint ?? Boolean(TOOLS[tool.name].write),
       idempotentHint: true, openWorldHint: false,
     });
   }
+  assert.deepEqual(result.tools.find(t => t.name === 'whats-new').annotations, {
+    readOnlyHint:false,destructiveHint:false,idempotentHint:true,openWorldHint:false,
+  });
   const initialized = (await rpc("/mcp", "initialize")).result;
   assert.equal(createHash("sha256").update(initialized.instructions).digest("hex"), "f5addd0158e33d2082cb108e0aef0b4135abe6b04887d9381b034e3c82eea882");
   assert.equal(initialized.serverInfo.name, "carr-record-layer");
@@ -157,6 +161,7 @@ test("the original /mcp discovery and initialization contract stays unchanged", 
 test("Doc initialization describes brokerage usage without the engineering briefing", async () => {
   const { result } = await rpc("/doc/mcp", "initialize");
   assert.match(result.instructions, /brokerage colleague/i);
+  assert.match(result.instructions, /^When .*what is new.*what they missed.*cold.*whats-new first/i);
   assert.match(result.instructions, /idempotency_key/);
   assert.doesNotMatch(result.instructions, /DELEGATION LATCH|standing-context FIRST/);
 });
@@ -167,7 +172,7 @@ test("the Doc OAuth adapter requires a resolved partner grant, never a purpose-b
   });
   const partner = await mcpApiHandler.fetch(request(), {}, { props: { slug: "joe" } });
   assert.equal(partner.status, 200);
-  assert.deepEqual((await partner.json()).result.tools.map(t => t.name).sort(), [...READS, ...WRITES].sort());
+  assert.deepEqual((await partner.json()).result.tools.map(t => t.name).sort(), [...READS, ...WRITES, ...ACKNOWLEDGEMENTS].sort());
   assert.equal((await mcpApiHandler.fetch(request(), {}, { props: { slug: "codex" } })).status, 403);
   assert.equal((await mcpApiHandler.fetch(request(), {}, { props: { slug: "codex", human: false } })).status, 403);
   assert.equal((await mcpApiHandler.fetch(request(), {}, { props: { slug: "synthetic-unknown" } })).status, 401);
