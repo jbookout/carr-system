@@ -20449,7 +20449,7 @@ export function renderGeneratedFrontier() {
       version: REGISTRY_V100_VERSION,
       dbCatalogBaseline: PROGRESS_DIRECTORY_V100_DB_CATALOG_BASELINE,
     });
-  artifacts["migrations/0757_progress_directory_scac_successor.sql"] =
+  artifacts["migrations/0763_progress_directory_scac_successor.sql"] =
     renderProgressDirectoryRegistrySql(v100Rows,
       artifacts["migrations/0755_property_evidence_scac_successor.sql"]);
 
@@ -21465,7 +21465,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     await writeFile(resolve("mcp-server/src/scac-mutation-registry.v100.generated.js"),
       renderRuntimeProjection(rows, { version: REGISTRY_V100_VERSION,
         dbCatalogBaseline: PROGRESS_DIRECTORY_V100_DB_CATALOG_BASELINE }));
-    await writeFile(resolve("migrations/0757_progress_directory_scac_successor.sql"),
+    await writeFile(resolve("migrations/0763_progress_directory_scac_successor.sql"),
       renderProgressDirectoryRegistrySql(rows));
     process.stdout.write("Progress directory v100 frontier generated\n");
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
