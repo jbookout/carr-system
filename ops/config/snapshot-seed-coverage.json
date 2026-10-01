@@ -91,6 +91,7 @@
     "ops.capability_agent_session": "capability session records — runtime evidence",
     "ops.capability_verification": "capability verification receipts — runtime evidence",
     "ops.deployment": "deployment history — runtime records",
+    "ops.doc_whats_new_lead_creation": "per-lead creation evidence (lead UUID, creation timestamp and original transaction ID) — business data. Migration 0766 backfills existing leads, and future inserts populate it through the lead trigger. A structure-only rebuild excludes leads and their watermark history, so this ledger must also start empty; business-data backups retain it with the leads.",
     "ops.guidance_intake": "guidance intake records — runtime history",
     "ops.incident": "incident records — runtime history",
     "ops.incident_fact": "per-incident evidence — runtime history",
