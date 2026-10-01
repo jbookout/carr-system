@@ -97,7 +97,7 @@ test("Tour feedback successor follows current main without reusing its seal or m
   assert.match(successor, /scac-mutation-registry\.v97/);
   assert.match(successor, /scac-mutation-registry\.v98/);
   assert.match(runtime, /scac-mutation-registry\.v98/);
-  assert.match(selector, /scac-mutation-registry\.v99\.generated\.js/);
+  assert.match(selector, /scac-mutation-registry\.v100\.generated\.js/);
   const migration = fs.readFileSync(path.join(root, "migrations/0749_tour_client_feedback.sql"));
   const digest = createHash("sha256").update(migration).digest("hex");
   assert.match(successor, new RegExp(`filename='0749_tour_client_feedback\\.sql' and sha256='${digest}'`));
