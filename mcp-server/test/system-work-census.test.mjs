@@ -9,13 +9,14 @@ function fixture({down, live=false, many=false, cacheComplete=true}={}){
  const seen=[];
  return {seen,query:async(sql,params)=>{
   seen.push({sql,params});if(sql.includes("as cache"))return {rows:[{cache}]};
-  const leg=SYSTEM_WORK_LEGS.find(l=>sql.includes(`(${l.sql})`));assert.ok(leg,'known source SQL');
+  if(sql.includes('ops.engineering_passport_facts'))return {rows:[{facts:null}]};
+  const leg=SYSTEM_WORK_LEGS.find(l=>sql===l.sql||sql.includes(`(${l.sql})`));assert.ok(leg,'known source SQL');
   if(down===leg.kind)throw Object.assign(new Error('offline'),{code:'42501'});
   if(sql.includes('count(*) as count'))return {rows:[{count:many?4:1}]};
   let rows=Array.from({length:many?4:1},(_,i)=>({...row(leg.kind,i),completed:live}));
   if(params[5])rows=rows.filter(r=>r.id===params[5]);
   if(params.length===11)rows=rows.filter(r=>leg.kind>params[8]||(leg.kind===params[8]&&r.id>params[9]));
-  return {rows:rows.slice(0,params.at(-1))};
+  return {rows:sql===leg.sql?rows:rows.slice(0,params.at(-1))};
  }};
 }
 const read=(client,args={})=>readSystemWorkCensus({client,actor,correlationId:'synthetic',now,...args});

@@ -2,6 +2,7 @@
 import { canonicalJson } from './artifact-trust.js';
 import { createHash } from 'node:crypto';
 import { organizationTenantForActor, personalScopeForActor } from './identity.js';
+import { closureProjection } from './engineering-runtime.js';
 
 const base = (source, kind, sql, note = null) => ({ source, kind, sql, note });
 // Every SELECT has the same typed columns. Source states are preserved, never
@@ -31,7 +32,7 @@ export const SYSTEM_WORK_LEGS = [
         'deal_ref','lead_ref','client_ref','vendor_ref','party_ref']
       or (jsonb_typeof(s)='string' and lower(trim(both '"' from s::text)) ~ '^(deal|lead|client|vendor|party)(:|/)')
       or exists(select 1 from jsonb_each(case when jsonb_typeof(s)='object' then s else '{}'::jsonb end) e
-        where e.key in ('subject_type','entity_type','record_type','type')
+        where e.key in ('subject','subject_type','entity_type','record_type','type')
         and lower(trim(both '"' from e.value::text)) in ('deal','lead','client','vendor','party')))`),
   base('ops.work_shape_revision', 'work_shape', `select s.id::text as id,w.title,w.state,s.created_at as opened_at,
     s.created_at as last_activity_at,w.owner_actor as owner,s.version::text as version,
@@ -42,7 +43,8 @@ export const SYSTEM_WORK_LEGS = [
     case when m.completed then 'complete' else w.state end as state,p.created_at as opened_at,
     coalesce(m.last_activity_at,p.created_at) as last_activity_at,w.owner_actor as owner,p.work_request_version::text as version,
     (w.state='confirmed_closed' or m.completed) as completed,w.state in ('declined','superseded') as cancelled,
-    jsonb_build_object('work_request',w.ref) as identity from ops.engineering_slice_plan p join ops.work_request w on w.id=p.work_request_id
+    jsonb_build_object('work_request',w.ref) as identity,p.plan_digest,p.accepted_plan_id,p.accepted_plan_hash
+    from ops.engineering_slice_plan p join ops.work_request w on w.id=p.work_request_id
     left join lateral(select count(*)>0 and bool_and(coalesce(mark.status='complete',false)) as completed,
       max(mark.created_at) as last_activity_at from jsonb_array_elements(p.plan->'slices') member
       left join lateral(select status,created_at from ops.slice_completion_mark
@@ -211,6 +213,34 @@ export async function readSystemWorkCensus({client,actor,correlationId,now=()=>n
  const cacheFresh=cacheShape&&['system-work-external.v1','system-work-external.v2'].includes(cache?.schema)&&iso(cache.observed_at)&&(+at-Date.parse(cache.observed_at)<3600000)&&cache.complete===true&&+at>=Date.parse(cache.observed_at);
  for(const leg of SYSTEM_WORK_LEGS.filter(l=>kinds.includes(l.kind)&&(!sources||sources.includes(l.source)))){
   try{
+   if(leg.kind==='slice_plan') {
+    // Completion belongs to the Passport. Resolve it before selecting either
+    // library, counting, or paginating; legacy marks cannot override lineage.
+    const result=await client.query(leg.sql,[tenant,sponsor]);
+    const rows=[];let missing=0;
+    for(const raw of result.rows) {
+     const row={...raw};
+     const facts=(await client.query('select ops.engineering_passport_facts($1::text) as facts',[row.identity.work_request])).rows[0]?.facts;
+     const registered=facts?.slice_plans?.find(p=>p.id===row.id);
+     if(registered) {
+      if(registered.plan?.plan_digest!==row.plan_digest || registered.accepted_plan_id!==row.accepted_plan_id || registered.accepted_plan_hash!==row.accepted_plan_hash)
+       throw err('engineering_census_plan_binding_mismatch');
+      const passport=closureProjection(facts,Error);
+      if(passport.plan_digest!==row.plan_digest) throw err('engineering_census_plan_binding_mismatch');
+      row.completed=passport.closure_state==='complete';
+      row.state=row.completed?'complete':passport.stale_conflict.state==='stale'?'stale':passport.slices.some(s=>s.state==='reopened')?'reopened':passport.closure_state;
+      const dates=[row.last_activity_at,...(facts.receipts??[]).map(r=>r.created_at),...(facts.reviewer_facts??[]).map(r=>r.created_at)].map(iso).filter(Boolean).sort();
+      row.last_activity_at=dates.at(-1);
+     }
+     const item=normalized(row,leg,at);
+     if(!item){missing++;continue;}
+     if(item.completed===live && (live||!item.cancelled) && Date.parse(item.opened_at)<=+at-age*86400000 &&
+       (!filters.id||item.id===filters.id) && (!text||`${item.title} ${item.id}`.toLowerCase().includes(text.toLowerCase()))) rows.push(item);
+    }
+    coverage.push({kind:leg.kind,source_ref:leg.source,state:missing?'partial':'complete',count_total:rows.length,reason:missing?'rows_missing_dates':null});
+    items.push(...rows.filter(r=>!cursor||cmp({kind:cursor.kind,id:cursor.id,opened_at:cursor.date,last_activity_at:cursor.date},r,live)<0).sort((a,b)=>cmp(a,b,live)).slice(0,limit+1));
+    continue;
+   }
    const order=live?'last_activity_at':'opened_at',direction=live?'desc':'asc',op=live?'<':'>';
    // Parameters bind search, dates and authority. Values never become SQL.
    const projection=`select id,title,state,date_trunc('milliseconds',opened_at) as opened_at,

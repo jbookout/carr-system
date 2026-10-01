@@ -4,6 +4,23 @@ import assert from 'node:assert/strict';
 import pg from 'pg';
 import {readSystemWorkCensus,SYSTEM_WORK_LEGS} from '../src/system-work-census.v5.js';
 const url=process.env.SYSTEM_WORK_TEST_DATABASE_URL;
+test('bare business subjects stay excluded alongside recursive business identities',{skip:!url},async()=>{
+ const db=new pg.Client({connectionString:url});await db.connect();
+ try{
+  await db.query('begin');
+  await db.query(`create temporary table business_loop_fixture as select * from public.loop_item with no data`);
+  const subjects=[{},...['deal','lead','client','vendor','party'].flatMap(type=>[
+   {subject:type},{nested:{subject:type}},{nested:{[type+'_id']:'synthetic'}},{subject_ref:type+':synthetic'}])];
+  for(const [i,extra] of subjects.entries())await db.query(`insert into business_loop_fixture
+   (id,kind,title,status,tier,domain,extra_cells,created_at,updated_at,version)
+   values(gen_random_uuid(),'idea','Synthetic subject','open','shared','system',$1,now(),now(),1)`,[extra]);
+  const client={query:(sql,params)=>db.query(sql.replaceAll('public.loop_item','pg_temp.business_loop_fixture'),params)};
+  const result=await readSystemWorkCensus({client,actor:{slug:'joe',human:true},kinds:'loop'});
+  assert.equal(result.coverage[0].state,'complete');
+  assert.equal(result.items.length,1);
+  assert.equal(result.coverage[0].count_total,1);
+ }finally{await db.query('rollback');await db.end();}
+});
 test('actual PostgreSQL legs compile, grants execute and private/business loops are excluded',{skip:!url},async()=>{
  const client=new pg.Client({connectionString:url});await client.connect();
  try{
