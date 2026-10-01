@@ -115,16 +115,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Grouped by measured duration (2026-09-23 main run): gates 252s and
-        # migration 268s each stand alone; everything else together is about
-        # 160s. Every class must appear in exactly one group.
+        # 2026-10-01 run 36928008916: this combined group took 310s (unit
+        # 228s, types 36s, secret 33s, other classes 13s), below ten minutes.
+        # Keep the heavier gates and migration classes separate. Every class
+        # must appear in exactly one group (ops/ci-selftest.py verifies this).
         classes:
           - "pushfloor unit types contract secret dependency binding artifact freshness"
           - "gates"
           - "migration"
-    # The slowest group (migration, 268s on 2026-09-23) plus about 90s of
-    # setup. The ceiling stays generous: a group that hangs should time out,
-    # not a group that grew by a minute.
+    # 2026-10-01 run 36927706376 measured gates 701s and migration 1034s;
+    # twenty minutes leaves migration about 166s for setup. PR 1465 exhausted
+    # this ceiling in apt update before ANY class ran, so zsh setup now has
+    # its own short deadline instead of consuming the checks' whole budget.
     timeout-minutes: 20
 
     services:
@@ -204,9 +206,18 @@ jobs:
 
       - name: Install zsh
         # bin/review-council-runner.sh has a #!/bin/zsh shebang and its test
-        # invokes it by that interpreter. Installing zsh keeps that suite in CI
-        # rather than excluding it — the coverage is worth 3 seconds of apt.
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh
+        # invokes it by that interpreter. The runner already carries apt
+        # indexes: try the required install first. Only stale/missing indexes
+        # need a refresh. Bound both network waits and the entire setup step;
+        # an unavailable package still fails the job, never skips its tests.
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          apt_options=(-o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
+          if ! sudo apt-get "${apt_options[@]}" install -y -qq zsh; then
+            sudo apt-get "${apt_options[@]}" update -qq
+            sudo apt-get "${apt_options[@]}" install -y -qq zsh
+          fi
 
       - name: Install PostgreSQL 17
         # Role-migration fixtures own clusters so roles cannot leak into the
