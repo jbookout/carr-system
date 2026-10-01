@@ -763,6 +763,8 @@ export async function callTool(env, actor, name, args, profile = "full", judgeWo
   // Refuse even generic delegation before it can recurse into an allowed verb.
   if (profile === "doc" && !allowedIn(profile, name, tool))
     throw new ToolError({ error: "not_in_profile", verb: name, profile });
+  // Judge payload limits on the canonical values the registered handler sees.
+  if (profile === "doc") coerceArgsToSchema(tool.inputSchema, args);
   // A capture dedup override needs separate human confirmation. This endpoint
   // exposes ordinary capture only, not a caller-asserted confirmation bypass.
   if (profile === "doc" && name === "log-capture" && args?.force_new === true)

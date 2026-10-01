@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { dispatch, allowedIn, profileForActor, mcpApiHandler } from "../src/mcp.js";
 import { TOOLS } from "../src/tools.js";
 import { authenticatedIdentity } from "../src/identity.js";
+import { Pool } from "@neondatabase/serverless";
 
 const READS = ["catch-me-up", "today-triage", "find", "find-and-catch-up",
   "deal-board", "get-deal-room", "who-do-we-know", "counterparty-history",
@@ -61,6 +62,28 @@ test("Doc cannot override capture dedup with caller-asserted confirmation", asyn
     status: "queued", force_new: true,
   } });
   assert.equal(JSON.parse(result.content[0].text).error, "not_in_profile");
+});
+
+test("Doc payload guards judge the same coerced values the handlers receive", async () => {
+  const connect = Pool.prototype.connect;
+  Pool.prototype.connect = async () => { throw new Error("synthetic_database_boundary_reached"); };
+  try {
+    for (const force_new of ["true", " TRUE "]) {
+      const { result } = await rpc("/doc/mcp", "tools/call", { name: "log-capture", arguments: {
+        idempotency_key: "d170d000-0000-4000-8000-000000000008", session: "Synthetic source",
+        status: "queued", force_new,
+      } });
+      assert.equal(JSON.parse(result.content[0].text).error, "not_in_profile");
+    }
+    const { result } = await rpc("/doc/mcp", "tools/call", { name: "log-activity", arguments: {
+      idempotency_key: "d170d000-0000-4000-8000-000000000009", ref: "SYNTHETIC",
+      kind: "note", summary: "Synthetic fixture",
+      links: JSON.stringify([{ from_ref: "SYNTHETIC-A", to_ref: "SYNTHETIC-B", kind: "knows" }]),
+    } });
+    assert.equal(JSON.parse(result.content[0].text).error, "not_in_profile");
+  } finally {
+    Pool.prototype.connect = connect;
+  }
 });
 
 test("the original /mcp discovery and initialization contract stays unchanged", async () => {
