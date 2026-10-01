@@ -155,6 +155,12 @@ begin
     return new;
   end if;
 
+  -- A fixed snapshot can omit a claim committed by the prior lock holder.
+  if current_setting('transaction_isolation') not in ('read committed','read uncommitted') then
+    raise exception using errcode='25001',
+      message='work-in-progress admission requires READ COMMITTED isolation';
+  end if;
+
   -- All competing claims and reassignments share one admission lock.
   perform pg_advisory_xact_lock(757, 1);
   already_in_flight := (tg_op = 'UPDATE' and old.state in ('claimed','in_progress'));
@@ -214,6 +220,12 @@ CREATE OR REPLACE FUNCTION ops.reserve_job_cost(p_job_id uuid, p_lease_token uui
 AS $function$
 declare j ops.job%rowtype; route ops.provider_route%rowtype; spent numeric; reserved numeric; rid uuid;
 begin
+  -- The route lock serializes admission, but a fixed snapshot can still
+  -- omit reservations committed by the prior lock holder.
+  if current_setting('transaction_isolation') not in ('read committed','read uncommitted') then
+    raise exception using errcode='25001',
+      message='provider route budget admission requires READ COMMITTED isolation';
+  end if;
   select * into j from ops.job where id=p_job_id for update;
   if not found or j.state<>'running' or j.lease_token<>p_lease_token or j.leased_until<now() then
     raise exception 'job % does not hold this live lease',p_job_id;
@@ -683,6 +695,12 @@ alter table public.commission_allocation validate constraint allocation_not_own_
 create function public.enforce_allocation_tree() returns trigger
 language plpgsql set search_path=pg_catalog,public,pg_temp as $$
 begin
+  -- The ancestor census must see commits made by the prior lock holder.
+  -- Fixed snapshots do not refresh after an advisory-lock wait.
+  if current_setting('transaction_isolation') not in ('read committed','read uncommitted') then
+    raise exception using errcode='25001',
+      message='commission allocation tree writes require READ COMMITTED isolation';
+  end if;
   perform pg_advisory_xact_lock(hashtextextended('commission-allocation:'||new.commission_id::text,757));
   if new.parent_id is not null and exists (
     with recursive ancestors as (

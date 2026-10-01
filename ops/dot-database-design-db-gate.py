@@ -329,12 +329,22 @@ class DatabaseDesign(unittest.TestCase):
         self.c=psycopg.connect(self.race_dsn)
         self.c.execute("set carr.acting_actor_slug='joe'; set carr.verified_human_actor_slug='joe'; set carr.organization_tenant_id='carr-internal'")
 
-    def overlap(self, first_sql, first_args, second_sql, second_args):
+    def overlap(self, first_sql, first_args, second_sql, second_args, *, isolation=None, census=None):
         self.c.commit()
-        first=self.one(first_sql, first_args)
         other=psycopg.connect(self.race_dsn)
         other.execute("set carr.acting_actor_slug='joe'; set carr.verified_human_actor_slug='joe'; set carr.organization_tenant_id='carr-internal'")
         other.commit()
+        if isolation is not None:
+            self.c.isolation_level = isolation
+            other.isolation_level = isolation
+            # Both snapshots must exist BEFORE either competing mutation.
+            self.c.execute(census).fetchone()
+            other.execute(census).fetchone()
+        try:
+            first=self.one(first_sql, first_args)
+        except psycopg.Error as e:
+            self.c.rollback()
+            first={'refused':e.sqlstate,'error':str(e).splitlines()[0]}
         def run():
             try:
                 result=other.execute(second_sql,second_args).fetchone()[0]
@@ -356,7 +366,31 @@ class DatabaseDesign(unittest.TestCase):
             self.c.commit()
             second=future.result(timeout=5)
         other.close()
+        self.c.isolation_level = psycopg.IsolationLevel.READ_COMMITTED
         return first,second
+
+    def test_05d_allocation_competing_parents_preserve_tree(self):
+        for isolation in (psycopg.IsolationLevel.READ_COMMITTED,
+                          psycopg.IsolationLevel.REPEATABLE_READ,
+                          psycopg.IsolationLevel.SERIALIZABLE):
+            with self.subTest(isolation=isolation):
+                self.isolated_race_database()
+                _,_,deal=self.business()
+                commission=self.seed('public.commission',deal_id=deal,gross_amount=100,status='expected',created_by=self.actor)
+                a=self.insert('public.commission_allocation',commission_id=commission,actor_id=self.actor,kind='house',fraction=1)
+                b=self.insert('public.commission_allocation',commission_id=commission,actor_id=self.actor,kind='house',fraction=1)
+                first,second=self.overlap(
+                    'update public.commission_allocation set parent_id=%s where id=%s returning id',(b,a),
+                    'update public.commission_allocation set parent_id=%s where id=%s returning id',(a,b),
+                    isolation=isolation,census='select count(*) from public.commission_allocation')
+                cycles=self.one('select count(*) from public.commission_allocation a join public.commission_allocation b on a.parent_id=b.id and b.parent_id=a.id')
+                self.assertEqual(cycles,0,(first,second))
+                self.assertIsInstance(second,dict,(first,second))
+                self.assertIn(second['refused'],('23514','40001','25001'))
+                if isolation == psycopg.IsolationLevel.READ_COMMITTED:
+                    self.assertNotIsInstance(first,dict)
+                else:
+                    self.assertEqual([result['refused'] for result in (first,second)],['25001','25001'])
 
     def test_09_wip_limit_serializes_competing_claims(self):
         self.isolated_race_database()
@@ -369,6 +403,30 @@ class DatabaseDesign(unittest.TestCase):
         self.assertIsInstance(second,dict,(first,second))
         self.assertEqual(self.one("select count(*) from ops.work_request where state='claimed'"),1)
 
+    def test_09b_wip_competing_fixed_snapshots_preserve_both_limits(self):
+        for isolation in (psycopg.IsolationLevel.REPEATABLE_READ,
+                          psycopg.IsolationLevel.SERIALIZABLE):
+            for limit in ('executor','system'):
+                with self.subTest(isolation=isolation,limit=limit):
+                    self.isolated_race_database()
+                    self.c.execute('set session_replication_role=replica')
+                    ids=[]
+                    executors=['synthetic','synthetic'] if limit=='executor' else ['synthetic-a','synthetic-b','synthetic-c']
+                    for executor in executors:
+                        ids.append(self.insert('ops.work_request',ref='WR-'+uuid.uuid4().hex[:10],title='Synthetic fixed-snapshot claim',requester_actor='joe',executor_actor=executor,shape_disposition='not_required',shape_fixed_surface_ref='synthetic',shape_rationale='Synthetic fixture',shape_decided_by_actor_id=self.actor,shape_decided_at=self.one('select now()')))
+                    if limit=='system':
+                        self.c.execute("update ops.work_request set state='claimed' where id=%s",(ids.pop(),))
+                    self.c.execute('set session_replication_role=origin')
+                    first,second=self.overlap(
+                        "update ops.work_request set state='claimed' where id=%s returning state",(ids[0],),
+                        "update ops.work_request set state='claimed' where id=%s returning state",(ids[1],),
+                        isolation=isolation,census='select count(*) from ops.work_request')
+                    count=self.one("select count(*) from ops.work_request where state in ('claimed','in_progress')")
+                    self.assertLessEqual(count,1 if limit=='executor' else 2,(first,second))
+                    self.assertIsInstance(second,dict,(first,second))
+                    self.assertIn(second['refused'],('23514','40001','25001'))
+                    self.assertEqual([result['refused'] for result in (first,second)],['25001','25001'])
+
     def test_11_budget_serializes_competing_reservations(self):
         self.isolated_race_database()
         a,ta=self.job();b,tb=self.job();route=uuid.uuid4().hex
@@ -376,6 +434,23 @@ class DatabaseDesign(unittest.TestCase):
         first,second=self.overlap('select ops.reserve_job_cost(%s,%s,%s,6)',(a,ta,route),'select ops.reserve_job_cost(%s,%s,%s,6)',(b,tb,route))
         self.assertIsInstance(second,dict,(first,second))
         self.assertEqual(self.one('select sum(estimated_cost_usd) from ops.cost_reservation where route_key=%s',(route,)),6)
+
+    def test_11b_budget_competing_fixed_snapshots_preserve_limit(self):
+        for isolation in (psycopg.IsolationLevel.REPEATABLE_READ,
+                          psycopg.IsolationLevel.SERIALIZABLE):
+            with self.subTest(isolation=isolation):
+                self.isolated_race_database()
+                a,ta=self.job();b,tb=self.job();route=uuid.uuid4().hex
+                self.c.execute("insert into ops.provider_route(route_key,priority,endpoint_ref,monthly_budget_usd) values(%s,(select coalesce(max(priority),0)+1 from ops.provider_route),'synthetic',10)",(route,))
+                first,second=self.overlap(
+                    'select ops.reserve_job_cost(%s,%s,%s,6)',(a,ta,route),
+                    'select ops.reserve_job_cost(%s,%s,%s,6)',(b,tb,route),
+                    isolation=isolation,census='select count(*) from ops.cost_reservation')
+                reserved=self.one('select coalesce(sum(estimated_cost_usd),0) from ops.cost_reservation where route_key=%s',(route,))
+                self.assertLessEqual(reserved,10,(first,second))
+                self.assertIsInstance(second,dict,(first,second))
+                self.assertIn(second['refused'],('40001','25001'))
+                self.assertEqual([result['refused'] for result in (first,second)],['25001','25001'])
 
     def test_19_refused_conversation_rename_leaves_no_revision(self):
         self.isolated_race_database()

@@ -4,7 +4,7 @@ declare v ops.scac_mutation_registry_version%rowtype; registration jsonb;
 begin
   if not exists(select 1 from public.schema_migrations where filename='0755_property_evidence_scac_successor.sql' and sha256='317dff389c5a1b1f78be1f9131991f419fd33103d64018418d1010d892962dcd') then
     raise exception 'Dot database design v101 requires exact applied 0755'; end if;
-  if not exists(select 1 from public.schema_migrations where filename='0757_dot_database_design.sql' and sha256='ab81297c230d863048c8c240fa5f4c935aa70cde3d698dbe820c4ea7ab5ae9ae') then
+  if not exists(select 1 from public.schema_migrations where filename='0757_dot_database_design.sql' and sha256='f389ffbde63b74aa601b5b4ca5689eaa783724dac9ba3c1313d9e97c94c6faa9') then
     raise exception 'Dot database design v101 requires exact applied 0757'; end if;
   select * into v from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v99';
   if v.registry_digest is distinct from 'sha256:b8c963310dae7cf990e046f6b022b01c76b3ac0b487994d5bea0eff679a32ec9' or v.entry_count<>2511
