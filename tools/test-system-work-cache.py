@@ -5,6 +5,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 spec=importlib.util.spec_from_file_location('cache',Path(__file__).with_name('system_work_cache.py'))
+assert spec is not None and spec.loader is not None
 cache=importlib.util.module_from_spec(spec);spec.loader.exec_module(cache)
 NOW=datetime(2026,10,1,tzinfo=timezone.utc)
 class CacheTests(unittest.TestCase):
