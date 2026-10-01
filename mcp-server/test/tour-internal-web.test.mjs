@@ -46,6 +46,82 @@ const issueBody = { projection_id: projectionId, token_digest: digest, permissio
 const searchBody = { query: null, counties: ["Escambia"], property_types: [], min_square_feet: null,
   max_square_feet: null, availability: [], entrance_verified: null, public_projection_ready: null,
   photos_available: null, sort: "updated_desc", cursor: null, limit: 25 };
+const appointmentBody = (start, end) => ({ idempotency_key: routeId, route_version_id: routeId, property_id: stopA,
+  route_sequence: 1, route_label: "A", stop_state: "active", appointment_start: start, appointment_end: end,
+  locked_appointment: true, dwell_minutes: 20, buffer_minutes: 5,
+  access_coordinate_status: "approved", assertion_set_digest: digest });
+
+test("HTTP rejects reversed microsecond windows before writes and preserves valid windows", async t => {
+  for (const [name, start, end, valid] of [
+    ["reversed", "2026-10-01T14:00:00.123999Z", "2026-10-01T14:00:00.123001Z", false],
+    ["equal across offsets", "2026-10-01T09:00:00.123456-05:00", "2026-10-01T14:00:00.123456Z", true],
+    ["increasing", "2026-10-01T14:00:00.123001Z", "2026-10-01T14:00:00.123002Z", true],
+    ["reversed across offsets", "2026-10-01T09:00:00.123999-05:00", "2026-10-01T14:00:00.123001Z", false],
+    ["reversed before epoch", "1969-12-31T23:59:59.999999Z", "1969-12-31T23:59:59.999998Z", false],
+    ["increasing across epoch", "1969-12-31T23:59:59.999999Z", "1970-01-01T00:00:00.000001Z", true],
+    ["reversed distant date", "9999-10-01T14:00:00.123999Z", "9999-10-01T14:00:00.123998Z", false],
+  ]) await t.test(name, async () => {
+    const calls = [], body = appointmentBody(start, end);
+    const surface = handler({ appendRouteStopFn: async context => {
+      calls.push(context.input); return { ok: true, data: { route_stop_id: stopA } };
+    } });
+    const response = await surface.fetch(request("/api/tours/route-stop", {
+      method: "POST", headers: postHeaders, body: JSON.stringify(body),
+    }), { APP_HOST: "app.doctorcre.com" }, {}, ACTOR, SESSION);
+    assert.equal(response.status, valid ? 200 : 400, await response.text());
+    assert.deepEqual(calls, valid ? [body] : []);
+  });
+});
+
+test("HTTP appointment timestamps respect PostgreSQL offset and year boundaries", async t => {
+  for (const [name, start, end, valid] of [
+    ["positive offset boundary", "2026-10-01T14:00:00.123456+15:59", "2026-10-01T14:00:00.123457+15:59", true],
+    ["negative offset boundary", "2026-10-01T14:00:00.123456-15:59", "2026-10-01T14:00:00.123457-15:59", true],
+    ["first AD year", "0001-10-01T14:00:00Z", "0001-10-01T14:30:00Z", true],
+    ["last four-digit year", "9999-10-01T14:00:00Z", "9999-10-01T14:30:00Z", true],
+    ["positive offset overflow", "2026-10-01T14:00:00+16:00", "2026-10-01T14:30:00+16:00", false],
+    ["negative offset overflow", "2026-10-01T14:00:00-16:00", "2026-10-01T14:30:00-16:00", false],
+    ["minute overflow", "2026-10-01T14:00:00+15:60", "2026-10-01T14:30:00+15:60", false],
+    ["year zero", "0000-10-01T14:00:00Z", "0000-10-01T14:30:00Z", false],
+    ["extended year", "+010000-10-01T14:00:00Z", "+010000-10-01T14:30:00Z", false],
+  ]) await t.test(name, async () => {
+    const calls = [], body = appointmentBody(start, end);
+    const surface = handler({ appendRouteStopFn: async context => {
+      calls.push(context.input); return { ok: true, data: { route_stop_id: stopA } };
+    } });
+    const inputs = valid ? [body] : ["appointment_start", "appointment_end"].map(field =>
+      ({ ...appointmentBody("2026-10-01T14:00:00Z", "2026-10-01T14:30:00Z"), [field]: body[field] }));
+    for (const input of inputs) {
+      const response = await surface.fetch(request("/api/tours/route-stop", {
+        method: "POST", headers: postHeaders, body: JSON.stringify(input),
+      }), { APP_HOST: "app.doctorcre.com" }, {}, ACTOR, SESSION);
+      assert.equal(response.status, valid ? 200 : 400, await response.text());
+      assert.deepEqual(calls, valid ? [body] : []);
+    }
+  });
+});
+
+test("revised route save accepts unchanged PostgreSQL appointment timestamps", async () => {
+  const calls = [];
+  const surface = handler({ appendRouteStopFn: async context => {
+    calls.push(context.input); return { ok: true, data: { route_stop_id: stopA } };
+  } });
+  for (const [start, end] of [
+    ["2026-10-01T14:00:00+00:00", "2026-10-01T14:30:00+00:00"],
+    ["2026-10-01T09:00:00.123456-05:00", "2026-10-01T09:30:00.123456-05:00"],
+    ["2026-10-02T00:00:00+10:00", "2026-10-02T00:30:00+10:00"],
+  ]) {
+    const body = { idempotency_key: routeId, route_version_id: routeId, property_id: stopA,
+      route_sequence: 1, route_label: "A", stop_state: "active", appointment_start: start,
+      appointment_end: end, locked_appointment: true, dwell_minutes: 20, buffer_minutes: 5,
+      access_coordinate_status: "approved", assertion_set_digest: digest };
+    const response = await surface.fetch(request("/api/tours/route-stop", {
+      method: "POST", headers: postHeaders, body: JSON.stringify(body),
+    }), { APP_HOST: "app.doctorcre.com" }, {}, ACTOR, SESSION);
+    assert.equal(response.status, 200, await response.text());
+    assert.deepEqual(calls.at(-1), body, "preserve the instant and PostgreSQL microseconds");
+  }
+});
 
 test("authenticated property search and versioned cart keep exact tenant-safe contracts", async () => {
   const calls = [];
@@ -222,6 +298,7 @@ test("known optimistic races remain conflicts rather than service outages", asyn
     "tour route preparation refuses stale state",
     "route version refuses concurrent or stale route state",
     "route acceptance refuses concurrent or stale route state",
+    "route acceptance refuses changed draft contents",
     "cheat sheet revision refuses concurrent or stale version",
     "cheat sheet restore refuses unavailable or stale revision",
     "tour selection refuses stale version",
