@@ -273,11 +273,39 @@ class RelayTests(unittest.TestCase):
         self.assertTrue(self.engine.poll(thread, execute=False))
         self.assertEqual((self.state / thread / "report.txt").read_text(), "\n")
 
+    def test_report_marker_with_feeder_job_label_alone_finishes(self):
+        thread = self.engine.send_job("Synthetic brief")
+        self.slack.incoming = [{
+            "ts": "2.000001", "user": "agent",
+            "text": "DOT-REPORT-END AF-carr-system-1287",
+        }]
+        self.assertTrue(self.engine.poll(thread, execute=False))
+        self.assertEqual((self.state / thread / "report.txt").read_text(), "\n")
+
+    def test_report_marker_with_feeder_job_label_preserves_final_text(self):
+        thread = self.engine.send_job("Synthetic brief")
+        self.slack.incoming = [{
+            "ts": "2.000001", "user": "agent",
+            "text": "Final: no blockers. DOT-REPORT-END AF-doctorcre-app-117",
+        }]
+        self.assertTrue(self.engine.poll(thread, execute=False))
+        self.assertEqual((self.state / thread / "report.txt").read_text(),
+                         "Final: no blockers.\n")
+
+    def test_report_marker_with_49_character_label_does_not_finish(self):
+        thread = self.engine.send_job("Synthetic brief")
+        self.slack.incoming = [{
+            "ts": "2.000001", "user": "agent",
+            "text": "DOT-REPORT-END " + "A" * 49,
+        }]
+        self.assertFalse(self.engine.poll(thread, execute=False))
+        self.assertFalse((self.state / thread / "report.txt").exists())
+
     def test_report_marker_with_job_label_inside_fence_does_not_finish(self):
         thread = self.engine.send_job("Synthetic brief")
         self.slack.incoming = [{
             "ts": "2.000001", "user": "agent",
-            "text": "```\nPONG DOT-REPORT-END T\nDOT-REPORT-END K\n```",
+            "text": "```\nPONG DOT-REPORT-END T\nDOT-REPORT-END K\nDOT-REPORT-END AF-carr-system-1287\n```",
         }]
         self.assertFalse(self.engine.poll(thread, execute=False))
         self.assertFalse((self.state / thread / "report.txt").exists())
@@ -297,6 +325,11 @@ class RelayTests(unittest.TestCase):
             ("Answer DOT-REPORT-END", "Answer\n"),
             ("First line\n  Last line\tDOT-REPORT-END a0-Z\nIgnored", "First line\n  Last line\n"),
             ("Answer DOT-REPORT-END A123456789-z", "Answer\n"),
+            ("DOT-REPORT-END A123456789-zz", "\n"),
+            ("DOT-REPORT-END K_", "\n"),
+            ("DOT-REPORT-END K.", "\n"),
+            ("Answer DOT-REPORT-END AF.example_job-117", "Answer\n"),
+            ("DOT-REPORT-END " + "A" * 48, "\n"),
         ]
         for index, (text, expected) in enumerate(cases):
             with self.subTest(text=text):
@@ -311,8 +344,9 @@ class RelayTests(unittest.TestCase):
     def test_invalid_report_marker_suffixes_do_not_finish(self):
         cases = [
             "AnswerDOT-REPORT-END", "DOT-REPORT-END!", "DOT-REPORT-END K extra",
-            "DOT-REPORT-END A123456789-zz", "DOT-REPORT-END K_", "DOT-REPORT-END é",
-            "DOT-REPORT-END  K", "DOT-REPORT-END\tK", "DOT-REPORT-END K.",
+            "DOT-REPORT-END é", "DOT-REPORT-END K/", "DOT-REPORT-END K+",
+            "DOT-REPORT-END  K", "DOT-REPORT-END\tK",
+            "see DOT-REPORT-END AF-carr-system-1287 rules below",
         ]
         for index, text in enumerate(cases):
             with self.subTest(text=text):

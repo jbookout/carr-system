@@ -332,7 +332,7 @@ def _protocol(text):
         if fence == "mac-run" and line.strip():
             commands.append(line.strip())
         if fence is None:
-            marker = re.search(r"(?:^|\s)DOT-REPORT-END(?: [A-Za-z0-9-]{1,12})?$", line.rstrip())
+            marker = re.search(r"(?:^|\s)DOT-REPORT-END(?: [A-Za-z0-9._-]{1,48})?$", line.rstrip())
             if marker:
                 prefix = line[:marker.start()].rstrip()
                 if prefix:
