@@ -1254,6 +1254,7 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
   local definer_pg_proof definer_pg_log
   for definer_pg_proof in \
     mcp-server/test/security-definer-search-path-postgres.sql \
+    mcp-server/test/definer-temp-substitution-postgres.sql \
     mcp-server/test/definer-hardening-catalog-postgres.sql \
     mcp-server/test/completion-tenant-barriers-postgres.sql \
     mcp-server/test/dot-security-definers-postgres.sql; do
