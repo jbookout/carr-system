@@ -3,7 +3,7 @@
 // gate: it owns no identity, authority selection, database, routing, or map
 // implementation.
 
-import { validRouteTimestamp } from "./tour-route-timestamp.js";
+import { validRouteTimestamp, routeTimestampMicroseconds } from "./tour-route-timestamp.js";
 
 export const TOUR_INTERNAL_ASSET_DIRECTORY = "../out/doctorcre-artifacts/current/tours";
 
@@ -176,7 +176,7 @@ function validRouteStop(v) {
   if (active ? !(boundedInt(v.route_sequence, 1, 2147483647) && typeof v.route_label === "string" && /^[A-Za-z0-9._ -]{1,80}$/.test(v.route_label.trim()))
     : !(v.route_sequence === null && v.route_label === null)) return false;
   const hasStart = v.appointment_start !== null, hasEnd = v.appointment_end !== null;
-  if (hasStart !== hasEnd || (hasStart && (!validRouteTimestamp(v.appointment_start) || !validRouteTimestamp(v.appointment_end) || Date.parse(v.appointment_end) < Date.parse(v.appointment_start)))) return false;
+  if (hasStart !== hasEnd || (hasStart && (!validRouteTimestamp(v.appointment_start) || !validRouteTimestamp(v.appointment_end) || routeTimestampMicroseconds(v.appointment_end) < routeTimestampMicroseconds(v.appointment_start)))) return false;
   return typeof v.locked_appointment === "boolean" && (!v.locked_appointment || hasStart) &&
     boundedInt(v.dwell_minutes, 0, 1440) && boundedInt(v.buffer_minutes, 0, 1440) &&
     ACCESS_STATUS.has(v.access_coordinate_status) && validDigest(v.assertion_set_digest);
