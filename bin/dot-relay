@@ -47,7 +47,7 @@ PROTOCOL:
   125 output limit. Refused/interrupted requests post "held for orchestrator".
   Outside any fence, DOT-REPORT-END ends the report alone on a stripped line
   or as a whitespace-separated suffix, optionally followed by one space and
-  a job label matching [A-Za-z0-9-]{1,12}. Text before the suffix becomes the
+  a job label matching [A-Za-z0-9._-]{1,48}. Text before the suffix becomes the
   last report line. Mid-sentence mentions do not finish. Completion saves
   that reply's report and exits 0.
   Watch saves a report without consuming commands needed by a later relay.
