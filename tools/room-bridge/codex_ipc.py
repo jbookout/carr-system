@@ -175,6 +175,8 @@ def start_turn(thread_id: str, text: str, *, socket_path: str | None = None,
     the text is steered into the running turn instead, which is what a person
     typing into that window mid-turn gets.
     """
+    from desks import desk_prompt
+    text = desk_prompt(text)
     base = {"thread_id": thread_id}
     client = _open(socket_path, timeout)
     if client is None:
@@ -185,7 +187,8 @@ def start_turn(thread_id: str, text: str, *, socket_path: str | None = None,
             return {**base, "status": "not_live", "detail": "no Codex Desktop window holds this thread"}
         started = client.request("thread-follower-start-turn", {
             "conversationId": thread_id,
-            "turnStart": {"request": {"threadId": thread_id, "input": _text_input(text)},
+            "turnStart": {"request": {"threadId": thread_id, "input": _text_input(text),
+                                      "approvalPolicy": "never"},
                           "context": {}},
         }, target=owner)
         if started.get("resultType") == "success":

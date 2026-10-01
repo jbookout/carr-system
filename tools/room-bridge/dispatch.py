@@ -87,9 +87,10 @@ def _record(results_path: Path, row: dict) -> None:
 
 def _to_claude(entry: dict, task: str, msg_id: str) -> dict:
     """Deliver one peer turn to a live labeled session."""
+    desks.dispatched_permission_mode(entry.get("permission_mode"))
     payload = {
         "type": "user",
-        "message": {"role": "user", "content": task},
+        "message": {"role": "user", "content": desks.desk_prompt(task)},
         "origin": {"kind": "peer", "from": f"hermes:{entry['name']}", "msg_id": msg_id},
     }
     conn = inject_mod.inject_keepalive(entry["socket"], payload)
@@ -111,7 +112,7 @@ def _to_claude_desktop(entry: dict, task: str) -> dict:
     try:
         return claude_desktop_wire.launch_background(entry, task)
     except claude_desktop_wire.ClaudeDesktopError as exc:
-        return {"status": "failed", "detail": exc.code}
+        return {"status": "failed", "detail": exc.code, "error": str(exc)}
 
 
 def _codex_events(stdout: str) -> list[dict]:
@@ -143,6 +144,7 @@ def _to_codex(
     would throw away everything it had been told. `codex exec resume <id>`
     carries it, and --json reports the thread id in its first event.
     """
+    task = desks.desk_prompt(task)
     thread = None if fresh else entry.get("thread_id")
     # A THREAD CODEX DESKTOP HOLDS OPEN CANNOT BE RESUMED FROM HERE. Found live
     # 2026-09-27: the orchestrator's Desktop thread refused `codex exec resume`
@@ -196,6 +198,9 @@ def _to_codex(
                     "bad_codex_config",
                     "Codex config overrides must be non-empty strings")
             argv += ["-c", override]
+        # Bind both starts and resumes, after overrides, so an old thread or
+        # caller config cannot restore human approval cards.
+        argv += ["-c", 'approval_policy="never"']
         # `codex exec resume` does not accept -C/-s/--add-dir at all — a
         # resumed session already carries the cwd, sandbox and extra dirs it
         # was FIRST started with, and passing them again is a hard CLI parse
@@ -292,6 +297,8 @@ def dispatch(
     registry = registry or Registry()
     results_path = Path(results_path or DEFAULT_RESULTS)
     entry = registry.resolve(name)          # every refusal happens here
+    original_task = task
+    task = desks.desk_prompt(task)
     msg_id = str(uuid.uuid4())
     if entry["kind"] in ("claude-desktop", "codex-session", "codex-live", "flash-local", "grok-cli"):
         if not entry.get("model") or not str(entry.get("model")).strip():
@@ -342,7 +349,7 @@ def dispatch(
         "msg_id": msg_id,
         "desk": name,
         "kind": entry["kind"],
-        "task": task,
+        "task": original_task,
         "dispatched_at": _now(),
         **outcome,
     }
@@ -504,6 +511,7 @@ def desk_start(
     shell = (
         f"exec 3<>{shlex.quote(str(fifo))}; "
         f"exec claude --messaging-socket-path {shlex.quote(str(sock))} "
+        f"--permission-mode dontAsk "
         f"-p --input-format stream-json --output-format stream-json --verbose "
         f"<&3 >>{shlex.quote(str(log))} 2>&1"
     )
@@ -541,10 +549,9 @@ def desk_start(
                         f"nothing bound {sock} within {BIND_TIMEOUT_S:.0f}s")
 
     registry.register(name, "claude-session", socket=str(sock))
-    if seed:
-        with fifo.open("w") as fh:
-            fh.write(json.dumps(
-                {"type": "user", "message": {"role": "user", "content": seed}}) + "\n")
+    with fifo.open("w") as fh:
+        fh.write(json.dumps(
+            {"type": "user", "message": {"role": "user", "content": desks.desk_prompt(seed or "")}}) + "\n")
 
     return {"name": name, "socket": str(sock), "pid": proc.pid, "log": str(log),
             "already_running": False}

@@ -155,7 +155,9 @@ def test_start_turn_sends_follower_request_with_turn_shape():
     turn = start["params"]["turnStart"]["request"]
     assert start["params"]["conversationId"] == THREAD
     assert turn["threadId"] == THREAD
-    assert turn["input"] == [{"type": "text", "text": "hello sol", "text_elements": []}]
+    assert turn["approvalPolicy"] == "never"
+    from desks import DESK_INSTRUCTION
+    assert turn["input"] == [{"type": "text", "text": DESK_INSTRUCTION + "\n\nhello sol", "text_elements": []}]
 
 
 def test_start_turn_without_owner_is_not_live():
@@ -171,7 +173,8 @@ def test_busy_thread_falls_back_to_steer():
     assert out["status"] == "delivered" and out["mode"] == "steer", out
     steer = [m for m in _requests(r) if m["method"] == "thread-follower-steer-turn"][0]
     assert steer["params"]["conversationId"] == THREAD
-    assert steer["params"]["input"] == [{"type": "text", "text": "hello", "text_elements": []}]
+    from desks import DESK_INSTRUCTION
+    assert steer["params"]["input"] == [{"type": "text", "text": DESK_INSTRUCTION + "\n\nhello", "text_elements": []}]
 
 
 def test_both_refused_is_failed_with_detail():

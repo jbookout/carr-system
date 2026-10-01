@@ -57,6 +57,19 @@ KINDS = ("claude-session", "claude-desktop", "codex-session", "codex-live", "fla
 KIND_ALIASES = {"codex-exec": "codex-session"}
 EFFORT_CHOICES = ("minimal", "low", "medium", "high", "xhigh")
 
+DESK_INSTRUCTION = (
+    "Model Room desk instruction: If you need approvals, permissions, or decisions, "
+    "send them to the orchestrator session via send_message in one message, then "
+    "end the turn. Never ask Joe."
+)
+
+
+def desk_prompt(task: str) -> str:
+    """Carry the fixed instruction on first turns and every resumed task."""
+    if task == DESK_INSTRUCTION or task.startswith(DESK_INSTRUCTION + "\n\n"):
+        return task
+    return DESK_INSTRUCTION + ("\n\n" + task if task else "")
+
 DEFAULT_REGISTRY = Path(
     os.environ.get(
         "CARR_HERMES_DESKS",
@@ -71,6 +84,19 @@ class DeskError(Exception):
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
+
+
+def dispatched_permission_mode(value: object = None) -> str:
+    """Omission means dontAsk; wider noninteractive modes require opt-in."""
+    mode = "dontAsk" if value is None else value
+    if mode not in ("dontAsk", "auto", "acceptEdits"):
+        raise DeskError(
+            "unsafe_permission_mode",
+            f"dispatched desk permission mode {mode!r} is refused: use dontAsk "
+            "(default), or explicitly register auto/acceptEdits. Approvals and "
+            "permission needs belong to the orchestrator; never ask Joe.",
+        )
+    return str(mode)
 
 
 def is_live(sock_path: str, timeout: float = 0.25) -> bool:
@@ -165,7 +191,8 @@ class Registry:
             if not socket:
                 raise DeskError("missing_socket", "a claude-session desk needs --socket")
             refuse_pid_socket(socket)
-            entry = {"kind": kind, "socket": str(socket)}
+            entry = {"kind": kind, "socket": str(socket),
+                     "permission_mode": dispatched_permission_mode(permission_mode)}
         elif kind == "claude-desktop":
             if not model:
                 raise DeskError("missing_model", "a claude-desktop desk needs --model")
@@ -179,7 +206,7 @@ class Registry:
                 # Background work cannot stop on a terminal approval dialog.
                 # dontAsk denies unapproved actions instead of widening the
                 # session's authority or leaving a hidden prompt waiting.
-                "permission_mode": str(permission_mode or "dontAsk"),
+                "permission_mode": dispatched_permission_mode(permission_mode),
             }
         elif kind == "grok-cli":
             if model != "grok-4.7" or effort != "high" or sandbox != "read-only":
@@ -248,6 +275,9 @@ class Registry:
         entry = {**entry, "kind": kind}
         if kind not in KINDS:
             raise DeskError("bad_kind", f"desk {name!r} has kind {kind!r}")
+        if kind in ("claude-session", "claude-desktop"):
+            # Recheck edited/legacy entries at the dispatch boundary.
+            entry["permission_mode"] = dispatched_permission_mode(entry.get("permission_mode"))
         if kind == "grok-cli" and (entry.get("model") != "grok-4.7"
                 or entry.get("effort") != "high" or entry.get("sandbox") != "read-only"):
             raise DeskError("bad_grok_posture", "Grok requires grok-4.7/high/read-only")
