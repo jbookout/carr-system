@@ -556,6 +556,10 @@ test("system census honors exact Passport completion before library filtering, c
   facts.receipts.push(bindReceiptLineage(receiptRow("55555555-5555-4555-8555-555555555555", successor.id, "slice:one", "failed", "2026-08-27T00:01:00Z"), plan, successor));
   assert.equal((await read(false)).items[0]?.id, row.id);
   assert.equal((await read(true)).items.length, 0);
+  facts.slice_plans[0].id = "66666666-6666-4666-8666-666666666666";
+  const mismatched = await read(true);
+  assert.equal(mismatched.items.length, 0);
+  assert.equal(mismatched.coverage[0].state, "unavailable", "a different registered plan cannot fall back to a legacy completion mark");
 });
 
 test("source merge authority comes from one reader-safe projection, never direct runtime table reads", async () => {

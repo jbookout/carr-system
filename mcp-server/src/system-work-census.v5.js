@@ -222,6 +222,7 @@ export async function readSystemWorkCensus({client,actor,correlationId,now=()=>n
      const row={...raw};
      const facts=(await client.query('select ops.engineering_passport_facts($1::text) as facts',[row.identity.work_request])).rows[0]?.facts;
      const registered=facts?.slice_plans?.find(p=>p.id===row.id);
+     if(facts?.source && !registered) throw err('engineering_census_plan_binding_mismatch');
      if(registered) {
       if(registered.plan?.plan_digest!==row.plan_digest || registered.accepted_plan_id!==row.accepted_plan_id || registered.accepted_plan_hash!==row.accepted_plan_hash)
        throw err('engineering_census_plan_binding_mismatch');
