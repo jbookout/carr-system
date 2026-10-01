@@ -46,6 +46,13 @@ test('runway: exact decimal accumulation, payroll, shifted expense and incomplet
   assert.equal(runway(a).delayed.ledger[1].costs_usd, 5100);
   a.one_time_costs[0].month = 3; const r = runway(a).delayed; assert.equal(r.status, 'incomplete_model'); assert.equal(r.required_initial_cash_usd, null);
 });
+test('runway: funded loan stays in the ledger when first payment is beyond the horizon', () => {
+  const a = runwayFixture(); a.loan = { principal_usd: 120000, annual_rate_pct: 0, amortization_months: 12, funding_month: 1, payment_start_month: 4 };
+  const r = runway(a).base;
+  assert.equal(r.ledger[0].injections_usd, 120000);
+  assert.equal(r.ledger[0].closing_cash_usd, 180000);
+  assert.equal(r.status, 'incomplete_model'); assert.equal(r.required_initial_cash_usd, null);
+});
 test('A2 case 1: construction-only contingency and reimbursement economics', () => {
   const r = conversion(conversionFixture()); assert.deepEqual(r.total_cost_usd, { low: 118000, high: 140000 });
   assert.deepEqual(r.tenant_economic_cost_usd, { low: 88000, high: 110000 }); assert.equal(r.reimbursement_month, 6);

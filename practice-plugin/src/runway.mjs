@@ -68,7 +68,7 @@ export function calculateRunway(a) {
     for (const c of a.cash_injections) { if (c.month > h) omitted.add(c.id); else injections[c.month - 1] = injections[c.month - 1].plus(c.amount_usd); }
     if (a.loan) {
       if (a.loan.funding_month > h || a.loan.payment_start_month > h) omitted.add('loan_schedule');
-      else injections[a.loan.funding_month - 1] = injections[a.loan.funding_month - 1].plus(a.loan.principal_usd);
+      if (a.loan.funding_month <= h) injections[a.loan.funding_month - 1] = injections[a.loan.funding_month - 1].plus(a.loan.principal_usd);
       for (let m = a.loan.payment_start_month; m <= Math.min(h, a.loan.payment_start_month + a.loan.amortization_months - 1); m++) cost[m - 1] = cost[m - 1].plus(loanPayment);
     }
     const receipts = new Map();
