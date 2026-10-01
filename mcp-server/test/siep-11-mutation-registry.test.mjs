@@ -1127,9 +1127,9 @@ test("the ACTIVE runtime registry is v63, and a stale v19 import fails admission
   // schema (detail="boot", page) for the rule boot; v91 (provisional)
   // registers V5-RW02's three safe-stop run-store verbs and reseals update-deal.
   assert.equal(SCAC_MUTATION_REGISTRY_VERSION, "scac-mutation-registry.v101");
-  const v100SelectorDigest = fs.readFileSync(new URL("../src/scac-mutation-registry.v101.generated.js", import.meta.url), "utf8").match(
+  const v101SelectorDigest = fs.readFileSync(new URL("../src/scac-mutation-registry.v101.generated.js", import.meta.url), "utf8").match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
-  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, v100SelectorDigest);
+  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, v101SelectorDigest);
   assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV90.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
   assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV88.match(
@@ -3021,7 +3021,7 @@ test("the complete source-only frontier is byte-reproducible from frozen inputs"
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
   assert.equal(migrations.length, 107);
   assert.deepEqual(migrations.map(path => path.match(/migrations\/(\d{4})_/)[1]),
-    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545", "0547", "0548", "0549", "0550", "0551", "0552", "0553", "0555", "0557", "0558", "0559", "0560", "0561", "0562", "0563", "0564", "0566", "0567", "0568", "0569", "0570", "0572", "0576", "0578", "0581", "0582", "0584", "0585", "0588", "0589", "0600", "0603", "0609", "0614", "0618", "0625", "0627", "0629", "0701", "0705", "0707", "0709", "0718", "0720", "0722", "0723", "0725", "0727", "0730", "0731", "0734", "0737", "0739", "0741", "0743", "0745", "0748", "0750", "0755", "0763", "0769"]);
+    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545", "0547", "0548", "0549", "0550", "0551", "0552", "0553", "0555", "0557", "0558", "0559", "0560", "0561", "0562", "0563", "0564", "0566", "0567", "0568", "0569", "0570", "0572", "0576", "0578", "0581", "0582", "0584", "0585", "0588", "0589", "0600", "0603", "0609", "0614", "0618", "0625", "0627", "0629", "0701", "0705", "0707", "0709", "0718", "0720", "0722", "0723", "0725", "0727", "0730", "0731", "0734", "0737", "0739", "0741", "0743", "0745", "0748", "0750", "0755", "0763", "0767"]);
   assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 98);
   assert.equal(paths.length, 205);
   // 0502 IS DELIBERATELY ABSENT FROM THIS LIST. It is a hand-authored domain
@@ -3506,13 +3506,4 @@ test("the bound MCP fields are exactly what the runtime admission check compares
   const actual = body.slice(body.indexOf("const actual = {"), body.indexOf("};"));
   const compared = [...actual.matchAll(/^\s+([a-z_]+):/gm)].map(match => match[1]).sort();
   assert.deepEqual(compared, MCP_TOOL_BOUND_FIELDS.filter(field => field !== "ingress_key").sort());
-});
-test('unfinished-work is admitted by a forward successor without changing predecessor contracts',async()=>{
- const previous=frozenInventory('scac-mutation-registry.v100');
- const successor=frozenInventory('scac-mutation-registry.v101');
- assert.equal(previous.some(r=>r.ingress_key==='mcp-tool:unfinished-work'),false);
- const entry=successor.find(r=>r.ingress_key==='mcp-tool:unfinished-work');
- assert.equal(entry.write,false);
- assert.equal(SCAC_MUTATION_REGISTRY_VERSION,'scac-mutation-registry.v101');
- await assertRegisteredOperation('unfinished-work',TOOLS['unfinished-work'],{});
 });

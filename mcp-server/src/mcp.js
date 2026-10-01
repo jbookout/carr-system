@@ -634,7 +634,7 @@ function toolList(profile = "full") {
       // model can tell `find` from `reassign-deal` without parsing prose.
       annotations: profile === "doc" ? docToolAnnotations(t) : {
         readOnlyHint: !t.write,
-        destructiveHint: Boolean(t.write),
+        destructiveHint: t.destructiveHint ?? Boolean(t.write),
         idempotentHint: true,               // every write runs the idempotency envelope
         openWorldHint: false,
       },

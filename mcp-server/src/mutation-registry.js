@@ -4,7 +4,7 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v101 seals the unfinished system-work census contract and repaired producer source.
+// v101 admits partner catch-up and its scoped watermark store.
 // v100 seals the authenticated published Progress board directory and the current catalog.
 // v96 admits Doc suggestion producer, decision, and correction verbs.
 // v95 admits the permission-scoped Operations schedule read.

@@ -21,7 +21,7 @@ from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connec
 
 REPO = Path(__file__).resolve().parents[1]
 
-# 0769 installs System work v101 and seals Progress directory v100 as history.
+# 0767 installs catch-up v101 and seals Progress directory v100 as history.
 # Both are pinned: an unreviewed frontier or a rewritten predecessor must fail closed.
 LIVE_REGISTRY_VERSION = "scac-mutation-registry.v101"
 LIVE_REGISTRY_ORDINAL = 101
@@ -35,7 +35,7 @@ SEALED_PREDECESSOR_MIGRATION = (
     "migrations/0763_progress_directory_scac_successor.sql"
 )
 LIVE_REGISTRY_MIGRATION = (
-    "migrations/0769_system_work_scac_successor.sql"
+    "migrations/0767_doc_whats_new_scac_successor.sql"
 )
 
 LIVE_CATALOG_CURRENT_FN = f"ops.scac_mutation_catalog_v{LIVE_REGISTRY_ORDINAL}_current()"
