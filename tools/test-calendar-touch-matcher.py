@@ -72,6 +72,15 @@ class LiveExports(unittest.TestCase):
         # Freemail never becomes a domain match.
         self.assertEqual(sorted(by_domain), ["clinic-a.example.test"])
 
+    def test_vendor_export_is_an_exact_contact_source(self):
+        self.seed_live()
+        workbook(self.root / "DNA/Network/vendors.xlsx", "Vendors",
+                 ["ID", "Name", "Company", "Email"],
+                 [["V-1", "Synthetic Vendor", "Synthetic Service", "vendor@service.example.test"]])
+        emails, domains = matcher.load_record_contacts(root=str(self.root))
+        self.assertEqual(emails.get("vendor@service.example.test"), "V-1 / Synthetic Vendor")
+        self.assertIn("service.example.test", domains)
+
     def test_draft_flat_layout_is_not_read(self):
         workbook(self.root / "client-roster.xlsx", "Clients",
                  ["Client ID", "Name", "Practice / Entity", "Email"],

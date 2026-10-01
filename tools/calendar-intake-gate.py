@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail closed when a new calendar attendee has not completed intake.
+"""Check unmatched attendee intake independently from matched meeting capture.
 
 The local-calendar capture can prove an attendee address exists.  It cannot
 pretend that this has become a usable CARR record.  For each unmatched external
@@ -7,7 +7,8 @@ address, the companion intake worker must record three independently checkable
 steps: a local-mail search, open-source research, and either an existing or a
 new canonical record.  This gate is deliberately mechanical: no model decides
 whether the evidence is enough, and a missing receipt is a refusal, not an
-empty successful capture.
+empty successful intake. Capture callers may defer unfinished intake while the
+attendees remain in the proposals unknown list; malformed evidence still fails.
 
 Evidence is a small operational hand-off, not canonical business prose.  The
 worker which actually searches Joe's local mail and researches the contact owns
@@ -104,6 +105,8 @@ def main() -> int:
     ap.add_argument("--evidence", type=Path, required=True)
     ap.add_argument("--aggregate-only", action="store_true",
                     help="report counts only for stored command logs and receipts")
+    ap.add_argument("--defer-unmatched", action="store_true",
+                    help="leave unknowns in the proposals intake list without failing matched capture")
     args = ap.parse_args()
     try:
         gaps = unresolved(load_json(args.proposals, "calendar proposals"),
@@ -113,6 +116,9 @@ def main() -> int:
         print(f"calendar-intake-gate: REFUSE {message}", file=sys.stderr)
         return 78
     if gaps:
+        if args.defer_unmatched:
+            print(f"calendar-intake-gate: PENDING unresolved={len(gaps)}; retained in proposals unknown list")
+            return 0
         if args.aggregate_only:
             print(f"calendar-intake-gate: REFUSE unresolved={len(gaps)}", file=sys.stderr)
         else:

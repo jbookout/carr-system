@@ -74,5 +74,17 @@ with tempfile.TemporaryDirectory() as raw:
           and "new@example.com" not in p.stdout + p.stderr,
           p.stdout + p.stderr)
 
+    p = subprocess.run([sys.executable, str(SCRIPT), "--proposals", str(proposal_path),
+                        "--evidence", str(evidence_path), "--aggregate-only", "--defer-unmatched"],
+                       text=True, capture_output=True)
+    check("capture mode reports pending intake without refusing matched meetings",
+          p.returncode == 0 and "PENDING unresolved=1" in p.stdout
+          and "new@example.com" not in p.stdout + p.stderr)
+    evidence_path.write_text("not-json")
+    p = subprocess.run([sys.executable, str(SCRIPT), "--proposals", str(proposal_path),
+                        "--evidence", str(evidence_path), "--aggregate-only", "--defer-unmatched"],
+                       text=True, capture_output=True)
+    check("capture mode still refuses malformed evidence", p.returncode == 78)
+
 print("OK all checks passed" if not failed else "FAIL " + ", ".join(failed))
 raise SystemExit(bool(failed))

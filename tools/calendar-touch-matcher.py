@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Match calendar attendee emails to people already in the record.
 
-Reads the LOCAL Apple Calendar database (Full Disk Access required; EventKit is
-not usable here because macOS cannot prompt an unbundled binary), pulls attendee
-email addresses, and matches them against the client roster and lead registry.
+Consumes the local EventKit attendee dump on the unattended path, pulls attendee
+email addresses, and matches them against the live client, lead and vendor exports.
+The legacy direct database reader requires Full Disk Access.
 
 Produces INFERRED TOUCHES: dated evidence that contact happened, each carrying the
 event that proves it and a confidence level. Nothing is written to the record —
@@ -50,6 +50,7 @@ GROUP_CONTAINER = os.path.expanduser(
 # The relative paths are the exporters' own ROSTER_REL / REGISTRY_REL
 # (exporters/targets.py); tools/test-calendar-touch-matcher.py pins them so the
 # two cannot drift apart silently again.
+VENDORS_REL = "DNA/Network/vendors.xlsx"
 ROSTER_REL = "DNA/Clients/client-roster.xlsx"
 REGISTRY_REL = "DNA/Leads/lead-registry.xlsx"
 INTERNAL_DOMAIN = "carr.us"
@@ -63,14 +64,14 @@ def export_home():
 
 
 class NoRecordContacts(RuntimeError):
-    """The roster and registry yielded no contact at all: a source failure."""
+    """The contact exports yielded no contact at all: a source failure."""
 FREEMAIL = {"gmail.com", "icloud.com", "yahoo.com", "hotmail.com", "outlook.com", "aol.com"}
 
 
 def load_record_contacts(snapshot=None, root=None):
-    """Return (email -> label) and (domain -> label) from the roster and registry.
+    """Return (email -> label) and (domain -> label) from the client, lead and vendor exports.
 
-    Without a snapshot this reads the LIVE exports under ``root`` (default: the
+    Without a snapshot this reads client, lead and vendor LIVE exports under ``root`` (default: the
     exporters' EXPORT_HOME) and raises NoRecordContacts when they yield nothing,
     because zero known contacts is a broken source, never an empty book: read as
     data it turns every attendee into an unknown.
@@ -128,6 +129,7 @@ def load_record_contacts(snapshot=None, root=None):
 
     ingest(ROSTER_REL, "Clients", "Client ID", "Name", "Practice / Entity", "Email")
     ingest(REGISTRY_REL, "Registry", "Lead ID", "Contact Name", "Practice", "Email")
+    ingest(VENDORS_REL, "Vendors", "ID", "Name", "Company", "Email")
     if not by_email:
         detail = "; ".join(missing) or "no row carried an email address"
         raise NoRecordContacts(f"record contacts: none loaded from the live exports ({detail})")
@@ -271,13 +273,14 @@ def main():
         return 3
 
     latest, events, upcoming = {}, defaultdict(list), {}
-    for email, day, title, when in rows:
+    for email, day, title, when in sorted(rows, key=lambda row: (row[1], row[2]), reverse=True):
         if when == "upcoming":
             upcoming.setdefault(email, (day, title))
             continue
         if email not in latest:
             latest[email] = day
-        events[email].append((day, title))
+        if (day, title) not in events[email]:
+            events[email].append((day, title))
 
     exact, domain, unknown, internal = {}, {}, {}, set()
     for email in latest:
@@ -308,7 +311,7 @@ def main():
             # caught by an actual write attempt, not by reading the code.
             "exact": [{"email": e, "ref": _ref_of(exact[e]),
                        "label": str(exact[e]), "last_seen": latest[e],
-                       "events": [{"day": d, "title": t} for d, t in events[e][:5]]}
+                       "events": [{"day": d, "title": t} for d, t in events[e]]}
                       for e in exact],
             "domain": [{"email": e, "org": str(domain[e]), "last_seen": latest[e]} for e in domain],
             "unknown": [{"email": e, "domain": d, "last_seen": latest[e]}

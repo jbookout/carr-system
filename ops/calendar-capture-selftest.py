@@ -175,7 +175,7 @@ check("canary bypasses normal intake and emits only its strict aggregate",
       p.returncode == 0 and 'calendar-capture: canary-result' in p.stdout)
 
 # 7. One unresolved external attendee cannot suppress an independently proven
-# exact match.  The intake still refuses the run; only the exact match is
+# exact match or refuse its capture. Only the exact match is
 # eligible for the canonical activity call.  All identities here are synthetic.
 mixed = {
     "counts": {"emails": 2, "exact": 1, "domain": 0, "unknown": 1,
@@ -196,12 +196,12 @@ shutil.copy2(REPO / "tools" / "calendar-intake-gate.py",
 (root / "run.sh").chmod(0o755)
 p = run(root, stub)
 calls = (root / "out" / "canonical-calls.txt")
-check("unresolved intake still refuses completion", p.returncode == 78,
+check("pending unmatched intake does not refuse exact capture", p.returncode == 0,
       f"exit={p.returncode}")
 check("unresolved intake preserves the independent exact touch",
       calls.is_file() and calls.read_text().splitlines() == ["log-activity"],
       f"calls={calls.read_text() if calls.exists() else 'none'}")
-check("live refusal output is aggregate-only",
+check("live capture output is aggregate-only",
       not any(value in p.stdout + p.stderr for value in (
           "new@example.test", "known@example.test", "C-TEST", "Synthetic meeting")))
 (root / "run.sh").write_text(
@@ -211,6 +211,89 @@ p = run(root, stub)
 check("failed exact write takes precedence without leaking call output",
       p.returncode == 1 and not any(value in p.stdout + p.stderr for value in (
           "new@example.test", "known@example.test", "C-TEST", "Synthetic meeting")))
+
+# Multiple synthetic meetings must each reach client, lead and vendor records.
+# Use the real matcher and workbook reader, rather than precomputed proposals.
+import datetime
+import openpyxl
+root, stub = fixture(appends="events scanned: 9; carrying attendees: 9\nexit=0",
+                     dump_json=json.dumps({
+                         f"Synthetic meeting {i}|{datetime.date.today().isoformat()}": [email]
+                         for i, email in enumerate([
+                             "client@clinic.example.test", "lead@practice.example.test",
+                             "vendor@service.example.test", "client@clinic.example.test",
+                             "client@clinic.example.test", "client@clinic.example.test",
+                             "client@clinic.example.test", "client@clinic.example.test",
+                             "new@unknown.example.test"])
+                     }))
+shutil.copy2(REPO / "tools/calendar-touch-matcher.py", root / "tools/calendar-touch-matcher.py")
+shutil.copy2(REPO / "tools/calendar-intake-gate.py", root / "tools/calendar-intake-gate.py")
+(root / ".venv").symlink_to(sys.prefix, target_is_directory=True)
+(root / "exporters").mkdir()
+(root / "exporters/__init__.py").write_text("")
+(root / "exporters/common.py").write_text(f"EXPORT_HOME = {str(root / 'exports')!r}\n")
+for rel, sheet, headers, row in [
+    ("DNA/Clients/client-roster.xlsx", "Clients", ["Client ID", "Name", "Practice / Entity", "Email"],
+     ["C-TEST", "Synthetic Client", "Synthetic Clinic", "client@clinic.example.test"]),
+    ("DNA/Leads/lead-registry.xlsx", "Registry", ["Lead ID", "Contact Name", "Practice", "Email"],
+     ["L-TEST", "Synthetic Lead", "Synthetic Practice", "lead@practice.example.test"]),
+    ("DNA/Network/vendors.xlsx", "Vendors", ["ID", "Name", "Company", "Email"],
+     ["V-TEST", "Synthetic Vendor", "Synthetic Service", "vendor@service.example.test"]),
+]:
+    path = root / "exports" / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = sheet
+    ws.append(headers)
+    ws.append(row)
+    wb.save(path)
+(root / "run.sh").write_text(
+    "#!/usr/bin/env python3\nimport json,sys\n"
+    "with open('out/activity-args.jsonl','a') as f: f.write(sys.argv[3]+'\\n')\n"
+    "print('{\"ok\":true}')\n")
+(root / "run.sh").chmod(0o755)
+p = run(root, stub)
+arg_path = root / "out/activity-args.jsonl"
+activities = [json.loads(line) for line in arg_path.read_text().splitlines()] if arg_path.exists() else []
+check("every synthetic meeting reaches its matched client, lead or vendor despite an unknown",
+      p.returncode == 0 and len(activities) == 8
+      and sorted(a["ref"] for a in activities) == ["C-TEST"] * 6 + ["L-TEST", "V-TEST"],
+      f"exit={p.returncode}, touches={len(activities)}")
+check("unmatched list retains the unknown without assigning a touch",
+      json.loads((root / "out/calendar-touch-proposals.json").read_text())["counts"]["unknown"] == 1)
+check("distinct same-day meetings have distinct retry keys",
+      len({a["idempotency_key"] for a in activities}) == 8)
+p = run(root, stub)
+repeated = [json.loads(line) for line in arg_path.read_text().splitlines()] if arg_path.exists() else []
+check("repeat capture keeps identical event keys and activity payloads",
+      len(repeated) == 16 and repeated[:8] == repeated[8:])
+p = run(root, stub, "--dry-run", "--receipt-safe")
+check("dry-run reports would-write count without a canonical call or identity output",
+      p.returncode == 0 and "would_write=8" in p.stdout
+      and len(arg_path.read_text().splitlines()) == 16
+      and not any(x in p.stdout + p.stderr for x in ("@", "C-TEST", "L-TEST", "V-TEST", "Synthetic meeting")))
+
+# Execute the actual nightly calendar block with a fake step wrapper; no other
+# nightly step, scheduler, database or credential is run.
+nightly = (REPO / "bin/nightly.sh").read_text()
+block = nightly[nightly.index("# Added 2026-08-06 (loop #180)"):nightly.index("# MAIL, loop #169")]
+shutil.copy2(SCRIPT, root / "bin/calendar-eventkit-capture.sh")
+(root / "bin/calendar-eventkit-capture.sh").chmod(0o755)
+(root / "bin/archive-calendar.sh").write_text("#!/bin/sh\nexit 0\n")
+(root / "bin/archive-calendar.sh").chmod(0o755)
+env = {**os.environ, "CARR_REPO": str(root), "PATH": str(stub) + os.pathsep + os.environ.get("PATH", ""),
+       "CARR_CALENDAR_CAPTURE_WAIT_SECONDS": "1"}
+p = subprocess.run(["/bin/zsh", "-c", 'step() { shift; "$@"; }\n' + block],
+                   cwd=root, env=env, capture_output=True, text=True, timeout=15)
+check("nightly calendar step executes the capture and continues with unmatched pending",
+      p.returncode == 0 and "source=eventkit mode=live" in p.stdout
+      and len(arg_path.read_text().splitlines()) == 24)
+
+# Invalid intake evidence still fails, even when unknowns are deferred.
+(root / "out/calendar-intake-evidence.json").write_text("not-json")
+p = run(root, stub)
+check("malformed intake ledger still refuses capture completion", p.returncode == 78)
 
 # 8. Matcher diagnostics can contain attendee data. The launcher and Control
 # Plane persist command output, so only fixed failure classes may leave this job.

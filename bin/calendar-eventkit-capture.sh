@@ -42,11 +42,12 @@
 #   bin/calendar-eventkit-capture.sh --dry-run --receipt-safe  # aggregate-only receipt output
 #   bin/calendar-eventkit-capture.sh --days 14  # widen the window
 set -u
+umask 077
 
 REPO="${CARR_REPO:-$HOME/carr-system}"
 cd "$REPO" || { echo "calendar-capture: FAIL cannot reach $REPO" >&2; exit 1; }
 
-APP="$REPO/tools/CARR Calendar Access.app"
+APP="${CARR_CALENDAR_ACCESS_APP:-$REPO/tools/CARR Calendar Access.app}"
 OUTPUT_ROOT="${CARR_CALENDAR_OUTPUT_ROOT:-$REPO/out}"
 ACCESS_LOG="$OUTPUT_ROOT/calendar-access.log"
 PY="$REPO/.venv/bin/python"
@@ -110,7 +111,7 @@ fi
 # CARR_REPO at a temp root holding a stub bundle and no build tooling; without
 # this guard the rebuild fires there, fails, and aborts the run before the
 # behavior under test is ever reached.
-if [ -x "$REPO/bin/build-calendar-access.sh" ] && [ -f "$REPO/tools/calendar-access-stub.c" ] \
+if [ "$APP" = "$REPO/tools/CARR Calendar Access.app" ] && [ -x "$REPO/bin/build-calendar-access.sh" ] && [ -f "$REPO/tools/calendar-access-stub.c" ] \
    && { [ ! -x "$APP/Contents/MacOS/carr-calendar-access" ] || ! codesign -v "$APP" 2>/dev/null; }; then
   echo "calendar-capture: bundle needs building for this machine — running bin/build-calendar-access.sh"
   "$REPO/bin/build-calendar-access.sh" || {
@@ -204,7 +205,7 @@ fi
 # Exact matches have their own evidence and deterministic idempotency keys.
 # Process them even when a separate unknown attendee still requires intake.
 "$PY" - "$MATCH_JSON" "$DRY" "$DAYS" "${SCANNED:-0}" "$RECEIPT_SAFE" <<'PYEOF'
-import json, subprocess, sys, pathlib
+import hashlib, json, subprocess, sys
 path, dry, days, scanned, receipt_safe = (sys.argv[1], sys.argv[2] == "1", sys.argv[3],
                                           sys.argv[4], sys.argv[5] == "1")
 d = json.load(open(path))
@@ -218,33 +219,39 @@ if dry and not receipt_safe:
     for m in d["domain"]:
         print(f"  domain-only, NOT logged  {m['email']} -> {m['org'][:50]}")
 
-if not d["exact"]:
+touches = [(e, ev) for e in d["exact"] for ev in (e["events"] or
+           [{"day": e["last_seen"], "title": "(untitled)"}])]
+if not touches:
     print("calendar-capture: no exact matches in this window — nothing to log")
     print(f"calendar-capture: source=eventkit mode={'shadow' if dry else 'live'} "
           f"scanned={scanned} exact=0 domain={c['domain']} unknown={c['unknown']} "
-          "writes=0 failed=0")
+          "writes=0 failed=0 would_write=0")
     sys.exit(0)
 
 if dry:
     if not receipt_safe:
-        for e in d["exact"]:
-            print(f"  would log touch  {e['ref']}  via {e['email']}  ({e['last_seen']})")
+        for e, ev in touches:
+            print(f"  would log touch  {e['ref']}  via {e['email']}  ({ev.get('day', e['last_seen'])})")
     print(f"calendar-capture: source=eventkit mode=shadow scanned={scanned} "
-          f"exact={c['exact']} domain={c['domain']} unknown={c['unknown']} writes=0 failed=0")
+          f"exact={c['exact']} domain={c['domain']} unknown={c['unknown']} writes=0 failed=0 "
+          f"would_write={len(touches)}")
     sys.exit(0)
 
-repo = pathlib.Path(__file__).resolve().parent if False else pathlib.Path.cwd()
 failed = 0
 written = 0
-for e in d["exact"]:
-    ev = (e["events"] or [{}])[0]
+for e, ev in touches:
     # log-activity with kind "meeting", NOT stamp-touch. stamp-touch is shorthand
     # for a call or a text and its enum accepts only those two; a calendar meeting
     # is neither, and the first live launchd fire was refused for exactly that —
     # caught by the required-argument guard rather than written wrong.
     day = ev.get("day", e["last_seen"])
+    # Event identity is already title+day in the EventKit dump. Include the
+    # matched subject so different meetings and record destinations never share
+    # one attendee/day key. Retrying this event sends the identical payload.
+    event_identity = json.dumps([e["ref"], e["email"], day, ev.get("title", "(untitled)")],
+                                ensure_ascii=False, separators=(",", ":"))
     args = json.dumps({
-        "idempotency_key": f"calcap-{e['email']}-{e['last_seen']}",
+        "idempotency_key": "calcap-event-v1-" + hashlib.sha256(event_identity.encode()).hexdigest(),
         "ref": e["ref"],
         "kind": "meeting",
         "occurred_at": day,
@@ -276,22 +283,22 @@ sys.exit(1 if failed else 0)
 PYEOF
 CAPTURE_STATUS=$?
 
-# An address that does not resolve in the record is not a successful capture.
-# It starts a deterministic intake: local-mail search, research, then an
-# evidence-backed record result.  Until the intake worker supplies all three
-# receipts, this run refuses completion.  --dry-run remains read-only and
-# prints candidates without requiring (or creating) evidence.
+# Unmatched attendees remain in the proposals unknown list for local-mail
+# search, research and a canonical record. Pending intake cannot invalidate
+# independently matched meetings. Invalid evidence remains a hard failure;
+# the standalone intake gate still requires all three receipts by default.
+# --dry-run neither consumes evidence nor writes canonical records.
 INTAKE_STATUS=0
 if [ "$DRY" -ne 1 ]; then
   "$PY" "$REPO/tools/calendar-intake-gate.py" \
           --proposals "$MATCH_JSON" --evidence "$INTAKE_EVIDENCE" \
-          --aggregate-only || INTAKE_STATUS=$?
+          --aggregate-only --defer-unmatched || INTAKE_STATUS=$?
 fi
 if [ "$CAPTURE_STATUS" -ne 0 ]; then
   echo "calendar-capture: FAIL one or more exact touches were not logged" >&2
   exit "$CAPTURE_STATUS"
 fi
 if [ "$INTAKE_STATUS" -ne 0 ]; then
-  echo "calendar-capture: REFUSE unmatched attendee intake is incomplete; no successful completion receipt" >&2
+  echo "calendar-capture: REFUSE invalid unmatched attendee intake evidence" >&2
   exit 78
 fi
