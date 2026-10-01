@@ -174,9 +174,12 @@ def siep11_gate():
 def require_loopback(dsn: str) -> None:
     from psycopg.conninfo import conninfo_to_dict
 
+    # Loopback only, like every db-gate: ops/ci.sh refuses a non-loopback DSN
+    # before any gate runs, and this repeats it for direct invocation. Hosted
+    # CI's throwaway service carries a password, so a password is allowed.
     info = conninfo_to_dict(dsn)
-    if info.get("host") not in ("127.0.0.1", "localhost") or "password" in info:
-        raise RuntimeError("requires a credential-free disposable loopback database")
+    if info.get("host") not in ("127.0.0.1", "localhost", "::1"):
+        raise RuntimeError("requires a disposable loopback database")
 
 
 def main() -> int:
