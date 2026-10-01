@@ -35,6 +35,9 @@
 //               minus humanOnly, same as the agent-token door, never a wider
 //               grant than that.
 //   /pipeline/changes  OAuth-protected Deal Room event cursor + live presence.
+//   /doc/mcp    Partner-only Doc brokerage tools, behind the same OAuth
+//               provider. The resource path pins a closed capability profile;
+//               request parameters cannot expand it. No machine-token door.
 //   /authorize  Google sign-in starts (our code — see google-oidc.js)
 //   /callback   Google returns; identity verified; allow-list applied; issue
 //   /token      implemented by the provider
@@ -212,7 +215,7 @@ const defaultHandler = {
   },
 };
 
-// Both protected routes receive the same provider-verified ctx.props. The
+// Protected routes receive the same provider-verified ctx.props. The
 // pipeline function itself accepts an actor and query client, so the Deal Room
 // session-cookie gate mounts it without changing its contract.
 async function pipelineApi(request, env, actor) {
@@ -251,7 +254,7 @@ function captureHandler(env) {
 const protectedApiHandler = {
   async fetch(request, env, ctx) {
     const pathname = new URL(request.url).pathname;
-    if (pathname === "/mcp") return mcpApiHandler.fetch(request, env, ctx);
+    if (pathname === "/mcp" || pathname === "/doc/mcp") return mcpApiHandler.fetch(request, env, ctx);
     if (pathname !== "/pipeline/changes") return json({ error: "not_found" }, 404);
     // THE GRANT DOOR, WITH THE SERVER'S WITNESS. `actorFromProps` is no longer
     // exported (amendment 8, fourth correction round): a grant's props are an
@@ -585,7 +588,7 @@ function continuityActorFor(request, env) {
 // ---------- the provider ----------
 
 const oauthOptions = {
-  apiRoute: ["/mcp", "/pipeline/changes"],
+  apiRoute: ["/mcp", "/doc/mcp", "/pipeline/changes"],
   apiHandler: protectedApiHandler,
   defaultHandler,
 

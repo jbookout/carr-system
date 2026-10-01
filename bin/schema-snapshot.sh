@@ -1228,7 +1228,7 @@ fi
 
 
 PROGRESS_DIRECTORY_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0757_progress_directory_scac_successor.sql')" \
+  "select exists (select 1 from schema_migrations where filename='0763_progress_directory_scac_successor.sql')" \
   2>/dev/null)"
 case "$PROGRESS_DIRECTORY_REGISTRY_APPLIED" in
   t|f) ;;
@@ -1236,6 +1236,18 @@ case "$PROGRESS_DIRECTORY_REGISTRY_APPLIED" in
 esac
 if [ "$PROGRESS_DIRECTORY_REGISTRY_APPLIED" = t ] && [ "$PROPERTY_EVIDENCE_REGISTRY_APPLIED" != t ]; then
   echo "schema-snapshot: Progress directory v100 is applied without v99 predecessor" >&2
+  exit 1
+fi
+
+WHATS_NEW_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0767_doc_whats_new_scac_successor.sql')" \
+  2>/dev/null)"
+case "$WHATS_NEW_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read catch-up v101 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$WHATS_NEW_REGISTRY_APPLIED" = t ] && [ "$PROGRESS_DIRECTORY_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: catch-up v101 is applied without v100 predecessor" >&2
   exit 1
 fi
 
@@ -3043,6 +3055,17 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                                        SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v99'"
                                        SCAC_FULL_SET_SEAL_COUNT=99
                                        SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v100_current()"
+                                     if [ "$WHATS_NEW_REGISTRY_APPLIED" = t ]; then
+                                       SCAC_CURRENT_NUMBER=101
+                                       SCAC_VERSION_COUNT=101
+                                       SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v101'")"
+                                       SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v101'")"
+                                       SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v101.generated.js"
+                                       SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v101'"
+                                       SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v100'"
+                                       SCAC_FULL_SET_SEAL_COUNT=100
+                                       SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v101_current()"
+                                     fi
                                      fi
                                      fi
                                      fi

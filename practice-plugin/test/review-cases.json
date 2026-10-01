@@ -1,0 +1,403 @@
+[
+  {
+    "name": "positive dental room-by-room plan",
+    "tool": "plan_practice_space",
+    "input": {
+      "practice_type": "dental",
+      "providers": 2,
+      "operatories": 4,
+      "exam_rooms": 0
+    },
+    "error": false,
+    "expected": {
+      "practice_type": "dental",
+      "usable_square_feet": {
+        "low": 1875,
+        "high": 2835
+      },
+      "rentable_square_feet": {
+        "low": 2063,
+        "high": 3402
+      },
+      "rooms": [
+        {
+          "room": "Operatories",
+          "count": 4,
+          "per_room_square_feet": {
+            "low": 110,
+            "high": 140
+          },
+          "total_square_feet": {
+            "low": 440,
+            "high": 560
+          }
+        },
+        {
+          "room": "Provider workrooms",
+          "count": 2,
+          "per_room_square_feet": {
+            "low": 80,
+            "high": 100
+          },
+          "total_square_feet": {
+            "low": 160,
+            "high": 200
+          }
+        },
+        {
+          "room": "Reception",
+          "count": 1,
+          "per_room_square_feet": {
+            "low": 160,
+            "high": 220
+          },
+          "total_square_feet": {
+            "low": 160,
+            "high": 220
+          }
+        },
+        {
+          "room": "Waiting",
+          "count": 2,
+          "per_room_square_feet": {
+            "low": 100,
+            "high": 150
+          },
+          "total_square_feet": {
+            "low": 200,
+            "high": 300
+          }
+        },
+        {
+          "room": "Sterilization and lab",
+          "count": 1,
+          "per_room_square_feet": {
+            "low": 160,
+            "high": 240
+          },
+          "total_square_feet": {
+            "low": 160,
+            "high": 240
+          }
+        },
+        {
+          "room": "Staff support",
+          "count": 2,
+          "per_room_square_feet": {
+            "low": 60,
+            "high": 90
+          },
+          "total_square_feet": {
+            "low": 120,
+            "high": 180
+          }
+        },
+        {
+          "room": "Storage",
+          "count": 1,
+          "per_room_square_feet": {
+            "low": 100,
+            "high": 160
+          },
+          "total_square_feet": {
+            "low": 100,
+            "high": 160
+          }
+        },
+        {
+          "room": "Toilets",
+          "count": 1,
+          "per_room_square_feet": {
+            "low": 100,
+            "high": 140
+          },
+          "total_square_feet": {
+            "low": 100,
+            "high": 140
+          }
+        },
+        {
+          "room": "Mechanical support",
+          "count": 1,
+          "per_room_square_feet": {
+            "low": 60,
+            "high": 100
+          },
+          "total_square_feet": {
+            "low": 60,
+            "high": 100
+          }
+        },
+        {
+          "room": "Circulation",
+          "count": 1,
+          "per_room_square_feet": {
+            "low": 375,
+            "high": 735
+          },
+          "total_square_feet": {
+            "low": 375,
+            "high": 735
+          }
+        }
+      ],
+      "assumptions": [
+        "Original V0 planning allowances dated 2026-10-01; square feet are approximate.",
+        "Usable area includes circulation of 25% to 35% of room area.",
+        "Rentable area adds an assumed 10% to 20% common-area load to usable area."
+      ],
+      "limitations": [
+        "Outpatient planning only; specialized imaging, surgery and inpatient uses need a separate program.",
+        "An architect must verify equipment clearances, accessibility, code, utilities and clinical workflow before selecting space."
+      ],
+      "notice": "Educational estimate only; not legal, financial, or design advice."
+    }
+  },
+  {
+    "name": "positive dated Mobile occupancy estimate",
+    "tool": "estimate_occupancy_cost",
+    "input": {
+      "square_feet": 2000,
+      "market": "mobile_downtown",
+      "lease_type": "full_service"
+    },
+    "error": false,
+    "expected": {
+      "square_feet": 2000,
+      "market": "mobile_downtown",
+      "lease_type": "full_service",
+      "components": [
+        {
+          "component": "Base rent",
+          "annual_rate": {
+            "low": 16.88,
+            "high": 25.32
+          },
+          "annual_cost": {
+            "low": 33760.0,
+            "high": 50640.0
+          },
+          "basis": "Estimate: survey anchor times 0.8 to 1.2; source data 2024-12-31, assumptions 2026-10-01."
+        },
+        {
+          "component": "Pass-through operating costs",
+          "annual_rate": {
+            "low": 0,
+            "high": 0
+          },
+          "annual_cost": {
+            "low": 0,
+            "high": 0
+          },
+          "basis": "Estimate: bundled with base rent in this full-service scenario; verify actual inclusions. Assumption 2026-10-01."
+        },
+        {
+          "component": "Unbundled utilities",
+          "annual_rate": {
+            "low": 1,
+            "high": 3
+          },
+          "annual_cost": {
+            "low": 2000,
+            "high": 6000
+          },
+          "basis": "Estimate: original unbundled utilities allowance, not a measured market rate. Assumption 2026-10-01; survey context 2024-12-31."
+        }
+      ],
+      "annual_cost": {
+        "low": 35760,
+        "high": 56640
+      },
+      "monthly_cost": {
+        "low": 2980,
+        "high": 4720
+      },
+      "source": {
+        "title": "Downtown Mobile Alliance Office Market Overview, year end 2024",
+        "data_date": "2024-12-31",
+        "retrieved_date": "2026-10-01",
+        "observed_annual_rate": 21.1,
+        "method": "General-office mixed-service survey anchor; estimated sensitivity of minus/plus 20%. Lease allocations and utilities are original assumptions dated 2026-10-01, not observed quotes."
+      },
+      "assumptions": [
+        "Every range is an estimate in USD per rentable square foot per year, or USD for the stated period.",
+        "The report is mixed general-office asking rent; 81.22% of reported asking rates are full service.",
+        "Lease-type offsets and utilities are scenario assumptions, not observed healthcare expense data."
+      ],
+      "limitations": [
+        "Source data are dated 2024-12-31; this is not a current quote or a medical-office market survey.",
+        "Only Downtown Mobile is supported; other Gulf Coast markets need authorized dated sources.",
+        "Excludes build-out, TI financing, equipment, deposits, moving costs, parking and practice operations; confirm lease inclusions."
+      ],
+      "notice": "Educational estimate only; not legal, financial, or design advice."
+    }
+  },
+  {
+    "name": "positive five-year lease versus buy assumptions",
+    "tool": "compare_lease_buy",
+    "input": {
+      "square_feet": 2000,
+      "annual_lease_rate": 25,
+      "purchase_price": 600000,
+      "down_payment_percent": 20,
+      "interest_rate_percent": 6,
+      "loan_term_years": 20,
+      "holding_years": 5,
+      "annual_owner_cost": 12000,
+      "closing_cost_percent": 3,
+      "sale_cost_percent": 6
+    },
+    "error": false,
+    "expected": {
+      "assumptions": {
+        "square_feet": 2000,
+        "annual_lease_rate": 25,
+        "purchase_price": 600000,
+        "down_payment_percent": 20,
+        "interest_rate_percent": 6,
+        "loan_term_years": 20,
+        "holding_years": 5,
+        "annual_owner_cost": 12000,
+        "closing_cost_percent": 3,
+        "sale_cost_percent": 6
+      },
+      "monthly_loan_payment": 3438.87,
+      "upfront_buy_cash": 138000,
+      "lease_total_cash": 250000,
+      "buy_total_cash_before_sale": 404332.14,
+      "remaining_loan_balance": 407518.07,
+      "net_sale_proceeds": 156481.93,
+      "buy_net_cost_after_sale": 247850.22,
+      "limitations": [
+        "Scenario comparison only; neither option is recommended automatically.",
+        "Assumes level lease rent, fixed-rate fully amortizing debt, no appreciation and sale at the input purchase price.",
+        "Ignores tax effects, opportunity cost, inflation, major repairs, build-out and financing eligibility; compare equivalent lease/owner cost inclusions."
+      ],
+      "notice": "Educational estimate only; not legal, financial, or design advice."
+    }
+  },
+  {
+    "name": "positive dental negotiable lease checklist",
+    "tool": "get_healthcare_lease_checklist",
+    "input": {
+      "practice_type": "dental"
+    },
+    "error": false,
+    "expected": {
+      "practice_type": "dental",
+      "items": [
+        {
+          "topic": "Tenant improvements",
+          "questions": [
+            "What TI allowance is available, when is it paid, and who covers overruns?",
+            "Who approves plans, owns improvements and handles restoration at lease end?"
+          ]
+        },
+        {
+          "topic": "Exclusivity",
+          "questions": [
+            "Can the landlord agree to a defined healthcare-use exclusivity, and what are its exceptions and remedies?"
+          ]
+        },
+        {
+          "topic": "Permitted use",
+          "questions": [
+            "Does the use clause cover the intended services and future practice changes, subject to zoning and licensing?"
+          ]
+        },
+        {
+          "topic": "Assignment and practice sale",
+          "questions": [
+            "Can the lease transfer with a practice sale or ownership change, and when is consent required?",
+            "Is the original tenant or guarantor released after an approved assignment?"
+          ]
+        },
+        {
+          "topic": "HVAC and plumbing",
+          "questions": [
+            "Can HVAC capacity, after-hours service, plumbing, electrical loads and equipment connections support the proposed medical use?",
+            "Who pays for upgrades, maintenance, repairs and replacement?"
+          ]
+        },
+        {
+          "topic": "Timing and recurring costs",
+          "questions": [
+            "When does rent start relative to delivery, permits and build-out?",
+            "Which operating costs, tax increases, utilities and capital expenses can pass through, with what caps and audit rights?"
+          ]
+        },
+        {
+          "topic": "Access and exit",
+          "questions": [
+            "What parking, accessibility, signage, renewal, casualty and early-exit terms are negotiable?"
+          ]
+        },
+        {
+          "topic": "Dental equipment",
+          "questions": [
+            "Can suction, compressed air, sterilization and chair plumbing be installed with required permits?"
+          ]
+        }
+      ],
+      "limitations": [
+        "Every term is negotiable; the checklist does not determine enforceability or replace a qualified attorney.",
+        "Verify zoning, permits, licensing and physical suitability with the relevant professionals."
+      ],
+      "notice": "Educational estimate only; not legal, financial, or design advice."
+    }
+  },
+  {
+    "name": "positive explicit actual-search help",
+    "tool": "get_broker_search_help",
+    "input": {
+      "request": "actual_search_help"
+    },
+    "error": false,
+    "expected": {
+      "description": "CARR is a commercial real estate brokerage that represents healthcare tenants and buyers.",
+      "informational_page": "https://example.com/carr/practice-search-information",
+      "limitations": [
+        "Placeholder informational page; a published page must be configured before submission.",
+        "No property search, contact capture or message is performed by this tool."
+      ],
+      "notice": "Educational estimate only; not legal, financial, or design advice."
+    }
+  },
+  {
+    "name": "negative unsolicited broker suggestion",
+    "tool": "get_broker_search_help",
+    "input": {
+      "request": "general_education"
+    },
+    "error": true,
+    "expected": {
+      "error": "Use this informational tool only after an explicit request for help with an actual property search."
+    }
+  },
+  {
+    "name": "negative unsupported market",
+    "tool": "estimate_occupancy_cost",
+    "input": {
+      "square_feet": 2000,
+      "market": "pensacola",
+      "lease_type": "full_service"
+    },
+    "error": true,
+    "expected": {
+      "error": "Unsupported planning input. Only the dated Downtown Mobile table is available; do not supply contact or listing data."
+    }
+  },
+  {
+    "name": "negative contact and licensed-listing payload",
+    "tool": "get_healthcare_lease_checklist",
+    "input": {
+      "practice_type": "medical",
+      "contact": "synthetic-forbidden-field",
+      "listing_data": "synthetic-restricted-fixture"
+    },
+    "error": true,
+    "expected": {
+      "error": "Invalid planning input. Use only the declared fields and supported numeric ranges; do not supply personal or listing data."
+    }
+  }
+]
