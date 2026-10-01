@@ -64,23 +64,74 @@ test("Doc cannot override capture dedup with caller-asserted confirmation", asyn
   assert.equal(JSON.parse(result.content[0].text).error, "not_in_profile");
 });
 
-test("Doc payload guards judge the same coerced values the handlers receive", async () => {
+test("Doc refuses every accepted true encoding before capture database access", async () => {
   const connect = Pool.prototype.connect;
-  Pool.prototype.connect = async () => { throw new Error("synthetic_database_boundary_reached"); };
+  let connections = 0;
+  Pool.prototype.connect = async () => {
+    connections++;
+    throw new Error("synthetic_database_boundary_reached");
+  };
   try {
-    for (const force_new of ["true", " TRUE "]) {
+    for (const force_new of [true, "true", "TRUE", " True ", "\ttrue\n"]) {
       const { result } = await rpc("/doc/mcp", "tools/call", { name: "log-capture", arguments: {
         idempotency_key: "d170d000-0000-4000-8000-000000000008", session: "Synthetic source",
         status: "queued", force_new,
       } });
-      assert.equal(JSON.parse(result.content[0].text).error, "not_in_profile");
+      assert.equal(JSON.parse(result.content[0].text).error, "not_in_profile", JSON.stringify(force_new));
+      assert.equal(connections, 0, "a refused override must never open the writer connection");
     }
-    const { result } = await rpc("/doc/mcp", "tools/call", { name: "log-activity", arguments: {
-      idempotency_key: "d170d000-0000-4000-8000-000000000009", ref: "SYNTHETIC",
-      kind: "note", summary: "Synthetic fixture",
-      links: JSON.stringify([{ from_ref: "SYNTHETIC-A", to_ref: "SYNTHETIC-B", kind: "knows" }]),
-    } });
-    assert.equal(JSON.parse(result.content[0].text).error, "not_in_profile");
+  } finally {
+    Pool.prototype.connect = connect;
+  }
+});
+
+test("Doc refuses array and serialized activity relationships before database access", async () => {
+  const connect = Pool.prototype.connect;
+  let connections = 0;
+  Pool.prototype.connect = async () => {
+    connections++;
+    throw new Error("synthetic_database_boundary_reached");
+  };
+  try {
+    const relationships = [{ from_ref: "SYNTHETIC-A", to_ref: "SYNTHETIC-B", kind: "knows" }];
+    for (const links of [relationships, JSON.stringify(relationships), ` \n${JSON.stringify(relationships)}\t`]) {
+      const { result } = await rpc("/doc/mcp", "tools/call", { name: "log-activity", arguments: {
+        idempotency_key: "d170d000-0000-4000-8000-000000000009", ref: "SYNTHETIC",
+        kind: "note", summary: "Synthetic fixture", links,
+      } });
+      assert.equal(JSON.parse(result.content[0].text).error, "not_in_profile", JSON.stringify(links));
+      assert.equal(connections, 0, "a refused relationship must never open the writer connection");
+    }
+  } finally {
+    Pool.prototype.connect = connect;
+  }
+});
+
+test("Doc still admits false capture overrides and empty activity links", async () => {
+  const connect = Pool.prototype.connect;
+  let connections = 0;
+  Pool.prototype.connect = async () => {
+    connections++;
+    throw new Error("synthetic_database_boundary_reached");
+  };
+  try {
+    for (const force_new of [false, "false", " FALSE "]) {
+      const { result } = await rpc("/doc/mcp", "tools/call", { name: "log-capture", arguments: {
+        idempotency_key: "d170d000-0000-4000-8000-000000000010", session: "Synthetic source",
+        status: "queued", force_new,
+      } });
+      assert.equal(result.isError, true);
+      assert.equal(JSON.parse(result.content[0].text).error, "unhandled_verb_failure");
+    }
+    for (const links of [[], "[]", " \n[]\t"]) {
+      const { result } = await rpc("/doc/mcp", "tools/call", { name: "log-activity", arguments: {
+        idempotency_key: "d170d000-0000-4000-8000-000000000011", ref: "SYNTHETIC",
+        kind: "note", summary: "Synthetic fixture", links,
+      } });
+      assert.equal(result.isError, true);
+      assert.equal(JSON.parse(result.content[0].text).error, "unhandled_verb_failure");
+    }
+    assert.equal(connections, 6);
   } finally {
     Pool.prototype.connect = connect;
   }
