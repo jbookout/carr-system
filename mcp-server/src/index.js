@@ -76,11 +76,12 @@
 // (mcpApiHandler's/protectedApiHandler's own actor-unresolved 401) is recorded
 // at its own call site below, since a 401 is invisible to a >=500 check.
 
-import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
+import { OAuthProvider, getOAuthApi } from "@cloudflare/workers-oauth-provider";
 import { neon, Pool } from "@neondatabase/serverless";
 import { mcpApiHandler, dispatch, dispatchEngineeringController, canonicalOwnershipExecutionHost } from "./mcp.js";
 import { engineeringControllerActorForToken } from "./authenticated-canonical-ownership.js";
-import { handleAuthorize, handleCallback } from "./google-oidc.js";
+import { handleAuthorize, handleCallback, handleConsent } from "./google-oidc.js";
+import { sharedOAuthFetch, mcpOriginRefusal, isSharedOAuthPath } from "./oauth-policy.js";
 import { agentActorForToken, authenticatedIdentity, continuityActorForTokenMaps,
          serveReviewRequest,
          hermesActorForTokenMaps, hermesCosActorForToken } from "./identity.js";
@@ -205,6 +206,7 @@ const defaultHandler = {
     if (url.pathname === "/ingest" && request.method === "POST") return ingest(request, env);
     if (url.pathname === "/authorize") return handleAuthorize(request, env);
     if (url.pathname === "/callback") return handleCallback(request, env);
+    if (url.pathname === "/consent") return handleConsent(request, env);
     return json({ service: "carr-mcp", surfaces: ["/healthz", "/health", "/release", "/ingest", "/mcp", "/pipeline/changes", "/authorize", "/callback"] }, 404);
   },
 };
@@ -581,7 +583,7 @@ function continuityActorFor(request, env) {
 
 // ---------- the provider ----------
 
-const oauthProvider = new OAuthProvider({
+const oauthOptions = {
   apiRoute: ["/mcp", "/pipeline/changes"],
   apiHandler: protectedApiHandler,
   defaultHandler,
@@ -617,7 +619,8 @@ const oauthProvider = new OAuthProvider({
   onError({ code, description, status }) {
     console.warn(`OAuth error response: ${status} ${code} - ${description}`);
   },
-});
+};
+const oauthProvider = new OAuthProvider(oauthOptions);
 
 // Same verb and cursor implementations as the bearer-token surface; only the
 // authentication adapter differs. The cookie session already resolved to the
@@ -672,6 +675,11 @@ const dealroomHandler = createDealroomHandler({
 // owned by OAuthProvider/defaultHandler.
 async function routeRequest(request, env, ctx) {
   const url = new URL(request.url);
+  // Validate before machine-token, browser-cookie and provider routes alike.
+  if (isSharedOAuthPath(url.pathname)) {
+    const refused = mcpOriginRefusal(request, env);
+    if (refused) return refused;
+  }
   // The confidential reports host is an isolated leaf. Unknown paths close as
   // report-surface 404s and can never alias MCP, OAuth, capture, or Deal Room.
   if (isReportsHostRequest(request)) return reportsHandler.fetch(request, env, ctx);
@@ -711,7 +719,9 @@ async function routeRequest(request, env, ctx) {
     if (localActor) return dispatch(request, env, ctx, localActor);
   }
   if (isDealroomRequest(request, env)) return dealroomHandler.fetch(request, env, ctx);
-  return oauthProvider.fetch(request, env, ctx);
+  return sharedOAuthFetch(oauthProvider, request, {
+    ...env, OAUTH_PROVIDER: getOAuthApi(oauthOptions, env),
+  }, ctx);
 }
 
 // Top-level export. wrapWithCorrelation covers every route above in one
