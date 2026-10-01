@@ -1,8 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { createServer } from "node:http";
+import { launchChrome } from "../../dealroom/test/chrome-launch.mjs";
 import { handleAuthorize, s256 } from "../src/google-oidc.js";
 import * as policy from "../src/oauth-policy.js";
+import { OAuthConsentState } from "../src/oauth-consent-state.js";
 
 // Substitute only the deployment identity allow-list with synthetic accounts.
 // Signature verification, callback and approval code execute unchanged.
@@ -13,6 +17,7 @@ const propsForSlug = (slug, extra) => ({ slug, ...extra });
 const agentSlugForClient = () => null;
 const verifiedAgentSlugForClient = () => null;`)
   .replace('"./oauth-policy.js"', JSON.stringify(new URL("../src/oauth-policy.js", import.meta.url).href))
+  .replace('"./oauth-consent-state.js"', JSON.stringify(new URL("../src/oauth-consent-state.js", import.meta.url).href))
 ).toString("base64")}`);
 
 // Only the Workers host class is stubbed. The pinned provider's parsing,
@@ -44,7 +49,19 @@ class MemoryKV {
   }
 }
 async function fixture(extraOptions = {}) {
-  const env = { OAUTH_KV: new MemoryKV(), GOOGLE_CLIENT_ID: "synthetic-config", GOOGLE_CLIENT_SECRET: "synthetic-config" };
+  const objects = new Map();
+  const env = { OAUTH_KV: new MemoryKV(), GOOGLE_CLIENT_ID: "synthetic-config", GOOGLE_CLIENT_SECRET: "synthetic-config",
+    OAUTH_CONSENT_STATE: { idFromName: id => id, get: id => {
+      if (!objects.has(id)) {
+        const values = new Map();
+        let queue = Promise.resolve();
+        const storage = { values, get: async k => structuredClone(values.get(k)), put: async (k, v) => values.set(k, structuredClone(v)),
+          delete: async k => values.delete(k), deleteAll: async () => values.clear(), setAlarm: async () => {},
+          transaction: fn => { const result = queue.then(() => fn(storage)); queue = result.catch(() => {}); return result; } };
+        objects.set(id, new OAuthConsentState({ storage }));
+      }
+      return objects.get(id);
+    } } };
   const options = { apiRoute: ["/mcp", "/doc/mcp", "/pipeline/changes"],
     apiHandler: { fetch: async () => new Response("accepted") },
     defaultHandler: { fetch: handleAuthorize }, authorizeEndpoint: "/authorize",
@@ -55,10 +72,11 @@ async function fixture(extraOptions = {}) {
   const rawProvider = new OAuthProvider(options);
   const provider = { fetch: (request, env, ctx) => policy.sharedOAuthFetch
     ? policy.sharedOAuthFetch(rawProvider, request, env, ctx) : rawProvider.fetch(request, env, ctx) };
-  return { env, client, provider, rawProvider };
+  return { env, client, provider, rawProvider, objects };
 }
 async function authorization(client, changes = {}) {
   const params = new URLSearchParams({ response_type: "code", client_id: client.clientId,
+    state: "synthetic-client-state",
     redirect_uri: REDIRECT, code_challenge_method: "S256", code_challenge: await s256(VERIFIER),
     resource: `${ORIGIN}/mcp`, ...changes });
   for (const [k, v] of Object.entries(changes)) if (v === null) params.delete(k);
@@ -83,10 +101,10 @@ async function signedIdentity(email = "partner@example.invalid") {
   return { id_token: `${message}.${Buffer.from(signature).toString("base64url")}`,
     jwks: { keys: [{ ...await crypto.subtle.exportKey("jwk", pair.publicKey), kid: "synthetic" }] } };
 }
-async function consentFixture(email, clientName = "Synthetic Client") {
+async function consentFixture(email, clientName = "Synthetic Client", redirectUri = REDIRECT) {
   const f = await fixture();
-  await f.env.OAUTH_PROVIDER.updateClient(f.client.clientId, { clientName });
-  const start = await f.provider.fetch(await authorization(f.client), f.env, ctx());
+  await f.env.OAUTH_PROVIDER.updateClient(f.client.clientId, { clientName, redirectUris: [redirectUri] });
+  const start = await f.provider.fetch(await authorization(f.client, { redirect_uri: redirectUri }), f.env, ctx());
   const state = new URL(start.headers.get("location")).searchParams.get("state");
   const cookie = start.headers.get("set-cookie")?.split(";")[0] || "";
   const identity = await signedIdentity(email);
@@ -109,14 +127,17 @@ async function approve(f, { cookie = f.cookie, origin = ORIGIN, form = f.form, m
     headers: { cookie, origin, "content-type": "application/x-www-form-urlencoded" },
     ...(method === "POST" ? { body: new URLSearchParams({ ...Object.fromEntries(form), decision }) } : {}) }), f.env);
 }
+async function handoffUrl(response) {
+  return new URL((await response.text()).match(/href="([^"]+)"/)[1].replaceAll("&amp;", "&"));
+}
 test("verified identity reaches client-specific consent before any grant and approval issues a bound code", async () => {
   const f = await consentFixture();
   assert.equal(f.response.status, 200);
   for (const value of ["Synthetic Client", REDIRECT, `${ORIGIN}/mcp`, "Read and write"]) assert.ok(f.html.includes(value));
   assert.equal((await f.env.OAUTH_PROVIDER.listUserGrants("synthetic-partner")).items.length, 0);
   const accepted = await approve(f);
-  assert.equal(accepted.status, 302);
-  const code = new URL(accepted.headers.get("location")).searchParams.get("code");
+  assert.equal(accepted.status, 200);
+  const code = (await handoffUrl(accepted)).searchParams.get("code");
   const tokens = await (await exchange(f, { grant_type: "authorization_code", code, code_verifier: VERIFIER })).json();
   assert.equal(tokens.resource, `${ORIGIN}/mcp`);
   assert.equal((await access(f, tokens.access_token, "/mcp")).status, 200);
@@ -130,7 +151,7 @@ test("consent rejects absent/wrong browser cookie, cross-site POST, tampered non
     assert.ok([400, 403, 405].includes((await approve(f, options)).status));
     assert.equal((await f.env.OAUTH_PROVIDER.listUserGrants("synthetic-partner")).items.length, 0);
   }
-  for (const [key] of f.env.OAUTH_KV.values) if (key.startsWith("pending_consent:")) await f.env.OAUTH_KV.delete(key);
+  for (const object of f.objects.values()) { const pending = object.storage.values.get("pending"); pending.expiresAt = 1; }
   assert.equal((await approve(f)).status, 400);
 });
 test("wrong Google identity is denied and configured approved-client IDs restrict authorizations", async () => {
@@ -152,7 +173,7 @@ test("denying consent never issues a grant and untrusted client labels are escap
   assert.equal(f.html.includes("<script>"), false);
   assert.equal(f.response.headers.get("x-frame-options"), "DENY");
   assert.match(f.response.headers.get("content-security-policy"), /frame-ancestors 'none'/);
-  assert.equal((await approve(f, { decision: "deny" })).status, 403);
+  assert.equal((await approve(f, { decision: "deny" })).status, 200);
   assert.equal((await f.env.OAUTH_PROVIDER.listUserGrants("synthetic-partner")).items.length, 0);
   assert.equal((await approve(f)).status, 400);
 });
@@ -161,8 +182,9 @@ test("consent cannot replace the approved redirect or bypass a changed server cl
   const f = await consentFixture();
   const form = new URLSearchParams({ ...Object.fromEntries(f.form), redirect_uri: "https://hostile.example/callback", resource: `${ORIGIN}/doc/mcp` });
   const accepted = await approve(f, { form });
-  assert.equal(new URL(accepted.headers.get("location")).origin, "https://client.example");
-  const code = new URL(accepted.headers.get("location")).searchParams.get("code");
+  const target = await handoffUrl(accepted);
+  assert.equal(target.origin, "https://client.example");
+  const code = target.searchParams.get("code");
   assert.equal((await (await exchange(f, { grant_type: "authorization_code", code, code_verifier: VERIFIER })).json()).resource, `${ORIGIN}/mcp`);
   const changed = await consentFixture();
   changed.env.CARR_OAUTH_APPROVED_CLIENT_IDS = "[]";
@@ -322,4 +344,190 @@ test("absent Origin and exact ChatGPT/Claude/configured origins reach OAuth auth
   }
   f.env.CARR_MCP_ALLOWED_ORIGINS = '["*"]';
   assert.equal((await f.provider.fetch(new Request(`${ORIGIN}/mcp`, { headers: { origin: "https://chatgpt.com" } }), f.env, ctx())).status, 403);
+});
+
+test("authenticated access and refresh revocation retain pinned provider behavior", async () => {
+  for (const hint of ["access_token", "refresh_token"]) {
+    const f = await fixture();
+    const tokens = await (await exchange(f, { grant_type: "authorization_code", code: await codeGrant(f), code_verifier: VERIFIER })).json();
+    const revoke = params => exchange(f, { token: tokens[hint], token_type_hint: hint, ...params });
+    assert.equal((await revoke({ client_id: "wrong-client" })).status, 401);
+    assert.equal((await access(f, tokens.access_token, "/mcp")).status, 200);
+    assert.equal((await revoke({})).status, 200);
+    assert.equal((await access(f, tokens.access_token, "/mcp")).status, 401);
+    if (hint === "refresh_token") assert.equal((await exchange(f, { grant_type: "refresh_token", refresh_token: tokens.refresh_token })).status, 400);
+  }
+});
+
+test("token media types are case insensitive, parameter aware and exact", async () => {
+  for (const type of ["Application/X-Www-Form-Urlencoded", "application/x-www-form-urlencoded; charset=UTF-8", "Application/Json; charset=UTF-8",
+    "application/json-evil", "application/x-www-form-urlencoded-evil"]) {
+    const f = await fixture();
+    const params = { client_id: f.client.clientId, grant_type: "authorization_code", code: await codeGrant(f), code_verifier: VERIFIER };
+    const response = await f.provider.fetch(new Request(`${ORIGIN}/token`, { method: "POST", headers: { "content-type": type },
+      body: type.toLowerCase().includes("json") ? JSON.stringify(params) : new URLSearchParams(params) }), f.env, ctx());
+    assert.equal(response.status, type.includes("-evil") ? 400 : 200, type);
+  }
+});
+
+test("OAuth storage outages propagate to the server failure boundary instead of invalid credentials", async () => {
+  const f = await fixture();
+  const unavailable = new Error("synthetic storage unavailable");
+  f.env.OAUTH_KV.get = async () => { throw unavailable; };
+  await assert.rejects(access(f, "synthetic:grant:token", "/mcp"), e => e === unavailable);
+});
+
+test("client lookup outage after signed callback propagates instead of claiming deregistration", async () => {
+  const f = await fixture();
+  const start = await f.provider.fetch(await authorization(f.client), f.env, ctx());
+  const state = new URL(start.headers.get("location")).searchParams.get("state");
+  const identity = await signedIdentity();
+  await f.env.OAUTH_KV.put("google_jwks_cache", JSON.stringify(identity.jwks));
+  const unavailable = new Error("synthetic client lookup unavailable");
+  f.env.OAUTH_PROVIDER.lookupClient = async () => { throw unavailable; };
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => Response.json(identity);
+  try {
+    await assert.rejects(syntheticOidc.handleCallback(new Request(`${ORIGIN}/callback?state=${state}&code=synthetic-code`,
+      { headers: { cookie: start.headers.get("set-cookie").split(";")[0] } }), f.env), e => e === unavailable);
+  } finally { globalThis.fetch = original; }
+});
+
+test("OAuth errors are readable by exact approved origins only", async () => {
+  const f = await fixture();
+  f.env.CARR_MCP_ALLOWED_ORIGINS = '["https://browser.example"]';
+  const tokens = await (await exchange(f, { grant_type: "authorization_code", code: await codeGrant(f), code_verifier: VERIFIER })).json();
+  for (const [key, item] of f.env.OAUTH_KV.values) {
+    if (key.startsWith("token:")) { const data = JSON.parse(item.value); data.expiresAt = 1; item.value = JSON.stringify(data); }
+  }
+  for (const origin of ["https://chatgpt.com", "https://browser.example", "https://hostile.example"]) {
+    for (const token of ["invalid", tokens.access_token]) {
+      const response = await f.provider.fetch(new Request(`${ORIGIN}/mcp`, { headers: { origin, authorization: `Bearer ${token}` } }), f.env, ctx());
+      assert.equal(response.headers.get("access-control-allow-origin"), origin.includes("hostile") ? null : origin);
+      if (!origin.includes("hostile")) assert.match(response.headers.get("vary"), /Origin/i);
+    }
+    const response = await f.provider.fetch(new Request(`${ORIGIN}/token`, { method: "POST", headers: { origin, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ client_id: f.client.clientId, grant_type: "refresh_token", refresh_token: tokens.refresh_token, resource: `${ORIGIN}/doc/mcp` }) }), f.env, ctx());
+    assert.equal(response.headers.get("access-control-allow-origin"), origin.includes("hostile") ? null : origin);
+    assert.equal(response.status, origin.includes("hostile") ? 403 : 400);
+  }
+});
+
+test("concurrent consent and stale KV snapshots cannot issue a second grant after approve or deny", async () => {
+  const f = await consentFixture();
+  const snapshot = new Map(f.env.OAUTH_KV.values);
+  const responses = await Promise.all([approve(f), approve(f)]);
+  assert.equal(responses.filter(r => r.status < 400).length, 1);
+  assert.equal((await f.env.OAUTH_PROVIDER.listUserGrants("synthetic-partner")).items.length, 1);
+  const get = f.env.OAUTH_KV.get.bind(f.env.OAUTH_KV);
+  f.env.OAUTH_KV.get = async (key, options) => key.startsWith("pending_consent:") && snapshot.has(key)
+    ? JSON.parse(snapshot.get(key).value) : get(key, options);
+  assert.equal((await approve(f)).status, 400);
+  const denied = await consentFixture();
+  const stale = new Map(denied.env.OAUTH_KV.values);
+  await approve(denied, { decision: "deny" });
+  const deniedGet = denied.env.OAUTH_KV.get.bind(denied.env.OAUTH_KV);
+  denied.env.OAUTH_KV.get = async (key, options) => key.startsWith("pending_consent:") && stale.has(key)
+    ? JSON.parse(stale.get(key).value) : deniedGet(key, options);
+  assert.equal((await approve(denied)).status, 400);
+  assert.equal((await denied.env.OAUTH_PROVIDER.listUserGrants("synthetic-partner")).items.length, 0);
+});
+
+test("pending identity is encrypted at rest without storing its browser decryption key", async () => {
+  const f = await consentFixture();
+  const storage = [...f.env.OAUTH_KV.values.values()].map(item => item.value).join("\n") +
+    JSON.stringify([...f.objects.values()].map(object => [...object.storage.values]));
+  for (const identity of ["partner@example.invalid", "synthetic-subject", "synthetic-partner", f.cookie.split("=")[1]])
+    assert.equal(storage.includes(identity), false, `raw storage exposes ${identity}`);
+  assert.equal((await approve(f)).status, 200);
+});
+
+test("stored browser authentication digest cannot decrypt pending identity", async () => {
+  const f = await consentFixture();
+  const pending = f.objects.get(f.form.get("id")).storage.values.get("pending");
+  const key = await crypto.subtle.importKey("raw", Buffer.from(pending.browser, "base64url"), "AES-GCM", false, ["decrypt"]);
+  await assert.rejects(crypto.subtle.decrypt({ name: "AES-GCM", iv: Buffer.from(pending.encryptedGrant.iv, "base64url"),
+    additionalData: new TextEncoder().encode(`carr-oauth-consent-v1:${f.form.get("id")}`) }, key,
+  Buffer.from(pending.encryptedGrant.ciphertext, "base64url")));
+  assert.equal((await approve(f)).status, 200);
+});
+
+test("denial completes the registered client attempt with access_denied and original state", async () => {
+  const f = await consentFixture();
+  const denied = await approve(f, { decision: "deny" });
+  assert.equal(denied.status, 200);
+  const html = await denied.text();
+  const target = new URL(html.match(/href="([^"]+)"/)[1].replaceAll("&amp;", "&"));
+  assert.equal(target.origin + target.pathname, REDIRECT);
+  assert.equal(target.searchParams.get("error"), "access_denied");
+  assert.equal(target.searchParams.get("state"), "synthetic-client-state");
+  assert.equal(target.searchParams.has("code"), false);
+  assert.equal(target.searchParams.has("access_token"), false);
+  assert.equal((await f.env.OAUTH_PROVIDER.listUserGrants("synthetic-partner")).items.length, 0);
+  const changed = await consentFixture();
+  await changed.env.OAUTH_PROVIDER.updateClient(changed.client.clientId, { redirectUris: ["https://replacement.example/callback"] });
+  const refused = await approve(changed, { decision: "deny" });
+  assert.equal(refused.status, 400);
+  assert.equal((await refused.text()).includes('href="https://client.example'), false);
+});
+
+test("Chrome completes approve and deny at an external client while consent form stays restricted", { timeout: 90000 }, async t => {
+  const chrome = [process.env.CHROME_PATH, "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "/usr/bin/google-chrome", "/usr/bin/chromium"].filter(Boolean).find(existsSync);
+  if (!chrome) { t.skip("Chrome is unavailable"); return; }
+  const browser = await launchChrome(chrome);
+  t.after(() => browser.close());
+  const socket = new WebSocket(browser.pageWsUrl);
+  t.after(() => socket.close());
+  await new Promise((resolve, reject) => { socket.addEventListener("open", resolve, { once: true }); socket.addEventListener("error", reject, { once: true }); });
+  let serial = 0;
+  const pending = new Map();
+  socket.addEventListener("message", event => {
+    const value = JSON.parse(String(event.data));
+    if (!pending.has(value.id)) return;
+    const { resolve, reject } = pending.get(value.id); pending.delete(value.id);
+    if (value.error) reject(new Error(JSON.stringify(value.error))); else resolve(value.result);
+  });
+  const call = (method, params = {}) => new Promise((resolve, reject) => { const id = ++serial; pending.set(id, { resolve, reject }); socket.send(JSON.stringify({ id, method, params })); });
+  const evaluate = async expression => {
+    const result = await call("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
+    if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
+    return result.result.value;
+  };
+  for (const decision of ["approve", "deny"]) {
+    let callback, posts = 0, serverError;
+    const clientServer = createServer((req, res) => {
+      const url = new URL(req.url, "http://127.0.0.1");
+      if (url.pathname === "/callback") callback = url;
+      res.end("Client received OAuth result");
+    });
+    await new Promise(resolve => clientServer.listen(0, "127.0.0.1", resolve));
+    t.after(() => new Promise(resolve => { clientServer.closeAllConnections(); clientServer.close(resolve); }));
+    const redirect = `http://127.0.0.1:${clientServer.address().port}/callback`;
+    const f = await consentFixture(undefined, "Synthetic Client", redirect);
+    const server = createServer(async (req, res) => {
+      try {
+        let response;
+        if (req.method === "POST") {
+          posts++;
+          const chunks = []; for await (const chunk of req) chunks.push(chunk);
+          response = await syntheticOidc.handleConsent(new Request(`${ORIGIN}/consent`, { method: "POST",
+            headers: { cookie: f.cookie, origin: ORIGIN, "content-type": req.headers["content-type"] }, body: Buffer.concat(chunks) }), f.env);
+        } else response = new Response(f.html, { headers: f.response.headers });
+        res.writeHead(response.status, Object.fromEntries(response.headers)); res.end(await response.text());
+      } catch (error) { serverError = error; res.writeHead(500).end(); }
+    });
+    await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+    t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
+    await call("Page.navigate", { url: `http://127.0.0.1:${server.address().port}/` });
+    for (let i = 0; i < 300; i++) { if (await evaluate('!!document.querySelector("form")')) break; await new Promise(resolve => setTimeout(resolve, 10)); }
+    assert.match(f.response.headers.get("content-security-policy"), /form-action 'self';/);
+    await evaluate(`document.querySelector('button[value="${decision}"]').click()`);
+    for (let i = 0; i < 300 && !callback; i++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.ifError(serverError);
+    assert.equal(posts, 1);
+    assert.ok(callback, `Chrome must reach external callback after ${decision}`);
+    assert.equal(callback.searchParams.get("state"), "synthetic-client-state");
+    assert.equal(callback.searchParams.has("code"), decision === "approve");
+    assert.equal(callback.searchParams.get("error"), decision === "deny" ? "access_denied" : null);
+  }
 });

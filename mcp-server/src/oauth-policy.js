@@ -62,14 +62,31 @@ function oauthError(request, status, error) {
 // Interpose policy, not token cryptography. The provider validates client
 // authentication, code/verifier and refresh-token hashes before it writes.
 export async function sharedOAuthFetch(provider, request, env, ctx) {
+  const path = new URL(request.url).pathname;
+  const corsRoute = isSharedOAuthPath(path) || path === "/token";
+  if (corsRoute) {
+    const refused = mcpOriginRefusal(request, env);
+    if (refused) return refused;
+  }
+  const response = await policyFetch(provider, request, env, ctx);
+  const origin = request.headers.get("origin");
+  if (!corsRoute || !origin) return response;
+  const headers = new Headers(response.headers);
+  headers.set("access-control-allow-origin", origin);
+  headers.append("vary", "Origin");
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
+async function policyFetch(provider, request, env, ctx) {
   const url = new URL(request.url);
   if (isSharedOAuthPath(url.pathname)) {
     const refused = mcpOriginRefusal(request, env);
     if (refused) return refused;
     const bearer = request.headers.get("authorization")?.match(/^Bearer (.+)$/i)?.[1];
     if (bearer) {
-      let token;
-      try { token = await env.OAUTH_PROVIDER.unwrapToken(bearer); } catch { /* invalid token */ }
+      // Null means invalid/expired; operational errors reach the existing
+      // server-failure boundary and its failure recorder.
+      const token = await env.OAUTH_PROVIDER.unwrapToken(bearer);
       if (!token) return oauthError(request, 401, "invalid_token");
       const audience = token.audience;
       const permitted = legacyResource(audience, request)
@@ -81,17 +98,20 @@ export async function sharedOAuthFetch(provider, request, env, ctx) {
   if (url.pathname === "/token" && request.method === "POST") {
     let body;
     try {
-      const type = request.headers.get("content-type") || "";
-      if (type.startsWith("application/json")) {
+      const type = (request.headers.get("content-type") || "").split(";", 1)[0].trim().toLowerCase();
+      if (type === "application/json") {
         const data = await request.clone().json();
         if (Object.values(data).some(v => typeof v !== "string")) throw new Error();
         body = new URLSearchParams(data);
-      } else if (type.startsWith("application/x-www-form-urlencoded")) {
+      } else if (type === "application/x-www-form-urlencoded") {
         body = new URLSearchParams(await request.clone().text());
       } else throw new Error();
       for (const key of [...body.keys()]) if (body.getAll(key).length !== 1) throw new Error();
     } catch { return oauthError(request, 400, "invalid_request"); }
     const kind = body.get("grant_type");
+    // RFC 7009 shares the provider's token endpoint. Authentication and
+    // revocation (including unknown-token handling) remain provider-owned.
+    if (kind === null && body.has("token")) return provider.fetch(request, env, ctx);
     if (!["authorization_code", "refresh_token"].includes(kind))
       return oauthError(request, 400, "unsupported_grant_type");
     if (kind === "authorization_code" && !/^[A-Za-z0-9._~-]{43,128}$/.test(body.get("code_verifier") || ""))

@@ -81,6 +81,7 @@ import { neon, Pool } from "@neondatabase/serverless";
 import { mcpApiHandler, dispatch, dispatchEngineeringController, canonicalOwnershipExecutionHost } from "./mcp.js";
 import { engineeringControllerActorForToken } from "./authenticated-canonical-ownership.js";
 import { handleAuthorize, handleCallback, handleConsent } from "./google-oidc.js";
+export { OAuthConsentState } from "./oauth-consent-state.js";
 import { sharedOAuthFetch, mcpOriginRefusal, isSharedOAuthPath } from "./oauth-policy.js";
 import { agentActorForToken, authenticatedIdentity, continuityActorForTokenMaps,
          serveReviewRequest,
