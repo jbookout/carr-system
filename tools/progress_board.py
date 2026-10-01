@@ -786,6 +786,10 @@ def publish_board(project: str) -> dict[str, int]:
     before = call_verb("read-progress-board", {"board_id": board})
     remote_snapshot = before.get("snapshot")
     snapshot = board_snapshot(state)
+    if board == "carr-v5":
+        from system_work_cache import cached_github
+        snapshot["external_inventory"] = cached_github(board_dir() / "system-work-github-cache.json",
+            Path.home() / "carr-system/out/orch/dot/job13/report-G.md")
     if remote_snapshot is None or remote_snapshot.get("snapshot_json") != snapshot:
         args = {"board_id": board, "base_version": int(remote_snapshot["version"]) if remote_snapshot else 0,
                 "snapshot": snapshot}
