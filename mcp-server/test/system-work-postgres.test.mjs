@@ -10,7 +10,7 @@ test('actual PostgreSQL legs compile, grants execute and private/business loops 
  await client.query('begin');
  const ids=['00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000002'];
  await client.query(`insert into public.actor(id,slug,kind,display_name) values ($1,'joe','human','Synthetic owner one'),($2,'dell','human','Synthetic owner two')`,ids);
- for(const [index,tier,personal,domain,subject] of [[1,'shared',null,'system',{}],[2,'personal',ids[0],'system',{}],[3,'personal',ids[1],'system',{}],[4,'shared',null,'deals',{}],[5,'shared',null,'system',{subject_type:'client'}]]){
+ for(const [index,tier,personal,domain,subject] of [[1,'shared',null,'system',{}],[2,'personal',ids[0],'system',{}],[3,'personal',ids[1],'system',{}],[4,'shared',null,'deals',{}],[5,'shared',null,'system',{subject_type:'client'}],[6,'shared',null,'system',{subject:{deal_id:'synthetic'}}]]){
   await client.query(`insert into public.loop_item(kind,number,block_id,render_seq,title,tier,personal_to,domain,extra_cells,created_by,updated_by)
   values('idea',$1,$2,1,'Synthetic loop',$3,$4,$5,$6,$2,$2)`,[String(index),ids[0],tier,personal,domain,subject]);
  }

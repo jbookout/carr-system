@@ -28,7 +28,8 @@ export const SYSTEM_WORK_LEGS = [
       where trim(both '"' from s::text) in ('deal','lead','client','vendor','party'))
     and not exists (select 1 from jsonb_path_query(l.extra_cells,'$.**.subject') s
       where s::text ~ '"(deal|lead|client|vendor|party)(:|"|/)')
-    and not (l.extra_cells ?| array['deal_id','lead_id','client_id','vendor_id'])`),
+    and not exists (select 1 from jsonb_path_query(l.extra_cells,'$.**') s
+      where s ?| array['deal_id','lead_id','client_id','vendor_id'])`),
   base('ops.work_shape_revision', 'work_shape', `select s.id::text as id,w.title,w.state,s.created_at as opened_at,
     s.created_at as last_activity_at,w.owner_actor as owner,s.version::text as version,
     w.state='confirmed_closed' as completed,w.state in ('declined','superseded') as cancelled,
@@ -99,6 +100,8 @@ export const SYSTEM_WORK_LEGS = [
     false as cancelled,jsonb_build_object('board_id',b.board_id,'task_id',t.key) as identity
     from public.board_snapshot b,jsonb_each(coalesce(b.snapshot_json->'tasks','{}'::jsonb)) t
     where b.organization_tenant_id=$1 and b.sponsoring_human_slug=$2
+    and t.value->>'repo' in ('jbookout/carr-system','jbookout/doctorcre-app','jbookout/software-factory')
+    and coalesce(t.value->>'domain','system')='system'
     and (t.value->>'status' is distinct from 'done' or t.value->>'stage' in ('live','measured'))`),
 ];
 export const EXTERNAL_WORK_KINDS = ['pull_request','remote_branch','builder_brief_file'];
