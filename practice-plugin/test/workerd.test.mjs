@@ -6,8 +6,8 @@ test('bundled Worker completes MCP requests in local workerd with no bindings', 
   const worker = new Miniflare(convertV4MiniflareOptions({
     workers: [{ name: 'practice-synthetic', modules: true, scriptPath: '.build/worker.js', compatibilityDate: '2026-10-01' }],
   }));
-  const post = body => worker.dispatchFetch('https://practice.synthetic.invalid/mcp', {
-    method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
+  const post = (body, extra = {}) => worker.dispatchFetch('https://practice.synthetic.invalid/mcp', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', ...extra },
     body: JSON.stringify(body),
   });
   try {
@@ -24,5 +24,14 @@ test('bundled Worker completes MCP requests in local workerd with no bindings', 
     const result = (await call.json()).result;
     assert.equal(result.structuredContent.monthly_cost.low, 2980);
     assert.equal(result.structuredContent.source.data_date, '2024-12-31');
+    const rejected = await post({ jsonrpc: '2.0', id: 4, method: 'ping' }, {
+      'MCP-Protocol-Version': 'REJECTED_MARKER',
+    });
+    assert.equal(rejected.status, 400);
+    const text = await rejected.text();
+    assert.doesNotMatch(text, /REJECTED_MARKER/);
+    assert.deepEqual(JSON.parse(text), {
+      jsonrpc: '2.0', error: { code: -32000, message: 'Unsupported protocol version.' }, id: null,
+    });
   } finally { await worker.dispose(); }
 });

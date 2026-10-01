@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { SUPPORTED_PROTOCOL_VERSIONS } from '@modelcontextprotocol/sdk/types.js';
 import worker from '../src/worker.mjs';
 
 const endpoint = 'https://practice.synthetic.invalid/mcp';
@@ -41,6 +42,31 @@ test('transport refuses foreign origins and invalid protocol/header/body request
   assert.equal((await worker.fetch(new Request(endpoint, { method: 'GET' }))).status, 405);
   assert.equal((await worker.fetch(new Request(endpoint, { method: 'DELETE' }))).status, 405);
   assert.equal((await worker.fetch(new Request('https://practice.synthetic.invalid/'))).status, 404);
+});
+
+test('transport rejects unsupported protocol headers without echoing caller text', async () => {
+  const response = await post({ jsonrpc: '2.0', id: 1, method: 'ping' }, {
+    'MCP-Protocol-Version': 'REJECTED_MARKER',
+  });
+  assert.equal(response.status, 400);
+  const text = await response.text();
+  assert.doesNotMatch(text, /REJECTED_MARKER/);
+  const body = JSON.parse(text);
+  assert.equal(body.jsonrpc, '2.0');
+  assert.equal(body.error.code, -32000);
+  assert.equal(body.error.message, 'Unsupported protocol version.');
+  assert.equal(body.id, null);
+  assert.equal(response.headers.get('Cache-Control'), 'no-store');
+  assert.equal(response.headers.get('X-Content-Type-Options'), 'nosniff');
+});
+
+test('transport accepts every SDK-supported protocol header and the missing-header default', async () => {
+  for (const version of [undefined, ...SUPPORTED_PROTOCOL_VERSIONS]) {
+    const extra = version === undefined ? {} : { 'MCP-Protocol-Version': version };
+    const response = await post({ jsonrpc: '2.0', id: 1, method: 'ping' }, extra);
+    assert.equal(response.status, 200, version);
+    assert.deepEqual(await response.json(), { jsonrpc: '2.0', id: 1, result: {} });
+  }
 });
 
 test('Worker has no binding, secrets, OAuth, logs or outbound request capability in source', () => {
