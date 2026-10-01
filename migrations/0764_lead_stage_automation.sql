@@ -38,3 +38,13 @@ create table lead_contact_draft (
 );
 grant select on lead_stage_move,lead_contact_draft to carr_reader,carr_writer;
 grant insert,update on lead_stage_move,lead_contact_draft to carr_writer;
+
+-- Keep both new writable relations under the existing shadow reference monitor.
+create trigger scac_reference_monitor_guard_row before insert or update or delete
+on public.lead_stage_move for each row execute function ops.scac_reference_monitor_guard();
+create trigger scac_reference_monitor_guard_truncate before truncate
+on public.lead_stage_move for each statement execute function ops.scac_reference_monitor_guard();
+create trigger scac_reference_monitor_guard_row before insert or update or delete
+on public.lead_contact_draft for each row execute function ops.scac_reference_monitor_guard();
+create trigger scac_reference_monitor_guard_truncate before truncate
+on public.lead_contact_draft for each statement execute function ops.scac_reference_monitor_guard();

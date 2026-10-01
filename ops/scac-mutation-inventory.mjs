@@ -19481,7 +19481,7 @@ export function renderLeadAutomationRegistrySql(rows, predecessorSql = null) {
   const preflight = `do $lead_automation_v101_preflight$\ndeclare v ops.scac_mutation_registry_version%rowtype; registration jsonb;\nbegin\n` +
     `  if not exists(select 1 from public.schema_migrations where filename='${predecessorPath.split("/").at(-1)}' and sha256='${predecessorDigest}') then\n` +
     `    raise exception 'Lead automation v101 requires exact applied 0763'; end if;\n` +
-    `  if not exists(select 1 from public.schema_migrations where filename='0764_lead_stage_automation.sql' and sha256='8ff81897c6769b1f3c9abd3c0e59f61727ff80464aedd27c2f7d8f027b07ccd4') then\n` +
+    `  if not exists(select 1 from public.schema_migrations where filename='0764_lead_stage_automation.sql' and sha256='258bafa8f930a78bf100ecc8995c107b533d0ef4d366d2ae82a5c0adfa04f327') then\n` +
     `    raise exception 'Lead automation v101 requires exact applied 0764'; end if;\n` +
     `  select * into v from ops.scac_mutation_registry_version where registry_version='${REGISTRY_V100_VERSION}';\n` +
     `  if v.registry_digest is distinct from '${oldSeal.digest}' or v.entry_count<>${oldSeal.entryCount}\n` +
