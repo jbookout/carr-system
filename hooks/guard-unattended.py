@@ -137,6 +137,9 @@ KNOWN_HOSTS = (
     "api.anthropic.com", "console.neon.tech",
     "neon.tech", "cloudflareapi.com", "cloudflare.com", "r2.cloudflarestorage.com",
     "googleapis.com", "github.com", "api.github.com", "hc-ping.com",
+    # Dot relay uses the Slack Web API; its user token stays in ~/.hermes/.env.
+    # This host is fixed infrastructure, not a record-derived practice domain.
+    "slack.com",
     "npiregistry.cms.hhs.gov", "download.cms.gov",
     # raw.githubusercontent.com: loop #163 named its absence as the gap forcing
     # the gh-api workaround for plain changelog reads. Added 2026-08-06 with the
