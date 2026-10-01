@@ -80,6 +80,7 @@ export function projectTourDetail(raw) {
     name: raw.tour_name,
     status: raw.tour_status,
     route_version_id: latestRoute?.id || null,
+    route_acceptance_digest: latestRoute?.acceptance_digest || null,
     route_version_label: latestRoute ? `Version ${latestRoute.route_version}${latestRoute.accepted ? " · accepted" : " · draft"}` : null,
     route_version_state: latestRoute?.accepted ? "accepted" : latestRoute ? "draft" : "missing",
     accepted_route_version: Number.isInteger(acceptedRoute?.route_version) ? acceptedRoute.route_version : 0,
