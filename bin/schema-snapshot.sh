@@ -1228,7 +1228,7 @@ fi
 
 
 PROGRESS_DIRECTORY_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0757_progress_directory_scac_successor.sql')" \
+  "select exists (select 1 from schema_migrations where filename='0763_progress_directory_scac_successor.sql')" \
   2>/dev/null)"
 case "$PROGRESS_DIRECTORY_REGISTRY_APPLIED" in
   t|f) ;;

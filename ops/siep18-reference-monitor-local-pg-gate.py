@@ -32,7 +32,7 @@ SEALED_PREDECESSOR_DIGEST = (
 )
 SEALED_PREDECESSOR_ENTRY_COUNTS = (2516, 1008)
 SEALED_PREDECESSOR_MIGRATION = (
-    "migrations/0757_progress_directory_scac_successor.sql"
+    "migrations/0763_progress_directory_scac_successor.sql"
 )
 LIVE_REGISTRY_MIGRATION = (
     "migrations/0767_doc_whats_new_scac_successor.sql"

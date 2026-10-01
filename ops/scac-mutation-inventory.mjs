@@ -19395,7 +19395,7 @@ export function renderProgressDirectoryRegistrySql(rows, predecessorSql = null) 
 }
 
 export function renderWhatsNewRegistrySql(rows, predecessorSql = null) {
-  const predecessorPath = "migrations/0757_progress_directory_scac_successor.sql";
+  const predecessorPath = "migrations/0763_progress_directory_scac_successor.sql";
   const predecessor = predecessorSql ?? readFileSync(resolve(REPO_ROOT, predecessorPath), "utf8");
   const predecessorDigest = "e681ae7a57fc115e2526ee8d433905b55a632af6c9d41e8a7fec7e484d31afa2";
   if (sha256(predecessor) !== predecessorDigest)
@@ -20559,7 +20559,7 @@ export function renderGeneratedFrontier() {
       version: REGISTRY_V100_VERSION,
       dbCatalogBaseline: PROGRESS_DIRECTORY_V100_DB_CATALOG_BASELINE,
     });
-  artifacts["migrations/0757_progress_directory_scac_successor.sql"] =
+  artifacts["migrations/0763_progress_directory_scac_successor.sql"] =
     renderProgressDirectoryRegistrySql(v100Rows,
       artifacts["migrations/0755_property_evidence_scac_successor.sql"]);
 
@@ -20569,7 +20569,7 @@ export function renderGeneratedFrontier() {
       version: REGISTRY_V101_VERSION, dbCatalogBaseline: WHATS_NEW_V101_DB_CATALOG_BASELINE,
     });
   artifacts["migrations/0767_doc_whats_new_scac_successor.sql"] =
-    renderWhatsNewRegistrySql(v101Rows, artifacts["migrations/0757_progress_directory_scac_successor.sql"]);
+    renderWhatsNewRegistrySql(v101Rows, artifacts["migrations/0763_progress_directory_scac_successor.sql"]);
 
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
@@ -21583,7 +21583,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     await writeFile(resolve("mcp-server/src/scac-mutation-registry.v100.generated.js"),
       renderRuntimeProjection(rows, { version: REGISTRY_V100_VERSION,
         dbCatalogBaseline: PROGRESS_DIRECTORY_V100_DB_CATALOG_BASELINE }));
-    await writeFile(resolve("migrations/0757_progress_directory_scac_successor.sql"),
+    await writeFile(resolve("migrations/0763_progress_directory_scac_successor.sql"),
       renderProgressDirectoryRegistrySql(rows));
     process.stdout.write("Progress directory v100 frontier generated\n");
   } else if (process.argv[2] === "--write-whats-new-frontier") {

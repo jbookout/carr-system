@@ -2,7 +2,7 @@
 do $whats_new_v101_preflight$
 declare v ops.scac_mutation_registry_version%rowtype; registration jsonb;
 begin
-  if not exists(select 1 from public.schema_migrations where filename='0757_progress_directory_scac_successor.sql' and sha256='e681ae7a57fc115e2526ee8d433905b55a632af6c9d41e8a7fec7e484d31afa2') then
+  if not exists(select 1 from public.schema_migrations where filename='0763_progress_directory_scac_successor.sql' and sha256='e681ae7a57fc115e2526ee8d433905b55a632af6c9d41e8a7fec7e484d31afa2') then
     raise exception 'Whats new v101 requires exact applied 0755'; end if;
   if not exists(select 1 from public.schema_migrations where filename='0756_dot_reader.sql' and sha256='ec171ac7bb688927392a963cd2bc93c16ea8a25135fbffb7af30ef8510aae183') then
     raise exception 'Whats new v101 requires exact applied 0756'; end if;
