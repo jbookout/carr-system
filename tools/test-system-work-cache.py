@@ -2,6 +2,10 @@ import importlib.util
 import json
 import tempfile
 import unittest
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
+from datetime import timedelta
 from datetime import datetime, timezone
 from pathlib import Path
 spec=importlib.util.spec_from_file_location('cache',Path(__file__).with_name('system_work_cache.py'))
@@ -45,6 +49,31 @@ class CacheTests(unittest.TestCase):
    p=Path(d)/'brief-synthetic.txt';p.write_text('ROLE: builder\nREPOS: carr-system\nBRANCH: synthetic\n')
    self.assertEqual(cache.unfinished_briefs(d,[{'repository':'jbookout/carr-system','branch':'synthetic'}]),[])
    rows=cache.unfinished_briefs(d,[]);self.assertEqual(len(rows),1);self.assertNotIn('body',rows[0])
+ def test_concurrent_refresh_never_overwrites_newer_evidence(self):
+  with tempfile.TemporaryDirectory() as d:
+   path=Path(d)/'cache.json'
+   started=threading.Event(); release=threading.Event()
+   def older_read(args):
+    if '/pulls?' in args[1]:
+     started.set(); self.assertTrue(release.wait(5))
+    return self.read(args)
+   with ThreadPoolExecutor(max_workers=2) as pool:
+    old=pool.submit(cache.cached_github,path,now=NOW,read=older_read)
+    self.assertTrue(started.wait(5))
+    newer=cache.cached_github(path,now=NOW+timedelta(minutes=1),read=self.read)
+    release.set(); result=old.result(timeout=5)
+   self.assertEqual(json.loads(path.read_text()),newer)
+   self.assertEqual(result,newer)
+ def test_malformed_dependencies_never_claim_complete_or_crash(self):
+  for malformed in ({}, None, [None], [[None]], [[{}]]):
+   with self.subTest(malformed=malformed):
+    result=cache.collect_github(NOW,read=lambda _:malformed)
+    self.assertFalse(result['complete'])
+    self.assertTrue(all(not c['complete'] for c in result['coverage']))
+  with tempfile.TemporaryDirectory() as d:
+   p=Path(d)/'cache.json';p.write_text('null')
+   self.assertTrue(cache.cached_github(p,now=NOW,read=self.read)['complete'])
+  self.assertEqual(cache.dot_suggestions('Last commit: 2026-09-01'),{})
  def test_dot_suggestions_are_labels_not_automatic_dispositions(self):
   report='ALREADY LANDED ANOTHER WAY • 1\nsynthetic-old\nLast commit: 2026-09-01\nJOB G • 3/4: Abandoned work worth finishing • 12\nsynthetic-finish\nLast commit: 2026-09-01\n'
   r=cache.dot_suggestions(report);self.assertEqual(r['synthetic-old']['action'],'cancel');self.assertEqual(r['synthetic-finish']['action'],'progress')

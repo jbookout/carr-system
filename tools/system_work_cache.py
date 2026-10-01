@@ -4,6 +4,9 @@ Read-only GitHub operations. The cache is projection data in board_snapshot;
 source identity and suggestions do not grant branch or pull-request authority.
 """
 import json
+import fcntl
+import os
+import tempfile
 import re
 import subprocess
 from datetime import datetime, timezone, timedelta
@@ -20,6 +23,7 @@ def github_json(args):
 
 def dot_suggestions(report):
     """Parse only the report's branch headings; prose stays in its private record."""
+    previous = ""
     section = None
     result = {}
     for line in report.splitlines():
@@ -29,10 +33,40 @@ def dot_suggestions(report):
         elif 'Abandoned work to cancel' in line: section = 'cancel'
         if line.startswith('Last commit:'):
             name = previous.strip()
-            if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9/_.-]+', name):
+            if section and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9/_.-]+', name):
                 result[name] = {'action': section, 'label': "The Dot's suggestion", 'source': 'Dot job13 report G, 2026-10-01'}
         previous = line
     return result
+
+
+def pages_of_rows(value):
+    if not isinstance(value, list) or not value or any(not isinstance(page, list) for page in value):
+        raise ValueError('GitHub pagination envelope invalid')
+    rows = [row for page in value for row in page]
+    if any(not isinstance(row, dict) for row in rows):
+        raise ValueError('GitHub row invalid')
+    return rows
+
+
+def date_value(value):
+    if not isinstance(value, str):
+        raise ValueError('date missing')
+    date = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    if date.tzinfo is None:
+        raise ValueError('date must include timezone')
+    return date
+
+
+def required_text(value):
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError('text missing')
+    return value
+
+
+def valid_cache(value):
+    return (isinstance(value, dict) and value.get('schema') == 'system-work-external.v1'
+            and isinstance(value.get('items'), list) and all(isinstance(row, dict) for row in value['items'])
+            and isinstance(value.get('coverage'), list) and isinstance(value.get('complete'), bool))
 
 
 def collect_github(now, read=github_json, suggestions=None):
@@ -40,8 +74,14 @@ def collect_github(now, read=github_json, suggestions=None):
     for repo in REPOSITORIES:
         try:
             pr_pages = read(['api',f'repos/{repo}/pulls?state=all&per_page=100','--paginate','--slurp'])
-            prs = [pr for page in pr_pages for pr in page]
+            prs = pages_of_rows(pr_pages)
             for pr in prs:
+                if type(pr['number']) is not int or pr['number'] < 1:
+                    raise ValueError('PR number invalid')
+                required_text(pr['title']); required_text(pr['html_url']); required_text(pr['head']['ref'])
+                date_value(pr['created_at']); date_value(pr['updated_at'])
+                if pr.get('merged_at') is not None: date_value(pr['merged_at'])
+                if pr.get('state', 'open') not in ('open', 'closed'): raise ValueError('PR state invalid')
                 pr_heads.append({'repository':repo,'branch':pr['head']['ref']})
                 pr_work_refs.update(re.findall(r'WR-\d+',pr.get('body') or ''))
                 completed = bool(pr.get('merged_at'))
@@ -52,20 +92,22 @@ def collect_github(now, read=github_json, suggestions=None):
                     'completed':completed,'cancelled':False,'link':pr['html_url'],
                     'branch':pr['head']['ref'],'work_refs':sorted(set(re.findall(r'WR-\d+',pr.get('body') or ''))),'identity':{}})
             pages = read(['api',f'repos/{repo}/branches?per_page=100','--paginate','--slurp'])
-            for branch in [b for page in pages for b in page]:
-                name=branch['name']
+            for branch in pages_of_rows(pages):
+                name=required_text(branch['name'])
                 if name=='main': continue
                 commit = read(['api',f"repos/{repo}/commits/{branch['commit']['sha']}"])
                 date=commit['commit']['committer']['date']
+                date_value(date)
                 if now-datetime.fromisoformat(date.replace('Z','+00:00')) <= timedelta(days=7): continue
                 compare=read(['api',f'repos/{repo}/compare/main...{quote(name,safe="")}'])
-                if compare.get('ahead_by',0)==0: continue
+                if not isinstance(compare,dict) or type(compare.get('ahead_by')) is not int or compare['ahead_by'] < 0: raise ValueError('compare invalid')
+                if compare['ahead_by']==0: continue
                 items.append({'id':f'{repo}:branch:{name}','kind':'remote_branch','title':name,'state':'unmerged',
                     'opened_at':date,'last_activity_at':date,'owner':None,'version':branch['commit']['sha'],
                     'completed':False,'cancelled':False,'link':f'https://github.com/{repo}/tree/{quote(name,safe="")}',
                     'identity':{},'suggested_triage':(suggestions or {}).get(name) if repo.endswith('/carr-system') else None})
             coverage.append({'repository':repo,'complete':True,'reason':None})
-        except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
             coverage.append({'repository':repo,'complete':False,'reason':'github_read_failed'})
     return {'schema':'system-work-external.v1','observed_at':now.isoformat(),
             'complete':all(c['complete'] for c in coverage),'completed_pr_history':True,'coverage':coverage,'pr_heads':pr_heads,'pr_work_refs':sorted(pr_work_refs),'items':items}
@@ -101,11 +143,14 @@ def cached_github(path, report_path=None, now=None, read=github_json):
     path = Path(path)
     try:
         cache=json.loads(path.read_text())
-        date=datetime.fromisoformat(cache['observed_at'].replace('Z','+00:00'))
+        if not valid_cache(cache): raise ValueError('invalid cache')
+        date=date_value(cache['observed_at'])
         if cache.get('schema')=='system-work-external.v1' and cache.get('completed_pr_history') and timedelta(0)<=now-date<timedelta(minutes=15): return cache
-    except (OSError, ValueError, KeyError): pass
+    except (OSError, ValueError, KeyError, TypeError, AttributeError): pass
     suggestions={}
-    if report_path and Path(report_path).is_file(): suggestions=dot_suggestions(Path(report_path).read_text())
+    try:
+        if report_path and Path(report_path).is_file(): suggestions=dot_suggestions(Path(report_path).read_text())
+    except (OSError, UnicodeError): pass
     cache=collect_github(now,read,suggestions)
     try:
         cache["items"].extend(unfinished_briefs(Path.home() / "carr-system/out/orch", cache["pr_heads"]))
@@ -113,5 +158,22 @@ def cached_github(path, report_path=None, now=None, read=github_json):
     except OSError:
         cache["briefs_unavailable"] = True
     path.parent.mkdir(parents=True,exist_ok=True)
-    path.write_text(json.dumps(cache,sort_keys=True))
+    # Refresh outside the lock, then serialize monotonic atomic promotion only.
+    with path.with_suffix(path.suffix + '.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            current = json.loads(path.read_text())
+            if valid_cache(current) and date_value(current['observed_at']) > date_value(cache['observed_at']):
+                return current
+        except (OSError, ValueError, KeyError, TypeError): pass
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, prefix=path.name+'.', suffix='.tmp', delete=False) as stream:
+                temporary = stream.name
+                json.dump(cache, stream, sort_keys=True)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            if temporary and os.path.exists(temporary): os.unlink(temporary)
     return cache

@@ -1,4 +1,6 @@
 // System design/build projection of the existing work inventory federation.
+import { canonicalJson } from './artifact-trust.js';
+import { createHash } from 'node:crypto';
 import { organizationTenantForActor, personalScopeForActor } from './identity.js';
 
 const base = (source, kind, sql, note = null) => ({ source, kind, sql, note });
@@ -24,24 +26,32 @@ export const SYSTEM_WORK_LEGS = [
     jsonb_build_object('loop_id',l.id,'kind',l.kind) as identity from public.loop_item l
     where l.kind in ('open_loop','idea','team_loop','action_required') and l.domain='system'
     and (l.tier='shared' or (l.tier='personal' and l.personal_to=(select id from ops.system_work_actor_scope where slug=$2)))
-    and not exists (select 1 from jsonb_path_query(l.extra_cells,'$.**.subject_type') s
-      where trim(both '"' from s::text) in ('deal','lead','client','vendor','party'))
-    and not exists (select 1 from jsonb_path_query(l.extra_cells,'$.**.subject') s
-      where s::text ~ '"(deal|lead|client|vendor|party)(:|"|/)')
     and not exists (select 1 from jsonb_path_query(l.extra_cells,'$.**') s
-      where s ?| array['deal_id','lead_id','client_id','vendor_id'])`),
+      where s ?| array['deal_id','lead_id','client_id','vendor_id','party_id',
+        'deal_ref','lead_ref','client_ref','vendor_ref','party_ref']
+      or (jsonb_typeof(s)='string' and lower(trim(both '"' from s::text)) ~ '^(deal|lead|client|vendor|party)(:|/)')
+      or exists(select 1 from jsonb_each(case when jsonb_typeof(s)='object' then s else '{}'::jsonb end) e
+        where e.key in ('subject_type','entity_type','record_type','type')
+        and lower(trim(both '"' from e.value::text)) in ('deal','lead','client','vendor','party')))`),
   base('ops.work_shape_revision', 'work_shape', `select s.id::text as id,w.title,w.state,s.created_at as opened_at,
     s.created_at as last_activity_at,w.owner_actor as owner,s.version::text as version,
     w.state='confirmed_closed' as completed,w.state in ('declined','superseded') as cancelled,
     jsonb_build_object('work_request',w.ref) as identity from ops.work_shape_revision s join ops.work_request w on w.id=s.work_request_id
     where w.organization_tenant_id=$1 and not exists(select 1 from ops.work_shape_revision newer where newer.work_request_id=s.work_request_id and newer.version>s.version)`),
-  base('ops.engineering_slice_plan', 'slice_plan', `select p.id::text as id,coalesce(p.plan->>'title',w.title) as title,
-    coalesce(m.status,w.state) as state,p.created_at as opened_at,coalesce(m.created_at,p.created_at) as last_activity_at,
-    w.owner_actor as owner,p.work_request_version::text as version,
-    (w.state='confirmed_closed' or coalesce(m.status='complete',false)) as completed,w.state in ('declined','superseded') as cancelled,
+  base('ops.engineering_slice_plan', 'slice_plan', `select p.id::text as id,w.title,
+    case when m.completed then 'complete' else w.state end as state,p.created_at as opened_at,
+    coalesce(m.last_activity_at,p.created_at) as last_activity_at,w.owner_actor as owner,p.work_request_version::text as version,
+    (w.state='confirmed_closed' or m.completed) as completed,w.state in ('declined','superseded') as cancelled,
     jsonb_build_object('work_request',w.ref) as identity from ops.engineering_slice_plan p join ops.work_request w on w.id=p.work_request_id
-    left join lateral(select status,created_at from ops.slice_completion_mark where slice_id=p.plan->>'slice_id' order by mark_seq desc limit 1) m on true
-    where w.organization_tenant_id=$1`),
+    left join lateral(select count(*)>0 and bool_and(coalesce(mark.status='complete',false)) as completed,
+      max(mark.created_at) as last_activity_at from jsonb_array_elements(p.plan->'slices') member
+      left join lateral(select status,created_at from ops.slice_completion_mark
+        where slice_id=member->>'slice_ref' order by mark_seq desc limit 1) mark on true) m on true
+    where w.organization_tenant_id=$1 and not exists(select 1 from ops.engineering_slice_plan newer
+      where newer.work_request_id=p.work_request_id and
+       ((newer.plan->'accepted_plan_revision'->>'revision')::int > (p.plan->'accepted_plan_revision'->>'revision')::int
+        or (newer.plan->'accepted_plan_revision'->>'revision'=p.plan->'accepted_plan_revision'->>'revision'
+         and (newer.created_at,newer.id)>(p.created_at,p.id))))`),
   base('ops.rule_admission','governance_item', `select a.rule_id::text as id,left(coalesce(a.reason,a.binding_moment),160) as title,
     a.state,a.updated_at as opened_at,a.updated_at as last_activity_at,null::text as owner,a.version::text as version,
     a.state='admitted' as completed,a.state='rejected' as cancelled,jsonb_build_object('rule_id',a.rule_id) as identity
@@ -101,7 +111,7 @@ export const SYSTEM_WORK_LEGS = [
     from public.board_snapshot b,jsonb_each(coalesce(b.snapshot_json->'tasks','{}'::jsonb)) t
     where b.organization_tenant_id=$1 and b.sponsoring_human_slug=$2
     and t.value->>'repo' in ('jbookout/carr-system','jbookout/doctorcre-app','jbookout/software-factory')
-    and coalesce(t.value->>'domain','system')='system'
+    and t.value->>'domain'='system'
     and (t.value->>'status' is distinct from 'done' or t.value->>'stage' in ('live','measured'))`),
 ];
 export const EXTERNAL_WORK_KINDS = ['pull_request','remote_branch','builder_brief_file'];
@@ -112,15 +122,15 @@ const compareText=(a,b)=>a===b?0:a<b?-1:1;
 const cmp = (a,b,live) => (live ? compareText(b.last_activity_at,a.last_activity_at) : compareText(a.opened_at,b.opened_at)) || compareText(a.kind,b.kind) || compareText(a.id,b.id);
 
 export function systemWorkActions(item) {
-  if(item.completed) return [];
+  if(item.completed || item.cancelled) return [];
   const action=(action,verb,args,fields,versioned=false)=>({action,verb,args,fields,versioned});
   const reason=[{name:'reason',label:'Reason',required:true}];
   switch(item.kind) {
     case 'loop': return [action('cancel','close-loop',{...item.identity,resolution:'dropped'},[{name:'outcome',label:'Why cancel?',required:true}],true),
       action('progress','update-loop',item.identity,[{name:'body',label:'Progress and next step',required:true}],true),
       action('redesign','update-loop',item.identity,[{name:'title',label:'Revised title',required:true},{name:'body',label:'Revised design',required:true}],true)];
-    case 'work_request': return [action('cancel','decline-work-request',item.identity,[{name:'exit_reason',label:'Why cancel?',required:true}],true),
-      ...(item.state==='captured'?[action('progress','review-and-triage',item.identity,[{name:'classification',label:'Review lane',choices:['operational','needs_judgment','safety_review'],required:true}],true)]:[])];
+    case 'work_request': return item.state==='captured' ? [action('cancel','decline-work-request',item.identity,[{name:'exit_reason',label:'Why cancel?',required:true}],true),
+      ...(item.state==='captured'?[action('progress','review-and-triage',item.identity,[{name:'classification',label:'Review lane',choices:['operational','needs_judgment','safety_review'],required:true}],true)]:[])] : [];
     case 'capability_session': return item.identity.sequence ? [action('cancel','cancel-capability-session',item.identity,reason,true)] : [];
     case 'investigation': return [action('cancel','close-investigation',{...item.identity,status:'abandoned'},[
       {name:'conclusion',label:'Conclusion',required:true},{name:'confidence',label:'Confidence (0 to 1)',type:'number',min:0,max:1,required:true},
@@ -128,19 +138,34 @@ export function systemWorkActions(item) {
       {name:'termination_reason',label:'Termination reason',choices:['budget_exhausted','insufficient_evidence','signal_invalid','superseded'],required:true}])];
     case 'ready_plan_amendment': return [action('progress','accept-ready-plan-amendment',item.identity,[],true)];
     case 'retrieval_proposal': return [action('progress','approve-retrieval-proposals',{proposal_ids:[item.id]},[{name:'golden_suite_digest',label:'Verified golden suite digest',required:true}],true)];
-    case 'incident': return [action('progress','triage-incident',item.identity,[{name:'next_action',label:'Next investigation step',required:true},{name:'impact_assessment',label:'Impact assessment',required:true}]),
-      action('redesign','triage-incident',item.identity,[{name:'next_action',label:'Revised investigation',required:true},{name:'impact_assessment',label:'Revised impact assessment',required:true}])];
+    case 'incident': return item.state==='detected' ? [action('progress','triage-incident',item.identity,[{name:'next_action',label:'Next investigation step',required:true},{name:'impact_assessment',label:'Impact assessment',required:true}]),
+      action('redesign','triage-incident',item.identity,[{name:'next_action',label:'Revised investigation',required:true},{name:'impact_assessment',label:'Revised impact assessment',required:true}])] : [];
     case 'cutover_plan': { const {stage,...args}=item.identity; const stages=['read_legacy','build_projection','shadow_compare','single_write_authority','cutover','monitor','recovery_ready']; const next=stages[stages.indexOf(stage)+1];
       return [action('cancel','cancel-workflow-cutover-plan',args,reason),...(next?[action('progress','advance-workflow-cutover-stage',{...args,to_stage:next},[...reason,{name:'evidence_ref',label:'Accepted workflow evidence',required:['shadow_compare','single_write_authority','cutover'].includes(next)}])]:[])]; }
     case 'slice_proposal': return [action('progress','confirm-slice-completions',item.identity,reason)];
     default:return [];
   }
 }
+const navigationFor=(row,kind)=>{
+ if(['work_request','work_shape','slice_plan','builder_brief','ready_plan_amendment'].includes(kind)) {
+  const ref=row.identity?.human_ref??row.identity?.work_request;
+  if(typeof ref==='string' && /^WR-[0-9]{1,12}$/.test(ref))
+   return {state:'available',link:`/system-work.html?work_request=${encodeURIComponent(ref)}`,identity:{work_request:ref}};
+ }
+ if(kind==='progress_task' && row.identity?.board_id)
+  return {state:'available',link:`/control-room/progress?board=${encodeURIComponent(row.identity.board_id)}`,identity:row.identity};
+ if(['pull_request','remote_branch'].includes(kind) && typeof row.link==='string' && /^https:\/\/github\.com\/jbookout\/(carr-system|doctorcre-app)\//.test(row.link))
+  return {state:'available',link:row.link,identity:{id:row.id}};
+ return {state:'unavailable',link:null,reason:'owning_workflow_has_no_supported_record_navigation',identity:row.identity??{}};
+};
 const normalized=(row,leg,now)=>{
  const opened=iso(row.opened_at),activity=iso(row.last_activity_at);if(!opened||!activity||!row.id) return null;
+ const navigation=navigationFor(row,leg.kind);
  const item={...row,id:String(row.id),source:leg.source,kind:leg.kind,opened_at:opened,last_activity_at:activity,
-   age:Math.max(0,Math.floor((+now-Date.parse(opened))/86400000)),link:row.link || (leg.kind==='progress_task'?`/control-room/progress?board=${encodeURIComponent(row.identity.board_id)}`:'/system-work.html'),
-   status:row.state,updated_at:activity,source_ref:leg.source,open:'/system-work.html',related:[],unlinked:true};
+   age:Math.max(0,Math.floor((+now-Date.parse(opened))/86400000)),link:navigation.link,navigation,
+   status:row.state,updated_at:activity,source_ref:leg.source,open:navigation.link,related:[],unlinked:true};
+ item.source_workflow=leg.kind==='incident'?{read:{verb:'get-incident',args:item.identity}}:
+  leg.kind==='work_request'?{read:{verb:'work-request-card',args:{work_request:item.identity.human_ref}}}:null;
  item.available_triage_actions=systemWorkActions(item);return item;
 };
 
@@ -155,14 +180,35 @@ export async function readSystemWorkCensus({client,actor,correlationId,now=()=>n
  if(kinds.some(k=>!SYSTEM_WORK_KINDS.includes(k)))throw err('AUTHORIZATION_REFUSED');
  const sources=filters.source?String(filters.source).split(','):null;
  if(sources?.some(s=>![...SYSTEM_WORK_LEGS.map(l=>l.source),'github','builder_files'].includes(s)))throw err('AUTHORIZATION_REFUSED');
- const signature=JSON.stringify([kinds,sources,age,text,live,sponsor]);
+ const signature=JSON.stringify([kinds,sources,age,text,live,sponsor,filters.id??null]);
  let cursor=null;if(filters.cursor) {try{cursor=JSON.parse(Buffer.from(filters.cursor,'base64url').toString());}catch{throw err('AUTHORIZATION_REFUSED');}
-  if(cursor.signature!==signature||!iso(cursor.date)||!kinds.includes(cursor.kind)||typeof cursor.id!=='string')throw err('AUTHORIZATION_REFUSED');}
+  if(!cursor || typeof cursor!=='object' || Array.isArray(cursor) || cursor.signature!==signature||!iso(cursor.date)||!kinds.includes(cursor.kind)||typeof cursor.id!=='string')throw err('AUTHORIZATION_REFUSED');}
  const coverage=[],items=[];
  const cacheRead=await client.query(`select snapshot_json->'external_inventory' as cache from public.board_snapshot
    where organization_tenant_id=$1 and sponsoring_human_slug=$2 and board_id='carr-v5'`,[tenant,sponsor]).catch(()=>({rows:[]}));
- const cache=cacheRead.rows[0]?.cache;
- const cacheFresh=cache?.schema==='system-work-external.v1'&&iso(cache.observed_at)&&(+at-Date.parse(cache.observed_at)<3600000)&&cache.complete===true&&+at>=Date.parse(cache.observed_at);
+ let cache=cacheRead.rows[0]?.cache;
+ let pagesMissing=false;
+ if(cache?.schema==='system-work-external.v2') {
+  const pages=cache.pages;
+  const validManifest=Array.isArray(pages) && pages.length<=10000 && pages.every(p=>p &&
+   typeof p.board_id==='string' && /^carr-v5-external-[a-zA-Z0-9-]+$/.test(p.board_id) && Number.isSafeInteger(p.version) && p.version>0 && Number.isSafeInteger(p.count) && p.count>=0);
+  const loaded=[];
+  if(validManifest) {
+   const response=await client.query(`select board_id,version,snapshot_json from public.board_snapshot
+    where organization_tenant_id=$1 and sponsoring_human_slug=$2 and board_id=any($3::text[])`,[tenant,sponsor,pages.map(p=>p.board_id)]).catch(()=>({rows:[]}));
+   for(const page of pages) {
+    const stored=response.rows.find(r=>r.board_id===page.board_id);
+    const rows=stored?.snapshot_json?.items;
+    if(!stored || Number(stored.version)!==page.version || !Array.isArray(rows) || rows.length!==page.count ||
+       (page.digest && createHash('sha256').update(canonicalJson(stored.snapshot_json)).digest('hex')!==page.digest)) {pagesMissing=true;continue;}
+    loaded.push(...rows);
+   }
+  } else pagesMissing=true;
+  if(loaded.length!==cache.item_count)pagesMissing=true;
+  cache={...cache,items:loaded};
+ }
+ const cacheShape=cache && typeof cache==='object' && Array.isArray(cache.items) && cache.items.every(r=>r && typeof r==='object' && !Array.isArray(r));
+ const cacheFresh=cacheShape&&['system-work-external.v1','system-work-external.v2'].includes(cache?.schema)&&iso(cache.observed_at)&&(+at-Date.parse(cache.observed_at)<3600000)&&cache.complete===true&&+at>=Date.parse(cache.observed_at);
  for(const leg of SYSTEM_WORK_LEGS.filter(l=>kinds.includes(l.kind)&&(!sources||sources.includes(l.source)))){
   try{
    const order=live?'last_activity_at':'opened_at',direction=live?'desc':'asc',op=live?'<':'>';
@@ -185,12 +231,17 @@ export async function readSystemWorkCensus({client,actor,correlationId,now=()=>n
  }
  for(const kind of EXTERNAL_WORK_KINDS.filter(k=>kinds.includes(k)&&(!sources||sources.includes(k==='builder_brief_file'?'builder_files':'github')))){
   const source=kind==='builder_brief_file'?'builder_files':'github';
-  const all=(cache?.items??[]).filter(r=>r.kind===kind&&Boolean(r.completed)===live&&(!filters.id||r.id===filters.id)&&
-    (!r.personal_to||r.personal_to===sponsor)&&!r.cancelled&&(!text||`${r.title} ${r.id}`.toLowerCase().includes(text.toLowerCase())));
-  const valid=all.map(r=>normalized(r,{source,kind},at)).filter(Boolean).filter(r=>r.age>=age);
+  const all=(cacheShape?cache.items:[]).filter(r=>r.kind===kind && (!r.personal_to||r.personal_to===sponsor));
+  const shapeValid=r=>typeof r.id==='string' && r.id.trim()!=='' && typeof r.title==='string' &&
+   typeof r.opened_at==='string' && typeof r.last_activity_at==='string' &&
+   typeof r.completed==='boolean' && typeof r.cancelled==='boolean' && r.identity && typeof r.identity==='object' && !Array.isArray(r.identity);
+  const rejected=all.filter(r=>!shapeValid(r)||!iso(r.opened_at)||!iso(r.last_activity_at)).length;
+  const valid=all.filter(shapeValid).map(r=>normalized(r,{source,kind},at)).filter(Boolean).filter(r=>
+   r.completed===live && !r.cancelled && (!filters.id||r.id===filters.id) &&
+   (!text||`${r.title} ${r.id}`.toLowerCase().includes(text.toLowerCase())) && r.age>=age);
   items.push(...valid.filter(r=>!cursor||cmp({kind:cursor.kind,id:cursor.id,opened_at:cursor.date,last_activity_at:cursor.date},r,live)<0));
   const historyMissing=live&&kind==='pull_request'&&cache?.completed_pr_history!==true;
-  coverage.push({kind,source_ref:source,state:!cacheFresh?'unavailable':kind==='builder_brief_file'||historyMissing?'partial':'complete',reason:!cacheFresh?'github_cache_missing_stale_or_incomplete':kind==='builder_brief_file'?'unstructured_brief_pr_relationships':historyMissing?'cache_contains_open_github_work_only':null,count_total:cacheFresh?valid.length:null,observed_at:cache?.observed_at??null});
+  coverage.push({kind,source_ref:source,state:!cacheFresh?'unavailable':kind==='builder_brief_file'||historyMissing||rejected||pagesMissing?'partial':'complete',reason:!cacheFresh?'github_cache_missing_stale_or_incomplete':kind==='builder_brief_file'?'unstructured_brief_pr_relationships':historyMissing?'cache_contains_open_github_work_only':pagesMissing?'external_history_pages_missing_or_invalid':rejected?'rows_rejected_invalid_dates_or_identity':null,count_rejected:rejected,count_total:cacheFresh?valid.length+rejected:null,observed_at:cache?.observed_at??null});
  }
  items.sort((a,b)=>cmp(a,b,live));const page=items.slice(0,limit);
  for(const c of coverage){c.count_returned=page.filter(r=>r.kind===c.kind).length;if(!Number.isFinite(c.count_total)){c.count_total=null;if(c.state==='complete'){c.state='partial';c.reason='count_unavailable';}}}

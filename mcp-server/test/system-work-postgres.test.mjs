@@ -10,7 +10,11 @@ test('actual PostgreSQL legs compile, grants execute and private/business loops 
  await client.query('begin');
  const ids=['00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000002'];
  await client.query(`insert into public.actor(id,slug,kind,display_name) values ($1,'joe','human','Synthetic owner one'),($2,'dell','human','Synthetic owner two')`,ids);
- for(const [index,tier,personal,domain,subject] of [[1,'shared',null,'system',{}],[2,'personal',ids[0],'system',{}],[3,'personal',ids[1],'system',{}],[4,'shared',null,'deals',{}],[5,'shared',null,'system',{subject_type:'client'}],[6,'shared',null,'system',{subject:{deal_id:'synthetic'}}]]){
+ for(const [index,tier,personal,domain,subject] of [[1,'shared',null,'system',{}],[2,'personal',ids[0],'system',{}],[3,'personal',ids[1],'system',{}],[4,'shared',null,'deals',{}],[5,'shared',null,'system',{subject_type:'client'}],[6,'shared',null,'system',{subject:{deal_id:'synthetic'}}],
+  ...['deal','lead','client','vendor','party'].flatMap((type,i)=>[[10+i*4,'shared',null,'system',{nested:{[type+'_id']:'synthetic'}}],
+   [11+i*4,'shared',null,'system',{subject_ref:type+':synthetic'}],
+   [12+i*4,'shared',null,'system',{nested:{ref:type+'/synthetic'}}],
+   [13+i*4,'shared',null,'system',{subject:{type,ref:'synthetic'}}]])]){
   await client.query(`insert into public.loop_item(kind,number,block_id,render_seq,title,tier,personal_to,domain,extra_cells,created_by,updated_by)
   values('idea',$1,$2,1,'Synthetic loop',$3,$4,$5,$6,$2,$2)`,[String(index),ids[0],tier,personal,domain,subject]);
  }
@@ -25,4 +29,42 @@ test('actual PostgreSQL legs compile, grants execute and private/business loops 
  }
  await client.query('rollback');
  }finally{await client.end();}
+});
+test('progress census requires explicit system classification',{skip:!url},async()=>{
+ const client=new pg.Client({connectionString:url});await client.connect();
+ try{await client.query('begin');
+ await client.query(`insert into public.board_snapshot(organization_tenant_id,sponsoring_human_slug,board_id,snapshot_json,updated_by_actor_id)
+ values('carr-internal','joe','synthetic-classification',$1,'00000000-0000-4000-8000-000000000001')`,[JSON.stringify({tasks:{
+  unknown:{repo:'jbookout/carr-system',title:'Synthetic unknown'},
+  system:{repo:'jbookout/carr-system',domain:'system',title:'Synthetic system'},
+  business:{repo:'jbookout/carr-system',domain:'deals',title:'Synthetic business'}}})]);
+ await client.query('set local role carr_reader');
+ const result=await readSystemWorkCensus({client,actor:{slug:'joe',human:true},kinds:'progress_task'});
+ assert.equal(result.coverage[0].state,'complete');
+ assert.deepEqual(result.items.map(i=>i.identity.task_id),['system']);
+ }finally{await client.query('rollback');await client.end();}
+});
+test('canonical slice members drive mixed, complete, reopened and superseded plan status',{skip:!url},async()=>{
+ const client=new pg.Client({connectionString:url});await client.connect();
+ try{await client.query('begin');
+ const work=(await client.query(`insert into ops.work_request(ref,title,state,requester_actor,organization_tenant_id)
+ values('WR-999991','Synthetic canonical plan','in_progress','joe','carr-internal') returning id`)).rows[0].id;
+ const insertPlan=async(revision,slices,date)=>(await client.query(`insert into ops.engineering_slice_plan
+ (work_request_id,accepted_plan_id,accepted_plan_hash,work_request_version,plan_digest,plan,idempotency_key,created_at)
+ values($1,gen_random_uuid(),$2,1,$2,$3,gen_random_uuid(),$4) returning id`,[work,'sha256:'+'1'.repeat(64),JSON.stringify({
+ schema_version:'engineering-slice-plan.v1',work_request:{id:'wr:'+work,state_version:1,canonical_record_digest:'sha256:'+'1'.repeat(64)},
+ accepted_plan_revision:{id:'PLAN-synthetic',revision,digest:'sha256:'+'1'.repeat(64)},plan_digest:'sha256:'+'1'.repeat(64),slices:slices.map(slice_ref=>({slice_ref}))}),date])).rows[0].id;
+ const old=await insertPlan(1,['synthetic-old'],'2026-09-01T00:00:00Z');
+ const current=await insertPlan(2,['synthetic-a','synthetic-b'],'2026-09-02T00:00:00Z');
+ const mark=async(ref,status,seq)=>client.query(`insert into ops.slice_completion_mark(slice_id,status,criteria_receipt,idempotency_key,mark_seq,created_at)
+ values($1,$2,'{}',gen_random_uuid(),$3,'2026-09-10T00:00:00Z'::timestamptz + $3::bigint * interval '1 second')`,[ref,status,seq]);
+ await mark('synthetic-a','complete',1);await mark('synthetic-old','complete',2);
+ const read=live_library=>readSystemWorkCensus({client,actor:{slug:'joe',human:true},kinds:'slice_plan',live_library});
+ let unfinished=await read(false);assert.deepEqual(unfinished.items.map(i=>i.id),[current]);assert.equal((await read(true)).items.length,0);
+ await mark('synthetic-b','complete',3);
+ assert.equal((await read(false)).items.length,0);assert.deepEqual((await read(true)).items.map(i=>i.id),[current]);
+ await mark('synthetic-a','in_progress',4);
+ unfinished=await read(false);assert.deepEqual(unfinished.items.map(i=>i.id),[current]);assert.equal((await read(true)).items.length,0);
+ assert.ok(!unfinished.items.some(i=>i.id===old));
+ }finally{await client.query('rollback');await client.end();}
 });
