@@ -5355,7 +5355,12 @@ export const TOOLS = {
             or exists(select 1 from vendor v where v.party_id=p.id and v.vendor_ref is not null) as has_business_ref,
            (select count(distinct rf.kind) from record_flag rf where rf.subject_type='party' and rf.subject_id=p.id
              and rf.kind in ('verified','address','phone','email','npi','specialty') and coalesce(rf.value->>'found','true') <> 'false') as verified_identity_fields,
-           ((select count(*) from activity a where a.subject_type='party' and a.subject_id=p.id)
+           -- Activities attach to role rows, which move with the party below.
+           -- EXISTS counts a multi-role activity once, without multiplying it.
+           ((select count(*) from activity a
+              where exists(select 1 from client cl where cl.id=a.client_id and cl.party_id=p.id)
+                 or exists(select 1 from lead l where l.id=a.lead_id and l.party_id=p.id)
+                 or exists(select 1 from vendor v where v.id=a.vendor_id and v.party_id=p.id))
              + (select count(*) from deal_participant dp where dp.party_id=p.id)
              + (select count(*) from party_link pl where pl.from_party=p.id or pl.to_party=p.id or pl.via_party=p.id)) as linked_records
           from party p where p.id = any($1::uuid[])`, [[surv.partyId, merg.partyId]]);
@@ -5369,7 +5374,10 @@ export const TOOLS = {
       const sweep = await c.query(
         `/* merge_orphan_sweep */
          select 'party_link' as attachment, count(*)::int as count from party_link where from_party=$1 or to_party=$1 or via_party=$1
-         union all select 'activity', count(*)::int from activity where subject_type='party' and subject_id=$1
+         union all select 'activity', count(*)::int from activity a
+           where exists(select 1 from client cl where cl.id=a.client_id and cl.party_id=$1)
+              or exists(select 1 from lead l where l.id=a.lead_id and l.party_id=$1)
+              or exists(select 1 from vendor v where v.id=a.vendor_id and v.party_id=$1)
          union all select 'deal_participant', count(*)::int from deal_participant where party_id=$1
          union all select 'record_flag', count(*)::int from record_flag where subject_type='party' and subject_id=$1
          union all select 'child_party', count(*)::int from party where org_id=$1`, [merg.partyId]);
