@@ -55,7 +55,7 @@ export function rankRecordCandidates(rows, scope) {
 // computation, candidate cap nor semantic judgment reads rejected records.
 // Doctrine belongs to the single server-owned tenant (no tenant column in its
 // existing schema). Memory has an explicit tenant, plus promotion provenance.
-// SUPERSEDES is a live edge, not a word in text; only current revision pointers
+// OVERRIDES/SUPERSEDES are live edges, not words in text; only current revision pointers
 // are joined. Dossiers/distillations/indexes are not governing doctrine.
 export const RECORD_RETRIEVAL_SQL = `
   with eligible as materialized (
@@ -77,7 +77,9 @@ export const RECORD_RETRIEVAL_SQL = `
        and (d.visibility='shared' or (d.visibility='personal' and d.owner_actor_id=$2::uuid))
        and not exists (
          select 1 from public.doctrine_edge e
-          where e.target_section_id=s.id and e.edge_type='SUPERSEDES' and e.retired_by_revision_id is null
+          join public.doctrine_section suppressor on suppressor.id=e.source_section_id
+          where e.target_section_id=s.id and e.edge_type in ('OVERRIDES','SUPERSEDES')
+            and e.retired_by_revision_id is null and suppressor.status='active'
        )
     union all
     select m.id, 'memory'::text, 'context'::text, m.organization_tenant_id,

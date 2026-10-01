@@ -104,6 +104,115 @@ test("semantic failure and beam mode keep deterministic ranking", async () => {
   }
 });
 
+// Setup writes stay in the socket-only disposable fixture. Retrieval always
+// runs with the same read-only carr_reader posture as the evaluation.
+async function changeFixture(client, sql, params) {
+  await client.query("set default_transaction_read_only=off");
+  await client.query("reset role");
+  try { await client.query(sql, params); }
+  finally {
+    await client.query("set role carr_reader");
+    await client.query("set default_transaction_read_only=on");
+  }
+}
+
+test("SQL excludes active OVERRIDES and SUPERSEDES targets before exact or lexical ranking", async t => {
+  const db = await syntheticDatabase();
+  t.after(db.close);
+  const [target, source] = fixture.records;
+  for (const edgeType of ["OVERRIDES", "SUPERSEDES"]) {
+    await changeFixture(db.client, "insert into doctrine_edge values ($1,$2,$3,null)",
+      [source.record_id, target.record_id, edgeType]);
+    for (const q of [target.record_id, target.title, `${target.doc_slug}#${target.section_key}`, "encrypted backups nightly"]) {
+      const result = await searchExistingRecords(db.client, fixture.callers.shared.actor, { q });
+      assert.ok(!result.hits.some(r => r.record_id === target.record_id), `${edgeType}: ${q}`);
+    }
+    await changeFixture(db.client, "delete from doctrine_edge where source_section_id=$1 and target_section_id=$2",
+      [source.record_id, target.record_id]);
+  }
+});
+
+test("SQL restores targets when suppressors retire or edges retire; exceptions never suppress", async t => {
+  const db = await syntheticDatabase();
+  t.after(db.close);
+  const [target, source] = fixture.records;
+  const lookup = async expected => {
+    for (const q of [target.record_id, "encrypted backups nightly"]) {
+      const result = await searchExistingRecords(db.client, fixture.callers.shared.actor, { q });
+      assert.equal(result.hits.some(r => r.record_id === target.record_id), expected, q);
+    }
+  };
+  for (const edgeType of ["SUPERSEDES", "OVERRIDES"]) {
+    await changeFixture(db.client, "insert into doctrine_edge values ($1,$2,$3,null)",
+      [source.record_id, target.record_id, edgeType]);
+    await lookup(false);
+    // Match retire-doctrine-section: outbound edges remain, status/version change.
+    await changeFixture(db.client, "update doctrine_section set status='retired',current_version=current_version+1 where id=$1",
+      [source.record_id]);
+    await lookup(true);
+    await changeFixture(db.client, "update doctrine_section set status='active',current_version=current_version-1 where id=$1",
+      [source.record_id]);
+    await lookup(false);
+    await changeFixture(db.client, "update doctrine_edge set retired_by_revision_id=$1 where source_section_id=$2 and target_section_id=$3",
+      [source.revision_id, source.record_id, target.record_id]);
+    await lookup(true);
+    await changeFixture(db.client, "delete from doctrine_edge where source_section_id=$1 and target_section_id=$2",
+      [source.record_id, target.record_id]);
+  }
+  await changeFixture(db.client, "insert into doctrine_edge values ($1,$2,'EXCEPTION_TO',null)",
+    [source.record_id, target.record_id]);
+  await lookup(true);
+});
+
+test("eval counts committed unreviewed doctrine and unpromoted memory extras despite perfect recall", async () => {
+  const decoys = [
+    fixture.records.find(r => r.record_type === "doctrine" && r.authority === "unreviewed" && r.scope === "shared"),
+    fixture.records.find(r => r.record_type === "memory" && !r.promoted && r.scope === "shared"),
+  ];
+  for (const decoy of decoys) {
+    assert.ok(decoy);
+    const result = await evaluate(null, async (_c, _actor, args) => {
+      const caller = Object.entries(fixture.callers).find(([, c]) => c.actor === _actor)[0];
+      const q = fixture.questions.find(q => q.question === args.q && q.caller === caller);
+      return { hits: q.expected_ids.length ? [...q.expected_ids, decoy.record_id].map(record_id => ({ record_id })) : [] };
+    });
+    assert.equal(result.metrics.recall_at_5, 1);
+    assert.equal(result.metrics.out_of_scope_leakage, 23, decoy.record_id);
+  }
+});
+
+test("leakage oracle rejects each admission-property mutation independently of recall", () => {
+  const doctrine = fixture.records[0];
+  const memory = fixture.records.find(r => r.record_type === "memory" && r.scope === "shared" && r.promoted && r.authority === "context");
+  const mutations = [
+    [doctrine, { record_type: "unknown" }], [doctrine, { authority: "unreviewed" }],
+    [doctrine, { content_class: "distillation" }], [memory, { authority: "governing" }],
+    [memory, { content_class: "rule" }], [memory, { promoted: false }],
+    [doctrine, { organization_tenant_id: "other-tenant" }], [doctrine, { organization_tenant_id: null }],
+    [doctrine, { scope: "hidden", visibility: "hidden" }], [doctrine, { visibility: "personal" }],
+    [doctrine, { visibility: undefined }],
+    [doctrine, { scope: "personal", visibility: "personal", owner_actor_id: fixture.callers.blue.owner_actor_id }],
+    [doctrine, { status: "retired" }], [memory, { status: "active" }],
+    [doctrine, { superseded: true }], [doctrine, { superseded: undefined }],
+    [doctrine, { revision_id: null }], [doctrine, { current_revision_id: "old" }],
+    [doctrine, { version: 0, current_version: 0 }], [doctrine, { current_version: 2 }],
+    [doctrine, { version: undefined, current_version: undefined }],
+  ];
+  for (const [base, extra] of mutations) {
+    const mutant = { ...base, ...extra, record_id: "oracle-mutant" };
+    fixture.records.push(mutant);
+    try {
+      const metrics = measures([{ caller: "amber", expected_ids: [doctrine.record_id], ids: [doctrine.record_id, mutant.record_id] }]);
+      assert.equal(metrics.recall_at_5, 1);
+      assert.equal(metrics.out_of_scope_leakage, 1, JSON.stringify(extra));
+    } finally { fixture.records.pop(); }
+  }
+  const positive = { caller: "amber", expected_ids: [doctrine.record_id], ids: [doctrine.record_id, memory.record_id] };
+  assert.equal(measures([positive]).out_of_scope_leakage, 0, "eligible extra context remains allowed");
+  assert.equal(measures([{ ...positive, ids: [...positive.ids, "unknown-record"] }]).out_of_scope_leakage, 1);
+  assert.equal(measures([{ caller: "shared", expected_ids: [], ids: [fixture.records[20].record_id] }]).out_of_scope_leakage, 1);
+});
+
 test("SQL retrieval and frozen previously-unnecessary-question eval: recall improves, leakage is zero", async t => {
   const db=await syntheticDatabase();
   t.after(db.close);
@@ -118,6 +227,7 @@ test("SQL retrieval and frozen previously-unnecessary-question eval: recall impr
   assert.ok(current.metrics.recall_at_5>baseline.metrics.recall_at_5);
   assert.ok(current.metrics.recall_at_5>=0.9);
   for (const q of current.rows) {
+    assert.equal(measures([q]).out_of_scope_leakage, 0, `${q.id}: every returned id must be admitted`);
     if (!q.expected_ids.length) assert.deepEqual(q.ids,[],q.id);
     else for (const id of q.expected_ids) assert.ok(q.ids.includes(id),`${q.id}: expected ${id} in ${q.ids}`);
   }

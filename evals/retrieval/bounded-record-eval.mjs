@@ -119,15 +119,31 @@ export const BASELINE_SQL = `
   select record_id from records where vector @@ plainto_tsquery('english',$1)
   order by ts_rank(vector,plainto_tsquery('english',$1)) desc,record_id limit 5`;
 
+// Independent fixture oracle: do not import the production admission function.
+// A regression in that function must not redefine what this eval accepts.
+function forbiddenRecord(r, caller) {
+  if (!r || !caller || r.organization_tenant_id !== "carr-internal") return true;
+  if (!["shared", "personal"].includes(r.scope) || r.visibility !== r.scope) return true;
+  if (r.scope === "personal" && (!caller.owner_actor_id || caller.owner_actor_id !== r.owner_actor_id)) return true;
+  if (r.superseded !== false) return true;
+  if (r.record_type === "doctrine") {
+    const version = Number(r.version);
+    return r.authority !== "governing" || !["playbook", "sop", "reference", "rule"].includes(r.content_class) ||
+      r.status !== "active" || !r.revision_id || r.revision_id !== r.current_revision_id ||
+      !Number.isInteger(version) || version < 1 || version !== Number(r.current_version);
+  }
+  if (r.record_type === "memory")
+    return r.authority !== "context" || !["preference", "fact", "episodic", "procedural"].includes(r.content_class) ||
+      r.status !== "promoted" || r.promoted !== true;
+  return true;
+}
+
 export function measures(rows) {
   const positive = rows.filter(r => r.expected_ids.length);
   const recall = positive.reduce((sum,r) => sum + r.expected_ids.filter(id => r.ids.includes(id)).length / r.expected_ids.length,0) / positive.length;
   const leakage = rows.reduce((n,row) => n + row.ids.filter(id => {
     const r = fixture.records.find(r => r.record_id === id);
-    const owner = fixture.callers[row.caller].owner_actor_id;
-    return !r || r.organization_tenant_id !== "carr-internal" || r.superseded ||
-      !["active","promoted"].includes(r.status) ||
-      (r.scope === "personal" && (!owner || owner !== r.owner_actor_id));
+    return forbiddenRecord(r, fixture.callers[row.caller]);
   }).length,0);
   return { questions: rows.length, positive_questions: positive.length, recall_at_5: recall, out_of_scope_leakage: leakage };
 }
