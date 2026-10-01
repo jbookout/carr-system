@@ -173,7 +173,8 @@ def start_turn(thread_id: str, text: str, *, socket_path: str | None = None,
     Returns {"status": "delivered"|"not_live"|"failed", "thread_id", "mode",
     "detail"}. When the owner refuses a new turn because one is already running,
     the text is steered into the running turn instead, which is what a person
-    typing into that window mid-turn gets.
+    typing into that window mid-turn gets. Desk calls requiring never refuse
+    instead: steering cannot override the active turn's approval policy.
     """
     # Ordinary session messages preserve the Desktop owner's posture. Desk
     # dispatch explicitly supplies never and its already-instructed prompt.
@@ -197,6 +198,10 @@ def start_turn(thread_id: str, text: str, *, socket_path: str | None = None,
             return {**base, "status": "delivered", "mode": "start",
                     "detail": "turn started in the Codex Desktop window that owns the thread"}
         start_error = str(started.get("error") or "start refused")
+        if approval_policy == "never":
+            return {**base, "status": "failed",
+                    "detail": "desk turn refused; cannot bind never by steering an existing turn. "
+                              "Permission needs go to the orchestrator. " + start_error[:200]}
         steered = client.request("thread-follower-steer-turn", {
             "conversationId": thread_id, "input": _text_input(text),
         }, target=owner)

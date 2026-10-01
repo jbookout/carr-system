@@ -124,6 +124,19 @@ class DeskFirstTurnTests(unittest.TestCase):
         self.assertNotIn("approvalPolicy", request)
         self.assertEqual(request["input"][0]["text"], "Synthetic ordinary session message")
 
+    def test_desk_never_steers_into_a_turn_with_unverified_permissions(self):
+        from unittest.mock import Mock
+        client = Mock()
+        client.owner.return_value = "fixture-owner"
+        client.request.side_effect = [{"resultType": "error", "error": "turn already in progress"},
+                                      {"resultType": "success"}]
+        with patch.object(dispatch.codex_ipc, "_open", return_value=client), \
+             patch.object(dispatch.codex_ipc, "thread_owner", return_value="fixture-owner"):
+            result = dispatch._to_codex({"thread_id": "fixture-thread"}, "Synthetic task", env={}, live_desktop=True)
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("orchestrator", result["detail"])
+        self.assertEqual(client.request.call_count, 1)
+
     def test_background_default_and_explicit_modes_include_instruction(self):
         sid = "12345678-1234-4123-8123-123456789abc"
         for mode in (None, "dontAsk", "auto", "acceptEdits"):
