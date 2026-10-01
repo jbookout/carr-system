@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # ci: db-gate
+# doctrine: runbook
 """Run the synthetic lead-stage behavior fixture on CI's disposable database."""
 import os
 from pathlib import Path
