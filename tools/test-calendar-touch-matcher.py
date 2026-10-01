@@ -6,6 +6,8 @@ Regression for 2026-09-27: the matcher read the exporters' draft directory
 0 record contacts and reported every attendee as unknown. Fixture workbooks
 only; example.test addresses.
 """
+import datetime
+import json
 import importlib.util
 import io
 import os
@@ -14,7 +16,7 @@ import re
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 import openpyxl
@@ -100,6 +102,36 @@ class LiveExports(unittest.TestCase):
         self.assertEqual(code, 5)
         self.assertIn("FATAL: record contacts: none loaded", err.getvalue())
         self.assertIsNone(re.search(r"[\w.+-]+@[\w-]+\.[\w.]+", err.getvalue()))
+
+    def test_newest_touch_and_nearest_future_event_are_reported(self):
+        self.seed_live()
+        today = datetime.date.today()
+        old = (today - datetime.timedelta(days=3)).isoformat()
+        latest = (today - datetime.timedelta(days=1)).isoformat()
+        near = (today + datetime.timedelta(days=1)).isoformat()
+        far = (today + datetime.timedelta(days=8)).isoformat()
+        dump = self.root / "dump.json"
+        dump.write_text(json.dumps({
+            f"Old synthetic meeting|{old}": ["one@clinic-a.example.test"],
+            f"New synthetic meeting|{latest}": ["one@clinic-a.example.test"],
+            f"Near synthetic meeting|{near}": ["one@clinic-a.example.test"],
+            f"Far synthetic meeting|{far}": ["one@clinic-a.example.test"],
+        }))
+        output = io.StringIO()
+        with mock.patch.object(matcher, "export_home", return_value=str(self.root)), \
+                mock.patch.object(sys, "argv", ["matcher", "7", "--json", "--from-dump", str(dump)]), \
+                redirect_stdout(output), redirect_stderr(io.StringIO()):
+            self.assertEqual(matcher.main(), 0)
+        proposal = json.loads(output.getvalue())["exact"][0]
+        self.assertEqual(proposal["last_seen"], latest)
+        self.assertEqual([e["day"] for e in proposal["events"]], [latest, old])
+        output = io.StringIO()
+        with mock.patch.object(matcher, "export_home", return_value=str(self.root)), \
+                mock.patch.object(sys, "argv", ["matcher", "7", "--from-dump", str(dump)]), \
+                redirect_stdout(output):
+            self.assertEqual(matcher.main(), 0)
+        self.assertIn("Near synthetic meeting", output.getvalue())
+        self.assertNotIn("Far synthetic meeting", output.getvalue())
 
     def test_snapshot_path_is_unchanged(self):
         emails, domains = matcher.load_record_contacts(

@@ -275,7 +275,8 @@ def main():
     latest, events, upcoming = {}, defaultdict(list), {}
     for email, day, title, when in sorted(rows, key=lambda row: (row[1], row[2]), reverse=True):
         if when == "upcoming":
-            upcoming.setdefault(email, (day, title))
+            if email not in upcoming or day < upcoming[email][0]:
+                upcoming[email] = (day, title)
             continue
         if email not in latest:
             latest[email] = day
