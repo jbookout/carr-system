@@ -102,6 +102,12 @@ case("gh pr create carrying the Claude Code attribution link",
           'Generated with [Claude Code](https://claude.com/claude-code)"'), ALLOW)
 case("claude.com read", fetch("https://claude.com/claude-code"), ALLOW)
 
+# Dot relay's Slack Web API is fixed infrastructure; unknown hosts stay denied.
+case("bash curl to the Slack Web API is allowed",
+     bash("curl https://slack.com/api/auth.test"), ALLOW)
+case("bash curl to an unrelated unknown API host is still blocked",
+     bash("curl https://unlisted-api-host.example/api/auth.test"), DENY)
+
 # DoctorCRE's production app is a fixed CARR-owned domain. Its gated board
 # route must be reachable for a live, unauthenticated sign-in check.
 case("DoctorCRE app production route is allowed",
