@@ -45,11 +45,14 @@ export function screenConversion(a) {
   if (!unique(a.requirements.map(x => x.id)) || !unique(a.scope_lines.map(x => x.id)) || !unique(a.scope_lines.map(x => x.shared_scope_group)) || !unique(a.required_scope_ids)) throw new Error('duplicates');
   if (a.rentable_sf < a.usable_sf) throw new Error('area bases');
   const ids = new Set(a.scope_lines.map(x => x.id)), unpriced = new Set(a.required_scope_ids.filter(x => !ids.has(x))), warnings = [];
+  const unresolvedClearances = a.equipment.filter(e => !e.clearance_reviewed)
+    .map(e => `Equipment clearance review: ${e.equipment_ref}; specification: ${e.specification_ref}`);
+  if (unresolvedClearances.length) warnings.push('Equipment clearances remain unreviewed; layout and remediation scope need verification.');
   const scopeById = new Map(a.scope_lines.map(x => [x.id, x]));
   const rows = a.requirements.map(r => {
     let status = 'UNKNOWN', deficit = null;
     const proof = a.jurisdiction_resolved && a.jurisdiction_ref && r.jurisdiction_ref === a.jurisdiction_ref && r.edition_ref && r.evidence_ref && r.requirement_verified_on && r.requirement_verified_on <= a.as_of_date;
-    if (r.applicability === 'no') status = 'NOT_APPLICABLE';
+    if (r.applicability === 'no' && proof) status = 'NOT_APPLICABLE';
     else if (r.applicability === 'yes' && proof) {
       if (r.type === 'explicit_prohibition') { if (typeof r.required_value !== 'boolean') throw new Error('prohibition type'); status = r.required_value ? 'HARD_STOP' : 'MET'; }
       else if (r.existing.status === 'verified' && r.existing.evidence_ref && r.existing.verified_on && r.existing.verified_on <= a.as_of_date && r.existing.units === r.units && r.existing.voltage === r.voltage && r.existing.phase === r.phase) {
@@ -93,7 +96,8 @@ export function screenConversion(a) {
     const eligible = allowance.eligible_scope_ids.reduce((n, x) => n.plus(preciseCosts.get(x)[bound]), D(0));
     applied[bound] = D(allowance.maximum_usd).lt(eligible) ? D(allowance.maximum_usd) : eligible;
   }
-  const unknown = rows.some((r, i) => a.requirements[i].mandatory && r.status === 'UNKNOWN');
+  const unknownRequirements = rows.some((r, i) => a.requirements[i].mandatory && r.status === 'UNKNOWN');
+  const unknown = unknownRequirements || unresolvedClearances.length > 0;
   const outcome = rows.some(r => r.status === 'HARD_STOP') ? 'BLOCKED' : unknown ? 'NEEDS_VERIFICATION'
     : rows.some((r, i) => a.requirements[i].mandatory && r.status === 'DEFICIENCY') ? 'REMEDIATION_REQUIRED' : 'NO_IDENTIFIED_GAP';
   // Unknown mandatory scope cannot produce a complete total even if all entered lines are priced.
@@ -105,7 +109,7 @@ export function screenConversion(a) {
     confirmed_allowance_applied_usd: { low: dollars(applied.low), high: dollars(applied.high) }, unconfirmed_allowance_usd: allowance && !allowance.confirmed ? allowance.maximum_usd : null,
     reimbursement_month: allowance?.reimbursement_month ?? null, cost_per_usable_sf_usd: complete ? { low: dollars(low.div(a.usable_sf)), high: dollars(high.div(a.usable_sf)) } : null,
     unpriced_scope_ids: [...unpriced], confirmations: ['Landlord: verify physical capacities, usable/rentable measurements and parking rights.', 'Designer/engineers/equipment supplier: confirm dimensions, utilities, ventilation and priced remediation.', 'Permitting authority: confirm governing jurisdiction, adopted editions, intended use and applicability.'],
-  }, { warnings, missing_inputs: [...unpriced, ...(unknown ? ['Mandatory requirement evidence or verified compatible capacity'] : [])],
+  }, { warnings, missing_inputs: [...unpriced, ...unresolvedClearances, ...(unknownRequirements ? ['Mandatory requirement evidence or verified compatible capacity'] : [])],
     assumptions: ['Evidence is owner-supplied; the tool does not authenticate documents or independently inspect the building.', 'Gross funding need includes construction contingency. Confirmed allowance reimbursement reduces economic cost, not up-front funding need.'],
     limitations: ['NO_IDENTIFIED_GAP is limited to inspected requirements. No code-compliance or engineering approval is issued.', 'Only synthetic references are accepted; identification and controlling documents remain outside this public tool.'] });
 }

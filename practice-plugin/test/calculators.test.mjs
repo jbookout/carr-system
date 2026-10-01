@@ -12,6 +12,136 @@ const runway = a => invoke('calculate_practice_runway_v1', a);
 const conversion = a => invoke('screen_practice_conversion_v1', a);
 const sale = a => invoke('check_lease_sale_readiness_v1', a);
 
+for (const missingProof of ['unresolved', 'mismatch', 'future']) {
+  test(`conversion: non-applicability requires proof (${missingProof})`, () => {
+    const a = conversionFixture(); a.requirements[0].applicability = 'no';
+    if (missingProof === 'unresolved') {
+      a.jurisdiction_resolved = false; a.jurisdiction_ref = null;
+      a.requirements[0].evidence_ref = null; a.requirements[0].requirement_verified_on = null;
+    } else if (missingProof === 'mismatch') a.requirements[0].jurisdiction_ref = 'other';
+    else a.requirements[0].requirement_verified_on = '2026-10-02';
+    const response = callTool('screen_practice_conversion_v1', a); assert.ok(!response.isError);
+    const r = response.structuredContent.results;
+    assert.equal(r.requirements[0].status, 'UNKNOWN', missingProof);
+    assert.equal(r.outcome, 'NEEDS_VERIFICATION'); assert.equal(r.total_cost_usd, null);
+    assert.ok(response.structuredContent.missing_inputs.length);
+  });
+}
+test('conversion: documented non-applicability preserves complete costs', () => {
+  const documented = conversionFixture(); documented.requirements[0].applicability = 'no';
+  assert.equal(conversion(documented).requirements[0].status, 'NOT_APPLICABLE');
+  assert.equal(conversion(documented).outcome, 'NO_IDENTIFIED_GAP');
+  assert.deepEqual(conversion(documented).total_cost_usd, { low: 118000, high: 140000 });
+});
+
+test('conversion: unreviewed equipment clearances retain unresolved scope', () => {
+  const a = conversionFixture(); a.requirements[0].existing.value = 400;
+  a.equipment = [{ equipment_ref: 'device', specification_ref: 'spec', quantity: 1, clearance_reviewed: false }];
+  const response = callTool('screen_practice_conversion_v1', a); assert.ok(!response.isError);
+  const r = response.structuredContent.results;
+  assert.equal(r.outcome, 'NEEDS_VERIFICATION'); assert.equal(r.total_cost_usd, null);
+  assert.equal(r.tenant_economic_cost_usd, null); assert.equal(r.cost_per_usable_sf_usd, null);
+  assert.deepEqual(r.known_cost_subtotal_usd, { low: 118000, high: 140000 });
+  assert.match(response.structuredContent.missing_inputs.join(' '), /clearance.*device.*spec/i);
+  assert.match(response.structuredContent.warnings.join(' '), /clearance/i);
+  a.equipment[0].clearance_reviewed = true;
+  const reviewed = callTool('screen_practice_conversion_v1', a).structuredContent;
+  assert.equal(reviewed.results.outcome, 'NO_IDENTIFIED_GAP');
+  assert.deepEqual(reviewed.results.total_cost_usd, { low: 118000, high: 140000 });
+  assert.deepEqual(reviewed.missing_inputs, []);
+});
+
+for (const deadline of ['2026-12-01', '2027-01-01']) {
+  test(`sale: undelivered notice due by closing is conditional (${deadline})`, () => {
+    const a = saleFixture();
+    for (const o of a.renewal_options) { o.notice_delivered = fact('no'); o.notice_deadline = deadline; }
+    const r = sale(a);
+    assert.equal(r.verified_control_end_exclusive, '2032-01-01');
+    assert.equal(r.conditional_control_end_exclusive, '2042-01-01');
+    assert.equal(r.coverage, 'SHORTFALL'); assert.equal(r.status, 'ACTION_REQUIRED');
+    assert.match(r.flags.join(' '), /notice.*closing/i);
+    assert.match(r.excluded_options[0].reason, /notice/i);
+  });
+}
+test('sale: deadline day is still an unperformed notice dependency', () => {
+  const a = saleFixture(); a.as_of_date = '2026-12-01';
+  for (const o of a.renewal_options) o.notice_delivered = fact('no');
+  const r = sale(a);
+  assert.equal(r.deadlines[0].days, 0); assert.equal(r.status, 'ACTION_REQUIRED');
+  assert.equal(r.verified_control_end_exclusive, '2032-01-01');
+  assert.equal(r.conditional_control_end_exclusive, '2042-01-01');
+});
+test('sale: future buyer notice route requires documented exercise rights', () => {
+  const a = saleFixture();
+  for (const o of a.renewal_options) { o.notice_delivered = fact('no'); o.notice_deadline = '2027-01-02'; }
+  assert.equal(sale(a).status, 'NO_IDENTIFIED_OBSTACLE');
+  assert.equal(sale(a).verified_control_end_exclusive, '2042-01-01');
+  a.renewal_options[0].exercisable_by_buyer = fact('unknown');
+  assert.equal(sale(a).verified_control_end_exclusive, '2032-01-01');
+  assert.equal(sale(a).conditional_control_end_exclusive, '2042-01-01');
+  assert.equal(sale(a).coverage, 'SHORTFALL');
+});
+
+test('sale: renewal input permutations preserve chronological buyer coverage', () => {
+  const a = saleFixture(), expected = sale(a); a.renewal_options.reverse();
+  assert.deepEqual(sale(a), expected);
+  assert.equal(a.renewal_options[0].id, 'second');
+});
+test('sale: an actual gap excludes the later chain in any input order', () => {
+  const a = saleFixture(); a.renewal_options[1].start_date = '2037-02-01';
+  const expected = sale(a); a.renewal_options.reverse();
+  assert.deepEqual(sale(a), expected);
+  assert.equal(expected.verified_control_end_exclusive, '2037-01-01');
+  assert.equal(expected.status, 'ACTION_REQUIRED');
+  assert.match(expected.excluded_options[0].reason, /gap/i);
+});
+for (const reverse of [false, true]) {
+  test(`sale: ambiguous overlapping options refuse (${reverse})`, () => {
+    const a = saleFixture(); a.renewal_options[1].start_date = '2036-01-01';
+    if (reverse) a.renewal_options.reverse();
+    assert.ok(callTool('check_lease_sale_readiness_v1', a).isError);
+  });
+}
+
+for (const value of ['no', 'unknown']) {
+  test(`sale: an unnecessary lender waiver may be ${value}`, () => {
+    const a = saleFixture(); a.lender_waiver_applicable = fact('no'); a.lender_waiver = fact(value);
+    const r = sale(a);
+    assert.equal(r.status, 'NO_IDENTIFIED_OBSTACLE'); assert.equal(r.coverage, 'PASSES_CONFIGURED_CHECK');
+    assert.ok(!r.flags.some(f => /waiver/i.test(f)));
+  });
+}
+test('sale: a required lender waiver needs documented scoped terms', () => {
+  const a = saleFixture(); a.lender_waiver_applicable = fact(); a.lender_waiver = fact('no');
+  assert.equal(sale(a).status, 'ACTION_REQUIRED');
+  a.lender_waiver = fact('unknown'); assert.equal(sale(a).status, 'REVIEW_REQUIRED');
+  a.lender_waiver = fact(); assert.equal(sale(a).status, 'REVIEW_REQUIRED');
+  a.lender_waiver_terms = { waived_requirement: 'coverage_months', required_months: 60, evidence_ref: 'lender_exception', verified_on: '2026-10-01' };
+  a.renewal_options = [];
+  const waived = sale(a); assert.equal(waived.status, 'NO_IDENTIFIED_OBSTACLE');
+  assert.equal(waived.required_coverage_end, '2032-01-01'); assert.equal(waived.coverage, 'PASSES_CONFIGURED_CHECK');
+  a.defaults_resolved = fact('no'); assert.equal(sale(a).status, 'ACTION_REQUIRED');
+  a.defaults_resolved = fact(); a.required_consents_obtained = fact('no'); assert.equal(sale(a).status, 'ACTION_REQUIRED');
+  a.required_consents_obtained = fact(); a.lender_waiver_terms.required_months = 120;
+  assert.equal(sale(a).coverage, 'SHORTFALL');
+  a.lender_waiver_terms.verified_on = '2026-10-02';
+  assert.ok(callTool('check_lease_sale_readiness_v1', a).isError);
+});
+test('sale: unknown or unproven waiver applicability requires review', () => {
+  const a = saleFixture(); a.lender_waiver_applicable = fact('unknown');
+  assert.equal(sale(a).status, 'REVIEW_REQUIRED');
+  assert.match(sale(a).flags.join(' '), /waiver.*applicab/i);
+  a.lender_waiver_applicable = { value: 'no', evidence_ref: null };
+  assert.equal(sale(a).status, 'REVIEW_REQUIRED');
+  delete a.lender_waiver_applicable;
+  assert.equal(sale(a).status, 'REVIEW_REQUIRED');
+});
+test('sale: unnecessary waiver never forgives a coverage shortfall', () => {
+  const a = saleFixture(); a.lender_waiver_applicable = fact('no'); a.lender_waiver = fact('no'); a.renewal_options = [];
+  const r = sale(a); assert.equal(r.coverage, 'SHORTFALL'); assert.equal(r.shortfall_months, 60);
+  assert.equal(r.status, 'ACTION_REQUIRED');
+});
+
 test('A1 case 1: exact cash ledger and reserve funding', () => {
   const r = runway(runwayFixture()).base;
   assert.deepEqual(r.ledger.map(x => x.closing_cash_usd), [60000, 50000, 60000]);
