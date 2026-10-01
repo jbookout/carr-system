@@ -10,7 +10,7 @@ const READS = ["catch-me-up", "today-triage", "find", "find-and-catch-up",
   "deal-board", "get-deal-room", "who-do-we-know", "counterparty-history",
   "lead-board", "schedule-board", "search-tour-properties", "read-doctrine",
   "search-doctrine", "recall-memory"];
-const WRITES = ["add-deal-note", "log-activity", "add-critical-date", "log-capture"];
+const WRITES = ["add-deal-note", "log-activity", "set-next-step", "add-critical-date", "log-capture"];
 const actor = () => authenticatedIdentity.connectionForGrant({ slug: "joe" });
 async function rpc(path, method, params) {
   const request = new Request(`https://synthetic.example${path}`, {
@@ -36,7 +36,7 @@ test("Doc HTTP discovery exposes exactly the curated brokerage tools", async () 
 
 test("Doc refuses guessed reads, destructive writes and passthroughs before any database access", async () => {
   for (const [name, args] of [["list-verbs", {}], ["read-profiles", {}],
-    ["confirm-merge", {}], ["set-next-step", {}],
+    ["confirm-merge", {}], ["reassign-deal", {}],
     ["call-verb", { verb: "find", args: { query: "Synthetic" } }]]) {
     const { result } = await rpc("/doc/mcp?profile=full", "tools/call", { name, arguments: args });
     assert.equal(result.isError, true, name);
