@@ -153,7 +153,7 @@ const navigationFor=(row,kind)=>{
    return {state:'available',link:`/system-work.html?work_request=${encodeURIComponent(ref)}`,identity:{work_request:ref}};
  }
  if(kind==='progress_task' && row.identity?.board_id)
-  return {state:'available',link:`/control-room/progress?board=${encodeURIComponent(row.identity.board_id)}`,identity:row.identity};
+  return {state:'available',link:`/progress-board.html?board=${encodeURIComponent(row.identity.board_id)}`,identity:row.identity};
  if(['pull_request','remote_branch'].includes(kind) && typeof row.link==='string' && /^https:\/\/github\.com\/jbookout\/(carr-system|doctorcre-app)\//.test(row.link))
   return {state:'available',link:row.link,identity:{id:row.id}};
  return {state:'unavailable',link:null,reason:'owning_workflow_has_no_supported_record_navigation',identity:row.identity??{}};

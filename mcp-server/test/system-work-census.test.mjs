@@ -143,7 +143,7 @@ test('source navigation selects supported owning WRs or explicitly reports unava
    assert.equal(target.pathname,'/system-work.html');assert.equal(target.searchParams.get('work_request'),'WR-000001');
    assert.equal(item.navigation.state,'available');
   }else if(item.kind==='progress_task'){
-   const target=new URL(item.link,'https://example.invalid');assert.equal(target.searchParams.get('board'),'synthetic-board');
+   const target=new URL(item.link,'https://example.invalid');assert.equal(target.searchParams.get('board'),'synthetic-board');assert.equal(target.pathname,'/progress-board.html');
   }else{assert.equal(item.link,null,item.kind);assert.equal(item.navigation.state,'unavailable',item.kind);assert.ok(item.navigation.reason);}
  }
 });

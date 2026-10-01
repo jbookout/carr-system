@@ -84187,7 +84187,7 @@
           "effect_class": "audit_side_effect",
           "source_locator": "mcp-server/src/system-work-census.v5.js",
           "schema_digest": "126ebd4723150468d305a554501dcf6d3f15023849350468d33e1bb0d9154fb6",
-          "source_digest": "a08c91b66053a101dca32c27114b1d9db24402dc8533299d098b3c4f6f086f43",
+          "source_digest": "0849c194206ae4b741ca92814dcd020f651ac5855a66dbd00474ea6244fc1417",
           "write": false,
           "human_only": false,
           "authority_only": false,
@@ -84532,7 +84532,7 @@
         }
       },
       "expected_count": 1085,
-      "expected_sha256": "edea1797461170f9bd44c213c1fc8a8d681b96871d7a365a78c1cfcf67cfbc53"
+      "expected_sha256": "68a8821b4d9d7587094ffcc4fc358e75fdbb4bc5cd858521c63c843e00144735"
     }
   ],
   "current_source_review": {
