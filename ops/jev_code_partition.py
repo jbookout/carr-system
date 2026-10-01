@@ -63,7 +63,10 @@ COMMENT_MIN_LINES = 4
 COMMENT_FOLLOW_LINES = 20
 PACK_BELOW_CHARS = 600          # a partition this small is packed with neighbours
 SUFFIXES = (".py", ".mjs", ".js", ".cjs")
-EXCLUDE_PARTS = ("node_modules/", "/vendor/", ".min.js")
+# Review noise (node_modules, vendored code, minified assets, lockfiles,
+# generated registries) is decided by the one review-tier map
+# (ops/config/review-tiers.v1.json, engineering-workflow-sop section 15), read
+# through lib/review_tiers.py. Migrations are never noise.
 
 KINDS = ("function", "function_part", "except_block", "comment_block", "long_span")
 
@@ -81,10 +84,11 @@ def _load(name, rel):
 
 
 def tracked_sources(repo=REPO):
+    tiers = _load("review_tiers", "lib/review_tiers.py")
     out = subprocess.run(["git", "ls-files", "-z"], capture_output=True,
                          cwd=repo, timeout=120).stdout
     return [f for f in map(os.fsdecode, out.split(b"\0"))
-            if f.endswith(SUFFIXES) and not any(p in f for p in EXCLUDE_PARTS)]
+            if f.endswith(SUFFIXES) and not tiers.is_review_noise(f)]
 
 
 def digest(text):

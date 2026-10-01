@@ -332,7 +332,9 @@ class DotReview(unittest.TestCase):
 
     def test_b18_triage_unique_paths(self):
         mod=load('ops/jev_done_checks.py');judge=FakeJudge()
-        answer=mod.triage_review(diff(['ops/a-b.py','ops/a_b.py']), '',judge_module=judge,client=FakeClient)
+        # src/, not ops/: ops/ is tier 3 in ops/config/review-tiers.v1.json, so
+        # it floors high without reaching the judge this test inspects.
+        answer=mod.triage_review(diff(['src/a-b.py','src/a_b.py']), '',judge_module=judge,client=FakeClient)
         self.assertEqual(2,len(judge.state['files']),answer)
 
     def test_b19_triage_overflow_risky_path(self):

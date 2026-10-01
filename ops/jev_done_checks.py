@@ -72,13 +72,23 @@ AMBIGUOUS_LO = 0.35
 AMBIGUOUS_HI = 0.65
 
 
-def _sibling(name):
-    spec = importlib.util.spec_from_file_location(name, os.path.join(REPO, "ops", f"{name}.py"))
+def _sibling(name, folder="ops"):
+    spec = importlib.util.spec_from_file_location(name, os.path.join(REPO, folder, f"{name}.py"))
     if spec is None or spec.loader is None:
         raise ImportError(name)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+_LIB_MODULES: dict = {}
+
+
+def _sibling_lib(name):
+    """A lib/ module, loaded once per process."""
+    if name not in _LIB_MODULES:
+        _LIB_MODULES[name] = _sibling(name, folder="lib")
+    return _LIB_MODULES[name]
 
 
 def _result(check_id, verdict, *, confidence=None, escalate=False, detail=None, advice=None):
@@ -358,12 +368,20 @@ def check_done_claim(final_message, evidence, *, client=None, judge_module=None)
 # #17 — review triage
 # =========================================================================
 #
-# Deterministic floor first, always: a path matching RISKY_PATH is "high" with
-# no Jev call at all, because that judgment does not need to be asked — it is
-# already the rule the caller wrote. Everything else rides one `score`
-# question per file, ALL of them in one request.
+# Deterministic floor first, always: a tier-3 path in the one review-tier map
+# (ops/config/review-tiers.v1.json, engineering-workflow-sop section 15) is
+# "high" with no Jev call at all, because that judgment does not need to be
+# asked — it is already the rule the map wrote. The map carries every pattern
+# the old private regex held (auth|security|migrat|db/|payment|crypto|secret).
+# Everything else rides one `score` question per file, ALL of them in one
+# request.
 
-RISKY_PATH = re.compile(r"auth|security|migrat|db/|payment|crypto|secret", re.I)
+def deterministic_high_floor(path):
+    """True when the review-tier map puts `path` at the triage floor tier.
+    Raises when the map cannot be read; triage_review records that per file."""
+    tiers = _sibling_lib("review_tiers")
+    return tiers.tier_for_path(path) >= tiers.TRIAGE_HIGH_FLOOR_TIER
+
 
 FILE_HEADER = re.compile(r"^diff --git a/(?P<a>.+?) b/(?P<b>.+?)$", re.M)
 MAX_HUNK_CHARS = 3000
@@ -461,7 +479,15 @@ def triage_review(diff_text, task_text, *, client=None, judge_module=None,
         results = {}
         to_judge = {}
         for path, chunk in files.items():
-            if RISKY_PATH.search(path):
+            try:
+                floor = deterministic_high_floor(path)
+            except Exception as exc:
+                # An unreadable map must not quietly lower review: the file is
+                # high, and the detail names why so the fault is visible.
+                results[path] = {"risk": "high", "source": "review_tier_map_unreadable",
+                                 "error": str(exc)[:200]}
+                continue
+            if floor:
                 results[path] = {"risk": "high", "source": "deterministic_floor"}
             elif len(to_judge) < MAX_TRIAGE_FILES:
                 to_judge[path] = chunk

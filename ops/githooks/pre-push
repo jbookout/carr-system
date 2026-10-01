@@ -527,7 +527,10 @@ TOLLS
   fi
 fi
 
-exit 0
+# The two REPORTERS below run on every push that got this far. Neither can
+# change the outcome, so no exit sits above them: until 2026-09-30 a bare
+# `exit 0` here left the client-name note unreachable from the day it landed.
+# ops/pr-size-check-selftest.py fails if a top-level exit returns above them.
 
 # ---------------------------------------------------------------------------
 # CLIENT-NAME NOTE, a REPORTER and not a gate (decision 4d6ce1c7, 2026-09-24).
@@ -541,5 +544,20 @@ exit 0
 if [ -n "$REPO_ROOT" ] && [ -f "$REPO_ROOT/ops/githooks/client-name-warn.py" ] \
     && command -v python3 >/dev/null 2>&1; then
   python3 "$REPO_ROOT/ops/githooks/client-name-warn.py" "origin/main...HEAD" "$REPO_ROOT" || true
+fi
+
+# ---------------------------------------------------------------------------
+# DECOMPOSITION NOTE, a REPORTER and not a gate (engineering-workflow-sop
+# section 15, small incremental changes). Over 300 changed lines or 5 files
+# outside generated paths, or moves mixed with edits, prints a short split
+# suggestion. Silent otherwise; exit status discarded; Git's hook variables
+# stripped so its git calls read this checkout and nothing else.
+# ---------------------------------------------------------------------------
+if [ -n "$REPO_ROOT" ] && [ -f "$REPO_ROOT/ops/pr-size-check.py" ] \
+    && command -v python3 >/dev/null 2>&1; then
+  env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE -u GIT_PREFIX \
+      -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
+      -u GIT_COMMON_DIR -u GIT_NAMESPACE -u GIT_CEILING_DIRECTORIES \
+      python3 "$REPO_ROOT/ops/pr-size-check.py" "origin/main...HEAD" "$REPO_ROOT" || true
 fi
 exit 0
