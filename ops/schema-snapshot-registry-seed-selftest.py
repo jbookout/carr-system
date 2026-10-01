@@ -739,7 +739,7 @@ assert "ops.scac_mutation_catalog_v99_current()" in GENERATOR
 assert 'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v100"' in (
     ROOT / "mcp-server" / "src" / "scac-mutation-registry.v100.generated.js"
 ).read_text(encoding="utf-8")
-assert "0757_progress_directory_scac_successor.sql" in GENERATOR
+assert "0763_progress_directory_scac_successor.sql" in GENERATOR
 assert "PROGRESS_DIRECTORY_REGISTRY_APPLIED" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=100" in GENERATOR
 assert "SCAC_VERSION_COUNT=100" in GENERATOR
