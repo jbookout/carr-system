@@ -73,7 +73,7 @@ try {
       args.base_version=1;
     }
     if(verb==='record-lead-contact')args={...args,lead:f.ref,native_ref:'local-mail:overlap-'+randomUUID(),counterparty_address:'contact@example.test',kind:'email_in',occurred_at:new Date(Date.now()-10000).toISOString(),automated:false};
-    const pause=pauseAfter(a,sql=>sql.includes('select request_hash, response from tool_call'));
+    const pause=pauseAfter(a,sql=>sql.startsWith('select request_hash, response'));
     const first=transaction(a,verb,args);first.catch(()=>{});await pause.reached;
     let finished=false;const second=transaction(b,verb,args).finally(()=>{finished=true;});second.catch(()=>{});
     await blockedOrFinished(b.processID,()=>finished);
