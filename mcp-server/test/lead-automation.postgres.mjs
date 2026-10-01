@@ -49,6 +49,38 @@ try {
   await tools['advance-leads'].handler(c,actor,{});
   equal((await c.query('select stage from lead where id=$1',[lead])).rows[0].stage,'outreach_active');
   equal((await c.query("select count(*)::int n from event where subject_id=$1 and field='stage' and new_value ? 'evidence_ref'",[lead])).rows[0].n,2);
+  // A whole captured batch must advance over repeated jobs using occurrence
+  // ordering, even though every stage event is recorded later by this job.
+  const batchLead=randomUUID(),batchRef='L-SYNTH-'+randomUUID();
+  await c.query(`insert into lead(id,registry_ref,party_id,stage,event_confidence,est_lease_event,created_at,created_by,updated_by)
+    values($1,$2,$3,'qualified','high',current_date+90,now()-interval '7 days',$4,$4)`,[batchLead,batchRef,party,actor.id]);
+  const batchDraft=(await c.query(`insert into lead_contact_draft(lead_id,party_id,subject,body,scheduled_for,time_zone,created_by,approved_by,approved_at)
+    values($1,$2,'Synthetic','Synthetic batch body',now()-interval '4 hours','America/Chicago',$3,$3,now()-interval '4 hours') returning *`,[batchLead,party,actor.id])).rows[0];
+  await tools['record-lead-contact'].handler(c,actor,{...contact,lead:batchRef,native_ref:'local-mail:batch-sent',kind:'email_out',occurred_at:new Date(now-10800000).toISOString(),first_contact_draft_id:batchDraft.id,draft_body_sha256:createHash('sha256').update(batchDraft.body).digest('hex')});
+  await tools['record-lead-contact'].handler(c,actor,{...contact,lead:batchRef,native_ref:'local-mail:batch-reply',occurred_at:new Date(now-7200000).toISOString()});
+  await tools['record-lead-contact'].handler(c,actor,{...contact,lead:batchRef,native_ref:'local-calendar:batch-tour',kind:'tour',occurred_at:new Date(now-3600000).toISOString(),ended_at:new Date(now-1800000).toISOString(),attended:true,lead_stage_signal:'opportunity'});
+  for(const stage of ['outreach_active','engaged','opportunity']) {
+    await tools['advance-leads'].handler(c,actor,{});
+    equal((await c.query('select stage from lead where id=$1',[batchLead])).rows[0].stage,stage);
+  }
+  // A zero-row update cannot create applied provenance or a returned effect.
+  const rejectedLead=randomUUID(),rejectedRef='L-SYNTH-'+randomUUID();
+  await c.query(`insert into lead(id,registry_ref,party_id,stage,event_confidence,est_lease_event,created_at,created_by,updated_by)
+    values($1,$2,$3,'new','high',current_date+90,now()-interval '7 days',$4,$4)`,[rejectedLead,rejectedRef,party,actor.id]);
+  await tools['record-lead-contact'].handler(c,actor,{...contact,lead:rejectedRef,native_ref:'local-mail:rejected-stage'});
+  await c.query(`create function pg_temp.reject_stage() returns trigger language plpgsql as $$begin return null; end$$`);
+  await c.query(`create trigger synthetic_reject_stage before update on lead for each row when (old.id='${rejectedLead}'::uuid) execute function pg_temp.reject_stage()`);
+  const rejected=await tools['advance-leads'].handler(c,actor,{});
+  equal(rejected.moves.filter(m=>m.lead_id===rejectedLead),[]);
+  equal((await c.query("select count(*)::int n from lead_stage_move where lead_id=$1 and status='applied'",[rejectedLead])).rows[0].n,0);
+  equal((await c.query("select count(*)::int n from event where subject_id=$1 and field='stage'",[rejectedLead])).rows[0].n,0);
+  await c.query('drop trigger synthetic_reject_stage on lead');
+  await c.query('update lead set suppressed=true where id=$1',[rejectedLead]);
+  // Human reset: the previously applied evidence must not claim a second move.
+  await c.query("update lead set stage='new' where id=$1",[lead]);
+  const conflict=await tools['advance-leads'].handler(c,actor,{});
+  equal(conflict.moves.filter(m=>m.lead_id===lead),[]);
+  equal((await c.query('select stage from lead where id=$1',[lead])).rows[0].stage,'new');
   // A weak proposal must not consume the evidence forever. The same local
   // contact becomes sufficient once the lease event is verified.
   const weakLead=randomUUID(),weakRef='L-SYNTH-'+randomUUID();
@@ -79,3 +111,4 @@ try {
   await c.query('rollback to savepoint invalid_dispatch');
   console.log(`db-gate-proof: lead automation — ${checks} synthetic assertions; stage provenance, draft-only approval, replay, suppression, dry-run and search SQL`);
 } finally {await c.query('rollback');await c.end();}
+await import('./lead-automation-concurrency.postgres.mjs');

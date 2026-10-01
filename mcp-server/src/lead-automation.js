@@ -39,7 +39,7 @@ export function planLeadMoves(leads, activities, drafts, now) {
     const evidence = activities.filter(a => a.lead_id === lead.id &&
       Number.isFinite(new Date(a.occurred_at).getTime()) && new Date(a.occurred_at).getTime() <= clock &&
       new Date(a.occurred_at).getTime() >= new Date(lead.created_at).getTime())
-      .sort((a, b) => new Date(b.occurred_at) - new Date(a.occurred_at) || a.id.localeCompare(b.id));
+      .sort((a, b) => new Date(a.occurred_at) - new Date(b.occurred_at) || a.id.localeCompare(b.id));
     let proposal = null;
     for (const a of evidence) {
       const m = metadata(a);
@@ -86,7 +86,10 @@ export function planLeadMoves(leads, activities, drafts, now) {
 
 const LEADS_SQL = `select l.*, (p.merged_into is not null or p.deleted_at is not null) as party_merged,
   (p.contact_state <> 'active') as party_suppressed,
-  coalesce((select max(e.recorded_at) from event e where e.subject_type='lead' and e.subject_id=l.id and e.field='stage'),l.created_at) as stage_since
+  coalesce((select case when e.cause='automation_job' then coalesce(a.occurred_at,e.recorded_at) else e.recorded_at end
+    from event e left join activity a on a.id::text=e.new_value->>'activity_id' and a.lead_id=l.id
+    where e.subject_type='lead' and e.subject_id=l.id and e.field='stage' and e.new_value->>'stage'=l.stage
+    order by e.recorded_at desc,e.id desc limit 1),l.created_at) as stage_since
   from lead l join party p on p.id=l.party_id order by l.id`;
 const ACTIVITIES_SQL = `select a.* from activity a join lead l on l.id=a.lead_id
   where a.source in ('mail_ingest','local_mail','calendar','calendar_ingest') order by a.occurred_at,a.id`;
@@ -95,9 +98,9 @@ const DRAFTS_SQL = `select * from lead_contact_draft order by created_at,id`;
 export function leadAutomationTools({ withEnvelope, writeEvent, ToolError }) {
   const fail = error => { throw new ToolError({ error }); };
   const schema = properties => ({ type: "object", additionalProperties: false, properties });
-  async function snapshot(c) {
+  async function snapshot(c, lock = false) {
     const now = (await c.query("select now() as now")).rows[0].now;
-    const leads = (await c.query(LEADS_SQL)).rows;
+    const leads = (await c.query(LEADS_SQL + (lock ? " for update of l,p" : ""))).rows;
     const activities = (await c.query(ACTIVITIES_SQL)).rows;
     const drafts = (await c.query(DRAFTS_SQL)).rows;
     return { now, leads, activities, drafts };
@@ -105,20 +108,34 @@ export function leadAutomationTools({ withEnvelope, writeEvent, ToolError }) {
   async function apply(c, actor, args) {
     // Lock the live rows before observing evidence; a competing human edit must
     // be seen here, not overwritten by a planner's stale snapshot.
-    await c.query("select id from lead order by id for update");
-    const s = await snapshot(c);
-    const moves = planLeadMoves(s.leads, s.activities, s.drafts, s.now);
-    for (const move of moves) {
+    const s = await snapshot(c, true);
+    const moves = [];
+    for (const move of planLeadMoves(s.leads, s.activities, s.drafts, s.now)) {
+      await c.query("savepoint lead_stage_effect");
       const row = (await c.query(`insert into lead_stage_move
         (lead_id,from_stage,to_stage,activity_id,evidence_ref,strength,status,created_by)
         values ($1,$2,$3,$4,$5,$6,$7,$8) on conflict (lead_id,from_stage,to_stage,activity_id) do update
-        set status='applied',strength='strong'
-        where lead_stage_move.status='proposed' and excluded.status='applied' returning id`,
-      [move.lead_id, move.from_stage, move.to_stage, move.activity_id, move.evidence_ref, move.strength, move.status, actor.id])).rows[0];
-      if (!row || move.status !== "applied") continue;
-      await c.query("update lead set stage=$1,updated_by=$2 where id=$3 and version=$4", [move.to_stage,actor.id,move.lead_id,move.base_version]);
+        set strength=excluded.strength
+        where lead_stage_move.status='proposed' returning id`,
+      [move.lead_id, move.from_stage, move.to_stage, move.activity_id, move.evidence_ref, move.strength, "proposed", actor.id])).rows[0];
+      if (!row) { await c.query("release savepoint lead_stage_effect"); continue; }
+      if (move.status === "proposed") {
+        moves.push(move);
+        await c.query("release savepoint lead_stage_effect");
+        continue;
+      }
+      const updated = await c.query("update lead set stage=$1,updated_by=$2 where id=$3 and version=$4 and stage=$5 and not suppressed returning id",
+        [move.to_stage,actor.id,move.lead_id,move.base_version,move.from_stage]);
+      if (updated.rowCount !== 1) {
+        await c.query("rollback to savepoint lead_stage_effect");
+        await c.query("release savepoint lead_stage_effect");
+        continue;
+      }
+      await c.query("update lead_stage_move set status='applied',strength='strong' where id=$1", [row.id]);
       await writeEvent(c, actor, "advance-leads", "lead", move.lead_id,
         { field: "stage", old: { stage: move.from_stage }, new: { stage: move.to_stage, evidence_ref: move.evidence_ref, activity_id: move.activity_id, move_id: row.id }, cause: "automation_job" });
+      moves.push(move);
+      await c.query("release savepoint lead_stage_effect");
     }
     // Includes human-qualified rows and heals an interrupted draft preparation.
     // A previous first contact suppresses a duplicate introduction.
@@ -126,18 +143,21 @@ export function leadAutomationTools({ withEnvelope, writeEvent, ToolError }) {
       from lead l join party p on p.id=l.party_id
       where l.stage='qualified' and not l.suppressed and p.merged_into is null and p.deleted_at is null and p.contact_state='active'
         and not exists(select 1 from activity a where a.lead_id=l.id and a.kind='email_out')
-        and not exists(select 1 from lead_contact_draft d where d.lead_id=l.id)`)).rows;
+        and not exists(select 1 from lead_contact_draft d where d.lead_id=l.id)
+      order by l.id for update of l,p`)).rows;
+    let draftsPrepared = 0;
     for (const l of qualified) {
       const timezone = args.time_zone || "America/Chicago";
       const schedule = nextMorning(s.now, timezone);
-      await c.query(`insert into lead_contact_draft
+      const prepared = await c.query(`insert into lead_contact_draft
         (lead_id,party_id,owner_id,subject,body,scheduled_for,time_zone,created_by)
-        values ($1,$2,$3,$4,$5,$6,$7,$8) on conflict (lead_id) do nothing`,
+        values ($1,$2,$3,$4,$5,$6,$7,$8) on conflict (lead_id) do nothing returning id`,
       [l.id,l.party_id,l.owner_id,"Your next practice space",
         "I help healthcare practices plan their next space, representing tenants and buyers. If a move or renewal is on your horizon, would a brief conversation be useful?",
         schedule,timezone,actor.id]);
+      draftsPrepared += prepared.rowCount;
     }
-    return { ok: true, contract: LEAD_AUTOMATION_CONTRACT, moves, drafts_prepared: qualified.length, sent: false };
+    return { ok: true, contract: LEAD_AUTOMATION_CONTRACT, moves, drafts_prepared: draftsPrepared, sent: false };
   }
   return {
     "record-lead-contact": {
@@ -211,7 +231,7 @@ export function leadAutomationTools({ withEnvelope, writeEvent, ToolError }) {
         if (!actor.human) fail("human_approval_required");
         const d = (await c.query(`select d.* from lead_contact_draft d join lead l on l.id=d.lead_id
           join party p on p.id=l.party_id where d.id=$1 and d.party_id=l.party_id
-          and l.stage='qualified' and not l.suppressed and p.merged_into is null and p.deleted_at is null and p.contact_state='active' for update of l,d`, [args.draft_id])).rows[0];
+          and l.stage='qualified' and not l.suppressed and p.merged_into is null and p.deleted_at is null and p.contact_state='active' for update of l,p,d`, [args.draft_id])).rows[0];
         if (!d || d.approved_at) fail("draft_not_pending");
         await c.query("update lead_contact_draft set approved_at=now(),approved_by=$2 where id=$1",[d.id,actor.id]);
         await writeEvent(c,actor,"approve-lead-draft","lead",d.lead_id,{ new: { draft_id: d.id, approved: true, sent: false } });
@@ -225,7 +245,7 @@ export function leadAutomationTools({ withEnvelope, writeEvent, ToolError }) {
         if (!actor.human) fail("human_approval_required");
         const m = (await c.query(`select m.*,l.version,l.stage from lead_stage_move m
           join lead l on l.id=m.lead_id join party p on p.id=l.party_id
-          where m.id=$1 and m.status='proposed' and not l.suppressed and p.merged_into is null and p.deleted_at is null and p.contact_state='active' for update of l,m`,[args.move_id])).rows[0];
+          where m.id=$1 and m.status='proposed' and not l.suppressed and p.merged_into is null and p.deleted_at is null and p.contact_state='active' for update of l,p,m`,[args.move_id])).rows[0];
         if (!m || m.version !== args.base_version || m.stage !== m.from_stage) fail("stale_lead_proposal");
         await c.query("update lead set stage=$1,updated_by=$2 where id=$3",[m.to_stage,actor.id,m.lead_id]);
         await c.query("update lead_stage_move set status='applied',approved_by=$2,approved_at=now() where id=$1",[m.id,actor.id]);

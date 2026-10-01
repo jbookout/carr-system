@@ -64,6 +64,7 @@ class Fake {
   constructor(){this.sql=[];this.moves=[];this.drafts=[];this.events=[];this.l={...lead};}
   async query(text,p=[]){
     const sql=text.replace(/\s+/g," ").trim();this.sql.push(sql);
+    if(/^(savepoint|release savepoint|rollback to savepoint)/.test(sql))return {rows:[]};
     if(sql==="select now() as now")return {rows:[{now:NOW}]};
     if(sql.startsWith("select id from lead order"))return {rows:[{id:lead.id}]};
     if(sql.startsWith("select l.*, (p.merged_into"))return {rows:[this.l]};
@@ -72,9 +73,9 @@ class Fake {
     if(sql.startsWith("insert into lead_stage_move")){
       if(this.moves.length)return {rows:[]};this.moves.push(p);return {rows:[{id:"move-example"}]};
     }
-    if(sql.startsWith("update lead set stage")){this.l.stage=p[0];return {rows:[]};}
+    if(sql.startsWith("update lead set stage")){this.l.stage=p[0];return {rows:[{id:lead.id}],rowCount:1};}
     if(sql.startsWith("select l.id,l.party_id,l.owner_id"))return {rows:this.l.stage==="qualified"&&!this.drafts.length?[{id:lead.id,party_id:lead.party_id,name:"Example Practice",owner_id:null}]:[]};
-    if(sql.startsWith("insert into lead_contact_draft")){this.drafts.push({id:"draft-example",lead_id:p[0],party_id:p[1],scheduled_for:p[5]});return {rows:[]};}
+    if(sql.startsWith("insert into lead_contact_draft")){this.drafts.push({id:"draft-example",lead_id:p[0],party_id:p[1],scheduled_for:p[5]});return {rows:[{id:'draft-example'}],rowCount:1};}
     if(sql.startsWith("select d.* from lead_contact_draft d join lead"))return {rows:this.drafts};
     if(sql.startsWith("update lead_contact_draft")){this.drafts[0].approved_at=NOW;return {rows:[]};}
     if(sql.startsWith("select d.*,l.registry_ref"))return {rows:this.drafts};
@@ -100,7 +101,12 @@ test("job writes provenance and one draft; a repeated run does not recreate eith
   assert.equal(r.sent,false);assert.equal(db.l.stage,"qualified");assert.equal(db.drafts[0].scheduled_for,"2026-10-02T11:00:00.000Z");
   assert.equal(db.events[0][4].new.evidence_ref,"local-mail:synthetic-001");
   await tools["advance-leads"].handler(db,human,{idempotency_key:"synthetic-job-2"});assert.equal(db.moves.length,1);assert.equal(db.drafts.length,1);
-  assert.ok(db.sql[0].includes("for update"));
+  assert.ok(db.sql.some(s=>s.startsWith("select l.*")&&s.includes("for update of l,p")));
+});
+test("existing applied evidence is not returned as a newly applied move",async()=>{
+  const db=new Fake();db.moves=[['already-applied']];
+  const result=await tools['advance-leads'].handler(db,human,{idempotency_key:'synthetic-conflict'});
+  assert.deepEqual(result.moves,[]);assert.deepEqual(db.events,[]);assert.equal(db.l.stage,'new');
 });
 test("draft approval is human-only, makes no stage move and cannot send",async()=>{
   const db=new Fake();db.drafts=[{id:"draft-example",lead_id:lead.id}];

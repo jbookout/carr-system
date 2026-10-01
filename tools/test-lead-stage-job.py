@@ -1,6 +1,9 @@
 import importlib.util
 from pathlib import Path
 import unittest
+from unittest.mock import patch
+import subprocess
+import traceback
 
 spec = importlib.util.spec_from_file_location("lead_job", Path(__file__).resolve().parents[1] / "bin/lead-stage-job.py")
 assert spec is not None and spec.loader is not None
@@ -9,6 +12,23 @@ spec.loader.exec_module(job)
 
 
 class LeadStageJobTests(unittest.TestCase):
+    def test_subprocess_failures_never_disclose_contact_inputs(self):
+        args = {"counterparty_address": "private-sentinel@example.test", "native_ref": "local-mail:private-sentinel"}
+        for failure in ("timeout", "launch"):
+            def run(argv, **kwargs):
+                if failure == "timeout":
+                    raise subprocess.TimeoutExpired(argv, kwargs["timeout"], output="private-sentinel")
+                raise OSError("private-sentinel launch failure")
+            with self.subTest(failure=failure), patch.object(job.subprocess, "run", run):
+                try:
+                    job.call_verb("record-lead-contact", args)
+                except Exception:
+                    rendered = traceback.format_exc()
+                else:
+                    self.fail("subprocess failure must stop the job")
+                self.assertIn("RuntimeError: record-lead-contact failed", rendered)
+                self.assertNotIn("private-sentinel", rendered)
+
     def test_dry_run_is_only_a_read(self):
         calls = []
         job.run_job(lambda v, a: calls.append((v, a)) or {"moves": []}, dry_run=True)

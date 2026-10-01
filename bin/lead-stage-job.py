@@ -38,8 +38,13 @@ def run_job(call, *, dry_run=False, evidence=None, time_zone="America/Chicago"):
 
 
 def call_verb(verb, args):
-    result = subprocess.run([str(REPO / "run.sh"), "call", verb, json.dumps(args)],
-                            cwd=REPO, text=True, capture_output=True, timeout=120)
+    try:
+        result = subprocess.run([str(REPO / "run.sh"), "call", verb, json.dumps(args)],
+                                cwd=REPO, text=True, capture_output=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"{verb} failed (timeout)") from None
+    except OSError:
+        raise RuntimeError(f"{verb} failed (launch)") from None
     if result.returncode:
         # Errors may contain source identifiers. Console carries only operation
         # and exit status; no captured source text is echoed into a public log.
