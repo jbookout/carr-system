@@ -22,8 +22,8 @@ const dentalChecks = {
   code: ['If nitrous is used, confirm scavenging with outdoor discharge away from air intakes, equipment compatibility, measured flow, leaks and exposure monitoring.',
     'DISAGREE with automatic sprinkler determination from sedation alone. Sedation and recovery are an early fire-review trigger; confirm patient self-preservation, floor/exit conditions and adopted codes with the fire authority.'],
 };
-const build = (label, document, sizing, rooms, checks = {}, parking = null, warnings = []) => ({
-  label, source: source(document), sizing, rooms, parking, warnings,
+const build = (label, document, sizing, rooms, checks = {}, parking = null, warnings = [], supplementalRooms = []) => ({
+  label, source: source(document), sizing, rooms, parking, warnings, supplementalRooms,
   checklist: Object.fromEntries(Object.keys(sharedChecks).map(k => [k, [...sharedChecks[k], ...(checks[k] || [])]])),
 });
 const ops = { kind: 'operatories', sf: 400, type: 'CARR estimate', rule: 'Operatories × 400 usable SF; whole-office heuristic already includes support/circulation.' };
@@ -51,7 +51,8 @@ export const VERTICALS = {
       plumbing: ['Confirm a sink in each exam room and a non-lobby specimen bathroom near the lab where samples are collected.'],
       hvac: ['Confirm equipment heat loads and zones, process ventilation, biologic storage and refrigeration alarms.'],
       code: ['Imaging, medical gases, lasers and procedures trigger specialist design/code review. Primary-care sizing does not cover oncology, surgery centers or other large/procedural specialties.'],
-    }, five, ['Training lists a separate typical single-doctor band; the formula is a screening rule and does not guarantee the exam-room program fits.']),
+    }, five, ['Training lists a separate typical single-doctor band; the formula is a screening rule and does not guarantee the exam-room program fits.'],
+    ['Nursing work area', 'Medication storage', 'Clean supplies', 'Soiled utility', 'Reception/waiting', 'Staff/admin', 'Toilets', 'Housekeeping/IT']),
   veterinary: build('Small-animal veterinary', 'vet-vertical-guide', band(1500, 2500, 'Small-animal starting band; animal census/services, not provider multiplication, control the program.'),
     ['Dual-access exam rooms', 'Open treatment and wash/prep', 'Surgery and recovery', 'Separate feline and canine housing', 'Isolation', 'Imaging', 'Lab/pharmacy', 'Comfort room', 'Reception/scale', 'Food and supplies', 'Laundry', 'Staff/admin', 'Toilets', 'Discreet rear/side access and freezer'], {
       power: ['Confirm radiography, freezer, laundry and gas equipment specifications; fixed CT requires a separate equipment/utility review.'],
@@ -97,7 +98,7 @@ export const spaceResults = z.strictObject({
   net_room_square_feet: rangeSchema.nullable(), rentable_square_feet: rangeSchema.nullable(),
   number_types: z.strictObject({ usable_square_feet: numberType, net_room_square_feet: numberType, rentable_square_feet: numberType, parking_ratio: numberType, parking_spaces: numberType }),
   public_benchmarks: z.array(z.strictObject({ name: z.string(), net_square_feet: z.number(), source_class: z.literal('published public benchmark'), evidence_classification: z.literal('public_benchmark'), type: numberType, applicability: z.string() })),
-  rooms: z.array(z.strictObject({ room: z.string(), source_class: z.literal('CARR agent training') })),
+  rooms: z.array(z.strictObject({ room: z.string(), source_class: z.enum(['CARR agent training', 'proposed planning allowance']) })),
   parking: z.strictObject({ ratio: z.number().nullable(), spaces_needed: rangeSchema.nullable(), type: numberType,
     source_class: z.string(), area_basis: z.string(), status: z.literal('preliminary; local requirement unverified') }),
   due_diligence: checklistSchema, mechanical_capacity: z.literal('unverified'),
@@ -137,12 +138,12 @@ export function planSpace(a) {
       { name: 'Exercise-area reference', net_square_feet: 420, source_class: 'published public benchmark', evidence_classification: 'public_benchmark', type: 'calculated example', applicability: 'Input to this proposed example; equipment-specific allowances remain additional and unverified.' },
     ] : [],
     rentable_square_feet: a.rentable_to_usable_factor ? { low: Math.ceil(usable.low * a.rentable_to_usable_factor), high: Math.ceil(usable.high * a.rentable_to_usable_factor) } : null,
-    rooms: v.rooms.map(room => ({ room, source_class: 'CARR agent training' })),
+    rooms: v.rooms.map(room => ({ room, source_class: v.supplementalRooms.includes(room) ? 'proposed planning allowance' : 'CARR agent training' })),
     parking: { ratio: parkingRatio ?? null, spaces_needed: parkingRatio ? { low: Math.ceil(usable.low * parkingRatio / 1000), high: Math.ceil(usable.high * parkingRatio / 1000) } : null,
       type: parkingRatio ? 'CARR estimate' : 'calculated example', source_class: parkingRatio ? 'CARR agent training' : 'not stated in training',
       area_basis: 'Usable SF for heuristic only; confirm local denominator', status: 'preliminary; local requirement unverified' },
     due_diligence: v.checklist, mechanical_capacity: 'unverified',
-  }, { sources: [v.source, ...(net ? [allowanceSource] : []), ...(s.kind === 'therapy_allowance' ? [ptBenchmark] : [])], missing_inputs: missing,
+  }, { sources: [v.source, ...(net || v.supplementalRooms.length ? [allowanceSource] : []), ...(s.kind === 'therapy_allowance' ? [ptBenchmark] : [])], missing_inputs: missing,
     warnings: [...v.warnings, ...(s.kind === 'single_provider_band' ? ['Reference band is not scaled to the entered room count; confirm the room/equipment program before treating it as a space target.'] : [])],
     assumptions: ['Whole-office training estimates already include support and circulation; do not add a room grossing factor again.',
       'Derived parking and rentable-area numbers are calculated examples; the parking ratio is a CARR estimate. No code minima are inferred.',

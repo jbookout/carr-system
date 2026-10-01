@@ -42,6 +42,12 @@ for (const c of cases) {
 test('every catalog vertical has an independent sizing case', () => {
   assert.deepEqual(cases.map(c => c[0]).sort(), Object.keys(VERTICALS).sort());
 });
+test('primary-care support supplements are separate from training room facts', () => {
+  const r = callTool('plan_practice_space', example(cases.find(c => c[0] === 'medical'))).structuredContent;
+  assert.equal(r.results.rooms.find(x => x.room === 'Nursing work area').source_class, 'proposed planning allowance');
+  assert.equal(r.results.rooms.find(x => x.room === 'Exam rooms with sinks').source_class, 'CARR agent training');
+  assert.ok(r.sources.some(x => x.source_class === 'proposed planning allowance'));
+});
 test('whole-office dental rule has no duplicated circulation and explicit area conversion', () => {
   const a = example(cases[0]), r = callTool('plan_practice_space', { ...a, rentable_to_usable_factor: 1.2 }).structuredContent.results;
   assert.deepEqual(r.usable_square_feet, { low: 2000, high: 2000 }); assert.equal(r.net_room_square_feet, null);
