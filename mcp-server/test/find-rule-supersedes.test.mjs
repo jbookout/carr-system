@@ -4,6 +4,10 @@ import { randomUUID } from 'node:crypto';
 import { TOOLS, executeRegisteredTool, ToolError } from '../src/tools.js';
 import { requiresAuthorityConnection } from '../src/mcp.js';
 
+const dsn=process.env.CARR_RULE_TEST_DATABASE_URL;
+// Refuse unsafe configuration before any database test can construct a client.
+if (dsn) assert.match(dsn,/^postgres(?:ql)?:\/\/[^@/]*@(?:127\.0\.0\.1|localhost):/);
+
 const oldId = 'aabbccdd-0000-4000-8000-000000000001';
 const newId = 'aabbccdd-0000-4000-8000-000000000002';
 const machine = { id: '11111111-1111-4111-8111-111111111111', slug: 'codex', human: false };
@@ -60,7 +64,6 @@ test('ordinary teach keeps its writer route; human supersession uses retirement 
   assert.equal(c.calls.some(x=>x.sql.includes('ops.retire_superseded_rule')),false);
 });
 
-const dsn=process.env.CARR_RULE_TEST_DATABASE_URL;
 test('real PostgreSQL: a proposed replacement cannot supersede itself',
   {skip:!dsn}, async () => {
   const {Client}=(await import('pg')).default;
@@ -146,7 +149,6 @@ test('real PostgreSQL: human supersession executes the full teach envelope under
 });
 test('real PostgreSQL: proposed phrase lookup, literal wildcards, retirement, replay and rollback',
   {skip:!dsn},async () => {
-  assert.match(dsn,/^postgres(?:ql)?:\/\/[^@/]*@(?:127\.0\.0\.1|localhost):/);
   const {Client}=(await import('pg')).default; const c=new Client({connectionString:dsn}); await c.connect();
   const actorId=randomUUID(), old=randomUUID(), phrase=`Synthetic phrase ${randomUUID()}`;
   const actor={...machine,id:actorId};
