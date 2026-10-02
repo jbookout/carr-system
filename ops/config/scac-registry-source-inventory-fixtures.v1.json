@@ -84266,6 +84266,24 @@
       ],
       "expected_count": 1085,
       "expected_sha256": "7e245615be93afe8b26322b640167b00876efc27eac60c647fb0beee4ba87ac5"
+    },
+    {
+      "version": "v104",
+      "remove": [],
+      "upsert": [],
+      "row_replacements": {
+        "mcp-tool:link-parties": {
+          "schema_digest": "0ffb8c8c7ab89cbb729eba73afa67c6b9ac0cba84bdbe5e17a15b99e5e827c5a"
+        },
+        "external-admin:tools/migrate.py": {
+          "schema_digest": "399762b3ac93830e04b03f49fa4d11c945b3ba3a33b7a62fac5b14b4eb5a2559",
+          "handler_digest": "399762b3ac93830e04b03f49fa4d11c945b3ba3a33b7a62fac5b14b4eb5a2559"
+        }
+      },
+      "source_digest_replacements": {},
+      "expected_count": 1085,
+      "expected_sha256": "f6c142bfd04de80e91ff360e1b076939a5ed3ab3ac950de4ab3373d2a33ba348",
+      "reason": "W14 admits exact referral deal attribution and binds its atomic migration pair; prior authority flags remain sealed."
     }
   ],
   "current_source_review": {

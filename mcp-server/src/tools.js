@@ -1,3 +1,4 @@
+import { bindReferralDeal } from "./relationship-network.js";
 import { trustedOverride, dealEvidenceEntries, requireRelationshipPartner, mergeRelationshipFields } from "./vendor-relationship.js";
 // CARR MCP tool registry — Wave 1 verbs (tool-contracts-2026-07-30.md §2).
 // Every write runs the envelope: idempotency replay via tool_call, actor from
@@ -5238,6 +5239,7 @@ export const TOOLS = {
       idempotency_key: { type: "string" }, from_party: { type: "string" }, to_party: { type: "string" },
       kind: { type: "string", description: "a slug from party_link_kind: knows, works_with, can_introduce, intro_requested, introduced, referred" },
       via_party: { type: "string", description: "WHO made the connection — the broker in the middle. A ref (V-/C-/L-/T-/P-) or a party uuid. Omit ONLY for a genuinely direct edge with no third party; for 'a vendor sent us this client' the vendor goes HERE, not on an end. Refused if it resolves to either end, because a broker cannot be one of the two people being connected." },
+      deal_id: { type: "string", description: "Exact referred deal UUID; referral/referred only, destination must be its live client party, note required. Several deals may attach to one relationship." },
       occurred_on: { type: "string", description: "YYYY-MM-DD — when it happened. An offer and a completed introduction are different events and the gap between them is the follow-up." },
       note: { type: "string" } }, required: ["idempotency_key","from_party","to_party","kind"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "link-parties", args, async () => {
@@ -5296,6 +5298,12 @@ export const TOOLS = {
             hint: "occurred_on is a calendar date, YYYY-MM-DD" });
       }
 
+      const attachDeal = async linkId => {
+        let deal;
+        try { deal = await bindReferralDeal(c, actor, args, ends, kind, linkId); }
+        catch (error) { throw new ToolError({error:error.code || 'referral_deal_invalid'}); }
+        if (deal) await writeEvent(c,actor,'link-parties','party',ends.via_party || ends.from_party,{new:{link_id:linkId,deal_id:deal,kind:'referred'},idempotency_key:args.idempotency_key});
+      };
       // Upsert against 0020's unique index. Before it, two taps wrote two identical
       // edges and nothing complained. `do nothing` returns no row on conflict, so
       // the existing edge is read back and returned — the caller gets the edge it
@@ -5312,6 +5320,8 @@ export const TOOLS = {
           "select id, via_party, occurred_on from party_link where from_party=$1 and to_party=$2 and kind=$3",
           [ends.from_party, ends.to_party, kind]);
         const row = cur.rows[0];
+        if (args.deal_id && row.via_party && row.via_party !== ends.via_party) throw new ToolError({error:"referral_broker_mismatch"});
+        await attachDeal(row.id);
         // BACKFILL, not overwrite. Every edge written between 0051 and 2026-08-10
         // carries a null broker, because this verb had no via_party to pass — the
         // schema was ternary and the only writer was binary. Those edges are the
@@ -5343,6 +5353,7 @@ export const TOOLS = {
         { new: { kind, to: ends.to_party, via: ends.via_party, occurred_on: occurredOn,
                  from_input: args.from_party, to_input: args.to_party },
           idempotency_key: args.idempotency_key });
+      await attachDeal(ins.rows[0].id);
       return { ok: true, link_id: ins.rows[0].id, existing: false };
     }),
   },
