@@ -10,6 +10,8 @@ const { catalog, groups, markets } = JSON.parse(document.querySelector('#catalog
 const $ = id => document.getElementById(id);
 let current = null, previous = null, revision = 0, contextId;
 let pendingPublication, publishing = false;
+const localPublications = new Set();
+let awaitingPublicationReceipt = false, deferredContextChange = false;
 function options(select, rows, selected) {
   select.replaceChildren(...rows.map(([value, label]) => { const item = document.createElement('option'); item.value = value; item.textContent = label; return item; }));
   if (selected) select.value = selected;
@@ -132,14 +134,20 @@ async function publish(plan, token = revision) {
     while (pendingPublication) {
       const next = pendingPublication; pendingPublication = undefined;
       if (next.token !== revision) continue;
+      awaitingPublicationReceipt = true;
       try {
         const receipt = await extensions.modelContext.update(next.plan ? {
           content: [{ type: 'text', text: `${range(next.plan.results.usable_square_feet)} usable SF; preliminary ${next.plan.results.practice_type} space plan.`, _meta: { 'openai/title': 'Current space plan' } }],
           structuredContent: { practice_space_plan: { inputs: { ...next.plan.inputs_used, market: next.plan.market || 'other_market' } } },
         } : { content: [], structuredContent: {} });
+        // Even an obsolete publication owns its host notification echo.
+        if (receipt?.updateId) localPublications.add(receipt.updateId);
         if (next.token === revision) contextId = receipt?.updateId;
       } catch {
         if (next.token === revision) $('sync-note').textContent = 'Plan context could not be shared. Retry the update.';
+      } finally {
+        awaitingPublicationReceipt = false;
+        if (deferredContextChange) { deferredContextChange = false; syncContext(); }
       }
     }
   } finally { publishing = false; }
@@ -162,7 +170,11 @@ $('undo').addEventListener('click', () => { if (previous) void update({ ...previ
 function syncContext() {
   const context = extensions.modelContext?.getCurrent();
   if (context === undefined) return;
+  if (context !== null && localPublications.has(context.updateId)) return;
   if (context !== null && context.updateId === contextId) return;
+  // Hosts may notify before acknowledging an update. Wait for its identity,
+  // while keeping explicit removal (null) immediate.
+  if (context !== null && awaitingPublicationReceipt) { deferredContextChange = true; return; }
   contextId = context?.updateId;
   if (context === null) { ++revision; current = previous = null; $('undo').disabled = true; render(null); if (publishing) void publish(null); return; }
   const inputs = context.structuredContent?.practice_space_plan?.inputs;

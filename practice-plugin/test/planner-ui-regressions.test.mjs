@@ -6,7 +6,7 @@ import { plannerHtml } from '../.build/planner-resource.mjs';
 import { calculatePlan, callPlanner } from '../src/planner.mjs';
 
 const dental = { practice_type: 'dental_gp', providers: 1, operatories: 5, exam_rooms: 0, market: 'mobile_downtown' };
-async function host(t, { delay = false, contextSupport = true } = {}) {
+async function host(t, { delay = false, contextSupport = true, echo = false } = {}) {
   const executablePath = ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', chromium.executablePath()].find(p => fs.existsSync(p));
   assert.ok(executablePath, 'Browser regressions must run, never skip');
   const browser = await chromium.launch({ executablePath, headless: true });
@@ -16,7 +16,7 @@ async function host(t, { delay = false, contextSupport = true } = {}) {
   await page.exposeFunction('calculate', params => calculatePlan(params.arguments));
   await page.route('https://host.synthetic.invalid/', route => route.fulfill({ contentType: 'text/html', body: '<iframe style="width:100%;height:800px;border:0"></iframe>' }));
   await page.goto('https://host.synthetic.invalid/');
-  await page.evaluate(({ html, delay, contextSupport }) => {
+  await page.evaluate(({ html, delay, contextSupport, echo }) => {
     window.shared = []; window.calls = []; window.pending = []; window.pendingCalls = []; window.delayCalls = false; window.attachedContext = null;
     const frame = document.querySelector('iframe');
     window.notify = context => { window.attachedContext = context; frame.contentWindow.postMessage({ jsonrpc: '2.0', method: 'ui/notifications/host-context-changed', params: { 'openai/modelContext': context } }, '*'); };
@@ -34,18 +34,47 @@ async function host(t, { delay = false, contextSupport = true } = {}) {
       }
       else if (m.method === 'ui/update-model-context') {
         window.shared.push(m.params);
-        const complete = () => { window.attachedContext = { ...m.params, updateId: `local-${m.id}` }; reply({ _meta: { 'openai/modelContext': { updateId: window.attachedContext.updateId } } }); };
+        const complete = () => {
+          window.attachedContext = { ...m.params, updateId: `local-${m.id}` };
+          if (echo === 'before') window.notify(window.attachedContext);
+          reply({ _meta: { 'openai/modelContext': { updateId: window.attachedContext.updateId } } });
+          if (echo === 'after') window.notify(window.attachedContext);
+        };
         if (delay) window.pending.push(complete); else complete();
       } else reply({});
     });
     frame.srcdoc = html;
-  }, { html: plannerHtml, delay, contextSupport });
+  }, { html: plannerHtml, delay, contextSupport, echo });
   const frame = page.frameLocator('iframe');
   await frame.locator('#sync-note').filter({ hasText: contextSupport ? 'shared with this conversation' : 'does not support' }).waitFor();
   return { page, frame };
 }
 const submit = async (frame, rooms) => { await frame.locator('#rooms').fill(String(rooms)); await frame.locator('button[type=submit]').click(); await frame.locator('.area').filter({ hasText: `${(rooms * 400).toLocaleString()}–${(rooms * 400).toLocaleString()} usable SF` }).waitFor(); };
 const remount = page => page.evaluate(() => { const frame = document.querySelector('iframe'); frame.srcdoc = frame.srcdoc; });
+
+for (const echo of ['after', 'before']) test(`obsolete removal echo ${echo} its receipt preserves the newer render`, async t => {
+  const { page, frame } = await host(t, { delay: true, echo });
+  await submit(frame, 5); await page.waitForFunction(() => window.pending.length === 1);
+  await page.evaluate(() => window.notify(null));
+  await frame.locator('#status').filter({ hasText: 'Choose a program' }).waitFor();
+  await page.evaluate(() => window.complete());
+  await page.waitForFunction(() => window.pending.length === 1 && window.shared.length === 2);
+  await submit(frame, 7);
+  const newerRender = await frame.locator('#plan').innerText();
+  await page.evaluate(() => window.complete());
+  await page.waitForFunction(() => window.pending.length === 1 && window.shared.length === 3);
+  await page.frames()[1].evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  // The next publication starts only after the clear receipt/echo is processed.
+  assert.equal(await frame.locator('#plan').innerText(), newerRender, 'obsolete clear must not erase the newer plan');
+  assert.match(await frame.locator('#status').innerText(), /Space plan updated/);
+  await page.evaluate(() => window.complete());
+  await page.waitForFunction(() => window.attachedContext.structuredContent.practice_space_plan.inputs.operatories === 7);
+  await remount(page); await frame.locator('.area').filter({ hasText: '2,800–2,800' }).waitFor();
+  // A distinct host removal still clears the plan after publication echoes.
+  await page.evaluate(() => window.notify({ content: [], structuredContent: {}, updateId: 'host-removal' }));
+  await frame.locator('#status').filter({ hasText: 'Choose a program' }).waitFor();
+  assert.equal(await frame.locator('.area').count(), 0);
+});
 
 test('delayed publications cannot replace a newer plan or reattach a removed plan', async t => {
   const { page, frame } = await host(t, { delay: true });
