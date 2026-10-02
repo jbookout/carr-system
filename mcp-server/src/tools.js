@@ -8867,7 +8867,7 @@ registerTools({
                 to_jsonb(commencement_on)#>>'{}' as commencement_on,
                 to_jsonb(expiration_on)#>>'{}' as expiration_on,
                 options_note, evidence_kind, evidence_ref, source
-           from lease where deal_id=$1 and status='current'`, [s.id]);
+           from v_deal_room_current_lease where deal_id=$1`, [s.id]);
       return stripDealPlaceholders({ schema_version: "deal-timeline.v1", lease: lease.rows[0] || null,
         deal_id: s.id, ...deal.rows[0], thread: thread.rows,
         critical_dates: criticalDates.rows, next_actions: actions.rows,

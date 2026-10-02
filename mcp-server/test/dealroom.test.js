@@ -316,7 +316,7 @@ class FakeClient {
         parked_at: deal.parked_at, parked_by: deal.parked_by,
         salesforce_id: deal.salesforce_id, base_version: deal.version }] : [] };
     }
-    if (sql.includes("from lease where deal_id=$1")) return { rows: this.currentLease ? [this.currentLease] : [] };
+    if (sql.includes("from v_deal_room_current_lease where deal_id=$1")) return { rows: this.currentLease ? [this.currentLease] : [] };
     if (sql.includes("from v_deal_room_note")) {
       const rows = this.notes.filter(n => n.deal_id === params[0])
         .sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id))
@@ -1340,5 +1340,5 @@ test("deal timeline returns exact current lease dates and explicit absence witho
   assert.equal(Object.hasOwn(page.lease, "rent_start_on"), false);
   assert.equal(Object.hasOwn(page.lease, "option_on"), false);
   const source = await readFile(new URL("../src/tools.js", import.meta.url), "utf8");
-  assert.match(source, /from lease where deal_id=\$1 and status='current'/);
+  assert.match(source, /from v_deal_room_current_lease where deal_id=\$1/);
 });
