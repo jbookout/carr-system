@@ -3,11 +3,17 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { TOOLS } from '../src/tools.js';
 import { parseBusinessQuery, readBusinessList, readBusinessRecord } from '../src/workspace-business-read.js';
+const LOOPBACK = /^postgres(?:ql)?:\/\/[^@]+@(?:127\.0\.0\.1|localhost):\d+\//;
+
+test('W5 database proof accepts both loopback names and refuses external hosts', () => {
+  for (const host of ['127.0.0.1','localhost']) assert.ok(LOOPBACK.test(`postgres://demo@${host}:5432/demo`));
+  for (const host of ['example.com','localhost.example.com','127.0.0.1.example.com','postgres']) assert.equal(LOOPBACK.test(`postgres://demo@${host}:5432/demo`),false);
+});
 
 test('W5 PostgreSQL: sourced stats, partner override, audit, replay, CAS and reader grants', async t => {
   const dsn = process.env.DATABASE_URL;
   if (!dsn) { assert.notEqual(process.env.CARR_VENDOR_DIRECTORY_DB_REQUIRED, '1'); t.skip('disposable PostgreSQL required'); return; }
-  assert.match(dsn, /^postgres(?:ql)?:\/\/[^@]+@127\.0\.0\.1:\d+\//, 'loopback only');
+  assert.match(dsn, LOOPBACK, 'loopback only');
   const { Client } = (await import('pg')).default;
   const db = new Client({connectionString:dsn}); await db.connect();
   await db.query('begin');

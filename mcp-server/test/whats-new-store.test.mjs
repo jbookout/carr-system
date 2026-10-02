@@ -31,7 +31,9 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
     execFileSync(path.join(bin,'initdb'), ['-D',dir,'-U','fixture','--auth=trust','--no-locale'], { stdio: 'pipe' });
     execFileSync(path.join(bin,'pg_ctl'), ['-D',dir,'-l',path.join(dir,'server.log'),'-o',`-k ${dir} -h ''`,'-w','start'], { stdio: 'pipe' });
     running = true;
-    const connect = async () => { const c = new pg.Client({ host: dir, user: 'fixture', database: 'postgres' }); await c.connect(); clients.push(c); return c; };
+    // SQL thresholds use the business day in Chicago. Fixture current_date must
+    // use that same day, including when the runner's clock is already tomorrow.
+    const connect = async () => { const c = new pg.Client({ host: dir, user: 'fixture', database: 'postgres' }); await c.connect(); clients.push(c); await c.query("set time zone 'America/Chicago'"); return c; };
     const c = await connect();
     await c.query('create schema ops; create role carr_writer; create role carr_authority; create role carr_reader; grant usage on schema ops to carr_writer,carr_authority,carr_reader;');
     const schema = readFileSync(path.join(root,'db/schema.sql'),'utf8');
