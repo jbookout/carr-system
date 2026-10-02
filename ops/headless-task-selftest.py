@@ -64,16 +64,30 @@ elif mode == 'null':
 else:
     if os.environ.get('CARR_HEADLESS_RECEIPT') and mode != 'failure':
         artifact = pathlib.Path(os.environ['CARR_HEADLESS_RECEIPT']+'.artifact')
-        artifact.write_text('synthetic completed task artifact')
+        artifact.write_text('Required store unavailable; stopped without work' if mode == 'failed-artifact' else 'synthetic completed task artifact')
         pathlib.Path(os.environ['CARR_HEADLESS_RECEIPT']).write_text(json.dumps({
             'schema':'carr-headless-completion/v1', 'task_id':'test-task',
             'run_id':os.environ['CARR_HEADLESS_RUN_ID'], 'outcome':'completed',
             'artifacts':[{'path':str(artifact),'sha256':hashlib.sha256(artifact.read_bytes()).hexdigest()}]}))
     print(json.dumps({'type':'result','subtype':'success','is_error':False,
-                     'permission_denials':[], 'result':'done'}))
+                     'permission_denials':[], 'result':'Required store unavailable; stopped without work' if mode == 'failed-artifact' else 'done'}))
 sys.exit(7 if mode == 'failure' else 0)
 ''')
         fake.chmod(0o755)
+        # Replace only the judgment provider in every synthetic subprocess.
+        # The runner still reads evidence, builds the question and checks the
+        # typed verdict. No test starts a live model or uses a credential.
+        (self.fakebin/'sitecustomize.py').write_text(
+            f'import sys, os, time; sys.path.insert(0, {str(REPO)!r})\n'
+            'from ops import jev_judge as j\n'
+            'def judge(subject, questions, **kwargs):\n'
+            ' time.sleep(float(os.environ.get("FAKE_JUDGE_DELAY", "0")))\n'
+            ' evidence = subject["evidence"]\n'
+            ' passed = all(item["content"] == "synthetic completed task artifact" for item in evidence)\n'
+            ' verdict = "completed" if passed else "failed"\n'
+            ' return {"model":"jev-fixture", "answers":{"completion":{"type":"choice",\n'
+            '  "choice":verdict,"confidence":1.0,"probabilities":{verdict:1.0}}}}\n'
+            'j.judge = judge\n')
         recorder = self.repo / 'run.sh'
         recorder.write_text('''#!/usr/bin/env python3
 import json, os, pathlib, sys
@@ -84,6 +98,7 @@ print(json.dumps({'ok':True}))
 ''')
         recorder.chmod(0o755)
         self.env = {**os.environ, 'HOME': str(self.home),
+                    'PYTHONPATH': str(self.fakebin),
                     'PATH': str(self.fakebin) + os.pathsep + os.environ['PATH'],
                     'FAKE_ARGS': str(self.home / 'args.json'),
                     'FAKE_RECORDS': str(self.home / 'records.jsonl')}
@@ -92,6 +107,7 @@ print(json.dumps({'ok':True}))
         ops_record.write_text('''import json, os, pathlib, sys
 p = pathlib.Path(os.environ['FAKE_OPS_RECORDS'])
 with p.open('a') as f: f.write(json.dumps(sys.argv[1:])+'\\n')
+if os.environ.get('FAKE_OPS_RECORD_FAIL'): sys.exit(1)
 print(sys.argv[sys.argv.index('--correlation')+1]+' aa000000-0000-4000-8000-000000000002')
 ''')
         self.env['FAKE_OPS_RECORDS'] = str(self.home/'ops-records.jsonl')
@@ -383,6 +399,68 @@ print(sys.argv[sys.argv.index('--correlation')+1]+' aa000000-0000-4000-8000-0000
             '--check-fresh-since', stamp_before()],env=self.env,capture_output=True,text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_02_failed_artifact_with_correct_receipt_digest_is_not_completion(self):
+        result = self.run_task('failed-artifact')
+        self.assertEqual(result.returncode, 65, result.stderr)
+        self.assertFalse(any(r['status'] == 'success' for r in self.ledger()))
+        self.assertFalse((self.home/'ops-records.jsonl').exists() and any(
+            'succeeded' in json.loads(line) for line in
+            (self.home/'ops-records.jsonl').read_text().splitlines()))
+        self.assertEqual(self.run_task().returncode, 0, 'failure must not suppress real work')
+
+    def test_completion_judgment_uses_the_task_deadline(self):
+        self.env['FAKE_JUDGE_DELAY']='0.6'
+        result=self.run_task(timeout='0.4')
+        self.assertEqual(result.returncode,124,result.stderr)
+        self.assertFalse(any(r['status']=='success' for r in self.ledger()))
+
+    def test_canonical_outage_replays_original_terminal_identity_without_work(self):
+        self.env['FAKE_OPS_RECORD_FAIL']='1'
+        self.assertEqual(self.run_task().returncode,0)
+        folder=self.repo/'out/headless/test-task'
+        pending=json.loads((folder/'pending-runs.json').read_text())
+        self.assertEqual(len(pending),1)
+        run_id=pending[0]['run_id']
+        # The ledger is authoritative even if its projection is missing/stale.
+        (folder/'pending-runs.json').write_text('[]')
+        self.env.pop('FAKE_OPS_RECORD_FAIL')
+        (self.home/'args.json').unlink()
+        self.assertEqual(self.run_task().returncode,0)
+        self.assertFalse((self.home/'args.json').exists())
+        calls=[json.loads(s) for s in (self.home/'ops-records.jsonl').read_text().splitlines()]
+        self.assertEqual(len(calls),2)
+        self.assertTrue(all(c[c.index('--correlation')+1]==run_id for c in calls))
+        self.assertEqual(json.loads((folder/'pending-runs.json').read_text()),[])
+
+    def test_10_terminal_append_crash_recovers_canonical_receipt_before_skip(self):
+        driver = (f'import sys,os;sys.path.insert(0,{str(REPO)!r});'
+                  'from lib import headless_tasks as h; real=h.append_ledger;\n'
+                  'def crash(path,row):\n'
+                  ' real(path,row)\n'
+                  ' if row.get("status")=="success" and not row.get("canonical_recorded"): os._exit(143)\n'
+                  'h.append_ledger=crash\n'
+                  f'sys.exit(h.main(["test-task","--repo",{str(self.repo)!r}]))')
+        result = subprocess.run([sys.executable,'-c',driver], env=self.env,
+                                capture_output=True,text=True,timeout=30)
+        self.assertEqual(result.returncode,143,result.stderr)
+        self.assertFalse((self.home/'ops-records.jsonl').exists())
+        (self.home/'args.json').unlink()
+        result = self.run_task()
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('window_succeeded',result.stdout)
+        self.assertFalse((self.home/'args.json').exists(), 'completed effects must not repeat')
+        self.assertTrue((self.home/'ops-records.jsonl').exists(), 'canonical publication was lost')
+        calls = [json.loads(s) for s in (self.home/'ops-records.jsonl').read_text().splitlines()]
+        self.assertEqual(len(calls),1)
+        self.assertIn('succeeded',calls[0])
+        self.assertEqual(calls[0][calls[0].index('--correlation')+1],
+                         next(r['run_id'] for r in self.ledger() if r['status']=='success'))
+        result = subprocess.run([str(REPO/'bin/headless-task'),'test-task','--repo',str(self.repo),
+            '--check-fresh-since',stamp_before()],env=self.env,capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(self.run_task().returncode,0)
+        self.assertEqual(len((self.home/'ops-records.jsonl').read_text().splitlines()),1)
+
     def test_canonical_recovery_notice_keeps_verified_work_fresh(self):
         recorder = self.repo/'tools/ops-record.py'
         with recorder.open('a') as handle:
@@ -458,15 +536,46 @@ print(sys.argv[sys.argv.index('--correlation')+1]+' aa000000-0000-4000-8000-0000
     def test_completion_reads_artifact_digest_and_rejects_wrong_run(self):
         from lib.headless_tasks import verify_completion
         import hashlib
-        artifact=self.home/'artifact.json'; artifact.write_text('{"synthetic":"done"}')
+        artifact=self.home/'artifact.json'; artifact.write_text('synthetic completed task artifact')
         receipt=self.home/'receipt.json'
         data={'schema':'carr-headless-completion/v1','task_id':'test-task','run_id':'this-run',
               'outcome':'completed','artifacts':[{'path':str(artifact),'sha256':hashlib.sha256(artifact.read_bytes()).hexdigest()}]}
         receipt.write_text(json.dumps(data))
-        self.assertEqual(verify_completion(receipt,'test-task','this-run'),'completed')
-        with self.assertRaises(ValueError): verify_completion(receipt,'test-task','other-run')
+        prompt=self.home/'.claude/scheduled-tasks/test-task/SKILL.md'
+        answer={'model':'jev-fixture','answers':{'completion':{'type':'choice','choice':'completed',
+            'confidence':1.0,'probabilities':{'completed':1.0}}}}
+        with patch('ops.jev_judge.judge',return_value=answer) as judge:
+            self.assertEqual(verify_completion(receipt,'test-task','this-run',prompt.read_text()),'completed')
+            subject, questions = judge.call_args.args
+            self.assertEqual(subject['task_instructions'],prompt.read_text())
+            self.assertEqual(subject['evidence'][0]['content'],artifact.read_text())
+            self.assertIn('completion',questions)
+        with self.assertRaises(ValueError): verify_completion(receipt,'test-task','other-run',prompt.read_text())
         artifact.write_text('tampered')
-        with self.assertRaises(ValueError): verify_completion(receipt,'test-task','this-run')
+        with self.assertRaises(ValueError): verify_completion(receipt,'test-task','this-run',prompt.read_text())
+
+    def test_completion_verdict_uncertainty_outage_and_noop_are_not_work_success(self):
+        from lib.headless_tasks import verify_completion
+        from ops.jev_judge import JudgeUnavailable
+        import hashlib
+        artifact=self.home/'output'; artifact.write_text('synthetic completed task artifact')
+        receipt=self.home/'receipt'
+        data={'schema':'carr-headless-completion/v1','task_id':'test-task','run_id':'this-run',
+              'outcome':'completed','artifacts':[{'path':str(artifact),'sha256':hashlib.sha256(artifact.read_bytes()).hexdigest()}]}
+        prompt=self.home/'.claude/scheduled-tasks/test-task/SKILL.md'
+        receipt.write_text(json.dumps(data))
+        for verdict, confidence in [('completed',.5),('unproven',1.0),('failed',1.0),('noop',1.0)]:
+            answer={'model':'jev-fixture','answers':{'completion':{'type':'choice','choice':verdict,
+                'confidence':confidence,'probabilities':{verdict:confidence}}}}
+            with self.subTest(verdict=verdict,confidence=confidence), patch('ops.jev_judge.judge',return_value=answer):
+                with self.assertRaises(ValueError): verify_completion(receipt,'test-task','this-run',prompt.read_text())
+        with patch('ops.jev_judge.judge',side_effect=JudgeUnavailable('fixture outage')):
+            with self.assertRaises(ValueError): verify_completion(receipt,'test-task','this-run',prompt.read_text())
+        data['outcome']='noop';receipt.write_text(json.dumps(data))
+        answer={'model':'jev-fixture','answers':{'completion':{'type':'choice','choice':'noop',
+            'confidence':1.0,'probabilities':{'noop':1.0}}}}
+        with patch('ops.jev_judge.judge',return_value=answer):
+            self.assertEqual(verify_completion(receipt,'test-task','this-run',prompt.read_text()),'noop')
 
     def test_hard_killed_wrapper_reconciles_orphan_before_retry(self):
         child=subprocess.Popen([str(REPO/'bin/headless-task'),'test-task','--repo',str(self.repo)],
