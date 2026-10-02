@@ -21,21 +21,21 @@ from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connec
 
 REPO = Path(__file__).resolve().parents[1]
 
-# 0755 installs property evidence v99 and seals Tour feedback v98 as history.
+# 0767 installs catch-up v101 and seals Progress directory v100 as history.
 # Both are pinned: an unreviewed frontier or a rewritten predecessor must fail closed.
-LIVE_REGISTRY_VERSION = "scac-mutation-registry.v99"
-LIVE_REGISTRY_ORDINAL = 99
-SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v98"
+LIVE_REGISTRY_VERSION = "scac-mutation-registry.v101"
+LIVE_REGISTRY_ORDINAL = 101
+SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v100"
 SEALED_PREDECESSOR_ORDINAL = LIVE_REGISTRY_ORDINAL - 1
 SEALED_PREDECESSOR_DIGEST = (
-    "sha256:a766b8b60983e409d87571b7397c9856d2751f6bf0ea19efb13db046ce48ffbe"
+    "sha256:7f0e6b6c5e5d5510a574d551540a2cc24dd69aab5789e756c8b18618ef349849"
 )
-SEALED_PREDECESSOR_ENTRY_COUNTS = (2505, 1007)
+SEALED_PREDECESSOR_ENTRY_COUNTS = (2516, 1008)
 SEALED_PREDECESSOR_MIGRATION = (
-    "migrations/0750_tour_client_feedback_scac_successor.sql"
+    "migrations/0763_progress_directory_scac_successor.sql"
 )
 LIVE_REGISTRY_MIGRATION = (
-    "migrations/0755_property_evidence_scac_successor.sql"
+    "migrations/0767_doc_whats_new_scac_successor.sql"
 )
 
 LIVE_CATALOG_CURRENT_FN = f"ops.scac_mutation_catalog_v{LIVE_REGISTRY_ORDINAL}_current()"

@@ -285,6 +285,9 @@ PRIMARY_ONLY = {
     "com.carr.delivery-cadence-a05-sweep.plist",
     "com.carr.nightly-exports-daytime-retry.plist",
     "com.carr.timebomb-audit.plist",
+    # WR-000178: the Studio's Tailscale stayed stopped ~6h after the 2026-09-30
+    # reboot and cut SSH to the MacBook. The hub is the node that must come up.
+    "com.carr.tailscale-up.plist",
 }
 
 

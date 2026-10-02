@@ -651,8 +651,8 @@ def queue_turn(lane: str, sha: str, step: str, rc: int, log: str, record_path: s
     SHA must never share an id with the first. The queue key gains a suffix on
     later attempts for the same reason at the Hermes queue."""
     key = f"release-fix-{sha[:8]}" + (f"-{attempt}" if attempt > 1 else "")
-    ahead = ("PRODUCTION MIGRATIONS WERE APPLIED in this run before it stopped "
-             "(db_ahead_of_worker: true): the database is ahead of the serving Worker, so the fix "
+    ahead = ("PRODUCTION MIGRATIONS WERE ATTEMPTED in this run before it stopped "
+             "(db_ahead_of_worker: true): the database may be ahead of the serving Worker, so the fix "
              "must keep the new schema working with the currently deployed Worker.\n"
              if db_ahead_of_worker else "")
     if do_migration:
@@ -1068,8 +1068,10 @@ class Pipeline:
             return 1
         finally:
             self.remove_worktrees()
-        ok = baseline_complete and live_complete and not any(
-            f.get("hard_error") for f in baseline_findings)
+        ok = (baseline_complete and live_complete
+              and (baseline_res.rc == 0 or (baseline_res.rc == 1 and baseline_findings))
+              and (live_res.rc == 0 or (live_res.rc == 1 and live_findings)) and not any(
+                  f.get("hard_error") for f in baseline_findings + live_findings))
         self.out("  health-preflight: " + ("OK" if ok else "FAILED — see rc/findings above"))
         return 0 if ok else 1
 
@@ -1369,11 +1371,13 @@ class Pipeline:
 
     def ci_run(self, gh: Any, lane_cfg: dict, pr: int, head_sha: str) -> int:
         ci = [r for r in gh.runs_for(head_sha)
-              if r.get("name") == lane_cfg["ci_workflow_name"] and r.get("event") == "pull_request"
-              and r.get("conclusion") == "success"]
+              if r.get("name") == lane_cfg["ci_workflow_name"] and r.get("event") == "pull_request"]
         if not ci:
             raise Blocked("ci_not_green", f"PR #{pr} has no successful {lane_cfg['ci_workflow_name']} run")
         run_id = max(int(r["id"]) for r in ci)
+        newest = max(ci, key=lambda r: (int(r["id"]), int(r.get("run_attempt", 1))))
+        if newest.get("conclusion") != "success":
+            raise Blocked("ci_not_green", f"PR #{pr} newest CI run {run_id} is not successful")
         jobs = gh.jobs(run_id)
         if not any(j.get("name") == lane_cfg["ci_required_job"] and j.get("conclusion") == "success" for j in jobs):
             raise Blocked("ci_not_green", f"PR #{pr} run {run_id} lacks a green `{lane_cfg['ci_required_job']}`")
@@ -1515,6 +1519,9 @@ class Pipeline:
             return rc
 
     def run_lane(self, lane: str) -> int:
+        self.mutated = False
+        self.db_ahead_of_worker = False
+        self.do_migration = None
         lane_cfg = self.cfg[lane]
         why = kill_switch(self.cfg, lane)
         if why:
@@ -1764,9 +1771,11 @@ class Pipeline:
         if pending or self.dry_run:
             if self.dry_run:
                 self.out("  [dry-run] next line runs only when migrate-plan lists pending > 0")
-            self.step("migrate-apply", ["bin/migrate-prod.sh", "--apply"], wt)
             if not self.dry_run:
+                # Batches commit separately. Once apply starts, a failure can
+                # leave production changed; retain the warning on every exit.
                 self.db_ahead_of_worker = True
+            self.step("migrate-apply", ["bin/migrate-prod.sh", "--apply"], wt)
 
         # 5. upload the immutable candidate, verifier bound at upload time
         key = ("<next free r-%s-NN>" % self.today) if self.dry_run else next_release_key(

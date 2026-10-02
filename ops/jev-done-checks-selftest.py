@@ -360,6 +360,35 @@ class TriageReviewTests(unittest.TestCase):
         self.assertEqual(result["detail"]["files"]["src/auth.py"]["source"], "deterministic_floor")
         self.assertIn("advice", result["detail"])
 
+    def test_floor_reads_the_review_tier_map(self):
+        # hooks/ is tier 3 in ops/config/review-tiers.v1.json and matched
+        # nothing in the regex the map replaced: the floor comes from the map.
+        fake = FakeJudge(answers={})
+        result = jdc.triage_review("diff --git a/hooks/lint-gate.py b/hooks/lint-gate.py\n@@ -1 +1 @@\n+x\n",
+                                   "task", judge_module=fake)
+        self.assertEqual(result["detail"]["files"]["hooks/lint-gate.py"]["source"], "deterministic_floor")
+        self.assertEqual(fake.calls, 0)
+
+    def test_unreadable_map_floors_high_and_says_why(self):
+        fake = FakeJudge(answers={})
+        original = jdc._sibling_lib
+
+        def broken(name):
+            raise ValueError("review-tiers map is malformed")
+
+        jdc._sibling_lib = broken
+        try:
+            result = jdc.triage_review("diff --git a/README.md b/README.md\n@@ -1 +1 @@\n+x\n",
+                                       "task", judge_module=fake)
+        finally:
+            jdc._sibling_lib = original
+        row = result["detail"]["files"]["README.md"]
+        self.assertEqual(row["risk"], "high")
+        self.assertEqual(row["source"], "review_tier_map_unreadable")
+        self.assertIn("malformed", row["error"])
+        self.assertEqual(result["verdict"], "needs_review")
+        self.assertEqual(fake.calls, 0)
+
     def test_mixed_diff_one_floor_one_judged_high(self):
         files = jdc.split_diff_by_file(DIFF_TWO_FILES)
         widgets_key = jdc._safe_id("src/widgets.py")
