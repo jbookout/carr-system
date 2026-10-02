@@ -16,6 +16,8 @@ alter table public.vendor add constraint vendor_trust_override_shape check (
     trust_override->>'recorded_at' is not null
   )
 );
-grant select on public.activity, public.party_link, public.deal to carr_reader;
-grant select (loan_programs,deal_history_verified_at,trust_override,deal_evidence) on public.vendor to carr_reader;
+grant select on table public.activity to carr_reader;
+grant select on table public.party_link to carr_reader;
+grant select on table public.deal to carr_reader;
+grant select (loan_programs,deal_history_verified_at,trust_override,deal_evidence) on table public.vendor to carr_reader;
 create index if not exists activity_vendor_contact_order on public.activity (vendor_id,occurred_at desc,id desc) where vendor_id is not null;
