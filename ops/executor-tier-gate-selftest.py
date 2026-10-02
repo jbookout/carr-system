@@ -25,12 +25,12 @@ HOOK = os.path.join(REPO, "hooks", "executor-tier-gate.py")
 PASS = 0
 
 
-def run(tool_input, stub, transcript_path=None):
+def run(tool_input, stub, transcript_path=None, *, hook=HOOK):
     env = {**os.environ, "CARR_EXECUTOR_TIER_JEV_STUB": stub}
     payload = {"tool_name": "Agent", "tool_input": tool_input}
     if transcript_path:
         payload["transcript_path"] = transcript_path
-    out = subprocess.run([sys.executable, HOOK], input=json.dumps(payload), capture_output=True,
+    out = subprocess.run([sys.executable, hook], input=json.dumps(payload), capture_output=True,
                          text=True, env=env, timeout=30).stdout.strip()
     return json.loads(out)["hookSpecificOutput"] if out else None
 
@@ -105,17 +105,11 @@ check("a dearer pick never pushes a spawn upward", r is None, r)
 r = run({**brief, "subagent_type": "fork"}, "haiku:0.99")
 check("forks stay exempt", r is None, r)
 
-# PR 1406 routes merge_review to Codex; earlier policy targets Opus. The
-# exemption follows the loaded target, so either merge order is supported.
-policy = json.loads((Path(REPO) / "ops/config/model-routes.v1.json").read_text())
-pin_target = policy["dispatch_targets"][policy["pins"]["merge_review"]["target"]]
+# A routing pin exempts an in-process spawn only when the pin actually names
+# that model. The merge_review pin preserves the Opus review policy.
 pinned = {**brief, "model": "opus", "prompt": "executor: opus per routing pin merge_review\nReview PR 1 adversarially."}
 r = run(pinned, "sonnet:0.84")
-if pin_target.get("subagent_model") == pinned["model"]:
-    check("a spawn matching the loaded merge-review pin gets no cheaper-tier advice", r is None, r)
-else:
-    check("an Opus spawn cannot claim a different merge-review target as an exemption",
-          r and "EXECUTOR ADVICE" in r.get("additionalContext", ""), r)
+check("the Opus merge-review pin exempts its matching model", r is None, r)
 
 routed = {**brief, "model": "opus", "prompt": "executor: opus per routing dispatch\nChange the parser."}
 r = run(routed, "sonnet:0.84")
@@ -150,25 +144,27 @@ finally:
 
 print(f"executor-tier-gate-selftest: all {PASS} checks passed")
 
-# Exercise this whole hook suite across either PR 1406/1407 merge order.
-# Only test copies use the synthetic policies; no installed policy is changed.
-if not os.environ.get("CARR_EXECUTOR_TIER_POLICY_SELFTEST"):
-    policy = json.loads((Path(REPO) / "ops/config/model-routes.v1.json").read_text())
-    for model in ("opus", None):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "hooks").mkdir()
-            (root / "ops/config").mkdir(parents=True)
-            shutil.copyfile(HOOK, root / "hooks/executor-tier-gate.py")
-            copied_test = root / "ops/executor-tier-gate-selftest.py"
-            shutil.copyfile(__file__, copied_test)
-            candidate = json.loads(json.dumps(policy))
-            candidate["dispatch_targets"]["merge_review_test"] = {"subagent_model": model}
+# Policy changes vary the pin contract, not the rest of the executor suite.
+# Exercise the actual hook against the loaded policy and both supported target
+# shapes. Test copies keep installed policy untouched.
+policy = json.loads((Path(REPO) / "ops/config/model-routes.v1.json").read_text())
+for target_model in ("loaded", "opus", None):
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / "hooks").mkdir()
+        (root / "ops/config").mkdir(parents=True)
+        copied_hook = root / "hooks/executor-tier-gate.py"
+        shutil.copyfile(HOOK, copied_hook)
+        candidate = json.loads(json.dumps(policy))
+        if target_model != "loaded":
+            candidate["dispatch_targets"]["merge_review_test"] = {"subagent_model": target_model}
             candidate["pins"]["merge_review"]["target"] = "merge_review_test"
-            (root / "ops/config/model-routes.v1.json").write_text(json.dumps(candidate))
-            result = subprocess.run([sys.executable, str(copied_test)], capture_output=True,
-                                    text=True, timeout=60,
-                                    env={**os.environ, "CARR_EXECUTOR_TIER_POLICY_SELFTEST": "1"})
-            check(f"complete suite with merge_review targeting {model or 'Codex desk'}",
-                  result.returncode == 0, result.stdout + result.stderr)
-    print("executor-tier-gate-selftest: both merge-review policy shapes passed")
+        (root / "ops/config/model-routes.v1.json").write_text(json.dumps(candidate))
+        pin_target = candidate["dispatch_targets"][candidate["pins"]["merge_review"]["target"]]
+        r = run(pinned, "sonnet:0.84", hook=str(copied_hook))
+        if pin_target.get("subagent_model") == pinned["model"]:
+            check("a spawn matching the loaded merge-review pin gets no cheaper-tier advice", r is None, r)
+        else:
+            check("an Opus spawn cannot claim a different merge-review target as an exemption",
+                  r and "EXECUTOR ADVICE" in r.get("additionalContext", ""), r)
+print("executor-tier-gate-selftest: loaded and both merge-review policy shapes passed")
