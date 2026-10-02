@@ -2,6 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { invoiceTrackerTools } from '../src/invoice-tracker.js';
 import { TOOLS } from '../src/tools.js';
+import { readFileSync } from 'node:fs';
+import { SCAC_MUTATION_REGISTRY_VERSION } from '../src/mutation-registry.js';
+import { frozenInventory, registrySeal, FIND_RULE_V103_DB_CATALOG_BASELINE } from '../../ops/scac-mutation-inventory.mjs';
 class ToolError extends Error { constructor(payload) { super(payload.error); this.payload=payload; } }
 function harness(patch={}) {
   const row={id:'demo-commission',deal_id:'demo-deal',status:'invoiced',version:4,invoiced_on:'2026-09-01',received_on:null,today:'2026-10-02',...patch};
@@ -41,4 +44,17 @@ test('all deal reads expose the four lifecycle fields without inventing a missin
   assert.ok(lifecycle,`${name} reads lifecycle dates`);assert.match(lifecycle,/lane/);assert.match(lifecycle,/outcome/);
   assert.ok(JSON.stringify(result).includes('"invoiced_on":null'),`${name} preserves null`);
  }
+});
+
+test('reference-monitor acceptance uses the live invoice frontier and exact sealed predecessor',()=>{
+ const gate=readFileSync(new URL('../../ops/siep18-reference-monitor-local-pg-gate.py',import.meta.url),'utf8');
+ const value=name=>gate.match(new RegExp(`${name}\\s*=\\s*(?:\\(\\s*)?"([^"]+)"`))?.[1];
+ assert.equal(value('LIVE_REGISTRY_VERSION'),SCAC_MUTATION_REGISTRY_VERSION);
+ assert.equal(Number(gate.match(/LIVE_REGISTRY_ORDINAL = (\d+)/)?.[1]),Number(SCAC_MUTATION_REGISTRY_VERSION.split('.v')[1]));
+ const predecessor=registrySeal('scac-mutation-registry.v103',frozenInventory('scac-mutation-registry.v103'),FIND_RULE_V103_DB_CATALOG_BASELINE);
+ assert.equal(value('SEALED_PREDECESSOR_VERSION'),predecessor.version);
+ assert.equal(value('SEALED_PREDECESSOR_DIGEST'),predecessor.digest);
+ assert.match(gate,new RegExp(`SEALED_PREDECESSOR_ENTRY_COUNTS = \\(${predecessor.entryCount}, ${predecessor.sourceEntryCount}\\)`));
+ assert.equal(value('LIVE_REGISTRY_MIGRATION'),'migrations/0784_invoice_tracker_scac_successor.sql');
+ assert.equal(value('SEALED_PREDECESSOR_MIGRATION'),'migrations/0770_find_rule_scac_successor.sql');
 });
