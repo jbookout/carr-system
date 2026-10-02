@@ -135,14 +135,14 @@ test("approval queue and last-search read are registered; never-run and failed-r
   assert.equal(TOOLS["approve-lead-draft"].humanOnly,true);
 });
 test("database migration has draft-only constraints and finite forward transitions",()=>{
-  const sql=readFileSync(new URL("../../migrations/0768_lead_stage_automation.sql",import.meta.url),"utf8");
+  const sql=readFileSync(new URL("../../migrations/0769_lead_stage_automation.sql",import.meta.url),"utf8");
   assert.match(sql,/check \(requires_human_send\)/);assert.match(sql,/check \(not dispatchable\)/);
   assert.match(sql,/unique\(lead_id,from_stage,to_stage,activity_id\)/);assert.doesNotMatch(sql,/grant.*delete/i);
 });
 
 test("lead schema and SCAC seal are one strict atomic delivery",()=>{
   const runner=readFileSync(new URL("../../tools/migrate.py",import.meta.url),"utf8");
-  assert.equal((runner.match(/"0768_lead_stage_automation.sql",\s*"0769_lead_automation_scac_successor.sql"/g)||[]).length,2);
+  assert.equal((runner.match(/"0769_lead_stage_automation.sql",\s*"0770_lead_automation_scac_successor.sql"/g)||[]).length,2);
 });
 
 test("older strong evidence is not hidden by a newer weak match",()=>{
@@ -164,4 +164,18 @@ test("dated inbound deferral and held opportunity tour provide strong terminal m
 
 test("malformed contact metadata cannot break the whole job",()=>{
   for(const detail of ['null','[]','1','"text"','invalid']) assert.deepEqual(plan(lead,{...contact,detail}),[]);
+});
+
+// A merge may advance the registry, but may never replace a sealed predecessor.
+test("lead successor preserves human-only party merges and all v102 MCP contracts", async () => {
+  const { frozenInventory, boundInventoryRows } = await import("../../ops/scac-mutation-inventory.mjs");
+  const { SCAC_MUTATION_REGISTRY_VERSION, registeredOperation } = await import("../src/mutation-registry.js");
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, "scac-mutation-registry.v103");
+  const before = frozenInventory("scac-mutation-registry.v102");
+  const after = frozenInventory("scac-mutation-registry.v103");
+  const byKey = new Map(boundInventoryRows(after).map(row => [row.ingress_key, row]));
+  for (const row of boundInventoryRows(before).filter(row => row.ingress_key.startsWith("mcp-tool:"))) assert.deepEqual(byKey.get(row.ingress_key), row);
+  assert.equal(registeredOperation("confirm-merge").human_only, true);
+  for (const name of ["advance-leads", "approve-lead-draft", "approve-lead-move"])
+    assert.ok(registeredOperation(name), `${name} must remain registered`);
 });

@@ -2876,6 +2876,9 @@ export const TOOLS = {
 
   "catch-me-up": {
     write: false,
+    // The canonical replay ledger is not granted to the views-only reader.
+    // This route supplies actor context inside a read-only transaction.
+    writerConnection: true,
     description: "The merged timeline (event + activity rows) for one deal, client, lead, or vendor, newest first, plus its narrative-file pointer (notes_path). Use before any conversation about a record.",
     inputSchema: { type: "object", properties: { ref: { type: "string", description: "L-204 / C-127 / V-CPA-006 / deal or party name" }, limit: { type: "integer", default: 20 } }, required: ["ref"] },
     handler: async (c, _a, args) => {
@@ -2884,12 +2887,21 @@ export const TOOLS = {
         `select entry_kind, occurred_at, actor, verb, summary, detail, owed
          from v_subject_timeline where subject_type=$1 and subject_id=$2
          order by occurred_at desc limit $3`, [s.type, s.id, args.limit || 20]);
-      return { subject: s, timeline: rows.rows };
+      const captured = await c.query(
+        `select t.idempotency_key as key, a.id::text as activity_id, a.summary
+           from tool_call t join activity a on a.id::text=t.response->>'activity_id'
+          where t.verb='log-activity' and t.actor_id=$1
+            and a.${FK[s.type]}=$2 and t.idempotency_key like 'calcap-%'
+          order by t.idempotency_key limit 5001`, [_a.id, s.id]);
+      if (captured.rows.length > 5000)
+        throw new ToolError({ error: "calendar_history_too_large" });
+      return { subject: s, timeline: rows.rows, calendar_history: captured.rows };
     },
   },
 
   "find-and-catch-up": {
     write: false,
+    writerConnection: true, // catch-me-up reads the actor-bound replay ledger.
     description: "Find one live person, practice, vendor, or deal by name and immediately return that record's catch-me-up timeline. This is the bounded read-only composition of find then catch-me-up: exactly one live match proceeds; zero returns not_found; multiple matches return needs_disambiguation and no timeline. Retired aliases, linked neighbours, and related deals are never selected as the target. It performs no model call, retry, write, send, or arbitrary tool dispatch.",
     inputSchema: { type: "object", additionalProperties: false, properties: {
       query: { type: "string", description: `name to find, at most ${FIND_CATCH_UP_QUERY_MAX} characters` },
@@ -2912,7 +2924,7 @@ export const TOOLS = {
         throw new ToolError({ error: "invalid_limit",
           hint: `limit must be an integer from 1 to ${FIND_CATCH_UP_LIMIT_MAX}` });
 
-      // Reuse the registered read handlers directly on the same reader client.
+      // Reuse the registered read handlers on the same read-only client.
       // This is not a generic composite dispatcher: the two names are fixed in
       // code, no callback/tool name/provider is accepted, and the second handler
       // is unreachable until the first yields exactly one live target.
@@ -2943,6 +2955,7 @@ export const TOOLS = {
 
   "prepare-conversation": {
     write: false,
+    writerConnection: true, // fixed composition includes catch-me-up.
     description: "Prepare for one conversation by resolving a name to exactly one live record, returning its recent catch-up timeline, and—when the target is a person or organization—showing the existing introduction paths to that exact ref. This is a fixed bounded read composition: ambiguous or missing identity stops before timeline/graph reads; deals receive timeline context but are never pretended to be intro-graph people. It performs no model call, retry, write, send, or arbitrary tool dispatch.",
     inputSchema: { type: "object", additionalProperties: false, properties: {
       query: { type: "string", description: `person, organization, vendor, or deal name; at most ${FIND_CATCH_UP_QUERY_MAX} characters` },
@@ -5307,6 +5320,7 @@ export const TOOLS = {
 
   "confirm-merge": {
     write: true,
+    humanOnly: true,
     description: "HUMAN-confirmed merge of two duplicate parties: sets merged_into on the loser so it becomes a pointer to the survivor. Only after a human has looked at both records — the Hovanian rule means nothing auto-merges, ever.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, survivor_party: { type: "string" }, merged_party: { type: "string" },
@@ -5346,6 +5360,23 @@ export const TOOLS = {
         throw new ToolError({ error: "match_basis_required",
           hint: "state the corroborating signal that established this duplicate; a name alone is never a merge basis" });
 
+      // Serialize overlapping merges before reading scores or moving roles.
+      // A stable UUID order also keeps reverse calls from deadlocking. The
+      // caller's transaction holds these locks through the mutation and event.
+      const endpoints = await c.query(
+        `/* merge_live_endpoints */
+         select id, merged_into from party where id = any($1::uuid[])
+          order by id for update`, [[surv.partyId, merg.partyId]]);
+      if (endpoints.rows.length !== 2)
+        throw new ToolError({ error: "merge_survivorship_unavailable",
+          hint: "both party rows must be readable before a merge can run" });
+      for (const endpoint of endpoints.rows) {
+        if (endpoint.merged_into)
+          throw new ToolError({ error: "party_already_merged", party_id: endpoint.id,
+            merged_into: endpoint.merged_into,
+            hint: "read the live party and confirm the duplicate pair again before merging" });
+      }
+
       // The human confirms THAT this pair is a duplicate. Code decides WHICH
       // row survives, with the rule's exact precedence, so a human cannot
       // accidentally retire the more-cited or better-evidenced record.
@@ -5357,7 +5388,12 @@ export const TOOLS = {
             or exists(select 1 from vendor v where v.party_id=p.id and v.vendor_ref is not null) as has_business_ref,
            (select count(distinct rf.kind) from record_flag rf where rf.subject_type='party' and rf.subject_id=p.id
              and rf.kind in ('verified','address','phone','email','npi','specialty') and coalesce(rf.value->>'found','true') <> 'false') as verified_identity_fields,
-           ((select count(*) from activity a where a.subject_type='party' and a.subject_id=p.id)
+           -- Activities attach to role rows, which move with the party below.
+           -- EXISTS counts a multi-role activity once, without multiplying it.
+           ((select count(*) from activity a
+              where exists(select 1 from client cl where cl.id=a.client_id and cl.party_id=p.id)
+                 or exists(select 1 from lead l where l.id=a.lead_id and l.party_id=p.id)
+                 or exists(select 1 from vendor v where v.id=a.vendor_id and v.party_id=p.id))
              + (select count(*) from deal_participant dp where dp.party_id=p.id)
              + (select count(*) from party_link pl where pl.from_party=p.id or pl.to_party=p.id or pl.via_party=p.id)) as linked_records
           from party p where p.id = any($1::uuid[])`, [[surv.partyId, merg.partyId]]);
@@ -5371,10 +5407,22 @@ export const TOOLS = {
       const sweep = await c.query(
         `/* merge_orphan_sweep */
          select 'party_link' as attachment, count(*)::int as count from party_link where from_party=$1 or to_party=$1 or via_party=$1
-         union all select 'activity', count(*)::int from activity where subject_type='party' and subject_id=$1
+         union all select 'activity', count(*)::int from activity a
+           where exists(select 1 from client cl where cl.id=a.client_id and cl.party_id=$1)
+              or exists(select 1 from lead l where l.id=a.lead_id and l.party_id=$1)
+              or exists(select 1 from vendor v where v.id=a.vendor_id and v.party_id=$1)
          union all select 'deal_participant', count(*)::int from deal_participant where party_id=$1
          union all select 'record_flag', count(*)::int from record_flag where subject_type='party' and subject_id=$1
          union all select 'child_party', count(*)::int from party where org_id=$1`, [merg.partyId]);
+
+      // Moving role rows cannot preserve graph endpoints or the broker. Until
+      // an attachment-preserving merge handles duplicate and self edges, refuse
+      // this pair before any write instead of retiring a still-cited party.
+      const graphCount = sweep.rows.find(row => row.attachment === "party_link")?.count;
+      if (Number(graphCount) > 0)
+        throw new ToolError({ error: "merge_graph_attachments_require_resolution",
+          party_id: merg.partyId, count: Number(graphCount),
+          hint: "the losing party has introduction links; preserve their endpoints and broker before confirming this merge" });
 
       // JOE'S RULING, in his words: "Okafor is a client now duh. everyone starts
       // as a lead." A lead record and a client record for the same person are
@@ -8467,10 +8515,15 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
   // The registry-wide test covers every present and future humanOnly verb.
   if (tool.humanOnly === true) {
     const actorClass = authorizationClassForActor(actor);
-    if (actorClass !== "verified_partner" && !canExercisePartnerAuthority(actor))
+    // Identity merges require the human caller even when a machine holds
+    // sponsor-scoped partner authority. Other partner-authority verbs retain
+    // their existing native/local agent route.
+    if (actorClass !== "verified_partner" &&
+        (name === "confirm-merge" || !canExercisePartnerAuthority(actor)))
       throw new ToolError({ error: "human_only_verb_requires_verified_partner",
         verb: name, actor_class: actorClass,
-        hint: "this verb records a partner-authority act and requires either the verified partner " +
+        hint: name === "confirm-merge" ? "confirm-merge requires a verified human partner; machine identities cannot confirm identity merges." :
+              "this verb records a partner-authority act and requires either the verified partner " +
               "or a server-verified native/local agent bound to that partner's sponsor-scoped " +
               "authority connection." });
   }

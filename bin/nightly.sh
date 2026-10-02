@@ -1213,6 +1213,12 @@ step "portability mirror (md+csv, 2 locations)" \
 # when ~/.config/carr/calendar.env is absent, same contract as the other steps.
 step "calendar archive (both partners' feeds)"       ./bin/archive-calendar.sh
 
+# The archive is a participant-stripped schedule, not meeting-touch evidence.
+# Use the attendee-aware EventKit capture after the live contact exports above.
+# Unknown attendees remain queued separately; exact write failures fail the step.
+step "calendar meetings to touches (EventKit)" \
+  ./bin/calendar-eventkit-capture.sh --days 7
+
 # MAIL, loop #169. The calendar lane proves a meeting happened; most follow-up
 # never becomes one, so a calendar-only view of the relationship sees a fraction
 # of the real contact. That gap is why vendor touch coverage sat at 0.7%.
