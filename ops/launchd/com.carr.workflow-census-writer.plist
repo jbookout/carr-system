@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  doctrine: doctorcre-v5-astra-integration-review
+
+  com.carr.workflow-census-writer: the single writer of the V5-F09 workflow
+  census store (migration 0708, ops.workflow_census_record).
+
+  Once a day it reads the control plane's rows through the read-only tap, runs
+  the F09 classifier, and records the census through record-workflow-census,
+  where the deployed Worker stamps the principal (joe-local, from this Mac's
+  LOCAL_TOKENS bearer) and the server time and extends the hash chain.
+  lib/control_plane_workflow_truth_reader.py accepts the latest census only
+  while it is younger than the freshness window in
+  ops/config/workflow-census-attestation.v1.json (26 hours for this daily
+  cadence), so a missed run turns the census route to "stale" rather than
+  silently serving an old census.
+
+  StartCalendarInterval, NOT StartInterval: StartInterval jobs have been seen
+  never firing on this Mac. 04:10 local: after nightly-record-layer's 02:05 run
+  and the Monday 03:30 time-bomb audit, before the working day.
+
+  PRIMARY MACHINE ONLY (ops/config-as-code.py PRIMARY_ONLY): the writer
+  principal on the allowlist is joe-local; the same job on another Mac would be
+  recorded under that Mac's actor and read back as an unknown writer.
+
+  RISK: YELLOW. Read-only against the database through tools/db-tap.py; one
+  append per run through the record layer's write door (./run.sh call, no
+  credential of its own). Never edits or deletes a census row; the store
+  refuses both.
+
+  INSTALLING IT IS A DELIBERATE ACT, and only after the PR that adds
+  record-workflow-census has merged AND the Worker carrying it is deployed
+  (before that, every run is refused by the write door and exits non-zero).
+  From the canonical checkout:
+    sed "s|{{REPO}}|$PWD|g" ops/launchd/com.carr.workflow-census-writer.plist \
+      > ~/Library/LaunchAgents/com.carr.workflow-census-writer.plist
+    plutil -lint ~/Library/LaunchAgents/com.carr.workflow-census-writer.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.carr.workflow-census-writer.plist
+  Once installed, ops/config-as-code.py check holds the installed body to this
+  file like every other CARR LaunchAgent.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.carr.workflow-census-writer</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>{{REPO}}/bin/run-scheduled.sh</string>
+    <string>workflow-census-writer</string>
+    <string>launchd.run</string>
+    <string>{{REPO}}/.venv/bin/python</string>
+    <string>{{REPO}}/ops/workflow-census-writer.py</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/opt/homebrew/opt/libpq/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>CARR_REPO</key>
+    <string>{{REPO}}</string>
+  </dict>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>4</integer>
+    <key>Minute</key><integer>10</integer>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>{{REPO}}/out/workflow-census-writer.log</string>
+  <key>StandardErrorPath</key>
+  <string>{{REPO}}/out/workflow-census-writer.log</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>

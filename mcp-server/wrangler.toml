@@ -273,6 +273,23 @@ enabled = true
 binding = "carr_documents"
 bucket_name = "carr-documents"
 
+# V5-F09 census anchor (2026-09-24): the head (seq, row_hash) of the database's
+# workflow census chain, held OUTSIDE the database so a wholesale rewrite of
+# ops.workflow_census_record by its owner no longer matches it. A SQLite-backed
+# Durable Object, not KV: strongly consistent, refuses a head that does not
+# advance, and has no external write API (Jev architecture_or_design, 1.0). It
+# needs no namespace id -- `wrangler deploy` creates the class from the
+# migration below. See src/workflow-census-anchor.js.
+[[durable_objects.bindings]]
+name = "WORKFLOW_CENSUS_ANCHOR"
+class_name = "WorkflowCensusAnchor"
+
+# Durable Object class migrations are inherited by [env.staging]; the staging
+# Worker is a separate script, so it gets its own, separate object storage.
+[[migrations]]
+tag = "v1-workflow-census-anchor"
+new_sqlite_classes = ["WorkflowCensusAnchor"]
+
 # ─────────────────────────────────────────────────────────────────────────────
 # STAGING (2026-08-13). Gate G1 requires an environment PROVEN unable to reach
 # Production data or credentials. The database half is a separate Neon project
@@ -353,6 +370,12 @@ run_worker_first = true
 [[env.staging.kv_namespaces]]
 binding = "OAUTH_KV"
 id = "faa513fd07ec45d88abc5949f323aec5"
+
+# Its OWN census anchor: durable_objects bindings are not inherited, and the
+# staging script's objects are separate from production's by construction.
+[[env.staging.durable_objects.bindings]]
+name = "WORKFLOW_CENSUS_ANCHOR"
+class_name = "WorkflowCensusAnchor"
 
 [env.staging.observability]
 enabled = true

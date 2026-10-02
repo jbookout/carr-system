@@ -1,3 +1,4 @@
+// v104 admits workflow census over main v103 without rewriting historical seals.
 import {
   SCAC_MUTATION_DB_METADATA_AUTHORITY,
   SCAC_MUTATION_OPERATIONS,
@@ -198,7 +199,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v103.generated.js";
+} from "./scac-mutation-registry.v104.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 

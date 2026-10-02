@@ -269,6 +269,10 @@ PRIMARY_ONLY = {
     "com.carr.local-briefs.plist",
     "com.carr.partner-ping.plist",
     "com.carr.cutover-watch.plist",
+    # The V5-F09 census writer records under this Mac's actor; the census
+    # reader's writer list names joe-local only, so a second machine's run
+    # would be recorded and then read back as an unknown writer.
+    "com.carr.workflow-census-writer.plist",
     # Joe 2026-09-26: the Mac Studio is the hub and the MacBook is a thin client
     # into it, so work that acts on shared state runs on the primary alone.
     # room-bridge: both Macs carried the same Model Room desks and raced for

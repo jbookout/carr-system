@@ -41,6 +41,15 @@ from typing import Any, cast
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
+# HERMETIC. The F09 census route now asks the deployed Worker for the attested
+# census (lib/control_plane_workflow_truth_reader).  This suite proves the
+# route's fail-closed shape and its consumer's wiring, never a live answer, so it
+# pins the route's offline switch -- which can only ever produce the unavailable
+# answer -- for itself and every child it spawns.  The attested path and every
+# negative path of the verifier are ops/workflow-census-attestation-selftest.py.
+import os as _os  # noqa: E402
+
+_os.environ["CARR_WORKFLOW_CENSUS_OFFLINE"] = "1"
 
 failures: list[str] = []
 total = 0
@@ -1325,7 +1334,7 @@ def _raises_attribute_error(call) -> bool:
 LABEL_ROUTE_REASON = "handle_integrity_unprovable"
 LABEL_ITEM_DISPOSITION = "not_proven"
 LABEL_OWED_SEAM = "durable_signed_census_store_seam"
-CENSUS_ROUTE_SCHEMA = "control-plane-workflow-truth-census.v1"
+CENSUS_ROUTE_SCHEMA = "control-plane-workflow-truth-census.v2"
 # THE RENAME, AND WHY IT IS NOT A COSMETIC ONE.  The reason id used to be spelled
 # ``reading_handle_integrity_unprovable``, which carries the privileged union word
 # "read" as a substring -- and the ninth cut therefore had to carve that string
@@ -1587,10 +1596,9 @@ def source_adapter_checks() -> None:
           json.dumps(sorted(set(RETIRED) & reader_bound)))
     reader_public = {name for name in dir(reader)
                      if not name.startswith("_")} - {"annotations"}
-    check("the reader's whole public surface is the frozen answer, its schema id "
-          "and one no-argument callable",
-          reader_public == {"SCHEMA_VERSION", "CENSUS_ROUTE_ANSWER",
-                            "workflow_truth_census"}
+    check("the reader's whole public surface is its schema id and one no-argument "
+          "callable",
+          reader_public == {"SCHEMA_VERSION", "workflow_truth_census"}
           and reader_public == set(reader_all),
           json.dumps(sorted(reader_public)))
     reader_tree = _reader_ast.parse(
@@ -1603,8 +1611,19 @@ def source_adapter_checks() -> None:
         and isinstance(node.func, (_reader_ast.Name, _reader_ast.Attribute))
         and (getattr(node.func, "attr", getattr(node.func, "id", "")) in
              ("run", "check_output", "Popen", "connect", "system", "popen")))
-    check("the reader runs no process and opens no connection any more",
-          not query_calls, json.dumps(query_calls))
+    # THE ONE PROCESS THE REWIRED READER RUNS, AND WHAT IT IS NOT.  The census
+    # route asks the deployed Worker through ``./run.sh call read-workflow-census``
+    # (a credential-less child with HOME, PATH and LANG only).  It never opens a
+    # database connection and never reaches the canonical tap: the store is read
+    # through the server's read door or not at all.
+    reader_source = (REPO / "lib" / "control_plane_workflow_truth_reader.py").read_text(
+        encoding="utf-8")
+    check("the reader runs exactly one process -- the server's census read door -- and "
+          "opens no connection",
+          query_calls == ["run"] and '"read-workflow-census"' in reader_source
+          and "db-tap" not in reader_source and "psycopg" not in reader_source
+          and "DATABASE_URL" not in reader_source.replace("no DATABASE_URL", ""),
+          json.dumps(query_calls))
 
     # NO CONSUMER ANYWHERE IN THE TREE STILL REACHES FOR ONE OF THEM.  A grep, but
     # a parsed one: every .py file under lib/, tools/, ops/ and bin/ is parsed and
@@ -1682,10 +1701,10 @@ def source_adapter_checks() -> None:
                                     _reader_ast.If, _reader_ast.Try))],
           inspect.getsource(entry)[:200])
     census_code = reader.workflow_truth_census.__code__
-    check("the census route is built the same way: no argument, no global, one "
-          "frozen free variable",
+    check("the census route is built the same way: no argument, no global, only the "
+          "transport, the config source and the verifier it was bound to",
           census_code.co_argcount == 0 and census_code.co_names == ()
-          and census_code.co_freevars == ("answer",),
+          and set(census_code.co_freevars) == {"answer_for", "config_source", "transport"},
           json.dumps({"names": list(census_code.co_names),
                       "free": list(census_code.co_freevars)}))
 
@@ -1734,12 +1753,12 @@ def source_adapter_checks() -> None:
                           "item_disposition": LABEL_ITEM_DISPOSITION,
                           "owed_seam": LABEL_OWED_SEAM},
           json.dumps(dict(label)))
-    check("the census route carries the same reason, disposition and seam under its "
-          "own schema id",
+    check("the census route, with no server answer, fails closed with today's reason "
+          "and disposition under its own schema id",
           dict(census) == {"schema_version": CENSUS_ROUTE_SCHEMA, "available": False,
                            "reason": LABEL_ROUTE_REASON,
                            "item_disposition": LABEL_ITEM_DISPOSITION,
-                           "owed_seam": LABEL_OWED_SEAM},
+                           "detail": "offline_by_environment"},
           json.dumps(dict(census)))
     check("neither route's own strings carry a word from the privileged union",
           not [word for word in PRIVILEGED_WORD_UNION
@@ -1914,18 +1933,16 @@ def label_route_fallback_checks() -> None:
               "the caller's functions and the caller's answer",
               getattr(reader, "read_workflow_truth_snapshot")()["owners"]
               == {f"{CALLER_WORKFLOW_KEY}@v1": CALLER_OWNER}
-              and reader.CENSUS_ROUTE_ANSWER["available"] is True,
-              json.dumps(reader.CENSUS_ROUTE_ANSWER))
+              and getattr(reader, "CENSUS_ROUTE_ANSWER")["available"] is True,
+              json.dumps(getattr(reader, "CENSUS_ROUTE_ANSWER")))
         after_rebind = reader.workflow_truth_census()
-        check("probe 2: the census route answers byte-identically to before, and "
-              "returns the very object bound at import",
+        check("probe 2: the census route answers byte-identically to before",
               json.dumps(dict(after_rebind), sort_keys=True) == census_before
-              and after_rebind is census_object
               and not any(token in json.dumps(dict(after_rebind))
                           for token in caller_strings),
               json.dumps(dict(after_rebind)))
     finally:
-        setattr(reader, "CENSUS_ROUTE_ANSWER", census_object)
+        delattr(reader, "CENSUS_ROUTE_ANSWER")
         delattr(reader, "read_workflow_truth_snapshot")
         delattr(reader, "render_reading")
 
@@ -2525,7 +2542,6 @@ def closed_union_sweep_checks() -> None:
               "lib.assurance_health_sources.LABEL_ROUTE_ANSWER",
               "lib.assurance_health_sources.SCHEMA_VERSION",
               "lib.assurance_health_sources.assurance_health_census",
-              "lib.control_plane_workflow_truth_reader.CENSUS_ROUTE_ANSWER",
               "lib.control_plane_workflow_truth_reader.SCHEMA_VERSION",
               "lib.control_plane_workflow_truth_reader.workflow_truth_census"],
           json.dumps(sorted(label for label, _ in exports)))
@@ -3161,16 +3177,18 @@ def census_route_invariance_checks() -> None:
     further out, and it was still rendering caller content as the control plane's
     own answer.
 
-    WHAT REPLACED IT.  The reader mints and renders nothing; both this surface's
-    F09 section and its A01 section print one invariant unavailable line built
-    from frozen literals.  This check drives the real script in a subprocess with
-    all three names rebound -- the snapshot read, the render, and the frozen
-    census export -- and every subprocess refused, then asserts:
+    WHAT REPLACED IT.  The reader mints and renders nothing in the caller's
+    process: since migration 0708 it asks the deployed Worker for the
+    hash-chained census and recomputes it, and with no server answer it fails
+    closed.  This check drives the real script in a subprocess with all three old
+    names rebound -- the snapshot read, the render, and the old frozen census
+    export -- and every subprocess refused (so no server answer exists), then
+    asserts:
 
       1. both sections printed;
       2. not one of the caller's strings reached the output;
-      3. both sections carry the same reason id, the same ``not_proven``
-         disposition and the same owed seam name;
+      3. both sections carry the same reason id and the same ``not_proven``
+         disposition, and the A01 section still names its owed seam;
       4. no count, no state and no census row is printed by either of them;
       5. the control -- that the rebinding really did land in that process, which
          is asserted by the probe itself failing to change anything only because
@@ -3183,10 +3201,11 @@ def census_route_invariance_checks() -> None:
                           and "workflow census" in line)]
     check("the canonical surface ran far enough to print both sections",
           "Workflow truth —" in out and "Assurance health —" in out, out[-600:])
-    check("the F09 census section reports unavailable with the frozen reason, the "
-          "not-proven disposition and the owed seam",
-          f"  -- workflow census   UNAVAILABLE — {LABEL_ROUTE_REASON}; item carried "
-          f"as {LABEL_ITEM_DISPOSITION}; owed seam {LABEL_OWED_SEAM}" in out,
+    check("the F09 census section, with no server answer, reports unavailable with "
+          "today's reason and the not-proven disposition",
+          f"  -- workflow census   UNAVAILABLE — {LABEL_ROUTE_REASON} (" in out
+          and f"item carried as {LABEL_ITEM_DISPOSITION}" in out
+          and "ATTESTED" not in out,
           "\n".join(section_lines))
     check("the A01 assurance section reports the same three facts",
           f"  -- assurance health   UNAVAILABLE — {LABEL_ROUTE_REASON}; item carried "
@@ -3208,18 +3227,18 @@ def census_route_invariance_checks() -> None:
     # writes are performed here, in this process, and read back.
     import lib.control_plane_workflow_truth_reader as reader
 
-    frozen = reader.workflow_truth_census()
+    frozen = dict(reader.workflow_truth_census())
     setattr(reader, "read_workflow_truth_snapshot", lambda: {"available": True})
     try:
         check("the probe's write really does land on the reader module: the name it "
               "rebinds exists afterwards and holds the caller's function",
               getattr(reader, "read_workflow_truth_snapshot")() == {"available": True}
-              and reader.workflow_truth_census() is frozen,
+              and dict(reader.workflow_truth_census()) == frozen,
               json.dumps(dict(reader.workflow_truth_census())))
     finally:
         delattr(reader, "read_workflow_truth_snapshot")
     check("and the census route is unchanged once the probe is cleaned up",
-          reader.workflow_truth_census() is frozen
+          dict(reader.workflow_truth_census()) == frozen
           and dict(reader.workflow_truth_census())["reason"] == LABEL_ROUTE_REASON,
           json.dumps(dict(reader.workflow_truth_census())))
 
