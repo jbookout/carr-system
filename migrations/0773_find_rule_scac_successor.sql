@@ -246,8 +246,8 @@ begin
   if (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v103')<>2615
     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v103' and ingress_kind not in ('db_function_acl','db_relation_acl','db_column_acl'))<>1085
     or bad_hash or v.registry_digest is distinct from 'sha256:0b2c4e20f070b852ed3ecce6f19547526ee6d0d1b06bd389c720998f07c4e3bf'
-    or v.entry_set_digest is distinct from 'sha256:f1e8fad474c360423c158c7b7543fc64261206311ab2098334c516ce0f44b766' then
-    raise exception 'Find rule v103 seed or entry-set seal drifted: actual % expected %', v.entry_set_digest, 'sha256:f1e8fad474c360423c158c7b7543fc64261206311ab2098334c516ce0f44b766';
+    or v.entry_set_digest is distinct from 'sha256:134c401a3785406c1a84f2594d42a60f718cc6814bef74f26c5513f6b724cac3' then
+    raise exception 'Find rule v103 seed or entry-set seal drifted: actual % expected %', v.entry_set_digest, 'sha256:134c401a3785406c1a84f2594d42a60f718cc6814bef74f26c5513f6b724cac3';
   end if;
 end $find_rule_v103_seed$;
 
