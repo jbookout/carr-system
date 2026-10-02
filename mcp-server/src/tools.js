@@ -337,7 +337,7 @@ async function withEnvelope(client, actor, verb, args, fn) {
   // reports a version conflict instead of the promised replay.
   // Keep this scoped until the shared envelope's existing fake-client suites
   // are migrated to model the extra query for every historical write verb.
-  if (verb === "whats-new" || verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "answer-work-request-for-joe" || verb === "decline-work-request" || verb === "supersede-work-request" || verb === "propose-ready-plan" || verb === "review-heavy-build-plan" || verb === "accept-ready-plan" || verb === "propose-ready-plan-amendment" || verb === "accept-ready-plan-amendment" || verb === "acknowledge-ready-plan-amendment" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease" || verb === "observe-memory" || verb === "promote-memory" || verb === "correct-memory" || verb === "forget-memory" || verb === "register-engineering-slice-plan" || verb === "admit-engineering-slice" || verb === "review-engineering-slice" || verb === "append-tour-rights-receipt" || verb === "revoke-tour-rights-receipt" || verb === "append-tour-source-evidence" || verb === "append-tour-field-assertion" || verb === "create-tour-public-projection-draft" || verb === "seal-tour-public-projection" || verb === "append-tour-property-identifier-assertion" || verb === "append-tour-coordinate-candidate" || verb === "append-tour-entrance-verification-receipt" || verb === "codex-checkpoint" || verb === "codex-record-event" || verb === "ask-jev" || TOUR_DOMAIN_SERIALIZED_WRITES.has(verb) || BOARD_ANSWER_WRITE_VERBS.has(verb) || MEETING_MODE_WRITE_VERBS.includes(verb))
+  if (verb === "teach" || verb === "whats-new" || verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "answer-work-request-for-joe" || verb === "decline-work-request" || verb === "supersede-work-request" || verb === "propose-ready-plan" || verb === "review-heavy-build-plan" || verb === "accept-ready-plan" || verb === "propose-ready-plan-amendment" || verb === "accept-ready-plan-amendment" || verb === "acknowledge-ready-plan-amendment" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease" || verb === "observe-memory" || verb === "promote-memory" || verb === "correct-memory" || verb === "forget-memory" || verb === "register-engineering-slice-plan" || verb === "admit-engineering-slice" || verb === "review-engineering-slice" || verb === "append-tour-rights-receipt" || verb === "revoke-tour-rights-receipt" || verb === "append-tour-source-evidence" || verb === "append-tour-field-assertion" || verb === "create-tour-public-projection-draft" || verb === "seal-tour-public-projection" || verb === "append-tour-property-identifier-assertion" || verb === "append-tour-coordinate-candidate" || verb === "append-tour-entrance-verification-receipt" || verb === "codex-checkpoint" || verb === "codex-record-event" || verb === "ask-jev" || TOUR_DOMAIN_SERIALIZED_WRITES.has(verb) || BOARD_ANSWER_WRITE_VERBS.has(verb) || MEETING_MODE_WRITE_VERBS.includes(verb))
     await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [key]);
   const prior = await client.query("select request_hash, response from tool_call where idempotency_key=$1", [key]);
   if (prior.rows.length) {
@@ -5760,14 +5760,48 @@ export const TOOLS = {
     }),
   },
 
+  "find-rule": {
+    description: "Find proposed, active, or retired rules by their words when the id is unknown. Matches a literal substring or all whitespace-separated words, case-insensitively. Returns bounded statement previews and full ids for amend-rule or retire-rule. Read-only; status defaults to any.",
+    inputSchema: { type: "object", properties: {
+      text: { type: "string", minLength: 1 },
+      status: { type: "string", enum: ["proposed", "active", "retired", "any"], default: "any" },
+      limit: { type: "integer", minimum: 1, maximum: 100, default: 20 },
+    }, required: ["text"] },
+    handler: async (c, actor, args) => {
+      const text = String(args.text || "").trim();
+      if (!text) throw new ToolError({ error: "rule_search_text_required" });
+      const status = args.status ?? "any";
+      if (!["proposed", "active", "retired", "any"].includes(status))
+        throw new ToolError({ error: "invalid_rule_status" });
+      const limit = args.limit ?? 20;
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100)
+        throw new ToolError({ error: "invalid_rule_search_limit" });
+      const personalScope = personalScopeForActor(actor);
+      if (personalScope.status === "error")
+        throw new ToolError({ error: personalScope.error });
+      const matches = await c.query(
+        `select id, left(id::text,8) as short_id, status, version, created_at,
+                scope, left(statement,200) as statement
+           from v_rule_lookup
+          where (personal_to is null or personal_to=$5::text)
+            and ($2='any' or status=$2)
+            and (strpos(lower(statement),lower($1))>0 or not exists (
+              select 1 from unnest($3::text[]) as terms(word)
+               where strpos(lower(statement),lower(word))=0))
+          order by created_at desc, id
+          limit $4`, [text, status, text.split(/\s+/u), limit, personalScope.sponsor]);
+      return { ok: true, rules: matches.rows };
+    },
+  },
+
   "teach": {
     write: true,
-    description: "Write a rule from the human's own words (status: proposed — after exact enforcement is built and verified, one explicit human approve-rule act atomically activates the enforced policy). Capture the verbatim quote. Personal-scope rules (voice, format) set personal_to. WHEN TO CALL IT — the test is 'would the system have to ask this again?', NOT whether the partner phrased it as 'always X' or 'never Y'. Standing lessons arrive as ordinary sentences: a modeling ruling ('cadence studio is one national account'), a correction to a fact in the record, a choice between options you offered with the reasoning attached, a rejection of a draft. Capture on the spot, never at 'session close' — the same event-not-session-close rule protocol 27b already settles. Pass supersedes when this rule replaces an earlier one; the old rule is NOT retired by that alone (use retire-rule), but the link is recorded so nobody re-litigates a settled point from a stale row. ENFORCEMENT-FIRST BIRTH (WR-000019 slice S10): every teach REQUIRES enforcement_home, one of 'gate' (a deny/stop control will carry it — name carrying_control), 'jit' (delivered just-in-time by pack/moment), 'core' (always-loaded), or 'judgment_advisory' (no mechanical control ever will — say why_no_machine in one line). This is a refusal, not a default: a rule captured with nobody having said where it will live is exactly how guidance debt piled up before this slice, and a silent default would be indistinguishable from a considered choice. THIS IS CLERICAL WORK, NOT SELF-MODIFICATION, AND IT IS NEVER REFUSED ON THAT GROUND. Joe's ruling 2026-08-10, verbatim: 'You didn't make your own rule. You applied my rule to the system.' A session INVENTING a standing rule for itself would be self-modification and would be gated. A session TRANSCRIBING what a partner just said is the entire purpose of this verb, and the gate is already built into it: the rule lands as PROPOSED, binds nobody, and takes effect through one human approve-rule act only when enforcement is ready. A session that declines to record a partner's instruction because writing rules 'feels like' changing itself has not been careful, it has lost the instruction — which is the one outcome this verb exists to prevent. Recorded because a session hit exactly this on the day the ruling was made and stopped three routes early.",
+    description: "Write a rule from the human's own words (status: proposed — after exact enforcement is built and verified, one explicit human approve-rule act atomically activates the enforced policy). Capture the verbatim quote. Personal-scope rules (voice, format) set personal_to. WHEN TO CALL IT — the test is 'would the system have to ask this again?', NOT whether the partner phrased it as 'always X' or 'never Y'. Standing lessons arrive as ordinary sentences: a modeling ruling ('cadence studio is one national account'), a correction to a fact in the record, a choice between options you offered with the reasoning attached, a rejection of a draft. Capture on the spot, never at 'session close' — the same event-not-session-close rule protocol 27b already settles. Pass supersedes when this rule replaces an earlier one; the old rule is retired with an immutable receipt in the same transaction. Superseding an ACTIVE rule requires a human caller and the same authority connection as retire-rule. ENFORCEMENT-FIRST BIRTH (WR-000019 slice S10): every teach REQUIRES enforcement_home, one of 'gate' (a deny/stop control will carry it — name carrying_control), 'jit' (delivered just-in-time by pack/moment), 'core' (always-loaded), or 'judgment_advisory' (no mechanical control ever will — say why_no_machine in one line). This is a refusal, not a default: a rule captured with nobody having said where it will live is exactly how guidance debt piled up before this slice, and a silent default would be indistinguishable from a considered choice. THIS IS CLERICAL WORK, NOT SELF-MODIFICATION, AND IT IS NEVER REFUSED ON THAT GROUND. Joe's ruling 2026-08-10, verbatim: 'You didn't make your own rule. You applied my rule to the system.' A session INVENTING a standing rule for itself would be self-modification and would be gated. A session TRANSCRIBING what a partner just said is the entire purpose of this verb, and the gate is already built into it: the rule lands as PROPOSED, binds nobody, and takes effect through one human approve-rule act only when enforcement is ready. A session that declines to record a partner's instruction because writing rules 'feels like' changing itself has not been careful, it has lost the instruction — which is the one outcome this verb exists to prevent. Recorded because a session hit exactly this on the day the ruling was made and stopped three routes early.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, statement: { type: "string" },
       human_quote: { type: "string" }, scope: { type: "object" },
       personal: { type: "boolean", description: "true = applies to this partner only" },
-      supersedes: { type: "string", description: "rule_id this one replaces; recorded as a link, does not retire it" },
+      supersedes: { type: "string", description: "rule_id this one replaces and retires atomically; ACTIVE rules require a human caller" },
       enforcement_home: { type: "string", enum: ["gate","jit","core","judgment_advisory"],
         description: "REQUIRED. Where this rule will be enforced: 'gate' (a deny/stop control — pass carrying_control), 'jit' (delivered just-in-time by pack/moment), 'core' (always-loaded), or 'judgment_advisory' (no mechanical control — pass why_no_machine)." },
       carrying_control: { type: "string", description: "REQUIRED when enforcement_home is 'gate'. The control this rule's enforcement will carry — an existing control_key, or the one about to be built." },
@@ -5792,15 +5826,21 @@ export const TOOLS = {
         throw new ToolError({ error: "why_no_machine_required",
           hint: "enforcement_home 'judgment_advisory' means no mechanical control will ever back this rule; say why not in why_no_machine, one line" });
 
+      let supersedes = args.supersedes || null;
       // A supersedes pointer at a rule that does not exist is a silent lie in the
       // audit trail, so it is checked rather than trusted.
-      if (args.supersedes) {
+      if (supersedes) {
         // Short form accepted (loop #261): the gist index prints 8 characters and
         // that is the only id a session can quote back.
-        args.supersedes = await resolveRuleId(c, args.supersedes, "supersedes");
-        const prior = await c.query("select id, status from rule where id=$1", [args.supersedes]);
+        supersedes = await resolveRuleId(c, supersedes, "supersedes");
+        const prior = await c.query("select id, status from rule where id=$1 for update", [supersedes]);
         if (!prior.rows.length) throw new ToolError({ error: "supersedes_not_found",
-          rule_id: args.supersedes, hint: "pass the id of a real rule, or omit supersedes" });
+          rule_id: supersedes, hint: "pass the id of a real rule, or omit supersedes" });
+        if (prior.rows[0].status === "retired")
+          throw new ToolError({ error: "already_retired", rule_id: supersedes });
+        if (prior.rows[0].status === "active" && actor.human !== true)
+          throw new ToolError({ error: "human_only", verb: "teach", rule_id: supersedes,
+            hint: "superseding an ACTIVE rule requires a human caller" });
       }
       const r = await c.query(
         `insert into rule (statement, human_quote, taught_by, scope, personal_to, supersedes)
@@ -5811,7 +5851,15 @@ export const TOOLS = {
          // belt-and-braces: it makes the storage line and the echo lines
          // structurally incapable of disagreeing, which is the disagreement that
          // stored a shared rule as personal while reporting otherwise.
-         args.personal === true ? actor.id : null, args.supersedes || null]);
+         args.personal === true ? actor.id : null, supersedes || null]);
+      // This definer door preserves retirement receipts and the active-rule
+      // authority guard. Failure rolls back the new rule and its envelope too.
+      let retirement = null;
+      if (supersedes) {
+        const retired = await c.query("select ops.retire_superseded_rule($1,$2) as result",
+          [r.rows[0].id, args.idempotency_key]);
+        retirement = retired.rows[0].result;
+      }
       // Capture precedes authority. Every proposed rule enters the same intake
       // state machine immediately, but this row is deliberately only CAPTURED:
       // neither a model nor the transcription verb can make it binding.
@@ -5821,7 +5869,7 @@ export const TOOLS = {
          values ('rule','human',$1,$2,'captured',$3)`,
         [`rule:${r.rows[0].id}`, args.statement, actor.id]);
       await writeEvent(c, actor, "teach", "rule", r.rows[0].id,
-        { new: { statement: args.statement, supersedes: args.supersedes || null,
+        { new: { statement: args.statement, supersedes: supersedes || null,
                  enforcement_home: enforcementHome,
                  carrying_control: enforcementHome === "gate" ? carryingControl : null,
                  why_no_machine: enforcementHome === "judgment_advisory" ? whyNoMachine : null },
@@ -5842,7 +5890,8 @@ export const TOOLS = {
                next_authority_action: "approve-rule",
                scope_applied: scopeApplied,
                personal_requested: args.personal === true,
-               supersedes: args.supersedes || null,
+               supersedes: supersedes || null,
+               retirement,
                enforcement_home: enforcementHome,
                carrying_control: enforcementHome === "gate" ? carryingControl : null,
                why_no_machine: enforcementHome === "judgment_advisory" ? whyNoMachine : null,
