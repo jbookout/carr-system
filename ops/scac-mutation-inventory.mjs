@@ -19707,7 +19707,7 @@ export function renderFindRuleRegistrySql(rows, predecessorSql = null) {
   const preflight = `do $find_rule_v103_preflight$\ndeclare v ops.scac_mutation_registry_version%rowtype; registration jsonb;\nbegin\n` +
     `  if not exists(select 1 from public.schema_migrations where filename='${predecessorPath.split("/").at(-1)}' and sha256='${predecessorDigest}') then\n` +
     `    raise exception 'Find rule v103 requires exact applied 0768'; end if;\n` +
-    `  if not exists(select 1 from public.schema_migrations where filename='0769_rule_teach_supersession.sql' and sha256='${sha256(readFileSync(resolve(REPO_ROOT, "migrations/0769_rule_teach_supersession.sql"), "utf8"))}') then\n` +
+    `  if not exists(select 1 from public.schema_migrations where filename='0785_rule_teach_supersession.sql' and sha256='${sha256(readFileSync(resolve(REPO_ROOT, "migrations/0785_rule_teach_supersession.sql"), "utf8"))}') then\n` +
     `    raise exception 'Find rule v103 requires exact supersession migration'; end if;\n` +
     `  select * into v from ops.scac_mutation_registry_version where registry_version='${REGISTRY_V102_VERSION}';\n` +
     `  if v.registry_digest is distinct from '${oldSeal.digest}' or v.entry_count<>${oldSeal.entryCount}\n` +
@@ -20807,7 +20807,7 @@ export function renderGeneratedFrontier() {
   artifacts["mcp-server/src/scac-mutation-registry.v103.generated.js"] =
     renderRuntimeProjection(v103Rows, { version: REGISTRY_V103_VERSION,
       dbCatalogBaseline: FIND_RULE_V103_DB_CATALOG_BASELINE });
-  artifacts["migrations/0770_find_rule_scac_successor.sql"] =
+  artifacts["migrations/0786_find_rule_scac_successor.sql"] =
     renderFindRuleRegistrySql(v103Rows, artifacts["migrations/0768_confirm_merge_human_only_scac_successor.sql"]);
 
 
@@ -21845,7 +21845,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     await writeFile(resolve("mcp-server/src/scac-mutation-registry.v103.generated.js"),
       renderRuntimeProjection(rows, { version: REGISTRY_V103_VERSION,
         dbCatalogBaseline: FIND_RULE_V103_DB_CATALOG_BASELINE }));
-    await writeFile(resolve("migrations/0770_find_rule_scac_successor.sql"), renderFindRuleRegistrySql(rows));
+    await writeFile(resolve("migrations/0786_find_rule_scac_successor.sql"), renderFindRuleRegistrySql(rows));
     process.stdout.write("Find rule v103 frontier generated\n");
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools(), REGISTRY_V103_VERSION);

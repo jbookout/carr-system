@@ -16,9 +16,9 @@ test('find-rule follows the shipped human-only merge registry without rewriting 
   assert.equal(registeredOperation('confirm-merge').human_only, true);
   assert.ok(registeredOperation('find-rule'));
   const sql = inventory.renderFindRuleRegistrySql(successor);
-  assert.equal(readFileSync(new URL('../../migrations/0770_find_rule_scac_successor.sql', import.meta.url), 'utf8'), sql);
+  assert.equal(readFileSync(new URL('../../migrations/0786_find_rule_scac_successor.sql', import.meta.url), 'utf8'), sql);
   assert.match(sql, /0768_confirm_merge_human_only_scac_successor.sql/);
-  assert.match(sql, /0769_rule_teach_supersession.sql/);
+  assert.match(sql, /0785_rule_teach_supersession.sql/);
   assert.match(sql, /scac_mutation_registry_v102_seal_available\(\)/);
   assert.match(sql, /scac_mutation_registry_v103_seal_available\(\)/);
 });

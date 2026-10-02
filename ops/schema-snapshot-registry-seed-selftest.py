@@ -765,7 +765,7 @@ assert "SCAC_VERSION_COUNT=102" in GENERATOR
 assert "SCAC_FULL_SET_SEAL_COUNT=101" in GENERATOR
 assert "ops.scac_mutation_catalog_v102_current()" in GENERATOR
 assert 'scac-mutation-registry.v102.generated.js' in GENERATOR
-assert "0770_find_rule_scac_successor.sql" in GENERATOR
+assert "0786_find_rule_scac_successor.sql" in GENERATOR
 assert "FIND_RULE_REGISTRY_APPLIED" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=103" in GENERATOR
 assert "SCAC_VERSION_COUNT=103" in GENERATOR

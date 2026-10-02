@@ -86861,11 +86861,34 @@
           "owner_package": "11",
           "implementation_state": "inventoried_not_atomically_mediated",
           "classification_authorizing": false
+        },
+        {
+          "ingress_key": "external-admin:tools/migrate.py",
+          "ingress_kind": "external_admin",
+          "operation": "tools/migrate.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "tools/migrate.py",
+          "schema_digest": "63f25941c34f3bd4df19ad630830618f5b3af53a5dd7aeee624e2b3b87ceff0c",
+          "handler_digest": "63f25941c34f3bd4df19ad630830618f5b3af53a5dd7aeee624e2b3b87ceff0c",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
         }
       ],
       "expected_count": 1085,
-      "expected_sha256": "e755569a7105467219e95e79d1cceaa768cc9710f499e58f94025c040f44f956",
-      "reason": "PR 865 source-only review: re-derive the existing credential rotation external-admin row after enabling scoped verifier rotation, validating URIs, valid port ranges and targets before mutation, and verifying the complete caller identity contract. No new ingress, authority, grant, runtime selector or historical seal change."
+      "expected_sha256": "0a3774e5416d55140f3a6e744491efe38e5a1f0358a02d712ab3ddde0517f764",
+      "reason": "PR 865 source-only review: re-derive the existing credential rotation external-admin row after enabling scoped verifier rotation, validating URIs, valid port ranges and targets before mutation, and verifying the complete caller identity contract. No new ingress, authority, grant, runtime selector or historical seal change. Release fix-forward: re-derive the existing migration runner external-admin row after its find-rule atomic group follows the files renumbered 0769/0770 -> 0785/0786 (they were merged below the already-applied 0771, so the applied ledger stopped being a source prefix). Same authority contract; only the reviewed bytes move."
     }
   }
 }
