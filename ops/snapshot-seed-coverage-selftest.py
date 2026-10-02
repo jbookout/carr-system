@@ -30,6 +30,7 @@ import sys
 import tempfile
 import contextlib
 import io
+import time
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
@@ -835,6 +836,40 @@ def main():
         case("the data region starts at the ledger COPY header, so its rows are excised",
              module.data_region(artifact(["0100_x.sql"])).startswith("COPY public.schema_migrations"))
 
+        # Pad each whitespace position independently and all of them together.
+        # Both literal spellings and bare/format EXECUTE use the same contract.
+        for quote in ("'insert into ops.compound_exec values (1)'",
+                      "$q$insert into ops.compound_exec values (1)$q$"):
+            for tokens in (("execute",), ("execute", "format", "(")):
+                for padded_gap in (*range(len(tokens)), None):
+                    prefix = "".join(token + (" " * 5000 if padded_gap in (gap, None) else " ")
+                                     for gap, token in enumerate(tokens))
+                    sql = "do $$ begin " + prefix + quote + (");" if "format" in tokens else ";") + " end $$;"
+                    case(f"EXECUTE prefix gaps {tokens}/{padded_gap}/{quote[0]} preserve seeds",
+                         "ops.compound_exec" in module.written_tables(sql))
+                    repo_gap = build_repo(tmp + "/prefix-gap", {"0100_gap.sql": sql},
+                                          {"carried": {}, "excluded": {}})
+                    case("compound EXECUTE padding cannot bypass classification",
+                         any("UNCLASSIFIED" in f for f in module.check(repo_gap, artifact(["0100_gap.sql"]))))
+        for tokens in (("do",), ("do", "language", "plpgsql")):
+            for padded_gap in (*range(len(tokens)), None):
+                prefix = "".join(token + ("\n\t" * 2500 if padded_gap in (gap, None) else " ")
+                                 for gap, token in enumerate(tokens))
+                sql = prefix + "$$ begin insert into ops.compound_do values (1); end $$;"
+                case(f"DO prefix gaps {tokens}/{padded_gap} preserve seeds",
+                     "ops.compound_do" in module.written_tables(sql))
+
+        for newline in ("\n", "\r\n"):
+            for suffix in ("suffix", " ", "\t"):
+                block = newline.join(["COPY public.review_data (value) FROM stdin;",
+                                      "\\." + suffix, "a'b", "\\.", "",
+                                      "insert into party values (1);", ""])
+                repo_marker = build_repo(tmp + "/marker", {"0100_marker.sql": "insert into party values (1);"},
+                                         {"carried": {}, "excluded": {"party": "runtime data"}})
+                found = module.check(repo_marker, artifact(["0100_marker.sql"], [block]))
+                case(f"COPY marker suffix {suffix!r} with {newline!r} is row data",
+                     any("DECLARED EXCLUDED BUT PRESENT" in f and "party" in f for f in found))
+
         # THE TAIL BOUND IS COUNTED IN SIGNIFICANT CHARACTERS. Every consumer looks
         # back past optional whitespace, so a raw-character bound measures the
         # whitespace rather than the token, and a long enough run loses the seed.
@@ -892,13 +927,9 @@ def main():
         case("a word merely ENDING in execute does not make its literal into statements",
              not any("ops.ghost_exec" in f for f in module.check(repo_fe, artifact(["0100_fe.sql"]))))
 
-        # N12. A dynamic literal's doubled quotes are how a single quote is spelled
-        # inside it, and undoubling them changes what the scanned text MEANS. Here
-        # the undoubled form opens a literal that swallows the rest of the string,
-        # so only the first table is really written; leaving them doubled reads the
-        # tail as a second statement and reports a table the database never touches.
+        # Doubled quotes decode to one quoted value containing SQL-looking text.
         doubled = ("do $$ begin execute "
-                   "'insert into ops.dq_first values (''); insert into ops.dq_phantom values (1)'; "
+                   "'insert into ops.dq_first values (''; insert into ops.dq_phantom values (1)'')'; "
                    "end $$;\n")
         repo_dq = build_repo(tmp + "/r6dq", {"0100_dq.sql": doubled}, {"carried": {}, "excluded": {}})
         found = module.check(repo_dq, artifact(["0100_dq.sql"]))
@@ -906,16 +937,17 @@ def main():
              any("ops.dq_first" in f for f in found)
              and not any("ops.dq_phantom" in f for f in found))
 
-        # N14. A THIRD LENGTH BOUND, and until now the only undocumented one. The
-        # CTAS pattern allows up to 4000 characters between the table name and
-        # `as select`, which is where a long column specification lives. Narrowing
-        # it loses the seed, so the width is load-bearing and gets a case.
-        wide_ctas = ("create table ops.wide_ctas (\n"
-                     + "".join(f"  col_{i} integer,\n" for i in range(60))
-                     + "  last_col integer\n) as select * from ops.some_source;\n")
-        repo_ct = build_repo(tmp + "/r6ct", {"0100_ct.sql": wide_ctas}, {"carried": {}, "excluded": {}})
-        case("a CREATE TABLE AS with a long column list is still a seed",
-             any("ops.wide_ctas" in f for f in module.check(repo_ct, artifact(["0100_ct.sql"]))))
+        # CTAS column lists contain names, never typed definitions. Exercise a
+        # valid wide header beyond the former cutoff, plus a smaller control.
+        for width in (60, 400):
+            cols = [f"col_{i:04}_long_name" for i in range(width)]
+            wide_ctas = ("create table ops.wide_ctas (" + ", ".join(cols)
+                         + ") as select " + ", ".join("1 as " + c for c in cols) + ";")
+            repo_ct = build_repo(tmp + f"/r6ct{width}", {"0100_ct.sql": wide_ctas},
+                                 {"carried": {}, "excluded": {}})
+            case(f"a valid {width}-column CREATE TABLE AS is still a seed",
+                 any("UNCLASSIFIED" in f and "ops.wide_ctas" in f
+                     for f in module.check(repo_ct, artifact(["0100_ct.sql"]))))
 
         # N16. SECURITY LABEL ON FUNCTION names a routine without calling it, the
         # same shape as GRANT and REVOKE. Losing that alternative makes a defined
@@ -927,22 +959,28 @@ def main():
         case("SECURITY LABEL ON FUNCTION names a routine, it does not call it",
              not any("ops.seclabel_ghost" in f for f in module.check(repo_sl, artifact(["0100_sl.sql"]))))
 
-        # N19. _blank must PRESERVE LENGTH. Nested COPY headers produce genuinely
-        # overlapping spans -- the outer block ends at the inner block's terminator,
-        # so the inner header sits inside the outer span. Without the overlap guard
-        # the negative slice re-emits the overlapped stretch and the text GROWS,
-        # which duplicates whatever statements sit in it. Measured: 130 bytes in,
-        # 178 out.
+        # A header inside COPY data is a row of the outer table. It must not
+        # fabricate row evidence for a carried table that is absent.
         nested_copy = ("COPY public.outer_tbl (a) FROM stdin;\n"
                        "COPY public.inner_tbl (b) FROM stdin;\n"
                        "datarow\n\\.\n\n"
                        "insert into party (name) values ('acme');\n")
         blocks, _rest = module.copy_blocks(nested_copy)
-        spans = [(b[2], b[3]) for b in blocks]
-        case("nested COPY headers really do produce overlapping spans",
-             len(spans) > 1 and spans[1][0] < spans[0][1])
-        case("_blank preserves length, so an overlap cannot duplicate a statement",
-             len(module._blank(nested_copy, spans)) == len(nested_copy))
+        case("a COPY header in row data produces only the outer block",
+             len(blocks) == 1 and blocks[0][0] == "outer_tbl")
+        repo_nested = build_repo(tmp + "/r6nested",
+                                 {"0100_nested.sql": "insert into inner_tbl values (1);"},
+                                 {"carried": {"inner_tbl": "required vocabulary"},
+                                  "excluded": {"party": "runtime data"}})
+        found = module.check(repo_nested, artifact(["0100_nested.sql"], [nested_copy]))
+        case("a nested COPY header cannot mint carried rows",
+             any("DECLARED CARRIED BUT ABSENT" in f and "inner_tbl" in f for f in found))
+        case("SQL after an outer COPY block remains visible",
+             any("DECLARED EXCLUDED BUT PRESENT" in f and "party" in f for f in found))
+        case("blanking COPY spans preserves artifact length",
+             len(module._blank(nested_copy, [(b[2], b[3]) for b in blocks])) == len(nested_copy))
+        case("blanking overlapping spans preserves length independently of COPY parsing",
+             len(module._blank("abcdefghij", [(1, 6), (3, 8)])) == 10)
 
         # Whitespace is legal around the schema separator.
         repo = build_repo(tmp + "/r6sp",
@@ -1239,6 +1277,21 @@ def main():
                         "select ops.h();\n")
         case("an E-string with a backslash-escaped quote still leaves the call visible",
              "ops.landed" in module.written_tables(escaped_call))
+
+    # PostgreSQL concatenates newline-separated adjacent literals. Doubling
+    # their count must stay below quadratic growth; use best-of-two to reduce
+    # scheduling noise, plus a small allowance for timer resolution.
+    timings = []
+    for count in (16000, 32000):
+        sql = "select " + "'x'\n" * count + ";"
+        samples = []
+        for _ in range(2):
+            start = time.perf_counter()
+            module.scan_sql(sql)
+            samples.append(time.perf_counter() - start)
+        timings.append(min(samples))
+    case(f"adjacent literal scanning scales below quadratic ({timings})",
+         timings[1] < timings[0] * 3.2 + 0.03)
 
     # -------------------------------------------------------------------- 9d
     # A COPY WITH NO TERMINATOR used to blank the region to end of file, so a

@@ -96,44 +96,15 @@ COPY_BLOCK = re.compile(r"^COPY\s+" + TABLE + r"\s*(?:\([^)]*\)\s*)?FROM\s+stdin
 # lands rows, and so does `execute format('insert into t ...', ...)`. The scanner
 # blanked both and detected nothing, while scan_sql's own docstring justified the
 # blanking with "no row-landing statement hides inside a string" -- which is
-# precisely false here. 43 applied migrations already use EXECUTE over a string
-# literal or a dollar-quoted body; an earlier revision of this comment said
-# twelve, understating its own blast radius by 3.5x.
+# precisely false here. Ordinary and dollar-quoted EXECUTE literals both run SQL.
 #
 # format() is matched as an optional wrapper rather than a separate case because
 # the literal is still the FIRST argument; a table interpolated as %s cannot be
 # recovered by anyone and is not pretended to be, but a literal table name in the
-# format string is read exactly like any other.
+# format string is read exactly like any other. Variables, concatenated fragments,
+# and escape-prefixed EXECUTE literals are not decoded as dynamic SQL.
 EXECUTE_ARGUMENT = re.compile(
     r"(?:^|[^A-Za-z0-9_])execute\s*(?:format\s*\(\s*)?$", re.I)
-
-# CHEAP PREFILTER FOR EXECUTE_ARGUMENT. This check runs on every string literal
-# and every dollar-quote in the file -- 100k+ times on a schema snapshot the
-# size PR #1297 committed -- and EXECUTE_ARGUMENT's anchored alternation
-# `(?:^|[^A-Za-z0-9_])...$` gives Python's re engine no fixed literal prefix to
-# fast-scan for, so it retries the match at every position of the up-to-4096-
-# character tail. Profiling against #1297's db/schema.sql showed this single
-# regex accounting for the majority of scan_sql's time.
-#
-# EXECUTE_ARGUMENT can only ever match a string that contains the substring
-# "execute" (case-insensitively) -- that is a necessary, not sufficient,
-# condition, by construction of the pattern. So a plain literal search for
-# "execute" is a correctness-preserving filter: when it finds nothing,
-# EXECUTE_ARGUMENT is guaranteed to find nothing either, and the expensive
-# pattern is skipped. A literal-only pattern (no anchors, no alternation) IS
-# something Python's re engine can fast-scan, so this prefilter itself is
-# several times cheaper per call than EXECUTE_ARGUMENT, and it almost always
-# is the only one that runs: real migrations use EXECUTE rarely (a dozen or so
-# in this repository's whole history), so the expensive pattern now runs only
-# on that small minority of tails instead of on every literal in the file.
-EXECUTE_LITERAL = re.compile(r"execute", re.I)
-
-
-def _is_execute_argument(text):
-    """bool(EXECUTE_ARGUMENT.search(text)), same result, cheaper on the common
-    case where "execute" does not appear at all -- see EXECUTE_LITERAL above."""
-    return bool(EXECUTE_LITERAL.search(text) and EXECUTE_ARGUMENT.search(text))
-
 
 CREATE_ROUTINE = re.compile(
     r"create\s+(?:or\s+replace\s+)?(?:function|procedure)\s+"
@@ -173,7 +144,7 @@ WRITES_ANYWHERE = (
     # so counting them is a pure false alarm — and a check that cries wolf gets
     # switched off, which is the failure mode this whole file exists to avoid.
     re.compile(r"create\s+(?:unlogged\s+)?table\s+(?:if\s+not\s+exists\s+)?"
-               + TABLE + r"[^;]{0,4000}?\bas\s+(?:with|select)", re.I | re.S),
+               + TABLE + r"[^;]*?\bas\s+(?:with|select)", re.I | re.S),
 )
 
 # ROW EVIDENCE IS A NARROWER QUESTION THAN PRESENCE, AND THE TWO DIRECTIONS WANT
@@ -211,18 +182,9 @@ def normalise(table):
     return table[len("public."):] if table.startswith("public.") else table
 
 
-# HOW FAR BACK THE THREE BACKWARD-LOOKING TESTS MAY REACH. All are anchored to
-# the END of the accumulated buffer: the keyword test reads the word immediately
-# before the dollar-quote, the `do language <lang>` form spans well under a
-# hundred characters, and EXECUTE_ARGUMENT reads one word plus an optional
-# `format(`.
-#
-# THE COUNT IS OF SIGNIFICANT CHARACTERS, NOT RAW ONES, and an earlier revision
-# of this comment claimed only two consumers and that neither could see the
-# truncation. A third had been added and every one of them looks back past
-# optional whitespace, so a raw bound let a long whitespace run push the word out
-# of the window and lose a seed. _tail_significant discards the trailing run
-# before counting.
+# Prefix checks read an incrementally maintained suffix with every whitespace
+# run collapsed to one space. The supported prefixes are short token sequences;
+# arbitrary padding between any of their tokens cannot consume this window.
 HEAD_TAIL = 4096
 
 # The routine-header scan is bounded far more generously because it looks for the
@@ -237,41 +199,6 @@ HEAD_TAIL = 4096
 # That is a false alarm at worst, never a missed seed, and this file's whole
 # purpose is to refuse rather than to miss.
 ROUTINE_TAIL = 65536
-
-
-def _tail_significant(parts, count):
-    r"""The last `count` characters that are not part of a trailing whitespace run.
-
-    WHY THIS EXISTS, AND WHY _tail ALONE WAS WRONG. Every consumer of the tail
-    looks BACKWARD PAST OPTIONAL WHITESPACE: the keyword test is
-    `([A-Za-z_]+)\s*$`, the do-language form ends `\s*$`, and EXECUTE_ARGUMENT
-    ends `\s*(?:format\s*\()?\s*$`. A raw character bound therefore measures the
-    wrong thing -- the whitespace, not the token -- so a long enough run of it
-    pushes the word out of the window and the test reads as though the word were
-    not there.
-
-    That is not academic. `execute` followed by 4200 spaces and an INSERT literal
-    detected nothing while 4000 spaces detected it: a MISSED SEED, which is the
-    one direction this file is not allowed to fail in, and it was introduced by
-    the bound that was added to fix the quadratic scan. Found by the ninth
-    independent review.
-
-    Trailing whitespace is discarded first and only then are characters counted,
-    so the window is measured in the text the patterns actually read. The scan
-    stays linear: the discarded run is walked once, backwards, and never rejoined.
-    """
-    out, size, seen_significant = [], 0, False
-    for chunk in reversed(parts):
-        if not seen_significant:
-            stripped = chunk.rstrip()
-            if not stripped:
-                continue
-            chunk, seen_significant = stripped, True
-        out.append(chunk)
-        size += len(chunk)
-        if size >= count:
-            break
-    return "".join(reversed(out))[-count:]
 
 
 def _tail(parts, count):
@@ -360,59 +287,37 @@ def scan_sql(sql):
     # chunks instead of characters.
     pending_top, pending_size = [], 0
 
-    # DISTANCE SINCE THE LAST "execute", tracked incrementally instead of
-    # re-discovered by re-scanning a fresh HEAD_TAIL-sized window on every
-    # single literal and dollar-quote. That per-occurrence re-scan was the
-    # actual hot spot profiling found on PR #1297's larger db/schema.sql:
-    # quotes sit roughly a hundred characters apart in real SQL, so
-    # consecutive HEAD_TAIL=4096-character windows overlap by well over 95%,
-    # and EXECUTE_ARGUMENT's search was redoing that overlapping work from
-    # scratch each time.
-    #
-    # "execute" is rare -- a dozen or so migrations in this repository's whole
-    # history -- so tracking "how far back was the last one" turns almost
-    # every check into an integer comparison instead of a regex search: only
-    # a literal or dollar-quote that lands within HEAD_TAIL characters AFTER
-    # a real "execute" ever needs the full tail(HEAD_TAIL) + pattern check.
-    # That fallback path is unchanged and still exact -- this only decides
-    # WHETHER to take it, never changes what it returns.
-    #
-    # chars_since_execute is measured from the end of the accumulated buffer
-    # back to the END of the most recent "execute" match, in the same
-    # coordinates tail() reads in: each fresh scan_sql call (top level or a
-    # nested routine/DO body via _scanned) starts its own `top` from empty,
-    # so a fresh, "nothing seen yet" start here matches a fresh, empty buffer
-    # there -- neither can see past its own call's start.
-    chars_since_execute = HEAD_TAIL + 1
+    # Prefix context is separate from output: comments and inert literals add
+    # whitespace to output, but never make the next query revisit old chunks.
+    # Update once per appended run, including whitespace across chunk joins.
+    prefix_tail = ""
+    execute_distance = HEAD_TAIL + 1
     execute_carry = ""
 
     def append_top(value):
-        nonlocal pending_size, chars_since_execute, execute_carry
+        nonlocal pending_size, prefix_tail, execute_distance, execute_carry
         if value:
+            compact = re.sub(r"\s+", " ", value)
+            if prefix_tail.endswith(" ") and compact.startswith(" "):
+                compact = compact[1:]
+            if compact:
+                # Measure the EXECUTE prefilter in the same normalized text as
+                # the prefix checks; raw padding must not disqualify a literal.
+                combined = execute_carry + compact
+                found = combined.lower().rfind("execute")
+                execute_distance = (execute_distance + len(compact) if found == -1
+                                    else len(combined) - found - len("execute"))
+                execute_carry = combined[-6:]
+                prefix_tail = (prefix_tail + compact)[-HEAD_TAIL:]
             pending_top.append(value)
             pending_size += len(value)
-            # Only the last few characters of what came before `value` can
-            # combine with it to spell "execute" across the join; 6 is one
-            # short of len("execute"), which is exactly enough to complete a
-            # split match together with at least one character of `value`.
-            combined = execute_carry + value
-            found = combined.lower().rfind("execute")
-            if found == -1:
-                chars_since_execute += len(value)
-            else:
-                chars_since_execute = len(combined) - (found + len("execute"))
-            execute_carry = combined[-6:]
             if pending_size >= 4096:
                 top.append("".join(pending_top))
                 pending_top.clear()
                 pending_size = 0
 
-    def maybe_execute_argument(text):
-        """_is_execute_argument(text), skipped entirely when chars_since_execute
-        already proves no "execute" can be in the window text represents."""
-        if chars_since_execute > HEAD_TAIL:
-            return False
-        return _is_execute_argument(text)
+    def execute_argument():
+        return execute_distance <= HEAD_TAIL and bool(EXECUTE_ARGUMENT.search(prefix_tail))
 
     def flush_top():
         nonlocal pending_size
@@ -452,8 +357,7 @@ def scan_sql(sql):
             # IS THIS LITERAL AN ARGUMENT TO EXECUTE? If so its text is not inert
             # -- it is SQL that runs. Decided BEFORE the literal is consumed,
             # because `top` still ends at the character before the quote here.
-            flush_top()
-            dynamic = _is_execute_argument(_tail_significant(top, HEAD_TAIL))
+            dynamic = execute_argument()
             opened = i
             i += 1
             while i < n:
@@ -486,8 +390,7 @@ def scan_sql(sql):
                 append_top(sql[i:])
                 break
             body = sql[match.end():end]
-            flush_top()
-            head = _tail_significant(top, HEAD_TAIL)
+            head = prefix_tail
             previous = re.search(r"([A-Za-z_]+)\s*$", head)
             keyword = previous.group(1).lower() if previous else ""
             # `do language plpgsql $$ ... $$` is the same statement as `do $$ ... $$`.
@@ -498,7 +401,7 @@ def scan_sql(sql):
             # `execute $$ ... $$` is the same statement as `execute '...'`, with the
             # other spelling of a string. Handled here rather than by widening the
             # literal branch, because a dollar-quote is consumed by this branch.
-            if keyword == "execute" or _is_execute_argument(head):
+            if keyword == "execute" or execute_argument():
                 append_top(" " + _scanned(body) + " ")
                 i = end + len(tag)
                 continue
@@ -687,21 +590,20 @@ def copy_blocks(region):
     vanish if one ever appeared.
     """
     blocks, unterminated = [], []
-    for head in COPY_BLOCK.finditer(region):
-        end = region.find("\n\\.", head.end())
-        if end == -1:
-            # NOT blanked to end of file, which is what this used to do. A COPY with
-            # no terminator swallowed everything after it, so a truncated artifact
-            # hid every later statement -- including an excluded table's rows, the
-            # one thing the presence direction exists to catch. Silence is the worst
-            # available answer to a malformed artifact, so it is reported instead and
-            # the block contributes nothing.
+    cursor = 0
+    terminator = re.compile(r"^\\\.\r?$", re.M)
+    while (head := COPY_BLOCK.search(region, cursor)) is not None:
+        end = terminator.search(region, head.end())
+        if end is None:
+            # Preserve the SQL text for conservative presence scanning, and
+            # refuse the malformed outer block. Its data cannot open new blocks.
             unterminated.append(normalise(head.group(1)))
-            continue
-        body = region[head.end():end]
+            break
+        body = region[head.end():end.start()]
         blocks.append((normalise(head.group(1)),
                        any(line.strip() for line in body.split("\n")),
-                       head.start(), end + 3))
+                       head.start(), end.end()))
+        cursor = end.end()
     return blocks, unterminated
 
 
