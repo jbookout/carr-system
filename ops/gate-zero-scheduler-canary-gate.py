@@ -149,8 +149,9 @@ def jobs_dsn(dsn: str, password: str) -> str:
     if not password:
         raise RuntimeError("the jobs DSN needs the throwaway password this gate just set")
     encoded = quote(password, safe="")
+    host = f"[{parsed.hostname}]" if ":" in (parsed.hostname or "") else parsed.hostname
     rebuilt = urlunparse(parsed._replace(
-        netloc=f"carr_jobs:{encoded}@{parsed.hostname}:{parsed.port}"))
+        netloc=f"carr_jobs:{encoded}@{host}:{parsed.port}"))
     check = urlparse(rebuilt)
     if check.username != "carr_jobs" or check.password != encoded \
             or check.hostname not in {"127.0.0.1", "localhost", "::1"} \

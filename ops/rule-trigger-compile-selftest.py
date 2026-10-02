@@ -790,9 +790,18 @@ for prompt, rule_id in (
         ("Just click my Carr.us@gmail account. The password is autofilled", "c66dc739"),
         ("It appears that flash got stuck on test 6", "d9ce2b08"),
         ("it didnt ask, it just said no such file", "d9ce2b08"),
-        ("look in my email folder for sapala", "49533583")):
+        ("look in my email folder for sapala", "49533583"),
+        ("Give the already-merged two-line change an independent review.", "2b66211d"),
+        ("Adversarial read-only review of the PR that strips names from the tree.", "2b66211d"),
+        ("Get a Codex review on this PR before it goes to the orchestrator.", "2b66211d")):
     check(f"committed cue delivers {rule_id} on its logged prompt",
           rule_id in rtd.match(prompt, committed_rows or [], human=True), prompt[:40])
+for prompt in ("Review the doc for typos.", "Please review my calendar for Tuesday.",
+               "The independent contractor signed the lease."):
+    check("the verifier cue does not fire on an ordinary review or an unrelated 'independent'",
+          "2b66211d" not in [r for r, sources in rtd.match(
+              prompt, committed_rows or [], human=True).items() if "prompt_cue" in sources],
+          prompt[:40])
 for banner in ("Last login: Thu Sep 24 11:01:21 on ttys001\nbooko@Joes-MacBook-Pro ~ % ls",
                "the file to dells computer? or the command\n\n"
                "Last login: Wed Sep 23 21:20:47 on ttys001\nbooko@J"):
