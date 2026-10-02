@@ -3126,8 +3126,7 @@ export const TOOLS = {
     description: "Open pipeline grouped by phase. Never exposes Salesforce commission/close-date placeholders (they are placeholders, not data).",
     inputSchema: { type: "object", properties: {} },
     handler: async (c) => ({ deals: (await c.query(`select b.*, d.operating_state, d.parking_note, to_jsonb(d.invoiced_on)#>>'{}' as invoiced_on
-      from v_deal_board b join deal d on d.id=b.id
-      where d.invoiced_on is null
+      from v_deal_board b join v_deal_room_board d on d.id=b.id
       order by b.phase_sort, b.name /* dealboard:operating-state */`)).rows }),
   },
 
