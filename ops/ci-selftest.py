@@ -1321,6 +1321,22 @@ def test_hosted_ci_runs_classes_in_parallel_behind_one_required_context():
           {"ran": ran, "order": classes})
 
 
+def test_hosted_class_deadline_allows_the_verified_migration_lane():
+    """PR 1478's passing DB acceptance run 36977206540 took 22m55s.
+
+    Its strict migration peer was cancelled at the old 20-minute job ceiling.
+    Give the same checks room for setup and runner variation while retaining a
+    finite deadline and the separate five-minute required aggregate.
+    """
+    jobs = _hosted_workflow().get("jobs") or {}
+    classes = jobs.get("classes") or {}
+    deadline = classes.get("timeout-minutes")
+    check("hosted class deadline accommodates the verified 22m55s migration plus setup",
+          isinstance(deadline, int) and 30 <= deadline <= 45, deadline)
+    check("the required aggregate keeps its separate five-minute deadline",
+          (jobs.get("checks") or {}).get("timeout-minutes") == 5)
+
+
 def test_hosted_zsh_setup_does_not_refresh_working_indexes():
     """PR 1465 spent its entire job budget in apt update before any class ran.
 
@@ -1408,6 +1424,7 @@ def main():
                test_push_floor_defers_the_gates_class_instead_of_running_it,
                test_strict_still_owns_the_gates_class,
                test_hosted_ci_runs_classes_in_parallel_behind_one_required_context,
+               test_hosted_class_deadline_allows_the_verified_migration_lane,
                test_hosted_zsh_setup_does_not_refresh_working_indexes):
         try:
             fn()
