@@ -825,23 +825,33 @@ def codex_permissions_source():
 
 
 def canonical_codex_permissions(raw):
-    """Read the managed slice only when it matches the parsed live settings."""
+    """Read reserved semantic paths, independent of comments and TOML syntax."""
     import tomllib
+    import tomlkit
     try:
-        parsed = tomllib.loads(raw)
-        _, markers = codex_permission_syntax(raw)
-        if len(markers) != 2 or [m[2] for m in markers] != [
-                CODEX_PERMISSIONS_BEGIN, CODEX_PERMISSIONS_END]:
+        source = codex_permissions_source()
+        if source is None:
             return None
-        body = raw[markers[0][1]:markers[1][0]].strip() + "\n"
-        managed = tomllib.loads(body)
-        if parsed.get('default_permissions') not in managed.get('permissions', {}):
+        default_line, body = source
+        expected = tomllib.loads(default_line + "\n" + body)
+        parsed = tomllib.loads(portable(raw))
+        default = parsed.get('default_permissions')
+        permissions = parsed.get('permissions')
+        if not isinstance(default, str) or default not in expected['permissions'] \
+                or not isinstance(permissions, dict):
             return None
-        for name, profile in managed.get('permissions', {}).items():
-            if parsed.get('permissions', {}).get(name) != profile:
+        profiles = {}
+        for name in expected['permissions']:
+            profile = permissions.get(name)
+            if not isinstance(profile, dict):
                 return None
-        default = 'default_permissions = ' + json.dumps(parsed['default_permissions'])
-        return portable(default + "\n\n" + body)
+            profiles[name] = profile
+        observed = {'default_permissions': default, 'permissions': profiles}
+        # Equal semantics render in the source's form. Changed values remain
+        # visible to drift checks and pull; unrelated settings stay outside it.
+        if observed == expected:
+            return default_line + "\n\n" + body
+        return tomlkit.dumps(observed)
     except (tomllib.TOMLDecodeError, ValueError, TypeError, AttributeError):
         return None
 

@@ -141,6 +141,36 @@ def main():
     permission_review_regressions()
     import tomllib
     default, body = mod.codex_permissions_source()
+    # Codex may rewrite TOML syntax and discard comments without changing the
+    # installed permissions. Read the same reserved paths the installer owns.
+    import tomlkit
+    expected_permissions = mod.portable(default + "\n\n" + body)
+    markerless = mod.concrete(default + "\n\n" + body)
+    assert mod.canonical_codex_permissions(markerless) == expected_permissions
+    values = tomllib.loads(markerless)
+    rewritten = tomlkit.dumps({
+        'notes': mod.CODEX_PERMISSIONS_BEGIN + '\nexample only',
+        'default_permissions': values['default_permissions'],
+        'permissions': {
+            'custom': {'description': 'keep me'},
+            **{name: dict(reversed(list(profile.items())))
+               for name, profile in reversed(list(values['permissions'].items()))},
+        },
+    })
+    assert mod.canonical_codex_permissions(rewritten) == expected_permissions
+    quoted = markerless.replace('[permissions.carr_unattended]',
+                                "[ 'permissions' . 'carr_unattended' ]")
+    assert mod.canonical_codex_permissions(quoted) == expected_permissions
+    values['permissions']['carr_unattended']['network']['enabled'] = False
+    drifted = mod.canonical_codex_permissions(tomlkit.dumps(values))
+    assert isinstance(drifted, str) and drifted != expected_permissions
+    assert tomllib.loads(drifted)['permissions']['carr_unattended']['network']['enabled'] is False
+    values['default_permissions'] = 'carr_drive_readonly'
+    assert tomllib.loads(mod.canonical_codex_permissions(tomlkit.dumps(values)))[
+        'default_permissions'] == 'carr_drive_readonly'
+    del values['permissions']['carr_drive_readonly']
+    assert mod.canonical_codex_permissions(tomlkit.dumps(values)) is None
+    print('PASS semantic permission reads survive comment/syntax rewrites and detect drift')
     raw = ('model = "fixture"\n' + default + '\n'
            '[permissions.carr_unattended]\nextends = ":read-only"\n'
            '[permissions.carr_unattended.network]\nenabled = false\n'

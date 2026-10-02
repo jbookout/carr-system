@@ -84179,6 +84179,19 @@
     {
       "version": "v102",
       "remove": [],
+      "upsert": [],
+      "row_replacements": {
+        "mcp-tool:confirm-merge": {
+          "human_only": true,
+          "principal_mode": "server_verified_human"
+        }
+      },
+      "expected_count": 1084,
+      "expected_sha256": "98054b8eb743d97fe1dba0bec67826bea0c359b82c6dd8a4041adb0653ea1bf7"
+    },
+    {
+      "version": "v103",
+      "remove": [],
       "upsert": [
         {
           "ingress_key": "external-admin:bin/migrate-prod.sh",
@@ -84228,8 +84241,8 @@
         }
       ],
       "expected_count": 1084,
-      "expected_sha256": "b9306437964d0e5ba65e142dd8916bcda47678586e3bdf84fbfd8eba47dfcdf1",
-      "reason": "Task AD source-only review of the production migration wrapper and its diagnostic helper. Failure capture and redaction change only; no new ingress, grant, live registry selection or production effect. Runtime and database registry remain v101."
+      "expected_sha256": "4a9506541c82bf5af6f0de9a95ec216ea33762ae1ae6fbf4924935326773b8e2",
+      "reason": "Task AD source-only review of the production migration wrapper and its diagnostic helper. Failure capture and redaction change only; no new ingress, grant, live registry selection or production effect. Runtime and database registry remain v102, preserving the human-only confirm-merge contract."
     }
   ],
   "current_source_review": {

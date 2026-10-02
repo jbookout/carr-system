@@ -130,12 +130,23 @@ function pageFor(surface, env) {
     if (set) jar.cookie = set.split(";")[0];
     return response;
   };
-  const context = createContext({ document: doc, fetch: fetchBridge, crypto, Promise, JSON, Number, String, Array, RegExp, Error, TypeError, Math, Date, URL, AbortController, clearTimeout,
-    // The feedback deadline is seconds in the browser; keep it instant here.
-    setTimeout: (fn, ms) => setTimeout(fn, ms >= 1000 ? 5 : ms) });
+  // Advance browser deadlines explicitly. Async crypto and response handling
+  // must finish independently of the host scheduler's load.
+  const deadlines = new Map();
+  let timerId = 0;
+  const context = createContext({ document: doc, fetch: fetchBridge, crypto, Promise, JSON, Number, String, Array, RegExp, Error, TypeError, Math, Date, URL, AbortController,
+    setTimeout: (fn, ms) => { const id = ++timerId; deadlines.set(id, { fn, ms }); return id; },
+    clearTimeout: id => deadlines.delete(id) });
   context.globalThis = context;
   context.__CARR_TOUR_TAKE_SHARE_TOKEN__ = () => TOKEN;
-  return { doc, ids, jar, trace, context };
+  const expireFeedbackDeadline = () => {
+    assert.equal(deadlines.size, 1, "one feedback deadline is pending");
+    const [id, timer] = [...deadlines][0];
+    assert.equal(timer.ms, 8000, "the browser feedback deadline remains eight seconds");
+    deadlines.delete(id);
+    timer.fn();
+  };
+  return { doc, ids, jar, trace, context, deadlines, expireFeedbackDeadline };
 }
 async function openShare(w, { waitFeedback = true } = {}) {
   runInContext(await readFile(SHARE_JS, "utf8"), w.context);
@@ -428,8 +439,21 @@ test("the feedback read never gates the packet: pending, timeout and 503 leave t
   ]) {
     const { env, w } = await setup({ scopes: name.startsWith("no feedback") ? ["view_packet"] : undefined });
     env.intercept = intercept;
-    const list = await openShare(w);
+    let feedbackSignal;
+    if (name === "pending forever") env.intercept["/api/share/feedback"] = (_call, options) => {
+      feedbackSignal = options.signal;
+      return new Promise(() => {});
+    };
+    const list = await openShare(w, { waitFeedback: name !== "pending forever" });
     assert.equal(list.children.length, 2, `${name}: packet rendered`);
+    if (name === "pending forever") {
+      assert.equal(list.dataset.feedbackState, "loading");
+      assert.equal(feedbackSignal.aborted, false);
+      w.expireFeedbackDeadline();
+      await until(() => list.dataset.feedbackState === "unavailable", "feedback deadline reported");
+      assert.equal(feedbackSignal.aborted, true);
+      assert.equal(list.children.length, 2, "packet remains usable after timeout");
+    }
     assert.equal(posts(w, "/api/share/exchange").length, 1);
     assert.ok(w.trace.some(t => t.path === "/api/share/report") && w.trace.some(t => t.path === "/api/share/map"), `${name}: report and map were requested`);
     const message = w.doc.querySelector("#feedback-status").textContent;
@@ -444,6 +468,24 @@ test("the feedback read never gates the packet: pending, timeout and 503 leave t
       assert.equal(w.doc.querySelector("#retry-feedback").hidden, true);
     }
   }
+});
+
+test("a delayed feedback retry waits for its response without a shortened fixture deadline", async () => {
+  const { env, w } = await setup();
+  env.intercept = { "/api/share/feedback": async () => new Response("{}", { status: 503 }) };
+  const list = await openShare(w);
+  assert.equal(list.dataset.feedbackState, "unavailable");
+  const hold = deferred();
+  env.intercept = { "/api/share/feedback": async call => { await hold.gate; return call(); } };
+  await w.doc.querySelector("#retry-feedback").click();
+  // A delayed response is still before the browser's deadline. Scheduler load
+  // must not turn it into a timeout in the fixture.
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(list.dataset.feedbackState, "loading");
+  hold.release();
+  await until(() => list.dataset.feedbackState === "ready", "delayed feedback ready after retry");
+  assert.ok(controls(list.children[0]).pick);
+  assert.equal(w.deadlines.size, 0, "completed feedback clears its deadline");
 });
 
 test("a failed feedback read can be retried and then works", async () => {

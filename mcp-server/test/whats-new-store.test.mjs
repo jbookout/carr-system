@@ -29,10 +29,13 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
   const clients = [];
   try {
     execFileSync(path.join(bin,'initdb'), ['-D',dir,'-U','fixture','--auth=trust','--no-locale'], { stdio: 'pipe' });
-    execFileSync(path.join(bin,'pg_ctl'), ['-D',dir,'-l',path.join(dir,'server.log'),'-o',`-k ${dir} -h ''`,'-w','start'], { stdio: 'pipe' });
+    // Hosted Postgres uses UTC; the catchup date contract uses America/Chicago.
+    execFileSync(path.join(bin,'pg_ctl'), ['-D',dir,'-l',path.join(dir,'server.log'),'-o',`-k ${dir} -h '' -c timezone=UTC`,'-w','start'], { stdio: 'pipe' });
     running = true;
-    const connect = async () => { const c = new pg.Client({ host: dir, user: 'fixture', database: 'postgres' }); await c.connect(); clients.push(c); await c.query("set time zone 'UTC'"); return c; };
+    const connect = async () => { const c = new pg.Client({ host: dir, user: 'fixture', database: 'postgres' }); await c.connect(); clients.push(c); return c; };
     const c = await connect();
+    // Hosted PostgreSQL uses UTC; business-day thresholds use Chicago.
+    await c.query("set time zone 'UTC'");
     await c.query('create schema ops; create role carr_writer; create role carr_authority; create role carr_reader; grant usage on schema ops to carr_writer,carr_authority,carr_reader;');
     const schema = readFileSync(path.join(root,'db/schema.sql'),'utf8');
     const authorityFunction = schema.match(/CREATE FUNCTION ops.authority_login_slug\([^\n]+\)[\s\S]*?\n\$\$;/)?.[0];
@@ -90,8 +93,6 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
     assert.equal((await context()).first_call,true);
     await assert.rejects(c.query('select * from ops.doc_whats_new_watermark'), /permission denied/);
     await c.query('reset role');
-    // Run a UTC session but seed Chicago business dates, as the product does.
-    // Between UTC and Chicago midnight, current_date would put due dates a day ahead.
     // Fixtures use the snapshot's actual table definitions, never production data.
     await c.query("insert into party(id,kind,name,created_by,updated_by) values($1,'org','Synthetic Practice',$2,$2)",[uuid(3),uuid(1)]);
     await c.query("insert into client(id,party_id,status,created_by,updated_by) values($1,$2,'active',$3,$3)",[uuid(4),uuid(3),uuid(1)]);
@@ -99,8 +100,8 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
     await c.query("insert into lead(id,registry_ref,party_id,stage,created_by,updated_by,owner_id) values($1,'L-SYNTHETIC',$2,'new',$3,$3,$3)",[uuid(6),uuid(3),uuid(1)]);
     await c.query("insert into event(id,occurred_at,actor_id,verb,subject_type,subject_id,field,new_value,cause) values($1,now(),$2,'update-deal','deal',$3,'phase','\"review\"','human_stated'),($4,now(),$2,'update-lead','lead',$5,'stage','\"contacted\"','human_stated')",[uuid(7),uuid(2),uuid(5),uuid(8),uuid(6)]);
     await c.query("insert into activity(id,occurred_at,actor_id,kind,summary,deal_id) values($1,now(),$2,'call','Reviewed the synthetic terms',$3)",[uuid(9),uuid(2),uuid(5)]);
-    await c.query("insert into next_action(id,subject_type,subject_id,owner_id,description,due_on,created_by,updated_by) values($1,'deal',$2,$3,'Review synthetic terms',(clock_timestamp() at time zone 'America/Chicago')::date,$3,$3)",[uuid(10),uuid(5),uuid(1)]);
-    await c.query("insert into critical_date(id,deal_id,kind,due_on,source,created_by) values($1,$2,'option_window',(clock_timestamp() at time zone 'America/Chicago')::date+7,'synthetic',$3)",[uuid(11),uuid(5),uuid(1)]);
+    await c.query("insert into next_action(id,subject_type,subject_id,owner_id,description,due_on,created_by,updated_by) values($1,'deal',$2,$3,'Review synthetic terms',current_date,$3,$3)",[uuid(10),uuid(5),uuid(1)]);
+    await c.query("insert into critical_date(id,deal_id,kind,due_on,source,created_by) values($1,$2,'option_window',current_date+7,'synthetic',$3)",[uuid(11),uuid(5),uuid(1)]);
     await identity('joe');
     const next = await context();
     for (const name of ['deal_changes','lead_changes','next_actions','critical_dates','partner_activity','new_leads']) {
@@ -141,14 +142,27 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
     await c.query('insert into ops.doc_suggestion_scan(idempotency_key,conversation_id,through_sequence) values($1,$2,0)',[uuid(23),uuid(20)]);
     await identity('joe');
     assert.equal((await section('doc_suggestions',await context())).state,'ready');
-    await c.query('reset role');
-    await c.query("update next_action set created_at=now()-interval '3 days',updated_at=now()-interval '3 days' where id=$1",[uuid(10)]);
-    await c.query("update critical_date set created_at=now()-interval '3 days',updated_at=now()-interval '3 days',due_on=(clock_timestamp() at time zone 'America/Chicago')::date+14 where id=$1",[uuid(11)]);
-    await c.query("update ops.doc_suggestion set suggested_at=now()-interval '3 days',disposition='snoozed',snoozed_material_version=material_version,snoozed_until=(clock_timestamp() at time zone 'America/Chicago')::date where id=$1",[uuid(21)]);
-    await identity('joe');
-    // Time crossing a due threshold counts even without a new record write.
-    const todayContext = { ...await context(), since:new Date(Date.now()-86400000).toISOString(),previous_snapshot:null };
-    for (const name of ['next_actions','critical_dates','doc_suggestions']) assert.equal((await section(name,todayContext)).state,'ready',name);
+    // Use the reader clock and pin the UTC/Chicago gap and both DST transitions.
+    // Each case binds fixture dates and the catch-up window to one high-water.
+    const liveContext = await context();
+    for (const high_water of [liveContext.high_water,'2026-10-02T00:20:00Z','2026-10-02T18:00:00Z','2026-03-08T08:30:00Z','2026-11-01T07:30:00Z']) {
+      const thresholdContext = { high_water, since:new Date(Date.parse(high_water)-86400000).toISOString(), previous_snapshot:null };
+      for (const timezone of ['UTC','America/Chicago']) {
+        await c.query('reset role');
+        await c.query("select set_config('TimeZone',$1,false)",[timezone]);
+        await c.query("update next_action set created_at=$2::timestamptz-interval '3 days',updated_at=$2::timestamptz-interval '3 days',due_on=($2::timestamptz at time zone 'America/Chicago')::date where id=$1",[uuid(10),high_water]);
+        await c.query("update critical_date set created_at=$2::timestamptz-interval '3 days',updated_at=$2::timestamptz-interval '3 days',due_on=($2::timestamptz at time zone 'America/Chicago')::date+14 where id=$1",[uuid(11),high_water]);
+        await c.query("update ops.doc_suggestion set suggested_at=$2::timestamptz-interval '3 days',disposition='snoozed',snoozed_material_version=material_version,snoozed_until=($2::timestamptz at time zone 'America/Chicago')::date where id=$1",[uuid(21),high_water]);
+        await identity('joe');
+        // Time crossing a due threshold counts even without a new record write.
+        for (const [name,ref] of [['next_actions',`next-action:${uuid(10)}`],['critical_dates',`critical-date:${uuid(11)}`],['doc_suggestions',`doc-suggestion:${uuid(21)}`]]) {
+          const result = await section(name,thresholdContext);
+          assert.equal(result.state,'ready',`${name} in ${timezone} at ${high_water}`);
+          assert.ok(result.items.some(i => i.ref === ref),`${name} in ${timezone} at ${high_water}: Chicago threshold must be visible`);
+        }
+      }
+    }
+    await c.query("set time zone 'UTC'");
     await identity('dell');
     assert.equal((await section('new_leads',await context())).state,'empty');
     await c.query('reset role');
