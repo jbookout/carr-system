@@ -84,17 +84,21 @@ def main():
         with_attendees += 1
         title = str(ev.title() or "").strip()
         start = datetime.fromtimestamp(float(ev.startDate().timeIntervalSince1970()), timezone.utc)
-        identifier = str(ev.calendarItemIdentifier() or "")
+        external = str(ev.calendarItemExternalIdentifier() or "")
+        local = str(ev.calendarItemIdentifier() or "")
+        identifier = f"server:{external}" if external else f"local:{local}"
         calendar = str(ev.calendar().calendarIdentifier() or "")
-        if not identifier or not calendar:
+        if not (external or local) or not calendar:
             raise ValueError("EventKit event has no stable identity")
         # occurrenceDate is the original recurrence slot, surviving title edits.
         occurrence = ""
-        if ev.hasRecurrenceRules():
-            slot = ev.occurrenceDate()
-            if slot is None:
-                raise ValueError("recurring event has no occurrence identity")
+        # Detached instances may no longer carry recurrence rules. The server
+        # UID and original slot still identify their occurrence after edits.
+        slot = ev.occurrenceDate()
+        if slot is not None:
             occurrence = str(float(slot.timeIntervalSince1970()))
+        elif ev.hasRecurrenceRules():
+            raise ValueError("recurring event has no occurrence identity")
         identity = json.dumps([calendar, identifier, occurrence], separators=(",", ":"))
         out["events"].append({
             "event_id": hashlib.sha256(identity.encode()).hexdigest(),

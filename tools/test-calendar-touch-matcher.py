@@ -172,8 +172,10 @@ class LiveExports(unittest.TestCase):
             ev = mock.Mock()
             ev.title.return_value = "Same"
             ev.calendarItemIdentifier.return_value = identifier
+            ev.calendarItemExternalIdentifier.return_value = f"server-{identifier}"
             ev.calendar.return_value.calendarIdentifier.return_value = "calendar-1"
             ev.hasRecurrenceRules.return_value = False
+            ev.occurrenceDate.return_value = None
             ev.startDate.return_value.timeIntervalSince1970.return_value = start
             ev.attendees.return_value = []
             ev.organizer.return_value.URL.return_value.resourceSpecifier.return_value = "a@example.test"
@@ -198,12 +200,26 @@ class LiveExports(unittest.TestCase):
         pathlib.Path(producer.OUT).unlink()
         a.hasRecurrenceRules.return_value = b.hasRecurrenceRules.return_value = True
         b.calendarItemIdentifier.return_value = "id-one"
+        b.calendarItemExternalIdentifier.return_value = "server-id-one"
+        a.occurrenceDate.return_value = mock.Mock()
+        b.occurrenceDate.return_value = mock.Mock()
         a.occurrenceDate.return_value.timeIntervalSince1970.return_value = 1790874000
         b.occurrenceDate.return_value.timeIntervalSince1970.return_value = 1790960400
         with mock.patch.object(producer, "request_access", return_value=True), redirect_stdout(io.StringIO()):
             self.assertEqual(producer.main(), 0)
         recurring = json.loads(pathlib.Path(producer.OUT).read_text())["events"]
         self.assertNotEqual(recurring[0]["event_id"], recurring[1]["event_id"])
+
+        # Detaching/rescheduling one recurrence can drop its recurrence rules
+        # and change the local item ID; server UID and original slot persist.
+        pathlib.Path(producer.OUT).unlink()
+        a.hasRecurrenceRules.return_value = False
+        a.calendarItemIdentifier.return_value = "detached-local-id"
+        a.startDate.return_value.timeIntervalSince1970.return_value += 3600
+        with mock.patch.object(producer, "request_access", return_value=True), redirect_stdout(io.StringIO()):
+            self.assertEqual(producer.main(), 0)
+        detached = json.loads(pathlib.Path(producer.OUT).read_text())["events"]
+        self.assertEqual(recurring[0]["event_id"], detached[0]["event_id"])
 
     def test_snapshot_path_is_unchanged(self):
         emails, domains = matcher.load_record_contacts(
