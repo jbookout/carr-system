@@ -104,11 +104,10 @@ r = run({**brief, "subagent_type": "fork"}, "haiku:0.99")
 check("forks stay exempt", r is None, r)
 
 # A routing pin exempts an in-process spawn only when the pin actually names
-# that model. The merge_review pin now selects a Codex desk, not Opus.
+# that model. The merge_review pin preserves the Opus review policy.
 pinned = {**brief, "model": "opus", "prompt": "executor: opus per routing pin merge_review\nReview PR 1 adversarially."}
 r = run(pinned, "sonnet:0.84")
-check("an Opus spawn cannot claim the Codex merge-review pin as an exemption",
-      r and "EXECUTOR ADVICE" in r.get("additionalContext", ""), r)
+check("the Opus merge-review pin exempts its matching model", r is None, r)
 
 routed = {**brief, "model": "opus", "prompt": "executor: opus per routing dispatch\nChange the parser."}
 r = run(routed, "sonnet:0.84")

@@ -22,7 +22,8 @@ left the system while still appearing in the rule count.
 A judged relevance question is exactly the shape that fits: the moment is the
 query, the rules are the candidates, and "does this bind here" is a noul. The
 published reranking method applies directly, including its central constraint —
-ONE REQUEST PER CANDIDATE, so no rule's score is influenced by its competitors.
+ONE SCOPED QUESTION PER RULE in a shared batch. Rules are independently
+true or false, and each question names only its own rule.
 
 WHAT THIS IS NOT, AND THE TRAP THAT PRODUCED THE WARNING. It is tempting to
 measure a selector by how well it reproduces what the regexes deliver. Do not.
@@ -79,7 +80,6 @@ replaced rather than layered. Both entry points log, because a live mechanism
 nobody can audit afterwards is worse than a shadow one.
 """
 
-import concurrent.futures as cf
 import hashlib
 import importlib.util
 import json
@@ -112,16 +112,12 @@ CACHE_TTL_SECONDS = 30 * 60
 CACHE_MAX_ENTRIES = 4096
 MAP = os.path.join(REPO, "ops", "config", "rule-enforcement-map.json")
 
-# MEASURED, not guessed, and the measurement is worth keeping because the first
-# guess was wrong in the unexpected direction. Twenty real moments were sampled
-# from a session transcript and scored against the whole corpus. At 0.85 only
-# one moment in twenty drew any rule at all — too strict to be useful. At 0.75
-# every hit was correct on a hand read, no single rule dominated, and the rules
-# that surfaced were overwhelmingly ones no regex can reach. Below 0.70 the
-# distribution starts including rules whose topic matches and whose condition
-# does not. Re-derive this from SHADOW_LOG as real traffic accumulates.
-BIND_AT = 0.75
-BATCH_BIND_AT = 0.35
+# Calibrated against frozen serial-positive training targets; serial agreement
+# is a comparator, not a claim of independent human accuracy.
+# Full-recall, best-precision training interval: (0.57, 0.73]. Its midpoint
+# maximizes the margin to the nearest training scores, without tuning on test.
+# Cases, variant scores and replay: ops/fixtures/rule-batch-parity.v1.json.
+BATCH_BIND_AT = 0.65
 BIND_BATCH_SIZE = 7
 EVALUATED_MODEL = "jev-1.13.0"
 
@@ -137,11 +133,6 @@ class SelectionUnavailable(RuntimeError):
 # A moment that surfaces twenty rules has surfaced none, because nobody reads
 # twenty. The cap is part of the design, not a performance concern.
 MAX_SURFACED = 5
-
-# The corpus asked serially took over a minute live. Those fallback requests are
-# independent by construction, so the only cost of asking them at once is the
-# vendor's rate limit, which the client already backs off from.
-WORKERS = 16
 
 # THE CHEAP RANKING PASS. A Choice carrying every rule, which narrows 211 to
 # this many before any rule is judged on its own. The vendor's own shape for
@@ -284,17 +275,13 @@ def binding_question(client=None):
 
 
 def batch_binding_question(rule_id, client=None):
-    """One independently scoped Noul in a shared-state binding request."""
+    """Preserve the measured binding criteria, scoped to one rule in a batch."""
     ts = client or _sibling("typesafe_client")
+    baseline = binding_question(ts)
     return ts.noul(
-        f"For the human intent in `state.situation`, does ONLY `state.rules.{rule_id}` "
-        "bind this exact next action? Answer yes only when its stated trigger is met "
-        "now and following it would change what the session does. Topic overlap, "
-        "a rule already satisfied, or a different future action means no. Other "
-        "rules in `state.rules` are independent and may also bind or none may bind.",
-        true="This rule's condition is met now and requires a change to this action.",
-        false="This rule concerns another action, is already satisfied, or none of "
-              "its conditions is met; it does not bind this moment.")
+        f"Judge ONLY `state.rules.{rule_id}` independently of the other listed rules. "
+        + baseline["instructions"],
+        true=baseline["criteria"]["true"], false=baseline["criteria"]["false"])
 
 
 def rank_question(rules, client=None):
@@ -323,7 +310,7 @@ def rank_question(rules, client=None):
 
 def narrow(situation, rules, *, limit=SHORTLIST, client=None, api_key=None,
            judge=None):
-    """The rules worth judging one at a time, from one cheap ranking request.
+    """The rules worth judging in scoped batches, from one cheap ranking request.
 
     Returns the shortlist, or the whole roster when the ranking is unavailable
     — falling back to judging everything is slower and more expensive but not
@@ -407,15 +394,15 @@ def _rule_text(rule):
 
 
 def select(situation, rules=None, *, floor=None, limit=MAX_SURFACED,
-           client=None, api_key=None, judge=None, workers=WORKERS,
+           client=None, api_key=None, judge=None,
            shortlist=SHORTLIST, cache_path=None, cache_ttl=None, now=None,
-           session_id=None, cache_info=None, serial_fallback=False):
+           session_id=None, cache_info=None):
     """Rank rules by whether they bind to `situation`.
 
     TWO STAGES. One Choice over the roster narrows it to a shortlist, then
     independent, scoped Nouls share state in batches of BIND_BATCH_SIZE.
-    Several rules can bind one moment and usually none do. The prior serial
-    requests remain available through serial_fallback=True only.
+    Several rules can bind one moment and usually none do. Failed batches
+    remain unavailable; no serial request is made.
 
     The first version judged all 211 rules one at a time. That cost ten times
     the requests for the same answer.
@@ -433,7 +420,7 @@ def select(situation, rules=None, *, floor=None, limit=MAX_SURFACED,
     indistinguishable from one that was judged and rejected.
     """
     rules = load_rules() if rules is None else rules
-    floor = (BIND_AT if serial_fallback else BATCH_BIND_AT) if floor is None else floor
+    floor = BATCH_BIND_AT if floor is None else floor
     if cache_path is None and judge is None and client is None and api_key is None:
         cache_path = CACHE_PATH
     judge = judge or _sibling("jev_judge")
@@ -475,37 +462,11 @@ def select(situation, rules=None, *, floor=None, limit=MAX_SURFACED,
             fresh[rank_key] = {"ids": [rule["id"] for rule in short],
                                "ranking_model": short[0].get("ranking_model") if short else None}
 
-    question = {"binds": binding_question(client)}
-
     def verdict_key(rule):
         return cache.key({"session": session, "rule": rule["id"],
                           "pack": packs.get(rule["id"], ""), "prompt": prompt_hash,
                           "text": _rule_text(rule), "source": source,
-                          "batch_roster": roster if not serial_fallback else None,
-                          "serial_fallback": serial_fallback})
-
-    def score(rule):
-        # THE STATEMENT IS THE RULE. `gist` stays as the headline because a
-        # named thing is easier to judge with a name attached, but the text
-        # the question is actually answered against is the statement, and
-        # before 2026-09-18 it was never sent at all. Falls back to the
-        # headline when the corpus has no statement for this id, so a rule
-        # added since the last corpus refresh is judged on less rather than
-        # skipped.
-        subject = {"situation": situation,
-                   "rule_title": rule["gist"],
-                   "rule": rule.get("statement") or rule["gist"],
-                   "rule_context": rule.get("context", "")}
-        try:
-            answer = judge.judge(subject, question, client=client, api_key=api_key,
-                                 model=EVALUATED_MODEL)
-            return {
-                **rule,
-                "probability": float(answer["answers"]["binds"]["noul"]),
-                "binding_model": answer.get("model"),
-            }
-        except (judge.JudgeUnavailable, KeyError, TypeError, ValueError):
-            return {**rule, "probability": None, "binding_model": None}
+                          "batch_roster": roster})
 
     reused, to_ask = [], []
     for rule in short:
@@ -519,38 +480,32 @@ def select(situation, rules=None, *, floor=None, limit=MAX_SURFACED,
     info["verdicts_reused"] = len(reused)
     info["verdicts_asked"] = len(to_ask)
 
-    if not serial_fallback:
-        asked = []
-        for start in range(0, len(to_ask), BIND_BATCH_SIZE):
-            group = to_ask[start:start + BIND_BATCH_SIZE]
-            state = {"situation": situation, "rules": {
-                rule["id"]: {"title": rule.get("gist") or (rule.get("statement") or "")[:150],
-                             "statement": (rule.get("statement") or rule.get("gist") or "")[:4000],
-                             "context": rule.get("context", "")}
-                for rule in group}}
-            questions = {f"bind_{rule['id']}": batch_binding_question(rule["id"], client)
-                         for rule in group}
+    asked = []
+    for start in range(0, len(to_ask), BIND_BATCH_SIZE):
+        group = to_ask[start:start + BIND_BATCH_SIZE]
+        state = {"situation": situation, "rules": {
+            rule["id"]: {"title": rule.get("gist") or (rule.get("statement") or "")[:150],
+                         "statement": (rule.get("statement") or rule.get("gist") or "")[:4000],
+                         "context": rule.get("context", "")}
+            for rule in group}}
+        questions = {f"bind_{rule['id']}": batch_binding_question(rule["id"], client)
+                     for rule in group}
+        try:
+            answer = judge.judge(state, questions, client=client, api_key=api_key,
+                                 model=EVALUATED_MODEL)
+            answers = answer["answers"]
+        except (judge.JudgeUnavailable, KeyError, TypeError, ValueError):
+            answers = {}
+            answer = {}
+        for rule in group:
             try:
-                answer = judge.judge(state, questions, client=client, api_key=api_key,
-                                     model=EVALUATED_MODEL)
-                answers = answer["answers"]
-            except (judge.JudgeUnavailable, KeyError, TypeError, ValueError):
-                answers = {}
-                answer = {}
-            for rule in group:
-                try:
-                    probability = float(answers[f"bind_{rule['id']}"]["noul"])
-                    if not 0 <= probability <= 1:
-                        raise ValueError("invalid Noul")
-                except (KeyError, TypeError, ValueError):
-                    probability = None
-                asked.append({**rule, "probability": probability,
-                              "binding_model": answer.get("model")})
-    elif workers > 1 and len(to_ask) > 1:
-        with cf.ThreadPoolExecutor(max_workers=workers) as pool:
-            asked = list(pool.map(score, to_ask))
-    else:
-        asked = [score(rule) for rule in to_ask]
+                probability = float(answers[f"bind_{rule['id']}"]["noul"])
+                if not 0 <= probability <= 1:
+                    raise ValueError("invalid Noul")
+            except (KeyError, TypeError, ValueError):
+                probability = None
+            asked.append({**rule, "probability": probability,
+                          "binding_model": answer.get("model")})
     if cache is not None:
         for row in asked:
             if row["probability"] is not None:
@@ -591,7 +546,7 @@ def advise(situation, *, log_path=SHADOW_LOG, **kwargs):
     structured facts; semantic content regexes are replaced rather than layered.
 
     Still logs. A live mechanism that cannot be audited later is worse than a
-    shadow one, and the log is how BIND_AT gets re-derived from real traffic.
+    shadow one, and the log is how BATCH_BIND_AT gets re-derived from real traffic.
     """
     cache_info = {}
     surfaced = select(situation, cache_info=cache_info, **kwargs)
@@ -608,7 +563,7 @@ def advise(situation, *, log_path=SHADOW_LOG, **kwargs):
         "unavailable": unavailable,
         "unreachable_by_regex": sorted(
             {row["id"] for row in advice} - reachable_rule_ids()),
-        "floor": kwargs.get("floor", BIND_AT if kwargs.get("serial_fallback") else BATCH_BIND_AT),
+        "floor": kwargs.get("floor", BATCH_BIND_AT),
         "detail": advice,
     })
     if unavailable:
@@ -651,7 +606,7 @@ def shadow_selection(situation, command_text, *, log_path=SHADOW_LOG, **kwargs):
         "regex_only": sorted(did - set(would)),
         "unreachable_today_among_judged": sorted(
             set(would) - reachable_rule_ids()),
-        "floor": kwargs.get("floor", BIND_AT if kwargs.get("serial_fallback") else BATCH_BIND_AT),
+        "floor": kwargs.get("floor", BATCH_BIND_AT),
         "detail": judged,
     }
     _append(log_path, record)

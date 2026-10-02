@@ -74,7 +74,8 @@ rtd = load("rule_trigger_delivery_t", RTD_PATH)
 class Client:
     @staticmethod
     def noul(instructions, true=None, false=None):
-        return {"type": "noul", "instructions": instructions}
+        return {"type": "noul", "instructions": instructions,
+                "criteria": {"true": true, "false": false}}
 
 
 RULES = [
@@ -143,7 +144,7 @@ class Asker:
         self.fail = fail
 
     def __call__(self, subject, questions, *, rule_id=None, **kwargs):
-        self.calls.append(rule_id)
+        self.calls.extend(subject["rules"])
         self.subjects = getattr(self, "subjects", []) + [subject]
         if self.fail:
             raise RuntimeError("synthetic outage")
@@ -183,7 +184,7 @@ def run(module, text, tmp, *, session="s1", now=1000.0, doc=None, ask=None, rank
         ask=ask if ask is not None else Asker(), client=Client,
         rank=rank if rank is not None else Ranker(),
         delivered_cache=delivered, envelope=envelope,
-        log_path=os.path.join(tmp, "log.jsonl"), serial_fallback=True)
+        log_path=os.path.join(tmp, "log.jsonl"))
 
 
 def ids(rows):
@@ -239,7 +240,7 @@ def prop_fail_open(rtc_m, rtd_m):
     except Exception:
         return False
     return (bool(out) and len(ask.calls) >= 1
-            and rank.calls + len(ask.calls) <= rtd_m.MAX_JEV_CALLS)
+            and rank.calls + len(ask.subjects) <= rtd_m.MAX_JEV_CALLS)
 
 
 def prop_residual_every_human_prompt(rtc_m, rtd_m):
@@ -280,9 +281,9 @@ def prop_budget_cap(rtc_m, rtd_m):
         run(rtd_m, "anything at all", tmp, ask=ask, rank=rank, doc=doc,
             rules=many + FILLERS, table=table_for(doc, tmp))
         log = [json.loads(line) for line in Path(tmp, "log.jsonl").read_text().splitlines()]
-    total = rank.calls + len(ask.calls)
+    total = rank.calls + len(getattr(ask, "subjects", []))
     k = rtd.BIND_TOP_K
-    return (total <= 8 and log[-1]["jev_calls"] == total
+    return (total <= rtd.MAX_JEV_CALLS and log[-1]["jev_calls"] == total
             and len(ask.asked()) == k and len(log[-1]["overflow"]) == 40 - k)
 
 
@@ -347,18 +348,18 @@ def prop_default_rank(rtc_m, rtd_m):
                          triggers_path=table_for(compiled_doc(), tmp), compiled=compiled_doc(),
                          rules=ROSTER, ask=ask, client=ChoiceClient, rank=None,
                          delivered_cache=os.path.join(tmp, "d"), envelope=False,
-                         log_path=os.path.join(tmp, "log.jsonl"), serial_fallback=True)
+                         log_path=os.path.join(tmp, "log.jsonl"))
             row = json.loads(Path(tmp, "log.jsonl").read_text().splitlines()[-1])
         bound, _ = rtd_m.judge_budgeted("git push please", ROSTER[1:], [],
                                         ask=Asker(0.9), client=ChoiceClient,
-                                        serial_fallback=True)
+                                        )
         model.extend({r["ranking_model"] for r in bound.values()})
     except Exception:
         return False
     finally:
         rtd_m._sibling = real_sibling
     return (requests == [["rank"]] * 2 and row["rank_status"] == "ok"
-            and "ffff0039" in ask.asked() and row["jev_calls"] == 1 + len(ask.calls)
+            and "ffff0039" in ask.asked() and row["jev_calls"] == 1 + len(ask.subjects)
             and model == ["stub-ranker"])
 
 
@@ -372,7 +373,7 @@ def prop_ranking_fails_binding_up(rtc_m, rtd_m):
         row = json.loads(Path(tmp, "log.jsonl").read_text().splitlines()[-1])
     expected = [f"ffff{i:04d}" for i in range(rtd_m.BIND_TOP_K)]
     return (ask.calls == expected and row["rank_status"] == "unavailable_overlap_fallback"
-            and row["jev_calls"] == 1 + rtd_m.BIND_TOP_K
+            and row["jev_calls"] == 2
             and all(r["ranking_model"] is None for r in out) and bool(out))
 
 
@@ -425,26 +426,29 @@ class SlowTransport:
         return self.now
 
     def __call__(self, subject, questions, *, rule_id=None, **kwargs):
-        self.calls.append(rule_id)
+        self.calls.extend(subject["rules"])
         self.now += self.seconds
-        return {"answers": {"binds": {"noul": 0.9}}, "model": "slow-stub"}
+        return {"answers": {q: {"noul": 0.9} for q in questions}, "model": "slow-stub"}
 
 
 def prop_deadline(rtc_m, rtd_m):
-    """A slow transport: binding stops once the deadline is near, what was
-    judged before it is still returned, and the rest is reported unjudged.
-    At 5 s a request against the 12 s clock: requests start at 0, 5 and 10 s
-    (10 s leaves 2 s, above the 1 s floor); the 4th would start at 15 s."""
+    """A batch starts within the clock; an expired deadline starts no batch
+    and reports every shortlisted rule unjudged."""
     slow = SlowTransport(5.0)
     selected, report = rtd_m.judge_budgeted(
         "anything", ROSTER, [], rank=Ranker(), ask=slow, client=Client, titles={},
-        clock=slow.clock, serial_fallback=True)
-    expected = int((rtd_m.DEADLINE_SECONDS - rtd_m.MIN_CALL_SECONDS) // 5.0) + 1
-    return (len(slow.calls) == expected < rtd_m.BIND_TOP_K
+        clock=slow.clock)
+    expired = SlowTransport(5.0)
+    empty, expired_report = rtd_m.judge_budgeted(
+        "anything", ROSTER[:2], [], ask=expired, client=Client, titles={},
+        clock=expired.clock, deadline=0)
+    return (len(slow.calls) == rtd_m.BIND_TOP_K
             and sorted(selected) == sorted(slow.calls) == sorted(report["judged"])
-            and report["deadline_hit"] is True
-            and len(report["unjudged"]) == rtd_m.BIND_TOP_K - expected
-            and report["calls"] == 1 + expected)
+            and report["deadline_hit"] is False and report["unjudged"] == []
+            and report["calls"] == 2
+            and expired.calls == [] and empty == {}
+            and expired_report["deadline_hit"] is True
+            and len(expired_report["unjudged"]) == 2)
 
 
 def prop_deadline_keeps_matches(rtc_m, rtd_m):
@@ -694,8 +698,8 @@ for name, prop in PROPERTIES.items():
 
 # ---------------------------------------------------------------- direct cases
 
-check("the hard budget is one ranking plus BIND_TOP_K single-rule requests, and is 8",
-      rtd.MAX_JEV_CALLS == 1 + rtd.BIND_TOP_K == 8)
+check("the hard budget is one ranking plus one binding batch",
+      rtd.MAX_JEV_CALLS == 2)
 
 with tempfile.TemporaryDirectory() as tmp:
     hit = run(rtd, "please git push this", tmp)
@@ -726,7 +730,7 @@ with tempfile.TemporaryDirectory() as tmp:
 check("a failed ranking still judges stale rules and is counted",
       "aaaa0002" in ask.asked() and ask.calls[0] == "aaaa0002"
       and row["rank_status"] == "unavailable_overlap_fallback"
-      and row["jev_calls"] == 1 + len(ask.calls) <= rtd.MAX_JEV_CALLS, row)
+      and row["jev_calls"] == 1 + len(ask.subjects) <= rtd.MAX_JEV_CALLS, row)
 
 pool = [{"id": "bbbb0002", "statement": "Nothing in common."},
         {"id": "bbbb0001", "statement": "Also nothing."},
@@ -739,9 +743,10 @@ check("the overlap fallback reads compiled keywords, then breaks ties by rule id
 with tempfile.TemporaryDirectory() as tmp:
     ask, rank = Asker(0.1), Ranker()
     run(rtd, "anything", tmp, ask=ask, rank=rank)
-check("the ranking's top BIND_TOP_K are judged, one rule per request",
+check("the ranking's top BIND_TOP_K are judged, one shared batch",
       rank.calls == 1 and len(ask.calls) == rtd.BIND_TOP_K == len(ask.asked())
-      and all(set(subject) == {"situation", "rule_title", "rule", "rule_context"}
+      and len(ask.subjects) == 1
+      and all(set(subject) == {"situation", "rules"}
               for subject in ask.subjects), ask.calls)
 
 with tempfile.TemporaryDirectory() as tmp:
@@ -893,7 +898,7 @@ MUTANTS = [
       "set(probabilities) <= {jrs.NONE_BIND}:")),
     # The deadline removed from the binding loop.
     ("binding stops at the deadline and keeps what was judged", RTD_PATH,
-     ("        if left < MIN_CALL_SECONDS:", "        if False:")),
+     ("    if deadline - clock() < MIN_CALL_SECONDS:", "    if False:")),
     # The deadline removed from the ranking request.
     ("a passed deadline makes no request and still delivers matches", RTD_PATH,
      ("        elif deadline - clock() < MIN_CALL_SECONDS:", "        elif False:")),

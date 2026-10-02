@@ -114,24 +114,23 @@ def load_catalog(path=None):
         return json.load(fh)
 
 
-def dispatch(task, context="", *, pin=None, audit_pin=False, work_kind=None, flash_free=True,
+def dispatch(task, context="", *, pin=None, audit_pin=False, flash_free=True,
              policy=None, catalog=None, judge=None, client=None, rng=random.random, log_path=LOG_PATH):
     """Return the selected desk and its route evidence.
 
-    A known pin or typed review/build skips the paid route unless audit_pin
-    explicitly requests a comparison sample. Typed work uses the Codex desk.
-    An unknown pin or work_kind raises ValueError. One receipt is logged.
+    A known pin skips the paid route unless audit_pin explicitly requests a
+    comparison sample. Policy pins take precedence over the judged route;
+    unpinned work retains the configured target for its judged category.
+    An unknown pin raises ValueError. One receipt is logged.
     """
     policy = policy or load_policy()
     catalog = catalog or load_catalog()
     pins = {k: v for k, v in policy["pins"].items() if not k.startswith("_")}
     if pin is not None and pin not in pins:
         raise ValueError(f"unknown pin {pin!r}; known: {', '.join(sorted(pins))}")
-    if work_kind not in (None, "review", "build"):
-        raise ValueError("work_kind must be review or build")
     # Explicit policy pins need no paid routing call. An audit is an explicit
     # sample, so the comparison route is calculated only for that request.
-    if (pin is not None or work_kind is not None) and not audit_pin:
+    if pin is not None and not audit_pin:
         row = {"route": None, "scores": {}, "fallback": False, "overflow": False,
                "audit": False, "jev_error": None}
     else:
@@ -159,10 +158,6 @@ def dispatch(task, context="", *, pin=None, audit_pin=False, work_kind=None, fla
         target, subagent_model, effort, reason = routed_target, routed_model, routed_effort, None
     else:
         target, reason = pins[pin]["target"], pins[pin]["reason"]
-        subagent_model = policy["dispatch_targets"][target]["subagent_model"]
-        effort = policy["dispatch_targets"][target]["effort"]
-    if work_kind in ("review", "build") or (pin is None and row["route"] == "code"):
-        target = "sol"
         subagent_model = policy["dispatch_targets"][target]["subagent_model"]
         effort = policy["dispatch_targets"][target]["effort"]
     out = {"route": row["route"], "target": target, "desk": catalog["targets"][target].get("desk"),
@@ -201,12 +196,11 @@ if __name__ == "__main__":
         ap.add_argument("--context", default="")
         ap.add_argument("--pin")
         ap.add_argument("--audit-pin", action="store_true")
-        ap.add_argument("--work-kind", choices=("review", "build"))
         ap.add_argument("--flash-busy", action="store_true")
         a = ap.parse_args(sys.argv[2:])
         try:
             print(json.dumps(dispatch(a.task, a.context, pin=a.pin, audit_pin=a.audit_pin,
-                                      work_kind=a.work_kind, flash_free=not a.flash_busy), indent=1))
+                                      flash_free=not a.flash_busy), indent=1))
         except ValueError as exc:
             print(f"jev_model_route: {exc}", file=sys.stderr)
             raise SystemExit(2)
