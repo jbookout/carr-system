@@ -609,7 +609,10 @@ def main(argv=None) -> int:
                    'CARR_HEADLESS_RUN_ID':row['run_id'],
                    'CARR_HEADLESS_RECEIPT':str(folder/(row['run_id']+'.completion.json'))}
             def started_child(child):
-                row.update(child_pid=child.pid, child_birth=process_birth(child.pid))
+                birth = process_birth(child.pid)
+                if not birth:
+                    raise ValueError('child identity unavailable')
+                row.update(child_pid=child.pid, child_birth=birth)
                 append_ledger(ledger, row)
             code, reason = _claude(prompt, repo, args.model, args.allowed_tools, timeout,
                                    log, env, started_child)

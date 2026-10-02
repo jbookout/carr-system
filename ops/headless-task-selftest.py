@@ -463,6 +463,18 @@ print(sys.argv[sys.argv.index('--correlation')+1]+' aa000000-0000-4000-8000-0000
             try: os.killpg(pid,signal.SIGKILL)
             except (ProcessLookupError,PermissionError): pass
 
+    def test_missing_child_birth_prevents_model_work(self):
+        driver = (f'import sys,os;sys.path.insert(0,{str(REPO)!r});'
+                  'from lib import headless_tasks as h;'
+                  'birth=h.process_birth;'
+                  'h.process_birth=lambda pid:birth(pid) if pid==os.getpid() else "";'
+                  f'sys.exit(h.main(["test-task","--repo",{str(self.repo)!r}]))')
+        result = subprocess.run([sys.executable, '-c', driver], env=self.env,
+                                cwd=self.repo, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 70, result.stderr)
+        self.assertFalse((self.home/'args.json').exists())
+        self.assertEqual(self.ledger()[-1]['status'], 'failed')
+
     def test_child_cannot_do_work_before_its_identity_is_durable(self):
         """Kill during identity capture, before the child journal append."""
         driver = self.home/'launch-gap.py'
