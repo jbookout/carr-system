@@ -3252,7 +3252,7 @@
      ],
      "verbs": [],
      "bash_patterns": [
-      "\\bclaude\\s+--remote\\b"
+      "(?<![\\w.-])claude(?![\\w-])(?:\\s+(?:\"[^\"]*\"|'[^']*'|[^\\s;&|]+))*?\\s+--(?:remote|cloud|environment)(?![\\w-])"
      ]
     }
    ]
