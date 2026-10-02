@@ -4,6 +4,19 @@ import { createDealroomHandler, isDealroomRequest } from "../src/dealroom-web.js
 import { parseBusinessQuery } from "../src/workspace-business-read.js";
 
 const HOST = "dealroom.doctorcre.com";
+
+test('clients refuse vendor-only territory filtering and sorting through the authenticated route', async () => {
+ const env=environment();
+ const handler=createDealroomHandler(overrides(async (_env,actor,request)=>{
+  parseBusinessQuery('clients',new URL(request.url).searchParams,actor.slug);
+  return payloadFor('clients',actor);
+ }));
+ const session=await signIn(handler,env);
+ for(const query of ['contract=vendor-directory.v1&territory=Synthetic%20North','contract=vendor-directory.v1&sort=territory']) {
+  const response=await handler.fetch(new Request(`https://${HOST}/api/v1/business/clients?${query}`,{headers:{cookie:session}}),env,{});
+  assert.equal(response.status,400);assert.equal((await response.json()).error,'QUERY_INVALID');
+ }
+});
 const ID = "3f1a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8";
 const JOE_EMAIL = "joe.bookout.carr.us@gmail.com";
 

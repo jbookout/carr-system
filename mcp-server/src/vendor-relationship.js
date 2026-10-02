@@ -16,8 +16,11 @@ export function enrichRelationship(payload, now) {
     win_rate: verified && stats.won + stats.lost > 0 ? stats.won / (stats.won + stats.lost) : null,
     computed_tier: computedTrust(stats, now), formula_version: 'vendor-trust.v1' };
 }
+export function requireRelationshipPartner(actor, code = 'AUTHORIZATION_REFUSED') {
+  if (actor?.human !== true || !['joe', 'dell'].includes(actor?.slug)) throw Object.assign(new Error(code), { code });
+}
 export function trustedOverride(value, actor, now = new Date().toISOString()) {
-  if (actor?.human !== true || !['joe', 'dell'].includes(actor?.slug)) throw Object.assign(new Error('AUTHORIZATION_REFUSED'), { code: 'AUTHORIZATION_REFUSED' });
+  requireRelationshipPartner(actor);
   if (value === null) return null;
   if (!value || !['Proven', 'Established', 'Trial'].includes(value.tier) || typeof value.reason !== 'string' || !value.reason.trim() || value.reason.length > 500 || Object.keys(value).some(k => !['tier', 'reason'].includes(k))) throw Object.assign(new Error('trust_override_invalid'), { code: 'trust_override_invalid' });
   return { tier: value.tier, reason: value.reason.trim(), recorded_by: actor.slug, recorded_at: now };
@@ -27,11 +30,57 @@ export function dealEvidenceEntries(value) {
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const seen = new Set();
   return value.map(entry => {
-    if (!entry || !uuid.test(entry.deal_id) || !['referred','worked'].includes(entry.role) || !['mail','calendar','salesforce','entry'].includes(entry.evidence_kind) || !Number.isFinite(Date.parse(entry.occurred_at)) || typeof entry.evidence_ref !== 'string' || !entry.evidence_ref.trim() || entry.evidence_ref.length > 500 || Object.keys(entry).some(k => !['deal_id','role','evidence_kind','evidence_ref','occurred_at'].includes(k))) throw Object.assign(new Error('deal_evidence_invalid'), { code: 'deal_evidence_invalid' });
-    const key = `${entry.deal_id}:${entry.role}`;
+    const occurred_at = canonicalEvidenceTimestamp(entry?.occurred_at);
+    if (!entry || typeof entry.deal_id !== 'string' || !uuid.test(entry.deal_id) || !['referred','worked'].includes(entry.role) || !['mail','calendar','salesforce','entry'].includes(entry.evidence_kind) || !occurred_at || typeof entry.evidence_ref !== 'string' || !entry.evidence_ref.trim() || entry.evidence_ref.length > 500 || Object.keys(entry).some(k => !['deal_id','role','evidence_kind','evidence_ref','occurred_at'].includes(k))) throw Object.assign(new Error('deal_evidence_invalid'), { code: 'deal_evidence_invalid' });
+    const deal_id = entry.deal_id.toLowerCase();
+    const key = `${deal_id}:${entry.role}`;
     if (seen.has(key)) throw Object.assign(new Error('deal_evidence_duplicate'), { code: 'deal_evidence_duplicate' });
-    seen.add(key); return { ...entry, evidence_ref: entry.evidence_ref.trim() };
+    seen.add(key); return { deal_id, role: entry.role, occurred_at, evidence_kind: entry.evidence_kind, evidence_ref: entry.evidence_ref.trim() };
   });
+}
+
+// Supported input is an ISO date (UTC midnight) or an ISO timestamp with an
+// explicit timezone. Validate the calendar before Date.parse can normalize it.
+function canonicalEvidenceTimestamp(value) {
+  if (typeof value !== 'string') return null;
+  const parts = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(Z|[+-]\d{2}:\d{2}))?$/.exec(value);
+  if (!parts) return null;
+  const [, y, m, d, h = '00', minute = '00', second = '00', zone = 'Z'] = parts;
+  const year = Number(y), month = Number(m), day = Number(d);
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (year < 1 || month < 1 || month > 12 || day < 1 || day > days[month - 1] || Number(h) > 23 || Number(minute) > 59 || Number(second) > 59 || (zone !== 'Z' && (Number(zone.slice(1,3)) > 23 || Number(zone.slice(4)) > 59))) return null;
+  const parsed = Date.parse(value.length === 10 ? `${value}T00:00:00Z` : value);
+  if (!Number.isFinite(parsed)) return null;
+  const canonical = new Date(parsed).toISOString();
+  return /^[0-9]{4}-/.test(canonical) && !canonical.startsWith('0000-') ? canonical : null;
+}
+
+// Preserve all programs and exact associations. Conflicting observations keep
+// the survivor's value and are reported with the loser's value in merge history.
+// Coverage transfers only with an unchanged complete evidence set.
+export function mergeRelationshipFields(survivor, loser) {
+  const filled = {}, conflicts = [];
+  const a = dealEvidenceEntries(survivor.deal_evidence || []);
+  const b = dealEvidenceEntries(loser.deal_evidence || []);
+  const entries = new Map(a.map(e => [`${e.deal_id}:${e.role}`, e]));
+  for (const entry of b) {
+    const key = `${entry.deal_id}:${entry.role}`, current = entries.get(key);
+    if (!current) entries.set(key, entry);
+    else if (JSON.stringify(current) !== JSON.stringify(entry)) conflicts.push({field:'deal_evidence',survivor:current,merged:entry});
+  }
+  filled.deal_evidence = dealEvidenceEntries([...entries.values()]);
+  const programs = [...new Set([...(survivor.loan_programs || []), ...(loser.loan_programs || [])])];
+  if (programs.length) filled.loan_programs = programs;
+  if (!survivor.trust_override && loser.trust_override) filled.trust_override = loser.trust_override;
+  else if (survivor.trust_override && loser.trust_override && JSON.stringify(survivor.trust_override) !== JSON.stringify(loser.trust_override))
+    conflicts.push({field:'trust_override',survivor:survivor.trust_override,merged:loser.trust_override});
+  const fingerprint = entries => JSON.stringify(entries.map(e => JSON.stringify(e)).sort());
+  if (!a.length && !survivor.deal_history_verified_at) filled.deal_history_verified_at = loser.deal_history_verified_at || null;
+  else if (!b.length && !loser.deal_history_verified_at) filled.deal_history_verified_at = survivor.deal_history_verified_at || null;
+  else if (fingerprint(a) === fingerprint(b)) filled.deal_history_verified_at = survivor.deal_history_verified_at || loser.deal_history_verified_at || null;
+  else filled.deal_history_verified_at = null;
+  return {filled, conflicts};
 }
 // Exact IDs only. Neither a relationship edge nor a matching name proves a
 // vendor worked a deal. Historical Salesforce records remain canonical deals.
