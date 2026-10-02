@@ -1,4 +1,4 @@
-"""Implementation of grok-run.sh; stdout contains only joined Grok text."""
+"""Implementation of grok-run.sh; stdout contains only the final Grok message."""
 import argparse
 import json
 import os
@@ -7,7 +7,9 @@ import re
 import subprocess
 import sys
 
-MODEL = "grok-4.7"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools/room-bridge"))
+from grok_wire import MODEL, TIMEOUT_S, invoke_cli, parse_stream
+
 PREFIX = "Do not call any CARR or record-layer tool; do not write anything unless asked."
 
 
@@ -65,24 +67,9 @@ def preflight():
     return version
 
 
-def parse_output(lines, cli_version):
-    chunks = []
-    end = {}
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            event = json.loads(line)
-        except ValueError:
-            end = {"stopReason": "invalid_stream"}
-            break
-        if not isinstance(event, dict):
-            end = {"stopReason": "invalid_stream"}
-            break
-        if event.get("type") == "text" and isinstance(event.get("data"), str):
-            chunks.append(event["data"])
-        elif event.get("type") == "end":
-            end = event
+def parse_output(lines, cli_version, returncode=0):
+    parsed = parse_stream(lines, returncode)
+    end = parsed["end"]
     usage = end.get("modelUsage", {})
     models = sorted(usage) if isinstance(usage, dict) else []
     receipt = {
@@ -90,12 +77,7 @@ def parse_output(lines, cli_version):
         "stopReason": end.get("stopReason"), "num_turns": end.get("num_turns"),
         "cost_usd": end.get("total_cost_usd", end.get("cost_usd")), "cli_version": cli_version,
     }
-    code = 0
-    if receipt["stopReason"] != "end_turn":
-        code = 4
-    elif not any(model.startswith(MODEL) for model in models):
-        code = 5
-    return "".join(chunks), receipt, code
+    return parsed["text"], receipt, parsed["code"]
 
 
 def main():
@@ -105,6 +87,8 @@ def main():
         "GROK_RUN_FAKE_NDJSON replays a fixture without calling Grok/npm."))
     parser.add_argument("--effort", choices=("low", "medium", "high"), default="high")
     parser.add_argument("--max-turns", type=int, default=60)
+    parser.add_argument("--timeout-seconds", type=int, default=int(TIMEOUT_S),
+                        help="model invocation timeout in seconds (1-1800; default: 180)")
     parser.add_argument("--writable", action="store_true")
     prompt = parser.add_mutually_exclusive_group(required=True)
     prompt.add_argument("--prompt")
@@ -112,6 +96,8 @@ def main():
     args = parser.parse_args()
     if args.max_turns < 1:
         parser.error("--max-turns must be a positive integer")
+    if not 1 <= args.timeout_seconds <= 1800:
+        parser.error("--timeout-seconds must be between 1 and 1800")
     try:
         requested_prompt = args.prompt_file.read_text(encoding="utf-8") if args.prompt_file else args.prompt
         fixture = os.environ.get("GROK_RUN_FAKE_NDJSON")
@@ -120,15 +106,10 @@ def main():
                 output, receipt, code = parse_output(stream, "fixture")
         else:
             cli_version = preflight()
-            result = subprocess.run([
-                "grok", "--model", MODEL, "--reasoning-effort", args.effort,
-                "--max-turns", str(args.max_turns), "--always-approve",
-                "--sandbox", "workspace" if args.writable else "read-only",
-                "--output-format", "streaming-json", "--print", PREFIX + "\n\n" + requested_prompt,
-            ], capture_output=True, text=True, stdin=subprocess.DEVNULL)
-            output, receipt, code = parse_output(result.stdout.splitlines(), cli_version)
-            if result.returncode and not code:
-                code = 4
+            result = invoke_cli(PREFIX + "\n\n" + requested_prompt, effort=args.effort,
+                                max_turns=args.max_turns, writable=args.writable,
+                                timeout_seconds=args.timeout_seconds)
+            output, receipt, code = parse_output(result.stdout.splitlines(), cli_version, result.returncode)
         serialized = json.dumps(receipt, sort_keys=True) + "\n"
         if os.environ.get("GROK_RUN_RECEIPT"):
             Path(os.environ["GROK_RUN_RECEIPT"]).write_text(serialized, encoding="utf-8")

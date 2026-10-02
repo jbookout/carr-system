@@ -38,7 +38,7 @@ class CouncilGrokTests(unittest.TestCase):
             return (run.returncode, out.read_text() if out.exists() else None,
                     (tmp / "grok.rejected").exists())
 
-    def test_completed_run_delivers_the_joined_text(self):
+    def test_completed_run_delivers_the_final_text(self):
         code, text, rejected = self.chair("good.ndjson")
         self.assertEqual(code, 0)
         self.assertTrue(text and not text.lstrip().startswith("{"), text)

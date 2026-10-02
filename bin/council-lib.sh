@@ -104,7 +104,7 @@ run_codex() {
 
 # run_grok <brief> <out>           — council tier
 # Goes through the sanctioned runner (bin/grok-run.sh), never `grok` directly:
-# it pins the model, streams and joins the text events, and verifies the end
+# it pins the model, returns the final assistant message, and verifies the end
 # event (stopReason and modelUsage). A cancelled or wrong-model run exits
 # nonzero, and its text is moved to <out>.rejected so it can never be read as
 # a chair's answer. The runner's receipt lands in the .err file.
