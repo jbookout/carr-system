@@ -29,7 +29,8 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
   const clients = [];
   try {
     execFileSync(path.join(bin,'initdb'), ['-D',dir,'-U','fixture','--auth=trust','--no-locale'], { stdio: 'pipe' });
-    execFileSync(path.join(bin,'pg_ctl'), ['-D',dir,'-l',path.join(dir,'server.log'),'-o',`-k ${dir} -h ''`,'-w','start'], { stdio: 'pipe' });
+    // Hosted Postgres uses UTC; the catchup date contract uses America/Chicago.
+    execFileSync(path.join(bin,'pg_ctl'), ['-D',dir,'-l',path.join(dir,'server.log'),'-o',`-k ${dir} -h '' -c timezone=UTC`,'-w','start'], { stdio: 'pipe' });
     running = true;
     const connect = async () => { const c = new pg.Client({ host: dir, user: 'fixture', database: 'postgres' }); await c.connect(); clients.push(c); return c; };
     const c = await connect();
@@ -139,13 +140,16 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
     await c.query('insert into ops.doc_suggestion_scan(idempotency_key,conversation_id,through_sequence) values($1,$2,0)',[uuid(23),uuid(20)]);
     await identity('joe');
     assert.equal((await section('doc_suggestions',await context())).state,'ready');
+    // Anchor due dates to the same capture clock and timezone as the contract,
+    // including an evening where UTC's date is already the following day.
+    const todayContext = { ...await context(), since:'2026-10-01T02:00:00Z',
+      high_water:'2026-10-02T02:00:00Z', previous_snapshot:null };
     await c.query('reset role');
-    await c.query("update next_action set created_at=now()-interval '3 days',updated_at=now()-interval '3 days' where id=$1",[uuid(10)]);
-    await c.query("update critical_date set created_at=now()-interval '3 days',updated_at=now()-interval '3 days',due_on=current_date+14 where id=$1",[uuid(11)]);
-    await c.query("update ops.doc_suggestion set suggested_at=now()-interval '3 days',disposition='snoozed',snoozed_material_version=material_version,snoozed_until=current_date where id=$1",[uuid(21)]);
+    await c.query("update next_action set created_at=$2::timestamptz-interval '3 days',updated_at=$2::timestamptz-interval '3 days',due_on=($2::timestamptz at time zone 'America/Chicago')::date where id=$1",[uuid(10),todayContext.high_water]);
+    await c.query("update critical_date set created_at=$2::timestamptz-interval '3 days',updated_at=$2::timestamptz-interval '3 days',due_on=($2::timestamptz at time zone 'America/Chicago')::date+14 where id=$1",[uuid(11),todayContext.high_water]);
+    await c.query("update ops.doc_suggestion set suggested_at=$2::timestamptz-interval '3 days',disposition='snoozed',snoozed_material_version=material_version,snoozed_until=($2::timestamptz at time zone 'America/Chicago')::date where id=$1",[uuid(21),todayContext.high_water]);
     await identity('joe');
     // Time crossing a due threshold counts even without a new record write.
-    const todayContext = { ...await context(), since:new Date(Date.now()-86400000).toISOString(),previous_snapshot:null };
     for (const name of ['next_actions','critical_dates','doc_suggestions']) assert.equal((await section(name,todayContext)).state,'ready',name);
     await identity('dell');
     assert.equal((await section('new_leads',await context())).state,'empty');

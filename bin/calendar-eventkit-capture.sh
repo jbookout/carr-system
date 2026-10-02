@@ -239,6 +239,21 @@ if [ "$CANARY" -eq 1 ]; then
   exec "$PY" "$REPO/tools/calendar-canary-result.py" --proposals "$MATCH_JSON"
 fi
 
+# Triage still needs the complete local-store export outside the rolling touch
+# window. Publish only after this invocation's reader and matcher succeeded;
+# private completion and scratch remain the authority for capture writes.
+if ! "$PY" - "$DUMP" "$OUTPUT_ROOT/calendar-attendees.json" <<'TRIAGEPY'
+import os, shutil, sys, tempfile
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(sys.argv[2]))
+with os.fdopen(fd, "wb") as out, open(sys.argv[1], "rb") as source:
+    shutil.copyfileobj(source, out)
+os.replace(tmp, sys.argv[2])
+TRIAGEPY
+then
+  echo "calendar-capture: FAIL triage snapshot publication did not complete" >&2
+  exit 1
+fi
+
 # Exact matches have their own evidence and deterministic idempotency keys.
 # Process them even when a separate unknown attendee still requires intake.
 "$PY" - "$MATCH_JSON" "$DRY" "$DAYS" "${SCANNED:-0}" "$RECEIPT_SAFE" <<'PYEOF'

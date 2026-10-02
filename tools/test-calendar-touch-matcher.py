@@ -181,12 +181,24 @@ class LiveExports(unittest.TestCase):
             ev.organizer.return_value.URL.return_value.resourceSpecifier.return_value = "a@example.test"
             return ev
         a, b = event("id-one", 1790874000), event("id-two", 1790877600)
+        b.organizer.return_value.URL.return_value.resourceSpecifier.return_value = "b@example.test"
         store = fake_modules["EventKit"].EKEventStore.alloc.return_value.init.return_value
         store.eventsMatchingPredicate_.return_value = [a, b]
         producer.OUT = str(self.root / "produced.json")
         with mock.patch.object(producer, "request_access", return_value=True), redirect_stdout(io.StringIO()):
             self.assertEqual(producer.main(), 0)
         first = json.loads(pathlib.Path(producer.OUT).read_text())
+        triage_spec = importlib.util.spec_from_file_location("triage_reader", REPO / "tools/calendar-triage-plan.py")
+        triage = importlib.util.module_from_spec(triage_spec)
+        triage_spec.loader.exec_module(triage)
+        with mock.patch.object(triage, "ATTENDEES", producer.OUT):
+            local = triage.load_local_attendees()
+        ingest = {"summary": "Same", "starts_at": "2026-10-01T12:00:00-05:00"}
+        # Legacy input and the actual new producer must return the same address.
+        self.assertEqual(triage.emails_in(ingest, {"Same|2026-10-01": ["a@example.test"]}), ["a@example.test"])
+        self.assertEqual(triage.emails_in(ingest, local), ["a@example.test"])
+        ingest["starts_at"] = "2026-10-01T13:00:00-05:00"
+        self.assertEqual(triage.emails_in(ingest, local), ["b@example.test"])
         pathlib.Path(producer.OUT).unlink()
         a.title.return_value = "Edited"
         with mock.patch.object(producer, "request_access", return_value=True), redirect_stdout(io.StringIO()):

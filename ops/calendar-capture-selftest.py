@@ -17,6 +17,7 @@ CI on a machine that has none of those.
 """
 import os
 import json
+import importlib.util
 import atexit
 import shutil
 import subprocess
@@ -445,6 +446,32 @@ p = subprocess.run(["/bin/zsh", "-c", harness], cwd=root,
     env=dict(os.environ, CARR_REPO=str(root), PATH=f"{stub}:{os.environ['PATH']}"),
     capture_output=True, text=True, timeout=15)
 check("damaged evidence is a nightly failure", "rc_total=1" in p.stdout and "state=failed" in p.stdout)
+
+# R1: private reader output must also reach the existing triage consumer through
+# a completed snapshot, without letting a failed reader replace the last one.
+triage_dump = {"schema": "calendar-events/v2", "events": [{
+    "event_id": "synthetic-triage-occurrence", "title": "Synthetic triage meeting",
+    "start_at": "2026-10-01T17:00:00+00:00", "emails": ["triage@example.test"]}]}
+root, stub = fixture(appends="exit=0", dump_json=json.dumps(triage_dump),
+                     matcher_json=json.dumps(exact_only))
+published = root / "out/calendar-attendees.json"
+published.write_text('{"legacy|2026-09-01": ["old@example.test"]}')
+p = run(root, stub, "--dry-run")
+triage_spec = importlib.util.spec_from_file_location("triage_capture_reader", REPO / "tools/calendar-triage-plan.py")
+assert triage_spec is not None and triage_spec.loader is not None
+triage_reader = importlib.util.module_from_spec(triage_spec)
+triage_spec.loader.exec_module(triage_reader)
+setattr(triage_reader, "ATTENDEES", str(published))
+addresses = triage_reader.emails_in({"summary": "Synthetic triage meeting",
+    "starts_at": "2026-10-01T12:00:00-05:00"}, triage_reader.load_local_attendees())
+check("successful capture publishes a usable private triage snapshot",
+      p.returncode == 0 and addresses == ["triage@example.test"]
+      and published.stat().st_mode & 0o777 == 0o600)
+before_failure = published.read_bytes()
+(stub / "open").write_text('#!/bin/sh\nfor target do :; done\necho exit=1 > "$target/calendar-access.log"\n')
+p = run(root, stub, "--dry-run")
+check("failed reader preserves the completed triage snapshot",
+      p.returncode != 0 and published.read_bytes() == before_failure)
 
 print(f"\n{'OK all checks passed' if not failures else f'FAIL {len(failures)}: ' + ', '.join(failures)}")
 sys.exit(1 if failures else 0)
