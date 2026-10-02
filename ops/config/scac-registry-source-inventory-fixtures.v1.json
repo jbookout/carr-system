@@ -87497,6 +87497,29 @@
           "classification_authorizing": false
         },
         {
+          "ingress_key": "script-entrypoint:ops/local-pg-ci.py",
+          "ingress_kind": "script_entrypoint",
+          "operation": "ops/local-pg-ci.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "ops/local-pg-ci.py",
+          "schema_digest": "a1bba5ed83d11d2451be74c9f6393eece35453f936e05b2c79f7b4540c6fb5c0",
+          "handler_digest": "a1bba5ed83d11d2451be74c9f6393eece35453f936e05b2c79f7b4540c6fb5c0",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
           "ingress_key": "script-entrypoint:ops/onedrive-prepublish-wake.py",
           "ingress_kind": "script_entrypoint",
           "operation": "ops/onedrive-prepublish-wake.py",
@@ -87548,8 +87571,8 @@
           "operation": "ops/scac-mutation-inventory.mjs",
           "effect_class": "administrative_mutation",
           "source_locator": "ops/scac-mutation-inventory.mjs",
-          "schema_digest": "a6c20943f2b8415629162b191ac3a79e8dda99c1c346812f242ee30e92310869",
-          "handler_digest": "a6c20943f2b8415629162b191ac3a79e8dda99c1c346812f242ee30e92310869",
+          "schema_digest": "dd8c8b0907db463547e1f136607144b4be297283e6d8205ca4028bae7ef1cd26",
+          "handler_digest": "dd8c8b0907db463547e1f136607144b4be297283e6d8205ca4028bae7ef1cd26",
           "write": true,
           "human_only": false,
           "authority_only": true,
@@ -87912,7 +87935,7 @@
         }
       ],
       "expected_count": 1097,
-      "expected_sha256": "c08bdea1c84e64457b83cbb14ef5a32c5498b1da01680c947af98d33e0e7db3e"
+      "expected_sha256": "ac85b444ea602773de77b399072fcbad899823e2fbf26126f3b9936eb9b0e0e3"
     }
   ],
   "current_source_review": {
