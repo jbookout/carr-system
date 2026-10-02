@@ -35,6 +35,9 @@
 //               minus humanOnly, same as the agent-token door, never a wider
 //               grant than that.
 //   /pipeline/changes  OAuth-protected Deal Room event cursor + live presence.
+//   /doc/mcp    Partner-only Doc brokerage tools, behind the same OAuth
+//               provider. The resource path pins a closed capability profile;
+//               request parameters cannot expand it. No machine-token door.
 //   /authorize  Google sign-in starts (our code — see google-oidc.js)
 //   /callback   Google returns; identity verified; allow-list applied; issue
 //   /token      implemented by the provider
@@ -78,14 +81,16 @@
 
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { neon, Pool } from "@neondatabase/serverless";
-import { mcpApiHandler, dispatch } from "./mcp.js";
+import { mcpApiHandler, dispatch, dispatchEngineeringController, canonicalOwnershipExecutionHost } from "./mcp.js";
+import { engineeringControllerActorForToken } from "./authenticated-canonical-ownership.js";
 import { handleAuthorize, handleCallback } from "./google-oidc.js";
-import { actorFromProps, agentActorForToken, hermesActorForTokenMaps,
-         hermesCosActorForToken } from "./identity.js";
+import { agentActorForToken, authenticatedIdentity, continuityActorForTokenMaps,
+         serveReviewRequest,
+         hermesActorForTokenMaps, hermesCosActorForToken } from "./identity.js";
 import { pipelineChanges } from "./dealroom.js";
 import { authorizeProgram6Action, createDealroomHandler, isDealroomRequest, isLegacyDealroomRequest } from "./dealroom-web.js";
 import { createProgram6RoutineController } from "./program6-routine-controller.js";
-import { appendRoomTurn, DEFAULT_ROOM, readRoomQueue, readRoomTurns } from "./partner-room.js";
+import { appendRoomTurn, DEFAULT_ROOM, OBSERVATORY_ROOM, readRoomQueue, readRoomTurns } from "./partner-room.js";
 import { createCaptureHandler } from "./capture.js";
 import { TOOLS } from "./tools.js";
 import { buildRelease } from "./release.js";
@@ -190,16 +195,24 @@ async function ingest(request, env) {
 const defaultHandler = {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    // /healthz is deliberately NOT /health: it touches no secret, no env
+    // binding and no database, so it answers even when the Worker's boot
+    // itself is what is in question (a module-scope throw during import --
+    // e.g. a Node-only API called at load time -- kills every route
+    // including /health before any handler runs). CI's Worker-boot check
+    // (bin/worker-boot-check.sh) asks this route specifically so a defect
+    // like that fails CI instead of only surfacing on the next real deploy.
+    if (url.pathname === "/healthz") return json({ ok: true });
     if (url.pathname === "/health") return health(env);
     if (url.pathname === "/release") return release(env);
     if (url.pathname === "/ingest" && request.method === "POST") return ingest(request, env);
     if (url.pathname === "/authorize") return handleAuthorize(request, env);
     if (url.pathname === "/callback") return handleCallback(request, env);
-    return json({ service: "carr-mcp", surfaces: ["/health", "/release", "/ingest", "/mcp", "/pipeline/changes", "/authorize", "/callback"] }, 404);
+    return json({ service: "carr-mcp", surfaces: ["/healthz", "/health", "/release", "/ingest", "/mcp", "/pipeline/changes", "/authorize", "/callback"] }, 404);
   },
 };
 
-// Both protected routes receive the same provider-verified ctx.props. The
+// Protected routes receive the same provider-verified ctx.props. The
 // pipeline function itself accepts an actor and query client, so the Deal Room
 // session-cookie gate mounts it without changing its contract.
 async function pipelineApi(request, env, actor) {
@@ -238,9 +251,17 @@ function captureHandler(env) {
 const protectedApiHandler = {
   async fetch(request, env, ctx) {
     const pathname = new URL(request.url).pathname;
-    if (pathname === "/mcp") return mcpApiHandler.fetch(request, env, ctx);
+    if (pathname === "/mcp" || pathname === "/doc/mcp") return mcpApiHandler.fetch(request, env, ctx);
     if (pathname !== "/pipeline/changes") return json({ error: "not_found" }, 404);
-    const actor = actorFromProps(ctx.props, env.CARR_NATIVE_AGENT_OAUTH_CLIENTS);
+    // THE GRANT DOOR, WITH THE SERVER'S WITNESS. `actorFromProps` is no longer
+    // exported (amendment 8, fourth correction round): a grant's props are an
+    // ordinary object, so an exported builder was a brander taking caller bytes.
+    // The witness is the OAuth client secret this same Worker already holds;
+    // identity.js brands only when the bytes match what it read from the
+    // server's environment at initialisation, and returns the same actor either
+    // way, so a missing secret costs a receipt identity and never a session.
+    const actor = authenticatedIdentity.connectionForGrant(
+      ctx.props, env.CARR_NATIVE_AGENT_OAUTH_CLIENTS, env.GOOGLE_CLIENT_SECRET);
     if (!actor) {
       // Same reasoning as mcpApiHandler's identical check (mcp.js) — a
       // provider-validated grant with no resolvable actor, not a routine
@@ -351,21 +372,29 @@ function probeActorFor(request, env) {
 // maps (it never will in practice — they are separate secrets) resolves
 // deterministically to probe first; in practice a caller only ever holds one
 // of the two tokens.
-function reviewActorFor(request, env) {
-  const auth = request.headers.get("authorization") || "";
-  const token = auth.replace(/^Bearer\s+/i, "");
-  if (!token) return null;
-  let tokens;
-  try {
-    tokens = JSON.parse(env.REVIEW_TOKENS || "{}");
-  } catch {
-    tokens = {};
-  }
-  const slug = Object.keys(tokens).find((s) => tokens[s] && tokens[s] === token);
-  if (!slug) return null;
-  return { slug, display: `Reviewer (${slug})`, human: false, review: true, via: "review-token", client_id: null };
-}
-
+//
+// THE MATCHING LOGIC MOVED TO identity.js ON 2026-09-12 (PR 1013) and THE DOOR
+// ITSELF FOLLOWED IT on 2026-09-14 (amendment 9, fifth correction round). There
+// is no `reviewActorFor(request)` here any more, because there is no exported
+// function to delegate to: `reviewActorForToken` minted a branded actor and
+// `dispatchFor` returned a callable that entered a context, and a probe that
+// composed the two ran its own code as `review_agent`. Both are module-private
+// inside identity.js now.
+//
+// WHAT THIS FILE CALLS INSTEAD is `serveReviewRequest`, in the /mcp route below:
+// it matches the request's own Authorization header against the REVIEW_TOKENS
+// map identity.js read from `process.env` at initialisation — which wrangler
+// populates from this Worker's secrets (nodejs_compat, 2026-07-01 compatibility
+// date) — and serves the request as what it matched, through the same dispatch
+// this file uses for every other door. No bearer match answers null and the next
+// door gets its turn.
+//
+// IT ESTABLISHES NO AUTHENTICATED CALL (sixth correction round, 2026-09-15). The
+// previous shape passed this file's dispatch INTO identity.js as a callback so
+// the whole request ran inside a receipt context, and a callback parameter on an
+// exported door is an exported context entry — which is what amendment 8
+// forbids. The context is now reached only by NAME, through
+// `serveAuthenticatedCall`, over a frozen map of the server's own entries.
 // ---------- hermes token (R0 runtime evaluation, 2026-08-16) ----------
 //
 // The fifth door, built on the PROBE_TOKENS/REVIEW_TOKENS pattern above and
@@ -462,6 +491,15 @@ function agentActorFor(request, env) {
   return agentActorForToken(request.headers.get("authorization"), env.AGENT_TOKENS);
 }
 
+// A separate secret map and a separate dispatcher are intentional: this actor
+// cannot reach the ordinary MCP profile, where every non-full profile retains
+// read verbs.  Only the exact four ownership operations below are listable or
+// callable, and their plan/executor authority is re-read in mcp.js.
+function engineeringControllerActorFor(request, env) {
+  return engineeringControllerActorForToken(request.headers.get("authorization"),
+    env.ENGINEERING_CONTROLLER_TOKENS, agentActorForToken);
+}
+
 // ---------- local token (Phase 1, 2026-08-13, decision 97e76a2f) ----------
 //
 // THE DEFECT THIS CLOSES. `run.sh call <verb>` (tools/call-verb.py ->
@@ -521,13 +559,33 @@ function agentActorFor(request, env) {
 // and a token colliding across maps resolves deterministically to whichever
 // is checked first — in practice a caller holds exactly one.
 function localActorFor(request, env) {
-  return agentActorForToken(request.headers.get("authorization"), env.LOCAL_TOKENS, "local-token");
+  const actor = agentActorForToken(
+    request.headers.get("authorization"), env.LOCAL_TOKENS, "local-token");
+  // Compatibility exists only for the staged production cutover. Deploy the
+  // Worker in compat, provision both isolated maps, rotate the Codex hook to
+  // its new client profile, then promote this server-side flag to required.
+  // In required mode the shared local token carries no continuity surface and
+  // both continuity families refuse it.
+  // DECORATED IN PLACE, never copied: identity.js's brand is object identity
+  // (amendment 8), so `{ ...actor }` here would hand the dispatch an actor that
+  // authenticates as nobody. The object is built per request by the door above.
+  return actor && env.CONTINUITY_SURFACE_ENFORCEMENT === "compat"
+    ? Object.assign(actor, { continuity_surface: "codex", continuity_surface_compat: true })
+    : actor;
+}
+
+function continuityActorFor(request, env) {
+  return continuityActorForTokenMaps(
+    request.headers.get("authorization"),
+    env.CODEX_CONTINUITY_TOKENS,
+    env.CLAUDE_CONTINUITY_TOKENS,
+  );
 }
 
 // ---------- the provider ----------
 
 const oauthProvider = new OAuthProvider({
-  apiRoute: ["/mcp", "/pipeline/changes"],
+  apiRoute: ["/mcp", "/doc/mcp", "/pipeline/changes"],
   apiHandler: protectedApiHandler,
   defaultHandler,
 
@@ -581,14 +639,17 @@ const dealroomHandler = createDealroomHandler({
     const client = { query: async (text, params = []) => ({ rows: await sql.query(text, params) }) };
     return readCommandCenterSummary({ client, actor, correlationId: correlationId || env.CORRELATION_ID });
   },
-  // The Model Room observatory's two doors onto the partner room. Both call the
-  // SAME functions the read-room / add-room-turn verbs call (partner-room.js) —
+  // The Model Room observatory's doors onto the room wire. Turns are read and
+  // posted in OBSERVATORY_ROOM, the room the local bridge polls, so a browser
+  // post reaches the queue; the queue projection is read from DEFAULT_ROOM where
+  // Hermes writes it. All call the SAME functions the read-room / add-room-turn
+  // verbs call (partner-room.js) —
   // these two adapters supply a connection and nothing else, so the panel can
   // never read a different wire than a desk does.
   roomReadFn: (env, params) => {
     const sql = neon(env.DATABASE_URL_READER);
     const client = { query: async (text, values = []) => ({ rows: await sql.query(text, values) }) };
-    return readRoomTurns(client, { room: DEFAULT_ROOM, ...params });
+    return readRoomTurns(client, { room: OBSERVATORY_ROOM, ...params });
   },
   queueReadFn: (env, params) => {
     const sql = neon(env.DATABASE_URL_READER);
@@ -599,7 +660,7 @@ const dealroomHandler = createDealroomHandler({
     const pool = new Pool({ connectionString: env.DATABASE_URL_WRITER });
     const client = await pool.connect();
     try {
-      return await appendRoomTurn(client, { room: DEFAULT_ROOM, ...params });
+      return await appendRoomTurn(client, { room: OBSERVATORY_ROOM, ...params });
     } finally {
       client.release();
       await pool.end();
@@ -625,16 +686,30 @@ async function routeRequest(request, env, ctx) {
     return captureHandler(env).fetch(request, env, ctx);
   }
   if (url.pathname === "/mcp") {
+    const controllerActor = engineeringControllerActorFor(request, env);
+    if (controllerActor) {
+      // This is deploy metadata, never an MCP parameter.  The controller skips
+      // ordinary dispatch(), so attach the same server-derived host binding it
+      // would otherwise receive there before the ownership context is minted.
+      Object.assign(controllerActor, { execution_host_id: canonicalOwnershipExecutionHost(env) });
+      return dispatchEngineeringController(request, env, ctx, controllerActor);
+    }
     const probeActor = probeActorFor(request, env);
     if (probeActor) return dispatch(request, env, ctx, probeActor);
-    const reviewActor = reviewActorFor(request, env);
-    if (reviewActor) return dispatch(request, env, ctx, reviewActor);
+    // THE REVIEW COUNCIL'S DOOR. The bearer is matched inside identity.js and
+    // the request is served by what it matched, with no callback crossing the
+    // boundary in either direction and no authenticated call established. `null`
+    // means this was not a review-council request at all.
+    const reviewServed = await serveReviewRequest(request, env, ctx);
+    if (reviewServed !== null) return reviewServed;
     const hermesCosActor = hermesCosActorFor(request, env);
     if (hermesCosActor) return dispatch(request, env, ctx, hermesCosActor);
     const hermesActor = hermesActorFor(request, env);
     if (hermesActor) return dispatch(request, env, ctx, hermesActor);
     const agentActor = agentActorFor(request, env);
     if (agentActor) return dispatch(request, env, ctx, agentActor);
+    const continuityActor = continuityActorFor(request, env);
+    if (continuityActor) return dispatch(request, env, ctx, continuityActor);
     const localActor = localActorFor(request, env);
     if (localActor) return dispatch(request, env, ctx, localActor);
   }

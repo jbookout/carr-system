@@ -16,7 +16,7 @@ const fonts = {
 };
 const packet = {
   as_of: "2026-08-27T12:00:00Z",
-  caveat: "Facts are provided for tour planning and remain subject to change.",
+  caveat: null,
   properties: [
     { property_ref: "property:public:ZetaMedicalPlaza0001", route_sequence: 20, route_label: "B", name: "Zeta Medical Plaza", address: "200 Zeta Way, Pensacola, FL", property_type: "Medical office", size: { value: 4200, unit: "SF" }, availability: "Available" },
     { property_ref: "property:public:AlphaHealthCenter01", route_sequence: 10, route_label: "A", name: "Alpha Health Center", address: "100 Alpha Drive, Pensacola, FL", suite: "Suite 120", property_type: "Medical office", asking_economics: { value: "24.00", currency: "USD", period: "NNN" }, availability: "Available", parking: "4.5/1,000 SF" },
@@ -64,14 +64,17 @@ test("stored PDF inspection derives pages, markers, component digests, and embed
 
 test("PDF renderer rejects authoritative content that cannot fit instead of truncating it", async () => {
   const overflow = structuredClone(packet);
-  overflow.properties[0].name = Array.from({ length: 12 }, () => "Authoritative").join(" ");
+  // Within the 120-character client value cap, yet too wide for the layout.
+  overflow.properties[0].name = "W".repeat(120);
   await assert.rejects(renderTourPacketPdf(overflow, fonts), /tour_pdf_content_overflow/);
 });
 
 test("PDF renderer measures route-label bounds and stored inspection decodes text extents and transformations", async () => {
+  // A stop marker is 1-3 letters or digits (V5-J303), so a long label is
+  // refused before layout rather than measured.
   const overflow = structuredClone(packet);
   overflow.properties[0].route_label = "W".repeat(80);
-  await assert.rejects(renderTourPacketPdf(overflow, fonts), /tour_pdf_content_overflow/);
+  await assert.rejects(renderTourPacketPdf(overflow, fonts), /tour_packet_invalid_route_label/);
 
   const rendered = await renderTourPacketPdf(packet, fonts);
   const document = await PDFDocument.load(rendered.bytes, { updateMetadata: false });

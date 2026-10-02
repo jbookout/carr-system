@@ -70,7 +70,7 @@ declare v ops.scac_mutation_registry_version%rowtype; e ops.scac_mutation_regist
 begin
   select * into v from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v1';
   if v.registry_version is null then return jsonb_build_object('registered',false,'reason','registry_unavailable'); end if;
-  select count(*),'sha256:'||encode(public.digest(convert_to(coalesce(string_agg(entry_digest,',' order by ingress_key collate "C"),''),'UTF8'),'sha256'),'hex'),
+  select count(*),'sha256:'||encode(public.digest(convert_to(coalesce(string_agg(entry_digest,',' order by ingress_key collate "C", entry_digest collate "C"),''),'UTF8'),'sha256'),'hex'),
          coalesce(bool_or(entry_digest is distinct from 'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(contract),'UTF8'),'sha256'),'hex')),false)
     into actual_count,actual_set_digest,contract_digest_mismatch from ops.scac_mutation_registry_entry where registry_version=v.registry_version;
   if actual_count<>v.entry_count or actual_set_digest is distinct from v.entry_set_digest or contract_digest_mismatch then
@@ -159,7 +159,7 @@ do $$ declare actual_count integer; actual_digest text; expected jsonb; category
 begin
   for category,kind in values ('secdef_execute','db_function_acl'),('relation_dml','db_relation_acl'),('column_dml','db_column_acl') loop
     select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(
-      contract-'effect_class'-'owner_package'-'implementation_state'-'classification_authorizing'-'source_locator' order by ingress_key collate "C"),'[]'::jsonb)),'UTF8'),'sha256'),'hex')
+      contract-'effect_class'-'owner_package'-'implementation_state'-'classification_authorizing'-'source_locator' order by ingress_key collate "C", ops.scac_canonical_json(contract-'effect_class'-'owner_package'-'implementation_state'-'classification_authorizing'-'source_locator') collate "C"),'[]'::jsonb)),'UTF8'),'sha256'),'hex')
       into actual_count,actual_digest from ops.scac_mutation_registry_entry where ingress_kind=kind;
     select catalog_projection->category into expected from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v1';
     if actual_count<>(expected->>'count')::integer or actual_digest<>expected->>'digest' then

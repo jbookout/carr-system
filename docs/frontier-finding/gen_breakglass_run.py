@@ -6,9 +6,23 @@ POST-state — definition text for a catalog object, or row values by key for
 a table row) and emits the self-contained run bundle that
 docs/frontier-finding/breakglass_run.py executes:
 
-    .venv/bin/python docs/frontier-finding/gen_breakglass_run.py \\
+    .venv/bin/python -c "import sys; sys.path.insert(0, sys.argv[1]); \\
+        import gen_breakglass_run as m; sys.exit(m.main(sys.argv[2:]))" \\
+        docs/frontier-finding \\
         --candidate <candidate>.sql --manifest <targets>.json \\
         --wr-note-ref "<ref>" --out <run>.sql
+
+INVOKE IT THROUGH THAT SHIM AND NOTHING ELSE. This file is deliberately an
+IMPORT-ONLY library — no shebang, no `if __name__ == "__main__"` block — so the
+sealed SCAC mutation registry never counts it as a script entrypoint (see
+README.md and breakglass_selftest.py:46). Running it directly as
+`.venv/bin/python docs/frontier-finding/gen_breakglass_run.py ...` DEFINES THE
+MODULE, WRITES NO BUNDLE, PRINTS NOTHING, AND EXITS 0 — a silent success. That
+is the dangerous shape: a session following the old wording sees exit 0 and can
+record "pre-activation baseline captured" when nothing was captured, leaving a
+production-apply prerequisite looking satisfied while being empty. Measured
+2026-09-03: REAL_EXIT=0, no output file. The docstring itself used to give the
+direct form on this line and at RESTORE MODE below; both are corrected.
 
 REFUSES a candidate that trips contains_transaction_control(), imported
 VERBATIM from tools/migrate.py — not reimplemented, per the plan.
@@ -27,7 +41,9 @@ breakglass_run.py rather than re-derived, so the two can never drift apart.
 
 RESTORE MODE:
 
-    .venv/bin/python docs/frontier-finding/gen_breakglass_run.py \\
+    .venv/bin/python -c "import sys; sys.path.insert(0, sys.argv[1]); \\
+        import gen_breakglass_run as m; sys.exit(m.main(sys.argv[2:]))" \\
+        docs/frontier-finding \\
         --restore <receipt>.json --out <restore-run>.sql
 
 Generates a restore run for a NAMED receipt (one that actually committed —

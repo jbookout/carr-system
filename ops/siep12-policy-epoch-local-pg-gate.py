@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connection, set_local_role
-from scac_mutation_db_inventory import project, project_role_authority, summarize
+from scac_mutation_db_inventory import project, project_escalation, project_role_authority, summarize
 
 REPO = Path(__file__).resolve().parents[1]
 

@@ -31,23 +31,19 @@ deferred to the integrity activation program's registry re-pin (WR-000048),
 where the break-glass tooling must be inventoried as reviewed rows, not
 smuggled in by omission.
 
-## Running break-glass anyway, honestly
+## Running break-glass
 
-The tracked files genuinely cannot execute directly. The interim is a
-3-line launcher kept OUTSIDE the git index, e.g.
-`out/frontier-finding/bin/run_breakglass.py`:
-
-```python
-import sys; sys.path.insert(0, "docs/frontier-finding")
-import breakglass_run
-sys.exit(breakglass_run.main())
-```
-
-Invoked through `tools/db-tap.py`'s break-glass path with the launcher's
-absolute path:
+The libraries still cannot execute directly — that is permanent and on
+purpose. The WR-000048 registry re-pin added the honest front door:
+`tools/run-breakglass.py`, a TRACKED, REVIEWED launcher inventoried as a
+break-glass-class entrypoint (beside `tools/db-tap.py` and
+`tools/call-verb.py`), wrapping the same sys.path shim the selftest proves.
+The earlier out-of-index interim shim (`out/frontier-finding/bin/
+run_breakglass.py`) is retired by that registration and should be deleted
+where found.
 
 ```
 CARR_BREAK_GLASS=1 .venv/bin/python tools/db-tap.py --reason "<WR-000046 note ref>" \
-    run "$(pwd)/out/frontier-finding/bin/run_breakglass.py" -- \
+    run tools/run-breakglass.py -- \
     --approved <run>.sql --receipt <receipt>.json
 ```
