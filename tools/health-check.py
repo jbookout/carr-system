@@ -146,17 +146,16 @@ def _jev_spend_row():
 
 
 def _jev_paid_cap_row():
-    client_path = os.path.join(REPO_ROOT, "ops", "typesafe_client.py")
-    spec = importlib.util.spec_from_file_location("jev_cap_client", client_path)
-    client = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(client)
-    return client.paid_cap_health()
-
-
-if CANONICAL_SECTION == "jev-cap":
-    _cap_line = _jev_paid_cap_row()
-    print(_cap_line)
-    sys.exit(int(_cap_line.startswith(("HIT", "UNKNOWN"))))
+    try:
+        client_path = os.path.join(REPO_ROOT, "ops", "typesafe_client.py")
+        spec = importlib.util.spec_from_file_location("jev_cap_client", client_path)
+        client = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(client)
+        return client.paid_cap_health()
+    except Exception as exc:
+        return (f"UNKNOWN jev paid cap — {type(exc).__name__} · on breach: "
+                "owner orchestrator · remediation restore the cap reader/configuration · "
+                "verify rerun health · auto-clear on successful read")
 
 
 if CANONICAL_SECTION == "jev-spend":
@@ -1306,8 +1305,16 @@ def _canonical_health():
     """The normal health surface: record/control-plane/local truth only."""
     _FINDINGS.clear()
     rc = 0
+    if CANONICAL_SECTION in ("all", "credentials", "jev-cap"):
+        _cap_line = _jev_paid_cap_row()
+        print("  " + _cap_line)
+        if _cap_line.startswith(("HIT", "UNKNOWN")):
+            rc = _red("jev_paid_cap", _cap_line, hard_error=_cap_line.startswith("UNKNOWN"))
+        for _subject, _count in re.findall(r"(pending|failed)=(\d+)", _cap_line):
+            if int(_count):
+                rc = _red("jev_spend_alert", _cap_line, subject=_subject, count=int(_count))
     try:
-        snap = _canonical_snapshot()
+        snap = {} if CANONICAL_SECTION == "jev-cap" else _canonical_snapshot()
     except Exception as exc:
         print(f"canonical health: REFUSED ({type(exc).__name__}: {exc})")
         _red("canonical_health_refused", f"{type(exc).__name__}: {exc}", hard_error=True)
@@ -1592,7 +1599,6 @@ def _canonical_health():
                   "on breach: open/update one dedup loop · owner orchestrator · "
                   "remediation find caller in jev usage log · auto-clear when below threshold")
         # ── credential health (added 2026-09-24) ────────────────────────────
-        print("  " + _jev_paid_cap_row())
         # Daily liveness lane for every credential CARR needs to run
         # unattended — wrangler/Cloudflare, Neon, the two MCP machine-bearer
         # tokens, gh, the Claude and Codex CLI logins, and the Google OAuth

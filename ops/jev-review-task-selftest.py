@@ -182,6 +182,7 @@ class HookOutputTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.env = fixture_env()
+        self.env["CARR_JEV_WORKER"] = ""
         self.repo = self.root / "repo"
         (self.repo / "src").mkdir(parents=True)
         self.target = self.repo / "src/a.py"

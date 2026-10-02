@@ -24,6 +24,7 @@ import os
 import queue
 import re
 import subprocess
+import time
 import tempfile
 import threading
 import unittest
@@ -80,6 +81,15 @@ class DailyCapTests(unittest.TestCase):
         self.alerts = queue.Queue()
         self.sink_patch = patch.object(client, "_emit_spend_alert", self.alerts.put, create=True)
         self.enterContext(self.sink_patch)
+        self.delivery_threads = []
+        def launch(path, day):
+            thread = threading.Thread(target=client._deliver_pending_spend_alerts,
+                                      args=(path, day), daemon=True)
+            self.delivery_threads.append(thread)
+            thread.start()
+        self.enterContext(patch.object(client, "_launch_spend_alert_worker", launch, create=True))
+        self.addCleanup(lambda: [thread.join(2) for thread in self.delivery_threads
+                                if thread.ident is not None])
         self.clock = self.enterContext(patch.object(client, "datetime", wraps=datetime))
         self.clock.now.return_value = datetime(2026, 10, 2, tzinfo=timezone.utc)
 
@@ -177,6 +187,26 @@ class DailyCapTests(unittest.TestCase):
                 self.ask("uncountable")
         self.assertEqual(self.requests, [])
 
+    def test_corrupt_seed_evidence_is_unavailable_without_transport(self):
+        for evidence in (b'{"ts":"2026-10-02",', b'not json\n', b'\xff\n', b'[]\n',
+                         b'{"ts":"invalid"}\n',
+                         b'{"ts":"2026-10-02T01:00:00Z","cache_hit":"false"}\n'):
+            with self.subTest(evidence=evidence):
+                self.log.write_bytes(evidence)
+                with self.assertRaisesRegex(client.TypeSafeError, "accounting"):
+                    self.ask("uncountable")
+                self.assertTrue(client.paid_cap_health().startswith("UNKNOWN"))
+        self.assertEqual(self.requests, [])
+
+    def test_cap_configuration_is_required_and_has_no_legacy_default(self):
+        remaining = {key: value for key, value in client.JEV_COST_CONFIG.items()
+                     if key != "daily_paid_call_cap"}
+        with patch.dict(client.JEV_COST_CONFIG, remaining, clear=True):
+            with self.assertRaisesRegex(client.TypeSafeError, "cap"):
+                self.ask("missing cap configuration")
+            self.assertTrue(client.paid_cap_health().startswith("UNKNOWN"))
+        self.assertEqual(self.requests, [])
+
     def test_deadline_expiring_during_accounting_never_starts_transport(self):
         self.options["deadline"] = 15.0
         with patch.object(client.time, "monotonic", side_effect=[10.0, 20.0]):
@@ -200,6 +230,9 @@ class DailyCapAlarmTests(unittest.TestCase):
                          (threshold, calls, 10))
         self.assertIn("Jev goes unavailable at the cap", alert["message"])
         self.assertIn(f"{calls}/10", alert["message"])
+        for thread in self.delivery_threads:
+            if thread.ident is not None:
+                thread.join(2)
         return alert
 
     def test_one_alert_per_threshold_none_below_half_and_no_repeat_at_cap(self):
@@ -217,6 +250,95 @@ class DailyCapAlarmTests(unittest.TestCase):
                 self.ask("over cap")
         self.assertTrue(self.alerts.empty())
         self.assertEqual(len(self.requests), 10)
+
+    def test_short_lived_process_does_not_wait_for_slow_notifications(self):
+        fake_module = self.log.with_name("notifier.py")
+        marker = self.log.with_name("submitted.txt")
+        fake_module.write_text("import time\ndef _deliver_pending_spend_alerts(path,day):\n"
+                               f"    time.sleep(5)\n    open({str(marker)!r}, 'w').write('submitted')\n")
+        code = f'''import importlib.util
+spec = importlib.util.spec_from_file_location("client", {str(MODULE_PATH)!r})
+client = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(client)
+client.__file__ = {str(fake_module)!r}
+client.JEV_DAILY_CAP_LOG = {str(self.log)!r}
+client._dispatch_spend_alerts([{{"message": "fake", "day": "2026-10-02"}}] * 3)
+'''
+        started = time.monotonic()
+        subprocess.run([os.sys.executable, "-c", code], check=True, timeout=10,
+                       capture_output=True)
+        self.assertLess(time.monotonic() - started, 3, "hook exit exceeds its three-second budget")
+        end = time.monotonic() + 8
+        while time.monotonic() < end:
+            if marker.exists() and marker.read_text() == "submitted":
+                break
+            time.sleep(0.01)
+        self.assertEqual(marker.read_text(), "submitted", "delivery survived hook exit")
+
+    def test_process_death_after_commit_retains_pending_alert_and_recovers(self):
+        for i in range(4):
+            self.ask(str(i))
+        with patch.object(client, "_dispatch_spend_alerts"):
+            self.ask("threshold committed but not dispatched")
+        self.assertIn("pending=1", client.paid_cap_health())
+        self.ask("recover pending warning")
+        self.alert(50, 5)
+        self.assertTrue(self.alerts.empty())
+
+    def test_failed_launch_retries_and_delivery_acknowledges_only_success(self):
+        for i in range(4):
+            self.ask(str(i))
+        with patch.object(client, "_launch_spend_alert_worker", side_effect=OSError("fixture spawn failure")):
+            self.ask("threshold")
+        self.assertIn("failed=1", client.paid_cap_health())
+        self.assertIn("OSError", client.paid_cap_health())
+        self.ask("retry launch")
+        self.alert(50, 5)
+        self.assertIn("delivered=1", client.paid_cap_health())
+        self.assertIn("failed=0", client.paid_cap_health())
+
+    def test_dead_delivery_lease_recovers_and_failure_retry_ceiling_is_three(self):
+        for i in range(4):
+            self.ask(str(i))
+        with patch.object(client, "_dispatch_spend_alerts"):
+            self.ask("pending threshold")
+        path = str(self.log) + ".daily-cap.sqlite3"
+        with client.sqlite3.connect(path) as db:
+            db.execute("UPDATE daily_cap_delivery SET state='sending',attempts=1,lease_until=0 WHERE day=?", ("2026-10-02",))
+        db.close()
+        self.assertIn("failed=1", client.paid_cap_health())
+        self.ask("recover expired lease")
+        self.alert(50, 5)
+        with patch.object(client, "_launch_spend_alert_worker", side_effect=OSError("fixture spawn failure")):
+            for i in range(4):
+                self.ask(f"remaining-{i}")
+            for i in range(6):
+                with self.assertRaises(client.TypeSafeError):
+                    self.ask(f"refused-{i}")
+        with client.sqlite3.connect(path) as db:
+            rows = db.execute("SELECT threshold,attempts,state FROM daily_cap_delivery ORDER BY threshold").fetchall()
+        db.close()
+        self.assertEqual(rows, [(50, 2, "delivered"), (80, 3, "failed"), (100, 3, "failed")])
+        self.assertEqual(len(self.requests), 10)
+
+    def test_notifier_failure_is_observable_and_retry_is_bounded(self):
+        for i in range(4):
+            self.ask(str(i))
+        failed = threading.Event()
+        def broken(_alert):
+            failed.set()
+            raise TimeoutError("fixture notifier timeout")
+        with patch.object(client, "_emit_spend_alert", broken):
+            self.ask("threshold")
+            self.assertTrue(failed.wait(1))
+            # Wait for the delivery result, not just entry into the sink.
+            end = time.monotonic() + 2
+            while "failed=1" not in client.paid_cap_health() and time.monotonic() < end:
+                time.sleep(0.01)
+            self.assertIn("failed=1", client.paid_cap_health())
+        self.ask("recover failed notification")
+        self.alert(50, 5)
+        self.assertEqual(len(self.requests), 6)
 
     def test_day_rollover_resets_threshold_alerts(self):
         for day in (2, 3):
@@ -276,7 +398,7 @@ class DailyCapAlarmTests(unittest.TestCase):
             self.assertEqual(alert["top_session"], ["earlier-session", 7])
         self.assertTrue(self.alerts.empty())
 
-    def test_mac_notification_adapter_has_bounded_wait_on_alarm_thread(self):
+    def test_mac_notification_adapter_has_bounded_wait_in_detached_worker(self):
         with patch.object(client.subprocess, "run") as notify:
             REAL_ALERT_SINK({"message": '5/10 top caller "worker"; session a\\b'})
         args = notify.call_args.args[0]
@@ -284,11 +406,6 @@ class DailyCapAlarmTests(unittest.TestCase):
         self.assertIn("display notification", args[2])
         self.assertIn('\\"worker\\"', args[2])
         self.assertEqual(notify.call_args.kwargs["timeout"], 5)
-
-    def test_health_surface_has_cap_row_and_narrow_section(self):
-        source = (MODULE_PATH.parent.parent / "tools" / "health-check.py").read_text()
-        self.assertTrue('if CANONICAL_SECTION == "jev-cap":' in source, 'missing narrow cap health section')
-        self.assertTrue('print("  " + _jev_paid_cap_row())' in source, 'cap row absent from full health')
 
     def test_cache_hits_never_emit_threshold_alerts(self):
         self.options["cache_ttl_seconds"] = 60
@@ -306,7 +423,7 @@ class DailyCapAlarmTests(unittest.TestCase):
             def __init__(self, db):
                 self.db = db
             def execute(self, sql, *args):
-                if "CREATE TABLE IF NOT EXISTS daily_cap_alarms" in sql:
+                if "CREATE TABLE IF NOT EXISTS daily_cap_attribution" in sql:
                     raise client.sqlite3.OperationalError("fake alarm-only failure")
                 return self.db.execute(sql, *args)
             def __getattr__(self, name):
@@ -320,7 +437,7 @@ class DailyCapAlarmTests(unittest.TestCase):
         self.assertEqual(len(self.requests), 10)
         self.assertTrue(self.alerts.empty())
 
-    def test_alarm_savepoint_failure_and_thread_start_failure_fail_open(self):
+    def test_alarm_savepoint_failure_and_process_start_failure_fail_open(self):
         connect = client.sqlite3.connect
         class NoAlarmSavepoint:
             def __init__(self, db):
@@ -336,7 +453,7 @@ class DailyCapAlarmTests(unittest.TestCase):
             self.assertEqual(self.ask("first")["model"], ANSWER["model"])
         for i in range(3):
             self.ask(str(i))
-        with patch.object(client.threading.Thread, "start", side_effect=RuntimeError("thread unavailable")):
+        with patch.object(client, "_launch_spend_alert_worker", side_effect=RuntimeError("process unavailable")):
             self.assertEqual(self.ask("threshold")["model"], ANSWER["model"])
         self.assertEqual(len(self.requests), 5)
 

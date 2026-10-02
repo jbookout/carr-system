@@ -49,7 +49,12 @@ class _null:
     def __exit__(self, *a): return False
 
 
-class NeverDeniesTests(unittest.TestCase):
+class AttendedFixture(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(mock.patch.dict(os.environ, CARR_JEV_WORKER=""))
+
+
+class NeverDeniesTests(AttendedFixture):
     """A probabilistic refusal in front of every shell call turns a model's
     uncertainty into a blocked session. This must never happen."""
 
@@ -109,7 +114,7 @@ class NeverDeniesTests(unittest.TestCase):
                       "a warning without its reason is noise a session learns to skip")
 
 
-class FailsOpenTests(unittest.TestCase):
+class FailsOpenTests(AttendedFixture):
     def test_unparseable_payload(self):
         self.assertEqual(run("not json at all")[0], 0)
 
@@ -134,7 +139,7 @@ class FailsOpenTests(unittest.TestCase):
         self.assertEqual(code, 0)
 
 
-class SpendsNothingUnnecessarilyTests(unittest.TestCase):
+class SpendsNothingUnnecessarilyTests(AttendedFixture):
     """Three free filters run before any request. Each one is asserted, because
     a filter that silently stops working costs money on every command."""
 
@@ -178,7 +183,7 @@ class SpendsNothingUnnecessarilyTests(unittest.TestCase):
         self.assertEqual(called, [])
 
 
-class ModelRoomRouteTests(unittest.TestCase):
+class ModelRoomRouteTests(AttendedFixture):
     def test_rule_is_available_from_another_checkout(self):
         with tempfile.TemporaryDirectory() as other_checkout:
             self.assertIn("Model Room", hook.model_room_rule(other_checkout))
@@ -227,7 +232,7 @@ class _Facts:
         return {}
 
 
-class RepoRootTests(unittest.TestCase):
+class RepoRootTests(AttendedFixture):
     """The hook runs in the canonical checkout; the session usually does not.
 
     The first live run of this pre-check warned at 0.94 about a file the session
@@ -294,7 +299,7 @@ class RepoRootTests(unittest.TestCase):
         self.assertEqual(seen["repo"], "/a/checkout")
 
 
-class ThresholdTests(unittest.TestCase):
+class ThresholdTests(AttendedFixture):
     def test_below_the_floor_is_silent_but_still_logged(self):
         logged = []
         code, out = run({"tool_name": "Bash", "tool_input": {"command": "git push"}},
@@ -311,7 +316,7 @@ class ThresholdTests(unittest.TestCase):
         self.assertIn("PRE-CHECK", out)
 
 
-class ReadDetectionTests(unittest.TestCase):
+class ReadDetectionTests(AttendedFixture):
     def test_reads_are_recognised(self):
         for command in ("grep -n foo bar.py", "cat ops/ci.sh", "git status",
                         "sed -n '1,10p' x.py", "ls ops | wc -l",
@@ -328,7 +333,7 @@ class ReadDetectionTests(unittest.TestCase):
         self.assertFalse(hook.is_pure_read("cat x | tee /tmp/out"))
 
 
-class LogSizeTests(unittest.TestCase):
+class LogSizeTests(AttendedFixture):
     def test_the_log_is_capped_by_size_not_by_count(self):
         """A count cap is not a size cap: one enormous line defeats it."""
         with tempfile.TemporaryDirectory() as tmp:

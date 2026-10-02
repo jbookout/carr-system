@@ -91,7 +91,7 @@ import copy
 import json
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 HEALTH_CHECK_PATH = Path(__file__).resolve().parent / "health-check.py"
@@ -566,6 +566,106 @@ class RedHelper(unittest.TestCase):
         self.red("job_stuck", "second", subject="j")
         self.assertEqual(len(self.ns["_FINDINGS"]), 1)
         self.assertEqual(self.ns["_FINDINGS"][0]["count"], 2)
+
+
+class PaidCapCanonicalHealthTests(unittest.TestCase):
+    """Execute the shipped health function and CLI with only external readers stubbed."""
+
+    def namespace(self):
+        import os, re, sys, time, subprocess
+        from unittest.mock import Mock
+        ns = _load_finding_and_red_functions()
+        mod = ast.Module(body=[_find_function("_canonical_health"),
+                               _find_function("_jev_paid_cap_row")], type_ignores=[])
+        ns.update(os=os, re=re, sys=sys, time=time, REPO_ROOT=str(HEALTH_CHECK_PATH.parent.parent),
+                  CANONICAL_SECTION="credentials", CANONICAL_FIXTURE=None, timedelta=timedelta,
+                  _HEALTH_COMPLETION_MARKER="HEALTH_COMPLETE", importlib=__import__("importlib"),
+                  _canonical_snapshot=lambda: {}, _jev_spend_row=lambda: (None, "OK spend"),
+                  subprocess=Mock(run=Mock(return_value=subprocess.CompletedProcess([], 0, "SKIP fixture", ""))))
+        exec(compile(mod, str(HEALTH_CHECK_PATH), "exec"), ns)
+        return ns
+
+    def all_namespace(self):
+        from unittest.mock import Mock
+        ns = self.namespace()
+        snap = {"exports": {}, "jobs": [], "job_definitions": [], "controls": {}}
+        ns.update(CANONICAL_SECTION="all", _canonical_snapshot=lambda: snap,
+                  _canonical_now=lambda snap: datetime.now(timezone.utc),
+                  _canonical_contradiction_alarm=lambda: 0,
+                  _canonical_workflow_truth=lambda: None, _canonical_assurance_health=lambda: None,
+                  _tailscale_row=lambda: ("OK fixture node", False),
+                  _health_sub=Mock(classify_loose_status=Mock(return_value={
+                      "actionable_tracked": [], "actionable_untracked": [],
+                      "expected_patched_submodules": [], "managed_artifacts": []}),
+                      loose_work_requires_attention=Mock(return_value=False)),
+                  _jev_outage=Mock(evaluate=Mock(return_value={"status": "ok", "pending": False}),
+                                   reconcile=Mock(return_value="none")))
+        for name in ("_headless_rows", "_live_jobs", "_missing_due_executions", "_stuck_live_jobs",
+                     "_legacy_scheduled_definitions", "_calendar_prebrief_standing", "_calendar_prebrief_unknowns"):
+            ns[name] = lambda *args: []
+        return ns
+
+    def test_all_health_sections_report_cap_failure_with_other_checks_clean(self):
+        import io, contextlib
+        for line in ("OK jev paid cap", "HIT jev paid cap", "UNKNOWN jev paid cap"):
+            with self.subTest(line=line):
+                ns = self.all_namespace()
+                ns["_jev_paid_cap_row"] = lambda: line
+                with contextlib.redirect_stdout(io.StringIO()) as out:
+                    self.assertEqual(ns["_canonical_health"](), int(not line.startswith("OK")))
+                self.assertIn("HEALTH_COMPLETE", out.getvalue())
+                self.assertEqual([row["key"] for row in ns["_FINDINGS"]],
+                                 [] if line.startswith("OK") else ["jev_paid_cap"])
+
+    def test_canonical_health_records_cap_failures_and_finishes(self):
+        import io, contextlib
+        for line in ("HIT jev paid cap — 10/10", "UNKNOWN jev paid cap — broken"):
+            with self.subTest(line=line):
+                ns = self.namespace()
+                ns["_jev_paid_cap_row"] = lambda: line
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    self.assertEqual(ns["_canonical_health"](), 1)
+                self.assertIn("HEALTH_COMPLETE", out.getvalue())
+                [finding] = ns["_FINDINGS"]
+                self.assertEqual(finding["key"], "jev_paid_cap")
+                self.assertEqual(finding["hard_error"], line.startswith("UNKNOWN"))
+
+    def test_failed_alerts_are_canonical_findings_even_below_cap(self):
+        import io, contextlib
+        ns = self.namespace()
+        ns["_jev_paid_cap_row"] = lambda: "WARN jev paid cap — alarms pending=0 failed=1 delivered=0"
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ns["_canonical_health"](), 1)
+        [finding] = ns["_FINDINGS"]
+        self.assertEqual((finding["key"], finding["subject"], finding["count"]),
+                         ("jev_spend_alert", "failed", 1))
+
+    def test_loader_errors_are_contained_in_canonical_health_and_cli(self):
+        import io, contextlib, importlib.util, runpy, sys
+        from unittest.mock import patch
+        original = importlib.util.spec_from_file_location
+        def fail_cap_loader(name, *args, **kwargs):
+            if name == "jev_cap_client":
+                raise ImportError("fixture missing client configuration")
+            return original(name, *args, **kwargs)
+        with patch.object(importlib.util, "spec_from_file_location", fail_cap_loader):
+            ns = self.namespace()
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(ns["_canonical_health"](), 1)
+            self.assertIn("HEALTH_COMPLETE", out.getvalue())
+            self.assertTrue(ns["_FINDINGS"][0]["hard_error"])
+            findings = Path(self.enterContext(tempfile.TemporaryDirectory())) / "findings.json"
+            with patch.object(sys, "argv", [str(HEALTH_CHECK_PATH), "--section", "jev-cap", "--findings-json", str(findings)]), \
+                    contextlib.redirect_stdout(io.StringIO()) as narrow:
+                with self.assertRaises(SystemExit) as exited:
+                    runpy.run_path(str(HEALTH_CHECK_PATH), run_name="__main__")
+            self.assertEqual(exited.exception.code, 1)
+            self.assertIn("UNKNOWN jev paid cap", narrow.getvalue())
+            self.assertIn("ImportError", narrow.getvalue())
+            [finding] = json.loads(findings.read_text())["findings"]
+            self.assertEqual(finding["key"], "jev_paid_cap")
+            self.assertTrue(finding["hard_error"])
 
 
 class RcAssignedOnlyViaRed(unittest.TestCase):

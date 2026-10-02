@@ -67,7 +67,7 @@ import re
 import sqlite3
 import subprocess
 import sys
-import threading
+from contextlib import closing
 import time
 import urllib.error
 import urllib.request
@@ -568,13 +568,23 @@ def _logged_attempt_rows(log_path, day):
                 try:
                     row = json.loads(line)
                 except ValueError:
-                    continue
-                if (isinstance(row, dict) and str(row.get("ts", "")).startswith(day)
+                    raise TypeSafeError("Jev unavailable: daily cap accounting has malformed seed evidence") from None
+                if not isinstance(row, dict) or not isinstance(row.get("ts"), str):
+                    raise TypeSafeError("Jev unavailable: daily cap accounting has invalid seed evidence")
+                try:
+                    stamp = datetime.fromisoformat(row["ts"].replace("Z", "+00:00"))
+                except ValueError:
+                    raise TypeSafeError("Jev unavailable: daily cap accounting has invalid seed timestamp") from None
+                if stamp.tzinfo is None or ("cache_hit" in row and type(row["cache_hit"]) is not bool):
+                    raise TypeSafeError("Jev unavailable: daily cap accounting has invalid seed fields")
+                if (stamp.astimezone(timezone.utc).strftime("%Y-%m-%d") == day
                         and not row.get("cache_hit")
                         and row.get("error") != "daily_paid_call_cap"):
                     yield row
     except FileNotFoundError:
         pass
+    except UnicodeError:
+        raise TypeSafeError("Jev unavailable: daily cap accounting has invalid seed encoding") from None
 
 
 def _logged_attempts(log_path, day):
@@ -582,14 +592,14 @@ def _logged_attempts(log_path, day):
 
 
 def _daily_cap_limit():
-    cap = JEV_COST_CONFIG.get("daily_paid_call_cap", 1500)
+    cap = JEV_COST_CONFIG.get("daily_paid_call_cap")
     if type(cap) is not int or cap < 0:
         raise TypeSafeError("Jev unavailable: invalid daily paid call cap")
     return cap
 
 
 def _claim_spend_alerts(db, log_path, day, previous, allowed, cap, caller):
-    """Claim alarms and attribution in the cap transaction; alarm errors fail open.
+    """Queue alarms and attribution in the cap transaction; alarm errors fail open.
 
     Seed once from existing receipts, including upgrades of an AP counter. A
     reservation with no receipt is retained as unknown, never guessed away.
@@ -600,32 +610,38 @@ def _claim_spend_alerts(db, log_path, day, previous, allowed, cap, caller):
     except Exception:
         return []
     try:
-        db.execute("CREATE TABLE IF NOT EXISTS daily_cap_alarms "
-                   "(day TEXT PRIMARY KEY, mask INTEGER NOT NULL)")
+        db.execute("CREATE TABLE IF NOT EXISTS daily_cap_attribution "
+                   "(day TEXT PRIMARY KEY)")
         db.execute("CREATE TABLE IF NOT EXISTS daily_cap_counts "
                    "(day TEXT, dimension TEXT, name TEXT, count INTEGER NOT NULL, "
                    "PRIMARY KEY(day,dimension,name))")
-        row = db.execute("SELECT mask FROM daily_cap_alarms WHERE day=?", (day,)).fetchone()
+        db.execute("CREATE TABLE IF NOT EXISTS daily_cap_delivery "
+                   "(day TEXT, threshold INTEGER, alert_json TEXT NOT NULL, "
+                   "state TEXT NOT NULL, attempts INTEGER NOT NULL, lease_until REAL NOT NULL, "
+                   "error TEXT, PRIMARY KEY(day,threshold))")
+        row = db.execute("SELECT day FROM daily_cap_attribution WHERE day=?", (day,)).fetchone()
         if row is None:
             receipts = list(_logged_attempt_rows(log_path, day))
+            # Rebuild attribution once for existing counters as well. The
+            # old alarm mask held no delivery evidence and is no longer read.
+            db.execute("DELETE FROM daily_cap_counts WHERE day=?", (day,))
             for dimension, field in (("caller", "caller"), ("session", "session")):
                 counts = Counter(str(r.get(field) or "unknown") for r in receipts)
                 counts["unknown"] += max(0, previous - len(receipts))
                 db.executemany("INSERT INTO daily_cap_counts VALUES (?,?,?,?)",
                                [(day, dimension, name, count) for name, count in counts.items() if count])
-            db.execute("DELETE FROM daily_cap_alarms WHERE day < ?", (day,))
+            db.execute("DELETE FROM daily_cap_attribution WHERE day < ?", (day,))
             db.execute("DELETE FROM daily_cap_counts WHERE day < ?", (day,))
-            db.execute("INSERT INTO daily_cap_alarms VALUES (?,0)", (day,))
+            db.execute("DELETE FROM daily_cap_delivery WHERE day < ?", (day,))
+            db.execute("INSERT INTO daily_cap_attribution VALUES (?)", (day,))
         if allowed:
             for dimension, name in (("caller", caller), ("session", _session_id())):
                 db.execute("INSERT INTO daily_cap_counts VALUES (?,?,?,1) "
                            "ON CONFLICT(day,dimension,name) DO UPDATE SET count=count+1",
                            (day, dimension, str(name or "unknown")))
         used = previous + int(allowed)
-        mask = row[0] if row else 0
-        alerts = []
-        for bit, threshold in enumerate((50, 80, 100)):
-            if used * 100 < cap * threshold or mask & (1 << bit):
+        for threshold in (50, 80, 100):
+            if used * 100 < cap * threshold:
                 continue
             top = {}
             for dimension in ("caller", "session"):
@@ -637,11 +653,16 @@ def _claim_spend_alerts(db, log_path, day, previous, allowed, cap, caller):
                        f"Top caller: {top['caller'][0]} ({top['caller'][1]}); "
                        f"top session: {top['session'][0]} ({top['session'][1]}). "
                        "Jev goes unavailable at the cap; resets at 00:00 UTC.")
-            alerts.append({"day": day, "threshold": threshold, "calls": used, "cap": cap,
-                           "top_caller": top["caller"], "top_session": top["session"],
-                           "message": message})
-            mask |= 1 << bit
-        db.execute("UPDATE daily_cap_alarms SET mask=? WHERE day=?", (mask, day))
+            alert = {"day": day, "threshold": threshold, "calls": used, "cap": cap,
+                     "top_caller": top["caller"], "top_session": top["session"], "message": message}
+            # A threshold is queued once; only successful OS submission
+            # changes its delivery row to acknowledged.
+            db.execute("INSERT OR IGNORE INTO daily_cap_delivery VALUES (?,?,?,'pending',0,0,NULL)",
+                       (day, threshold, json.dumps(alert)))
+
+        alerts = [json.loads(r[0]) for r in db.execute(
+            "SELECT alert_json FROM daily_cap_delivery WHERE day=? AND state != 'delivered' "
+            "AND attempts < 3 AND lease_until <= ? ORDER BY threshold", (day, time.time()))]
         db.execute("RELEASE spend_alarm")
         return alerts
     except Exception:
@@ -656,7 +677,7 @@ def _claim_spend_alerts(db, log_path, day, previous, allowed, cap, caller):
 def _emit_spend_alert(alert):
     """Reuse cutover-watch/version-sentinel's local macOS notification path.
 
-    Runs on the alarm thread, with a bounded wait, never on the Jev call path.
+    Runs in the detached delivery process, with a bounded wait.
     No prompt, answer or credential crosses into the notification.
     """
     message = alert["message"].replace("\\", "\\\\").replace('"', '\\"')
@@ -667,27 +688,74 @@ def _emit_spend_alert(alert):
                    timeout=5, check=True)
 
 
+def _deliver_pending_spend_alerts(path, day):
+    """One bounded delivery pass, in a detached process, with durable leases.
+
+    A later reservation (even one refused at the cap) recovers failed/stale
+    leases, up to three attempts per threshold. OS submission is acknowledged
+    only after the sink returns successfully. Death after submission but before
+    acknowledgement can cause a repeat; exactly-once OS delivery is unavailable.
+    """
+    for threshold in (50, 80, 100):
+        with closing(sqlite3.connect(path, timeout=1)) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT alert_json,attempts FROM daily_cap_delivery "
+                             "WHERE day=? AND threshold=? AND state != 'delivered' "
+                             "AND attempts < 3 AND lease_until <= ?",
+                             (day, threshold, time.time())).fetchone()
+            if row is None:
+                continue
+            attempt = row[1] + 1
+            db.execute("UPDATE daily_cap_delivery SET state='sending',attempts=?,lease_until=? "
+                       "WHERE day=? AND threshold=?", (attempt, time.time() + 30, day, threshold))
+        error = None
+        try:
+            _emit_spend_alert(json.loads(row[0]))
+        except Exception as exc:
+            error = type(exc).__name__
+        with closing(sqlite3.connect(path, timeout=1)) as db, db:
+            db.execute("UPDATE daily_cap_delivery SET state=?,lease_until=0,error=? "
+                       "WHERE day=? AND threshold=? AND attempts=? AND state='sending'",
+                       ("failed" if error else "delivered", error, day, threshold, attempt))
+
+
+def _launch_spend_alert_worker(path, day):
+    # This runs fixed repository code, with accounting identifiers only. All
+    # descriptors are detached so neither interpreter exit nor captured hook
+    # output waits for notification delivery. It performs no model work.
+    code = ("import importlib.util,sys; "
+            "s=importlib.util.spec_from_file_location('jev_alert_client',sys.argv[1]); "
+            "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); "
+            "m._deliver_pending_spend_alerts(sys.argv[2],sys.argv[3])")
+    subprocess.Popen([sys.executable, "-c", code, os.path.abspath(__file__), path, day],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+
+
 def _dispatch_spend_alerts(alerts):
     if not alerts:
         return
-    sink = _emit_spend_alert
-    def emit():
-        for alert in alerts:
-            try:
-                sink(alert)
-            except Exception:
-                pass
+    path = os.fspath(JEV_DAILY_CAP_LOG) + ".daily-cap.sqlite3"
+    day = alerts[0]["day"]
     try:
-        # Non-daemon: a short-lived hook still gets its claimed alert submitted.
-        # The production sink has a deadline; ask() never joins this thread.
-        threading.Thread(target=emit, name="jev-spend-alarm").start()
-    except Exception:
-        pass
+        _launch_spend_alert_worker(path, day)
+    except Exception as exc:
+        # Retain failed-launch evidence and capacity; the next reservation
+        # retries the pending warning, with the same three-attempt ceiling.
+        try:
+            with closing(sqlite3.connect(path, timeout=0.1)) as db, db:
+                db.execute("UPDATE daily_cap_delivery SET state='failed',attempts=attempts+1,error=? "
+                           "WHERE day=? AND state IN ('pending','failed') AND attempts < 3",
+                           (type(exc).__name__, day))
+        except (OSError, sqlite3.Error):
+            pass  # Durable pending rows remain visible to the read-only health path.
 
 
-PAID_CAP_ACTION = ("on breach: notify Joe once at 50%/80%/100% via macOS notification; "
+PAID_CAP_ACTION = ("on breach: notify Joe at 50%/80%/100% via macOS notification; "
                    "cap refuses further paid calls · owner orchestrator · remediation "
-                   "reduce top caller/session demand · verify next UTC day below 50% "
+                   "reduce top caller/session demand; pending/failed alarms recover on next "
+                   "reservation, at most three attempts (stale lease after 30s); inspect "
+                   "notification sink if exhausted · verify next UTC day below 50% "
                    "· auto-clear at UTC rollover")
 
 
@@ -696,18 +764,30 @@ def paid_cap_health(*, now=None):
     day = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).strftime("%Y-%m-%d")
     try:
         cap = _daily_cap_limit()
+        deliveries = []
         path = Path(os.fspath(JEV_DAILY_CAP_LOG) + ".daily-cap.sqlite3")
         if path.exists():
             db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
             try:
                 row = db.execute("SELECT attempts FROM daily_cap WHERE day=?", (day,)).fetchone()
+                deliveries = db.execute("SELECT state,attempts,lease_until,error FROM daily_cap_delivery "
+                                        "WHERE day=?", (day,)).fetchall()
             finally:
                 db.close()
             used = row[0] if row else _logged_attempts(JEV_DAILY_CAP_LOG, day)
         else:
             used = _logged_attempts(JEV_DAILY_CAP_LOG, day)
         status = "HIT" if used >= cap else "WARN" if used * 100 >= cap * 50 else "OK"
-        return f"{status} jev paid cap — {used}/{cap} paid calls · UTC {day} · {PAID_CAP_ACTION}"
+        failed = sum(state == "failed" or (state == "sending" and lease <= time.time())
+                     for state, attempts, lease, error in deliveries)
+        pending = sum(state in ("pending", "sending") for state, _, _, _ in deliveries)
+        delivered = sum(state == "delivered" for state, _, _, _ in deliveries)
+        if status == "OK" and (failed or pending):
+            status = "WARN"
+        errors = sorted({error for _, _, _, error in deliveries if error})
+        return (f"{status} jev paid cap — {used}/{cap} paid calls · UTC {day} · "
+                f"alarms pending={pending} failed={failed} delivered={delivered} "
+                f"errors={','.join(errors) or 'none'} · {PAID_CAP_ACTION}")
     except (OSError, sqlite3.Error, TypeSafeError) as exc:
         return f"UNKNOWN jev paid cap — {type(exc).__name__} · {PAID_CAP_ACTION}"
 
@@ -816,7 +896,7 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
     credential hash also scopes the cache, including when no name is supplied.
     Cache hits return usage=None and cannot count as fresh vendor-call evidence.
     Paid attempts (including retries) are capped per UTC day by
-    ops/config/jev-cost-guard.v1.json's daily_paid_call_cap (default 1500).
+    ops/config/jev-cost-guard.v1.json's required daily_paid_call_cap.
     Offline injected openers do not reserve paid calls or write live receipts.
     """
     if not isinstance(questions, dict) or not questions:
