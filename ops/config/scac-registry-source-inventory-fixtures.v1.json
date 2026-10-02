@@ -84178,7 +84178,19 @@
     },
     {
       "version": "v102",
-      "reason": "W3 Leads: optional workspace read, stage evidence/undo and human ownership/client links. Historical contracts remain sealed.",
+      "remove": [],
+      "upsert": [],
+      "row_replacements": {
+        "mcp-tool:confirm-merge": {
+          "human_only": true,
+          "principal_mode": "server_verified_human"
+        }
+      },
+      "expected_count": 1084,
+      "expected_sha256": "98054b8eb743d97fe1dba0bec67826bea0c359b82c6dd8a4041adb0653ea1bf7"
+    },
+    {
+      "version": "v103",
       "remove": [],
       "upsert": [
         {
@@ -84188,7 +84200,7 @@
           "effect_class": "administrative_mutation",
           "source_locator": "mcp-server/src/tools.js",
           "schema_digest": "e8fd95ee3e3428270a198dcc4b1dcdacbeaa9634c11c610c86e867aa83ffee2a",
-          "source_digest": "d4aec1c2d464be157771f57e62d7c74b40eb4bde7e5e2c4ed29d2432405f41e2",
+          "source_digest": "73d3922e82829327a850bd519006ac24a02bd1a007e491ab0593d958f0e41ac0",
           "write": true,
           "human_only": true,
           "authority_only": false,
@@ -84211,7 +84223,7 @@
           "effect_class": "audit_side_effect",
           "source_locator": "mcp-server/src/tools.js",
           "schema_digest": "82702101136b8f45dafb837abdfdabe063cf8adac3fbaf50bd1db597727eeb8d",
-          "source_digest": "d4aec1c2d464be157771f57e62d7c74b40eb4bde7e5e2c4ed29d2432405f41e2",
+          "source_digest": "73d3922e82829327a850bd519006ac24a02bd1a007e491ab0593d958f0e41ac0",
           "write": false,
           "human_only": false,
           "authority_only": false,
@@ -84234,7 +84246,7 @@
           "effect_class": "administrative_mutation",
           "source_locator": "mcp-server/src/tools.js",
           "schema_digest": "2ed03a91db3e222b9482976a7968380b55b9842300f9340967e3995a71dc2329",
-          "source_digest": "d4aec1c2d464be157771f57e62d7c74b40eb4bde7e5e2c4ed29d2432405f41e2",
+          "source_digest": "73d3922e82829327a850bd519006ac24a02bd1a007e491ab0593d958f0e41ac0",
           "write": true,
           "human_only": true,
           "authority_only": false,
@@ -84257,7 +84269,7 @@
           "effect_class": "administrative_mutation",
           "source_locator": "mcp-server/src/tools.js",
           "schema_digest": "95ec1c1236e8486b71bd6ca6fc665d23eaf1cc349014079e49e4aafdb9caac9c",
-          "source_digest": "d4aec1c2d464be157771f57e62d7c74b40eb4bde7e5e2c4ed29d2432405f41e2",
+          "source_digest": "73d3922e82829327a850bd519006ac24a02bd1a007e491ab0593d958f0e41ac0",
           "write": true,
           "human_only": false,
           "authority_only": false,
@@ -84275,7 +84287,7 @@
         }
       ],
       "expected_count": 1086,
-      "expected_sha256": "161389e1e2edc47bb5a0b67709989d4a9fbe51d5407d94e1114cbc68b1e55dd1"
+      "expected_sha256": "aab3d374a6e9938df68f13d89a601fa60602048bd257ba3f04a1042e1c1377dc"
     }
   ],
   "current_source_review": {

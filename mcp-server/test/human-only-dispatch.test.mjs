@@ -90,6 +90,7 @@ test("the registry still carries the humanOnly verbs this gate was built for", (
     "attest-execution-environment-conformance",
     "claim-lead",
     "close-incident",
+    "confirm-merge",
     "decide-doc-suggestion",
     "link-lead-client",
     "propose-doc-correction",
@@ -145,8 +146,8 @@ test("accept-portfolio-revision admits the verified nonhuman joe-local principal
   assert.equal(out.receipt_id, receiptId);
 });
 
-test("verified sponsor-bound agents pass every humanOnly identity gate", async () => {
-  for (const verb of humanOnlyVerbs) {
+test("verified sponsor-bound agents pass partner-authority gates except human identity merges", async () => {
+  for (const verb of humanOnlyVerbs.filter(name => name !== "confirm-merge")) {
     for (const [label, actor] of SPONSORED_PARTNER_ACTORS) {
       const error = await executeRegisteredTool(forbiddenClient, actor, verb, {})
         .then(() => null, (e) => e);
