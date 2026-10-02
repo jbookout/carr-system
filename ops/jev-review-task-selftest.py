@@ -198,6 +198,33 @@ class HookOutputTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_worker_postwrite_hook_skips_jev_without_loading_reviewer(self):
+        out = io.StringIO()
+        with patch.dict(os.environ, CARR_JEV_WORKER="off"), \
+                patch.object(lint, "_changed_code_paths") as paths, \
+                contextlib.redirect_stdout(out):
+            lint.code_review({"tool_name": "apply_patch", "tool_input": {"patch": "fixture"}})
+        paths.assert_not_called()
+        self.assertEqual(out.getvalue(), "", "no paid review or claimed Jev receipt")
+
+    def test_worker_keeps_deterministic_writing_lint(self):
+        payload = {"tool_name": "Write", "tool_input": {"file_path": str(self.target)}}
+        response = subprocess.CompletedProcess([], 0, stdout="hard-ban fixture", stderr="")
+        out = io.StringIO()
+        with patch.dict(os.environ, CARR_JEV_WORKER="off"), \
+                patch.object(lint.sys, "stdin", io.StringIO(json.dumps(payload))), \
+                patch.object(lint, "_changed_code_paths") as paths, \
+                patch.object(lint, "surface_for", return_value="email"), \
+                patch.object(lint.os.path, "exists", return_value=True), \
+                patch.object(lint.subprocess, "run", return_value=response) as runner, \
+                patch.object(lint, "log"), contextlib.redirect_stdout(out):
+            with self.assertRaises(SystemExit) as exited:
+                lint.main()
+        self.assertEqual(exited.exception.code, 0)
+        paths.assert_not_called()
+        runner.assert_called_once()
+        self.assertIn("WRITING-LINT", out.getvalue())
+
     def run_hook(self, cfg, transcript_path):
         payload = {"tool_name": "Write", "cwd": str(self.repo),
                    "session_id": "s", "tool_use_id": "t",

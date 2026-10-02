@@ -26,6 +26,8 @@ import subprocess
 import tempfile
 import unittest
 import urllib.error
+from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -59,6 +61,123 @@ def responder(payload, capture=None):
 ANSWER = {"model": "jev-1.13.0",
           "answers": {"q": {"type": "noul", "noul": 0.91}},
           "usage": {"input_tokens": 10, "output_tokens": 2}}
+
+
+class DailyCapTests(unittest.TestCase):
+    def setUp(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.log = root / "calls.jsonl"
+        self.enterContext(patch.object(client, "JEV_DAILY_CAP_LOG", str(self.log)))
+        self.options = dict(api_key="offline-fixture", calls_log=str(self.log),
+                            cache_path=str(root / "cache.sqlite3"), caller="cap-test")
+        self.requests = []
+        self.enterContext(patch.object(client.urllib.request, "urlopen",
+                                       responder(ANSWER, self.requests)))
+        self.enterContext(patch.dict(client.JEV_COST_CONFIG, daily_paid_call_cap=2))
+        self.clock = self.enterContext(patch.object(client, "datetime", wraps=datetime))
+        self.clock.now.return_value = datetime(2026, 10, 2, tzinfo=timezone.utc)
+
+    def ask(self, text):
+        return client.ask(text, {"q": client.noul("Fixture judgment")}, **self.options)
+
+    def test_cap_reached_is_unavailable_with_zero_further_transport_calls(self):
+        self.ask("one")
+        self.ask("two")
+        for _ in range(3):
+            with self.assertRaisesRegex(client.TypeSafeError, "daily.*cap"):
+                self.ask("three")
+        self.assertEqual(len(self.requests), 2)
+        rows = [json.loads(line) for line in self.log.read_text().splitlines()]
+        cap_rows = [row for row in rows if row.get("error") == "daily_paid_call_cap"]
+        self.assertEqual(len(cap_rows), 1, "one visible refusal per UTC day")
+        self.assertFalse(cap_rows[0]["ok"])
+
+    def test_cache_hit_does_not_count_and_is_available_at_cap(self):
+        self.ask("one")
+        self.assertTrue(self.ask("one")["cache_hit"])
+        self.ask("two")
+        self.assertTrue(self.ask("one")["cache_hit"])
+        with self.assertRaises(client.TypeSafeError):
+            self.ask("three")
+        self.assertEqual(len(self.requests), 2)
+
+    def test_utc_day_rollover_resets_cap(self):
+        self.ask("one")
+        self.ask("two")
+        with self.assertRaises(client.TypeSafeError):
+            self.ask("three")
+        self.clock.now.return_value = datetime(2026, 10, 3, tzinfo=timezone.utc)
+        self.ask("three")
+        self.assertEqual(len(self.requests), 3)
+
+    def test_custom_receipt_logs_cannot_create_separate_daily_budgets(self):
+        self.ask("one")
+        self.options["calls_log"] = str(self.log.with_name("other.jsonl"))
+        self.ask("two")
+        self.options["calls_log"] = str(self.log.with_name("third.jsonl"))
+        with self.assertRaisesRegex(client.TypeSafeError, "daily.*cap"):
+            self.ask("three")
+        self.assertEqual(len(self.requests), 2)
+        self.assertIn("daily_paid_call_cap", self.log.read_text())
+        self.options["calls_log"] = os.devnull
+        with self.assertRaisesRegex(client.TypeSafeError, "daily paid call cap reached"):
+            self.ask("suppressed receipt destination")
+        self.assertEqual(len(self.requests), 2)
+
+    def test_existing_paid_log_seeds_cap_but_cache_rows_do_not(self):
+        self.log.write_text("\n".join(json.dumps(row) for row in [
+            {"ts": "2026-10-02T01:00:00Z", "ok": True, "usage": {"input_tokens": 1}},
+            {"ts": "2026-10-02T02:00:00Z", "cache_hit": True},
+            {"ts": "2026-10-01T01:00:00Z", "ok": True},
+        ]) + "\n")
+        self.ask("one")
+        with self.assertRaises(client.TypeSafeError):
+            self.ask("two")
+        self.assertEqual(len(self.requests), 1)
+
+    def test_concurrent_callers_share_hard_cap(self):
+        self.options["cache_ttl_seconds"] = 0
+        def attempt(i):
+            try:
+                self.ask(str(i))
+                return True
+            except client.TypeSafeError:
+                return False
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            outcomes = list(pool.map(attempt, range(12)))
+        self.assertEqual(sum(outcomes), 2)
+        self.assertEqual(len(self.requests), 2)
+
+    def test_worker_flag_does_not_disable_explicit_brief_judgment(self):
+        with patch.dict(os.environ, CARR_JEV_WORKER="off"):
+            self.ask("explicit judgment from brief")
+        self.assertEqual(len(self.requests), 1)
+
+    def test_retry_cannot_cross_daily_cap(self):
+        client.JEV_COST_CONFIG["daily_paid_call_cap"] = 1
+        attempts = []
+        def throttled(request, timeout=None):
+            attempts.append(1)
+            raise urllib.error.HTTPError("https://fixture.invalid", 429, "throttled",
+                                         {"retry-after": "0"}, io.BytesIO(b""))
+        with patch.object(client.urllib.request, "urlopen", throttled):
+            with self.assertRaisesRegex(client.TypeSafeError, "daily.*cap"):
+                self.ask("retry")
+        self.assertEqual(len(attempts), 1)
+
+    def test_accounting_failure_uses_outage_contract_without_transport(self):
+        with patch.object(client.sqlite3, "connect", side_effect=client.sqlite3.OperationalError):
+            with self.assertRaisesRegex(client.TypeSafeError, "accounting failed"):
+                self.ask("uncountable")
+        self.assertEqual(self.requests, [])
+
+    def test_deadline_expiring_during_accounting_never_starts_transport(self):
+        self.options["deadline"] = 15.0
+        with patch.object(client.time, "monotonic", side_effect=[10.0, 20.0]):
+            with self.assertRaisesRegex(client.TypeSafeError, "deadline"):
+                self.ask("expired while reserving")
+        self.assertEqual(self.requests, [])
+
 
 SPEND_SPEC = importlib.util.spec_from_file_location(
     "jev_spend_health", MODULE_PATH.with_name("jev_spend_health.py"))
@@ -466,6 +585,10 @@ class CallReceiptTests(unittest.TestCase):
     must carry the response's usage when present, and (round 3) must carry
     no response id the vendor never supplies."""
 
+    def setUp(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(patch.object(client, "JEV_DAILY_CAP_LOG", str(root / "quota.jsonl")))
+
     def test_only_schema_valid_answer_with_usage_is_usable(self):
         questions = {"q": client.noul("?")}
         self.assertTrue(client.usable_judgment(ANSWER, questions))
@@ -687,6 +810,10 @@ class CalibrationRecordTests(unittest.TestCase):
     """Every Choice/Score/Noul answer carries its FULL distribution, entropy,
     the pinned model, and a state digest, so accuracy can later be measured
     per question family rather than argued for."""
+
+    def setUp(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(patch.object(client, "JEV_DAILY_CAP_LOG", str(root / "quota.jsonl")))
 
     def test_distribution_vectors_shared_with_the_worker(self):
         vectors = json.loads(VECTORS_PATH.read_text(encoding="utf-8"))

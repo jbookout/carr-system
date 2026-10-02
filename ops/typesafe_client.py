@@ -124,6 +124,8 @@ CANONICAL_REPO = _canonical_repo_root(REPO)
 # worktree's ask() and the canonical checkout's Stop-hook reader agree on one
 # physical file — see _canonical_repo_root above.
 JEV_CALLS_LOG = os.path.join(CANONICAL_REPO, "out", "jev-calls.jsonl")
+# Receipt destinations may vary for evals; the spend budget never does.
+JEV_DAILY_CAP_LOG = JEV_CALLS_LOG
 JUDGE_CACHE_PATH = os.path.join(CANONICAL_REPO, "out", "jev-judge-cache.sqlite3")
 with open(os.path.join(REPO, "ops", "config", "jev-cost-guard.v1.json"), encoding="utf-8") as _config_file:
     JEV_COST_CONFIG = json.load(_config_file)
@@ -551,6 +553,74 @@ def _append_call_receipt(questions, facets, result, log_path, *, caller=None,
         pass
 
 
+def _logged_attempts(log_path, day):
+    """Seed a new UTC day from pre-cap receipts, excluding free cache hits.
+
+    Count attempts conservatively: failures may still have consumed credits.
+    A missing log means no prior calls; unreadable evidence makes Jev unavailable.
+    """
+    count = 0
+    try:
+        with open(log_path, encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if (isinstance(row, dict) and str(row.get("ts", "")).startswith(day)
+                        and not row.get("cache_hit")
+                        and row.get("error") != "daily_paid_call_cap"):
+                    count += 1
+    except FileNotFoundError:
+        pass
+    return count
+
+
+def _reserve_paid_call(questions, facets, caller, question_kind, prompt_sha256):
+    """Atomically reserve one transport attempt across processes and worktrees.
+
+    The small counter lives beside the canonical call log, not inside a session.
+    Reservations are never refunded: uncertain delivery can have been billable.
+    Cache hits reach neither this function nor the transport. Storage failure
+    uses the same TypeSafeError outage contract, so hooks retain their fallback.
+    """
+    log_path = JEV_DAILY_CAP_LOG
+    cap = JEV_COST_CONFIG.get("daily_paid_call_cap", 1500)
+    if type(cap) is not int or cap < 0:
+        raise TypeSafeError("Jev unavailable: invalid daily paid call cap")
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    notice = False
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(log_path)), exist_ok=True)
+        db = sqlite3.connect(os.fspath(log_path) + ".daily-cap.sqlite3", timeout=1.0)
+        try:
+            db.execute("CREATE TABLE IF NOT EXISTS daily_cap "
+                       "(day TEXT PRIMARY KEY, attempts INTEGER NOT NULL, notified INTEGER NOT NULL)")
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT attempts, notified FROM daily_cap WHERE day=?", (day,)).fetchone()
+            if row is None:
+                row = (_logged_attempts(log_path, day), 0)
+                db.execute("DELETE FROM daily_cap WHERE day < ?", (day,))
+                db.execute("INSERT INTO daily_cap VALUES (?,?,0)", (day, row[0]))
+            allowed = row[0] < cap
+            if allowed:
+                db.execute("UPDATE daily_cap SET attempts=attempts+1 WHERE day=?", (day,))
+            elif not row[1]:
+                notice = True
+                db.execute("UPDATE daily_cap SET notified=1 WHERE day=?", (day,))
+            db.commit()
+        finally:
+            db.close()
+    except (OSError, sqlite3.Error) as exc:
+        raise TypeSafeError(f"Jev unavailable: daily cap accounting failed ({type(exc).__name__})") from None
+    if notice:
+        _append_call_receipt(questions, facets, None, log_path, caller=caller,
+                             question_kind=question_kind, prompt_sha256=prompt_sha256,
+                             ok=False, error="daily_paid_call_cap")
+    if not allowed:
+        raise TypeSafeError(f"Jev unavailable: daily paid call cap reached ({cap}, UTC {day})")
+
+
 def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
         api_key=None, retries=RATE_LIMIT_RETRIES, endpoint=ENDPOINT, opener=None,
         facets=None, calls_log=JEV_CALLS_LOG, deadline=None, caller=None,
@@ -608,6 +678,9 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
     `account` names an account or organization when the caller has one. The
     credential hash also scopes the cache, including when no name is supplied.
     Cache hits return usage=None and cannot count as fresh vendor-call evidence.
+    Paid attempts (including retries) are capped per UTC day by
+    ops/config/jev-cost-guard.v1.json's daily_paid_call_cap (default 1500).
+    Offline injected openers do not reserve paid calls or write live receipts.
     """
     if not isinstance(questions, dict) or not questions:
         raise TypeSafeError("ask needs a non-empty map of questions")
@@ -662,6 +735,16 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
             if remaining <= 0:
                 raise TypeSafeError("deadline passed before the request could be sent")
             attempt_timeout = min(timeout, remaining)
+        if opener is None:
+            _reserve_paid_call(questions, facets, caller,
+                               question_kind, prompt_sha256)
+            # Accounting can wait on another worker's transaction. Preserve
+            # the caller's absolute deadline before starting any transport.
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TypeSafeError("deadline passed during daily cap accounting")
+                attempt_timeout = min(timeout, remaining)
         try:
             with send(request, timeout=attempt_timeout) as response:
                 http_status = getattr(response, "status", None)

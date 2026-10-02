@@ -53,6 +53,27 @@ class NeverDeniesTests(unittest.TestCase):
     """A probabilistic refusal in front of every shell call turns a model's
     uncertainty into a blocked session. This must never happen."""
 
+    def test_worker_flagged_hook_skips_automatic_judgment(self):
+        with mock.patch.dict(os.environ, {"CARR_JEV_WORKER": "off"}), \
+                mock.patch.object(hook, "check") as check:
+            self.assertEqual(run({"tool_name": "exec_command", "tool_input": {
+                "cmd": "./ops/ci.sh --nope"}}), (0, ""))
+        check.assert_not_called()
+
+    def test_normal_attended_hook_still_calls_judgment(self):
+        with mock.patch.dict(os.environ, {"CARR_JEV_WORKER": "", "CARR_PRECHECK": "1"}), \
+                mock.patch.object(hook, "check", return_value=(None, {}, {})) as check:
+            run({"tool_name": "exec_command", "tool_input": {"cmd": "./ops/ci.sh --nope"}})
+        check.assert_called_once()
+
+    def test_worker_model_route_is_deterministic_without_loading_judge(self):
+        with mock.patch.dict(os.environ, CARR_JEV_WORKER="off"), \
+                mock.patch.object(hook, "_sibling") as sibling:
+            note = hook.advisory({"tool_name": "exec_command", "tool_input": {
+                "cmd": "codex exec --dangerously-bypass-hook-trust fixture-task"}})
+        self.assertIn("MODEL ROOM ROUTE", note)
+        sibling.assert_not_called()
+
     def test_the_library_contains_no_denial(self):
         source = HOOK_PATH.read_text(encoding="utf-8")
         for forbidden in ("exit(2)", "exit (2)", '"block"', "'block'", "permissionDecision"):
