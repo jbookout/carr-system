@@ -25,7 +25,7 @@ import json
 import os
 import re
 import sys
-from datetime import datetime
+from datetime import date, datetime
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 INTERNAL = ("@carr.us",)
@@ -63,7 +63,9 @@ def emails_in(event, local=None):
     """Every address the event mentions, deduplicated, lowercased.
 
     V2 joins title and the aware start instant so same-title meetings stay
-    separate. Legacy title/day snapshots remain readable during the upgrade.
+    separate. All-day feed dates retain embedded addresses but cannot join a
+    timed snapshot instant. Legacy title/day snapshots remain readable during
+    the upgrade.
     Feed UIDs and EventKit identifiers occupy different namespaces.
     """
     blob = " ".join(str(event.get(k) or "") for k in
@@ -76,15 +78,20 @@ def emails_in(event, local=None):
             if not isinstance(local.get("events"), list):
                 raise ValueError("invalid calendar event snapshot")
             if start:
-                instant = datetime.fromisoformat(start.replace("Z", "+00:00"))
-                if instant.tzinfo is None:
-                    raise ValueError("calendar ingest start must have a timezone")
-                for row in local["events"]:
-                    captured = datetime.fromisoformat(row["start_at"].replace("Z", "+00:00"))
-                    if captured.tzinfo is None:
-                        raise ValueError("calendar snapshot start must have a timezone")
-                    if row["title"].strip() == title and captured == instant:
-                        extra.extend(row["emails"])
+                if event.get("all_day") is True and re.fullmatch(r"\d{4}-\d{2}-\d{2}", start):
+                    # DATE values have no instant; do not invent a timezone or
+                    # borrow attendees from a same-title timed meeting.
+                    date.fromisoformat(start)
+                else:
+                    instant = datetime.fromisoformat(start.replace("Z", "+00:00"))
+                    if instant.tzinfo is None:
+                        raise ValueError("calendar ingest start must have a timezone")
+                    for row in local["events"]:
+                        captured = datetime.fromisoformat(row["start_at"].replace("Z", "+00:00"))
+                        if captured.tzinfo is None:
+                            raise ValueError("calendar snapshot start must have a timezone")
+                        if row["title"].strip() == title and captured == instant:
+                            extra.extend(row["emails"])
         else:
             extra = local.get(f"{title}|{start[:10]}", [])
     out = []
