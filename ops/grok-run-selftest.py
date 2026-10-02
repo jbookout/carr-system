@@ -25,25 +25,47 @@ spec.loader.exec_module(runner)
 
 
 class GrokRunTests(unittest.TestCase):
-    def test_hook_turns_preserve_substantive_answer_for_runner_and_desk(self):
+    def test_unattributed_hook_turns_cannot_nominate_an_earlier_answer(self):
         # Minimized from the private 2026-10-02 Grok hook-turn capture. Retain
         # response/usage boundaries; replace source prose and omit rule text.
         raw = (FIXTURES / "hook-turns.ndjson").read_text()
         text, _, code = runner.parse_output(raw.splitlines(), "fixture")
         self.assertEqual(code, 0)
-        self.assertEqual(text, "Fetched post: the announced skill is example-pro.\nSource: https://example.com/post")
+        # This historical capture has no task/response provenance. Its prose
+        # cannot authorize replacing the final response with an earlier one.
+        self.assertEqual(text, "Noted. Standing by.")
         desk = grok_wire.parse_result(raw, 0)
         self.assertEqual(desk["status"], "completed")
         self.assertEqual(desk["result"], text)
 
-    def test_acknowledgements_alone_are_non_answers(self):
+    def test_short_literal_answers_are_preserved(self):
         end = json.loads((FIXTURES / "hook-turns.ndjson").read_text().splitlines()[-1])
         for ack in ("Noted. Standing by.", "Noted. No tools were called.", "No action."):
             with self.subTest(ack=ack):
                 raw = [json.dumps({"type": "text", "data": ack}), json.dumps(end)]
                 text, _, code = runner.parse_output(raw, "fixture")
-                self.assertEqual(text, "")
-                self.assertEqual(code, 4)
+                self.assertEqual(text, ack)
+                self.assertEqual(code, 0)
+
+    def test_corrections_and_literal_answers_through_both_public_callers(self):
+        end = json.loads((FIXTURES / "hook-turns.ndjson").read_text().splitlines()[-1])
+        correction = "The rule boot stopped after page 3. Pages 1 and 2 are already complete; retry page 3."
+        for answer in (correction, "No action.", "The lifecycle warning is noted. Restart the failed job."):
+            for earlier in ([], [{"type": "text", "data": "The boot stopped after page 1."}, {"type": "usage"}]):
+                with self.subTest(answer=answer, earlier=bool(earlier)):
+                    raw = '\n'.join(map(json.dumps, [*earlier, {"type": "text", "data": answer}, {"type": "usage"}, end]))
+                    provider = mock.Mock(return_value=subprocess.CompletedProcess([], 0, raw, ''))
+                    desk = grok_wire.run_task({"model": "grok-4.7", "effort": "high", "sandbox": "read-only"}, 'Explain the result', run=provider)
+                    self.assertEqual(desk.get("result"), answer)
+                    self.assertEqual(desk["status"], "completed")
+                    for writable in (False, True):
+                        argv = ['grok-run', '--prompt', 'Explain the result'] + (['--writable'] if writable else [])
+                        with mock.patch.object(sys, 'argv', argv), mock.patch.object(runner, 'preflight', return_value='fixture'), \
+                                mock.patch.object(runner, 'invoke_cli', return_value=provider.return_value), \
+                                mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(sys, 'stdout', io.StringIO()) as stdout, \
+                                mock.patch.object(sys, 'stderr', io.StringIO()):
+                            self.assertEqual(runner.main(), 0)
+                            self.assertEqual(stdout.getvalue().strip(), answer)
 
     def test_latest_short_substantive_answer_wins(self):
         events = [json.loads(line) for line in (FIXTURES / "hook-turns.ndjson").read_text().splitlines()]

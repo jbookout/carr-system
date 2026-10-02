@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 
 MODEL = "grok-4.7"
@@ -17,20 +16,6 @@ PROVIDER_MODEL = "grok-4.7-build"
 EFFORT = "high"
 TIMEOUT_S = 180.0
 MAX_TURNS = 60
-
-# Only standalone acknowledgements and known CARR administrative replies are
-# non-answers. Length is never a ranking signal: a short correction must win.
-ACKNOWLEDGEMENT = re.compile(
-    r"(?:Noted\.?\s*)?(?:Standing by\.?|No tools were called\.?|No action\.?|"
-    r"No new request in that warning, so nothing else to run\.?)|Noted\.?", re.I)
-HOOK_STATUS_STARTS = ("The rule boot stopped", "The rule gate's state folder",
-                      "The lifecycle warning is noted.", "CARR rule boot pages")
-
-
-def is_non_answer(text: str) -> bool:
-    value = text.strip()
-    return bool(ACKNOWLEDGEMENT.fullmatch(value) or value.startswith(HOOK_STATUS_STARTS))
-
 
 def validate_entry(entry: dict) -> None:
     if (entry.get("model") != MODEL or entry.get("effort") != EFFORT
@@ -49,10 +34,14 @@ def model_usage_error(models) -> str | None:
 
 
 def parse_stream(lines, returncode: int = 0) -> dict:
-    """Keep the latest substantive assistant response with exactly one end."""
+    """Keep the latest assistant response with exactly one end.
+
+    These events do not identify which task produced each response. Prose
+    cannot establish lifecycle provenance or authorize reusing an older answer.
+    The verified read-only invocation suppresses lifecycle hooks at the source.
+    """
     chunks = []
     final_chunks = []
-    non_answer_seen = False
     end: dict = {}
     detail = None
     for line in lines:
@@ -82,18 +71,12 @@ def parse_stream(lines, returncode: int = 0) -> dict:
             # identified empty response. Older streams omit messageId, so text
             # also establishes a boundary. Accounting alone cannot erase it.
             if chunks or event.get("messageId"):
-                if is_non_answer("".join(chunks)):
-                    non_answer_seen = True
-                else:
-                    final_chunks = chunks
+                final_chunks = chunks
                 chunks = []
         elif event.get("type") == "end":
             end = event
     if chunks:
-        if is_non_answer("".join(chunks)):
-            non_answer_seen = True
-        else:
-            final_chunks = chunks
+        final_chunks = chunks
     text = "".join(final_chunks)
     code = 0
     if detail:
@@ -107,8 +90,6 @@ def parse_stream(lines, returncode: int = 0) -> dict:
         detail = model_usage_error(end.get("modelUsage"))
         if detail:
             code = 5
-        elif not text.strip() and non_answer_seen:
-            detail, code = "grok_non_answer", 4
     return {"text": text, "end": end, "detail": detail, "code": code}
 
 

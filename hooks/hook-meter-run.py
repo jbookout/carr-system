@@ -110,7 +110,7 @@ def bounded_grok_read_only():
         return False
     sys.path.insert(0, REPO)
     try:
-        from lib.grok_invocation import bounded_grok_read_only as probe
+        from hooks.grok_invocation import bounded_grok_read_only as probe
     except ImportError:
         return False
     return probe()

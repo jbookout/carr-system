@@ -550,9 +550,13 @@ def checkpoint_request(identity: dict, cursor: dict, response: dict | None) -> s
 
 def main() -> int:
     sys.path.insert(0, str(REPO))
-    from lib.grok_invocation import bounded_grok_read_only
-    if bounded_grok_read_only():
-        return 0
+    if os.environ.get("CARR_GROK_RUN_READ_ONLY") == "1":
+        try:
+            from hooks.grok_invocation import bounded_grok_read_only
+            if bounded_grok_read_only():
+                return 0
+        except ImportError:
+            pass  # an unavailable optional probe retains ordinary processing
     mode = _read_mode()
     if mode == "disabled":
         return 0
