@@ -2118,8 +2118,9 @@ for (const [operation, schema] of Object.entries(OPERATION_SCHEMAS)) {
 // This is the integration tail the description above kept naming as the
 // parent's job. It adds no judgment and no persistence of its own: every verb
 // is the store method above, run unchanged, on the connection mcp.js already
-// opened for that verb — the ordinary writer connection, or the per-partner
-// authority connection for the two authorityOnly verbs — and inside the
+// opened for that verb — the ordinary writer connection (opened `begin read
+// only` for the one read, which is why every verb declares writerConnection),
+// or the per-partner authority connection for the two authorityOnly verbs — and inside the
 // transaction mcp.js already began. It opens no connection, begins and commits
 // nothing itself, reads no environment and holds no clock.
 //
@@ -2273,6 +2274,19 @@ export function recordSourceAuthorityStoreTools({
     };
     tools[name] = {
       write,
+      // EVERY VERB, THE READ INCLUDED, RUNS ON THE WRITER CONNECTION, exactly as
+      // the J102 door does. A verb that is neither `write` nor `writerConnection`
+      // goes to mcp.js's reader connection, which carries no actor context, and
+      // since 0732 ops.f01_context_actor_slug() derives the reader bundle as the
+      // fixed slug 'carr-reader' — so openOperation's strict equality refused
+      // every caller of the read (live 2026-09-27: handler joe-local, database
+      // carr-reader). With this flag mcp.js opens the read `begin read only` on
+      // the writer login and sets carr.acting_actor_slug first, so the database
+      // derives the caller's own slug and the unchanged check passes. It widens
+      // nothing: ops.f01_read is STABLE, the transaction is read-only, writes
+      // already ran here, and the two authorityOnly verbs still route to the
+      // partner's authority login (connectionRouteForTool checks that first).
+      writerConnection: true,
       ...(humanOnly ? { humanOnly: true } : {}),
       ...(authorityOnly ? { authorityOnly: true } : {}),
       description: TOOL_DESCRIPTIONS[name],

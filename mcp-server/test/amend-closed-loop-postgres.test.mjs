@@ -72,32 +72,87 @@ async function connect(pg) {
 
 /** Two real connections racing under Promise.all is not, by itself, a
  * reliable reproduction of a lost-update race: nothing guarantees the two
- * sessions' `select version from loop_item ...` queries are actually
- * in flight AT THE SAME TIME rather than one finishing (and committing)
- * before the other's read even starts, which would produce a correct
- * version_conflict with or without `for update`. This patches both clients'
- * `query` so that EITHER session's first "select version from loop_item"
- * call blocks until the OTHER session has also reached its own — forcing
- * genuine overlap on the exact statement the lock (or its absence) governs,
- * deterministically, regardless of scheduler or network timing. */
-function synchronizeFirstVersionRead(clientA, clientB) {
-  let readyA, readyB;
-  const aReady = new Promise((resolve) => { readyA = resolve; });
-  const bReady = new Promise((resolve) => { readyB = resolve; });
-  function wrap(client, signalSelf, waitForOther) {
+ * sessions' `select version from loop_item ...` reads overlap rather than one
+ * session writing (or committing) before the other's read executes. An
+ * earlier version of this helper only held each read until the other session
+ * had ISSUED its own, then let both run free — which said nothing about when
+ * either read actually executed relative to the other session's writes.
+ *
+ * This patches both clients' `query` so that each session's first
+ * "select version from loop_item" read RUNS, and then its result is held —
+ * the session still inside its open transaction, before any write — until
+ * one of exactly two things is observed:
+ *
+ *   - the OTHER session's read has also returned. Without `for update` this
+ *     is always what happens: both sessions have read the same version before
+ *     either writes, deterministically, which is the lost-update interleaving
+ *     the mutant must exhibit.
+ *   - the OTHER session's backend is waiting on a Lock, on that same read,
+ *     blocked by THIS session's pid (pg_stat_activity + pg_blocking_pids).
+ *     With `for update` this is always what happens: the second reader is
+ *     provably queued behind the first's row lock, so the real test exercises
+ *     the lock rather than a lucky ordering. Holding for "both read" here
+ *     would deadlock (the blocked read cannot return until this session
+ *     commits), which is why the lock wait is itself a release condition —
+ *     and why pointing the mutant test at the real code fails its assertion
+ *     instead of hanging.
+ *
+ * Neither condition within 10s is a loud failure, never a silent pass. The
+ * returned state records what each session read and which condition released
+ * the holds, for the tests to assert on. */
+function holdVersionReadsUntilOverlap(admin, clientA, clientB) {
+  const TIMEOUT_MS = 10000;
+  const state = { reads: {}, lockWaitObserved: false, bothReadObserved: false };
+  const returned = { A: false, B: false };
+  function wrap(name, client, otherName, other) {
     const original = client.query.bind(client);
     let intercepted = false;
     client.query = (text, params) => {
-      if (!intercepted && typeof text === "string" && text.startsWith("select version from loop_item")) {
-        intercepted = true;
-        signalSelf();
-        return waitForOther.then(() => original(text, params));
-      }
-      return original(text, params);
+      if (intercepted || typeof text !== "string" || !text.startsWith("select version from loop_item"))
+        return original(text, params);
+      intercepted = true;
+      return original(text, params).then(async (result) => {
+        state.reads[name] = result.rows[0]?.version;
+        returned[name] = true;
+        const deadline = Date.now() + TIMEOUT_MS;
+        for (;;) {
+          if (returned[otherName]) { state.bothReadObserved = true; return result; }
+          const waiting = await admin.query(
+            `select 1 from pg_stat_activity
+              where pid = $1 and wait_event_type = 'Lock'
+                and query like 'select version from loop_item%'
+                and $2::int = any(pg_blocking_pids(pid))`,
+            [other.processID, client.processID]);
+          if (waiting.rows.length) { state.lockWaitObserved = true; return result; }
+          if (Date.now() > deadline)
+            throw new Error(`session ${name} read version ${state.reads[name]} and session ${otherName} ` +
+              `neither read nor blocked on the row lock within ${TIMEOUT_MS}ms`);
+          await new Promise((resolve) => setTimeout(resolve, 2));
+        }
+      });
     };
   }
-  wrap(clientA, readyA, bReady);
-  wrap(clientB, readyB, aReady);
+  wrap("A", clientA, "B", clientB);
+  wrap("B", clientB, "A", clientA);
+  return state;
+}
+
+/** One amend attempt inside its already-open transaction. The COMMIT (or
+ * rollback) is AWAITED before the attempt settles. It used to be fired and
+ * forgotten, so Promise.all could settle — and the admin connection read the
+ * amendment trail — while the last winner's COMMIT was still in flight: the
+ * trail then showed one row where two had been written (the hosted-CI flake,
+ * "actual: 1, expected: 2"), and the same query moments later showed both. */
+async function attemptInTransaction(client, run) {
+  let result;
+  try {
+    result = await run();
+  } catch (e) {
+    await client.query("rollback");
+    return { ok: false, e };
+  }
+  await client.query("commit");
+  return { ok: true, r: result };
 }
 
 async function mintActor(admin, slug) {
@@ -405,17 +460,13 @@ test("DB: for update really serializes two concurrent amends against the same ba
     // succeeding against the stale one it read.
     await a.query("begin");
     await b.query("begin");
-    synchronizeFirstVersionRead(a, b);
-    const attemptA = TOOLS["amend-closed-loop"].handler(a, actor, {
+    const overlap = holdVersionReadsUntilOverlap(admin, a, b);
+    const attemptA = attemptInTransaction(a, () => TOOLS["amend-closed-loop"].handler(a, actor, {
       idempotency_key: randomUUID(), loop_id, base_version: version,
-      outcome: "Session A's correction of the placeholder outcome.", reason: "session A" })
-      .then((r) => { a.query("commit").catch(() => {}); return { ok: true, r }; })
-      .catch((e) => { a.query("rollback").catch(() => {}); return { ok: false, e }; });
-    const attemptB = TOOLS["amend-closed-loop"].handler(b, actor, {
+      outcome: "Session A's correction of the placeholder outcome.", reason: "session A" }));
+    const attemptB = attemptInTransaction(b, () => TOOLS["amend-closed-loop"].handler(b, actor, {
       idempotency_key: randomUUID(), loop_id, base_version: version,
-      outcome: "Session B's correction of the placeholder outcome.", reason: "session B" })
-      .then((r) => { b.query("commit").catch(() => {}); return { ok: true, r }; })
-      .catch((e) => { b.query("rollback").catch(() => {}); return { ok: false, e }; });
+      outcome: "Session B's correction of the placeholder outcome.", reason: "session B" }));
 
     const [resA, resB] = await Promise.all([attemptA, attemptB]);
     const outcomes = [resA, resB];
@@ -433,6 +484,9 @@ test("DB: for update really serializes two concurrent amends against the same ba
       "the lock must produce EXACTLY ONE amendment row, not one per attempt — without `for update` both sessions " +
       "read the same stale version and both succeed, producing two rows that both record prior_outcome 'x'");
     assert.equal(trail.rows[0].prior_outcome, "x");
+    assert.equal(overlap.lockWaitObserved, true,
+      "the losing session's version read must have been OBSERVED waiting on the winner's row lock — " +
+      "otherwise this run proved a lucky ordering, not the lock");
   } finally {
     await a.end();
     await b.end();
@@ -460,23 +514,20 @@ test("DB MUTANT: removing versionGuard's `for update` breaks the concurrency pro
 
     await a.query("begin");
     await b.query("begin");
-    synchronizeFirstVersionRead(a, b);
-    const attemptA = mutant.TOOLS["amend-closed-loop"].handler(a, actor, {
+    const overlap = holdVersionReadsUntilOverlap(admin, a, b);
+    const attemptA = attemptInTransaction(a, () => mutant.TOOLS["amend-closed-loop"].handler(a, actor, {
       idempotency_key: randomUUID(), loop_id, base_version: version,
-      outcome: "Session A's correction of the placeholder outcome.", reason: "session A" })
-      .then((r) => { a.query("commit").catch(() => {}); return { ok: true, r }; })
-      .catch((e) => { a.query("rollback").catch(() => {}); return { ok: false, e }; });
-    const attemptB = mutant.TOOLS["amend-closed-loop"].handler(b, actor, {
+      outcome: "Session A's correction of the placeholder outcome.", reason: "session A" }));
+    const attemptB = attemptInTransaction(b, () => mutant.TOOLS["amend-closed-loop"].handler(b, actor, {
       idempotency_key: randomUUID(), loop_id, base_version: version,
-      outcome: "Session B's correction of the placeholder outcome.", reason: "session B" })
-      .then((r) => { b.query("commit").catch(() => {}); return { ok: true, r }; })
-      .catch((e) => { b.query("rollback").catch(() => {}); return { ok: false, e }; });
+      outcome: "Session B's correction of the placeholder outcome.", reason: "session B" }));
 
     const [resA, resB] = await Promise.all([attemptA, attemptB]);
     const winners = [resA, resB].filter((o) => o.ok);
 
     // THE PROOF THAT THE LOCK IS LOAD-BEARING: without `for update`, both
-    // sessions read version=2 before either writes, so BOTH pass versionGuard
+    // sessions read version=2 before either writes (holdVersionReadsUntilOverlap
+    // forces that interleaving), so BOTH pass versionGuard
     // and BOTH succeed — the exact bug the reviewer identified. If this
     // mutant somehow still produced only one winner, the concurrency test
     // above would not actually be exercising the lock and would need
@@ -490,6 +541,11 @@ test("DB MUTANT: removing versionGuard's `for update` breaks the concurrency pro
     assert.equal(trail.rows.length, 2, "the mutant appends two amendment rows, not one");
     assert.ok(trail.rows.every((r) => r.prior_outcome === "x"),
       "both rows record the same stale prior_outcome — neither session saw the other's write");
+    assert.deepEqual(overlap.reads, { A: version, B: version },
+      "both sessions read the same base version inside their open transactions");
+    assert.equal(overlap.bothReadObserved, true,
+      "neither session was released to write until both had read — the forced lost-update interleaving");
+    assert.equal(overlap.lockWaitObserved, false, "without `for update` no session ever waits on the read");
   } finally {
     await a.end();
     await b.end();

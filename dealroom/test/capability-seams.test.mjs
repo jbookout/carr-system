@@ -67,10 +67,13 @@ test("healthSeam (V5-A01) is honestly unavailable without a client getHealth", a
 });
 
 test("healthSeam reports real health when the client answers — a read may safely be performed", async () => {
-  const client = { getHealth: async () => ({ status: "green" }) };
-  const result = await healthSeam(client);
+  const scope = { workflow_key: "doctorcre.release", workflow_version: 7, work_request_id: "WR-700" };
+  let observed;
+  const client = { getHealth: async (value) => { observed = value; return { status: "green" }; } };
+  const result = await healthSeam(client, scope);
   assert.equal(result.available, true);
   assert.equal(result.detail.status, "green");
+  assert.deepEqual(observed, scope);
 });
 
 test("healthSeam refuses honestly, never fabricating a value, when the real read throws", async () => {

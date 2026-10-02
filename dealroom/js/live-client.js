@@ -283,6 +283,12 @@ export function createLiveClient(opts = {}) {
       return rpc('read-record-source-authority', { selector: { kind: 'current_policy' } });
     },
 
+    // V5-A01's record-backed, exact-scope health projection. The server owns
+    // both the label and its evidence trace; the browser merely asks and shows.
+    async getHealth(scope) {
+      return rpc('read-assurance-health', { scope });
+    },
+
     async startReview(args) { return write('start-deal-review', args); },
     async reviewDeal(args) { return write('review-deal', args); },
     async endReview(args) { return write('end-deal-review', args); },

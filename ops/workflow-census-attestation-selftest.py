@@ -612,7 +612,7 @@ def main() -> int:
     # the dollar quotes (pg_proc.prosrc). The local Postgres gate checks the
     # same pins against a real database's read door.
     import re as _re
-    migration = (REPO / "migrations" / "0708_workflow_census_store.sql").read_text(encoding="utf-8")
+    migration = (REPO / "migrations" / "0774_workflow_census_store.sql").read_text(encoding="utf-8")
     trigger_functions = dict(_re.findall(
         r"create trigger (workflow_census_record_\w+)\n[^;]*?execute function ops\.(\w+)\(\);",
         migration))

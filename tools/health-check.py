@@ -17,11 +17,13 @@ Second mode, added 2026-08-02:
 classifies scheduled tasks by whether a firing window has actually PASSED, so a
 brand-new task is never mistaken for a broken one. See the scheduler section below.
 """
+import importlib.util
 import json, os, sys, glob, time, re, subprocess, calendar
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
 from zoneinfo import ZoneInfo
 import health_submodule as _health_sub
+import jev_outage_health as _jev_outage
 
 # Script-relative, NOT expanduser("~/carr-system") — same fix as commit fad87a4
 # (tests) and c4d040d (gates). This is the ONLY caller of ops/renders-verify.py,
@@ -104,8 +106,8 @@ def _reader_args(argv):
         # A parent shell may carry this old ambient variable.  Normal health must
         # not pass it to any child or let a child silently choose a Drive reader.
         os.environ.pop("CARR_VAULT", None)
-    if section not in ("all", "exports", "jobs", "registry", "credentials"):
-        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials")
+    if section not in ("all", "exports", "jobs", "registry", "credentials", "jev-spend", "tailscale"):
+        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials|jev-spend|tailscale")
     if fixture and recovery:
         raise SystemExit("health-check: --fixture is for hermetic canonical tests only")
     return recovery, reason, vault, section, fixture, findings_json, rest
@@ -114,6 +116,30 @@ def _reader_args(argv):
 RECOVERY_MODE, RECOVERY_REASON, VAULT, CANONICAL_SECTION, CANONICAL_FIXTURE, FINDINGS_JSON_PATH, \
     _READER_REST = _reader_args(sys.argv[1:])
 sys.argv[1:] = _READER_REST
+
+
+def _jev_spend_row():
+    """Use the same receipt reader and response loop for manual and nightly health."""
+    spend_path = os.path.join(REPO_ROOT, "ops", "jev_spend_health.py")
+    spend_spec = importlib.util.spec_from_file_location("jev_spend_health", spend_path)
+    jev_spend_health = importlib.util.module_from_spec(spend_spec)
+    spend_spec.loader.exec_module(jev_spend_health)
+    return jev_spend_health, jev_spend_health.check_spend(
+        extra_logs=[jev_spend_health.FACTORY_USAGE_LOG],
+        worker_usage=jev_spend_health.read_worker_usage)
+
+
+if CANONICAL_SECTION == "jev-spend":
+    try:
+        _spend_module, _spend_line = _jev_spend_row()
+    except Exception as exc:
+        print(f"UNAVAILABLE jev spend — {type(exc).__name__}; "
+              "on breach: nightly ledger records an incident · owner orchestrator · "
+              "remediation restore the receipt reader · verify the next run reads "
+              "all usage sources · noncritical incidents auto-clear after three healthy runs")
+        sys.exit(1)
+    print(_spend_line)
+    sys.exit(_spend_module.nightly_exit_status(_spend_line))
 
 # ── scheduler register (added 2026-08-02) ────────────────────────────────────
 # A TASK THAT HAS NEVER REACHED ITS FIRST WINDOW LOOKS EXACTLY LIKE A TASK THAT IS
@@ -748,7 +774,25 @@ print(json.dumps({"registered": sorted(TARGETS), "rows": rows, "retired": retire
                             and r.kind='completion') as completion_receipt_count
                    from ops.v_job_control v join ops.job j on j.id=v.id
                    where v.created_at > now() - interval '40 days' and v.mode='live'
-                  order by v.created_at desc"""
+                  order by v.created_at desc;
+                 select 'CPB',
+                        coalesce((select r.activated_at::text
+                                    from ops.calendar_prebrief_runtime_activation_receipt r
+                                    join ops.calendar_prebrief_allowed_calendar a
+                                      on a.sponsor='joe' and a.active_revision_id=r.allowlist_revision_id
+                                    join ops.calendar_prebrief_allowlist_receipt l2
+                                      on l2.id=a.active_revision_id and l2.sponsor='joe'
+                                     and l2.configuration_digest=a.configuration_digest
+                                   where r.id=(select l.id
+                                                 from ops.calendar_prebrief_runtime_activation_receipt l
+                                                where l.sponsor='joe'
+                                                order by l.activated_at desc,l.id desc limit 1)),''),
+                        coalesce((select json_agg(json_build_object(
+                                           'job_id',p.job_id,'attempt',p.attempt,
+                                           'event_count',p.event_count))
+                                    from ops.calendar_prebrief_projection_receipt p
+                                   where p.sponsor='joe'
+                                     and p.captured_at > now() - interval '40 days')::text,'[]')"""
         _venv_python = os.path.join(REPO_ROOT, ".venv/bin/python")
         _query_python = _venv_python if os.path.exists(_venv_python) else sys.executable
         p = subprocess.run(
@@ -794,6 +838,15 @@ print(json.dumps({"registered": sorted(TARGETS), "rows": rows, "retired": retire
                         "leased_until": cols[13], "timeout_seconds": int(cols[14]),
                         "completion_receipt_count": int(cols[15]),
                     })
+                elif len(cols) == 3 and cols[0] == "CPB":
+                    try:
+                        receipts = json.loads(cols[2])
+                    except ValueError:
+                        receipts = None
+                    snapshot["calendar_prebrief"] = {
+                        "activated_at": cols[1] or None,
+                        "receipts": receipts if isinstance(receipts, list) else None,
+                    }
             snapshot["job_definitions"] = definitions
             snapshot["jobs"] = rows
         # NO F09 CENSUS IS PUT INTO THIS SNAPSHOT. The census section fetches the
@@ -1069,6 +1122,125 @@ _FINDINGS: list = []
 # but excludes them from its regression diff (review point D).
 
 
+CALENDAR_PREBRIEF_KEY = "calendar-prebrief-projection-joe-daily"
+# The runtime may enqueue only inside 06:30-06:45 America/Chicago and a claim
+# retries once (base 60s, 300s timeout), so a weekday slot is judged an hour on.
+CALENDAR_PREBRIEF_JUDGED_AFTER = timedelta(minutes=60)
+CALENDAR_PREBRIEF_BREACH = (
+    "on breach: update loop #665 (owner joe-desk session) — read "
+    "out/calendar-prebrief-joe-launchd.log and the job's failure_class, fix the named "
+    "gate, verify with the next 06:30 weekday receipt; clears when the latest due slot "
+    "succeeds with event_count > 0")
+
+
+def _calendar_prebrief_standing(snap):
+    """Joe's live calendar prebrief: a missed weekday run, or 0 events 2 runs running.
+
+    Returns (finding_key, detail) pairs. Silent (no finding) while the prebrief is
+    not activated: an allowlist changed after the last activation fences the
+    scheduler by design, and a fenced job is not a missed one. Once activated,
+    every weekday 06:30 America/Chicago slot at or after the activation must end
+    in a succeeded job carrying a projection receipt, and the two latest
+    receipted slots must not both have read zero events — a bounded 52-day window
+    over Joe's primary calendar that is empty two weekdays in a row is a broken
+    source (wrong calendar, lost permission), not a quiet week.
+    """
+    state = snap.get("calendar_prebrief")
+    if not isinstance(state, dict):
+        return []
+    enabled = {d.get("key") for d in snap.get("job_definitions") or [] if isinstance(d, dict)}
+    activated = _iso(state.get("activated_at"))
+    if CALENDAR_PREBRIEF_KEY not in enabled or activated is None:
+        return []
+    receipts = state.get("receipts")
+    counts = {}
+    for row in receipts if isinstance(receipts, list) else [None]:
+        if (not isinstance(row, dict) or not isinstance(row.get("job_id"), str)
+                or type(row.get("attempt")) is not int or type(row.get("event_count")) is not int):
+            return [("calendar_prebrief_unreadable",
+                     f"{CALENDAR_PREBRIEF_KEY} projection receipts unreadable · {CALENDAR_PREBRIEF_BREACH}")]
+        counts[(row["job_id"], row["attempt"])] = row["event_count"]
+    zone = ZoneInfo("America/Chicago")
+    now = _canonical_now(snap)
+    jobs = [j for j in _live_jobs(snap) if j.get("definition_key") == CALENDAR_PREBRIEF_KEY]
+    slots = []
+    # The job ledger read covers 40 days; judge the recent fortnight only.
+    day = max(activated, now - timedelta(days=14)).astimezone(zone).date()
+    while True:
+        slot = datetime(day.year, day.month, day.day, 6, 30, tzinfo=zone)
+        if slot + CALENDAR_PREBRIEF_JUDGED_AFTER > now:
+            break
+        # The scheduler can still enqueue a slot until 06:45 local.
+        if day.isoweekday() <= 5 and slot + timedelta(minutes=15) > activated:
+            slots.append(slot)
+        day += timedelta(days=1)
+    if not slots:
+        return []
+    outcomes = []  # (slot, event_count or None when no receipted success, job state)
+    for slot in slots:
+        match = [j for j in jobs if _iso(j.get("scheduled_for")) == slot.astimezone(timezone.utc)]
+        done = [counts[(j.get("id"), j.get("attempt"))] for j in match
+                if j.get("state") == "succeeded" and (j.get("id"), j.get("attempt")) in counts]
+        outcomes.append((slot, done[0] if done else None,
+                         match[0].get("state") if match else "never scheduled"))
+    findings = []
+    latest_slot, latest_events, latest_state = outcomes[-1]
+    if latest_events is None:
+        missed = sum(1 for _, events, _ in outcomes[-2:] if events is None)
+        findings.append(("calendar_prebrief_missed_run",
+                         f"{CALENDAR_PREBRIEF_KEY} MISSED its "
+                         f"{latest_slot.strftime('%Y-%m-%d %H:%M %Z')} run ({latest_state}); "
+                         f"{missed} of the last {min(2, len(outcomes))} weekday slot(s) missed "
+                         f"· {CALENDAR_PREBRIEF_BREACH}"))
+    read = [(slot, events) for slot, events, _ in outcomes if events is not None]
+    if len(read) >= 2 and read[-1][1] == 0 and read[-2][1] == 0:
+        findings.append(("calendar_prebrief_zero_events",
+                         f"{CALENDAR_PREBRIEF_KEY} read 0 events on its last 2 runs "
+                         f"({read[-2][0].date()}, {read[-1][0].date()}) "
+                         f"· {CALENDAR_PREBRIEF_BREACH}"))
+    return findings
+
+
+CALENDAR_PREBRIEF_LAST_RUN = os.path.join(REPO_ROOT, "out", "calendar-prebrief-joe-last-run.json")
+CALENDAR_PREBRIEF_UNKNOWN_BREACH = (
+    "on breach: attendee intake (rule d7c69aa6) — search mail, research, then create the "
+    "record for each skipped attendee; owner joe-desk session; verify with the next "
+    "prebrief's count; clears at 0")
+
+
+def _calendar_prebrief_unknowns(now, path=CALENDAR_PREBRIEF_LAST_RUN):
+    """Skipped unknown attendees in the latest completed Joe prebrief (migration 0735).
+
+    Since 0735 an outside attendee the record does not know no longer refuses the
+    snapshot; it is skipped and counted. The count is intake debt, not a failure,
+    so it is surfaced here (the runtime's addressless last-run summary is the only
+    place it lives) and cleared by intake. A summary older than four days is
+    ignored: a stale run is the missed-run finding's business, not this one's.
+    The summary is written under the checkout the runtime runs from, so a
+    health run from any other checkout finds no file and stays silent.
+    Returns (finding_key, detail) pairs; never an address.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            body = json.load(fh)
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError):
+        return [("calendar_prebrief_unknowns_unreadable",
+                 f"{CALENDAR_PREBRIEF_KEY} last-run summary unreadable · {CALENDAR_PREBRIEF_UNKNOWN_BREACH}")]
+    report = body.get("unknown_attendees") if isinstance(body, dict) else None
+    when = _iso(body.get("scheduled_for")) if isinstance(body, dict) else None
+    if (not isinstance(report, dict) or type(report.get("count")) is not int
+            or report["count"] < 0 or when is None):
+        return [("calendar_prebrief_unknowns_unreadable",
+                 f"{CALENDAR_PREBRIEF_KEY} last-run summary malformed · {CALENDAR_PREBRIEF_UNKNOWN_BREACH}")]
+    if now - when > timedelta(days=4) or report["count"] == 0:
+        return []
+    return [("calendar_prebrief_unknown_attendees",
+             f"{CALENDAR_PREBRIEF_KEY} skipped {report['count']} unknown outside attendee(s) "
+             f"on its {when.date()} run · {CALENDAR_PREBRIEF_UNKNOWN_BREACH}")]
+
+
 def _canonical_finding(key, detail, *, subject="", count=1, hard_error=False, time_rolling=False):
     print(f"  CANONICAL_FINDING {key} — {detail}")
     for row in _FINDINGS:
@@ -1130,6 +1302,16 @@ def _red(key, detail, *, subject="", count=1, hard_error=False, time_rolling=Fal
     _canonical_finding(key, detail, subject=subject, count=count,
                         hard_error=hard_error, time_rolling=time_rolling)
     return 1
+
+
+def _tailscale_row():
+    spec = importlib.util.spec_from_file_location(
+        "tailscale_health", os.path.join(REPO_ROOT, "ops", "tailscale_health.py"))
+    if spec is None or spec.loader is None:
+        raise ImportError("Tailscale health loader unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.row(binary=os.environ.get("TAILSCALE_BIN", module.TAILSCALE_BIN))
 
 
 def _canonical_health():
@@ -1268,6 +1450,22 @@ def _canonical_health():
                 detail = f"{job.get('definition_key')} job={job.get('id')} {why}"
                 print(f"  ⚠︎ {detail}")
                 rc = _red("job_stuck", detail, subject=str(job.get("definition_key")))
+            prebrief = _calendar_prebrief_standing(snap)
+            if not CANONICAL_FIXTURE:
+                prebrief += _calendar_prebrief_unknowns(_canonical_now(snap))
+            for key, detail in prebrief:
+                print(f"  ⚠︎ {detail}")
+                # A missed slot is a specific calendar instant, reported like
+                # job_missing_due; zero events is a state, not a clock crossing.
+                # Skipped-attendee counts are intake debt that moves daily. The
+                # key is time_rolling but NOT on the release pipeline's
+                # first-appearance allowlist, so the release gate still diffs it
+                # like doctrine_gate: a first appearance between baseline and
+                # live read fails that release. The finding carries count 1,
+                # so N rising day to day does not.
+                rc = _red(key, detail, subject=CALENDAR_PREBRIEF_KEY,
+                          time_rolling=(key in ("calendar_prebrief_missed_run",
+                                                "calendar_prebrief_unknown_attendees")))
             # THE CARRIED COUNT RIDES ON THE LINE EITHER WAY, same contract the
             # exports section uses for retired targets: a chosen state stays
             # visible rather than becoming silence (rule bd4a6d22).
@@ -1275,7 +1473,7 @@ def _canonical_health():
                 print(f"  -- CARRIED {len(legacy)} definition(s) still on a legacy "
                       f"scheduler, no Control Plane ledger row expected: "
                       f"{', '.join(legacy)}")
-            if not (bad or unreceipted or missing or stuck):
+            if not (bad or unreceipted or missing or stuck or prebrief):
                 print(f"  OK {len(live_jobs)} live job(s), every due window present; "
                       "no terminal failure, stuck state, or unreceipted success")
         # THE CENSUS SECTIONS DO NOT TURN THIS PROCESS RED FOR "CANNOT BE PROVEN",
@@ -1398,6 +1596,15 @@ def _canonical_health():
                 rc = _red("repo_loose_work", f"{len(_actionable)} actionable path(s)", count=len(_actionable))
 
     if CANONICAL_SECTION in ("all", "credentials"):
+        # The source log is canonical across worktrees. The row carries its
+        # response action on both OK and WARN, and the helper owns one loop.
+        try:
+            _, _spend_line = _jev_spend_row()
+            print("  " + _spend_line)
+        except Exception as exc:
+            print(f"  UNAVAILABLE jev spend — {type(exc).__name__}; "
+                  "on breach: open/update one dedup loop · owner orchestrator · "
+                  "remediation find caller in jev usage log · auto-clear when below threshold")
         # ── credential health (added 2026-09-24) ────────────────────────────
         # Daily liveness lane for every credential CARR needs to run
         # unattended — wrangler/Cloudflare, Neon, the two MCP machine-bearer
@@ -1525,6 +1732,45 @@ def _canonical_health():
             rc = _red("credential_health", f"check failed ({type(e).__name__}: {e})", hard_error=True)
 
     if CANONICAL_SECTION == "all":
+        # Jev liveness compares the last usable provider receipt with a
+        # recent failed judgment attempt. The row's loop is filed once and
+        # closed only after a later schema-valid judgment appears in these logs.
+        try:
+            _loop_state = os.path.join(REPO_ROOT, "out", "jev-outage-loop.json")
+            _joh = _jev_outage.evaluate(
+                os.path.join(REPO_ROOT, "out", "jev-judge.jsonl"),
+                os.path.join(REPO_ROOT, "out", "jev-calls.jsonl"),
+                state_path=_loop_state)
+            _action = _jev_outage.action(_joh.get("reason"))
+            _outcome = _jev_outage.reconcile(
+                _joh, _loop_state,
+                lambda name, payload: _jev_outage.call_verb(name, payload, repo=REPO_ROOT))
+            if _joh["status"] == "warn":
+                _last = (f"last success {_joh['age_hours']}h ago"
+                         if _joh["age_hours"] is not None else "no usable call recorded")
+                _condition = ("outage evidence unreadable" if _joh["reason"] == "log_unreadable"
+                              else f"recent attempt failed ({_joh['reason']})")
+                _detail = f"{_last}; {_condition}; loop {_outcome}"
+                print(f"  ⚠︎ {'Jev live judgment':<18} {_detail} · {_action}")
+                rc = _red("jev_live_outage", _detail)
+            elif _outcome == "error":
+                _detail = "outage loop could not be auto-cleared"
+                print(f"  ⚠︎ {'Jev live judgment':<18} {_detail} · {_action}")
+                rc = _red("jev_live_outage", _detail)
+            else:
+                _summary = ("success verified; outage loop cleared" if _outcome == "cleared"
+                            else "recent failure; last success is inside the grace window"
+                            if _joh["pending"]
+                            else "no recent failed attempts" if _joh["status"] == "skip"
+                            else "successful Jev call is fresh")
+                print(f"  {'OK' if _joh['status'] == 'ok' else '--'} "
+                      f"{'Jev live judgment':<18} {_summary} · {_action}")
+        except Exception as e:
+            _detail = f"outage evidence unreadable ({type(e).__name__})"
+            print(f"  ⚠︎ {'Jev live judgment':<18} {_detail} · {_jev_outage.action('log_unreadable')}")
+            rc = _red("jev_live_outage", _detail)
+
+    if CANONICAL_SECTION == "all":
         # Jev call receipt tamper audit (migrations/0587). The receipt store is
         # detectable-not-prevented against its database owner; this is the
         # detection half: a receipt with no matching ask-jev tool_call row, or
@@ -1571,6 +1817,18 @@ def _canonical_health():
             _detail = f"check failed ({type(e).__name__}: {e})"
             print(f"  ⚠︎ {'jev receipts':<18} {_detail}")
             rc = _red("jev_call_receipt_integrity", _detail, hard_error=True)
+
+    if CANONICAL_SECTION in ("all", "tailscale"):
+        try:
+            line, failed = _tailscale_row()
+            print(line)
+            if failed:
+                rc = _red("tailscale", line.strip(), subject="local-node", hard_error=True)
+        except Exception as exc:
+            detail = (f"Tailscale check unavailable ({type(exc).__name__}) · on breach: "
+                      "owner orchestrator · fix: restore ops/tailscale_health.py · "
+                      "verify: rerun health · auto-clear: next successful node read")
+            rc = _red("tailscale", detail, subject="local-node", hard_error=True)
 
     # WHOLE-RUN backstop, alongside the static AST proof in tools/health-
     # check-findings-selftest.py (round 8 of an independent review of PR

@@ -23,5 +23,6 @@ import "../../dealroom/test/inert-registry.test.mjs";
 import "../../dealroom/test/lead-board-client.test.mjs";
 import "../../dealroom/test/lead-board-static.test.mjs";
 import "../../dealroom/test/system-work-branding.test.mjs";
+import "../../dealroom/test/doc-panel-real-browser-journey.test.mjs";
 import "../../dealroom/test/workspace-command-center-model.test.mjs";
 import "../../dealroom/test/workspace-command-center-static.test.mjs";

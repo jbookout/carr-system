@@ -16,6 +16,7 @@
 import { organizationTenantForActor, personalScopeForActor } from "./identity.js";
 import { searchDoctrineSituations } from "./situation-retrieval.js";
 import { CORE_RULE_IDS, CORE_RULE_COUNT, CORE_RULE_TRIAGE_SOURCE } from "./core-rule-ids.js";
+import { ruleBootPage } from "./rule-boot.js";
 
 const CORE_RULE_ID_SET = new Set(CORE_RULE_IDS);
 
@@ -906,7 +907,8 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
     "standing-context": {
       description: "THE SESSION BRIEFING VERB (the #219 design, P6 of the doctrine-store build): everything a session must load before working, served from the store — the taught rules (shared + this partner's personal set, with the counts to recite), pending action-required items, and the doctrine catalog pointer. This replaces file-based rule loading: a session that calls this needs no compiled-rules file, no vault read, no Drive. Call it FIRST in any session; recite the counts back to the partner. DEFAULT detail is `gist` — one line per rule, which is what a boot call can actually hold. Pull full text for the handful you need with rule_ids, or everything with detail=full (large; see the payload note in the handler).",
       inputSchema: { type: "object", properties: {
-        detail: { type: "string", enum: ["gist", "full"], description: "gist (DEFAULT) = one line per rule, no human_quote. full = every rule's complete text; ~180KB at 147 rules, which overflows a tool result on most clients. Prefer gist + rule_ids." },
+        detail: { type: "string", enum: ["gist", "full", "boot"], description: "gist (DEFAULT) = one line per rule, no human_quote. full = every rule's complete text; ~180KB at 147 rules, which overflows a tool result on most clients. Prefer gist + rule_ids. boot = the gated RULE BOOT: the full text of every always-on rule plus a one-line index of every active rule, paged (see `page`); hooks/rule-boot-gate.py denies other tools in a context until it has fetched every page of the current digest." },
+        page: { type: "integer", minimum: 1, description: "detail=boot only: which page of the rule boot to return (1-based, DEFAULT 1). Each response carries pages_total and the exact next call; read every page." },
         rule_ids: { type: "array", items: { type: "string" }, description: "Short ids (the 8-char form the gist prints, e.g. '4e104d4c'). These rules come back in FULL regardless of detail — the lookup path for 'read the binding text before acting on a gist'." },
         workflow: { type: "string", description: "Optional current workflow key used to select applicable typed constraints after registry activation. It is ALSO read as a rule pack name: pass the pack the observed work belongs to and its rules compile into the payload. `rule_delivery.pack_index` lists the names and what triggers each." },
         packs: { type: "array", items: { type: "string" }, description: "Rule packs to compile, when the work spans more than one (git AND a deal, say). Loading is MONOTONIC by design — a pack adds rules and never removes Layer 0. Unknown names come back in rule_delivery.packs_not_found rather than silently loading nothing." },
@@ -932,6 +934,28 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
             hint: "this authenticated runtime expected a server-derived sponsoring human. Reconnect through the registered OAuth flow; do not supply a partner argument." });
         }
         const who = scope.sponsor;
+        // THE GATED RULE BOOT (mcp-server/src/rule-boot.js). Its own branch,
+        // ahead of every other read: it needs only the sponsor-scoped rule
+        // rows (same filter as the recitation below) and must stay cheap,
+        // because every session and subagent fetches every page of it.
+        if (args.detail === "boot") {
+          const bootRows = (await c.query(
+            `select id, statement, personal_to
+               from v_compiled_rules
+              where (personal_to is null or ($1::text is not null and personal_to = $1))
+                and coalesce(scope->>'kind','') <> 'intro_politics'
+              /* standing-context:rule-boot */`, [who])).rows;
+          const bootSponsor = scope.status === "personal" ? who : null;
+          const boot = await ruleBootPage(bootRows, bootSponsor, args.page ?? 1);
+          if (boot.error) {
+            throw new ToolError({ error: boot.error, page: args.page,
+              pages_total: boot.pages_total, digest: boot.digest,
+              hint: `pages run 1..${boot.pages_total}; start again at page 1` });
+          }
+          return { ok: true, rule_boot: boot,
+            identity: { sponsoring_human_id: who,
+              personal_brain_scope: bootSponsor ? `${bootSponsor}-personal` : "none" } };
+        }
         const detail = args.detail === "full" ? "full" : "gist";
         const wanted = new Set((args.rule_ids || []).map(s => String(s).trim().toLowerCase()));
         const requestedPacks = [...new Set(

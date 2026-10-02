@@ -391,17 +391,101 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0706_amend_closed_loop.sql",
         "0707_amend_closed_loop_scac_successor.sql",
     ),
-    # V5-F09 workflow census store: 0708 installs ops.record_workflow_census
-    # (EXECUTE to carr_writer), ops.read_workflow_census (EXECUTE to
-    # carr_reader and carr_writer) and ops.reanchor_workflow_census (EXECUTE
-    # to carr_authority only) behind the append-only, database-hash-chained
-    # ops.workflow_census_record; 0709 seals that catalog as v82, chained
-    # from v81 (0707). Same deferred-epoch-trigger shape as the pairs above --
-    # 0708 applied alone would be refused at commit, so the pair must be one
-    # transaction.
+    # DoctorCRE V5-D01: 0708 installs the append-only action_class_successor
+    # registry (status CHECK-locked to 'inactive', its own immutability
+    # trigger, the read_action_class_successors and
+    # action_class_successor_gate SECURITY DEFINER doors -- EXECUTE to
+    # carr_reader, carr_writer only, PUBLIC explicitly revoked first); 0709
+    # seals that catalog as v82, chained from v81 (0707). Same
+    # deferred-epoch-trigger shape as the pairs above: 0708 applied alone
+    # would be refused at commit, so the pair must be one transaction.
     (
-        "0708_workflow_census_store.sql",
-        "0709_workflow_census_store_scac_successor.sql",
+        "0774_workflow_census_store.sql",
+        "0775_workflow_census_store_scac_successor.sql",
+    ),
+    (
+        "0708_action_class_successor_registry.sql",
+        "0709_action_class_successor_registry_scac_successor.sql",
+    ),
+    # V5-A01: 0717 installs the append-only six-layer assurance-health
+    # evidence store plus its SECURITY DEFINER record/read doors; 0718 seals
+    # those grants and the two registered MCP verbs as SCAC v83, chained
+    # from v82 (0709).
+    (
+        "0717_assurance_health_evidence_store.sql",
+        "0718_assurance_health_evidence_store_scac_successor.sql",
+    ),
+    # DoctorCRE V5-A03: 0719 installs the append-only complete-set review
+    # cycle and its SECURITY DEFINER writer/read doors; 0720 seals the exact
+    # source and catalog as SCAC v84, chained from v83 (0718). The deferred
+    # policy-epoch trigger must see both or neither.
+    (
+        "0719_doctorcre_a03_review_store.sql",
+        "0720_doctorcre_a03_review_scac_successor.sql",
+    ),
+    # DoctorCRE V5-A02: 0721 installs the append-only Joe-authority fallback
+    # receipt, its authority-only writer, and the universal read-only active
+    # rule coverage function; 0722 seals that catalog as provisional v85,
+    # chained from v84 (0720). The deferred SCAC epoch trigger means the pair
+    # must commit atomically.
+    (
+        "0721_a02_rule_enforcement_coverage.sql",
+        "0722_a02_rule_enforcement_coverage_scac_successor.sql",
+    ),
+    # DoctorCRE V5-F05: 0724 installs the authority-bound typed rule-contract
+    # store and its actor-scoped universe reader; 0725 seals the resulting
+    # source and database capability frontier as provisional v87, chained from
+    # v86 (0723). The deferred policy-epoch trigger must observe both or neither.
+    (
+        "0724_f05_live_rule_context.sql",
+        "0725_f05_live_rule_context_scac_successor.sql",
+    ),
+    # DoctorCRE V5-RW02: 0726 installs the append-only attended Salesforce
+    # reconciliation evidence store and its SECURITY DEFINER doors; 0727 seals
+    # those exact ingresses and catalog grants as provisional v88, chained
+    # from v87 (0725). The domain migration cannot commit without its
+    # matching successor.
+    (
+        "0726_salesforce_reconciliation_rw02_store.sql",
+        "0727_salesforce_reconciliation_rw02_scac_successor.sql",
+    ),
+    # DoctorCRE V5-RW02 safe stops: 0733 installs the append-only attended-run
+    # outcome ledger, the consent-revocation record, their SECURITY DEFINER
+    # doors and the deal invoiced marker; 0734 seals those ingresses and grants
+    # as provisional v91, chained from v90 (0731). Both or neither.
+    (
+        "0733_salesforce_rw02_safe_stop_run_store.sql",
+        "0734_salesforce_rw02_safe_stop_scac_successor.sql",
+    ),
+    # The industry events table changes the measured catalog. Its v92 seal
+    # must commit with the domain migration so no intermediate catalog leaks.
+    (
+        "0738_industry_events.sql",
+        "0739_industry_events_scac_successor.sql",
+    ),
+    (
+        "0740_board_answers.sql",
+        "0741_board_answers_scac_successor.sql",
+    ),
+    (
+        "0744_doc_suggestions.sql",
+        "0745_doc_suggestions_scac_successor.sql",
+    ),
+    (
+        "0749_tour_client_feedback.sql",
+        "0750_tour_client_feedback_scac_successor.sql",
+    ),
+    (
+        "0754_tour_property_evidence.sql",
+        "0755_property_evidence_scac_successor.sql",
+    ),
+    (
+        "0757_progress_directory_scac_successor.sql",
+    ),
+    (
+        "0765_doc_whats_new.sql",
+        "0766_doc_whats_new_repair.sql",
+        "0767_doc_whats_new_scac_successor.sql",
     ),
 )
 
@@ -475,8 +559,64 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0707_amend_closed_loop_scac_successor.sql",
     ),
     (
-        "0708_workflow_census_store.sql",
-        "0709_workflow_census_store_scac_successor.sql",
+        "0774_workflow_census_store.sql",
+        "0775_workflow_census_store_scac_successor.sql",
+    ),
+    (
+        "0708_action_class_successor_registry.sql",
+        "0709_action_class_successor_registry_scac_successor.sql",
+    ),
+    (
+        "0717_assurance_health_evidence_store.sql",
+        "0718_assurance_health_evidence_store_scac_successor.sql",
+    ),
+    (
+        "0719_doctorcre_a03_review_store.sql",
+        "0720_doctorcre_a03_review_scac_successor.sql",
+    ),
+    (
+        "0721_a02_rule_enforcement_coverage.sql",
+        "0722_a02_rule_enforcement_coverage_scac_successor.sql",
+    ),
+    (
+        "0724_f05_live_rule_context.sql",
+        "0725_f05_live_rule_context_scac_successor.sql",
+    ),
+    (
+        "0726_salesforce_reconciliation_rw02_store.sql",
+        "0727_salesforce_reconciliation_rw02_scac_successor.sql",
+    ),
+    (
+        "0733_salesforce_rw02_safe_stop_run_store.sql",
+        "0734_salesforce_rw02_safe_stop_scac_successor.sql",
+    ),
+    (
+        "0738_industry_events.sql",
+        "0739_industry_events_scac_successor.sql",
+    ),
+    (
+        "0740_board_answers.sql",
+        "0741_board_answers_scac_successor.sql",
+    ),
+    (
+        "0744_doc_suggestions.sql",
+        "0745_doc_suggestions_scac_successor.sql",
+    ),
+    (
+        "0749_tour_client_feedback.sql",
+        "0750_tour_client_feedback_scac_successor.sql",
+    ),
+    (
+        "0754_tour_property_evidence.sql",
+        "0755_property_evidence_scac_successor.sql",
+    ),
+    (
+        "0757_progress_directory_scac_successor.sql",
+    ),
+    (
+        "0765_doc_whats_new.sql",
+        "0766_doc_whats_new_repair.sql",
+        "0767_doc_whats_new_scac_successor.sql",
     ),
 )
 

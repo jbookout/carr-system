@@ -78,12 +78,13 @@ export async function lifecycleSeam(client, dealId) {
  * so — unlike lifecycleSeam — this may safely perform it. Otherwise
  * unavailable.
  * @param {import('./client.js').DealRoomClient|null|undefined} client
+ * @param {{workflow_key:string,workflow_version:number,work_request_id?:string}} scope
  * @returns {Promise<SeamResult>}
  */
-export async function healthSeam(client) {
+export async function healthSeam(client, scope) {
   if (typeof client?.getHealth === 'function') {
     try {
-      const detail = await client.getHealth();
+      const detail = await client.getHealth(scope);
       return { available: true, capability: 'V5-A01', detail };
     } catch (error) {
       return refused('V5-A01', error, 'Health read failed.');

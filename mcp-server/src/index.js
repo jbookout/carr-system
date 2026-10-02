@@ -35,6 +35,9 @@
 //               minus humanOnly, same as the agent-token door, never a wider
 //               grant than that.
 //   /pipeline/changes  OAuth-protected Deal Room event cursor + live presence.
+//   /doc/mcp    Partner-only Doc brokerage tools, behind the same OAuth
+//               provider. The resource path pins a closed capability profile;
+//               request parameters cannot expand it. No machine-token door.
 //   /authorize  Google sign-in starts (our code — see google-oidc.js)
 //   /callback   Google returns; identity verified; allow-list applied; issue
 //   /token      implemented by the provider
@@ -87,7 +90,7 @@ import { agentActorForToken, authenticatedIdentity, continuityActorForTokenMaps,
 import { pipelineChanges } from "./dealroom.js";
 import { authorizeProgram6Action, createDealroomHandler, isDealroomRequest, isLegacyDealroomRequest } from "./dealroom-web.js";
 import { createProgram6RoutineController } from "./program6-routine-controller.js";
-import { appendRoomTurn, DEFAULT_ROOM, readRoomQueue, readRoomTurns } from "./partner-room.js";
+import { appendRoomTurn, DEFAULT_ROOM, OBSERVATORY_ROOM, readRoomQueue, readRoomTurns } from "./partner-room.js";
 import { createCaptureHandler } from "./capture.js";
 import { TOOLS } from "./tools.js";
 import { buildRelease } from "./release.js";
@@ -212,7 +215,7 @@ const defaultHandler = {
   },
 };
 
-// Both protected routes receive the same provider-verified ctx.props. The
+// Protected routes receive the same provider-verified ctx.props. The
 // pipeline function itself accepts an actor and query client, so the Deal Room
 // session-cookie gate mounts it without changing its contract.
 async function pipelineApi(request, env, actor) {
@@ -251,7 +254,7 @@ function captureHandler(env) {
 const protectedApiHandler = {
   async fetch(request, env, ctx) {
     const pathname = new URL(request.url).pathname;
-    if (pathname === "/mcp") return mcpApiHandler.fetch(request, env, ctx);
+    if (pathname === "/mcp" || pathname === "/doc/mcp") return mcpApiHandler.fetch(request, env, ctx);
     if (pathname !== "/pipeline/changes") return json({ error: "not_found" }, 404);
     // THE GRANT DOOR, WITH THE SERVER'S WITNESS. `actorFromProps` is no longer
     // exported (amendment 8, fourth correction round): a grant's props are an
@@ -585,7 +588,7 @@ function continuityActorFor(request, env) {
 // ---------- the provider ----------
 
 const oauthProvider = new OAuthProvider({
-  apiRoute: ["/mcp", "/pipeline/changes"],
+  apiRoute: ["/mcp", "/doc/mcp", "/pipeline/changes"],
   apiHandler: protectedApiHandler,
   defaultHandler,
 
@@ -639,14 +642,17 @@ const dealroomHandler = createDealroomHandler({
     const client = { query: async (text, params = []) => ({ rows: await sql.query(text, params) }) };
     return readCommandCenterSummary({ client, actor, correlationId: correlationId || env.CORRELATION_ID });
   },
-  // The Model Room observatory's two doors onto the partner room. Both call the
-  // SAME functions the read-room / add-room-turn verbs call (partner-room.js) —
+  // The Model Room observatory's doors onto the room wire. Turns are read and
+  // posted in OBSERVATORY_ROOM, the room the local bridge polls, so a browser
+  // post reaches the queue; the queue projection is read from DEFAULT_ROOM where
+  // Hermes writes it. All call the SAME functions the read-room / add-room-turn
+  // verbs call (partner-room.js) —
   // these two adapters supply a connection and nothing else, so the panel can
   // never read a different wire than a desk does.
   roomReadFn: (env, params) => {
     const sql = neon(env.DATABASE_URL_READER);
     const client = { query: async (text, values = []) => ({ rows: await sql.query(text, values) }) };
-    return readRoomTurns(client, { room: DEFAULT_ROOM, ...params });
+    return readRoomTurns(client, { room: OBSERVATORY_ROOM, ...params });
   },
   queueReadFn: (env, params) => {
     const sql = neon(env.DATABASE_URL_READER);
@@ -657,7 +663,7 @@ const dealroomHandler = createDealroomHandler({
     const pool = new Pool({ connectionString: env.DATABASE_URL_WRITER });
     const client = await pool.connect();
     try {
-      return await appendRoomTurn(client, { room: DEFAULT_ROOM, ...params });
+      return await appendRoomTurn(client, { room: OBSERVATORY_ROOM, ...params });
     } finally {
       client.release();
       await pool.end();

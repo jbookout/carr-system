@@ -17,6 +17,8 @@ from typing import Any
 
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO))
+from lib import launchd_calendar  # noqa: E402
 SERVICES = REPO / "ops" / "config" / "services.json"
 TOMBSTONES = REPO / "ops" / "config" / "reachability-tombstones.json"
 PLIST = REPO / "ops" / "launchd" / "com.carr.fleet-sync.plist"
@@ -71,8 +73,9 @@ def main() -> int:
           launchd.get("ProgramArguments") == expected_arguments,
           repr(launchd.get("ProgramArguments")))
     check("LaunchAgent fires hourly",
-          launchd.get("StartInterval") == 3600,
-          repr(launchd.get("StartInterval")))
+          "StartInterval" not in launchd
+          and launchd_calendar.cadence_seconds(launchd) == 3600,
+          repr(launchd.get("StartCalendarInterval")))
     check("LaunchAgent also fires at load (login/wake catch-up)",
           launchd.get("RunAtLoad") is True,
           repr(launchd.get("RunAtLoad")))

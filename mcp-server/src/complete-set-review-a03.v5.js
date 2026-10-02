@@ -1,27 +1,30 @@
-// DoctorCRE v5 slice V5-A03 — THE INDEPENDENT-REVIEW PUBLIC SURFACE, and it is
-// a surface that cannot say yes about anything.
+// DoctorCRE v5 slice V5-A03 — THE LEGACY PURE-POLICY SURFACE, and it is a
+// surface that cannot say yes about anything. The authoritative append-only
+// implementation now lives behind the tools in independent-review-cycle-
+// store.v5.js; this module remains intentionally input-insensitive so PR #987's
+// historical classifier boundary cannot become a second authority.
 //
 // WHAT THIS FILE MAY NOT DECIDE, said first because it is the whole point.
 //
-// (1) WHETHER A REVIEW IS INDEPENDENT. There is no reviewer identity registry
-// in this repository. A caller naming a builder, an architect, a releaser and
+// (1) WHETHER A REVIEW IS INDEPENDENT. This pure module does not read the
+// authoritative reviewer identity registry. A caller naming a builder, an architect, a releaser and
 // eleven reviewers is DESCRIBING a separation, not evidencing one, and nothing
 // here can check that the identity the caller calls the builder is the identity
 // that built the change. So identity separation is not established by
 // construction, and no exported function reports it as established.
 //
-// (2) WHETHER A FINDING SET IS THE COMPLETE ONE. There is no finding registry.
+// (2) WHETHER A FINDING SET IS THE COMPLETE ONE. This pure module does not read the finding registry.
 // The nearest relative is `receipt.receipt.deviations` — the maker's own list of
 // what is wrong with the maker's own work — which is exactly the shape this
 // slice must never treat as authority.
 //
 // (3) WHICH ROUND THIS IS, OR WHETHER THE PRIOR ROUND WAS BATCH-REPAIRED AND
-// FULLY REGRESSED. There is no round ledger. `ops.engineering_reviewer_fact`
+// FULLY REGRESSED. This pure module does not read the round ledger. `ops.engineering_reviewer_fact`
 // rows could be counted, but a count of reviewer facts is a count of REVIEWERS:
 // a second independent reviewer of one unchanged receipt is indistinguishable
 // from a second round after a repair, and Q042.D1's bound is on rounds.
 //
-// (4) HOW A DISPUTE ENDED. There is no adjudication receipt store.
+// (4) HOW A DISPUTE ENDED. This pure module does not read the adjudication receipt store.
 // `adjudicate-incident` and `adjudicate-investigation-branch` settle incidents
 // and investigation branches — different subjects, with no slice, round,
 // reviewer or delivered set anywhere in them. Reusing one would be a second
@@ -341,8 +344,8 @@ function reason(id) {
 //
 // Each is a NAME, not a port: nothing a caller passes can become one, because
 // no function here accepts a holder as an argument and this module exports no
-// way to bind one. The bindings are `null` because the seams do not exist. When
-// a ruling builds one, this object is the single place it binds.
+// way to bind one. The bindings stay `null` because this legacy pure-policy
+// surface deliberately does not read the authoritative record-layer store.
 // ---------------------------------------------------------------------------
 
 const V5_A03_BINDINGS = Object.freeze({
@@ -421,7 +424,8 @@ function refuseSecondArgument(received, name, seam, code) {
  * check that the identity called `builder` built anything, that the identity
  * called `reviewer-security` is entitled to review security, or that two refs
  * spelled differently are two different actors. Establishing that is
- * `seam:independent-reviewer-identity-registry`, and it does not exist.
+ * `seam:independent-reviewer-identity-registry`, which this legacy pure-policy
+ * surface deliberately does not bind.
  */
 export function readReviewRoutingAdmission(request) {
   // eslint-disable-next-line no-unused-vars, prefer-rest-params -- the arity IS
@@ -431,7 +435,7 @@ export function readReviewRoutingAdmission(request) {
   return unavailable(
     "review_routing_admission",
     "reviewer_identity_registry_unavailable",
-    "no authoritative registry of which identities may review, in which dimension, on which change exists, so identity separation cannot be established by construction",
+    "this legacy pure-policy surface does not bind the authoritative reviewer registry, so identity separation cannot be established here",
     [V5_REVIEWER_IDENTITY_REGISTRY_SEAM],
     V5_ROUTING_CHECKS,
     {
@@ -530,10 +534,10 @@ export function readReviewRoundAdmission(request) {
  *
  * MAY IT: unavailable. HOW DID IT END: this module never says, on any input,
  * forever. `adjudicated_outcome` is null and `disposition_recorded` is false
- * because `seam:bounded-adjudication-receipt-store` does not exist — nothing in
- * this repository can write a pass, a fail or a quarantine for a review dispute,
- * and an outcome a party can state about its own dispute is not an adjudication,
- * it is a self-certification with a judge's letterhead.
+ * because this legacy pure-policy surface does not bind
+ * `seam:bounded-adjudication-receipt-store`; an outcome a party can state about
+ * its own dispute is not an adjudication, it is a self-certification with a
+ * judge's letterhead.
  */
 export function readBoundedAdjudication(request) {
   // eslint-disable-next-line no-unused-vars, prefer-rest-params -- the arity IS
@@ -543,7 +547,7 @@ export function readBoundedAdjudication(request) {
   return unavailable(
     "bounded_adjudication",
     "bounded_adjudication_receipt_store_unavailable",
-    "no store holds an adjudication receipt for a review dispute, so no disposition can be recorded and no outcome can be read",
+    "this legacy pure-policy surface does not bind the adjudication receipt store, so no disposition can be recorded or read here",
     [V5_ADJUDICATION_RECEIPT_STORE_SEAM],
     V5_ADJUDICATION_CHECKS,
     {
@@ -551,7 +555,7 @@ export function readBoundedAdjudication(request) {
       round_limit: V5_MAX_REVIEW_ROUNDS,
       adjudication_receipt_store_seam: V5_ADJUDICATION_RECEIPT_STORE_SEAM,
       store_bound: boundSeam(V5_ADJUDICATION_RECEIPT_STORE_SEAM, "resolveReceipt") !== null,
-      // Null and false on every input, forever, until the store exists.
+      // Null and false on every input because this surface never reads the store.
       adjudicated_outcome: null,
       outcome_is_caller_stated: false,
       disposition_recorded: false,
@@ -574,9 +578,9 @@ export function readBoundedAdjudication(request) {
  * dispute was adjudicated".
  *
  * A receipt is resolved from the authoritative store or it is not resolved at
- * all. The store does not exist, so this reports that and nothing else, and a
- * receipt body handed in as a second argument is a contract violation rather
- * than evidence.
+ * all. This legacy surface does not bind the store, so it reports that and
+ * nothing else; a receipt body handed in as a second argument is a contract
+ * violation rather than evidence.
  *
  * THE SHAPE RULES STILL EXIST AND ARE STILL PROVED — content addressing, digest
  * agreement, kind, change and delivered-set binding, the closed outcome
@@ -594,7 +598,7 @@ export function verifyAdjudicationReceipt(request) {
   return unavailable(
     "adjudication_receipt_verification",
     "bounded_adjudication_receipt_store_unavailable",
-    "an adjudication receipt is resolved from the authoritative store, and no such store exists; a receipt body supplied by a caller is not a reading of one",
+    "an adjudication receipt is resolved from the authoritative store, which this legacy pure-policy surface does not bind; a caller-supplied body is not a reading of one",
     [V5_ADJUDICATION_RECEIPT_STORE_SEAM],
     V5_ADJUDICATION_CHECKS,
     {
@@ -624,8 +628,8 @@ export function verifyAdjudicationReceipt(request) {
 // `isolating`, which published the same three dispositions in a thesaurus.
 //
 // The binding these codes are owed belongs to
-// `seam:bounded-adjudication-receipt-store`, which does not exist. When it does,
-// it — and only it — decides which stored disposition is which ordinal, and it
+// `seam:bounded-adjudication-receipt-store`, which this legacy surface does not
+// bind. The authoritative store alone decides which stored disposition is which ordinal, and it
 // pins this vocabulary through `v5A03AdjudicationOutcomeVocabularyDigest()`
 // rather than by importing values that never leave this file.
 // ---------------------------------------------------------------------------
