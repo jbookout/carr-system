@@ -1262,16 +1262,16 @@ def test_strict_still_owns_the_gates_class():
 
 
 # ------------------------------------------------- 25. the hosted split
-def _hosted_workflow():
-    """ci.yml as a dict, parsed by the js-yaml the server already carries."""
+def _hosted_workflow(filename="ci.yml"):
+    """Workflow as a dict, parsed by the js-yaml the server already carries."""
     import json
     out = subprocess.run(
         ["node", "-e",
          "const y=require('js-yaml');const fs=require('fs');"
          "process.stdout.write(JSON.stringify(y.load(fs.readFileSync(process.argv[1],'utf8'))))",
-         str(REPO / ".github" / "workflows" / "ci.yml")],
+         str(REPO / ".github" / "workflows" / filename)],
         cwd=REPO / "mcp-server", capture_output=True, text=True, timeout=60)
-    check("ci.yml parses", out.returncode == 0, out.stderr[-300:])
+    check(f"{filename} parses", out.returncode == 0, out.stderr[-300:])
     return json.loads(out.stdout) if out.returncode == 0 else {}
 
 
@@ -1319,6 +1319,31 @@ def test_hosted_ci_runs_classes_in_parallel_behind_one_required_context():
     check("every CLASS_ORDER class runs in exactly one class job",
           sorted(ran) == sorted(classes) and len(ran) == len(set(ran)),
           {"ran": ran, "order": classes})
+
+
+def test_hosted_migration_budget_covers_the_database_lane():
+    """Both workflows run the canonical migration class, including DB gates.
+
+    PR 1406's required job expired at twenty minutes while the disposable
+    PostgreSQL lane completed successfully. Setup plus the migration proofs
+    must fit the same finite budget in either hosted route.
+    """
+    jobs = _hosted_workflow().get("jobs") or {}
+    database_jobs = _hosted_workflow("db-acceptance.yml").get("jobs") or {}
+    database_budget = (database_jobs.get("acceptance") or {}).get("timeout-minutes")
+    check("database acceptance declares a finite job budget",
+          isinstance(database_budget, int) and database_budget > 0, database_budget)
+    migration_jobs = []
+    for name, job in jobs.items():
+        groups = ((job.get("strategy") or {}).get("matrix") or {}).get("classes") or []
+        if any("migration" in str(group).split() for group in groups):
+            migration_jobs.append(name)
+            budget = job.get("timeout-minutes")
+            check(f"hosted migration job '{name}' covers the database lane budget",
+                  isinstance(budget, int) and isinstance(database_budget, int)
+                  and budget >= database_budget > 0,
+                  {"migration_minutes": budget, "database_minutes": database_budget})
+    check("the hosted migration budget was checked", bool(migration_jobs))
 
 
 def test_hosted_zsh_setup_does_not_refresh_working_indexes():
@@ -1408,6 +1433,7 @@ def main():
                test_push_floor_defers_the_gates_class_instead_of_running_it,
                test_strict_still_owns_the_gates_class,
                test_hosted_ci_runs_classes_in_parallel_behind_one_required_context,
+               test_hosted_migration_budget_covers_the_database_lane,
                test_hosted_zsh_setup_does_not_refresh_working_indexes):
         try:
             fn()
