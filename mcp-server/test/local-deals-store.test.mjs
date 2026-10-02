@@ -53,7 +53,7 @@ test('Local Deals PostgreSQL caller and evidence regressions', { skip: !bin && '
     for (const [slug, sort] of [['research', 1], ['negotiation', 2], ['legal', 3], ['closed', 4]]) {
       await c.query('insert into deal_phase(slug,label,sort) values($1,$1,$2)', [slug, sort]);
     }
-    await c.query(readFileSync(path.join(root, 'migrations/0769_local_deal_board_evidence.sql'), 'utf8'));
+    await c.query(readFileSync(path.join(root, 'migrations/0771_local_deal_board_evidence.sql'), 'utf8'));
     const fixture = async national => {
       await c.query("insert into party(id,kind,name,created_by,updated_by) values($1,'org','Synthetic Practice',$2,$2)", [id(2), actor.id]);
       await c.query('insert into client(id,party_id,created_by,updated_by) values($1,$2,$3,$3)', [id(3), id(2), actor.id]);

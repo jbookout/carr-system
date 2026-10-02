@@ -26,7 +26,7 @@ test('deal-room-board returns exact phase event identity and invoice marker in t
 });
 
 test('phase evidence projection selects the latest change, dates evidence independently and excludes undo automation',async () => {
-  const sql=await readFile(new URL('../../migrations/0769_local_deal_board_evidence.sql',import.meta.url),'utf8');
+  const sql=await readFile(new URL('../../migrations/0771_local_deal_board_evidence.sql',import.meta.url),'utf8');
   assert.match(sql,/distinct on \(e\.subject_id\)/);
   assert.match(sql,/order by e\.subject_id, e\.recorded_at desc, e\.id desc/);
   assert.match(sql,/e\.occurred_at/);
