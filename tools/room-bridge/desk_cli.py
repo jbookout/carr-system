@@ -67,7 +67,7 @@ def cmd_refresh(reg: desks.Registry, args) -> int:
         print(f"refresh: no desk named {args.name!r} — register it first", file=sys.stderr)
         return 2
     entry = entries[args.name]
-    if args.cwd and entry.get("kind") in ("claude-desktop", "codex-session", "codex-live"):
+    if args.cwd and entry.get("kind") in ("claude-desktop", "codex-session", "codex-live", "grok-cli"):
         # desks.Registry.register() always starts a codex-session entry with
         # thread_id=None (untouched, on purpose — see desks.py). Re-pointing a
         # stale cwd through it therefore also drops any old thread_id, which is
@@ -113,7 +113,7 @@ def cmd_list(reg: desks.Registry, args) -> int:
         seat = e.get("room_seat", "(no room seat — bridge will not route to it)")
         last_seen = e.get("last_seen", "never")
         last_live = e.get("last_live")
-        if e.get("kind") in ("claude-desktop", "codex-session", "codex-live") and e.get("model"):
+        if e.get("kind") in ("claude-desktop", "codex-session", "codex-live", "grok-cli") and e.get("model"):
             where = f"{e.get('model')} (effort={e.get('effort')})"
         else:
             where = e.get("socket") or "?"
@@ -150,7 +150,8 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--effort", default=None, choices=list(desks.EFFORT_CHOICES))
     r.add_argument("--cwd", default=None)
     r.add_argument("--permission-mode", default=None,
-                   choices=["acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"])
+                   help="dispatched desks use dontAsk only; other modes are refused and "
+                        "permission needs go to the orchestrator")
     r.add_argument("--seat", default=None, help="the room seat this desk speaks for")
     r.add_argument("--room-listen", default=None, choices=list(registry_ext.ROOM_LISTEN_MODES),
                    help="'mention': hear people's turns, and other desks only when @seat-mentioned")

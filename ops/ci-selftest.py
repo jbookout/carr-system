@@ -1262,16 +1262,16 @@ def test_strict_still_owns_the_gates_class():
 
 
 # ------------------------------------------------- 25. the hosted split
-def _hosted_workflow():
-    """ci.yml as a dict, parsed by the js-yaml the server already carries."""
+def _hosted_workflow(filename="ci.yml"):
+    """Workflow as a dict, parsed by the js-yaml the server already carries."""
     import json
     out = subprocess.run(
         ["node", "-e",
          "const y=require('js-yaml');const fs=require('fs');"
          "process.stdout.write(JSON.stringify(y.load(fs.readFileSync(process.argv[1],'utf8'))))",
-         str(REPO / ".github" / "workflows" / "ci.yml")],
+         str(REPO / ".github" / "workflows" / filename)],
         cwd=REPO / "mcp-server", capture_output=True, text=True, timeout=60)
-    check("ci.yml parses", out.returncode == 0, out.stderr[-300:])
+    check(f"{filename} parses", out.returncode == 0, out.stderr[-300:])
     return json.loads(out.stdout) if out.returncode == 0 else {}
 
 
@@ -1321,6 +1321,99 @@ def test_hosted_ci_runs_classes_in_parallel_behind_one_required_context():
           {"ran": ran, "order": classes})
 
 
+def test_hosted_migration_budget_covers_observed_acceptance_runtime():
+    """PR1121's strict migration job was killed at 20 minutes, while its
+    separate exact-head DB acceptance succeeded after 23m51s. Allow at least
+    30 minutes including setup, without relaxing the other groups' budgets.
+    Both workflows run the canonical migration class; its budget must also
+    cover the separate database lane. Read the actual job/matrix wiring,
+    so an unused budget cannot pass.
+    """
+    job = _hosted_workflow()["jobs"]["classes"]
+    groups = job["strategy"]["matrix"]["classes"]
+    budgets = re.fullmatch(
+        r"\$\{\{ matrix\.classes == 'migration' && (\d+) \|\| (\d+) \}\}",
+        str(job["timeout-minutes"]))
+    check("class jobs select a bounded migration-specific budget", budgets is not None)
+    if budgets is None:
+        return
+    migration_budget, other_budget = map(int, budgets.groups())
+    database_jobs = _hosted_workflow("db-acceptance.yml").get("jobs") or {}
+    database_budget = (database_jobs.get("acceptance") or {}).get("timeout-minutes")
+    check("database acceptance declares a finite job budget",
+          isinstance(database_budget, int) and database_budget > 0, database_budget)
+    check("hosted migration budget covers the database lane budget",
+          isinstance(database_budget, int) and migration_budget >= database_budget > 0,
+          {"migration_minutes": migration_budget, "database_minutes": database_budget})
+    migration = [migration_budget for group in groups if group == "migration"]
+    check("migration job has bounded headroom over the observed 24-minute run",
+          len(migration) == 1 and 30 <= migration[0] <= 35, migration)
+    other = [other_budget for group in groups if group != "migration"]
+    check("other class groups retain their 20-minute budgets",
+          len(other) == 2 and all(budget == 20 for budget in other), other)
+
+
+def test_hosted_zsh_setup_does_not_refresh_working_indexes():
+    """PR 1465 spent its entire job budget in apt update before any class ran.
+
+    Execute the workflow's setup with a synthetic apt, not a second installer.
+    A working install must never refresh; stale indexes must still be repaired;
+    an unavailable mirror must fail setup rather than green-light missing zsh.
+    """
+    wf = _hosted_workflow()
+    setup = next(st for st in wf["jobs"]["classes"]["steps"]
+                 if st.get("name") == "Install zsh")
+    check("zsh setup has a three-minute step deadline",
+          0 < setup.get("timeout-minutes", 0) <= 3)
+    with tempfile.TemporaryDirectory(prefix="ci-zsh-setup-") as tmp:
+        fixture = pathlib.Path(tmp)
+        sudo = fixture / "sudo"
+        sudo.write_text("#!" + sys.executable + "\n" + '''
+import json, os, pathlib, sys
+log = pathlib.Path(os.environ["CI_SETUP_CALLS"])
+calls = json.loads(log.read_text()) if log.exists() else []
+calls.append(sys.argv[1:])
+log.write_text(json.dumps(calls))
+args = sys.argv[1:]
+mode = os.environ["CI_SETUP_FIXTURE"]
+if mode == "working" and "update" in args:
+    sys.exit(91)
+if mode != "working" and len(calls) == 1:
+    sys.exit(100)
+if mode == "unavailable" and "update" in args:
+    sys.exit(100)
+if mode == "retry-failed" and len(calls) == 3:
+    sys.exit(100)
+''')
+        sudo.chmod(0o755)
+        for mode, expected in (("working", ["install"]),
+                               ("stale", ["install", "update", "install"]),
+                               ("unavailable", ["install", "update"]),
+                               ("retry-failed", ["install", "update", "install"])):
+            log = fixture / (mode + ".json")
+            env = scrubbed_env()
+            env.update(PATH=str(fixture) + os.pathsep + os.environ["PATH"],
+                       CI_SETUP_CALLS=str(log), CI_SETUP_FIXTURE=mode)
+            ran = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", setup["run"]],
+                                 cwd=fixture, env=env, capture_output=True, text=True,
+                                 timeout=10)
+            calls = json.loads(log.read_text()) if log.exists() else []
+            actions = [next((arg for arg in args if arg in ("install", "update")), "unknown")
+                       for args in calls]
+            check(f"zsh setup {mode} uses the required install/refresh path",
+                  actions == expected, actions)
+            check(f"zsh setup {mode} propagates its outcome",
+                  (ran.returncode != 0) == (mode in ("unavailable", "retry-failed")),
+                  ran.returncode)
+            check(f"zsh setup {mode} bounds every apt network request",
+                  bool(calls) and all(args[0] == "apt-get" and
+                      all(option in args for option in ("Acquire::Retries=1",
+                          "Acquire::http::Timeout=15", "Acquire::https::Timeout=15"))
+                      for args in calls), calls)
+        check("zsh remains a required installed package",
+              all("zsh" in args for args in calls if "install" in args))
+
+
 def main():
     for fn in (test_no_green_without_running,
                test_class_table_is_complete,
@@ -1346,7 +1439,9 @@ def main():
                test_gates_selftests_have_a_process_group_watchdog,
                test_push_floor_defers_the_gates_class_instead_of_running_it,
                test_strict_still_owns_the_gates_class,
-               test_hosted_ci_runs_classes_in_parallel_behind_one_required_context):
+               test_hosted_ci_runs_classes_in_parallel_behind_one_required_context,
+               test_hosted_migration_budget_covers_observed_acceptance_runtime,
+               test_hosted_zsh_setup_does_not_refresh_working_indexes):
         try:
             fn()
         except Exception as exc:  # a crashing case is a failing case, never a silent skip

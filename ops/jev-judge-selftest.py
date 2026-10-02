@@ -58,6 +58,11 @@ class LibraryShapeTests(unittest.TestCase):
 
 
 class JudgeTests(unittest.TestCase):
+    def test_explicit_evaluated_model_reaches_client(self):
+        client = FakeClient()
+        judge_mod.judge({"code": "x"}, {"q": {}}, client=client, model="jev-1.13.0")
+        self.assertEqual(client.calls[0][2]["model"], "jev-1.13.0")
+
     def test_every_question_about_one_subject_travels_in_one_request(self):
         client = FakeClient({"a": {"type": "noul", "noul": 0.9},
                              "b": {"type": "noul", "noul": 0.1}})
@@ -132,6 +137,153 @@ class RecordTests(unittest.TestCase):
         with open(self.log, "a", encoding="utf-8") as handle:
             handle.write("{not json\n")
         self.assertEqual(judge_mod.agreement(self.log, kind="k")["rows"], 1)
+
+
+class CalibrationRecordTests(unittest.TestCase):
+    """record() keeps what a later calibration needs: a judgment id to join an
+    outcome to, the question family and consequence class, the full
+    distribution with entropy, and what the caller actually did."""
+
+    def setUp(self):
+        self.dir = self.enterContext(tempfile.TemporaryDirectory())
+        self.log = str(Path(self.dir) / "jev-judge.jsonl")
+
+    def _rows(self):
+        return [json.loads(line) for line in Path(self.log).read_text().splitlines() if line.strip()]
+
+    def test_row_carries_judgment_id_family_class_action_and_distribution(self):
+        answer = judge_mod.judge({"code": "x"}, {"q": {}}, client=FakeClient(
+            {"q": {"type": "choice", "choice": "b", "confidence": 0.8,
+                   "probabilities": {"a": 0.2, "b": 0.8}}}))
+        row = judge_mod.record("gate_probe", "ops/thing.py", answer, log_path=self.log,
+                               family="defect_class", consequence_class="commit_warning",
+                               downstream_action={"q": "warned"}, receipt_id="r-1")
+        self.assertRegex(row["judgment_id"], r"^[0-9a-f-]{36}$")
+        stored = self._rows()[0]
+        self.assertEqual(stored["judgment_id"], row["judgment_id"])
+        self.assertEqual(stored["family"], "defect_class")
+        self.assertEqual(stored["consequence_class"], "commit_warning")
+        self.assertEqual(stored["downstream_action"], {"q": "warned"})
+        self.assertEqual(stored["receipt_id"], "r-1")
+        question = stored["calibration"]["questions"]["q"]
+        self.assertEqual(question["distribution"], {"a": 0.2, "b": 0.8})
+        self.assertAlmostEqual(question["entropy_bits"], 0.7219280948873623)
+        self.assertEqual(stored["calibration"]["model_answered"], "jev-1.13.0")
+
+    def test_client_calibration_block_is_kept_verbatim_when_present(self):
+        block = {"schema": "carr.jev-calibration.v1", "model_requested": "jev-1.13.0",
+                 "model_answered": "jev-1.13.0", "model_pinned": True,
+                 "state_sha256": "0" * 64, "questions": {"q": {"entropy_bits": 0.1}}}
+        answer = {"model": "jev-1.13.0", "answers": {"q": {"type": "noul", "noul": 0.99}},
+                  "calibration": block}
+        judge_mod.record("k", "ref", answer, log_path=self.log)
+        self.assertEqual(self._rows()[0]["calibration"], block)
+
+    def test_error_rows_still_get_a_judgment_id_and_no_calibration(self):
+        row = judge_mod.record("k", "ref", None, error="down", log_path=self.log,
+                               family="f", consequence_class="c", downstream_action="fell_back")
+        self.assertIn("judgment_id", row)
+        self.assertNotIn("calibration", row)
+        self.assertEqual(row["downstream_action"], "fell_back")
+
+
+class RouteTests(unittest.TestCase):
+    """Code owns the act-or-review decision; Jev only supplies the entropy."""
+
+    BANDS = {"schema": "carr.jev-calibrated-bands.v1", "bands": {
+        "defect_class": {"commit_warning": {"max_entropy_bits": 0.6, "model": "jev-1.13.0"}}}}
+
+    def _answer(self, p, model="jev-1.13.0"):
+        return {"model": model, "answers": {"q": {"type": "noul", "noul": p}}}
+
+    def _route(self, answer, family="defect_class", consequence_class="commit_warning", bands=None):
+        return judge_mod.route(answer, "q", family=family, consequence_class=consequence_class,
+                               bands=self.BANDS if bands is None else bands)
+
+    def test_within_the_calibrated_band_acts(self):
+        routed = self._route(self._answer(0.95))  # 0.286 bits
+        self.assertEqual(routed["route"], "act")
+        self.assertEqual(routed["reason"], "within_calibrated_band")
+
+    def test_above_the_calibrated_band_goes_to_review(self):
+        routed = self._route(self._answer(0.8))  # 0.722 bits
+        self.assertEqual((routed["route"], routed["reason"]), ("review", "above_calibrated_band"))
+        self.assertAlmostEqual(routed["entropy_bits"], 0.7219280948873623)
+        self.assertEqual(routed["max_entropy_bits"], 0.6)
+
+    def test_an_uncalibrated_family_or_class_goes_to_review(self):
+        self.assertEqual(self._route(self._answer(0.99), family="other")["reason"], "uncalibrated")
+        self.assertEqual(self._route(self._answer(0.99), consequence_class="client_document")["reason"],
+                         "uncalibrated")
+
+    def test_a_band_never_transfers_to_another_model(self):
+        routed = self._route(self._answer(0.99, model="jev-1.14.0"))
+        self.assertEqual((routed["route"], routed["reason"]), ("review", "model_mismatch"))
+
+    def test_no_distribution_means_review(self):
+        answer = {"model": "jev-1.13.0", "answers": {"q": {"type": "choice", "choice": "a",
+                                                           "confidence": 0.99}}}
+        self.assertEqual(self._route(answer)["reason"], "no_distribution")
+        answer = {"model": "jev-1.13.0", "calibration": {
+            "schema": "carr.jev-calibration.v1", "model_requested": "jev-1.13.0",
+            "model_answered": "jev-1.13.0", "model_pinned": True,
+            "questions": {"q": {"distribution": {"true": 0.99, "false": 0.01}}}}}
+        self.assertEqual(self._route(answer)["route"], "review")
+
+    def test_supplied_partial_or_forged_calibration_cannot_authorize_an_act(self):
+        answer = self._answer(0.8)  # actual entropy is above the band
+        answer["calibration"] = {"questions": {"q": {"entropy_bits": 0.01}}}
+        self.assertEqual(self._route(answer)["route"], "review")
+        low_entropy = self._answer(0.99)
+        low_entropy["calibration"] = {"questions": {"q": {"entropy_bits": 0.01}}}
+        self.assertEqual(self._route(low_entropy)["reason"], "calibration_mismatch")
+        complete = judge_mod._client().answer_distribution(None, low_entropy["answers"]["q"])
+        complete.pop("distribution")
+        low_entropy["calibration"] = {
+            "schema": "carr.jev-calibration.v1", "model_requested": "jev-1.13.0",
+            "model_answered": "jev-1.13.0", "model_pinned": True,
+            "questions": {"q": complete}}
+        self.assertEqual(self._route(low_entropy)["reason"], "calibration_mismatch")
+        answer["calibration"]["questions"]["q"] = {
+            "entropy_bits": 0.01, "distribution_complete": True,
+            "distribution": {"true": 0.99, "false": 0.01}}
+        self.assertEqual(self._route(answer)["route"], "review")
+
+    def test_moving_model_alias_never_acts_even_if_named_in_a_band(self):
+        alias_bands = {"schema": "carr.jev-calibrated-bands.v1", "bands": {
+            "defect_class": {"commit_warning": {"max_entropy_bits": 0.6,
+                                                  "model": "jev-latest"}}}}
+        self.assertEqual(self._route(self._answer(0.99, model="jev-latest"),
+                                      bands=alias_bands)["route"], "review")
+
+    def test_zero_probability_offered_choice_is_valid_in_a_full_block(self):
+        raw = {"type": "choice", "choice": "b", "probabilities": {"a": 0.1, "b": 0.9}}
+        answer = {"model": "jev-1.13.0", "answers": {"q": raw}}
+        summary = judge_mod._client().answer_distribution(
+            {"type": "choice", "criteria": {"a": "a", "b": "b", "c": "c"}}, raw)
+        answer["calibration"] = {
+            "schema": "carr.jev-calibration.v1", "model_requested": "jev-1.13.0",
+            "model_answered": "jev-1.13.0", "model_pinned": True,
+            "questions": {"q": summary}}
+        self.assertEqual(self._route(answer)["route"], "act")
+
+    def test_pooled_or_malformed_bands_are_refused_as_review(self):
+        pooled = {"schema": "carr.jev-calibrated-bands.v1",
+                  "bands": {"*": {"commit_warning": {"max_entropy_bits": 2, "model": "jev-1.13.0"}}}}
+        self.assertEqual(self._route(self._answer(0.99), family="*", bands=pooled)["reason"],
+                         "band_invalid")
+        wrong = {"schema": "carr.jev-calibrated-bands.v1",
+                 "bands": {"defect_class": {"commit_warning": {"max_entropy_bits": -1,
+                                                               "model": "jev-1.13.0"}}}}
+        self.assertEqual(self._route(self._answer(0.99), bands=wrong)["reason"], "band_invalid")
+
+    def test_committed_bands_file_is_valid_and_calibrates_nothing_yet(self):
+        bands = judge_mod.load_bands()
+        self.assertEqual(bands["schema"], "carr.jev-calibrated-bands.v1")
+        self.assertEqual(bands["bands"], {},
+                         "a band enters only from a held-out calibration report, reviewed")
+        self.assertEqual(judge_mod.route(self._answer(0.999), "q", family="defect_class",
+                                         consequence_class="commit_warning")["route"], "review")
 
 
 class DefaultsTests(unittest.TestCase):

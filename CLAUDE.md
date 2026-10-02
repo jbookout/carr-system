@@ -1,9 +1,8 @@
 # carr-system — repo pointer for sessions
 
-Code lives here. Business, brand, persona, and deal context does NOT — by
-design. Before concluding something "doesn't exist," query the CARR Record
-Layer (the MCP connector's verbs, or `./run.sh retrieve "<question>"` locally):
-it is the source of truth for doctrine, records, and brand.
+Code lives here. The CARR Record Layer owns business, brand, persona, deal
+context and doctrine. Query its verbs or `./run.sh retrieve "<question>"`
+before declaring anything absent.
 
 The 2026-08-19 cutoff retired the generated Drive .md files; there is no
 compiled-rules file or vault CLAUDE.md to fall back on. A session that cannot
@@ -49,6 +48,11 @@ the classifier declined; that is working around a denial rather than filing it.
 ## Migration and release state
 Read current canonical migration/release state before naming frontier/blocker.
 Dated incidents/WRs are history; source/CI grants no live authority.
+
+## Steering evals
+
+Surfaces in `evals/surfaces.json`: `/claude-api build-eval`, then
+`/claude-api hillclimb`; ship per `evals/README.md`.
 
 ## Map work has one mandatory front door
 
@@ -98,5 +102,6 @@ silently treated as absent.
    A17 back as closed. Only then report the migration complete to Dell in plain
    language.
 
-There is no local fallback any more. The doctrine store is the only doctrine
-surface; if it is unreachable, stop and say so.
+## PR design and debt
+
+Read and follow [the required PR policy](AGENTS.md#before-every-pr-design-and-debt-pass).

@@ -59,21 +59,30 @@ KNOWN_HOSTS in hooks/guard-unattended.py.
 """
 
 import hashlib
+import importlib.util
 import json
 import math
 import os
 import re
 import sqlite3
+import shutil
+import uuid
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from functools import partial
 
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 KEY_PATH = os.path.expanduser("~/.config/carr/typesafe.env")
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_judge_spec = importlib.util.spec_from_file_location(
+    "carr_judge_interface", os.path.join(REPO, "tools", "judge", "interface.py"))
+assert _judge_spec and _judge_spec.loader
+JUDGE = importlib.util.module_from_spec(_judge_spec)
+_judge_spec.loader.exec_module(JUDGE)
 
 
 def _canonical_repo_root(fallback):
@@ -220,12 +229,234 @@ def score(instructions, levels):
     return {"type": "score", "instructions": instructions, "criteria": levels}
 
 
+# THE FULL DISTRIBUTION, NOT JUST THE PICK (Joe's ruling: code decides, Jev
+# only judges, and thresholds are calibrated per action). A pick and a
+# confidence cannot be calibrated after the fact; the distribution it came from
+# can. These readers turn one typed answer into the distribution over every
+# option, its entropy in bits, and the top option, identically to the Worker's
+# answerDistribution() in mcp-server/src/jev-call-receipt.js — both suites run
+# ops/fixtures/jev-calibration/distribution-vectors.v1.json. Nothing here is a
+# threshold: entropy is recorded so a threshold can later be MEASURED per
+# question family (ops/jev_calibration.py), never assumed.
+#
+# The tolerance is numeric sanity for rounded vendor probabilities (three
+# options at two decimals can miss one by 0.015), not a decision boundary.
+PROBABILITY_SUM_TOLERANCE = 0.02
+MOVING_MODEL_ALIAS = re.compile(r"(?:^|-)latest$")
+
+
+def model_is_pinned(model):
+    """True for an exact model version; false for a moving alias or nothing."""
+    return isinstance(model, str) and bool(model.strip()) and not MOVING_MODEL_ALIAS.search(model.strip())
+
+
+def state_sha256(state):
+    """sha256 of the canonical JSON of the state; equals the Worker's state_sha256."""
+    return _prompt_sha256(state)
+
+
+def entropy_bits(probabilities):
+    """Shannon entropy in bits of an already-normalized probability list."""
+    return -sum(p * math.log2(p) for p in probabilities if p > 0) + 0.0
+
+
+def _probability(value):
+    return (not isinstance(value, bool) and isinstance(value, (int, float))
+            and math.isfinite(value) and 0 <= value <= 1)
+
+
+def answer_distribution(question, answer):
+    """One answer as {type, distribution, distribution_complete,
+    probability_sum, entropy_bits, top, top_probability}.
+
+    `question` may be None (a log row that kept the answers but not the
+    questions); options the answer names are then the whole option set.
+    distribution is None when the vendor returned no probabilities; entropy is
+    None unless every probability is valid and they sum to one within
+    PROBABILITY_SUM_TOLERANCE. Missing offered options count as zero.
+    """
+    question = question if isinstance(question, dict) else {}
+    answer = answer if isinstance(answer, dict) else {}
+    kind = question.get("type") or answer.get("type")
+    distribution = None
+    top = None
+    if kind == "noul":
+        p = answer.get("noul")
+        if _probability(p):
+            distribution = {"true": p, "false": 1 - p}
+    elif kind in ("choice", "score"):
+        raw = answer.get("probabilities")
+        criteria = question.get("criteria")
+        if kind == "choice":
+            offered = (list(criteria) if isinstance(criteria, dict) else
+                       list(question.get("choices") or []))
+            top = answer.get("choice") if isinstance(answer.get("choice"), str) else None
+            if isinstance(raw, dict):
+                keys = offered + [k for k in raw if k not in offered]
+                distribution = {k: raw.get(k, 0) for k in keys}
+        else:
+            levels = criteria if isinstance(criteria, list) else []
+            if isinstance(raw, dict):
+                count = max([len(levels)] + [int(k) + 1 for k in raw
+                                             if isinstance(k, str) and k.isascii() and k.isdigit()])
+                distribution = {}
+                for index in range(count):
+                    level = levels[index] if index < len(levels) else None
+                    value = raw.get(level) if level is not None and level in raw else raw.get(str(index), 0)
+                    distribution[str(index)] = value
+    complete = False
+    total = None
+    entropy = None
+    top_probability = None
+    if distribution is not None:
+        values = list(distribution.values())
+        if values and all(_probability(v) for v in values):
+            total = sum(values)
+            complete = abs(total - 1) <= PROBABILITY_SUM_TOLERANCE
+            if complete and total > 0:
+                entropy = entropy_bits([v / total for v in values])
+            best = max(values)
+            top = next(k for k, v in distribution.items() if v == best)
+            top_probability = best
+    return {"type": kind, "distribution": distribution, "distribution_complete": complete,
+            "probability_sum": total, "entropy_bits": entropy, "top": top,
+            "top_probability": top_probability}
+
+
+def calibration_block(state, questions, result, model_requested):
+    """What a later calibration needs about one call, attached to ask()'s result."""
+    result = result if isinstance(result, dict) else {}
+    answers = result.get("answers") if isinstance(result.get("answers"), dict) else {}
+    questions = questions if isinstance(questions, dict) else {}
+    return {
+        "schema": "carr.jev-calibration.v1",
+        "model_requested": model_requested,
+        "model_answered": result.get("model"),
+        "model_pinned": model_is_pinned(model_requested),
+        "state_sha256": state_sha256(state),
+        "questions": {key: answer_distribution(questions.get(key), answers.get(key))
+                      for key in sorted(answers)},
+    }
+
+
+def _safe_calibration_block(state, questions, result, model_requested):
+    """Recording must never turn a usable judgment into a failed call."""
+    try:
+        return calibration_block(state, questions, result, model_requested)
+    except Exception:
+        return None
+
+
 def _session_id():
     for key in SESSION_ID_ENV_KEYS:
         value = os.environ.get(key)
         if value and value.strip():
             return value.strip()
     return None
+
+
+# System-work calls use the Worker's append-only call log. The authenticated
+# local-verb transport holds the MCP bearer; this client never reads it.
+# Receipts are diagnostic evidence, not per-turn obligations: PR 1407 retired
+# prompt-facet enforcement in favor of judgment-boundary checks.
+# Runtime consumers keep their pinned direct Jev route. The external Worker
+# ingress derives system_work, so it cannot reinterpret a runtime request.
+# On Worker failure the direct fallback uses the remaining caller budget and
+# records a fixed error category with no server receipt or raw error text.
+SERVER_VERB = "ask-jev"
+# Hooks retain the direct route to stay within their timeout. An explicitly
+# requested build advisory can still use the server log; prompt intake defers it.
+IN_HOOK_ENV = "CARR_JEV_IN_HOOK"
+# The Worker caps its own vendor call at 10s; node's start and the round trip
+# get the rest. The whole server attempt never takes more than this share of
+# the caller's timeout, so a failed attempt still leaves time to go direct.
+SERVER_SHARE_OF_TIMEOUT = 0.7
+MIN_DIRECT_SECONDS = 2.0
+
+
+def _local_verb_script():
+    """mcp-server/local-verb.mjs, preferring this checkout's own copy and
+    falling back to the canonical checkout's (every worktree shares one
+    Worker, so either reaches the same verb)."""
+    for root in (REPO, CANONICAL_REPO):
+        candidate = os.path.join(root, "mcp-server", "local-verb.mjs")
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def _node_binary():
+    for candidate in (shutil.which("node"), "/opt/homebrew/bin/node", "/usr/local/bin/node"):
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _server_error_category(stderr):
+    """A fixed category for a failed verb call. Never the raw text: local-verb
+    stderr is the Worker's own error JSON, which carries no credential, but a
+    category is all a receipt or a gate needs."""
+    text = stderr or ""
+    for marker, category in (
+            ('"unknown_tool"', "verb_not_deployed"),
+            ('"jev_proxy_unconfigured"', "worker_key_unbound"),
+            ('"jev_upstream_failed"', "vendor_failed_at_worker"),
+            ("could not reach the deployed Worker", "worker_unreachable"),
+            ("no MCP token", "local_token_missing"),
+            ("refusing MCP token file", "local_token_insecure")):
+        if marker in text:
+            return category
+    return "server_call_failed"
+
+
+def server_ask(state, questions, *, model, facets, purpose, session_id, timeout,
+               runner=None):
+    """Ask the Worker's ask-jev verb. Returns (result, None) on success, where
+    result is {"model", "answers", "usage", "server_receipt": {...}}, or
+    (None, <category>) on any failure. Never raises."""
+    script = _local_verb_script()
+    node = _node_binary()
+    if runner is None and (script is None or node is None):
+        return None, "node_or_local_verb_missing"
+    args = {
+        "idempotency_key": str(uuid.uuid4()),
+        "session_id": session_id,
+        "purpose": purpose,
+        "state": state,
+        "questions": questions,
+        "facets": sorted({str(f) for f in facets}) if facets else [],
+        "model": model,
+    }
+    try:
+        run = runner or subprocess.run
+        proc = run([node or "node", script or "local-verb.mjs", SERVER_VERB,
+                    json.dumps(args, ensure_ascii=False)],
+                   capture_output=True, text=True,
+                   timeout=float(timeout),
+                   stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return None, "server_timeout"
+    except Exception:
+        return None, "server_call_failed"
+    if proc.returncode != 0:
+        return None, _server_error_category(proc.stderr)
+    try:
+        out = json.loads(proc.stdout)
+    except ValueError:
+        return None, "server_response_unparseable"
+    if (not isinstance(out, dict) or out.get("ok") is not True
+            or not isinstance(out.get("answers"), dict)
+            or not isinstance(out.get("receipt_id"), str)):
+        return None, "server_response_malformed"
+    return {
+        "model": out.get("model"),
+        "answers": out["answers"],
+        "usage": out.get("usage") if isinstance(out.get("usage"), dict) else None,
+        "cache_hit": out.get("cache_hit") is True,
+        "server_receipt": {k: out.get(k) for k in (
+            "receipt_id", "recorded_at", "purpose", "session_id",
+            "state_sha256", "prompt_sha256")},
+    }, None
 
 
 def usable_judgment(result, questions):
@@ -363,7 +594,8 @@ def _store_cached_result(path, cache_key, result, ttl):
 
 def _append_call_receipt(questions, facets, result, log_path, *, caller=None,
                          question_kind=None, prompt_sha256=None, ok=True,
-                         cache_hit=False, error=None):
+                         cache_hit=False, error=None, calibration=None,
+                         server_error=None, session=None):
     """Best-effort, APPEND-ONLY JSONL row, never storing the request or the
     answers, never able to turn a successful ask() into a failure. See
     JEV_CALLS_LOG above.
@@ -377,6 +609,12 @@ def _append_call_receipt(questions, facets, result, log_path, *, caller=None,
     shell write naming this file, and hooks/completion-evidence-gate.py
     records a detection event for any turn whose tool calls name it — this
     function, reached only through ask(), is the one legitimate writer.
+
+    `calibration` is ask()'s calibration_block(). The row keeps only its
+    numbers — entropy and completeness per question, aligned with
+    question_ids_sha256 — plus the state digest and the requested model. The
+    distributions themselves name options, which are caller text, so they stay
+    in the returned result and in jev_judge.record()'s log, never here.
     """
     try:
         answered = result if isinstance(result, dict) else {}
@@ -385,7 +623,7 @@ def _append_call_receipt(questions, facets, result, log_path, *, caller=None,
                   else bool(ok and usage))
         row = {
             "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "session": _session_id(),
+            "session": session or _session_id(),
             "question_ids_sha256": [hashlib.sha256(qid.encode("utf-8")).hexdigest()
                                     for qid in sorted(questions)],
             "caller": caller,
@@ -401,7 +639,20 @@ def _append_call_receipt(questions, facets, result, log_path, *, caller=None,
             "usable": usable,
             "ok": bool(ok and usable and not cache_hit),
             "cache_hit": cache_hit,
+            "server_receipt_id": ((answered.get("server_receipt") or {}).get("receipt_id")
+                                  if not cache_hit else None),
+            "server_error": server_error,
         }
+        per_question = (calibration or {}).get("questions") if isinstance(calibration, dict) else None
+        ordered = [per_question.get(qid) or {} for qid in sorted(questions)] if isinstance(per_question, dict) else None
+        row.update({
+            "state_sha256": calibration.get("state_sha256") if per_question is not None else None,
+            "model_requested": calibration.get("model_requested") if per_question is not None else None,
+            "model_pinned": calibration.get("model_pinned") if per_question is not None else None,
+            "entropy_bits": [q.get("entropy_bits") for q in ordered] if ordered is not None else None,
+            "distribution_complete": ([q.get("distribution_complete") is True for q in ordered]
+                                      if ordered is not None else None),
+        })
         if error:
             row["error"] = error
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
@@ -414,7 +665,29 @@ def _append_call_receipt(questions, facets, result, log_path, *, caller=None,
 def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
         api_key=None, retries=RATE_LIMIT_RETRIES, endpoint=ENDPOINT, opener=None,
         facets=None, calls_log=JEV_CALLS_LOG, deadline=None, caller=None,
-        cache_ttl_seconds=JUDGE_CACHE_TTL_SECONDS, cache_path=JUDGE_CACHE_PATH, account=None):
+        cache_ttl_seconds=JUDGE_CACHE_TTL_SECONDS, cache_path=JUDGE_CACHE_PATH, account=None,
+        work_class="system_work", purpose="call", server_runner=None, session_id=None):
+    """Compatibility entrypoint: all existing callers cross the class switch.
+
+    The original transport retains its wire, retry, cache and receipt contract.
+    Runtime consumers explicitly pass app_runtime, which cannot use Decisions.
+    """
+    try:
+        return JUDGE.ask(state, questions, jev=partial(_ask_jev, work_class=work_class), work_class=work_class,
+                         model=model, timeout=timeout, api_key=api_key, retries=retries,
+                         endpoint=endpoint, opener=opener, facets=facets, calls_log=calls_log,
+                         deadline=deadline, caller=caller or _caller_name(),
+                         cache_ttl_seconds=cache_ttl_seconds, cache_path=cache_path, account=account,
+                         purpose=purpose, server_runner=server_runner, session_id=session_id)
+    except JUDGE.JudgeUnavailable as exc:
+        raise TypeSafeError(str(exc)) from None
+
+
+def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
+             api_key=None, retries=RATE_LIMIT_RETRIES, endpoint=ENDPOINT, opener=None,
+             facets=None, calls_log=JEV_CALLS_LOG, deadline=None, caller=None,
+             cache_ttl_seconds=JUDGE_CACHE_TTL_SECONDS, cache_path=JUDGE_CACHE_PATH, account=None,
+             purpose="call", server_runner=None, session_id=None, work_class="system_work"):
     """Evaluate `state` against a map of questions in ONE request.
 
     `state` is a string, or a mapping when the context has several parts —
@@ -435,6 +708,14 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
     production. On a successful response this also appends one best-effort
     receipt row to `calls_log` (default out/jev-calls.jsonl) — see
     JEV_CALLS_LOG's module-level note for what it carries and why.
+
+    System-work calls try the Worker's receipt-recording verb before the direct
+    transport. Runtime calls keep the pinned vendor route: the external Worker
+    ingress derives system_work and cannot carry a caller-selected runtime class.
+    Hook-internal calls remain direct. `purpose`
+    distinguishes a normal call from the build advisory; `session_id` binds a
+    hook's payload identity, and `server_runner` is an offline test seam.
+    The Worker owns caching on that path; direct calls retain the local cache.
 
     `deadline` is optional: an absolute time.monotonic() value. With one,
     each attempt's timeout and each rate-limit sleep is capped at the time
@@ -469,6 +750,44 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
 
     if not isinstance(cache_ttl_seconds, (int, float)) or not math.isfinite(cache_ttl_seconds) or cache_ttl_seconds < 0:
         raise TypeSafeError("cache_ttl_seconds must be a finite nonnegative number")
+    server_error = None
+    started = time.monotonic()
+    in_hook = os.environ.get(IN_HOOK_ENV) == "1" and purpose != "build_advisory"
+    if opener is None and api_key is None and not in_hook and work_class != "app_runtime":
+        server_timeout = float(timeout)
+        if deadline is not None:
+            server_timeout = min(server_timeout, deadline - started)
+        if server_timeout <= 0:
+            raise TypeSafeError("deadline passed before the request could be sent")
+        served, server_error = server_ask(
+            state, questions, model=model, facets=facets, purpose=purpose,
+            session_id=session_id or _session_id() or "unbound",
+            timeout=server_timeout * SERVER_SHARE_OF_TIMEOUT, runner=server_runner)
+        if served is not None:
+            cache_hit = served.get("cache_hit") is True
+            # Worker cache hits carry typed answers and a new bound receipt,
+            # but no billable usage. Validate their answers without reporting
+            # the validation placeholder as measured spend.
+            validation = ({**served, "usage": {"input_tokens": 0, "output_tokens": 0}}
+                          if cache_hit else served)
+            valid = usable_judgment(validation, questions)
+            calibration = (_safe_calibration_block(state, questions, served, model)
+                           if valid else None)
+            _append_call_receipt(questions, facets,
+                {**served, "schema_valid": valid, "usable": valid}, calls_log,
+                caller=caller, question_kind=question_kind, prompt_sha256=prompt_sha256,
+                ok=valid, cache_hit=cache_hit, calibration=calibration, session=session_id)
+            if not valid:
+                raise TypeSafeError("TypeSafe returned an unusable judgment")
+            served["calibration"] = calibration
+            return served
+        # Preserve the caller's total budget through the direct fallback.
+        deadline = min(deadline, started + float(timeout)) if deadline is not None else started + float(timeout)
+        timeout = deadline - time.monotonic()
+        if timeout < MIN_DIRECT_SECONDS:
+            raise TypeSafeError(f"Jev server path failed ({server_error}) and no time is left for a direct call")
+    elif in_hook:
+        server_error = "in_hook_direct"
     use_cache = cache_ttl_seconds > 0 and opener is None
     credential = api_key or read_api_key()
     cache_key = (_cache_key(endpoint, account, credential, model, caller,
@@ -476,9 +795,10 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
     if use_cache:
         hit = _cached_result(cache_path, cache_key)
         if hit is not None:
+            hit["calibration"] = _safe_calibration_block(state, questions, hit, model)
             _append_call_receipt(questions, facets, hit, calls_log, caller=caller,
                                  question_kind=question_kind, prompt_sha256=prompt_sha256,
-                                 ok=False, cache_hit=True)
+                                 ok=False, cache_hit=True, calibration=hit["calibration"])
             return hit
 
     request = urllib.request.Request(
@@ -517,6 +837,8 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
             schema_valid = usable_judgment(result, questions)
             usable = (type(http_status) is int and 200 <= http_status < 300 and
                       schema_valid)
+            calibration = (_safe_calibration_block(state, questions, result, model)
+                           if schema_valid else None)
             # Round-2 fix: only a REAL production call (no opener) writes a
             # receipt. `opener` is the offline selftest/mock path (see the
             # docstring above) — a mock response was never actually seen by
@@ -530,12 +852,17 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
                             "usable": False})
                 _append_call_receipt(questions, facets, receipt, calls_log,
                                      caller=caller, question_kind=question_kind,
-                                     prompt_sha256=prompt_sha256, ok=usable)
+                                     prompt_sha256=prompt_sha256, ok=usable,
+                                     calibration=calibration,
+                                     server_error=server_error or "direct_call", session=session_id)
             if not usable:
                 raise TypeSafeError("TypeSafe returned an unusable judgment")
             if use_cache:
                 _store_cached_result(cache_path, cache_key, result,
                                      cache_ttl_seconds)
+            # Attached after caching, so the cache holds the vendor's answer
+            # alone and a hit recomputes the block from it.
+            result["calibration"] = calibration
             return result
         except urllib.error.HTTPError as err:
             if opener is None:

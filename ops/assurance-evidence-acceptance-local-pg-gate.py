@@ -2183,7 +2183,11 @@ def main() -> int:
                 join pg_namespace n on n.oid=c.relnamespace cross join lateral
                 aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) acl
                 where n.nspname='ops' and c.relname like 'assurance_%%'
-                  and c.relkind='r' and acl.grantee<>c.relowner)
+                  and c.relkind='r' and acl.grantee<>c.relowner
+                  -- The dedicated review login reads all business tables.
+                  -- Only its non-grantable SELECT is authorized here.
+                  and not coalesce((acl.grantee=to_regrole('dot_reader')
+                    and acl.privilege_type='SELECT' and not acl.is_grantable),false))
               and not exists(select 1 from pg_proc p
                 join pg_namespace n on n.oid=p.pronamespace cross join lateral
                 aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) acl
@@ -2196,7 +2200,7 @@ def main() -> int:
                     'ops.record_assurance_execution_manifest(uuid,uuid,bigint,text,jsonb,jsonb,jsonb,jsonb,uuid)'::regprocedure,
                     'ops.assurance_manifest_currentness(uuid,text,text,text,text,text,uuid)'::regprocedure])
                     and acl.grantee='carr_ownership_issuer'::regrole))""")[0]
-            check("A3a tables and non-approved functions have owner-only ACLs", no_external_acl)
+            check("A3a tables allow only owner authority and Dot SELECT; functions retain exact callers", no_external_acl)
             issuer_functions = one(cur, """select coalesce(array_agg(p.oid::regprocedure::text
               order by p.oid::regprocedure::text),'{}'::text[]) from pg_proc p cross join lateral
               aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) acl
