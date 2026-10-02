@@ -73,3 +73,14 @@ test('actor switch between read and command refuses all three writes before muta
   assert.match(migration,/0768_confirm_merge_human_only_scac_successor.sql/);
   assert.match(migration,/0769_lead_archived_stage.sql/);
  });
+
+test('reference monitor pins the predecessor counts sealed by main', async()=>{
+ const gate = await readFile(new URL('../../ops/siep18-reference-monitor-local-pg-gate.py',import.meta.url),'utf8');
+ const predecessor = gate.match(/SEALED_PREDECESSOR_VERSION = "([^"]+)"/)[1];
+ const path = gate.match(/SEALED_PREDECESSOR_MIGRATION = \(\s*"([^"]+)"/)[1];
+ const migration = await readFile(new URL(`../../${path}`,import.meta.url),'utf8');
+ const sealed = migration.match(new RegExp(`values \\('${predecessor.replaceAll('.', '\\.')}'[^\\n]*?'sha256:[0-9a-f]{64}',(\\d+),(\\d+),`));
+ assert.ok(sealed, 'predecessor must have an exact sealed registry row');
+ const pinned = gate.match(/SEALED_PREDECESSOR_ENTRY_COUNTS = \((\d+), (\d+)\)/);
+ assert.deepEqual(pinned.slice(1).map(Number), sealed.slice(1).map(Number));
+});

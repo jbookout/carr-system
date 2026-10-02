@@ -2071,7 +2071,7 @@ select v.registry_version,
   const output = execFileSync("psql", [dsn, "-X", "-A", "-t", "-F", "\t",
     "-v", "ON_ERROR_STOP=1", "-c", sql], { encoding: "utf8" });
   const rows = output.trim().split("\n").filter(Boolean).map(line => line.split("\t"));
-  const currentVersion = Number(REGISTRY_V37_VERSION.split(".v").at(-1));
+  const currentVersion = Number(REGISTRY_V103_VERSION.split(".v").at(-1));
   const expectedVersions = Array.from({ length: currentVersion }, (_, index) =>
     `scac-mutation-registry.v${index + 1}`);
   if (rows.length !== expectedVersions.length ||
