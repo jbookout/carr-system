@@ -128,10 +128,33 @@ def classify(command: str) -> tuple[str, str] | None:
     for segment in _invocations(command):
         for pattern, kind in PATTERNS:
             if pattern.search(segment):
-                return kind, _target(segment)
+                return kind, (_secret_target(segment) if 'secret' in kind else _target(segment))
         if GH_API_WRITE.search(segment) and GH_API_SETTINGS_PATH.search(segment):
             return "github_api", _target(segment)
     return None
+
+
+def _secret_target(command: str) -> str:
+    """Extract a secret name without ever falling back to value-bearing text."""
+    if not _splittable(command):
+        return 'secret'
+    words = shlex.split(command)
+    for i, word in enumerate(words[:-1]):
+        if word == 'secret' and words[i + 1] in {'set', 'put', 'delete', 'remove'}:
+            skip_value = False
+            for arg in words[i + 2:]:
+                if skip_value:
+                    skip_value = False
+                    continue
+                if arg in {'--body', '-b', '--repo', '-R', '--org', '-o', '--env', '-e', '--app', '-a', '--name', '--config', '-c'}:
+                    skip_value = True
+                elif arg.startswith('-'):
+                    continue
+                elif re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', arg):
+                    return arg
+                else:
+                    break
+    return 'secret'
 
 
 def _target(command: str) -> str:
@@ -220,6 +243,11 @@ def record(kind: str, target: str, command: str, reason: str,
     """Write the change to the record layer, and to a local spool if that fails.
     NEVER raises into the caller: the change has already happened, and refusing
     to acknowledge it would make the gate the thing that hides history."""
+    # Secrets may arrive in an inline --body/-b, an API field, or stdin.
+    # Persist only the invocation identity for secret-setting commands.
+    if 'secret' in kind or re.search(r"/secrets(?:/|\b)", command, re.I):
+        target = _secret_target(command)
+        command = kind + ' ' + target + ' <value redacted>'
     row = {
         "recorded_at": datetime.now(timezone.utc).isoformat(),
         "kind": kind,

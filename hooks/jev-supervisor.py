@@ -231,7 +231,11 @@ def post_tool_use(payload, run):
 
 
 def _last_test_evidence(transcript):
-    """The most recent test-looking Bash command and its output, from the transcript."""
+    """Completed tests after the latest human request in the tail.
+
+    If that request is outside the bounded tail, omit test evidence rather than
+    risk attributing an earlier task's test to this one.
+    """
     evidence = {}
     try:
         with open(transcript, "rb") as fh:
@@ -242,12 +246,34 @@ def _last_test_evidence(transcript):
     except OSError:
         return evidence
     commands = {}
+    tests = []
+    saw_request = False
     for raw in lines:
         try:
             rec = json.loads(raw)
         except ValueError:
             continue
+        if not isinstance(rec, dict):
+            continue
         content = (rec.get("message") or {}).get("content")
+        origin = rec.get("origin") if isinstance(rec.get("origin"), dict) else {}
+        if (rec.get("type") == "user" and not rec.get("isMeta")
+                and not rec.get("isSidechain") and not rec.get("isCompactSummary")
+                and origin.get("kind") in (None, "", "human", "user", "keyboard")):
+            human_text = (isinstance(content, str) and bool(content.strip()))
+            if isinstance(content, list):
+                blocks = [b for b in content if isinstance(b, dict)]
+                human_text = (not any(b.get("type") == "tool_result" for b in blocks)
+                              and any(b.get("type") == "text" and
+                                      isinstance(b.get("text"), str) and b["text"].strip()
+                                      for b in blocks))
+            if human_text:
+                saw_request = True
+                commands.clear()
+                tests.clear()
+                continue
+        if not saw_request:
+            continue
         if not isinstance(content, list):
             continue
         for block in content:
@@ -258,9 +284,49 @@ def _last_test_evidence(transcript):
                 if TEST_COMMAND.search(cmd):
                     commands[block.get("id")] = cmd
             elif block.get("type") == "tool_result" and block.get("tool_use_id") in commands:
-                evidence = {"test_command": commands[block["tool_use_id"]],
-                            "test_output": _text(block.get("content"))[-6000:],
-                            "test_failed": bool(block.get("is_error"))}
+                code = int(block["is_error"]) if isinstance(block.get("is_error"), bool) else None
+                tests.append((commands.pop(block["tool_use_id"]),
+                              _text(block.get("content"))[-6000:], code))
+    if not tests:
+        return evidence
+    command, output, code = tests[-1]
+    evidence = {"test_command": command, "test_output": output,
+                "test_run_count": len(tests),
+                "test_failure_count": sum(result != 0 for _, _, result in tests if result is not None)}
+    if code is not None:
+        evidence["test_exit_code"] = code
+    # Keep the failure signal even when many later successful runs crowd the
+    # evidence budget. The count covers failures whose excerpts do not fit.
+    limit = 3900
+    header = (f"{len(tests)} completed test runs; "
+              f"{evidence['test_failure_count']} failed. Chronological excerpts:\n")
+    selected = set(range(len(tests)))
+    def excerpt(i):
+        test_command, test_output, result = tests[i]
+        status = "FAIL" if result else "PASS" if result == 0 else "UNKNOWN"
+        return f"{i + 1}. {status} {test_command[:250]}\n{test_output[-900:]}\n"
+    lines = {i: excerpt(i) for i in selected}
+    if len(header) + sum(map(len, lines.values())) > limit:
+        # Reserve the latest result, then retain as many recent failures and
+        # their later same-command passes as fit. Counts cover omitted runs.
+        important = {len(tests) - 1}
+        for i, (test_command, _, result) in enumerate(tests):
+            if result not in (None, 0):
+                important.add(i)
+                for j in range(len(tests) - 1, i, -1):
+                    if tests[j][0] == test_command and tests[j][2] == 0:
+                        important.add(j)
+                        break
+        kept = set()
+        for i in sorted(important, reverse=True):
+            if len(header) + sum(len(lines[j]) for j in kept) + len(lines[i]) <= limit:
+                kept.add(i)
+        selected = kept
+    omitted = len(tests) - len(selected)
+    if omitted:
+        header += f"{omitted} selected excerpts omitted by size limit.\n"
+        evidence["test_history_truncated"] = True
+    evidence["test_history"] = (header + "".join(lines[i] for i in sorted(selected)))[:limit]
     return evidence
 
 

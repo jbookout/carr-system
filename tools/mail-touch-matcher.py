@@ -64,9 +64,12 @@ def main():
         sys.exit(f"mail extract not found: {extract}")
 
     cal = load_calendar_matcher()
-    by_email, by_domain = cal.load_record_contacts()
-    if not by_email:
-        sys.exit("no record contacts loaded — check out/exports roster and registry")
+    # Shares the calendar matcher's loader, which reads the LIVE exports at the
+    # exporters' EXPORT_HOME and refuses an empty book (2026-09-27).
+    try:
+        by_email, by_domain = cal.load_record_contacts()
+    except cal.NoRecordContacts as exc:
+        sys.exit(f"no record contacts loaded — {exc}")
 
     messages = json.load(open(extract))
 

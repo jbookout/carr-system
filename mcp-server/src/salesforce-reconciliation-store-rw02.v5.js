@@ -118,11 +118,20 @@ export function createSalesforceReconciliationStore({ db, evaluators = {} } = {}
     }
   }
 
-  async function open(client, actor) {
+  // The reader bundle's fixed database identity (ops.f01_context_actor_slug,
+  // 0626/0732). A read verb runs on the reader connection, where the database
+  // cannot know the handler's actor and always answers this slug; the handler
+  // actor is then the server-authenticated one. A WRITE must still match the
+  // database actor exactly, and the reader slug never satisfies a write.
+  const READER_PRINCIPAL = "carr-reader";
+
+  async function open(client, actor, { read = false } = {}) {
     const row = one(await client.query(
       "SELECT ops.f01_principal() AS principal, ops.f01_now_text() AS server_now"), "rw02 principal");
     const dbPrincipal = typeof row.principal === "string" ? JSON.parse(row.principal) : row.principal;
-    if (dbPrincipal?.actor_slug !== actor.slug) fail("actor_context_mismatch",
+    const dbActor = dbPrincipal?.actor_slug;
+    const admitted = dbActor === actor.slug || (read && dbActor === READER_PRINCIPAL);
+    if (!admitted) fail("actor_context_mismatch",
       "database and handler actor do not match", { handler_actor: actor.slug,
         database_actor: dbPrincipal?.actor_slug ?? null });
     return row.server_now;
@@ -230,7 +239,7 @@ export function createSalesforceReconciliationStore({ db, evaluators = {} } = {}
     if (!V5_RW02_ACTION_KIND_KEYS.includes(action_kind)) fail("unknown_action_kind",
       "payload.action_kind is not registered", { path: "payload.action_kind" });
     return transaction(async client => {
-      await open(client, actor);
+      await open(client, actor, { read: true });
       const result = await client.query("SELECT record FROM ops.rw02_action_evidence($1::text)",
         [action_kind]);
       const evidence = (result.rows ?? []).map((row, index) => {

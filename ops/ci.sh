@@ -328,7 +328,7 @@ fail_tail() {  # fail_tail <logfile>
 # that HAS Python are all unchanged.
 check_unit() {
   local failed_pkgs=""
-  for pkg in mcp-server control-room workspace; do
+  for pkg in mcp-server control-room workspace practice-plugin; do
     [ -f "$pkg/package.json" ] || continue
     local unit_env=""
     [ "$pkg" = "mcp-server" ] && unit_env="F03_PARITY_REQUIRE_PYTHON=1"
@@ -342,7 +342,7 @@ check_unit() {
   if [ -n "$failed_pkgs" ]; then
     bad unit "node suites failed:$failed_pkgs"
   else
-    ok unit "mcp-server, control-room, workspace suites pass"
+    ok unit "Node package suites pass"
   fi
 }
 
@@ -772,12 +772,26 @@ PYEOF
   # gate for mcp-server/src/core-rule-ids.js against ops/config/rule-
   # triage.v1.json's `home: "core"` set -- the generated module doctrine.js
   # reads because a Cloudflare Worker has no filesystem at request time.
+  # rule-boot-classes-check JOINED 2026-09-26 (gated rule boot): the same
+  # parity shape for mcp-server/src/rule-boot-classes.js against
+  # ops/config/rule-classes.v1.json, plus the rule boot's token budget (fails
+  # naming the largest always-on rules; never truncates).
+  # rule-route-coverage JOINED 2026-09-26 (100%-recall rule delivery). Same
+  # kind again: repository files only. It fails when an active rule has no
+  # delivery route, a corpus rule is missing from ops/config/rule-routes.v1.json,
+  # or a trigger names a verb, tool or gate that cannot fire.
+  # check-eval-receipt JOINED 2026-09-29 (eval-gate): a change to a surface
+  # registered in evals/surfaces.json carries evals/<surface>/receipt.json or a
+  # reasoned no-eval line in the PR body. Enforced only in a pull_request run,
+  # where GITHUB_EVENT_PATH carries the body; elsewhere a missing receipt is
+  # advisory and a malformed one still fails. Procedure: evals/README.md.
   for inv in enforcement-coverage-check audit-queue-freshness-check map-row-evidence-check \
              rule-enforcement-map-check rule-load-layer-check rule-classification-parity-check \
              reachability-check selftest-git-isolation-check \
              drive-dependency-inventory drive-retirement-readiness-gate \
              mechanism-doctrine-gate scheduler-cutover-coverage-gate \
-             boot-budget-check core-rule-ids-check; do
+             boot-budget-check core-rule-ids-check rule-route-coverage \
+             rule-boot-classes-check check-eval-receipt; do
     [ -f "ops/$inv.py" ] || continue
     run_quiet "$LOGDIR/gate-$inv.log" "$PY" "ops/$inv.py" \
       || { inherited_abort "$inv" "$PY" "ops/$inv.py"
@@ -1289,6 +1303,22 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     fi
   fi
 
+  # 0732: the F01/J102/RW02 actor gate as the Worker's REAL login shapes
+  # (app_writer in carr_writer, app_reader in carr_reader), not the NOLOGIN
+  # bundles every other fixture impersonates. It also covers the negative cast:
+  # exporter, owner-shaped, jobs-holding and unrelated logins stay refused, and
+  # the reader cannot write. One rolled-back transaction, role creation
+  # included.
+  if [ -f mcp-server/test/f01-login-bundle-membership-postgres.sql ]; then
+    if ! run_quiet "$LOGDIR/f01-login-bundle-membership-postgres.log" \
+         "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+         -f mcp-server/test/f01-login-bundle-membership-postgres.sql; then
+      tail -30 "$LOGDIR/f01-login-bundle-membership-postgres.log" >&2
+      bad migration "the F01 login-bundle membership proof (0732) failed"
+      return
+    fi
+  fi
+
   # V5-F05: the typed contract binder and actor-scoped universe census need a
   # real database. The unit class exercises the runtime adapter with a fake
   # client; this lane proves append-only persistence, idempotent replay,
@@ -1420,7 +1450,7 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
   # V5-RW02 joins it: the evidence store's replay projection, its typed
   # conflict and its write-time refusal of malformed or double-counted
   # readback evidence only exist on real rows as carr_writer.
-  for proof in cost-ledger-projection.v5 doc-conversation notifications session-identity dispatch-spine meeting-mode delivery-cadence-a05-tools amend-closed-loop-postgres action-class-successor-registry-postgres independent-review-cycle-postgres a02-rule-enforcement-postgres salesforce-reconciliation-rw02-postgres; do
+  for proof in cost-ledger-projection.v5 doc-conversation notifications session-identity dispatch-spine meeting-mode delivery-cadence-a05-tools amend-closed-loop-postgres action-class-successor-registry-postgres independent-review-cycle-postgres a02-rule-enforcement-postgres salesforce-reconciliation-rw02-postgres salesforce-read-run-store-rw02-postgres; do
     if [ -f "mcp-server/test/$proof.test.mjs" ]; then
       if ! DATABASE_URL="$dsn" CARR_COST_LEDGER_DB_REQUIRED=1 \
            CARR_DOC_CONVERSATION_DB_REQUIRED=1 CARR_R03_DB_REQUIRED=1 \
@@ -1502,6 +1532,37 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
          -f mcp-server/test/r03-notifications-postgres.sql; then
       tail -30 "$LOGDIR/r03-notifications-postgres.log" >&2
       bad migration "the R03 notification mint, recipient and status proof failed"
+      return
+    fi
+  fi
+
+  # V5-R03 action-needed producer: recipient routing, recovery standing,
+  # deferred exclusion and replay dedupe in a rolled-back transaction.
+  if [ -f mcp-server/test/r03-loop-queue-postgres.sql ]; then
+    if ! run_quiet "$LOGDIR/r03-loop-queue-postgres.log" \
+         "$psql_bin" -X -v ON_ERROR_STOP=1 -P format=csv -d "$dsn" \
+         -f mcp-server/test/r03-loop-queue-postgres.sql; then
+      tail -30 "$LOGDIR/r03-loop-queue-postgres.log" >&2
+      bad migration "the R03 loop producer and dedupe proof failed"
+      return
+    fi
+    if ! awk -F, '
+      $0=="r03_recovered_health" { phase=1; next }
+      $0=="r03_actor_mismatch_health" { phase=2; next }
+      $1=="joe" && phase==1 {
+        recovered=($2==3 && $3==3 && $4==3 && $6==0 && $7==0 &&
+                   $8==0 && $9==1 && $10==0 && index($15,"No open")==1)
+        phase=0
+      }
+      $1=="joe" && phase==2 {
+        mismatch=($2==4 && $3==3 && $4==3 && $6==1 && $7==1 &&
+                  $8==1 && $9==1 && $10==0 && index($15,"On missing")==1)
+        phase=0
+      }
+      END { exit !(recovered && mismatch) }
+    ' "$LOGDIR/r03-loop-queue-postgres.log"; then
+      tail -30 "$LOGDIR/r03-loop-queue-postgres.log" >&2
+      bad migration "R03 standing report conflates historical and unresolved failures"
       return
     fi
   fi
