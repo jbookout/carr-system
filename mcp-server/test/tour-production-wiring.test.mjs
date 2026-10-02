@@ -84,7 +84,7 @@ test("production Tour runtime presents the exact browser view without promoting 
   const detail = projectTourDetail({
     id: "tour", tour_name: "Bay County", tour_status: "draft", route_version: 1,
     routes: [
-      { id: "draft-route", route_version: 2, accepted: false, stops: [{ id: "stop", route_sequence: 1, route_label: "A", property_name: "Alpha Clinic", property_address: "100 Main St" }] },
+      { id: "draft-route", route_version: 2, accepted: false, acceptance_digest: `sha256:${"a".repeat(64)}`, stops: [{ id: "stop", route_sequence: 1, route_label: "A", property_name: "Alpha Clinic", property_address: "100 Main St" }] },
       { id: "accepted-route", route_version: 1, accepted: true, stops: [] },
     ],
     projections: [{ id: "draft-projection", status: "draft" }, { id: "approved-projection", status: "approved" }],
@@ -95,6 +95,7 @@ test("production Tour runtime presents the exact browser view without promoting 
   });
   assert.equal(detail.name, "Bay County");
   assert.equal(detail.route_version_id, "draft-route");
+  assert.equal(detail.route_acceptance_digest, `sha256:${"a".repeat(64)}`);
   assert.equal(detail.route_version_state, "draft");
   assert.equal(detail.accepted_route_version, 1);
   assert.equal(detail.stops[0].label, "A · Alpha Clinic");

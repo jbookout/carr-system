@@ -12,16 +12,18 @@
 // NO SEND CAPABILITY EXISTS OR WILL EXIST IN THIS WORKER.
 
 import { neon, Pool } from "@neondatabase/serverless";
+import { DOC_TOOL_NAMES, DOC_INSTRUCTIONS, docToolAnnotations } from "./doc-profile.js";
 import { TOOLS, ToolError, executeRegisteredTool, assertRegisteredToolInput,
   auditIdentity, assertNoCallerAuthorityFields, coerceArgsToSchema,
   pgConstraintError, describeConstraint } from "./tools.js";
 import { canExercisePartnerAuthority, partnerAuthoritySlugForActor } from "./partner-authority.js";
-import { authenticatedIdentity, authorizationClassForActor, organizationTenantForActor,
+import { authenticatedIdentity, isKnownPartner, authorizationClassForActor, organizationTenantForActor,
   personalScopeForActor, verifiedAgentSlugForClient } from "./identity.js";
 import { deriveTrustedPrincipalBinding,
   ExactEffectRefusal, SCAC_TRUSTED_PRINCIPAL_READBACK_SQL } from "./scac-exact-effects.js";
 import { scheduleFailureRecord, rpcInternalErrorFailureClass, actorUnresolvedFailureClass, RPC_INTERNAL_ERROR_CODE } from "./trace.js";
 import { gateZeroSeatConnection } from "./gate-zero-seat-connection.v5.js";
+import { providerFor as judgeProviderFor } from "./judge-provider.js";
 import { jevAskBinding, prefetchJevAnswer, reserveJevCallAttempt,
   validateAskJevArgs } from "./jev-call-receipt.js";
 import { foundationAssuranceSeatConnection } from
@@ -258,7 +260,7 @@ const RULE_DELIVERY_RAIL = ` RULE DELIVERY: use only exact canonical pack names 
 
 // ---------- capability profiles (2026-08-02) ----------
 //
-// WHAT THIS IS, AND WHAT IT IS NOT. This is a BLAST-RADIUS REDUCER for surfaces
+// Ordinary profiles are a BLAST-RADIUS REDUCER for surfaces
 // a human configured, not an authorization boundary. Authorization is, and stays,
 // the OAuth grant plus `humanOnly` — a caller who wants the full surface simply
 // omits the parameter, and that is fine, because the threat this addresses is not
@@ -275,10 +277,14 @@ const RULE_DELIVERY_RAIL = ` RULE DELIVERY: use only exact canonical pack names 
 // b42e217e, 2026-08-02). A newer partner needs better defaults and clearer verb
 // descriptions, never fewer capabilities.
 //
-// Selected per-request: POST /mcp?profile=capture
+// Selected per-request: POST /mcp?profile=capture. Doc is separately pinned by
+// its OAuth resource path and inherits no unnamed read verbs.
 export const PROFILES = {
   // Everything. The default, and what both partners' interactive sessions use.
   full: null,
+
+  // Closed read AND write set, forced by the OAuth resource path.
+  doc: new Set(DOC_TOOL_NAMES),
 
   // Native lifecycle credentials are purpose-bound server-side. They expose
   // only their own record surface even if a caller asks for ?profile=full.
@@ -577,6 +583,7 @@ function profileFor(request) {
  * voluntary limiter for everyone else and a no-op for these three.
  */
 export function profileForActor(actor, request) {
+  if (new URL(request.url).pathname === "/doc/mcp") return "doc";
   if (actor?.continuity_surface === "codex" && actor?.via === "codex-continuity-token")
     return "codex-continuity";
   if (actor?.continuity_surface === "claude" && actor?.via === "claude-continuity-token")
@@ -591,6 +598,7 @@ export function profileForActor(actor, request) {
 }
 
 export function allowedIn(profile, name, tool) {
+  if (profile === "doc") return PROFILES.doc.has(name);
   if (profile === "full") return true;
   if (tool.fullOnly) return false;            // sensitive operational reads stay off probe/reviewer/read
   if (!tool.write) return true;              // reads are allowed in every profile
@@ -624,9 +632,9 @@ function toolList(profile = "full") {
       inputSchema: t.inputSchema,
       // Machine-readable danger signal, so a client's permission layer and the
       // model can tell `find` from `reassign-deal` without parsing prose.
-      annotations: {
+      annotations: profile === "doc" ? docToolAnnotations(t) : {
         readOnlyHint: !t.write,
-        destructiveHint: Boolean(t.write),
+        destructiveHint: t.destructiveHint ?? Boolean(t.write),
         idempotentHint: true,               // every write runs the idempotency envelope
         openWorldHint: false,
       },
@@ -740,7 +748,7 @@ export async function executeWithTrustedPrincipal(actor, readback, requiredBundl
 
 // Exported for deterministic no-network identity-gate tests. It remains the
 // single normal dispatcher path; callers receive no additional route or grant.
-export async function callTool(env, actor, name, args, profile = "full") {
+export async function callTool(env, actor, name, args, profile = "full", judgeWorkClass = "system_work") {
   const personalScope = personalScopeForActor(actor);
   if (personalScope.status === "error") {
     throw new ToolError({ error: personalScope.error,
@@ -752,6 +760,15 @@ export async function callTool(env, actor, name, args, profile = "full") {
   assertNoCallerAuthorityFields(args);
   const tool = TOOLS[name];
   if (!tool) throw new ToolError({ error: "unknown_tool", name });
+  // Refuse even generic delegation before it can recurse into an allowed verb.
+  if (profile === "doc" && !allowedIn(profile, name, tool))
+    throw new ToolError({ error: "not_in_profile", verb: name, profile });
+  // Judge payload limits on the canonical values the registered handler sees.
+  if (profile === "doc") coerceArgsToSchema(tool.inputSchema, args);
+  // A capture dedup override needs separate human confirmation. This endpoint
+  // exposes ordinary capture only, not a caller-asserted confirmation bypass.
+  if (profile === "doc" && name === "log-capture" && args?.force_new === true)
+    throw new ToolError({ error: "not_in_profile", verb: "log-capture (force_new)", profile });
   // The generic call-verb delegator is itself a reviewed ingress. Validate its
   // immutable outer contract before parsing or recursing into the inner tool.
   await assertRegisteredToolInput(name, tool, args || {});
@@ -938,7 +955,7 @@ export async function callTool(env, actor, name, args, profile = "full") {
   const writerRead = tool.writerConnection === true && !tool.write;
   let readOk = true, readErrorKind = null;
   try {
-    if (tool.jevProxy === true && env?.TYPESAFE_API_KEY) {
+    if (tool.jevProxy === true && (env?.TYPESAFE_API_KEY || judgeProviderFor(judgeWorkClass) === "decisions")) {
       const jevArgs = args || {};
       jevRequest = validatedJevRequest;
       // An envelope replay already has its receipt; do not spend or reserve
@@ -955,7 +972,7 @@ export async function callTool(env, actor, name, args, profile = "full") {
         jevAsk = jevAskBinding(env, fetch, { reserveAttempt: async () => {
           return reserveJevCallAttempt(client, { ...actor, id: actorRow.id }, jevArgs);
         } });
-        jevPrefetched = await prefetchJevAnswer(jevArgs, jevAsk);
+        jevPrefetched = await prefetchJevAnswer(jevArgs, jevAsk, judgeWorkClass);
         client.jevPrefetched = jevPrefetched;
       }
     }
@@ -1102,7 +1119,7 @@ export async function dispatch(request, env, ctx, actor) {
           protocolVersion: PROTOCOL,
           capabilities: { tools: {} },
           serverInfo: { name: "carr-record-layer", version: "0.1.0" },
-          instructions:
+          instructions: profile === "doc" ? DOC_INSTRUCTIONS :
             "CARR's record layer AND the doctrine store — the ONE source of truth for Joe Bookout's " +
             "healthcare-CRE practice (partner Dell McCraney; business only, personal life is Life AI). " +
             "OPENING ACT, every session: call standing-context FIRST — it returns the taught rules " +
@@ -1225,6 +1242,11 @@ export const mcpApiHandler = {
       });
       return json({ error: "unauthorized" }, 401);
     }
+    // Doc is the partner connector. Purpose-bound native-agent OAuth grants
+    // keep their own endpoint/profile and cannot gain brokerage writes here.
+    if (new URL(request.url).pathname === "/doc/mcp" &&
+        (actor.human !== true || !isKnownPartner(actor.slug)))
+      return json({ error: "doc_partner_grant_required" }, 403);
     return dispatch(request, env, ctx, actor);
   },
 };

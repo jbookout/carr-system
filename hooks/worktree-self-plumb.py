@@ -478,7 +478,8 @@ def reap_main(argv):
                 detail = " ".join((p.stdout + " " + p.stderr).split())[:200]
                 say(f"KEEP  {name} — --remove refused: {detail}")
                 kept += 1
-        run_git(["worktree", "prune"], canon)
+        if not dry:
+            run_git(["worktree", "prune"], canon)
         say(f"reap done: {reaped} {'would be ' if dry else ''}reaped, {kept} kept")
     finally:
         try:
