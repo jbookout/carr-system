@@ -1,3 +1,4 @@
+import { escapeHtml } from "./esc.js";
 const ENDPOINT = "/api/v1/command-center";
 const EXPIRY_TICK_MS = 5_000;
 import {
@@ -48,9 +49,6 @@ function setHealth(state) {
   if (healthLabel) healthLabel.textContent = HEALTH_LABEL[state] || HEALTH_LABEL.unavailable;
 }
 
-const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
-  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-}[char]));
 
 function formatObserved(value) {
   const date = new Date(value);

@@ -328,7 +328,7 @@ fail_tail() {  # fail_tail <logfile>
 # that HAS Python are all unchanged.
 check_unit() {
   local failed_pkgs=""
-  for pkg in mcp-server control-room workspace; do
+  for pkg in mcp-server control-room workspace practice-plugin; do
     [ -f "$pkg/package.json" ] || continue
     local unit_env=""
     [ "$pkg" = "mcp-server" ] && unit_env="F03_PARITY_REQUIRE_PYTHON=1"
@@ -342,7 +342,7 @@ check_unit() {
   if [ -n "$failed_pkgs" ]; then
     bad unit "node suites failed:$failed_pkgs"
   else
-    ok unit "mcp-server, control-room, workspace suites pass"
+    ok unit "Node package suites pass"
   fi
 }
 
@@ -589,7 +589,7 @@ PYEOF
   # the next tools/somewhere/deeper/test_x.py turns a gate red asking to be
   # decided, rather than sitting in the tree looking like coverage.
   local eligible=""
-  for t in ops/*-selftest.py tools/test-*.py tools/test_*.py \
+  for t in ops/*-selftest.py tools/test-*.py tools/test_*.py tools/*-selftest.py \
            tools/room-bridge/test_*_unit.py \
            tools/room-bridge/test_activation_reliability.py; do
     [ -f "$t" ] || continue
@@ -772,17 +772,60 @@ PYEOF
   # gate for mcp-server/src/core-rule-ids.js against ops/config/rule-
   # triage.v1.json's `home: "core"` set -- the generated module doctrine.js
   # reads because a Cloudflare Worker has no filesystem at request time.
+  # rule-boot-classes-check JOINED 2026-09-26 (gated rule boot): the same
+  # parity shape for mcp-server/src/rule-boot-classes.js against
+  # ops/config/rule-classes.v1.json, plus the rule boot's token budget (fails
+  # naming the largest always-on rules; never truncates).
+  # rule-route-coverage JOINED 2026-09-26 (100%-recall rule delivery). Same
+  # kind again: repository files only. It fails when an active rule has no
+  # delivery route, a corpus rule is missing from ops/config/rule-routes.v1.json,
+  # or a trigger names a verb, tool or gate that cannot fire.
+  # check-eval-receipt JOINED 2026-09-29 (eval-gate): a change to a surface
+  # registered in evals/surfaces.json carries evals/<surface>/receipt.json or a
+  # reasoned no-eval line in the PR body. Enforced only in a pull_request run,
+  # where GITHUB_EVENT_PATH carries the body; elsewhere a missing receipt is
+  # advisory and a malformed one still fails. Procedure: evals/README.md.
   for inv in enforcement-coverage-check audit-queue-freshness-check map-row-evidence-check \
              rule-enforcement-map-check rule-load-layer-check rule-classification-parity-check \
              reachability-check selftest-git-isolation-check \
              drive-dependency-inventory drive-retirement-readiness-gate \
              mechanism-doctrine-gate scheduler-cutover-coverage-gate \
-             boot-budget-check core-rule-ids-check; do
+             boot-budget-check core-rule-ids-check rule-route-coverage \
+             rule-boot-classes-check check-eval-receipt; do
     [ -f "ops/$inv.py" ] || continue
     run_quiet "$LOGDIR/gate-$inv.log" "$PY" "ops/$inv.py" \
       || { inherited_abort "$inv" "$PY" "ops/$inv.py"
            failures="$failures $inv"; tail -12 "$LOGDIR/gate-$inv.log" >&2; }
   done
+
+  # GATE REPLAY JOINED 2026-09-24 (defect class capability-reported-live-
+  # before-first-human-use: PR #1224's Stop gate never fired on 803 real
+  # receipts, PR #1225's shell regexes were proven only on invented commands).
+  # ops/gate-replay.py RUNS every gate in hooks/ over the committed real
+  # fixtures in ops/fixtures/real-replay/, the way the harness runs it, and
+  # compares every verdict with the committed snapshot there. It computes
+  # nothing from a base ref: it runs everything, every time. It is outside the
+  # loop above for two reasons: it takes about a minute, so it gets its own
+  # timeout, and it may answer 78 (NOT CONFIGURED) on a local interpreter
+  # without requirements.lock, which is announced like any other skip. On a
+  # hosted runner it never answers 78; a missing dependency there is a failure.
+  if [ -f ops/gate-replay.py ]; then
+    "$PY" "$CI_TIMEOUT_HELPER" 900 "$PY" ops/gate-replay.py >"$LOGDIR/gate-gate-replay.log" 2>&1
+    local rrc=$?
+    if [ "$rrc" -eq 78 ]; then
+      skiplist="$skiplist gate-replay.py"
+      printf '        \033[33mnot run\033[0m  %s — NOT CONFIGURED (exit 78): %s\n' \
+        gate-replay.py "$(tail -1 "$LOGDIR/gate-gate-replay.log" 2>/dev/null)" >&2
+    elif [ "$rrc" -ne 0 ]; then
+      inherited_abort gate-replay "$PY" ops/gate-replay.py
+      failures="$failures gate-replay"; tail -40 "$LOGDIR/gate-gate-replay.log" >&2
+    else
+      # A pass prints its invocation count, runtime and verdict totals, so the
+      # hosted log shows the replay ran and how long it took.
+      grep -E '^gate-replay: [0-9]+ invocations|^  verdicts: |^gate-replay: OK' \
+        "$LOGDIR/gate-gate-replay.log" >&2
+    fi
+  fi
 
   # Did the suite move the tree it was invoked in? See tree_fingerprint() above.
   if [ "$(tree_fingerprint)" != "$tree_before" ]; then
@@ -903,6 +946,17 @@ check_pushfloor() {
          floor_fail gate-integrity \
            "a gate moved without its baseline. Re-bless what you changed and stage it in the SAME commit: python3 hooks/gate-integrity.py --bless <gate> && git add ops/config/gate-baseline.json"; }
 
+  # A single `git ls-files` + pattern match against the whole tracked tree —
+  # cheaper than anything else in this class, and the one check that must
+  # never be skippable by scoping to $changed: a client deliverable that came
+  # back through a revert or a rebase is a violation whether or not THIS push
+  # touched deliverables/ (WR-000049, Joe's 2026-09-03 public-repo ruling).
+  run_quiet "$LOGDIR/pushfloor-no-client-deliverables.log" \
+    "$PY" ops/no-client-deliverables-gate.py \
+    || { tail -12 "$LOGDIR/pushfloor-no-client-deliverables.log" >&2
+         floor_fail no-client-deliverables \
+           "a client-deliverable path is tracked. git rm it — this repo is public and must carry no client record."; }
+
   if [ -n "$changed" ] && [ -f ops/githooks/path-hygiene-check.py ]; then
     local added
     added="$(git diff --name-only --diff-filter=ACR "$CARR_CI_RANGE" 2>/dev/null || true)"
@@ -950,6 +1004,21 @@ check_pushfloor() {
         printf '        \033[33mnot run\033[0m  types — mypy absent; the hosted types class still covers this\n' >&2
       fi
     fi
+  fi
+
+  # A registry successor changes the active version returned by the inventory
+  # graph. The 2026-09-22 v41 successor reached hosted unit before this exact
+  # assertion ran locally, costing a full strict-CI cycle. These two focused
+  # tests take under a second together and keep the local floor bounded.
+  if [ -n "$changed" ] && printf '%s\n' "$changed" | grep -Eq \
+      '^(migrations/[0-9]+_.*scac.*\.sql|mcp-server/src/scac-mutation-registry\.v[0-9]+\.generated\.js|ops/config/scac-registry-.*\.json)$'; then
+    ran="$ran scac-atlas"
+    run_quiet "$LOGDIR/pushfloor-scac-atlas.log" node --test \
+      mcp-server/test/atlas-inventory-graph-read.test.mjs \
+      mcp-server/test/atlas-inventory-graph-web.test.mjs \
+      || { tail -18 "$LOGDIR/pushfloor-scac-atlas.log" >&2
+           floor_fail scac-atlas \
+             "active registry changed; update the Atlas version contract or repair its reader before push"; }
   fi
 
   # ── predictor: the gate-impact closure ───────────────────────────────────
@@ -1173,6 +1242,13 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     return
   fi
 
+  if ! CARR_RULE_TEST_DATABASE_URL="$dsn" run_quiet "$LOGDIR/migration-rule-supersession.log" \
+      node --test mcp-server/test/find-rule-supersedes.test.mjs; then
+    tail -30 "$LOGDIR/migration-rule-supersession.log" >&2
+    bad migration "rule lookup or atomic teach supersession database proof failed"
+    return
+  fi
+
   # Tour Operations carries database-owned rights, identity, route, digest,
   # ACL, and append-only invariants that cannot be proved by text-shape tests.
   # The DoctorCRE v5 portfolio proof joins the same loop for the same reason:
@@ -1188,7 +1264,10 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     mcp-server/test/tour-property-identity-jurisdiction-postgres.sql \
     mcp-server/test/tour-domain-route-cheat-sheet-postgres.sql \
     mcp-server/test/tour-delivery-data-plane-postgres.sql \
-    mcp-server/test/work-portfolio-postgres.sql; do
+    mcp-server/test/tour-client-share-allowlist-postgres.sql \
+    mcp-server/test/assurance-health-store-postgres.sql \
+    mcp-server/test/work-portfolio-postgres.sql \
+    mcp-server/test/local-deals-postgres.sql; do
     [ -f "$tour_pg_proof" ] || continue
     tour_pg_log="$LOGDIR/$(basename "$tour_pg_proof" .sql).log"
     if ! run_quiet "$tour_pg_log" \
@@ -1205,6 +1284,62 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     tail -30 "$LOGDIR/model-role-store-postgres.log" >&2
     bad migration "Model Room role-store PostgreSQL acceptance failed"
     return
+  fi
+
+  # V5-J103: consent is read-only and limited to each partner's own carr.us
+  # mailbox, drafts can never dispatch, receipts keep provenance, and no runtime
+  # role can write a read receipt yet.
+  if ! run_quiet "$LOGDIR/governed-correspondence-store-postgres.log" \
+       "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+       -f mcp-server/test/governed-correspondence-store-postgres.sql; then
+    tail -30 "$LOGDIR/governed-correspondence-store-postgres.log" >&2
+    bad migration "V5-J103 governed correspondence store PostgreSQL acceptance failed"
+    return
+  fi
+
+  # V5-F01 record homes, source authority and document identity: both SQL
+  # fixtures (each on its own template copy of this database) and the nine
+  # registered verbs end to end as carr_writer and the authority login. It
+  # commits only into the copies it creates and drops them on the way out.
+  if [ -f mcp-server/test/record-source-authority-live-pg.v5.test.mjs ]; then
+    if ! DATABASE_URL="$dsn" CARR_F01_DB_REQUIRED=1 PSQL="$psql_bin" \
+         run_quiet "$LOGDIR/record-source-authority-live-pg.log" \
+         node --test mcp-server/test/record-source-authority-live-pg.v5.test.mjs; then
+      tail -40 "$LOGDIR/record-source-authority-live-pg.log" >&2
+      bad migration "V5-F01 record-source-authority PostgreSQL acceptance failed"
+      return
+    fi
+  fi
+
+  # 0732: the F01/J102/RW02 actor gate as the Worker's REAL login shapes
+  # (app_writer in carr_writer, app_reader in carr_reader), not the NOLOGIN
+  # bundles every other fixture impersonates. It also covers the negative cast:
+  # exporter, owner-shaped, jobs-holding and unrelated logins stay refused, and
+  # the reader cannot write. One rolled-back transaction, role creation
+  # included.
+  if [ -f mcp-server/test/f01-login-bundle-membership-postgres.sql ]; then
+    if ! run_quiet "$LOGDIR/f01-login-bundle-membership-postgres.log" \
+         "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+         -f mcp-server/test/f01-login-bundle-membership-postgres.sql; then
+      tail -30 "$LOGDIR/f01-login-bundle-membership-postgres.log" >&2
+      bad migration "the F01 login-bundle membership proof (0732) failed"
+      return
+    fi
+  fi
+
+  # V5-F05: the typed contract binder and actor-scoped universe census need a
+  # real database. The unit class exercises the runtime adapter with a fake
+  # client; this lane proves append-only persistence, idempotent replay,
+  # server-derived rule identity/provenance, and explicit missing-rule census
+  # against the migrated schema.
+  if [ -f mcp-server/test/rule-context-runtime-postgres.test.mjs ]; then
+    if ! DATABASE_URL="$dsn" CARR_F05_DB_REQUIRED=1 \
+         run_quiet "$LOGDIR/rule-context-runtime-postgres.log" \
+         node --test mcp-server/test/rule-context-runtime-postgres.test.mjs; then
+      tail -40 "$LOGDIR/rule-context-runtime-postgres.log" >&2
+      bad migration "V5-F05 rule-context PostgreSQL acceptance failed"
+      return
+    fi
   fi
 
   # Continuity bindings and append-only records need actual PostgreSQL proof.
@@ -1301,11 +1436,38 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
   # WR-000119 joins it too: its centre case mints a link with NO ack beside a
   # dispatch with no link at all and asserts the two nulls are different, which
   # is a claim about rows and not about a shaper.
-  for proof in cost-ledger-projection.v5 doc-conversation notifications session-identity dispatch-spine; do
+  # V5-UX-B11 Meeting Mode joins it: two devices, one row, one acceptance and
+  # one processing owner are claims about real locks on separate connections.
+  # V5-A05 delivery-cadence joins it: the review that shipped it required a
+  # real-DB proof rather than the unit-stub coverage that let the
+  # morning-brief grant gap and the caller-evidence gap both through once.
+  # amend-closed-loop joins it: the append-only correction trail (loop_amendment,
+  # migration 0702) and trg_touch_row's version bump are claims about rows a
+  # fake client cannot make honestly.
+  # V5-D01 action-class-successor-registry joins it: the status CHECK
+  # constraint, the append-only immutability trigger and the unconditional
+  # gate function are claims about real rows and real constraints a fake
+  # client cannot make honestly.
+  # V5-A03 joins it: complete eleven-dimension submissions, non-shrinking
+  # regression evidence, role/session separation, the two-round ceiling and
+  # stronger adjudication are all transactional claims over append-only rows.
+  # V5-A02 rule-enforcement coverage joins it: its first review found every
+  # SQL logic mutant surviving a FakeDb suite, so the coverage function, the
+  # Joe-authority fallback writer and their append-only guards are proved here
+  # on real rows as the real principals, and a skip is a failure.
+  # V5-RW02 joins it: the evidence store's replay projection, its typed
+  # conflict and its write-time refusal of malformed or double-counted
+  # readback evidence only exist on real rows as carr_writer.
+  for proof in cost-ledger-projection.v5 doc-conversation notifications session-identity dispatch-spine meeting-mode delivery-cadence-a05-tools amend-closed-loop-postgres action-class-successor-registry-postgres independent-review-cycle-postgres a02-rule-enforcement-postgres salesforce-reconciliation-rw02-postgres salesforce-read-run-store-rw02-postgres; do
     if [ -f "mcp-server/test/$proof.test.mjs" ]; then
       if ! DATABASE_URL="$dsn" CARR_COST_LEDGER_DB_REQUIRED=1 \
            CARR_DOC_CONVERSATION_DB_REQUIRED=1 CARR_R03_DB_REQUIRED=1 \
            CARR_SESSION_IDENTITY_DB_REQUIRED=1 CARR_DISPATCH_SPINE_DB_REQUIRED=1 \
+           CARR_MEETING_MODE_DB_REQUIRED=1 CARR_AMEND_CLOSED_LOOP_DB_REQUIRED=1 \
+           CARR_ACTION_CLASS_SUCCESSOR_DB_REQUIRED=1 \
+           CARR_V5_A03_DB_REQUIRED=1 \
+           CARR_A02_RULE_COVERAGE_DB_REQUIRED=1 \
+           CARR_RW02_DB_REQUIRED=1 \
            run_quiet "$LOGDIR/$proof-db.log" \
            node --test "mcp-server/test/$proof.test.mjs"; then
         tail -30 "$LOGDIR/$proof-db.log" >&2
@@ -1378,6 +1540,37 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
          -f mcp-server/test/r03-notifications-postgres.sql; then
       tail -30 "$LOGDIR/r03-notifications-postgres.log" >&2
       bad migration "the R03 notification mint, recipient and status proof failed"
+      return
+    fi
+  fi
+
+  # V5-R03 action-needed producer: recipient routing, recovery standing,
+  # deferred exclusion and replay dedupe in a rolled-back transaction.
+  if [ -f mcp-server/test/r03-loop-queue-postgres.sql ]; then
+    if ! run_quiet "$LOGDIR/r03-loop-queue-postgres.log" \
+         "$psql_bin" -X -v ON_ERROR_STOP=1 -P format=csv -d "$dsn" \
+         -f mcp-server/test/r03-loop-queue-postgres.sql; then
+      tail -30 "$LOGDIR/r03-loop-queue-postgres.log" >&2
+      bad migration "the R03 loop producer and dedupe proof failed"
+      return
+    fi
+    if ! awk -F, '
+      $0=="r03_recovered_health" { phase=1; next }
+      $0=="r03_actor_mismatch_health" { phase=2; next }
+      $1=="joe" && phase==1 {
+        recovered=($2==3 && $3==3 && $4==3 && $6==0 && $7==0 &&
+                   $8==0 && $9==1 && $10==0 && index($15,"No open")==1)
+        phase=0
+      }
+      $1=="joe" && phase==2 {
+        mismatch=($2==4 && $3==3 && $4==3 && $6==1 && $7==1 &&
+                  $8==1 && $9==1 && $10==0 && index($15,"On missing")==1)
+        phase=0
+      }
+      END { exit !(recovered && mismatch) }
+    ' "$LOGDIR/r03-loop-queue-postgres.log"; then
+      tail -30 "$LOGDIR/r03-loop-queue-postgres.log" >&2
+      bad migration "R03 standing report conflates historical and unresolved failures"
       return
     fi
   fi
@@ -1612,6 +1805,12 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
           db_gate_failures="$db_gate_failures $(basename "$g")"
           tail -20 "$LOGDIR/db-gate-$(basename "$g").log" >&2
         fi
+        # A gate may print a `db-gate-proof:` line saying what it actually
+        # exercised (for example how many race scenarios ran). run_quiet keeps
+        # a passing gate's output in its log file, so surface just that line:
+        # a gate that returned 0 without running anything must not be
+        # indistinguishable from one that passed.
+        grep -h '^db-gate-proof:' "$LOGDIR/db-gate-$(basename "$g").log" 2>/dev/null || true
         db_gate_timings="$db_gate_timings $(basename "$g" .py)=$(( $(date +%s) - _gt0 ))s"
       elif grep -qE "$dsn_read" "$g"; then
         # A gate that reads a DSN and carries no marker really is unrun, and
@@ -1671,6 +1870,27 @@ check_binding() {
       if(missing.length){console.error("wrangler.toml missing: "+missing.join(", "));process.exit(1);}
       if(/DATABASE_URL\s*=/.test(t)){console.error("wrangler.toml declares a DATABASE_URL inline; it belongs in a secret");process.exit(1);}
     ' || { problems="$problems wrangler.toml"; cat "$LOGDIR/binding-wrangler.log" >&2; }
+  fi
+  # A NEW DEFECT CLASS (DoctorCRE V5-R02 review, PR #1245, 2026-09-24): code
+  # that bundles clean and passes every Node-side test, but throws at MODULE
+  # LOAD in workerd because it called a Node-only API (fileURLToPath,
+  # execFileSync) at top level. Nothing above this line ever runs the Worker
+  # in a Worker runtime, so nothing above catches it. bin/worker-boot-check.sh
+  # boots the real Worker in local workerd (same wrangler binary
+  # bin/deploy-worker.sh ships with) and asks the dependency-free /healthz
+  # route for a 200 -- proof the module graph finished loading, not proof of
+  # correctness (mcp-server's own test suite owns that). Skipped, not failed,
+  # when wrangler's npm install has not happened here: this is the SAME
+  # posture as the mypy skip below for a machine that has not installed a
+  # pinned dependency, and a hard failure here would refuse every push on a
+  # machine that has simply never run `npm install` in mcp-server/.
+  if [ -x mcp-server/node_modules/.bin/wrangler ]; then
+    if ! run_quiet "$LOGDIR/binding-worker-boot.log" ./bin/worker-boot-check.sh; then
+      problems="$problems worker-boot"
+      tail -40 "$LOGDIR/binding-worker-boot.log" >&2
+    fi
+  else
+    printf '        \033[33mskip\033[0m  worker-boot-check — wrangler not installed (run npm install in mcp-server/)\n' >&2
   fi
   # CONFIG-AS-CODE IS SCOPED TO BRANCHES THAT ARE ACTUALLY IN THAT BUSINESS.
   #

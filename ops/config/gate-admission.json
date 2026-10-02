@@ -22,6 +22,16 @@
       "scarce_resource_cost": "One reopened model turn only after a measured threshold or conservative fallback cap; PostToolUse notices are one-shot and PreCompact never blocks.",
       "unique_bind": "No other gate preserves precompact high-water, validates cross-surface ownership and evidence bindings, detects stale worker heartbeats, or refuses Stop until the exact predecessor-to-successor takeover is verified.",
       "matcher_test": "ops/context-handoff-gate-selftest.py"
+    },
+    "rule-boot-gate.py": {
+      "parent_incident": "On 2026-09-26 the rule-delivery audit found that no SessionStart hook loaded any rule: 195 active rules existed, and a session or subagent reached its first tool call having read none of them unless it chose to call standing-context. Joe demanded 100% recall of relevant rules.",
+      "landing_harm": "A session or subagent acts (edits, commits, sends, spawns) without having read the always-on rules or the index that tells it which rule applies, so a known rule is broken for want of being read.",
+      "bind_moment": "PreToolUse on every tool, from SessionStart (startup, resume, clear, compact, fork) or subagent start until that context has every page of standing-context detail=boot for the armed digest confirmed (PostToolUse reads each fetch's answer; a new digest or page count re-arms the session).",
+      "consumer": "The session or subagent itself: the always-on full text and the rule index land in its own context before it acts.",
+      "self_serve_remedy": "Make the calls the deny names: standing-context {\"detail\":\"boot\",\"page\":N} for each missing page, over the CARR MCP connector or as `./run.sh call standing-context '{\"detail\":\"boot\",\"page\":N}'`. The fetch is always allowed. No context can be locked out: a fetch that errors unlocks it with RULES UNAVAILABLE; a Worker that does not serve the boot yet holds nothing (RULE BOOT NOT DEPLOYED YET); a hold that cannot be recorded is not made (STATE UNWRITABLE); and after 3 holds without progress the gate stops holding that context (RULES UNREAD).",
+      "scarce_resource_cost": "About 34k tokens of rule text per context, once per session start or subagent, plus at most 3 denied calls per context. The hook reads a few marker files on each call and parses the fetch answer on PostToolUse: no network, no model.",
+      "unique_bind": "No other gate stops a context from acting before it has read the rules; SessionStart context is capped at 10,000 characters, so the rules cannot be pushed in, and every other rule-delivery path is advisory.",
+      "matcher_test": "ops/rule-boot-gate-selftest.py"
     }
   }
 }

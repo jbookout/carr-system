@@ -39,9 +39,12 @@ import subprocess
 import sys
 import pathlib
 import unittest
+import uuid
 
 OPS = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(OPS)
+sys.path.insert(0, OPS)
+from git_env import fixture_env                                # noqa: E402
 
 
 def load(module_name):
@@ -85,7 +88,10 @@ class MessageBoundaryJevTests(unittest.TestCase):
         payload = {
             "hook_event_name": "UserPromptSubmit",
             "cwd": REPO,
-            "session_id": "jev-operational-selftest",
+            # A fresh session per run: the compiled-trigger matcher does not
+            # resend a rule a session already has in context, so a fixed id
+            # would see the rule deduped on the second run inside the window.
+            "session_id": f"jev-operational-selftest-{uuid.uuid4().hex}",
             "turn_id": turn,
             "prompt": prompt,
         }
@@ -180,6 +186,11 @@ class DefectClassAdvisoryTests(unittest.TestCase):
         self.module = load("jev_defect_class")
 
     def test_it_still_returns_a_ranked_shortlist(self):
+        # The corpus is read from the live store. When the store cannot be
+        # reached the advisor returns nothing by design, and that is an
+        # environment fact, not a judgment regression: skip, never fail.
+        if not self.module.load_classes():
+            self.skipTest("defect-class corpus unreachable from this checkout")
         note = self.module.advise({
             "claimed": "the library was finished and working",
             "actual": "nothing in the repository ever called it, so it never ran"})
@@ -298,6 +309,40 @@ class ChangeCollectorTests(unittest.TestCase):
             "list is being mis-parsed and every judgment it makes is about "
             "the wrong change: " + ", ".join(missing))
 
+    def test_a_deleted_path_is_reported_as_deleted_not_edited(self):
+        """A deletion is not an edit to a file that no longer exists.
+
+        Found 2026-09-23: a branch that untracked one binary made the property
+        above fail, because the "D" row fell through to "edited". Built on a
+        throwaway repository with no remote, so nothing is fetched. Every git
+        call, including change()'s own, runs under fixture_env(): git exports
+        GIT_DIR into the push hook, and inherited it would aim these calls at
+        the live repository instead of the fixture.
+        """
+        import tempfile
+        from unittest import mock
+        env = fixture_env()
+        with tempfile.TemporaryDirectory() as tmp:
+            def git(*args):
+                subprocess.run(["git", *args], cwd=tmp, check=True, env=env,
+                               capture_output=True, text=True, timeout=60)
+            git("init", "-q", "-b", "base")
+            git("config", "user.email", "selftest@example.invalid")
+            git("config", "user.name", "selftest")
+            for name in ("gone.txt", "kept.txt"):
+                pathlib.Path(tmp, name).write_text(name + "\n")
+            git("add", ".")
+            git("commit", "-q", "-m", "base")
+            git("switch", "-q", "-c", "work")
+            git("rm", "-q", "gone.txt")
+            pathlib.Path(tmp, "kept.txt").write_text("changed\n")
+            git("commit", "-q", "-am", "work")
+            with mock.patch.dict(os.environ, env, clear=True):
+                state = self.module.change(base="base", repo=tmp)
+        self.assertEqual(state["files"]["deleted"], ["gone.txt"])
+        self.assertEqual(state["files"]["edited"], ["kept.txt"])
+        self.assertEqual(state["files"]["added"], [])
+
     def test_it_sees_uncommitted_work(self):
         """The advisory is most useful mid-edit, which is when the first
         version was blind: it diffed origin/main...HEAD only."""
@@ -326,11 +371,26 @@ class ChangeTollAdvisoryTests(unittest.TestCase):
                 ["hooks/delegation-gate.py", "ops/ci.sh"],
             "this_branch_merged_another_branch": False})
         named = {name for _probability, name, _fix in owed}
-        for expected in ("new_ingress_admitted", "inventory_reseal", "gate_rebless"):
-            self.assertIn(expected, named,
-                          f"a new hook with a shebang plus two edited entrypoints "
-                          f"plainly owes {expected}; missing it means the judgment "
-                          f"stopped discriminating")
+        self.assertIn("gate_rebless", named,
+                      "an edited gate under hooks/ plainly owes a re-bless; "
+                      "missing it means the judgment stopped discriminating")
+        # Decision 05e144eb (2026-09-24): scripts are no longer sealed, so a new
+        # hook and two edited scripts owe no registry successor. Naming one
+        # would send every session back to hand-sealing.
+        for absent in ("new_ingress_admitted", "inventory_reseal"):
+            self.assertNotIn(absent, named,
+                             f"a script-only change no longer owes {absent}")
+
+    def test_it_still_names_a_reseal_for_a_new_verb(self):
+        owed = self.module.owed({
+            "files": {"added": [], "edited": ["mcp-server/src/tools.js"]},
+            "added_files_with_a_shebang_or_main_guard": [],
+            "edited_files_that_are_script_entrypoints": [],
+            "summary": "adds a new MCP write verb register-widget to tools.js",
+            "this_branch_merged_another_branch": False})
+        named = {name for _probability, name, _fix in owed}
+        self.assertTrue(named & {"new_ingress_admitted", "inventory_reseal"},
+                        "a new MCP verb is still a sealed row and owes a successor")
 
     def test_it_still_stays_quiet_on_a_change_that_owes_nothing(self):
         owed = self.module.owed({

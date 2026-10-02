@@ -32,11 +32,14 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-VAULT = ("/Users/booko/Library/CloudStorage/"
-         "GoogleDrive-joe.bookout.carr.us@gmail.com/My Drive/CARR AI")
-RUN_SH = "/Users/booko/carr-system/run.sh"
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
+# Derived from HOME, not typed in (2026-09-23 audit): the literal /Users/booko
+# spelling was right on one machine and silently matched nothing on any other.
+VAULT = os.path.join(os.path.expanduser("~"), "Library", "CloudStorage",
+                     "GoogleDrive-joe.bookout.carr.us@gmail.com", "My Drive", "CARR AI")
+CANONICAL = os.environ.get("CARR_ROOT") or os.path.join(os.path.expanduser("~"), "carr-system")
+RUN_SH = os.path.join(CANONICAL, "run.sh")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from lib.rule_delivery_preuse import (  # noqa:E402
     POSTWRITE_RECEIPT_SCHEMA, digest, postwrite_reviewer_digest, receipt_id,
@@ -258,6 +261,14 @@ def code_review(payload):
         return
     receipt = {"status": "reviewed", "paths": [], "findings": [], "models": [],
                "reason": None, "instruction": None}
+    if not any(path.endswith(CODE_SUFFIXES) for path in paths):
+        receipt["status"] = "skipped"
+        receipt["reason"] = "no_supported_code_paths"
+        receipt["paths"] = [
+            {"path": os.path.basename(path), "status": "not_reviewed",
+             "reason": "unsupported_extension"} for path in paths]
+        print(_review_context(payload, receipt))
+        return
     try:
         import importlib.util
         root = subprocess.run(["git", "rev-parse", "--show-toplevel"],
@@ -265,7 +276,21 @@ def code_review(payload):
                               cwd=os.path.dirname(paths[0]) or ".",
                               timeout=15).stdout.strip()
         if not root:
-            raise RuntimeError("git_root_unavailable")
+            # A path outside any git repo (a scratchpad write) has no diff to
+            # review. It stays "unavailable" -- supported code went unreviewed,
+            # and #1123 made these receipts truthful so no review is ever
+            # claimed for it -- but it now says WHY. It used to be raised as a
+            # bare RuntimeError and reported by class name only, so every
+            # scratchpad write read "unavailable: RuntimeError", which looked
+            # like an outage (2026-09-24 audit).
+            log(f"UNAVAILABLE outside_repo paths={[os.path.basename(p) for p in paths]}")
+            print(_review_context(payload, {
+                "status": "unavailable",
+                "reason": "outside_repo",
+                "instruction": "The edit is saved outside any git repository, so there is no diff "
+                               "to review and no Jev review may be claimed for it.",
+            }))
+            return
         # This hook is installed from CARR for every code home. The edited
         # repository supplies the diff; CARR supplies the Jev reviewer.
         spec = importlib.util.spec_from_file_location(
@@ -274,7 +299,7 @@ def code_review(payload):
             raise RuntimeError("review_module_unavailable")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        hits = []
+        hits, acted = [], []
         for path in paths:
             rel = os.path.relpath(os.path.realpath(path), os.path.realpath(root))
             path_receipt = {"path": rel}
@@ -318,25 +343,53 @@ def code_review(payload):
             region = {"path": rel, "line": 0,
                       "kind": "just written by this session",
                       "code": code}
-            scores = module.review_one(region)
+            # The same request also asks whether the change fits the task.
+            # That answer ACTS (Joe, 2026-09-24, decision 5ec806a4): when it
+            # clears the threshold, module.review_for_edit() hands back
+            # `_would_block` and it is surfaced below as a real finding, not
+            # folded into the advisory list.
+            scores = module.review_for_edit(region, payload)
             model = scores.get("_model")
-            if isinstance(model, str) and model not in receipt["models"]:
+            if not isinstance(model, str) or not model.strip():
+                raise RuntimeError("missing_model_readback")
+            if model not in receipt["models"]:
                 receipt["models"].append(model)
             path_receipt.update(status="jev_reviewed", candidates=candidate_kinds)
             for name, value in scores.items():
                 if not name.startswith("_") and value >= REVIEW_AT:
                     hits.append((rel, name, value))
+            if scores.get("_would_block") and not any(
+                    item["path"] == rel for item in acted):
+                acted.append({
+                    "path": rel, "question": "task_fit_mismatch",
+                    "probability": scores["_would_block"],
+                    "effect": "must_address",
+                    "instruction": (
+                        "Jev judged this change unrequested by, or contradicting, "
+                        "or a concrete mistake against, the most recent human "
+                        "request -- confirm the change is intended before "
+                        "continuing, or fix it."),
+                })
         hits.sort(key=lambda item: -item[2])
         for rel, name, value in hits:
             receipt["findings"].append({
                 "path": rel, "question": name, "probability": value,
-                "effect": "advisory_only",
+                "effect": "required",
             })
+        receipt["findings"].extend(acted)
+        if not receipt["models"]:
+            receipt["status"] = "skipped"
+            receipt["reason"] = "no_jev_candidate"
         print(_review_context(payload, receipt))
     except Exception as exc:
+        # The class name alone ("RuntimeError") told nobody what happened; the
+        # audit log and everyone reading this receipt need the message too.
+        detail = str(exc).strip()
+        reason = f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+        log(f"UNAVAILABLE {reason}")
         print(_review_context(payload, {
             "status": "unavailable",
-            "reason": type(exc).__name__,
+            "reason": reason,
             "instruction": "The edit is saved, but no Jev review may be claimed for it.",
         }))
 
@@ -367,7 +420,7 @@ def main():
         res = subprocess.run(
             [RUN_SH, "lint", path, "--surface", surface],
             capture_output=True, text=True, timeout=TIMEOUT,
-            cwd="/Users/booko/carr-system",
+            cwd=CANONICAL,
         )
         out = (res.stdout or "") + (res.stderr or "")
         if not out.strip():

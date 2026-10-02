@@ -203,8 +203,17 @@ def test_writable_roots_are_exactly_the_two_authorized_machine_paths():
         "/Users/booko/carr-system/out",
     )
     assert adapter._dedicated_writable_roots() == list(adapter.AUTHORIZED_WRITABLE_ROOTS)
-    if Path(adapter.AUTHORIZED_WRITABLE_ROOTS[0]).is_dir():
+    # Another checkout on the same host does not make this clone an installed
+    # desk. Authenticate this repository's metadata, not a sibling's existence.
+    if adapter._git_common_dir() == Path(adapter.AUTHORIZED_WRITABLE_ROOTS[0]):
         assert _resolve_live_writable_roots() == list(adapter.AUTHORIZED_WRITABLE_ROOTS)
+    else:
+        try:
+            _resolve_live_writable_roots()
+        except adapter.DispatchRefusal:
+            pass
+        else:
+            raise AssertionError("private clone accepted the installed desk's write boundary")
 
 
 def test_network_access_is_exactly_the_two_github_delivery_hosts():
@@ -273,6 +282,8 @@ def test_success_is_fresh_and_database_capability_is_not_forwarded():
     assert adapter.STANDING_CONTEXT_NATIVE_PROJECTION_JS in seen["prompt"]
     assert adapter.STANDING_CONTEXT_RULE_CHUNK_JS in seen["prompt"]
     assert "rule-jit-trigger-delivery/v1" in seen["prompt"]
+    assert "rule-route-trigger-delivery/v1" in seen["prompt"]
+    assert "any context beginning `RULE ROUTE` as rules NOT delivered" in seen["prompt"]
     assert "never treat its `declared_packs`, identity, or receipt id as the native" in seen["prompt"]
     assert "repeat until remaining=0" in seen["prompt"]
     assert "Never print the raw CallToolResult" in seen["prompt"]

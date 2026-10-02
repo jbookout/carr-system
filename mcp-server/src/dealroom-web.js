@@ -30,6 +30,7 @@ import {
 import { isTourInternalRequest } from "./tour-internal-web.js";
 import { executeRegisteredTool } from "./tools.js";
 import { readDealWithJev } from "./jev-deal-reading.js";
+import { callTool } from "./mcp.js";
 
 export const DEALROOM_ASSET_DIRECTORY = "../out/doctorcre-artifacts/current"; // mirrors wrangler.toml [assets]
 
@@ -230,24 +231,28 @@ function withHeaders(response, additions, status = response.status) {
   return new Response(response.body, { status, statusText: response.statusText, headers });
 }
 
+export const DEALROOM_CSP = [
+  "default-src 'self'",
+  "base-uri 'none'",
+  "object-src 'none'",
+  "frame-ancestors 'none'",
+  "form-action 'self'",
+  "script-src 'self'",
+  "style-src 'self' https://fonts.googleapis.com",
+  "font-src 'self' https://fonts.gstatic.com",
+  "img-src 'self' data:",
+  "connect-src 'self'",
+  "worker-src 'self'",
+  "manifest-src 'self'",
+].join("; ");
+
 function withSecurityHeaders(response) {
   const headers = new Headers(response.headers);
   // Deal Room is a static asset bundle.  The public shell uses external CSS
   // and JavaScript too, so neither scripts nor styles need unsafe-inline.
-  headers.set("content-security-policy", [
-    "default-src 'self'",
-    "base-uri 'none'",
-    "object-src 'none'",
-    "frame-ancestors 'none'",
-    "form-action 'self'",
-    "script-src 'self'",
-    "style-src 'self' https://fonts.googleapis.com",
-    "font-src 'self' https://fonts.gstatic.com",
-    "img-src 'self' data:",
-    "connect-src 'self' http://127.0.0.1:4682",
-    "worker-src 'self'",
-    "manifest-src 'self'",
-  ].join("; "));
+  // connect-src is same-origin only: no served page loads post-call-client.js
+  // (the only loopback client), and that client refuses non-loopback pages.
+  headers.set("content-security-policy", DEALROOM_CSP);
   headers.set("strict-transport-security", "max-age=31536000; includeSubDomains");
   headers.set("x-content-type-options", "nosniff");
   headers.set("x-frame-options", "DENY");
@@ -830,7 +835,11 @@ async function jevDealReadingResponse(request, env, session, dependencies) {
     });
     const record = await reader(args.deal);
     const read = dependencies.jevDealRead || readDealWithJev;
-    return json(await read(record, { apiKey: env.TYPESAFE_API_KEY }));
+    return json(await read(record, { askJev: env.TYPESAFE_API_KEY ? request =>
+      callTool(env, session.actor, "ask-jev", {
+        idempotency_key: crypto.randomUUID(), session_id: `worker-deal-reading-${crypto.randomUUID()}`,
+        purpose: "call", ...request,
+      }, "full", "app_runtime") : undefined }));
   } catch {
     return json({ error: "DEPENDENCY_UNAVAILABLE" }, 503);
   }

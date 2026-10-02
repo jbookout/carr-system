@@ -565,6 +565,10 @@ test("manifest and service worker are public with PWA-safe headers and offline t
   assert.doesNotMatch(swResponse.headers.get("content-security-policy"), /unsafe-inline/);
   assert.equal(swResponse.headers.get("x-content-type-options"), "nosniff");
   assert.equal(swResponse.headers.get("x-frame-options"), "DENY");
+  const csp = swResponse.headers.get("content-security-policy");
+  assert.match(csp, /(^|; )connect-src 'self'(;|$)/, "connect-src is same-origin only");
+  assert.doesNotMatch(csp, /127\.0\.0\.1|localhost/, "no loopback target in the hosted CSP");
+  assert.equal(swResponse.headers.get("referrer-policy"), "no-referrer");
   const sw = await swResponse.text();
   assert.match(sw, /DATA_PATHS/);
   assert.match(sw, /state: "reconnecting"/);

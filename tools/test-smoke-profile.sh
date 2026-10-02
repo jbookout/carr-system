@@ -37,14 +37,18 @@ case "$payload" in
   *'"target":"Ric"'*)
     printf '%s\n' '{"result":"needs_disambiguation V-BNK-034"}'
     ;;
-  *'"query":"Hughes"'*)
-    printf '%s\n' '{"result":"Hughes"}'
+  *'"query":"CPA"'*)
+    printf '%s\n' '{"result":"CPA"}'
     ;;
-  *'"query":"Jon Shaw"'*)
-    printf '%s\n' '{"result":"\"connections\" Tyrer"}'
+  *'"query":"__smoke_graph_vendor_fixture_unset__"'*)
+    # SMOKE_GRAPH_VENDOR_QUERY is unset here (WR-000049, the double's fixture
+    # file carries only the ball-probe subject — see run_smoke), so
+    # smoke-reads.sh SKIPs this check rather than calling it; this case is
+    # dead but kept so a future canned run has something to match.
+    printf '%s\n' '{"result":"\"connections\""}'
     ;;
   *'"target":"C-155"'*)
-    printf '%s\n' '{"result":"Dion Moniz \"hops\":2"}'
+    printf '%s\n' '{"result":"Synthetic Twohop \"hops\":2"}'
     ;;
   *'"target":"Nobody Smokeprobe Xyzzy"'*)
     printf '%s\n' '{"result":"No counterparty history"}'
@@ -58,7 +62,13 @@ case "$payload" in
   *'"query":"Qwertzuiop Vraxmandel"'*)
     printf '%s\n' '{"result":"\"parties\":[] \"organizations\":[]"}'
     ;;
-  *'"query":"Mia Arafa"'*)
+  *'"query":"__smoke_merged_client_fixture_unset__"'*)
+    # This pattern cannot match anything a real fixture would ever query for
+    # (WR-000049: SMOKE_MERGED_CLIENT_QUERY is unset in this double — see the
+    # note above run_smoke — so smoke-reads.sh SKIPs the merged-record check
+    # rather than calling it). Kept only so a future real query still has a
+    # canned case to fall into, without hardcoding the real client name this
+    # double does not need.
     printf '%s\n' '{"result":"C-046 C-036 \"merged\":true"}'
     ;;
   *'"name":"log-activity"'*|*'"name":"set-next-action"'*|*'"name":"complete-action"'*)
@@ -85,18 +95,31 @@ check() {
   fi
 }
 
+# The double's own fixture file: synthetic, and only the ball-probe subject,
+# so partner mode still exercises the fixed-key completion path (WR-000049
+# moved that real deal name out of the tracked script).
+printf '%s\n' 'SMOKE_BALL_PROBE_REF="Synthetic Closed Deal"' > "$TMP_ROOT/fixtures.env"
+
 run_smoke() {
   local mode="$1" output="$2" calls="$3"
   : > "$calls"
+  # SMOKE_LOCAL_FIXTURES forced to a path that cannot exist (WR-000049): this
+  # double must behave the same on every machine, including Joe's own, which
+  # carries a real (gitignored) mcp-server/smoke-reads.local.env with real
+  # client names smoke-reads.sh would otherwise pick up — this contract test
+  # is about call routing, not that fixture's content, and a canned response
+  # here has no matching real data behind it anyway.
   if [ "$mode" = probe ]; then
     env -i PATH="$TMP_ROOT:$PATH" HOME="$TMP_ROOT" \
       SMOKE_PROFILE_CALL_LOG="$calls" CARR_MCP_ENV="$TMP_ROOT/no-env" \
+      SMOKE_LOCAL_FIXTURES="$TMP_ROOT/fixtures.env" \
       CARR_MCP_PROBE_TOKEN=probe-token SMOKE_REPS=1 SMOKE_REP_SLEEP=0 \
       SMOKE_CALL_ATTEMPTS=1 SMOKE_CALL_RETRY_SLEEP=0 \
       bash "$SMOKE" > "$output" 2>&1
   else
     env -i PATH="$TMP_ROOT:$PATH" HOME="$TMP_ROOT" \
       SMOKE_PROFILE_CALL_LOG="$calls" CARR_MCP_ENV="$TMP_ROOT/no-env" \
+      SMOKE_LOCAL_FIXTURES="$TMP_ROOT/fixtures.env" \
       CARR_MCP_TOKEN_JOE=partner-token SMOKE_REPS=1 SMOKE_REP_SLEEP=0 \
       SMOKE_CALL_ATTEMPTS=1 SMOKE_CALL_RETRY_SLEEP=0 \
       bash "$SMOKE" > "$output" 2>&1

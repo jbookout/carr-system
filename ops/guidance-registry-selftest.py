@@ -413,8 +413,8 @@ def main():
     # manifest-declared type. No rule was reclassified; every dropped count
     # is a whole rule leaving the active set, not a type change.
     reviewed_counts = {
-        "constraint": 73, "procedure": 76, "doctrine": 12, "rubric": 36,
-        "preference": 11, "precedent": 3, "example": 0,
+        "constraint": 70, "procedure": 77, "doctrine": 12, "rubric": 35,
+        "preference": 12, "precedent": 3, "example": 0,
     }
     split_compile_pass = (
         not reviewed_errors and not reviewed_compile_errors
@@ -451,7 +451,7 @@ def main():
         "source_manifest_provenance": {
             "path": "audits/guidance-migration-manifest.v1.tsv", "sha256": "a" * 64,
             "manifest": "carr-guidance-migration", "schema_version": "1.0.0",
-            "source_classification": "judgment_ambient", "entry_count": 91,
+            "source_classification": "judgment_ambient", "entry_count": 93,
         },
         "base_inventory": {
             "path": "ops/config/rule-enforcement-map.json", "sha256": "b" * 64,
@@ -492,9 +492,10 @@ def main():
         # manifest row (procedure) and compiles to one more guidance item.
         # procedure 73 -> 74. Nothing was reclassified; this is one whole rule
         # ENTERING the active set, the mirror of the 2026-08-27 retirement batch.
-        # 209 -> 211 on 2026-09-05: the isolated-delivery and create-missing-
+        # Current map tracks the live active rule set; retired rows leave the manifest.
+        # Historical 209 -> 211 on 2026-09-05: the isolated-delivery and create-missing-
         # verbs rules are both session rails, so each compiles as one procedure.
-        and len(activation_manifest["entries"]) == 211
+        and len(activation_manifest["entries"]) == len(reviewed_registry["items"])
         and registry.activation_manifest_bytes(activation_manifest).endswith(b"\n")
         and len(registry.activation_manifest_sha256(activation_manifest)) == 64
         and registry.activation_manifest_sha256(activation_manifest)

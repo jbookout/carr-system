@@ -1,3 +1,5 @@
+import { escapeHtml } from "./esc.js";
+import { claimInert, releaseInert } from "./inert-registry.js";
 // Clients and Vendors: the browser half of the Journey 1 business read.
 //
 // THE URL IS THE VIEW'S MEMORY. Search text, every filter, the sort, the page
@@ -81,9 +83,6 @@ const scopeButtons = dom.scopeSwitch ? [...dom.scopeSwitch.querySelectorAll("[da
 const view = Object.assign(createBusinessState(), { freshnessKey: null, returnFocusId: null });
 let searchTimer = null;
 
-const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
-  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-}[char]));
 
 function formatMoment(value) {
   const date = new Date(value);
@@ -337,7 +336,7 @@ function renderPager(payload) {
   const link = (id, label, page, enabled, rel) => enabled
     ? `<a class="action secondary-action" id="${id}" rel="${rel}" href="${escapeHtml(viewHref({ ...view.query, page }))}">${label}</a>`
     : `<span class="action secondary-action disabled" id="${id}" aria-disabled="true">${label}</span>`;
-  dom.pager.innerHTML = `${link("pagerPrevious", "Previous", Math.max(1, view.query.page - 1), summary.hasPrevious, "prev")}<span class="pager-position">Page ${summary.page} of ${summary.pageCount}</span>${link("pagerNext", "Next", view.query.page + 1, summary.hasNext, "next")}`;
+  dom.pager.innerHTML = `${link("pagerPrevious", "Previous", Math.max(1, view.query.page - 1), summary.hasPrevious, "prev")}<span class="pager-position">Page ${escapeHtml(summary.page)} of ${escapeHtml(summary.pageCount)}</span>${link("pagerNext", "Next", view.query.page + 1, summary.hasNext, "next")}`;
 }
 
 function renderList() {
@@ -438,6 +437,17 @@ function backgroundRegions() {
   return [...document.querySelectorAll("[data-panel-background]")];
 }
 
+// Round 3 (V5-J101 review of PR #1259 at afc85607): this used to force each
+// region's inert flag to match `modal` unconditionally on every call, with no
+// memory of whether something ELSE — Doc, on the same page — also currently
+// needs the same region inert. Two independent panels writing the same boolean with no
+// coordination meant whichever one wrote LAST won, discarding the other's
+// still-active claim in either direction. claimInert/releaseInert
+// (inert-registry.js) hold a real reference count shared with doc-panel.js:
+// this panel's own claim can never undo Doc's, and Doc's can never undo this
+// panel's, however the two happen to interleave.
+const PANEL_OWNER = "record-panel";
+
 function applyPanelModality() {
   if (!dom.panel) return;
   const modal = panelIsModal();
@@ -445,11 +455,8 @@ function applyPanelModality() {
   if (modal) dom.panel.setAttribute("aria-modal", "true");
   else dom.panel.removeAttribute("aria-modal");
   for (const region of backgroundRegions()) {
-    // `inert` is the real containment; aria-hidden keeps assistive technology
-    // out of the covered content where inert is not supported yet.
-    region.inert = modal;
-    if (modal) region.setAttribute("aria-hidden", "true");
-    else region.removeAttribute("aria-hidden");
+    if (modal) claimInert(region, PANEL_OWNER);
+    else releaseInert(region, PANEL_OWNER);
   }
 }
 

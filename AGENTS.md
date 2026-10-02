@@ -9,8 +9,10 @@ code work happens — booted with no instructions at all.
 Call `mcp__carr__standing_context` directly FIRST. Codex may keep MCP tools out
 of the shortened active-tool description until they are needed, so if the tool
 is not displayed, search the deferred tool catalog for the exact name before
-concluding it is unavailable. Recite the counts it returns in your first
-response, so the partner can see what is binding you.
+concluding it is unavailable. In the first response, report the number of
+shared and personal rules actually delivered, alongside the available corpus
+counts. Do not describe corpus counts as rules loaded into the session. Fetch
+full text only for rules binding the current task or explicit rule IDs.
 
 Only when the direct MCP tool is genuinely unavailable or returns a service
 error, use the checkout's fallback:
@@ -39,15 +41,22 @@ this policy and supersedes the narrower approval rule. It carries forward
 the product priority from decision `019146bd-15fb-4f5e-8849-ed63911469e0`.
 The full current text is STORE doctrine
 `engineering-workflow-sop#00-scope-and-provenance`, section
-`52880de2-ab90-4673-b046-b74f900aa2de@5`, content hash
-`89e180adc6ecd5b138d21c65b85bffff4aca2677edb58f4a80049329b15eaed1`.
+`52880de2-ab90-4673-b046-b74f900aa2de@6`, content hash
+`0d4fde90e98b0fab9f769e07f1b4732f8ec90cdf458834a8df2e9e1611e13626`.
 That version and hash record this observed policy's provenance. At runtime,
 fetch the current section by its stable section ID; do not use this observed
 snapshot as a current-version gate.
 
 - Continue the next unfinished DoctorCRE product task attended; preserve
   completed audits and reviews. The unattended engineering controller is not
-  its prerequisite. Unattended dispatch remains disabled.
+  its prerequisite. Joe's ruling 2026-09-24, decision
+  `b729859d-be5d-4521-ba50-d4517bc57208`: the claim that "unattended
+  dispatch remains disabled" was never his rule — a model wrote it and
+  framed it as his direction. His actual goal is maximum automation,
+  including scripted jobs starting agent sessions automatically. This does
+  not touch the real production, credential, external-send,
+  destructive-action, and merge-approve safeguards below, which remain in
+  force as technical checks, nor does it waive CI as the merge gate.
 - Do not put a new Work Request ahead of product work unless it names the
   product task it blocks. Existing substrate work may finish but
   may not spawn child Work Requests. Backlog a substrate follow-up with the
@@ -76,6 +85,29 @@ delivery; it remains a real constraint until then. Permissions imposed by the
 host, provider, sandbox, or law are outside CARR's control and must be reported
 accurately.
 <!-- carr-product-first-policy:end -->
+
+## Jev in reviews
+
+Decision `d57501f6-00e7-4ff5-a886-c28a5d5501d6` records Joe's direction:
+Jev is authorized to participate in every kind of review. Use it for bounded
+review judgments wherever it helps, including code, CI, pull requests, product
+behavior, and CARR records. Do not ask for a separate Jev-specific approval or
+exclude a review merely because its category is not prelisted. Preserve source
+evidence, required checks, and any distinct reviewer-of-record requirement.
+
+## Model Room before another model
+
+<!-- carr-model-room-route:start -->
+Decision `284028a5-8295-498a-af1e-6cae5c6034e7` records Joe's route:
+call Claude, Grok, and other external models through the Model Room. Before
+attempting a direct model CLI or API call, pull this rule into the preflight
+judgment with Jev and route the work to the named Model Room desk. Verify the
+desk's actual model and result. Choose every subagent by the cheapest tier
+still qualified to do the task correctly, name it on the call, and never
+silently delegate a portion to another model (Joe, 2026-09-23: the earlier
+Opus-always line was a temporary usage-window instruction, now retired). A model
+CLI used solely for authentication or health readback is not a model-work call.
+<!-- carr-model-room-route:end -->
 
 ## Authorized code homes and repository boundaries
 
@@ -185,6 +217,24 @@ both. Run one class while iterating:
 `ops/ci-selftest.py` tests the checker itself. Do not remove the bash re-exec at
 the top of `ops/ci.sh`: under zsh its class loop does not word-split, and the
 script will report every class green having executed none.
+
+## Changes to LLM-steering surfaces ship with an eval
+
+Any change to a surface registered in `evals/surfaces.json` runs
+`/claude-api build-eval`, then `/claude-api hillclimb`, and ships with
+`evals/<surface>/receipt.json`, or a reasoned `no-eval: <surface>: <reason>`
+line in the PR body. Procedure: `evals/README.md`.
+
+Reviewer checklist on the exact head: `ops/check-eval-receipt.py` passed; each
+receipt was changed in this PR; its verdict matches its numbers and authorizes
+shipping (`ship` or `ship_cost_at_parity`, with no critical regression); each
+no-eval line names a real reason a measurement is impossible. An unreadable PR
+event fails the check.
+
+## Progress board
+
+For work >5 steps or >30 min, update `out/boards/<project>.html` via
+`tools/progress_board.py` after each step; record Joe questions with defaults.
 
 ## Git discipline on a shared tree
 

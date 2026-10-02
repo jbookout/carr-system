@@ -207,6 +207,18 @@ test("audit taxonomy is append only and reconstructable", () => {
   assert.ok(audit.families.governance.includes("unsupported_action.refused"));
 });
 
+test("sourceVerificationIsFresh rejects a status past its max_age_days expiry", () => {
+  const maxAgeDays = 30;
+  const observedMs = Date.parse("2026-08-27T00:00:00Z");
+  const verification = {status: "fresh", observed_at: "2026-08-27T00:00:00Z", max_age_days: maxAgeDays};
+  const atExpiryBoundaryMs = observedMs + maxAgeDays * 24 * 60 * 60 * 1000;
+  assert.equal(sourceVerificationIsFresh(verification, atExpiryBoundaryMs), true, "still fresh exactly at the max_age_days boundary");
+  const onePastExpiryMs = observedMs + (maxAgeDays + 1) * 24 * 60 * 60 * 1000;
+  assert.equal(sourceVerificationIsFresh(verification, onePastExpiryMs), false, "rejected one day past max_age_days expiry");
+  assert.equal(sourceVerificationIsFresh({...verification, status: "stale"}, observedMs), false, "non-fresh status is never fresh");
+  assert.equal(sourceVerificationIsFresh({...verification, max_age_days: 1.5}, observedMs), false, "max_age_days must be a positive integer");
+});
+
 test("policy learning stays offline, bounded, and non-authoritative", () => {
   const registry = read("contracts/policy-learning-formulation-registry.v1.json");
   const envelope = read("contracts/policy-learning-envelope.v1.schema.json");
@@ -301,6 +313,10 @@ test("S0 memory evaluation baseline is frozen, complete, and non-authoritative",
 
   const sourceFamilies = new Set(fixture.source_lock.sources.map(row => row.family));
   assert.deepEqual([...sourceFamilies].sort(), ["carr", "hermes", "mem0", "neon", "openviking", "postgresql", "practitioner"].sort());
+  // Freshness is evaluated as-of the fixture's own recorded observation instant, not wall-clock
+  // time: this is a frozen synthetic contract fixture, so "fresh" is a fact about internal
+  // consistency at the time it was pinned, not a claim that survives forever.
+  const asOfMs = Math.max(...fixture.source_lock.sources.map(row => Date.parse(row.verification.observed_at)));
   for (const source of fixture.source_lock.sources) {
     assert.match(source.exact_ref, /^(https:\/\/|repo:|doctrine:)/);
     assert.match(source.pin.value, /^(sha256:|git:|revision:)/);
@@ -312,7 +328,7 @@ test("S0 memory evaluation baseline is frozen, complete, and non-authoritative",
     assert.ok(source.verification.max_age_days >= 1 && source.verification.max_age_days <= 90);
     assert.match(source.verification.verification_ref, /^(https:\/\/|repo:|doctrine:|check:)/);
     assert.equal(Number.isNaN(Date.parse(source.verification.observed_at)), false);
-    assert.equal(sourceVerificationIsFresh(source.verification), true, `${source.source_id} freshness has not expired`);
+    assert.equal(sourceVerificationIsFresh(source.verification, asOfMs), true, `${source.source_id} freshness has not expired`);
   }
   assert.ok(fixture.source_lock.sources.some(row => row.source_id === "mem0-v3-additive" && row.behavior_epoch === "current"));
   assert.ok(fixture.source_lock.sources.some(row => row.source_id === "mem0-legacy-operations" && row.behavior_epoch === "legacy"));
@@ -486,6 +502,9 @@ test("check:S0-1 pins every research revision and separates claims from reproduc
   assert.deepEqual(fixture.record_state_binding.accepted_resource_revisions, ACCEPTED_S0_RESOURCE_REVISIONS);
 
   const allowedClasses = new Set(["vendor_claim", "packet_bound_claim", "source_inspected", "locally_reproduced"]);
+  // Same fixed-as-of rule as the S0 baseline test: freshness is checked against the fixture's own
+  // recorded observation instant, never wall-clock time.
+  const asOfMs = Math.max(...fixture.source_lock.sources.map(row => Date.parse(row.verification.observed_at)));
   for (const source of fixture.source_lock.sources) {
     assert.match(source.exact_ref, /^(https:\/\/|repo:|doctrine:)/, `${source.source_id} exact ref`);
     assert.match(source.pin.value, /^(git:[a-f0-9]{7,40}|sha256:[a-f0-9]{64}|revision:[a-z0-9][a-z0-9._:-]+)$/, `${source.source_id} exact pin`);
@@ -493,7 +512,7 @@ test("check:S0-1 pins every research revision and separates claims from reproduc
     assert.ok(source.claims.length > 0, `${source.source_id} claims`);
     assert.equal(source.verification.status, "fresh", `${source.source_id} freshness`);
     assert.ok(source.verification.max_age_days <= 30, `${source.source_id} freshness window`);
-    assert.equal(sourceVerificationIsFresh(source.verification), true, `${source.source_id} freshness expiry`);
+    assert.equal(sourceVerificationIsFresh(source.verification, asOfMs), true, `${source.source_id} freshness expiry`);
     if (source.exact_ref.startsWith("https://github.com/") && source.pin.value.startsWith("git:")) {
       assert.ok(source.exact_ref.includes(source.pin.value.slice("git:".length)), `${source.source_id} URL carries immutable commit`);
     }
@@ -541,7 +560,7 @@ test("check:S0-1 pins every research revision and separates claims from reproduc
   const expiredSource = structuredClone(fixture);
   expiredSource.source_lock.sources[0].verification.observed_at = "2000-01-01T00:00:00Z";
   assert.equal(validate(expiredSource).valid, true, "cross-field age is enforced by the executable gate");
-  assert.equal(sourceVerificationIsFresh(expiredSource.source_lock.sources[0].verification), false);
+  assert.equal(sourceVerificationIsFresh(expiredSource.source_lock.sources[0].verification, asOfMs), false);
 });
 
 test("check:S0-2 freezes executable corpus, splits, labels, metrics, confidence, versions, cost, latency, and horizons", () => {

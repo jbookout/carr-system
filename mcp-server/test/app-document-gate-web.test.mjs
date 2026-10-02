@@ -48,6 +48,10 @@ test("every DoctorCRE app page route is a Deal Room request; an unlisted page is
     assert.equal(isDealroomRequest(new Request(`https://${HOST}${path}`), { DEALROOM_HOST: HOST }), true, `${path} must be admitted`);
   }
   assert.equal(isDealroomRequest(new Request(`https://${HOST}/not-an-app-page`), { DEALROOM_HOST: HOST }), false);
+  // The typed shared Meeting page was removed from the app (decision
+  // 7dc47eea): the pipeline conversation is recorded by Deal Room Call Mode.
+  assert.equal(isDealroomRequest(new Request(`https://${HOST}/meeting`), { DEALROOM_HOST: HOST }), false,
+    "/meeting is retired and must not be admitted by the gate");
 });
 
 test("an app page route answers like Home: sign-in redirect, flag-gated 404, then 200 for a session", async () => {
