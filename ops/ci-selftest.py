@@ -1321,6 +1321,67 @@ def test_hosted_ci_runs_classes_in_parallel_behind_one_required_context():
           {"ran": ran, "order": classes})
 
 
+def test_hosted_zsh_setup_does_not_refresh_working_indexes():
+    """PR 1465 spent its entire job budget in apt update before any class ran.
+
+    Execute the workflow's setup with a synthetic apt, not a second installer.
+    A working install must never refresh; stale indexes must still be repaired;
+    an unavailable mirror must fail setup rather than green-light missing zsh.
+    """
+    wf = _hosted_workflow()
+    setup = next(st for st in wf["jobs"]["classes"]["steps"]
+                 if st.get("name") == "Install zsh")
+    check("zsh setup has a three-minute step deadline",
+          0 < setup.get("timeout-minutes", 0) <= 3)
+    with tempfile.TemporaryDirectory(prefix="ci-zsh-setup-") as tmp:
+        fixture = pathlib.Path(tmp)
+        sudo = fixture / "sudo"
+        sudo.write_text("#!" + sys.executable + "\n" + '''
+import json, os, pathlib, sys
+log = pathlib.Path(os.environ["CI_SETUP_CALLS"])
+calls = json.loads(log.read_text()) if log.exists() else []
+calls.append(sys.argv[1:])
+log.write_text(json.dumps(calls))
+args = sys.argv[1:]
+mode = os.environ["CI_SETUP_FIXTURE"]
+if mode == "working" and "update" in args:
+    sys.exit(91)
+if mode != "working" and len(calls) == 1:
+    sys.exit(100)
+if mode == "unavailable" and "update" in args:
+    sys.exit(100)
+if mode == "retry-failed" and len(calls) == 3:
+    sys.exit(100)
+''')
+        sudo.chmod(0o755)
+        for mode, expected in (("working", ["install"]),
+                               ("stale", ["install", "update", "install"]),
+                               ("unavailable", ["install", "update"]),
+                               ("retry-failed", ["install", "update", "install"])):
+            log = fixture / (mode + ".json")
+            env = scrubbed_env()
+            env.update(PATH=str(fixture) + os.pathsep + os.environ["PATH"],
+                       CI_SETUP_CALLS=str(log), CI_SETUP_FIXTURE=mode)
+            ran = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", setup["run"]],
+                                 cwd=fixture, env=env, capture_output=True, text=True,
+                                 timeout=10)
+            calls = json.loads(log.read_text()) if log.exists() else []
+            actions = [next((arg for arg in args if arg in ("install", "update")), "unknown")
+                       for args in calls]
+            check(f"zsh setup {mode} uses the required install/refresh path",
+                  actions == expected, actions)
+            check(f"zsh setup {mode} propagates its outcome",
+                  (ran.returncode != 0) == (mode in ("unavailable", "retry-failed")),
+                  ran.returncode)
+            check(f"zsh setup {mode} bounds every apt network request",
+                  bool(calls) and all(args[0] == "apt-get" and
+                      all(option in args for option in ("Acquire::Retries=1",
+                          "Acquire::http::Timeout=15", "Acquire::https::Timeout=15"))
+                      for args in calls), calls)
+        check("zsh remains a required installed package",
+              all("zsh" in args for args in calls if "install" in args))
+
+
 def main():
     for fn in (test_no_green_without_running,
                test_class_table_is_complete,
@@ -1346,7 +1407,8 @@ def main():
                test_gates_selftests_have_a_process_group_watchdog,
                test_push_floor_defers_the_gates_class_instead_of_running_it,
                test_strict_still_owns_the_gates_class,
-               test_hosted_ci_runs_classes_in_parallel_behind_one_required_context):
+               test_hosted_ci_runs_classes_in_parallel_behind_one_required_context,
+               test_hosted_zsh_setup_does_not_refresh_working_indexes):
         try:
             fn()
         except Exception as exc:  # a crashing case is a failing case, never a silent skip

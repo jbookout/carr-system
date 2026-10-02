@@ -304,6 +304,25 @@ class LibraryShapeTests(unittest.TestCase):
 
 
 class DispatchOwnershipTests(unittest.TestCase):
+    def test_runtime_router_preserves_explicit_transcript_owner(self):
+        session = 'dispatch-runtime'
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / 'transcript.jsonl'
+            transcript.write_text(json.dumps({'type': 'user',
+                'timestamp': '2026-09-29T12:00:00Z',
+                'message': {'role': 'user', 'content': 'judge this'}}) + '\n')
+            log = Path(directory) / 'calls.jsonl'
+            with patch.dict(os.environ, {'CODEX_THREAD_ID': session}), patch.object(
+                    client.urllib.request, 'urlopen', responder(ANSWER)):
+                result = client.ask('state', {'q': client.noul('judge')},
+                    api_key='offline', cache_ttl_seconds=0, calls_log=str(log),
+                    work_class='app_runtime', transcript_path=str(transcript))
+            row = json.loads(log.read_text())
+            self.assertEqual(result['answers'], ANSWER['answers'])
+            self.assertEqual(row['session'], session)
+            self.assertTrue(row['human_turn_id'].startswith('human-turn:v1:'))
+            self.assertTrue(row['ok'])
+
     def test_standalone_ask_captures_owner_outside_repo(self):
         with tempfile.TemporaryDirectory() as directory:
             transcript = Path(directory) / "transcript.jsonl"
