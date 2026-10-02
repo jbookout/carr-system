@@ -37,14 +37,29 @@ async function fixture(c, options = {}) {
     display: sponsor.display_name,
     human: true,
   };
+  const native =
+    (await c.query("select id from actor where slug='codex'")).rows[0] ||
+    (
+      await c.query(
+        "insert into actor(slug,kind,display_name) values('codex','automation','Synthetic native executor') returning id",
+      )
+    ).rows[0];
+  const localIdentity =
+    (await c.query("select id from actor where slug='joe-local'")).rows[0] ||
+    (
+      await c.query(
+        "insert into actor(slug,kind,display_name) values('joe-local','automation','Synthetic local executor') returning id",
+      )
+    ).rows[0];
   const machine = {
-    id: aid,
+    id: native.id,
     slug: "codex",
     human: false,
     native_agent_verified: true,
     sponsoring_human_slug: "joe",
     authorization_class: "sponsored_agent",
   };
+  const local = { ...machine, id: localIdentity.id, slug: "joe-local" };
   const ordinary = { id: aid, slug, human: false };
   const party = randomUUID(),
     lead = randomUUID();
@@ -56,7 +71,7 @@ async function fixture(c, options = {}) {
     "insert into lead(id,party_id,stage,created_by,updated_by) values($1,$2,'new',$3,$3)",
     [lead, party, aid],
   );
-  return { aid, human, machine, ordinary, party, lead };
+  return { aid, human, machine, local, ordinary, party, lead };
 }
 async function command(c, f, name, extra = {}, actor = f.human) {
   await c.query("begin");
@@ -141,7 +156,7 @@ run(
   "F2: sponsored and local reviews without words retain automated intent; ordinary Undo refuses",
   async (c) => {
     const f = await fixture(c);
-    for (const actor of [f.machine, { ...f.machine, slug: "joe-local" }]) {
+    for (const actor of [f.machine, f.local]) {
       await command(
         c,
         f,
