@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""hook-meter-run.py — runs a gate, times it, records what happened, decides nothing.
+"""hook-meter-run.py — dispatches hooks, times them, preserves gate verdicts.
+
+Bounded read-only Grok print children do not own a CARR session lifecycle.
+Only their named context/state hooks are suppressed; effect guards still run.
 
     /usr/bin/env python3 hooks/hook-meter-run.py hooks/guard-unattended.py [args...]
 
@@ -99,6 +102,25 @@ STOP_EVENTS = ("Stop", "SubagentStop")
 
 MAX_FIELD = 300
 INVOCATION_REPO_ENV = "CARR_HOOK_INVOCATION_REPO"
+
+def bounded_grok_read_only():
+    # Keep one classifier for marked and ordinary context invocations. The
+    # protected probe returns immediately without ps for unmarked sessions.
+    # Missing optional plumbing must keep every gate running.
+    sys.path.insert(0, REPO)
+    try:
+        from hooks.grok_invocation import bounded_grok_read_only as probe
+    except ImportError:
+        return False
+    return probe()
+
+# Bounded retrieval has no CARR session lifecycle. Keep effect guards running;
+# suppress only context delivery/state hooks imported through Claude settings.
+GROK_CONTEXT_HOOKS = frozenset({
+    "gate-integrity.py", "rule-boot-gate.py", "context-handoff-gate.py",
+    "session-presence-hook.py", "rule-pack-preuse-reselection.py",
+    "rule-pack-drift-gate.py", "chat-lint-carryover.py",
+})
 
 
 class Tee(io.TextIOBase):
@@ -485,6 +507,10 @@ def main():
     target = argv[0]
     if not os.path.isabs(target):
         target = os.path.join(REPO, target)
+    if (os.path.dirname(os.path.abspath(target)) == os.path.join(REPO, "hooks")
+            and os.path.basename(target) in GROK_CONTEXT_HOOKS
+            and bounded_grok_read_only()):
+        return 0
 
     # ── setup. The two steps that would change a verdict if they failed —
     #    handing the gate its stdin, and passing its output through — use io
