@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 OPS = Path(__file__).resolve().parent
@@ -623,6 +624,127 @@ class HandoffTests(unittest.TestCase):
                                    judge_module=FakeJudge())
         self.assertIn("last_failure", result["kept"])
         self.assertIn("KeyError", result["pack"])
+
+
+class StopBoundaryBatchTests(unittest.TestCase):
+    def test_diff_uses_review_tier_map_without_paid_judgment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            judge = FakeJudge({})
+            results = jdc.inspect_stop_boundary(
+                "", {}, "diff --git a/hooks/lint-gate.py b/hooks/lint-gate.py\n+x\n",
+                "change hook", "session-map", client=FakeClient, judge_module=judge,
+                state_dir=tmp, receipt_path=os.path.join(tmp, "receipt.jsonl"))
+            self.assertEqual(judge.calls, 0)
+            self.assertEqual(results[0]["verdict"], "needs_review")
+            self.assertEqual(results[0]["detail"]["source"], "deterministic_floor")
+
+    def test_unreadable_map_keeps_diff_at_high_floor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            judge = FakeJudge({})
+            with patch.object(jdc, "_sibling_lib", side_effect=ValueError("malformed map")):
+                results = jdc.inspect_stop_boundary(
+                    "", {}, "diff --git a/app.py b/app.py\n+x\n",
+                    "change app", "session-broken-map", client=FakeClient, judge_module=judge,
+                    state_dir=tmp, receipt_path=os.path.join(tmp, "receipt.jsonl"))
+            self.assertEqual(judge.calls, 0)
+            self.assertEqual(results[0]["verdict"], "needs_review")
+            self.assertEqual(results[0]["detail"]["source"], "review_tier_map_unreadable")
+            self.assertIn("malformed", results[0]["detail"]["error"])
+
+    def test_diff_overflow_is_reviewed_instead_of_dropped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            judge = FakeJudge({"risk_0": {"type": "score", "score": 0.1}})
+            diff = "diff --git a/app.py b/app.py\n+x\ndiff --git a/extra.py b/extra.py\n+y\n"
+            with patch.object(jdc, "MAX_TRIAGE_FILES", 1):
+                results = jdc.inspect_stop_boundary(
+                    "", {}, diff, "change app", "session-overflow", client=FakeClient,
+                    judge_module=judge, state_dir=tmp,
+                    receipt_path=os.path.join(tmp, "receipt.jsonl"))
+            self.assertEqual(judge.calls, 1)
+            self.assertEqual(set(judge.last[1]), {"risk_0"})
+            self.assertEqual(results[0]["detail"]["source"], "unreviewed_overflow")
+            self.assertEqual(results[0]["verdict"], "needs_review")
+
+    def test_historical_completion_mention_does_not_create_done_obligation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            judge = FakeJudge({
+                "claim_scope": {"type": "choice", "choice": "other", "confidence": 0.98},
+                "claims_supported": {"type": "noul", "noul": 0.1},
+                "omitted_failure": {"type": "noul", "noul": 0.9},
+            })
+            results = jdc.inspect_stop_boundary(
+                "The earlier repair was complete; I am still investigating this change.",
+                {"test_output": "FAILED test_x"}, "", "investigate app", "session-history",
+                client=FakeClient, judge_module=judge, state_dir=tmp,
+                receipt_path=os.path.join(tmp, "receipt.jsonl"))
+            self.assertEqual(judge.calls, 1)
+            self.assertIn("claim_scope", judge.last[1])
+            self.assertFalse(any(row["check"] == "done_claim" for row in results))
+
+    def test_current_claim_with_truncated_failed_history_is_uncertain(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            judge = FakeJudge({
+                "claim_scope": {"type": "choice", "choice": "current_completion", "confidence": 0.98},
+                "claims_supported": {"type": "noul", "noul": 0.99},
+                "omitted_failure": {"type": "noul", "noul": 0.01},
+            })
+            results = jdc.inspect_stop_boundary(
+                "The repair is complete.",
+                {"test_history_truncated": True, "test_failure_count": 1,
+                 "test_history": "Some earlier runs omitted", "test_exit_code": 0},
+                "", "repair app", "session-truncated", client=FakeClient,
+                judge_module=judge, state_dir=tmp,
+                receipt_path=os.path.join(tmp, "receipt.jsonl"))
+            done = next(row for row in results if row["check"] == "done_claim")
+            self.assertEqual(done["verdict"], "uncertain")
+
+    def test_failed_test_floor_survives_unavailable_judgment_and_retries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            class Unavailable(FakeJudge):
+                def judge(self, state, questions, **kwargs):
+                    self.calls += 1
+                    raise RuntimeError("offline")
+            judge = Unavailable({})
+            receipt = os.path.join(tmp, "receipt.jsonl")
+            args = ("All tests pass.", {"test_output": "FAILED test_x"}, "",
+                    "change app", "session-unavailable")
+            first = jdc.inspect_stop_boundary(
+                *args, client=FakeClient, judge_module=judge, state_dir=tmp,
+                receipt_path=receipt)
+            second = jdc.inspect_stop_boundary(
+                *args, client=FakeClient, judge_module=judge, state_dir=tmp,
+                receipt_path=receipt)
+            self.assertEqual(judge.calls, 2)
+            self.assertIn("unsupported", [r["verdict"] for r in first])
+            self.assertIn("unavailable", [r["verdict"] for r in second])
+            self.assertEqual([json.loads(line)["status"] for line in
+                              Path(receipt).read_text().splitlines()],
+                             ["unavailable", "unavailable"])
+
+    def test_claim_and_diff_use_one_request_then_skip_unchanged_stop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            judge = FakeJudge({
+                "claim_scope": {"type": "choice", "choice": "current_completion", "confidence": 0.98},
+                "claims_supported": {"type": "noul", "noul": 0.1},
+                "omitted_failure": {"type": "noul", "noul": 0.9},
+            })
+            diff = "diff --git a/app.py b/app.py\n+print('changed')\n"
+            first = jdc.inspect_stop_boundary(
+                "All tests pass.", {"test_output": "FAILED test_x"}, diff,
+                "change app", "session-1", client=FakeClient, judge_module=judge,
+                state_dir=tmp, receipt_path=os.path.join(tmp, "receipt.jsonl"))
+            self.assertEqual(judge.calls, 1)
+            self.assertIn("claims_supported", judge.last[1])
+            self.assertTrue(any(q.startswith("risk_") for q in judge.last[1]))
+            self.assertIn("unsupported", [r["verdict"] for r in first])
+            second = jdc.inspect_stop_boundary(
+                "All tests pass.", {"test_output": "FAILED test_x"}, diff,
+                "change app", "session-1", client=FakeClient, judge_module=judge,
+                state_dir=tmp, receipt_path=os.path.join(tmp, "receipt.jsonl"))
+            self.assertEqual(judge.calls, 1)
+            self.assertEqual(second, [])
+            row = json.loads(Path(tmp, "receipt.jsonl").read_text().splitlines()[0])
+            self.assertEqual(row["status"], "answered")
 
 
 if __name__ == "__main__":
