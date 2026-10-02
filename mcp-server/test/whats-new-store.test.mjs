@@ -21,8 +21,11 @@ if (!bin || !existsSync(path.join(bin,'postgres'))) {
 }
 if (!bin || !existsSync(path.join(bin,'postgres'))) bin = null;
 const uuid = n => `aa000000-0000-4000-8000-${String(n).padStart(12,'0')}`;
+// The catch-up contract evaluates calendar thresholds in the business timezone,
+// including when a UTC session has already crossed into the next date.
+const businessToday = "(clock_timestamp() at time zone 'America/Chicago')::date";
 
-test('SQL catchup store binds identity, time, coverage and late commits', { skip: !bin && 'local PostgreSQL binaries unavailable' }, async () => {
+for (const timezone of ['UTC', 'America/Chicago']) test(`SQL catchup store binds identity, time, coverage and late commits (${timezone})`, { skip: !bin && 'local PostgreSQL binaries unavailable' }, async () => {
   const migration = readFileSync(path.join(root, 'migrations/0765_doc_whats_new.sql'), 'utf8');
   const dir = mkdtempSync('/tmp/doc-catchup-');
   let running = false;
@@ -31,7 +34,7 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
     execFileSync(path.join(bin,'initdb'), ['-D',dir,'-U','fixture','--auth=trust','--no-locale'], { stdio: 'pipe' });
     execFileSync(path.join(bin,'pg_ctl'), ['-D',dir,'-l',path.join(dir,'server.log'),'-o',`-k ${dir} -h ''`,'-w','start'], { stdio: 'pipe' });
     running = true;
-    const connect = async () => { const c = new pg.Client({ host: dir, user: 'fixture', database: 'postgres' }); await c.connect(); clients.push(c); return c; };
+    const connect = async () => { const c = new pg.Client({ host: dir, user: 'fixture', database: 'postgres' }); await c.connect(); clients.push(c); await c.query("select set_config('TimeZone',$1,false)", [timezone]); return c; };
     const c = await connect();
     await c.query('create schema ops; create role carr_writer; create role carr_authority; create role carr_reader; grant usage on schema ops to carr_writer,carr_authority,carr_reader;');
     const schema = readFileSync(path.join(root,'db/schema.sql'),'utf8');
@@ -97,8 +100,8 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
     await c.query("insert into lead(id,registry_ref,party_id,stage,created_by,updated_by,owner_id) values($1,'L-SYNTHETIC',$2,'new',$3,$3,$3)",[uuid(6),uuid(3),uuid(1)]);
     await c.query("insert into event(id,occurred_at,actor_id,verb,subject_type,subject_id,field,new_value,cause) values($1,now(),$2,'update-deal','deal',$3,'phase','\"review\"','human_stated'),($4,now(),$2,'update-lead','lead',$5,'stage','\"contacted\"','human_stated')",[uuid(7),uuid(2),uuid(5),uuid(8),uuid(6)]);
     await c.query("insert into activity(id,occurred_at,actor_id,kind,summary,deal_id) values($1,now(),$2,'call','Reviewed the synthetic terms',$3)",[uuid(9),uuid(2),uuid(5)]);
-    await c.query("insert into next_action(id,subject_type,subject_id,owner_id,description,due_on,created_by,updated_by) values($1,'deal',$2,$3,'Review synthetic terms',current_date,$3,$3)",[uuid(10),uuid(5),uuid(1)]);
-    await c.query("insert into critical_date(id,deal_id,kind,due_on,source,created_by) values($1,$2,'option_window',current_date+7,'synthetic',$3)",[uuid(11),uuid(5),uuid(1)]);
+    await c.query(`insert into next_action(id,subject_type,subject_id,owner_id,description,due_on,created_by,updated_by) values($1,'deal',$2,$3,'Review synthetic terms',${businessToday},$3,$3)`,[uuid(10),uuid(5),uuid(1)]);
+    await c.query(`insert into critical_date(id,deal_id,kind,due_on,source,created_by) values($1,$2,'option_window',${businessToday}+7,'synthetic',$3)`,[uuid(11),uuid(5),uuid(1)]);
     await identity('joe');
     const next = await context();
     for (const name of ['deal_changes','lead_changes','next_actions','critical_dates','partner_activity','new_leads']) {
@@ -141,8 +144,8 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
     assert.equal((await section('doc_suggestions',await context())).state,'ready');
     await c.query('reset role');
     await c.query("update next_action set created_at=now()-interval '3 days',updated_at=now()-interval '3 days' where id=$1",[uuid(10)]);
-    await c.query("update critical_date set created_at=now()-interval '3 days',updated_at=now()-interval '3 days',due_on=current_date+14 where id=$1",[uuid(11)]);
-    await c.query("update ops.doc_suggestion set suggested_at=now()-interval '3 days',disposition='snoozed',snoozed_material_version=material_version,snoozed_until=current_date where id=$1",[uuid(21)]);
+    await c.query(`update critical_date set created_at=now()-interval '3 days',updated_at=now()-interval '3 days',due_on=${businessToday}+14 where id=$1`,[uuid(11)]);
+    await c.query(`update ops.doc_suggestion set suggested_at=now()-interval '3 days',disposition='snoozed',snoozed_material_version=material_version,snoozed_until=${businessToday} where id=$1`,[uuid(21)]);
     await identity('joe');
     // Time crossing a due threshold counts even without a new record write.
     const todayContext = { ...await context(), since:new Date(Date.now()-86400000).toISOString(),previous_snapshot:null };
