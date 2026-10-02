@@ -475,9 +475,18 @@ test("Chrome completes approve and deny at an external client while consent form
   const chrome = [process.env.CHROME_PATH, "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "/usr/bin/google-chrome", "/usr/bin/chromium"].filter(Boolean).find(existsSync);
   if (!chrome) { t.skip("Chrome is unavailable"); return; }
   const browser = await launchChrome(chrome);
-  t.after(() => browser.close());
   const socket = new WebSocket(browser.pageWsUrl);
-  t.after(() => socket.close());
+  const servers = [];
+  t.after(async () => {
+    socket.close();
+    try {
+      await Promise.all(servers.map(server => new Promise(resolve => {
+        server.closeAllConnections(); server.close(resolve);
+      })));
+    } finally {
+      await browser.close();
+    }
+  });
   await new Promise((resolve, reject) => { socket.addEventListener("open", resolve, { once: true }); socket.addEventListener("error", reject, { once: true }); });
   let serial = 0;
   const pending = new Map();
@@ -501,7 +510,7 @@ test("Chrome completes approve and deny at an external client while consent form
       res.end("Client received OAuth result");
     });
     await new Promise(resolve => clientServer.listen(0, "127.0.0.1", resolve));
-    t.after(() => new Promise(resolve => { clientServer.closeAllConnections(); clientServer.close(resolve); }));
+    servers.push(clientServer);
     const redirect = `http://127.0.0.1:${clientServer.address().port}/callback`;
     const f = await consentFixture(undefined, "Synthetic Client", redirect);
     const server = createServer(async (req, res) => {
@@ -517,7 +526,7 @@ test("Chrome completes approve and deny at an external client while consent form
       } catch (error) { serverError = error; res.writeHead(500).end(); }
     });
     await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
-    t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
+    servers.push(server);
     await call("Page.navigate", { url: `http://127.0.0.1:${server.address().port}/` });
     for (let i = 0; i < 300; i++) { if (await evaluate('!!document.querySelector("form")')) break; await new Promise(resolve => setTimeout(resolve, 10)); }
     assert.match(f.response.headers.get("content-security-policy"), /form-action 'self';/);
