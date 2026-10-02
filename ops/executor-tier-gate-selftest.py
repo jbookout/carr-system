@@ -14,6 +14,8 @@ loosens it.
 """
 import json
 import os
+from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -23,12 +25,12 @@ HOOK = os.path.join(REPO, "hooks", "executor-tier-gate.py")
 PASS = 0
 
 
-def run(tool_input, stub, transcript_path=None):
+def run(tool_input, stub, transcript_path=None, *, hook=HOOK):
     env = {**os.environ, "CARR_EXECUTOR_TIER_JEV_STUB": stub}
     payload = {"tool_name": "Agent", "tool_input": tool_input}
     if transcript_path:
         payload["transcript_path"] = transcript_path
-    out = subprocess.run([sys.executable, HOOK], input=json.dumps(payload), capture_output=True,
+    out = subprocess.run([sys.executable, hook], input=json.dumps(payload), capture_output=True,
                          text=True, env=env, timeout=30).stdout.strip()
     return json.loads(out)["hookSpecificOutput"] if out else None
 
@@ -131,37 +133,38 @@ outs = [subprocess.run([sys.executable, HOOK], input=json.dumps({"tool_name": "A
 check("a fixture run makes no live judgment and is deterministic",
       outs[0] == outs[1] and "JEV'S PICK" not in outs[0], outs)
 
-# ── decision 0b11c89b: required actions must reach the subagent prompt ─────
+# A historical prompt-facet receipt cannot impose a new Agent-prompt gate.
 path = build_advisory_transcript(["architecture_or_design"])
 try:
     r = run({**brief, "model": "haiku"}, "haiku:0.99", transcript_path=path)
-    check("KNOWN-BAD: a required facet missing from the prompt is denied",
-          r and r.get("permissionDecision") == "deny"
-          and "architecture_or_design" in r["permissionDecisionReason"], r)
-
-    named_brief = {**brief, "prompt": brief["prompt"] + "\narchitecture_or_design: judge the seam with Jev."}
-    r = run({**named_brief, "model": "haiku"}, "haiku:0.99", transcript_path=path)
-    check("KNOWN-GOOD: naming the required facet in the prompt is not denied",
-          not (r and r.get("permissionDecision") == "deny"), r)
-
-    na_brief = {**brief, "prompt": brief["prompt"] +
-               "\nJev required actions: not applicable — read-only lookup."}
-    r = run({**na_brief, "model": "haiku"}, "haiku:0.99", transcript_path=path)
-    check("KNOWN-GOOD: an explicit not-applicable line is not denied",
+    check("historical prompt facets do not deny a named executor",
           not (r and r.get("permissionDecision") == "deny"), r)
 finally:
     os.unlink(path)
 
-no_actions_path = build_advisory_transcript([])
-try:
-    r = run({**brief, "model": "haiku"}, "haiku:0.99", transcript_path=no_actions_path)
-    check("an advisory with no required actions is not denied",
-          not (r and r.get("permissionDecision") == "deny"), r)
-finally:
-    os.unlink(no_actions_path)
-
-r = run({**brief, "model": "haiku"}, "haiku:0.99", transcript_path="/nonexistent/path.jsonl")
-check("a missing transcript fails open (no required-actions denial)",
-      not (r and r.get("permissionDecision") == "deny"), r)
-
 print(f"executor-tier-gate-selftest: all {PASS} checks passed")
+
+# Policy changes vary the pin contract, not the rest of the executor suite.
+# Exercise the actual hook against the loaded policy and both supported target
+# shapes. Test copies keep installed policy untouched.
+policy = json.loads((Path(REPO) / "ops/config/model-routes.v1.json").read_text())
+for target_model in ("loaded", "opus", None):
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / "hooks").mkdir()
+        (root / "ops/config").mkdir(parents=True)
+        copied_hook = root / "hooks/executor-tier-gate.py"
+        shutil.copyfile(HOOK, copied_hook)
+        candidate = json.loads(json.dumps(policy))
+        if target_model != "loaded":
+            candidate["dispatch_targets"]["merge_review_test"] = {"subagent_model": target_model}
+            candidate["pins"]["merge_review"]["target"] = "merge_review_test"
+        (root / "ops/config/model-routes.v1.json").write_text(json.dumps(candidate))
+        pin_target = candidate["dispatch_targets"][candidate["pins"]["merge_review"]["target"]]
+        r = run(pinned, "sonnet:0.84", hook=str(copied_hook))
+        if pin_target.get("subagent_model") == pinned["model"]:
+            check("a spawn matching the loaded merge-review pin gets no cheaper-tier advice", r is None, r)
+        else:
+            check("an Opus spawn cannot claim a different merge-review target as an exemption",
+                  r and "EXECUTOR ADVICE" in r.get("additionalContext", ""), r)
+print("executor-tier-gate-selftest: loaded and both merge-review policy shapes passed")
