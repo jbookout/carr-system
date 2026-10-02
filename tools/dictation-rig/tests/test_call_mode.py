@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import unittest
+import urllib.error
 from email.message import Message
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -724,7 +725,7 @@ class PostCallTests(unittest.TestCase):
         self.assertEqual(post_call_jev.topic_cut(segments, [3, 5, 7], ask=ask), 5)
         boundaries = sent[0]["boundaries"]  # type: ignore[index]
         self.assertEqual(len(boundaries), 3)
-        self.assertTrue(boundaries["b1"]["before"]["text"].startswith("t4 "))
+        self.assertEqual(boundaries["b1"]["before"]["text"], segments[4]["text"][-600:])
         self.assertTrue(boundaries["b1"]["after"]["text"].startswith("t5 "))
         for pair in boundaries.values():
             self.assertLessEqual(len(pair["before"]["text"]), post_call_jev.CUT_SEGMENT_CHARS)
@@ -752,7 +753,96 @@ class PostCallTests(unittest.TestCase):
         segments = [{"speaker": "Speaker A", "text": "synthetic topic"}] * 3
         with patch.object(post_call_jev, "_client", return_value=client):
             self.assertEqual(post_call_jev.topic_cut(segments, [1]), 1)
-        self.assertEqual(client.ask.call_args.kwargs, {"work_class": "app_runtime"})
+        kwargs = client.ask.call_args.kwargs
+        self.assertEqual(kwargs["work_class"], "app_runtime")
+        self.assertEqual(kwargs["retries"], 0)
+        self.assertEqual(kwargs["timeout"], 5.0)
+        self.assertGreater(kwargs["deadline"], time.monotonic())
+
+    def _transport_client(self, opener):
+        # Fresh real client, pinned offline before credentials or transport.
+        spec = importlib.util.spec_from_file_location("topic_transport_test", _OFFLINE_CLIENT.__file__)
+        client = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(client)
+        real_ask = client.ask
+        client.ask = lambda state, questions, **kwargs: real_ask(
+            state, questions, api_key="synthetic-offline-key", opener=opener, **kwargs)
+        return client
+
+    def test_topic_rate_limit_keeps_greedy_chunks_without_backoff(self) -> None:
+        def rate_limited(_request, timeout):
+            raise urllib.error.HTTPError("https://offline.invalid", 429, "limited",
+                                         {"retry-after": "86400"}, io.BytesIO(b""))
+
+        client = self._transport_client(rate_limited)
+        segments = self.long_segments()
+        greedy = post_call.transcript_chunks({"segments": segments}, limit=10000)
+        with patch.object(post_call_jev, "_client", return_value=client), \
+             patch.object(client.time, "sleep") as sleep:
+            chunks = post_call.transcript_chunks({"segments": segments}, limit=10000,
+                                                 choose_cut=post_call_jev.topic_cut)
+        self.assertEqual(chunks, greedy)
+        sleep.assert_not_called()
+
+    def test_topic_budget_exhaustion_allows_both_local_distillers_to_proceed(self) -> None:
+        transcript = {"segments": self.long_segments(100)}
+        greedy = post_call.transcript_chunks(transcript)
+        self.assertGreater(len(greedy), 3)
+        request = {"session": self.session.name, "context": self.context, "transcript": transcript}
+        for distiller in (post_call.resident_flash_distiller, post_call.llama_distiller):
+            with self.subTest(distiller=distiller.__name__):
+                clock = [100.0]
+                timeouts = []
+
+                def timed_out(_request, timeout):
+                    timeouts.append(timeout)
+                    clock[0] += timeout
+                    raise urllib.error.URLError("synthetic timeout")
+
+                client = self._transport_client(timed_out)
+                chunks_sent = []
+                child = Mock()
+
+                def local_opener(target, timeout=None):
+                    if isinstance(target, str):
+                        return self._FakeOpenerResponse(b"{}")
+                    chunks_sent.append(json.loads(target.data)["messages"])
+                    return self._FakeOpenerResponse(json.dumps({"choices": [{"message": {
+                        "content": json.dumps(self.output())}}]}).encode())
+
+                with patch.object(post_call.post_call_jev, "_client", return_value=client), \
+                     patch.object(client.time, "monotonic", side_effect=lambda: clock[0]), \
+                     patch.object(Path, "is_file", return_value=True):
+                    if distiller is post_call.llama_distiller:
+                        result = distiller(request, opener=local_opener, popen=Mock(return_value=child))
+                    else:
+                        result = distiller(request, opener=local_opener)
+                self.assertEqual(len(timeouts), 1, "all cuts must share one deadline")
+                self.assertLessEqual(sum(timeouts), 5.0)
+                self.assertEqual(len(chunks_sent), len(greedy))
+                for messages, chunk in zip(chunks_sent, greedy):
+                    self.assertIn(json.dumps(chunk, ensure_ascii=False), messages[-1]["content"])
+                self.assertEqual(result["joe_tasks"][0]["title"], "Call vendor")
+
+    def test_topic_cut_keeps_the_before_suffix_and_after_prefix(self) -> None:
+        segments = self.long_segments()
+        segments[7]["text"] = "synthetic topic A " + "a" * 900 + " setup for synthetic topic B"
+        segments[8]["text"] = "synthetic topic B continuation " + "b" * 900 + " unrelated ending"
+        sent = []
+
+        def continuation_judge(state, questions):
+            sent.append(state)
+            return {"answers": {key: {"noul": 0.1 if "synthetic topic B" in pair["before"]["text"]
+                                      and "synthetic topic B" in pair["after"]["text"] else 0.9}
+                                for key, pair in state["boundaries"].items()}}
+
+        chunks = post_call.transcript_chunks({"segments": segments}, limit=10000,
+            choose_cut=lambda segs, opts: post_call_jev.topic_cut(segs, opts, ask=continuation_judge))
+        pair = sent[0]["boundaries"]["b0"]
+        self.assertEqual(pair["before"]["text"], segments[7]["text"][-600:])
+        self.assertEqual(pair["after"]["text"], segments[8]["text"][:600])
+        self.assertEqual([len(chunk["segments"]) for chunk in chunks], [9, 9, 2])
+        self.assertEqual([seg for chunk in chunks for seg in chunk["segments"]], segments)
 
     def test_draft_creator_is_injectable_and_requires_a_confirmed_candidate(self) -> None:
         post_call.store_context(self.session, self.context)

@@ -451,6 +451,13 @@ def transcript_chunks(transcript: dict[str, Any], limit: int = 24000,
     return chunks
 
 
+def _topic_chunks(transcript: dict[str, Any]) -> list[dict[str, Any]]:
+    """Share one optional judgment budget across every cut, then split greedily."""
+    deadline = time.monotonic() + post_call_jev.TOPIC_CUT_BUDGET_SECONDS
+    return transcript_chunks(transcript, choose_cut=lambda segments, options:
+        post_call_jev.topic_cut(segments, options, deadline=deadline))
+
+
 def merge_chunk_outputs(outputs: list[dict[str, Any]]) -> dict[str, Any]:
     """Deterministic merge: preserve first occurrence, no cross-chunk invention."""
     if not outputs:
@@ -582,7 +589,7 @@ def llama_distiller(request: dict[str, Any], popen: Callable[..., Any] = subproc
     context_json = json.dumps(request["context"], ensure_ascii=False)
     if len(context_json) > 28000:
         raise RuntimeError("call-context index exceeds bounded local distiller context")
-    chunks = transcript_chunks(request["transcript"], choose_cut=post_call_jev.topic_cut)
+    chunks = _topic_chunks(request["transcript"])
     child = popen([
         LLAMA_SERVER, "-m", str(LLAMA_MODEL), "--host", "127.0.0.1",
         "--port", str(LLAMA_PORT), "-c", "16384", "--threads", "4",
@@ -655,7 +662,7 @@ def resident_flash_distiller(request: dict[str, Any], opener: Callable[..., Any]
         raise DistillerUnavailable(
             f"the resident local model server at {FLASH_SERVER_URL} is unreachable"
         )
-    chunks = transcript_chunks(request["transcript"], choose_cut=post_call_jev.topic_cut)
+    chunks = _topic_chunks(request["transcript"])
     outputs: list[dict[str, Any]] = []
     try:
         for chunk in chunks:
