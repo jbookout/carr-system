@@ -19588,7 +19588,7 @@ export function renderLeadsRegistrySql(rows, predecessorSql = null) {
   const preflight = `do $leads_v102_preflight$\ndeclare v ops.scac_mutation_registry_version%rowtype; registration jsonb;\nbegin\n` +
     `  if not exists(select 1 from public.schema_migrations where filename='${predecessorPath.split("/").at(-1)}' and sha256='${predecessorDigest}') then\n` +
     `    raise exception 'Leads v102 requires exact applied 0767'; end if;\n` +
-    `  if not exists(select 1 from public.schema_migrations where filename='0768_lead_archived_stage.sql' and sha256='54aa5741619819ac478d5f249026b21ae20d04f49332da93f29d4896f211f755') then raise exception 'Leads v102 requires exact Archived vocabulary'; end if;\n` +
+    `  if not exists(select 1 from public.schema_migrations where filename='0768_lead_archived_stage.sql' and sha256='87968ce940428d7921d0bde4ade8be224f8a16748af49691c77dac751220dbea') then raise exception 'Leads v102 requires exact Archived vocabulary'; end if;\n` +
     `  select * into v from ops.scac_mutation_registry_version where registry_version='${REGISTRY_V101_VERSION}';\n` +
     `  if v.registry_digest is distinct from '${oldSeal.digest}' or v.entry_count<>${oldSeal.entryCount}\n` +
     `    or v.source_entry_count<>${oldSeal.sourceEntryCount} or v.entry_set_digest is distinct from '${oldEntrySet}'\n` +

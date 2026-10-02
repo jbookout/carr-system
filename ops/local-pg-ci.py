@@ -601,6 +601,18 @@ def run_local_ci(
             else:
                 print("local-db-ci: Codex continuity real-PostgreSQL integration passed")
         if exit_code == 0:
+            leads_env = dict(ci_env)
+            leads_env["LEAD_WORKSPACE_TEST_DATABASE_URL"] = dsn
+            leads = command_runner.run(
+                ["node", "--test", "mcp-server/test/lead-workspace-pg.test.mjs"],
+                env=leads_env, cwd=repo, capture=True,
+            )
+            if leads.returncode:
+                print(f"local-db-ci: Leads registered PostgreSQL acceptance failed: {_failure_detail(leads)}", file=sys.stderr)
+                exit_code = leads.returncode
+            else:
+                print("local-db-ci: Leads registered PostgreSQL acceptance passed")
+        if exit_code == 0:
             acceptance_script = repo / "ops/atomic-rule-approval-local-pg-acceptance.py"
             if not acceptance_python.is_file() or not os.access(acceptance_python, os.X_OK):
                 print("local-db-ci: repository Python environment is unavailable", file=sys.stderr)

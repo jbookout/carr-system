@@ -1,4 +1,4 @@
-import { readLeadWorkspace, LEAD_WORKSPACE_SCHEMA } from "./lead-workspace.js";
+import { readLeadWorkspace, LEAD_WORKSPACE_SCHEMA, validateStageReview, lockLeadLifecycle } from "./lead-workspace.js";
 // CARR MCP tool registry — Wave 1 verbs (tool-contracts-2026-07-30.md §2).
 // Every write runs the envelope: idempotency replay via tool_call, actor from
 // the verified token (never the payload), base_version conflicts ask and never
@@ -4710,17 +4710,15 @@ export const TOOLS = {
       const subject = await resolveSubject(c, args.lead);
       if (subject.type !== "lead") throw new ToolError({ error: "not_a_lead" });
       await versionGuard(c, "lead", subject.id, args.base_version);
-      const row = (await c.query(`select l.stage,l.suppressed,l.owner_id,l.client_id,
-        exists(select 1 from party p where p.id=l.party_id and p.merged_into is null and p.deleted_at is null) as live_party,
-        exists(select 1 from client cl where cl.party_id=l.party_id and cl.merged_into is null) as is_client,
-        exists(select 1 from v_lead_client_best b where b.lead_ref=l.registry_ref and not b.either_merged) as linked_client
-        from lead l where l.id=$1`, [subject.id])).rows[0];
-      if (!row || !row.live_party || row.stage !== "new" || row.suppressed || row.owner_id || row.client_id || row.is_client || row.linked_client)
+      const { current: row } = await lockLeadLifecycle(c, subject.id);
+      if (!row || !row.live_party || row.stage !== "new" || !row.contact_eligible || row.owner_id || row.client_id || row.is_client || row.linked_client)
         throw new ToolError({ error: "lead_not_claimable" });
-      await c.query("update lead set owner_id=$1,owner_label=$2,updated_by=$1 where id=$3", [actor.id, actor.display || actor.slug, subject.id]);
+      const owner = (await c.query("select id,slug,display_name from actor where slug=$1 and active", [partnerAuthoritySlugForActor(actor)])).rows[0];
+      if (!owner) throw new ToolError({ error: "human_owner_unavailable" });
+      await c.query("update lead set owner_id=$1,owner_label=$2,updated_by=$3 where id=$4", [owner.id, owner.display_name, actor.id, subject.id]);
       await writeEvent(c, actor, "claim-lead", "lead", subject.id, { field: "owner_id", old: { owner_id: null },
-        new: { owner_id: actor.id }, cause: "human_stated", idempotency_key: args.idempotency_key });
-      return { ok: true, lead_id: subject.id, owner: actor.slug };
+        new: { owner_id: owner.id }, idempotency_key: args.idempotency_key });
+      return { ok: true, lead_id: subject.id, owner: owner.slug };
     }),
   },
 
@@ -4737,18 +4735,13 @@ export const TOOLS = {
       const subject = await resolveSubject(c, args.lead);
       if (subject.type !== "lead") throw new ToolError({ error: "not_a_lead" });
       await versionGuard(c, "lead", subject.id, args.base_version);
-      const current = (await c.query(`select l.client_id,l.suppressed,
-        exists(select 1 from party p where p.id=l.party_id and p.merged_into is null and p.deleted_at is null) as live_party,
-        exists(select 1 from client cl where cl.party_id=l.party_id and cl.merged_into is null) as is_client,
-        exists(select 1 from v_lead_client_best b where b.lead_id=l.id and not b.either_merged) as linked_client
-        from lead l where l.id=$1`, [subject.id])).rows[0];
-      if (!current || !current.live_party || current.is_client || current.suppressed || current.client_id || current.linked_client) throw new ToolError({ error: "lead_not_linkable" });
-      const target = (await c.query(`select cl.id from client cl join party p on p.id=cl.party_id
-        where cl.id=$1 and cl.merged_into is null and p.merged_into is null and p.deleted_at is null`, [args.client_id])).rows[0];
+      const { current, target } = await lockLeadLifecycle(c, subject.id, args.client_id);
+      if (!current || !current.live_party || current.is_client || !current.contact_eligible || current.client_id || current.linked_client)
+        throw new ToolError({ error: "lead_not_linkable" });
       if (!target) throw new ToolError({ error: "client_not_found" });
       await c.query("update lead set client_id=$1,updated_by=$2 where id=$3", [target.id, actor.id, subject.id]);
       await writeEvent(c, actor, "link-lead-client", "lead", subject.id, { field: "client_id",
-        old: { client_id: null }, new: { client_id: target.id }, cause: "human_correction", idempotency_key: args.idempotency_key });
+        old: { client_id: null }, new: { client_id: target.id }, idempotency_key: args.idempotency_key });
       return { ok: true, lead_id: subject.id, client_id: target.id };
     }),
   },
@@ -4763,6 +4756,11 @@ export const TOOLS = {
       fields: { type: "object", description: "subset of: stage, lane, segment, source_type, source_detail, suppressed, est_lease_event, next_action_date, notes_path, notes, event_source, event_confidence, report_back_due, drip_campaign, drip_added, sf_deal" } },
       required: ["idempotency_key","lead","base_version","fields"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "update-lead", args, async () => {
+      const reviewed = Object.hasOwn(args, "stage_review") ? validateStageReview(args.stage_review, args.fields, ToolError) : null;
+      if (reviewed?.undo_event_id) {
+        if (!canExercisePartnerAuthority(actor)) throw new ToolError({ error: "human_confirmation_required" });
+        if (!reviewed.human_quote?.trim()) throw new ToolError({ error: "undo_human_quote_required" });
+      }
       if (args.expected_actor && args.expected_actor !== actor.slug) throw new ToolError({ error: "account_changed" });
       const s = await resolveSubject(c, args.lead);
       if (s.type !== "lead") throw new ToolError({ error: "not_a_lead", resolved: s });
@@ -4802,21 +4800,20 @@ export const TOOLS = {
           hint: "a standing suppression instruction may be cleared only by an authenticated human" });
       }
       let stageReview = null;
-      if (args.stage_review) {
-        if (!keys.includes("stage") || !String(args.stage_review.reason || "").trim())
-          throw new ToolError({ error: "stage_review_invalid" });
-        const ids = [...new Set(args.stage_review.evidence_ids || [])];
+      if (reviewed) {
+        const ids = reviewed.evidence_ids;
         const evidence = ids.length ? (await c.query(
-          "select id,occurred_at from activity where lead_id=$1 and id=any($2::uuid[]) and occurred_at<=now()", [s.id, ids])).rows : [];
+          "select id,occurred_at,kind,connected from activity where lead_id=$1 and id=any($2::uuid[]) and occurred_at<=now()", [s.id, ids])).rows : [];
         if (evidence.length !== ids.length) throw new ToolError({ error: "stage_evidence_mismatch" });
-        if (args.stage_review.undo_event_id) {
-          const last = (await c.query(`select id,cause,old_value->>'stage' as prior_stage from event
-            where subject_type='lead' and subject_id=$1 and field='stage'
-            order by occurred_at desc,id desc limit 1`, [s.id])).rows[0];
-          if (!last || !["automation_job","ingest_email","ingest_calendar","system"].includes(last.cause) || last.id !== args.stage_review.undo_event_id || last.prior_stage !== args.fields.stage)
+        if (args.fields.stage === "engaged" && evidence.some(row => ["call","text"].includes(row.kind) && row.connected !== true))
+          throw new ToolError({ error: "stage_evidence_not_contact" });
+        if (reviewed.undo_event_id) {
+          const last = (await c.query(`select * from v_lead_stage_transition
+            where lead_id=$1 order by mutation_order desc limit 1`, [s.id])).rows[0];
+          if (!last || !last.automatic || last.event_id !== reviewed.undo_event_id.toLowerCase() || last.prior_stage !== args.fields.stage || last.stage !== current.stage)
             throw new ToolError({ error: "undo_changed" });
         }
-        stageReview = { ...args.stage_review, evidence_ids: ids,
+        stageReview = { ...reviewed, evidence_ids: ids,
           evidence_date: evidence.map(row => new Date(row.occurred_at).toISOString()).sort().at(-1) || null };
       }
       const old = (await c.query(`select ${keys.join(",")} from lead where id=$1`, [s.id])).rows[0];
@@ -4826,7 +4823,7 @@ export const TOOLS = {
       for (const k of keys)
         await writeEvent(c, actor, "update-lead", "lead", s.id,
           { field: k, old: { [k]: old[k] }, new: { [k]: args.fields[k], ...(k === "stage" && stageReview ? { stage_review: stageReview } : {}) },
-            ...(k === "stage" && stageReview ? { cause: stageReview.undo_event_id ? "human_correction" : canExercisePartnerAuthority(actor) ? "human_stated" : "automation_job",
+            ...(k === "stage" && stageReview ? { cause: stageReview.undo_event_id ? "human_correction" : undefined,
               human_quote: stageReview.human_quote, agent_rationale: stageReview.reason } : {}), idempotency_key: args.idempotency_key });
       return { ok: true, updated: keys };
     }),
