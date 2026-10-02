@@ -10,6 +10,8 @@ import { doctrineTools } from "./doctrine.js";
 import { situationRetrievalTools } from "./situation-retrieval.js";
 import { investigationTools } from "./investigation.js";
 import { docConversationTools } from "./doc-conversation.js";
+import { docSuggestionTools } from "./doc-suggestions.js";
+import { whatsNewTools } from "./whats-new.js";
 import { MEETING_MODE_WRITE_VERBS, meetingModeTools } from "./meeting-mode.js";
 import { notificationTools } from "./notifications.js";
 import { deliveryCadenceA05Tools } from "./delivery-cadence-a05-tools.js";
@@ -67,6 +69,11 @@ import { recordSourceAuthorityStoreTools } from "./record-source-authority-store
 // through mcp.js's setWriterActorContext, which sets the actor and the
 // server-verified sponsor the store and SQL writers derive attribution from.
 import { creLifecycleStoreTools } from "./cre-lifecycle-store.v5.js";
+import { salesforceReconciliationStoreTools } from
+  "./salesforce-reconciliation-store-rw02.v5.js";
+// V5-RW02 safe stops: the server-side run-outcome ledger behind the
+// 5-consecutive-clean counter, and the humanOnly consent revocation.
+import { salesforceReadRunStoreTools } from "./salesforce-read-run-store-rw02.v5.js";
 import { foundationAssuranceMinimumTools } from
   "./foundation-assurance-minimum-producer.v5.js";
 // V5-S01's live door: the settled global boundaries evaluated at the dispatch
@@ -78,6 +85,8 @@ import { governedCorrespondenceStoreTools } from "./governed-correspondence-stor
 import { assuranceHealthStoreTools } from "./assurance-health-store.v5.js";
 import { completeSetReviewA03StoreTools } from "./independent-review-cycle-store.v5.js";
 import { ruleContextRuntimeTools } from "./rule-context-runtime.v5.js";
+import { BOARD_ANSWER_WRITE_VERBS, boardAnswerTools } from "./board-answers.js";
+import { scheduleBoardTools } from "./schedule-board.js";
 export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
 
 // ---------- envelope helpers ----------
@@ -328,7 +337,7 @@ async function withEnvelope(client, actor, verb, args, fn) {
   // reports a version conflict instead of the promised replay.
   // Keep this scoped until the shared envelope's existing fake-client suites
   // are migrated to model the extra query for every historical write verb.
-  if (verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "answer-work-request-for-joe" || verb === "decline-work-request" || verb === "supersede-work-request" || verb === "propose-ready-plan" || verb === "review-heavy-build-plan" || verb === "accept-ready-plan" || verb === "propose-ready-plan-amendment" || verb === "accept-ready-plan-amendment" || verb === "acknowledge-ready-plan-amendment" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease" || verb === "observe-memory" || verb === "promote-memory" || verb === "correct-memory" || verb === "forget-memory" || verb === "register-engineering-slice-plan" || verb === "admit-engineering-slice" || verb === "review-engineering-slice" || verb === "append-tour-rights-receipt" || verb === "revoke-tour-rights-receipt" || verb === "append-tour-source-evidence" || verb === "append-tour-field-assertion" || verb === "create-tour-public-projection-draft" || verb === "seal-tour-public-projection" || verb === "append-tour-property-identifier-assertion" || verb === "append-tour-coordinate-candidate" || verb === "append-tour-entrance-verification-receipt" || verb === "codex-checkpoint" || verb === "codex-record-event" || verb === "ask-jev" || TOUR_DOMAIN_SERIALIZED_WRITES.has(verb) || MEETING_MODE_WRITE_VERBS.includes(verb))
+  if (verb === "whats-new" || verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "answer-work-request-for-joe" || verb === "decline-work-request" || verb === "supersede-work-request" || verb === "propose-ready-plan" || verb === "review-heavy-build-plan" || verb === "accept-ready-plan" || verb === "propose-ready-plan-amendment" || verb === "accept-ready-plan-amendment" || verb === "acknowledge-ready-plan-amendment" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease" || verb === "observe-memory" || verb === "promote-memory" || verb === "correct-memory" || verb === "forget-memory" || verb === "register-engineering-slice-plan" || verb === "admit-engineering-slice" || verb === "review-engineering-slice" || verb === "append-tour-rights-receipt" || verb === "revoke-tour-rights-receipt" || verb === "append-tour-source-evidence" || verb === "append-tour-field-assertion" || verb === "create-tour-public-projection-draft" || verb === "seal-tour-public-projection" || verb === "append-tour-property-identifier-assertion" || verb === "append-tour-coordinate-candidate" || verb === "append-tour-entrance-verification-receipt" || verb === "codex-checkpoint" || verb === "codex-record-event" || verb === "ask-jev" || TOUR_DOMAIN_SERIALIZED_WRITES.has(verb) || BOARD_ANSWER_WRITE_VERBS.has(verb) || MEETING_MODE_WRITE_VERBS.includes(verb))
     await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [key]);
   const prior = await client.query("select request_hash, response from tool_call where idempotency_key=$1", [key]);
   if (prior.rows.length) {
@@ -406,6 +415,77 @@ async function writeEvent(client, actor, verb, subjectType, subjectId, fields = 
      actor.via || null, actor.client_id || null, identity.organization_tenant_id,
      identity.sponsoring_human_slug, identity.personal_scope, identity.authorization_class,
      identity.correlation_id, fields.recorded_at_after_lock === true]);
+}
+
+const INDUSTRY_EVENT_KINDS = ["conference", "association_meeting", "trade_show", "networking"];
+const INDUSTRY_EVENT_ATTENDANCE_INTENTS = ["considering", "plan_to_attend", "not_attending"];
+const INDUSTRY_EVENT_STATUSES = ["planned", "attended", "skipped", "cancelled"];
+const PARTNER_SLUGS = ["joe", "dell"];
+
+function industryEventText(value, field, { optional = false, max = 1000 } = {}) {
+  if ((value === undefined || value === null || value === "") && optional) return null;
+  if (typeof value !== "string" || !value.trim() || value.trim().length > max)
+    throw new ToolError({ error: "industry_event_text_invalid", field });
+  return value.trim();
+}
+
+function industryEventTimestamp(value, field) {
+  const text = industryEventText(value, field, { max: 80 });
+  if (!/[zZ]|[+-]\d{2}:?\d{2}$/.test(text) || Number.isNaN(Date.parse(text)))
+    throw new ToolError({ error: "industry_event_timestamp_invalid", field,
+      hint: "send an RFC3339 timestamp with an explicit timezone offset" });
+  return text;
+}
+
+function industryEventUrl(value) {
+  if (value === undefined || value === null || value === "") return null;
+  let url;
+  try { url = new URL(String(value)); } catch {
+    throw new ToolError({ error: "industry_event_url_invalid" });
+  }
+  if (!/^https?:$/.test(url.protocol))
+    throw new ToolError({ error: "industry_event_url_invalid", hint: "use an http or https URL" });
+  return url.toString();
+}
+
+function industryEventValue(value, field, allowed) {
+  if (!allowed.includes(value))
+    throw new ToolError({ error: "industry_event_value_invalid", field, allowed });
+  return value;
+}
+
+function validateIndustryEventFields(args, { partial = false } = {}) {
+  const required = partial ? [] : ["title", "organizer", "kind", "starts_at", "ends_at", "source"];
+  for (const field of required) industryEventText(args[field], field);
+  const clean = {};
+  if (!partial || Object.hasOwn(args, "title")) clean.title = industryEventText(args.title, "title", { max: 500 });
+  if (!partial || Object.hasOwn(args, "organizer")) clean.organizer = industryEventText(args.organizer, "organizer", { max: 500 });
+  if (!partial || Object.hasOwn(args, "kind")) clean.kind = industryEventValue(args.kind, "kind", INDUSTRY_EVENT_KINDS);
+  if (!partial || Object.hasOwn(args, "starts_at")) clean.starts_at = industryEventTimestamp(args.starts_at, "starts_at");
+  if (!partial || Object.hasOwn(args, "ends_at")) clean.ends_at = industryEventTimestamp(args.ends_at, "ends_at");
+  if (clean.starts_at && clean.ends_at && Date.parse(clean.ends_at) <= Date.parse(clean.starts_at))
+    throw new ToolError({ error: "industry_event_time_order_invalid", hint: "ends_at must be after starts_at" });
+  if (!partial || Object.hasOwn(args, "location")) clean.location = industryEventText(args.location, "location", { optional: true, max: 500 });
+  if (!partial || Object.hasOwn(args, "is_virtual")) {
+    if (args.is_virtual !== undefined && typeof args.is_virtual !== "boolean")
+      throw new ToolError({ error: "industry_event_virtual_invalid" });
+    clean.is_virtual = args.is_virtual === undefined ? false : args.is_virtual;
+  }
+  if (!partial || Object.hasOwn(args, "url")) clean.url = industryEventUrl(args.url);
+  if (!partial || Object.hasOwn(args, "relevance_note")) clean.relevance_note = industryEventText(args.relevance_note, "relevance_note", { optional: true, max: 2000 });
+  if (!partial || Object.hasOwn(args, "attendance_intent"))
+    clean.attendance_intent = args.attendance_intent === undefined ? "considering" : industryEventValue(args.attendance_intent, "attendance_intent", INDUSTRY_EVENT_ATTENDANCE_INTENTS);
+  if (!partial || Object.hasOwn(args, "owner_partner")) clean.owner_partner = industryEventValue(args.owner_partner, "owner_partner", PARTNER_SLUGS);
+  if (!partial || Object.hasOwn(args, "status"))
+    clean.status = args.status === undefined ? "planned" : industryEventValue(args.status, "status", INDUSTRY_EVENT_STATUSES);
+  if (!partial || Object.hasOwn(args, "source")) clean.source = industryEventText(args.source, "source", { max: 2000 });
+  return clean;
+}
+
+function industryEventId(value) {
+  if (typeof value !== "string" || !UUID_RE.test(value))
+    throw new ToolError({ error: "industry_event_id_invalid" });
+  return value;
 }
 
 // [defect 18b12fda-b79c-43a1-86c4-51b9623e12fd, 2026-08-14] THE VIOLATION WAS OURS.
@@ -2795,6 +2875,9 @@ export const TOOLS = {
 
   "catch-me-up": {
     write: false,
+    // The canonical replay ledger is not granted to the views-only reader.
+    // This route supplies actor context inside a read-only transaction.
+    writerConnection: true,
     description: "The merged timeline (event + activity rows) for one deal, client, lead, or vendor, newest first, plus its narrative-file pointer (notes_path). Use before any conversation about a record.",
     inputSchema: { type: "object", properties: { ref: { type: "string", description: "L-204 / C-127 / V-CPA-006 / deal or party name" }, limit: { type: "integer", default: 20 } }, required: ["ref"] },
     handler: async (c, _a, args) => {
@@ -2803,12 +2886,21 @@ export const TOOLS = {
         `select entry_kind, occurred_at, actor, verb, summary, detail, owed
          from v_subject_timeline where subject_type=$1 and subject_id=$2
          order by occurred_at desc limit $3`, [s.type, s.id, args.limit || 20]);
-      return { subject: s, timeline: rows.rows };
+      const captured = await c.query(
+        `select t.idempotency_key as key, a.id::text as activity_id, a.summary
+           from tool_call t join activity a on a.id::text=t.response->>'activity_id'
+          where t.verb='log-activity' and t.actor_id=$1
+            and a.${FK[s.type]}=$2 and t.idempotency_key like 'calcap-%'
+          order by t.idempotency_key limit 5001`, [_a.id, s.id]);
+      if (captured.rows.length > 5000)
+        throw new ToolError({ error: "calendar_history_too_large" });
+      return { subject: s, timeline: rows.rows, calendar_history: captured.rows };
     },
   },
 
   "find-and-catch-up": {
     write: false,
+    writerConnection: true, // catch-me-up reads the actor-bound replay ledger.
     description: "Find one live person, practice, vendor, or deal by name and immediately return that record's catch-me-up timeline. This is the bounded read-only composition of find then catch-me-up: exactly one live match proceeds; zero returns not_found; multiple matches return needs_disambiguation and no timeline. Retired aliases, linked neighbours, and related deals are never selected as the target. It performs no model call, retry, write, send, or arbitrary tool dispatch.",
     inputSchema: { type: "object", additionalProperties: false, properties: {
       query: { type: "string", description: `name to find, at most ${FIND_CATCH_UP_QUERY_MAX} characters` },
@@ -2831,7 +2923,7 @@ export const TOOLS = {
         throw new ToolError({ error: "invalid_limit",
           hint: `limit must be an integer from 1 to ${FIND_CATCH_UP_LIMIT_MAX}` });
 
-      // Reuse the registered read handlers directly on the same reader client.
+      // Reuse the registered read handlers on the same read-only client.
       // This is not a generic composite dispatcher: the two names are fixed in
       // code, no callback/tool name/provider is accepted, and the second handler
       // is unreachable until the first yields exactly one live target.
@@ -2862,6 +2954,7 @@ export const TOOLS = {
 
   "prepare-conversation": {
     write: false,
+    writerConnection: true, // fixed composition includes catch-me-up.
     description: "Prepare for one conversation by resolving a name to exactly one live record, returning its recent catch-up timeline, and—when the target is a person or organization—showing the existing introduction paths to that exact ref. This is a fixed bounded read composition: ambiguous or missing identity stops before timeline/graph reads; deals receive timeline context but are never pretended to be intro-graph people. It performs no model call, retry, write, send, or arbitrary tool dispatch.",
     inputSchema: { type: "object", additionalProperties: false, properties: {
       query: { type: "string", description: `person, organization, vendor, or deal name; at most ${FIND_CATCH_UP_QUERY_MAX} characters` },
@@ -3752,11 +3845,11 @@ export const TOOLS = {
 
   "update-deal": {
     write: true,
-    description: "Field-level change to a deal (deal_type, phase, segment, outcome, notes_path, salesforce_id, city, lane). deal_type uses the closed deal_type_ref vocabulary. Requires base_version from a fresh read; a same-field conflict means someone else wrote the same column — ask the human, never retry blind. A version bump from a DIFFERENT field (someone else's disjoint edit) is rebased automatically and reported back as `rebased`/`rebase_receipt`; nothing about this call's own fields is ever silently changed. To move a deal to a DIFFERENT CLIENT, use reassign-deal: client_id is deliberately not settable here.",
+    description: "Field-level change to a deal (deal_type, phase, segment, outcome, notes_path, salesforce_id, city, lane, invoiced_on). invoiced_on (YYYY-MM-DD) marks the deal invoiced, which takes it out of the Salesforce reconciliation absence scope (V5-RW02). deal_type uses the closed deal_type_ref vocabulary. Requires base_version from a fresh read; a same-field conflict means someone else wrote the same column — ask the human, never retry blind. A version bump from a DIFFERENT field (someone else's disjoint edit) is rebased automatically and reported back as `rebased`/`rebase_receipt`; nothing about this call's own fields is ever silently changed. To move a deal to a DIFFERENT CLIENT, use reassign-deal: client_id is deliberately not settable here.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, deal: { type: "string" },
       base_version: { type: "integer" },
-      fields: { type: "object", description: "subset of: deal_type, phase, segment, outcome, closed_on, won_value, notes_path, salesforce_id, city, lane" } },
+      fields: { type: "object", description: "subset of: deal_type, phase, segment, outcome, closed_on, won_value, notes_path, salesforce_id, city, lane, invoiced_on" } },
       required: ["idempotency_key","deal","base_version","fields"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "update-deal", args, async () => {
       const s = await resolveSubject(c, args.deal);
@@ -3764,12 +3857,23 @@ export const TOOLS = {
       // city and lane joined the list in 0074, when they stopped being source_row
       // passthrough and became real columns. Before that they were unsettable,
       // which is why salesforce-diff could only ever REPORT a city move.
+      // invoiced_on joined in 0733 (V5-RW02): a won deal stays in the Salesforce
+      // reconciliation absence scope until it is marked invoiced.
       const allowed = ["deal_type","phase","segment","outcome","closed_on","won_value","notes_path",
-                       "salesforce_id","city","lane"];
+                       "salesforce_id","city","lane","invoiced_on"];
       if ("client_id" in args.fields) throw new ToolError({ error: "use_reassign_deal",
         hint: "moving a deal between clients is structural, not a field edit — use reassign-deal" });
       const keys = Object.keys(args.fields).filter(k => allowed.includes(k));
       if (!keys.length) throw new ToolError({ error: "no_updatable_fields", allowed });
+      // A real calendar date: the pattern, then a round trip, so 2026-13-45 or
+      // 2026-02-30 is refused here instead of failing later as a raw cast error.
+      const isCalendarDate = value => typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) &&
+        !Number.isNaN(Date.parse(`${value}T00:00:00Z`)) &&
+        new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value;
+      if (keys.includes("invoiced_on") && args.fields.invoiced_on !== null &&
+          !isCalendarDate(args.fields.invoiced_on))
+        throw new ToolError({ error: "invalid_invoiced_on",
+          hint: "invoiced_on is a calendar date YYYY-MM-DD, or null to clear it" });
       // Legacy phase edits share the Deal Room event stream. Acquire its lock
       // before versionGuard can lock the deal row, matching Deal Room lock order.
       if (keys.includes("phase")) await lockDealField(c, s.id, "phase");
@@ -5214,6 +5318,7 @@ export const TOOLS = {
 
   "confirm-merge": {
     write: true,
+    humanOnly: true,
     description: "HUMAN-confirmed merge of two duplicate parties: sets merged_into on the loser so it becomes a pointer to the survivor. Only after a human has looked at both records — the Hovanian rule means nothing auto-merges, ever.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, survivor_party: { type: "string" }, merged_party: { type: "string" },
@@ -5253,6 +5358,23 @@ export const TOOLS = {
         throw new ToolError({ error: "match_basis_required",
           hint: "state the corroborating signal that established this duplicate; a name alone is never a merge basis" });
 
+      // Serialize overlapping merges before reading scores or moving roles.
+      // A stable UUID order also keeps reverse calls from deadlocking. The
+      // caller's transaction holds these locks through the mutation and event.
+      const endpoints = await c.query(
+        `/* merge_live_endpoints */
+         select id, merged_into from party where id = any($1::uuid[])
+          order by id for update`, [[surv.partyId, merg.partyId]]);
+      if (endpoints.rows.length !== 2)
+        throw new ToolError({ error: "merge_survivorship_unavailable",
+          hint: "both party rows must be readable before a merge can run" });
+      for (const endpoint of endpoints.rows) {
+        if (endpoint.merged_into)
+          throw new ToolError({ error: "party_already_merged", party_id: endpoint.id,
+            merged_into: endpoint.merged_into,
+            hint: "read the live party and confirm the duplicate pair again before merging" });
+      }
+
       // The human confirms THAT this pair is a duplicate. Code decides WHICH
       // row survives, with the rule's exact precedence, so a human cannot
       // accidentally retire the more-cited or better-evidenced record.
@@ -5264,7 +5386,12 @@ export const TOOLS = {
             or exists(select 1 from vendor v where v.party_id=p.id and v.vendor_ref is not null) as has_business_ref,
            (select count(distinct rf.kind) from record_flag rf where rf.subject_type='party' and rf.subject_id=p.id
              and rf.kind in ('verified','address','phone','email','npi','specialty') and coalesce(rf.value->>'found','true') <> 'false') as verified_identity_fields,
-           ((select count(*) from activity a where a.subject_type='party' and a.subject_id=p.id)
+           -- Activities attach to role rows, which move with the party below.
+           -- EXISTS counts a multi-role activity once, without multiplying it.
+           ((select count(*) from activity a
+              where exists(select 1 from client cl where cl.id=a.client_id and cl.party_id=p.id)
+                 or exists(select 1 from lead l where l.id=a.lead_id and l.party_id=p.id)
+                 or exists(select 1 from vendor v where v.id=a.vendor_id and v.party_id=p.id))
              + (select count(*) from deal_participant dp where dp.party_id=p.id)
              + (select count(*) from party_link pl where pl.from_party=p.id or pl.to_party=p.id or pl.via_party=p.id)) as linked_records
           from party p where p.id = any($1::uuid[])`, [[surv.partyId, merg.partyId]]);
@@ -5278,10 +5405,22 @@ export const TOOLS = {
       const sweep = await c.query(
         `/* merge_orphan_sweep */
          select 'party_link' as attachment, count(*)::int as count from party_link where from_party=$1 or to_party=$1 or via_party=$1
-         union all select 'activity', count(*)::int from activity where subject_type='party' and subject_id=$1
+         union all select 'activity', count(*)::int from activity a
+           where exists(select 1 from client cl where cl.id=a.client_id and cl.party_id=$1)
+              or exists(select 1 from lead l where l.id=a.lead_id and l.party_id=$1)
+              or exists(select 1 from vendor v where v.id=a.vendor_id and v.party_id=$1)
          union all select 'deal_participant', count(*)::int from deal_participant where party_id=$1
          union all select 'record_flag', count(*)::int from record_flag where subject_type='party' and subject_id=$1
          union all select 'child_party', count(*)::int from party where org_id=$1`, [merg.partyId]);
+
+      // Moving role rows cannot preserve graph endpoints or the broker. Until
+      // an attachment-preserving merge handles duplicate and self edges, refuse
+      // this pair before any write instead of retiring a still-cited party.
+      const graphCount = sweep.rows.find(row => row.attachment === "party_link")?.count;
+      if (Number(graphCount) > 0)
+        throw new ToolError({ error: "merge_graph_attachments_require_resolution",
+          party_id: merg.partyId, count: Number(graphCount),
+          hint: "the losing party has introduction links; preserve their endpoints and broker before confirming this merge" });
 
       // JOE'S RULING, in his words: "Okafor is a client now duh. everyone starts
       // as a lead." A lead record and a client record for the same person are
@@ -8131,6 +8270,109 @@ export const TOOLS = {
       };
     }),
   },
+
+  "add-industry-event": {
+    write: true,
+    description: "Record a healthcare CRE industry event such as a conference, association meeting, trade show, or networking event. Timestamps must include their timezone; source and the owner partner are required. Tenant is server-derived.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" }, title: { type: "string" }, organizer: { type: "string" },
+      kind: { type: "string", enum: INDUSTRY_EVENT_KINDS }, starts_at: { type: "string" },
+      ends_at: { type: "string" }, location: { type: ["string", "null"] }, is_virtual: { type: "boolean" },
+      url: { type: ["string", "null"] }, relevance_note: { type: ["string", "null"] },
+      attendance_intent: { type: "string", enum: INDUSTRY_EVENT_ATTENDANCE_INTENTS },
+      owner_partner: { type: "string", enum: PARTNER_SLUGS },
+      status: { type: "string", enum: INDUSTRY_EVENT_STATUSES }, source: { type: "string" },
+    }, required: ["idempotency_key", "title", "organizer", "kind", "starts_at", "ends_at", "owner_partner", "source"] },
+    handler: async (c, actor, args) => {
+      const clean = validateIndustryEventFields(args);
+      return withEnvelope(c, actor, "add-industry-event", args, async () => {
+        const tenant = organizationTenantForActor(actor);
+        const inserted = await c.query(
+          `insert into industry_event
+             (organization_tenant_id,title,organizer,kind,starts_at,ends_at,location,is_virtual,url,
+              relevance_note,attendance_intent,owner_partner,status,source,created_by_actor_id,updated_by_actor_id)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15)
+           returning id, organization_tenant_id, title, organizer, kind, starts_at, ends_at, location,
+                     is_virtual, url, relevance_note, attendance_intent, owner_partner, status, source,
+                     version, created_at, updated_at`,
+          [tenant, clean.title, clean.organizer, clean.kind, clean.starts_at, clean.ends_at,
+           clean.location, clean.is_virtual, clean.url, clean.relevance_note, clean.attendance_intent,
+           clean.owner_partner, clean.status, clean.source, actor.id]);
+        const event = inserted.rows[0];
+        await writeEvent(c, actor, "add-industry-event", "industry_event", event.id,
+          { new: event, idempotency_key: args.idempotency_key });
+        return { ok: true, event };
+      });
+    },
+  },
+
+  "list-industry-events": {
+    write: false,
+    description: "List tenant-scoped healthcare CRE industry events for the Events tab, ordered by start time. Returns the current version needed for a later update.",
+    inputSchema: { type: "object", properties: { limit: { type: "integer" } } },
+    handler: async (c, actor, args) => {
+      const limit = args.limit === undefined ? 50 : args.limit;
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100)
+        throw new ToolError({ error: "industry_event_limit_invalid", hint: "limit must be an integer from 1 through 100" });
+      const result = await c.query(
+        `select id, organization_tenant_id, title, organizer, kind, starts_at, ends_at, location,
+                is_virtual, url, relevance_note, attendance_intent, owner_partner, status, source,
+                version, created_at, updated_at
+           from industry_event
+          where organization_tenant_id=$1
+          order by starts_at, id limit $2`, [organizationTenantForActor(actor), limit]);
+      return { ok: true, events: result.rows, count: result.rows.length };
+    },
+  },
+
+  "update-industry-event": {
+    write: true,
+    description: "Update a tenant-scoped healthcare CRE industry event with optimistic concurrency. Send the version returned by list-industry-events as base_version; stale updates refuse without changing the row.",
+    inputSchema: { type: "object", properties: {
+      idempotency_key: { type: "string" }, event_id: { type: "string" }, base_version: { type: "integer" },
+      title: { type: "string" }, organizer: { type: "string" }, kind: { type: "string", enum: INDUSTRY_EVENT_KINDS },
+      starts_at: { type: "string" }, ends_at: { type: "string" }, location: { type: ["string", "null"] },
+      is_virtual: { type: "boolean" }, url: { type: ["string", "null"] }, relevance_note: { type: ["string", "null"] },
+      attendance_intent: { type: "string", enum: INDUSTRY_EVENT_ATTENDANCE_INTENTS },
+      owner_partner: { type: "string", enum: PARTNER_SLUGS }, status: { type: "string", enum: INDUSTRY_EVENT_STATUSES },
+      source: { type: "string" },
+    }, required: ["idempotency_key", "event_id", "base_version"] },
+    handler: async (c, actor, args) => {
+      const eventId = industryEventId(args.event_id);
+      if (!Number.isInteger(args.base_version) || args.base_version < 1)
+        throw new ToolError({ error: "industry_event_base_version_invalid" });
+      const clean = validateIndustryEventFields(args, { partial: true });
+      const keys = ["title", "organizer", "kind", "starts_at", "ends_at", "location", "is_virtual",
+        "url", "relevance_note", "attendance_intent", "owner_partner", "status", "source"]
+        .filter(key => Object.hasOwn(clean, key));
+      if (!keys.length)
+        throw new ToolError({ error: "industry_event_update_empty" });
+      return withEnvelope(c, actor, "update-industry-event", args, async () => {
+        const tenant = organizationTenantForActor(actor);
+        const values = keys.map(key => clean[key]);
+        const actorParam = values.length + 1;
+        const idParam = values.length + 2;
+        const tenantParam = values.length + 3;
+        const versionParam = values.length + 4;
+        const set = keys.map((key, index) => `${key}=$${index + 1}`);
+        set.push(`updated_by_actor_id=$${actorParam}`, "updated_at=now()", "version=version+1");
+        const result = await c.query(
+          `update industry_event set ${set.join(",")}
+             where id=$${idParam} and organization_tenant_id=$${tenantParam} and version=$${versionParam}
+           returning id, organization_tenant_id, title, organizer, kind, starts_at, ends_at, location,
+                     is_virtual, url, relevance_note, attendance_intent, owner_partner, status, source,
+                     version, created_at, updated_at`,
+          [...values, actor.id, eventId, tenant, args.base_version]);
+        if (!result.rows.length)
+          throw new ToolError({ error: "industry_event_version_conflict",
+            hint: "read the event again and retry with its current version" });
+        const event = result.rows[0];
+        await writeEvent(c, actor, "update-industry-event", "industry_event", event.id,
+          { new: event, idempotency_key: args.idempotency_key });
+        return { ok: true, event };
+      });
+    },
+  },
 };
 
 // These names describe server-owned authority, never data a tool invocation may
@@ -8271,10 +8513,15 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
   // The registry-wide test covers every present and future humanOnly verb.
   if (tool.humanOnly === true) {
     const actorClass = authorizationClassForActor(actor);
-    if (actorClass !== "verified_partner" && !canExercisePartnerAuthority(actor))
+    // Identity merges require the human caller even when a machine holds
+    // sponsor-scoped partner authority. Other partner-authority verbs retain
+    // their existing native/local agent route.
+    if (actorClass !== "verified_partner" &&
+        (name === "confirm-merge" || !canExercisePartnerAuthority(actor)))
       throw new ToolError({ error: "human_only_verb_requires_verified_partner",
         verb: name, actor_class: actorClass,
-        hint: "this verb records a partner-authority act and requires either the verified partner " +
+        hint: name === "confirm-merge" ? "confirm-merge requires a verified human partner; machine identities cannot confirm identity merges." :
+              "this verb records a partner-authority act and requires either the verified partner " +
               "or a server-verified native/local agent bound to that partner's sponsor-scoped " +
               "authority connection." });
   }
@@ -8438,6 +8685,8 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "model-role-store": "mcp-server/src/model-role-store.v5.js",
   "record-source-authority": "mcp-server/src/record-source-authority-store.v5.js",
   "cre-lifecycle": "mcp-server/src/cre-lifecycle-store.v5.js",
+  "salesforce-reconciliation-rw02": "mcp-server/src/salesforce-reconciliation-store-rw02.v5.js",
+  "salesforce-read-run-rw02": "mcp-server/src/salesforce-read-run-store-rw02.v5.js",
   "foundation-assurance": "mcp-server/src/foundation-assurance-minimum-producer.v5.js",
   "global-boundaries-door": "mcp-server/src/global-boundaries-door.v5.js",
   "journey-one-clock-door": "mcp-server/src/journey-one-clock-door.v5.js",
@@ -8446,6 +8695,10 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "action-class-successor-registry": "mcp-server/src/action-class-successor-registry.v5.js",
   "complete-set-review-a03-store": "mcp-server/src/independent-review-cycle-store.v5.js",
   "rule-context-runtime": "mcp-server/src/rule-context-runtime.v5.js",
+  "board-answers": "mcp-server/src/board-answers.js",
+  "schedule-board": "mcp-server/src/schedule-board.js",
+  "doc-suggestions": "mcp-server/src/doc-suggestions.js",
+  "whats-new": "mcp-server/src/whats-new.js",
 });
 
 function bindToolSource(tool, source) {
@@ -9436,6 +9689,8 @@ registerTools({
 
 // Doctrine store verbs (P2, decision 82a2fb62) — same envelope, same contracts.
 registerTools(doctrineTools({ withEnvelope, writeEvent, ToolError }), "doctrine");
+registerTools(boardAnswerTools({ withEnvelope, writeEvent }), "board-answers");
+registerTools(scheduleBoardTools(), "schedule-board");
 
 // WR-AI-006: curation proposals are machine-callable; approval and retirement
 // remain human-only inside their handlers and the dispatcher boundary.
@@ -9450,6 +9705,8 @@ registerTools(investigationTools({ withEnvelope, writeEvent, ToolError }), "inve
 // runs on the writer connection because that is the only one that installs the
 // acting-actor context ops.doc_conversation_facts is handed.
 registerTools(docConversationTools({ withEnvelope, writeEvent, ToolError }), "doc-conversation");
+registerTools(docSuggestionTools({ withEnvelope, writeEvent, ToolError }), "doc-suggestions");
+registerTools(whatsNewTools({ withEnvelope, executeRegisteredTool, ToolError }), "whats-new");
 
 // V5-UX-B11: non-recording shared Meeting Mode. The store's definer functions
 // own every transition; an accepted action points at an existing write verb in
@@ -9581,6 +9838,9 @@ registerTools(benchmarkAcceptanceStoreTools({
 registerTools(modelRoleStoreTools({ withEnvelope, writeEvent, ToolError }),
   "model-role-store");
 registerTools(creLifecycleStoreTools({ withEnvelope, ToolError }), "cre-lifecycle");
+registerTools(salesforceReconciliationStoreTools({ withEnvelope, ToolError }),
+  "salesforce-reconciliation-rw02");
+registerTools(salesforceReadRunStoreTools({ withEnvelope, ToolError }), "salesforce-read-run-rw02");
 registerTools(recordSourceAuthorityStoreTools({ withEnvelope, ToolError }),
   "record-source-authority");
 registerTools(foundationAssuranceMinimumTools({

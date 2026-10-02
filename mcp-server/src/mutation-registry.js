@@ -4,7 +4,43 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v87 (PROVISIONAL) is the runtime selector after DoctorCRE V5-F05's
+// v102 seals confirm-merge as a human identity act; machines are refused.
+// v101 admits partner catch-up and its scoped watermark store.
+// v100 seals the authenticated published Progress board directory and the current catalog.
+// v96 admits Doc suggestion producer, decision, and correction verbs.
+// v95 admits the permission-scoped Operations schedule read.
+// v94 sealed tenant-scoped progress board answers.
+// v93 sealed the tenant-scoped Industry Events record
+// contract. Its 0739 successor chains after incident triage v92 (0737).
+//
+// Superseded note (v92): v92 was the runtime selector for the bounded incident-triage
+// transition and its exact incident-reference contract. It chains over v91
+// (0734) after the ordered 0733/0734/0735/0736 ledger; final numbering is
+// assigned at merge.
+//
+// Superseded note (v91): v91 (PROVISIONAL) was the runtime selector for DoctorCRE V5-RW02's safe-stop
+// run store. It registers the read-salesforce-autonomy-counter read, the
+// record-salesforce-run-outcome writer and the human-only
+// revoke-salesforce-read-consent writer, and reseals update-deal for its new
+// invoiced_on field. None carries a Salesforce or other provider effect. It
+// chains over v90's own seal (0731) with 0733/0734; final numbering is
+// assigned at merge.
+//
+// Superseded note (v90): v90 was the runtime selector after the rule-boot change to standing-context:
+// its input schema gained detail="boot" and an integer page (the paginated
+// rule boot served from rule-boot.js). The verb stays read-only; the runtime
+// compares its schema_digest before admitting it, so the selector has to read
+// the registry that sealed the new schema. It chains over v89's own seal
+// (0730) with 0731. v89 itself only sealed an external-admin script row, so
+// the selector moved straight from v88 to v90.
+//
+// Superseded note (v88): v88 (PROVISIONAL) was the runtime selector for DoctorCRE V5-RW02's attended
+// Salesforce reconciliation record layer. It registers three observation /
+// readback writers and one per-action evidence reader, while the store and
+// registry both preserve zero provider-effect authority. It chains over v87's
+// own seal (0725); final numbering is assigned at merge.
+//
+// Superseded note (v87): v87 (PROVISIONAL) was the runtime selector after DoctorCRE V5-F05's
 // authenticated rule-context runtime. Its sealed catalog admits the read-only
 // read-action-context and the authority-only bind-rule-context-contract write,
 // and preserves v86 and earlier as history. It chains over v86's own seal
@@ -161,7 +197,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v87.generated.js";
+} from "./scac-mutation-registry.v102.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 

@@ -50,6 +50,8 @@ from desks import DeskError, Registry  # noqa: E402
 import claude_wire as inject_mod  # noqa: E402  — the Idea 78 wire, see the module
 import claude_desktop_wire  # noqa: E402 — background supervisor + supported /desktop
 import codex_wire  # noqa: E402  — Codex worked out this protocol, see the module
+import codex_ipc  # noqa: E402  — a thread Codex Desktop holds open, see the module
+import grok_wire  # noqa: E402 — authenticated public retrieval, provider metadata checked
 import flash_wire  # noqa: E402  — the local Flash model as a desk, see the module
 import execution_contract  # noqa: E402 — portable Job Passport v1 seam
 import verb_io  # noqa: E402 — the ONE path to the record layer; see that module
@@ -132,6 +134,7 @@ def _to_codex(
     env: dict | None,
     fresh: bool = False,
     config_overrides: tuple[str, ...] = (),
+    live_desktop: bool = False,
 ) -> dict:
     """Send one task to a standing Codex thread, resuming it when there is one.
 
@@ -141,6 +144,25 @@ def _to_codex(
     carries it, and --json reports the thread id in its first event.
     """
     thread = None if fresh else entry.get("thread_id")
+    # A THREAD CODEX DESKTOP HOLDS OPEN CANNOT BE RESUMED FROM HERE. Found live
+    # 2026-09-27: the orchestrator's Desktop thread refused `codex exec resume`
+    # with "thread ... already has an active writer", so a turn addressed to it
+    # never arrived. When the Desktop router names an owner, the turn is
+    # started inside that owner instead; the session answers in its own window,
+    # the same contract as a live Claude desk. No owner (Desktop closed, or the
+    # thread not open there) keeps the durable resume path below.
+    #
+    # OPT-IN, and its own status. Only the conversational bridge asks for this
+    # (bridge.deliver passes live_desktop=True). A caller that waits for a result
+    # in the desk log, like the queue executor, would read a plain "delivered" as
+    # "wait", time out, and dispatch again, starting a fresh turn in the same
+    # Desktop thread on every retry (PR #1345 review). "delivered_live" says the
+    # answer arrives in the session's own window and nowhere a caller can wait on.
+    if live_desktop and thread and codex_ipc.thread_owner(thread) is not None:
+        live = codex_ipc.start_turn(thread, task)
+        if live.get("status") != "not_live":
+            status = "delivered_live" if live.get("status") == "delivered" else live.get("status")
+            return {"resumed": True, **live, "status": status, "thread_id": thread}
     with tempfile.TemporaryDirectory(prefix="hermes-codex-") as tmp:
         last = Path(tmp) / "last-message.txt"
         argv = ["codex", "exec"]
@@ -256,8 +278,13 @@ def dispatch(
     fresh: bool = False,
     config_overrides: tuple[str, ...] = (),
     cwd: str | None = None,
+    live_desktop: bool = False,
 ) -> dict:
     """Send one task to one desk. Raises DeskError when the desk is not usable.
+
+    `live_desktop` (codex-session desks only) lets a thread Codex Desktop holds
+    open take the turn in its own window, returning status "delivered_live".
+    Only a caller that expects no result back may set it; see _to_codex.
 
     `cwd` (codex-session desks only) runs this one task in that directory on a FRESH
     thread and leaves the desk's standing thread untouched: flash-run's escalation gives
@@ -266,7 +293,7 @@ def dispatch(
     results_path = Path(results_path or DEFAULT_RESULTS)
     entry = registry.resolve(name)          # every refusal happens here
     msg_id = str(uuid.uuid4())
-    if entry["kind"] in ("claude-desktop", "codex-session", "codex-live", "flash-local"):
+    if entry["kind"] in ("claude-desktop", "codex-session", "codex-live", "flash-local", "grok-cli"):
         if not entry.get("model") or not str(entry.get("model")).strip():
             raise DeskError(
                 "unnamed_model_or_effort",
@@ -286,8 +313,10 @@ def dispatch(
         outcome = _to_claude(entry, task, msg_id)
     elif entry["kind"] == "claude-desktop":
         outcome = _to_claude_desktop(entry, task)
+    elif entry["kind"] == "grok-cli":
+        outcome = grok_wire.run_task(entry, task)
     elif entry["kind"] == "flash-local":
-        outcome = flash_wire.run_turn(task)
+        outcome = flash_wire.run_task(task)
     elif entry["kind"] == "codex-live":
         outcome = codex_wire.run_turn(
             entry["socket"], task,
@@ -303,6 +332,7 @@ def dispatch(
     else:
         outcome = _to_codex(
             entry, task, env, fresh=fresh, config_overrides=config_overrides,
+            live_desktop=live_desktop,
         )
         # pin the desk to its thread so the next task lands in the same one
         if outcome.get("thread_id"):

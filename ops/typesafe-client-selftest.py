@@ -17,14 +17,17 @@ than left to a reviewer noticing.
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import io
 import json
+import os
 import re
 import subprocess
 import tempfile
 import unittest
 import urllib.error
 from pathlib import Path
+from unittest.mock import patch
 
 
 MODULE_PATH = Path(__file__).with_name("typesafe_client.py")
@@ -36,6 +39,7 @@ SPEC.loader.exec_module(client)
 
 class FakeResponse(io.BytesIO):
     """Minimal stand-in for what urlopen hands back as a context manager."""
+    status = 200
 
     def __enter__(self):
         return self
@@ -55,6 +59,219 @@ def responder(payload, capture=None):
 ANSWER = {"model": "jev-1.13.0",
           "answers": {"q": {"type": "noul", "noul": 0.91}},
           "usage": {"input_tokens": 10, "output_tokens": 2}}
+
+SPEND_SPEC = importlib.util.spec_from_file_location(
+    "jev_spend_health", MODULE_PATH.with_name("jev_spend_health.py"))
+
+
+class SpendHealthTests(unittest.TestCase):
+    def test_canonical_health_invokes_spend_row(self):
+        source = (MODULE_PATH.parent.parent / "tools" / "health-check.py").read_text()
+        self.assertIn("worker_usage=jev_spend_health.read_worker_usage", source)
+
+    def test_loaded_nightly_chain_runs_the_spend_alarm_and_preflights_its_sources(self):
+        nightly = (MODULE_PATH.parent.parent / "bin" / "nightly.sh").read_text()
+        self.assertTrue('step "Jev daily spend alarm"' in nightly
+                        and './.venv/bin/python tools/health-check.py --section jev-spend' in nightly,
+                        "nightly chain does not invoke the narrow Jev spend alarm")
+        preflight = nightly.split('if [ "${1:-}" = "--preflight" ]; then', 1)[1].split('missing=0', 1)[0]
+        self.assertIn("tools/health-check.py", preflight)
+        self.assertIn("ops/jev_spend_health.py", preflight)
+
+    def test_nightly_alarm_has_a_narrow_exit_status(self):
+        health = (MODULE_PATH.parent.parent / "tools" / "health-check.py").read_text()
+        self.assertIn('"jev-spend"', health)
+        self.assertIn('if CANONICAL_SECTION == "jev-spend":', health)
+        self.assertIn('sys.exit(_spend_module.nightly_exit_status(_spend_line))', health)
+
+    def test_nightly_alarm_fails_closed_when_usage_or_loop_action_is_unknown(self):
+        spend = importlib.util.module_from_spec(SPEND_SPEC)
+        SPEND_SPEC.loader.exec_module(spend)
+        self.assertEqual(spend.nightly_exit_status("OK jev spend — $0.000"), 0)
+        self.assertEqual(spend.nightly_exit_status("WARN jev spend — $0.600"), 0)
+        for line in ("UNKNOWN jev spend — missing usage",
+                     "UNAVAILABLE jev spend — Worker unreachable",
+                     "WARN jev spend — $0.600 · loop action FAILED (RuntimeError)"):
+            self.assertEqual(spend.nightly_exit_status(line), 1)
+
+    def test_unsettled_worker_attempt_keeps_nightly_alarm_unknown(self):
+        spend = importlib.util.module_from_spec(SPEND_SPEC)
+        SPEND_SPEC.loader.exec_module(spend)
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "absent.jsonl"
+            state = Path(d) / "loop.json"
+            now = __import__("datetime").datetime(2026, 9, 28,
+                tzinfo=__import__("datetime").timezone.utc)
+            line = spend.check_spend(log, MODULE_PATH.parent / "config" / "jev-cost-guard.v1.json",
+                state, lambda *_: None, now=now,
+                worker_usage=lambda _day: {"calls": 0, "input_tokens": 0,
+                                            "unknown": 1, "pending_attempts": 1})
+            self.assertIn("1 call or attempt missing usage", line)
+            self.assertEqual(spend.nightly_exit_status(line), 1)
+
+    def test_narrow_health_cli_exits_before_unrelated_checks(self):
+        source_tools = MODULE_PATH.parent.parent / "tools"
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "tools").mkdir()
+            (root / "ops").mkdir()
+            (root / "tools" / "health-check.py").write_text(
+                (source_tools / "health-check.py").read_text())
+            (root / "ops" / "jev_spend_health.py").write_text(
+                "import os\n"
+                "FACTORY_USAGE_LOG = 'factory-log'\n"
+                "def read_worker_usage(day): raise AssertionError('not called')\n"
+                "def check_spend(*, extra_logs, worker_usage):\n"
+                "    assert extra_logs == [FACTORY_USAGE_LOG]\n"
+                "    assert worker_usage is read_worker_usage\n"
+                "    return os.environ['TEST_SPEND_ROW']\n"
+                "def nightly_exit_status(line): return 0 if line.startswith('OK ') else 1\n")
+            for line, expected in (("OK jev spend — $0.000", 0),
+                                   ("UNKNOWN jev spend — missing usage", 1)):
+                result = subprocess.run(
+                    [os.sys.executable, str(root / "tools" / "health-check.py"),
+                     "--section", "jev-spend"],
+                    cwd=root, capture_output=True, text=True,
+                    env={**os.environ, "PYTHONPATH": str(source_tools),
+                         "TEST_SPEND_ROW": line}, timeout=10)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                self.assertEqual(result.stdout.strip(), line)
+            (root / "ops" / "jev_spend_health.py").unlink()
+            missing = subprocess.run(
+                [os.sys.executable, str(root / "tools" / "health-check.py"),
+                 "--section", "jev-spend"],
+                cwd=root, capture_output=True, text=True,
+                env={**os.environ, "PYTHONPATH": str(source_tools)}, timeout=10)
+            self.assertEqual(missing.returncode, 1)
+            for required in ("owner orchestrator", "restore the receipt reader",
+                             "verify the next run", "auto-clear after three healthy runs"):
+                self.assertIn(required, missing.stdout)
+
+    def test_daily_spend_warns_and_dedups_one_loop_then_auto_clears(self):
+        self.assertTrue(SPEND_SPEC and SPEND_SPEC.loader)
+        spend = importlib.util.module_from_spec(SPEND_SPEC)
+        SPEND_SPEC.loader.exec_module(spend)
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "calls.jsonl"
+            state = Path(d) / "loop.json"
+            config = MODULE_PATH.parent / "config" / "jev-cost-guard.v1.json"
+            events = []
+
+            def verb(name, payload):
+                events.append((name, payload))
+                if name == "read-loop":
+                    return {"loop_id": payload["loop_id"], "version": 1}
+                return {"ok": True, "loop_id": "loop-1", "number": "901"}
+
+            def row(ts, tokens, **other):
+                return json.dumps({"ts": ts, "ok": True, "usage": {"input_tokens": tokens,
+                                   "output_tokens": 5}, **other}) + "\n"
+
+            log.write_text(row("2026-09-28T02:00:00Z", 12_000_000) +
+                           row("2026-09-27T02:00:00Z", 90_000_000) +
+                           row("2026-09-28T03:00:00Z", 10_000_000, cache_hit=True))
+            day = __import__("datetime").datetime(2026, 9, 28, 4, tzinfo=__import__("datetime").timezone.utc)
+            first = spend.check_spend(log, config, state, verb, now=day)
+            self.assertIn("WARN", first)
+            self.assertIn("$0.50", first)
+            self.assertIn("owner orchestrator", first)
+            self.assertIn("find caller in jev usage log", first)
+            self.assertIn("auto-clear", first)
+            self.assertEqual([x[0] for x in events], ["add-loop"])
+            self.assertEqual(events[0][1]["owner"], "claude")
+            spend.check_spend(log, config, state, verb, now=day)
+            self.assertEqual(len(events), 1)
+            log.write_text(log.read_text() + row("2026-09-28T04:00:00Z", 5_000_000))
+            spend.check_spend(log, config, state, verb, now=day)
+            self.assertEqual([x[0] for x in events], ["add-loop", "read-loop", "update-loop"])
+            self.assertEqual(events[-1][1]["base_version"], 1)
+            next_day = day.replace(day=29)
+            cleared = spend.check_spend(log, config, state, verb, now=next_day)
+            self.assertIn("OK", cleared)
+            self.assertEqual([x[0] for x in events], ["add-loop", "read-loop", "update-loop",
+                                                  "read-loop", "close-loop"])
+            self.assertEqual(events[-1][1]["base_version"], 1)
+
+    def test_success_without_usage_is_unknown_and_preserves_spend_warning(self):
+        self.assertTrue(SPEND_SPEC and SPEND_SPEC.loader)
+        spend = importlib.util.module_from_spec(SPEND_SPEC)
+        SPEND_SPEC.loader.exec_module(spend)
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "calls.jsonl"
+            state = Path(d) / "loop.json"
+            config = MODULE_PATH.parent / "config" / "jev-cost-guard.v1.json"
+            events = []
+
+            def verb(name, payload):
+                events.append(name)
+                return {"ok": True, "loop_id": "warning-1"}
+
+            day = __import__("datetime").datetime(2026, 9, 28, tzinfo=__import__("datetime").timezone.utc)
+            log.write_text(json.dumps({"ts": "2026-09-28T01:00:00Z", "ok": True,
+                                       "usage": {"input_tokens": 12_000_000}}) + "\n")
+            self.assertIn("WARN", spend.check_spend(log, config, state, verb, now=day))
+            self.assertEqual(events, ["add-loop"])
+            log.write_text(log.read_text() + json.dumps({
+                "ts": "2026-09-29T01:00:00Z", "ok": True, "usage": None,
+            }) + "\n")
+            unknown = spend.check_spend(log, config, state, verb,
+                                        now=day.replace(day=29))
+            self.assertIn("UNKNOWN", unknown)
+            self.assertIn("missing usage", unknown)
+            self.assertNotIn("OK", unknown)
+            self.assertNotIn("$0.000", unknown)
+            self.assertEqual(events, ["add-loop"])
+            self.assertEqual(json.loads(state.read_text())["loop_id"], "warning-1")
+
+    def test_daily_alarm_adds_factory_and_worker_receipts_once(self):
+        spend = importlib.util.module_from_spec(SPEND_SPEC)
+        SPEND_SPEC.loader.exec_module(spend)
+        with tempfile.TemporaryDirectory() as d:
+            local = Path(d) / "local.jsonl"
+            factory = Path(d) / "factory.jsonl"
+            state = Path(d) / "loop.json"
+            events = []
+            day = __import__("datetime").datetime(2026, 9, 28, tzinfo=__import__("datetime").timezone.utc)
+            local.write_text(json.dumps({"ts": "2026-09-28T02:00:00Z", "ok": True,
+                "usage": {"input_tokens": 4_000_000}}) + "\n" +
+                json.dumps({"ts": "2026-09-28T02:01:00Z", "ok": False,
+                "http_status": 200, "schema_valid": False,
+                "usage": {"input_tokens": 1_000_000}}) + "\n")
+            factory.write_text(json.dumps({"ts": "2026-09-28T03:00:00Z", "ok": True,
+                "usage": {"input_tokens": 2_000_000}}) + "\n" +
+                json.dumps({"ts": "2026-09-28T03:01:00Z", "ok": False,
+                "cache_hit": True, "usage": None}) + "\n")
+            def verb(name, payload):
+                events.append(name)
+                return {"ok": True, "loop_id": "spend-warning"}
+            result = spend.check_spend(local, MODULE_PATH.parent / "config" / "jev-cost-guard.v1.json",
+                state, verb, now=day, extra_logs=[factory],
+                worker_usage=lambda _day: {"calls": 1, "input_tokens": 6_000_000, "unknown": 0})
+            self.assertIn("WARN", result)
+            self.assertIn("$0.546", result)
+            self.assertIn("4 calls", result)
+            self.assertEqual(events, ["add-loop"])
+
+    def test_daily_alarm_works_before_local_log_exists(self):
+        spend = importlib.util.module_from_spec(SPEND_SPEC)
+        SPEND_SPEC.loader.exec_module(spend)
+        with tempfile.TemporaryDirectory() as d:
+            local = Path(d) / "absent.jsonl"
+            factory = Path(d) / "factory.jsonl"
+            state = Path(d) / "loop.json"
+            day = __import__("datetime").datetime(2026, 9, 28, tzinfo=__import__("datetime").timezone.utc)
+            factory.write_text(json.dumps({"ts": "2026-09-28T03:00:00Z", "ok": True,
+                "usage": {"input_tokens": 7_000_000}}) + "\n")
+            events = []
+            def verb(name, payload):
+                events.append(name)
+                return {"ok": True, "loop_id": "spend-warning"}
+            result = spend.check_spend(local, MODULE_PATH.parent / "config" / "jev-cost-guard.v1.json",
+                state, verb, now=day, extra_logs=[factory],
+                worker_usage=lambda _day: {"calls": 1, "input_tokens": 6_000_000, "unknown": 0})
+            self.assertIn("WARN", result)
+            self.assertIn("$0.546", result)
+            self.assertEqual(events, ["add-loop"])
 
 
 class LibraryShapeTests(unittest.TestCase):
@@ -134,8 +351,12 @@ class AskTests(unittest.TestCase):
         captured = []
         questions = {"a": client.noul("A?"), "b": client.noul("B?"),
                      "c": client.score("C?", ["low", "high"])}
+        answer = {**ANSWER, "answers": {
+            "a": {"type": "noul", "noul": 0.91},
+            "b": {"type": "noul", "noul": 0.13},
+            "c": {"type": "score", "score": 0.7, "confidence": 0.8}}}
         client.ask("state", questions, api_key="k",
-                   opener=responder(ANSWER, captured))
+                   opener=responder(answer, captured))
         self.assertEqual(len(captured), 1, "batching is the whole point; one call per question is 12x the cost")
         sent = json.loads(captured[0].data)
         self.assertEqual(set(sent["questions"]), {"a", "b", "c"})
@@ -245,6 +466,53 @@ class CallReceiptTests(unittest.TestCase):
     must carry the response's usage when present, and (round 3) must carry
     no response id the vendor never supplies."""
 
+    def test_only_schema_valid_answer_with_usage_is_usable(self):
+        questions = {"q": client.noul("?")}
+        self.assertTrue(client.usable_judgment(ANSWER, questions))
+        for bad in ({}, {**ANSWER, "answers": {}},
+                    {**ANSWER, "answers": {"q": {"type": "noul", "noul": 2}}},
+                    {**ANSWER, "usage": {}}, {**ANSWER, "usage": None}):
+            with self.subTest(bad=bad):
+                self.assertFalse(client.usable_judgment(bad, questions))
+        with tempfile.TemporaryDirectory() as d:
+            log = str(Path(d) / "calls.jsonl")
+            client._append_call_receipt(questions, [], {"model": "jev", "usage": None}, log)
+            row = json.loads(Path(log).read_text())
+            self.assertFalse(row["ok"])
+            self.assertFalse(row["usable"])
+
+    def test_http_200_empty_body_records_unusable_call(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = str(Path(d) / "calls.jsonl")
+            with patch.object(client.urllib.request, "urlopen", responder({})):
+                with self.assertRaises(client.TypeSafeError):
+                    client.ask("s", {"q": client.noul("?")}, api_key="k", calls_log=log)
+            row = json.loads(Path(log).read_text())
+            self.assertEqual(row["http_status"], 200)
+            self.assertFalse(row["ok"])
+            self.assertFalse(row["schema_valid"])
+
+    def test_new_receipts_hash_question_ids_and_preserve_facet_credit(self):
+        name = "private_semantic_creation_question"
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "calls.jsonl"
+            answer = {**ANSWER, "answers": {
+                name: {"type": "noul", "noul": 0.91}}}
+            with patch.object(client.urllib.request, "urlopen", responder(answer)):
+                client.ask("state", {name: client.noul("is this relevant?")},
+                           api_key="secret", calls_log=str(log))
+            raw = log.read_text()
+            row = json.loads(raw.splitlines()[0])
+        self.assertNotIn(name, raw)
+        self.assertNotIn("question_ids", row)
+        self.assertEqual(row["question_ids_sha256"], [hashlib.sha256(name.encode()).hexdigest()])
+        reader_path = MODULE_PATH.parent.parent / "lib" / "jev_required_actions.py"
+        spec = importlib.util.spec_from_file_location("jev_required_actions", reader_path)
+        assert spec and spec.loader
+        reader = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(reader)
+        self.assertTrue(reader._call_covers_facet(row, "semantic_creation"))
+
     def test_real_call_receipt_includes_usage_and_no_response_id(self):
         # This exercises _append_call_receipt directly with a real-shaped
         # response (the function ask() calls only when opener is None, i.e.
@@ -252,7 +520,8 @@ class CallReceiptTests(unittest.TestCase):
         # receipt below for why the mock path can't be used to test this).
         answer = {"model": "jev-1.13.0", "id": "resp-abc123",
                   "answers": {"q": {"type": "noul", "noul": 0.8}},
-                  "usage": {"input_tokens": 11, "output_tokens": 3}}
+                  "usage": {"input_tokens": 11, "output_tokens": 3},
+                  "usable": True, "schema_valid": True, "http_status": 200}
         with tempfile.TemporaryDirectory() as d:
             log = str(Path(d) / "jev-calls.jsonl")
             client._append_call_receipt({"q": 1}, ["semantic_creation"], answer, log)
@@ -261,6 +530,127 @@ class CallReceiptTests(unittest.TestCase):
         self.assertNotIn("response_id", rows[0])
         self.assertEqual(rows[0]["usage"], {"input_tokens": 11, "output_tokens": 3})
         self.assertEqual(rows[0]["facets"], ["semantic_creation"])
+
+    def test_network_receipt_names_caller_kind_hash_and_tokens_without_prompt(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = str(Path(d) / "calls.jsonl")
+            with patch.object(client.urllib.request, "urlopen", responder(ANSWER)):
+                client.ask("private prompt", {"q": client.noul("private question")},
+                           api_key="secret", caller="unit-judge", calls_log=log,
+                           cache_path=str(Path(d) / "cache.sqlite3"))
+            row = json.loads(Path(log).read_text().splitlines()[0])
+        self.assertEqual(row["caller"], "unit-judge")
+        self.assertEqual(row["question_kind"], "noul")
+        self.assertRegex(row["prompt_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(row["usage"]["input_tokens"], 10)
+        self.assertNotIn("private prompt", json.dumps(row))
+        self.assertNotIn("private question", json.dumps(row))
+        self.assertNotIn("secret", json.dumps(row))
+
+    def test_default_client_caches_identical_calls_for_every_caller(self):
+        with tempfile.TemporaryDirectory() as d:
+            requests = []
+            cache = str(Path(d) / "cache.sqlite3")
+            log = str(Path(d) / "calls.jsonl")
+            with patch.object(client.urllib.request, "urlopen", responder(ANSWER, requests)):
+                args = {"api_key": "secret", "caller": "direct-model-room",
+                        "cache_path": cache, "calls_log": log}
+                first = client.ask("same state", {"q": client.noul("same question")}, **args)
+                second = client.ask("same state", {"q": client.noul("same question")}, **args)
+            self.assertEqual(len(requests), 1)
+            self.assertEqual(first["usage"]["input_tokens"], 10)
+            self.assertIsNone(second["usage"])
+            self.assertTrue(second["cache_hit"])
+
+    def test_invalid_json_attempt_is_logged_without_request_text(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = str(Path(d) / "calls.jsonl")
+            with patch.object(client.urllib.request, "urlopen", return_value=FakeResponse(b"not-json")):
+                with self.assertRaises(ValueError):
+                    client.ask("sensitive state", {"q": client.noul("private question")},
+                               api_key="secret", caller="unit-judge", calls_log=log)
+            row = json.loads(Path(log).read_text().splitlines()[0])
+        self.assertFalse(row["ok"])
+        self.assertRegex(row["prompt_sha256"], r"^[0-9a-f]{64}$")
+        self.assertNotIn("sensitive state", json.dumps(row))
+
+    def test_identical_judge_call_within_ttl_makes_zero_additional_network_calls(self):
+        with tempfile.TemporaryDirectory() as d:
+            cache = str(Path(d) / "cache.sqlite3")
+            log = str(Path(d) / "calls.jsonl")
+            requests = []
+            with patch.object(client.urllib.request, "urlopen", responder(ANSWER, requests)):
+                kw = {"api_key": "secret", "caller": "jev_judge",
+                      "cache_ttl_seconds": 60, "cache_path": cache, "calls_log": log}
+                first = client.ask("same state", {"q": client.noul("same?")}, **kw)
+                second = client.ask("same state", {"q": client.noul("same?")}, **kw)
+            self.assertEqual(len(requests), 1)
+            self.assertEqual(first["answers"], second["answers"])
+            self.assertTrue(second["cache_hit"])
+            self.assertIsNone(second["usage"])
+            rows = [json.loads(x) for x in Path(log).read_text().splitlines()]
+            self.assertEqual(sum(row.get("ok") is True for row in rows), 1)
+
+    def test_cache_key_separates_caller_and_prompt_and_expiry(self):
+        with tempfile.TemporaryDirectory() as d:
+            requests = []
+            cache = str(Path(d) / "cache.sqlite3")
+            clock = [100.0]
+            with patch.object(client.urllib.request, "urlopen", responder(ANSWER, requests)):
+                with patch.object(client.time, "time", side_effect=lambda: clock[0]):
+                    for index, (caller, state) in enumerate((("judge-a", "x"), ("judge-b", "x"),
+                                                             ("judge-a", "y"), ("judge-a", "x"))):
+                        if index == 3:
+                            clock[0] = 161.0
+                        client.ask(state, {"q": client.noul("?")}, api_key="secret",
+                                   caller=caller, cache_ttl_seconds=60,
+                                   cache_path=cache, calls_log=str(Path(d) / "calls.jsonl"))
+            self.assertEqual(len(requests), 4)
+
+    def test_cache_separates_endpoint_account_model_and_question_kind(self):
+        with tempfile.TemporaryDirectory() as d:
+            requests = []
+
+            def answer(request, timeout=None):
+                requests.append(request)
+                kind = json.loads(request.data)["questions"]["q"]["type"]
+                value = ({"type": "score", "score": 1, "confidence": 0.8}
+                         if kind == "score" else
+                         {"type": "noul", "noul": len(requests) / 10})
+                return FakeResponse(json.dumps({**ANSWER, "answers": {"q": value}}).encode())
+
+            kw = {"caller": "same-caller", "cache_ttl_seconds": 60,
+                  "cache_path": str(Path(d) / "cache.sqlite3"),
+                  "calls_log": str(Path(d) / "calls.jsonl")}
+            with patch.object(client.urllib.request, "urlopen", answer):
+                first = client.ask("same state", {"q": client.noul("same?")},
+                                   api_key="account-a", endpoint="https://one.example/api",
+                                   model="jev-a", **kw)
+                by_endpoint = client.ask("same state", {"q": client.noul("same?")},
+                                         api_key="account-a", endpoint="https://two.example/api",
+                                         model="jev-a", **kw)
+                by_account = client.ask("same state", {"q": client.noul("same?")},
+                                        api_key="account-a", endpoint="https://one.example/api",
+                                        model="jev-a", account="org-b", **kw)
+                by_credential = client.ask("same state", {"q": client.noul("same?")},
+                                           api_key="account-b", endpoint="https://one.example/api",
+                                           model="jev-a", **kw)
+                by_model = client.ask("same state", {"q": client.noul("same?")},
+                                      api_key="account-a", endpoint="https://one.example/api",
+                                      model="jev-b", **kw)
+                by_kind = client.ask("same state", {"q": client.score("same?", ["no", "yes"])},
+                                     api_key="account-a", endpoint="https://one.example/api",
+                                     model="jev-a", **kw)
+                repeated = client.ask("same state", {"q": client.noul("same?")},
+                                      api_key="account-a", endpoint="https://one.example/api",
+                                      model="jev-a", **kw)
+            self.assertEqual(len(requests), 6)
+            self.assertEqual([x["answers"]["q"] for x in
+                              (first, by_endpoint, by_account, by_credential, by_model, by_kind)],
+                             [{"type": "noul", "noul": n / 10} for n in range(1, 6)] +
+                             [{"type": "score", "score": 1, "confidence": 0.8}])
+            self.assertEqual(repeated["answers"], first["answers"])
+            self.assertTrue(repeated["cache_hit"])
 
     def test_mock_opener_path_writes_no_receipt(self):
         """A call made through `opener` (the offline selftest/mock path) must
@@ -287,6 +677,116 @@ class CallReceiptTests(unittest.TestCase):
         first, second = (json.loads(line) for line in lines)
         self.assertEqual(first["facets"], ["evidence_matching"])
         self.assertEqual(second["facets"], ["diagnosis"])
+
+
+VECTORS_PATH = (MODULE_PATH.parent / "fixtures" / "jev-calibration" /
+                "distribution-vectors.v1.json")
+
+
+class CalibrationRecordTests(unittest.TestCase):
+    """Every Choice/Score/Noul answer carries its FULL distribution, entropy,
+    the pinned model, and a state digest, so accuracy can later be measured
+    per question family rather than argued for."""
+
+    def test_distribution_vectors_shared_with_the_worker(self):
+        vectors = json.loads(VECTORS_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(vectors["probability_sum_tolerance"], client.PROBABILITY_SUM_TOLERANCE)
+        for vector in vectors["vectors"]:
+            with self.subTest(vector["name"]):
+                got = client.answer_distribution(vector["question"], vector["answer"])
+                want = vector["expected"]
+                for field in ("type", "distribution", "distribution_complete", "top"):
+                    self.assertEqual(got[field], want[field], field)
+                for field in ("entropy_bits", "top_probability"):
+                    if want[field] is None:
+                        self.assertIsNone(got[field], field)
+                    else:
+                        self.assertAlmostEqual(got[field], want[field], places=12, msg=field)
+
+    def test_distribution_can_be_read_without_the_question(self):
+        got = client.answer_distribution(None, {"type": "choice", "choice": "a",
+                                                "probabilities": {"a": 0.75, "b": 0.25}})
+        self.assertEqual(got["distribution"], {"a": 0.75, "b": 0.25})
+        self.assertTrue(got["distribution_complete"])
+
+    def test_state_digest_matches_the_worker_canonical_json(self):
+        # Same vector mcp-server/test/jev-call-receipt.test.mjs pins.
+        self.assertEqual(client.state_sha256({"plan": "ship it"}),
+                         hashlib.sha256(b'{"plan":"ship it"}').hexdigest())
+        self.assertEqual(client.state_sha256("plain text state"),
+                         hashlib.sha256(b'"plain text state"').hexdigest())
+
+    def test_pinned_means_an_exact_version_not_a_moving_alias(self):
+        self.assertFalse(client.model_is_pinned("jev-latest"))
+        self.assertFalse(client.model_is_pinned(None))
+        self.assertTrue(client.model_is_pinned("jev-1.13.0"))
+
+    def test_ask_returns_a_calibration_block(self):
+        questions = {"q": client.noul("?"),
+                     "pick": client.choice("which?", {"a": "A", "b": "B"})}
+        answer = {"model": "jev-1.13.0", "usage": {"input_tokens": 3, "output_tokens": 1},
+                  "answers": {"q": {"type": "noul", "noul": 0.8},
+                              "pick": {"type": "choice", "choice": "b", "confidence": 0.9,
+                                       "probabilities": {"a": 0.1, "b": 0.9}}}}
+        result = client.ask({"plan": "ship it"}, questions, api_key="k",
+                            model="jev-1.13.0", opener=responder(answer))
+        block = result["calibration"]
+        self.assertEqual(block["schema"], "carr.jev-calibration.v1")
+        self.assertEqual(block["model_requested"], "jev-1.13.0")
+        self.assertEqual(block["model_answered"], "jev-1.13.0")
+        self.assertTrue(block["model_pinned"])
+        self.assertEqual(block["state_sha256"], client.state_sha256({"plan": "ship it"}))
+        self.assertEqual(block["questions"]["pick"]["distribution"], {"a": 0.1, "b": 0.9})
+        self.assertAlmostEqual(block["questions"]["q"]["entropy_bits"], 0.7219280948873623)
+        # The vendor's own answers are untouched.
+        self.assertEqual(result["answers"], answer["answers"])
+
+    def test_receipt_row_carries_entropy_digest_and_model_but_no_option_text(self):
+        questions = {"b_pick": client.choice("which?", {"secret-option": "A", "other": "B"}),
+                     "a_q": client.noul("?")}
+        answer = {"model": "jev-1.13.0", "usage": {"input_tokens": 3, "output_tokens": 1},
+                  "answers": {"a_q": {"type": "noul", "noul": 0.5},
+                              "b_pick": {"type": "choice", "choice": "other", "confidence": 0.5,
+                                         "probabilities": {"secret-option": 0.5, "other": 0.5}}}}
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "calls.jsonl"
+            with patch.object(client.urllib.request, "urlopen", responder(answer)):
+                client.ask({"plan": "x"}, questions, api_key="k", calls_log=str(log),
+                           cache_ttl_seconds=0)
+            raw = log.read_text()
+        row = json.loads(raw.splitlines()[0])
+        self.assertNotIn("secret-option", raw)
+        self.assertEqual(row["model_requested"], "jev-latest")
+        self.assertFalse(row["model_pinned"])
+        self.assertEqual(row["state_sha256"], client.state_sha256({"plan": "x"}))
+        # Aligned with question_ids_sha256, which is sorted by question id.
+        self.assertEqual(row["entropy_bits"], [1.0, 1.0])
+        self.assertEqual(row["distribution_complete"], [True, True])
+
+    def test_a_calibration_bug_never_fails_a_usable_call(self):
+        with patch.object(client, "calibration_block", side_effect=RuntimeError("boom")):
+            result = client.ask("s", {"q": client.noul("?")}, api_key="k",
+                                opener=responder(ANSWER))
+        self.assertIsNone(result["calibration"])
+        self.assertEqual(result["answers"], ANSWER["answers"])
+
+    def test_failed_call_receipt_has_null_calibration_fields(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = str(Path(d) / "calls.jsonl")
+            client._append_call_receipt({"q": 1}, [], None, log, ok=False, error="network")
+            row = json.loads(Path(log).read_text())
+        self.assertIsNone(row["entropy_bits"])
+        self.assertIsNone(row["state_sha256"])
+
+    def test_cache_hit_still_carries_a_calibration_block(self):
+        with tempfile.TemporaryDirectory() as d:
+            args = {"api_key": "k", "cache_path": str(Path(d) / "c.sqlite3"),
+                    "calls_log": str(Path(d) / "calls.jsonl"), "cache_ttl_seconds": 60}
+            with patch.object(client.urllib.request, "urlopen", responder(ANSWER)):
+                client.ask("s", {"q": client.noul("?")}, **args)
+                hit = client.ask("s", {"q": client.noul("?")}, **args)
+        self.assertTrue(hit["cache_hit"])
+        self.assertAlmostEqual(hit["calibration"]["questions"]["q"]["distribution"]["true"], 0.91)
 
 
 class CanonicalRepoRootTests(unittest.TestCase):

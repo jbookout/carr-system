@@ -14,7 +14,7 @@ const eligible = (text) => ({ ...record(text),
 test('thin Deal Room evidence abstains without a vendor call', async () => {
   let calls = 0;
   const answer = await readDealWithJev(record('Brief note'), {
-    apiKey: 'synthetic', fetchImpl: async () => { calls++; throw Error('unexpected call'); },
+    askJev: async () => { calls++; throw Error('unexpected call'); },
   });
   assert.equal(answer.judged, false);
   assert.equal(answer.reason, 'insufficient_recorded_evidence');
@@ -26,12 +26,12 @@ test('one bounded request returns typed advice without source text', async () =>
   let payload;
   const answer = await readDealWithJev(eligible(text), {
     apiKey: 'synthetic', now: new Date('2026-09-21'),
-    fetchImpl: async (_url, init) => {
-      payload = JSON.parse(init.body);
-      return { ok: true, json: async () => ({ model: 'jev-1.13.0', answers: {
+    askJev: async request => {
+      payload = request;
+      return { model: 'jev-1.13.0', answers: {
         movement: { score: 3.1 }, waiting_on: { choice: 'client', confidence: 0.91 },
         silence_is_bad: { noul: 0.18 },
-      } }) };
+      } };
     },
   });
   assert.equal(payload.model, 'jev-latest');
@@ -43,11 +43,29 @@ test('one bounded request returns typed advice without source text', async () =>
   assert.equal(JSON.stringify(answer).includes(text), false);
 });
 
+test('eligible Deal Room advice uses the receipt-backed Jev door', async () => {
+  const text = 'The landlord sent a counter; the tenant must decide whether to accept the revised rate. '.repeat(4);
+  const calls = [];
+  const answer = await readDealWithJev(eligible(text), {
+    askJev: async request => {
+      calls.push(request);
+      return { model: 'jev-1.13.0', usage: { input_tokens: 9, output_tokens: 1 },
+        receipt_id: 'server-receipt', answers: {
+          movement: { score: 3.1 }, waiting_on: { choice: 'client', confidence: 0.91 },
+          silence_is_bad: { noul: 0.18 },
+        } };
+    },
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].model, 'jev-latest');
+  assert.equal(answer.judged, true);
+});
+
 test('invalid vendor answers abstain', async () => {
   const answer = await readDealWithJev(eligible('The landlord sent a counter with a revised rental rate and a shorter response period. '.repeat(3)), {
-    apiKey: 'synthetic', fetchImpl: async () => ({ ok: true, json: async () => ({
+    askJev: async () => ({
       answers: { movement: { score: 12 }, waiting_on: { choice: 'unknown' }, silence_is_bad: { noul: 1.2 } },
-    }) }),
+    }),
   });
   assert.equal(answer.judged, false);
   assert.equal(answer.reason, 'invalid_jev_answer');
@@ -62,7 +80,7 @@ test('evidence count uses source text rather than phase labels', () => {
 test('verbose irrelevant note abstains before vendor egress', async () => {
   let calls = 0;
   const answer = await readDealWithJev(record('A'.repeat(220)), {
-    apiKey: 'synthetic', fetchImpl: async () => { calls++; throw Error('unexpected vendor call'); },
+    askJev: async () => { calls++; throw Error('unexpected vendor call'); },
   });
   assert.equal(answer.judged, false);
   assert.equal(answer.reason, 'insufficient_recorded_evidence');
@@ -97,12 +115,12 @@ test('current structured deal facts can support a short explicit next step', asy
     documents: [{ sent_status: 'sent', note: 'Private document' }],
   };
   let payload;
-  const answer = await readDealWithJev(deal, { apiKey: 'synthetic',
-    fetchImpl: async (_url, init) => {
-      payload = JSON.parse(init.body);
-      return { ok: true, json: async () => ({ model: 'jev-test', answers: {
+  const answer = await readDealWithJev(deal, {
+    askJev: async request => {
+      payload = request;
+      return { model: 'jev-test', answers: {
         movement: { score: 3 }, waiting_on: { choice: 'client' }, silence_is_bad: { noul: 0.2 },
-      } }) };
+      } };
     },
   });
   assert.equal(answer.judged, true);

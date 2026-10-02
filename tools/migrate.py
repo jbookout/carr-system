@@ -436,6 +436,53 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0724_f05_live_rule_context.sql",
         "0725_f05_live_rule_context_scac_successor.sql",
     ),
+    # DoctorCRE V5-RW02: 0726 installs the append-only attended Salesforce
+    # reconciliation evidence store and its SECURITY DEFINER doors; 0727 seals
+    # those exact ingresses and catalog grants as provisional v88, chained
+    # from v87 (0725). The domain migration cannot commit without its
+    # matching successor.
+    (
+        "0726_salesforce_reconciliation_rw02_store.sql",
+        "0727_salesforce_reconciliation_rw02_scac_successor.sql",
+    ),
+    # DoctorCRE V5-RW02 safe stops: 0733 installs the append-only attended-run
+    # outcome ledger, the consent-revocation record, their SECURITY DEFINER
+    # doors and the deal invoiced marker; 0734 seals those ingresses and grants
+    # as provisional v91, chained from v90 (0731). Both or neither.
+    (
+        "0733_salesforce_rw02_safe_stop_run_store.sql",
+        "0734_salesforce_rw02_safe_stop_scac_successor.sql",
+    ),
+    # The industry events table changes the measured catalog. Its v92 seal
+    # must commit with the domain migration so no intermediate catalog leaks.
+    (
+        "0738_industry_events.sql",
+        "0739_industry_events_scac_successor.sql",
+    ),
+    (
+        "0740_board_answers.sql",
+        "0741_board_answers_scac_successor.sql",
+    ),
+    (
+        "0744_doc_suggestions.sql",
+        "0745_doc_suggestions_scac_successor.sql",
+    ),
+    (
+        "0749_tour_client_feedback.sql",
+        "0750_tour_client_feedback_scac_successor.sql",
+    ),
+    (
+        "0754_tour_property_evidence.sql",
+        "0755_property_evidence_scac_successor.sql",
+    ),
+    (
+        "0757_progress_directory_scac_successor.sql",
+    ),
+    (
+        "0765_doc_whats_new.sql",
+        "0766_doc_whats_new_repair.sql",
+        "0767_doc_whats_new_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -526,6 +573,42 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0724_f05_live_rule_context.sql",
         "0725_f05_live_rule_context_scac_successor.sql",
+    ),
+    (
+        "0726_salesforce_reconciliation_rw02_store.sql",
+        "0727_salesforce_reconciliation_rw02_scac_successor.sql",
+    ),
+    (
+        "0733_salesforce_rw02_safe_stop_run_store.sql",
+        "0734_salesforce_rw02_safe_stop_scac_successor.sql",
+    ),
+    (
+        "0738_industry_events.sql",
+        "0739_industry_events_scac_successor.sql",
+    ),
+    (
+        "0740_board_answers.sql",
+        "0741_board_answers_scac_successor.sql",
+    ),
+    (
+        "0744_doc_suggestions.sql",
+        "0745_doc_suggestions_scac_successor.sql",
+    ),
+    (
+        "0749_tour_client_feedback.sql",
+        "0750_tour_client_feedback_scac_successor.sql",
+    ),
+    (
+        "0754_tour_property_evidence.sql",
+        "0755_property_evidence_scac_successor.sql",
+    ),
+    (
+        "0757_progress_directory_scac_successor.sql",
+    ),
+    (
+        "0765_doc_whats_new.sql",
+        "0766_doc_whats_new_repair.sql",
+        "0767_doc_whats_new_scac_successor.sql",
     ),
 )
 

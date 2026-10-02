@@ -105,6 +105,37 @@ ALWAYS_INHERITS = {"fork"}
 
 MODEL_FRONTMATTER = re.compile(r"^model\s*:\s*\S+", re.M)
 
+# The routing policy (ops/jev_model_route.py dispatch, config ops/config/model-routes.v1.json) already chose the
+# tier for a spawn whose executor line cites it, e.g. "executor: opus per routing pin merge_review". Advising a
+# cheaper tier on that launch contradicts the policy on the same call, so this hook defers to it.
+ROUTES_PATH = os.path.join(REPO, "ops", "config", "model-routes.v1.json")
+ROUTING_LINE = re.compile(r"executor:\s*`?([\w.-]+)`?\s+per routing (?:pin ([\w-]+)|dispatch)\b", re.I)
+
+
+def routing_decided(prompt, model):
+    """The routing reason when the prompt's executor line cites the routing policy for this same model, else None.
+
+    A pin counts only if it exists in the policy and its target dispatches this model, so a made-up pin name or a
+    line naming a different model than the call leaves the advice in place. Any read failure means no deferral."""
+    m = ROUTING_LINE.search(prompt or "")
+    if not m or m.group(1).lower() != model.strip().lower():
+        return None
+    try:
+        with open(ROUTES_PATH, encoding="utf-8") as fh:
+            policy = json.load(fh)
+        targets = {k: v for k, v in (policy.get("dispatch_targets") or {}).items() if isinstance(v, dict)}
+        models = {str(t["subagent_model"]).lower() for t in targets.values() if t.get("subagent_model")}
+        if m.group(2) is None:
+            return "dispatch" if model.strip().lower() in models else None
+        pin = (policy.get("pins") or {}).get(m.group(2))
+        if not isinstance(pin, dict):
+            return None
+        pinned = (targets.get(pin.get("target")) or {}).get("subagent_model")
+        return f"pin {m.group(2)}" if str(pinned).lower() == model.strip().lower() else None
+    except Exception as exc:
+        log(f"ROUTING(unreadable) {exc}")
+        return None
+
 
 def log(msg):
     try:
@@ -315,6 +346,10 @@ def main():
         # than the job needs; that is ADVICE, never a refusal, until the logged
         # judgments show the threshold can be trusted.
         if isinstance(model, str) and model.strip():
+            routed = routing_decided(prompt, model)
+            if routed:
+                log(f"SKIP(routing {routed}) chosen={model} desc={desc[:80]}")
+                sys.exit(0)
             pick = jev_pick(desc, prompt, subagent_type, model)
             if pick and pick[3] and pick[1] >= pick[2]:
                 log(f"ADVISE chosen={model} jev={pick[0]}@{pick[1]:.2f} desc={desc[:80]}")

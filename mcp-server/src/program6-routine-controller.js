@@ -75,6 +75,7 @@ export function createProgram6RoutineController(overrides = {}) {
   const dependencies = {
     callToolFn: callTool,
     needsJoeAdvisoryFn: needsJoeAdvisory,
+    advisoryDeadlineMs: 1100,
     // Fail closed until the Deal Room boundary explicitly injects its verifier.
     authorizeAction: async () => json({ error: "program6_browser_mutations_unavailable" }, 503),
     ...overrides,
@@ -98,7 +99,27 @@ export function createProgram6RoutineController(overrides = {}) {
             // Advisory failures never turn the authenticated canonical read into a refusal.
             let advisory;
             try {
-              advisory = await dependencies.needsJoeAdvisoryFn(result, { apiKey: env?.TYPESAFE_API_KEY });
+              const advisoryPromise = dependencies.needsJoeAdvisoryFn(result, {
+                askJev: env?.TYPESAFE_API_KEY ? request => dependencies.callToolFn(env, actor, "ask-jev", {
+                  idempotency_key: crypto.randomUUID(), session_id: `worker-needs-joe-${crypto.randomUUID()}`,
+                  purpose: "call", ...request,
+                }, "full") : undefined,
+              });
+              if (typeof ctx?.waitUntil === "function") {
+                // A slow optional answer must not stall the queue, and the
+                // receipted vendor call must outlive this HTTP response.
+                ctx.waitUntil(advisoryPromise.catch(() => {}));
+                let timer;
+                advisory = await Promise.race([
+                  advisoryPromise,
+                  new Promise(resolve => { timer = setTimeout(() => resolve({
+                    schema: "jev_c13_decision_queue_advisory/v1", status: "unavailable",
+                    reason: "jev_deadline", items: [],
+                  }), dependencies.advisoryDeadlineMs); }),
+                ]).finally(() => clearTimeout(timer));
+              } else {
+                advisory = await advisoryPromise;
+              }
             } catch {
               advisory = { schema: "jev_c13_decision_queue_advisory/v1", status: "unavailable",
                 reason: "jev_unavailable", items: [] };
