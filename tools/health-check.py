@@ -106,8 +106,8 @@ def _reader_args(argv):
         # A parent shell may carry this old ambient variable.  Normal health must
         # not pass it to any child or let a child silently choose a Drive reader.
         os.environ.pop("CARR_VAULT", None)
-    if section not in ("all", "exports", "jobs", "registry", "credentials", "jev-spend", "tailscale"):
-        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials|jev-spend|tailscale")
+    if section not in ("all", "exports", "jobs", "registry", "credentials", "jev-spend", "tailscale", "headless"):
+        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials|jev-spend|tailscale|headless")
     if fixture and recovery:
         raise SystemExit("health-check: --fixture is for hermetic canonical tests only")
     return recovery, reason, vault, section, fixture, findings_json, rest
@@ -116,6 +116,22 @@ def _reader_args(argv):
 RECOVERY_MODE, RECOVERY_REASON, VAULT, CANONICAL_SECTION, CANONICAL_FIXTURE, FINDINGS_JSON_PATH, \
     _READER_REST = _reader_args(sys.argv[1:])
 sys.argv[1:] = _READER_REST
+
+
+def _headless_rows():
+    sys.path.insert(0, REPO_ROOT)
+    from pathlib import Path
+    from lib.headless_tasks import health_rows
+    return health_rows(Path(REPO_ROOT), Path.home())
+
+
+if CANONICAL_SECTION == "headless":
+    _rows = _headless_rows()
+    for _row in _rows:
+        print(_row["line"])
+    if not _rows:
+        print("OK headless — no installed headless task plists")
+    sys.exit(int(any(row["status"] == "WARN" for row in _rows)))
 
 
 def _jev_spend_row():
@@ -1352,6 +1368,12 @@ def _canonical_health():
                       f"all receipted inside 26h{_carried}")
 
     if CANONICAL_SECTION in ("all", "jobs"):
+        for headless_row in _headless_rows():
+            print("  " + headless_row["line"])
+            if headless_row["status"] == "WARN":
+                rc = _red("headless_"+headless_row["reason"], headless_row["line"],
+                          subject=headless_row["task_id"],
+                          hard_error=headless_row["hard_error"], time_rolling=headless_row["time_rolling"])
         print("Schedule drift — durable Control Plane job state")
         jobs = snap.get("jobs")
         definitions = snap.get("job_definitions")
