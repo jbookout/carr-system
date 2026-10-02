@@ -360,6 +360,7 @@ def _claude(prompt: Path, repo: Path, model: str, tools: str, timeout: float,
         # The child cannot execute model work until its identity is fsynced.
         # If the wrapper dies before acknowledging that append, closing the
         # pipe makes the launcher exit without ever invoking the CLI.
+        ready_write: int | None
         ready_read, ready_write = os.pipe()
         launcher = ('import os,sys; fd=int(sys.argv[1]); '
                     'ready=os.read(fd,1); os.close(fd); '
