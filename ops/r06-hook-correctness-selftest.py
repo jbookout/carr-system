@@ -4,6 +4,7 @@
 import importlib.util
 import json
 import os
+from pathlib import Path
 import subprocess
 import sys
 import tempfile
@@ -49,18 +50,40 @@ def main():
     check("trailing whitespace after the root object remains valid",
           runner._top_level_cwd(b'{"cwd":"/first"} \t\r\n') == "/first")
 
-    prior = os.environ.pop(meter.INVOCATION_REPO_ENV, None)
-    try:
-        check("Git hook resolves the registered helper tree",
-              meter.routing_repo(REPO) == REPO)
-        check("Claude hook resolves payload cwd to the registered helper tree",
-              meter.routing_repo(canonical, os.path.join(REPO, "ops")) == REPO)
-        unregistered = os.path.join(canonical, ".claude", "worktrees", "not-registered")
-        check("unregistered helper nomination falls back canonical",
-              meter.routing_repo(canonical, unregistered) == canonical)
-    finally:
-        if prior is not None:
-            os.environ[meter.INVOCATION_REPO_ENV] = prior
+    # Build the Git metadata the router reads. The invoking checkout may be a
+    # linked tree outside .claude/worktrees, which must fall back to canonical.
+    with tempfile.TemporaryDirectory(prefix="r06-routing-") as tmp:
+        fixture_canonical = Path(tmp).resolve() / "canonical"
+        fixture_common = fixture_canonical / ".git"
+        helper = fixture_canonical / ".claude" / "worktrees" / "helper"
+        outside = fixture_canonical / "out" / "helper"
+        for name, tree in (("helper", helper), ("outside", outside)):
+            (tree / "ops").mkdir(parents=True)
+            admin = fixture_common / "worktrees" / name
+            admin.mkdir(parents=True)
+            (tree / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+            (admin / "commondir").write_text("../..\n", encoding="utf-8")
+            (admin / "gitdir").write_text(str(tree / ".git") + "\n", encoding="utf-8")
+        fixture_root = str(fixture_canonical)
+        prior = os.environ.pop(meter.INVOCATION_REPO_ENV, None)
+        try:
+            check("Git hook resolves the registered helper tree",
+                  meter.routing_repo(str(helper)) == str(helper))
+            check("Claude hook resolves payload cwd to the registered helper tree",
+                  meter.routing_repo(fixture_root, str(helper / "ops")) == str(helper))
+            unregistered = str(helper.parent / "not-registered")
+            check("unregistered helper nomination falls back canonical",
+                  meter.routing_repo(fixture_root, unregistered) == fixture_root)
+            check("registered tree outside helper root falls back canonical",
+                  meter.routing_repo(str(outside)) == fixture_root
+                  and meter.routing_repo(fixture_root, str(outside / "ops")) == fixture_root)
+            (fixture_common / "worktrees" / "helper" / "gitdir").write_text(
+                str(outside / ".git") + "\n", encoding="utf-8")
+            check("mismatched registration backlink falls back canonical",
+                  meter.routing_repo(fixture_root, str(helper)) == fixture_root)
+        finally:
+            if prior is not None:
+                os.environ[meter.INVOCATION_REPO_ENV] = prior
 
     with tempfile.TemporaryDirectory(prefix="r06-hook-") as tmp:
         gate = os.path.join(tmp, "show-context.py")

@@ -377,5 +377,10 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(done.stdout.strip(), "advise")
 
 
+
+# Independently reproduced Dot cases share the offline behavioral fixtures.
+import runpy as _dot_runpy
+_dot_runpy.run_path(str(__import__("pathlib").Path(__file__).with_name("dot-review-selftest.py")))["run_regressions"](['test_b15'])
+
 if __name__ == "__main__":
     unittest.main()

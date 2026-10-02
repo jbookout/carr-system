@@ -188,3 +188,6 @@ if failures:
     sys.exit(1)
 print("GATE INTEGRITY STRICT SELFTEST PASSED: content drift fails CI, the boot "
       "hook still never blocks, and machine state never fabricates a failure.")
+
+import runpy as _dot_runpy
+_dot_runpy.run_path(str(Path(__file__).with_name("dot-review-selftest.py")))["run_regressions"](["test_b30"])

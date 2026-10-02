@@ -1,12 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { launchChrome, CHROME_STARTUP_TIMEOUT_MS, CHROME_STOP_TIMEOUT_MS } from "./chrome-launch.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEALROOM = path.resolve(HERE, "..");
@@ -21,6 +20,8 @@ const CHROME_CANDIDATES = [
 ].filter(Boolean);
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Both bounded launches, their teardown, and the existing journey budget.
+const BROWSER_TEST_TIMEOUT_MS = 2 * CHROME_STARTUP_TIMEOUT_MS + 4 * CHROME_STOP_TIMEOUT_MS + 30_000;
 
 async function chromeBinary() {
   for (const candidate of CHROME_CANDIDATES) {
@@ -173,54 +174,14 @@ async function pagesServer(t, { rpc } = {}) {
 async function launchBrowser(t) {
   const chrome = await chromeBinary();
   if (!chrome) return { unavailableReason: "Chrome/Chromium was not found; real V5-J101 browser evidence was not run" };
-  const profile = await mkdtemp(path.join(tmpdir(), "v5-j101-chrome-"));
-  const child = spawn(chrome, [
-    "--headless=new", "--no-first-run", "--disable-gpu", "--no-sandbox",
-    "--allow-file-access-from-files", "--remote-debugging-port=0", `--user-data-dir=${profile}`, "about:blank",
-  ], { stdio: ["ignore", "ignore", "pipe"] });
-  let stderr = "";
-  child.stderr.on("data", (chunk) => { stderr += chunk; });
-  t.after(async () => {
-    child.kill("SIGTERM");
-    await Promise.race([new Promise((resolve) => child.once("exit", resolve)), wait(3000)]);
-    // Chrome can still be flushing its own profile files microseconds after
-    // "exit" fires, which occasionally loses this rm/rmdir race with
-    // ENOTEMPTY. One short retry clears it without masking a real failure.
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      try {
-        await rm(profile, { recursive: true, force: true });
-        break;
-      } catch (error) {
-        if (attempt === 2) throw error;
-        await wait(200);
-      }
-    }
-  });
-  const portFile = path.join(profile, "DevToolsActivePort");
-  // 20s, not 3s: a cold first-ever headless launch on a shared CI runner can
-  // take meaningfully longer to write this file than it does on a warm local
-  // machine, and 3s (60 x 50ms) was observed to time out in hosted CI even
-  // though Chrome was present and did eventually come up.
-  for (let attempt = 0; attempt < 200 && !existsSync(portFile); attempt += 1) {
-    // A killed-by-signal child (signalCode set, exitCode null) never sets
-    // exitCode, so checking exitCode alone would spin the full 20s against a
-    // process that has already died instead of failing fast with a reason.
-    if (child.exitCode !== null || child.signalCode !== null) {
-      return { unavailableReason: `Chrome exited before DevTools started (code ${child.exitCode}, signal ${child.signalCode}): ${stderr.slice(-2000)}` };
-    }
-    await wait(100);
-  }
-  if (!existsSync(portFile)) {
-    return { unavailableReason: `Chrome did not publish a DevTools endpoint within 20s: ${stderr.slice(-2000)}` };
-  }
-  const [port] = String(await readFile(portFile)).split(/\r?\n/);
-  const targets = await fetch(`http://127.0.0.1:${port}/json/list`).then((response) => response.json());
-  const target = targets.find((item) => item.type === "page");
-  assert.ok(target?.webSocketDebuggerUrl, "Chrome did not expose a page target");
-  const cdp = new DevTools(target.webSocketDebuggerUrl);
+  let browser;
+  try { browser = await launchChrome(chrome); }
+  catch (error) { return { unavailableReason: error.message }; }
+  const cdp = new DevTools(browser.pageWsUrl);
+  t.after(async () => { cdp.close(); await browser.close(); });
+  t.diagnostic(`[chrome-startup] ${JSON.stringify({ startupMs: browser.startupMs, attempts: browser.attempts })}`);
   await cdp.call("Page.enable");
   await cdp.call("Runtime.enable");
-  t.after(() => cdp.close());
   return { cdp };
 }
 
@@ -385,7 +346,7 @@ const FOCUS_TRAP_CHECK = `(() => {
   return { prevented: !notPrevented, movedToFirst: document.activeElement === stops[0] };
 })()`;
 
-test("V5-J101 real Chrome desktop/touch journeys preserve modality, focus, reflow, targets, and inert Calls/Tours", { timeout: 30_000 }, async (t) => {
+test("V5-J101 real Chrome desktop/touch journeys preserve modality, focus, reflow, targets, and inert Calls/Tours", { timeout: BROWSER_TEST_TIMEOUT_MS }, async (t) => {
   const origin = await pagesServer(t);
   const browser = await launchBrowser(t);
   if (!browser.cdp) {
@@ -426,7 +387,7 @@ test("V5-J101 real Chrome desktop/touch journeys preserve modality, focus, reflo
   assert.equal(await cdp.evaluate("document.activeElement?.id"), "docPanelToggle", "closing Doc must restore focus to its opener");
 });
 
-test("V5-J101 the overflow/panel-fit guard catches live layout mutants a scrollWidth-only check would have missed", { timeout: 30_000 }, async (t) => {
+test("V5-J101 the overflow/panel-fit guard catches live layout mutants a scrollWidth-only check would have missed", { timeout: BROWSER_TEST_TIMEOUT_MS }, async (t) => {
   const origin = await pagesServer(t);
   const browser = await launchBrowser(t);
   if (!browser.cdp) {
@@ -467,7 +428,7 @@ test("V5-J101 the overflow/panel-fit guard catches live layout mutants a scrollW
   assert.deepEqual(modalityGuard(restored, "dialog"), [], "removing both mutants must restore a clean pass, proving the guard reacts to state rather than failing permanently");
 });
 
-test("V5-J101 Doc opens via real keyboard activation (not .click()) at desktop width on Home, Deals, and Clients/Vendors", { timeout: 30_000 }, async (t) => {
+test("V5-J101 Doc opens via real keyboard activation (not .click()) at desktop width on Home, Deals, and Clients/Vendors", { timeout: BROWSER_TEST_TIMEOUT_MS }, async (t) => {
   const origin = await pagesServer(t);
   const browser = await launchBrowser(t);
   if (!browser.cdp) {
@@ -499,7 +460,7 @@ const FIXTURE_DEAL = Object.freeze({
   operating_state: "active", account_client_id: null, field_base: {},
 });
 
-test("V5-J101 the UI form and Doc composer send equivalent set-next-step payloads through their REAL entry points", { timeout: 30_000 }, async (t) => {
+test("V5-J101 the UI form and Doc composer send equivalent set-next-step payloads through their REAL entry points", { timeout: BROWSER_TEST_TIMEOUT_MS }, async (t) => {
   const rpc = createRpcFixture(FIXTURE_DEAL);
   const origin = await pagesServer(t, { rpc });
   const browser = await launchBrowser(t);

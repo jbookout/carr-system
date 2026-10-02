@@ -386,7 +386,7 @@ def read_deal(bundle, *, api_key=None, timeout=20.0, opener=None):
     state, asked = state_for(bundle), questions(bundle)
     try:
         answer = ts.ask(state, asked, timeout=timeout, api_key=api_key,
-                        opener=opener)
+                        opener=opener, work_class="app_runtime")
     except Exception as exc:  # the room must build whatever the service does
         return dict(bundle, judged=False, reason=f"the judgment did not run: {exc}")
     answers = answer.get("answers") or {}

@@ -50,6 +50,11 @@ the classifier declined; that is working around a denial rather than filing it.
 Read current canonical migration/release state before naming frontier/blocker.
 Dated incidents/WRs are history; source/CI grants no live authority.
 
+## Steering evals
+
+Surfaces in `evals/surfaces.json`: `/claude-api build-eval`, then
+`/claude-api hillclimb`; ship per `evals/README.md`.
+
 ## Map work has one mandatory front door
 
 For any request to recommend, design, build, revise, review, or publish a map,
@@ -97,6 +102,3 @@ silently treated as absent.
    `./.venv/bin/python ops/config-as-code.py check </dev/null`. Read A15 and
    A17 back as closed. Only then report the migration complete to Dell in plain
    language.
-
-There is no local fallback any more. The doctrine store is the only doctrine
-surface; if it is unreachable, stop and say so.
