@@ -484,8 +484,12 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0767_doc_whats_new_scac_successor.sql",
     ),
     (
-        "0769_lead_stage_automation.sql",
-        "0770_lead_automation_scac_successor.sql",
+        "0769_rule_teach_supersession.sql",
+        "0770_find_rule_scac_successor.sql",
+    ),
+    (
+        "0772_lead_stage_automation.sql",
+        "0773_lead_automation_scac_successor.sql",
     ),
 )
 
@@ -615,8 +619,12 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0767_doc_whats_new_scac_successor.sql",
     ),
     (
-        "0769_lead_stage_automation.sql",
-        "0770_lead_automation_scac_successor.sql",
+        "0769_rule_teach_supersession.sql",
+        "0770_find_rule_scac_successor.sql",
+    ),
+    (
+        "0772_lead_stage_automation.sql",
+        "0773_lead_automation_scac_successor.sql",
     ),
 )
 

@@ -135,11 +135,9 @@ SEMANTIC_FAILURE_CONTEXT = (
 MESSAGE_LIMIT_CHARS = 90_000
 
 # ONE CLOCK FOR THE WHOLE PROMPT HOOK. ops/config/hooks.json kills this hook at
-# 20 s, and a killed hook delivers nothing. The three slow steps run in order
-# — the build advisory (ops/jev_build_advisory.py: one attempt, at most 6 s,
-# no rate-limit retries), the rule judgment (ops/rule_trigger_delivery.py:
-# its own 12 s clock, cut short here so SELECTOR_RESERVE_SECONDS stay for the
-# last step), and the standing-context door — and all of them end by
+# 20 s, and a killed hook delivers nothing. The two slow steps run in order:
+# rule judgment (ops/rule_trigger_delivery.py, with its own 12 s clock) and
+# the standing-context door. Both end by
 # HOOK_BUDGET_SECONDS after the process started, leaving ~2 s for the
 # interpreter and the receipt.
 HOOK_BUDGET_SECONDS = 18.0
@@ -477,7 +475,7 @@ def _build_adviser(situation: str) -> dict:
         raise RuntimeError("build advisory unavailable")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.advise(situation)
+    return module.deferred()
 
 
 def _build_unavailable(error: Exception | None = None) -> dict:
