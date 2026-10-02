@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { computedTrust, enrichRelationship, trustedOverride, dealEvidenceEntries } from '../src/vendor-relationship.js';
+import { computedTrust, enrichRelationship, trustedOverride, dealEvidenceEntries, mergeRelationshipFields } from '../src/vendor-relationship.js';
 import { parseBusinessQuery, readBusinessList } from '../src/workspace-business-read.js';
 const now='2026-10-01T12:00:00Z';
 const proven={coverage_verified_at:now,deals_referred:5,deals_worked:8,won:7,lost:1,first_worked_at:'2024-09-01T12:00:00Z',last_contacted_at:'2026-09-01T12:00:00Z'};
@@ -20,9 +20,44 @@ test('override keeps computed tier and stamps verified actor and reason; clients
 });
 test('deal associations require exact IDs, explicit role, date and sourced evidence; duplicates refuse',()=>{
  const entry={deal_id:'00000000-0000-4000-8000-000000000001',role:'worked',occurred_at:now,evidence_kind:'salesforce',evidence_ref:'synthetic-row-1'};
- assert.deepEqual(dealEvidenceEntries([entry]),[entry]);
+ assert.deepEqual(dealEvidenceEntries([entry]),[{...entry,occurred_at:new Date(now).toISOString()}]);
  for(const update of [{deal_id:'near name'},{role:'works_with'},{evidence_kind:'guess'},{evidence_ref:''},{occurred_at:'yesterday'}])assert.throws(()=>dealEvidenceEntries([{...entry,...update}]));
  assert.throws(()=>dealEvidenceEntries([entry,entry]));
+});
+
+test('evidence rejects impossible calendars and coercible non-timestamps and canonicalizes ISO values', () => {
+ const entry={deal_id:'abcdefab-cdef-4abc-8abc-abcdefabcdef',role:'worked',occurred_at:now,evidence_kind:'entry',evidence_ref:'synthetic'};
+ for(const occurred_at of [0,'1','2026-02-30','2026-02-31T12:00:00Z','2025-02-29','2026-04-31','2026-13-01','2026-01-01T24:00:00Z','2026-01-01T12:60:00Z','2026-01-01T12:00:00'])
+  assert.throws(()=>dealEvidenceEntries([{...entry,occurred_at}]),e=>e.code==='deal_evidence_invalid',String(occurred_at));
+ for(const [occurred_at,expected] of [['2024-02-29','2024-02-29T00:00:00.000Z'],['2026-10-01T12:00:00+02:00','2026-10-01T10:00:00.000Z']])
+  assert.equal(dealEvidenceEntries([{...entry,occurred_at}])[0].occurred_at,expected);
+});
+
+test('deal UUID spelling is canonical before duplicate detection for both roles', () => {
+ for(const role of ['worked','referred']) {
+  const entry={deal_id:'abcdefab-cdef-4abc-8abc-abcdefabcdef',role,occurred_at:now,evidence_kind:'entry',evidence_ref:'synthetic'};
+  assert.throws(()=>dealEvidenceEntries([entry,{...entry,deal_id:entry.deal_id.toUpperCase()}]),e=>e.code==='deal_evidence_duplicate');
+  assert.equal(dealEvidenceEntries([{...entry,deal_id:entry.deal_id.toUpperCase()}])[0].deal_id,entry.deal_id);
+ }
+});
+
+test('merge compares evidence values independent of object key order and refuses an oversized union', () => {
+ const entry={deal_id:'abcdefab-cdef-4abc-8abc-abcdefabcdef',role:'worked',occurred_at:now,evidence_kind:'entry',evidence_ref:'synthetic'};
+ const survivor={deal_evidence:[entry],deal_history_verified_at:now};
+ const reordered=Object.fromEntries(Object.entries(entry).reverse());
+ const merged=mergeRelationshipFields(survivor,{...survivor,deal_evidence:[reordered]});
+ assert.deepEqual(merged.conflicts,[]);assert.equal(merged.filled.deal_history_verified_at,now);
+ const entries=Array.from({length:100},(_,i)=>({...entry,deal_id:`00000000-0000-4000-8000-${String(i).padStart(12,'0')}`}));
+ assert.throws(()=>mergeRelationshipFields({deal_evidence:entries},{deal_evidence:[entry]}),e=>e.code==='deal_evidence_invalid');
+});
+
+test('relationship authority has one scoped implementation used by override and attestation', async () => {
+ const {readFile}=await import('node:fs/promises');
+ const relationship=await readFile(new URL('../src/vendor-relationship.js',import.meta.url),'utf8');
+ const tools=await readFile(new URL('../src/tools.js',import.meta.url),'utf8');
+ const writer=tools.slice(tools.indexOf('"update-vendor":'),tools.indexOf('"update-lead":'));
+ assert.doesNotMatch(writer,/actor\.human|includes\(actor\.slug\)/);
+ assert.match(relationship,/requireRelationshipPartner/);
 });
 test('all sorts and owner/territory are server queries with deterministic ties and parameterized values',async()=>{
  for(const dataset of ['clients','vendors'])for(const sort of ['name','vertical','deal_type','last_deal_desc','last_deal_asc',...(dataset==='vendors'?['territory']:[])]){

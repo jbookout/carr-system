@@ -73,7 +73,7 @@ const SLUG = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 const PAGE = /^[1-9][0-9]{0,3}$/;
 
 const LIST_KEYS = {
-  clients: ["contract", "viewer", "scope", "q", "status", "type", "pipeline", "sort", "page", "owner", "territory"],
+  clients: ["contract", "viewer", "scope", "q", "status", "type", "pipeline", "sort", "page", "owner"],
   vendors: ["contract", "viewer", "scope", "q", "category", "stage", "disposition", "sort", "page", "owner", "territory"],
 };
 const RECORD_KEYS = ["viewer", "contract"];
@@ -193,7 +193,7 @@ export function parseBusinessQuery(dataset, searchParams, viewerSlug) {
     q: searchTerm(params),
     owner: oneOf(params, "owner", ["all", "joe", "dell"], "all"),
     territory: boundedTerritory(params),
-    sort: oneOf(params, "sort", SORTS, DEFAULT_SORT),
+    sort: oneOf(params, "sort", dataset === "clients" ? SORTS.filter(sort => sort !== "territory") : SORTS, DEFAULT_SORT),
     page: pageNumber(params),
     page_size: PAGE_SIZE,
   };
