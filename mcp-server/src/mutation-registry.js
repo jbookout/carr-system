@@ -4,7 +4,9 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v101 seals definer hardening over the published Progress directory v100.
+// v102 seals definer hardening over the published partner catch-up v101.
+// v101 admits partner catch-up and its scoped watermark store.
+// v100 seals the authenticated published Progress board directory and the current catalog.
 // v96 admits Doc suggestion producer, decision, and correction verbs.
 // v95 admits the permission-scoped Operations schedule read.
 // v94 sealed tenant-scoped progress board answers.
@@ -195,7 +197,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v101.generated.js";
+} from "./scac-mutation-registry.v102.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 

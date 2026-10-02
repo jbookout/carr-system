@@ -2,7 +2,7 @@
 """Source-only regressions for the SECURITY DEFINER hardening review round.
 
 Paired with ops/definer-hardening-local-pg-gate.py. Needs no database:
-  * the SIEP-11 gate keeps v100 alongside v101 (a predecessor database must
+  * the SIEP-11 gate keeps v100 alongside v102 (a predecessor database must
     still validate) and still fails closed outside the reviewed range;
   * the qualification audit flags bare application references and ignores
     comments, literals, qualified names, CTEs and pg_catalog built-ins, and
@@ -44,15 +44,16 @@ class FakeCatalog(GATE.Catalog):  # type: ignore[name-defined,misc]
 
 
 class SuccessorAllowlist(unittest.TestCase):
-    def test_predecessor_v100_and_current_v101_are_supported(self):
+    def test_predecessor_v100_and_current_v102_are_supported(self):
         gate = GATE.siep11_gate()
         for version in ("scac-mutation-registry.v2", "scac-mutation-registry.v99",
-                        "scac-mutation-registry.v100", "scac-mutation-registry.v101"):
+                        "scac-mutation-registry.v100", "scac-mutation-registry.v101",
+                        "scac-mutation-registry.v102"):
             gate.require_supported_successor(version)
 
     def test_unreviewed_frontiers_fail_closed(self):
         gate = GATE.siep11_gate()
-        for version in ("scac-mutation-registry.v1", "scac-mutation-registry.v102",
+        for version in ("scac-mutation-registry.v1", "scac-mutation-registry.v103",
                         "scac-mutation-registry.v1000", "scac-mutation-registry.vX"):
             with self.assertRaisesRegex(RuntimeError, "unsupported live successor"):
                 gate.require_supported_successor(version)
