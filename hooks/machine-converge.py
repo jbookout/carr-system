@@ -204,6 +204,10 @@ def converge():
 
 
 def main():
+    sys.path.insert(0, REPO)
+    from lib.grok_invocation import bounded_grok_read_only
+    if bounded_grok_read_only():
+        return 0
     try:
         if scrubbed_env is None:
             return 0  # cannot pin which repository git would hit — see above

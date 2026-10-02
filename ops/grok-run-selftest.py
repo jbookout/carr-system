@@ -25,6 +25,32 @@ spec.loader.exec_module(runner)
 
 
 class GrokRunTests(unittest.TestCase):
+    def test_hook_turns_preserve_substantive_answer_for_runner_and_desk(self):
+        # Minimized from the private 2026-10-02 Grok hook-turn capture. Retain
+        # response/usage boundaries; replace source prose and omit rule text.
+        raw = (FIXTURES / "hook-turns.ndjson").read_text()
+        text, _, code = runner.parse_output(raw.splitlines(), "fixture")
+        self.assertEqual(code, 0)
+        self.assertEqual(text, "Fetched post: the announced skill is example-pro.\nSource: https://example.com/post")
+        desk = grok_wire.parse_result(raw, 0)
+        self.assertEqual(desk["status"], "completed")
+        self.assertEqual(desk["result"], text)
+
+    def test_acknowledgements_alone_are_non_answers(self):
+        end = json.loads((FIXTURES / "hook-turns.ndjson").read_text().splitlines()[-1])
+        for ack in ("Noted. Standing by.", "Noted. No tools were called.", "No action."):
+            with self.subTest(ack=ack):
+                raw = [json.dumps({"type": "text", "data": ack}), json.dumps(end)]
+                text, _, code = runner.parse_output(raw, "fixture")
+                self.assertEqual(text, "")
+                self.assertEqual(code, 4)
+
+    def test_latest_short_substantive_answer_wins(self):
+        events = [json.loads(line) for line in (FIXTURES / "hook-turns.ndjson").read_text().splitlines()]
+        events[-1:-1] = [{"type": "text", "data": "The answer is 42."}, {"type": "usage"}]
+        text, _, code = runner.parse_output(map(json.dumps, events), "fixture")
+        self.assertEqual((text, code), ("The answer is 42.", 0))
+
     def test_timeout_option_reaches_provider_and_preserves_default(self):
         for value in (None, "1", "600", "1800"):
             with self.subTest(timeout=value):

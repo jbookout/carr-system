@@ -549,6 +549,10 @@ def checkpoint_request(identity: dict, cursor: dict, response: dict | None) -> s
 
 
 def main() -> int:
+    sys.path.insert(0, str(REPO))
+    from lib.grok_invocation import bounded_grok_read_only
+    if bounded_grok_read_only():
+        return 0
     mode = _read_mode()
     if mode == "disabled":
         return 0

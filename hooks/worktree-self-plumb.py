@@ -536,6 +536,10 @@ def maybe_spawn_reaper(canon, current_wt):
 
 
 def main():
+    sys.path.insert(0, REPO)
+    from lib.grok_invocation import bounded_grok_read_only
+    if bounded_grok_read_only():
+        return 0
     if "--reap" in sys.argv[1:]:
         # Detached child (or a hand/selftest run) — no SessionStart payload.
         try:

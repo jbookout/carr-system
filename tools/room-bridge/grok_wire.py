@@ -8,6 +8,8 @@ No token is loaded here, and no other provider is a fallback.
 from __future__ import annotations
 
 import json
+import os
+import re
 import subprocess
 
 MODEL = "grok-4.7"
@@ -15,6 +17,19 @@ PROVIDER_MODEL = "grok-4.7-build"
 EFFORT = "high"
 TIMEOUT_S = 180.0
 MAX_TURNS = 60
+
+# Only standalone acknowledgements and known CARR administrative replies are
+# non-answers. Length is never a ranking signal: a short correction must win.
+ACKNOWLEDGEMENT = re.compile(
+    r"(?:Noted\.?\s*)?(?:Standing by\.?|No tools were called\.?|No action\.?|"
+    r"No new request in that warning, so nothing else to run\.?)|Noted\.?", re.I)
+HOOK_STATUS_STARTS = ("The rule boot stopped", "The rule gate's state folder",
+                      "The lifecycle warning is noted.", "CARR rule boot pages")
+
+
+def is_non_answer(text: str) -> bool:
+    value = text.strip()
+    return bool(ACKNOWLEDGEMENT.fullmatch(value) or value.startswith(HOOK_STATUS_STARTS))
 
 
 def validate_entry(entry: dict) -> None:
@@ -34,9 +49,10 @@ def model_usage_error(models) -> str | None:
 
 
 def parse_stream(lines, returncode: int = 0) -> dict:
-    """Keep the final assistant message in a stream with exactly one end."""
+    """Keep the latest substantive assistant response with exactly one end."""
     chunks = []
     final_chunks = []
+    non_answer_seen = False
     end: dict = {}
     detail = None
     for line in lines:
@@ -66,10 +82,19 @@ def parse_stream(lines, returncode: int = 0) -> dict:
             # identified empty response. Older streams omit messageId, so text
             # also establishes a boundary. Accounting alone cannot erase it.
             if chunks or event.get("messageId"):
-                final_chunks = chunks
+                if is_non_answer("".join(chunks)):
+                    non_answer_seen = True
+                else:
+                    final_chunks = chunks
                 chunks = []
         elif event.get("type") == "end":
             end = event
+    if chunks:
+        if is_non_answer("".join(chunks)):
+            non_answer_seen = True
+        else:
+            final_chunks = chunks
+    text = "".join(final_chunks)
     code = 0
     if detail:
         end = {**end, "stopReason": "invalid_stream"}
@@ -82,7 +107,9 @@ def parse_stream(lines, returncode: int = 0) -> dict:
         detail = model_usage_error(end.get("modelUsage"))
         if detail:
             code = 5
-    return {"text": "".join(chunks or final_chunks), "end": end, "detail": detail, "code": code}
+        elif not text.strip() and non_answer_seen:
+            detail, code = "grok_non_answer", 4
+    return {"text": text, "end": end, "detail": detail, "code": code}
 
 
 def parse_result(stdout: str, returncode: int) -> dict:
@@ -112,8 +139,12 @@ def invoke_cli(prompt: str, *, cwd=None, effort=EFFORT, max_turns=MAX_TURNS,
             "--max-turns", str(max_turns), "--always-approve",
             "--sandbox", "workspace" if writable else "read-only",
             "--output-format", "streaming-json", "--print", prompt]
+    env = dict(os.environ)
+    env.pop("CARR_GROK_RUN_READ_ONLY", None)
+    if not writable:
+        env["CARR_GROK_RUN_READ_ONLY"] = "1"
     return run(argv, cwd=cwd, capture_output=True, text=True,
-               stdin=subprocess.DEVNULL, timeout=timeout_seconds)
+               stdin=subprocess.DEVNULL, timeout=timeout_seconds, env=env)
 
 
 def run_task(entry: dict, task: str, *, run=subprocess.run) -> dict:
