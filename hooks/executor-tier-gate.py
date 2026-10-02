@@ -71,7 +71,6 @@ import os
 import re
 import sys
 from datetime import datetime, timezone
-from typing import Any, Callable, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:                                    # telemetry only — never load-bearing
@@ -81,25 +80,11 @@ except Exception:                       # a missing meter must not change a verd
     LOG = os.path.expanduser("~/carr-system/out/hook-guard.log")
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO)
-SERVER_READ_BUDGET_SECONDS = 5.0
-binding_required_facets = None  # type: Optional[Callable[..., Any]]
-turn_required_facets = None  # type: Optional[Callable[[Any], Any]]
-fetch_receipts_for = None  # type: Optional[Callable[..., Any]]
-session_ids_for = None  # type: Optional[Callable[..., Any]]
-server_read_since = None  # type: Optional[Callable[..., Any]]
-chain_view = None  # type: Optional[Callable[..., Any]]
-load_transcript = None  # type: Optional[Callable[..., Any]]
-prompt_names_facet = None  # type: Optional[Callable[[Any, Any], Any]]
-prompt_names_not_applicable = None  # type: Optional[Callable[[Any], Any]]
-try:                                    # same fail-open posture as jev_pick below
-    from lib.jev_required_actions import (
-        binding_required_facets, chain_view, prompt_names_facet,
-        prompt_names_not_applicable, server_read_since, turn_required_facets)
-    from lib.jev_server_receipts import fetch_receipts_for, session_ids_for
-    from lib.transcript_read import load_transcript
-except Exception:
-    pass
-
+# Decision c136a8e1-c135-4553-9e50-64c9640d12b7 (Joe, 2026-09-25)
+# narrows 0b11c89b to judgment points. The orchestrator's 2026-10-02 PR 1407
+# ruling retires C07's generated prompt-facet propagation deny in favor of
+# batched boundary checks in hooks/jev-supervisor.py. Executor naming and
+# exact routing-policy pin checks below remain enforced.
 # Where a subagent definition may live. Project scope first: that is where the
 # fifteen CARR agents are, and a project definition wins over a user-level one
 # of the same name.
@@ -235,65 +220,6 @@ def jev_pick(desc, prompt, subagent_type, chosen):
         return None
 
 
-def missing_required_actions_in_prompt(payload, prompt):
-    """The required facets this turn's Jev advisory named that `prompt` does
-    not mention, or [] when nothing is required / the advisory could not be
-    read / the prompt already covers it. Never raises.
-
-    Decision 0b11c89b (2026-09-24, Joe): "Jev is not advisory only." C07 of
-    the 2026-09-24 bypass audit is this exact gap — no code compared an Agent
-    prompt with the turn's advisory, so a required action stopped at the
-    parent and never reached the subagent that would actually do the work.
-    """
-    if (binding_required_facets is None or prompt_names_not_applicable is None
-            or prompt_names_facet is None or load_transcript is None
-            or fetch_receipts_for is None or turn_required_facets is None
-            or session_ids_for is None or server_read_since is None or chain_view is None):
-        return []
-    if prompt_names_not_applicable(prompt):
-        return []
-    try:
-        path = payload.get("transcript_path") or payload.get("transcriptPath")
-        if not path or not os.path.exists(path):
-            return []
-        # One bad line in the session's own transcript must not switch the
-        # gate off (bypass hunt, PR #1224): lib/transcript_read.py skips it
-        # and records a transcript_tamper event instead of raising.
-        recs = load_transcript(
-            path, hook="executor-tier-gate",
-            session=payload.get("session_id") or payload.get("sessionId"),
-            log_path=os.path.join(REPO, "out", "jev-required-actions-gate.jsonl"))
-        # The genuine human prompt's own advisory only (round 4): advisories
-        # carried by folded notifications are not consulted. SERVER-VERIFIED
-        # (2026-09-24): the facets come from the Worker's own build_advisory
-        # rows, and the prompt boundary only from the transcript's uuid chain
-        # anchored on this very tool_use, so a forged prompt or advisory
-        # appended to the transcript cannot shrink the list. With the server
-        # unreachable the on-chain transcript copy is used, and logged.
-        session = payload.get("session_id") or payload.get("sessionId")
-        # A real Claude transcript always carries uuids and always reads the
-        # server; a uuid-less fixture with no advisory never reaches the network.
-        has_chain = any(isinstance(r, dict) and r.get("uuid") for r in recs)
-        # F4/F6: one 5s budget (this hook has 10s), read by session from this
-        # turn's own start; a read that runs out is the unreachable case.
-        since = server_read_since(chain_view(
-            recs, anchor_tool_use_id=payload.get("tool_use_id"))["recs"])
-        server = (fetch_receipts_for(session_ids_for(session), since,
-                                     budget_seconds=SERVER_READ_BUDGET_SECONDS)
-                  if has_chain or turn_required_facets(recs)[0] is not None else None)
-        required, _turn_key, info = binding_required_facets(
-            recs, server, anchor_tool_use_id=payload.get("tool_use_id"))
-        if info.get("server") != "ok" or info.get("basis") != "server":
-            log(f"JEV-REQUIRED-ACTIONS(unverified) server={info.get('server')} "
-                f"reason={info.get('reason')} basis={info.get('basis')}")
-    except Exception as exc:
-        log(f"JEV-REQUIRED-ACTIONS(unavailable) {exc}")
-        return []
-    if not required:
-        return []
-    return [f for f in required if not prompt_names_facet(prompt, f)]
-
-
 def advise(note):
     print(json.dumps({
         "hookSpecificOutput": {
@@ -352,25 +278,6 @@ def main():
         desc = ti.get("description") or ""
 
         prompt = ti.get("prompt") or ""
-
-        # DECISION 0b11c89b'S PreToolUse HALF, ahead of the tier check below:
-        # a required action that stops at the parent and never reaches the
-        # subagent doing the work is exactly the C07 gap the bypass audit
-        # named. This denies independently of whatever the tier check below
-        # decides.
-        missing = missing_required_actions_in_prompt(payload, prompt)
-        if missing:
-            named = ", ".join(missing)
-            log(f"DENY(jev-required-actions) missing={named} desc={desc[:80]}")
-            deny(
-                "JEV REQUIRED ACTIONS NOT NAMED. This turn's Jev build advisory required "
-                f"{named}, and this Agent prompt names none of them. Decision 0b11c89b "
-                "(2026-09-24, Joe): Jev is required, not advisory, for these facets.\n\n"
-                "FIX: add a line to the prompt for each missing facet (for example, "
-                f"\"{missing[0]}: ...\" naming what Jev judgment the subagent must use and "
-                "consume), or, if none genuinely applies to this subtask, add the line "
-                f"\"Jev required actions: not applicable — <reason>\" to the prompt."
-            )
 
         # The executor is named on the call. Jev may still think it is dearer
         # than the job needs; that is ADVICE, never a refusal, until the logged

@@ -113,45 +113,16 @@ from stop_latch import (  # noqa: E402
     claim_identity, latched, record_fire, record_satisfied)
 
 sys.path.insert(0, REPO)
-from lib.jev_required_actions import (  # noqa: E402
-    chain_view, current_turn_slice, evaluate_required_actions, full_turn_slice,
-    jev_calls_log_mentions, server_read_since, turn_boundary_timestamp, turn_required_facets,
-    unexplained_receipts)
-from lib.jev_server_receipts import fetch_receipts_for, session_ids_for  # noqa: E402
+# Decision c136a8e1-c135-4553-9e50-64c9640d12b7 (Joe, 2026-09-25)
+# narrows 0b11c89b: Jev runs at judgment points, not on every turn. The
+# orchestrator's 2026-10-02 PR 1407 ruling replaces generated prompt-facet
+# Stop obligations with hooks/jev-supervisor.py's batched boundary checks.
+# Deterministic completion evidence and requirement checks remain here.
 from lib.transcript_read import load_transcript  # noqa: E402
 
 
-def _canonical_repo_root(fallback):
-    """Same helper as ops/typesafe_client.py's (duplicated on purpose — this
-    hook deliberately has no import-time dependency on the vendor client
-    module). Resolves the ONE repo root shared by every worktree via `git
-    rev-parse --path-format=absolute --git-common-dir`, so this hook reads
-    the SAME out/jev-calls.jsonl that ask() wrote to, whichever worktree
-    either one is running from. Falls back to `fallback` on any failure."""
-    try:
-        out = subprocess.run(
-            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
-            cwd=fallback, capture_output=True, text=True, timeout=5, check=True,
-        ).stdout.strip()
-        if out:
-            return os.path.dirname(out)
-    except Exception:
-        pass
-    return fallback
-
-
-CANONICAL_REPO = _canonical_repo_root(REPO)
-
 LOG = os.path.join(REPO, "out", "completion-evidence-gate.jsonl")
 JEV_LOG = os.path.join(REPO, "out", "jev-required-actions-gate.jsonl")
-# Same physical path ops/typesafe_client.py's ask() appends a receipt to on
-# every successful call (its JEV_CALLS_LOG) — resolved via CANONICAL_REPO
-# (not the possibly-worktree-local REPO) so a call made from any worktree and
-# this hook, wherever it runs from, agree on one file. Kept as a literal path
-# rather than an import of ops/typesafe_client.py, so this hook has no
-# import-time dependency on the vendor client.
-JEV_CALLS_LOG = (os.environ.get("CARR_JEV_CALLS_LOG_OVERRIDE")
-                 or os.path.join(CANONICAL_REPO, "out", "jev-calls.jsonl"))
 # The FLOOR trigger, kept and widened with the verbs Joe named (finished,
 # landed, phase-complete, ready, live). It is no longer the only trigger: the
 # clause predicate below fires with or without any of these words.
@@ -384,12 +355,6 @@ HUMAN_ONLY_WRITE_ACTION_EXACT = {
 CLAUSE_REASON = "unaccounted clause"
 FLOOR_REASONS = ("terminal completion claim has no fresh verification",
                  "delivery claim names no recipient")
-# Decision 0b11c89b (2026-09-24, Joe): "Jev is not advisory only. It's in our
-# hard rules or it is supposed to be." A fourth reason class, independent of
-# the claim-set layers above — it fires whenever THIS turn's build advisory
-# required a facet and the turn shows neither a Jev call nor a named refusal,
-# regardless of whether a completion claim was made at all.
-JEV_REQUIRED_REASON = "jev required actions missing"
 JEV_REQUIREMENT_REASON = "jev requirement judged unmet"
 
 CARR_MCP_PREFIXES = ("mcp__carr__", "mcp__carr_records__", "mcp__carr-continuity__")
@@ -1390,148 +1355,6 @@ def evaluate(recs, ledger=None):
     return True, "terminal completion claim has no fresh verification"
 
 
-def jev_audit(row):
-    if row.get("session") == "selftest":
-        return
-    try:
-        os.makedirs(os.path.dirname(JEV_LOG), exist_ok=True)
-        with open(JEV_LOG, "a") as fh:
-            fh.write(json.dumps(row) + "\n")
-    except Exception:
-        pass
-
-
-# F4: the Worker read's whole budget. This Stop hook has 15s for everything
-# it does; the read gets 6s of it, and a read that runs out falls through to
-# the unreachable-server verdict (every facet unverified, said loudly).
-SERVER_READ_BUDGET_SECONDS = 6.0
-
-
-def jev_required_actions_check(session, recs, anchor_text=None):
-    """decision 0b11c89b's Stop-side half. Returns (block, reason, identity)
-    with `block` False whenever there is nothing to enforce (no advisory this
-    turn, an unavailable advisory, or a readable advisory with no required
-    actions) or when this exact turn's finding has already been latched.
-
-    SERVER-VERIFIED (2026-09-24). Credit and the required facets come from the
-    Worker's own receipt rows (lib/jev_server_receipts.py), never from a file
-    the gated model can write; the turn boundary, the prompt advisory copy and
-    the refusal text come only from records on the transcript's uuid chain,
-    anchored on the Stop payload's last_assistant_message. An unreachable
-    server credits nothing and says so in the reopen.
-    """
-    # The Jev turn is the LIBRARY's turn (a human prompt plus every folded
-    # notification, Stop feedback and cross-session message), not this hook's
-    # own human_turns() window — that one restarts at a task notification,
-    # which would drop a JEV-REFUSED line written before it (round 3).
-    view = chain_view(recs, anchor_text=anchor_text)
-    trusted = view["recs"]
-    window = current_turn_slice(trusted)
-    full_window = full_turn_slice(recs, trusted)
-    texts = [text(rec, {"assistant"}) for rec in window]
-    written_paths = sorted({p for rec in full_window for p in file_paths(*tool(rec))})
-    boundary_ts = turn_boundary_timestamp(trusted)
-    # Every real Claude transcript carries uuids, so a real session always
-    # reads the server. A uuid-less transcript with no advisory at all (a
-    # hand-built fixture in another gate's selftest) has nothing to verify and
-    # never reaches the network.
-    # F6: read by session (the payload's id, and the environment's if it
-    # differs) from this turn's own start, not the newest N rows.
-    server = (fetch_receipts_for(session_ids_for(session), server_read_since(trusted),
-                                 budget_seconds=SERVER_READ_BUDGET_SECONDS)
-              if view["chain"] or turn_required_facets(trusted)[0] is not None else None)
-    result = evaluate_required_actions(trusted, texts, JEV_CALLS_LOG, session, written_paths,
-                                       server=server, full_turn_recs=full_window)
-    # FORGERY DETECTION. Records that look like a prompt, an advisory or a
-    # refusal but sit off the uuid chain were ignored above; record them.
-    if boundary_ts is not None:
-        stamp = boundary_ts.strftime("%Y-%m-%dT%H:%M:%SZ")
-        orphans = [o for o in view["orphans"] if (o.get("timestamp") or "") >= stamp]
-    else:
-        orphans = list(view["orphans"])
-    if orphans:
-        jev_audit({"ts": now(), "session": session, "event": "jev_transcript_offchain_record",
-                   "turn_key": result.get("turn_key"), "anchor": view["anchor"],
-                   "records": orphans[:10]})
-    server_block = result.get("server") or {}
-    if server_block.get("unverified_local_receipts"):
-        jev_audit({"ts": now(), "session": session, "event": "jev_local_receipt_unverified",
-                   "turn_key": result.get("turn_key"),
-                   "receipts": server_block["unverified_local_receipts"][:10]})
-    if server_block.get("unmatched_advisories"):
-        jev_audit({"ts": now(), "session": session, "event": "jev_server_advisory_unmatched",
-                   "turn_key": result.get("turn_key"),
-                   "advisories": server_block["unmatched_advisories"][:10]})
-    # ask() is the only legitimate writer of out/jev-calls.jsonl and never
-    # names it in a tool command, so any tool call in this turn that does is
-    # recorded as a detection event beside the verdict, with the command. The
-    # file no longer credits anything, but the attempt is still worth a record.
-    mentions = jev_calls_log_mentions(full_window)
-    if mentions:
-        jev_audit({"ts": now(), "session": session, "event": "jev_calls_log_named",
-                   "turn_key": result.get("turn_key"),
-                   "write_like": any(m["write_like"] for m in mentions),
-                   "mentions": mentions[:10]})
-    unexplained = unexplained_receipts(recs, result.get("credited_receipts") or [])
-    if unexplained and server_block.get("status") != "ok":
-        jev_audit({"ts": now(), "session": session, "event": "jev_receipt_unexplained",
-                   "turn_key": result.get("turn_key"), "receipts": unexplained[:10]})
-    jev_audit({"ts": now(), "session": session, "chain": view["chain"],
-               "anchor": view["anchor"], **result})
-    if result["status"] != "required" or not result["missing"]:
-        return False, "", None
-    # LATCHED PER TURN, NOT PER SESSION: the identity includes this turn's own
-    # build-advisory receipt id (or prompt hash), which is unique per turn, so
-    # the SAME missing-facet set recurring in a LATER turn still reopens.
-    # stop_latch's own identity/latch machinery is reused unchanged — only the
-    # token set fed into it is turn-scoped now.
-    identity = claim_identity(
-        "completion-evidence-gate", JEV_REQUIRED_REASON,
-        [result.get("turn_key") or session, *result["missing"]])
-    if latched(session, identity):
-        return False, "", None
-    missing = ", ".join(result["missing"])
-    reason = (f"this turn's Jev build advisory required {missing}, and the turn shows "
-              "neither a server-recorded Jev call (ops/typesafe_client.py, which goes "
-              "through the Worker's ask-jev verb) nor a named refusal "
-              f"(\"JEV-REFUSED: <facet> <reason>\") for it")
-    if server_block.get("status") and server_block["status"] != "ok":
-        reason += (f". SERVER RECEIPT LOG UNREACHABLE ({server_block.get('reason')}): no Jev "
-                   "call this turn can be verified, so none is credited. This is the gate "
-                   "failing closed on purpose. A named refusal whose reason is not an outage "
-                   "still clears a facet; either way this reopen is latched for the turn and "
-                   "will not repeat")
-    elif server_block.get("unverified_local_receipts"):
-        reason += (". A local receipt claims a call for this turn but the server has no row "
-                   "for it (a call that fell back to the vendor directly, or a forged row); "
-                   "it is not credited")
-    if server_block.get("advisory_basis") == "transcript_unverified":
-        reason += (". The required facets come from the transcript's advisory copy because "
-                   "the server holds no build_advisory row for this turn")
-    contradicted = result.get("contradicted_refusals") or []
-    if contradicted:
-        answered = result.get("jev_answered") or {}
-        evidence = "this turn's own build advisory came back from Jev"
-        if answered.get("receipts_ok"):
-            evidence += f", and {answered['receipts_ok']} Jev call(s) this turn succeeded"
-        reason += (f". CONTRADICTION: the refusal for {', '.join(contradicted)} says Jev was "
-                   f"unreachable or unavailable, but {evidence}, so it does not count. Call "
-                   "Jev for it now; if that call really fails too, this reopen is latched "
-                   "for the turn and will not repeat")
-    return True, reason, identity
-
-
-def jev_required_actions_message(req_reason):
-    """The required-facets reopen text: on its own, or appended to another
-    reopen's message so one reopen carries both reasons."""
-    return ("JEV REQUIRED ACTIONS GATE — " + req_reason + ".\n"
-            "Decision 0b11c89b (2026-09-24, Joe): Jev is required, not advisory, for "
-            "the facets this turn's build advisory names. Either call Jev through "
-            "ops/typesafe_client.py (noul/choice/ask) for the missing facet(s) before "
-            "closing, or say so explicitly with a line reading "
-            "\"JEV-REFUSED: <facet> <reason>\" (for example, Jev unreachable).")
-
-
 def jev_requirements_advisory(payload, recs):
     """ops/jev_requirements.py asks Jev whether each requirement of the last
     human request is met by this turn's diff, records the answer in
@@ -1622,27 +1445,7 @@ def main():
             record_satisfied(session, claim_identity(
                 "completion-evidence-gate", reason_class, tokens))
 
-        # DECISION 0b11c89b'S STOP-SIDE HALF runs on EVERY Stop, whatever
-        # else decides to reopen. It used to run only when nothing else had:
-        # an unverified "done" claim (or #1228's unmet-requirement reopen)
-        # took the one reopen, the continuation Stop returned early on
-        # stop_hook_active, and the missing facets were never raised — a
-        # model could skip Jev by claiming done (fresh review of fdc927fd).
-        # Now one reopen carries both reasons, and both identities are fired
-        # so neither repeats. Named req_* so it cannot be confused with
-        # #1228's jev_identity (the requirement-checklist reopen).
-        req_blocked, req_reason, req_identity = jev_required_actions_check(
-            session, recs, anchor_text=payload.get("last_assistant_message"))
-
         if not blocked:
-            if req_blocked:
-                record_fire(session, req_identity)
-                audit({"ts": now(), "hook": "completion-evidence-gate",
-                       "session": session, "reason": req_reason,
-                       "claim_identity": req_identity})
-                print(json.dumps({"decision": "block",
-                                  "reason": jev_required_actions_message(req_reason)}))
-                return 0
             if isinstance(jev, dict) and jev.get("advisory"):
                 print(json.dumps({"systemMessage": jev["advisory"]}))
             return 0
@@ -1659,27 +1462,12 @@ def main():
             reason_class, tokens = ledger["identity"]
             identity = claim_identity("completion-evidence-gate", reason_class, tokens)
             if latched(session, identity):
-                # The claim was already reopened once; a latched claim must
-                # not take the required-facets check down with it.
-                if req_blocked:
-                    record_fire(session, req_identity)
-                    audit({"ts": now(), "hook": "completion-evidence-gate",
-                           "session": session, "reason": req_reason,
-                           "claim_identity": req_identity})
-                    print(json.dumps({"decision": "block",
-                                      "reason": jev_required_actions_message(req_reason)}))
                 return 0
             record_fire(session, identity)
 
-        also = ""
-        if req_blocked:
-            record_fire(session, req_identity)
-            also = "\n\nALSO — " + jev_required_actions_message(req_reason)
         audit({"ts": now(), "hook": "completion-evidence-gate",
                "session": session, "reason": reason,
-               "claim_identity": identity,
-               **({"jev_required_reason": req_reason,
-                   "jev_required_identity": req_identity} if req_blocked else {})})
+               "claim_identity": identity})
         print(json.dumps({"decision": "block", "reason": (
             "COMPLETION EVIDENCE GATE — " + reason + ".\n"
             "A close binds to the ORDER, not to the slice you finished. Every ordered "
@@ -1688,7 +1476,7 @@ def main():
             "that invokes it, the loaded scheduler, a named recipient, real first use), "
             "or a sentence naming that clause as not done. Rewording the close does not "
             "help — silence blocks the same as \"done\". If your own record already shows "
-            "the work landed, do not close by calling it unbuilt.") + also}))
+            "the work landed, do not close by calling it unbuilt.")}))
         return 0
     except Exception:
         return 0

@@ -41,7 +41,6 @@ class FakeClient:
                 "criteria": {"true": true, "false": false}}
 
     def ask(self, state, questions, timeout, **kwargs):
-        self.purpose = kwargs.get("purpose", "call")
         self.state = state
         self.questions = questions
         self.timeout = timeout
@@ -60,25 +59,27 @@ class AdvisoryTests(unittest.TestCase):
     def test_one_batched_request_returns_every_typed_facet(self):
         client = FakeClient()
         result = advisory.advise("Design and verify the change", client=client)
-        self.assertEqual(result["schema"], "jev-build-advisory/v1")
+        self.assertEqual(result["schema"], "jev-build-advisory/v2")
         self.assertEqual(result["model"], "jev-test")
         self.assertEqual(set(result["facets"]), set(advisory.FACETS))
         self.assertEqual(set(client.questions),
-                         set(advisory.FACETS) | set(advisory.GUIDANCE_TEXT))
-        self.assertEqual(set(result["guidance"]), set(advisory.GUIDANCE_TEXT))
+                         set(advisory.FACETS))
         self.assertEqual(client.state, {"partner_request": "Design and verify the change"})
-        self.assertEqual(result["authority"], "required")
-        self.assertIn("permissions_and_authority", result["deterministic_exclusions"])
-        self.assertEqual(
-            [row["facet"] for row in result["required_actions"]],
-            [facet for i, facet in enumerate(advisory.FACETS) if i % 2 == 0])
-        self.assertTrue(all("Jev" in row["instruction"]
-                            for row in result["required_actions"]))
+        self.assertNotIn("required_actions", result)
+        self.assertNotIn("authority", result)
+        self.assertNotIn("guidance", result)
+
+    def test_human_intent_defers_judgment_without_prompt_obligation(self):
+        from lib.rule_delivery_preuse import validate_build_advisory
+        receipt = advisory.deferred()
+        self.assertEqual(receipt["effect"], "no_prompt_obligation")
+        self.assertTrue(validate_build_advisory(receipt, prompt_sha256="x"))
+        self.assertNotIn("required_actions", receipt)
 
     def test_missing_or_invalid_answers_are_unavailable(self):
         class Broken(FakeClient):
             def ask(self, state, questions, timeout, **kwargs):
-                row = super().ask(state, questions, timeout, **kwargs)
+                row = super().ask(state, questions, timeout)
                 row["answers"][advisory.FACETS[0]]["noul"] = 1.2
                 return row
         with self.assertRaises(advisory.AdvisoryUnavailable):
@@ -237,7 +238,7 @@ class MachineEnvelopeTests(unittest.TestCase):
     def test_a_partner_request_is_still_advised(self):
         client = FakeClient()
         result = advisory.advise("Please redesign the rule compiler.", client=client)
-        self.assertEqual(result["schema"], "jev-build-advisory/v1")
+        self.assertEqual(result["schema"], "jev-build-advisory/v2")
         mixed = "<system-reminder>context</system-reminder>\nPlease fix the gate."
         self.assertFalse(advisory.is_machine_envelope(mixed))
 
@@ -272,31 +273,13 @@ class MachineEnvelopeTests(unittest.TestCase):
                             now=1000.0 + 31 * 60)
             self.assertEqual(len(calls), 3)
 
-    def test_production_advisory_always_reaches_receipt_writer(self):
-        calls = []
-
-        class Counting(FakeClient):
-            def ask(self, state, questions, timeout, **kwargs):
-                calls.append(kwargs)
-                return super().ask(state, questions, timeout, **kwargs)
-
-        with tempfile.TemporaryDirectory() as tmp:
-            cache = os.path.join(tmp, "c.json")
-            with patch.object(advisory, "_client", return_value=Counting()), \
-                    patch.object(advisory, "CACHE_PATH", cache):
-                for _ in range(2):
-                    advisory.advise("Same synthetic request", session_id="synthetic-session")
-            self.assertEqual(len(calls), 2)
-            self.assertTrue(all(c["purpose"] == "build_advisory" for c in calls))
-            self.assertTrue(all(c["session_id"] == "synthetic-session" for c in calls))
-
     def test_an_unwritable_cache_still_advises(self):
         with tempfile.TemporaryDirectory() as tmp:
             blocker = os.path.join(tmp, "file")
             Path(blocker).write_text("x", encoding="utf-8")
             result = advisory.advise("Request", client=FakeClient(),
                                      cache_path=os.path.join(blocker, "c.json"))
-            self.assertEqual(result["schema"], "jev-build-advisory/v1")
+            self.assertEqual(result["schema"], "jev-build-advisory/v2")
 
 
 class EditCoverageTests(unittest.TestCase):

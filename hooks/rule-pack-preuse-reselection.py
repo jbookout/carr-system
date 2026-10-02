@@ -135,11 +135,9 @@ SEMANTIC_FAILURE_CONTEXT = (
 MESSAGE_LIMIT_CHARS = 90_000
 
 # ONE CLOCK FOR THE WHOLE PROMPT HOOK. ops/config/hooks.json kills this hook at
-# 20 s, and a killed hook delivers nothing. The three slow steps run in order
-# — the build advisory (ops/jev_build_advisory.py: one attempt, at most 6 s,
-# no rate-limit retries), the rule judgment (ops/rule_trigger_delivery.py:
-# its own 12 s clock, cut short here so SELECTOR_RESERVE_SECONDS stay for the
-# last step), and the standing-context door — and all of them end by
+# 20 s, and a killed hook delivers nothing. The two slow steps run in order:
+# rule judgment (ops/rule_trigger_delivery.py, with its own 12 s clock) and
+# the standing-context door. Both end by
 # HOOK_BUDGET_SECONDS after the process started, leaving ~2 s for the
 # interpreter and the receipt.
 HOOK_BUDGET_SECONDS = 18.0
@@ -470,17 +468,14 @@ def _semantic_adviser(situation: str, session_id: str | None = None) -> list[dic
     return module.advise(situation, session_id=session_id, deadline=deadline)
 
 
-def _build_adviser(situation: str, session_id: str | None = None) -> dict:
+def _build_adviser(situation: str) -> dict:
     path = REPO / "ops/jev_build_advisory.py"
     spec = importlib.util.spec_from_file_location("jev_build_advisory_live", path)
     if spec is None or spec.loader is None:
         raise RuntimeError("build advisory unavailable")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    # The session id is passed explicitly: the Worker keys its build_advisory
-    # receipt row to it (ops/typesafe_client.py SERVER_VERB), and a hook's
-    # environment need not carry the session variables a Bash tool call does.
-    return module.advise(situation, session_id=session_id)
+    return module.deferred()
 
 
 def _build_unavailable(error: Exception | None = None) -> dict:
@@ -585,8 +580,7 @@ def _process_prompt(payload: dict, runner: Callable,
                                  "not_attempted_oversize")
         return _context(canonical(receipt).decode("utf-8"), "UserPromptSubmit")
     try:
-        build = (build_adviser(prompt) if build_adviser is not None
-                 else _build_adviser(prompt, payload.get("session_id")))
+        build = (build_adviser or _build_adviser)(prompt)
         if not isinstance(build, dict):
             raise RuntimeError("build adviser returned malformed advice")
     except Exception as exc:

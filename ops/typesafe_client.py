@@ -73,6 +73,7 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from functools import partial
 
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 KEY_PATH = os.path.expanduser("~/.config/carr/typesafe.env")
@@ -354,51 +355,17 @@ def _session_id():
     return None
 
 
-# THE SERVER-SIDE CALL LOG (2026-09-24, after a reviewer bypassed every Jev gate
-# by appending ONE forged record to a file the gated model can write). The
-# session transcript and out/jev-calls.jsonl are both writable by the model,
-# because the model's shell runs as the same OS user as the hooks and as this
-# client: any local file, local key, or local daemon a hook can use, the model
-# can use too. So the production path no longer calls the vendor from here. It
-# asks the deployed Worker's `ask-jev` verb, which makes the TypeSafe call with
-# the Worker's own secret and appends a server-timestamped receipt to an
-# append-only table (migration 0587) in a short transaction after the vendor
-# answered, through the same write envelope that records a tool_call row for
-# the same idempotency key. lib/jev_required_actions.py credits a required facet
-# only from rows the Worker's read door returns, and that door returns only
-# receipts matched by their ask-jev tool_call row.
-#
-# DETECTABLE, NOT PREVENTED. The model's OS user can read the database owner
-# credential (tools/db-tap.py), so it can insert, backdate or delete receipt
-# rows, or disable the append-only trigger, directly in the database. None of
-# that is prevented. A receipt inserted alone has no ask-jev tool_call row, so
-# the read door never returns it and the integrity audit in `./run.sh health`
-# (read-jev-call-receipt-integrity) flags it, and a disabled trigger. Not
-# caught: a hand-inserted tool_call twin, a genuine receipt edited, backdated
-# or deleted in place, or a trigger disabled and re-enabled between audits.
-# Moving that credential out of the model's reach is Joe's separate, parked
-# decision.
-#
-# The verb is reached the way every local caller reaches the Worker:
-# mcp-server/local-verb.mjs's zero-install HTTPS path with the LOCAL_TOKENS
-# bearer. This module never reads, sees, or forwards that bearer; local-verb.mjs
-# does, from its own 600-mode file.
-#
-# FALLBACK, AND WHY IT IS NOT A BYPASS. If the verb cannot be used (not yet
-# deployed, Worker unreachable, no node, the Worker holds no vendor key), ask()
-# still calls the vendor directly as it always did, so a working Jev is never
-# turned off by a Worker outage. That call has NO server receipt, so the gates
-# treat any facet it was meant to satisfy as UNVERIFIED and say so loudly. The
-# local out/jev-calls.jsonl row records `server_receipt_id: null` and the
-# category of the server failure, never its text.
+# System-work calls use the Worker's append-only call log. The authenticated
+# local-verb transport holds the MCP bearer; this client never reads it.
+# Receipts are diagnostic evidence, not per-turn obligations: PR 1407 retired
+# prompt-facet enforcement in favor of judgment-boundary checks.
+# Runtime consumers keep their pinned direct Jev route. The external Worker
+# ingress derives system_work, so it cannot reinterpret a runtime request.
+# On Worker failure the direct fallback uses the remaining caller budget and
+# records a fixed error category with no server receipt or raw error text.
 SERVER_VERB = "ask-jev"
-PURPOSES = ("call", "build_advisory")
-# Jev calls a HOOK makes for its own purposes (rule selection, supervisors,
-# code review) are not a session's Jev use and must not cost a hook its time
-# budget, so hooks/hook-meter-run.py marks the process and those calls go to
-# the vendor directly. The UserPromptSubmit build advisory is the exception:
-# it always tries the server, because the gates bind to the server's copy.
-# Setting the marker from a shell only makes that shell's calls uncredited.
+# Hooks retain the direct route to stay within their timeout. An explicitly
+# requested build advisory can still use the server log; prompt intake defers it.
 IN_HOOK_ENV = "CARR_JEV_IN_HOOK"
 # The Worker caps its own vendor call at 10s; node's start and the round trip
 # get the rest. The whole server attempt never takes more than this share of
@@ -706,7 +673,7 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
     Runtime consumers explicitly pass app_runtime, which cannot use Decisions.
     """
     try:
-        return JUDGE.ask(state, questions, jev=_ask_jev, work_class=work_class,
+        return JUDGE.ask(state, questions, jev=partial(_ask_jev, work_class=work_class), work_class=work_class,
                          model=model, timeout=timeout, api_key=api_key, retries=retries,
                          endpoint=endpoint, opener=opener, facets=facets, calls_log=calls_log,
                          deadline=deadline, caller=caller or _caller_name(),
@@ -720,7 +687,7 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
              api_key=None, retries=RATE_LIMIT_RETRIES, endpoint=ENDPOINT, opener=None,
              facets=None, calls_log=JEV_CALLS_LOG, deadline=None, caller=None,
              cache_ttl_seconds=JUDGE_CACHE_TTL_SECONDS, cache_path=JUDGE_CACHE_PATH, account=None,
-             purpose="call", server_runner=None, session_id=None):
+             purpose="call", server_runner=None, session_id=None, work_class="system_work"):
     """Evaluate `state` against a map of questions in ONE request.
 
     `state` is a string, or a mapping when the context has several parts —
@@ -742,8 +709,10 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
     receipt row to `calls_log` (default out/jev-calls.jsonl) — see
     JEV_CALLS_LOG's module-level note for what it carries and why.
 
-    Production calls try the Worker's receipt-recording verb before the direct
-    transport. Hook-internal calls remain direct and uncredited. `purpose`
+    System-work calls try the Worker's receipt-recording verb before the direct
+    transport. Runtime calls keep the pinned vendor route: the external Worker
+    ingress derives system_work and cannot carry a caller-selected runtime class.
+    Hook-internal calls remain direct. `purpose`
     distinguishes a normal call from the build advisory; `session_id` binds a
     hook's payload identity, and `server_runner` is an offline test seam.
     The Worker owns caching on that path; direct calls retain the local cache.
@@ -784,7 +753,7 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
     server_error = None
     started = time.monotonic()
     in_hook = os.environ.get(IN_HOOK_ENV) == "1" and purpose != "build_advisory"
-    if opener is None and api_key is None and not in_hook:
+    if opener is None and api_key is None and not in_hook and work_class != "app_runtime":
         server_timeout = float(timeout)
         if deadline is not None:
             server_timeout = min(server_timeout, deadline - started)
