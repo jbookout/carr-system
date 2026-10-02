@@ -1309,8 +1309,7 @@ def test_hosted_ci_runs_classes_in_parallel_behind_one_required_context():
     ran = []
     for n in needs:
         job = jobs.get(n) or {}
-        matrix = (job.get("strategy") or {}).get("matrix") or {}
-        groups = [row["classes"] for row in matrix.get("include", [])]
+        groups = ((job.get("strategy") or {}).get("matrix") or {}).get("classes") or []
         for g in groups:
             ran.extend(str(g).replace(",", " ").split())
         run_lines = " ".join(str(st.get("run", "")) for st in job.get("steps", []))
@@ -1329,19 +1328,18 @@ def test_hosted_migration_budget_covers_observed_acceptance_runtime():
     Read the actual job/matrix wiring, so an unused budget cannot pass.
     """
     job = _hosted_workflow()["jobs"]["classes"]
-    matrix = job["strategy"]["matrix"]
-    wired = job["timeout-minutes"] == "${{ matrix.timeout_minutes }}"
-    check("class jobs use their declared matrix budgets", wired)
-    if not wired:
+    groups = job["strategy"]["matrix"]["classes"]
+    budgets = re.fullmatch(
+        r"\$\{\{ matrix\.classes == 'migration' && (\d+) \|\| (\d+) \}\}",
+        str(job["timeout-minutes"]))
+    check("class jobs select a bounded migration-specific budget", budgets is not None)
+    if budgets is None:
         return
-    groups = [(row["classes"], row["timeout_minutes"])
-              for row in matrix["include"]]
-    migration = [budget for classes, budget in groups
-                 if "migration" in classes.split()]
+    migration_budget, other_budget = map(int, budgets.groups())
+    migration = [migration_budget for group in groups if group == "migration"]
     check("migration job has bounded headroom over the observed 24-minute run",
           len(migration) == 1 and 30 <= migration[0] <= 35, migration)
-    other = [budget for classes, budget in groups
-             if "migration" not in classes.split()]
+    other = [other_budget for group in groups if group != "migration"]
     check("other class groups retain their 20-minute budgets",
           len(other) == 2 and all(budget == 20 for budget in other), other)
 
