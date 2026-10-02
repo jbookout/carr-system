@@ -785,6 +785,30 @@ class TranscriptHelperTests(unittest.TestCase):
 
 
 class BoundaryBatchTests(unittest.TestCase):
+    def test_main_desk_test_introduces_a_visible_boundary_in_real_replay(self):
+        repo = OPS.parent
+        case = next(json.loads(line) for line in
+                    (repo / "ops/fixtures/real-replay/file-edits.jsonl").read_text().splitlines()
+                    if json.loads(line)["id"] == "f47899fdbe4b")
+        tool_input = {key: value.replace("{{REPO}}", str(repo)) if isinstance(value, str)
+                      else value for key, value in case["tool_input"].items()}
+        # Main added a real desk-permissions test after the original snapshot.
+        candidates = watch._shortlist_tests([tool_input["file_path"]], str(repo))
+        self.assertIn("tools/room-bridge/test_desk_permissions_unit.py", candidates)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+                watch, "_shortlist_tests", return_value=candidates):
+            out = watch.inspect_tool_event(case["tool_name"], tool_input, "updated", None,
+                                          "edit the desk", str(repo),
+                                          client=FakeClient(error=RuntimeError("offline replay")),
+                                          judge_module=FakeJudge(),
+                                          receipt_path=os.path.join(tmp, "receipt.jsonl"))
+        self.assertTrue(any(row["verdict"] == "unavailable" and row["escalate"] for row in out))
+        snapshot = (repo / "ops/fixtures/real-replay/verdict-snapshot.tsv").read_text()
+        expected = [line.split("\t") for line in snapshot.splitlines()
+                    if line.startswith("jev-supervisor.py\tPostToolUse")
+                    and "\tedits:f47899fdbe4b\t" in line]
+        self.assertEqual([row[3] for row in expected], ["announce"])
+
     def test_replacing_existing_function_is_not_duplicate_creation(self):
         with tempfile.TemporaryDirectory() as tmp:
             client = FakeClient({})
