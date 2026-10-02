@@ -21,18 +21,18 @@ from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connec
 
 REPO = Path(__file__).resolve().parents[1]
 
-# 0768 installs human-only merges v103 and seals catch-up v102 as history.
+# 0775 installs workflow census v104 and seals rule lookup v103 as history.
 # Both are pinned: an unreviewed frontier or a rewritten predecessor must fail closed.
-LIVE_REGISTRY_VERSION = "scac-mutation-registry.v103"
-LIVE_REGISTRY_ORDINAL = 103
-SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v102"
+LIVE_REGISTRY_VERSION = "scac-mutation-registry.v104"
+LIVE_REGISTRY_ORDINAL = 104
+SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v103"
 SEALED_PREDECESSOR_ORDINAL = LIVE_REGISTRY_ORDINAL - 1
 SEALED_PREDECESSOR_DIGEST = (
-    "sha256:e4d54f752db9af067b65e84eb45f4297acad7100b54553f763bd981609830dc9"
+    "sha256:6560a285ebd4a71d9ed3b63b644f13e06d0f1ccbddadf174d990f4f2453434b7"
 )
-SEALED_PREDECESSOR_ENTRY_COUNTS = (2602, 1084)
+SEALED_PREDECESSOR_ENTRY_COUNTS = (2615, 1085)
 SEALED_PREDECESSOR_MIGRATION = (
-    "migrations/0768_confirm_merge_human_only_scac_successor.sql"
+    "migrations/0770_find_rule_scac_successor.sql"
 )
 LIVE_REGISTRY_MIGRATION = (
     "migrations/0775_workflow_census_store_scac_successor.sql"
@@ -1050,11 +1050,11 @@ def main() -> int:
                 raise RuntimeError(
                     f"{LIVE_REGISTRY_VERSION} grant projection is not exact: {registry[3]!r}"
                 )
-            # The successor is registry-only, so it must ADD the v21 seal and leave
-            # v20 exactly as 0494 sealed it. Pin the historical row by digest and
+            # The successor must add its seal and leave the pinned predecessor
+            # exactly as its migration sealed it. Pin the historical row by digest and
             # counts, require the database to revalidate that seal's entry set, and
             # require the two digests to actually differ -- a successor that merely
-            # relabelled v20 would satisfy none of these.
+            # relabelled the predecessor would satisfy none of these.
             predecessor = cur.execute(
                 """select registry_digest,entry_count,source_entry_count
                      from ops.scac_mutation_registry_version where registry_version=%s""",
@@ -1062,7 +1062,7 @@ def main() -> int:
             ).fetchone()
             if predecessor != (SEALED_PREDECESSOR_DIGEST, *SEALED_PREDECESSOR_ENTRY_COUNTS):
                 raise RuntimeError(
-                    f"sealed {SEALED_PREDECESSOR_VERSION} row drifted under the v21 "
+                    f"sealed {SEALED_PREDECESSOR_VERSION} row drifted under {LIVE_REGISTRY_VERSION} "
                     f"successor: {predecessor!r}"
                 )
             if registry[0] == SEALED_PREDECESSOR_DIGEST:
