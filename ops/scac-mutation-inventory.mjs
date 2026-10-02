@@ -1979,6 +1979,8 @@ export const FIND_RULE_V102_DB_CATALOG_BASELINE = Object.freeze({
   ...WHATS_NEW_V101_DB_CATALOG_BASELINE,
   projection_version: "scac-db-catalog-projection.v102",
   secdef_execute: { count: 1202, digest: "sha256:6cafde917cb382bde5d5783d969931b095c03113156f6e9cfb54b2f7021361cc" },
+  relation_dml: { count: 312, digest: "sha256:66a684dc279406159259a471f10616d3e90a25784a128e5ffd65435630d8ff48" },
+  runtime_dml_grants: { count: 324, digest: "sha256:737d33c39a84282e88d37cf317b829ccf9c696046fdb8486fcea9d3ad4c019cb" },
 });
 
 export const JOB_DEFINITION_BASELINE = Object.freeze({

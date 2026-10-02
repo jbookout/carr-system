@@ -61,6 +61,89 @@ test('ordinary teach keeps its writer route; human supersession uses retirement 
 });
 
 const dsn=process.env.CARR_RULE_TEST_DATABASE_URL;
+test('real PostgreSQL: a proposed replacement cannot supersede itself',
+  {skip:!dsn}, async () => {
+  const {Client}=(await import('pg')).default;
+  const c=new Client({connectionString:dsn}); await c.connect();
+  const actorId=randomUUID(), replacement=randomUUID(), slug=`fixture-${actorId}`;
+  try {
+    await c.query('begin');
+    await c.query("insert into actor(id,slug,kind,display_name) values($1,$2,'automation','Synthetic self-supersession actor')",
+      [actorId,slug]);
+    await c.query("select set_config('carr.acting_actor_slug',$1,true)",[slug]);
+    await c.query('set local role carr_writer');
+    await c.query('insert into rule(id,statement,taught_by,supersedes) values($1,$2,$3,$1)',
+      [replacement,'Synthetic self-supersession',actorId]);
+    await c.query('savepoint refusal');
+    await assert.rejects(()=>c.query('select ops.retire_superseded_rule($1,$2)',[replacement,randomUUID()]),
+      /cannot supersede itself/);
+    await c.query('rollback to savepoint refusal');
+    await c.query('reset role');
+    assert.equal((await c.query('select status from rule where id=$1',[replacement])).rows[0].status,'proposed');
+    assert.equal((await c.query('select count(*)::int as n from ops.rule_retirement_receipt where rule_id=$1',
+      [replacement])).rows[0].n,0);
+  } finally { await c.query('rollback'); await c.end(); }
+});
+test('real PostgreSQL: updating a committed replacement cannot withdraw its predecessor',
+  {skip:!dsn}, async () => {
+  const {Client}=(await import('pg')).default;
+  const c=new Client({connectionString:dsn}); await c.connect();
+  const actorId=randomUUID(), old=randomUUID(), replacement=randomUUID();
+  const slug=`fixture-${actorId}`;
+  try {
+    await c.query('begin');
+    await c.query("insert into actor(id,slug,kind,display_name) values($1,$2,'automation','Synthetic provenance actor')",
+      [actorId,slug]);
+    await c.query('insert into rule(id,statement,taught_by) values($1,$2,$3)',
+      [old,'Synthetic committed predecessor',actorId]);
+    await c.query('insert into rule(id,statement,taught_by,supersedes) values($1,$2,$3,$4)',
+      [replacement,'Synthetic committed replacement',actorId,old]);
+    await c.query('commit');
+    await c.query('begin');
+    await c.query("select set_config('carr.acting_actor_slug',$1,true)",[slug]);
+    await c.query('set local role carr_writer');
+    await c.query('update rule set statement=$1 where id=$2', ['Synthetic later update',replacement]);
+    await c.query('savepoint refusal');
+    await assert.rejects(()=>c.query('select ops.retire_superseded_rule($1,$2)',[replacement,randomUUID()]),
+      /newly taught proposed replacement/);
+    await c.query('rollback to savepoint refusal');
+    await c.query('reset role');
+    assert.equal((await c.query('select status from rule where id=$1',[old])).rows[0].status,'proposed');
+    assert.equal((await c.query('select count(*)::int as n from ops.rule_retirement_receipt where rule_id=$1',
+      [old])).rows[0].n,0);
+  } finally {
+    await c.query('rollback');
+    // Only these committed, disposable synthetic fixtures need cleanup.
+    await c.query('delete from rule where id=any($1::uuid[])',[[replacement,old]]);
+    await c.query('delete from actor where id=$1',[actorId]);
+    await c.end();
+  }
+});
+test('real PostgreSQL: human supersession executes the full teach envelope under authority',
+  {skip:!dsn}, async () => {
+  const {Client}=(await import('pg')).default;
+  const c=new Client({connectionString:dsn}); await c.connect();
+  try {
+    await c.query('begin');
+    const joe=(await c.query("select id from actor where slug='joe'")).rows[0];
+    const actor={id:joe.id,slug:'joe',human:true};
+    const old=randomUUID();
+    await c.query("select set_config('carr.acting_actor_slug','joe',true)");
+    await c.query("select set_config('carr.verified_human_actor_slug','joe',true)");
+    await c.query('insert into rule(id,statement,taught_by) values($1,$2,$3)',
+      [old,'Synthetic human predecessor',joe.id]);
+    assert.equal(requiresAuthorityConnection(TOOLS.teach,actor,teachArgs(old)),true);
+    await c.query('set local role carr_authority');
+    const args=teachArgs(old);
+    const result=await executeRegisteredTool(c,actor,'teach',args);
+    assert.equal(result.retirement.status,'retired');
+    assert.deepEqual(await executeRegisteredTool(c,actor,'teach',args),{replayed:true,...result});
+    await c.query('reset role');
+    assert.equal((await c.query('select status from rule where id=$1',[old])).rows[0].status,'retired');
+    assert.equal((await c.query('select state from ops.guidance_intake where source_ref=$1',
+      [`rule:${result.rule_id}`])).rows[0].state,'captured');
+  } finally { await c.query('rollback'); await c.end(); }
+});
 test('real PostgreSQL: proposed phrase lookup, literal wildcards, retirement, replay and rollback',
   {skip:!dsn},async () => {
   assert.match(dsn,/^postgres(?:ql)?:\/\/[^@/]*@(?:127\.0\.0\.1|localhost):/);

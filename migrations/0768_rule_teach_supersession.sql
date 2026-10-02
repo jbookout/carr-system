@@ -5,6 +5,33 @@ create view public.v_rule_lookup as
     from public.rule r left join public.actor a on a.id=r.personal_to;
 grant select on public.v_rule_lookup to carr_reader,carr_writer,carr_authority;
 
+-- Human replacement capture uses the existing authority credential. It needs
+-- the same capture inserts as writer; activation and retirement still use
+-- their separate definer doors and approval proofs.
+grant insert on public.rule,ops.guidance_intake to carr_authority;
+
+-- Tuple xmin changes on UPDATE. Keep INSERT provenance outside the mutable
+-- rule row, with no runtime DML or callable writer door to forge it. The
+-- top-level xid remains the same across teach's savepoint subtransactions.
+create table ops.rule_insert_provenance (
+  rule_id uuid primary key references public.rule(id) on delete cascade,
+  taught_by uuid not null references public.actor(id),
+  transaction_id xid8 not null
+);
+revoke all on ops.rule_insert_provenance from public,carr_reader,carr_writer,carr_authority,carr_jobs;
+create function ops.record_rule_insert_provenance()
+returns trigger language plpgsql security definer
+set search_path=pg_catalog,ops,public as $$
+begin
+  insert into ops.rule_insert_provenance(rule_id,taught_by,transaction_id)
+    values(new.id,new.taught_by,pg_current_xact_id());
+  return new;
+end $$;
+revoke all on function ops.record_rule_insert_provenance()
+  from public,carr_reader,carr_writer,carr_authority,carr_jobs;
+create trigger rule_insert_provenance after insert on public.rule
+  for each row execute function ops.record_rule_insert_provenance();
+
 -- A replacement captures new proposed guidance and retires its predecessor in
 -- one transaction. No rule is activated. Active retirement keeps the existing
 -- Joe authority connection, exact approval proof, and immutable receipts.
@@ -26,16 +53,15 @@ begin
   if not found or v_replacement.status<>'proposed'
      or v_replacement.taught_by is distinct from v_actor
      or v_replacement.supersedes is null
-     -- An MVCC-visible, uncommitted row belongs to this transaction, including
-     -- a savepoint subtransaction. Reconstruct xmin's epoch from the snapshot
-     -- so the test also works after 32-bit transaction IDs wrap.
      or not exists(
-       select 1 from public.rule,
-         (select pg_snapshot_xmax(pg_current_snapshot())::text::numeric as next_xid) epoch
-       where id=p_replacement and pg_xact_status(
-         (next_xid-mod(next_xid-xmin::text::numeric,4294967296))::text::xid8)='in progress')
+       select 1 from ops.rule_insert_provenance
+        where rule_id=p_replacement and taught_by=v_actor
+          and transaction_id=pg_current_xact_id())
      or btrim(coalesce(p_idempotency_key,''))='' then
     raise exception 'supersession requires this transaction''s newly taught proposed replacement';
+  end if;
+  if v_replacement.supersedes=p_replacement then
+    raise exception 'a rule cannot supersede itself';
   end if;
   select * into v_rule from public.rule where id=v_replacement.supersedes for update;
   if not found or v_rule.status not in ('proposed','active') then
