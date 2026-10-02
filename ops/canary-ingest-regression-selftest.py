@@ -228,7 +228,7 @@ class Regressions(unittest.TestCase):
         registry = self.directory / 'services.json'
         service = next(s for s in json.loads((REPO / 'ops/config/services.json').read_text())['services'] if s['key'] == 'canary-ingest-sink')
         registry.write_text(json.dumps({'services': [service]}))
-        with patch.object(scheduler, 'REPO_PLISTS', str(plist_dir)), patch.object(scheduler, 'INSTALLED', str(plist_dir)), patch.object(scheduler, 'SERVICES', str(registry)), patch.object(scheduler, 'loaded_labels', return_value={'com.carr.canary-ingest-sink'}), contextlib.redirect_stdout(io.StringIO()):
+        with patch.object(scheduler, 'REPO', str(self.directory)), patch.object(scheduler, 'REPO_PLISTS', str(plist_dir)), patch.object(scheduler, 'INSTALLED', str(plist_dir)), patch.object(scheduler, 'SERVICES', str(registry)), patch.object(scheduler, 'loaded_labels', return_value={'com.carr.canary-ingest-sink'}), contextlib.redirect_stdout(io.StringIO()):
             result = scheduler.main()
         self.assertFalse(scheduler.DRIFT, scheduler.DRIFT)
         self.assertEqual(result, 0)
