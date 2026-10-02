@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,7 +26,9 @@ if (root / "fail").exists():
 if (root / "malformed").exists():
     print("{bad synthetic-private-error")
     sys.exit(0)
-print(json.dumps({"ok": not (root / "wrong-ack").exists(), "flag_id": "00000000-0000-4000-8000-000000000001",
+if (root / "change-source").exists():
+    pathlib.Path(payload["source"]).write_text(payload["value"]["text"] + "changed after snapshot\\n")
+print(json.dumps({"ok": not (root / "wrong-ack").exists(), "flag_id": 123 if (root / "numeric-id").exists() else "00000000-0000-4000-8000-000000000001",
                   "subject_type": "repo", "kind": "research_report", "found": True}))
 '''
 
@@ -43,7 +46,7 @@ class FilerTests(unittest.TestCase):
         self.reports.mkdir(parents=True)
         self.ledger = self.reports.parent / "filed-reports.json"
 
-    def report(self, job="010-V-synthetic", text="# Synthetic topic\nSee https://example.org/source.\n"):
+    def report(self, job="010-V-synthetic", text="# Synthetic topic\nSee https://example.org/source.\nDOT-REPORT-END\n"):
         path = self.reports / (job + ".txt")
         path.write_bytes(text.encode("utf-8"))
         os.utime(path, (1767225600, 1767225600))  # fixture: 2026-01-01 UTC
@@ -68,6 +71,7 @@ class FilerTests(unittest.TestCase):
     def test_full_multi_page_report_and_metadata(self):
         text = "# Synthetic metro research\r\n" + "Unicode: café — λ\r\n" * 15000
         text += "[Source](https://example.org/a)\r\nhttps://example.org/a\r\nhttps://example.net/b.\r\n"
+        text += "DOT-REPORT-END\r\n"
         path = self.report("020-M-synthetic", text)
         self.run_filer()
         request, = self.requests()
@@ -114,6 +118,85 @@ class FilerTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, err)
         self.assertEqual(len(self.requests()), 1)
 
+    def test_concurrent_first_publication_waits_for_completion(self):
+        path = self.reports / "publishing.txt"
+        writer_source = '''import sys
+with open(sys.argv[1], "w") as report:
+    report.write("# Synthetic publishing\\nFirst half\\n")
+    report.flush()
+    print("ready", flush=True)
+    sys.stdin.readline()
+    report.write("Second half\\nDOT-REPORT-END publishing\\n")
+'''
+        with subprocess.Popen([sys.executable, "-c", writer_source, str(path)],
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True) as writer:
+            try:
+                self.assertEqual(writer.stdout.readline().strip(), "ready")
+                self.run_filer(ok=False)
+                self.assertEqual(self.requests(), [])
+                self.assertFalse(self.ledger.exists())
+            finally:
+                writer.communicate("finish\n", timeout=10)
+        self.assertEqual(writer.returncode, 0)
+        self.run_filer()
+        self.run_filer()
+        request, = self.requests()
+        self.assertEqual(request["value"]["text"],
+                         "# Synthetic publishing\nFirst half\nSecond half\nDOT-REPORT-END publishing\n")
+        self.assertEqual(self.entries()[path.stem]["status"], "filed")
+
+    def test_intermediate_part_marker_is_not_completion(self):
+        path = self.report(text="# Synthetic part 1 of 2\nFirst half\nDOT-REPORT-END\n")
+        self.run_filer(path, ok=False)
+        self.assertEqual(self.requests(), [])
+        path.write_text(path.read_text() + "\n# Synthetic part 2 of 2\nSecond half\nDOT-REPORT-END\n")
+        self.run_filer(path)
+        self.assertEqual(len(self.requests()), 1)
+
+    def test_marker_inside_unclosed_fence_is_not_completion(self):
+        for fence in ("```text", "~~~text"):
+            with self.subTest(fence=fence):
+                path = self.report(text=f"# Synthetic unfinished\n{fence}\nDOT-REPORT-END\n")
+                self.run_filer(path, ok=False)
+                self.assertEqual(self.requests(), [])
+        path.write_text(path.read_text() + "~~~\nFinal text\nDOT-REPORT-END\n")
+        self.run_filer(path)
+
+    def test_source_changed_before_acknowledgement_stays_pending(self):
+        path = self.report()
+        (self.root / "change-source").touch()
+        self.run_filer(ok=False)
+        self.assertEqual(self.entries()[path.stem]["status"], "pending")
+        self.run_filer(ok=False)
+        self.assertEqual(len(self.requests()), 1)
+
+    def test_timeout_cancels_wrapper_chain_and_retains_pending(self):
+        path = self.report()
+        filer = self.root / "bin/dot-file-reports"
+        source = filer.read_text()
+        self.assertEqual(source.count("timeout=60"), 1)
+        filer.write_text(source.replace("timeout=60", "timeout=0.2"))
+        # run.sh -> Python wrapper -> Node HTTP-client stand-in, all holding
+        # the inherited pipes. Cancellation must reach the delayed Node effect.
+        node = '''const fs = require('node:fs');
+fs.writeFileSync(process.argv[1] + '/started', String(process.pid));
+setTimeout(() => fs.writeFileSync(process.argv[1] + '/late-effect', 'orphan'), 700);
+'''
+        child = "import subprocess,sys; subprocess.run(['node', '-e', sys.argv[1], sys.argv[2]])"
+        wrapper = (
+            "#!/usr/bin/env python3\nimport json,pathlib,subprocess,sys\n"
+            "root = pathlib.Path(__file__).parent\n"
+            "payload = json.load(sys.stdin)\n"
+            "(root / 'requests.jsonl').write_text(json.dumps(payload) + '\\n')\n"
+            f"subprocess.run([sys.executable, '-c', {child!r}, {node!r}, str(root)])\n"
+        )
+        (self.root / "run.sh").write_text(wrapper)
+        self.run_filer(ok=False)
+        self.assertEqual(self.entries()[path.stem]["status"], "pending")
+        self.assertTrue((self.root / "started").exists(), "fixture must launch the Node descendant")
+        time.sleep(1)
+        self.assertFalse((self.root / "late-effect").exists(), "timed-out transport left a running descendant")
+
     def test_ambiguous_failure_reuses_exact_frozen_request(self):
         path = self.report()
         failure = self.root / "fail"
@@ -140,6 +223,32 @@ class FilerTests(unittest.TestCase):
         (self.root / "malformed").touch()
         self.run_filer(ok=False)
         self.assertEqual(self.entries()[path.stem]["status"], "pending")
+
+    def test_numeric_receipt_id_is_sanitized_and_stays_pending(self):
+        path = self.report()
+        (self.root / "numeric-id").touch()
+        proc = self.run_filer(ok=False)
+        self.assertNotIn("Traceback", proc.stderr)
+        self.assertIn("invalid filing receipt", proc.stderr)
+        self.assertEqual(self.entries()[path.stem]["status"], "pending")
+
+    def test_numeric_ledger_id_is_sanitized_without_send(self):
+        path = self.report()
+        self.run_filer()
+        ledger = json.loads(self.ledger.read_text())
+        ledger["jobs"][path.stem]["flag_id"] = 123
+        self.ledger.write_text(json.dumps(ledger))
+        proc = self.run_filer(ok=False)
+        self.assertNotIn("Traceback", proc.stderr)
+        self.assertIn("invalid ledger", proc.stderr)
+        self.assertEqual(len(self.requests()), 1)
+
+    def test_citations_preserve_balanced_parentheses(self):
+        self.report(text="# Sources\n[Page](https://example.org/Function_(math)).\n"
+                         "https://example.org/Function_(math)\nDOT-REPORT-END\n")
+        self.run_filer()
+        request, = self.requests()
+        self.assertEqual(request["value"]["citations"], ["https://example.org/Function_(math)"])
 
     def test_rejected_receipt_under_optimized_python_keeps_pending(self):
         path = self.report()
@@ -169,6 +278,13 @@ class FilerTests(unittest.TestCase):
 
 
 class StdinTransportTests(unittest.TestCase):
+    def test_required_source_frontier_remains_sealed(self):
+        proc = subprocess.run(
+            ["node", "ops/scac-mutation-inventory.mjs", "--check-source-inventory-frontier"],
+            cwd=ROOT, capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
     def test_sanctioned_wrapper_to_node_preserves_large_stdin_and_argv_baseline(self):
         # Synthetic Node preload observes the existing client at the fetch seam,
         # before auth, network or DB. No token fixture or secret value is required.
