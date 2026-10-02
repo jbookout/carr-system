@@ -3138,7 +3138,9 @@ export const TOOLS = {
     write: false,
     description: "Open pipeline grouped by phase. Never exposes Salesforce commission/close-date placeholders (they are placeholders, not data).",
     inputSchema: { type: "object", properties: {} },
-    handler: async (c) => ({ deals: (await c.query("select * from v_deal_board where outcome is null order by phase_sort, name")).rows }),
+    handler: async (c) => ({ deals: (await c.query(`select b.*, d.operating_state, d.parking_note, to_jsonb(d.invoiced_on)#>>'{}' as invoiced_on
+      from v_deal_board b join v_deal_room_board d on d.id=b.id
+      order by b.phase_sort, b.name /* dealboard:operating-state */`)).rows }),
   },
 
   "deal-room-board": {
@@ -3180,6 +3182,8 @@ export const TOOLS = {
                 to_jsonb(b.last_touch)#>>'{}' as last_touch,
                 to_jsonb(b.last_review_at)#>>'{}' as last_review_at, b.workspace_kind,
                 b.operating_state, b.parking_reason, b.parking_note,
+                to_jsonb(b.invoiced_on)#>>'{}' as invoiced_on,
+                (select to_jsonb(pc) from v_deal_room_phase_change pc where pc.deal_id=b.id) as phase_change,
                 to_jsonb(b.parked_at)#>>'{}' as parked_at, b.parked_by,
                 coalesce((
                   select jsonb_object_agg(latest.field,
@@ -3211,7 +3215,7 @@ export const TOOLS = {
             and ($3::uuid is null or account_client_id=$3::uuid)
           order by started_at desc limit 1`,
         [actor.slug, workspace, args.account_client_id || null]);
-      return { actor: actor.slug, deals: deals.rows, accounts: accounts.rows,
+      return { schema_version: 'local-deals-board.v1', actor: actor.slug, deals: deals.rows, accounts: accounts.rows,
         open_session: session.rows[0] || null };
     },
   },
@@ -8743,6 +8747,8 @@ registerTools({
                 b.market_agent, to_jsonb(b.last_touch)#>>'{}' as last_touch,
                 to_jsonb(b.last_review_at)#>>'{}' as last_review_at, b.workspace_kind,
                 b.operating_state, b.parking_reason, b.parking_note,
+                to_jsonb(b.invoiced_on)#>>'{}' as invoiced_on,
+                (select to_jsonb(pc) from v_deal_room_phase_change pc where pc.deal_id=b.id) as phase_change,
                 to_jsonb(b.parked_at)#>>'{}' as parked_at, b.parked_by,
                 r.salesforce_id, r.base_version
            from v_deal_room_board b
