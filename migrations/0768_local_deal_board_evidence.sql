@@ -41,7 +41,7 @@ select d.id, d.name, d.deal_type as type, d.phase, d.owner, d.attention,
   left join deal_market_assignment dma on dma.deal_id = d.id
   left join v_last_touch lt on lt.subject_type = 'deal' and lt.subject_id = d.id
   left join actor pa on pa.id = d.parked_by
- where d.invoiced_on is null and (d.outcome is null or d.outcome='won');
+ where d.invoiced_on is null;
 
 
 -- Latest phase event only: a manual correction removes an older automatic badge.

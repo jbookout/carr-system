@@ -10,8 +10,12 @@ begin
   insert into deal(client_id,name,deal_type,phase,outcome,created_by,updated_by)
     values(c,'W4 Demo Assignment','renewal','closed','won',a,a) returning id into d;
   if not exists(select 1 from v_deal_room_board where id=d) then raise exception 'Uninvoiced closed deal disappeared'; end if;
-  update deal set operating_state='parked',parking_reason='other',parking_note='Demo unverified import',parked_at=now(),parked_by=a where id=d;
+  update deal set outcome='paused',operating_state='parked',parking_reason='other',parking_note='Demo unverified import',parked_at=now(),parked_by=a where id=d;
   if not exists(select 1 from v_deal_room_board where id=d and operating_state='parked' and parking_note='Demo unverified import') then raise exception 'Parking fields lost'; end if;
+  update deal set operating_state='active',parking_reason=null,parking_note=null,parked_at=null,parked_by=null where id=d;
+  if not exists(select 1 from v_deal_room_board where id=d and operating_state='active') then raise exception 'Revived paused assignment disappeared'; end if;
+  update deal set outcome='lost' where id=d;
+  if not exists(select 1 from v_deal_room_board where id=d) then raise exception 'Uninvoiced closed outcome hidden'; end if;
   insert into event(actor_id,subject_type,subject_id,verb,field,old_value,new_value,cause,agent_rationale,occurred_at,recorded_at)
     values(a,'deal',d,'patch-deal-field','phase','{"phase":"negotiation"}','{"phase":"legal"}','ingest_email','Draft prepared','2026-10-03','2026-10-04') returning id into e;
   select * into row from v_deal_room_phase_change where deal_id=d;

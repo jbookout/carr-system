@@ -30,6 +30,6 @@ test('phase evidence projection selects the latest change, dates evidence indepe
   assert.match(sql,/order by e\.subject_id, e\.recorded_at desc, e\.id desc/);
   assert.match(sql,/e\.occurred_at/);
   assert.match(sql,/e\.verb <> 'revert-deal-field'/);
-  assert.match(sql,/d\.invoiced_on is null and \(d\.outcome is null or d\.outcome='won'\)/);
+  assert.match(sql,/where d\.invoiced_on is null;/);
   assert.match(sql,/grant select on v_deal_room_phase_change to carr_reader, carr_writer/);
 });
