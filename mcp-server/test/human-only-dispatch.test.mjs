@@ -91,6 +91,7 @@ test("the registry still carries the humanOnly verbs this gate was built for", (
     "close-incident",
     "confirm-merge",
     "decide-doc-suggestion",
+    "mark-invoice-paid",
     "propose-doc-correction",
     // V5-F01: installing the field-authority/retention policy and appending a
     // preservation hold are partner acts on the authority connection.

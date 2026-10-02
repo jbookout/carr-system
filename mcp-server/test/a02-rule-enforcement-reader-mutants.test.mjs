@@ -23,7 +23,7 @@ test.after(() => rmSync(WORK, { recursive: true, force: true }));
 
 let serial = 0;
 function relink(source) {
-  return source.replace(/from\s+"\.\/([^"]+)"/g, (_, file) =>
+  return source.replace(/from\s+['"]\.\/([^'"]+)['"]/g, (_, file) =>
     `from "${pathToFileURL(join(SRC, file)).href}"`);
 }
 async function loadReal(file) {
