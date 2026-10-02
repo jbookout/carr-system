@@ -33,7 +33,12 @@ async function groupStopsWithin(child, ms) {
   const deadline = performance.now() + ms;
   for (;;) {
     try { process.kill(-child.pid, 0); }
-    catch (error) { if (error.code === "ESRCH") return true; throw error; }
+    catch (error) {
+      if (error.code === "ESRCH") return true;
+      // Darwin can report EPERM while an exited group's members await reaping.
+      // The group still exists: keep polling, never treat EPERM as stopped.
+      if (error.code !== "EPERM") throw error;
+    }
     const remaining = deadline - performance.now();
     if (remaining <= 0) return false;
     await wait(Math.min(50, remaining));
