@@ -17,11 +17,12 @@ bundle at all — that is why this lane read as permanently denied until 2026-08
 Read-only: it opens nothing, changes nothing, and writes one JSON file of addresses
 already sitting in Joe's own calendar.
 """
+import hashlib
 import json
 import os
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 
 from EventKit import EKEventStore, EKEntityTypeEvent
 from Foundation import NSDate
@@ -65,7 +66,7 @@ def main():
     pred = store.predicateForEventsWithStartDate_endDate_calendars_(start, end, None)
     events = store.eventsMatchingPredicate_(pred) or []
 
-    out = {}
+    out = {"schema": "calendar-events/v2", "events": []}
     with_attendees = 0
     for ev in events:
         emails = []
@@ -81,19 +82,31 @@ def main():
         if not emails:
             continue
         with_attendees += 1
-        # KEYED THREE WAYS ON PURPOSE. The ingest payload carries a Google uid; the
-        # local store's identifier is its own. Title+date is the join that actually
-        # lands, so it is the primary key here and the identifiers ride along for
-        # anyone who can use them.
         title = str(ev.title() or "").strip()
-        day = str(ev.startDate().descriptionWithLocale_(None) or "")[:10]
-        out.setdefault(f"{title}|{day}", sorted(set(emails)))
+        start = datetime.fromtimestamp(float(ev.startDate().timeIntervalSince1970()), timezone.utc)
+        identifier = str(ev.calendarItemIdentifier() or "")
+        calendar = str(ev.calendar().calendarIdentifier() or "")
+        if not identifier or not calendar:
+            raise ValueError("EventKit event has no stable identity")
+        # occurrenceDate is the original recurrence slot, surviving title edits.
+        occurrence = ""
+        if ev.hasRecurrenceRules():
+            slot = ev.occurrenceDate()
+            if slot is None:
+                raise ValueError("recurring event has no occurrence identity")
+            occurrence = str(float(slot.timeIntervalSince1970()))
+        identity = json.dumps([calendar, identifier, occurrence], separators=(",", ":"))
+        out["events"].append({
+            "event_id": hashlib.sha256(identity.encode()).hexdigest(),
+            "start_at": start.isoformat(), "title": title, "emails": emails,
+        })
 
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
-    with open(OUT, "w") as fh:
+    fd = os.open(OUT, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as fh:
         json.dump(out, fh, indent=1, sort_keys=True)
     print(f"events scanned: {len(events)}; carrying attendees: {with_attendees}; "
-          f"keys written: {len(out)} -> {OUT}")
+          f"events written: {len(out['events'])} -> {OUT}")
     return 0
 
 

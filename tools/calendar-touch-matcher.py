@@ -100,6 +100,7 @@ def load_record_contacts(snapshot=None, root=None):
         wb = openpyxl.load_workbook(full, read_only=True, data_only=True)
         if sheet not in wb.sheetnames:
             missing.append(f"{path} (no sheet {sheet!r})")
+            wb.close()
             return
         ws = wb[sheet]
         header, idx = None, {}
@@ -113,6 +114,9 @@ def load_record_contacts(snapshot=None, root=None):
                         for i, c in enumerate(cells):
                             if c.lower() == want.lower():
                                 idx[key] = i
+                if header is not None and set(idx) != {"id", "name", "org", "email"}:
+                    missing.append(f"{path} (required headers missing)")
+                    break
                 continue
             if "email" not in idx:
                 continue
@@ -127,10 +131,14 @@ def load_record_contacts(snapshot=None, root=None):
                 if dom not in FREEMAIL and dom != INTERNAL_DOMAIN:
                     by_domain.setdefault(dom, label)
 
+        if header is None:
+            missing.append(f"{path} (required headers missing)")
+        wb.close()
+
     ingest(ROSTER_REL, "Clients", "Client ID", "Name", "Practice / Entity", "Email")
     ingest(REGISTRY_REL, "Registry", "Lead ID", "Contact Name", "Practice", "Email")
     ingest(VENDORS_REL, "Vendors", "ID", "Name", "Company", "Email")
-    if not by_email:
+    if missing or not by_email:
         detail = "; ".join(missing) or "no row carried an email address"
         raise NoRecordContacts(f"record contacts: none loaded from the live exports ({detail})")
     return by_email, by_domain
@@ -208,25 +216,46 @@ def read_dump(path, days):
     its dump instead, and the whole pipeline needs ONE grant rather than two.
     Reading the database stays the default for a human at a terminal.
 
-    Dump shape is {"<title>|<YYYY-MM-DD>": [attendee, ...]}.
+    V2 carries stable event IDs and aware start timestamps. Legacy title/day
+    dumps remain readable, but cannot prove that a same-day event has happened.
     """
     with open(path) as fh:
         dump = json.load(fh)
-    today = datetime.date.today()
-    floor = today - datetime.timedelta(days=days)
+    now = datetime.datetime.fromtimestamp(time.time(), datetime.timezone.utc)
+    floor = now - datetime.timedelta(days=days)
     rows = []
+    if isinstance(dump, dict) and dump.get("schema") == "calendar-events/v2":
+        if not isinstance(dump.get("events"), list):
+            raise ValueError("calendar events must be an array")
+        for event in dump["events"]:
+            if (not isinstance(event, dict) or not isinstance(event.get("event_id"), str)
+                    or not event["event_id"] or not isinstance(event.get("title"), str)
+                    or not isinstance(event.get("emails"), list)):
+                raise ValueError("invalid calendar event")
+            start = datetime.datetime.fromisoformat(event["start_at"])
+            if start.tzinfo is None:
+                raise ValueError("calendar start timestamp requires timezone")
+            if start < floor:
+                continue
+            when = "upcoming" if start > now else "past"
+            for email in event["emails"]:
+                if not isinstance(email, str) or "@" not in email:
+                    raise ValueError("invalid calendar attendee")
+                rows.append((email.strip().lower(), start.date().isoformat(), event["title"],
+                             when, event["event_id"], start.isoformat()))
+        return rows
+    if not isinstance(dump, dict):
+        raise ValueError("invalid legacy calendar dump")
+    today = now.date()
     for key, emails in dump.items():
         title, _, day = key.rpartition("|")
-        try:
-            on = datetime.date.fromisoformat(day)
-        except ValueError:
+        on = datetime.date.fromisoformat(day)
+        if not isinstance(emails, list):
+            raise ValueError("invalid legacy attendees")
+        # Date-only dumps cannot prove a same-day meeting already happened.
+        when = "upcoming" if on >= today else "past"
+        if on < floor.date():
             continue
-        if on > today:
-            when = "upcoming"
-        elif on >= floor:
-            when = "past"
-        else:
-            continue          # outside the window entirely
         for email in emails:
             rows.append((email.strip().lower(), day, title, when))
     return rows
@@ -273,15 +302,20 @@ def main():
         return 3
 
     latest, events, upcoming = {}, defaultdict(list), {}
-    for email, day, title, when in sorted(rows, key=lambda row: (row[1], row[2]), reverse=True):
+    for row in sorted(rows, key=lambda row: (row[5] if len(row) > 4 else row[1], row[2]), reverse=True):
+        email, day, title, when = row[:4]
+        event = {"day": day, "title": title}
+        if len(row) > 4:
+            event.update(event_id=row[4], start_at=row[5])
         if when == "upcoming":
             if email not in upcoming or day < upcoming[email][0]:
                 upcoming[email] = (day, title)
             continue
         if email not in latest:
             latest[email] = day
-        if (day, title) not in events[email]:
-            events[email].append((day, title))
+        identity = event.get("event_id") or (day, title)
+        if not any((e.get("event_id") or (e["day"], e["title"])) == identity for e in events[email]):
+            events[email].append(event)
 
     exact, domain, unknown, internal = {}, {}, {}, set()
     for email in latest:
@@ -312,7 +346,7 @@ def main():
             # caught by an actual write attempt, not by reading the code.
             "exact": [{"email": e, "ref": _ref_of(exact[e]),
                        "label": str(exact[e]), "last_seen": latest[e],
-                       "events": [{"day": d, "title": t} for d, t in events[e]]}
+                       "events": events[e]}
                       for e in exact],
             "domain": [{"email": e, "org": str(domain[e]), "last_seen": latest[e]} for e in domain],
             "unknown": [{"email": e, "domain": d, "last_seen": latest[e]}
@@ -335,7 +369,7 @@ def main():
         print("INFERRED TOUCHES — proposals, nothing written:")
         for tier, bucket in (("exact", exact), ("domain", domain)):
             for email, label in sorted(bucket.items(), key=lambda kv: latest[kv[0]], reverse=True):
-                day, title = events[email][0]
+                day, title = events[email][0]["day"], events[email][0]["title"]
                 print(f"  [{tier:6}] {day}  {label}")
                 print(f"            via {email} — {title[:60]}")
     if upcoming:

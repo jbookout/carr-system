@@ -54,11 +54,27 @@ class LiveExports(unittest.TestCase):
         workbook(self.root / matcher.REGISTRY_REL, "Registry",
                  ["Lead ID", "Contact Name", "Practice", "Email"],
                  [["L-1", "Lead Two", "Practice B", "two@gmail.com"]])
+        workbook(self.root / matcher.VENDORS_REL, "Vendors",
+                 ["ID", "Name", "Company", "Email"], [])
+
+    def test_partial_export_failure_refuses_even_with_client_contacts(self):
+        self.seed_live()
+        for damage in ("missing", "sheet", "headers"):
+            path = self.root / matcher.VENDORS_REL
+            if damage == "missing":
+                path.unlink()
+            elif damage == "sheet":
+                workbook(path, "Wrong", ["ID", "Name", "Company", "Email"], [])
+            elif damage == "headers":
+                workbook(path, "Vendors", ["Email"], [["vendor@service.example.test"]])
+            with self.subTest(damage=damage), self.assertRaises(matcher.NoRecordContacts):
+                matcher.load_record_contacts(root=str(self.root))
 
     def test_relative_paths_match_the_exporters(self):
         text = (REPO / "exporters" / "targets.py").read_text(encoding="utf-8")
         self.assertIn(f'ROSTER_REL = "{matcher.ROSTER_REL}"', text)
         self.assertIn(f'REGISTRY_REL = "{matcher.REGISTRY_REL}"', text)
+        self.assertIn(f'VENDORS_REL = "{matcher.VENDORS_REL}"', text)
 
     def test_default_root_is_the_exporters_export_home(self):
         with mock.patch.dict(os.environ, {"CARR_EXPORT_HOME": str(self.root)}):
@@ -132,6 +148,62 @@ class LiveExports(unittest.TestCase):
             self.assertEqual(matcher.main(), 0)
         self.assertIn("Near synthetic meeting", output.getvalue())
         self.assertNotIn("Far synthetic meeting", output.getvalue())
+
+    def test_timestamped_dump_excludes_later_today_and_preserves_occurrences(self):
+        now = datetime.datetime(2026, 10, 1, 23, 30, tzinfo=datetime.timezone.utc)
+        dump = self.root / "dump.json"
+        dump.write_text(json.dumps({"schema": "calendar-events/v2", "events": [
+            {"event_id": "series/one", "start_at": "2026-10-01T18:00:00-05:00", "title": "Same", "emails": ["a@example.test"]},
+            {"event_id": "series/two", "start_at": "2026-10-01T19:00:00-05:00", "title": "Same", "emails": ["a@example.test"]},
+            {"event_id": "next/day", "start_at": "2026-10-02T01:00:00+02:00", "title": "UTC boundary", "emails": ["a@example.test"]},
+        ]}))
+        with mock.patch.object(matcher.time, "time", return_value=now.timestamp()):
+            rows = matcher.read_dump(str(dump), 7)
+        self.assertEqual([r[3] for r in rows], ["past", "upcoming", "past"])
+        self.assertEqual([r[4] for r in rows], ["series/one", "series/two", "next/day"])
+
+    def test_producer_preserves_same_title_events_and_stable_id_after_edit(self):
+        fake_modules = {"EventKit": mock.Mock(), "Foundation": mock.Mock()}
+        with mock.patch.dict(sys.modules, fake_modules):
+            spec = importlib.util.spec_from_file_location("dump_producer", REPO / "tools/calendar-attendee-dump.py")
+            producer = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(producer)
+        def event(identifier, start):
+            ev = mock.Mock()
+            ev.title.return_value = "Same"
+            ev.calendarItemIdentifier.return_value = identifier
+            ev.calendar.return_value.calendarIdentifier.return_value = "calendar-1"
+            ev.hasRecurrenceRules.return_value = False
+            ev.startDate.return_value.timeIntervalSince1970.return_value = start
+            ev.attendees.return_value = []
+            ev.organizer.return_value.URL.return_value.resourceSpecifier.return_value = "a@example.test"
+            return ev
+        a, b = event("id-one", 1790874000), event("id-two", 1790877600)
+        store = fake_modules["EventKit"].EKEventStore.alloc.return_value.init.return_value
+        store.eventsMatchingPredicate_.return_value = [a, b]
+        producer.OUT = str(self.root / "produced.json")
+        with mock.patch.object(producer, "request_access", return_value=True), redirect_stdout(io.StringIO()):
+            self.assertEqual(producer.main(), 0)
+        first = json.loads(pathlib.Path(producer.OUT).read_text())
+        pathlib.Path(producer.OUT).unlink()
+        a.title.return_value = "Edited"
+        with mock.patch.object(producer, "request_access", return_value=True), redirect_stdout(io.StringIO()):
+            self.assertEqual(producer.main(), 0)
+        second = json.loads(pathlib.Path(producer.OUT).read_text())
+        self.assertEqual(len(first["events"]), 2)
+        self.assertEqual(first["events"][0]["event_id"], second["events"][0]["event_id"])
+        self.assertNotEqual(first["events"][0]["event_id"], first["events"][1]["event_id"])
+
+        # The same series has a separate stable identity for each original recurrence slot.
+        pathlib.Path(producer.OUT).unlink()
+        a.hasRecurrenceRules.return_value = b.hasRecurrenceRules.return_value = True
+        b.calendarItemIdentifier.return_value = "id-one"
+        a.occurrenceDate.return_value.timeIntervalSince1970.return_value = 1790874000
+        b.occurrenceDate.return_value.timeIntervalSince1970.return_value = 1790960400
+        with mock.patch.object(producer, "request_access", return_value=True), redirect_stdout(io.StringIO()):
+            self.assertEqual(producer.main(), 0)
+        recurring = json.loads(pathlib.Path(producer.OUT).read_text())["events"]
+        self.assertNotEqual(recurring[0]["event_id"], recurring[1]["event_id"])
 
     def test_snapshot_path_is_unchanged(self):
         emails, domains = matcher.load_record_contacts(

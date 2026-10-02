@@ -62,7 +62,7 @@ def fixture(app_exists=True, appends="", *, dump_json="", matcher_json=""):
     stub.mkdir()
     open_script = (
         "#!/bin/sh\n"
-        f'target="${{CARR_CALENDAR_OUTPUT_ROOT:-{root}/out}}"\n'
+        'for target do :; done\n'
         'mkdir -p "$target"\n'
         f"cat >> \"$target/calendar-access.log\" <<'EOF'\n{appends}\nEOF\n"
     )
@@ -79,6 +79,16 @@ def fixture(app_exists=True, appends="", *, dump_json="", matcher_json=""):
 
 
 def run(root, stub, *args, timeout=90, extra_env=None, input_text=None):
+    writer = root / "run.sh"
+    if writer.exists() and "catch-me-up" not in writer.read_text():
+        original = root / "writer-original"
+        shutil.copy2(writer, original)
+        writer.write_text("#!/usr/bin/env python3\nimport json,os,sys\n"
+            "if sys.argv[2]=='catch-me-up':\n"
+            " print(json.dumps({'calendar_history':[]}))\n"
+            "elif sys.argv[2]=='add-room-turn': print('{\"ok\":true,\"seq\":123}')\n"
+            "else: os.execv('./writer-original',['./writer-original',*sys.argv[1:]])\n")
+        writer.chmod(0o755)
     env = dict(os.environ)
     env["CARR_REPO"] = str(root)
     env["CARR_CALENDAR_CAPTURE_WAIT_SECONDS"] = "2"
@@ -157,8 +167,8 @@ check("receipt-safe EventKit shadow prints no attendee or record identity",
           "L-PRIVATE", "person@example.com", "domain@example.com",
           "unknown@example.com", "Private Org")))
 check("receipt-safe EventKit shadow confines scratch evidence to its output root",
-      (isolated / "calendar-access.log").is_file()
-      and (isolated / "calendar-attendees.json").is_file()
+      bool(list((isolated / "calendar-runs").glob("*/calendar-access.log")))
+      and bool(list((isolated / "calendar-runs").glob("*/calendar-attendees.json")))
       and (isolated / "calendar-touch-proposals.json").is_file()
       and not (root / "out" / "calendar-access.log").exists())
 
@@ -182,7 +192,7 @@ mixed = {
                "internal": 0, "upcoming": 0},
     "exact": [{"ref": "C-TEST", "email": "known@example.test",
                "last_seen": "2026-09-25", "events": [{"day": "2026-09-25",
-               "title": "Synthetic meeting"}]}],
+               "title": "Synthetic meeting", "event_id": "synthetic-one", "start_at": "2026-09-25T12:00:00+00:00"}]}],
     "domain": [],
     "unknown": [{"email": "new@example.test", "last_seen": "2026-09-25"}],
 }
@@ -217,15 +227,16 @@ check("failed exact write takes precedence without leaking call output",
 import datetime
 import openpyxl
 root, stub = fixture(appends="events scanned: 9; carrying attendees: 9\nexit=0",
-                     dump_json=json.dumps({
-                         f"Synthetic meeting {i}|{datetime.date.today().isoformat()}": [email]
+                     dump_json=json.dumps({"schema": "calendar-events/v2", "events": [
+                         {"event_id": f"synthetic-{i}", "start_at": (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1, hours=i)).isoformat(),
+                          "title": f"Synthetic meeting {i}", "emails": [email]}
                          for i, email in enumerate([
                              "client@clinic.example.test", "lead@practice.example.test",
                              "vendor@service.example.test", "client@clinic.example.test",
                              "client@clinic.example.test", "client@clinic.example.test",
                              "client@clinic.example.test", "client@clinic.example.test",
                              "new@unknown.example.test"])
-                     }))
+                     ]}))
 shutil.copy2(REPO / "tools/calendar-touch-matcher.py", root / "tools/calendar-touch-matcher.py")
 shutil.copy2(REPO / "tools/calendar-intake-gate.py", root / "tools/calendar-intake-gate.py")
 (root / ".venv").symlink_to(sys.prefix, target_is_directory=True)
@@ -293,7 +304,7 @@ check("nightly calendar step executes the capture and continues with unmatched p
 # Invalid intake evidence still fails, even when unknowns are deferred.
 (root / "out/calendar-intake-evidence.json").write_text("not-json")
 p = run(root, stub)
-check("malformed intake ledger still refuses capture completion", p.returncode == 78)
+check("malformed intake ledger still refuses capture completion", p.returncode == 65)
 
 # 8. Matcher diagnostics can contain attendee data. The launcher and Control
 # Plane persist command output, so only fixed failure classes may leave this job.
@@ -349,6 +360,91 @@ for name, response, status, succeeds in response_cases:
     check(name, p.returncode == (0 if succeeds else 1) and marker in output
           and not any(value in output for value in (
               "known@example.test", "C-TEST", "Synthetic meeting", response)))
+
+# Regression 6: generic failure cannot authorize a stale dump.
+root, stub = fixture(appends="exit=1", matcher_json=json.dumps(exact_only))
+(root / "out/calendar-attendees.json").write_text("{}")
+(root / "run.sh").write_text("#!/bin/sh\necho '{\"ok\":true}'\n")
+(root / "run.sh").chmod(0o755)
+p = run(root, stub)
+check("failed reader cannot write from a stale dump", p.returncode == 1 and "logged exact touch" not in p.stdout)
+
+# Regression 5: a second capture must not complete the paused first reader.
+root, stub = fixture(matcher_json=json.dumps(exact_only))
+(stub / "open").write_text("#!/bin/sh\nexit 0\n")
+env = dict(os.environ, CARR_REPO=str(root), PATH=f"{stub}:{os.environ['PATH']}",
+           CARR_CALENDAR_CAPTURE_WAIT_SECONDS="3")
+a = subprocess.Popen(["sh", str(SCRIPT), "--dry-run"], env=env,
+                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+import time
+time.sleep(0.4)
+(stub / "open").write_text("#!/bin/sh\nfor target do :; done\nmkdir -p \"$target\"\necho '{}' > \"$target/calendar-attendees.json\"\necho exit=0 >> \"$target/calendar-access.log\"\n")
+b = run(root, stub)
+aout, aerr = a.communicate(timeout=10)
+check("concurrent dry/live capture cannot acknowledge another read", a.returncode == 1 and b.returncode != 0 and "source=eventkit" not in aout)
+
+# A timed-out reader completes during the next invocation. Its private exit/dump
+# must never promote the next reader, which has not completed at all.
+root, stub = fixture(matcher_json=json.dumps(exact_only))
+(stub / "open").write_text("#!/usr/bin/env python3\nimport subprocess,sys\n"
+    "subprocess.Popen([sys.executable,'-c',\"import pathlib,time,sys; time.sleep(1.5); p=pathlib.Path(sys.argv[1]); (p/'calendar-attendees.json').write_text('{}'); (p/'calendar-access.log').write_text('exit=0\\\\n')\",sys.argv[-1]],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n")
+p = run(root, stub, extra_env={"CARR_CALENDAR_CAPTURE_WAIT_SECONDS":"1"})
+(stub / "open").write_text("#!/bin/sh\nexit 0\n")
+next_run = run(root, stub)
+check("late completion after timeout cannot authorize the next read", p.returncode == 1 and next_run.returncode == 1 and "logged exact touch" not in next_run.stdout)
+
+# Regression 1/8: canonical legacy replay and title edits never create a second activity.
+root, stub = fixture(appends="exit=0", dump_json="{}", matcher_json=json.dumps(exact_only))
+shutil.copy2(REPO / "tools/calendar-intake-gate.py", root / "tools/calendar-intake-gate.py")
+(root / "run.sh").write_text("#!/usr/bin/env python3\n" +
+    "import json,sys,pathlib\np=pathlib.Path('out/store.json')\ns=json.loads(p.read_text()) if p.exists() else {}\na=json.loads(sys.argv[3])\n" +
+    "if sys.argv[2]=='catch-me-up':\n print(json.dumps({'calendar_history':[{'key':k,'activity_id':v['id'],'summary':v['summary']} for k,v in s.items()]}))\n" +
+    "else:\n k=a['idempotency_key']\n s.setdefault(k,dict(a,id=str(len(s)+1)))\n p.write_text(json.dumps(s))\n print('{\"ok\":true}')\n")
+(root / "run.sh").chmod(0o755)
+# Execute the prior writer's attendee/day algorithm against the same persistent
+# fake store, then upgrade. This is the base loop (first event per exact email),
+# rather than two invocations of the new occurrence writer or a seeded store.
+for e in json.loads(json.dumps(exact_only))["exact"]:
+    ev = e["events"][0]
+    payload = {"idempotency_key":f"calcap-{e['email']}-{e['last_seen']}",
+               "ref":e["ref"], "kind":"meeting", "occurred_at":ev["day"],
+               "summary":f"Meeting: {ev['title']}"[:180]}
+    old_run = subprocess.run(["./run.sh","call","log-activity",json.dumps(payload)],
+                             cwd=root, capture_output=True, text=True)
+    check("prior attendee/day writer captures the baseline activity", old_run.returncode == 0)
+p = run(root, stub)
+check("upgrade preserves a legacy activity without duplication", p.returncode == 0 and len(json.loads((root / "out/store.json").read_text())) == 1)
+rescheduled = json.loads(json.dumps(exact_only))
+rescheduled["exact"][0]["last_seen"] = "2026-09-26"
+rescheduled["exact"][0]["events"][0].update(day="2026-09-26", start_at="2026-09-26T12:00:00+00:00", title="Edited legacy title")
+(root / "tools/calendar-touch-matcher.py").write_text(f"print({json.dumps(rescheduled)!r})\n")
+p = run(root, stub)
+check("date and title edits preserve a reconciled legacy occurrence", p.returncode == 0 and len(json.loads((root / "out/store.json").read_text())) == 1)
+(root / "tools/calendar-touch-matcher.py").write_text(f"print({json.dumps(exact_only)!r})\n")
+(root / "out/store.json").write_text("{}")
+p = run(root, stub)
+edited = json.loads(json.dumps(exact_only))
+edited["exact"][0]["events"][0]["title"] = "Edited title"
+(root / "tools/calendar-touch-matcher.py").write_text(f"print({json.dumps(edited)!r})\n")
+p = run(root, stub)
+check("title edits preserve the same captured occurrence", p.returncode == 0 and len(json.loads((root / "out/store.json").read_text())) == 1)
+
+# Regression 3: malformed evidence fails the actual nightly step, not EX_CONFIG skip.
+nightly_step = nightly[nightly.index('step() {'):nightly.index('\ntombstone() {')]
+(root / "out/calendar-intake-evidence.json").write_text("not-json")
+shutil.copy2(SCRIPT, root / "bin/calendar-eventkit-capture.sh")
+(root / "bin/calendar-eventkit-capture.sh").chmod(0o755)
+harness = """rc_total=0; seam_blocked=0; LOG=out/nightly-test.log
+say() { print -r -- "$@"; }
+record_run() { print -r -- "state=$2"; }
+carr_step_timeout_prefix() { CARR_STEP_TIMEOUT_ARGV=(); }
+carr_step_timeout_for() { print 10; }
+carr_routine_exec() { "$@"; }
+""" + nightly_step + "\nstep calendar ./bin/calendar-eventkit-capture.sh\nprint -r -- \"rc_total=$rc_total\"\n"
+p = subprocess.run(["/bin/zsh", "-c", harness], cwd=root,
+    env=dict(os.environ, CARR_REPO=str(root), PATH=f"{stub}:{os.environ['PATH']}"),
+    capture_output=True, text=True, timeout=15)
+check("damaged evidence is a nightly failure", "rc_total=1" in p.stdout and "state=failed" in p.stdout)
 
 print(f"\n{'OK all checks passed' if not failures else f'FAIL {len(failures)}: ' + ', '.join(failures)}")
 sys.exit(1 if failures else 0)

@@ -2875,6 +2875,9 @@ export const TOOLS = {
 
   "catch-me-up": {
     write: false,
+    // The canonical replay ledger is not granted to the views-only reader.
+    // This route supplies actor context inside a read-only transaction.
+    writerConnection: true,
     description: "The merged timeline (event + activity rows) for one deal, client, lead, or vendor, newest first, plus its narrative-file pointer (notes_path). Use before any conversation about a record.",
     inputSchema: { type: "object", properties: { ref: { type: "string", description: "L-204 / C-127 / V-CPA-006 / deal or party name" }, limit: { type: "integer", default: 20 } }, required: ["ref"] },
     handler: async (c, _a, args) => {
@@ -2883,12 +2886,21 @@ export const TOOLS = {
         `select entry_kind, occurred_at, actor, verb, summary, detail, owed
          from v_subject_timeline where subject_type=$1 and subject_id=$2
          order by occurred_at desc limit $3`, [s.type, s.id, args.limit || 20]);
-      return { subject: s, timeline: rows.rows };
+      const captured = await c.query(
+        `select t.idempotency_key as key, a.id::text as activity_id, a.summary
+           from tool_call t join activity a on a.id::text=t.response->>'activity_id'
+          where t.verb='log-activity' and t.actor_id=$1
+            and a.${FK[s.type]}=$2 and t.idempotency_key like 'calcap-%'
+          order by t.idempotency_key limit 5001`, [_a.id, s.id]);
+      if (captured.rows.length > 5000)
+        throw new ToolError({ error: "calendar_history_too_large" });
+      return { subject: s, timeline: rows.rows, calendar_history: captured.rows };
     },
   },
 
   "find-and-catch-up": {
     write: false,
+    writerConnection: true, // catch-me-up reads the actor-bound replay ledger.
     description: "Find one live person, practice, vendor, or deal by name and immediately return that record's catch-me-up timeline. This is the bounded read-only composition of find then catch-me-up: exactly one live match proceeds; zero returns not_found; multiple matches return needs_disambiguation and no timeline. Retired aliases, linked neighbours, and related deals are never selected as the target. It performs no model call, retry, write, send, or arbitrary tool dispatch.",
     inputSchema: { type: "object", additionalProperties: false, properties: {
       query: { type: "string", description: `name to find, at most ${FIND_CATCH_UP_QUERY_MAX} characters` },
@@ -2911,7 +2923,7 @@ export const TOOLS = {
         throw new ToolError({ error: "invalid_limit",
           hint: `limit must be an integer from 1 to ${FIND_CATCH_UP_LIMIT_MAX}` });
 
-      // Reuse the registered read handlers directly on the same reader client.
+      // Reuse the registered read handlers on the same read-only client.
       // This is not a generic composite dispatcher: the two names are fixed in
       // code, no callback/tool name/provider is accepted, and the second handler
       // is unreachable until the first yields exactly one live target.
@@ -2942,6 +2954,7 @@ export const TOOLS = {
 
   "prepare-conversation": {
     write: false,
+    writerConnection: true, // fixed composition includes catch-me-up.
     description: "Prepare for one conversation by resolving a name to exactly one live record, returning its recent catch-up timeline, and—when the target is a person or organization—showing the existing introduction paths to that exact ref. This is a fixed bounded read composition: ambiguous or missing identity stops before timeline/graph reads; deals receive timeline context but are never pretended to be intro-graph people. It performs no model call, retry, write, send, or arbitrary tool dispatch.",
     inputSchema: { type: "object", additionalProperties: false, properties: {
       query: { type: "string", description: `person, organization, vendor, or deal name; at most ${FIND_CATCH_UP_QUERY_MAX} characters` },

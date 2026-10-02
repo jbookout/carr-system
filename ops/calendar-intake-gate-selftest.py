@@ -84,7 +84,27 @@ with tempfile.TemporaryDirectory() as raw:
     p = subprocess.run([sys.executable, str(SCRIPT), "--proposals", str(proposal_path),
                         "--evidence", str(evidence_path), "--aggregate-only", "--defer-unmatched"],
                        text=True, capture_output=True)
-    check("capture mode still refuses malformed evidence", p.returncode == 78)
+    check("capture mode still refuses malformed evidence", p.returncode == 65)
+
+with tempfile.TemporaryDirectory() as raw:
+    root = Path(raw)
+    proposal_path, evidence_path = root / "proposals.json", root / "evidence.json"
+    queue = root / "pending.json"
+    proposal_path.write_text(json.dumps(proposals))
+    (root / "run.sh").write_text("#!/usr/bin/env python3\nimport json,sys\n"
+        "open('dispatch.json','w').write(sys.argv[3])\nprint('{\"ok\":true,\"seq\":123}')\n")
+    (root / "run.sh").chmod(0o755)
+    command = [sys.executable, str(SCRIPT), "--proposals", str(proposal_path),
+               "--evidence", str(evidence_path), "--queue", str(queue),
+               "--aggregate-only", "--defer-unmatched", "--dispatch"]
+    p = subprocess.run(command, cwd=root, capture_output=True, text=True)
+    check("unknown attendee is durably queued and dispatched", p.returncode == 0 and queue.exists() and (root / "dispatch.json").exists())
+    proposal_path.write_text(json.dumps({"unknown": []}))  # eight days later, outside rolling window
+    p = subprocess.run(command, cwd=root, capture_output=True, text=True)
+    check("rolled-out attendee remains pending until all receipts exist", p.returncode == 0 and queue.exists() and "new@example.com" in queue.read_text())
+    evidence_path.write_text(json.dumps(complete))
+    p = subprocess.run(command, cwd=root, capture_output=True, text=True)
+    check("evidenced intake clears durable pending item", p.returncode == 0 and queue.exists() and json.loads(queue.read_text()) == {})
 
 print("OK all checks passed" if not failed else "FAIL " + ", ".join(failed))
 raise SystemExit(bool(failed))
