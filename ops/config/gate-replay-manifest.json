@@ -457,6 +457,9 @@
     "hook_meter.py": {
       "role": "helper"
     },
+    "grok_invocation.py": {
+      "role": "helper"
+    },
     "jev-supervisor.py": {
       "role": "gate",
       "wirings": [

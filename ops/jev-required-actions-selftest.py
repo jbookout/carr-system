@@ -6,6 +6,12 @@ repo = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(repo))
 from lib.rule_delivery_preuse import validate_build_advisory
 
+# Every retired enforcement site must retain the later decision's provenance.
+decision = "c136a8e1-c135-4553-9e50-64c9640d12b7"
+for path in ("hooks/completion-evidence-gate.py", "hooks/executor-tier-gate.py",
+             "lib/rule_delivery_preuse.py", "lib/jev_required_actions.py"):
+    assert decision in (repo / path).read_text(), f"missing retirement provenance: {path}"
+
 stop = (repo / "hooks/completion-evidence-gate.py").read_text()
 preuse = (repo / "hooks/rule-pack-preuse-reselection.py").read_text()
 assert "evaluate_required_actions" not in stop

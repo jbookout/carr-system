@@ -80,6 +80,11 @@ except Exception:                       # a missing meter must not change a verd
     LOG = os.path.expanduser("~/carr-system/out/hook-guard.log")
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO)
+# Decision c136a8e1-c135-4553-9e50-64c9640d12b7 (Joe, 2026-09-25)
+# narrows 0b11c89b to judgment points. The orchestrator's 2026-10-02 PR 1407
+# ruling retires C07's generated prompt-facet propagation deny in favor of
+# batched boundary checks in hooks/jev-supervisor.py. Executor naming and
+# exact routing-policy pin checks below remain enforced.
 # Where a subagent definition may live. Project scope first: that is where the
 # fifteen CARR agents are, and a project definition wins over a user-level one
 # of the same name.

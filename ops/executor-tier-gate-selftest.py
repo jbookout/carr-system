@@ -14,6 +14,8 @@ loosens it.
 """
 import json
 import os
+from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -103,12 +105,17 @@ check("a dearer pick never pushes a spawn upward", r is None, r)
 r = run({**brief, "subagent_type": "fork"}, "haiku:0.99")
 check("forks stay exempt", r is None, r)
 
-# The routing policy (ops/jev_model_route.py dispatch) already chose this tier: a pinned or routed spawn states it
-# in its executor line, and this hook must not give the opposite advice on the same launch (Orchestrator session,
-# 2026-09-26: "Jev puts 0.82-0.84 on sonnet" on spawns the merge_review and gate_authority_code pins set to opus).
+# PR 1406 routes merge_review to Codex; earlier policy targets Opus. The
+# exemption follows the loaded target, so either merge order is supported.
+policy = json.loads((Path(REPO) / "ops/config/model-routes.v1.json").read_text())
+pin_target = policy["dispatch_targets"][policy["pins"]["merge_review"]["target"]]
 pinned = {**brief, "model": "opus", "prompt": "executor: opus per routing pin merge_review\nReview PR 1 adversarially."}
 r = run(pinned, "sonnet:0.84")
-check("a spawn carrying a known routing pin gets no cheaper-tier advice", r is None, r)
+if pin_target.get("subagent_model") == pinned["model"]:
+    check("a spawn matching the loaded merge-review pin gets no cheaper-tier advice", r is None, r)
+else:
+    check("an Opus spawn cannot claim a different merge-review target as an exemption",
+          r and "EXECUTOR ADVICE" in r.get("additionalContext", ""), r)
 
 routed = {**brief, "model": "opus", "prompt": "executor: opus per routing dispatch\nChange the parser."}
 r = run(routed, "sonnet:0.84")
@@ -142,3 +149,26 @@ finally:
     os.unlink(path)
 
 print(f"executor-tier-gate-selftest: all {PASS} checks passed")
+
+# Exercise this whole hook suite across either PR 1406/1407 merge order.
+# Only test copies use the synthetic policies; no installed policy is changed.
+if not os.environ.get("CARR_EXECUTOR_TIER_POLICY_SELFTEST"):
+    policy = json.loads((Path(REPO) / "ops/config/model-routes.v1.json").read_text())
+    for model in ("opus", None):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "hooks").mkdir()
+            (root / "ops/config").mkdir(parents=True)
+            shutil.copyfile(HOOK, root / "hooks/executor-tier-gate.py")
+            copied_test = root / "ops/executor-tier-gate-selftest.py"
+            shutil.copyfile(__file__, copied_test)
+            candidate = json.loads(json.dumps(policy))
+            candidate["dispatch_targets"]["merge_review_test"] = {"subagent_model": model}
+            candidate["pins"]["merge_review"]["target"] = "merge_review_test"
+            (root / "ops/config/model-routes.v1.json").write_text(json.dumps(candidate))
+            result = subprocess.run([sys.executable, str(copied_test)], capture_output=True,
+                                    text=True, timeout=60,
+                                    env={**os.environ, "CARR_EXECUTOR_TIER_POLICY_SELFTEST": "1"})
+            check(f"complete suite with merge_review targeting {model or 'Codex desk'}",
+                  result.returncode == 0, result.stdout + result.stderr)
+    print("executor-tier-gate-selftest: both merge-review policy shapes passed")

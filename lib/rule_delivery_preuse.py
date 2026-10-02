@@ -120,6 +120,12 @@ SELECTOR_SOURCE_PATHS = (
 
 def validate_build_advisory(row: object, *, prompt_sha256: str) -> bool:
     """Validate the advisory or its fixed visible abstention."""
+    # Decision c136a8e1-c135-4553-9e50-64c9640d12b7 (2026-09-25) narrows
+    # 0b11c89b to judgment points; the 2026-10-02 orchestrator ruling on
+    # PR 1407 retires per-turn required_actions, authority, guidance and
+    # deterministic_exclusions. v2 is an exact advisory-only contract:
+    # legacy v1 obligations and extra authority fields are rejected, while
+    # hooks/jev-supervisor.py owns the batched boundary judgments.
     if not isinstance(row, dict):
         return False
     if row.get("schema") == BUILD_ADVISORY_UNAVAILABLE_SCHEMA:

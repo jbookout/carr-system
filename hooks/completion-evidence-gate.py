@@ -113,6 +113,11 @@ from stop_latch import (  # noqa: E402
     claim_identity, latched, record_fire, record_satisfied)
 
 sys.path.insert(0, REPO)
+# Decision c136a8e1-c135-4553-9e50-64c9640d12b7 (Joe, 2026-09-25)
+# narrows 0b11c89b: Jev runs at judgment points, not on every turn. The
+# orchestrator's 2026-10-02 PR 1407 ruling replaces generated prompt-facet
+# Stop obligations with hooks/jev-supervisor.py's batched boundary checks.
+# Deterministic completion evidence and requirement checks remain here.
 from lib.transcript_read import load_transcript  # noqa: E402
 
 
