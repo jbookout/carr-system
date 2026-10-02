@@ -63,6 +63,30 @@ import re
 import sys
 
 DOLLAR = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*|)\$")
+
+# THE OTHER HOT SPOT, alongside EXECUTE_ARGUMENT: scan_sql's main loop advanced
+# one character at a time even through long runs of perfectly ordinary text
+# (identifiers, keywords, whitespace -- the bulk of any SQL file), each such
+# character taking its own trip through append_top and the pending-chunk
+# bookkeeping. Profiling PR #1297's db/schema.sql (24MB, no unusually long
+# comments or literals) showed exactly that: tens of millions of one-character
+# append_top calls.
+#
+# ORDINARY_RUN finds the next position that could possibly start a construct
+# the scan needs to treat specially: a string literal ("'"), a dollar-quote or
+# dollar-quoted string ("$"), a line comment ("--") or a block comment ("/*").
+# Whenever the current position is none of those (the `else` branch below),
+# every character up to that next position is going to be appended verbatim
+# exactly as scan_sql already does one at a time -- so it is appended in one
+# slice instead. This changes nothing about which characters take which
+# branch, only how many Python-level steps it costs to get there: a run of
+# 10,000 ordinary characters becomes one slice-and-append instead of 10,000.
+#
+# A lone "-" or "/" that fails its own branch's more specific test (not part of
+# "--" or "/*") already falls into this same `else` branch today and is
+# appended as ordinary text, so folding it into a bulk slice changes nothing
+# about its handling either.
+ORDINARY_RUN = re.compile(r"'|\$|--|/\*")
 TABLE = r"(\"?[a-z_][a-z0-9_]*\"?(?:\s*\.\s*\"?[a-z_][a-z0-9_]*\"?)?)"
 LEDGER_COPY = re.compile(r"^COPY\s+public\.schema_migrations\s*\(", re.M)
 COPY_BLOCK = re.compile(r"^COPY\s+" + TABLE + r"\s*(?:\([^)]*\)\s*)?FROM\s+stdin\s*;", re.I | re.M)
@@ -80,6 +104,34 @@ COPY_BLOCK = re.compile(r"^COPY\s+" + TABLE + r"\s*(?:\([^)]*\)\s*)?FROM\s+stdin
 # format string is read exactly like any other.
 EXECUTE_ARGUMENT = re.compile(
     r"(?:^|[^A-Za-z0-9_])execute\s*(?:format\s*\(\s*)?$", re.I)
+
+# CHEAP PREFILTER FOR EXECUTE_ARGUMENT. This check runs on every string literal
+# and every dollar-quote in the file -- 100k+ times on a schema snapshot the
+# size PR #1297 committed -- and EXECUTE_ARGUMENT's anchored alternation
+# `(?:^|[^A-Za-z0-9_])...$` gives Python's re engine no fixed literal prefix to
+# fast-scan for, so it retries the match at every position of the up-to-4096-
+# character tail. Profiling against #1297's db/schema.sql showed this single
+# regex accounting for the majority of scan_sql's time.
+#
+# EXECUTE_ARGUMENT can only ever match a string that contains the substring
+# "execute" (case-insensitively) -- that is a necessary, not sufficient,
+# condition, by construction of the pattern. So a plain literal search for
+# "execute" is a correctness-preserving filter: when it finds nothing,
+# EXECUTE_ARGUMENT is guaranteed to find nothing either, and the expensive
+# pattern is skipped. A literal-only pattern (no anchors, no alternation) IS
+# something Python's re engine can fast-scan, so this prefilter itself is
+# several times cheaper per call than EXECUTE_ARGUMENT, and it almost always
+# is the only one that runs: real migrations use EXECUTE rarely (a dozen or so
+# in this repository's whole history), so the expensive pattern now runs only
+# on that small minority of tails instead of on every literal in the file.
+EXECUTE_LITERAL = re.compile(r"execute", re.I)
+
+
+def _is_execute_argument(text):
+    """bool(EXECUTE_ARGUMENT.search(text)), same result, cheaper on the common
+    case where "execute" does not appear at all -- see EXECUTE_LITERAL above."""
+    return bool(EXECUTE_LITERAL.search(text) and EXECUTE_ARGUMENT.search(text))
+
 
 CREATE_ROUTINE = re.compile(
     r"create\s+(?:or\s+replace\s+)?(?:function|procedure)\s+"
@@ -264,15 +316,59 @@ def scan_sql(sql):
     # chunks instead of characters.
     pending_top, pending_size = [], 0
 
+    # DISTANCE SINCE THE LAST "execute", tracked incrementally instead of
+    # re-discovered by re-scanning a fresh HEAD_TAIL-sized window on every
+    # single literal and dollar-quote. That per-occurrence re-scan was the
+    # actual hot spot profiling found on PR #1297's larger db/schema.sql:
+    # quotes sit roughly a hundred characters apart in real SQL, so
+    # consecutive HEAD_TAIL=4096-character windows overlap by well over 95%,
+    # and EXECUTE_ARGUMENT's search was redoing that overlapping work from
+    # scratch each time.
+    #
+    # "execute" is rare -- a dozen or so migrations in this repository's whole
+    # history -- so tracking "how far back was the last one" turns almost
+    # every check into an integer comparison instead of a regex search: only
+    # a literal or dollar-quote that lands within HEAD_TAIL characters AFTER
+    # a real "execute" ever needs the full tail(HEAD_TAIL) + pattern check.
+    # That fallback path is unchanged and still exact -- this only decides
+    # WHETHER to take it, never changes what it returns.
+    #
+    # chars_since_execute is measured from the end of the accumulated buffer
+    # back to the END of the most recent "execute" match, in the same
+    # coordinates tail() reads in: each fresh scan_sql call (top level or a
+    # nested routine/DO body via _scanned) starts its own `top` from empty,
+    # so a fresh, "nothing seen yet" start here matches a fresh, empty buffer
+    # there -- neither can see past its own call's start.
+    chars_since_execute = HEAD_TAIL + 1
+    execute_carry = ""
+
     def append_top(value):
-        nonlocal pending_size
+        nonlocal pending_size, chars_since_execute, execute_carry
         if value:
             pending_top.append(value)
             pending_size += len(value)
+            # Only the last few characters of what came before `value` can
+            # combine with it to spell "execute" across the join; 6 is one
+            # short of len("execute"), which is exactly enough to complete a
+            # split match together with at least one character of `value`.
+            combined = execute_carry + value
+            found = combined.lower().rfind("execute")
+            if found == -1:
+                chars_since_execute += len(value)
+            else:
+                chars_since_execute = len(combined) - (found + len("execute"))
+            execute_carry = combined[-6:]
             if pending_size >= 4096:
                 top.append("".join(pending_top))
                 pending_top.clear()
                 pending_size = 0
+
+    def maybe_execute_argument(text):
+        """_is_execute_argument(text), skipped entirely when chars_since_execute
+        already proves no "execute" can be in the window text represents."""
+        if chars_since_execute > HEAD_TAIL:
+            return False
+        return _is_execute_argument(text)
 
     def flush_top():
         nonlocal pending_size
@@ -312,7 +408,7 @@ def scan_sql(sql):
             # IS THIS LITERAL AN ARGUMENT TO EXECUTE? If so its text is not inert
             # -- it is SQL that runs. Decided BEFORE the literal is consumed,
             # because `top` still ends at the character before the quote here.
-            dynamic = bool(EXECUTE_ARGUMENT.search(tail(HEAD_TAIL)))
+            dynamic = chars_since_execute <= HEAD_TAIL and _is_execute_argument(tail(HEAD_TAIL))
             opened = i
             i += 1
             while i < n:
@@ -356,7 +452,7 @@ def scan_sql(sql):
             # `execute $$ ... $$` is the same statement as `execute '...'`, with the
             # other spelling of a string. Handled here rather than by widening the
             # literal branch, because a dollar-quote is consumed by this branch.
-            if keyword == "execute" or EXECUTE_ARGUMENT.search(head):
+            if keyword == "execute" or maybe_execute_argument(head):
                 append_top(" " + _scanned(body) + " ")
                 i = end + len(tag)
                 continue
@@ -372,8 +468,10 @@ def scan_sql(sql):
                 append_top(" ")                                   # dollar-quoted string literal
             i = end + len(tag)
         else:
-            append_top(ch)
-            i += 1
+            match = ORDINARY_RUN.search(sql, i)
+            end = match.start() if match else n
+            append_top(sql[i:end])
+            i = end
     flush_top()
     return "".join(top), do_bodies, routines
 

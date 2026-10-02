@@ -16,6 +16,7 @@ import importlib.util
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import types
@@ -209,11 +210,70 @@ def test_extractor_is_honest_about_the_real_instructions_block():
           500 < n < 20_000)
 
 
+def test_doc_branch_measures_the_larger_served_instruction_string():
+    with tempfile.TemporaryDirectory(prefix="boot-budget-doc-") as tmp:
+        claude_md, mcp_js, fixture, budget = make_tree(
+            tmp, claude_md_bytes=1, instr_chars=100, rail_chars=50,
+            current_recitation_bytes=1, pack_index_bytes=1,
+            total_budget_tokens=1000, sub_budgets_tokens={})
+        with open(mcp_js) as fh:
+            src = fh.read()
+        with open(mcp_js, "w") as fh:
+            fh.write(src.replace("instructions:",
+                                'instructions: profile === "doc" ? DOC_INSTRUCTIONS :'))
+        doc = os.path.join(tmp, "doc-profile.js")
+        for size, expected in [(300, 300), (5, 150)]:
+            with open(doc, "w") as fh:
+                fh.write('export const DOC_INSTRUCTIONS = "' + "d" * size + '";')
+            check(f"Doc branch size {size} measures max(Doc, full), excluding condition labels",
+                  boot_budget_check.connector_instructions_bytes(mcp_js) == expected)
+        with open(doc, "w") as fh:
+            fh.write('export const DOC_INSTRUCTIONS = "' + "d" * 4000 + '";')
+        b, tokens, total, _ = boot_budget_check.measure(
+            claude_md_path=claude_md, mcp_js_path=mcp_js,
+            core_fixture_path=fixture, budget_path=budget)
+        check("a Doc-only overage still fails the existing total budget",
+              any(name == "TOTAL" for name, _, _ in boot_budget_check.evaluate(b, tokens, total)))
+        with open(doc, "w") as fh:
+            fh.write("export const DOC_INSTRUCTIONS = unmeasuredPrompt;")
+        try:
+            boot_budget_check.connector_instructions_bytes(mcp_js)
+        except ValueError:
+            refused = True
+        else:
+            refused = False
+        check("an unsupported Doc expression refuses instead of dropping its measurement", refused)
+
+
+def test_real_measurement_matches_served_full_and_doc_instructions():
+    script = """
+import { dispatch } from './mcp-server/src/mcp.js';
+import { authenticatedIdentity } from './mcp-server/src/identity.js';
+const sizes = [];
+for (const path of ['/mcp', '/doc/mcp']) {
+  const request = new Request('https://api.doctorcre.com' + path, {
+    method: 'POST', body: JSON.stringify({jsonrpc: '2.0', id: 1, method: 'initialize'})
+  });
+  const reply = await (await dispatch(request, {}, {},
+    authenticatedIdentity.connectionForGrant({slug: 'joe'}))).json();
+  sizes.push(Buffer.byteLength(reply.result.instructions, 'utf8'));
+}
+console.log(JSON.stringify(sizes));
+"""
+    sizes = json.loads(subprocess.check_output(
+        ["node", "--input-type=module", "-e", script], cwd=REPO, text=True))
+    check("real budget equals the largest served full/Doc instructions, not source labels",
+          boot_budget_check.connector_instructions_bytes(
+              os.path.join(REPO, "mcp-server", "src", "mcp.js")) == max(sizes))
+
+
 if __name__ == "__main__":
     test_passes_under_budget()
     test_synthetic_overage_fails_and_names_consolidation()
     test_main_exit_code_reflects_overage()
     test_extractor_is_honest_about_the_real_instructions_block()
+    test_doc_branch_measures_the_larger_served_instruction_string()
+    test_real_measurement_matches_served_full_and_doc_instructions()
     if FAILURES:
         print(f"\n{len(FAILURES)} FAILURE(S): {FAILURES}")
         sys.exit(1)

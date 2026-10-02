@@ -192,6 +192,12 @@ WRITE_ACTION_PREFIXES = {
     "update", "write",
 }
 WRITE_ACTION_EXACT = {
+    "whats-new",  # explicit mark_seen persists the authenticated partner's watermark
+    "acknowledge-board-answer",  # durable Received receipt for a board answer
+    "answer-board-question",      # human partner records a durable answer
+    "ask-board-question",         # opens a named question on the board
+    "publish-board-snapshot",     # publishes the signed-in board view
+    "revise-board-question",      # preserves the prior question revision
     "acknowledge-notification",  # writes ops.notification_read: a durable per-recipient
                                  # receipt a session could report as "I cleared that".
                                  # EXACT rather than a prefix for adjudicate's reason --
@@ -223,6 +229,9 @@ WRITE_ACTION_EXACT = {
                                  # a Doc conversation under a compare-and-swap. EXACT for
                                  # the same reason: "rename" covers one verb today, and a
                                  # future rename-shaped read must not inherit the class.
+    "suggest-doc-work",       # B08: stores one source-bound obligation suggestion;
+                              # "suggest" stays exact so future read-like suggestions
+                              # do not inherit write classification.
     "call-verb",             # unknown inner call is conservatively a write
     "cancel-capability-session",  # abandons the open build session on a capability
                               # project and returns that project to ready. A write in
@@ -233,6 +242,9 @@ WRITE_ACTION_EXACT = {
                               # reason as adjudicate above — it would cover exactly one
                               # verb today, and a generic "cancel" prefix would silently
                               # capture any future read named cancel-something.
+    "bind-rule-context-contract",  # V5-F05: appends an authority-only typed rule
+                                    # projection. EXACT: read-action-context is a
+                                    # read, and "bind" is not a blanket write prefix.
     "dry-run-doctrine-gates",
     "edit-loop-header",      # updates loop_block.prose_md, like presence-lease/review-deal:
                               # a one-off verb whose first word ("edit") is not a generic
@@ -251,6 +263,11 @@ WRITE_ACTION_EXACT = {
                                   # plan for one workflow identity. Same "open" first-word
                                   # reasoning as open-campaign/open-incident -- not
                                   # generalized into a prefix, exact entry instead.
+    "open-complete-set-review",  # DoctorCRE V5-A03: opens an append-only independent
+                                  # complete-set review case over an immutable delivered-set
+                                  # digest. Same "open" first-word reasoning as
+                                  # open-campaign/open-incident/open-workflow-cutover-plan --
+                                  # not generalized into a prefix, exact entry instead.
     "advance-workflow-cutover-stage",  # DoctorCRE V5-R02 (Q116): moves a cutover plan one
                                   # stage forward (read_legacy..recovery_ready). A durable
                                   # state transition a session could report as done without
@@ -267,6 +284,15 @@ WRITE_ACTION_EXACT = {
                                   # prefix (a future mark-* read must not inherit this class).
     "mark-slice-progress",       # DoctorCRE V5-R02 (Q153): the writer-side in_progress/blocked
                                   # mark beside mark-slice-completion; same exact-entry reasoning.
+    "propose-slice-completion",  # slice done-marker (0628): the automated seat's completion
+                                  # PROPOSAL (never a mark). Exact entry for
+                                  # mark-slice-completion's reason.
+    "confirm-slice-completions",  # slice done-marker (0628): the partner batch confirmation
+                                  # that writes complete. Exact entry, same reasoning.
+    "bind-slice-criterion-evidence",    # slice done-marker (0628): binds an unbound criterion
+                                  # to server-resolved evidence, once. "bind" is not a prefix.
+    "rebind-slice-criterion-evidence",  # slice done-marker (0628): the partner override of a
+                                  # binding; exact entry, same reasoning.
     "cancel-workflow-cutover-plan",  # DoctorCRE V5-R02: cancels an active cutover plan so it
                                   # stops governing enqueue. Exact entry, like
                                   # cancel-capability-session -- no blanket "cancel" prefix.
@@ -325,6 +351,26 @@ WRITE_ACTION_EXACT = {
     "transition-evaluation-case",  # human-authority append-only eval lifecycle write
     "transition-execution-environment-provider",  # human-authority provider CAS/rollback lifecycle write
     "record-foundation-assurance-minimum-outcome",
+    "evaluate-artifact-deletion",  # V5-F01: persists one bounded deletion-evaluation
+                                   # receipt (it never deletes). EXACT rather than a
+                                   # prefix: "evaluate" names judgments that are reads
+                                   # elsewhere, and as a prefix would capture them.
+    "raise-delivery-cadence-alert",  # V5-A05: persists a durable escalation/quiet-hours
+                                       # alert row the sweep job's own state depends on;
+                                       # "raise" stays exact rather than becoming a prefix,
+                                       # since a future raise-* read must not inherit the
+                                       # class -- same reasoning as report-problem/open-incident.
+    # V5-J102: the CRE lifecycle writers whose first word is not a write prefix.
+    # Each appends a lifecycle subject or event row (or one shadow run record) a
+    # session could report as done. EXACT, not prefixes: initialize-, open-,
+    # commit-, cancel- and run- would capture future reads named the same way.
+    "initialize-prospect-relationship",
+    "initialize-assignment",
+    "initialize-property-negotiation",
+    "open-cre-assignment",
+    "commit-winning-property",
+    "cancel-pending-deal",
+    "run-migration-shadow",
 }
 HUMAN_ONLY_WRITE_ACTION_EXACT = {
     "acknowledge-ready-plan-amendment",  # WR-000126 authenticated human-only notice write.
@@ -470,12 +516,20 @@ def payload_is_carr(payload, recs):
 
 def tool(rec):
     payload = rec.get("payload")
-    if isinstance(payload, dict) and payload.get("type") == "custom_tool_call":
+    if isinstance(payload, dict) and payload.get("type") in {"custom_tool_call", "function_call"}:
         name = str(payload.get("name", ""))
         # Codex records nested MCP calls inside a custom `exec` input.  Keep
         # direct MCP names intact too, for a future/runtime spelling that
         # writes them directly.
-        return (name if name.startswith("mcp__") else "functions." + name), payload.get("input")
+        value = payload.get("input")
+        if payload.get('type') == 'function_call':
+            value = payload.get('arguments')
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except ValueError:
+                    pass
+        return (name if name.startswith(("mcp__", "functions.")) else "functions." + name), value
     msg = rec.get("message") or rec
     content = msg.get("content")
     if isinstance(content, list):
@@ -548,7 +602,7 @@ def mutation(name, value):
 def verification(name, value):
     if name in VERIFY_TOOLS:
         return True
-    if name in {"Bash", "functions.exec"} and VERIFY_COMMAND.search(command(value)):
+    if name in {"Bash", "functions.exec", "functions.exec_command"} and VERIFY_COMMAND.search(command(value)):
         return True
     # A visible CARR read after an embedded CARR write is fresh evidence even
     # when Codex's outer custom call remains named only `functions.exec`.
@@ -1097,7 +1151,126 @@ def write_verb_names(window):
     return names
 
 
+def _call_id(rec):
+    payload = rec.get('payload') or {}
+    if payload.get('type') in {'custom_tool_call', 'function_call'}:
+        return payload.get('call_id')
+    content = message(rec).get('content')
+    for block in content if isinstance(content, list) else []:
+        if isinstance(block, dict) and block.get('type') == 'tool_use':
+            return block.get('id')
+    return None
+
+
+def _script_result(value, predicate):
+    output = value.split('\nOutput:\n', 1)[1].strip()
+    decoder = json.JSONDecoder()
+    statuses = []
+    try:
+        while output:
+            item, end = decoder.raw_decode(output)
+            statuses.append(predicate(item))
+            output = output[end:].strip()
+    except ValueError:
+        return False
+    return bool(statuses) and all(statuses)
+
+
+def _result_success(value, terminal_success=False):
+    """A paired result must be terminal; running, timeout and errors never count."""
+    if isinstance(value, str):
+        if re.search(r'Script running|session ID|timed?\s*out|timeout|Process exited with code [1-9]', value, re.I):
+            return False
+        if value.startswith('Script completed') and '\nOutput:\n' in value:
+            return _script_result(value, _result_success)
+        try:
+            return _result_success(json.loads(value))
+        except ValueError:
+            # Native shell wrappers carry an exit status. Claude's result
+            # envelope may instead explicitly report is_error=false.
+            return bool(re.search(r'Process exited with code 0\b', value)) or (terminal_success and bool(value.strip()))
+    if isinstance(value, list):
+        return bool(value) and all(_result_success(item, terminal_success) for item in value)
+    if isinstance(value, dict):
+        if value.get('is_error') or value.get('isError') or value.get('error') or value.get('ok') is False:
+            return False
+        if 'status' in value and value['status'] not in ('completed', 'success', 'succeeded'):
+            return False
+        if 'exit_code' in value:
+            return type(value['exit_code']) is int and value['exit_code'] == 0 and not value.get('session_id') and not value.get('cell_id')
+        if value.get('session_id') or value.get('cell_id'):
+            return False
+        if value.get('type') == 'text':
+            return _result_success(value.get('text', ''), terminal_success)
+        if 'output' in value:
+            return _result_success(value['output'], terminal_success)
+        if 'content' in value:
+            return _result_success(value['content'], terminal_success)
+        return value.get('ok') is True or value.get('status') in ('success', 'succeeded')
+    return False
+
+
+def _result_terminal(value):
+    """Completion of an attempt is separate from success of verification."""
+    if isinstance(value, str):
+        if re.search(r'Script running|session ID', value, re.I):
+            return False
+        if value.startswith('Script completed') and '\nOutput:\n' in value:
+            return _script_result(value, _result_terminal)
+        try:
+            return _result_terminal(json.loads(value))
+        except ValueError:
+            return bool(re.search(r'Process exited with code -?\d+\b', value))
+    if isinstance(value, list):
+        return bool(value) and all(_result_terminal(item) for item in value)
+    if isinstance(value, dict):
+        if value.get('session_id') or value.get('cell_id'):
+            return False
+        if 'status' in value and value['status'] not in ('completed', 'success', 'succeeded', 'failed'):
+            return False
+        if 'exit_code' in value:
+            return type(value['exit_code']) is int
+        if value.get('status') in ('completed', 'success', 'succeeded', 'failed') or type(value.get('ok')) is bool:
+            return True
+        for key in ('text', 'output', 'content'):
+            if key in value:
+                return _result_terminal(value[key])
+    return False
+
+
+def _completed_calls(recs):
+    results = {}
+    for rec in recs:
+        epoch = rec['_epoch']
+        payload = rec.get('payload') or {}
+        if payload.get('call_id') and payload.get('type') in {'custom_tool_call_output', 'function_call_output'}:
+            value = payload.get('output')
+            success = not payload.get('is_error') and _result_success(value)
+            results[payload.get('call_id')] = (epoch, success, success or _result_terminal(value))
+        content = message(rec).get('content')
+        for block in content if isinstance(content, list) else []:
+            if isinstance(block, dict) and block.get('type') == 'tool_result' and block.get('tool_use_id'):
+                value = block.get('content')
+                success = not block.get('is_error') and _result_success(value, block.get('is_error') is False)
+                terminal = success or _result_terminal(value) or (type(block.get('is_error')) is bool and not re.search(r'Script running|session ID', str(value), re.I))
+                results[block.get('tool_use_id')] = (epoch, success, terminal)
+    return results
+
+
 def evaluate(recs, ledger=None):
+    # A message may contain several tool calls. Preserve every operation as
+    # its own ordered record so all receipt and mutation readers see it.
+    expanded = []
+    for epoch, original in enumerate(recs):
+        rec = {**original, '_epoch': epoch}
+        msg = rec.get("message")
+        blocks = msg.get("content") if isinstance(msg, dict) else None
+        if isinstance(blocks, list) and sum(isinstance(b, dict) and b.get("type") == "tool_use" for b in blocks) > 1:
+            for block in blocks:
+                expanded.append({**rec, "message": {**msg, "content": [block]}})
+        else:
+            expanded.append(rec)
+    recs = expanded
     """Block when an ordered clause has no receipt, or a close denies one it holds.
 
     THE LEDGER OUT-PARAMETER carries what the latch needs and nothing else, so
@@ -1159,9 +1332,18 @@ def evaluate(recs, ledger=None):
     if not tracked:
         return False, "no tracked mutation"
 
-    latest = max(mutation_at + [idx for idx, rec in enumerate(window)
-                                if file_paths(*tool(rec))])
-    verified = any(verification(*tool(rec)) for rec in window[latest + 1:])
+    completions = _completed_calls(window)
+    changes = [rec for rec in window if mutation(*tool(rec)) or file_paths(*tool(rec))]
+    # Invocation order inside one assistant array is concurrency, not execution
+    # order. Each mutation needs a terminal result before verification starts.
+    change_results = [completions.get(_call_id(rec)) for rec in changes]
+    mutations_complete = all(item is not None and item[2] for item in change_results)
+    latest_finish = max((item[0] for item in change_results if item is not None), default=-1)
+    verified = mutations_complete and any(
+        verification(*tool(rec)) and rec['_epoch'] > latest_finish
+        and (completed := completions.get(_call_id(rec))) is not None
+        and completed[0] > rec['_epoch'] and completed[1]
+        for rec in window)
 
     # THE CLAUSE LAYER. No word in `final` is required to reach this: a session
     # that mutated against an order and closed on a clause with no receipt is

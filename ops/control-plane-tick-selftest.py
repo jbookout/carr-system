@@ -18,6 +18,8 @@ from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+from lib import launchd_calendar  # noqa: E402
 WRAPPER = REPO / "bin" / "control-plane-tick.sh"
 PLIST = REPO / "ops" / "launchd" / "com.carr.control-plane-tick.plist"
 SERVICES = REPO / "ops" / "config" / "services.json"
@@ -216,7 +218,7 @@ def main() -> int:
     check("plist invokes only the narrow wrapper",
           args == ["/bin/zsh", "{{REPO}}/bin/control-plane-tick.sh"], repr(args))
     check("plist wakes once per minute; the ledger owns actual recurrence",
-          plist.get("StartInterval") == 60)
+          "StartInterval" not in plist and launchd_calendar.cadence_seconds(plist) == 60)
     check("plist has no RunAtLoad side effect", "RunAtLoad" not in plist)
     check("plist does not carry a database credential", "CARR_DB_JOBS_URL" not in str(plist))
 

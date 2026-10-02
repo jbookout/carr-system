@@ -171,6 +171,124 @@ class TestQualityTests(unittest.TestCase):
 # --------------------------------------------------------- #14 done claim
 
 class DoneClaimTests(unittest.TestCase):
+    def test_judge_receives_current_request_test_history_and_failure_count(self):
+        fake = FakeJudge(answers={
+            "claim_scope": {"type": "choice", "choice": "current_completion", "confidence": 0.99},
+            "claims_supported": {"type": "noul", "noul": 0.9},
+            "evidence_shows_omitted_failure": {"type": "noul", "noul": 0.1},
+        })
+        evidence = {"test_command": "pytest test_regression.py", "test_output": "1 passed",
+                    "test_exit_code": 0, "test_run_count": 2, "test_failure_count": 1,
+                    "test_history": "1. FAIL pytest test_regression.py: 1 failed\n"
+                                    "2. PASS pytest test_regression.py: 1 passed"}
+        result = jdc.check_done_claim("Fixed; tests pass.", evidence, judge_module=fake)
+        self.assertEqual(result["verdict"], "supported")
+        state, questions = fake.last
+        self.assertEqual(state["evidence"]["test_failure_count"], "1")
+        self.assertEqual(state["evidence"]["test_run_count"], "2")
+        self.assertIn("1. FAIL", state["evidence"]["test_history"])
+        self.assertIn("2. PASS", state["evidence"]["test_history"])
+        self.assertIn("later passing", questions["evidence_shows_omitted_failure"]["instructions"])
+
+    def test_truncated_test_history_cannot_support_completion(self):
+        fake = FakeJudge(answers={
+            "claim_scope": {"type": "choice", "choice": "current_completion", "confidence": 0.99},
+            "claims_supported": {"type": "noul", "noul": 0.99},
+            "evidence_shows_omitted_failure": {"type": "noul", "noul": 0.01},
+        })
+        result = jdc.check_done_claim("Fixed; tests pass.", {
+            "test_run_count": 30, "test_failure_count": 3,
+            "test_history_truncated": True,
+            "test_history": "30 runs, 3 failures; some excerpts omitted",
+            "test_exit_code": 0,
+        }, judge_module=fake)
+        self.assertEqual(result["verdict"], "uncertain")
+        self.assertTrue(result["escalate"])
+        self.assertEqual(fake.last[0]["evidence"]["test_history_truncated"], "True")
+
+    def test_truncated_all_pass_history_can_support_completion(self):
+        fake = FakeJudge(answers={
+            "claim_scope": {"type": "choice", "choice": "current_completion", "confidence": 0.99},
+            "claims_supported": {"type": "noul", "noul": 0.99},
+            "evidence_shows_omitted_failure": {"type": "noul", "noul": 0.01},
+        })
+        result = jdc.check_done_claim("Fixed; tests pass.", {
+            "test_run_count": 30, "test_failure_count": 0,
+            "test_history_truncated": True,
+            "test_history": "30 runs, 0 failures; some passing excerpts omitted",
+            "test_exit_code": 0,
+        }, judge_module=fake)
+        self.assertEqual(result["verdict"], "supported")
+
+    def test_judge_sees_end_of_long_latest_test_output(self):
+        fake = FakeJudge(answers={
+            "claim_scope": {"type": "choice", "choice": "current_completion", "confidence": 0.99},
+            "claims_supported": {"type": "noul", "noul": 0.1},
+            "evidence_shows_omitted_failure": {"type": "noul", "noul": 0.9},
+        })
+        jdc.check_done_claim("Fixed.", {"test_output": "x" * 5000 + "FINAL FAILURE"},
+                             judge_module=fake)
+        self.assertIn("FINAL FAILURE", fake.last[0]["evidence"]["test_output"])
+
+    def test_low_confidence_other_is_an_uncertain_claim(self):
+        fake = FakeJudge(answers={
+            "claim_scope": {"type": "choice", "choice": "other", "confidence": 0.01},
+            "claims_supported": {"type": "noul", "noul": 0.12},
+            "evidence_shows_omitted_failure": {"type": "noul", "noul": 0.08},
+        })
+        result = jdc.check_done_claim("The fix is done.", {}, judge_module=fake)
+        self.assertEqual(result["verdict"], "uncertain")
+        self.assertTrue(result["escalate"])
+        self.assertIn("advice", result["detail"])
+
+    def test_missing_or_malformed_scope_confidence_is_uncertain(self):
+        for confidence in (None, "bad", -1, 2):
+            with self.subTest(confidence=confidence):
+                fake = FakeJudge(answers={"claim_scope": {
+                    "type": "choice", "choice": "other", "confidence": confidence}})
+                result = jdc.check_done_claim("The fix is done.", {}, judge_module=fake)
+                self.assertEqual(result["verdict"], "uncertain")
+                self.assertTrue(result["escalate"])
+
+    def test_low_confidence_current_completion_is_uncertain(self):
+        fake = FakeJudge(answers={"claim_scope": {
+            "type": "choice", "choice": "current_completion", "confidence": 0.2}})
+        result = jdc.check_done_claim("The fix is done.", {}, judge_module=fake)
+        self.assertEqual(result["verdict"], "uncertain")
+        self.assertTrue(result["escalate"])
+
+    def test_recorded_status_report_is_not_current_work_completion(self):
+        # cc59a986, 2026-09-29 13:01:52Z: "fixed" describes an older bug.
+        message = ("Jev is back online. My hooks showed it answering again right after you added the credit. "
+                   "At the old spending pace, $5 would last only about 2 to 3 days. Your $10 from Sept 24 "
+                   "was used up in about 4 days, and roughly $2.50 of that came from a bug that has since "
+                   "been fixed. These fixes merged since then, but I haven't checked that they're live in "
+                   "production yet.")
+        fake = FakeJudge(answers={
+            "claim_scope": {"type": "choice", "choice": "other", "confidence": 0.99},
+            "claims_supported": {"type": "noul", "noul": 0.06},
+            "evidence_shows_omitted_failure": {"type": "noul", "noul": 0.27},
+        })
+        result = jdc.check_done_claim(message, {"test_output": "unrelated test passed"},
+                                      judge_module=fake)
+        self.assertEqual(result["verdict"], "no_claim")
+        self.assertEqual(fake.calls, 1)
+
+    def test_recorded_explanation_of_done_checker_is_not_a_completion(self):
+        # cc59a986, 2026-09-29 13:03:54Z: "done" explains the check.
+        message = ("That line comes from a Jev check that runs every time I finish a reply. "
+                   "It checks whether a message saying something is done is backed by evidence. "
+                   "You're probably right that it's misfiring. Sol is going through that record "
+                   "for this session. It will count how many flags were real and how many were false alarms.")
+        fake = FakeJudge(answers={
+            "claim_scope": {"type": "choice", "choice": "other", "confidence": 0.99},
+            "claims_supported": {"type": "noul", "noul": 0.08},
+            "evidence_shows_omitted_failure": {"type": "noul", "noul": 0.28},
+        })
+        result = jdc.check_done_claim(message, {"test_output": "unrelated test passed"},
+                                      judge_module=fake)
+        self.assertEqual(result["verdict"], "no_claim")
+
     def test_no_completion_word_is_no_claim_and_costs_no_call(self):
         fake = FakeJudge()
         result = jdc.check_done_claim("Here is a summary of the changes.", {}, judge_module=fake)
@@ -179,6 +297,7 @@ class DoneClaimTests(unittest.TestCase):
 
     def test_supported_claim(self):
         fake = FakeJudge(answers={
+            "claim_scope": {"type": "choice", "choice": "current_completion", "confidence": 0.99},
             "claims_supported": {"type": "noul", "noul": 0.95},
             "evidence_shows_omitted_failure": {"type": "noul", "noul": 0.05},
         })
@@ -190,6 +309,7 @@ class DoneClaimTests(unittest.TestCase):
 
     def test_evidence_shows_omitted_failure(self):
         fake = FakeJudge(answers={
+            "claim_scope": {"type": "choice", "choice": "current_completion", "confidence": 0.99},
             "claims_supported": {"type": "noul", "noul": 0.3},
             "evidence_shows_omitted_failure": {"type": "noul", "noul": 0.9},
         })
@@ -240,6 +360,35 @@ class TriageReviewTests(unittest.TestCase):
         self.assertEqual(result["detail"]["files"]["src/auth.py"]["source"], "deterministic_floor")
         self.assertIn("advice", result["detail"])
 
+    def test_floor_reads_the_review_tier_map(self):
+        # hooks/ is tier 3 in ops/config/review-tiers.v1.json and matched
+        # nothing in the regex the map replaced: the floor comes from the map.
+        fake = FakeJudge(answers={})
+        result = jdc.triage_review("diff --git a/hooks/lint-gate.py b/hooks/lint-gate.py\n@@ -1 +1 @@\n+x\n",
+                                   "task", judge_module=fake)
+        self.assertEqual(result["detail"]["files"]["hooks/lint-gate.py"]["source"], "deterministic_floor")
+        self.assertEqual(fake.calls, 0)
+
+    def test_unreadable_map_floors_high_and_says_why(self):
+        fake = FakeJudge(answers={})
+        original = jdc._sibling_lib
+
+        def broken(name):
+            raise ValueError("review-tiers map is malformed")
+
+        jdc._sibling_lib = broken
+        try:
+            result = jdc.triage_review("diff --git a/README.md b/README.md\n@@ -1 +1 @@\n+x\n",
+                                       "task", judge_module=fake)
+        finally:
+            jdc._sibling_lib = original
+        row = result["detail"]["files"]["README.md"]
+        self.assertEqual(row["risk"], "high")
+        self.assertEqual(row["source"], "review_tier_map_unreadable")
+        self.assertIn("malformed", row["error"])
+        self.assertEqual(result["verdict"], "needs_review")
+        self.assertEqual(fake.calls, 0)
+
     def test_mixed_diff_one_floor_one_judged_high(self):
         files = jdc.split_diff_by_file(DIFF_TWO_FILES)
         widgets_key = jdc._safe_id("src/widgets.py")
@@ -264,6 +413,71 @@ class TriageReviewTests(unittest.TestCase):
         fake = FakeJudge(error=RuntimeError("down"))
         result = jdc.triage_review(DIFF_TWO_FILES, "task", judge_module=fake)
         self.assertEqual(result["verdict"], "unavailable")
+
+
+class TriageReviewCacheTests(unittest.TestCase):
+    """The Stop hook re-triages an unchanged diff at every Stop; an identical
+    diff and task is asked once per window, and the cache only ever costs an
+    extra ask."""
+
+    DIFF = "diff --git a/src/widgets.py b/src/widgets.py\n@@ -1 +1 @@\n+x = 1\n"
+    HIGH = {jdc._safe_id("src/widgets.py"): {"type": "score", "score": 1.8, "confidence": 0.7}}
+
+    def test_repeated_identical_diff_asks_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = os.path.join(tmp, "c.json")
+            fake = FakeJudge(answers=self.HIGH)
+            first = jdc.triage_review(self.DIFF, "task", judge_module=fake,
+                                      cache_path=cache, now=1000.0)
+            second = jdc.triage_review(self.DIFF, "task", judge_module=fake,
+                                       cache_path=cache, now=1100.0)
+            self.assertEqual(fake.calls, 1)
+            self.assertEqual(len(fake.rows), 1)  # a hit writes no call row
+            self.assertEqual(first, second)
+            self.assertEqual(second["verdict"], "needs_review")
+
+    def test_a_changed_diff_or_task_asks_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = os.path.join(tmp, "c.json")
+            fake = FakeJudge(answers=self.HIGH)
+            jdc.triage_review(self.DIFF, "task", judge_module=fake, cache_path=cache, now=1000.0)
+            jdc.triage_review(self.DIFF + "+y = 2\n", "task", judge_module=fake,
+                              cache_path=cache, now=1001.0)
+            jdc.triage_review(self.DIFF, "another task", judge_module=fake,
+                              cache_path=cache, now=1002.0)
+            self.assertEqual(fake.calls, 3)
+
+    def test_cache_expiry_asks_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = os.path.join(tmp, "c.json")
+            fake = FakeJudge(answers=self.HIGH)
+            jdc.triage_review(self.DIFF, "task", judge_module=fake, cache_path=cache, now=1000.0)
+            jdc.triage_review(self.DIFF, "task", judge_module=fake, cache_path=cache,
+                              now=1000.0 + 31 * 60)
+            self.assertEqual(fake.calls, 2)
+
+    def test_an_unwritable_cache_still_triages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            blocker = os.path.join(tmp, "file")
+            Path(blocker).write_text("not a directory", encoding="utf-8")
+            fake = FakeJudge(answers=self.HIGH)
+            for step in range(2):
+                result = jdc.triage_review(self.DIFF, "task", judge_module=fake,
+                                           cache_path=os.path.join(blocker, "c.json"),
+                                           now=1000.0 + step)
+                self.assertEqual(result["verdict"], "needs_review")
+            self.assertEqual(fake.calls, 2)
+
+    def test_an_outage_is_never_cached(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = os.path.join(tmp, "c.json")
+            down = FakeJudge(error=RuntimeError("down"))
+            self.assertEqual(jdc.triage_review(self.DIFF, "task", judge_module=down,
+                                               cache_path=cache, now=1000.0)["verdict"],
+                             "unavailable")
+            up = FakeJudge(answers=self.HIGH)
+            jdc.triage_review(self.DIFF, "task", judge_module=up, cache_path=cache, now=1001.0)
+            self.assertEqual(up.calls, 1)
 
 
 # --------------------------------------------------------- #24 fact check

@@ -12,7 +12,7 @@
   without having to remember it: "if im on my macbook working or my studio or
   whatever, i dont want to have to remember to do that." Four fixed fires a
   day left a machine that had been asleep or unused for a stretch showing
-  stale work for up to twelve hours; RunAtLoad plus an hourly StartInterval
+  stale work for up to twelve hours; RunAtLoad plus an hourly calendar fire
   means login or wake catches a Mac up immediately, and nothing is ever more
   than an hour behind while it's on. The job stays cheap and idempotent (a
   no-op re-render when everything is already current), so an hourly cadence
@@ -33,8 +33,11 @@
     <string>{{REPO}}/bin/fleet-sync.sh</string>
   </array>
 
-  <key>StartInterval</key>
-  <integer>3600</integer>
+  <!-- carr-launchd-interval-seconds: 3600 | rendered by lib/launchd_calendar.py; macOS 27 launchd never fires StartInterval -->
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Minute</key><integer>31</integer></dict>
+  </array>
 
   <key>RunAtLoad</key>
   <true/>
