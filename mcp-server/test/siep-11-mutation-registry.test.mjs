@@ -3507,3 +3507,46 @@ test("the bound MCP fields are exactly what the runtime admission check compares
   const compared = [...actual.matchAll(/^\s+([a-z_]+):/gm)].map(match => match[1]).sort();
   assert.deepEqual(compared, MCP_TOOL_BOUND_FIELDS.filter(field => field !== "ingress_key").sort());
 });
+
+// PR 865: a source-only credential-tool edit must bind the reviewed bytes
+// while preserving the sealed predecessor and all ingress authority fields.
+test("credential rotation source review matches the live frontier", () => {
+  assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
+});
+
+
+test("credential rotation source review cannot widen authority or admit an ingress", () => {
+  const probe = `
+    import assert from "node:assert/strict";
+    import fs from "node:fs";
+    import { syncBuiltinESMExports } from "node:module";
+    const read = fs.readFileSync;
+    const fixturePath = "ops/config/scac-registry-source-inventory-fixtures.v1.json";
+    const fixture = JSON.parse(read(fixturePath, "utf8"));
+    const review = fixture.current_source_reviews["scac-mutation-registry.v103"];
+    const variant = process.argv[1];
+    const errors = {
+      authority: /changed an ingress contract/,
+      locator: /changed an ingress contract/,
+      ingress: /unknown ingress/,
+      digest: /current source-inventory review drifted/,
+      base: /malformed or bound to the wrong frontier/,
+      broad: /must bind each changed row explicitly/,
+    };
+    if (variant === "authority") review.upsert[0].authority_only = false;
+    if (variant === "locator") review.upsert[0].source_locator = "other.py";
+    if (variant === "ingress") review.upsert[0].ingress_key = "external-admin:new.py";
+    if (variant === "digest") review.expected_sha256 = "0".repeat(64);
+    if (variant === "base") review.base_version = "v102";
+    if (variant === "broad") review.source_digest_replacements = {"other.py": "0".repeat(64)};
+    fs.readFileSync = (path, ...args) => String(path).endsWith(fixturePath)
+      ? JSON.stringify(fixture) : read(path, ...args);
+    syncBuiltinESMExports();
+    const { assertCurrentSourceInventoryMatchesFixture } = await import("./ops/scac-mutation-inventory.mjs");
+    const { TOOLS } = await import("./mcp-server/src/tools.js");
+    assert.throws(() => assertCurrentSourceInventoryMatchesFixture(TOOLS), errors[variant]);
+  `;
+  for (const variant of ["authority", "locator", "ingress", "digest", "base", "broad"])
+    execFileSync(process.execPath, ["--input-type=module", "-e", probe, variant],
+      { cwd: fileURLToPath(new URL("../../", import.meta.url)), stdio: "pipe" });
+});
