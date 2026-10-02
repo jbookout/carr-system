@@ -1,9 +1,8 @@
 # carr-system — repo pointer for sessions
 
-Code lives here. Business, brand, persona, and deal context does NOT — by
-design. Before concluding something "doesn't exist," query the CARR Record
-Layer (the MCP connector's verbs, or `./run.sh retrieve "<question>"` locally):
-it is the source of truth for doctrine, records, and brand.
+Code lives here. The CARR Record Layer owns business, brand, persona, deal
+context and doctrine. Query its verbs or `./run.sh retrieve "<question>"`
+before declaring anything absent.
 
 The 2026-08-19 cutoff retired the generated Drive .md files; there is no
 compiled-rules file or vault CLAUDE.md to fall back on. A session that cannot
@@ -103,11 +102,6 @@ silently treated as absent.
    A17 back as closed. Only then report the migration complete to Dell in plain
    language.
 
-## Before every PR: design and debt pass
+## PR design and debt
 
-Before opening or updating any pull request, apply both skills to the diff:
-
-1. `codebase-design`: deep modules, real seams, design the interface twice when it matters.
-2. `zero-tech-debt`: rework the change from its intended end state; delete dead compatibility paths and duplicated rules.
-
-Both are installed at `~/.agents/skills/` (sources: github.com/mattpocock/skills `skills/engineering/codebase-design`, github.com/jnsahaj/skills `skills/zero-tech-debt`). The PR reviewer checks both, so all two are required.
+Read and follow [the required PR policy](AGENTS.md#before-every-pr-design-and-debt-pass).

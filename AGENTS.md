@@ -325,7 +325,9 @@ Independently establish all six declared R06 checks: check:r06-packet-bindings, 
 
 Before opening or updating any pull request, apply both skills to the diff:
 
-1. `codebase-design`: deep modules, real seams, design the interface twice when it matters.
-2. `zero-tech-debt`: rework the change from its intended end state; delete dead compatibility paths and duplicated rules.
+1. `~/.agents/skills/codebase-design/SKILL.md`: deep modules, real seams, design the interface twice when it matters.
+2. `~/.agents/skills/zero-tech-debt/SKILL.md`: rework the change from its intended end state; delete dead compatibility paths and duplicated rules.
 
-Both are installed at `~/.agents/skills/` (sources: github.com/mattpocock/skills `skills/engineering/codebase-design`, github.com/jnsahaj/skills `skills/zero-tech-debt`). The PR reviewer checks both, so all two are required.
+Both passes are required. Read the skill files before applying them; if either
+is unavailable, report the missing skill instead of claiming the pass.
+This section is the canonical policy for both client entry points.
