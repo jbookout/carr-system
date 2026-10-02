@@ -215,6 +215,132 @@ class DailyCapTests(unittest.TestCase):
         self.assertEqual(self.requests, [])
 
 
+class WorkerDailyCapTests(unittest.TestCase):
+    ask = DailyCapTests.ask
+
+    def setUp(self):
+        DailyCapTests.setUp(self)
+        self.options.pop("api_key")
+        self.options["cache_ttl_seconds"] = 0
+        self.enterContext(patch.dict(os.environ, CARR_JEV_IN_HOOK="0"))
+        self.enterContext(patch.object(client, "read_api_key", return_value="offline-fixture"))
+        self.worker_calls = []
+        self.cached = False
+        self.worker_error = None
+        self.options["server_runner"] = self.worker
+
+    def worker(self, argv, **kwargs):
+        args = json.loads(argv[3])
+        mode = args.get("transport_mode")
+        self.worker_calls.append(mode)
+        if mode == "cache_only" and not self.cached:
+            return subprocess.CompletedProcess(argv, 1, "", '{"error":"jev_cache_miss"}')
+        if self.worker_error:
+            raise self.worker_error
+        answer = {**ANSWER, "ok": True, "receipt_id": "fixture-worker"}
+        if self.cached:
+            answer.update(cache_hit=True, usage=None)
+        return subprocess.CompletedProcess(argv, 0, json.dumps(answer), "")
+
+    def count(self):
+        path = str(self.log) + ".daily-cap.sqlite3"
+        db = client.sqlite3.connect(path)
+        try:
+            return db.execute("SELECT attempts FROM daily_cap").fetchone()[0]
+        finally:
+            db.close()
+
+    def test_zero_and_exhausted_cap_never_start_paid_worker_transport(self):
+        client.JEV_COST_CONFIG["daily_paid_call_cap"] = 0
+        with self.assertRaisesRegex(client.TypeSafeError, "daily.*cap"):
+            self.ask("zero capacity")
+        self.assertEqual(self.worker_calls, ["cache_only"])
+        client.JEV_COST_CONFIG["daily_paid_call_cap"] = 1
+        self.ask("one")
+        for _ in range(3):
+            with self.assertRaisesRegex(client.TypeSafeError, "daily.*cap"):
+                self.ask("exhausted")
+        self.assertEqual(self.worker_calls.count("paid_once"), 1)
+        self.assertEqual(self.count(), 1)
+        self.assertEqual(self.requests, [])
+
+    def test_worker_cache_hit_is_free_even_at_zero_cap(self):
+        client.JEV_COST_CONFIG["daily_paid_call_cap"] = 0
+        self.cached = True
+        result = self.ask("cached")
+        self.assertTrue(result["cache_hit"])
+        self.assertIsNone(result["usage"])
+        self.assertEqual(self.worker_calls, ["cache_only"])
+        self.assertFalse(Path(str(self.log) + ".daily-cap.sqlite3").exists())
+        self.assertEqual(self.requests, [])
+
+    def test_direct_fallback_cache_stays_free_when_worker_cache_misses_at_cap(self):
+        client.JEV_COST_CONFIG["daily_paid_call_cap"] = 1
+        self.options["cache_ttl_seconds"] = 60
+        def unavailable(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 1, "", '{"error":"unknown_tool"}')
+        with patch.dict(self.options, server_runner=unavailable):
+            self.ask("direct answer cached while Worker unavailable")
+        result = self.ask("direct answer cached while Worker unavailable")
+        self.assertTrue(result["cache_hit"])
+        self.assertEqual(self.count(), 1)
+        self.assertEqual(self.worker_calls, ["cache_only"])
+        self.assertEqual(len(self.requests), 1)
+
+    def test_uncertain_worker_attempt_consumes_capacity_before_direct_fallback(self):
+        client.JEV_COST_CONFIG["daily_paid_call_cap"] = 1
+        self.worker_error = subprocess.TimeoutExpired("offline-worker", 0.01)
+        with self.assertRaisesRegex(client.TypeSafeError, "daily.*cap"):
+            self.ask("uncertain paid attempt")
+        self.assertEqual(self.worker_calls, ["cache_only", "paid_once"])
+        self.assertEqual(self.count(), 1)
+        self.assertEqual(self.requests, [])
+        rows = [json.loads(row) for row in self.log.read_text().splitlines()]
+        self.assertTrue(any(row.get("error") == "server_timeout" for row in rows))
+
+    def test_worker_failure_and_direct_retry_each_reserve_capacity(self):
+        self.worker_error = OSError("offline-worker failed")
+        attempts = []
+        def throttled(request, timeout=None):
+            attempts.append(1)
+            raise urllib.error.HTTPError("https://fixture.invalid", 429, "throttled",
+                                         {"retry-after": "0"}, io.BytesIO(b""))
+        with patch.object(client.urllib.request, "urlopen", throttled):
+            with self.assertRaisesRegex(client.TypeSafeError, "daily.*cap"):
+                self.ask("worker then throttled fallback")
+        self.assertEqual(self.count(), 2)
+        self.assertEqual(len(attempts), 1)
+
+    def test_worker_route_rejects_corrupt_seed_and_missing_configuration(self):
+        for evidence in (b'{"ts":"2026-10-02",', b'not json\n', b'\xff\n'):
+            with self.subTest(evidence=evidence):
+                self.log.write_bytes(evidence)
+                with self.assertRaisesRegex(client.TypeSafeError, "accounting"):
+                    self.ask("unreadable seed")
+        with patch.dict(client.JEV_COST_CONFIG, {}, clear=True):
+            with self.assertRaisesRegex(client.TypeSafeError, "cap"):
+                self.ask("missing cap")
+        self.assertNotIn("paid_once", self.worker_calls)
+        self.assertEqual(self.requests, [])
+
+    def test_concurrent_worker_calls_share_cap_and_trigger_alarms(self):
+        def attempt(i):
+            try:
+                self.ask(str(i))
+                return True
+            except client.TypeSafeError:
+                return False
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            outcomes = list(pool.map(attempt, range(12)))
+        self.assertEqual(sum(outcomes), 2)
+        self.assertEqual(self.worker_calls.count("paid_once"), 2)
+        self.assertEqual(self.count(), 2)
+        for thread in self.delivery_threads:
+            thread.join(2)
+        alerts = [self.alerts.get_nowait() for _ in range(self.alerts.qsize())]
+        self.assertEqual(sorted(alert["threshold"] for alert in alerts), [50, 80, 100])
+
+
 class DailyCapAlarmTests(unittest.TestCase):
     ask = DailyCapTests.ask
 

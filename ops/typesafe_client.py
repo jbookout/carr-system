@@ -403,6 +403,7 @@ def _server_error_category(stderr):
     category is all a receipt or a gate needs."""
     text = stderr or ""
     for marker, category in (
+            ('"jev_cache_miss"', "cache_miss"),
             ('"unknown_tool"', "verb_not_deployed"),
             ('"jev_proxy_unconfigured"', "worker_key_unbound"),
             ('"jev_upstream_failed"', "vendor_failed_at_worker"),
@@ -415,7 +416,7 @@ def _server_error_category(stderr):
 
 
 def server_ask(state, questions, *, model, facets, purpose, session_id, timeout,
-               runner=None):
+               transport_mode, runner=None):
     """Ask the Worker's ask-jev verb. Returns (result, None) on success, where
     result is {"model", "answers", "usage", "server_receipt": {...}}, or
     (None, <category>) on any failure. Never raises."""
@@ -431,6 +432,7 @@ def server_ask(state, questions, *, model, facets, purpose, session_id, timeout,
         "questions": questions,
         "facets": sorted({str(f) for f in facets}) if facets else [],
         "model": model,
+        "transport_mode": transport_mode,
     }
     try:
         run = runner or subprocess.run
@@ -996,7 +998,10 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
     receipt row to `calls_log` (default out/jev-calls.jsonl) — see
     JEV_CALLS_LOG's module-level note for what it carries and why.
 
-    System-work calls try the Worker's receipt-recording verb before the direct
+    System-work calls probe the Worker's cache before reserving one paid Worker
+    attempt. The explicit transport modes are validated before the Worker can
+    fetch: an older Worker rejects them and the guarded direct route takes over.
+    A failed paid Worker attempt retains its reservation before the direct
     transport. Runtime calls keep the pinned vendor route: the external Worker
     ingress derives system_work and cannot carry a caller-selected runtime class.
     Hook-internal calls remain direct. `purpose`
@@ -1041,6 +1046,7 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
     if not isinstance(cache_ttl_seconds, (int, float)) or not math.isfinite(cache_ttl_seconds) or cache_ttl_seconds < 0:
         raise TypeSafeError("cache_ttl_seconds must be a finite nonnegative number")
     server_error = None
+    reservation_error = None
     started = time.monotonic()
     in_hook = os.environ.get(IN_HOOK_ENV) == "1" and purpose != "build_advisory"
     if opener is None and api_key is None and not in_hook and work_class != "app_runtime":
@@ -1049,10 +1055,34 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
             server_timeout = min(server_timeout, deadline - started)
         if server_timeout <= 0:
             raise TypeSafeError("deadline passed before the request could be sent")
+        server_deadline = started + server_timeout * SERVER_SHARE_OF_TIMEOUT
         served, server_error = server_ask(
             state, questions, model=model, facets=facets, purpose=purpose,
             session_id=session_id or _session_id() or "unbound",
-            timeout=server_timeout * SERVER_SHARE_OF_TIMEOUT, runner=server_runner)
+            timeout=server_deadline - time.monotonic(), transport_mode="cache_only", runner=server_runner)
+        if served is not None and served.get("cache_hit") is not True:
+            raise TypeSafeError("Jev unavailable: Worker cache-only contract violated")
+        if served is None and server_error == "cache_miss":
+            try:
+                _reserve_paid_call(questions, facets, caller, question_kind, prompt_sha256)
+            except TypeSafeError as error:
+                # A free direct-cache answer may still exist after a Worker
+                # cache miss. No transport may run if this reservation failed.
+                reservation_error = error
+            else:
+                remaining = server_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TypeSafeError("deadline passed during daily cap accounting")
+                served, server_error = server_ask(
+                    state, questions, model=model, facets=facets, purpose=purpose,
+                    session_id=session_id or _session_id() or "unbound",
+                    timeout=remaining, transport_mode="paid_once", runner=server_runner)
+                if served is None:
+                    _append_call_receipt(questions, facets, None, calls_log, caller=caller,
+                        question_kind=question_kind, prompt_sha256=prompt_sha256,
+                        ok=False, error=server_error, server_error=server_error, session=session_id)
+                elif served.get("cache_hit") is True:
+                    raise TypeSafeError("Jev unavailable: Worker paid-once contract violated")
         if served is not None:
             cache_hit = served.get("cache_hit") is True
             # Worker cache hits carry typed answers and a new bound receipt,
@@ -1074,12 +1104,19 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
         # Preserve the caller's total budget through the direct fallback.
         deadline = min(deadline, started + float(timeout)) if deadline is not None else started + float(timeout)
         timeout = deadline - time.monotonic()
-        if timeout < MIN_DIRECT_SECONDS:
+        if reservation_error is None and timeout < MIN_DIRECT_SECONDS:
             raise TypeSafeError(f"Jev server path failed ({server_error}) and no time is left for a direct call")
     elif in_hook:
         server_error = "in_hook_direct"
     use_cache = cache_ttl_seconds > 0 and opener is None
-    credential = api_key or read_api_key()
+    if reservation_error is not None and not use_cache:
+        raise reservation_error
+    try:
+        credential = api_key or read_api_key()
+    except TypeSafeError:
+        if reservation_error is not None:
+            raise reservation_error
+        raise
     cache_key = (_cache_key(endpoint, account, credential, model, caller,
                             question_kind, prompt_sha256) if use_cache else None)
     if use_cache:
@@ -1090,6 +1127,8 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
                                  question_kind=question_kind, prompt_sha256=prompt_sha256,
                                  ok=False, cache_hit=True, calibration=hit["calibration"])
             return hit
+    if reservation_error is not None:
+        raise reservation_error
 
     request = urllib.request.Request(
         endpoint, data=body, method="POST",
