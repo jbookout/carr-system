@@ -1309,7 +1309,8 @@ def test_hosted_ci_runs_classes_in_parallel_behind_one_required_context():
     ran = []
     for n in needs:
         job = jobs.get(n) or {}
-        groups = ((job.get("strategy") or {}).get("matrix") or {}).get("classes") or []
+        matrix = (job.get("strategy") or {}).get("matrix") or {}
+        groups = [row["classes"] for row in matrix.get("include", [])]
         for g in groups:
             ran.extend(str(g).replace(",", " ").split())
         run_lines = " ".join(str(st.get("run", "")) for st in job.get("steps", []))
@@ -1319,6 +1320,30 @@ def test_hosted_ci_runs_classes_in_parallel_behind_one_required_context():
     check("every CLASS_ORDER class runs in exactly one class job",
           sorted(ran) == sorted(classes) and len(ran) == len(set(ran)),
           {"ran": ran, "order": classes})
+
+
+def test_hosted_migration_budget_covers_observed_acceptance_runtime():
+    """PR1121's strict migration job was killed at 20 minutes, while its
+    separate exact-head DB acceptance succeeded after 23m51s. Allow at least
+    30 minutes including setup, without relaxing the other groups' budgets.
+    Read the actual job/matrix wiring, so an unused budget cannot pass.
+    """
+    job = _hosted_workflow()["jobs"]["classes"]
+    matrix = job["strategy"]["matrix"]
+    wired = job["timeout-minutes"] == "${{ matrix.timeout_minutes }}"
+    check("class jobs use their declared matrix budgets", wired)
+    if not wired:
+        return
+    groups = [(row["classes"], row["timeout_minutes"])
+              for row in matrix["include"]]
+    migration = [budget for classes, budget in groups
+                 if "migration" in classes.split()]
+    check("migration job has bounded headroom over the observed 24-minute run",
+          len(migration) == 1 and 30 <= migration[0] <= 35, migration)
+    other = [budget for classes, budget in groups
+             if "migration" not in classes.split()]
+    check("other class groups retain their 20-minute budgets",
+          len(other) == 2 and all(budget == 20 for budget in other), other)
 
 
 def test_hosted_zsh_setup_does_not_refresh_working_indexes():
@@ -1408,6 +1433,7 @@ def main():
                test_push_floor_defers_the_gates_class_instead_of_running_it,
                test_strict_still_owns_the_gates_class,
                test_hosted_ci_runs_classes_in_parallel_behind_one_required_context,
+               test_hosted_migration_budget_covers_observed_acceptance_runtime,
                test_hosted_zsh_setup_does_not_refresh_working_indexes):
         try:
             fn()

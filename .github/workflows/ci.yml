@@ -119,15 +119,18 @@ jobs:
         # 228s, types 36s, secret 33s, other classes 13s), below ten minutes.
         # Keep the heavier gates and migration classes separate. Every class
         # must appear in exactly one group (ops/ci-selftest.py verifies this).
-        classes:
-          - "pushfloor unit types contract secret dependency binding artifact freshness"
-          - "gates"
-          - "migration"
-    # 2026-10-01 run 36927706376 measured gates 701s and migration 1034s;
-    # twenty minutes leaves migration about 166s for setup. PR 1465 exhausted
-    # this ceiling in apt update before ANY class ran, so zsh setup now has
-    # its own short deadline instead of consuming the checks' whole budget.
-    timeout-minutes: 20
+        include:
+          - classes: "pushfloor unit types contract secret dependency binding artifact freshness"
+            timeout_minutes: 20
+          - classes: "gates"
+            timeout_minutes: 20
+          - classes: "migration"
+            timeout_minutes: 35
+    # PR 1121 run 37022556444 hit the migration job's 20-minute ceiling;
+    # separate exact-head DB acceptance passed in 23m51s (37022556209).
+    # Give migration setup and acceptance headroom while keeping every group
+    # bounded. zsh setup retains its own short deadline below.
+    timeout-minutes: ${{ matrix.timeout_minutes }}
 
     services:
       # The migration class needs a database to apply 130 forward migrations to.
