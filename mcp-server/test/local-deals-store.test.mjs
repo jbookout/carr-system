@@ -54,7 +54,6 @@ test('Local Deals PostgreSQL caller and evidence regressions', { skip: !bin && '
       await c.query('insert into deal_phase(slug,label,sort) values($1,$1,$2)', [slug, sort]);
     }
     await c.query(readFileSync(path.join(root, 'migrations/0771_local_deal_board_evidence.sql'), 'utf8'));
-    await c.query('alter table deal add column lane text;');
     const invoiceMigration = readFileSync(path.join(root, 'migrations/0772_invoice_tracker.sql'), 'utf8');
     await c.query(invoiceMigration.slice(invoiceMigration.indexOf('create or replace view v_deal_room_board'), invoiceMigration.indexOf('create or replace view v_deal_reconciliation_read')));
     const fixture = async national => {
