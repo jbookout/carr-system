@@ -84,6 +84,17 @@ FILE_ADVISORY_CATEGORY = "judgment_advisory"
 DB_MACHINE_CLASSES = {"machine_enforceable", "human_only"}
 DB_ADVISORY_CLASS = "judgment_advisory"
 
+# These active approved rows carry a broader admission classification than the
+# specific residual duty the reviewed map records. The approved admission is
+# preserved; the map must not claim a gate that does not enforce the duty.
+# Keep the exception exact and fail when either side changes its classification.
+PARTIAL_ADMISSION_RULES = {
+    "1fcaa63a",  # heavy-build phases beyond admission validators
+    "204391be",  # decide a missing product verb is required
+    "a2e78f48",  # recognize a known repair
+    "b7ec8f3b",  # review DoctorCRE surface grammar
+}
+
 
 def file_bucket(category: str | None) -> str | None:
     if category == FILE_ADVISORY_CATEGORY:
@@ -152,6 +163,10 @@ def compare(map_data: dict, export_data: dict) -> dict:
                           "normalize to a known bucket")
             continue
         compared += 1
+        if rule_id in PARTIAL_ADMISSION_RULES:
+            if f_bucket != "judgment_advisory" or d_bucket != "machine_enforceable":
+                errors.append(f"{rule_id} partial-admission exception is stale")
+            continue
         if f_bucket != d_bucket:
             mismatches.append({
                 "rule_id": rule_id,

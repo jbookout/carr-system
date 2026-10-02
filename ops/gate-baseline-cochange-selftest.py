@@ -288,7 +288,7 @@ with tempfile.TemporaryDirectory() as tmp:
     # or model window to move without the same reviewed bless.
     for contract_name, body in (
         ("hooks.json", '{"Stop": []}\n'),
-        ("session-context-lifecycle.v1.json", '{"schema_version": 1}\n'),
+        ("session-context-lifecycle.v2.json", '{"schema_version": 1}\n'),
     ):
         contract = repo / "ops" / "config" / contract_name
         contract.write_text(body)

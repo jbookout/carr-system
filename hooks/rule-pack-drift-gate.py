@@ -57,6 +57,7 @@ from pathlib import Path
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
+from lib.transcript_read import load_transcript  # noqa:E402
 from lib.rule_delivery_preuse import (  # noqa:E402
     contains_receipt_marker, has_background_tool_call, preuse_delivery,
 )
@@ -562,11 +563,146 @@ def delivery_state(records):
         if found is None:
             if "rule_delivery" not in serialized(record):
                 continue
-            found = _find_delivery(record)
+            found = standing_result_delivery(record, records[:index])
         if found:
             mode, packs, omit = found
             declared.update(packs)
     return mode, sorted(declared), omit
+
+
+def standing_result_delivery(record, prior):
+    """Credit service results only when tied to a standing-context call."""
+    calls = set()
+    for previous in prior:
+        native = previous.get("payload") or {}
+        if (previous.get("type") == "response_item" and native.get("type") in {'function_call', 'custom_tool_call'}
+                and ("standing_context" in str(native.get("name", ""))
+                     or "standing-context" in str(native.get("name", ""))
+                     or _native_standing_invocation(native))):
+            calls.add(native.get("call_id"))
+        message = previous.get("message") or {}
+        content = message.get("content")
+        for block in content if isinstance(content, list) else []:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            name = str(block.get("name", ""))
+            arguments = block.get('input') or {}
+            if "standing-context" in name or "standing_context" in name or (
+                    name == "Bash" and isinstance(arguments, dict)
+                    and _shell_standing_invocation(arguments.get('command', ''))):
+                calls.add(block.get("id"))
+    message = record.get("message") or {}
+    content = message.get("content")
+    for block in content if isinstance(content, list) else []:
+        if (isinstance(block, dict) and block.get("type") == "tool_result"
+                and block.get("tool_use_id") in calls and not block.get("is_error")):
+            return _service_delivery(block.get("content"))
+    payload = record.get("payload") or {}
+    if (record.get("type") == "response_item" and payload.get("type") in {'function_call_output', 'custom_tool_call_output'}
+            and payload.get("call_id") in calls and not payload.get("is_error")):
+        return _service_delivery(payload.get("output"))
+    invocation = payload.get("invocation") or {}
+    native_name = payload.get("tool_name") or invocation.get("tool", "")
+    if (record.get("type") == "event_msg" and payload.get("type") == "mcp_tool_call_end"
+            and ("standing_context" in str(native_name) or "standing-context" in str(native_name))
+            and not payload.get("is_error") and "Err" not in (payload.get("result") or {})):
+        return _service_delivery(payload.get("result"))
+    return None
+
+
+def _literal_transport(source):
+    """Parse a single native call with literal JSON-like transport arguments."""
+    import ast
+    source = source.strip().rstrip(';').strip()
+    if source.startswith('text(') and source.endswith(')'):
+        source = source[5:-1].strip()
+    match = re.fullmatch(r'(?:await\s+)?tools\.(mcp__carr__standing[_-]context|exec_command)\((.*)\)', source, re.S)
+    if not match:
+        return None
+    try:
+        raw = match.group(2)
+        # Replace strings first so key normalization cannot change their data.
+        strings = []
+        def protect(token):
+            strings.append(ast.literal_eval(token.group()))
+            return f'"__transport_string_{len(strings)-1}__"'
+        string_token = r"\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'"
+        raw = re.sub(string_token, protect, raw)
+        raw = re.sub(r'([{,]\s*)([A-Za-z_$][\w$]*)(\s*:)', r'\1"\2"\3', raw)
+        args = json.loads(raw)
+        def restore(value):
+            if isinstance(value, str) and re.fullmatch(r'__transport_string_\d+__', value):
+                return strings[int(value[len('__transport_string_'):-2])]
+            if isinstance(value, list):
+                return [restore(v) for v in value]
+            if isinstance(value, dict):
+                return {restore(k):restore(v) for k,v in value.items()}
+            return value
+        return match.group(1), restore(args)
+    except (ValueError, SyntaxError, IndexError):
+        return None
+
+
+def _native_standing_invocation(payload):
+    if payload.get('type') == 'custom_tool_call' and payload.get('name') in {'exec', 'functions.exec'}:
+        parsed = _literal_transport(str(payload.get('input', '')))
+        if parsed:
+            name, args = parsed
+            return name.startswith('mcp__carr__standing') or (
+                isinstance(args, dict) and _shell_standing_invocation(str(args.get('cmd', ''))))
+    if payload.get('type') == 'function_call' and str(payload.get('name', '')).split('.')[-1] == 'exec_command':
+        try:
+            args = json.loads(payload.get('arguments', '{}'))
+            return _shell_standing_invocation(args.get('cmd', ''))
+        except (ValueError, TypeError):
+            return False
+    return False
+
+
+def _shell_standing_invocation(command):
+    import shlex
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return False
+    if len(words) >= 3 and words[0] == 'cd' and os.path.isabs(words[1]) and words[2] == '&&':
+        words = words[3:]
+    if words and words[0] in {'bash', 'sh'}:
+        words = words[1:]
+    return (len(words) in {3, 4} and os.path.basename(words[0]) == 'run.sh'
+            and words[1:3] == ['call', 'standing-context'])
+
+
+def _service_delivery(value):
+    """Accept service envelopes and known transport wrappers, not arbitrary text."""
+    if isinstance(value, str):
+        value = value.strip()
+        if value.startswith('local-verb identity ->'):
+            value = value.partition('\n')[2].strip()
+        elif value.startswith('Script completed') and '\nOutput:\n' in value:
+            value = value.split('\nOutput:\n', 1)[1].strip()
+        try:
+            return _service_delivery(json.loads(value))
+        except ValueError:
+            return None
+    if isinstance(value, list):
+        for item in value:
+            found = _service_delivery(item)
+            if found:
+                return found
+    if isinstance(value, dict):
+        if (value.get('is_error') or value.get('isError') or value.get('ok') is False
+                or value.get('error') or value.get('session_id') or value.get('cell_id')
+                or ('exit_code' in value and value['exit_code'] != 0)):
+            return None
+        if 'rule_delivery' in value:
+            return _find_delivery(value)
+        for key in ('content', 'text', 'output', 'Ok'):
+            if key in value:
+                found = _service_delivery(value[key])
+                if found:
+                    return found
+    return None
 
 
 def _find_delivery(value):
@@ -732,12 +868,13 @@ def custom_tool_text(payload):
     raw = payload.get("input")
     if not isinstance(raw, str):
         return "\n".join((name, serialized(raw)))
-    if "mcp__carr__standing_context" in raw or "mcp__carr__standing-context" in raw:
+    parsed = _literal_transport(raw)
+    if parsed and parsed[0].startswith('mcp__carr__standing') and isinstance(parsed[1], dict):
         # This call establishes delivery state; its surface/tier/detail routing
         # metadata is not observed domain work. Keep the call and declared pack
         # names visible while excluding those fixed transport arguments.
-        packs = re.search(r"\bpacks\s*:\s*\[([^]]*)\]", raw)
-        return "\n".join((name, "standing_context", packs.group(1) if packs else ""))
+        packs = parsed[1].get('packs', [])
+        return "\n".join((name, "standing_context", serialized(packs)))
     normalized = _normalize_captured_tool_input(raw) if name == "exec" else None
     if normalized is None and name == "exec":
         normalized = _normalize_captured_inert_metadata(raw)
@@ -882,8 +1019,15 @@ def main():
         path = payload.get("transcript_path") or payload.get("transcriptPath")
         if not path or not os.path.exists(path):
             return 0
-        with open(path, errors="replace") as handle:
-            records = [json.loads(line) for line in handle if line.strip()]
+        # One bad line in the session's own transcript must not switch the
+        # gate off (bypass hunt, PR #1224): lib/transcript_read.py skips it
+        # and records a transcript_tamper event instead of raising.
+        # Logged beside the other gates' tamper events rather than into this
+        # gate's own schema-bound rule-delivery-shadow.jsonl.
+        records = load_transcript(
+            path, hook="rule-pack-drift-gate",
+            session=payload.get("session_id") or payload.get("sessionId"),
+            log_path=os.path.join(REPO, "out", "jev-required-actions-gate.jsonl"))
         triggers, members, local_map_digest = load_packs()
         result = evaluate(records, triggers, members)
         raw_session = payload.get("session_id") or payload.get("sessionId")

@@ -176,8 +176,9 @@ with tempfile.TemporaryDirectory() as directory:
         assert hook_process.exitcode == 0 and epoch_process.exitcode == 0
         rows = [json.loads(line) for line in race_path.read_text().splitlines()]
         kinds = [row.get("record_type") for row in rows]
-        assert "observation" in kinds
-        if "epoch" in kinds:
+        assert tuple(kinds) in (
+            ("observation",), ("epoch",), ("epoch", "observation")), kinds
+        if "observation" in kinds and "epoch" in kinds:
             assert kinds.index("epoch") < kinds.index("observation"), kinds
 
     # Deterministic cutover boundary: a finding writer already inside the

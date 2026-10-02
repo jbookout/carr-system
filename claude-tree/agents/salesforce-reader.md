@@ -62,7 +62,7 @@ occurrence as a discrepancy with the deal it appeared on. Any other CARR-owned c
 in a client field gets the same treatment, whether or not it is on this list.
 
 **8. Never auto-merge on a name.** Salesforce and the Deal Room drift on spelling ("Erik Peterson"
-against "Erik Petersen, DO, First Call DPC"). The differ surfaces near-matches as confirm-this
+against "Marcus Whitfield, DO, Bayview DPC"). The differ surfaces near-matches as confirm-this
 suggestions with the match basis shown. It never silently joins them, and neither do you. Same
 discipline as the standing lone-surname rule.
 

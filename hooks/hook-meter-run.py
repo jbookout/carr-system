@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""hook-meter-run.py — runs a gate, times it, records what happened, decides nothing.
+"""hook-meter-run.py — dispatches hooks, times them, preserves gate verdicts.
+
+Bounded read-only Grok print children do not own a CARR session lifecycle.
+Only their named context/state hooks are suppressed; effect guards still run.
 
     /usr/bin/env python3 hooks/hook-meter-run.py hooks/guard-unattended.py [args...]
 
@@ -98,6 +101,26 @@ DENY_MARKER = "DENY-CLASS:"
 STOP_EVENTS = ("Stop", "SubagentStop")
 
 MAX_FIELD = 300
+INVOCATION_REPO_ENV = "CARR_HOOK_INVOCATION_REPO"
+
+def bounded_grok_read_only():
+    # Keep one classifier for marked and ordinary context invocations. The
+    # protected probe returns immediately without ps for unmarked sessions.
+    # Missing optional plumbing must keep every gate running.
+    sys.path.insert(0, REPO)
+    try:
+        from hooks.grok_invocation import bounded_grok_read_only as probe
+    except ImportError:
+        return False
+    return probe()
+
+# Bounded retrieval has no CARR session lifecycle. Keep effect guards running;
+# suppress only context delivery/state hooks imported through Claude settings.
+GROK_CONTEXT_HOOKS = frozenset({
+    "gate-integrity.py", "rule-boot-gate.py", "context-handoff-gate.py",
+    "session-presence-hook.py", "rule-pack-preuse-reselection.py",
+    "rule-pack-drift-gate.py", "chat-lint-carryover.py",
+})
 
 
 class Tee(io.TextIOBase):
@@ -195,6 +218,95 @@ def _scan_field(raw, key):
         return value.decode("utf-8", "replace")
     except Exception:
         return None
+
+
+def _top_level_cwd(raw):
+    """Return only the root object's ``cwd`` string, without parsing payload bodies.
+
+    Tool input can contain arbitrary source text, including a seeded ``"cwd"``
+    key.  A substring search would let that fixture select the evidence writer.
+    This small scanner tracks JSON nesting and accepts the key only at depth one;
+    unusual escapes fall back to no context, which makes hook_meter use canonical.
+    """
+    try:
+        stack = []
+        in_string = False
+        escaped = False
+        start = None
+        tokens = []
+        root_started = False
+        root_closed = False
+        for index, byte in enumerate(raw):
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif byte == 0x5C:
+                    escaped = True
+                elif byte == 0x22:
+                    token = raw[start:index]
+                    in_string = False
+                    if len(stack) == 1:
+                        tokens.append((index, token))
+                continue
+            if not root_started:
+                if byte in b" \t\r\n":
+                    continue
+                if byte != 0x7B:
+                    return None
+                root_started = True
+                stack.append(0x7D)
+                continue
+            if byte == 0x22:
+                in_string = True
+                start = index + 1
+            elif byte == 0x7B:
+                stack.append(0x7D)
+            elif byte == 0x5B:
+                stack.append(0x5D)
+            elif byte in (0x7D, 0x5D):
+                if not stack or stack[-1] != byte:
+                    return None
+                stack.pop()
+                if not stack:
+                    root_closed = True
+                    if raw[index + 1:].strip():
+                        return None
+                    break
+        if in_string or not root_started or not root_closed:
+            return None
+        cwd = None
+        cwd_count = 0
+        for end, token in tokens:
+            if token != b"cwd":
+                continue
+            pos = end + 1
+            while pos < len(raw) and raw[pos] in b" \t\r\n":
+                pos += 1
+            if pos >= len(raw) or raw[pos] != 0x3A:
+                continue
+            cwd_count += 1
+            if cwd_count > 1:
+                return None
+            pos += 1
+            while pos < len(raw) and raw[pos] in b" \t\r\n":
+                pos += 1
+            if pos >= len(raw) or raw[pos] != 0x22:
+                return None
+            pos += 1
+            value_start = pos
+            while pos < len(raw):
+                if raw[pos] == 0x5C:
+                    return None
+                if raw[pos] == 0x22:
+                    cwd = raw[value_start:pos].decode("utf-8", "strict")
+                    break
+                pos += 1
+            else:
+                return None
+        return cwd
+    except Exception:
+        pass
+    return None
 
 
 def _payload_facts(raw):
@@ -364,6 +476,16 @@ def _structured_reason(text):
     return None
 
 
+def _error_tail(text, lines=6, cap=1200):
+    """The last `lines` non-empty stderr lines, capped, for an error row."""
+    try:
+        kept = [line.rstrip() for line in (text or "").splitlines() if line.strip()]
+        tail = "\n".join(kept[-lines:])
+        return tail if len(tail) <= cap else "…" + tail[-cap:]
+    except Exception:
+        return None
+
+
 def _headline(text):
     """First non-empty line of a refusal — the de-facto class gates already have."""
     try:
@@ -385,6 +507,10 @@ def main():
     target = argv[0]
     if not os.path.isabs(target):
         target = os.path.join(REPO, target)
+    if (os.path.dirname(os.path.abspath(target)) == os.path.join(REPO, "hooks")
+            and os.path.basename(target) in GROK_CONTEXT_HOOKS
+            and bounded_grok_read_only()):
+        return 0
 
     # ── setup. The two steps that would change a verdict if they failed —
     #    handing the gate its stdin, and passing its output through — use io
@@ -394,6 +520,15 @@ def main():
         raw = sys.stdin.buffer.read()
     except Exception:
         raw = b""
+    try:
+        # Never inherit an earlier wrapper's routing hint.  Only this payload's
+        # existing top-level cwd may nominate an invocation checkout.
+        os.environ.pop(INVOCATION_REPO_ENV, None)
+        invocation_cwd = _top_level_cwd(raw)
+        if invocation_cwd and os.path.isdir(invocation_cwd):
+            os.environ[INVOCATION_REPO_ENV] = os.path.abspath(invocation_cwd)
+    except Exception:
+        pass
     try:
         sys.stdin = replacement_stdin(raw)
     except Exception:
@@ -496,6 +631,12 @@ def main():
                            or _structured_reason(captured_out)),
             "deny_headline": (_clip(_headline(captured_err))
                               if outcome in ("deny", "ask", "error") else None),
+            # The last lines of stderr when the gate fell over. One headline
+            # was not enough: on 2026-09-23 two gates died at import on every
+            # call for a day and the row said only "Traceback (most recent
+            # call last):", which names nothing. The tail names the file and
+            # the exception.
+            "error_tail": (_error_tail(captured_err) if outcome == "error" else None),
             "pid": os.getpid(),
         }
         record["meter_ms"] = round(_time.monotonic() * 1000.0 - _T0 - elapsed, 2)
