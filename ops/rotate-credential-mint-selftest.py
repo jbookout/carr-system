@@ -135,6 +135,9 @@ def verifier_rotation_cases() -> None:
             "encoded startup role override": existing + "&options=-c%20role%3D" + role,
             "duplicate TLS parameter": existing + "&sslmode=require",
             "malformed port": existing.replace("/neondb", ":bad/neondb"),
+            "zero port": existing.replace("/neondb", ":0/neondb"),
+            "negative port": existing.replace("/neondb", ":-1/neondb"),
+            "out-of-range port": existing.replace("/neondb", ":65536/neondb"),
         }
         for label, dsn in invalid.items():
             events.clear()
@@ -145,14 +148,24 @@ def verifier_rotation_cases() -> None:
                 except AssertionError:
                     error = ""
             check(label + " refuses before all database mutation", bool(error) and events == [])
-        events.clear()
-        with patch.dict(os.environ, {"DATABASE_URL": "malformed"}), \
-                patch.object(rc, "new_password", side_effect=AssertionError("generation reached")):
-            try:
-                error = refused(lambda: rc.rotate_role(role, True))
-            except AssertionError:
-                error = ""
-        check("malformed owner refuses before all database mutation", bool(error) and events == [])
+        for label, owner in {
+            "malformed owner": "malformed",
+            "zero owner port": OWNER.replace("/neondb", ":0/neondb"),
+            "negative owner port": OWNER.replace("/neondb", ":-1/neondb"),
+            "out-of-range owner port": OWNER.replace("/neondb", ":65536/neondb"),
+        }.items():
+            events.clear()
+            with patch.dict(os.environ, {"DATABASE_URL": owner}), \
+                    patch.object(rc, "new_password", side_effect=AssertionError("generation reached")):
+                try:
+                    error = refused(lambda: rc.rotate_role(role, True))
+                except AssertionError:
+                    error = ""
+            check(label + " refuses before all database mutation", bool(error) and events == [])
+
+        for port in (1, 5432, 65535):
+            _, target = rc._postgres_parts(existing.replace("/neondb", f":{port}/neondb"), key)
+            check(f"valid explicit port {port} is preserved", target[1] == port)
 
         for identity, label in [
             (("other_login", role, True), "different session login"),

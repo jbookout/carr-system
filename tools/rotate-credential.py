@@ -219,6 +219,8 @@ def _postgres_parts(url: str, label: str):
         if "@" in parts.netloc.rsplit("@", 1)[0]:
             raise ValueError("multiple at signs")
         port = parts.port  # force urlsplit to reject a non-numeric port
+        if port is not None and not 1 <= port <= 65535:
+            raise ValueError("invalid port")
     except ValueError:
         sys.exit(f"rotate-credential: {label} is not a strict PostgreSQL URI")
     # A libpq query parameter can replace the URI's authority, database,
@@ -232,7 +234,7 @@ def _postgres_parts(url: str, label: str):
             or not parts.hostname or not parts.username or parts.password is None
             or not database or "/" in database):
         sys.exit(f"rotate-credential: {label} is not a strict PostgreSQL URI")
-    return parts, (parts.hostname.lower(), port or 5432, database)
+    return parts, (parts.hostname.lower(), 5432 if port is None else port, database)
 
 
 def _url_for_role(parts, role: str, password: str, query: str) -> str:
