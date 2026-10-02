@@ -1,3 +1,4 @@
+import { readLeadWorkspace, LEAD_WORKSPACE_SCHEMA } from "./lead-workspace.js";
 // CARR MCP tool registry — Wave 1 verbs (tool-contracts-2026-07-30.md §2).
 // Every write runs the envelope: idempotency replay via tool_call, actor from
 // the verified token (never the payload), base_version conflicts ask and never
@@ -337,7 +338,7 @@ async function withEnvelope(client, actor, verb, args, fn) {
   // reports a version conflict instead of the promised replay.
   // Keep this scoped until the shared envelope's existing fake-client suites
   // are migrated to model the extra query for every historical write verb.
-  if (verb === "whats-new" || verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "answer-work-request-for-joe" || verb === "decline-work-request" || verb === "supersede-work-request" || verb === "propose-ready-plan" || verb === "review-heavy-build-plan" || verb === "accept-ready-plan" || verb === "propose-ready-plan-amendment" || verb === "accept-ready-plan-amendment" || verb === "acknowledge-ready-plan-amendment" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease" || verb === "observe-memory" || verb === "promote-memory" || verb === "correct-memory" || verb === "forget-memory" || verb === "register-engineering-slice-plan" || verb === "admit-engineering-slice" || verb === "review-engineering-slice" || verb === "append-tour-rights-receipt" || verb === "revoke-tour-rights-receipt" || verb === "append-tour-source-evidence" || verb === "append-tour-field-assertion" || verb === "create-tour-public-projection-draft" || verb === "seal-tour-public-projection" || verb === "append-tour-property-identifier-assertion" || verb === "append-tour-coordinate-candidate" || verb === "append-tour-entrance-verification-receipt" || verb === "codex-checkpoint" || verb === "codex-record-event" || verb === "ask-jev" || TOUR_DOMAIN_SERIALIZED_WRITES.has(verb) || BOARD_ANSWER_WRITE_VERBS.has(verb) || MEETING_MODE_WRITE_VERBS.includes(verb))
+  if (verb === "claim-lead" || verb === "link-lead-client" || (verb === "update-lead" && args.stage_review) || verb === "whats-new" || verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "answer-work-request-for-joe" || verb === "decline-work-request" || verb === "supersede-work-request" || verb === "propose-ready-plan" || verb === "review-heavy-build-plan" || verb === "accept-ready-plan" || verb === "propose-ready-plan-amendment" || verb === "accept-ready-plan-amendment" || verb === "acknowledge-ready-plan-amendment" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease" || verb === "observe-memory" || verb === "promote-memory" || verb === "correct-memory" || verb === "forget-memory" || verb === "register-engineering-slice-plan" || verb === "admit-engineering-slice" || verb === "review-engineering-slice" || verb === "append-tour-rights-receipt" || verb === "revoke-tour-rights-receipt" || verb === "append-tour-source-evidence" || verb === "append-tour-field-assertion" || verb === "create-tour-public-projection-draft" || verb === "seal-tour-public-projection" || verb === "append-tour-property-identifier-assertion" || verb === "append-tour-coordinate-candidate" || verb === "append-tour-entrance-verification-receipt" || verb === "codex-checkpoint" || verb === "codex-record-event" || verb === "ask-jev" || TOUR_DOMAIN_SERIALIZED_WRITES.has(verb) || BOARD_ANSWER_WRITE_VERBS.has(verb) || MEETING_MODE_WRITE_VERBS.includes(verb))
     await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [key]);
   const prior = await client.query("select request_hash, response from tool_call where idempotency_key=$1", [key]);
   if (prior.rows.length) {
@@ -3257,8 +3258,9 @@ export const TOOLS = {
   "lead-board": {
     write: false,
     description: "The complete, safe worked-lead board. All leads surface, including weak, suppressed, and terminal rows: qualification is the human's job and this read is never pre-qualified or silently truncated. Returns the authoritative base_version needed by update-lead, ordered stage vocabulary including empty stages, score/confidence/freshness signals, and no phone, email, address, notes, or raw source detail.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
-    handler: async (c) => {
+    inputSchema: LEAD_WORKSPACE_SCHEMA,
+    handler: async (c, _actor, args = {}) => {
+      if (args.workspace === "leads") return readLeadWorkspace(c, args);
       const stages = (await c.query(
         `select slug,label,sort
            from v_lead_board_stage
@@ -4696,15 +4698,72 @@ export const TOOLS = {
   // do_not_contact -> do_not_contact) — there was no way to move a lead FORWARD
   // through its own funnel, or to correct one an import or a stuck drip left
   // behind. update-lead is that writer.
+  "claim-lead": {
+    write: true, humanOnly: true,
+    description: "Claim an unowned New lead for the authenticated human. Preserves stage, checks the current version and exact lifecycle links, and records the ownership change.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {
+      idempotency_key: { type: "string" }, expected_actor: { type: "string", minLength: 1 }, lead: { type: "string" }, base_version: { type: "integer" }
+    }, required: ["idempotency_key","lead","base_version","expected_actor"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "claim-lead", args, async () => {
+      if (args.expected_actor && args.expected_actor !== actor.slug) throw new ToolError({ error: "account_changed" });
+      if (!canExercisePartnerAuthority(actor)) throw new ToolError({ error: "human_confirmation_required" });
+      const subject = await resolveSubject(c, args.lead);
+      if (subject.type !== "lead") throw new ToolError({ error: "not_a_lead" });
+      await versionGuard(c, "lead", subject.id, args.base_version);
+      const row = (await c.query(`select l.stage,l.suppressed,l.owner_id,l.client_id,
+        exists(select 1 from party p where p.id=l.party_id and p.merged_into is null and p.deleted_at is null) as live_party,
+        exists(select 1 from client cl where cl.party_id=l.party_id and cl.merged_into is null) as is_client,
+        exists(select 1 from v_lead_client_best b where b.lead_ref=l.registry_ref and not b.either_merged) as linked_client
+        from lead l where l.id=$1`, [subject.id])).rows[0];
+      if (!row || !row.live_party || row.stage !== "new" || row.suppressed || row.owner_id || row.client_id || row.is_client || row.linked_client)
+        throw new ToolError({ error: "lead_not_claimable" });
+      await c.query("update lead set owner_id=$1,owner_label=$2,updated_by=$1 where id=$3", [actor.id, actor.display || actor.slug, subject.id]);
+      await writeEvent(c, actor, "claim-lead", "lead", subject.id, { field: "owner_id", old: { owner_id: null },
+        new: { owner_id: actor.id }, cause: "human_stated", idempotency_key: args.idempotency_key });
+      return { ok: true, lead_id: subject.id, owner: actor.slug };
+    }),
+  },
+
+  "link-lead-client": {
+    write: true, humanOnly: true,
+    description: "Confirm one lead belongs to an existing client, by exact IDs and an explicit human choice. Records the client pointer without merging parties or creating a client/deal. Refuses suppression, stale versions and an already linked lead.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {
+      idempotency_key: { type: "string" }, expected_actor: { type: "string", minLength: 1 }, lead: { type: "string" }, base_version: { type: "integer" },
+      client_id: { type: "string" }, confirmed: { type: "boolean", const: true }
+    }, required: ["idempotency_key","lead","base_version","client_id","confirmed","expected_actor"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "link-lead-client", args, async () => {
+      if (args.expected_actor && args.expected_actor !== actor.slug) throw new ToolError({ error: "account_changed" });
+      if (!canExercisePartnerAuthority(actor) || args.confirmed !== true) throw new ToolError({ error: "human_confirmation_required" });
+      const subject = await resolveSubject(c, args.lead);
+      if (subject.type !== "lead") throw new ToolError({ error: "not_a_lead" });
+      await versionGuard(c, "lead", subject.id, args.base_version);
+      const current = (await c.query(`select l.client_id,l.suppressed,
+        exists(select 1 from party p where p.id=l.party_id and p.merged_into is null and p.deleted_at is null) as live_party,
+        exists(select 1 from client cl where cl.party_id=l.party_id and cl.merged_into is null) as is_client,
+        exists(select 1 from v_lead_client_best b where b.lead_id=l.id and not b.either_merged) as linked_client
+        from lead l where l.id=$1`, [subject.id])).rows[0];
+      if (!current || !current.live_party || current.is_client || current.suppressed || current.client_id || current.linked_client) throw new ToolError({ error: "lead_not_linkable" });
+      const target = (await c.query(`select cl.id from client cl join party p on p.id=cl.party_id
+        where cl.id=$1 and cl.merged_into is null and p.merged_into is null and p.deleted_at is null`, [args.client_id])).rows[0];
+      if (!target) throw new ToolError({ error: "client_not_found" });
+      await c.query("update lead set client_id=$1,updated_by=$2 where id=$3", [target.id, actor.id, subject.id]);
+      await writeEvent(c, actor, "link-lead-client", "lead", subject.id, { field: "client_id",
+        old: { client_id: null }, new: { client_id: target.id }, cause: "human_correction", idempotency_key: args.idempotency_key });
+      return { ok: true, lead_id: subject.id, client_id: target.id };
+    }),
+  },
+
   "update-lead": {
     write: true,
     description: "Field-level change to a lead (stage, lane, segment, source_type, source_detail, suppressed, est_lease_event, next_action_date, notes_path, notes, event_source, event_confidence, report_back_due, drip_campaign, drip_added, sf_deal). stage and lane are FOREIGN KEYS into lead_stage/lead_lane; a wrong slug comes back with the full valid list rather than a bare internal error. do_not_contact is inseparable from suppressed=true, and only a human may clear an existing suppression instruction. base_version required from a fresh read; a conflict means someone else wrote — surface it to the human, never auto-retry. party_id (identity) and client_id (the lead-to-client conversion pointer) are deliberately absent from fields: neither is a field edit through this verb, the same posture update-deal takes on client_id and update-party-contact takes on identity fields generally (rule 5d44d3f3) — a discrepancy there is a different kind of correction, not a value to overwrite in place.",
     inputSchema: { type: "object", properties: {
-      idempotency_key: { type: "string" }, lead: { type: "string" },
+      idempotency_key: { type: "string" }, expected_actor: { type: "string", minLength: 1 }, lead: { type: "string" },
       base_version: { type: "integer" },
+      stage_review: { type: "object", additionalProperties: false, properties: { reason: { type: "string", minLength: 1, maxLength: 1000 }, evidence_ids: { type: "array", items: { type: "string" }, maxItems: 20 }, undo_event_id: { type: "string" }, human_quote: { type: "string", maxLength: 1000 } }, required: ["reason", "evidence_ids"] },
       fields: { type: "object", description: "subset of: stage, lane, segment, source_type, source_detail, suppressed, est_lease_event, next_action_date, notes_path, notes, event_source, event_confidence, report_back_due, drip_campaign, drip_added, sf_deal" } },
       required: ["idempotency_key","lead","base_version","fields"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "update-lead", args, async () => {
+      if (args.expected_actor && args.expected_actor !== actor.slug) throw new ToolError({ error: "account_changed" });
       const s = await resolveSubject(c, args.lead);
       if (s.type !== "lead") throw new ToolError({ error: "not_a_lead", resolved: s });
       await versionGuard(c, "lead", s.id, args.base_version);
@@ -4742,13 +4801,33 @@ export const TOOLS = {
         throw new ToolError({ error: "suppression_clear_requires_human",
           hint: "a standing suppression instruction may be cleared only by an authenticated human" });
       }
+      let stageReview = null;
+      if (args.stage_review) {
+        if (!keys.includes("stage") || !String(args.stage_review.reason || "").trim())
+          throw new ToolError({ error: "stage_review_invalid" });
+        const ids = [...new Set(args.stage_review.evidence_ids || [])];
+        const evidence = ids.length ? (await c.query(
+          "select id,occurred_at from activity where lead_id=$1 and id=any($2::uuid[]) and occurred_at<=now()", [s.id, ids])).rows : [];
+        if (evidence.length !== ids.length) throw new ToolError({ error: "stage_evidence_mismatch" });
+        if (args.stage_review.undo_event_id) {
+          const last = (await c.query(`select id,cause,old_value->>'stage' as prior_stage from event
+            where subject_type='lead' and subject_id=$1 and field='stage'
+            order by occurred_at desc,id desc limit 1`, [s.id])).rows[0];
+          if (!last || !["automation_job","ingest_email","ingest_calendar","system"].includes(last.cause) || last.id !== args.stage_review.undo_event_id || last.prior_stage !== args.fields.stage)
+            throw new ToolError({ error: "undo_changed" });
+        }
+        stageReview = { ...args.stage_review, evidence_ids: ids,
+          evidence_date: evidence.map(row => new Date(row.occurred_at).toISOString()).sort().at(-1) || null };
+      }
       const old = (await c.query(`select ${keys.join(",")} from lead where id=$1`, [s.id])).rows[0];
       const sets = keys.map((k, i) => `${k}=$${i + 2}`).join(", ");
       await c.query(`update lead set ${sets}, updated_by=$1 where id=$${keys.length + 2}`,
         [actor.id, ...keys.map(k => args.fields[k]), s.id]);
       for (const k of keys)
         await writeEvent(c, actor, "update-lead", "lead", s.id,
-          { field: k, old: { [k]: old[k] }, new: { [k]: args.fields[k] }, idempotency_key: args.idempotency_key });
+          { field: k, old: { [k]: old[k] }, new: { [k]: args.fields[k], ...(k === "stage" && stageReview ? { stage_review: stageReview } : {}) },
+            ...(k === "stage" && stageReview ? { cause: stageReview.undo_event_id ? "human_correction" : canExercisePartnerAuthority(actor) ? "human_stated" : "automation_job",
+              human_quote: stageReview.human_quote, agent_rationale: stageReview.reason } : {}), idempotency_key: args.idempotency_key });
       return { ok: true, updated: keys };
     }),
   },
