@@ -82,6 +82,7 @@ def verifier_rotation_cases() -> None:
     existing = PEER.replace("carr_jobs", role)
     password = "V" * 40
     events: list[object] = []
+    identity = (role, role, True)
 
     class Statement:
         def __init__(self, template):
@@ -91,9 +92,6 @@ def verifier_rotation_cases() -> None:
             return (self.template, *args)
 
     class RotationConnection:
-        def __init__(self, identity):
-            self.identity = identity
-
         def __enter__(self):
             return self
 
@@ -102,14 +100,15 @@ def verifier_rotation_cases() -> None:
 
         def execute(self, query):
             events.append(("execute", query))
-            return Result((self.identity,))
+            return Result((identity[1],) if query == "select current_user"
+                          and identity and len(identity) == 3 else identity)
 
         def commit(self):
             events.append("commit")
 
     def connect(dsn):
         events.append(("connect", dsn))
-        return RotationConnection("owner" if dsn == OWNER else identity)
+        return RotationConnection()
 
     def write(key, value):
         events.append(("write", key, value))
@@ -118,34 +117,82 @@ def verifier_rotation_cases() -> None:
     fake_psycopg.connect = connect  # type: ignore[attr-defined]
     fake_psycopg.sql = types.SimpleNamespace(  # type: ignore[attr-defined]
         SQL=Statement, Identifier=lambda value: value, Literal=lambda value: value)
-    identity = role
     with patch.dict(os.environ, {"DATABASE_URL": OWNER}, clear=True), \
             patch.dict(sys.modules, {"psycopg": fake_psycopg}), \
             patch.object(rc, "credential_env_lock", contextlib.nullcontext), \
             patch.object(rc, "read_env", return_value={key: existing}), \
             patch.object(rc, "new_password", return_value=password), \
-            patch.object(rc, "write_env_key", write), \
-            contextlib.redirect_stdout(io.StringIO()):
-        result = rc.rotate_role(role, True)
-        success = events == [
-            ("connect", OWNER),
-            ("execute", ("alter role {} with password {}", role, password)),
-            "commit",
-            ("connect", existing.replace("oldpw", password)),
-            ("execute", "select current_user"),
-            ("write", key, existing.replace("oldpw", password)),
-        ] and result == 0
+            patch.object(rc, "write_env_key", write):
+        # Every rejected URI must stop before opening a connection or generating
+        # a password; the fake records mutations independently of its identity.
+        invalid = {
+            "malformed URI": "not-a-postgres-uri",
+            "wrong host": existing.replace("ep-x-123", "ep-other-456"),
+            "wrong port": existing.replace("/neondb", ":5433/neondb"),
+            "wrong database": existing.replace("/neondb", "/otherdb"),
+            "wrong login": PEER,
+            "query login override": existing + "&user=other",
+            "encoded startup role override": existing + "&options=-c%20role%3D" + role,
+            "duplicate TLS parameter": existing + "&sslmode=require",
+            "malformed port": existing.replace("/neondb", ":bad/neondb"),
+        }
+        for label, dsn in invalid.items():
+            events.clear()
+            with patch.object(rc, "read_env", return_value={key: dsn}), \
+                    patch.object(rc, "new_password", side_effect=AssertionError("generation reached")):
+                try:
+                    error = refused(lambda: rc.rotate_role(role, True))
+                except AssertionError:
+                    error = ""
+            check(label + " refuses before all database mutation", bool(error) and events == [])
         events.clear()
-        identity = "wrong_role"
-        mismatch = refused(lambda: rc.rotate_role(role, True))
-        no_write = not any(isinstance(event, tuple) and event[0] == "write" for event in events)
+        with patch.dict(os.environ, {"DATABASE_URL": "malformed"}), \
+                patch.object(rc, "new_password", side_effect=AssertionError("generation reached")):
+            try:
+                error = refused(lambda: rc.rotate_role(role, True))
+            except AssertionError:
+                error = ""
+        check("malformed owner refuses before all database mutation", bool(error) and events == [])
+
+        for identity, label in [
+            (("other_login", role, True), "different session login"),
+            ((role, "other_role", True), "different effective role"),
+            ((role, role, False), "missing verifier membership"),
+            (None, "missing identity row"),
+        ]:
+            events.clear()
+            error = refused(lambda: rc.rotate_role(role, True))
+            check(label + " refuses without publishing", bool(error) and not any(
+                isinstance(event, tuple) and event[0] == "write" for event in events))
+
+        identity = (role, role, True)
+        events.clear()
+        result = rc.rotate_role(role, True)
+        check("verifier rotates and preserves URL options after exact identity verification",
+              result == 0 and events == [
+                  ("connect", OWNER),
+                  ("execute", ("alter role {} with password {}", role, password)),
+                  "commit",
+                  ("connect", existing.replace("oldpw", password)),
+                  ("execute", "select session_user,current_user,pg_has_role(session_user,'carr_program5_forward_fix_verifiers','member')"),
+                  ("write", key, existing.replace("oldpw", password)),
+              ])
+        for prior_role in ("carr_jobs", "app_exporter_local"):
+            events.clear()
+            identity = (prior_role,)
+            prior = PEER.replace("carr_jobs", prior_role)
+            with patch.object(rc, "read_env", return_value={rc.ROLE_ENV[prior_role]: prior}):
+                result = rc.rotate_role(prior_role, True)
+            check(prior_role + " retains rotation and current-user verification",
+                  result == 0 and events[-2:] == [
+                      ("execute", "select current_user"),
+                      ("write", rc.ROLE_ENV[prior_role], prior.replace("oldpw", password)),
+                  ])
         events.clear()
         with patch.object(rc, "read_env", return_value={}), \
                 patch.object(rc, "new_password", side_effect=AssertionError("generation reached")):
             missing = refused(lambda: rc.rotate_role(role, True))
-    check("verifier rotates, preserves URL options, verifies identity before publishing", success)
-    check("verifier identity mismatch refuses without publishing", "expected " + role in mismatch and no_write)
-    check("verifier cannot mint a missing connection", "nothing to rotate" in missing and events == [])
+        check("verifier cannot mint a missing connection", "nothing to rotate" in missing and events == [])
 
 
 def main() -> int:

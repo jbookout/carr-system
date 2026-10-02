@@ -678,21 +678,19 @@ def _rotate_existing_role_locked(role: str, generate: bool) -> int:
     env_key = ROLE_ENV[role]
     env = read_env()
     existing = env.get(env_key)
-    minting = False
     if not existing:
-        if role not in MINTABLE:
-            sys.exit(f"rotate-credential: {env_key} is not in {ENV_PATH} — nothing to rotate. "
-                     f"Add the line first; this tool changes a password, it does not mint a "
-                     f"connection.")
-        minting = True
-        if not generate:
-            # A first provision has no old value to preserve compatibility with,
-            # so there is nothing a typed password buys and one thing it costs:
-            # a human-chosen secret for an unattended role, typed twice, at the
-            # keyboard. Generated is strictly better here.
-            sys.exit(f"rotate-credential: {env_key} does not exist yet, so this run would MINT "
-                     f"it. Pass --generate: a credential no human ever needs to type should not "
-                     f"be one a human chooses.")
+        sys.exit(f"rotate-credential: {env_key} is not in {ENV_PATH} — nothing to rotate. "
+                 "Add the line first; this tool changes a password, it does not mint a connection.")
+
+    # Validate the effective libpq target before generating a password or
+    # opening the owner connection. The narrow parser rejects query overrides
+    # of the host, login, database, or startup role as well as malformed URIs.
+    _, owner_target = _postgres_parts(owner, "owner connection")
+    parts, target = _postgres_parts(existing, env_key)
+    if unquote(parts.username) != role:
+        sys.exit(f"rotate-credential: {env_key} has the wrong login — nothing changed")
+    if target != owner_target:
+        sys.exit(f"rotate-credential: {env_key} and owner target differ — nothing changed")
 
     if generate:
         pw = new_password()
@@ -705,29 +703,29 @@ def _rotate_existing_role_locked(role: str, generate: bool) -> int:
         if any(c in pw for c in " '\"@/:?#"):
             sys.exit("avoid spaces, quotes, and @ / : ? # (they break the URL form) — nothing changed")
 
+    new_url = swap_password(existing, pw)
     with psycopg.connect(owner) as conn:
         conn.execute(sql.SQL("alter role {} with password {}").format(
             sql.Identifier(role), sql.Literal(pw)))
         conn.commit()
-
-    # carr_backup is disabled. Permitted roles retain the existing rotation
-    # behavior: replace only the password in an existing URL.
-    assert existing is not None
-    new_url = swap_password(existing, pw)
 
     # PROVE IT BEFORE WRITING IT. If the new credential does not connect, the old
     # line stays in db.env and the only damage is a role whose password no longer
     # matches a file — recoverable by re-running. Writing first and verifying
     # after would leave an unusable file if the connection failed.
     with psycopg.connect(new_url) as conn:
-        row = conn.execute("select current_user").fetchone()
-        if not row or row[0] != role:
-            sys.exit(f"rotate-credential: verification connected as {row[0] if row else 'nobody'}, "
-                     f"expected {role} — db.env NOT written")
+        if role == "carr_program5_forward_fix_verifier":
+            row = conn.execute("select session_user,current_user,pg_has_role(session_user,'carr_program5_forward_fix_verifiers','member')").fetchone()
+            expected = (role, role, True)
+        else:
+            row = conn.execute("select current_user").fetchone()
+            expected = (role,)
+        if row != expected:
+            sys.exit(f"rotate-credential: verification is not the exact scoped identity "
+                     f"expected for {role} — db.env NOT written")
 
     write_env_key(env_key, new_url)
-    print(f"{role}: password {'set' if minting else 'rotated'} · {env_key} "
-          f"{'created' if minting else 'rewritten'} · verified connection as {role}")
+    print(f"{role}: password rotated · {env_key} rewritten · verified connection as {role}")
 
     return 0
 
