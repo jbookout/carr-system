@@ -31,9 +31,9 @@ FINAL_REPIN_MIGRATION = "0483_rule_delivery_activation_digest_repin.sql"
 # 0554 re-pins all eight targets once more (784e0527 -> c6e89d64). A snapshot
 # refreshed past it carries the new digest, so the chain must know it.
 CUTOVER_READY_MIGRATION = "0554_scoped_rule_delivery_cutover_ready.sql"
-# 0783 re-pins all eight targets once more (c6e89d64 -> the map digest after rule
+# 0772 re-pins all eight targets once more (c6e89d64 -> the map digest after rule
 # ede4b241 entered the reviewed map, 2026-09-29).
-MODEL_CHOICE_REPIN_MIGRATION = "0783_repin_rule_delivery_activation_after_model_choice_rule.sql"
+MODEL_CHOICE_REPIN_MIGRATION = "0772_repin_rule_delivery_activation_after_model_choice_rule.sql"
 SOURCE_MERGE_MIGRATION_SOURCE = (
     ROOT / "migrations" / SOURCE_MERGE_MIGRATION
 ).read_text(encoding="utf-8")

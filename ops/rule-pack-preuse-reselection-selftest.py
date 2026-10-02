@@ -1350,6 +1350,33 @@ def rules_routed_by(predicate) -> set[str]:
             if any(predicate(route) for route in entry["routes"])}
 
 
+# The Bash route (production route rail) fires on every supported cloud launch
+# form, wherever the flag sits among the options, and not on a local session.
+def _cli_routed(command):
+    return "ede4b241" in routed_for("Bash", {"command": command})
+
+
+for cloud_command in (
+        'claude --remote "fix the bug"',
+        'claude --model sonnet --remote "fix the bug"',
+        'claude --effort medium --remote',
+        'claude --cloud "fix the bug"',
+        'claude -p "fix the bug" --environment ccpool_synthetic',
+        'claude --remote="fix the bug"',
+        'cd repo && claude --model sonnet --cloud "fix; the bug"'):
+    check(f"cloud launch routes the model-choice rule: {cloud_command}",
+          _cli_routed(cloud_command))
+for local_command in (
+        'claude --remote-control',
+        'claude --remote-control "name"',
+        'claude --model sonnet',
+        'claude -p "explain this file"',
+        'claude --version && git remote add origin x',
+        'git push --remote origin',
+        'echo done; ls --cloud-init'):
+    check(f"local or unrelated command stays silent for the model-choice rule: {local_command}",
+          not _cli_routed(local_command))
+
 with tempfile.TemporaryDirectory() as route_tmp:
     saved_env = dict(os.environ)
     os.environ["CARR_RULE_ROUTE_DEDUPE_DIR"] = str(Path(route_tmp) / "dedupe")
