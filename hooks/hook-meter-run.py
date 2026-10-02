@@ -104,10 +104,9 @@ MAX_FIELD = 300
 INVOCATION_REPO_ENV = "CARR_HOOK_INVOCATION_REPO"
 
 def bounded_grok_read_only():
-    # Ordinary sessions retain the meter's minimal import budget. Missing
-    # context-boundary plumbing must keep every gate running.
-    if os.environ.get("CARR_GROK_RUN_READ_ONLY") != "1":
-        return False
+    # Keep one classifier for marked and ordinary context invocations. The
+    # protected probe returns immediately without ps for unmarked sessions.
+    # Missing optional plumbing must keep every gate running.
     sys.path.insert(0, REPO)
     try:
         from hooks.grok_invocation import bounded_grok_read_only as probe

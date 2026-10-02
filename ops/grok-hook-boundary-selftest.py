@@ -26,11 +26,22 @@ def load(path):
 
 
 class GrokHookBoundaryTests(unittest.TestCase):
+    def test_context_wrapper_reaches_protected_probe_without_process_readback(self):
+        meter = load(ROOT / 'hooks/hook-meter-run.py')
+        from hooks import grok_invocation as boundary
+        probe = boundary.bounded_grok_read_only
+        with mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch.object(boundary, 'bounded_grok_read_only', wraps=probe) as called, \
+                mock.patch.object(boundary.subprocess, 'run') as ps:
+            self.assertFalse(meter.bounded_grok_read_only())
+            called.assert_called_once()
+            ps.assert_not_called()
+
     def test_separate_session_owner_stops_inherited_exemption(self):
         from hooks import grok_invocation as boundary
         prefix = 'grok --model grok-4.7 --reasoning-effort high --max-turns 60 --always-approve --sandbox read-only --output-format streaming-json --print retrieval'
         for owner in ('claude --permission-mode acceptEdits task',
-                      'codex exec --sandbox workspace-write task',
+                      'codex exec --dangerously-bypass-hook-trust --sandbox workspace-write task',
                       'node /opt/bin/claude --permission-mode acceptEdits task',
                       'python unrelated-session.py',
                       'grok --sandbox workspace --print task'):
