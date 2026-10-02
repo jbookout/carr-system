@@ -348,9 +348,9 @@ def probe_live(entry: dict) -> bool:
 
 
 class QueueCompletionPostFailed(Exception):
-    """The flash-local FINAL completion post to the room failed.
+    """A synchronous desk's FINAL completion post to the room failed.
 
-    Raised only by run_once's post_flash_completion hook, wrapping the bare
+    Raised only by run_once's post_sync_completion hook, wrapping the bare
     RuntimeError add_room_turn raises (verb_io.py's contract). It is a distinct
     type, not a RuntimeError, so run_once's per-desk handler can contain exactly
     this failure to its own desk while every OTHER RuntimeError — a
@@ -385,7 +385,7 @@ def _post_queue_completion(terminal: dict, *, add_room_turn, seat: str) -> None:
 
     Used by the async pending path (handle_pending), which already has a full
     "terminal" dict ({"task_id": ..., "completion": ...}) in hand once
-    finish_pending returns. The synchronous flash-local path posts through
+    finish_pending returns. Synchronous desks without MCP tools post through
     _post_completion_payload directly instead — see finish_pending_posted.
     """
     completion = terminal.get("completion")
@@ -516,7 +516,7 @@ def deliver(name: str, entry: dict, seat: str, queued_turn: dict, *, state: dict
         )
         return {"desk": name, "outcome": "delivered_async"}
 
-    if kind in ("codex-session", "codex-live", "flash-local"):
+    if kind in ("codex-session", "codex-live", "flash-local", "grok-cli"):
         # Only a codex-session desk can sit on a thread Codex Desktop holds, and
         # this conversational path is the one caller that waits for nothing back,
         # so it alone opts into the Desktop route (see dispatch._to_codex).
@@ -528,6 +528,14 @@ def deliver(name: str, entry: dict, seat: str, queued_turn: dict, *, state: dict
             # thread (codex_ipc) and the session answers there, like a claude desk.
             return {"desk": name, "outcome": "delivered_live"}
         if status == "completed":
+            if kind == "grok-cli":
+                add_room_turn(body=json.dumps({"grok_execution": {
+                    "desk": name, "source_msg_id": queued_turn["msg_id"],
+                    "source_seq": queued_turn["seq"],
+                    "dispatch_msg_id": row["msg_id"],
+                    **row["provider_metadata"],
+                }}, separators=(",", ":")), seat="hermes", kind="receipt",
+                    msg_id=str(uuid.uuid4()))
             add_room_turn(body=(row.get("result") or "").strip() or "(empty reply)",
                           seat=seat, kind="turn", msg_id=str(uuid.uuid4()))
             return {"desk": name, "outcome": "replied_sync"}
@@ -580,6 +588,8 @@ def heartbeat_body(desk_entries: dict, cursor: int, cycle_at: str,
             "last_seen": entry.get("last_seen"),
             "auth": entry.get("last_auth") if isinstance(entry.get("last_auth"), bool) else None,
             "profile": entry.get("profile") if isinstance(entry.get("profile"), str) else None,
+            **({"model": entry.get("model"), "effort": entry.get("effort")}
+               if entry.get("kind") == "grok-cli" else {}),
         }
         for name, entry in sorted(desk_entries.items())
     ]
@@ -902,14 +912,13 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
                         return dispatch_fn(
                             name, prompt, registry=registry, results_path=results_path)
 
-                    # flash-local has no MCP tools of its own, unlike a codex-session or
-                    # claude-session desk, which post their own reply into the room as
-                    # part of doing the task. Flash's synchronous completion here is the
-                    # ONLY chance its answer has to reach the room, so its reply rides
-                    # along in the completion callback (finding: PR #1249 review).
+                    # Flash and Grok have no MCP tools of their own. Their
+                    # synchronous answers must reach the room through this
+                    # callback before the queue task becomes terminal.
                     is_flash_local = entry.get("kind") == "flash-local"
+                    publishes_sync_reply = entry.get("kind") in {"flash-local", "grok-cli"}
 
-                    def post_flash_completion(completion: dict) -> None:
+                    def post_sync_completion(completion: dict) -> None:
                         # Posted from INSIDE finish_pending_posted, only for a FINAL
                         # outcome and before Hermes is marked terminal — see that
                         # method's docstring for why a failed post must not lose the
@@ -929,9 +938,10 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
                         retry_at=state["queue_retry_at"], now=now_fn(),
                         desk_live=live_by_desk.get(name, True),
                         unavailable_since=state.get("queue_unavailable_since", {}),
-                        include_reply=is_flash_local,
+                        include_reply=publishes_sync_reply,
                         retry_protocol_errors=is_flash_local,
-                        post_completion=post_flash_completion if is_flash_local else None,
+                        post_completion=post_sync_completion if publishes_sync_reply else None,
+                        completion_dir=state_path.parent / (state_path.name + ".queue-completions"),
                     )
                     queue_scan_complete = queue_scan_complete and bool(
                         getattr(queue_executor, "last_ready_scan_complete", False))
@@ -1030,7 +1040,7 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
             # A queue outage says nothing about whether the named desk is live.
             registry_ext.stamp_heartbeat(name, live=live_by_desk.get(name, True), path=registry.path)
         except QueueCompletionPostFailed as e:
-            # ONLY the flash-local final completion post (post_flash_completion,
+            # ONLY a synchronous final completion post (post_sync_completion,
             # above). Hermes was never marked terminal for it (finish_pending_posted
             # posts BEFORE that mutation), so the claim just ages out and Hermes'
             # own recovery returns the task to its retry phase. This must cost only

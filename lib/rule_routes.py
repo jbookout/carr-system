@@ -48,6 +48,11 @@ ROUTE_KINDS = frozenset({"boot", "trigger", "path_rule", "gate", "duplicate"})
 TRIGGER_KEYS = ("tools", "verbs", "bash_patterns")
 ENTRY_KEYS = frozenset({"moment", "routes", "no_trigger_reason", "note"})
 PATH_INPUT_KEYS = ("file_path", "path", "notebook_path")
+# Built-in tools that only look. A path_rule route is a write-moment route (the
+# moments name building, editing and committing), so a call that merely reads a
+# matching path is not that moment. evals/rule-delivery measured routine reads
+# receiving rules through these globs. Every other tool keeps matching.
+READ_ONLY_TOOLS = frozenset({"Read", "Grep", "Glob", "LS", "NotebookRead"})
 BASH_TOOLS = frozenset({"Bash", "functions.exec"})
 
 # Tool names a route may name. Built-ins are Claude Code's own tools; the
@@ -300,6 +305,11 @@ def route_matches(route: dict, tool_name: str, tool_input: object,
         globs = _strings(route, "path_globs")
         if not globs:
             raise RouteShapeError("path_globs")
+        read_only = route.get("read_only", False)
+        if not isinstance(read_only, bool):
+            raise RouteShapeError("read_only")
+        if tool_name in READ_ONLY_TOOLS and not read_only:
+            return False
         paths = call_paths(tool_input)
         return any(fnmatch.fnmatch(path, pattern) for pattern in globs for path in paths)
     if kind != "trigger":

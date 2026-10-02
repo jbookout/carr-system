@@ -232,7 +232,10 @@ def _last_test_evidence(transcript):
         if not isinstance(rec, dict):
             continue
         content = (rec.get("message") or {}).get("content")
-        if rec.get("type") == "user":
+        origin = rec.get("origin") if isinstance(rec.get("origin"), dict) else {}
+        if (rec.get("type") == "user" and not rec.get("isMeta")
+                and not rec.get("isSidechain") and not rec.get("isCompactSummary")
+                and origin.get("kind") in (None, "", "human", "user", "keyboard")):
             human_text = (isinstance(content, str) and bool(content.strip()))
             if isinstance(content, list):
                 blocks = [b for b in content if isinstance(b, dict)]

@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 OPS = Path(__file__).resolve().parent
@@ -360,6 +361,35 @@ class TriageReviewTests(unittest.TestCase):
         self.assertEqual(result["detail"]["files"]["src/auth.py"]["source"], "deterministic_floor")
         self.assertIn("advice", result["detail"])
 
+    def test_floor_reads_the_review_tier_map(self):
+        # hooks/ is tier 3 in ops/config/review-tiers.v1.json and matched
+        # nothing in the regex the map replaced: the floor comes from the map.
+        fake = FakeJudge(answers={})
+        result = jdc.triage_review("diff --git a/hooks/lint-gate.py b/hooks/lint-gate.py\n@@ -1 +1 @@\n+x\n",
+                                   "task", judge_module=fake)
+        self.assertEqual(result["detail"]["files"]["hooks/lint-gate.py"]["source"], "deterministic_floor")
+        self.assertEqual(fake.calls, 0)
+
+    def test_unreadable_map_floors_high_and_says_why(self):
+        fake = FakeJudge(answers={})
+        original = jdc._sibling_lib
+
+        def broken(name):
+            raise ValueError("review-tiers map is malformed")
+
+        jdc._sibling_lib = broken
+        try:
+            result = jdc.triage_review("diff --git a/README.md b/README.md\n@@ -1 +1 @@\n+x\n",
+                                       "task", judge_module=fake)
+        finally:
+            jdc._sibling_lib = original
+        row = result["detail"]["files"]["README.md"]
+        self.assertEqual(row["risk"], "high")
+        self.assertEqual(row["source"], "review_tier_map_unreadable")
+        self.assertIn("malformed", row["error"])
+        self.assertEqual(result["verdict"], "needs_review")
+        self.assertEqual(fake.calls, 0)
+
     def test_mixed_diff_one_floor_one_judged_high(self):
         files = jdc.split_diff_by_file(DIFF_TWO_FILES)
         widgets_key = jdc._safe_id("src/widgets.py")
@@ -597,6 +627,44 @@ class HandoffTests(unittest.TestCase):
 
 
 class StopBoundaryBatchTests(unittest.TestCase):
+    def test_diff_uses_review_tier_map_without_paid_judgment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            judge = FakeJudge({})
+            results = jdc.inspect_stop_boundary(
+                "", {}, "diff --git a/hooks/lint-gate.py b/hooks/lint-gate.py\n+x\n",
+                "change hook", "session-map", client=FakeClient, judge_module=judge,
+                state_dir=tmp, receipt_path=os.path.join(tmp, "receipt.jsonl"))
+            self.assertEqual(judge.calls, 0)
+            self.assertEqual(results[0]["verdict"], "needs_review")
+            self.assertEqual(results[0]["detail"]["source"], "deterministic_floor")
+
+    def test_unreadable_map_keeps_diff_at_high_floor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            judge = FakeJudge({})
+            with patch.object(jdc, "_sibling_lib", side_effect=ValueError("malformed map")):
+                results = jdc.inspect_stop_boundary(
+                    "", {}, "diff --git a/app.py b/app.py\n+x\n",
+                    "change app", "session-broken-map", client=FakeClient, judge_module=judge,
+                    state_dir=tmp, receipt_path=os.path.join(tmp, "receipt.jsonl"))
+            self.assertEqual(judge.calls, 0)
+            self.assertEqual(results[0]["verdict"], "needs_review")
+            self.assertEqual(results[0]["detail"]["source"], "review_tier_map_unreadable")
+            self.assertIn("malformed", results[0]["detail"]["error"])
+
+    def test_diff_overflow_is_reviewed_instead_of_dropped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            judge = FakeJudge({"risk_0": {"type": "score", "score": 0.1}})
+            diff = "diff --git a/app.py b/app.py\n+x\ndiff --git a/extra.py b/extra.py\n+y\n"
+            with patch.object(jdc, "MAX_TRIAGE_FILES", 1):
+                results = jdc.inspect_stop_boundary(
+                    "", {}, diff, "change app", "session-overflow", client=FakeClient,
+                    judge_module=judge, state_dir=tmp,
+                    receipt_path=os.path.join(tmp, "receipt.jsonl"))
+            self.assertEqual(judge.calls, 1)
+            self.assertEqual(set(judge.last[1]), {"risk_0"})
+            self.assertEqual(results[0]["detail"]["source"], "unreviewed_overflow")
+            self.assertEqual(results[0]["verdict"], "needs_review")
+
     def test_historical_completion_mention_does_not_create_done_obligation(self):
         with tempfile.TemporaryDirectory() as tmp:
             judge = FakeJudge({
