@@ -246,7 +246,7 @@ def run_live_cases() -> None:
                             break
                 except (TimeoutError, OSError):
                     pass
-            check("POST over the ~2MiB size cap is 413 (refused on Content-Length alone)",
+            check("POST over the live-contract size cap is 413 (refused on Content-Length alone)",
                   b" 413 " in response, f"response head={response[:200]!r}")
 
             # ---- first sight / duplicate ----
@@ -274,6 +274,8 @@ def run_live_cases() -> None:
             rc, out, err = sink.stop()
 
         # ---- the ledger: digest present, note text absent ----
+        check("captured subprocess stdout/stderr contain no note text or bearer token",
+              note_text.encode() not in out + err and token.encode() not in out + err)
         ledger_path = ledger_dir / "ledger.jsonl"
         check("the ledger file exists after accepted posts", ledger_path.is_file())
         check("the ledger directory is mode 0700",
@@ -322,7 +324,7 @@ def run_ledger_trim_case() -> None:
         check("trimming drops the OLDEST entries, keeping the most recent",
               "trim-0" not in ids and f"trim-{cap + 6}" in ids, f"ids={ids}")
         check("an id trimmed off disk is still remembered in-process (bounded disk, not bounded memory)",
-              ledger.has_seen("trim-0") is True)
+              ledger.record("trim-0", b"synthetic duplicate") is True)
 
 
 def run_static_checks() -> None:

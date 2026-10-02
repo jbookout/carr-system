@@ -58,6 +58,9 @@ import sys
 from datetime import datetime, timezone
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, REPO)
+from lib import machine_role
+from lib.launchd_scope import allowed_on_machine
 
 # service key, launchd label, TCP port (None = process liveness only)
 TARGETS = [
@@ -153,7 +156,10 @@ def record(service: str, up: bool, signal: str, detail: str) -> int:
 
 def main() -> int:
     unrecorded = 0
-    for service, label, port in TARGETS:
+    primary = machine_role.is_primary(REPO)
+    targets = [target for target in TARGETS
+               if allowed_on_machine(target[1] + ".plist", primary)]
+    for service, label, port in targets:
         up, signal, detail = probe(label, port)
         rc = record(service, up, signal, detail)
         mark = "up  " if up else "DOWN"
@@ -185,14 +191,14 @@ def main() -> int:
     # `unknown` — Program 3's load-bearing decision, that health derives from
     # the latest observation and its freshness, already handles this correctly
     # without any help from an alarm.
-    if unrecorded == len(TARGETS):
+    if unrecorded == len(targets):
         print("probe-keepalive: nothing could be recorded at all — treating this "
               "as an unreachable ledger (EX_CONFIG), not as three simultaneous "
               "outages. These services will read stale, which is the honest "
               "answer when nobody could write down what was found.")
         return 78
 
-    print(f"probe-keepalive: {unrecorded} of {len(TARGETS)} results could not be "
+    print(f"probe-keepalive: {unrecorded} of {len(targets)} results could not be "
           f"recorded while others could — that is a real partial failure, not a "
           f"missing credential.")
     return 1

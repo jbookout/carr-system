@@ -36,10 +36,12 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import socket
 import stat
 import sys
 import threading
+import tempfile
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -47,7 +49,8 @@ from typing import cast
 
 EX_CONFIG = 78  # the repo's config-error convention (see notes-sweep-post.sh)
 
-MAX_BODY_BYTES = 2 * 1024 * 1024  # ~2 MiB
+TRANSPORT_CONTRACT = Path(__file__).resolve().parents[1] / "mcp-server/src/ingest-transport.v1.json"
+MAX_BODY_BYTES = json.loads(TRANSPORT_CONTRACT.read_text(encoding="utf-8"))["max_body_bytes"]
 LEDGER_MAX_LINES = 5000
 
 DEFAULT_PORT = 4684
@@ -107,7 +110,7 @@ def load_token(credential_file: str) -> str:
 
 
 class Ledger:
-    """Append-only, capped, privacy-preserving receipt log.
+    """Atomic, capped, privacy-preserving receipt log.
 
     One JSON line per accepted post: external_id, a sha256 of the raw request
     body, the raw body's byte length, and a UTC timestamp. Never the body
@@ -140,11 +143,12 @@ class Ledger:
                 if isinstance(ext_id, str):
                     self.seen.add(ext_id)
 
-    def has_seen(self, external_id: str) -> bool:
-        with self.lock:
-            return external_id in self.seen
+    def record(self, external_id: str, raw_body: bytes) -> bool:
+        """Durably accept a receipt and return its duplicate decision under one lock.
 
-    def record(self, external_id: str, raw_body: bytes) -> None:
+        A failed publication leaves the previous ledger intact and does not
+        mark the identifier as seen. No caller needs a separate membership read.
+        """
         row = {
             "external_id": external_id,
             "body_sha256": hashlib.sha256(raw_body).hexdigest(),
@@ -155,17 +159,70 @@ class Ledger:
         }
         line = json.dumps(row, sort_keys=True, separators=(",", ":"))
         with self.lock:
-            self.seen.add(external_id)
+            if external_id in self.seen:
+                return True
             lines = []
             if self.path.exists():
                 lines = self.path.read_text(encoding="utf-8").splitlines()
+            # A directory fsync can fail after replace published the receipt.
+            # Retrying must confirm that receipt instead of appending it twice.
+            if any(json.loads(item).get("external_id") == external_id for item in lines):
+                self._sync_directory()
+                self.seen.add(external_id)
+                return True
             lines.append(line)
             if len(lines) > self.max_lines:
                 lines = lines[-self.max_lines :]
-            self.path.write_text(
-                "\n".join(lines) + "\n", encoding="utf-8"
-            )
-            os.chmod(self.path, 0o600)
+            fd, temporary = tempfile.mkstemp(prefix=".ledger-", dir=self.dir)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write("\n".join(lines) + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, self.path)
+                self._sync_directory()
+            finally:
+                Path(temporary).unlink(missing_ok=True)
+            self.seen.add(external_id)
+            return False
+
+    def _sync_directory(self) -> None:
+        fd = os.open(self.dir, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+class BoundedHTTPServer(ThreadingHTTPServer):
+    """Bound unauthenticated header reads and authenticated body reads alike."""
+
+    def __init__(self, address, handler, *, read_timeout: float = 5.0,
+                 max_workers: int = 16) -> None:
+        self.read_timeout = read_timeout
+        self.workers = threading.BoundedSemaphore(max_workers)
+        super().__init__(address, handler)
+
+    def get_request(self):
+        request, address = super().get_request()
+        request.settimeout(self.read_timeout)
+        return request, address
+
+    def process_request(self, request, client_address) -> None:
+        if not self.workers.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.workers.release()
+            raise
+
+    def process_request_thread(self, request, client_address) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.workers.release()
 
 
 def make_handler(token: str, ingest_path: str, ledger: Ledger) -> type:
@@ -195,7 +252,7 @@ def make_handler(token: str, ingest_path: str, ledger: Ledger) -> type:
             if not header.startswith(prefix):
                 return False
             supplied = header[len(prefix) :]
-            return hmac.compare_digest(supplied, token)
+            return hmac.compare_digest(supplied.encode("utf-8"), token.encode("utf-8"))
 
         def do_POST(self) -> None:  # noqa: N802
             if self.path != ingest_path:
@@ -204,26 +261,36 @@ def make_handler(token: str, ingest_path: str, ledger: Ledger) -> type:
             if not self._authorized():
                 self._reply(401)
                 return
-            length_header = self.headers.get("Content-Length")
-            try:
-                length = int(length_header) if length_header is not None else 0
-            except ValueError:
+            lengths = self.headers.get_all("Content-Length", [])
+            if (self.headers.get("Transfer-Encoding") is not None or len(lengths) != 1
+                    or re.fullmatch(r"[0-9]+", lengths[0]) is None):
                 self._reply(400)
                 return
-            if length > MAX_BODY_BYTES:
-                # Drain nothing — refuse before reading an oversized body into
-                # memory. The connection is closed by send_response's Connection
-                # handling once we return without reading rfile.
+            digits = lengths[0].lstrip("0") or "0"
+            if len(digits) > len(str(MAX_BODY_BYTES)):
                 self._reply(413)
                 return
-            raw = self.rfile.read(length) if length else b""
+            length = int(digits)
+            if length > MAX_BODY_BYTES:
+                # Drain nothing — refuse before reading an oversized body into
+                # memory. The handler uses HTTP/1.0 and closes after its reply.
+                self._reply(413)
+                return
+            try:
+                raw = self.rfile.read(min(length, MAX_BODY_BYTES))
+            except TimeoutError:
+                self._reply(408)
+                return
+            if len(raw) != length:
+                self._reply(400)
+                return
             content_type = self.headers.get("Content-Type", "")
             if "application/json" not in content_type:
                 self._reply(400)
                 return
             try:
                 payload = json.loads(raw) if raw else {}
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, UnicodeDecodeError):
                 self._reply(400)
                 return
             if not isinstance(payload, dict):
@@ -233,9 +300,11 @@ def make_handler(token: str, ingest_path: str, ledger: Ledger) -> type:
             if not isinstance(external_id, str) or not external_id.strip():
                 self._reply(400)
                 return
-            duplicate = ledger.has_seen(external_id)
-            if not duplicate:
-                ledger.record(external_id, raw)
+            try:
+                duplicate = ledger.record(external_id, raw)
+            except OSError:
+                self._reply(503)
+                return
             self._reply(200, {"duplicate": duplicate})
 
         def do_GET(self) -> None:  # noqa: N802
@@ -268,7 +337,7 @@ def run(
     token = load_token(credential_file)
     ledger = Ledger(ledger_dir)
     handler = make_handler(token, ingest_path, ledger)
-    server = ThreadingHTTPServer(("127.0.0.1", port), handler)
+    server = BoundedHTTPServer(("127.0.0.1", port), handler)
     # Belt and braces on top of binding "127.0.0.1" literally: refuse to run at
     # all if the OS somehow handed back a non-loopback socket.
     # AF_INET always yields a str host here (never bytes, that is AF_UNIX-only);

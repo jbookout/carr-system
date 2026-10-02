@@ -89,6 +89,9 @@ WRAPPER_EXEMPT = {
                  "per restart",
     "doc-engine": "KeepAlive server — probed by bin/probe-keepalive.py (TCP "
                   "connect to 127.0.0.1:4680); same wrapper reason as call-mode",
+    "canary-ingest-sink": "KeepAlive server — probed by bin/probe-keepalive.py "
+                          "(TCP connect to 127.0.0.1:4684) on its installation "
+                          "machine; the wrapper would record one row per restart",
     "quill-dictate": "KeepAlive server — probed by bin/probe-keepalive.py, "
                      "process liveness only (no port to knock on); same wrapper "
                      "reason as call-mode",
