@@ -167,7 +167,7 @@ def validate_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
     clean = _require_mapping(manifest["clean"], "manifest.clean")
     if set(clean) != {"pathspecs", "expected"}:
         raise SweepError("manifest.clean fields are not exact")
-    # allow_empty: a branch-only settlement declares no clean set at all. This is
+    # A fixture can declare no clean set. This is
     # only safe because an empty list is now proven to SKIP the clean rather than
     # widen into `git clean -fd --` over the whole tree; the two changes belong
     # together and neither is correct without the other.
@@ -546,8 +546,8 @@ def _verify_branch_tip(repository: Path, branch: Mapping[str, Any]) -> bool:
 
 def _branch_set(repository: Path) -> set[str]:
     """Every local branch name, as a set."""
-    out = _git(repository, "for-each-ref", "--format=%(refname:short)", "refs/heads").stdout
-    return {line.strip() for line in out.splitlines() if line.strip()}
+    out = _git(repository, "for-each-ref", "--format=%(refname)", "refs/heads").stdout
+    return {line.removeprefix("refs/heads/") for line in out.splitlines() if line}
 
 
 def _delete_branches(repository: Path, manifest: Mapping[str, Any], parsed: Mapping[str, Any],
@@ -606,33 +606,14 @@ def _safe_remove(repository: Path, pathspec: str) -> None:
         raise SweepError(f"unsupported park removal type: {pathspec}")
 
 
-def _touches_working_tree(parsed: Mapping[str, Any]) -> bool:
-    """True when this settlement declares any file-level operation.
-
-    A settlement that deletes only branches reads and writes no file, so
-    requiring the whole checkout to be pinned and spotless would make it hostage
-    to work it never touches. On a checkout several sessions write to
-    continuously that condition is not merely inconvenient, it is never durably
-    true: this tree was cleaned to zero twice on 2026-09-02 and fresh work from
-    another session appeared within minutes both times. Assert what this run
-    changed, and nothing else.
-    """
-    return bool(parsed["clean_pathspecs"] or parsed["restore_paths"] or parsed.get("park_paths"))
-
-
 def _stage6_readback(repository: Path, manifest: Mapping[str, Any], parsed: Mapping[str, Any],
                      starting_branches: set[str], deleted: set[str]) -> None:
-    if _touches_working_tree(parsed):
-        head = _git(repository, "rev-parse", "HEAD").stdout.strip().lower()
-        if head != parsed["pinned"]:
-            raise SweepError(f"closing readback HEAD differs from pin: {head}")
-        status = _git(repository, "status", "--porcelain=v1").stdout
-        if status:
-            raise SweepError(f"closing readback has remaining tracked/untracked dirt: {status!r}")
-    else:
-        head = _git(repository, "rev-parse", "HEAD").stdout.strip().lower()
-        print("STAGE 6 branch-only settlement: no file operation was declared, so the "
-              "closing readback asserts branch sets only and leaves the working tree unjudged")
+    head = _git(repository, "rev-parse", "HEAD").stdout.strip().lower()
+    if head != parsed["pinned"]:
+        raise SweepError(f"closing readback HEAD differs from pin: {head}")
+    status = _git(repository, "status", "--porcelain=v1").stdout
+    if status:
+        raise SweepError(f"closing readback has remaining tracked/untracked dirt: {status!r}")
 
     # Branch closing is asserted as SETS, not as a pinned integer.  A count fixed at
     # authoring time is invalidated by any concurrent session creating a branch -- which
@@ -659,7 +640,7 @@ def _stage6_readback(repository: Path, manifest: Mapping[str, Any], parsed: Mapp
 
 
 def run_settlement(*, repository: Path, manifest_fd: int, allowlist_fd: int, capability_receipt_fd: int,
-                   execute: bool, authorized_production_canonical: bool = False,
+                   execute: bool,
                    before_disposal: Callable[[], None] | None = None) -> None:
     """Run one admitted settlement against *repository*.
 
@@ -699,9 +680,7 @@ def run_settlement(*, repository: Path, manifest_fd: int, allowlist_fd: int, cap
     # an unsatisfiable run into an honest refusal that names the remedy.  Bringing the
     # checkout current is a separate, adjudicated step and deliberately not this tool's job.
     head_now = _git(repository, "rev-parse", "HEAD").stdout.strip().lower()
-    # A branch-only settlement never reads or writes a file, so a checkout that
-    # is behind the pin cannot affect its outcome and does not gate it.
-    head_is_pinned = head_now == parsed["pinned"] or not _touches_working_tree(parsed)
+    head_is_pinned = head_now == parsed["pinned"]
     if not head_is_pinned:
         behind = _git(repository, "rev-list", "--count", f"{head_now}..{parsed['pinned']}",
                       check=False).stdout.strip() or "?"
@@ -731,16 +710,8 @@ def run_settlement(*, repository: Path, manifest_fd: int, allowlist_fd: int, cap
         raise SweepHeld(precondition)
     starting_branches = _branch_set(repository)
 
-    if _is_canonical_or_child(repository) and not authorized_production_canonical:
-        raise SweepError("execute mode refuses the canonical checkout tree; disposable fixtures only")
     if _is_canonical_or_child(repository):
-        # PRODUCTION ACTIVATION (2026-09-02): the fixtures-only boundary is crossed ONLY
-        # by the explicit --authorized-production-canonical-sweep flag. This does not weaken
-        # any rail — the single-use token, the every-path backup, the stage-4 fingerprint,
-        # the dry-run diff, the never-cleanable assertion, and the per-branch merge
-        # re-verification all still fire below and abort on any drift.
-        print("PRODUCTION ACTIVATION: executing the settlement against the CANONICAL checkout "
-              "under explicit authorization; all safety rails remain in force.")
+        raise SweepError("execute mode refuses the canonical checkout tree; disposable fixtures only")
     _stage3_backup(repository, manifest, parsed, allowlist)
     fingerprint = fingerprint_tree(repository)
     print(f"STAGE 4 fingerprint captured: {fingerprint}")
@@ -786,16 +757,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--capability-receipt-fd", type=int, required=True)
     parser.add_argument("--repository", type=Path, default=Path.cwd())
     parser.add_argument("--execute", action="store_true", help="allow fixture-only destructive stage-5 operations")
-    parser.add_argument("--authorized-production-canonical-sweep", dest="authorized_production_canonical",
-                        action="store_true",
-                        help="explicit, deliberate opt-in to sweep the REAL canonical checkout; "
-                             "without this, execute mode still refuses canonical and every child of it")
     args = parser.parse_args(argv)
     try:
         run_settlement(
             repository=args.repository, manifest_fd=args.manifest_fd, allowlist_fd=args.allowlist_fd,
             capability_receipt_fd=args.capability_receipt_fd, execute=args.execute,
-            authorized_production_canonical=args.authorized_production_canonical,
         )
     except SweepHeld as exc:
         print(f"HELD: {exc}")

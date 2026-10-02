@@ -6,6 +6,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import inspect
 import json
 import os
 from pathlib import Path
@@ -358,38 +359,121 @@ def test_closing_detects_undeleted_branch(root: Path) -> None:
     print("PASS closing_detects_undeleted_branch")
 
 
-def test_branch_only_settlement_ignores_working_tree(root: Path) -> None:
-    """A settlement that declares no file operation must not be gated by the tree.
+def test_canonical_execution_has_no_opt_in(root: Path) -> None:
+    fixture = Fixture(root / "canonical-refusal")
+    assert "authorized_production_canonical" not in inspect.signature(RUNNER.run_settlement).parameters
+    help_text = checked([sys.executable, str(RUNNER_PATH), "--help"], ROOT)
+    assert "--authorized-production-canonical-sweep" not in help_text
+    previous = RUNNER.CANONICAL_CHECKOUT
+    try:
+        for canonical in (fixture.repository, fixture.root):
+            setattr(RUNNER, "CANONICAL_CHECKOUT", canonical)
+            try:
+                invoke(fixture, fixture.manifest(clean_pathspecs=[], clean_expected=[]), execute=True)
+            except RUNNER.SweepError as exc:
+                assert "disposable fixtures only" in str(exc), str(exc)
+            else:
+                raise AssertionError("canonical execution did not refuse")
+    finally:
+        setattr(RUNNER, "CANONICAL_CHECKOUT", previous)
+    assert not git(fixture.repository, "for-each-ref", "refs/backup")
+    print("PASS canonical_execution_has_no_opt_in")
 
-    The shared checkout is written continuously by other sessions, so a
-    branch-only run cannot be made hostage to a cleanliness it never touches.
-    Here the checkout is behind the pin AND carries untracked debris, and the
-    branch deletion still completes.
-    """
-    fixture = Fixture(root / "branch-only")
-    git(fixture.repository, "switch", "-c", "merged-branch")
-    git(fixture.repository, "switch", "main")
-    tip = git(fixture.repository, "rev-parse", "HEAD").strip()
-    backup_ref = "refs/backup/fixture-r03-stage5/branch/merged-branch"
-    git(fixture.repository, "update-ref", backup_ref, tip)
-    branches = [{"name": "merged-branch", "tip": tip, "classification": "ancestry_merged",
-                 "tip_backup_ref": backup_ref, "host_confirmation": None}]
-    manifest = fixture.manifest(clean_pathspecs=[], clean_expected=[], branches=branches, branch_count=1)
-    # debris the run must leave alone, and a checkout deliberately behind the pin
-    debris = fixture.repository / "untouched-debris.txt"
-    debris.write_text("not this run's business\n", encoding="utf-8")
+
+def test_empty_operations_preserve_closing_contract(root: Path) -> None:
+    fixture = Fixture(root / "empty-operations-contract")
+    keep = fixture.repository / "keep.txt"
+    keep.write_text("untracked fixture content\n", encoding="utf-8")
+    manifest = fixture.manifest(clean_pathspecs=[], clean_expected=[])
+    try:
+        invoke(fixture, manifest, execute=True)
+    except RUNNER.SweepError as exc:
+        assert "remaining tracked/untracked dirt" in str(exc), str(exc)
+    else:
+        raise AssertionError("empty operations waived the manifest clean-tree contract")
+    assert keep.exists()
     _advance_origin_main(fixture)
-    manifest["pinned_origin_main"] = fixture.pin
-    manifest["closing"]["expected_head"] = fixture.pin
-    output = invoke(fixture, manifest, execute=True)
-    assert "branch-only settlement" in output, output
-    assert "clean skipped" in output, output
-    surviving = subprocess.run(["git", "for-each-ref", "--format=%(refname:short)", "refs/heads"],
-                               cwd=str(fixture.repository), env=ENV, text=True,
-                               stdout=subprocess.PIPE).stdout.split()
-    assert "merged-branch" not in surviving, f"branch was not deleted; refs={surviving}"
-    assert debris.exists(), "a branch-only settlement deleted an untracked file"
-    print("PASS branch_only_settlement_ignores_working_tree")
+    manifest = fixture.manifest(clean_pathspecs=[], clean_expected=[])
+    dry = invoke(fixture, manifest, execute=False)
+    assert "PRECONDITION NOT MET" in dry, dry
+    assert "PRECONDITION OK" not in dry, dry
+    try:
+        invoke(fixture, manifest, execute=True)
+    except RUNNER.SweepHeld as exc:
+        assert "is not the settled pin" in str(exc), str(exc)
+    else:
+        raise AssertionError("empty operations admitted a stale HEAD")
+    print("PASS empty_operations_preserve_closing_contract")
+
+
+def test_empty_operations_racing_write_aborts(root: Path) -> None:
+    fixture = Fixture(root / "empty-operations-race")
+    manifest = fixture.manifest(clean_pathspecs=[], clean_expected=[])
+    def write_unrelated() -> None:
+        (fixture.repository / "concurrent.txt").write_text("concurrent fixture write\n", encoding="utf-8")
+    try:
+        invoke(fixture, manifest, execute=True, before_disposal=write_unrelated)
+    except RUNNER.SweepError as exc:
+        assert "fingerprint changed" in str(exc), str(exc)
+    else:
+        raise AssertionError("concurrent write escaped the fixture fingerprint contract")
+    # The same dirt present at closing must also fail, independent of file operations.
+    parsed = RUNNER.validate_manifest(manifest)
+    try:
+        RUNNER._stage6_readback(fixture.repository, manifest, parsed, {"main"}, set())
+    except RUNNER.SweepError as exc:
+        assert "remaining tracked/untracked dirt" in str(exc), str(exc)
+    else:
+        raise AssertionError("closing waived concurrent dirt for empty operations")
+    assert (fixture.repository / "concurrent.txt").exists()
+    print("PASS empty_operations_racing_write_aborts")
+
+
+def test_stale_head_refuses_new_pin_branch_before_backup(root: Path) -> None:
+    fixture = Fixture(root / "stale-head-new-branch")
+    _advance_origin_main(fixture)
+    git(fixture.repository, "branch", "merged-at-new-pin", fixture.pin)
+    backup = "refs/backup/fixture-r03-stage5/branch/merged-at-new-pin"
+    branch = {"name": "merged-at-new-pin", "tip": fixture.pin, "classification": "ancestry_merged",
+              "tip_backup_ref": backup, "host_confirmation": None}
+    manifest = fixture.manifest(clean_pathspecs=[], clean_expected=[], branches=[branch])
+    try:
+        invoke(fixture, manifest, execute=True)
+    except RUNNER.SweepHeld as exc:
+        assert "is not the settled pin" in str(exc), str(exc)
+    else:
+        raise AssertionError("stale HEAD reached branch deletion instead of admission refusal")
+    assert git(fixture.repository, "rev-parse", "refs/heads/merged-at-new-pin").strip() == fixture.pin
+    assert not git(fixture.repository, "for-each-ref", "refs/backup")
+    assert not git(fixture.repository, "ls-remote", "--refs", "origin", backup)
+    print("PASS stale_head_refuses_new_pin_branch_before_backup")
+
+
+def test_branch_identity_survives_concurrent_tag_collision(root: Path) -> None:
+    fixture = Fixture(root / "retained-tag-collision")
+    git(fixture.repository, "branch", "bystander")
+    manifest = fixture.manifest(clean_pathspecs=[], clean_expected=[], branch_count=2)
+    def add_tag() -> None:
+        git(fixture.repository, "tag", "bystander")
+    output = invoke(fixture, manifest, execute=True, before_disposal=add_tag)
+    assert "closing readback passed" in output, output
+    assert RUNNER._branch_set(fixture.repository) == {"main", "bystander"}
+    print("PASS branch_identity_survives_concurrent_tag_collision")
+
+
+def test_declared_branch_identity_survives_existing_tag_collision(root: Path) -> None:
+    fixture = Fixture(root / "deleted-tag-collision")
+    git(fixture.repository, "branch", "merged")
+    git(fixture.repository, "tag", "merged")
+    backup = "refs/backup/fixture-r03-stage5/branch/merged"
+    branch = {"name": "merged", "tip": fixture.pin, "classification": "ancestry_merged",
+              "tip_backup_ref": backup, "host_confirmation": None}
+    output = invoke(fixture, fixture.manifest(clean_pathspecs=[], clean_expected=[],
+                                            branches=[branch], branch_count=1), execute=True)
+    assert "closing readback passed" in output, output
+    assert RUNNER._branch_set(fixture.repository) == {"main"}
+    assert git(fixture.repository, "rev-parse", "refs/tags/merged").strip() == fixture.pin
+    print("PASS declared_branch_identity_survives_existing_tag_collision")
 
 
 def test_empty_clean_set_never_cleans_whole_tree(root: Path) -> None:
@@ -401,7 +485,12 @@ def test_empty_clean_set_never_cleans_whole_tree(root: Path) -> None:
     nested.parent.mkdir()
     nested.write_text("also not condemned\n", encoding="utf-8")
     manifest = fixture.manifest(clean_pathspecs=[], clean_expected=[], branch_count=1)
-    invoke(fixture, manifest, execute=True)
+    try:
+        invoke(fixture, manifest, execute=True)
+    except RUNNER.SweepError as exc:
+        assert "remaining tracked/untracked dirt" in str(exc), str(exc)
+    else:
+        raise AssertionError("untracked dirt was accepted by the closing readback")
     assert keep.exists(), "empty clean set widened into deleting untracked files"
     assert nested.exists(), "empty clean set widened into a recursive tree clean"
     print("PASS empty_clean_set_never_cleans_whole_tree")
@@ -419,7 +508,12 @@ def main() -> int:
         test_precondition_refuses_stale_head(root)
         test_closing_detects_collateral_branch_loss(root)
         test_closing_detects_undeleted_branch(root)
-        test_branch_only_settlement_ignores_working_tree(root)
+        test_canonical_execution_has_no_opt_in(root)
+        test_empty_operations_preserve_closing_contract(root)
+        test_empty_operations_racing_write_aborts(root)
+        test_stale_head_refuses_new_pin_branch_before_backup(root)
+        test_branch_identity_survives_concurrent_tag_collision(root)
+        test_declared_branch_identity_survives_existing_tag_collision(root)
         test_empty_clean_set_never_cleans_whole_tree(root)
     print("r03-settlement-sweep-selftest: PASS")
     return 0
