@@ -764,7 +764,7 @@ async function defaultWorkInventoryReader(env, actor, correlationId, params = {}
   const client = { query: async (text, values = []) => ({ rows: await sql.query(text, values) }) };
   return readWorkInventoryCensus({
     client, actor, correlationId: correlationId || env.CORRELATION_ID,
-    cursor: params.cursor, limit: params.limit, kinds: params.kinds, statuses: params.statuses,
+    ...params,
   });
 }
 
@@ -780,7 +780,7 @@ async function defaultWorkInventoryReader(env, actor, correlationId, params = {}
 async function workInventoryResponse(request, env, session, dependencies) {
   if (!workspaceCommandCenterEnabled(env)) return json({ error: "not_found" }, 404);
   const url = new URL(request.url);
-  const allowed = new Set(["cursor", "limit", "kinds", "statuses"]);
+  const allowed = new Set(["cursor", "limit", "kinds", "statuses", "system", "source", "age", "text", "live_library", "id"]);
   if ([...url.searchParams.keys()].some((key) => !allowed.has(key))) {
     return json({ error: "AUTHORIZATION_REFUSED" }, 403);
   }
@@ -803,6 +803,8 @@ async function workInventoryResponse(request, env, session, dependencies) {
       limit: url.searchParams.get("limit"),
       kinds: url.searchParams.get("kinds"),
       statuses: url.searchParams.get("statuses"),
+      ...Object.fromEntries(["system", "source", "age", "text", "live_library", "id"]
+        .filter(key => url.searchParams.has(key)).map(key => [key, url.searchParams.get(key)])),
     });
     if (request.method === "HEAD") return new Response(null, { status: 200, headers: JSON_HEADERS });
     return json(payload);

@@ -780,12 +780,47 @@ def question_revision(question: dict[str, Any], project: str) -> dict[str, Any]:
     }
 
 
+def publish_external_inventory(cache: dict[str, Any]) -> dict[str, Any]:
+    """Publish immutable bounded pages before switching the manifest pointer."""
+    pages: list[dict[str, Any]] = []
+    batch: list[dict[str, Any]] = []
+    def emit(rows):
+        payload = {'items': rows}
+        encoded = json.dumps(payload, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+        digest = hashlib.sha256(encoded.encode()).hexdigest()
+        board_id = 'carr-v5-external-' + digest
+        before = call_verb('read-progress-board', {'board_id': board_id}).get('snapshot')
+        if before is None:
+            args = {'board_id': board_id, 'base_version': 0, 'snapshot': payload}
+            call_verb('publish-board-snapshot', {**args, 'idempotency_key': stable_key('publish-board-snapshot', args)})
+        after = call_verb('read-progress-board', {'board_id': board_id}).get('snapshot')
+        if not after or after.get('snapshot_json') != payload:
+            raise RuntimeError('external inventory page did not read back')
+        pages.append({'board_id': board_id, 'version': int(after['version']), 'count': len(rows), 'digest': digest})
+    for row in cache['items']:
+        candidate = [*batch, row]
+        if len(json.dumps({'items': candidate}, ensure_ascii=False)) > 120000:
+            if not batch: raise RuntimeError('external inventory row exceeds page contract')
+            emit(batch)
+            batch = [row]
+            if len(json.dumps({'items': batch}, ensure_ascii=False)) > 120000:
+                raise RuntimeError('external inventory row exceeds page contract')
+        else: batch = candidate
+    if batch: emit(batch)
+    return {**{key: value for key, value in cache.items() if key not in ('items', 'pr_heads')},
+            'schema': 'system-work-external.v2', 'pages': pages, 'item_count': len(cache['items'])}
+
+
 def publish_board(project: str) -> dict[str, int]:
     state = read_state(project)
     board = safe_project(project)
     before = call_verb("read-progress-board", {"board_id": board})
     remote_snapshot = before.get("snapshot")
     snapshot = board_snapshot(state)
+    if board == "carr-v5":
+        from system_work_cache import cached_github
+        snapshot["external_inventory"] = publish_external_inventory(cached_github(board_dir() / "system-work-github-cache.json",
+            Path.home() / "carr-system/out/orch/dot/job13/report-G.md"))
     if remote_snapshot is None or remote_snapshot.get("snapshot_json") != snapshot:
         args = {"board_id": board, "base_version": int(remote_snapshot["version"]) if remote_snapshot else 0,
                 "snapshot": snapshot}
@@ -972,6 +1007,7 @@ def command_task(args: argparse.Namespace) -> None:
     if args.delivery_target is not None:
         task["delivery_target"] = args.delivery_target
     task.update({
+        "domain": args.domain or prior.get("domain") or "system",
         "title": args.title or prior.get("title"),
         "status": args.status or prior.get("status"),
         "executor": args.executor or prior.get("executor"),
@@ -1076,6 +1112,7 @@ def parser() -> argparse.ArgumentParser:
     task.add_argument("--executor")
     task.add_argument("--pr", type=int)
     task.add_argument("--repo")
+    task.add_argument("--domain", choices=("system", "deals", "unclassified"))
     task.add_argument("--stage", choices=PR_STAGES)
     task.add_argument("--health", choices=("healthy", "question", "blocked"))
     task.add_argument("--note")
