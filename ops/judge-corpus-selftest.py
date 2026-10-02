@@ -136,7 +136,7 @@ class GoldCorpusTests(unittest.TestCase):
             (lambda c: c["cases"][0].pop("gold"), "gold"),
             (lambda c: c["cases"][0].update(split="train"), "split"),
             (lambda c: c["cases"][0]["source_ref"].update(sha256="0" * 64), "source digest"),
-            (lambda c: c["cases"][0]["gold"].update(binds="yes"), "boolean"),
+            (lambda c: c["cases"][0]["gold"].update(binds="yes"), "gold label outside requested answer domain"),
             (lambda c: c["cases"][0]["gold"].update(binds=not c["cases"][0]["gold"]["binds"]), "source gold"),
         ]:
             bad = copy.deepcopy(original)

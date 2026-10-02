@@ -12,11 +12,12 @@
 // NO SEND CAPABILITY EXISTS OR WILL EXIST IN THIS WORKER.
 
 import { neon, Pool } from "@neondatabase/serverless";
+import { DOC_TOOL_NAMES, DOC_INSTRUCTIONS, docToolAnnotations } from "./doc-profile.js";
 import { TOOLS, ToolError, executeRegisteredTool, assertRegisteredToolInput,
   auditIdentity, assertNoCallerAuthorityFields, coerceArgsToSchema,
   pgConstraintError, describeConstraint } from "./tools.js";
 import { canExercisePartnerAuthority, partnerAuthoritySlugForActor } from "./partner-authority.js";
-import { authenticatedIdentity, authorizationClassForActor, organizationTenantForActor,
+import { authenticatedIdentity, isKnownPartner, authorizationClassForActor, organizationTenantForActor,
   personalScopeForActor, verifiedAgentSlugForClient } from "./identity.js";
 import { deriveTrustedPrincipalBinding,
   ExactEffectRefusal, SCAC_TRUSTED_PRINCIPAL_READBACK_SQL } from "./scac-exact-effects.js";
@@ -259,7 +260,7 @@ const RULE_DELIVERY_RAIL = ` RULE DELIVERY: use only exact canonical pack names 
 
 // ---------- capability profiles (2026-08-02) ----------
 //
-// WHAT THIS IS, AND WHAT IT IS NOT. This is a BLAST-RADIUS REDUCER for surfaces
+// Ordinary profiles are a BLAST-RADIUS REDUCER for surfaces
 // a human configured, not an authorization boundary. Authorization is, and stays,
 // the OAuth grant plus `humanOnly` — a caller who wants the full surface simply
 // omits the parameter, and that is fine, because the threat this addresses is not
@@ -276,10 +277,14 @@ const RULE_DELIVERY_RAIL = ` RULE DELIVERY: use only exact canonical pack names 
 // b42e217e, 2026-08-02). A newer partner needs better defaults and clearer verb
 // descriptions, never fewer capabilities.
 //
-// Selected per-request: POST /mcp?profile=capture
+// Selected per-request: POST /mcp?profile=capture. Doc is separately pinned by
+// its OAuth resource path and inherits no unnamed read verbs.
 export const PROFILES = {
   // Everything. The default, and what both partners' interactive sessions use.
   full: null,
+
+  // Closed read AND write set, forced by the OAuth resource path.
+  doc: new Set(DOC_TOOL_NAMES),
 
   // Native lifecycle credentials are purpose-bound server-side. They expose
   // only their own record surface even if a caller asks for ?profile=full.
@@ -578,6 +583,7 @@ function profileFor(request) {
  * voluntary limiter for everyone else and a no-op for these three.
  */
 export function profileForActor(actor, request) {
+  if (new URL(request.url).pathname === "/doc/mcp") return "doc";
   if (actor?.continuity_surface === "codex" && actor?.via === "codex-continuity-token")
     return "codex-continuity";
   if (actor?.continuity_surface === "claude" && actor?.via === "claude-continuity-token")
@@ -592,6 +598,7 @@ export function profileForActor(actor, request) {
 }
 
 export function allowedIn(profile, name, tool) {
+  if (profile === "doc") return PROFILES.doc.has(name);
   if (profile === "full") return true;
   if (tool.fullOnly) return false;            // sensitive operational reads stay off probe/reviewer/read
   if (!tool.write) return true;              // reads are allowed in every profile
@@ -625,9 +632,9 @@ function toolList(profile = "full") {
       inputSchema: t.inputSchema,
       // Machine-readable danger signal, so a client's permission layer and the
       // model can tell `find` from `reassign-deal` without parsing prose.
-      annotations: {
+      annotations: profile === "doc" ? docToolAnnotations(t) : {
         readOnlyHint: !t.write,
-        destructiveHint: Boolean(t.write),
+        destructiveHint: t.destructiveHint ?? Boolean(t.write),
         idempotentHint: true,               // every write runs the idempotency envelope
         openWorldHint: false,
       },
@@ -716,6 +723,13 @@ export function authorityDsnForActor(env, runtimeActor) {
 // (a SECURITY DEFINER door that raises 42501 for anyone else) must declare
 // writerConnection so it lands on "writer_read_only" instead -- V5-A05's
 // cadence-status missed exactly this and its daily sweep could never succeed.
+// Active supersession keeps retire-rule's credential boundary. Human teach
+// calls carrying a replacement use authority; machine capture stays writer.
+export function requiresAuthorityConnection(tool, actor, args = {}) {
+  return tool.authorityOnly === true ||
+    (tool === TOOLS["teach"] && actor?.human === true && !!args?.supersedes);
+}
+
 export function connectionRouteForTool(tool) {
   if (!tool.write && !tool.writerConnection) return "reader";
   if (tool.authorityOnly) return "authority";
@@ -753,6 +767,15 @@ export async function callTool(env, actor, name, args, profile = "full", judgeWo
   assertNoCallerAuthorityFields(args);
   const tool = TOOLS[name];
   if (!tool) throw new ToolError({ error: "unknown_tool", name });
+  // Refuse even generic delegation before it can recurse into an allowed verb.
+  if (profile === "doc" && !allowedIn(profile, name, tool))
+    throw new ToolError({ error: "not_in_profile", verb: name, profile });
+  // Judge payload limits on the canonical values the registered handler sees.
+  if (profile === "doc") coerceArgsToSchema(tool.inputSchema, args);
+  // A capture dedup override needs separate human confirmation. This endpoint
+  // exposes ordinary capture only, not a caller-asserted confirmation bypass.
+  if (profile === "doc" && name === "log-capture" && args?.force_new === true)
+    throw new ToolError({ error: "not_in_profile", verb: "log-capture (force_new)", profile });
   // The generic call-verb delegator is itself a reviewed ingress. Validate its
   // immutable outer contract before parsing or recursing into the inner tool.
   await assertRegisteredToolInput(name, tool, args || {});
@@ -807,7 +830,7 @@ export async function callTool(env, actor, name, args, profile = "full", judgeWo
   if (!allowedIn(profile, name, tool))
     throw new ToolError({ error: "not_in_profile", verb: name, profile,
       hint: "this session is scoped; report what you would have done and let an interactive partner session do it" });
-  if (tool.authorityOnly && !authorityDsnForActor(env, actor))
+  if (requiresAuthorityConnection(tool, actor, args) && !authorityDsnForActor(env, actor))
     throw new ToolError({ error: "authority_connection_unavailable",
       hint: "this partner-authority operation requires a verified Joe/Dell principal or sponsored Codex/Claude identity plus the sponsor-scoped authority database binding" });
   // Payload-aware profile guard (2026-08-05). Name-level gating cannot see that
@@ -917,7 +940,8 @@ export async function callTool(env, actor, name, args, profile = "full", judgeWo
     validatedJevRequest = { state: normalized.state, model: normalized.model,
       questions: normalized.questions };
   }
-  const connectionString = tool.authorityOnly ? authorityDsnForActor(env, actor) : env.DATABASE_URL_WRITER;
+  const needsAuthority = requiresAuthorityConnection(tool, actor, args);
+  const connectionString = needsAuthority ? authorityDsnForActor(env, actor) : env.DATABASE_URL_WRITER;
   const pool = new Pool({ connectionString });
   const client = await pool.connect();
   // THE ORACLE SEAT WRITES ON ITS OWN CREDENTIAL, under standing-rule amendment
@@ -981,7 +1005,7 @@ export async function callTool(env, actor, name, args, profile = "full", judgeWo
     if (principalReadback.rows.length !== 1)
       throw new ToolError({ error: "trusted_database_principal_unavailable" });
     const result = await executeWithTrustedPrincipal(actorWithId, principalReadback.rows[0],
-      tool.authorityOnly ? "carr_authority" : "carr_writer",
+      needsAuthority ? "carr_authority" : "carr_writer",
       fullActor => executeRegisteredTool(client, fullActor, name, args || {}));
     await client.query("commit");
     if (jevPrefetched?.ok === true && result?.ok === true)
@@ -1103,7 +1127,7 @@ export async function dispatch(request, env, ctx, actor) {
           protocolVersion: PROTOCOL,
           capabilities: { tools: {} },
           serverInfo: { name: "carr-record-layer", version: "0.1.0" },
-          instructions:
+          instructions: profile === "doc" ? DOC_INSTRUCTIONS :
             "CARR's record layer AND the doctrine store — the ONE source of truth for Joe Bookout's " +
             "healthcare-CRE practice (partner Dell McCraney; business only, personal life is Life AI). " +
             "OPENING ACT, every session: call standing-context FIRST — it returns the taught rules " +
@@ -1226,6 +1250,11 @@ export const mcpApiHandler = {
       });
       return json({ error: "unauthorized" }, 401);
     }
+    // Doc is the partner connector. Purpose-bound native-agent OAuth grants
+    // keep their own endpoint/profile and cannot gain brokerage writes here.
+    if (new URL(request.url).pathname === "/doc/mcp" &&
+        (actor.human !== true || !isKnownPartner(actor.slug)))
+      return json({ error: "doc_partner_grant_required" }, 403);
     return dispatch(request, env, ctx, actor);
   },
 };

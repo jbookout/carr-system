@@ -285,6 +285,9 @@ PRIMARY_ONLY = {
     "com.carr.delivery-cadence-a05-sweep.plist",
     "com.carr.nightly-exports-daytime-retry.plist",
     "com.carr.timebomb-audit.plist",
+    # WR-000178: the Studio's Tailscale stayed stopped ~6h after the 2026-09-30
+    # reboot and cut SSH to the MacBook. The hub is the node that must come up.
+    "com.carr.tailscale-up.plist",
 }
 
 
@@ -1458,6 +1461,16 @@ def definition_only_installed_plists():
     return [f for f in carr_plists() if f in DEFINITION_ONLY]
 
 
+def pending_launchd_reloads():
+    """CARR jobs whose disk render has not been verified as loaded."""
+    if not os.path.isdir(LAUNCHD_SRC):
+        return []
+    suffix = ".plist.pending-reload"
+    return sorted(name[:-len(".pending-reload")]
+                  for name in os.listdir(LAUNCHD_SRC)
+                  if name.startswith("com.carr.") and name.endswith(suffix))
+
+
 # STARTINTERVAL IS REFUSED IN EVERY CARR LAUNCHAGENT TEMPLATE (2026-09-26).
 # On the Mac Studio, macOS 27.0, launchd never fires an agent scheduled with
 # StartInterval: `launchctl print` shows `runs = 0` and `pended nondemand spawn
@@ -1575,7 +1588,13 @@ def _cmd_check():
         (f"launchd template {rel} (SCHEDULE REFUSED)", problem)
         for rel, problem in refused_launchd_templates()
     ]
-    drift = missing + untracked + different + disallowed + refused
+    pending_reloads = [
+        (f"launchd {name} (PENDING RELOAD)",
+         "disk bytes do not prove the new definition is loaded; retry installation "
+         "from an external process and verify launchd registration")
+        for name in pending_launchd_reloads()
+    ]
+    drift = missing + untracked + different + disallowed + refused + pending_reloads
     if not drift and not unversioned:
         prerequisite_report = prerequisite_failure_report(PREREQUISITE_CHECK(REPO))
         if prerequisite_report:
@@ -1603,7 +1622,8 @@ def _cmd_check():
     # intentionally omitted from normal pairs() on a secondary.  Otherwise
     # "16 of 4" could claim to have checked only four items while reporting
     # sixteen violations, which is operationally misleading.
-    checked_items = len(configured_pairs) + len(disallowed) + len(refused)
+    checked_items = (len(configured_pairs) + len(disallowed) + len(refused)
+                     + len(pending_reloads))
     headline = f"config-as-code: DRIFT — {len(drift)} of {checked_items} items"
     if missing:
         headline += f" — {len(missing)} MISSING FROM MACHINE: " + ", ".join(
@@ -1805,6 +1825,21 @@ def hand_off_self_reload(filename, dest, body, label, launchctl=LAUNCHCTL_BIN):
     return "deferred"
 
 
+def launchd_registration(label):
+    """Read the job's registered plist path, or distinguish absence from error."""
+    inspected = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+                               capture_output=True, text=True, check=False)
+    if inspected.returncode == 0:
+        path_match = re.search(r"(?m)^\s*path = (.+)$", inspected.stdout or "")
+        if path_match:
+            return "loaded", path_match.group(1).strip()
+        return "failed", "launchctl print omitted the registered path"
+    detail = ((inspected.stderr or "") + "\n" + (inspected.stdout or "")).strip()
+    if inspected.returncode == 113 and f'Could not find service "{label}"' in detail:
+        return "absent", ""
+    return "failed", detail[:80] or "unknown launchctl error"
+
+
 def install_launchd_plist(filename, dest, body, body_matches):
     """Render and load one plist without letting an active job unload itself.
 
@@ -1813,7 +1848,9 @@ def install_launchd_plist(filename, dest, body, body_matches):
     it here kills the receipt wrapper.  That case leaves the destination
     untouched and hands the reload to a detached one-shot that runs only after
     this job has exited (hand_off_self_reload); if the hand-off cannot be
-    started it fails with the exact external-install remedy.
+    started it fails with the exact external-install remedy. For other jobs,
+    a pending marker survives interrupted or failed reloads until launchd is
+    observed absent before load and registered at the installed path after it.
     """
     try:
         label = plistlib.loads(body.encode("utf-8")).get("Label", "")
@@ -1821,26 +1858,71 @@ def install_launchd_plist(filename, dest, body, body_matches):
         label = ""
     active_label = os.environ.get(ACTIVE_LAUNCHD_LABEL_ENV, "").strip()
     is_active_self = bool(label and active_label == label)
+    pending = dest + ".pending-reload"
+
+    if not label:
+        print(f"      INSPECT FAILED ({filename} has no valid launchd label); "
+              "destination left unchanged")
+        return "failed"
 
     if is_active_self:
+        if os.path.exists(pending):
+            print(f"      PENDING RELOAD ({label}; active installer cannot verify its own "
+                  "loaded definition); run install from an external process")
+            return "failed"
         if body_matches:
             print(f"      kept loaded (active installer job {label}; body unchanged)")
             return "kept"
         return hand_off_self_reload(filename, dest, body, label)
 
+    # Every non-self mutation first proves this label is absent or belongs to
+    # this destination. A pending retry is an obligation to reconcile, not
+    # authority to unload a same-label job registered from another path.
+    state, detail = launchd_registration(label)
+    if state == "loaded" and detail != dest:
+        print(f"      INSPECT FAILED ({label} is loaded from an unexpected path); "
+              "destination left unchanged")
+        return "failed"
+    if state == "failed":
+        print(f"      INSPECT FAILED ({detail}); destination left unchanged")
+        return "failed"
+    if body_matches and not os.path.exists(pending) and state == "loaded":
+        # The hourly installer must not disturb a definition that is already
+        # loaded. Repeated unload/load cycles can strand a RunAtLoad/KeepAlive
+        # job in launchd's pending-spawn state even though its plist is right.
+        print(f"      kept loaded ({label}; body unchanged)")
+        return "kept"
+
+    # This marker is written before the disk plist changes. A failed or
+    # interrupted reload leaves it behind across installer processes, so a
+    # matching file and matching launchctl path cannot mask an old definition.
+    with open(pending, "w", encoding="utf-8") as fh:
+        fh.write(hashlib.sha256(body.encode("utf-8")).hexdigest() + "\n")
     if not body_matches:
         with open(dest, "w", encoding="utf-8") as fh:
             fh.write(body)
 
     subprocess.run(["launchctl", "unload", "-w", dest],
                    capture_output=True, check=False)
+    state, detail = launchd_registration(label)
+    if state != "absent":
+        print(f"      UNLOAD FAILED ({detail if state == 'failed' else 'job remains loaded'}); "
+              "pending reload retained")
+        return "failed"
     r = subprocess.run(["launchctl", "load", "-w", dest],
                        capture_output=True, text=True, check=False)
     if r.returncode == 0:
-        print("      loaded")
-        return "loaded"
+        state, detail = launchd_registration(label)
+        if (state == "loaded" and detail == dest
+                and launchd_texts_match(read(dest), body)):
+            os.unlink(pending)
+            print("      loaded")
+            return "loaded"
+        print(f"      LOAD UNVERIFIED ({detail if state == 'failed' else state}); "
+              "pending reload retained")
+        return "failed"
     print(f"      LOAD FAILED ({(r.stderr or r.stdout).strip()[:80]}) "
-          f"— migration will remain incomplete")
+          "— pending reload retained; migration will remain incomplete")
     return "failed"
 
 
@@ -2138,7 +2220,7 @@ def cmd_install(apply):
             continue
         body = concrete(source)
         body_matches = launchd_texts_match(read(dest), source)
-        if body_matches and not apply:
+        if body_matches and not apply and not os.path.exists(dest + ".pending-reload"):
             continue
         gone = missing_targets(body)
         if gone:
@@ -2153,9 +2235,9 @@ def cmd_install(apply):
             # e313a3ca). Writing the plist and stopping leaves the job on disk
             # and dead: on a fresh machine that means the nightly never runs,
             # so the record-derived fetch allowlist is generated once by the
-            # migration and then never refreshed as clients are added. unload
-            # is expected to fail when the job was never loaded; that is not
-            # an error, which is why only the load result is reported.
+            # migration and then never refreshed as clients are added. A
+            # pending marker keeps an interrupted reload visible until an
+            # absent-before/load/registered-after sequence verifies it.
             outcome = install_launchd_plist(f, dest, body, body_matches)
             if outcome == "failed":
                 launchd_activation_failures.append(f)

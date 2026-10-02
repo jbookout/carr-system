@@ -4,7 +4,10 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v99 seals the rights-filtered property evidence read function's database grant.
+// v103 admits rule lookup and atomic teach supersession.
+// v102 seals confirm-merge as a human identity act; machines are refused.
+// v101 admits partner catch-up and its scoped watermark store.
+// v100 seals the authenticated published Progress board directory and the current catalog.
 // v96 admits Doc suggestion producer, decision, and correction verbs.
 // v95 admits the permission-scoped Operations schedule read.
 // v94 sealed tenant-scoped progress board answers.
@@ -195,7 +198,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v99.generated.js";
+} from "./scac-mutation-registry.v103.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 
