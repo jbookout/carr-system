@@ -723,6 +723,13 @@ export function authorityDsnForActor(env, runtimeActor) {
 // (a SECURITY DEFINER door that raises 42501 for anyone else) must declare
 // writerConnection so it lands on "writer_read_only" instead -- V5-A05's
 // cadence-status missed exactly this and its daily sweep could never succeed.
+// Active supersession keeps retire-rule's credential boundary. Human teach
+// calls carrying a replacement use authority; machine capture stays writer.
+export function requiresAuthorityConnection(tool, actor, args = {}) {
+  return tool.authorityOnly === true ||
+    (tool === TOOLS["teach"] && actor?.human === true && !!args?.supersedes);
+}
+
 export function connectionRouteForTool(tool) {
   if (!tool.write && !tool.writerConnection) return "reader";
   if (tool.authorityOnly) return "authority";
@@ -823,7 +830,7 @@ export async function callTool(env, actor, name, args, profile = "full", judgeWo
   if (!allowedIn(profile, name, tool))
     throw new ToolError({ error: "not_in_profile", verb: name, profile,
       hint: "this session is scoped; report what you would have done and let an interactive partner session do it" });
-  if (tool.authorityOnly && !authorityDsnForActor(env, actor))
+  if (requiresAuthorityConnection(tool, actor, args) && !authorityDsnForActor(env, actor))
     throw new ToolError({ error: "authority_connection_unavailable",
       hint: "this partner-authority operation requires a verified Joe/Dell principal or sponsored Codex/Claude identity plus the sponsor-scoped authority database binding" });
   // Payload-aware profile guard (2026-08-05). Name-level gating cannot see that
@@ -933,7 +940,8 @@ export async function callTool(env, actor, name, args, profile = "full", judgeWo
     validatedJevRequest = { state: normalized.state, model: normalized.model,
       questions: normalized.questions };
   }
-  const connectionString = tool.authorityOnly ? authorityDsnForActor(env, actor) : env.DATABASE_URL_WRITER;
+  const needsAuthority = requiresAuthorityConnection(tool, actor, args);
+  const connectionString = needsAuthority ? authorityDsnForActor(env, actor) : env.DATABASE_URL_WRITER;
   const pool = new Pool({ connectionString });
   const client = await pool.connect();
   // THE ORACLE SEAT WRITES ON ITS OWN CREDENTIAL, under standing-rule amendment
@@ -997,7 +1005,7 @@ export async function callTool(env, actor, name, args, profile = "full", judgeWo
     if (principalReadback.rows.length !== 1)
       throw new ToolError({ error: "trusted_database_principal_unavailable" });
     const result = await executeWithTrustedPrincipal(actorWithId, principalReadback.rows[0],
-      tool.authorityOnly ? "carr_authority" : "carr_writer",
+      needsAuthority ? "carr_authority" : "carr_writer",
       fullActor => executeRegisteredTool(client, fullActor, name, args || {}));
     await client.query("commit");
     if (jevPrefetched?.ok === true && result?.ok === true)
