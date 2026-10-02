@@ -1,28 +1,27 @@
 import { z } from 'zod';
 import rates from '../data/rates.json' with { type: 'json' };
+import { NOTICE, envelope, envelopeShape, publicSource, allowanceSource, PlanningInputError } from './evidence.mjs';
+import { practiceSchema as practice, spaceInput, spaceResults, planSpace, checklistInput, checklistResults, getChecklist } from './verticals.mjs';
+import { runwayInput, runwayResults, calculateRunway } from './runway.mjs';
+import { conversionInput, conversionResults, screenConversion } from './conversion.mjs';
+import { saleInput, saleResults, checkSale } from './sale-readiness.mjs';
 
-// Configure the actual informational page before submission; never a contact form.
-export const INFORMATIONAL_PAGE = 'https://example.com/carr/practice-search-information';
-const NOTICE = 'Educational estimate only; not legal, financial, or design advice.';
+// No destination is configured until an informational page has been independently verified.
+export const INFORMATIONAL_PAGE = null;
 const range = z.strictObject({ low: z.number().finite(), high: z.number().finite() });
-const practice = z.enum(['dental', 'medical', 'veterinary']);
 const money = z.number().finite().nonnegative();
 const textList = z.array(z.string());
 const common = { limitations: textList, notice: z.literal(NOTICE) };
-const spaceInput = z.strictObject({
-  practice_type: practice, providers: z.number().int().min(1).max(50),
-  operatories: z.number().int().min(0).max(100), exam_rooms: z.number().int().min(0).max(100),
-});
 const occupancyInput = z.strictObject({
-  square_feet: z.number().min(100).max(100000), market: z.literal('mobile_downtown'),
+  square_feet: z.number().min(100).max(100000).describe('Rentable SF, never net room area or usable SF'), market: z.literal('mobile_downtown'),
   lease_type: z.enum(['full_service', 'modified_gross', 'triple_net']),
 });
 const buyInput = z.strictObject({
-  square_feet: z.number().min(100).max(100000), annual_lease_rate: z.number().min(0).max(200),
+  square_feet: z.number().min(100).max(100000).describe('Rentable SF, never net room area or usable SF'), annual_lease_rate: z.number().min(0).max(200).describe('USD per rentable SF per year; include comparable tenant costs, not monthly rent'),
   purchase_price: z.number().min(1000).max(100000000),
   down_payment_percent: z.number().min(0).max(100), interest_rate_percent: z.number().min(0).max(30),
   loan_term_years: z.number().int().min(1).max(40), holding_years: z.number().int().min(1).max(40),
-  annual_owner_cost: z.number().min(0).max(10000000),
+  annual_owner_cost: z.number().min(0).max(10000000).describe('Total USD per year for property tax, insurance, maintenance, utilities and comparable operating costs; excludes debt and upfront costs modeled separately'),
   closing_cost_percent: z.number().min(0).max(20), sale_cost_percent: z.number().min(0).max(20),
 });
 
@@ -32,52 +31,12 @@ const summed = rows => ({
   low: round(rows.reduce((sum, r) => sum + r.low, 0)),
   high: round(rows.reduce((sum, r) => sum + r.high, 0)),
 });
-const planningRow = (room, count, low, high) => ({
-  room, count, per_room_square_feet: { low, high }, total_square_feet: scaled({ low, high }, count),
-});
-
-function planSpace(a) {
-  const dental = a.practice_type === 'dental';
-  if (dental ? a.operatories === 0 || a.exam_rooms !== 0 : a.exam_rooms === 0 || a.operatories !== 0) {
-    throw new Error('incompatible room program');
-  }
-  const veterinary = a.practice_type === 'veterinary';
-  const rooms = [
-    dental ? planningRow('Operatories', a.operatories, 110, 140)
-      : planningRow('Exam rooms', a.exam_rooms, veterinary ? 120 : 100, veterinary ? 160 : 120),
-    planningRow('Provider workrooms', a.providers, 80, 100),
-    planningRow('Reception', 1, 160, 220), planningRow('Waiting', a.providers, 100, 150),
-    dental ? planningRow('Sterilization and lab', 1, 160, 240)
-      : planningRow('Clinical support', 1, veterinary ? 240 : 120, veterinary ? 360 : 180),
-    planningRow('Staff support', a.providers, 60, 90), planningRow('Storage', 1, 100, 160),
-    planningRow('Toilets', Math.ceil(a.providers / 3), 100, 140), planningRow('Mechanical support', 1, 60, 100),
-  ];
-  if (veterinary) rooms.push(planningRow('Animal holding', 1, 160, 240));
-  const subtotal = summed(rooms.map(r => r.total_square_feet));
-  rooms.push(planningRow('Circulation', 1, Math.ceil(subtotal.low * .25), Math.ceil(subtotal.high * .35)));
-  const usable = summed(rooms.map(r => r.total_square_feet));
-  return {
-    practice_type: a.practice_type, usable_square_feet: usable,
-    rentable_square_feet: { low: Math.ceil(usable.low * 1.1), high: Math.ceil(usable.high * 1.2) },
-    rooms,
-    assumptions: [
-      'Original V0 planning allowances dated 2026-10-01; square feet are approximate.',
-      'Usable area includes circulation of 25% to 35% of room area.',
-      'Rentable area adds an assumed 10% to 20% common-area load to usable area.',
-    ],
-    limitations: [
-      'Outpatient planning only; specialized imaging, surgery and inpatient uses need a separate program.',
-      'An architect must verify equipment clearances, accessibility, code, utilities and clinical workflow before selecting space.',
-    ], notice: NOTICE,
-  };
-}
-
 function estimateOccupancy(a) {
   const components = rates.lease_types[a.lease_type].map(c => ({
     ...c, annual_cost: scaled(c.annual_rate, a.square_feet),
   }));
   const annual = summed(components.map(c => c.annual_cost));
-  // Explicit projection: source URLs and authorization metadata never enter answers.
+  // Factual source citations are kept separate from optional action links.
   const { title, data_date, retrieved_date, observed_annual_rate, method } = rates.source;
   return {
     ...a, components, annual_cost: annual, monthly_cost: scaled(annual, 1 / 12),
@@ -144,7 +103,7 @@ function leaseChecklist(a) {
     ] },
     { topic: 'Access and exit', questions: ['What parking, accessibility, signage, renewal, casualty and early-exit terms are negotiable?'] },
   ];
-  if (a.practice_type === 'dental') items.push({ topic: 'Dental equipment', questions: [
+  if (a.practice_type === 'dental' || a.practice_type.startsWith('dental_')) items.push({ topic: 'Dental equipment', questions: [
     'Can suction, compressed air, sterilization and chair plumbing be installed with required permits?',
   ] });
   if (a.practice_type === 'veterinary') items.push({ topic: 'Veterinary operations', questions: [
@@ -157,82 +116,107 @@ function leaseChecklist(a) {
 }
 
 function definition(name, description, input, output, calculate) {
-  const json = schema => {
-    const { $schema, ...body } = z.toJSONSchema(schema, { target: 'draft-7' });
+  const json = (schema, io) => {
+    const { $schema, ...body } = z.toJSONSchema(schema, { target: 'draft-7', io });
     return body;
   };
-  return { name, description, inputSchema: json(input), outputSchema: json(output),
+  return { name, description, inputSchema: json(input, 'input'), outputSchema: json(output, 'output'),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     input, output, calculate };
 }
 
-export const TOOLS = [
-  definition('plan_practice_space',
-    'Estimate educational room-by-room usable and rentable space for an outpatient dental, medical or general small-animal veterinary practice. Original planning assumptions; not a code or clinical standard.',
-    spaceInput, z.strictObject({
-      practice_type: practice, usable_square_feet: range, rentable_square_feet: range,
-      rooms: z.array(z.strictObject({ room: z.string(), count: z.number().int().positive(), per_room_square_feet: range, total_square_feet: range })),
-      assumptions: textList, ...common,
-    }), planSpace),
-  definition('estimate_occupancy_cost',
-    'Estimate educational annual and monthly occupancy ranges from a bundled dated Downtown Mobile general-office survey anchor and disclosed expense assumptions. Only Downtown Mobile is supported; not a current healthcare rent quote.',
-    occupancyInput, z.strictObject({
-      ...occupancyInput.shape,
-      components: z.array(z.strictObject({ component: z.string(), annual_rate: range, annual_cost: range, basis: z.string() })),
-      annual_cost: range, monthly_cost: range,
-      source: z.strictObject({ title: z.string(), data_date: z.string(), retrieved_date: z.string(), observed_annual_rate: money, method: z.string() }),
-      assumptions: textList, ...common,
-    }), estimateOccupancy),
-  definition('compare_lease_buy',
-    'Calculate an educational lease-versus-buy cash scenario from numeric assumptions, showing debt, owner costs and sale proceeds. No tax, appreciation or financing recommendation.',
-    buyInput, z.strictObject({
-      assumptions: buyInput, monthly_loan_payment: money, upfront_buy_cash: money,
-      lease_total_cash: money, buy_total_cash_before_sale: money, remaining_loan_balance: money,
-      net_sale_proceeds: z.number().finite(), buy_net_cost_after_sale: z.number().finite(), ...common,
-    }), compareBuy),
-  definition('get_healthcare_lease_checklist',
-    'Provide an educational checklist of negotiable LOI and lease questions for a healthcare tenant, including TI, exclusivity, use, assignment, HVAC and plumbing. Not legal advice or an enforceability assessment.',
-    z.strictObject({ practice_type: practice }), z.strictObject({ practice_type: practice,
-      items: z.array(z.strictObject({ topic: z.string(), questions: textList })), ...common,
-    }), leaseChecklist),
-  definition('get_broker_search_help',
-    'Return a plain CARR description and an informational page only after an explicit user request for help with an actual property search. Do not use for general educational planning or unsolicited referrals. No contact capture or search is performed.',
-    z.strictObject({ request: z.literal('actual_search_help') }), z.strictObject({
-      description: z.string(), informational_page: z.literal(INFORMATIONAL_PAGE), ...common,
-    }), () => ({
-      description: 'CARR is a commercial real estate brokerage that represents healthcare tenants and buyers.',
-      informational_page: INFORMATIONAL_PAGE, limitations: [
-        'Placeholder informational page; a published page must be configured before submission.',
-        'No property search, contact capture or message is performed by this tool.',
-      ], notice: NOTICE,
-    })),
-];
+const rateSource = publicSource('office-rent', 'Downtown Mobile Alliance', rates.source.title, rates.source.url, 'USD/rentable SF/year', rates.source.publication_date);
+function legacyResult(a, calculate, sources = []) {
+  const { assumptions, limitations, notice, ...results } = calculate(a);
+  return envelope(a, { ...results, currency: 'USD', value_type: 'calculated example', evidence_classification: 'planning_assumption' }, {
+    sources, assumptions: Array.isArray(assumptions) ? assumptions : ['All numeric values supplied by owner; no hidden market defaults.'], limitations,
+  });
+}
+const wrapped = results => z.strictObject({ ...envelopeShape, results });
+const financialTags = { currency: z.literal('USD'), value_type: z.literal('calculated example'), evidence_classification: z.literal('planning_assumption') };
+const checklistResult = z.strictObject({ practice_type: practice,
+  items: z.array(z.strictObject({ topic: z.string(), questions: textList })),
+});
+// Configuration is a reviewed static deployment input, never a user-supplied tool argument.
+function informationalPage(config) {
+  if (!config || config.verified_informational !== true || !config.verified_at) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(config.verified_at)) return null;
+  try {
+    const u = new URL(config.url);
+    if (u.protocol !== 'https:' || u.username || u.password || u.search || u.hash ||
+      /(^|\.)(example\.(com|org|net)|localhost)$|\.invalid$/.test(u.hostname)) return null;
+    return u.href;
+  } catch { return null; }
+}
+export function createTools(config = null) {
+  const page = informationalPage(config);
+  return [
+    definition('plan_practice_space',
+      'Estimate preliminary educational usable space, room functions, parking and building due diligence from per-vertical CARR agent training. Dental subtypes, primary care, small-animal veterinary, optometry, chiropractic and physical therapy. Missing training rules remain explicit; not a code or fit verdict.',
+      spaceInput, wrapped(spaceResults), planSpace),
+    definition('get_practice_building_checklist',
+      'Return a read-only educational building due-diligence checklist for a healthcare vertical: questions about power, plumbing, HVAC zoning, parking and code triggers. No landlord contact or suitability certification.',
+      checklistInput, wrapped(checklistResults), getChecklist),
+    definition('estimate_occupancy_cost',
+      'Estimate educational annual and monthly occupancy ranges in USD using rentable SF and a bundled dated Downtown Mobile general-office survey. Not a current healthcare quote.',
+      occupancyInput, wrapped(z.strictObject({ ...occupancyInput.shape, ...financialTags,
+        components: z.array(z.strictObject({ component: z.string(), annual_rate: range, annual_cost: range, basis: z.string() })),
+        annual_cost: range, monthly_cost: range,
+        source: z.strictObject({ title: z.string(), data_date: z.string(), retrieved_date: z.string(), observed_annual_rate: money, method: z.string() }),
+      })), a => legacyResult(a, estimateOccupancy, [rateSource, allowanceSource])),
+    definition('compare_lease_buy',
+      'Calculate an educational USD lease-versus-buy cash scenario. Lease rate is USD per rentable SF per year; annual owner costs include comparable operating costs. No tax, appreciation or financing recommendation.',
+      buyInput, wrapped(z.strictObject({ ...financialTags, monthly_loan_payment: money, upfront_buy_cash: money,
+        lease_total_cash: money, buy_total_cash_before_sale: money, remaining_loan_balance: money,
+        net_sale_proceeds: z.number().finite(), buy_net_cost_after_sale: z.number().finite(),
+      })), a => legacyResult(a, compareBuy)),
+    definition('get_healthcare_lease_checklist',
+      'Provide an educational checklist of negotiable healthcare lease questions. Not a lease sale-readiness determination or legal advice.',
+      checklistInput, wrapped(checklistResult), a => {
+        const { notice, limitations, ...results } = leaseChecklist(a); return envelope(a, results, { limitations });
+      }),
+    definition('calculate_practice_runway_v1',
+      'Calculate an educational monthly USD cash ledger, funding gap and base/delayed opening scenarios from owner assumptions. Fixed-calendar costs stay fixed. No revenue forecast or financing approval; synthetic line identifiers only.',
+      runwayInput, wrapped(runwayResults), calculateRunway),
+    definition('screen_practice_conversion_v1',
+      'Screen educational conversion requirements and USD costs using owner-supplied evidence and compatible capacity units. Unknown or unpriced mandatory scope keeps totals incomplete. No code certification; use synthetic references, never addresses or document text.',
+      conversionInput, wrapped(conversionResults), screenConversion),
+    definition('check_lease_sale_readiness_v1',
+      'Check educational lease sale-readiness from documented dates, assignment, contiguous buyer-controlled options, notices and lender terms. Evidence references are synthetic; no lease text. Not legal approval.',
+      saleInput, wrapped(saleResults), checkSale),
+    definition('get_broker_search_help',
+      'Return a plain CARR description and a verified informational page, if configured, only after an explicit user request for help with an actual property search. Do not use for general education or unsolicited referrals. No contact capture or search.',
+      z.strictObject({ request: z.literal('actual_search_help') }), wrapped(z.strictObject({
+        description: z.string(), informational_page: z.string().nullable(),
+      })), a => envelope(a, {
+        description: 'CARR is a commercial real estate brokerage that represents healthcare tenants and buyers.', informational_page: page,
+      }, { missing_inputs: page ? [] : ['Verified informational page URL is not configured'],
+        limitations: ['No property search, contact capture or message is performed by this tool.'] })),
+  ];
+}
+export const TOOLS = createTools();
 
-// Cross-field schema constraints match the runtime room-program check.
-TOOLS[0].inputSchema.allOf = [{
-  if: { type: 'object', properties: { practice_type: { const: 'dental' } }, required: ['practice_type'] },
-  then: { type: 'object', properties: { operatories: { type: 'integer', minimum: 1 }, exam_rooms: { const: 0 } } },
-  else: { type: 'object', properties: { exam_rooms: { type: 'integer', minimum: 1 }, operatories: { const: 0 } } },
-}];
-
-export function callTool(name, args) {
-  const tool = TOOLS.find(t => t.name === name);
+export function callTool(name, args, tools = TOOLS) {
+  const tool = tools.find(t => t.name === name);
   if (!tool) return refusal('Unknown planning tool.');
   const parsed = tool.input.safeParse(args);
   if (!parsed.success) {
     if (name === 'get_broker_search_help') return refusal('Use this informational tool only after an explicit request for help with an actual property search.');
     if (name === 'estimate_occupancy_cost') return refusal('Unsupported planning input. Only the dated Downtown Mobile table is available; do not supply contact or listing data.');
-    return refusal('Invalid planning input. Use only the declared fields and supported numeric ranges; do not supply personal or listing data.');
+    const fields = [...new Set(parsed.error.issues.map(issue => issue.path.length ? issue.path.join('.') : 'declared_fields'))];
+    return refusal('Invalid planning input. Use only the declared fields and supported numeric ranges; do not supply personal or listing data.', fields);
   }
   try {
     const result = tool.output.parse(tool.calculate(parsed.data));
     return { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result };
-  } catch {
+  } catch (error) {
+    if (error instanceof PlanningInputError) return refusal('Invalid planning input. Check the named declared fields.', error.fields);
     return refusal('Invalid planning input. Check compatible room counts and numeric assumptions; professional review is required.');
   }
 }
 
-function refusal(error) {
+function refusal(error, invalid_fields) {
   // Never reflect raw input, schema errors, URLs, identity or diagnostics.
-  return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error }) }], structuredContent: { error } };
+  const result = { error, ...(invalid_fields ? { invalid_fields } : {}) };
+  return { isError: true, content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result };
 }
