@@ -3524,7 +3524,7 @@ test("credential rotation source review cannot widen authority or admit an ingre
     const read = fs.readFileSync;
     const fixturePath = "ops/config/scac-registry-source-inventory-fixtures.v1.json";
     const fixture = JSON.parse(read(fixturePath, "utf8"));
-    const review = fixture.current_source_reviews["scac-mutation-registry.v103"];
+    const review = fixture.current_source_reviews[${JSON.stringify(CURRENT_REGISTRY_VERSION)}];
     const variant = process.argv[1];
     const errors = {
       authority: /changed an ingress contract/,

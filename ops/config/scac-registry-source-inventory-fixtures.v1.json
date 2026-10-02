@@ -90536,6 +90536,37 @@
       "expected_count": 1085,
       "expected_sha256": "e755569a7105467219e95e79d1cceaa768cc9710f499e58f94025c040f44f956",
       "reason": "PR 865 source-only review: re-derive the existing credential rotation external-admin row after enabling scoped verifier rotation, validating URIs, valid port ranges and targets before mutation, and verifying the complete caller identity contract. No new ingress, authority, grant, runtime selector or historical seal change."
+    },
+    "scac-mutation-registry.v104": {
+      "base_version": "v104",
+      "upsert": [
+        {
+          "ingress_key": "external-admin:tools/rotate-credential.py",
+          "ingress_kind": "external_admin",
+          "operation": "tools/rotate-credential.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "tools/rotate-credential.py",
+          "schema_digest": "4ed693be3967044d4c2080e6385df47c955adebe91ed2800c6e584220aa58672",
+          "handler_digest": "4ed693be3967044d4c2080e6385df47c955adebe91ed2800c6e584220aa58672",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        }
+      ],
+      "expected_count": 1097,
+      "expected_sha256": "ef98bf3bfe20bf91e4c0ccc394d65259cf642a35e0ed8a4bc99dd25ba4b14cc8",
+      "reason": "PR 1470 main integration: carry the independently reviewed PR 865 credential rotation source bytes into the v104 frontier. The existing external-admin row retains its ingress and authority contract; no new ingress, grant, selector or historical seal changes."
     }
   }
 }
