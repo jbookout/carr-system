@@ -1262,16 +1262,16 @@ def test_strict_still_owns_the_gates_class():
 
 
 # ------------------------------------------------- 25. the hosted split
-def _hosted_workflow():
-    """ci.yml as a dict, parsed by the js-yaml the server already carries."""
+def _hosted_workflow(filename="ci.yml"):
+    """Workflow as a dict, parsed by the js-yaml the server already carries."""
     import json
     out = subprocess.run(
         ["node", "-e",
          "const y=require('js-yaml');const fs=require('fs');"
          "process.stdout.write(JSON.stringify(y.load(fs.readFileSync(process.argv[1],'utf8'))))",
-         str(REPO / ".github" / "workflows" / "ci.yml")],
+         str(REPO / ".github" / "workflows" / filename)],
         cwd=REPO / "mcp-server", capture_output=True, text=True, timeout=60)
-    check("ci.yml parses", out.returncode == 0, out.stderr[-300:])
+    check(f"{filename} parses", out.returncode == 0, out.stderr[-300:])
     return json.loads(out.stdout) if out.returncode == 0 else {}
 
 
@@ -1325,7 +1325,9 @@ def test_hosted_migration_budget_covers_observed_acceptance_runtime():
     """PR1121's strict migration job was killed at 20 minutes, while its
     separate exact-head DB acceptance succeeded after 23m51s. Allow at least
     30 minutes including setup, without relaxing the other groups' budgets.
-    Read the actual job/matrix wiring, so an unused budget cannot pass.
+    Both workflows run the canonical migration class; its budget must also
+    cover the separate database lane. Read the actual job/matrix wiring,
+    so an unused budget cannot pass.
     """
     job = _hosted_workflow()["jobs"]["classes"]
     groups = job["strategy"]["matrix"]["classes"]
@@ -1336,6 +1338,13 @@ def test_hosted_migration_budget_covers_observed_acceptance_runtime():
     if budgets is None:
         return
     migration_budget, other_budget = map(int, budgets.groups())
+    database_jobs = _hosted_workflow("db-acceptance.yml").get("jobs") or {}
+    database_budget = (database_jobs.get("acceptance") or {}).get("timeout-minutes")
+    check("database acceptance declares a finite job budget",
+          isinstance(database_budget, int) and database_budget > 0, database_budget)
+    check("hosted migration budget covers the database lane budget",
+          isinstance(database_budget, int) and migration_budget >= database_budget > 0,
+          {"migration_minutes": migration_budget, "database_minutes": database_budget})
     migration = [migration_budget for group in groups if group == "migration"]
     check("migration job has bounded headroom over the observed 24-minute run",
           len(migration) == 1 and 30 <= migration[0] <= 35, migration)
