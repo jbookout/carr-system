@@ -1172,12 +1172,10 @@ def _stub_git_answering_the_floor(changed_paths, *, main_paths=None, added_paths
                                   main_tree_paths=(), main_readable=True):
     """PATH-shadow git so the floor sees a chosen diff, and real git does the rest.
 
-    The floor decides what to run from `git diff --name-only ... $CARR_CI_RANGE`.
-    Feeding that one question is enough to drive the branch under test, and doing
-    it here rather than from history keeps the fixture hermetic: no commit is
-    made, no path is written into the tree, and the repository is not touched.
-    Every other git call — the branch name, HEAD, status — passes straight
-    through, so ci.sh still runs against the real checkout.
+    Model the pushed diff, the final diff from main, and main's admitted paths.
+    Keeping those separate exercises imported files and branch-owned changes
+    without creating commits or changing repository files. Other git calls,
+    including the branch name, HEAD and status, pass through to the real git.
     """
     real = shutil.which("git")
     if main_paths is None:
@@ -1197,9 +1195,8 @@ def _stub_git_answering_the_floor(changed_paths, *, main_paths=None, added_paths
             f'*" {FIXTURE_RANGE} "*)\n'
             '  case " $* " in *--diff-filter=ACMR*)\n'
             f'    printf "%s\\n" {" ".join(changed_paths)}; exit 0 ;;\n'
-            # ACR drives path-hygiene, which reads the files it is given. The
-            # fixture path does not exist, so report nothing ADDED rather than
-            # handing a checker a path it cannot open.
+            # Filename admission independently reads newly pushed paths.
+            # Ordinary fixtures add none; integration fixtures declare them.
             f'  *--diff-filter=ACR*) printf "%s\\n" {quoted_added}; exit 0 ;;\n'
             '  esac ;;\n'
             'esac\n'
