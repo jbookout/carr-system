@@ -19,7 +19,8 @@
 //     receipt_id. A row inserted straight into ops.jev_call_receipt has no
 //     such partner and is not credited.
 //   - read-jev-call-receipt-integrity (wired into ./run.sh health) counts
-//     receipts with no matching tool_call row and reports whether the
+//     receipts with no matching tool_call row (ask-jev-attempt for pending
+//     reservations, ask-jev for answers) and reports whether the
 //     append-only triggers are enabled right now. A disable-then-re-enable
 //     between two polls is not seen.
 //
@@ -44,6 +45,7 @@
 // string before it can reach a ToolError.
 
 import { ToolError as LeafToolError } from "./tool-error.js";
+import { judgeBinding, providerFor } from "./judge-provider.js";
 
 const ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 const USER_AGENT = "carr-worker-jev-proxy/1.0";
@@ -332,21 +334,33 @@ export function jevAskBinding(env, fetchImpl = fetch, options = {}) {
   return jevAsk;
 }
 
-// Existing append-only receipt door doubles as a pre-call attempt ledger.
-// It commits before fetch, so a later receipt failure remains visible as
-// missing usage. The settlement row is written in the final transaction.
+// Reserve the receipt and its pending ledger partner atomically before fetch.
+// Vendor failure leaves linked unknown spend, never an orphan or credited answer.
 export async function reserveJevCallAttempt(client, actor, args) {
   const { stateJson, questions, facets, model } = validateAskJevArgs(args);
   const key = `jev-attempt:${crypto.randomUUID()}`;
-  const row = (await client.query(
-    `select r.receipt_id from ops.record_jev_call_receipt($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) r`,
-    [args.session_id, "call", Object.keys(questions).sort(compareCodePoints), facets,
-      model, "jev-attempt-pending", await sha256Hex(stateJson),
-      await canonicalSha256(questions), await canonicalSha256({}), null,
-      JSON.stringify({}), null, actor.id, actor.slug, key],
-  )).rows[0];
-  if (!row?.receipt_id) throw new LeafToolError({ error: "jev_receipt_store_unavailable" });
-  return { key, receipt_id: row.receipt_id };
+  await client.query("begin");
+  try {
+    const row = (await client.query(
+      `select r.receipt_id from ops.record_jev_call_receipt($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) r`,
+      [args.session_id, "call", Object.keys(questions).sort(compareCodePoints), facets,
+        model, "jev-attempt-pending", await sha256Hex(stateJson),
+        await canonicalSha256(questions), await canonicalSha256({}), null,
+        JSON.stringify({}), null, actor.id, actor.slug, key],
+    )).rows[0];
+    if (!row?.receipt_id) throw new LeafToolError({ error: "jev_receipt_store_unavailable" });
+    await client.query(
+      `insert into tool_call (idempotency_key, verb, actor_id, request_hash, response)
+       values ($1,'ask-jev-attempt',$2,$3,$4)`,
+      [key, actor.id, await sha256Hex(key),
+        JSON.stringify({ receipt_id: row.receipt_id, cache_hit: false })],
+    );
+    await client.query("commit");
+    return { key, receipt_id: row.receipt_id };
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  }
 }
 
 function validateSessionId(ToolError, value) {
@@ -402,10 +416,11 @@ export function validateAskJevArgs(args, ToolError = LeafToolError) {
 // Validation failures throw; an upstream failure is returned (not thrown) so
 // the handler can raise it inside the envelope, where a same-key replay still
 // returns the stored response instead.
-export async function prefetchJevAnswer(args, ask) {
+export async function prefetchJevAnswer(args, ask, workClass = "system_work") {
   const { state, model, questions } = validateAskJevArgs(args);
+  providerFor(workClass);
   try {
-    return { ok: true, result: await ask({ state, model, questions }) };
+    return { ok: true, result: await judgeBinding(ask, workClass)({ state, model, questions }) };
   } catch (error) {
     if (error instanceof LeafToolError) return { ok: false, error: error.payload };
     return { ok: false, error: { error: "jev_upstream_failed", status: null, reason: "network" } };
@@ -462,13 +477,18 @@ export function jevCallReceiptTools({ withEnvelope, ToolError }) {
           )).rows[0];
           if (!row?.receipt_id) throw new ToolError({ error: "jev_call_receipt_refused" });
           if (answered.attempt) {
-            await c.query(
-              `insert into tool_call (idempotency_key, verb, actor_id, request_hash, response)
-               values ($1,'ask-jev-attempt',$2,$3,$4)`,
-              [answered.attempt.key, actor.id, await sha256Hex(answered.attempt.key),
+            const settlement = await c.query(
+              `update tool_call set response = $4::jsonb
+                where idempotency_key = $1 and verb = 'ask-jev-attempt'
+                  and actor_id = $2 and response->>'receipt_id' = $3
+                  and response->>'cache_hit' = 'false'
+                returning idempotency_key`,
+              [answered.attempt.key, actor.id, answered.attempt.receipt_id,
                 JSON.stringify({ receipt_id: answered.attempt.receipt_id,
                   cache_hit: true, settled_by: row.receipt_id })],
             );
+            if (settlement.rows.length !== 1)
+              throw new ToolError({ error: "jev_attempt_settlement_mismatch" });
           }
           return {
             ok: true,

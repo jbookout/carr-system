@@ -182,7 +182,7 @@ def _human_text(rec):
     # would act on now, send a PushNotification" was read as Joe's request and
     # held a turn open (2026-09-24, the first day it acted).
     origin = rec.get("origin") if isinstance(rec.get("origin"), dict) else {}
-    if origin.get("kind") not in (None, "", "user", "keyboard") or rec.get("isCompactSummary"):
+    if origin.get("kind") not in (None, "", "user", "keyboard", "human") or rec.get("isCompactSummary"):
         return None
     content = _content(rec)
     if isinstance(content, str):
