@@ -340,6 +340,15 @@ print(sys.argv[sys.argv.index('--correlation')+1]+' aa000000-0000-4000-8000-0000
         self.assertEqual(self.run_task().returncode, 0)
         self.assertEqual(self.ledger()[-1]['status'], 'skipped')
 
+    def test_intact_final_ledger_row_without_newline_survives_append(self):
+        folder = self.repo/'out/headless/test-task'
+        folder.mkdir(parents=True)
+        (folder/'ledger.jsonl').write_text('{"status":"failed"}')
+        self.assertEqual(self.run_task().returncode, 0)
+        self.assertEqual(self.ledger()[0], {'status': 'failed'})
+        self.assertEqual(self.run_task().returncode, 0)
+        self.assertEqual(self.ledger()[-1]['status'], 'skipped')
+
     def test_08_first_due_slot_not_full_install_interval(self):
         from lib.headless_tasks import health_rows
         settings = json.loads((self.repo/'ops/headless-tasks/tasks.json').read_text())
@@ -372,6 +381,19 @@ print(sys.argv[sys.argv.index('--correlation')+1]+' aa000000-0000-4000-8000-0000
         self.assertTrue(any('scheduled-session' in c and 'succeeded' in c for c in calls))
         result = subprocess.run([str(REPO/'bin/headless-task'),'test-task','--repo',str(self.repo),
             '--check-fresh-since', stamp_before()],env=self.env,capture_output=True,text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_canonical_recovery_notice_keeps_verified_work_fresh(self):
+        recorder = self.repo/'tools/ops-record.py'
+        with recorder.open('a') as handle:
+            # cmd_run emits the acknowledgement, then incident recovery notices.
+            handle.write("print('  cleared synthetic-incident recovered after verified work')\n")
+        self.assertEqual(self.run_task().returncode, 0)
+        folder = self.repo/'out/headless/test-task'
+        self.assertEqual(json.loads((folder/'pending-runs.json').read_text()), [])
+        self.assertTrue(self.ledger()[-1]['canonical_recorded'])
+        result = subprocess.run([str(REPO/'bin/headless-task'), 'test-task', '--repo', str(self.repo),
+            '--check-fresh-since', stamp_before()], env=self.env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_11_monthly_predicate_stops_before_model_and_does_not_refresh_success(self):

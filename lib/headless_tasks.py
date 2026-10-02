@@ -159,8 +159,14 @@ def ledger_rows(path: Path) -> list[dict]:
 
 
 def append_ledger(path: Path, row: dict) -> None:
-    with path.open('a') as handle:
-        handle.write(json.dumps(row, sort_keys=True) + '\n')
+    with path.open('ab+') as handle:
+        if handle.seek(0, os.SEEK_END):
+            handle.seek(-1, os.SEEK_END)
+            if handle.read(1) != b'\n':
+                # A crash can lose only the delimiter of an otherwise intact
+                # row. Preserve that row before appending the next record.
+                handle.write(b'\n')
+        handle.write((json.dumps(row, sort_keys=True) + '\n').encode())
         handle.flush()
         os.fsync(handle.fileno())
 
@@ -279,7 +285,11 @@ def record_run(repo: Path, task_id: str, row: dict) -> bool:
         str(repo/'tools/ops-record.py'), *argv], cwd=repo, capture_output=True, text=True, timeout=30)
     if result.returncode:
         return False
-    parts = result.stdout.strip().split()
+    # cmd_run's first line acknowledges the correlation and canonical run;
+    # later lines report incident recovery. They are diagnostic text, not part
+    # of the acknowledgement contract.
+    lines = result.stdout.splitlines()
+    parts = lines[0].split() if lines else []
     try:
         return len(parts) == 2 and str(uuid.UUID(parts[0])) == row['run_id'] and bool(uuid.UUID(parts[1]))
     except ValueError:
