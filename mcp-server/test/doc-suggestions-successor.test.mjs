@@ -1,3 +1,4 @@
+import { CURRENT_REGISTRY_VERSION } from "../../ops/scac-mutation-inventory.mjs";
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -37,5 +38,5 @@ test('Codex session read has its own sealed successor', () => {
   assert.match(sql, /scac-mutation-registry\.v97/);
   const runtime = read('mcp-server/src/scac-mutation-registry.v97.generated.js');
   assert.match(runtime, /mcp-tool:list-my-codex-sessions/);
-  assert.match(read('mcp-server/src/mutation-registry.js'), /scac-mutation-registry\.v103\.generated\.js/);
+  assert.match(read('mcp-server/src/mutation-registry.js'), new RegExp(CURRENT_REGISTRY_VERSION.replaceAll(".", "\\.") + "\\.generated\\.js"));
 });

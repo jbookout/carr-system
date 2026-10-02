@@ -487,6 +487,10 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0769_rule_teach_supersession.sql",
         "0770_find_rule_scac_successor.sql",
     ),
+    (
+        "0772_lead_stage_automation.sql",
+        "0773_lead_automation_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -617,6 +621,10 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0769_rule_teach_supersession.sql",
         "0770_find_rule_scac_successor.sql",
+    ),
+    (
+        "0772_lead_stage_automation.sql",
+        "0773_lead_automation_scac_successor.sql",
     ),
 )
 

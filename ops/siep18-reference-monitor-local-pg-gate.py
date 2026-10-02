@@ -21,21 +21,21 @@ from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connec
 
 REPO = Path(__file__).resolve().parents[1]
 
-# 0770 installs rule lookup v103 and seals human-only merges v102 as history.
+# 0773 installs lead automation v104 and seals shipped rule lookup v103 as history.
 # Both are pinned: an unreviewed frontier or a rewritten predecessor must fail closed.
-LIVE_REGISTRY_VERSION = "scac-mutation-registry.v103"
-LIVE_REGISTRY_ORDINAL = 103
-SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v102"
+LIVE_REGISTRY_VERSION = "scac-mutation-registry.v104"
+LIVE_REGISTRY_ORDINAL = 104
+SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v103"
 SEALED_PREDECESSOR_ORDINAL = LIVE_REGISTRY_ORDINAL - 1
 SEALED_PREDECESSOR_DIGEST = (
-    "sha256:e4d54f752db9af067b65e84eb45f4297acad7100b54553f763bd981609830dc9"
+    "sha256:6560a285ebd4a71d9ed3b63b644f13e06d0f1ccbddadf174d990f4f2453434b7"
 )
-SEALED_PREDECESSOR_ENTRY_COUNTS = (2606, 1084)
+SEALED_PREDECESSOR_ENTRY_COUNTS = (2615, 1085)
 SEALED_PREDECESSOR_MIGRATION = (
-    "migrations/0768_confirm_merge_human_only_scac_successor.sql"
+    "migrations/0770_find_rule_scac_successor.sql"
 )
 LIVE_REGISTRY_MIGRATION = (
-    "migrations/0770_find_rule_scac_successor.sql"
+    "migrations/0773_lead_automation_scac_successor.sql"
 )
 
 LIVE_CATALOG_CURRENT_FN = f"ops.scac_mutation_catalog_v{LIVE_REGISTRY_ORDINAL}_current()"

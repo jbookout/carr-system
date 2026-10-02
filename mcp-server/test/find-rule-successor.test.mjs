@@ -12,7 +12,13 @@ test('find-rule follows the shipped human-only merge registry without rewriting 
   assert.deepEqual(successor.find(row => row.ingress_key === 'mcp-tool:confirm-merge'),
     predecessor.find(row => row.ingress_key === 'mcp-tool:confirm-merge'));
   assert.ok(successor.some(row => row.ingress_key === 'mcp-tool:find-rule'));
-  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, 'scac-mutation-registry.v103');
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, 'scac-mutation-registry.v104');
+  const current = inventory.frozenInventory(SCAC_MUTATION_REGISTRY_VERSION);
+  for (const verb of ['find-rule','teach','confirm-merge']) {
+    const key = `mcp-tool:${verb}`;
+    assert.deepEqual(inventory.boundInventoryRows(current).find(row => row.ingress_key === key),
+      inventory.boundInventoryRows(successor).find(row => row.ingress_key === key));
+  }
   assert.equal(registeredOperation('confirm-merge').human_only, true);
   assert.ok(registeredOperation('find-rule'));
   const sql = inventory.renderFindRuleRegistrySql(successor);
