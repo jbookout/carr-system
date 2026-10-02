@@ -74,7 +74,71 @@ def commands(doc):
             for group in groups for hook in group.get("hooks", []) if isinstance(hook, dict)]
 
 
+def permission_review_regressions():
+    """Every review fixture checks semantic preservation and repeat-run repair."""
+    import tomllib
+    default, body = mod.codex_permissions_source()
+    expected = tomllib.loads(default + "\n" + body)
+    fixtures = {
+        "1-marker-in-string": default + "\nnotes = '''\n" + mod.CODEX_PERMISSIONS_BEGIN
+            + '\nexample="keep"\n' + mod.CODEX_PERMISSIONS_END
+            + "\n'''\n[permissions.carr_unattended]\nextends=\":workspace\"\n",
+        "2-header-in-string": "notes = '''\n[example]\nx=1\n'''\nmodel=\"fixture\"\n"
+            + '[permissions.carr_unattended]\nextends=":workspace"\n',
+        "2-indented-header": '  [permissions.carr_unattended]\nextends=":workspace"\n',
+        "2-quoted-default": '\'default_permissions\' = \'old\'\nmodel="keep"\n',
+        "3-nested-array": default + '\n[permissions.carr_unattended]\nvalues=[\n'
+            + '["a", "b"],\n["c"], # continuation\n]\n[other]\nvalue=42\n',
+        "4-inline-profile": default + '\n[permissions]\n'
+            + 'carr_unattended={extends=":read-only",network={enabled=false}}\n'
+            + 'custom={description="keep"}\n[other]\nvalue=42\n',
+        "4-root-inline": default + '\npermissions={carr_unattended={extends=":workspace"},'
+            + 'custom={description="keep"}}\n[other]\nvalue=42\n',
+        "4-dotted-profile": default + '\n[permissions]\ncarr_unattended.extends=":workspace"\n'
+            + 'custom.description="keep"\n[other]\nvalue=42\n',
+        "4-root-dotted": default + '\npermissions.carr_unattended.extends=":workspace"\n'
+            + 'permissions.custom.description="keep"\n[other]\nvalue=42\n',
+    }
+    # These valid documents must never be accepted from marker text alone.
+    examples = default + "\nnotes = '''\n" + mod.CODEX_PERMISSIONS_BEGIN + "\n" + body + mod.CODEX_PERMISSIONS_END + "\n'''\n"
+    assert mod.canonical_codex_permissions(examples) is None
+    missing_default = mod.CODEX_PERMISSIONS_BEGIN + "\n" + body + mod.CODEX_PERMISSIONS_END + "\n"
+    assert mod.canonical_codex_permissions(missing_default) is None
+    fixtures['1-marker-with-user-data'] = (default + "\n" + mod.CODEX_PERMISSIONS_BEGIN
+        + '\nnotes="keep" # user comment\n' + mod.CODEX_PERMISSIONS_END
+        + '\n[permissions.carr_unattended]\nextends=":workspace"\n[other]\nvalue=42\n')
+    fixtures['3-user-nested-array'] = (default + '\n[permissions.carr_unattended]\nextends=":workspace"\n'
+        + '[permissions.custom]\nvalues=[\n["a", "b"],\n["c"],\n] # keep array\n'
+        + "notes=\"\"\"\n[not.a.header]\n\"\"\"\n[other]\nvalue=42\n")
+    failures = []
+    for name, raw in fixtures.items():
+        try:
+            before = tomllib.loads(raw)
+            result = mod.install_codex_permissions(raw, default, body)
+            after = tomllib.loads(result)
+            assert after['default_permissions'] == expected['default_permissions']
+            for profile, value in expected['permissions'].items():
+                assert after['permissions'][profile] == value
+            def unrelated(doc):
+                doc.pop('default_permissions', None)
+                permissions = doc.get('permissions', {})
+                for profile in expected['permissions']:
+                    permissions.pop(profile, None)
+                if not permissions:
+                    doc.pop('permissions', None)
+                return doc
+            assert unrelated(before) == unrelated(after), 'unrelated values changed'
+            assert mod.install_codex_permissions(result, default, body) == result, 'not idempotent'
+            assert mod.canonical_codex_permissions(result) == mod.portable(default + "\n\n" + body)
+            print(f"PASS permission review {name}")
+        except Exception as exc:
+            failures.append(name)
+            print(f"FAIL permission review {name}: {type(exc).__name__}: {exc}")
+    assert not failures, f"permission review regressions: {failures}"
+
+
 def main():
+    permission_review_regressions()
     import tomllib
     default, body = mod.codex_permissions_source()
     raw = ('model = "fixture"\n' + default + '\n'
@@ -90,7 +154,6 @@ def main():
     assert parsed['other']['value'] == 42
     assert parsed['model'] == 'fixture'
     assert parsed['permissions']['carr_unattended']['network']['enabled'] is True
-    assert planned.index(mod.CODEX_PERMISSIONS_BEGIN) < planned.index('[permissions.custom]')
     assert mod.install_codex_permissions(planned, default, body) == planned
     quoted = raw.replace('[permissions.carr_unattended]', '[ "permissions" . "carr_unattended" ]')
     assert tomllib.loads(mod.install_codex_permissions(quoted, default, body))['other']['value'] == 42
@@ -102,7 +165,7 @@ def main():
     multiline = 'notes = \'\'\'\n[permissions.carr_unattended]\nexample = "keep"\n\'\'\'\n' + raw
     fixed = mod.install_codex_permissions(multiline, default, body)
     assert tomllib.loads(fixed)['notes'] == tomllib.loads(multiline)['notes']
-    print('markerless permissions replaced in place; valid TOML; repeat unchanged')
+    print('markerless permissions reconciled; valid TOML; repeat unchanged')
     merged = mod.merge_codex_carr_hooks(LIVE, DESIRED)
     names = commands(merged)
     again = mod.merge_codex_carr_hooks(merged, DESIRED)

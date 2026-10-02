@@ -825,14 +825,25 @@ def codex_permissions_source():
 
 
 def canonical_codex_permissions(raw):
-    """Render a live CARR-owned Codex permission slice in portable source form."""
-    default = re.search(r'^default_permissions\s*=\s*"[^"]+"\s*$', raw, re.M)
-    marker = re.search(re.escape(CODEX_PERMISSIONS_BEGIN) + r'\n(.*?)'
-                       + re.escape(CODEX_PERMISSIONS_END), raw, re.S)
-    if not default or not marker:
+    """Read the managed slice only when it matches the parsed live settings."""
+    import tomllib
+    try:
+        parsed = tomllib.loads(raw)
+        _, markers = codex_permission_syntax(raw)
+        if len(markers) != 2 or [m[2] for m in markers] != [
+                CODEX_PERMISSIONS_BEGIN, CODEX_PERMISSIONS_END]:
+            return None
+        body = raw[markers[0][1]:markers[1][0]].strip() + "\n"
+        managed = tomllib.loads(body)
+        if parsed.get('default_permissions') not in managed.get('permissions', {}):
+            return None
+        for name, profile in managed.get('permissions', {}).items():
+            if parsed.get('permissions', {}).get(name) != profile:
+                return None
+        default = 'default_permissions = ' + json.dumps(parsed['default_permissions'])
+        return portable(default + "\n\n" + body)
+    except (tomllib.TOMLDecodeError, ValueError, TypeError, AttributeError):
         return None
-    rendered = default.group(0).strip() + "\n\n" + marker.group(1).strip() + "\n"
-    return portable(rendered)
 
 
 def live_codex_permissions():
@@ -841,22 +852,31 @@ def live_codex_permissions():
     return None if raw is None else canonical_codex_permissions(raw)
 
 
-def codex_permission_table_spans(raw):
-    """Find reserved table families without interpreting string examples as tables."""
+def codex_permission_syntax(raw):
+    """Locate real headers and marker comments, excluding strings and arrays.
+
+    Recovery removes standalone reserved tables, including old duplicates.
+    TOML Kit owns key/value interpretation after that recovery.
+    """
     import tomllib
-    headers = []
+    headers, markers = [], []
     multiline = None
+    depth = 0
     offset = 0
-    tokens = re.compile(r'''"""|''' + "'''" + r'''|"(?:\\.|[^"\\])*"|'[^']*'|#[^\n]*''')
+    tokens = re.compile(r'''"""|''' + "'''" + r'''|"(?:\\.|[^"\\])*"|'[^']*'|#[^\n]*|[\[\]{}]''')
     for line in raw.splitlines(keepends=True):
-        if multiline is None and re.match(r'^\s*\[', line):
-            try:
-                table = tomllib.loads(line + '\n__carr_slice__ = true\n')
-            except tomllib.TOMLDecodeError:
-                table = {}
-            permissions = table.get('permissions', {})
-            owned = bool(set(permissions) & {'carr_unattended', 'carr_drive_readonly'})
-            headers.append((offset, owned))
+        if multiline is None and depth == 0:
+            if line.strip() in (CODEX_PERMISSIONS_BEGIN, CODEX_PERMISSIONS_END):
+                markers.append((offset, offset + len(line), line.strip()))
+            if re.match(r'^\s*\[', line):
+                try:
+                    table = tomllib.loads(line + '\n__carr_slice__ = true\n')
+                except tomllib.TOMLDecodeError:
+                    pass  # An array continuation is not a table boundary.
+                else:
+                    permissions = table.get('permissions', {})
+                    owned = bool(set(permissions) & {'carr_unattended', 'carr_drive_readonly'})
+                    headers.append((offset, owned))
         cursor = 0
         while cursor < len(line):
             if multiline is not None:
@@ -868,55 +888,74 @@ def codex_permission_table_spans(raw):
                 cursor = end + 3
                 if multiline == '"""' and escapes % 2:
                     continue
+                # One or two content quotes may precede the closing delimiter.
+                while cursor < min(end + 5, len(line)) and line[cursor] == multiline[0]:
+                    cursor += 1
                 multiline = None
             else:
                 token = tokens.search(line, cursor)
                 if token is None:
                     break
                 cursor = token.end()
-                if token.group() in ('"""', "'''"):
-                    multiline = token.group()
+                value = token.group()
+                if value in ('"""', "'''"):
+                    multiline = value
+                elif value.startswith('#'):
+                    break
+                elif value in ('[', '{'):
+                    depth += 1
+                elif value in (']', '}'):
+                    depth -= 1
         offset += len(line)
-    return [(start, headers[i + 1][0] if i + 1 < len(headers) else len(raw))
-            for i, (start, owned) in enumerate(headers) if owned]
+    spans = [(start, headers[i + 1][0] if i + 1 < len(headers) else len(raw))
+             for i, (start, owned) in enumerate(headers) if owned]
+    return spans, markers
 
 
 def install_codex_permissions(raw, default_line, body):
-    """Replace only the managed CARR slice of Codex's user-owned config.toml."""
-    default_re = re.compile(r'^default_permissions\s*=\s*"[^"]+"\s*\n?', re.M)
-    if default_re.search(raw):
-        planned = default_re.sub(default_line + "\n", raw, count=1)
-    else:
-        first_table = re.search(r'^\[', raw, re.M)
-        at = first_table.start() if first_table else len(raw)
-        planned = raw[:at] + default_line + "\n" + raw[at:]
+    """Repair reserved semantic paths; preserve every unrelated TOML value."""
+    import tomllib
+    import tomlkit
+    from tomlkit.items import InlineTable
 
-    managed = CODEX_PERMISSIONS_BEGIN + "\n" + body.rstrip() + "\n" + CODEX_PERMISSIONS_END
-    marker_re = re.compile(re.escape(CODEX_PERMISSIONS_BEGIN) + r'\n.*?'
-                           + re.escape(CODEX_PERMISSIONS_END), re.S)
-    # Codex rewrites TOML without comments. These reserved table families are
-    # still CARR-owned when the marker comments are absent. Include subtables,
-    # but stop at every other table so user-owned configuration stays in place.
-    spans = codex_permission_table_spans(planned)
-    spans.extend(match.span() for match in marker_re.finditer(planned))
+    expected = tomllib.loads(default_line + "\n" + body)
+    spans, markers = codex_permission_syntax(raw)
+    # Marker ownership covers comment lines only, never enclosed user data.
+    spans.extend((start, end) for start, end, _ in markers)
     merged = []
     for start, end in sorted(spans):
         if merged and start <= merged[-1][1]:
             merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
         else:
             merged.append((start, end))
-    spans = merged
-    if spans:
-        # Insert at the first original managed table, remove every old copy.
-        pieces, cursor = [], 0
-        for i, (start, end) in enumerate(spans):
-            pieces.append(planned[cursor:start])
-            if i == 0:
-                pieces.append(managed + "\n\n")
-            cursor = end
-        pieces.append(planned[cursor:])
-        return "".join(pieces)
-    return planned.rstrip() + "\n\n" + managed + "\n"
+    pieces, cursor = [], 0
+    for start, end in merged:
+        pieces.append(raw[cursor:start])
+        cursor = end
+    pieces.append(raw[cursor:])
+    document = tomlkit.parse("".join(pieces))
+    document['default_permissions'] = expected['default_permissions']
+    permissions = document.get('permissions')
+    if permissions is not None:
+        for name in expected['permissions']:
+            permissions.pop(name, None)
+        if not permissions:
+            del document['permissions']
+        elif isinstance(permissions, InlineTable):
+            # Inline parents are sealed in TOML; open the retained siblings so
+            # canonical profile headers can be declared alongside them.
+            retained = tomlkit.table()
+            for name, value in permissions.items():
+                retained.add(name, value)
+            document['permissions'] = retained
+    planned = (tomlkit.dumps(document).rstrip() + "\n\n" + CODEX_PERMISSIONS_BEGIN
+               + "\n" + body.rstrip() + "\n" + CODEX_PERMISSIONS_END + "\n")
+    parsed = tomllib.loads(planned)
+    if parsed.get('default_permissions') != expected['default_permissions'] or any(
+            parsed.get('permissions', {}).get(name) != profile
+            for name, profile in expected['permissions'].items()):
+        raise ValueError('Codex permission repair did not produce the required profiles/default')
+    return planned
 
 
 def codex_configuration_state():
