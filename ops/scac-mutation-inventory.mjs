@@ -2834,8 +2834,9 @@ export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
   version = REGISTRY_V103_VERSION) {
   const current = fullInventory(tools);
   let frozen = frozenInventory(version);
-  const review = SOURCE_INVENTORY_FIXTURES.current_source_review;
-  if (review && version === REGISTRY_V37_VERSION) {
+  const sourceOnlyReview = SOURCE_INVENTORY_FIXTURES.current_source_reviews?.[version];
+  const review = sourceOnlyReview || SOURCE_INVENTORY_FIXTURES.current_source_review;
+  if (review && (sourceOnlyReview || version === REGISTRY_V37_VERSION)) {
     const expectedBase = version.split(".").at(-1);
     if (review.base_version !== expectedBase || !Array.isArray(review.upsert) ||
         !Number.isInteger(review.expected_count) ||
@@ -2846,8 +2847,20 @@ export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
     for (const row of review.upsert) {
       if (!row || typeof row.ingress_key !== "string" || !reviewedByKey.has(row.ingress_key))
         throw new Error(`current source-inventory review has unknown ingress ${row?.ingress_key}`);
+      // A source-only review re-digests an existing external administration
+      // script. It cannot admit an ingress or change its authority contract.
+      if (sourceOnlyReview) {
+        const previous = reviewedByKey.get(row.ingress_key);
+        const contract = value => Object.fromEntries(Object.entries(value)
+          .filter(([key]) => !["schema_digest", "handler_digest", "source_digest"].includes(key)));
+        if (ingressKind(row) !== "external-admin" ||
+            sha256(contract(row)) !== sha256(contract(previous)))
+          throw new Error(`source-only review changed an ingress contract: ${row.ingress_key}`);
+      }
       reviewedByKey.set(row.ingress_key, row);
     }
+    if (sourceOnlyReview && Object.keys(review.source_digest_replacements || {}).length)
+      throw new Error("source-only review must bind each changed row explicitly");
     for (const [sourceLocator, sourceDigest] of Object.entries(review.source_digest_replacements || {})) {
       if (!/^[0-9a-f]{64}$/.test(sourceDigest))
         throw new Error(`current source digest replacement is malformed: ${sourceLocator}`);
