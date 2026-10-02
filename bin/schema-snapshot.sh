@@ -1251,6 +1251,20 @@ if [ "$WHATS_NEW_REGISTRY_APPLIED" = t ] && [ "$PROGRESS_DIRECTORY_REGISTRY_APPL
   exit 1
 fi
 
+DEFINER_HARDENING_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0770_dot_hardening_scac_successor.sql')" \
+  2>/dev/null)"
+case "$DEFINER_HARDENING_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read definer hardening v102 ledger state" >&2; exit 1 ;;
+esac
+if [ "$DEFINER_HARDENING_REGISTRY_APPLIED" = t ] && [ "$WHATS_NEW_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: definer hardening v102 is applied without v101 predecessor" >&2
+  exit 1
+fi
+
+
+
 # WR-000117. 0530 is the registry successor half of the atomic (0529,0530)
 # group, so probing the SUCCESSOR and not the domain migration is what says the
 # v34 registry surface exists. A snapshot taken between the two would be taken
@@ -1498,6 +1512,7 @@ $0 ~ /^CREATE POLICY [a-z_][a-z0-9_]* ON [a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]* FOR 
   split($0, words, " ")
   emit_carr_backup_policy(words[3], words[5])
   if (words[5] == "ops.work_request") carr_backup_policy_seen = 1
+  if (words[5] == "public.memory_item") carr_backup_memory_policy_seen = 1
   next
 }
 $0 == "-- Name: work_request; Type: ROW SECURITY; Schema: ops; Owner: -" && !carr_backup_policy_seen {
@@ -1509,6 +1524,16 @@ $0 == "-- Name: work_request; Type: ROW SECURITY; Schema: ops; Owner: -" && !car
   print ""
   print "--"
   carr_backup_policy_seen = 1
+}
+$0 == "-- Name: memory_item; Type: ROW SECURITY; Schema: public; Owner: -" && !carr_backup_memory_policy_seen {
+  print "-- Name: memory_item carr_backup_full_read_memory_item; Type: POLICY; Schema: public; Owner: -"
+  print "--"
+  print ""
+  emit_carr_backup_policy("carr_backup_full_read_memory_item", "public.memory_item")
+  print ""
+  print ""
+  print "--"
+  carr_backup_memory_policy_seen = 1
 }
 { print }
 ' "$SCHEMA_BODY" >> "$TMP"; then
@@ -3065,6 +3090,17 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                                        SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v100'"
                                        SCAC_FULL_SET_SEAL_COUNT=100
                                        SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v101_current()"
+                                     if [ "$DEFINER_HARDENING_REGISTRY_APPLIED" = t ]; then
+                                       SCAC_CURRENT_NUMBER=102
+                                       SCAC_VERSION_COUNT=102
+                                       SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v102'")"
+                                       SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v102'")"
+                                       SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v102.generated.js"
+                                       SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v102'"
+                                       SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v101'"
+                                       SCAC_FULL_SET_SEAL_COUNT=101
+                                       SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v102_current()"
+                                     fi
                                      fi
                                      fi
                                      fi

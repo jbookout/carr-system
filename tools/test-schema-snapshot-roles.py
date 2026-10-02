@@ -111,6 +111,21 @@ def main():
             expected_preamble + "\n\n\n" + conditional.group("body").strip()
             if conditional and conditional_gate else None
         )
+    dot_roles = re.search(
+        r"cat >> \"\$TMP\" <<'DOT_READER_ROLES'\n(?P<body>.*?)\nDOT_READER_ROLES",
+        generator, re.S,
+    )
+    dot_gate = ('if [ "$DOT_READER_APPLIED" = t ]; then\n'
+                'cat >> "$TMP" <<\'DOT_READER_ROLES\'') in generator \
+        and "filename='0756_dot_reader.sql'" in generator
+    dot_in_snapshot_ledger = re.search(
+        r"^0756_dot_reader\.sql\t[0-9a-f]{64}\t", sql, re.M,
+    ) is not None
+    if expected_preamble is not None and dot_in_snapshot_ledger:
+        expected_preamble = (
+            expected_preamble + "\n" + dot_roles.group("body").strip()
+            if dot_roles and dot_gate else None
+        )
     preamble_end = sql.find("--\n-- PostgreSQL database dump")
     check("the snapshot generator carries the exact checked-in role preamble",
           expected_preamble is not None and preamble_end > 0
@@ -169,6 +184,29 @@ def main():
           and "emit_carr_backup_policy(words[3], words[5])" in generator
           and 'print "do $carr_backup_snapshot_policy$"' in generator
           and 'pg_dump\'s exit status cannot be hidden behind a' in generator)
+
+    # Exercise the dump filter with both shapes pg_dump can emit. External
+    # roles are absent from disposable source clusters; their policies must
+    # still survive a snapshot round trip without duplicate CREATE POLICY.
+    policy_filter = re.search(r"if ! awk '\n(.*?)\n' \"\$SCHEMA_BODY\"", generator, re.S)
+    for table, policy, schema in [
+        ("work_request", "carr_backup_full_read", "ops"),
+        ("memory_item", "carr_backup_full_read_memory_item", "public"),
+    ]:
+        for present in (False, True):
+            dump = (f"CREATE POLICY {policy} ON {schema}.{table} FOR SELECT TO carr_backup USING (true);\n"
+                    if present else "")
+            dump += f"-- Name: {table}; Type: ROW SECURITY; Schema: {schema}; Owner: -\n"
+            rendered = subprocess.run(
+                ["awk", policy_filter.group(1).replace("'\\''", "'")], input=dump, text=True,
+                capture_output=True, check=False,
+            ) if policy_filter else None
+            check(f"{table} backup policy survives a dump with external role "
+                  f"{'present' if present else 'absent'} exactly once",
+                  rendered is not None and rendered.returncode == 0
+                  and rendered.stdout.count(f"create policy {policy} on {schema}.{table}") == 1
+                  and "if exists (select 1 from pg_roles where rolname = 'carr_backup') then" in rendered.stdout
+                  and "FOR SELECT TO carr_backup" not in rendered.stdout)
 
     # The schema body installs deferred policy-epoch triggers before the
     # appended data seeds are restored.  The migration ledger arrives before

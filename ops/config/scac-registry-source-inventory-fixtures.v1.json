@@ -84175,6 +84175,38 @@
       "expected_count": 1084,
       "expected_sha256": "fb60c6d8b092dceae702c619bbd500a26f308fe88ecfef43725e08a32cd3ed38",
       "reason": "Admit partner catch-up and scoped watermark capabilities; source repairs preserve supported histories and partial answers."
+    },
+    {
+      "version": "v102",
+      "remove": [],
+      "upsert": [
+        {
+          "ingress_key": "external-admin:tools/migrate.py",
+          "ingress_kind": "external_admin",
+          "operation": "tools/migrate.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "tools/migrate.py",
+          "schema_digest": "7fe17014ccedf68238bec2ba612fb7c5e4090576edc093ff9f3ef9146b257e7a",
+          "handler_digest": "7fe17014ccedf68238bec2ba612fb7c5e4090576edc093ff9f3ef9146b257e7a",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        }
+      ],
+      "expected_count": 1084,
+      "expected_sha256": "1edb406e2f63465adf3616881ba807360830cf8423500c9fcbdca6e22fea9fcd",
+      "reason": "Definer hardening preserves the published partner catch-up predecessor and reseals the atomic migration runner."
     }
   ],
   "current_source_review": {

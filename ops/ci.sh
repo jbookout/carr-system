@@ -1251,6 +1251,21 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
   # disposable database after pending migrations apply. Each proof rolls back
   # every fixture row and must be independently green.
   _mstep migrate
+  local definer_pg_proof definer_pg_log
+  for definer_pg_proof in \
+    mcp-server/test/security-definer-search-path-postgres.sql \
+    mcp-server/test/definer-temp-substitution-postgres.sql \
+    mcp-server/test/definer-hardening-catalog-postgres.sql \
+    mcp-server/test/completion-tenant-barriers-postgres.sql \
+    mcp-server/test/dot-security-definers-postgres.sql; do
+    definer_pg_log="$LOGDIR/$(basename "$definer_pg_proof" .sql).log"
+    if ! run_quiet "$definer_pg_log" \
+         "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" -f "$definer_pg_proof"; then
+      tail -30 "$definer_pg_log" >&2
+      bad migration "SECURITY DEFINER PostgreSQL acceptance failed: $definer_pg_proof"
+      return
+    fi
+  done
   local tour_pg_proof tour_pg_log
   for tour_pg_proof in \
     mcp-server/test/tour-operations-slice2-postgres.sql \
