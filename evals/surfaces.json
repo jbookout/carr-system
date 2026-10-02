@@ -21,6 +21,9 @@
       "globs": [
         "ops/jev_*.py",
         "ops/typesafe_client.py",
+        "tools/judge/interface.py",
+        "mcp-server/src/judge-providers.v1.json",
+        "mcp-server/src/judge-provider.js",
         "mcp-server/src/jev-*.js",
         "hooks/jev-supervisor.py",
         "lib/jev_required_actions.py",

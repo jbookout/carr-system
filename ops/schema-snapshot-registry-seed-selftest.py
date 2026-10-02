@@ -272,7 +272,7 @@ assert GENERATOR.count("e.entry_digest is distinct from 'sha256:'||encode(public
 assert GENERATOR.count("ops.scac_mutation_registry_seal_valid(historical.registry_version)") >= 2
 for version in range(1, 9):
     assert GENERATOR.count(f"'scac-mutation-registry.v{version}'") >= 2
-assert set(FULL_SET_SEALS) == {f"scac-mutation-registry.v{version}" for version in range(1, 101)}
+assert set(FULL_SET_SEALS) == {f"scac-mutation-registry.v{version}" for version in range(1, 103)}
 assert all(len(value) == 71 and value.startswith("sha256:") for value in FULL_SET_SEALS.values())
 assert FULL_SET_SEALS["scac-mutation-registry.v10"] != "sha256:" + "0" * 64
 assert FULL_SET_SEALS["scac-mutation-registry.v20"] == (
@@ -735,6 +735,39 @@ assert "SCAC_CURRENT_NUMBER=99" in GENERATOR
 assert "SCAC_VERSION_COUNT=99" in GENERATOR
 assert "SCAC_FULL_SET_SEAL_COUNT=98" in GENERATOR
 assert "ops.scac_mutation_catalog_v99_current()" in GENERATOR
+
+assert 'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v100"' in (
+    ROOT / "mcp-server" / "src" / "scac-mutation-registry.v100.generated.js"
+).read_text(encoding="utf-8")
+assert "0763_progress_directory_scac_successor.sql" in GENERATOR
+assert "PROGRESS_DIRECTORY_REGISTRY_APPLIED" in GENERATOR
+assert "SCAC_CURRENT_NUMBER=100" in GENERATOR
+assert "SCAC_VERSION_COUNT=100" in GENERATOR
+assert "SCAC_FULL_SET_SEAL_COUNT=99" in GENERATOR
+assert "ops.scac_mutation_catalog_v100_current()" in GENERATOR
+assert FULL_SET_SEALS["scac-mutation-registry.v100"] == (
+    "sha256:7cfee7487b9a42c62baf118b5b2a60c1f4680d3c18de4fa9b21f3ba2cc232106"
+)
+
+# A restored successor must carry the live catch-up registry and retain v100.
+assert "0767_doc_whats_new_scac_successor.sql" in GENERATOR
+assert "WHATS_NEW_REGISTRY_APPLIED" in GENERATOR
+assert "SCAC_CURRENT_NUMBER=101" in GENERATOR
+assert "SCAC_VERSION_COUNT=101" in GENERATOR
+assert "SCAC_FULL_SET_SEAL_COUNT=100" in GENERATOR
+assert "ops.scac_mutation_catalog_v101_current()" in GENERATOR
+assert 'scac-mutation-registry.v101.generated.js' in GENERATOR
+registry_gate = (ROOT / 'ops/siep11-mutation-registry-local-pg-gate.py').read_text()
+assert '"scac-mutation-registry.v101"' in registry_gate
+assert '"scac-mutation-registry.v102"' in registry_gate
+assert '"scac-mutation-registry.v103"' not in registry_gate
+assert "0768_job_watchdog_scac_successor.sql" in GENERATOR
+assert "JOB_WATCHDOG_REGISTRY_APPLIED" in GENERATOR
+assert "SCAC_CURRENT_NUMBER=102" in GENERATOR
+assert "SCAC_VERSION_COUNT=102" in GENERATOR
+assert "SCAC_FULL_SET_SEAL_COUNT=101" in GENERATOR
+assert "ops.scac_mutation_catalog_v102_current()" in GENERATOR
+
 assert "0720_doctorcre_a03_review_scac_successor.sql" in GENERATOR
 assert "V5_A03_REVIEW_REGISTRY_APPLIED" in GENERATOR
 assert "JEV_PROCESS_REGISTRY_APPLIED" in GENERATOR
@@ -918,14 +951,14 @@ loader_end = GENERATOR.index(
 )
 loader = GENERATOR[loader_start:loader_end]
 loaded_sql = subprocess.run(
-    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"), "99", "100"],
+    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"), "101", "102"],
     check=True,
     capture_output=True,
     text=True,
 ).stdout
-assert loaded_sql.count("scac-mutation-registry.v") == 99
-assert loaded_sql.count("sha256:") == 99
-assert FULL_SET_SEALS["scac-mutation-registry.v99"] in loaded_sql, (
+assert loaded_sql.count("scac-mutation-registry.v") == 101
+assert loaded_sql.count("sha256:") == 101
+assert FULL_SET_SEALS["scac-mutation-registry.v101"] in loaded_sql, (
     "the newest sealed history must actually reach the SQL the snapshot embeds"
 )
 
@@ -934,7 +967,7 @@ assert FULL_SET_SEALS["scac-mutation-registry.v99"] in loaded_sql, (
 # feed the loader deliberately broken input and require a nonzero exit, so a
 # seal set that lost v22, gained a stray version, or carried a malformed digest
 # cannot be rendered into a snapshot as if it were sealed history.
-def loader_rejects(seals: dict, count: str, current: str = "100") -> bool:
+def loader_rejects(seals: dict, count: str, current: str = "102") -> bool:
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
         json.dump(seals, handle)
         path = handle.name
@@ -1003,8 +1036,3 @@ assert FULL_SET_SEALS["scac-mutation-registry.v18"] == (
 assert FULL_SET_SEALS["scac-mutation-registry.v19"] == (
     "sha256:9f350292253eaf1d0b57f6c453b92330ceeee7f9c3a3c372a1d61968fc22c9f3"
 )
-
-# Watchdog admission is a forward successor of the delivered property frontier.
-assert "0756_job_watchdog_scac_successor.sql" in GENERATOR
-assert "JOB_WATCHDOG_REGISTRY_APPLIED" in GENERATOR
-assert "ops.scac_mutation_catalog_v100_current()" in GENERATOR
