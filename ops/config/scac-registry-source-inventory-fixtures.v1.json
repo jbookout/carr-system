@@ -84175,6 +84175,19 @@
       "expected_count": 1084,
       "expected_sha256": "fb60c6d8b092dceae702c619bbd500a26f308fe88ecfef43725e08a32cd3ed38",
       "reason": "Admit partner catch-up and scoped watermark capabilities; source repairs preserve supported histories and partial answers."
+    },
+    {
+      "version": "v102",
+      "remove": [],
+      "upsert": [],
+      "row_replacements": {
+        "mcp-tool:confirm-merge": {
+          "human_only": true,
+          "principal_mode": "server_verified_human"
+        }
+      },
+      "expected_count": 1084,
+      "expected_sha256": "98054b8eb743d97fe1dba0bec67826bea0c359b82c6dd8a4041adb0653ea1bf7"
     }
   ],
   "current_source_review": {
