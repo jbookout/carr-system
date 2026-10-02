@@ -35,8 +35,8 @@ async function groupStopsWithin(child, ms) {
     try { process.kill(-child.pid, 0); }
     catch (error) {
       if (error.code === "ESRCH") return true;
-      // Darwin can report EPERM while an exited group's members await reaping.
-      // The group still exists: keep polling, never treat EPERM as stopped.
+      // macOS can report EPERM while an owned group is exiting. Keep waiting;
+      // only ESRCH proves it is gone, and persistent errors still time out.
       if (error.code !== "EPERM") throw error;
     }
     const remaining = deadline - performance.now();

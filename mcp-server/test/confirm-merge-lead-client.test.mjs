@@ -58,6 +58,9 @@ class Fake {
 
     if (sql.startsWith("select request_hash, response")) return { rows: [] };
 
+    if (sql.includes("merge_live_endpoints"))
+      return { rows: params[0].map(id => ({ id, merged_into: null })) };
+
     // ref resolution — both inputs arrive as uuids in these tests
     if (sql.includes("v_ref_index")) return { rows: [] };
 
