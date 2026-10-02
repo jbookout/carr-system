@@ -449,6 +449,46 @@ print(sys.argv[sys.argv.index('--correlation')+1]+' aa000000-0000-4000-8000-0000
             try: os.killpg(pid,signal.SIGKILL)
             except (ProcessLookupError,PermissionError): pass
 
+    def test_child_cannot_do_work_before_its_identity_is_durable(self):
+        """Kill during identity capture, before the child journal append."""
+        driver = self.home/'launch-gap.py'
+        marker = self.home/'unjournaled-child.pid'
+        driver.write_text(
+            'import os,sys,time\n'
+            f'sys.path.insert(0,{str(REPO)!r})\n'
+            'from pathlib import Path\n'
+            'import lib.headless_tasks as h\n'
+            'real=h.process_birth\n'
+            'def stalled(pid):\n'
+            ' if pid != os.getpid():\n'
+            f'  Path({str(marker)!r}).write_text(str(pid))\n'
+            '  time.sleep(60)\n'
+            ' return real(pid)\n'
+            'h.process_birth=stalled\n'
+            f'raise SystemExit(h.main(["test-task","--repo",{str(self.repo)!r}]))\n')
+        wrapper = subprocess.Popen([sys.executable,str(driver)], cwd=self.repo,
+            env={**self.env,'FAKE_MODE':'timeout'},
+            stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        pid = None
+        try:
+            deadline = time.monotonic()+10
+            while not marker.exists() and time.monotonic()<deadline:
+                time.sleep(.02)
+            self.assertTrue(marker.exists(), 'identity capture never began')
+            pid = int(marker.read_text())
+            time.sleep(.2)
+            wrapper.kill(); wrapper.wait(timeout=5)
+            self.assertFalse((self.home/'args.json').exists(),
+                'effect-capable CLI started before its identity was journaled')
+            self.assertEqual(self.run_task().returncode, 0)
+            self.assertTrue(any(r.get('reason')=='interrupted' for r in self.ledger()))
+        finally:
+            if wrapper.poll() is None:
+                wrapper.kill(); wrapper.wait(timeout=5)
+            if pid:
+                try: os.killpg(pid,signal.SIGKILL)
+                except (ProcessLookupError,PermissionError): pass
+
 
 def stamp_before():
     return (datetime.now(timezone.utc)-timedelta(minutes=5)).isoformat()

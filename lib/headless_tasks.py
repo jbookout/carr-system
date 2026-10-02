@@ -356,9 +356,26 @@ def _claude(prompt: Path, repo: Path, model: str, tools: str, timeout: float,
     with tempfile.TemporaryFile(mode='w+') as input_handle:
         input_handle.write(instruction)
         input_handle.seek(0)
-        child = subprocess.Popen(command, stdin=input_handle, stdout=subprocess.PIPE,
-                                 stderr=subprocess.PIPE, text=True, errors='replace',
-                                 cwd=repo, env=child_env, start_new_session=True)
+        # The child cannot execute model work until its identity is fsynced.
+        # If the wrapper dies before acknowledging that append, closing the
+        # pipe makes the launcher exit without ever invoking the CLI.
+        ready_read, ready_write = os.pipe()
+        launcher = ('import os,sys; fd=int(sys.argv[1]); '
+                    'ready=os.read(fd,1); os.close(fd); '
+                    'sys.exit(130) if ready != b"1" else None; '
+                    'os.execvpe(sys.argv[2],sys.argv[2:],os.environ)')
+        try:
+            child = subprocess.Popen([sys.executable, '-c', launcher,
+                                      str(ready_read), *command],
+                                     stdin=input_handle, stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, text=True, errors='replace',
+                                     cwd=repo, env=child_env, start_new_session=True,
+                                     pass_fds=(ready_read,))
+        except BaseException:
+            os.close(ready_write)
+            raise
+        finally:
+            os.close(ready_read)
     threads = [threading.Thread(target=pump, args=(stream, name), daemon=True)
                for name, stream in [('stdout', child.stdout), ('stderr', child.stderr)]]
     for thread in threads:
@@ -370,6 +387,9 @@ def _claude(prompt: Path, repo: Path, model: str, tools: str, timeout: float,
     try:
         if started_child:
             started_child(child)
+        os.write(ready_write, b'1')
+        os.close(ready_write)
+        ready_write = None
         while done < 2 or child.poll() is None:
             if time.monotonic()-started >= timeout:
                 forced, reason = 124, 'timeout'
@@ -411,6 +431,8 @@ def _claude(prompt: Path, repo: Path, model: str, tools: str, timeout: float,
             return 65, 'invalid_completion_receipt'
         return 0, outcome
     finally:
+        if ready_write is not None:
+            os.close(ready_write)
         # Kill surviving children even when the parent has already exited.
         _terminate(child)
         for thread in threads:
