@@ -1321,29 +1321,36 @@ def test_hosted_ci_runs_classes_in_parallel_behind_one_required_context():
           {"ran": ran, "order": classes})
 
 
-def test_hosted_migration_budget_covers_the_database_lane():
-    """Both workflows run the canonical migration class, including DB gates.
-
-    PR 1406's required job expired at twenty minutes while the disposable
-    PostgreSQL lane completed successfully. Setup plus the migration proofs
-    must fit the same finite budget in either hosted route.
+def test_hosted_migration_budget_covers_observed_acceptance_runtime():
+    """PR1121's strict migration job was killed at 20 minutes, while its
+    separate exact-head DB acceptance succeeded after 23m51s. Allow at least
+    30 minutes including setup, without relaxing the other groups' budgets.
+    Both workflows run the canonical migration class; its budget must also
+    cover the separate database lane. Read the actual job/matrix wiring,
+    so an unused budget cannot pass.
     """
-    jobs = _hosted_workflow().get("jobs") or {}
+    job = _hosted_workflow()["jobs"]["classes"]
+    groups = job["strategy"]["matrix"]["classes"]
+    budgets = re.fullmatch(
+        r"\$\{\{ matrix\.classes == 'migration' && (\d+) \|\| (\d+) \}\}",
+        str(job["timeout-minutes"]))
+    check("class jobs select a bounded migration-specific budget", budgets is not None)
+    if budgets is None:
+        return
+    migration_budget, other_budget = map(int, budgets.groups())
     database_jobs = _hosted_workflow("db-acceptance.yml").get("jobs") or {}
     database_budget = (database_jobs.get("acceptance") or {}).get("timeout-minutes")
     check("database acceptance declares a finite job budget",
           isinstance(database_budget, int) and database_budget > 0, database_budget)
-    migration_jobs = []
-    for name, job in jobs.items():
-        groups = ((job.get("strategy") or {}).get("matrix") or {}).get("classes") or []
-        if any("migration" in str(group).split() for group in groups):
-            migration_jobs.append(name)
-            budget = job.get("timeout-minutes")
-            check(f"hosted migration job '{name}' covers the database lane budget",
-                  isinstance(budget, int) and isinstance(database_budget, int)
-                  and budget >= database_budget > 0,
-                  {"migration_minutes": budget, "database_minutes": database_budget})
-    check("the hosted migration budget was checked", bool(migration_jobs))
+    check("hosted migration budget covers the database lane budget",
+          isinstance(database_budget, int) and migration_budget >= database_budget > 0,
+          {"migration_minutes": migration_budget, "database_minutes": database_budget})
+    migration = [migration_budget for group in groups if group == "migration"]
+    check("migration job has bounded headroom over the observed 24-minute run",
+          len(migration) == 1 and 30 <= migration[0] <= 35, migration)
+    other = [other_budget for group in groups if group != "migration"]
+    check("other class groups retain their 20-minute budgets",
+          len(other) == 2 and all(budget == 20 for budget in other), other)
 
 
 def test_hosted_zsh_setup_does_not_refresh_working_indexes():
@@ -1433,7 +1440,7 @@ def main():
                test_push_floor_defers_the_gates_class_instead_of_running_it,
                test_strict_still_owns_the_gates_class,
                test_hosted_ci_runs_classes_in_parallel_behind_one_required_context,
-               test_hosted_migration_budget_covers_the_database_lane,
+               test_hosted_migration_budget_covers_observed_acceptance_runtime,
                test_hosted_zsh_setup_does_not_refresh_working_indexes):
         try:
             fn()

@@ -123,11 +123,11 @@ jobs:
           - "pushfloor unit types contract secret dependency binding artifact freshness"
           - "gates"
           - "migration"
-    # PR 1406's migration job exhausted twenty minutes while the same class
-    # passed in db-acceptance. Match that lane's budget for setup and DB proofs;
-    # ci-selftest prevents this budget from shrinking below the database lane.
-    # Zsh setup retains its own short deadline for unavailable apt mirrors.
-    timeout-minutes: 25
+    # Both PR 1121 and PR 1406 exhausted a 20-minute migration job while
+    # their separate database acceptance passed. Preserve measured headroom
+    # and cover that lane's declared budget without extending other groups.
+    # zsh setup retains its own short deadline below.
+    timeout-minutes: ${{ matrix.classes == 'migration' && 35 || 20 }}
 
     services:
       # The migration class needs a database to apply 130 forward migrations to.
