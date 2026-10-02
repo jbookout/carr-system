@@ -276,6 +276,8 @@ def check_failure_cases(label: str, call: dict, response: dict, missing_cause: s
     duplicate = response["shared_rules"] + response["shared_rules"][:1]
     nonbinding = copy.deepcopy(response["shared_rules"])
     nonbinding[0]["statement"] = " "
+    identity = response["identity"]
+    plan = response["rule_delivery"]
     cases = [
         ("nonzero", Runner(response, returncode=1, stderr="token=SUPER-SECRET"),
          "selector returned nonzero"),
@@ -284,9 +286,23 @@ def check_failure_cases(label: str, call: dict, response: dict, missing_cause: s
         ("not ok", Runner(changed(ok=False)), "selector response was not ok"),
         ("non-object response", Runner(stdout="[]"), "selector response was not ok"),
         ("identity", Runner(changed(identity={})), "selector identity is incomplete"),
+        ("mismatched local sponsor", Runner(changed(identity=dict(identity,
+            sponsoring_human_id="dell"))), "selector identity is incomplete"),
+        ("mismatched runtime and agent", Runner(changed(identity=dict(identity,
+            runtime_principal="codex"))), "selector identity is incomplete"),
+        ("unknown local identity", Runner(changed(identity=dict(identity,
+            agent_principal_id="some-local", runtime_principal="some-local"))),
+         "selector identity is incomplete"),
+        ("unknown pack", Runner(changed(rule_delivery=dict(plan,
+            packs_not_found=["unknown-pack"]))), "selector delivery plan is not exact"),
+        ("extra declared pack", Runner(changed(rule_delivery=dict(plan,
+            declared_packs=plan["declared_packs"] + ["unknown-pack"]))),
+         "selector delivery plan is not exact"),
         ("delivery plan", Runner(changed(rule_delivery=delivery)),
          "selector delivery plan is not exact"),
         ("rule pools", Runner(changed(personal_rules=None)),
+         "selector rule pools are malformed"),
+        ("shared rule pool", Runner(changed(shared_rules=None)),
          "selector rule pools are malformed"),
         ("malformed rule", Runner(changed(shared_rules=[None])),
          "selector returned a malformed rule"),
@@ -300,6 +316,10 @@ def check_failure_cases(label: str, call: dict, response: dict, missing_cause: s
          "unexpected TimeoutExpired"),
         ("unknown exception", Runner(error=RuntimeError("SUPER-SECRET")),
          "unexpected RuntimeError"),
+        ("unknown typed selector reason", Runner(error=rail.SelectorError("SUPER-SECRET")),
+         "unexpected SelectorError"),
+        ("typed selector subclass", Runner(error=type("SneakySelector", (rail.SelectorError,), {})(
+            "nonzero")), "unexpected SneakySelector"),
         ("RuntimeError subclass", Runner(error=type("Sneaky", (RuntimeError,), {})(
             "selector returned nonzero")), "unexpected Sneaky"),
     ]
