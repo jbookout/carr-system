@@ -18,7 +18,7 @@ export function invoiceTrackerTools({ ToolError, withEnvelope, writeEvent }) {
           observed_at: new Date().toISOString() };
       },
     },
-    'mark-invoice-paid': {
+    'record-commission-receipt': {
       write: true,
       humanOnly: true,
       description: 'Record full receipt of one already invoiced CARR commission with its payment date. Never creates a commission, alters amounts, pays out a broker, contacts anyone or moves money. Fresh base_version required; conflict refuses without rebasing. The event and receipt are atomic and the idempotency key replays the same outcome.',
@@ -26,7 +26,7 @@ export function invoiceTrackerTools({ ToolError, withEnvelope, writeEvent }) {
         idempotency_key: { type: 'string' }, commission_id: { type: 'string', format: 'uuid' },
         base_version: { type: 'integer', minimum: 1 }, received_on: { type: 'string', format: 'date' },
       }, required: ['idempotency_key', 'commission_id', 'base_version', 'received_on'] },
-      handler: async (c, actor, args) => withEnvelope(c, actor, 'mark-invoice-paid', args, async () => {
+      handler: async (c, actor, args) => withEnvelope(c, actor, 'record-commission-receipt', args, async () => {
         const day = args.received_on;
         if (typeof day !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(day) || !Number.isFinite(Date.parse(day + 'T00:00:00Z')) || new Date(day + 'T00:00:00Z').toISOString().slice(0, 10) !== day)
           throw new ToolError({ error: 'invalid_received_on' });
@@ -43,7 +43,7 @@ export function invoiceTrackerTools({ ToolError, withEnvelope, writeEvent }) {
         const paid = (await c.query(`update commission set status='received', received_on=$2,
           updated_by=$3 where id=$1 returning id, version as base_version,
           to_jsonb(received_on)#>>'{}' as received_on`, [row.id, day, actor.id])).rows[0];
-        await writeEvent(c, actor, 'mark-invoice-paid', 'deal', row.deal_id, {
+        await writeEvent(c, actor, 'record-commission-receipt', 'deal', row.deal_id, {
           field: 'commission_receipt', old: { commission_id: row.id, status: row.status, received_on: row.received_on },
           new: { commission_id: row.id, status: 'received', received_on: day }, idempotency_key: args.idempotency_key,
         });

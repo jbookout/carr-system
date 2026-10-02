@@ -19809,7 +19809,7 @@ export function renderInvoiceTrackerRegistrySql(rows, predecessorSql = null) {
   const preflight = `do $invoice_tracker_v104_preflight$\ndeclare v ops.scac_mutation_registry_version%rowtype; registration jsonb;\nbegin\n` +
     `  if not exists(select 1 from public.schema_migrations where filename='${predecessorPath.split("/").at(-1)}' and sha256='${predecessorDigest}') then\n` +
     `    raise exception 'Invoice tracker v104 requires exact applied 0770'; end if;\n` +
-    `  if not exists(select 1 from public.schema_migrations where filename='0772_invoice_tracker.sql' and sha256='${sha256(readFileSync(resolve(REPO_ROOT, "migrations/0772_invoice_tracker.sql"), "utf8"))}') then\n` +
+    `  if not exists(select 1 from public.schema_migrations where filename='0783_invoice_tracker.sql' and sha256='${sha256(readFileSync(resolve(REPO_ROOT, "migrations/0783_invoice_tracker.sql"), "utf8"))}') then\n` +
     `    raise exception 'Invoice tracker v104 requires exact invoice migration'; end if;\n` +
     `  select * into v from ops.scac_mutation_registry_version where registry_version='${REGISTRY_V103_VERSION}';\n` +
     `  if v.registry_digest is distinct from '${oldSeal.digest}' or v.entry_count<>${oldSeal.entryCount}\n` +
@@ -20914,7 +20914,7 @@ export function renderGeneratedFrontier() {
 
   const v104Rows = frozenInventory(REGISTRY_V104_VERSION);
   artifacts["mcp-server/src/scac-mutation-registry.v104.generated.js"] = renderRuntimeProjection(v104Rows, { version: REGISTRY_V104_VERSION, dbCatalogBaseline: INVOICE_TRACKER_V104_DB_CATALOG_BASELINE });
-  artifacts["migrations/0773_invoice_tracker_scac_successor.sql"] = renderInvoiceTrackerRegistrySql(v104Rows, artifacts["migrations/0770_find_rule_scac_successor.sql"]);
+  artifacts["migrations/0784_invoice_tracker_scac_successor.sql"] = renderInvoiceTrackerRegistrySql(v104Rows, artifacts["migrations/0770_find_rule_scac_successor.sql"]);
 
 
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
@@ -21956,11 +21956,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   } else if (process.argv[2] === "--write-invoice-tracker-frontier") {
     const rows = frozenInventory(REGISTRY_V104_VERSION);
     await writeFile(resolve("mcp-server/src/scac-mutation-registry.v104.generated.js"), renderRuntimeProjection(rows, { version: REGISTRY_V104_VERSION, dbCatalogBaseline: INVOICE_TRACKER_V104_DB_CATALOG_BASELINE }));
-    await writeFile(resolve("migrations/0773_invoice_tracker_scac_successor.sql"), renderInvoiceTrackerRegistrySql(rows));
+    await writeFile(resolve("migrations/0784_invoice_tracker_scac_successor.sql"), renderInvoiceTrackerRegistrySql(rows));
     process.stdout.write("Invoice tracker v104 frontier generated\n");
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools(), REGISTRY_V104_VERSION);
-    process.stdout.write(`source inventory matches frozen ${REGISTRY_V102_VERSION} frontier fixture\n`);
+    process.stdout.write(`source inventory matches frozen ${REGISTRY_V104_VERSION} frontier fixture\n`);
   } else if (process.argv[2] === "--check-generated-frontier") {
     const paths = assertGeneratedFrontierMatchesCommitted();
     process.stdout.write(`generated frontier is byte-exact (${paths.length} artifacts)\n`);

@@ -30,7 +30,7 @@ function relink(source) {
   // tools.js wraps a couple of long import statements across two lines
   // (`import { x } from\n  "./y.js";`), so the gap between `from` and the
   // string literal is whitespace, not always a single space.
-  return source.replace(/from\s+['"]\.\/([^'"]+)['"]/g, (_, file) =>
+  return source.replace(/from\s+"\.\/([^"]+)"/g, (_, file) =>
     `from "${pathToFileURL(join(SRC, file)).href}"`);
 }
 

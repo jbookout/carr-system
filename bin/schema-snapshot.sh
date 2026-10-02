@@ -1276,7 +1276,7 @@ if [ "$FIND_RULE_REGISTRY_APPLIED" = t ] && [ "$CONFIRM_MERGE_REGISTRY_APPLIED" 
 fi
 
 
-INVOICE_TRACKER_REGISTRY_APPLIED="$("$PSQL" -Atqc "select exists(select 1 from schema_migrations where filename='0773_invoice_tracker_scac_successor.sql')" 2>/dev/null)"
+INVOICE_TRACKER_REGISTRY_APPLIED="$("$PSQL" -Atqc "select exists(select 1 from schema_migrations where filename='0784_invoice_tracker_scac_successor.sql')" 2>/dev/null)"
 case "$INVOICE_TRACKER_REGISTRY_APPLIED" in
   t|f) ;;
   *) echo "schema-snapshot: could not read invoice tracker registry state" >&2; exit 1 ;;

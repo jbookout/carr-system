@@ -1,4 +1,4 @@
-import { invoiceTrackerTools } from './invoice-tracker.js';
+import { invoiceTrackerTools } from "./invoice-tracker.js";
 // CARR MCP tool registry — Wave 1 verbs (tool-contracts-2026-07-30.md §2).
 // Every write runs the envelope: idempotency replay via tool_call, actor from
 // the verified token (never the payload), base_version conflicts ask and never
@@ -2431,7 +2431,10 @@ export const TOOLS = {
         // The column is lead_owner; `owner` never existed on this view, so this
         // query has always thrown. It stayed invisible because the query above it
         // threw first (amendment 11) — one bug hiding another.
-        "select name, phase, lead_owner as owner, client_ref from v_deal_board where name ilike $1 limit 5",
+        `select name, phase, lead_owner as owner, client_ref,
+                to_jsonb(invoiced_on)#>>'{}' as invoiced_on,
+                to_jsonb(closed_on)#>>'{}' as closed_on, lane, outcome
+           from v_deal_board where name ilike $1 limit 5`,
         [`%${q}%`]);
       // [ORDER 18] The intro graph, through v_party_graph — SAFE COLUMNS ONLY, the
       // same views-only posture as v_ref_index. Capped deliberately: a hub like
@@ -2500,7 +2503,9 @@ export const TOOLS = {
         const named = new Set(deals.rows.map(d => d.name));
         if (clientRefs.length) {
           const dr = await c.query(
-            `select name, phase, lead_owner as owner, client_ref
+            `select name, phase, lead_owner as owner, client_ref,
+                    to_jsonb(invoiced_on)#>>'{}' as invoiced_on,
+                    to_jsonb(closed_on)#>>'{}' as closed_on, lane, outcome
                from v_deal_board where client_ref = any($1)
               order by client_ref, name limit $2`, [clientRefs, LINK_CAP]);
           linkedDeals = dr.rows.filter(d => !named.has(d.name));
@@ -3139,7 +3144,10 @@ export const TOOLS = {
     write: false,
     description: "Open pipeline grouped by phase. Never exposes Salesforce commission/close-date placeholders (they are placeholders, not data).",
     inputSchema: { type: "object", properties: {} },
-    handler: async (c) => ({ deals: (await c.query(`select b.*, d.operating_state, d.parking_note, d.lane, d.outcome, to_jsonb(d.closed_on)#>>'{}' as closed_on, to_jsonb(d.invoiced_on)#>>'{}' as invoiced_on
+    handler: async (c) => ({ deals: (await c.query(`select b.id, b.name, b.client_ref, b.client_name, b.deal_type,
+      b.phase, b.phase_sort, b.segment, b.outcome, b.lead_owner, b.last_touch, b.notes_path,
+      d.operating_state, d.parking_note, to_jsonb(d.invoiced_on)#>>'{}' as invoiced_on,
+      to_jsonb(d.closed_on)#>>'{}' as closed_on, d.lane
       from v_deal_board b join v_deal_room_board d on d.id=b.id
       order by b.phase_sort, b.name /* dealboard:operating-state */`)).rows }),
   },
