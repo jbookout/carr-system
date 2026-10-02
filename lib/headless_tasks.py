@@ -628,6 +628,7 @@ def main(argv=None) -> int:
             return 0
         code, reason = 70, 'runner_error'
         episode = 'initial'
+        ledger_readable = False
         old_handlers = {sig:signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
         def interrupted(signum, frame):
             raise InterruptedRun(signum)
@@ -641,6 +642,7 @@ def main(argv=None) -> int:
                 raise
             if repaired:
                 queue_alert(folder, args.task_id, 'ledger_torn_append', 'initial')
+            ledger_readable = True
             reconcile_runs(ledger, prior)
             prior = ledger_rows(ledger)
             for prior_row in prior:
@@ -694,14 +696,17 @@ def main(argv=None) -> int:
         row.update(end=stamp(datetime.now(UTC)), exit_code=code,
                    status=('noop' if reason == 'noop' else 'success') if code == 0 else 'failed', reason=reason)
         append_ledger(ledger, row)
-        if row['status'] in ('success', 'failed'):
-            replay_runs(repo, args.task_id, folder)
         log.write(f'END exit={code} reason={reason}\n')
         if code:
             queue_alert(folder, args.task_id, reason, episode)
             replay_alerts(repo, args.task_id, folder, log_path)
             pending_alerts = any(not a['delivered'] for a in json.loads((folder/'alerts.json').read_text()))
             log.write('ERROR pending_alert_delivery\n' if pending_alerts else 'DEFECT_RECORDED\n')
+        # Alert delivery uses its own durable outbox. Corrupt history must
+        # remain a hard execution failure without blocking those alerts or
+        # rebuilding canonical publication intent from unauthenticated rows.
+        if ledger_readable and row['status'] in ('success', 'failed'):
+            replay_runs(repo, args.task_id, folder)
         print(f'{"OK" if code == 0 else "FAIL"} {args.task_id}: {reason}; exit={code}; log={log_path}')
         return code
 

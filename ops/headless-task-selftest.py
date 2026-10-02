@@ -356,6 +356,31 @@ print(sys.argv[sys.argv.index('--correlation')+1]+' aa000000-0000-4000-8000-0000
         self.assertEqual(self.run_task().returncode, 0)
         self.assertEqual(self.ledger()[-1]['status'], 'skipped')
 
+    def test_07_interior_corruption_delivers_alerts_without_replaying_history(self):
+        folder = self.repo/'out/headless/test-task'
+        folder.mkdir(parents=True)
+        ledger = folder/'ledger.jsonl'
+        original = b'{"status":"failed"}\n{"status":\n{"status":"failed"}\n'
+        ledger.write_bytes(original)
+        # Canonical intent must remain untouched until its ledger can be read.
+        outbox = folder/'pending-runs.json'
+        outbox.write_text('[]')
+        for attempt in range(2):
+            result = self.run_task()
+            self.assertEqual(result.returncode, 70, result.stderr)
+            self.assertNotIn('Traceback', result.stderr)
+            self.assertFalse((self.home/'args.json').exists(), 'corruption must block model work')
+            self.assertFalse((self.home/'ops-records.jsonl').exists(), 'unreadable history must not be published')
+            self.assertEqual(outbox.read_text(), '[]')
+            self.assertTrue(ledger.read_bytes().startswith(original))
+            self.assertTrue(any(p.read_bytes() == original for p in folder.glob('ledger.corrupt.*')))
+            alerts = json.loads((folder/'alerts.json').read_text())
+            self.assertEqual({a['reason'] for a in alerts}, {'ledger_corrupt', 'runner_error'})
+            self.assertTrue(all(a['delivered'] for a in alerts))
+            calls = [json.loads(s) for s in (self.home/'records.jsonl').read_text().splitlines()]
+            self.assertEqual(len(calls), 2, f'attempt {attempt}: acknowledge each episode once')
+            self.assertEqual(len({json.loads(c[-1])['idempotency_key'] for c in calls}), 2)
+
     def test_intact_final_ledger_row_without_newline_survives_append(self):
         folder = self.repo/'out/headless/test-task'
         folder.mkdir(parents=True)
