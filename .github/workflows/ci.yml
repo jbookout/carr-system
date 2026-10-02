@@ -123,11 +123,11 @@ jobs:
           - "pushfloor unit types contract secret dependency binding artifact freshness"
           - "gates"
           - "migration"
-    # 2026-10-01 run 36927706376 measured gates 701s and migration 1034s;
-    # twenty minutes leaves migration about 166s for setup. PR 1465 exhausted
-    # this ceiling in apt update before ANY class ran, so zsh setup now has
-    # its own short deadline instead of consuming the checks' whole budget.
-    timeout-minutes: 20
+    # PR 1121 run 37022556444 hit the migration job's 20-minute ceiling;
+    # separate exact-head DB acceptance passed in 23m51s (37022556209).
+    # Give migration setup and acceptance headroom while keeping every group
+    # bounded. zsh setup retains its own short deadline below.
+    timeout-minutes: ${{ matrix.classes == 'migration' && 35 || 20 }}
 
     services:
       # The migration class needs a database to apply 130 forward migrations to.
