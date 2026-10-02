@@ -131,8 +131,9 @@ function pageFor(surface, env) {
     return response;
   };
   const context = createContext({ document: doc, fetch: fetchBridge, crypto, Promise, JSON, Number, String, Array, RegExp, Error, TypeError, Math, Date, URL, AbortController, clearTimeout,
-    // The feedback deadline is seconds in the browser; keep it instant here.
-    setTimeout: (fn, ms) => setTimeout(fn, ms >= 1000 ? 5 : ms) });
+    // Compress browser deadlines without racing ordinary reads under full-suite
+    // load. The pending-read tests still exercise expiry within their 2s bound.
+    setTimeout: (fn, ms) => setTimeout(fn, ms >= 1000 ? 100 : ms) });
   context.globalThis = context;
   context.__CARR_TOUR_TAKE_SHARE_TOKEN__ = () => TOKEN;
   return { doc, ids, jar, trace, context };
