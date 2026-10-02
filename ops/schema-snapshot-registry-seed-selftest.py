@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Registry seed rows must survive pg_dump's empty search_path on rebuild."""
 
+import ast
 import hashlib
 import json
 import os
@@ -782,6 +783,34 @@ assert "SCAC_FULL_SET_SEAL_COUNT=103" in GENERATOR
 assert "ops.scac_mutation_catalog_v104_current()" in GENERATOR
 assert 'scac-mutation-registry.v104.generated.js' in GENERATOR
 assert '"scac-mutation-registry.v104"' in registry_gate
+
+# The reference-monitor acceptance must follow the same live frontier and
+# independently pin its sealed predecessor's generated contract.
+monitor_tree = ast.parse((ROOT / "ops/siep18-reference-monitor-local-pg-gate.py").read_text())
+monitor_names = {"LIVE_REGISTRY_VERSION", "LIVE_REGISTRY_ORDINAL", "SEALED_PREDECESSOR_VERSION",
+                 "SEALED_PREDECESSOR_DIGEST", "SEALED_PREDECESSOR_ENTRY_COUNTS",
+                 "SEALED_PREDECESSOR_MIGRATION", "LIVE_REGISTRY_MIGRATION"}
+monitor_pins = {node.targets[0].id: ast.literal_eval(node.value)
+                for node in monitor_tree.body if isinstance(node, ast.Assign)
+                and isinstance(node.targets[0], ast.Name) and node.targets[0].id in monitor_names}
+assert monitor_pins["LIVE_REGISTRY_VERSION"] == "scac-mutation-registry.v104"
+assert monitor_pins["LIVE_REGISTRY_ORDINAL"] == 104
+assert monitor_pins["SEALED_PREDECESSOR_VERSION"] == "scac-mutation-registry.v103"
+predecessor_runtime = (ROOT / "mcp-server/src/scac-mutation-registry.v103.generated.js").read_text()
+predecessor_constants = dict(re.findall(r'^export const (SCAC_MUTATION_REGISTRY_\w+) = (.*);$',
+                                       predecessor_runtime, re.MULTILINE))
+assert monitor_pins["SEALED_PREDECESSOR_DIGEST"] == "sha256:" + json.loads(predecessor_constants["SCAC_MUTATION_REGISTRY_DIGEST"])
+predecessor_seal = json.loads(subprocess.run(
+    ["node", "--input-type=module", "-e", """
+    import { registrySeal, frozenInventory, FIND_RULE_V103_DB_CATALOG_BASELINE }
+      from './ops/scac-mutation-inventory.mjs';
+    console.log(JSON.stringify(registrySeal('scac-mutation-registry.v103',
+      frozenInventory('scac-mutation-registry.v103'), FIND_RULE_V103_DB_CATALOG_BASELINE)));
+    """], cwd=ROOT, capture_output=True, text=True, check=True).stdout)
+assert monitor_pins["SEALED_PREDECESSOR_ENTRY_COUNTS"] == (
+    predecessor_seal["entryCount"], predecessor_seal["sourceEntryCount"])
+assert monitor_pins["SEALED_PREDECESSOR_MIGRATION"] == "migrations/0770_find_rule_scac_successor.sql"
+assert monitor_pins["LIVE_REGISTRY_MIGRATION"] == "migrations/0772_jev_cap_scac_successor.sql"
 
 assert "0720_doctorcre_a03_review_scac_successor.sql" in GENERATOR
 assert "V5_A03_REVIEW_REGISTRY_APPLIED" in GENERATOR
