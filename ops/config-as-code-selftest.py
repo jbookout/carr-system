@@ -75,6 +75,34 @@ def commands(doc):
 
 
 def main():
+    import tomllib
+    default, body = mod.codex_permissions_source()
+    raw = ('model = "fixture"\n' + default + '\n'
+           '[permissions.carr_unattended]\nextends = ":read-only"\n'
+           '[permissions.carr_unattended.network]\nenabled = false\n'
+           '[permissions.custom]\ndescription = "keep me"\n'
+           '[permissions.carr_drive_readonly]\nextends = ":workspace"\n'
+           '[permissions.carr_drive_readonly.filesystem]\n"." = "write"\n'
+           '[other]\nvalue = 42\n')
+    planned = mod.install_codex_permissions(raw, default, body)
+    parsed = tomllib.loads(planned)
+    assert parsed['permissions']['custom']['description'] == 'keep me'
+    assert parsed['other']['value'] == 42
+    assert parsed['model'] == 'fixture'
+    assert parsed['permissions']['carr_unattended']['network']['enabled'] is True
+    assert planned.index(mod.CODEX_PERMISSIONS_BEGIN) < planned.index('[permissions.custom]')
+    assert mod.install_codex_permissions(planned, default, body) == planned
+    quoted = raw.replace('[permissions.carr_unattended]', '[ "permissions" . "carr_unattended" ]')
+    assert tomllib.loads(mod.install_codex_permissions(quoted, default, body))['other']['value'] == 42
+    # Recover a config already damaged by an older nightly append.
+    duplicated = raw + "\n" + mod.CODEX_PERMISSIONS_BEGIN + "\n" + body + mod.CODEX_PERMISSIONS_END + "\n"
+    repaired = mod.install_codex_permissions(duplicated, default, body)
+    tomllib.loads(repaired)
+    assert mod.install_codex_permissions(repaired, default, body) == repaired
+    multiline = 'notes = \'\'\'\n[permissions.carr_unattended]\nexample = "keep"\n\'\'\'\n' + raw
+    fixed = mod.install_codex_permissions(multiline, default, body)
+    assert tomllib.loads(fixed)['notes'] == tomllib.loads(multiline)['notes']
+    print('markerless permissions replaced in place; valid TOML; repeat unchanged')
     merged = mod.merge_codex_carr_hooks(LIVE, DESIRED)
     names = commands(merged)
     again = mod.merge_codex_carr_hooks(merged, DESIRED)

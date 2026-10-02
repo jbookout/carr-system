@@ -841,6 +841,46 @@ def live_codex_permissions():
     return None if raw is None else canonical_codex_permissions(raw)
 
 
+def codex_permission_table_spans(raw):
+    """Find reserved table families without interpreting string examples as tables."""
+    import tomllib
+    headers = []
+    multiline = None
+    offset = 0
+    tokens = re.compile(r'''"""|''' + "'''" + r'''|"(?:\\.|[^"\\])*"|'[^']*'|#[^\n]*''')
+    for line in raw.splitlines(keepends=True):
+        if multiline is None and re.match(r'^\s*\[', line):
+            try:
+                table = tomllib.loads(line + '\n__carr_slice__ = true\n')
+            except tomllib.TOMLDecodeError:
+                table = {}
+            permissions = table.get('permissions', {})
+            owned = bool(set(permissions) & {'carr_unattended', 'carr_drive_readonly'})
+            headers.append((offset, owned))
+        cursor = 0
+        while cursor < len(line):
+            if multiline is not None:
+                end = line.find(multiline, cursor)
+                if end < 0:
+                    break
+                # An escaped quote cannot close a multiline basic string.
+                escapes = len(line[:end]) - len(line[:end].rstrip('\\'))
+                cursor = end + 3
+                if multiline == '"""' and escapes % 2:
+                    continue
+                multiline = None
+            else:
+                token = tokens.search(line, cursor)
+                if token is None:
+                    break
+                cursor = token.end()
+                if token.group() in ('"""', "'''"):
+                    multiline = token.group()
+        offset += len(line)
+    return [(start, headers[i + 1][0] if i + 1 < len(headers) else len(raw))
+            for i, (start, owned) in enumerate(headers) if owned]
+
+
 def install_codex_permissions(raw, default_line, body):
     """Replace only the managed CARR slice of Codex's user-owned config.toml."""
     default_re = re.compile(r'^default_permissions\s*=\s*"[^"]+"\s*\n?', re.M)
@@ -854,8 +894,28 @@ def install_codex_permissions(raw, default_line, body):
     managed = CODEX_PERMISSIONS_BEGIN + "\n" + body.rstrip() + "\n" + CODEX_PERMISSIONS_END
     marker_re = re.compile(re.escape(CODEX_PERMISSIONS_BEGIN) + r'\n.*?'
                            + re.escape(CODEX_PERMISSIONS_END), re.S)
-    if marker_re.search(planned):
-        return marker_re.sub(managed, planned, count=1)
+    # Codex rewrites TOML without comments. These reserved table families are
+    # still CARR-owned when the marker comments are absent. Include subtables,
+    # but stop at every other table so user-owned configuration stays in place.
+    spans = codex_permission_table_spans(planned)
+    spans.extend(match.span() for match in marker_re.finditer(planned))
+    merged = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+        else:
+            merged.append((start, end))
+    spans = merged
+    if spans:
+        # Insert at the first original managed table, remove every old copy.
+        pieces, cursor = [], 0
+        for i, (start, end) in enumerate(spans):
+            pieces.append(planned[cursor:start])
+            if i == 0:
+                pieces.append(managed + "\n\n")
+            cursor = end
+        pieces.append(planned[cursor:])
+        return "".join(pieces)
     return planned.rstrip() + "\n\n" + managed + "\n"
 
 

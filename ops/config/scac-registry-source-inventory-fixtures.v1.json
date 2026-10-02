@@ -84175,6 +84175,61 @@
       "expected_count": 1084,
       "expected_sha256": "fb60c6d8b092dceae702c619bbd500a26f308fe88ecfef43725e08a32cd3ed38",
       "reason": "Admit partner catch-up and scoped watermark capabilities; source repairs preserve supported histories and partial answers."
+    },
+    {
+      "version": "v102",
+      "remove": [],
+      "upsert": [
+        {
+          "ingress_key": "external-admin:bin/migrate-prod.sh",
+          "ingress_kind": "external_admin",
+          "operation": "bin/migrate-prod.sh",
+          "effect_class": "administrative_mutation",
+          "source_locator": "bin/migrate-prod.sh",
+          "schema_digest": "6dd59622bfe283fabab9d3c9eabc0263c4b46ad73bd5c5e6afc2b70f4c81ec88",
+          "handler_digest": "6dd59622bfe283fabab9d3c9eabc0263c4b46ad73bd5c5e6afc2b70f4c81ec88",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "external-admin:tools/migrate-prod-support.py",
+          "ingress_kind": "external_admin",
+          "operation": "tools/migrate-prod-support.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "tools/migrate-prod-support.py",
+          "schema_digest": "65bf66fe43dcd9bc79cd84c431243ff50e142232dc26026f0ddfee839bf59d8e",
+          "handler_digest": "65bf66fe43dcd9bc79cd84c431243ff50e142232dc26026f0ddfee839bf59d8e",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        }
+      ],
+      "expected_count": 1084,
+      "expected_sha256": "b9306437964d0e5ba65e142dd8916bcda47678586e3bdf84fbfd8eba47dfcdf1",
+      "reason": "Task AD source-only review of the production migration wrapper and its diagnostic helper. Failure capture and redaction change only; no new ingress, grant, live registry selection or production effect. Runtime and database registry remain v101."
     }
   ],
   "current_source_review": {

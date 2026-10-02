@@ -536,6 +536,10 @@ export const REGISTRY_V98_VERSION = "scac-mutation-registry.v98";
 export const REGISTRY_V99_VERSION = "scac-mutation-registry.v99";
 export const REGISTRY_V100_VERSION = "scac-mutation-registry.v100";
 export const REGISTRY_V101_VERSION = "scac-mutation-registry.v101";
+// Source-only v102 records Task AD's reviewed external-admin script bytes.
+// It introduces no ingress or runtime contract. The deployed selector and
+// generated database seal remain v101; historical fixtures stay immutable.
+export const SOURCE_FRONTIER_VERSION = "scac-mutation-registry.v102";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
   "./config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url);
@@ -2720,6 +2724,7 @@ const SOURCE_INVENTORY_VERSION_KEYS = Object.freeze({
   [REGISTRY_V99_VERSION]: "v99",
   [REGISTRY_V100_VERSION]: "v100",
   [REGISTRY_V101_VERSION]: "v101",
+  [SOURCE_FRONTIER_VERSION]: "v102",
 });
 
 export function sourceInventoryFixtureDigest(rows) {
@@ -2812,7 +2817,7 @@ export function boundInventoryRows(rows) {
 }
 
 export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
-  version = REGISTRY_V101_VERSION) {
+  version = SOURCE_FRONTIER_VERSION) {
   const current = fullInventory(tools);
   let frozen = frozenInventory(version);
   const review = SOURCE_INVENTORY_FIXTURES.current_source_review;
@@ -21594,8 +21599,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     await writeFile(resolve("migrations/0767_doc_whats_new_scac_successor.sql"), renderWhatsNewRegistrySql(rows));
     process.stdout.write("Whats new v101 frontier generated\n");
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
-    assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools(), REGISTRY_V101_VERSION);
-    process.stdout.write(`source inventory matches frozen ${REGISTRY_V101_VERSION} frontier fixture\n`);
+    assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools(), SOURCE_FRONTIER_VERSION);
+    process.stdout.write(`source inventory matches frozen ${SOURCE_FRONTIER_VERSION} frontier fixture\n`);
   } else if (process.argv[2] === "--check-generated-frontier") {
     const paths = assertGeneratedFrontierMatchesCommitted();
     process.stdout.write(`generated frontier is byte-exact (${paths.length} artifacts)\n`);
