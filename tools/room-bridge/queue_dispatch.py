@@ -20,9 +20,12 @@ authority, state, or AttemptReceipt records from the small queue header.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Callable
 
 
@@ -204,10 +207,9 @@ def _bounded_reply(raw_result: str) -> str:
     removes secrets/PII from the model's own text; it is the desk's reply verbatim,
     just with the protocol line removed and a length bound applied.
 
-    Used only for the flash-local desk (see completion_payload's include_reply):
-    flash has no MCP tools of its own, so unlike a codex-session or claude-session
-    desk it cannot post its own answer into the room while doing the task. This is
-    the one place that answer can still reach the room.
+    Used for synchronous desks without MCP tools (Flash and Grok). They cannot
+    post their own answers into the room while doing the task; this callback
+    carries those answers.
     """
     if not isinstance(raw_result, str):
         return "(empty reply)"
@@ -280,7 +282,7 @@ class QueueDeskExecutor:
         )
 
     def _retry_or_block(self, task_id: str, code: str, *, now: str | None,
-                        before_block: Callable[[], None] | None = None) -> dict:
+                        before_block: Callable[[str], None] | None = None) -> dict:
         """Use only Hermes evidence for the finite recovery bound.
 
         ``before_block`` runs immediately before any permanent block, and never
@@ -291,7 +293,7 @@ class QueueDeskExecutor:
         """
         def block(reason: str) -> None:
             if before_block is not None:
-                before_block()
+                before_block(reason)
             self.adapter.block(task_id, reason, kind="transient")
 
         try:
@@ -319,7 +321,7 @@ class QueueDeskExecutor:
               unavailable_since: dict[str, str] | str | None = None,
               unavailable_wait_s: float = DESK_UNAVAILABLE_WAIT_S,
               include_reply: bool = False, retry_protocol_errors: bool = False,
-              post_completion=None) -> dict:
+              post_completion=None, completion_dir: Path | None = None) -> dict:
         target = self._target(target_alias)
         self.last_ready_task_ids = set()
         self.last_ready_scan_complete = False
@@ -365,11 +367,12 @@ class QueueDeskExecutor:
             return {"outcome": "retry_wait", "task_id": candidate[1], "target": target_alias,
                     "retry_at": scheduled_at}
         _created, task_id, parsed = min(ready_candidates)
+        receipt = self._read_final(completion_dir, parsed)
 
         # A socket-backed desk that is known dead gets a timing-only grace
         # window.  Crucially this happens before claim, so no Hermes attempt,
         # dispatch, retry, or reassignment is manufactured while waiting.
-        if desk_live is False:
+        if desk_live is False and receipt is None:
             task_unavailable_since = (
                 unavailable_since.get(task_id) if isinstance(unavailable_since, dict)
                 else unavailable_since
@@ -403,6 +406,10 @@ class QueueDeskExecutor:
             # Another controller may have won the atomic claim, or Hermes may
             # have become unavailable. Either way, dispatching would be wrong.
             return {"outcome": "claim_not_acquired", "task_id": task_id, "target": target_alias}
+        if receipt is not None:
+            if post_completion is None:
+                raise QueueDispatchError("saved completion requires its publication route")
+            return self._apply_final(receipt, post_completion)
         try:
             row = dispatch_call(self._prompt(parsed))
         except Exception as exc:  # dispatch details may contain provider output; never persist them here
@@ -449,12 +456,23 @@ class QueueDeskExecutor:
         raw_result = row.get("result")
         pending = {"kanban_task_id": task_id, "target": target_alias, "finish": parsed["meta"]["finish"],
                    "cap": parsed["meta"]["cap"], "source_seq": parsed["meta"]["source_seq"],
-                   "source_msg_id": parsed["meta"]["source_msg_id"]}
+                   "source_msg_id": parsed["meta"]["source_msg_id"],
+                   "dispatch_msg_id": row.get("msg_id")}
+        if include_reply and isinstance(row.get("provider_metadata"), dict):
+            # The wire validates provider identity. Keep only its declared
+            # receipt fields; arbitrary provider diagnostics never enter the room.
+            pending["provider_metadata"] = {
+                key: row["provider_metadata"][key] for key in (
+                    "requested_model", "actual_model", "effort", "request_id",
+                    "session_id", "model_calls", "cost_usd", "stop_reason")
+                if key in row["provider_metadata"]
+            }
         clean_result = raw_result if isinstance(raw_result, str) else ""
         if post_completion is not None:
             return self.finish_pending_posted(
                 pending, clean_result, post_completion=post_completion,
                 include_reply=include_reply, retry_protocol_errors=retry_protocol_errors, now=now,
+                completion_dir=completion_dir,
             )
         return self.finish_pending(
             pending, clean_result,
@@ -462,14 +480,81 @@ class QueueDeskExecutor:
         )
 
     @staticmethod
+    def _final_path(completion_dir: Path, task_id: str) -> Path:
+        return Path(completion_dir) / (hashlib.sha256(task_id.encode()).hexdigest() + ".json")
+
+    def _read_final(self, completion_dir: Path | None, parsed: dict) -> dict | None:
+        if completion_dir is None:
+            return None
+        try:
+            receipt = json.loads(self._final_path(completion_dir, parsed["task_id"]).read_text())
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as exc:
+            raise QueueDispatchError("saved completion is unreadable") from exc
+        expected = {"kanban_task_id": parsed["task_id"], "target": parsed["meta"]["target"],
+                    **{key: parsed["meta"][key] for key in
+                       ("finish", "cap", "source_seq", "source_msg_id")}}
+        completion = receipt.get("completion") if isinstance(receipt, dict) else None
+        callback = completion.get("queue_completion") if isinstance(completion, dict) else None
+        if (not isinstance(receipt, dict) or receipt.get("v") != 1
+                or receipt.get("binding") != expected
+                or receipt.get("method") not in {"complete", "request_review", "block"}
+                or not isinstance(receipt.get("summary"), str)
+                or not isinstance(receipt.get("metadata"), dict)
+                or not isinstance(receipt.get("outcome"), str)
+                or receipt.get("block_kind") not in {None, "transient", "needs_input"}
+                or not isinstance(callback, dict)
+                or any(callback.get(key) != parsed["meta"][key] for key in
+                       ("target", "source_seq", "source_msg_id"))
+                or callback.get("task_id") != parsed["task_id"]):
+            raise QueueDispatchError("saved completion binding is invalid")
+        return receipt
+
+    def _save_final(self, completion_dir: Path | None, receipt: dict) -> None:
+        if completion_dir is None:
+            return
+        path = self._final_path(completion_dir, receipt["binding"]["kanban_task_id"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Write ahead of publication, including an uncertain post response.
+        # Preserve JSON key order: the room compares the serialized body.
+        temp = path.with_suffix(".tmp")
+        with temp.open("w") as stream:
+            stream.write(json.dumps(receipt, separators=(",", ":")))
+            stream.flush()
+            os.fsync(stream.fileno())
+        temp.replace(path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+    def _apply_final(self, receipt: dict, post_completion) -> dict:
+        task_id = receipt["binding"]["kanban_task_id"]
+        result = {"outcome": receipt["outcome"], "task_id": task_id,
+                  "completion": receipt["completion"]}
+        if receipt["block_kind"] == "transient":
+            result["code"] = receipt["summary"]
+        if _task_status(self.adapter.show(task_id)) in TERMINAL_STATES:
+            return {**result, "outcome": "already_terminal"}
+        if post_completion is not None:
+            post_completion(receipt["completion"])
+        if receipt["method"] == "block":
+            self.adapter.block(task_id, receipt["summary"], kind=receipt["block_kind"])
+        else:
+            getattr(self.adapter, receipt["method"])(task_id, receipt["summary"], receipt["metadata"])
+        return result
+
+    @staticmethod
     def completion_payload(pending: dict, raw_result: str, *, include_reply: bool = False) -> dict:
         """Return the bounded callback contract.
 
-        Never return model prose — EXCEPT when ``include_reply`` is set, which only the
-        flash-local desk path sets (see start()/finish_pending()). A codex-session or
-        claude-session desk has its own MCP tools and posts its own reply into the room
+        Never return model prose — EXCEPT when ``include_reply`` is set by the
+        synchronous Flash/Grok desk paths (see start()/finish_pending()). A
+        codex-session or claude-session desk has its own MCP tools and posts its own reply into the room
         as part of doing the task, so the "never return model prose" rule holds for it
-        unchanged; flash-local has no tools, so its reply would otherwise be lost, and
+        unchanged; Flash/Grok have no tools, so their replies would otherwise be lost.
         ``include_reply`` is the one bounded exception carrying it back — its
         protocol result line stripped and truncated (_bounded_reply), not redacted.
         """
@@ -510,6 +595,10 @@ class QueueDeskExecutor:
             }
         if include_reply:
             callback["reply"] = _bounded_reply(raw_result)
+            if isinstance(pending.get("dispatch_msg_id"), str):
+                callback["dispatch_msg_id"] = pending["dispatch_msg_id"]
+            if isinstance(pending.get("provider_metadata"), dict):
+                callback["provider_metadata"] = pending["provider_metadata"]
         return {"queue_completion": callback}
 
     def finish_pending(self, pending: dict, raw_result: str, *, include_reply: bool = False,
@@ -521,18 +610,15 @@ class QueueDeskExecutor:
 
     def finish_pending_posted(self, pending: dict, raw_result: str, *, post_completion,
                               include_reply: bool = False, retry_protocol_errors: bool = False,
-                              now: str | None = None) -> dict:
+                              now: str | None = None, completion_dir: Path | None = None) -> dict:
         """Like finish_pending, but posts the room completion callback BEFORE any Hermes
         terminal transition, never after.
 
-        Only the synchronous flash-local path (start()) needs this. An async desk's
-        completion carries persisted "pending" state (state.py) across bridge cycles,
-        so if posting failed there after Hermes was already marked terminal, the next
-        cycle's handle_pending() would call finish_pending() again and retry the SAME
-        post under the SAME idempotency key. The synchronous path has no such
-        persisted state — Hermes IS the only durable record of it — so posting after
-        the terminal mutation (finish_pending's order) would lose the reply for good
-        on a post failure, with nothing left to retry it.
+        Synchronous desks without MCP tools (start()) need this. The bridge supplies
+        completion_dir to persist the exact final callback and terminal operation
+        before publication. Once Hermes releases a stale claim, start() claims it
+        again and replays that receipt without dispatching another provider call.
+        This is publication evidence, not a second task-state or retry authority.
 
         Posting first instead means a failed post (post_completion raises, and the
         exception propagates to the caller UNCHANGED) leaves the Hermes claim in
@@ -556,22 +642,30 @@ class QueueDeskExecutor:
         return self._finish(
             pending, raw_result, include_reply=include_reply,
             retry_protocol_errors=retry_protocol_errors, now=now, post_completion=post_completion,
+            completion_dir=completion_dir,
         )
 
     def _finish(self, pending: dict, raw_result: str, *, include_reply: bool,
-               retry_protocol_errors: bool, now: str | None, post_completion) -> dict:
+               retry_protocol_errors: bool, now: str | None, post_completion,
+               completion_dir: Path | None = None) -> dict:
         task_id = pending.get("kanban_task_id")
         if not isinstance(task_id, str) or not task_id.startswith("t_"):
             raise QueueDispatchError("pending queue task identity is invalid")
         completion = self.completion_payload(pending, raw_result, include_reply=include_reply)
 
-        def post_final() -> None:
-            # The ONE room post for this task, made only once the outcome is
-            # final and always before the Hermes terminal mutation that follows
-            # it. A raise propagates unchanged, so Hermes is never marked
-            # terminal for a completion the room did not receive.
+        def final_receipt(method: str, summary: str, outcome: str,
+                          metadata: dict | None = None, kind: str | None = None) -> dict:
+            receipt = {"v": 1, "binding": {key: pending.get(key) for key in
+                       ("kanban_task_id", "target", "finish", "cap", "source_seq", "source_msg_id")},
+                       "completion": completion, "method": method, "summary": summary,
+                       "metadata": metadata or {}, "block_kind": kind, "outcome": outcome}
             if post_completion is not None:
-                post_completion(completion)
+                self._save_final(completion_dir, receipt)
+            return receipt
+
+        def finish(method: str, summary: str, outcome: str,
+                   metadata: dict | None = None, kind: str | None = None) -> dict:
+            return self._apply_final(final_receipt(method, summary, outcome, metadata, kind), post_completion)
 
         def result(outcome: str) -> dict:
             return {"outcome": outcome, "task_id": task_id, "completion": completion}
@@ -584,12 +678,10 @@ class QueueDeskExecutor:
         except RecordWriteEvidenceMissing:
             metadata = {"queue_protocol": "carr-queue-result.v1", "target": pending.get("target"),
                         "outcome": "unverified", "verification": "record_write_evidence_missing"}
-            post_final()
             if pending.get("finish") == "review":
-                self.adapter.request_review(task_id, "record_write_evidence_missing", metadata)
-                return result("review")
-            self.adapter.block(task_id, "record_write_evidence_missing", kind="needs_input")
-            return result("record_write_evidence_missing")
+                return finish("request_review", "record_write_evidence_missing", "review", metadata)
+            return finish("block", "record_write_evidence_missing", "record_write_evidence_missing",
+                          kind="needs_input")
         except QueueDispatchError:
             # A desk with no MCP tools of its own (flash-local) is far more likely
             # to fumble the exact trailing-line protocol than a codex-session or
@@ -607,11 +699,13 @@ class QueueDeskExecutor:
             # so handing a task to a different desk would need a new, linked task
             # rather than a reassignment of this one — tracked as loop #649.
             if retry_protocol_errors:
+                def before_block(reason: str) -> None:
+                    receipt = final_receipt("block", reason, "blocked", kind="transient")
+                    if post_completion is not None:
+                        post_completion(receipt["completion"])
                 return self._retry_or_block(
-                    task_id, "result_protocol_error", now=now, before_block=post_final)
-            post_final()
-            self.adapter.block(task_id, "result_protocol_error")
-            return result("result_protocol_error")
+                    task_id, "result_protocol_error", now=now, before_block=before_block)
+            return finish("block", "result_protocol_error", "result_protocol_error")
 
         summary = terminal["summary"]
         metadata = {
@@ -621,18 +715,13 @@ class QueueDeskExecutor:
         }
         if pending.get("cap") == "record-write":
             metadata["record_write"] = {key: terminal[key] for key in RECORD_WRITE_EVIDENCE_FIELDS}
-        post_final()
         if terminal["outcome"] == "blocked":
-            self.adapter.block(task_id, terminal.get("code") or summary, kind="needs_input")
-            return result("blocked")
+            return finish("block", terminal.get("code") or summary, "blocked", kind="needs_input")
         if pending.get("finish") == "review":
-            self.adapter.request_review(task_id, summary, metadata)
-            return result("review")
+            return finish("request_review", summary, "review", metadata)
         if pending.get("finish") != "done":
-            self.adapter.block(task_id, "result_protocol_error")
-            return result("result_protocol_error")
-        self.adapter.complete(task_id, summary, metadata)
-        return result("done")
+            return finish("block", "result_protocol_error", "result_protocol_error")
+        return finish("complete", summary, "done", metadata)
 
     def fail_pending(self, pending: dict, reason: str, *, now: str | None = None) -> dict:
         task_id = pending.get("kanban_task_id")

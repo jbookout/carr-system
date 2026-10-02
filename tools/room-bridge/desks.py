@@ -52,7 +52,7 @@ NAME_OK = re.compile(r"^[a-z0-9][a-z0-9-]{1,40}$")
 # /tmp/cc-socks/79534.sock — a process, not a desk
 PID_SOCKET = re.compile(r"^\d+\.sock$")
 
-KINDS = ("claude-session", "claude-desktop", "codex-session", "codex-live", "flash-local")
+KINDS = ("claude-session", "claude-desktop", "codex-session", "codex-live", "flash-local", "grok-cli")
 # the old name for the Codex kind, before it carried a thread
 KIND_ALIASES = {"codex-exec": "codex-session"}
 EFFORT_CHOICES = ("minimal", "low", "medium", "high", "xhigh")
@@ -181,6 +181,11 @@ class Registry:
                 # session's authority or leaving a hidden prompt waiting.
                 "permission_mode": str(permission_mode or "dontAsk"),
             }
+        elif kind == "grok-cli":
+            if model != "grok-4.7" or effort != "high" or sandbox != "read-only":
+                raise DeskError("bad_grok_posture", "Grok requires grok-4.7/high/read-only")
+            entry = {"kind": kind, "model": model, "effort": effort,
+                     "sandbox": sandbox, "cwd": str(cwd or Path.cwd())}
         elif kind == "flash-local":
             # The model and effort are fixed by the direct protocol (ops/config/model-routes.v1.json): Flash,
             # thinking off. Recorded on the entry so a dispatch still names both, as every delegation must.
@@ -243,6 +248,9 @@ class Registry:
         entry = {**entry, "kind": kind}
         if kind not in KINDS:
             raise DeskError("bad_kind", f"desk {name!r} has kind {kind!r}")
+        if kind == "grok-cli" and (entry.get("model") != "grok-4.7"
+                or entry.get("effort") != "high" or entry.get("sandbox") != "read-only"):
+            raise DeskError("bad_grok_posture", "Grok requires grok-4.7/high/read-only")
         if kind in ("claude-session", "codex-live"):
             sock = entry.get("socket", "")
             # second refusal: the file is editable, the guard is not
