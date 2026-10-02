@@ -102,6 +102,52 @@ def _split_commas(value: str) -> list[str]:
     return parts
 
 
+# EVERY MULTI-WORD SPELLING format_type() CAN PRINT FOR AN ARGUMENT TYPE.
+# pg_get_function_identity_arguments() and oidvectortypes() both render through
+# format_type(), which spells exactly these pg_catalog types with a space in
+# them (typmods never appear in an argument identity). The list is closed: a
+# user-defined type is schema-qualified by the generator's search_path, so an
+# unqualified multi-word argument is always one of these.
+#
+# WHY THE PARSER NEEDS IT (2026-09-26, PR #1297). A function argument may or
+# may not carry a name, and a nameless multi-word type is textually identical to
+# "name type": `timestamp with time zone` read as name `timestamp`, type `with
+# time zone`. render_acl_facts() writes type-only identities, so the moment a
+# snapshot refresh absorbed ops.f01_instant_text's grant, acl_facts() read its
+# own output back as `ops.f01_instant_text(with time zone)` and the login gate
+# failed a correct database. None of the trailing fragments (`with time zone`,
+# `varying`, `precision`, ...) is a type, so an argument that is exactly one of
+# these spellings can only be a nameless type -- and Postgres' own grammar reads
+# it the same way.
+MULTIWORD_ARGUMENT_TYPES = frozenset({
+    "bit varying",
+    "character varying",
+    "double precision",
+    "time with time zone",
+    "time without time zone",
+    "timestamp with time zone",
+    "timestamp without time zone",
+})
+
+
+def _argument_type(argument: str) -> str:
+    """Return the type of one mode-stripped argument, with or without a name."""
+    normalized = " ".join(argument.split())
+    bare = normalized[:-2] if normalized.endswith("[]") else normalized
+    if bare in MULTIWORD_ARGUMENT_TYPES:
+        return normalized
+    try:
+        _argument_name, argument_type = normalized.split(" ", 1)
+    except ValueError as exc:
+        # The generated grammar admits only name/type pairs; a single-token
+        # nameless type reaches acl_facts() through DERIVED_FUNCTION_GRANT and
+        # never through here.
+        raise SnapshotGrantError(
+            f"generated function argument has no name/type pair: {argument}"
+        ) from exc
+    return argument_type
+
+
 def _snapshot_function_identity(schema: str, name: str, arguments: str) -> str:
     types: list[str] = []
     if arguments:
@@ -111,13 +157,7 @@ def _snapshot_function_identity(schema: str, name: str, arguments: str) -> str:
                 continue
             if mode in ("INOUT", "VARIADIC"):
                 argument = rest
-            try:
-                _argument_name, argument_type = argument.split(None, 1)
-            except ValueError as exc:
-                raise SnapshotGrantError(
-                    f"generated function argument has no name/type pair: {argument}"
-                ) from exc
-            normalized_type = " ".join(argument_type.split())
+            normalized_type = _argument_type(argument)
             # The snapshot SQL must qualify public composite types so it loads
             # under an empty/default search_path. PostgreSQL's ACL catalog
             # renderer (oidvectortypes) reports public/pg_catalog types without

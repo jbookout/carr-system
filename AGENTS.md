@@ -41,15 +41,22 @@ this policy and supersedes the narrower approval rule. It carries forward
 the product priority from decision `019146bd-15fb-4f5e-8849-ed63911469e0`.
 The full current text is STORE doctrine
 `engineering-workflow-sop#00-scope-and-provenance`, section
-`52880de2-ab90-4673-b046-b74f900aa2de@5`, content hash
-`89e180adc6ecd5b138d21c65b85bffff4aca2677edb58f4a80049329b15eaed1`.
+`52880de2-ab90-4673-b046-b74f900aa2de@6`, content hash
+`0d4fde90e98b0fab9f769e07f1b4732f8ec90cdf458834a8df2e9e1611e13626`.
 That version and hash record this observed policy's provenance. At runtime,
 fetch the current section by its stable section ID; do not use this observed
 snapshot as a current-version gate.
 
 - Continue the next unfinished DoctorCRE product task attended; preserve
   completed audits and reviews. The unattended engineering controller is not
-  its prerequisite. Unattended dispatch remains disabled.
+  its prerequisite. Joe's ruling 2026-09-24, decision
+  `b729859d-be5d-4521-ba50-d4517bc57208`: the claim that "unattended
+  dispatch remains disabled" was never his rule — a model wrote it and
+  framed it as his direction. His actual goal is maximum automation,
+  including scripted jobs starting agent sessions automatically. This does
+  not touch the real production, credential, external-send,
+  destructive-action, and merge-approve safeguards below, which remain in
+  force as technical checks, nor does it waive CI as the merge gate.
 - Do not put a new Work Request ahead of product work unless it names the
   product task it blocks. Existing substrate work may finish but
   may not spawn child Work Requests. Backlog a substrate follow-up with the
@@ -211,6 +218,24 @@ both. Run one class while iterating:
 the top of `ops/ci.sh`: under zsh its class loop does not word-split, and the
 script will report every class green having executed none.
 
+## Changes to LLM-steering surfaces ship with an eval
+
+Any change to a surface registered in `evals/surfaces.json` runs
+`/claude-api build-eval`, then `/claude-api hillclimb`, and ships with
+`evals/<surface>/receipt.json`, or a reasoned `no-eval: <surface>: <reason>`
+line in the PR body. Procedure: `evals/README.md`.
+
+Reviewer checklist on the exact head: `ops/check-eval-receipt.py` passed; each
+receipt was changed in this PR; its verdict matches its numbers and authorizes
+shipping (`ship` or `ship_cost_at_parity`, with no critical regression); each
+no-eval line names a real reason a measurement is impossible. An unreadable PR
+event fails the check.
+
+## Progress board
+
+For work >5 steps or >30 min, update `out/boards/<project>.html` via
+`tools/progress_board.py` after each step; record Joe questions with defaults.
+
 ## Git discipline on a shared tree
 
 Several sessions run against this one checkout at the same time.
@@ -295,3 +320,14 @@ For this R06 validator the source projection carries no R09 operator_assignment;
 This is a zero-source-edit registered validation of already delivered source. The historical ten-path owner write lease and failed registered attempts governed their own source-authoring envelopes only: do not replay them, import or upgrade their receipts, reinterpret that lease as a validator write cap, or retroactively claim that the later ordinary R3 fifteen-path delivery was authored by an old registered task. Preserve the source delivery's actual author models, authorship and author-session evidence separately from the fresh validator's model, identity and session. The current intent's exact-source manifest is read-only evidence, not source_merge or permission to change any path.
 
 Independently establish all six declared R06 checks: check:r06-packet-bindings, check:r06-model-route, check:r06-assurance-route, check:r06-two-hook-resolution, check:r06-overwrite-fake-sink and check:r06-baseline-and-seals. Exact-head hosted results and immutable artifacts may be independently authenticated, but never copy an assertion as evidence. Validate and submit only one new current-task receipt; claim complete only when all six checks pass, and retain the requirement for a distinct independent reviewer fact. This block grants no source edit, plan change, model-route change, old-receipt rewrite, live notification or page, settings install, controller action, R04, production migration, packet-close, merge, deploy, activation or release authority.
+
+## Before every PR: design and debt pass
+
+Before opening or updating any pull request, apply both skills to the diff:
+
+1. `~/.agents/skills/codebase-design/SKILL.md`: deep modules, real seams, design the interface twice when it matters.
+2. `~/.agents/skills/zero-tech-debt/SKILL.md`: rework the change from its intended end state; delete dead compatibility paths and duplicated rules.
+
+Both passes are required. Read the skill files before applying them; if either
+is unavailable, report the missing skill instead of claiming the pass.
+This section is the canonical policy for both client entry points.

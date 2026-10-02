@@ -30,6 +30,7 @@ import {
 import { isTourInternalRequest } from "./tour-internal-web.js";
 import { executeRegisteredTool } from "./tools.js";
 import { readDealWithJev } from "./jev-deal-reading.js";
+import { callTool } from "./mcp.js";
 
 export const DEALROOM_ASSET_DIRECTORY = "../out/doctorcre-artifacts/current"; // mirrors wrangler.toml [assets]
 
@@ -834,7 +835,11 @@ async function jevDealReadingResponse(request, env, session, dependencies) {
     });
     const record = await reader(args.deal);
     const read = dependencies.jevDealRead || readDealWithJev;
-    return json(await read(record, { apiKey: env.TYPESAFE_API_KEY }));
+    return json(await read(record, { askJev: env.TYPESAFE_API_KEY ? request =>
+      callTool(env, session.actor, "ask-jev", {
+        idempotency_key: crypto.randomUUID(), session_id: `worker-deal-reading-${crypto.randomUUID()}`,
+        purpose: "call", ...request,
+      }, "full", "app_runtime") : undefined }));
   } catch {
     return json({ error: "DEPENDENCY_UNAVAILABLE" }, 503);
   }

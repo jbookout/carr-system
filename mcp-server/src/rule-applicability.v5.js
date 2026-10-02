@@ -15,12 +15,16 @@
 // budget and mode half of Q065. The settled-decision table for ALL SEVEN sits
 // here because this is the lower module and one home beats two copies.
 //
-// THE FIELD NAMED `decision` IS NOT THE WRITE GATE. A coverage receipt reads
-// `decision: "allow"` whenever nothing hard-refused, which includes the case
-// where facts are unknown and a possibly-binding rule is standing. The gate a
-// call site must read before a consequential write is
-// `consequential_action_permitted`, and `write_gate_field` says so in the
-// receipt rather than in a comment a caller never opens.
+// `decision` NEVER READS ALLOW ON A BLOCKED RECEIPT. It has three values:
+// "allow" only when `consequential_action_permitted` is true; "read_only" when
+// nothing hard-refused but the write is blocked (facts unknown, a
+// possibly-binding rule standing, an incomplete universe); "refuse" on a
+// binding conflict or a delivery refusal. It used to read "allow" on the
+// read-only case, which was safe only for callers that read the write gate and
+// a trap for any caller that tested `decision === "allow"`, the idiom the rest
+// of this codebase uses. The write gate is still
+// `consequential_action_permitted`, `write_gate_field` still names it, and
+// verifyCoverageReceipt refuses a receipt whose `decision` disagrees with it.
 //
 // WHAT IS CODE HERE AND WHAT MUST ARRIVE AS TYPED POLICY:
 //
@@ -37,8 +41,8 @@
 //   and holds no rule of its own.
 //
 // TWO KINDS OF NO, following S01 and F01 deliberately:
-//   * A POLICY ANSWER is returned — a frozen result whose `decision` is "allow"
-//     or "refuse" with a stable `reason_id`. A coverage receipt that blocks a
+//   * A POLICY ANSWER is returned — a frozen result whose `decision` is "allow",
+//     "read_only" or "refuse" with a stable `reason_id`. A coverage receipt that blocks a
 //     consequential action is an ANSWER the caller records, not an exception.
 //   * A CONTRACT VIOLATION throws V5F05Error. Unknown fields, unknown
 //     vocabulary, open schemas, accessors, prototype keys, malformed Unicode,
@@ -67,6 +71,24 @@ export const V5_F05_KERNEL_SCHEMA_VERSION = "doctorcre-v5-f05-rule-applicability
 export const V5_F05_UNIVERSE_SCHEMA_VERSION = "doctorcre-v5-f05-rule-universe.v1";
 export const V5_F05_COVERAGE_SCHEMA_VERSION = "doctorcre-v5-f05-coverage-receipt.v1";
 export const V5_F05_POLICY_VERSION = 1;
+
+// The closed vocabulary of a coverage receipt's `decision`, and the one place
+// it is computed from the gates. "allow" is reserved for a permitted
+// consequential write; see the header.
+export const V5_F05_COVERAGE_DECISIONS = Object.freeze(["allow", "read_only", "refuse"]);
+
+/**
+ * The coverage `decision` for a receipt's two gates. Exported so a receipt
+ * built outside deriveRuleApplicability (the runtime's zero-rules receipt)
+ * reaches the same value by the same rule rather than by copying a literal.
+ * Only a literal `true` counts: a missing or non-boolean gate never reads as
+ * allow or read_only.
+ */
+export function coverageDecision({ consequential_action_permitted, read_only_exploration_permitted }) {
+  if (consequential_action_permitted === true) return "allow";
+  if (read_only_exploration_permitted === true) return "read_only";
+  return "refuse";
+}
 
 const DIGEST_REF = /^sha256:[0-9a-f]{64}$/;
 // Captured rather than merely shape-matched, because the calendar has to be
@@ -1822,6 +1844,8 @@ export function deriveRuleApplicability(request) {
   if (delivery_refusals.length > 0) blocking_reasons.push("rule_delivery_failed_closed");
 
   const refused = binding_conflicts.length > 0 || delivery_refusals.length > 0;
+  const consequential_action_permitted = coverage_complete && !refused;
+  const read_only_exploration_permitted = !refused;
   const receipt = {
     schema_version: V5_F05_COVERAGE_SCHEMA_VERSION,
     policy_version: V5_F05_POLICY_VERSION,
@@ -1830,7 +1854,7 @@ export function deriveRuleApplicability(request) {
     universe_digest: universe.universe_digest,
     universe_completeness: universe.completeness,
     now: request.now,
-    decision: refused ? "refuse" : "allow",
+    decision: coverageDecision({ consequential_action_permitted, read_only_exploration_permitted }),
     reason_id: binding_conflicts.length > 0 ? "unresolved_binding_conflict"
       : delivery_refusals.length > 0 ? "rule_delivery_failed_closed"
       : coverage_complete ? "coverage_complete" : "coverage_incomplete_read_only",
@@ -1856,13 +1880,12 @@ export function deriveRuleApplicability(request) {
     semantic_may_remove_controls: false,
     model_resolves_conflicts: false,
     coverage_complete,
-    consequential_action_permitted:
-      coverage_complete && binding_conflicts.length === 0 && delivery_refusals.length === 0,
-    read_only_exploration_permitted: !refused,
-    // `decision` above is NOT the write gate; this names the field that is, in
-    // the record rather than in a comment. A receipt can read allow while
-    // consequential_action_permitted is false, which is precisely Q065's
-    // marked read-only exploration.
+    consequential_action_permitted,
+    read_only_exploration_permitted,
+    // The write gate, named in the record rather than in a comment. `decision`
+    // agrees with it (allow only when it is true), but this is the field an
+    // admission call site reads. Q065's marked read-only exploration is
+    // `decision: "read_only"` with this gate false.
     write_gate_field: "consequential_action_permitted",
     blocking_reasons,
   };
@@ -1873,7 +1896,12 @@ export function deriveRuleApplicability(request) {
   });
 }
 
-/** Recompute a receipt's digest, so a hand-edited copy cannot pass as one. */
+/**
+ * Recompute a receipt's digest, so a hand-edited copy cannot pass as one, and
+ * check that its `decision` is the one its gates imply. The digest proves the
+ * bytes were not edited, not that they were right: a receipt re-hashed after
+ * setting `decision: "allow"` on a blocked write must still not pass.
+ */
 export function verifyCoverageReceipt(receipt) {
   assertObject(receipt, "receipt");
   assertDigestRef(receipt.receipt_digest, "receipt.receipt_digest");
@@ -1882,6 +1910,12 @@ export function verifyCoverageReceipt(receipt) {
     fail("coverage_receipt_digest_mismatch",
       "the coverage receipt no longer hashes to its own digest",
       { expected: receipt.receipt_digest, actual: recomputed });
+  }
+  const implied = coverageDecision(receipt);
+  if (receipt.decision !== implied) {
+    fail("coverage_receipt_decision_inconsistent",
+      "the coverage receipt's decision is not the one its write gate and read gate imply",
+      { decision: typeof receipt.decision === "string" ? receipt.decision : null, implied });
   }
   return true;
 }

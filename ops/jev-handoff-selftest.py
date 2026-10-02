@@ -68,7 +68,7 @@ class HandoffJudgeTests(unittest.TestCase):
 
     def test_text_with_no_computer_cue_costs_no_call(self):
         fake = FakeJudge(noul=0.99)
-        self.assertIsNone(handoff.judge("The meeting went well; Dr. Patel agreed.",
+        self.assertIsNone(handoff.judge("The meeting went well; Dr. Lindgren agreed.",
                                         surface="stop", judge_module=fake))
         self.assertEqual(fake.calls, 0)
 

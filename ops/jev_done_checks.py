@@ -8,13 +8,18 @@ None of these are things a grep can decide — each is a judgment about whether
 text supports text — so each asks Jev, narrowly, once a cheap deterministic
 trigger says it is worth asking.
 
-SHADOW FIRST. Every check here only REPORTS: {"check", "verdict", "confidence",
-"escalate", "detail"}. Nothing here blocks a turn, deletes a file, or refuses a
-commit. A caller (a hook, a gate, a dispatcher) reads the verdict and decides
-what, if anything, to do about it; ops/jev_judge.record() writes every
-judgment to out/jev-judge.jsonl beside whatever the caller ends up doing, so a
-threshold can be measured on real traffic later instead of guessed now. See
-ops/jev_judge.py for why shadow is the default and not a phase.
+A CHECK, DELIBERATELY, NOT AN ACTING GATE. Every function here only REPORTS:
+{"check", "verdict", "confidence", "escalate", "detail"}. Nothing here blocks a
+turn, deletes a file, or refuses a commit — that stays true after Joe's
+2026-09-24 ruling (decision 5ec806a4, "every jev check in the system too is
+not a shadow") retired shadow as a default holding pattern, because these
+checks were never held back by that default in the first place: a caller (a
+hook, a gate, a dispatcher) reads the verdict and decides what, if anything,
+to do about it, and this module has no acting behaviour of its own to turn
+on. ops/jev_judge.record() still writes every judgment to out/jev-judge.jsonl
+beside whatever the caller ends up doing, so a threshold can be measured on
+real traffic — that discipline is now the permanent audit trail rather than a
+precondition for acting. See ops/jev_judge.py for the current framing.
 
 TALK TO JEV THROUGH ops/jev_judge.py ONLY. Every check builds its questions
 with the typesafe client's noul/choice/score helpers (ops/typesafe_client.py)
@@ -67,13 +72,23 @@ AMBIGUOUS_LO = 0.35
 AMBIGUOUS_HI = 0.65
 
 
-def _sibling(name):
-    spec = importlib.util.spec_from_file_location(name, os.path.join(REPO, "ops", f"{name}.py"))
+def _sibling(name, folder="ops"):
+    spec = importlib.util.spec_from_file_location(name, os.path.join(REPO, folder, f"{name}.py"))
     if spec is None or spec.loader is None:
         raise ImportError(name)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+_LIB_MODULES: dict = {}
+
+
+def _sibling_lib(name):
+    """A lib/ module, loaded once per process."""
+    if name not in _LIB_MODULES:
+        _LIB_MODULES[name] = _sibling(name, folder="lib")
+    return _LIB_MODULES[name]
 
 
 def _result(check_id, verdict, *, confidence=None, escalate=False, detail=None, advice=None):
@@ -220,27 +235,29 @@ def check_test_quality(test_source, code_under_test, task_text, *, client=None, 
 # #14 — "done" claim check
 # =========================================================================
 #
-# Trigger: the final assistant message contains a completion word at all. No
-# such word, no call — most turns end without claiming anything.
+# Trigger: a completion word is a cheap candidate filter. Jev then decides
+# whether the message actually asserts completion of the work in this reply.
 
 DONE_CLAIM = re.compile(
     r"\b(done|fixed|passes|passing|works|working|complete(?:d)?|resolved|finished|"
     r"all\s+set|should\s+be\s+good|no\s+more\s+errors|no\s+failures)\b", re.I)
 
-EVIDENCE_FIELDS = ("test_command", "test_output", "test_exit_code", "diff_stat")
+EVIDENCE_FIELDS = ("test_command", "test_output", "test_exit_code", "test_run_count",
+                   "test_failure_count", "test_history", "test_history_truncated", "diff_stat")
 MAX_MESSAGE_CHARS = 4000
 MAX_EVIDENCE_FIELD_CHARS = 4000
 
 SUPPORT_HIGH = 0.60
 SUPPORT_LOW = 0.40
 OMITTED_FAILURE_HIGH = 0.50
+SCOPE_CONFIDENCE_MIN = 0.60
 
 
 def check_done_claim(final_message, evidence, *, client=None, judge_module=None):
-    """Does the evidence back up a completion claim in the final message?
+    """Does the evidence back up a current-work completion claim in the message?
 
-    `evidence` carries whichever of test_command / test_output / test_exit_code
-    / diff_stat the caller has; missing fields are simply left out of the call.
+    `evidence` carries the latest test plus current-request test history and
+    diff_stat when available; missing fields are left out of the call.
     """
     check_id = "done_claim"
     try:
@@ -250,34 +267,75 @@ def check_done_claim(final_message, evidence, *, client=None, judge_module=None)
         ev = {k: v for k, v in (evidence or {}).items()
               if k in EVIDENCE_FIELDS and v not in (None, "")}
         for k, v in list(ev.items()):
-            ev[k] = str(v)[:MAX_EVIDENCE_FIELD_CHARS]
+            value = str(v)
+            ev[k] = (value[-MAX_EVIDENCE_FIELD_CHARS:] if k == "test_output"
+                     else value[:MAX_EVIDENCE_FIELD_CHARS])
 
         jj = judge_module or _sibling("jev_judge")
         tsc = client or jj._client()
         questions = {
+            "claim_scope": tsc.choice(
+                "Classify the meaning of `final_message` before grading evidence. "
+                "Choose current_completion only when the assistant asserts that "
+                "work it is reporting in this reply is done, fixed, passing, "
+                "working, or verified. Choose other for an earlier work-status "
+                "report, a quoted or hypothetical completion phrase, or an "
+                "ordinary explanation of what a checker does. Choose unclear "
+                "when the message alone cannot establish which applies.",
+                options={
+                    "current_completion": "This reply asserts its reported work is complete or verified.",
+                    "other": "Completion words only describe earlier work, a quote, a hypothesis, or a process.",
+                    "unclear": "The message does not establish whether it claims current completion.",
+                }),
             "claims_supported": tsc.noul(
-                "`final_message` claims the work is done, fixed, passing, working "
-                "or complete. Does `evidence` (whichever of test_command, "
-                "test_output, test_exit_code, diff_stat is present) support that "
-                "claim?",
-                true="The evidence is consistent with the claim: for example a "
-                     "zero test_exit_code, test_output showing the relevant tests "
-                     "passing, or a diff_stat matching what was claimed done.",
+                "If `final_message` makes a current_completion claim, does "
+                "`evidence` (including test_history and test_failure_count when "
+                "present, plus the latest test and diff_stat) support that "
+                "claim? If there is no current_completion claim, this answer "
+                "will be ignored.",
+                true="The evidence is consistent with the claim: for example, "
+                     "a later passing run resolves an earlier failure of the same "
+                     "test, or a diff_stat matches what was claimed done.",
                 false="The evidence is missing, insufficient, or contradicts the "
                       "claim."),
             "evidence_shows_omitted_failure": tsc.noul(
-                "Does `evidence` show a failure, error, non-zero exit code, or "
-                "unresolved problem that `final_message` does not mention or "
-                "acknowledge?",
-                true="`evidence` contains a failure, error or non-zero exit that "
-                     "`final_message` is silent about.",
-                false="`evidence` shows no such unmentioned failure, or there is "
-                      "no evidence to check."),
+                "Does the chronological test_history or other `evidence` show "
+                "a failure or problem that `final_message` does not acknowledge "
+                "and that a later passing run of the same test has not resolved? "
+                "A red test followed by a later passing run is resolved; a "
+                "different passing test does not resolve it.",
+                true="The evidence shows a failure without a later passing run "
+                     "of the same test or acknowledgement in the message.",
+                false="Any earlier failure has a later passing run of the same "
+                      "test, is acknowledged, or there is no failure evidence."),
         }
         state = {"final_message": final_message[:MAX_MESSAGE_CHARS], "evidence": ev}
         answer = jj.judge(state, questions, client=client, timeout=TIMEOUT_SECONDS)
+        scope_answer = (answer.get("answers") or {}).get("claim_scope") or {}
+        scope = scope_answer.get("choice")
+        try:
+            scope_confidence = float(scope_answer.get("confidence"))
+            if not 0.0 <= scope_confidence <= 1.0:
+                scope_confidence = None
+        except (TypeError, ValueError):
+            scope_confidence = None
         jj.record("supervise.done_claim", _text_ref(final_message), answer, None,
-                  note={"evidence_fields": sorted(ev)})
+                  note={"evidence_fields": sorted(ev), "claim_scope": scope,
+                        "scope_confidence": scope_confidence})
+
+        if scope not in ("other", "current_completion") or (scope_confidence is None or
+                                                           scope_confidence < SCOPE_CONFIDENCE_MIN):
+            return _result(check_id, "uncertain", escalate=True,
+                           detail={"claim_scope": scope, "scope_confidence": scope_confidence},
+                           advice="Jev could not tell whether this reply claims completion; inspect the claim and current-task evidence")
+        if scope == "other":
+            return _result(check_id, "no_claim", detail={"claim_scope": scope})
+        if (ev.get("test_history_truncated") == "True" and
+                ev.get("test_failure_count") != "0"):
+            return _result(check_id, "uncertain", escalate=True,
+                           detail={"test_run_count": ev.get("test_run_count"),
+                                   "test_failure_count": ev.get("test_failure_count")},
+                           advice="the current-request test history is truncated; inspect omitted runs before claiming completion")
 
         supported = _noul(answer, "claims_supported")
         omitted = _noul(answer, "evidence_shows_omitted_failure")
@@ -310,12 +368,20 @@ def check_done_claim(final_message, evidence, *, client=None, judge_module=None)
 # #17 — review triage
 # =========================================================================
 #
-# Deterministic floor first, always: a path matching RISKY_PATH is "high" with
-# no Jev call at all, because that judgment does not need to be asked — it is
-# already the rule the caller wrote. Everything else rides one `score`
-# question per file, ALL of them in one request.
+# Deterministic floor first, always: a tier-3 path in the one review-tier map
+# (ops/config/review-tiers.v1.json, engineering-workflow-sop section 15) is
+# "high" with no Jev call at all, because that judgment does not need to be
+# asked — it is already the rule the map wrote. The map carries every pattern
+# the old private regex held (auth|security|migrat|db/|payment|crypto|secret).
+# Everything else rides one `score` question per file, ALL of them in one
+# request.
 
-RISKY_PATH = re.compile(r"auth|security|migrat|db/|payment|crypto|secret", re.I)
+def deterministic_high_floor(path):
+    """True when the review-tier map puts `path` at the triage floor tier.
+    Raises when the map cannot be read; triage_review records that per file."""
+    tiers = _sibling_lib("review_tiers")
+    return tiers.tier_for_path(path) >= tiers.TRIAGE_HIGH_FLOOR_TIER
+
 
 FILE_HEADER = re.compile(r"^diff --git a/(?P<a>.+?) b/(?P<b>.+?)$", re.M)
 MAX_HUNK_CHARS = 3000
@@ -359,27 +425,92 @@ def split_diff_by_file(diff_text):
     return out
 
 
-def triage_review(diff_text, task_text, *, client=None, judge_module=None):
-    """Per-file risk for a diff. verdict "needs_review" if any file is high risk."""
+# The Stop hook re-scores `git diff HEAD` at every Stop, and a diff nobody has
+# touched since the last Stop is the same question with the same answer.
+# Measured 2026-09-25 in out/jev-judge.jsonl: 223 review_triage calls, 219 of
+# them repeats of an earlier subject, one unchanged path asked 220 times. The
+# key is the exact state sent (hunks and task) plus the asking code, so a
+# changed hunk, a different task or a code change always asks again.
+REVIEW_CACHE_PATH = os.path.join(REPO, "out", "jev-review-triage-cache.json")
+REVIEW_CACHE_SOURCES = ("ops/jev_done_checks.py", "ops/jev_judge.py",
+                        "ops/typesafe_client.py", "ops/jev_verdict_cache.py")
+
+
+def _review_answer(jj, state, questions, client, cache_path, now):
+    """The judge's answer for this exact state, cached for identical repeats.
+
+    Returns (answer, fresh). Any cache failure falls through to asking; an
+    answer is stored only when every question came back with a score, so a
+    partial reply is never replayed."""
+    cache = entry_key = None
+    if cache_path:
+        try:
+            cache = _sibling("jev_verdict_cache")
+            entry_key = cache.key({"state": state, "questions": questions,
+                                   "source": cache.source_digest(*REVIEW_CACHE_SOURCES)})
+            cached = cache.get(cache_path, entry_key, now=now)
+            if isinstance(cached, dict) and isinstance(cached.get("answers"), dict):
+                return cached, False
+        except Exception:
+            cache = None
+    answer = jj.judge(state, questions, client=client, timeout=TIMEOUT_SECONDS)
+    answers = answer.get("answers") if isinstance(answer, dict) else None
+    if (cache is not None and isinstance(answers, dict)
+            and all(isinstance((answers.get(qid) or {}).get("score"), (int, float))
+                    for qid in questions)):
+        cache.put(cache_path, entry_key, answer, now=now)
+    return answer, True
+
+
+def triage_review(diff_text, task_text, *, client=None, judge_module=None,
+                  cache_path=None, now=None):
+    """Per-file risk for a diff. verdict "needs_review" if any file is high risk.
+
+    Production callers (no injected judge or client) reuse the answer for a
+    byte-identical diff and task inside the cache window; a test caches only
+    when it names `cache_path`."""
     check_id = "review_triage"
+    if cache_path is None and judge_module is None and client is None:
+        cache_path = REVIEW_CACHE_PATH
     try:
         files = split_diff_by_file(diff_text)
         if not files:
             return _result(check_id, "not_triggered", detail={"reason": "empty diff"})
-        files = dict(list(files.items())[:MAX_TRIAGE_FILES])
-
         results = {}
         to_judge = {}
         for path, chunk in files.items():
-            if RISKY_PATH.search(path):
+            try:
+                floor = deterministic_high_floor(path)
+            except Exception as exc:
+                # An unreadable map must not quietly lower review: the file is
+                # high, and the detail names why so the fault is visible.
+                results[path] = {"risk": "high", "source": "review_tier_map_unreadable",
+                                 "error": str(exc)[:200]}
+                continue
+            if floor:
                 results[path] = {"risk": "high", "source": "deterministic_floor"}
-            else:
+            elif len(to_judge) < MAX_TRIAGE_FILES:
                 to_judge[path] = chunk
+            else:
+                results[path] = {"risk": "high", "source": "unreviewed_overflow"}
 
         if to_judge:
             jj = judge_module or _sibling("jev_judge")
             tsc = client or jj._client()
-            keys = {path: _safe_id(path) for path in to_judge}
+            safe_ids = [_safe_id(path) for path in to_judge]
+            reserved = set(safe_ids)
+            used, keys = set(), {}
+            for index, path in enumerate(to_judge):
+                safe = _safe_id(path)
+                key = safe
+                if safe_ids.count(safe) > 1:
+                    key = f'file_{index}_{safe}'
+                    suffix = 0
+                    while key in reserved or key in used:
+                        suffix += 1
+                        key = f'file_{index}_{safe}_{suffix}'
+                keys[path] = key
+                used.add(key)
             questions = {
                 keys[path]: tsc.score(
                     f"{RISK_RUBRIC} The change is to path {path!r}, shown in "
@@ -391,9 +522,12 @@ def triage_review(diff_text, task_text, *, client=None, judge_module=None):
             state = {"files": {keys[path]: chunk for path, chunk in to_judge.items()}}
             if task_text:
                 state["task"] = task_text[:MAX_TASK_TEXT_CHARS]
-            answer = jj.judge(state, questions, client=client, timeout=TIMEOUT_SECONDS)
-            jj.record("supervise.review_triage", "|".join(sorted(to_judge))[:200], answer, None,
-                      note={"file_count": len(to_judge)})
+            answer, fresh = _review_answer(jj, state, questions, client, cache_path, now)
+            if fresh:
+                # out/jev-judge.jsonl is the record of calls Jev answered; a
+                # cache hit made no call and so writes no row.
+                jj.record("supervise.review_triage", "|".join(sorted(to_judge))[:200], answer,
+                          None, note={"file_count": len(to_judge)})
             for path in to_judge:
                 body = (answer.get("answers") or {}).get(keys[path], {})
                 value = body.get("score")

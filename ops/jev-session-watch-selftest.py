@@ -135,6 +135,9 @@ FAILURE_TEXT = ('Traceback (most recent call last):\n  File "a.py", line 3, in f
 class WatchProgressTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        state = mock.patch.object(watch, "STALE_STATE_DIR", os.path.join(self.tmp.name, "state"))
+        state.start()
+        self.addCleanup(state.stop)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -190,6 +193,66 @@ class WatchProgressTests(unittest.TestCase):
         self.assertGreaterEqual(out["detail"]["calls_since_last_file_edit"],
                                 watch.STALE_EDIT_CALLS)
         self.assertIn("30 tool calls", out["detail"]["advice"])
+
+    def _stale_rows(self, n, edit_id=None):
+        rows = [event("assistant", [tool_use(edit_id, "Edit", {"file": "a.py"})])] if edit_id else []
+        rows += [event("assistant", [tool_use(f"i{i}", "Bash", {"command": f"echo {i}"})])
+                 for i in range(n)]
+        return write_transcript(self.tmp.name, rows)
+
+    def _ask(self, path, **kw):
+        client = FakeClient({"stuck_in_loop": {"type": "noul", "noul": 0.1},
+                             "drifted_from_task": {"type": "noul", "noul": 0.1}})
+        with patched():
+            out = watch.watch_progress(path, "task", client=client, **kw)
+        return out, len(client.calls)
+
+    def test_stale_stretch_is_asked_once_not_on_every_call(self):
+        out, asks = self._ask(self._stale_rows(26, "e0"))
+        self.assertEqual((out["detail"]["trigger"], asks), ("no_edit_in_window", 1))
+        for n in (27, 30, 49):
+            out, asks = self._ask(self._stale_rows(n, "e0"))
+            self.assertEqual(asks, 0, n)
+            self.assertIsNone(out["detail"]["trigger"])
+            self.assertTrue(out["detail"]["stale_already_asked"])
+
+    def test_stale_stretch_re_arms_at_the_next_multiple(self):
+        self._ask(self._stale_rows(26, "e0"))
+        out, asks = self._ask(self._stale_rows(51, "e0"))
+        self.assertEqual((out["detail"]["trigger"], asks), ("no_edit_in_window", 1))
+        _out, asks = self._ask(self._stale_rows(52, "e0"))
+        self.assertEqual(asks, 0)
+
+    def test_a_new_edit_starts_a_new_stretch(self):
+        self._ask(self._stale_rows(26, "e0"))
+        _out, asks = self._ask(self._stale_rows(26, "e1"))
+        self.assertEqual(asks, 1)
+
+    def test_edit_outside_the_tail_re_arms_on_time(self):
+        path = self._stale_rows(30)
+        _out, asks = self._ask(path)
+        self.assertEqual(asks, 1)
+        _out, asks = self._ask(path)
+        self.assertEqual(asks, 0)
+        with mock.patch.object(watch, "STALE_REARM_SECONDS", 0):
+            _out, asks = self._ask(path)
+        self.assertEqual(asks, 1)
+
+    def test_unwritable_state_still_asks(self):
+        blocker = os.path.join(self.tmp.name, "file-not-dir")
+        Path(blocker).write_text("x")
+        path = self._stale_rows(30)
+        for _ in range(2):
+            _out, asks = self._ask(path, state_dir=os.path.join(blocker, "state"))
+            self.assertEqual(asks, 1)
+
+    def test_repeated_call_still_asks_every_time(self):
+        rows = [event("assistant", [tool_use(f"i{i}", "Bash", {"command": "pytest"})])
+                for i in range(30)]
+        path = write_transcript(self.tmp.name, rows)
+        for _ in range(2):
+            _out, asks = self._ask(path)
+            self.assertEqual(asks, 1)
 
     def test_edit_tool_resets_the_stale_counter(self):
         rows = [event("assistant", [tool_use("e0", "Edit", {"file": "a.py"})])]

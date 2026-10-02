@@ -90,6 +90,7 @@ if [ "${1:-}" = "--preflight" ]; then
     bin/sync-settings.sh bin/type-check.sh ops/store-markup-scan.py
     generators/build-open-items-dashboard.py ops/nightly-verb-probe.py
     bin/smoke-and-record.sh tools/ops-record.py ops/staging-observed-prune.py
+    tools/health-check.py ops/jev_spend_health.py
     # bin/routine-canonical-seam-refusal.sh came off this list on 2026-08-23: the
     # chain stopped launching it when the refusals became tombstones, and a
     # preflight that requires a file no step runs is checking the wrong thing.
@@ -836,7 +837,28 @@ step "fetch allowlist (client domains -> guard)"     ./.venv/bin/python ops/fetc
 # the cutoff. The seventh was a markdown render, retired with the other 38 and
 # counted as a survivor by mistake. The retired renders stay retired: each still
 # prints RETIRED here rather than being rewritten.
-step "exports (6 targets -> OneDrive)" env CARR_EXPORT_LIVE=1 ./run.sh export
+#
+# ── PRE-PUBLISH WAKE (defect: nightly.exports failed 9/22, 9/23, 9/24; on 9/24
+# it consumed the FULL 1800s exports wall-clock with zero partial output — see
+# out/nightly-runs/nightly-20260924T080221Z.log). Jev at 0.71: the OneDrive
+# File Provider idling overnight. ops/onedrive-prepublish-wake.py does one
+# single-attempt stat+small-read per live export target, bounded ONLY by its
+# own short external wall-clock (see bin/step-timeout.zsh), so a fully dark
+# provider costs at most that budget here rather than eating into the exports
+# step's own, much larger, wait_for_provider() budget below. A cold read here
+# is not a failure and never blocks the exports step from running.
+step "onedrive pre-publish wake" ./.venv/bin/python ops/onedrive-prepublish-wake.py
+#
+# CAFFEINATE (same defect). Runs the exports step under `caffeinate -i -s` so
+# this Mac cannot drop into an idle/system sleep state DURING the publish
+# window — the 02:05 launchd fire lands ten minutes into a scheduled dark
+# wake (see wait_for_provider()'s own header in exporters/common.py), and an
+# idle-related sleep transition mid-publish is exactly the kind of thing that
+# would leave the File Provider unresponsive with no error to catch. `-i`
+# prevents idle sleep, `-s` prevents system sleep while on AC power; both end
+# the instant this one command exits, so nothing outside this step is held
+# awake by it.
+step "exports (6 targets -> OneDrive)" caffeinate -i -s env CARR_EXPORT_LIVE=1 ./run.sh export
 EXPORTS_RC=$LAST_STEP_RC
 
 # CUTOVER READINESS (Phase 1, 2026-08-13, August 21 cutover). Right after the
@@ -1039,6 +1061,57 @@ step "rule-admission drift (reports, never admits)" ./.venv/bin/python ops/rule-
 # contract as its siblings: 0 whether or not it finds a miss, 78 = SKIP.
 step "rule-delivery shadow (reports, never scopes)" ./.venv/bin/python ops/rule-delivery-shadow-watch.py
 
+# CREDENTIAL HEALTH, added 2026-09-24. Joe is replacing every interactive login
+# CARR depends on with a long-lived scoped token, so the daily question is no
+# longer "did somebody re-authenticate" but "is each credential still good, and
+# how long until it isn't". ops/credential-health.py probes every credential in
+# ops/config/credential-inventory.v1.json (exit status / HTTP status only, never
+# a command's output or a response body beyond one named non-secret field),
+# writes out/credential-health.jsonl, and on a failed or expiring_soon finding
+# files exactly one deduplicated CARR loop per credential through
+# `./run.sh call add-loop` — the SAME finding-channel a human reading
+# `run.sh health` sees under tools/health-check.py's `credentials` section.
+#
+# --nightly IS THE POINT OF THIS COMMENT. Without it this step would exit
+# nonzero on every ordinary finding and redden the whole night for something
+# the loop it just filed already says — the exact "an alarm that fires every
+# day trains people to stop reading alarms" failure the four report-only steps
+# above this one were each written to avoid, and the same shape as
+# ops/rule-admission-drift.py: 0 on a finding, nonzero reserved for the lane
+# itself being unable to run (its inventory unreadable, or zero credentials
+# configured — a real defect, not a credential going stale).
+#
+# THE CREDENTIAL BOUNDARY (bin/routine-credential-env.sh's carr_routine_exec,
+# which every step runs through) strips the child process down to
+# HOME/PATH/LANG/TMPDIR plus the two named database capabilities — never a
+# broader ambient credential set, by design (see that file's own header). An
+# earlier version of this lane read NEON_API_KEY, CARR_MCP_PROBE_TOKEN and
+# CARR_MCP_LOCAL_TOKEN straight from os.environ, so all three read `unknown`
+# under every nightly run and a genuine finding on any of them would have
+# gone unfiled forever (independent review, PR #1218, blocked at aa435a54).
+# Fixed: those three probes now read their tokens file-first, the same way
+# cloudflare-deploy-token and claude-cli-oauth-token-studio always have —
+# straight off their dotenv files in ~/.config/carr/db.env and
+# ~/.config/carr/mcp-tokens.env via HOME, which IS in the stripped set — and
+# fall back to the (here, absent) environment variable only when the file
+# itself doesn't exist. All five file-backed credentials are therefore
+# checked for real under this boundary now; only a credential with no `path`
+# configured at all in the inventory, or one Joe hasn't provisioned as a file
+# on THIS machine yet, can still read `unknown` here — and that unknown now
+# files its own deduplicated loop too, whenever the file it names IS present
+# but couldn't be verified, so a never-checked credential can't stay silent.
+# `run.sh health` run by hand carries the fuller ambient environment and
+# reads all eleven credentials the same way; this nightly step is the same
+# lane, not a second implementation of it.
+step "credential health (reports, never rotates; loops on a finding)" \
+     ./.venv/bin/python ops/credential-health.py --nightly
+
+# The loaded 02:05 launchd chain runs the same spend reader and response loop
+# as manual health. Its narrow mode fails the step when Worker usage, a receipt,
+# or the loop action is unavailable; step() records that failure in the job ledger.
+step "Jev daily spend alarm" \
+     ./.venv/bin/python tools/health-check.py --section jev-spend
+
 step "encrypted backup -> R2"                        env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh
 # CAPTURED HERE, ON THE NEXT LINE, AND THAT IS THE WHOLE POINT (fixed 2026-08-23).
 # This assignment used to sit at the bottom of the portability mirror below, so
@@ -1139,6 +1212,12 @@ step "portability mirror (md+csv, 2 locations)" \
 # Shortcuts drop files, so archiving survives a dead Shortcut. Exit 78 = SKIP
 # when ~/.config/carr/calendar.env is absent, same contract as the other steps.
 step "calendar archive (both partners' feeds)"       ./bin/archive-calendar.sh
+
+# The archive is a participant-stripped schedule, not meeting-touch evidence.
+# Use the attendee-aware EventKit capture after the live contact exports above.
+# Unknown attendees remain queued separately; exact write failures fail the step.
+step "calendar meetings to touches (EventKit)" \
+  ./bin/calendar-eventkit-capture.sh --days 7
 
 # MAIL, loop #169. The calendar lane proves a meeting happened; most follow-up
 # never becomes one, so a calendar-only view of the relationship sees a fraction

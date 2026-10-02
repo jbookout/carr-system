@@ -785,9 +785,10 @@ test("the deferred clauses are named with their missing facts, never guessed", (
   assert.deepEqual([...V5_BACKUP_BLOCKING_DECISION_IDS], ["Q034.D1"]);
 
   const preimage = v5BackupQuarantinePolicyPreimage();
-  assert.equal(preimage.restore_clause, "deferred");
-  assert.equal(preimage.recovery_matrix_clause, "deferred");
-  assert.equal(preimage.outbound_reconciliation_clause, "deferred");
+  // Decided elsewhere, named here; this file still decides none of them.
+  assert.equal(preimage.restore_clause, "decided_in:recovery-matrix.v5.js");
+  assert.equal(preimage.recovery_matrix_clause, "decided_in:recovery-matrix.v5.js");
+  assert.equal(preimage.outbound_reconciliation_clause, "decided_in:recovery-matrix.v5.js");
   assert.equal(preimage.decides_restore, false);
   assert.equal(preimage.decides_recovery_matrix, false);
   assert.equal(preimage.decides_outbound_reconciliation, false);

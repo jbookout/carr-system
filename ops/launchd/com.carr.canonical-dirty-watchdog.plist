@@ -42,7 +42,11 @@
     <string>24</string>
   </array>
   <key>WorkingDirectory</key><string>{{REPO}}</string>
-  <key>StartInterval</key><integer>3600</integer>
+  <!-- carr-launchd-interval-seconds: 3600 | rendered by lib/launchd_calendar.py; macOS 27 launchd never fires StartInterval -->
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Minute</key><integer>7</integer></dict>
+  </array>
   <key>RunAtLoad</key><false/>
   <key>ThrottleInterval</key><integer>60</integer>
   <key>StandardOutPath</key><string>{{REPO}}/out/canonical-dirty-watchdog.log</string>

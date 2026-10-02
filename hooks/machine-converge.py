@@ -27,7 +27,7 @@ would have deleted the four bin/run-scheduled.sh wrapper lines that commit
 HIGH, the wrapper is part of what keeps the recording announcement durable,
 Florida is all-party-consent, a failure is legal exposure. `install` goes the
 other way: it renders the TRACKED template (which carries the wrapper and the
-still-recording StartInterval, PR #328) onto the machine, so a converge can
+still-recording five-minute tick, PR #328) onto the machine, so a converge can
 only ever restore the wrapper, never strip it. ops/machine-converge-selftest.py
 proves that end-to-end: a live plist seeded WITHOUT the wrapper comes out of a
 converge WITH it.
@@ -70,6 +70,13 @@ import sys
 # __file__ resolves through the absolute canonical path this hook is invoked
 # by, so REPO is the canonical tree regardless of which worktree's session
 # triggered it (same reasoning as worktree-self-plumb.py).
+#
+# CLOUD CONTAINERS (2026-09-27): the settings command runs this file only when
+# ~/carr-system/hooks exists and exits 0 otherwise. A Claude Code cloud clone
+# has no local actor, no launchd and no ~/.config/carr, and would otherwise
+# read as an unidentified secondary machine and run `config-as-code install
+# --apply` against the container. It must never converge there; ops/cloud-
+# hook-paths-selftest.py pins that no-op.
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOME = os.path.expanduser("~")
 ACTOR_FILE = os.path.join(HOME, ".config", "carr", "local-actor.json")
@@ -197,6 +204,14 @@ def converge():
 
 
 def main():
+    sys.path.insert(0, REPO)
+    if os.environ.get("CARR_GROK_RUN_READ_ONLY") == "1":
+        try:
+            from hooks.grok_invocation import bounded_grok_read_only
+            if bounded_grok_read_only():
+                return 0
+        except ImportError:
+            pass  # an unavailable optional probe retains ordinary processing
     try:
         if scrubbed_env is None:
             return 0  # cannot pin which repository git would hit — see above

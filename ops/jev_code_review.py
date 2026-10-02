@@ -65,7 +65,7 @@ def _client():
 
 SIGNATURES = (
     ("swallowed_failure",
-     re.compile(r"except\s+(?:Exception|BaseException|:)[^\n]*:\n\s+(?:pass|return\b[^\n]*)\n")),
+     re.compile(r"except(?:[ \t]+(?:Exception|BaseException)[^\n:]*|[ \t]*):\n\s+(?:pass|return\b[^\n]*)\n")),
     # Only the shape that actually bites: a coercion carrying its own default.
     # str(x) alone is 2,770 places and nearly all of them are printing; str(x
     # or "") is the one that turns None into the truthy string "None" while
@@ -86,9 +86,9 @@ SIGNATURES = (
 
 
 def tracked_sources(repo=REPO, suffixes=(".py", ".mjs", ".js")):
-    out = subprocess.run(["git", "ls-files"], capture_output=True, text=True,
+    out = subprocess.run(["git", "ls-files", "-z"], capture_output=True,
                          cwd=repo, timeout=120).stdout
-    return [f for f in out.splitlines()
+    return [f for f in map(os.fsdecode, out.split(b"\0"))
             if f.endswith(suffixes) and not f.startswith("node_modules")]
 
 
@@ -105,10 +105,38 @@ def regions(paths, repo=REPO):
             for match in pattern.finditer(text):
                 line_no = text[:match.start()].count("\n") + 1
                 lo = max(0, line_no - 1 - CONTEXT_BEFORE)
-                hi = min(len(lines), line_no + CONTEXT_AFTER)
-                snippet = "\n".join(lines[lo:hi])[:MAX_REGION_CHARS]
+                match_end_line = text[:match.end() - 1].count("\n") + 1
+                hi = min(len(lines), max(match_end_line, line_no + CONTEXT_AFTER))
+                full_snippet = "\n".join(lines[lo:hi])
+                # Remove only surrounding context; preserve every matched line.
+                anchor = line_no - 1
+                while len(full_snippet) > MAX_REGION_CHARS and (lo < anchor or hi > match_end_line):
+                    if lo < anchor and (hi <= match_end_line or
+                                        anchor - lo >= hi - match_end_line):
+                        lo += 1
+                    else:
+                        hi -= 1
+                    full_snippet = "\n".join(lines[lo:hi])
+                region_start = sum(len(line) + 1 for line in lines[:lo])
+                region_end = region_start + len(full_snippet)
+                # A match can sit beyond the cap on its own line. Move the
+                # bounded character window around its columns, preserving the
+                # matched source rather than only the beginning of that line.
+                snippet_start = region_start
+                if match.end() > region_start + MAX_REGION_CHARS:
+                    snippet_start = max(region_start, match.start() - (MAX_REGION_CHARS - (match.end() - match.start())) // 2)
+                snippet_end = min(region_end, snippet_start + MAX_REGION_CHARS)
+                snippet = text[snippet_start:snippet_end]
+                start_line = text[:snippet_start].count('\n') + 1
+                end_line = start_line + full_snippet.count("\n")
+                sent_end_line = (end_line if len(snippet) == len(full_snippet) else
+                                 start_line + snippet.count("\n") - 1)
                 found.append({"path": rel, "line": line_no, "kind": kind,
-                              "code": snippet})
+                              "code": snippet, "start_line": start_line,
+                              "end_line": end_line,
+                              "sent_end_line": sent_end_line,
+                              "start_offset": snippet_start, "end_offset": snippet_end,
+                              "match_start": match.start(), "match_end": match.end()})
     return _collapse(found)
 
 
@@ -128,7 +156,22 @@ def _collapse(found, window=CONTEXT_BEFORE + CONTEXT_AFTER):
         items.sort(key=lambda i: i["line"])
         current = None
         for item in items:
-            if current and item["line"] - current["line"] <= window:
+            if (current and item["line"] - current["line"] <= window
+                    and current["sent_end_line"] == current["end_line"]
+                    and item["sent_end_line"] == item["end_line"]
+                    and item["start_line"] <= current["end_line"] + 1
+                    and current["start_line"] <= item["end_line"] + 1):
+                lo = min(current["start_line"], item["start_line"])
+                hi = max(current["end_line"], item["end_line"])
+                source = {}
+                for region in (current, item):
+                    source.update(enumerate(region["code"].split("\n"), region["start_line"]))
+                code = "\n".join(source[n] for n in range(lo, hi + 1))
+                if len(code) > MAX_REGION_CHARS:
+                    current = dict(item)
+                    out.append(current)
+                    continue
+                current.update(code=code, start_line=lo, end_line=hi, sent_end_line=hi)
                 if item["kind"] not in current["kind"].split("+"):
                     current["kind"] += "+" + item["kind"]
                 continue
@@ -333,20 +376,29 @@ def findings(results, floor=REPORT_AT):
     return rows
 
 
-# --- task fit, in shadow ----------------------------------------------------
+# --- task fit, acting -------------------------------------------------------
 #
 # JOE, 2026-09-23 (decision a98c2832, Jev supervision checks): the per-edit
 # review judged the code against nothing but itself, so a change that was well
 # written and not what was asked for went through unremarked. The two
 # questions below read the change against the most recent human request. They
-# ride in the SAME request as the questions above, and they only ever RECORD
-# what they would have done: the Jev System One doctrine requires shadow
-# before any use that affects control, and SHADOW_BLOCK_AT is a placeholder
-# until the shadow rows (kind TASK_FIT_KIND in out/jev-judge.jsonl) say what
-# it should be.
+# ride in the SAME request as the questions above.
+#
+# JOE, 2026-09-24 (decision 5ec806a4, "every jev check in the system too is
+# not a shadow"): this check now ACTS on its judgment. When the top task-fit
+# probability clears TASK_FIT_ACT_AT, review_for_edit() returns `_would_block`
+# and hooks/lint-gate.py surfaces it as a real finding the session must
+# address, through the same findings channel the hook already uses -- not
+# folded into the advisory-only list. What stays, per the ruling: the
+# threshold keeps its shadow-era value as the starting point rather than
+# being re-guessed; a judgment failure is recorded as an error row and
+# RE-RAISED, so the hook falls back to its existing "unavailable" receipt
+# (the abstention path) instead of an affirmative pass or fail; and every
+# judgment, acted on or not, is still recorded to out/jev-judge.jsonl under
+# TASK_FIT_KIND so the log stays the audit trail.
 
-TASK_FIT_KIND = "post_write_task_fit_shadow"
-SHADOW_BLOCK_AT = 0.85            # placeholder; calibrate from the shadow log
+TASK_FIT_KIND = "post_write_task_fit"
+TASK_FIT_ACT_AT = 0.85            # starting point carried over from the shadow era
 ADVISORY_AT = 0.85                # the hook's REVIEW_AT, for the comparison row
 TASK_TAIL_CHARS = 2000
 TRANSCRIPT_TAIL_BYTES = 4 * 1024 * 1024
@@ -431,15 +483,17 @@ def _judge_module():
 
 
 def review_for_edit(region, payload, client=None, api_key=None, log_path=None):
-    """review_one for the post-write hook, plus the task-fit shadow.
+    """review_one for the post-write hook, plus the acting task-fit check.
 
     Returns what review_one returns, plus `_would_block` (the highest task-fit
-    probability) only when it clears SHADOW_BLOCK_AT. The task-fit answers are
-    removed from the scores, and underscored keys never become advisory
-    findings, so the hook's advisory output is unchanged. A judgment failure
-    is recorded as an error row and re-raised, so the hook's existing
-    "unavailable" receipt is unchanged too. With no transcript, only the
-    existing questions are asked and nothing is recorded.
+    probability) only when it clears TASK_FIT_ACT_AT -- the caller (lint-gate)
+    treats that as a real finding, not an advisory one. The task-fit answers
+    are removed from the scores, and underscored keys never become advisory
+    findings, so the hook's advisory-only output is unchanged apart from that
+    one signal. A judgment failure is recorded as an error row and RE-RAISED
+    -- the abstention path -- so the hook falls back to its existing
+    "unavailable" receipt instead of any affirmative verdict. With no
+    transcript, only the existing questions are asked and nothing is recorded.
     """
     payload = payload if isinstance(payload, dict) else {}
     task = latest_task(payload.get("transcript_path"))
@@ -468,13 +522,13 @@ def review_for_edit(region, payload, client=None, api_key=None, log_path=None):
         record(subject, {}, None, error="task_fit_answers_missing")
         return scores
     top = max(task_scores.values())
-    would_block = top >= SHADOW_BLOCK_AT
+    would_block = top >= TASK_FIT_ACT_AT
     advisory = sorted(name for name, value in scores.items()
                       if not name.startswith("_")
                       and isinstance(value, (int, float)) and value >= ADVISORY_AT)
-    record(dict(subject, would_block=would_block, threshold=SHADOW_BLOCK_AT,
+    record(dict(subject, would_block=would_block, threshold=TASK_FIT_ACT_AT,
                 task_scores=task_scores),
-           answer, {"advisory_findings": advisory, "effect": "advisory_only"},
+           answer, {"advisory_findings": advisory, "effect": "required"},
            note="agreed" if would_block == bool(advisory) else "disagreed")
     if would_block:
         scores["_would_block"] = top

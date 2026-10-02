@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { TOOLS } from "../src/tools.js";
 import { createLiveClient } from "../../dealroom/js/live-client.js";
@@ -52,6 +53,30 @@ test("live client derives Dell identity, normalizes conflict shape, and creates 
   assert.equal(lead.arguments.deal, "d2");
 });
 
+test("V5-A01 live client reads assurance health through the registered record-layer verb", async () => {
+  const expected = {
+    schema_version: "assurance-health.v1",
+    scope: { workflow_key: "doctorcre.release", workflow_version: 7, work_request_id: "WR-700" },
+    state: "not-yet-operational",
+    green: false,
+    capability_stage: "draft",
+    evidence: {},
+  };
+  const calls = [];
+  const client = createLiveClient({ fetchImpl: async (path, init) => {
+    assert.equal(path, "/mcp");
+    const request = JSON.parse(init.body);
+    calls.push(request.params);
+    return rpcResponse(expected);
+  } });
+
+  assert.deepEqual(await client.getHealth(expected.scope), expected);
+  assert.deepEqual(calls, [{
+    name: "read-assurance-health",
+    arguments: { scope: expected.scope },
+  }]);
+});
+
 test("release 1–5 verbs are registered with human gates on structural creation", () => {
   for (const name of ["start-deal-review","review-deal","end-deal-review",
     "set-market-agent","set-national-account-owner","create-national-account",
@@ -66,10 +91,19 @@ test("release 1–5 verbs are registered with human gates on structural creation
   assert.equal(TOOLS["create-national-market-deal"].humanOnly, undefined);
 });
 
-test("national-account migration keeps the 0061 hierarchy and explicitly assigns Musicologie", async () => {
+// The migration names the account it assigns; this public test must not
+// (WR-000049), and must not pin it by a plain digest of the name either: an
+// unkeyed hash of a name is confirmable by anyone with a name dictionary. It
+// pins the whole applied migration file instead, which fixes the literal
+// without deriving anything from the name alone.
+const MIGRATION_0090_SHA256 = "6599fdf05e4e140bb0ea354993c1904d73a5dc0dc2f2bb197d32feb1c60df17d";
+
+test("national-account migration keeps the 0061 hierarchy and explicitly assigns the national account", async () => {
   const sql = await file("migrations/0090_deal_room_workspaces.sql");
   assert.match(sql, /left join v_client_account vca/);
-  assert.match(sql, /lower\(p\.name\) = 'musicologie'/);
+  const assigned = sql.match(/lower\(p\.name\) = '([^']+)'/);
+  assert.ok(assigned, "the migration assigns an account by exact lowercased name");
+  assert.equal(createHash("sha256").update(sql).digest("hex"), MIGRATION_0090_SHA256);
   assert.match(sql, /join actor a on a\.slug = 'dell'/);
   assert.match(sql, /create table deal_market_assignment/);
   assert.match(sql, /create table deal_review_session/);

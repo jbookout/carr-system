@@ -160,11 +160,17 @@ blocked-but-listening server now reports as failed.
   by its `meta.json` offset onto one clock, merges by timestamp into a labeled
   `me`/`them` transcript. Quill's own Parakeet engine is disabled in config; the raw
   audio and the transcript both stay on this Mac.
-- `vocab-prompt.txt` — the whisper `--prompt` seed: CARR nouns, platforms, market
-  towns, and active client/prospect surnames. PURE PROMPT TEXT, no comments — the
-  whole file is fed to the model (~224-token budget). Refresh it from the live deal
-  board when the active book changes (source: the `deal-board` verb); a periodic
-  refresh job is a Phase B follow-up.
+- `vocab-prompt.txt` — the whisper `--prompt` seed: CARR nouns, platforms, and
+  market towns. PURE PROMPT TEXT, no comments — the whole file is fed to the
+  model (~224-token budget). Tracked; this repo is public (WR-000049,
+  2026-09-24), so it never carries a client roster.
+- `vocab-local.txt` — gitignored, same directory: active client/prospect
+  surnames, per-machine. Both `bin/transcribe_session.py`'s `load_prompt()`
+  and `Transcriber.swift`'s `vocabPrompt` load it, if present, and append it
+  to the tracked prompt, so dictation quality is unchanged; missing is not an
+  error (a fresh clone has none yet). Refresh it from the live deal board when
+  the active book changes (source: the `deal-board` verb); a periodic refresh
+  job is a Phase B follow-up.
 - Consent layer — see below. Non-negotiable tool behavior per Addendum 5.
 
 ## Build
@@ -235,9 +241,10 @@ In order, on his Mac:
 3. Model: download `ggml-large-v3-turbo.bin` into `~/.cache/whisper-cpp/models/`
    (~1.6 GB, from the whisper.cpp models repo — same full-model choice Joe
    ruled; `ggml-small.en.bin` works as the fallback slot).
-4. **Vocab prompt is per-partner**: regenerate `vocab-prompt.txt` from DELL'S
-   live book (deal-board verb), do not inherit Joe's client surnames. Same
-   file path, his names.
+4. **Vocab prompt is per-partner**: `vocab-prompt.txt` (tracked, generic
+   terms only) is shared as-is. Create his own `vocab-local.txt` (gitignored,
+   same directory) from DELL'S live book (deal-board verb) — do not inherit
+   Joe's client surnames; that file never syncs between machines.
 5. Build both: `bin/build-quill.sh`, then `bin/build-dictate.sh` (each carries
    the CPLUS_INCLUDE_PATH toolchain guard — never bare `swift build`).
 6. Deploy: `bin/install-config.sh` (meeting mode), `bin/install-consent.sh`

@@ -83,7 +83,9 @@ import {
   V5_F05_SETTLED_DECISION_IDS,
   V5_F05_FACT_DIMENSIONS,
   V5_F05_POLICY_VERSION,
+  V5_F05_COVERAGE_DECISIONS,
   assertF05DecisionBinding,
+  coverageDecision,
   deriveRuleApplicability,
   requireCompiledUniverse,
   v5F05DecisionSubsetDigest,
@@ -121,6 +123,25 @@ export const V5_F05_FROZEN_INPUT_SCHEMA_VERSION = "doctorcre-v5-f05-frozen-assem
 export const V5_F05_ATTESTATION_SCHEMA_VERSION = "doctorcre-v5-f05-verifier-attestation.v1";
 export const V5_F05_CORRECTION_SCHEMA_VERSION = "doctorcre-v5-f05-correction-proposal.v1";
 export const V5_F05_LINEAGE_SCHEMA_VERSION = "doctorcre-v5-f05-taint-lineage.v2";
+
+// The closed vocabulary of a manifest's `decision`: the coverage receipt's, by
+// reference rather than by copy. "allow" means the consequential write gate is
+// open and nothing else; read-only exploration reads "read_only", so a consumer
+// testing `decision === "allow"` cannot mistake exploration for permission.
+export const V5_F05_MANIFEST_DECISIONS = V5_F05_COVERAGE_DECISIONS;
+
+/**
+ * The manifest `decision` for its mode and two gates. The kernel's
+ * coverageDecision() is the rule; the one term added here is the mode's: a
+ * consequential_action_proposal whose write gate is shut is refused, because
+ * that proposal is the thing the manifest was asked to stand behind. Exported
+ * so verifyContextManifest and any reader derive it the same way.
+ */
+export function manifestDecision({ mode, consequential_action_permitted,
+  read_only_exploration_permitted }) {
+  if (mode === "consequential_action_proposal" && consequential_action_permitted !== true) return "refuse";
+  return coverageDecision({ consequential_action_permitted, read_only_exploration_permitted });
+}
 
 export const V5_F05_MANIFEST_VERSION = 2;
 
@@ -1247,13 +1268,13 @@ export function assembleContextManifest(frozen) {
     coverage.consequential_action_permitted && authority_envelope.decision === "allow";
   const read_only_exploration_permitted = hardRefusals.length === 0;
 
-  let decision = "allow";
+  // Three values, one rule: "allow" only with the write gate open, "read_only"
+  // for exploration the write gate does not cover, "refuse" otherwise.
+  const decision = manifestDecision({ mode, consequential_action_permitted, read_only_exploration_permitted });
   let reason_id = "context_assembled";
   if (hardRefusals.length > 0) {
-    decision = "refuse";
     reason_id = hardRefusals[0];
-  } else if (mode === "consequential_action_proposal" && !consequential_action_permitted) {
-    decision = "refuse";
+  } else if (decision === "refuse") {
     reason_id = blocking_reasons[0] ?? "authority_not_established";
   } else if (mode === "read_only_exploration" && blocking_reasons.length > 0) {
     reason_id = "read_only_exploration_under_uncertainty";
@@ -1361,10 +1382,11 @@ export function assembleContextManifest(frozen) {
     blocking_reasons,
     consequential_action_permitted,
     read_only_exploration_permitted,
-    // `decision` is not the write gate; this is. A manifest can read
-    // decision: "allow" in read-only exploration while a consequential write is
-    // refused, so an admission call site that reads `decision` reads the wrong
-    // field. Named in the record rather than in a comment.
+    // `decision` is not the write gate; this is. `decision` reads "allow" only
+    // when this field is true and "read_only" for exploration it does not
+    // cover, and verifyContextManifest holds the two together; an admission
+    // call site still reads this field. Named in the record rather than in a
+    // comment.
     write_gate_field: "consequential_action_permitted",
     record_attribution_written: false,
     model_resolves_conflicts: false,
@@ -1403,6 +1425,15 @@ export function verifyContextManifest(manifest) {
   if (recomputed !== manifest.manifest_digest) {
     fail("manifest_digest_mismatch", "the manifest no longer hashes to its own digest",
       { expected: manifest.manifest_digest, actual: recomputed });
+  }
+  // The digest proves the bytes were not edited, not that they were right: a
+  // manifest re-hashed after setting `decision: "allow"` on read-only
+  // exploration must still not pass.
+  const implied = manifestDecision(manifest);
+  if (manifest.decision !== implied) {
+    fail("manifest_decision_inconsistent",
+      "the manifest's decision is not the one its mode, write gate and read gate imply",
+      { decision: typeof manifest.decision === "string" ? manifest.decision : null, implied });
   }
   return true;
 }

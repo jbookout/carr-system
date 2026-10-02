@@ -38,16 +38,29 @@ about to happen and NOTHING has named the tier it will run on.
   · a definition file pinning `model:`    -> allow. The job description names
                                              its own tier, which is the point
                                              of pinning it there.
-  · none of the above                     -> DENY, naming what it would have
-                                             cost and how to fix it.
+  · none of the above, and Jev is
+    confident (>= ACT_AT) in a tier    -> ALLOW WITH JEV'S PICK FILLED IN as
+                                           the call's `model` (updatedInput),
+                                           said in the context line. Jev acts:
+                                           the tier is now a decision, made by
+                                           Jev and visible (Joe, 2026-09-24,
+                                           decision 5ec806a4: every Jev check
+                                           acts).
+  · none of the above, and Jev is
+    unavailable or not confident       -> DENY, naming what it would have
+                                           cost and how to fix it, exactly as
+                                           before Jev acted. An abstaining
+                                           judge never loosens the gate.
 
-IT DENIES RATHER THAN WARNS, which is the opposite of its neighbour
-rule-shape-gate.py, and the difference is deliberate. That gate warns because
-blocking would make `teach` refuse a partner's own words, which it must never
-do. Here the cost of a false stop is one round trip and one extra parameter,
-while the cost of a warning is that it gets clicked past — and prose that gets
-clicked past is precisely the failure being fixed. A gate that only warns would
-be the same aspiration in a new costume.
+IT DENIES RATHER THAN WARNS, which is the opposite of
+its neighbour rule-shape-gate.py, and the difference is deliberate. That gate
+warns because blocking would make `teach` refuse a partner's own words, which
+it must never do. Here the cost of a false stop is one round trip and one
+extra parameter, while the cost of a warning is that it gets clicked past —
+and prose that gets clicked past is precisely the failure being fixed. A gate
+that only warns would be the same aspiration in a new costume. Jev acting
+removes the round trip when it is confident, never the deny when it is not:
+a vendor outage leaves the gate exactly as strict as it was before Jev.
 
 FAILS OPEN on any error, like every other hook here. A gate that crashes must
 never be able to stop work. Logged to out/hook-guard.log.
@@ -58,6 +71,7 @@ import os
 import re
 import sys
 from datetime import datetime, timezone
+from typing import Any, Callable, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:                                    # telemetry only — never load-bearing
@@ -66,6 +80,17 @@ try:                                    # telemetry only — never load-bearing
 except Exception:                       # a missing meter must not change a verdict
     LOG = os.path.expanduser("~/carr-system/out/hook-guard.log")
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, REPO)
+turn_required_facets = None  # type: Optional[Callable[[Any], Any]]
+load_transcript = None  # type: Optional[Callable[..., Any]]
+prompt_names_facet = None  # type: Optional[Callable[[Any, Any], Any]]
+prompt_names_not_applicable = None  # type: Optional[Callable[[Any], Any]]
+try:                                    # same fail-open posture as jev_pick below
+    from lib.jev_required_actions import (
+        prompt_names_facet, prompt_names_not_applicable, turn_required_facets)
+    from lib.transcript_read import load_transcript
+except Exception:
+    pass
 
 # Where a subagent definition may live. Project scope first: that is where the
 # fifteen CARR agents are, and a project definition wins over a user-level one
@@ -79,6 +104,37 @@ AGENT_DIRS = [os.path.join(REPO, "claude-tree", "agents")]
 ALWAYS_INHERITS = {"fork"}
 
 MODEL_FRONTMATTER = re.compile(r"^model\s*:\s*\S+", re.M)
+
+# The routing policy (ops/jev_model_route.py dispatch, config ops/config/model-routes.v1.json) already chose the
+# tier for a spawn whose executor line cites it, e.g. "executor: opus per routing pin merge_review". Advising a
+# cheaper tier on that launch contradicts the policy on the same call, so this hook defers to it.
+ROUTES_PATH = os.path.join(REPO, "ops", "config", "model-routes.v1.json")
+ROUTING_LINE = re.compile(r"executor:\s*`?([\w.-]+)`?\s+per routing (?:pin ([\w-]+)|dispatch)\b", re.I)
+
+
+def routing_decided(prompt, model):
+    """The routing reason when the prompt's executor line cites the routing policy for this same model, else None.
+
+    A pin counts only if it exists in the policy and its target dispatches this model, so a made-up pin name or a
+    line naming a different model than the call leaves the advice in place. Any read failure means no deferral."""
+    m = ROUTING_LINE.search(prompt or "")
+    if not m or m.group(1).lower() != model.strip().lower():
+        return None
+    try:
+        with open(ROUTES_PATH, encoding="utf-8") as fh:
+            policy = json.load(fh)
+        targets = {k: v for k, v in (policy.get("dispatch_targets") or {}).items() if isinstance(v, dict)}
+        models = {str(t["subagent_model"]).lower() for t in targets.values() if t.get("subagent_model")}
+        if m.group(2) is None:
+            return "dispatch" if model.strip().lower() in models else None
+        pin = (policy.get("pins") or {}).get(m.group(2))
+        if not isinstance(pin, dict):
+            return None
+        pinned = (targets.get(pin.get("target")) or {}).get("subagent_model")
+        return f"pin {m.group(2)}" if str(pinned).lower() == model.strip().lower() else None
+    except Exception as exc:
+        log(f"ROUTING(unreadable) {exc}")
+        return None
 
 
 def log(msg):
@@ -171,10 +227,63 @@ def jev_pick(desc, prompt, subagent_type, chosen):
         return None
 
 
+def missing_required_actions_in_prompt(payload, prompt):
+    """The required facets this turn's Jev advisory named that `prompt` does
+    not mention, or [] when nothing is required / the advisory could not be
+    read / the prompt already covers it. Never raises.
+
+    Decision 0b11c89b (2026-09-24, Joe): "Jev is not advisory only." C07 of
+    the 2026-09-24 bypass audit is this exact gap — no code compared an Agent
+    prompt with the turn's advisory, so a required action stopped at the
+    parent and never reached the subagent that would actually do the work.
+    """
+    if (turn_required_facets is None or prompt_names_not_applicable is None
+            or prompt_names_facet is None or load_transcript is None):
+        return []
+    if prompt_names_not_applicable(prompt):
+        return []
+    try:
+        path = payload.get("transcript_path") or payload.get("transcriptPath")
+        if not path or not os.path.exists(path):
+            return []
+        # One bad line in the session's own transcript must not switch the
+        # gate off (bypass hunt, PR #1224): lib/transcript_read.py skips it
+        # and records a transcript_tamper event instead of raising.
+        recs = load_transcript(
+            path, hook="executor-tier-gate",
+            session=payload.get("session_id") or payload.get("sessionId"),
+            log_path=os.path.join(REPO, "out", "jev-required-actions-gate.jsonl"))
+        # The genuine human prompt's own advisory only (round 4): advisories
+        # carried by folded notifications are not consulted.
+        required, _turn_key = turn_required_facets(recs)
+    except Exception as exc:
+        log(f"JEV-REQUIRED-ACTIONS(unavailable) {exc}")
+        return []
+    if not required:
+        return []
+    return [f for f in required if not prompt_names_facet(prompt, f)]
+
+
 def advise(note):
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
+            "additionalContext": note,
+        }
+    }))
+    sys.exit(0)
+
+
+def allow_with_model(tool_input, tier, note):
+    """Let the spawn run with `tier` set as its model: Jev's pick, acting."""
+    updated = dict(tool_input)
+    updated["model"] = tier
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "permissionDecisionReason": note,
+            "updatedInput": updated,
             "additionalContext": note,
         }
     }))
@@ -214,10 +323,33 @@ def main():
 
         prompt = ti.get("prompt") or ""
 
+        # DECISION 0b11c89b'S PreToolUse HALF, ahead of the tier check below:
+        # a required action that stops at the parent and never reaches the
+        # subagent doing the work is exactly the C07 gap the bypass audit
+        # named. This denies independently of whatever the tier check below
+        # decides.
+        missing = missing_required_actions_in_prompt(payload, prompt)
+        if missing:
+            named = ", ".join(missing)
+            log(f"DENY(jev-required-actions) missing={named} desc={desc[:80]}")
+            deny(
+                "JEV REQUIRED ACTIONS NOT NAMED. This turn's Jev build advisory required "
+                f"{named}, and this Agent prompt names none of them. Decision 0b11c89b "
+                "(2026-09-24, Joe): Jev is required, not advisory, for these facets.\n\n"
+                "FIX: add a line to the prompt for each missing facet (for example, "
+                f"\"{missing[0]}: ...\" naming what Jev judgment the subagent must use and "
+                "consume), or, if none genuinely applies to this subtask, add the line "
+                f"\"Jev required actions: not applicable — <reason>\" to the prompt."
+            )
+
         # The executor is named on the call. Jev may still think it is dearer
         # than the job needs; that is ADVICE, never a refusal, until the logged
         # judgments show the threshold can be trusted.
         if isinstance(model, str) and model.strip():
+            routed = routing_decided(prompt, model)
+            if routed:
+                log(f"SKIP(routing {routed}) chosen={model} desc={desc[:80]}")
+                sys.exit(0)
             pick = jev_pick(desc, prompt, subagent_type, model)
             if pick and pick[3] and pick[1] >= pick[2]:
                 log(f"ADVISE chosen={model} jev={pick[0]}@{pick[1]:.2f} desc={desc[:80]}")
@@ -235,15 +367,18 @@ def main():
         if definition_pins_model(subagent_type):
             sys.exit(0)
 
+        # ACTING (Joe, 2026-09-24, decision 5ec806a4: "every jev check in the
+        # system too is not a shadow"). No model was named. When Jev is
+        # confident (>= ACT_AT) in a tier, the gate fills that tier in as the
+        # call's model and lets the spawn run: the executor is then named, by
+        # Jev, and the context line says so. When Jev abstains (unavailable,
+        # erroring, or under ACT_AT) the deterministic deny below stands
+        # unchanged -- an abstaining judge must never loosen the gate (the
+        # first draft of this flip advised instead of denying there, which
+        # would have let every spawn inherit Opus during a Jev outage).
         pick = jev_pick(desc, prompt, subagent_type, None)
-        jev_line = ""
-        if pick:
-            confident = pick[1] >= pick[2]
-            jev_line = (f"\n\nJEV'S PICK for this task: `{pick[0]}` at {pick[1]:.2f}"
-                        + ("." if confident else
-                           " (below the acting threshold, so treat it as a hint and use the table)."))
-        log(f"DENY subagent_type={subagent_type or '(none)'} jev={pick[0] if pick else '-'} desc={desc[:80]}")
-        deny(
+        confident = bool(pick) and pick[1] >= pick[2]
+        base_text = (
             "EXECUTOR NOT NAMED. This Agent call passes no `model`, and "
             f"`{subagent_type or 'the default type'}` has no model pinned in a definition file, "
             "so it will INHERIT THE PARENT TIER. On this machine the parent is pinned to Opus, "
@@ -259,8 +394,23 @@ def main():
             "If you genuinely want the parent tier, say so by passing it explicitly. The point "
             "is that the tier is a decision someone made, not one nobody noticed. Custom CARR "
             "agents that pin a model in their own frontmatter are exempt and need no parameter."
-            + jev_line
         )
+        if confident:
+            log(f"ALLOW(jev-picked) subagent_type={subagent_type or '(none)'} "
+                f"jev={pick[0]}@{pick[1]:.2f} desc={desc[:80]}")
+            allow_with_model(ti, pick[0], (
+                f"EXECUTOR NAMED BY JEV: this spawn passed no `model`, so Jev picked `{pick[0]}` "
+                f"at {pick[1]:.2f} (acting threshold {pick[2]:.2f}) as the cheapest tier that "
+                "would still do it correctly, and the gate set it on the call. State it in the "
+                f"executor line (\"executor: {pick[0]} (Jev's pick)\"). To use another tier, "
+                "pass `model` explicitly; an explicit pass is never overridden."))
+        jev_line = ""
+        if pick:
+            jev_line = (f"\n\nJEV'S PICK for this task: `{pick[0]}` at {pick[1]:.2f} "
+                        "(below the acting threshold, so treat it as a hint and use the table).")
+        log(f"DENY subagent_type={subagent_type or '(none)'} "
+            f"jev={pick[0] if pick else '-'} desc={desc[:80]}")
+        deny(base_text + jev_line)
     except Exception as exc:
         log(f"ALLOW(internal-error) {exc}")
         sys.exit(0)

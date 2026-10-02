@@ -14,13 +14,20 @@ That is a deliberate widening beyond the two- or three-way verdict named for
 each check below: "unavailable" is always a fourth possible outcome, and a
 caller checks for it before trusting the named verdicts at all.
 
-SHADOW FIRST. Every check that actually reaches Jev calls
-ops/jev_judge.py's record() with what Jev said, so a threshold here can later
-be measured against real traffic rather than argued for in a docstring. A
-check that never reaches Jev because its deterministic trigger did not fire
-has nothing to record — there is no judgment to shadow, only a skip — so
-those paths return without a record() call. That is documented per function
-below, not left implicit.
+A CHECK, DELIBERATELY, NOT AN ACTING GATE (Joe, 2026-09-24, decision 5ec806a4:
+"every jev check in the system too is not a shadow" — read alongside this
+module, not against it). That ruling retired shadow as a DEFAULT holding
+pattern; it did not turn every judgment in the codebase into a blocker. These
+six checks stay report-only because nothing here HAS a deterministic
+mechanism to compare against or override — pick_effort, split_plan and the
+rest are the caller's only source for that judgment, not a second opinion on
+one. Every check that actually reaches Jev still calls ops/jev_judge.py's
+record() with what Jev said, so a threshold here can be measured against real
+traffic rather than argued for in a docstring — that discipline did not
+change. A check that never reaches Jev because its deterministic trigger did
+not fire has nothing to record — there is no judgment to log, only a skip —
+so those paths return without a record() call. That is documented per
+function below, not left implicit.
 
 THE SHAPE PER CHECK. A cheap deterministic trigger runs first; a Jev round
 trip only happens when it fires, because a hook runs on every tool call and a

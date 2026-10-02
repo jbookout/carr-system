@@ -140,16 +140,28 @@ class CheckTests(unittest.TestCase):
             self.assertEqual(fake.rows[0]["kind"], "requirement_checklist")
             self.assertEqual(fake.rows[0]["note"]["source"], "split")
 
-    def test_low_score_yields_one_advisory_line(self):
+    def test_low_score_yields_an_unmet_list_worst_first(self):
         with Repo() as repo:
             repo.change()
             fake = FakeJudge(probs={"req_3": 0.05, "req_2": 0.2})
             out = req.check({"session_id": "s1"}, [user(PROMPT), edit(repo.path)],
                             judge_module=fake, llm=no_llm)
-            self.assertEqual(out.count("\n"), 0)
-            self.assertIn("requirement 3 may be unmet (p=0.05)", out)
-            self.assertIn("README", out)
-            self.assertIn("+1 more", out)
+            self.assertIsNone(out["advisory"])
+            self.assertEqual([item["index"] for item in out["unmet"]], [3, 2])
+            self.assertEqual(out["unmet"][0]["probability"], 0.05)
+            self.assertIn("README", out["unmet"][0]["text"])
+
+    def test_mid_band_score_yields_one_advisory_line_and_no_unmet(self):
+        with Repo() as repo:
+            repo.change()
+            fake = FakeJudge(probs={"req_3": 0.35, "req_2": 0.45})
+            out = req.check({"session_id": "s1"}, [user(PROMPT), edit(repo.path)],
+                            judge_module=fake, llm=no_llm)
+            self.assertEqual(out["unmet"], [])
+            self.assertEqual(out["advisory"].count("\n"), 0)
+            self.assertIn("requirement 3 may be unmet (p=0.35)", out["advisory"])
+            self.assertIn("README", out["advisory"])
+            self.assertIn("+1 more", out["advisory"])
 
     def test_outage_fails_open_and_records_an_error_row(self):
         with Repo() as repo:
@@ -198,6 +210,21 @@ class CheckTests(unittest.TestCase):
                 {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}}
             recs = [user("Delete the whole database right now."), edit(repo.path, "t0"),
                     user("Add a dry run flag to the exporter."), edit(repo.path), tool_result]
+            req.check({"session_id": "s1"}, recs, judge_module=fake, llm=no_llm)
+            self.assertEqual(fake.last[0]["task"], "Add a dry run flag to the exporter.")
+
+    def test_harness_notices_are_not_the_partners_request(self):
+        # 2026-09-24: a background-task notice's "send a PushNotification" line
+        # was judged an unmet request and reopened the turn.
+        with Repo() as repo:
+            repo.change()
+            fake = FakeJudge()
+            notice = user("[SYSTEM NOTIFICATION - NOT USER INPUT]\n<task-notification>monitor event"
+                          "</task-notification>\nIf this event is something the user would act on now, "
+                          "send a PushNotification.")
+            queued = {"type": "user", "origin": {"kind": "task-notification"},
+                      "message": {"role": "user", "content": "send a PushNotification"}}
+            recs = [user("Add a dry run flag to the exporter."), edit(repo.path), notice, queued]
             req.check({"session_id": "s1"}, recs, judge_module=fake, llm=no_llm)
             self.assertEqual(fake.last[0]["task"], "Add a dry run flag to the exporter.")
 

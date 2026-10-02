@@ -73,12 +73,23 @@ def claude_md_bytes(path):
         return len(fh.read())
 
 
+def instruction_concat(expression, path, rail=""):
+    """Decode the supported literal concatenation; unknown shapes fail closed."""
+    literal = r'"(?:[^"\\]|\\.)*"'
+    term = rf'(?:{literal}|RULE_DELIVERY_RAIL)'
+    if not re.fullmatch(rf'\s*{term}(?:\s*\+\s*{term})*\s*', expression):
+        raise ValueError(f"{path}: unsupported instructions expression")
+    return "".join(rail if token == "RULE_DELIVERY_RAIL" else json.loads(token)
+                   for token in re.findall(term, expression))
+
+
 def connector_instructions_bytes(path):
-    """Byte length of the `initialize` instructions block mcp.js serves --
-    the string-literal concatenation plus the separate RULE_DELIVERY_RAIL
-    template literal it appends. Measures ONE registration; see the module
-    docstring on why a second registration's duplicate cost is not folded in
-    here."""
+    """Largest served full/Doc instruction string for ONE registration.
+
+    Conditions and unselected profile notices are source code, not prompt text.
+    The default full resource and the fixed Doc resource are measured separately,
+    with the larger one charged against the existing ceiling.
+    """
     with open(path, "r", encoding="utf-8") as fh:
         src = fh.read()
     rail = ""
@@ -93,13 +104,33 @@ def connector_instructions_bytes(path):
     if end_marker not in src[start:]:
         raise ValueError(f"{path}: `instructions:` block never closes with `{end_marker}`")
     end = src.index(end_marker, start)
-    chunk = src[start:end]
-    literals = re.findall(r'"((?:[^"\\]|\\.)*)"', chunk)
-    joined = "".join(s.replace('\\"', '"') for s in literals)
+    chunk = src[start + len("instructions:"):end].strip().rstrip(",").strip()
+    doc_prefix = 'profile === "doc" ? DOC_INSTRUCTIONS :'
+    has_doc = chunk.startswith(doc_prefix)
+    if has_doc:
+        chunk = chunk[len(doc_prefix):].strip()
+    # Full is the default registration. The optional narrow-profile notice
+    # resolves to an empty string there; its comparison label is not served.
+    chunk = re.sub(
+        r'\+\s*\(profile === "full" \? "" : ` ACTIVE PROFILE: \$\{profile\}\.` '
+        r'\+ \(PROFILE_NOTICE\[profile\] \|\| ""\)\)\s*$', "", chunk)
+    joined = instruction_concat(chunk, path, rail)
     if not joined.strip():
         raise ValueError(f"{path}: extracted an empty instructions block -- "
                           "the string-literal shape probably changed")
-    return len((joined + rail).encode("utf-8"))
+    sizes = [len(joined.encode("utf-8"))]
+    if has_doc:
+        doc_path = os.path.join(os.path.dirname(path), "doc-profile.js")
+        with open(doc_path, encoding="utf-8") as fh:
+            doc_src = fh.read()
+        literal = r'"(?:[^"\\]|\\.)*"'
+        doc_match = re.search(
+            rf'export const DOC_INSTRUCTIONS\s*=\s*({literal}(?:\s*\+\s*{literal})*)\s*;',
+            doc_src)
+        if not doc_match:
+            raise ValueError(f"{doc_path}: DOC_INSTRUCTIONS literal not found")
+        sizes.append(len(instruction_concat(doc_match.group(1), doc_path).encode("utf-8")))
+    return max(sizes)
 
 
 def core_payload_bytes(fixture_path):

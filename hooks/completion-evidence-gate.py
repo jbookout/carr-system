@@ -102,6 +102,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 from datetime import datetime, timezone
 
@@ -111,7 +112,44 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from stop_latch import (  # noqa: E402
     claim_identity, latched, record_fire, record_satisfied)
 
+sys.path.insert(0, REPO)
+from lib.jev_required_actions import (  # noqa: E402
+    current_turn_slice, evaluate_required_actions, jev_calls_log_mentions,
+    unexplained_receipts)
+from lib.transcript_read import load_transcript  # noqa: E402
+
+
+def _canonical_repo_root(fallback):
+    """Same helper as ops/typesafe_client.py's (duplicated on purpose — this
+    hook deliberately has no import-time dependency on the vendor client
+    module). Resolves the ONE repo root shared by every worktree via `git
+    rev-parse --path-format=absolute --git-common-dir`, so this hook reads
+    the SAME out/jev-calls.jsonl that ask() wrote to, whichever worktree
+    either one is running from. Falls back to `fallback` on any failure."""
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=fallback, capture_output=True, text=True, timeout=5, check=True,
+        ).stdout.strip()
+        if out:
+            return os.path.dirname(out)
+    except Exception:
+        pass
+    return fallback
+
+
+CANONICAL_REPO = _canonical_repo_root(REPO)
+
 LOG = os.path.join(REPO, "out", "completion-evidence-gate.jsonl")
+JEV_LOG = os.path.join(REPO, "out", "jev-required-actions-gate.jsonl")
+# Same physical path ops/typesafe_client.py's ask() appends a receipt to on
+# every successful call (its JEV_CALLS_LOG) — resolved via CANONICAL_REPO
+# (not the possibly-worktree-local REPO) so a call made from any worktree and
+# this hook, wherever it runs from, agree on one file. Kept as a literal path
+# rather than an import of ops/typesafe_client.py, so this hook has no
+# import-time dependency on the vendor client.
+JEV_CALLS_LOG = (os.environ.get("CARR_JEV_CALLS_LOG_OVERRIDE")
+                 or os.path.join(CANONICAL_REPO, "out", "jev-calls.jsonl"))
 # The FLOOR trigger, kept and widened with the verbs Joe named (finished,
 # landed, phase-complete, ready, live). It is no longer the only trigger: the
 # clause predicate below fires with or without any of these words.
@@ -154,6 +192,12 @@ WRITE_ACTION_PREFIXES = {
     "update", "write",
 }
 WRITE_ACTION_EXACT = {
+    "whats-new",  # explicit mark_seen persists the authenticated partner's watermark
+    "acknowledge-board-answer",  # durable Received receipt for a board answer
+    "answer-board-question",      # human partner records a durable answer
+    "ask-board-question",         # opens a named question on the board
+    "publish-board-snapshot",     # publishes the signed-in board view
+    "revise-board-question",      # preserves the prior question revision
     "acknowledge-notification",  # writes ops.notification_read: a durable per-recipient
                                  # receipt a session could report as "I cleared that".
                                  # EXACT rather than a prefix for adjudicate's reason --
@@ -185,6 +229,9 @@ WRITE_ACTION_EXACT = {
                                  # a Doc conversation under a compare-and-swap. EXACT for
                                  # the same reason: "rename" covers one verb today, and a
                                  # future rename-shaped read must not inherit the class.
+    "suggest-doc-work",       # B08: stores one source-bound obligation suggestion;
+                              # "suggest" stays exact so future read-like suggestions
+                              # do not inherit write classification.
     "call-verb",             # unknown inner call is conservatively a write
     "cancel-capability-session",  # abandons the open build session on a capability
                               # project and returns that project to ready. A write in
@@ -195,6 +242,9 @@ WRITE_ACTION_EXACT = {
                               # reason as adjudicate above — it would cover exactly one
                               # verb today, and a generic "cancel" prefix would silently
                               # capture any future read named cancel-something.
+    "bind-rule-context-contract",  # V5-F05: appends an authority-only typed rule
+                                    # projection. EXACT: read-action-context is a
+                                    # read, and "bind" is not a blanket write prefix.
     "dry-run-doctrine-gates",
     "edit-loop-header",      # updates loop_block.prose_md, like presence-lease/review-deal:
                               # a one-off verb whose first word ("edit") is not a generic
@@ -209,6 +259,43 @@ WRITE_ACTION_EXACT = {
                                   # is deliberately not generalized, so this sibling gets the
                                   # same exact-entry treatment
     "open-investigation-branch",  # sibling of open-investigation, same reasoning
+    "open-workflow-cutover-plan",  # DoctorCRE V5-R02 (Q116): opens a cutover state-machine
+                                  # plan for one workflow identity. Same "open" first-word
+                                  # reasoning as open-campaign/open-incident -- not
+                                  # generalized into a prefix, exact entry instead.
+    "open-complete-set-review",  # DoctorCRE V5-A03: opens an append-only independent
+                                  # complete-set review case over an immutable delivered-set
+                                  # digest. Same "open" first-word reasoning as
+                                  # open-campaign/open-incident/open-workflow-cutover-plan --
+                                  # not generalized into a prefix, exact entry instead.
+    "advance-workflow-cutover-stage",  # DoctorCRE V5-R02 (Q116): moves a cutover plan one
+                                  # stage forward (read_legacy..recovery_ready). A durable
+                                  # state transition a session could report as done without
+                                  # having actually advanced, so it is a write this gate cares
+                                  # about; "advance" has two siblings now and still no
+                                  # blanket prefix: each advance-* is its own exact entry.
+    "advance-journey-one-clock",  # DoctorCRE V5-M01: appends one Journey 1 clock revision
+                                  # through a server-bound installation. A session could
+                                  # report the clock as started or advanced without it
+                                  # having happened (every deployed Worker refuses it), so
+                                  # it is a write this gate cares about. Exact entry.
+    "mark-slice-completion",     # DoctorCRE V5-R02 (Q153): the explicit slice-completion
+                                  # marker Joe asked for. "mark" is not generalized into a
+                                  # prefix (a future mark-* read must not inherit this class).
+    "mark-slice-progress",       # DoctorCRE V5-R02 (Q153): the writer-side in_progress/blocked
+                                  # mark beside mark-slice-completion; same exact-entry reasoning.
+    "propose-slice-completion",  # slice done-marker (0628): the automated seat's completion
+                                  # PROPOSAL (never a mark). Exact entry for
+                                  # mark-slice-completion's reason.
+    "confirm-slice-completions",  # slice done-marker (0628): the partner batch confirmation
+                                  # that writes complete. Exact entry, same reasoning.
+    "bind-slice-criterion-evidence",    # slice done-marker (0628): binds an unbound criterion
+                                  # to server-resolved evidence, once. "bind" is not a prefix.
+    "rebind-slice-criterion-evidence",  # slice done-marker (0628): the partner override of a
+                                  # binding; exact entry, same reasoning.
+    "cancel-workflow-cutover-plan",  # DoctorCRE V5-R02: cancels an active cutover plan so it
+                                  # stops governing enqueue. Exact entry, like
+                                  # cancel-capability-session -- no blanket "cancel" prefix.
     "issue-tour-share-grant",  # creates a confidential Tour share grant; "issue" stays
                                   # exact because issue-style reads may exist elsewhere
     "presence-lease",
@@ -240,6 +327,8 @@ WRITE_ACTION_EXACT = {
     "accept-outcome-feedback",  # Program 6 human-only observational acceptance; never completion
     "answer-work-request-for-joe",  # human-only needs_joe -> triaged answer; exact rather
                                       # than widening every future answer-* action
+    "ask-jev",  # the Worker makes the Jev call and appends an append-only receipt row
+                # (migration 0587) the Jev gates credit; exact rather than an ask-* prefix
     "supersede-work-request",  # Program 6 withdrawal of a request captured in error, into the
                                 # request that replaced it. Its sibling decline-work-request is
                                 # already covered by the "decline" prefix; "supersede" is in
@@ -262,6 +351,26 @@ WRITE_ACTION_EXACT = {
     "transition-evaluation-case",  # human-authority append-only eval lifecycle write
     "transition-execution-environment-provider",  # human-authority provider CAS/rollback lifecycle write
     "record-foundation-assurance-minimum-outcome",
+    "evaluate-artifact-deletion",  # V5-F01: persists one bounded deletion-evaluation
+                                   # receipt (it never deletes). EXACT rather than a
+                                   # prefix: "evaluate" names judgments that are reads
+                                   # elsewhere, and as a prefix would capture them.
+    "raise-delivery-cadence-alert",  # V5-A05: persists a durable escalation/quiet-hours
+                                       # alert row the sweep job's own state depends on;
+                                       # "raise" stays exact rather than becoming a prefix,
+                                       # since a future raise-* read must not inherit the
+                                       # class -- same reasoning as report-problem/open-incident.
+    # V5-J102: the CRE lifecycle writers whose first word is not a write prefix.
+    # Each appends a lifecycle subject or event row (or one shadow run record) a
+    # session could report as done. EXACT, not prefixes: initialize-, open-,
+    # commit-, cancel- and run- would capture future reads named the same way.
+    "initialize-prospect-relationship",
+    "initialize-assignment",
+    "initialize-property-negotiation",
+    "open-cre-assignment",
+    "commit-winning-property",
+    "cancel-pending-deal",
+    "run-migration-shadow",
 }
 HUMAN_ONLY_WRITE_ACTION_EXACT = {
     "acknowledge-ready-plan-amendment",  # WR-000126 authenticated human-only notice write.
@@ -273,6 +382,13 @@ HUMAN_ONLY_WRITE_ACTION_EXACT = {
 CLAUSE_REASON = "unaccounted clause"
 FLOOR_REASONS = ("terminal completion claim has no fresh verification",
                  "delivery claim names no recipient")
+# Decision 0b11c89b (2026-09-24, Joe): "Jev is not advisory only. It's in our
+# hard rules or it is supposed to be." A fourth reason class, independent of
+# the claim-set layers above — it fires whenever THIS turn's build advisory
+# required a facet and the turn shows neither a Jev call nor a named refusal,
+# regardless of whether a completion claim was made at all.
+JEV_REQUIRED_REASON = "jev required actions missing"
+JEV_REQUIREMENT_REASON = "jev requirement judged unmet"
 
 CARR_MCP_PREFIXES = ("mcp__carr__", "mcp__carr_records__", "mcp__carr-continuity__")
 NESTED_CARR_CALL = re.compile(
@@ -400,12 +516,20 @@ def payload_is_carr(payload, recs):
 
 def tool(rec):
     payload = rec.get("payload")
-    if isinstance(payload, dict) and payload.get("type") == "custom_tool_call":
+    if isinstance(payload, dict) and payload.get("type") in {"custom_tool_call", "function_call"}:
         name = str(payload.get("name", ""))
         # Codex records nested MCP calls inside a custom `exec` input.  Keep
         # direct MCP names intact too, for a future/runtime spelling that
         # writes them directly.
-        return (name if name.startswith("mcp__") else "functions." + name), payload.get("input")
+        value = payload.get("input")
+        if payload.get('type') == 'function_call':
+            value = payload.get('arguments')
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except ValueError:
+                    pass
+        return (name if name.startswith(("mcp__", "functions.")) else "functions." + name), value
     msg = rec.get("message") or rec
     content = msg.get("content")
     if isinstance(content, list):
@@ -478,7 +602,7 @@ def mutation(name, value):
 def verification(name, value):
     if name in VERIFY_TOOLS:
         return True
-    if name in {"Bash", "functions.exec"} and VERIFY_COMMAND.search(command(value)):
+    if name in {"Bash", "functions.exec", "functions.exec_command"} and VERIFY_COMMAND.search(command(value)):
         return True
     # A visible CARR read after an embedded CARR write is fresh evidence even
     # when Codex's outer custom call remains named only `functions.exec`.
@@ -1027,7 +1151,126 @@ def write_verb_names(window):
     return names
 
 
+def _call_id(rec):
+    payload = rec.get('payload') or {}
+    if payload.get('type') in {'custom_tool_call', 'function_call'}:
+        return payload.get('call_id')
+    content = message(rec).get('content')
+    for block in content if isinstance(content, list) else []:
+        if isinstance(block, dict) and block.get('type') == 'tool_use':
+            return block.get('id')
+    return None
+
+
+def _script_result(value, predicate):
+    output = value.split('\nOutput:\n', 1)[1].strip()
+    decoder = json.JSONDecoder()
+    statuses = []
+    try:
+        while output:
+            item, end = decoder.raw_decode(output)
+            statuses.append(predicate(item))
+            output = output[end:].strip()
+    except ValueError:
+        return False
+    return bool(statuses) and all(statuses)
+
+
+def _result_success(value, terminal_success=False):
+    """A paired result must be terminal; running, timeout and errors never count."""
+    if isinstance(value, str):
+        if re.search(r'Script running|session ID|timed?\s*out|timeout|Process exited with code [1-9]', value, re.I):
+            return False
+        if value.startswith('Script completed') and '\nOutput:\n' in value:
+            return _script_result(value, _result_success)
+        try:
+            return _result_success(json.loads(value))
+        except ValueError:
+            # Native shell wrappers carry an exit status. Claude's result
+            # envelope may instead explicitly report is_error=false.
+            return bool(re.search(r'Process exited with code 0\b', value)) or (terminal_success and bool(value.strip()))
+    if isinstance(value, list):
+        return bool(value) and all(_result_success(item, terminal_success) for item in value)
+    if isinstance(value, dict):
+        if value.get('is_error') or value.get('isError') or value.get('error') or value.get('ok') is False:
+            return False
+        if 'status' in value and value['status'] not in ('completed', 'success', 'succeeded'):
+            return False
+        if 'exit_code' in value:
+            return type(value['exit_code']) is int and value['exit_code'] == 0 and not value.get('session_id') and not value.get('cell_id')
+        if value.get('session_id') or value.get('cell_id'):
+            return False
+        if value.get('type') == 'text':
+            return _result_success(value.get('text', ''), terminal_success)
+        if 'output' in value:
+            return _result_success(value['output'], terminal_success)
+        if 'content' in value:
+            return _result_success(value['content'], terminal_success)
+        return value.get('ok') is True or value.get('status') in ('success', 'succeeded')
+    return False
+
+
+def _result_terminal(value):
+    """Completion of an attempt is separate from success of verification."""
+    if isinstance(value, str):
+        if re.search(r'Script running|session ID', value, re.I):
+            return False
+        if value.startswith('Script completed') and '\nOutput:\n' in value:
+            return _script_result(value, _result_terminal)
+        try:
+            return _result_terminal(json.loads(value))
+        except ValueError:
+            return bool(re.search(r'Process exited with code -?\d+\b', value))
+    if isinstance(value, list):
+        return bool(value) and all(_result_terminal(item) for item in value)
+    if isinstance(value, dict):
+        if value.get('session_id') or value.get('cell_id'):
+            return False
+        if 'status' in value and value['status'] not in ('completed', 'success', 'succeeded', 'failed'):
+            return False
+        if 'exit_code' in value:
+            return type(value['exit_code']) is int
+        if value.get('status') in ('completed', 'success', 'succeeded', 'failed') or type(value.get('ok')) is bool:
+            return True
+        for key in ('text', 'output', 'content'):
+            if key in value:
+                return _result_terminal(value[key])
+    return False
+
+
+def _completed_calls(recs):
+    results = {}
+    for rec in recs:
+        epoch = rec['_epoch']
+        payload = rec.get('payload') or {}
+        if payload.get('call_id') and payload.get('type') in {'custom_tool_call_output', 'function_call_output'}:
+            value = payload.get('output')
+            success = not payload.get('is_error') and _result_success(value)
+            results[payload.get('call_id')] = (epoch, success, success or _result_terminal(value))
+        content = message(rec).get('content')
+        for block in content if isinstance(content, list) else []:
+            if isinstance(block, dict) and block.get('type') == 'tool_result' and block.get('tool_use_id'):
+                value = block.get('content')
+                success = not block.get('is_error') and _result_success(value, block.get('is_error') is False)
+                terminal = success or _result_terminal(value) or (type(block.get('is_error')) is bool and not re.search(r'Script running|session ID', str(value), re.I))
+                results[block.get('tool_use_id')] = (epoch, success, terminal)
+    return results
+
+
 def evaluate(recs, ledger=None):
+    # A message may contain several tool calls. Preserve every operation as
+    # its own ordered record so all receipt and mutation readers see it.
+    expanded = []
+    for epoch, original in enumerate(recs):
+        rec = {**original, '_epoch': epoch}
+        msg = rec.get("message")
+        blocks = msg.get("content") if isinstance(msg, dict) else None
+        if isinstance(blocks, list) and sum(isinstance(b, dict) and b.get("type") == "tool_use" for b in blocks) > 1:
+            for block in blocks:
+                expanded.append({**rec, "message": {**msg, "content": [block]}})
+        else:
+            expanded.append(rec)
+    recs = expanded
     """Block when an ordered clause has no receipt, or a close denies one it holds.
 
     THE LEDGER OUT-PARAMETER carries what the latch needs and nothing else, so
@@ -1065,6 +1308,11 @@ def evaluate(recs, ledger=None):
         candidate = text(rec, {"assistant"}).strip()
         if candidate:
             final = candidate
+    if ledger is not None:
+        # jev_requirements_advisory() (see main()) needs the same "did the
+        # close name this as not done" text evaluate() already computed here,
+        # so it is not recomputed a second, possibly divergent way.
+        ledger["final"] = final
 
     contradiction = dual_block(recs, final)
     if contradiction:
@@ -1084,9 +1332,18 @@ def evaluate(recs, ledger=None):
     if not tracked:
         return False, "no tracked mutation"
 
-    latest = max(mutation_at + [idx for idx, rec in enumerate(window)
-                                if file_paths(*tool(rec))])
-    verified = any(verification(*tool(rec)) for rec in window[latest + 1:])
+    completions = _completed_calls(window)
+    changes = [rec for rec in window if mutation(*tool(rec)) or file_paths(*tool(rec))]
+    # Invocation order inside one assistant array is concurrency, not execution
+    # order. Each mutation needs a terminal result before verification starts.
+    change_results = [completions.get(_call_id(rec)) for rec in changes]
+    mutations_complete = all(item is not None and item[2] for item in change_results)
+    latest_finish = max((item[0] for item in change_results if item is not None), default=-1)
+    verified = mutations_complete and any(
+        verification(*tool(rec)) and rec['_epoch'] > latest_finish
+        and (completed := completions.get(_call_id(rec))) is not None
+        and completed[0] > rec['_epoch'] and completed[1]
+        for rec in window)
 
     # THE CLAUSE LAYER. No word in `final` is required to reach this: a session
     # that mutated against an order and closed on a clause with no receipt is
@@ -1131,11 +1388,99 @@ def evaluate(recs, ledger=None):
     return True, "terminal completion claim has no fresh verification"
 
 
+def jev_audit(row):
+    if row.get("session") == "selftest":
+        return
+    try:
+        os.makedirs(os.path.dirname(JEV_LOG), exist_ok=True)
+        with open(JEV_LOG, "a") as fh:
+            fh.write(json.dumps(row) + "\n")
+    except Exception:
+        pass
+
+
+def jev_required_actions_check(session, recs):
+    """decision 0b11c89b's Stop-side half. Returns (block, reason, identity)
+    with `block` False whenever there is nothing to enforce (no advisory this
+    turn, an unavailable advisory, or a readable advisory with no required
+    actions) or when this exact turn's finding has already been latched.
+    """
+    # The Jev turn is the LIBRARY's turn (a human prompt plus every folded
+    # notification, Stop feedback and cross-session message), not this hook's
+    # own human_turns() window — that one restarts at a task notification,
+    # which would drop a JEV-REFUSED line written before it (round 3).
+    window = current_turn_slice(recs)
+    texts = [text(rec, {"assistant"}) for rec in window]
+    written_paths = sorted({p for rec in window for p in file_paths(*tool(rec))})
+    result = evaluate_required_actions(recs, texts, JEV_CALLS_LOG, session, written_paths)
+    # FORGERY DETECTION ("detectable, not prevented", decision d47931da).
+    # ask() is the only legitimate writer of out/jev-calls.jsonl and never
+    # names it in a tool command, so any tool call in this turn that does is
+    # recorded as a detection event beside the verdict, with the command.
+    mentions = jev_calls_log_mentions(window)
+    if mentions:
+        jev_audit({"ts": now(), "session": session, "event": "jev_calls_log_named",
+                   "turn_key": result.get("turn_key"),
+                   "write_like": any(m["write_like"] for m in mentions),
+                   "mentions": mentions[:10]})
+    # PROVENANCE BACKSTOP (round 4). The mention check above misses an
+    # indirect write (`f=out/jev-calls; echo x >> $f.jsonl`, a script file).
+    # Every receipt credited to this turn must line up with a Python tool
+    # call (Bash running python, or an Agent in flight) in the transcript;
+    # one that does not is recorded, never blocked.
+    unexplained = unexplained_receipts(recs, result.get("credited_receipts") or [])
+    if unexplained:
+        jev_audit({"ts": now(), "session": session, "event": "jev_receipt_unexplained",
+                   "turn_key": result.get("turn_key"), "receipts": unexplained[:10]})
+    jev_audit({"ts": now(), "session": session, **result})
+    if result["status"] != "required" or not result["missing"]:
+        return False, "", None
+    # LATCHED PER TURN, NOT PER SESSION: the identity includes this turn's own
+    # build-advisory receipt id (or prompt hash), which is unique per turn, so
+    # the SAME missing-facet set recurring in a LATER turn still reopens.
+    # stop_latch's own identity/latch machinery is reused unchanged — only the
+    # token set fed into it is turn-scoped now.
+    identity = claim_identity(
+        "completion-evidence-gate", JEV_REQUIRED_REASON,
+        [result.get("turn_key") or session, *result["missing"]])
+    if latched(session, identity):
+        return False, "", None
+    missing = ", ".join(result["missing"])
+    reason = (f"this turn's Jev build advisory required {missing}, and the turn shows "
+              "neither a Jev call (ops/typesafe_client.py) nor a named refusal "
+              f"(\"JEV-REFUSED: <facet> <reason>\") for it")
+    contradicted = result.get("contradicted_refusals") or []
+    if contradicted:
+        answered = result.get("jev_answered") or {}
+        evidence = "this turn's own build advisory came back from Jev"
+        if answered.get("receipts_ok"):
+            evidence += f", and {answered['receipts_ok']} Jev call(s) this turn succeeded"
+        reason += (f". CONTRADICTION: the refusal for {', '.join(contradicted)} says Jev was "
+                   f"unreachable or unavailable, but {evidence}, so it does not count. Call "
+                   "Jev for it now; if that call really fails too, this reopen is latched "
+                   "for the turn and will not repeat")
+    return True, reason, identity
+
+
+def jev_required_actions_message(req_reason):
+    """The required-facets reopen text: on its own, or appended to another
+    reopen's message so one reopen carries both reasons."""
+    return ("JEV REQUIRED ACTIONS GATE — " + req_reason + ".\n"
+            "Decision 0b11c89b (2026-09-24, Joe): Jev is required, not advisory, for "
+            "the facets this turn's build advisory names. Either call Jev through "
+            "ops/typesafe_client.py (noul/choice/ask) for the missing facet(s) before "
+            "closing, or say so explicitly with a line reading "
+            "\"JEV-REFUSED: <facet> <reason>\" (for example, Jev unreachable).")
+
+
 def jev_requirements_advisory(payload, recs):
-    """SHADOW ONLY: ops/jev_requirements.py asks Jev whether each requirement
-    of the last human request is met by this turn's diff, records the answer
-    in out/jev-judge.jsonl and returns at most one advisory line. It never
-    decides `blocked`; every failure returns None."""
+    """ops/jev_requirements.py asks Jev whether each requirement of the last
+    human request is met by this turn's diff, records the answer in
+    out/jev-judge.jsonl, and returns None or {"advisory": str|None, "unmet":
+    [...]}. It decides nothing itself -- main() is what turns an `unmet`
+    requirement into a reopened turn, and only when the close does not
+    already name that requirement as not done. Every failure returns None,
+    the abstention path: no requirement report is ever read as met."""
     try:
         import importlib.util
         spec = importlib.util.spec_from_file_location(
@@ -1155,14 +1500,43 @@ def main():
         path = payload.get("transcript_path") or payload.get("transcriptPath")
         if not path or not os.path.exists(path):
             return 0
-        with open(path, errors="replace") as fh:
-            recs = [json.loads(line) for line in fh if line.strip()]
+        # One bad line in the session's own transcript must not switch the
+        # gate off (bypass hunt, PR #1224): lib/transcript_read.py skips it
+        # and records a transcript_tamper event instead of raising.
+        recs = load_transcript(path, hook="completion-evidence-gate",
+                               session=payload.get("session_id") or payload.get("sessionId"),
+                               log_path=JEV_LOG)
         if not payload_is_carr(payload, recs):
             return 0
         session = payload.get("session_id") or payload.get("sessionId")
         ledger = {}
         blocked, reason = evaluate(recs, ledger)
-        advisory = jev_requirements_advisory(payload, recs)
+        jev = jev_requirements_advisory(payload, recs)
+
+        # JEV ACTS BELOW LOW_AT (Joe, 2026-09-24, decision 5ec806a4: "every
+        # jev check in the system too is not a shadow"). Only tried when the
+        # deterministic layer above did not already reopen the turn for its
+        # own reason -- one reopening is enough, and the deterministic finding
+        # is reported first because it is what the session actually changed,
+        # not a probability about it. The ONE escape is the same one the
+        # clause layer gives: the close already says the requirement is not
+        # done, reusing RESIDUAL/terms_match rather than a second detector.
+        jev_identity = None
+        if not blocked and isinstance(jev, dict):
+            final = ledger.get("final", "")
+            for item in jev.get("unmet") or []:
+                if RESIDUAL.search(final) and terms_match(terms_of(item["text"]), final):
+                    continue
+                candidate = claim_identity(
+                    "completion-evidence-gate", JEV_REQUIREMENT_REASON, [item["text"]])
+                if candidate and latched(session, candidate):
+                    continue
+                jev_identity = candidate
+                blocked = True
+                reason = (f'requirement judged unmet by Jev (p={item["probability"]:.2f}): '
+                          f'"{item["text"]}" — no receipt and the close does not say '
+                          "it is not done")
+                break
 
         # THE CLAIM-SET LATCH (2026-08-23, Joe's Stop-gate rationing).
         #
@@ -1189,9 +1563,28 @@ def main():
             record_satisfied(session, claim_identity(
                 "completion-evidence-gate", reason_class, tokens))
 
+        # DECISION 0b11c89b'S STOP-SIDE HALF runs on EVERY Stop, whatever
+        # else decides to reopen. It used to run only when nothing else had:
+        # an unverified "done" claim (or #1228's unmet-requirement reopen)
+        # took the one reopen, the continuation Stop returned early on
+        # stop_hook_active, and the missing facets were never raised — a
+        # model could skip Jev by claiming done (fresh review of fdc927fd).
+        # Now one reopen carries both reasons, and both identities are fired
+        # so neither repeats. Named req_* so it cannot be confused with
+        # #1228's jev_identity (the requirement-checklist reopen).
+        req_blocked, req_reason, req_identity = jev_required_actions_check(session, recs)
+
         if not blocked:
-            if advisory:
-                print(json.dumps({"systemMessage": advisory}))
+            if req_blocked:
+                record_fire(session, req_identity)
+                audit({"ts": now(), "hook": "completion-evidence-gate",
+                       "session": session, "reason": req_reason,
+                       "claim_identity": req_identity})
+                print(json.dumps({"decision": "block",
+                                  "reason": jev_required_actions_message(req_reason)}))
+                return 0
+            if isinstance(jev, dict) and jev.get("advisory"):
+                print(json.dumps({"systemMessage": jev["advisory"]}))
             return 0
 
         # THE DUAL IS NEVER LATCHED. dual_block() returns before the tracked
@@ -1199,17 +1592,35 @@ def main():
         # calls landed work unbuilt is worth refusing every time it is uttered,
         # and its identity is the artifact rather than a claim-set anyway.
         identity = None
-        if ledger.get("identity"):
+        if jev_identity:
+            identity = jev_identity
+            record_fire(session, identity)
+        elif ledger.get("identity"):
             reason_class, tokens = ledger["identity"]
             identity = claim_identity("completion-evidence-gate", reason_class, tokens)
             if latched(session, identity):
+                # The claim was already reopened once; a latched claim must
+                # not take the required-facets check down with it.
+                if req_blocked:
+                    record_fire(session, req_identity)
+                    audit({"ts": now(), "hook": "completion-evidence-gate",
+                           "session": session, "reason": req_reason,
+                           "claim_identity": req_identity})
+                    print(json.dumps({"decision": "block",
+                                      "reason": jev_required_actions_message(req_reason)}))
                 return 0
             record_fire(session, identity)
 
+        also = ""
+        if req_blocked:
+            record_fire(session, req_identity)
+            also = "\n\nALSO — " + jev_required_actions_message(req_reason)
         audit({"ts": now(), "hook": "completion-evidence-gate",
                "session": session, "reason": reason,
-               "claim_identity": identity})
-        print(json.dumps({"decision": "block", "reason":
+               "claim_identity": identity,
+               **({"jev_required_reason": req_reason,
+                   "jev_required_identity": req_identity} if req_blocked else {})})
+        print(json.dumps({"decision": "block", "reason": (
             "COMPLETION EVIDENCE GATE — " + reason + ".\n"
             "A close binds to the ORDER, not to the slice you finished. Every ordered "
             "clause needs one of: a fresh receipt read from the surface that was "
@@ -1217,7 +1628,7 @@ def main():
             "that invokes it, the loaded scheduler, a named recipient, real first use), "
             "or a sentence naming that clause as not done. Rewording the close does not "
             "help — silence blocks the same as \"done\". If your own record already shows "
-            "the work landed, do not close by calling it unbuilt."}))
+            "the work landed, do not close by calling it unbuilt.") + also}))
         return 0
     except Exception:
         return 0

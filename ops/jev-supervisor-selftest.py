@@ -35,6 +35,16 @@ def load(mode):
     return module
 
 
+def load_default():
+    """Load the hook with CARR_JEV_SUPERVISOR unset, so MODE picks its own
+    default rather than an explicit override -- the case `load()` can't reach."""
+    os.environ.pop("CARR_JEV_SUPERVISOR", None)
+    spec = importlib.util.spec_from_file_location("jev_supervisor_default_test", HOOK)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def result(check, verdict, advice=""):
     return {"check": check, "verdict": verdict, "confidence": 0.9, "escalate": False,
             "detail": {"advice": advice} if advice else {}}
@@ -47,10 +57,13 @@ class FakeLibs:
         self.calls = []
         self.verdicts = verdicts or {}
         self.explode = set(explode)
+        self.done_evidence = None
 
     def _fn(self, name):
         def fn(*args, **kwargs):
             self.calls.append(name)
+            if name == "check_done_claim":
+                self.done_evidence = args[1]
             if name in self.explode:
                 raise RuntimeError("library bug")
             return result(name, self.verdicts.get(name, "ok"), f"advice from {name}")
@@ -109,12 +122,26 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(fake.calls, [])
 
     def test_shadow_mode_runs_checks_but_prints_nothing(self):
+        # Explicit override only, now that advise is the default (Joe,
+        # 2026-09-24, decision 5ec806a4): CARR_JEV_SUPERVISOR=shadow must
+        # still record without ever printing.
         m = load("shadow")
         fake = FakeLibs(verdicts={"triage_failure": "code_bug"})
         m._lib = fake
         code, out = run_main(m, self.failing_bash())
         self.assertEqual((code, out), (0, ""))
         self.assertIn("triage_failure", fake.calls)
+
+    def test_default_mode_is_advise_when_unset(self):
+        m = load_default()
+        self.assertEqual(m.MODE, "advise")
+        fake = FakeLibs(verdicts={"triage_failure": "code_bug", "locate_bug": "line_located"})
+        m._lib = fake
+        code, out = run_main(m, self.failing_bash())
+        self.assertEqual(code, 0)
+        ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("advice from triage_failure", ctx)
+        self.assertIn("advice from locate_bug", ctx)
 
     def test_failed_bash_routes_to_triage_and_bug_locator(self):
         m = load("advise")
@@ -186,6 +213,134 @@ class DispatcherTests(unittest.TestCase):
         self.assertIn("check_done_claim", fake.calls)
         self.assertIn("advice from check_done_claim", json.loads(out)["systemMessage"])
 
+    def test_stop_test_evidence_starts_at_latest_human_request(self):
+        m = load("shadow")
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as fh:
+            transcript = fh.name
+            rows = [
+                {"type": "user", "message": {"content": "Earlier task"}},
+                {"message": {"content": [{"type": "tool_use", "name": "Bash", "id": "old",
+                                           "input": {"command": "pytest old_test.py"}}]}},
+                {"message": {"content": [{"type": "tool_result", "tool_use_id": "old",
+                                           "content": "old test passed"}]}},
+                {"type": "user", "message": {"content": "Current task"}},
+                {"message": {"content": [{"type": "tool_use", "name": "Bash", "id": "new",
+                                           "input": {"command": "pytest new_test.py"}}]}},
+                {"message": {"content": [{"type": "tool_result", "tool_use_id": "new",
+                                           "content": "new test failed", "is_error": True}]}},
+            ]
+            fh.write("\n".join(json.dumps(row) for row in rows) + "\n")
+        try:
+            evidence = m._last_test_evidence(transcript)
+            self.assertEqual(evidence["test_command"], "pytest new_test.py")
+            self.assertEqual(evidence["test_output"], "new test failed")
+            self.assertEqual(evidence["test_exit_code"], 1)
+        finally:
+            os.unlink(transcript)
+
+    def test_stop_does_not_reuse_prior_task_test(self):
+        m = load("shadow")
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as fh:
+            transcript = fh.name
+            rows = [
+                {"type": "user", "message": {"content": "Earlier task"}},
+                {"message": {"content": [{"type": "tool_use", "name": "Bash", "id": "old",
+                                           "input": {"command": "pytest old_test.py"}}]}},
+                {"message": {"content": [{"type": "tool_result", "tool_use_id": "old",
+                                           "content": "old test passed"}]}},
+                {"type": "user", "message": {"content": "Current task"}},
+                {"type": "user", "message": {"content": [
+                    {"type": "tool_result", "tool_use_id": "unrelated", "content": "tool data"}]}},
+            ]
+            fh.write("\n".join(json.dumps(row) for row in rows) + "\n")
+        try:
+            self.assertEqual(m._last_test_evidence(transcript), {})
+        finally:
+            os.unlink(transcript)
+
+    def test_stop_passes_failed_then_passing_tests_to_done_claim(self):
+        m = load("shadow")
+        fake = FakeLibs()
+        m._lib = fake
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as fh:
+            transcript = fh.name
+            rows = [{"type": "user", "message": {"content": "Fix the current bug"}}]
+            for ident, output, failed in (("red", "1 failed: regression", True),
+                                          ("green", "1 passed", False)):
+                rows.extend([
+                    {"message": {"content": [{"type": "tool_use", "name": "Bash", "id": ident,
+                                               "input": {"command": "pytest test_regression.py"}}]}},
+                    {"type": "user", "message": {"content": [
+                        {"type": "tool_result", "tool_use_id": ident,
+                         "content": output, "is_error": failed}]}},
+                ])
+            fh.write("\n".join(json.dumps(row) for row in rows) + "\n")
+        try:
+            payload = {"hook_event_name": "Stop", "session_id": "t", "cwd": self.dir,
+                       "transcript_path": transcript, "last_assistant_message": "Fixed; tests pass."}
+            self.assertEqual(run_main(m, payload), (0, ""))
+            evidence = fake.done_evidence
+            self.assertEqual(evidence["test_exit_code"], 0)
+            self.assertEqual(evidence["test_run_count"], 2)
+            self.assertEqual(evidence["test_failure_count"], 1)
+            self.assertIn("1 failed: regression", evidence["test_history"])
+            self.assertIn("1 passed", evidence["test_history"])
+            self.assertLess(evidence["test_history"].index("1 failed: regression"),
+                            evidence["test_history"].index("1 passed"))
+        finally:
+            os.unlink(transcript)
+
+    def test_history_keeps_resolving_pass_before_unrelated_latest_test(self):
+        m = load("shadow")
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as fh:
+            transcript = fh.name
+            rows = [{"type": "user", "message": {"content": "Current task"}}]
+            for ident, command, output, failed in (
+                    ("red", "pytest test_regression.py", "regression failed", True),
+                    ("green", "pytest test_regression.py", "regression passed", False),
+                    ("other", "pytest test_other.py", "other passed", False)):
+                rows.extend([
+                    {"message": {"content": [{"type": "tool_use", "name": "Bash", "id": ident,
+                                               "input": {"command": command}}]}},
+                    {"type": "user", "message": {"content": [
+                        {"type": "tool_result", "tool_use_id": ident,
+                         "content": output, "is_error": failed}]}},
+                ])
+            fh.write("\n".join(json.dumps(row) for row in rows) + "\n")
+        try:
+            evidence = m._last_test_evidence(transcript)
+            self.assertEqual(evidence["test_failure_count"], 1)
+            for marker in ("regression failed", "regression passed", "other passed"):
+                self.assertIn(marker, evidence["test_history"])
+        finally:
+            os.unlink(transcript)
+
+    def test_large_history_reports_omissions_and_preserves_failure_count(self):
+        m = load("shadow")
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as fh:
+            transcript = fh.name
+            rows = [{"type": "user", "message": {"content": "Current task"}}]
+            for i in range(12):
+                ident = str(i)
+                rows.extend([
+                    {"message": {"content": [{"type": "tool_use", "name": "Bash", "id": ident,
+                                               "input": {"command": f"pytest test_{i}.py"}}]}},
+                    {"type": "user", "message": {"content": [
+                        {"type": "tool_result", "tool_use_id": ident,
+                         "content": f"result-{i}: " + "x" * 750,
+                         "is_error": i == 0}]}},
+                ])
+            fh.write("\n".join(json.dumps(row) for row in rows) + "\n")
+        try:
+            evidence = m._last_test_evidence(transcript)
+            self.assertEqual(evidence["test_run_count"], 12)
+            self.assertEqual(evidence["test_failure_count"], 1)
+            self.assertTrue(evidence["test_history_truncated"])
+            self.assertIn("result-11", evidence["test_history"])
+            self.assertLessEqual(len(evidence["test_history"]), 3900)
+        finally:
+            os.unlink(transcript)
+
     def test_stop_hook_active_does_nothing(self):
         m = load("advise")
         fake = FakeLibs(verdicts={"check_done_claim": "unsupported"})
@@ -208,6 +363,24 @@ class DispatcherTests(unittest.TestCase):
                               env=env, timeout=30)
         self.assertEqual((done.returncode, done.stdout), (0, ""))
 
+    def test_default_mode_is_advise_not_shadow(self):
+        """Decision 0b11c89b (2026-09-24, Joe): the default moved off shadow."""
+        env = dict(os.environ)
+        env.pop("CARR_JEV_SUPERVISOR", None)
+        script = ("import importlib.util, sys\n"
+                 f"spec = importlib.util.spec_from_file_location('m', {HOOK!r})\n"
+                 "m = importlib.util.module_from_spec(spec)\n"
+                 "spec.loader.exec_module(m)\n"
+                 "sys.stdout.write(m.MODE)\n")
+        done = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                              env=env, timeout=30)
+        self.assertEqual(done.stdout.strip(), "advise")
+
+
+
+# Independently reproduced Dot cases share the offline behavioral fixtures.
+import runpy as _dot_runpy
+_dot_runpy.run_path(str(__import__("pathlib").Path(__file__).with_name("dot-review-selftest.py")))["run_regressions"](['test_b15'])
 
 if __name__ == "__main__":
     unittest.main()

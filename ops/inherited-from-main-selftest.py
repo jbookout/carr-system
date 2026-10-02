@@ -287,6 +287,117 @@ subprocess.run([str(root / "runtime" / "tool")], check=True)
               "runtime prerequisite is absent from the merge-base worktree" in out, out)
 
 
+def test_the_replay_reuses_the_callers_installed_dependencies():
+    """Requirement: mcp-server/node_modules and .venv are symlinked into the
+    detached merge-base tree before a check runs there.
+
+    `git worktree add` materialises tracked source only — never an ignored,
+    installed directory such as node_modules or .venv (see .gitignore). A
+    check whose only problem is that IT runs in a fresh tree must not read as
+    a break on main; this proves the mechanism reuses what the caller
+    checkout already installed rather than merely detecting its absence.
+    """
+    dependency_check = """\
+import os
+import sys
+root = os.path.dirname(os.path.abspath(__file__))
+marker = os.path.join(root, "mcp-server", "node_modules", "MARKER")
+if os.path.isfile(marker):
+    sys.exit(0)
+sys.stderr.write("dependency missing: " + marker + "\\n")
+sys.exit(1)
+"""
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = make_repo(tmp, base_subject="good")
+        write(repo, "dependency-check.py", dependency_check)
+        git(repo, "add", "dependency-check.py", must=True)
+        git(repo, "commit", "-q", "-m", "add dependency-dependent check", must=True)
+        branch(repo, "innocent", {"unrelated.txt": "x\n"})
+        # An installed, ignored dependency directory present ONLY in the
+        # caller checkout — never committed, exactly like a real npm install.
+        os.makedirs(os.path.join(repo, "mcp-server", "node_modules"), exist_ok=True)
+        write(repo, "mcp-server/node_modules/MARKER", "installed\n")
+
+        rc, out = ask(repo, check_path="dependency-check.py")
+        check("the base replay finds the caller's node_modules via the symlink",
+              rc == NOT_INHERITED, f"exit {rc}\n{out}")
+        check("no attribution banner and no 'dependency missing' trace leak through",
+              "INHERITED FROM MAIN" not in out and "dependency missing" not in out, out)
+
+
+def test_missing_node_modules_replay_is_attribution_unavailable():
+    """defect 71c7c3f2 (PR #1195, hosted run 35979979350, 2026-09-24): the
+    merge-base re-run of ci-selftest.py's "ci.yml parses" check failed only
+    because the detached tree had no mcp-server/node_modules — a bare
+    `node -e "require('js-yaml')..."` MODULE_NOT_FOUND, reported INHERITED
+    FROM MAIN even though main's own gate had passed on its own PR.
+
+    This seeds a check whose caller-side install directory is ALSO absent (so
+    link_install_dirs() has nothing to symlink) and whose failure text names
+    the missing package rather than a tree-rooted path — the shape
+    missing_replay_prerequisite() cannot see, because Node's own
+    MODULE_NOT_FOUND message never spells the missing module as a path. The
+    verdict must be "attribution unavailable", never INHERITED and never a
+    silent NOT_INHERITED that would blame the branch for an environment gap.
+    """
+    node_style_check = """\
+import sys
+sys.stderr.write(
+    "node:internal/modules/cjs/loader:1050\\n"
+    "Error: Cannot find module 'js-yaml'\\n"
+    "Require stack:\\n"
+    "- /tmp/carr-mergebase-xyz/base/mcp-server/[eval]\\n"
+    "    at Module._resolveFilename (node:internal/modules/cjs/loader:1047:15) {\\n"
+    "  code: 'MODULE_NOT_FOUND',\\n"
+    "  requireStack: [ '/tmp/carr-mergebase-xyz/base/mcp-server/[eval]' ]\\n"
+    "}\\n"
+)
+sys.exit(1)
+"""
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = make_repo(tmp, base_subject="good")
+        write(repo, "node-check.py", node_style_check)
+        git(repo, "add", "node-check.py", must=True)
+        git(repo, "commit", "-q", "-m", "add node-dependent check", must=True)
+        branch(repo, "innocent", {"unrelated.txt": "x\n"})
+        # Deliberately no mcp-server/node_modules anywhere — the caller
+        # checkout has nothing to symlink, exactly like a from-scratch worktree.
+
+        rc, out = ask(repo, check_path="node-check.py")
+        check("a MODULE_NOT_FOUND replay is never read as an inherited break",
+              rc == CANNOT_TELL, f"exit {rc}\n{out}")
+        check("no INHERITED FROM MAIN banner is printed",
+              "INHERITED FROM MAIN" not in out, out)
+        check("the refusal names the environment-class signature",
+              "environment-class signature" in out and "MODULE_NOT_FOUND" in out, out)
+
+
+def test_missing_venv_replay_is_attribution_unavailable():
+    """The same environment-class guard for a Python virtualenv, not Node's."""
+    venv_style_check = """\
+import sys
+sys.stderr.write(
+    "/bin/sh: /tmp/carr-mergebase-xyz/base/.venv/bin/python: No such file or directory\\n"
+)
+sys.exit(1)
+"""
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = make_repo(tmp, base_subject="good")
+        write(repo, "venv-check.py", venv_style_check)
+        git(repo, "add", "venv-check.py", must=True)
+        git(repo, "commit", "-q", "-m", "add venv-dependent check", must=True)
+        branch(repo, "innocent", {"unrelated.txt": "x\n"})
+        # No .venv anywhere in the caller checkout either.
+
+        rc, out = ask(repo, check_path="venv-check.py")
+        check("a missing-venv replay is never read as an inherited break",
+              rc == CANNOT_TELL, f"exit {rc}\n{out}")
+        check("no INHERITED FROM MAIN banner is printed",
+              "INHERITED FROM MAIN" not in out, out)
+        check("the refusal names the missing virtualenv",
+              "virtualenv" in out, out)
+
+
 def test_a_check_this_branch_newly_collected_is_not_inherited():
     """main never RAN it, so its failure at the merge base is not main's break.
 
@@ -408,6 +519,9 @@ def main():
                test_committing_a_new_check_is_answered_by_the_pre_filter_first,
                test_exit_78_at_the_base_is_not_a_break,
                test_an_unmaterialised_runtime_prerequisite_is_not_a_break,
+               test_the_replay_reuses_the_callers_installed_dependencies,
+               test_missing_node_modules_replay_is_attribution_unavailable,
+               test_missing_venv_replay_is_attribution_unavailable,
                test_a_check_this_branch_newly_collected_is_not_inherited,
                test_a_check_the_merge_base_already_collected_stays_inherited,
                test_a_slow_base_run_times_out_into_cannot_tell,
