@@ -11,6 +11,7 @@ import { situationRetrievalTools } from "./situation-retrieval.js";
 import { investigationTools } from "./investigation.js";
 import { docConversationTools } from "./doc-conversation.js";
 import { docSuggestionTools } from "./doc-suggestions.js";
+import { docActivityTools } from "./doc-activity.js";
 import { whatsNewTools } from "./whats-new.js";
 import { MEETING_MODE_WRITE_VERBS, meetingModeTools } from "./meeting-mode.js";
 import { notificationTools } from "./notifications.js";
@@ -8598,6 +8599,7 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "situation-retrieval": "mcp-server/src/situation-retrieval.js",
   "investigation": "mcp-server/src/investigation.js",
   "doc-conversation": "mcp-server/src/doc-conversation.js",
+  "doc-activity": "mcp-server/src/doc-activity.js",
   "meeting-mode": "mcp-server/src/meeting-mode.js",
   "notifications": "mcp-server/src/notifications.js",
   "delivery-cadence-a05": "mcp-server/src/delivery-cadence-a05-tools.js",
@@ -9158,10 +9160,16 @@ registerTools({
       idempotency_key: { type: "string" }, event_id: { type: "string" },
     }, required: ["idempotency_key","event_id"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "revert-deal-field", args, async () => {
+      const scope = personalScopeForActor(actor);
+      if (scope.status === "error") throw new ToolError({ error: scope.error });
       const row = (await c.query(
         `select id,subject_id,field,old_value,new_value from event
-          where id=$1 and subject_type='deal'`, [args.event_id])).rows[0];
-      if (!row || !DEAL_ROOM_FIELDS.includes(row.field))
+          where id=$1 and subject_type='deal' and organization_tenant_id=$2
+            and (personal_scope='none' or personal_scope=$3)`,
+        [args.event_id, organizationTenantForActor(actor),
+          scope.status === "personal" ? `${scope.sponsor}-personal` : "none"])).rows[0];
+      if (!row || !DEAL_ROOM_FIELDS.includes(row.field) ||
+          !Object.prototype.hasOwnProperty.call(row.old_value || {}, row.field))
         throw new ToolError({ error: "event_not_revertible" });
       await lockDealField(c, row.subject_id, row.field);
       const latest = (await c.query(
@@ -9653,6 +9661,7 @@ registerTools(investigationTools({ withEnvelope, writeEvent, ToolError }), "inve
 // acting-actor context ops.doc_conversation_facts is handed.
 registerTools(docConversationTools({ withEnvelope, writeEvent, ToolError }), "doc-conversation");
 registerTools(docSuggestionTools({ withEnvelope, writeEvent, ToolError }), "doc-suggestions");
+registerTools(docActivityTools({ ToolError }), "doc-activity");
 registerTools(whatsNewTools({ withEnvelope, executeRegisteredTool, ToolError }), "whats-new");
 
 // V5-UX-B11: non-recording shared Meeting Mode. The store's definer functions

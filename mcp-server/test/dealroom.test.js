@@ -49,10 +49,11 @@ class FakeClient {
   addEvent({ actor = actors.joe, verb = "seed", subject_type = "deal", subject_id = ids.deal,
     field = null, old_value = null, new_value = null, recorded_at = this.now.toISOString(),
     id = this.uuid(), idempotency_key = null,
-    cause = null, human_quote = null, agent_rationale = null }) {
+    cause = null, human_quote = null, agent_rationale = null,
+    organization_tenant_id = "carr-internal", personal_scope = "none" }) {
     const row = { id, recorded_at, actor: actor.slug, actor_id: actor.id, verb, subject_type,
       subject_id, field, old_value, new_value, idempotency_key,
-      cause, human_quote, agent_rationale };
+      cause, human_quote, agent_rationale, organization_tenant_id, personal_scope };
     this.events.push(row);
     return row;
   }
@@ -71,7 +72,10 @@ class FakeClient {
       return { rows: [] };
     }
     if (sql.startsWith("select id,subject_id,field,old_value,new_value from event")) {
-      const event = this.events.find(row => row.id === params[0] && row.subject_type === "deal");
+      assert.match(sql, /organization_tenant_id=\$2/);
+      assert.match(sql, /personal_scope='none' or personal_scope=\$3/);
+      const event = this.events.find(row => row.id === params[0] && row.subject_type === "deal" &&
+        row.organization_tenant_id === params[1] && ["none", params[2]].includes(row.personal_scope));
       return { rows: event ? [{ id:event.id, subject_id:event.subject_id, field:event.field,
         old_value:event.old_value, new_value:event.new_value }] : [] };
     }
@@ -952,6 +956,30 @@ test("parking is a reversible operating state and never changes phase or outcome
     idempotency_key: "park-without-reason", deal: "Deal Alpha", field: "operating_state",
     value: { state: "parked" }, base_event_id: null,
   }), /parking_reason_required/);
+});
+
+test("undo refuses foreign tenant, other personal scope, unknown scope and missing inverse value", async () => {
+  for (const eventScope of [
+    { organization_tenant_id: "synthetic-other-tenant" },
+    { personal_scope: "dell-personal" },
+    { personal_scope: null },
+    { old_value: {} },
+  ]) {
+    const db = new FakeClient();
+    const event = db.addEvent({ field: "phase", old_value: { phase: "research" },
+      new_value: { phase: "legal" }, ...eventScope });
+    await assert.rejects(call("revert-deal-field", db, actors.joe,
+      { event_id: event.id, idempotency_key: "scoped-undo" }),
+    error => error.payload?.error === "event_not_revertible");
+    assert.equal(db.events.length, 1);
+    assert.equal(db.toolCalls.size, 0);
+  }
+  const db = new FakeClient();
+  const event = db.addEvent({ field: "phase", old_value: { phase: "research" },
+    new_value: { phase: "legal" }, personal_scope: "dell-personal" });
+  const result = await call("revert-deal-field", db, actors.dell,
+    { event_id: event.id, idempotency_key: "own-scoped-undo" });
+  assert.equal(result.reverted_event_id, event.id);
 });
 
 test("undo waits for a same-field writer and refuses its newer committed edit", async () => {
