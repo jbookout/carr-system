@@ -1,4 +1,4 @@
-"""Implementation of grok-run.sh; stdout contains only the final Grok message."""
+"""Implementation of grok-run.sh; stdout contains the substantive Grok answer."""
 import argparse
 import json
 import os

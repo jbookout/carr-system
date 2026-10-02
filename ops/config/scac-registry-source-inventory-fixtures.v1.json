@@ -84175,6 +84175,97 @@
       "expected_count": 1084,
       "expected_sha256": "fb60c6d8b092dceae702c619bbd500a26f308fe88ecfef43725e08a32cd3ed38",
       "reason": "Admit partner catch-up and scoped watermark capabilities; source repairs preserve supported histories and partial answers."
+    },
+    {
+      "version": "v102",
+      "remove": [],
+      "upsert": [],
+      "row_replacements": {
+        "mcp-tool:confirm-merge": {
+          "human_only": true,
+          "principal_mode": "server_verified_human"
+        }
+      },
+      "expected_count": 1084,
+      "expected_sha256": "98054b8eb743d97fe1dba0bec67826bea0c359b82c6dd8a4041adb0653ea1bf7"
+    },
+    {
+      "version": "v103",
+      "reason": "Register find-rule, reseal teach supersedes semantics/schema, and bind atomic migration group.",
+      "remove": [],
+      "upsert": [
+        {
+          "ingress_key": "external-admin:tools/migrate.py",
+          "ingress_kind": "external_admin",
+          "operation": "tools/migrate.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "tools/migrate.py",
+          "schema_digest": "b96e487b072c7e37d201f477ef5ea38da24bd63ef16aa072382af67628ee9dd9",
+          "handler_digest": "b96e487b072c7e37d201f477ef5ea38da24bd63ef16aa072382af67628ee9dd9",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "mcp-tool:find-rule",
+          "ingress_kind": "mcp_tool",
+          "operation": "find-rule",
+          "effect_class": "audit_side_effect",
+          "source_locator": "mcp-server/src/tools.js",
+          "schema_digest": "62d8d08c4fbc232594ac95bdd685d3c9c25435a6210ad1006ea9361cead2a8c2",
+          "source_digest": "334ca55d9b22ad9480aaebd59ca466f1020f2d2edc2ffbcb86a7a2918c29cd04",
+          "write": false,
+          "human_only": false,
+          "authority_only": false,
+          "principal_mode": "authenticated_registered_principal",
+          "mutation_kind": null,
+          "target_surface": "scac.surface.database",
+          "delegates_to": [],
+          "request_shape": "closed_top_level_schema",
+          "idempotency_mode": "not_applicable",
+          "rollback_class": "append_only_audit",
+          "admission_class": "application_default_deny",
+          "owner_package": "11",
+          "implementation_state": "source_guarded_not_deployed",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "mcp-tool:teach",
+          "ingress_kind": "mcp_tool",
+          "operation": "teach",
+          "effect_class": "administrative_mutation",
+          "source_locator": "mcp-server/src/tools.js",
+          "schema_digest": "ac28ee6aec77dace4d0f7b0493edd9815f1171606bc04a94bcd8a39a735fc8e4",
+          "source_digest": "334ca55d9b22ad9480aaebd59ca466f1020f2d2edc2ffbcb86a7a2918c29cd04",
+          "write": true,
+          "human_only": false,
+          "authority_only": false,
+          "principal_mode": "authenticated_registered_principal",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.database",
+          "delegates_to": [],
+          "request_shape": "closed_top_level_schema",
+          "idempotency_mode": "operation_principal_manifest_bound",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "application_default_deny",
+          "owner_package": "11",
+          "implementation_state": "source_guarded_not_deployed",
+          "classification_authorizing": false
+        }
+      ],
+      "expected_count": 1085,
+      "expected_sha256": "7e245615be93afe8b26322b640167b00876efc27eac60c647fb0beee4ba87ac5"
     }
   ],
   "current_source_review": {

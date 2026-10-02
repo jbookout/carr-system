@@ -33,7 +33,12 @@ async function groupStopsWithin(child, ms) {
   const deadline = performance.now() + ms;
   for (;;) {
     try { process.kill(-child.pid, 0); }
-    catch (error) { if (error.code === "ESRCH") return true; throw error; }
+    catch (error) {
+      if (error.code === "ESRCH") return true;
+      // macOS can report EPERM while an owned group is exiting. Keep waiting;
+      // only ESRCH proves it is gone, and persistent errors still time out.
+      if (error.code !== "EPERM") throw error;
+    }
     const remaining = deadline - performance.now();
     if (remaining <= 0) return false;
     await wait(Math.min(50, remaining));
