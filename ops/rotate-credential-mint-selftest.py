@@ -82,7 +82,7 @@ def verifier_rotation_cases() -> None:
     existing = PEER.replace("carr_jobs", role)
     password = "V" * 40
     events: list[object] = []
-    identity = (role, role, True)
+    identity: tuple[str, str, bool] | tuple[str] | None = (role, role, True)
 
     class Statement:
         def __init__(self, template):

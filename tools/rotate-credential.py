@@ -714,6 +714,7 @@ def _rotate_existing_role_locked(role: str, generate: bool) -> int:
     # matches a file — recoverable by re-running. Writing first and verifying
     # after would leave an unusable file if the connection failed.
     with psycopg.connect(new_url) as conn:
+        expected: tuple[str, str, bool] | tuple[str]
         if role == "carr_program5_forward_fix_verifier":
             row = conn.execute("select session_user,current_user,pg_has_role(session_user,'carr_program5_forward_fix_verifiers','member')").fetchone()
             expected = (role, role, True)

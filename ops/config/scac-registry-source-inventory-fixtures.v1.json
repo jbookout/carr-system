@@ -86845,8 +86845,8 @@
           "operation": "tools/rotate-credential.py",
           "effect_class": "administrative_mutation",
           "source_locator": "tools/rotate-credential.py",
-          "schema_digest": "3df98e217551b56380cc35dd6e84dc482a80cbb4099fe658ae97c2c556faeaf1",
-          "handler_digest": "3df98e217551b56380cc35dd6e84dc482a80cbb4099fe658ae97c2c556faeaf1",
+          "schema_digest": "a994876093411272ad4d1112592282fe16fe329f074f64f74279f63d06ee66d3",
+          "handler_digest": "a994876093411272ad4d1112592282fe16fe329f074f64f74279f63d06ee66d3",
           "write": true,
           "human_only": false,
           "authority_only": true,
@@ -86864,7 +86864,7 @@
         }
       ],
       "expected_count": 1085,
-      "expected_sha256": "0607c78de7ce9b0eb5b45da979c5663bb66b13be3357b2174d46e4875beb7ac7",
+      "expected_sha256": "6aaf5d59e9ea89ab0fe29df48b4023d03236d4793e2f1de7aa43b483312b4dff",
       "reason": "PR 865 source-only review: re-derive the existing credential rotation external-admin row after enabling scoped verifier rotation, validating URIs and targets before mutation, and verifying the complete caller identity contract. No new ingress, authority, grant, runtime selector or historical seal change."
     }
   }
