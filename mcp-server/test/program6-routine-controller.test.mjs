@@ -68,6 +68,33 @@ test("Jev failure does not change the canonical queue or fail its read", async (
   assert.deepEqual(canonical, { ok: true, items: [{ human_ref: REF, title: "Keep the source order", state: "ready" }] });
 });
 
+test("slow advice returns the queue promptly while its receipted call completes", async () => {
+  let finishCall;
+  const completed = new Promise(resolve => { finishCall = resolve; });
+  const waits = [];
+  const calls = [];
+  const controller = createProgram6RoutineController({
+    advisoryDeadlineMs: 5,
+    callToolFn: async (_env, _actor, name, args) => {
+      calls.push({ name, args });
+      if (name === "ask-jev") return completed;
+      return { ok: true, items: [{ human_ref: REF, title: "Queue", state: "ready" }] };
+    },
+    needsJoeAdvisoryFn: async (_queue, { askJev }) => askJev({
+      model: "jev-1.13.0", state: {}, questions: { q: { type: "noul", question: "Check" } },
+    }),
+  });
+  const response = await controller.fetch(request("/api/system-work/current"),
+    { TYPESAFE_API_KEY: "offline" }, { waitUntil: promise => waits.push(promise) }, ACTOR, SESSION);
+  const body = await response.json();
+  assert.equal(body.data.advisory.status, "unavailable");
+  assert.equal(calls[1].name, "ask-jev");
+  assert.equal(calls[1].args.purpose, "call");
+  assert.equal(waits.length, 1);
+  finishCall({ model: "jev-1.13.0", answers: {} });
+  await waits[0];
+});
+
 test("report route admits only the capture material and never a caller-selected verb or authority", async () => {
   const { controller, calls, authorizations } = subject();
   const body = { idempotency_key: "10000000-0000-0000-0000-000000000001", situation: "stale intake", title: "Source refresh", desired_outcome: "Current source", acceptance_criteria: [{ id: "SOURCE", text: "source is current" }] };

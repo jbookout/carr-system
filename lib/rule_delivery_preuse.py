@@ -42,7 +42,7 @@ GENERALIZED_RECEIPT_KEYS = frozenset({
     "map_digest", "source_digest", "identity", "rule_ids", "rules", "rule_delivery",
 })
 TRIGGER_TABLE_RELATIVE = "ops/config/rule-jit-triggers.v1.json"
-TRIGGER_KINDS = frozenset({"verb", "bash_family", "path_pattern", "content_regex"})
+TRIGGER_KINDS = frozenset({"verb", "bash_family", "path_pattern", "content_regex", "prompt_regex"})
 
 # The partner-message sibling. Unlike the two PreToolUse receipts, this one is
 # selected by semantic judgment rather than by a compiled trigger row. Its
@@ -73,7 +73,11 @@ BUILD_GUIDANCE_KEYS = frozenset({
     "prioritize_blocker_removal",
 })
 BUILD_ADVISORY_UNAVAILABLE_KEYS = frozenset({
-    "schema", "status", "effect", "instruction",
+    "schema", "status", "reason", "effect", "instruction",
+})
+BUILD_ADVISORY_UNAVAILABLE_REASONS = frozenset({
+    "billing_exhausted", "auth_failed", "rate_limited", "timeout", "network",
+    "server_5xx", "unknown",
 })
 # A background-task notification, cross-session message, Stop-hook reopen or
 # other machine envelope is not a partner request, so no build advice is
@@ -86,6 +90,13 @@ BUILD_RECEIPT_KEYS = frozenset({
     "schema", "receipt_id", "client", "session_id", "turn_id",
     "prompt_sha256", "adviser_digest", "configuration_digest",
     "source_digest", "semantic_rule_delivery", "advisory",
+})
+BUILD_FAILURE_STAGES = frozenset({
+    "semantic_adviser", "candidate_selection", "selector_call",
+    "selector_response", "receipt_assembly",
+})
+BUILD_FAILURE_REASONS = frozenset({
+    "timeout", "nonzero", "invalid_json", "not_ok", "invalid_data", "exception",
 })
 POSTWRITE_RECEIPT_SCHEMA = "jev-post-write-review/v2"
 POSTWRITE_RECEIPT_KEYS = frozenset({
@@ -131,6 +142,13 @@ SELECTOR_SOURCE_PATHS = (
     # so a change to either must invalidate old receipts too.
     "ops/jev_verdict_cache.py",
     "ops/machine_envelope.py",
+    # Message-time selection is now a match against Jev's compile-time
+    # judgments, so the matcher, the compiler and both compiled files are
+    # part of what selected a delivered rule.
+    "ops/rule_trigger_delivery.py",
+    "ops/rule_trigger_compile.py",
+    "ops/config/rule-jev-triggers.v1.json",
+    "ops/config/rule-jit-triggers.v1.json",
 )
 
 
@@ -141,6 +159,7 @@ def validate_build_advisory(row: object, *, prompt_sha256: str) -> bool:
     if row.get("schema") == BUILD_ADVISORY_UNAVAILABLE_SCHEMA:
         return (set(row) == BUILD_ADVISORY_UNAVAILABLE_KEYS
                 and row.get("status") == "unavailable"
+                and row.get("reason") in BUILD_ADVISORY_UNAVAILABLE_REASONS
                 and row.get("effect") == "visible_advisory_abstention"
                 and _nonempty(row.get("instruction")))
     if row.get("schema") == BUILD_ADVISORY_SKIPPED_SCHEMA:
@@ -184,7 +203,9 @@ def validate_build_advisory(row: object, *, prompt_sha256: str) -> bool:
 
 def validate_build_receipt(row: object, *, repo: Path) -> bool:
     """Validate the turn-bound build receipt even when no semantic rule binds."""
-    if not isinstance(row, dict) or set(row) != BUILD_RECEIPT_KEYS:
+    if not isinstance(row, dict) or set(row) not in {
+            BUILD_RECEIPT_KEYS,
+            BUILD_RECEIPT_KEYS | {"failure_stage", "failure_reason"}}:
         return False
     if row.get("schema") != BUILD_RECEIPT_SCHEMA:
         return False
@@ -200,6 +221,11 @@ def validate_build_receipt(row: object, *, repo: Path) -> bool:
         return False
     if row.get("semantic_rule_delivery") not in {
             "delivered", "not_applicable", "failed", "not_attempted_oversize"}:
+        return False
+    has_failure = "failure_stage" in row
+    if has_failure and (row["semantic_rule_delivery"] != "failed"
+                        or row["failure_stage"] not in BUILD_FAILURE_STAGES
+                        or row["failure_reason"] not in BUILD_FAILURE_REASONS):
         return False
     expected_config = digest({
         relative: file_sha256(repo / relative)
@@ -282,8 +308,13 @@ def validate_postwrite_receipt(row: object, *, repo: Path) -> bool:
 
 
 def semantic_selector_digest(repo: Path) -> str:
-    """Bind a semantic receipt to every implementation file that judged it."""
-    return digest({relative: file_sha256(repo / relative)
+    """Bind a semantic receipt to every implementation file that judged it.
+
+    An absent file digests as "absent" rather than raising: a missing compiled
+    trigger file is the fail-open case (delivery falls back to judging), and
+    its receipt must still be issuable and verifiable."""
+    return digest({relative: (file_sha256(repo / relative)
+                              if (repo / relative).is_file() else "absent")
                    for relative in SELECTOR_SOURCE_PATHS})
 
 

@@ -41,10 +41,11 @@ WHAT COUNTS AS EVIDENCE JEV WAS CALLED — rewritten. The first cut treated any
 Bash command merely naming `typesafe_client` as a call, which a bare `echo
 typesafe_client` or `grep ask ops/typesafe_client.py` satisfies without ever
 reaching the vendor. ops/typesafe_client.py's `ask()` now appends a receipt
-(session, ts, question ids, model, ok) to out/jev-calls.jsonl on every
+(session, ts, hashed question ids, facets, model, ok) to out/jev-calls.jsonl on every
 SUCCESSFUL response, and this module matches a required facet against that
 file: same session, a timestamp from this turn's start to now, and a
-question id (or an explicit `facets` list on the call) naming the facet. One
+facet inferred from a question id before logging (or an explicit `facets`
+list on the call) naming the facet. Legacy receipts still carry raw ids. One
 batched `ask()` still evaluates several facets at once (ops/typesafe_client.py's
 own "ASK TOGETHER" rule) — attribution is per named facet, not automatically
 "any call clears everything".

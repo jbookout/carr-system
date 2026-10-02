@@ -37,13 +37,44 @@ DEFAULT_DAYS = 120
 GROUP_CONTAINER = os.path.expanduser(
     "~/Library/Group Containers/group.com.apple.calendar/Calendar.sqlitedb"
 )
-EXPORTS = os.path.expanduser("~/carr-system/out/exports")
+# WHERE THE RECORD CONTACTS COME FROM (fixed 2026-09-27). This used to read
+# ~/carr-system/out/exports/<name>.xlsx — the exporters' DRAFT directory. Since
+# Joe's 2026-08-22 ruling the nightly chain exports LIVE, to EXPORT_HOME
+# (CARR's OneDrive), and never writes the draft copy; on the Studio the draft
+# directory does not exist at all. openpyxl was never reached, the loader
+# returned two empty maps, and every weekday run reported "record contacts
+# loaded: 0 emails, 0 domains" — so every external attendee read as unknown and
+# the intake gate refused the capture. The live projection is the file a person
+# opens, rebuilt every night; the draft is not the record.
+#
+# The relative paths are the exporters' own ROSTER_REL / REGISTRY_REL
+# (exporters/targets.py); tools/test-calendar-touch-matcher.py pins them so the
+# two cannot drift apart silently again.
+ROSTER_REL = "DNA/Clients/client-roster.xlsx"
+REGISTRY_REL = "DNA/Leads/lead-registry.xlsx"
 INTERNAL_DOMAIN = "carr.us"
+
+
+def export_home():
+    """The live export root, resolved exactly as the exporters resolve it."""
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from exporters.common import EXPORT_HOME
+    return str(EXPORT_HOME)
+
+
+class NoRecordContacts(RuntimeError):
+    """The roster and registry yielded no contact at all: a source failure."""
 FREEMAIL = {"gmail.com", "icloud.com", "yahoo.com", "hotmail.com", "outlook.com", "aol.com"}
 
 
-def load_record_contacts(snapshot=None):
-    """Return (email -> label) and (domain -> label) from the roster and registry."""
+def load_record_contacts(snapshot=None, root=None):
+    """Return (email -> label) and (domain -> label) from the roster and registry.
+
+    Without a snapshot this reads the LIVE exports under ``root`` (default: the
+    exporters' EXPORT_HOME) and raises NoRecordContacts when they yield nothing,
+    because zero known contacts is a broken source, never an empty book: read as
+    data it turns every attendee into an unknown.
+    """
     by_email, by_domain = {}, {}
     if snapshot is not None:
         if not isinstance(snapshot, list): raise ValueError("contact snapshot must be an array")
@@ -57,13 +88,17 @@ def load_record_contacts(snapshot=None):
             if dom not in FREEMAIL and dom!=INTERNAL_DOMAIN: by_domain.setdefault(dom,label)
         return by_email,by_domain
     import openpyxl
+    base = root if root is not None else export_home()
+    missing = []
 
     def ingest(path, sheet, id_col, name_col, org_col, email_col):
-        full = os.path.join(EXPORTS, path)
+        full = os.path.join(base, path)
         if not os.path.exists(full):
+            missing.append(f"{path} (absent)")
             return
         wb = openpyxl.load_workbook(full, read_only=True, data_only=True)
         if sheet not in wb.sheetnames:
+            missing.append(f"{path} (no sheet {sheet!r})")
             return
         ws = wb[sheet]
         header, idx = None, {}
@@ -91,8 +126,11 @@ def load_record_contacts(snapshot=None):
                 if dom not in FREEMAIL and dom != INTERNAL_DOMAIN:
                     by_domain.setdefault(dom, label)
 
-    ingest("client-roster.xlsx", "Clients", "Client ID", "Name", "Practice / Entity", "Email")
-    ingest("lead-registry.xlsx", "Registry", "Lead ID", "Contact Name", "Practice", "Email")
+    ingest(ROSTER_REL, "Clients", "Client ID", "Name", "Practice / Entity", "Email")
+    ingest(REGISTRY_REL, "Registry", "Lead ID", "Contact Name", "Practice", "Email")
+    if not by_email:
+        detail = "; ".join(missing) or "no row carried an email address"
+        raise NoRecordContacts(f"record contacts: none loaded from the live exports ({detail})")
     return by_email, by_domain
 
 
@@ -215,7 +253,13 @@ def main():
         if not isinstance(snapshot,list) or len(snapshot)!=envelope["contact_count"]: raise ValueError("contact snapshot count mismatch")
         snapshot_envelope=envelope
     days = int(argv[0]) if argv else DEFAULT_DAYS
-    by_email, by_domain = load_record_contacts(snapshot if snapshot_envelope else None)
+    try:
+        by_email, by_domain = load_record_contacts(snapshot if snapshot_envelope else None)
+    except NoRecordContacts as exc:
+        # Loud, nonzero, and addressless: the capture wrapper prints this line
+        # and fails the run instead of mis-reporting every attendee as unknown.
+        print(f"FATAL: {exc}", file=sys.stderr)
+        return 5
     # In --json mode stdout must be PARSEABLE and nothing else. This banner went
     # to stdout ahead of the payload and would have made json.load choke on the
     # first consumer — caught before shipping, not after.

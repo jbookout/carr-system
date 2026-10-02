@@ -9,6 +9,7 @@ queue when Hermes is unavailable.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import List, TypedDict
@@ -26,6 +27,9 @@ QUEUE_TRANSIENT_PREFIX = "queue_transient:"
 NONTERMINAL_STATUSES = ("triage", "todo", "ready", "scheduled", "running")
 META_PREFIX = "[CARR_QUEUE_META "
 META_FIELDS = {"v", "target", "cap", "source_seq", "source_msg_id", "finish"}
+# Optional: tasks created before origin stamping (and any without server provenance) carry the six fields above.
+META_OPTIONAL = {"origin"}
+ORIGIN_VALUE = re.compile(r"[a-z][a-z-]{0,31}:[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 RECONCILIATION_DIAGNOSTIC_LIMIT = 25
 
 
@@ -126,6 +130,12 @@ class KanbanAdapter:
             "source_seq": source_seq, "source_msg_id": turn.get("msg_id"),
             "finish": command["finish"],
         }
+        # Server-derived provenance (queue_grammar._origin's fields, never `seat` or body text), stamped into the
+        # adapter-built first line so the desk can require a trusted origin for a Flash code task whatever target
+        # was named. A posted body cannot forge it: the executor reads only this first line as metadata.
+        origin = f"{turn.get('origin_channel')}:{turn.get('origin_actor')}"
+        if ORIGIN_VALUE.fullmatch(origin):
+            meta["origin"] = origin
         task_body = f"[CARR_QUEUE_META {json.dumps(meta, separators=(',', ':'))}]\n{command['body']}".rstrip()
         argv = [
             "hermes", "kanban", "--board", BOARD, "create", "--project", PROJECT,
@@ -205,7 +215,9 @@ class KanbanAdapter:
             value = json.loads(first[len(META_PREFIX):-1])
         except (TypeError, json.JSONDecodeError):
             return None, "metadata_malformed"
-        if not isinstance(value, dict) or set(value) != META_FIELDS:
+        if not isinstance(value, dict) or not META_FIELDS <= set(value) <= META_FIELDS | META_OPTIONAL:
+            return None, "metadata_malformed"
+        if "origin" in value and not (isinstance(value["origin"], str) and ORIGIN_VALUE.fullmatch(value["origin"])):
             return None, "metadata_malformed"
         if (value.get("v") != 1 or not isinstance(value.get("target"), str)
                 or not isinstance(value.get("cap"), str)
@@ -427,6 +439,34 @@ class QueueService:
             reason = "capability_target_refused"
         elif row.get("overflow"):
             reason = "flash_busy_or_down"
+        elif (row.get("fallback") or row.get("jev_error")) and alias == "flash":
+            # Jev unreachable, or no score cleared its cutoff: the abstain route never lands on the cheapest desk
+            reason = "jev_abstained"
+        elif row["route"] == "script" and alias == "flash":
+            # Flash's script protocol needs the data named, in the policy's data folders (flash_wire.script_inputs)
+            import flash_wire
+            # data lines count in the body only, exactly as the desk reads them (flash_wire.task_parts)
+            paths, _, refusal = flash_wire.script_inputs(command.get("body") or "",
+                                                         roots=policy.get("script_data_roots") or [])
+            if refusal:
+                reason = "script_data_refused"
+            elif paths is None:
+                reason = "script_needs_data"
+        elif row["route"] == "code" and alias == "flash":
+            # Defense in depth: a Flash code run executes model-driven code on this host, so it is accepted only from
+            # a server-derived trusted origin (never `seat`), and only when the body names one allowlisted git
+            # project and one bounded test command, read exactly as the desk reads them (flash_wire.code_inputs over
+            # flash_wire.task_parts' body).
+            origin = f"{command.get('origin_channel')}:{command.get('origin_actor')}"
+            import flash_wire
+            spec, _, refusal = flash_wire.code_inputs(command.get("body") or "",
+                                                      roots=policy.get("code_project_roots") or [])
+            if origin not in (policy.get("code_task_origins") or []):
+                reason = "code_origin_untrusted"
+            elif refusal:
+                reason = "code_project_refused"
+            elif spec is None:
+                reason = "code_needs_project"
         if reason:
             alias = targets.get("fallback")
         return {"target": alias, "route": row["route"], "model": row.get("model"), "effort": row.get("effort"),

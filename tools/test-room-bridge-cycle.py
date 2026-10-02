@@ -92,7 +92,7 @@ def run_offline_cycle(**kwargs):
         )
 
 
-def fake_dispatch(name, task, *, registry, results_path, fresh=False):
+def fake_dispatch(name, task, *, registry, results_path, fresh=False, live_desktop=False):
     if name == "joe-desk":
         return {"msg_id": "dispatch-claude-1", "desk": name, "kind": "claude-session",
                 "task": task, "dispatched_at": "2026-08-22T00:00:00+00:00",
@@ -204,7 +204,7 @@ def a_pending_desk_is_never_offered_a_second_turn_before_it_answers():
 
         delivered_calls = {"n": 0}
 
-        def counting_dispatch(name, task, *, registry, results_path, fresh=False):
+        def counting_dispatch(name, task, *, registry, results_path, fresh=False, live_desktop=False):
             if name == "joe-desk":
                 delivered_calls["n"] += 1
             return fake_dispatch(name, task, registry=registry, results_path=results_path)

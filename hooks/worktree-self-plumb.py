@@ -118,6 +118,13 @@ import time
 # .claude/settings.json — the same "always call the canonical copy"
 # convention hooks/delegation-gate.py already uses), so REPO is the
 # canonical tree regardless of which worktree's cwd triggered this hook.
+#
+# CLOUD CONTAINERS (2026-09-27): the settings command runs this file only when
+# ~/carr-system/hooks exists and exits 0 otherwise. A Claude Code cloud clone
+# has no canonical checkout, no sibling worktrees to plumb and no orphans to
+# reap, so the hook does nothing there by design. The AGENTS.md policy block
+# this hook prints is therefore not injected in the cloud; ops/cloud-hook-
+# paths-selftest.py pins that no-op.
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Must match the three names bin/worktree.sh links at create time and
@@ -471,7 +478,8 @@ def reap_main(argv):
                 detail = " ".join((p.stdout + " " + p.stderr).split())[:200]
                 say(f"KEEP  {name} — --remove refused: {detail}")
                 kept += 1
-        run_git(["worktree", "prune"], canon)
+        if not dry:
+            run_git(["worktree", "prune"], canon)
         say(f"reap done: {reaped} {'would be ' if dry else ''}reaped, {kept} kept")
     finally:
         try:
