@@ -1127,9 +1127,9 @@ test("the ACTIVE runtime registry is v63, and a stale v19 import fails admission
   // schema (detail="boot", page) for the rule boot; v91 (provisional)
   // registers V5-RW02's three safe-stop run-store verbs and reseals update-deal.
   assert.equal(SCAC_MUTATION_REGISTRY_VERSION, "scac-mutation-registry.v102");
-  const v101SelectorDigest = fs.readFileSync(new URL("../src/scac-mutation-registry.v102.generated.js", import.meta.url), "utf8").match(
+  const v102SelectorDigest = fs.readFileSync(new URL("../src/scac-mutation-registry.v102.generated.js", import.meta.url), "utf8").match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
-  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, v101SelectorDigest);
+  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, v102SelectorDigest);
   assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV90.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
   assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV88.match(

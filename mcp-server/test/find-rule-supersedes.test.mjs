@@ -70,7 +70,7 @@ test('real PostgreSQL: proposed phrase lookup, literal wildcards, retirement, re
   try {
     await c.query('begin');
     await c.query("insert into actor(id,slug,kind,display_name) values($1,$2,'automation','Synthetic test actor')",
-      [actorId,`fixture-${actorId}`]); 
+      [actorId,`fixture-${actorId}`]);
     await c.query("select set_config('carr.acting_actor_slug',$1,true)",[`fixture-${actorId}`]);
     await c.query('insert into rule(id,statement,human_quote,taught_by) values($1,$2,$3,$4)',
       [old,`${phrase} 100%_literal ${'x'.repeat(250)}`,'Synthetic quote',actorId]);
