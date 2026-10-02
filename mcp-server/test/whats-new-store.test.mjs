@@ -147,33 +147,40 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
       ['2026-03-09T04:00:00Z', '2026-03-08T06:00:00Z'],
       ['2026-11-02T04:00:00Z', '2026-11-01T05:00:00Z'],
     ];
+    const originalZone = (await c.query('show TimeZone')).rows[0].TimeZone;
     let fixtureId = 80;
-    for (const zone of ['UTC', 'America/Chicago']) for (const [until, threshold] of windows) {
-      await c.query('reset role');
-      await c.query("select set_config('TimeZone',$1,false)", [zone]);
-      const fixtureDay = (await c.query("select ($1::timestamptz at time zone 'America/Chicago')::date::text as day", [until])).rows[0].day;
-      const actionId = uuid(fixtureId++);
-      const old = new Date(Date.parse(threshold) - 3 * 86400000).toISOString();
-      // INSERT preserves the old timestamps; UPDATE would fire next_action_touch
-      // and let a recent-write path mask a broken due-date threshold.
-      await c.query("insert into next_action(id,subject_type,subject_id,owner_id,description,due_on,created_by,updated_by,created_at,updated_at) values($1,'deal',$2,$3,'Synthetic threshold action',$4,$3,$3,$5,$5)", [actionId,uuid(5),uuid(1),fixtureDay,old]);
-      await c.query("update critical_date set created_at=$1,updated_at=$1,due_on=$2::date+14 where id=$3", [old,fixtureDay,uuid(11)]);
-      await c.query("update ops.doc_suggestion set suggested_at=$1,disposition='snoozed',snoozed_material_version=material_version,snoozed_until=$2 where id=$3", [old,fixtureDay,uuid(21)]);
-      await identity('joe');
-      const thresholdContext = { since:old, high_water:until, previous_snapshot:null };
-      const refs = { next_actions:`next-action:${actionId}`, critical_dates:`critical-date:${uuid(11)}`, doc_suggestions:`doc-suggestion:${uuid(21)}` };
-      for (const [name, ref] of Object.entries(refs)) {
-        const item = (await section(name,thresholdContext)).items.find(i => i.ref === ref);
-        assert.ok(item, `${zone} ${until}: ${name} must appear without a recent write`);
-        assert.equal(Date.parse(item.at),Date.parse(threshold),name);
-        const before = { ...thresholdContext, high_water:new Date(Date.parse(threshold)-1).toISOString() };
-        assert.equal((await section(name,before)).items.some(i => i.ref === ref),false,`${name} before threshold`);
-        const at = { ...thresholdContext, high_water:threshold };
-        assert.ok((await section(name,at)).items.some(i => i.ref === ref),`${name} at threshold`);
-        const seen = { ...thresholdContext, since:threshold };
-        assert.equal((await section(name,seen)).items.some(i => i.ref === ref),false,`${name} after acknowledgement`);
+    try {
+      for (const zone of ['UTC', 'America/Chicago']) for (const [until, threshold] of windows) {
+        await c.query('reset role');
+        await c.query("select set_config('TimeZone',$1,false)", [zone]);
+        const fixtureDay = (await c.query("select ($1::timestamptz at time zone 'America/Chicago')::date::text as day", [until])).rows[0].day;
+        const actionId = uuid(fixtureId++);
+        const old = new Date(Date.parse(threshold) - 3 * 86400000).toISOString();
+        // INSERT preserves the old timestamps; UPDATE would fire next_action_touch
+        // and let a recent-write path mask a broken due-date threshold.
+        await c.query("insert into next_action(id,subject_type,subject_id,owner_id,description,due_on,created_by,updated_by,created_at,updated_at) values($1,'deal',$2,$3,'Synthetic threshold action',$4,$3,$3,$5,$5)", [actionId,uuid(5),uuid(1),fixtureDay,old]);
+        await c.query("update critical_date set created_at=$1,updated_at=$1,due_on=$2::date+14 where id=$3", [old,fixtureDay,uuid(11)]);
+        await c.query("update ops.doc_suggestion set suggested_at=$1,disposition='snoozed',snoozed_material_version=material_version,snoozed_until=$2 where id=$3", [old,fixtureDay,uuid(21)]);
+        await identity('joe');
+        const thresholdContext = { since:old, high_water:until, previous_snapshot:null };
+        const refs = { next_actions:`next-action:${actionId}`, critical_dates:`critical-date:${uuid(11)}`, doc_suggestions:`doc-suggestion:${uuid(21)}` };
+        for (const [name, ref] of Object.entries(refs)) {
+          const item = (await section(name,thresholdContext)).items.find(i => i.ref === ref);
+          assert.ok(item, `${zone} ${until}: ${name} must appear without a recent write`);
+          assert.equal(Date.parse(item.at),Date.parse(threshold),name);
+          const before = { ...thresholdContext, high_water:new Date(Date.parse(threshold)-1).toISOString() };
+          assert.equal((await section(name,before)).items.some(i => i.ref === ref),false,`${name} before threshold`);
+          const at = { ...thresholdContext, high_water:threshold };
+          assert.ok((await section(name,at)).items.some(i => i.ref === ref),`${name} at threshold`);
+          const seen = { ...thresholdContext, since:threshold };
+          assert.equal((await section(name,seen)).items.some(i => i.ref === ref),false,`${name} after acknowledgement`);
+        }
       }
+    } finally {
+      await c.query("select set_config('TimeZone',$1,false)", [originalZone]);
     }
+    assert.equal((await c.query('show TimeZone')).rows[0].TimeZone,originalZone,
+      'threshold matrix must restore the session timezone');
     await identity('dell');
     assert.equal((await section('new_leads',await context())).state,'empty');
     await c.query('reset role');
