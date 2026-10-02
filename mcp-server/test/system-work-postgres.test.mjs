@@ -85,3 +85,40 @@ test('canonical slice members drive mixed, complete, reopened and superseded pla
  assert.ok(!unfinished.items.some(i=>i.id===old));
  }finally{await client.query('rollback');await client.end();}
 });
+
+test('slice-plan census binds PostgreSQL parameters before Passport completion', {skip:!url}, async()=>{
+ const db=new pg.Client({connectionString:url});await db.connect();
+ try{
+  await db.query('begin');
+  await db.query(`create temporary table census_work_fixture
+   (id uuid,ref text,title text,state text,organization_tenant_id text,owner_actor text);
+   create temporary table census_plan_fixture
+   (id uuid,work_request_id uuid,created_at timestamptz,work_request_version bigint,
+    plan jsonb,plan_digest text,accepted_plan_id uuid,accepted_plan_hash text);
+   create temporary table census_mark_fixture(slice_id text,status text,created_at timestamptz,mark_seq bigint)`);
+  const client={query:(sql,params)=>{
+   if(sql.includes('as cache'))return Promise.resolve({rows:[]});
+   if(sql.includes('ops.engineering_passport_facts'))return Promise.resolve({rows:[{facts:null}]});
+   return db.query(sql.replaceAll('ops.work_request','pg_temp.census_work_fixture')
+    .replaceAll('ops.engineering_slice_plan','pg_temp.census_plan_fixture')
+    .replaceAll('ops.slice_completion_mark','pg_temp.census_mark_fixture'),params);
+  }};
+  const read=live_library=>readSystemWorkCensus({client,actor:{slug:'joe',human:true},kinds:'slice_plan',live_library});
+  const empty=await read(false);
+  assert.equal(empty.coverage[0].state,'complete');assert.equal(empty.census_complete,true);
+  assert.equal(empty.coverage[0].count_total,0);
+  await db.query(`insert into census_work_fixture values
+   ('00000000-0000-4000-8000-000000000001','WR-999991','Synthetic plan','in_progress','carr-internal','joe');
+   insert into census_plan_fixture values
+   ('00000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-000000000001',now(),1,
+    '{"slices":[{"slice_ref":"synthetic-pg-slice"}],"accepted_plan_revision":{"revision":1}}',
+    'sha256:synthetic','00000000-0000-4000-8000-000000000003','sha256:synthetic')`);
+  const unfinished=await read(false);
+  assert.equal(unfinished.census_complete,true);assert.equal(unfinished.coverage[0].count_total,1);
+  assert.equal(unfinished.items[0].id,'00000000-0000-4000-8000-000000000002');
+  await db.query(`insert into census_mark_fixture values('synthetic-pg-slice','complete',now(),1)`);
+  assert.equal((await read(false)).items.length,0);
+  const live=await read(true);assert.equal(live.census_complete,true);
+  assert.equal(live.coverage[0].count_total,1);assert.equal(live.items[0].state,'complete');
+ }finally{await db.query('rollback');await db.end();}
+});

@@ -530,6 +530,7 @@ test("system census honors exact Passport completion before library filtering, c
       assert.equal(params[0], source.work.ref); return { rows: [{ facts }] };
     }
     assert.ok(sql.includes(SYSTEM_WORK_LEGS.find(l => l.kind === "slice_plan").sql));
+    assert.deepEqual(params, ["carr-internal"], "the raw slice-plan statement binds only its tenant parameter");
     const rows = sql.includes("completed=$3") && params[2] !== row.completed ? [] : [row];
     return { rows: sql.includes("count(*) as count") ? [{ count: rows.length }] : rows };
   } };

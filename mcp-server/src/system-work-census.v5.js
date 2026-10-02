@@ -216,7 +216,7 @@ export async function readSystemWorkCensus({client,actor,correlationId,now=()=>n
    if(leg.kind==='slice_plan') {
     // Completion belongs to the Passport. Resolve it before selecting either
     // library, counting, or paginating; legacy marks cannot override lineage.
-    const result=await client.query(leg.sql,[tenant,sponsor]);
+    const result=await client.query(leg.sql,[tenant]);
     const rows=[];let missing=0;
     for(const raw of result.rows) {
      const row={...raw};
