@@ -44,6 +44,7 @@ A3A_ISSUER: IssuerConfig = {}
 EXPECTED_A3A_TABLES = [
     "ops.assurance_evidence_extension",
     "ops.assurance_execution_manifest",
+    "ops.assurance_health_evidence",
     "ops.assurance_owner_acceptance_fact",
     "ops.assurance_review_extension",
 ]
@@ -51,6 +52,14 @@ EXPECTED_A3A_FUNCTIONS = sorted([
     "ops.assurance_all_tokens_absent(jsonb)",
     "ops.assurance_digest(jsonb)",
     "ops.assurance_exact_object(jsonb,text[])",
+    "ops.assurance_health_basis(text)",
+    "ops.assurance_health_evidence_immutable()",
+    "ops.assurance_health_exact_keys(jsonb,text[])",
+    "ops.assurance_health_instant(text)",
+    "ops.assurance_health_label(text,integer,text,jsonb)",
+    "ops.assurance_health_layers()",
+    "ops.assurance_health_refs_valid(jsonb)",
+    "ops.assurance_health_stage(text[])",
     "ops.assurance_identifier_valid(text)",
     "ops.assurance_lease_lineage_current(uuid,timestamp with time zone)",
     "ops.assurance_append_lineage_current(uuid,uuid,timestamp with time zone,uuid,bigint)",
@@ -77,6 +86,14 @@ EXPECTED_A3A_FUNCTION_POSTURE = {
     "ops.assurance_all_tokens_absent(jsonb)": (True, "s", "search_path=pg_catalog, ops"),
     "ops.assurance_digest(jsonb)": (False, "i", "search_path=pg_catalog, ops, public"),
     "ops.assurance_exact_object(jsonb,text[])": (False, "i", "search_path=pg_catalog"),
+    "ops.assurance_health_basis(text)": (False, "i", "search_path=pg_catalog"),
+    "ops.assurance_health_evidence_immutable()": (False, "v", "search_path=pg_catalog"),
+    "ops.assurance_health_exact_keys(jsonb,text[])": (False, "i", "search_path=pg_catalog"),
+    "ops.assurance_health_layers()": (False, "i", "search_path=pg_catalog"),
+    "ops.assurance_health_refs_valid(jsonb)": (False, "i", "search_path=pg_catalog"),
+    "ops.assurance_health_instant(text)": (False, "s", "search_path=pg_catalog"),
+    "ops.assurance_health_label(text,integer,text,jsonb)": (False, "s", "search_path=pg_catalog, public, ops"),
+    "ops.assurance_health_stage(text[])": (False, "i", "search_path=pg_catalog"),
     "ops.assurance_identifier_valid(text)": (False, "i", "search_path=pg_catalog"),
     "ops.assurance_lease_lineage_current(uuid,timestamp with time zone)":
         (True, "v", "search_path=pg_catalog, ops, public"),
@@ -784,12 +801,7 @@ def main() -> int:
                     "ops/a3a-rename-source.sql",
                 ])
         conn.commit()
-        with conn.cursor() as cur:
-            cur.execute("""update ops.job set next_attempt_at=now()+interval '1 day'
-              where definition_key='engineering-slice' and state='queued' and id<>%s""",
-              (dependency[0],))
-        conn.commit()
-        dependency_claim = cc.claim_one(conn, dependency[0], "a3a-dependency", [dependency[0]])
+        dependency_claim = cc.claim_one(conn, dependency[0], "a3a-dependency")
         with conn.cursor() as cur:
             cc.set_jobs(cur)
             dependency_receipt_id = cc.receipt(cur, dependency, dependency_claim, "claimed_complete")
@@ -815,12 +827,7 @@ def main() -> int:
             contract_evidence_requirements = multi_evidence_requirements()
         conn.commit()
 
-        with conn.cursor() as cur:
-            cur.execute("""update ops.job set next_attempt_at=now()+interval '1 day'
-              where definition_key='engineering-slice' and state='queued' and id<>%s""",
-              (fixture[0],))
-        conn.commit()
-        claim = cc.claim_one(conn, fixture[0], "a3a-controller", [fixture[0]])
+        claim = cc.claim_one(conn, fixture[0], "a3a-controller")
         with conn.cursor() as cur:
             expires_at = one(cur, """select least(j.leased_until,
               s.lease_expires_at,e.expires_at)-interval '5 seconds'
@@ -1340,8 +1347,19 @@ def main() -> int:
             # Every positive manifest must be admitted while the issuer runtime
             # and A2 lease are live.  0532a releases both before the terminal
             # receipt, so review-stage manifests are immutable pre-terminal facts.
+            #
+            # This window backs the fresh two-connection review race below,
+            # where the blocked racer's wait for pg_advisory_xact_lock is not
+            # bounded by anything the harness controls -- only by however long
+            # the winner's own round trip takes on whatever runner this test
+            # is on. 240s is already ample against this Mac; it is not against
+            # a contended CI runner, and this manifest also has to survive
+            # every owner-acceptance call made against it further down.  Sized
+            # generously rather than close to the metal, same principle as the
+            # EXPIRING_SNAPSHOT_WINDOW_SECONDS comment above: insert-critical
+            # windows get headroom, only the dedicated expiry tests stay tight.
             one(cur, "select pg_sleep(1.1)")
-            review_coord = make_coord(cur, lease, session, host, seconds=240)
+            review_coord = make_coord(cur, lease, session, host, seconds=600)
             review_input, review_manifest = compile_input(
                 cur, lease, plan, rules, review_coord, session, host, commit="a" * 40,
                 evidence_requirements=contract_evidence_requirements)
@@ -1349,7 +1367,7 @@ def main() -> int:
                 review_manifest, rules, review_coord, uuid.uuid4())
             review_manifest_id = manifest_id(review_row)
             one(cur, "select pg_sleep(1.1)")
-            owner_only_coord = make_coord(cur, lease, session, host, seconds=220)
+            owner_only_coord = make_coord(cur, lease, session, host, seconds=600)
             owner_only_input, owner_only_manifest = compile_input(
                 cur, lease, plan, rules, owner_only_coord, session, host,
                 evidence_requirements=contract_evidence_requirements)
@@ -1740,19 +1758,27 @@ def main() -> int:
                     reviewer_fact_id, review_manifest_id, ev_id, Jsonb(review),
                     review_digest, review_key,
                 ))
-            check("fresh review insert race is serialized",
-                  len(fresh_review_race) == 2
-                  and all(row.get("ok") is True for row in fresh_review_race)
-                  and len({row.get("review_id") for row in fresh_review_race}) == 1
-                  and sum(row.get("replayed") is False for row in fresh_review_race) == 1
-                  and sum(row.get("replayed") is True for row in fresh_review_race) == 1)
+            # This must be a check(), not a raise. Two connections are racing
+            # an identical idempotency key behind the function's own
+            # pg_advisory_xact_lock, so the blocked racer's wait is bounded
+            # only by however long the winner's own round trip takes -- and on
+            # a contended runner that wait is not bounded by anything this
+            # harness controls. A RuntimeError here used to abort the whole
+            # 200+ check suite on that one anomaly, discarding every
+            # diagnostic the rest of the file would otherwise have produced.
+            # Every sibling fresh-insert race in this file (see "owner
+            # conflicting fresh insert race is atomic" below) already reports
+            # through check() instead; this one is brought in line with that.
+            review_serialized = (
+                len(fresh_review_race) == 2
+                and all(row.get("ok") is True for row in fresh_review_race)
+                and len({row.get("review_id") for row in fresh_review_race}) == 1
+                and sum(row.get("replayed") is False for row in fresh_review_race) == 1
+                and sum(row.get("replayed") is True for row in fresh_review_race) == 1)
+            check("fresh review insert race is serialized", review_serialized,
+                  safe(fresh_review_race))
             review_result = next(
-                (row for row in fresh_review_race if row.get("replayed") is False), None)
-            if review_result is None:
-                raise RuntimeError(
-                    "fresh review race returned no inserting row: "
-                    f"{safe(fresh_review_race)}"
-                )
+                (row for row in fresh_review_race if row.get("replayed") is False), {})
             check("independent review extends existing Passport fact", review_result.get("ok") is True)
             review_replay = call(cur, "ops.record_assurance_review_extension", (
                 reviewer_fact_id, review_manifest_id, ev_id, Jsonb(review), review_digest, review_key,
@@ -2157,7 +2183,11 @@ def main() -> int:
                 join pg_namespace n on n.oid=c.relnamespace cross join lateral
                 aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) acl
                 where n.nspname='ops' and c.relname like 'assurance_%%'
-                  and c.relkind='r' and acl.grantee<>c.relowner)
+                  and c.relkind='r' and acl.grantee<>c.relowner
+                  -- The dedicated review login reads all business tables.
+                  -- Only its non-grantable SELECT is authorized here.
+                  and not coalesce((acl.grantee=to_regrole('dot_reader')
+                    and acl.privilege_type='SELECT' and not acl.is_grantable),false))
               and not exists(select 1 from pg_proc p
                 join pg_namespace n on n.oid=p.pronamespace cross join lateral
                 aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) acl
@@ -2170,7 +2200,7 @@ def main() -> int:
                     'ops.record_assurance_execution_manifest(uuid,uuid,bigint,text,jsonb,jsonb,jsonb,jsonb,uuid)'::regprocedure,
                     'ops.assurance_manifest_currentness(uuid,text,text,text,text,text,uuid)'::regprocedure])
                     and acl.grantee='carr_ownership_issuer'::regrole))""")[0]
-            check("A3a tables and non-approved functions have owner-only ACLs", no_external_acl)
+            check("A3a tables allow only owner authority and Dot SELECT; functions retain exact callers", no_external_acl)
             issuer_functions = one(cur, """select coalesce(array_agg(p.oid::regprocedure::text
               order by p.oid::regprocedure::text),'{}'::text[]) from pg_proc p cross join lateral
               aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) acl
@@ -2198,7 +2228,7 @@ def main() -> int:
                 signature: (security_definer, volatility, config)
                 for signature, security_definer, volatility, config in posture_rows
             }
-            check("exact A3a posture is pinned for all 24 functions",
+            check("exact assurance posture is pinned for all 32 functions",
                   actual_function_posture == EXPECTED_A3A_FUNCTION_POSTURE,
                   f"actual={safe(actual_function_posture)}")
             check("A3a schema fingerprint is invariant across all tests",

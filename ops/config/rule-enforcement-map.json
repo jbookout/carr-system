@@ -49,7 +49,6 @@
       "6901cc3b",
       "c6f69dee",
       "e313a3ca",
-      "1e62c007",
       "fb110a39",
       "8c1e6057",
       "5be2f462",
@@ -96,10 +95,8 @@
       "f5bac101",
       "1b8e7f43",
       "a8c55a47",
-      "61551180",
       "17ffd587",
       "6a4e6283",
-      "708c2150",
       "b1521526",
       "c1547ed1",
       "f04a05aa",
@@ -131,7 +128,6 @@
       "def3e84e",
       "388cc81e",
       "df8f1da0",
-      "2dbb0ad8",
       "9873a0d2",
       "9e3fb6d0",
       "3578d799",
@@ -155,7 +151,6 @@
       "1f3a7372",
       "af7de070",
       "647f843d",
-      "aa411351",
       "e8868cbe",
       "d9874334",
       "740bb505",
@@ -213,7 +208,10 @@
       "1f750181",
       "1fcaa63a",
       "737a68d6",
-      "a7784a18"
+      "a7784a18",
+      "204391be",
+      "a2e78f48",
+      "b7ec8f3b"
     ]
   },
   "categories": {
@@ -282,7 +280,6 @@
     "hard_pre_action": [
       "236ca227",
       "e313a3ca",
-      "1e62c007",
       "57d83b75",
       "ca841807",
       "4c21d86b",
@@ -299,7 +296,6 @@
       "308ef1de",
       "647f843d",
       "6cfb67f5",
-      "aa411351",
       "eaa31ac5",
       "cff429f5",
       "d7c69aa6",
@@ -324,7 +320,6 @@
       "97326357",
       "17ffd587",
       "6a4e6283",
-      "708c2150",
       "f04a05aa",
       "590b11e1",
       "b01edd26",
@@ -362,7 +357,6 @@
       "4f7c348f",
       "4a9188f3",
       "015183f5",
-      "2dbb0ad8",
       "185013c6",
       "fc21a431",
       "df55c398",
@@ -1120,13 +1114,6 @@
       "enforcement_class": "stop_gate",
       "exceptions": "the resend carries only the delta plus a pointer"
     },
-    "1e62c007": {
-      "binding_moment": "before away-mode write",
-      "category": "hard_pre_action",
-      "control": "no_send_worker",
-      "enforcement_class": "deny_gate",
-      "exceptions": "internal record work remains profile-scoped"
-    },
     "1f3a7372": {
       "binding_moment": "scheduled finding completion",
       "category": "post_action_verification",
@@ -1227,13 +1214,6 @@
       "category": "judgment_advisory",
       "enforcement_class": "judgment_ambient",
       "why_unenforceable": "Data-capture completeness judgment (what counts as 'useful')."
-    },
-    "2dbb0ad8": {
-      "binding_moment": "subagent staffing",
-      "category": "session_task_rail",
-      "control": "delegation_tripwire",
-      "enforcement_class": "surfacing",
-      "exceptions": "cheapest qualified seat"
     },
     "2e362970": {
       "category": "judgment_advisory",
@@ -1581,11 +1561,6 @@
       "enforcement_class": "judgment_ambient",
       "why_unenforceable": "Inference-quality judgment (did mail/calendar evidence actually establish contact)."
     },
-    "61551180": {
-      "category": "judgment_advisory",
-      "enforcement_class": "judgment_ambient",
-      "why_unenforceable": "Security/business tradeoff judgment (live vs speculative, reversible vs not)."
-    },
     "6172e7d5": {
       "category": "judgment_advisory",
       "enforcement_class": "judgment_ambient",
@@ -1642,13 +1617,6 @@
       "enforcement_class": "judgment_ambient",
       "rule_surface": "intro_politics",
       "why_unenforceable": "No tool call represents 'introduce' or 'co-invite' \u2014 the pairing is chosen inside prose a human sends, and the vendor attributes these rules key on (Category, Stage, Vertical, Territory, Links, delivery tier) live in vendors.xlsx and deals.md rather than on a gated write path. Delivery tier is a tiebreaker that sits below hard blocks and vertical/state fit and above relationship stage; ordering three soft factors for one client's need is judgment."
-    },
-    "708c2150": {
-      "binding_moment": "automation completion claim",
-      "category": "post_action_verification",
-      "control": "completion_evidence",
-      "enforcement_class": "stop_gate",
-      "exceptions": "read-only report"
     },
     "70e372f0": {
       "category": "judgment_advisory",
@@ -1921,13 +1889,6 @@
       "control": "completion_evidence",
       "enforcement_class": "stop_gate",
       "exceptions": "no tracked change"
-    },
-    "aa411351": {
-      "binding_moment": "before an internal approval question",
-      "category": "hard_pre_action",
-      "control": "escalation",
-      "enforcement_class": "deny_gate",
-      "exceptions": "client/public/money/destructive questions"
     },
     "ab814a26": {
       "binding_moment": "at explicit human approve-rule",
@@ -2350,6 +2311,21 @@
       "category": "judgment_advisory",
       "enforcement_class": "judgment_ambient",
       "why_unenforceable": "Structural-design judgment."
+    },
+    "204391be": {
+      "category": "judgment_advisory",
+      "enforcement_class": "judgment_ambient",
+      "why_unenforceable": "The task-specific instruction is delivered by its rule pack; no deterministic predicate can decide every application."
+    },
+    "a2e78f48": {
+      "category": "judgment_advisory",
+      "enforcement_class": "judgment_ambient",
+      "why_unenforceable": "The task-specific instruction is delivered by its rule pack; no deterministic predicate can decide every application."
+    },
+    "b7ec8f3b": {
+      "category": "judgment_advisory",
+      "enforcement_class": "judgment_ambient",
+      "why_unenforceable": "The task-specific instruction is delivered by its rule pack; no deterministic predicate can decide every application."
     }
   },
   "rule_load_layers": {
@@ -2470,13 +2446,6 @@
       "packs": [],
       "why": "An installed stop gate delivers this at its binding moment."
     },
-    "1e62c007": {
-      "load_layer": "control",
-      "packs": [
-        "scheduled-automation"
-      ],
-      "why": "An installed deny gate delivers this at its binding moment."
-    },
     "1f3a7372": {
       "load_layer": "control",
       "packs": [
@@ -2572,12 +2541,6 @@
       "load_layer": "pack",
       "packs": [
         "records-intake"
-      ]
-    },
-    "2dbb0ad8": {
-      "load_layer": "pack",
-      "packs": [
-        "delegation-council"
       ]
     },
     "2e362970": {
@@ -2867,11 +2830,6 @@
         "records-intake"
       ]
     },
-    "61551180": {
-      "load_layer": "layer0",
-      "packs": [],
-      "why": "The reversible-protection test applies to any live exposure found in any lane."
-    },
     "6172e7d5": {
       "load_layer": "pack",
       "packs": [
@@ -2933,13 +2891,6 @@
       "packs": [
         "vendor-intros"
       ]
-    },
-    "708c2150": {
-      "load_layer": "control",
-      "packs": [
-        "scheduled-automation"
-      ],
-      "why": "An installed stop gate delivers this at its binding moment."
     },
     "70e372f0": {
       "load_layer": "pack",
@@ -3207,11 +3158,6 @@
       "load_layer": "control",
       "packs": [],
       "why": "An installed stop gate delivers this at its binding moment."
-    },
-    "aa411351": {
-      "load_layer": "layer0",
-      "packs": [],
-      "why": "The audience gate that decides escalation; the installed gate only sees AskUserQuestion."
     },
     "ab814a26": {
       "load_layer": "control",
@@ -3616,6 +3562,25 @@
       "load_layer": "pack",
       "packs": [
         "governance-rules"
+      ]
+    },
+    "204391be": {
+      "load_layer": "pack",
+      "packs": [
+        "engineering-git",
+        "governance-rules"
+      ]
+    },
+    "a2e78f48": {
+      "load_layer": "pack",
+      "packs": [
+        "engineering-git"
+      ]
+    },
+    "b7ec8f3b": {
+      "load_layer": "pack",
+      "packs": [
+        "surface-doctrine"
       ]
     }
   },

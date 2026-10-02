@@ -361,8 +361,8 @@ function toast(msg){var t=document.getElementById("toast");t.textContent=msg;t.c
 function matches(d){
   if(state.owner==="ref"){if(!isReferred(d))return false;}
   else if(state.owner!=="all"&&(d.owner||"").split(" ")[0]!==state.owner) return false;
-  if(state.seg==="music"&&d.seg!=="Musicologie") return false;
-  if(state.seg==="core"&&d.seg==="Musicologie") return false;
+  if(state.seg==="music"&&d.seg!=="Cadence Studio") return false;
+  if(state.seg==="core"&&d.seg==="Cadence Studio") return false;
   if(state.q){var blob=[d.name,d.company,d.contact,d.city,d.seg,d.owner,d.phase,d.referral,whyLine(d)].join(" ").toLowerCase();
     if(blob.indexOf(state.q)<0) return false;}
   return true;
@@ -692,7 +692,7 @@ BODY = r"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
  <select id="segsel" aria-label="Segment">
   <option value="all">All segments</option>
   <option value="core">Panhandle book</option>
-  <option value="music">Musicologie rollout</option>
+  <option value="music">Cadence Studio rollout</option>
  </select>
  <select id="sortsel" class="hide" aria-label="Sort">
   <option value="attention">Needs attention first</option>

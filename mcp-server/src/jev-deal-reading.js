@@ -2,7 +2,6 @@
 // The record is fetched by the caller through the existing get-deal-room verb.
 // No model answer changes a deal, its ordering, or a partner's next action.
 export const JEV_DEAL_EVIDENCE_FLOOR = 200;
-const ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 const LEVELS = [
   "A client and space requirement are recorded, but no specific property is identified.",
   "Specific properties are being researched, toured, or compared; no offer is recorded.",
@@ -134,22 +133,15 @@ function probability(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 }
 
-export async function readDealWithJev(record, { apiKey, fetchImpl = fetch, now = new Date() } = {}) {
+export async function readDealWithJev(record, { askJev, now = new Date() } = {}) {
   const { evidenceChars, sufficient, state } = dealReadingState(record, now);
   const base = { schema: "carr.jev-deal-reading.v1", advisory_only: true,
     evidence_chars: evidenceChars, evidence_floor: JEV_DEAL_EVIDENCE_FLOOR };
   if (!sufficient)
     return { ...base, judged: false, reason: "insufficient_recorded_evidence" };
-  if (!apiKey) return { ...base, judged: false, reason: "jev_unavailable" };
+  if (typeof askJev !== "function") return { ...base, judged: false, reason: "jev_unavailable" };
   try {
-    const response = await fetchImpl(ENDPOINT, {
-      method: "POST",
-      headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
-      body: JSON.stringify({ model: "jev-latest", state, questions: dealReadingQuestions() }),
-      signal: AbortSignal.timeout(20000),
-    });
-    if (!response.ok) return { ...base, judged: false, reason: "jev_unavailable" };
-    const result = await response.json();
+    const result = await askJev({ model: "jev-latest", state, questions: dealReadingQuestions() });
     const answers = result?.answers;
     const movement = answers?.movement?.score;
     const waiting = answers?.waiting_on?.choice;

@@ -247,7 +247,7 @@ def main() -> int:
             assert lis.lines, "nothing reached the desk socket"
             frame = json.loads(lis.lines[0])
             assert frame["type"] == "user", frame
-            assert frame["message"]["content"] == "count the open loops", frame
+            assert frame["message"]["content"] == desks.DESK_INSTRUCTION + "\n\ncount the open loops", frame
             assert frame["origin"]["kind"] == "peer", frame
             assert frame["origin"]["from"].startswith("hermes:"), frame
         finally:
@@ -267,7 +267,7 @@ def main() -> int:
         "argv=sys.argv[1:]\n"
         f"open({str(argv_log)!r},'a').write(json.dumps(argv)+chr(10))\n"
         "resuming = 'resume' in argv[:2]\n"
-        "tid = argv[argv.index('-o')+2] if resuming else 'thread-first-0001'\n"
+        "tid = argv[-2] if resuming else 'thread-first-0001'\n"
         "print(json.dumps({'type':'thread.started','thread_id':tid}))\n"
         "out=None\n"
         "for i,a in enumerate(argv):\n"
@@ -304,9 +304,32 @@ def main() -> int:
         assert "-m" in argv and argv[argv.index("-m") + 1] == "gpt-5.1-codex-mini", argv
         assert "-c" in argv and argv[argv.index("-c") + 1] == "model_reasoning_effort=low", argv
         assert "-C" in argv and argv[argv.index("-C") + 1] == str(root), argv
-        assert argv[-1] == "rename the variable", argv
+        assert argv[-1] == desks.DESK_INSTRUCTION + "\n\nrename the variable", argv
 
     check("a task reaches codex headless at the desk's model and directory", dispatch_to_codex)
+
+    def per_task_cwd_starts_fresh_and_keeps_the_desk_thread():
+        """flash-run escalation (2026-09-24): Sol works in a throwaway copy per task.
+        A per-task cwd must start a fresh thread there and must not re-pin the desk."""
+        reg.register("sol-fixer", "codex-session", model="gpt-5.1-codex-mini", effort="low",
+                     cwd=str(root), sandbox="workspace-write")
+        reg.remember_thread("sol-fixer", "standing-thread")
+        task_dir = root / "task-copy"
+        task_dir.mkdir(exist_ok=True)
+        before = len(argv_log.read_text().splitlines())
+        env = dict(os.environ, PATH=f"{fake_bin}:{os.environ['PATH']}")
+        out = dispatch.dispatch("sol-fixer", "fix it", registry=reg,
+                                results_path=root / "sol-fixer-results.ndjson",
+                                env=env, cwd=str(task_dir))
+        assert out["status"] == "completed", out
+        argv = json.loads(argv_log.read_text().splitlines()[before])
+        assert "resume" not in argv, argv
+        assert argv[argv.index("-C") + 1] == str(task_dir), argv
+        assert argv[argv.index("-s") + 1] == "workspace-write", argv
+        assert reg.entries()["sol-fixer"].get("thread_id") == "standing-thread"
+
+    check("a per-task cwd starts fresh there and keeps the desk's thread",
+          per_task_cwd_starts_fresh_and_keeps_the_desk_thread)
 
     def codex_out_of_credit_is_its_own_status():
         """Codex prints the limit on stdout and exits 0, so the exit code lies."""

@@ -602,9 +602,11 @@ test("an undecided possibly-binding rule stops the write at the coverage check",
 });
 
 test("admission reads the gate field, not `decision`, on both artifacts", () => {
-  // The manifest above says decision "refuse" AND the receipt says "allow";
-  // neither field is the write gate, and reading either one would give the
-  // wrong answer on one of the two artifacts.
+  // The manifest above says decision "refuse" and the receipt says
+  // "read_only"; neither field is the write gate. The receipt's `decision`
+  // no longer reads "allow" on a blocked write (it used to, and a module
+  // testing `decision === "allow"` would have admitted this pair), but the
+  // admission still reads the gate field, never `decision`.
   const unknownFacts = {
     task_id: "t-9001", title: "Send the executed LOI to the client",
     boundary_action: "business.send_client_document",
@@ -613,16 +615,18 @@ test("admission reads the gate field, not `decision`, on both artifacts", () => 
   const manifest = assemble({ task: unknownFacts });
   const receipt = receiptFor({ task: unknownFacts });
   assert.equal(manifest.decision, "refuse");
-  assert.equal(receipt.decision, "allow");
+  assert.equal(receipt.decision, "read_only");
+  assert.notEqual(receipt.decision, "allow");
   assert.equal(receipt[receipt.write_gate_field], false);
 
   const decision = admit({ manifest, receipt });
   assert.equal(decision.write_gate_field_read, "consequential_action_permitted");
   assert.equal(decision.reason_id, "coverage_does_not_permit_consequential_action");
 
-  // And the clean pair goes the other way: the receipt's `decision` is "allow"
-  // there too, so a module reading `decision` would look identical on both.
-  assert.equal(receiptFor().decision, "allow");
+  // The clean pair: "allow" appears only where the write gate is true.
+  const clean = receiptFor();
+  assert.equal(clean.decision, "allow");
+  assert.equal(clean[clean.write_gate_field], true);
 });
 
 // ---------------------------------------------------- the projection check

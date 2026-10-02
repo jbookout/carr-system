@@ -454,6 +454,16 @@ def _structured_reason(text):
     return None
 
 
+def _error_tail(text, lines=6, cap=1200):
+    """The last `lines` non-empty stderr lines, capped, for an error row."""
+    try:
+        kept = [line.rstrip() for line in (text or "").splitlines() if line.strip()]
+        tail = "\n".join(kept[-lines:])
+        return tail if len(tail) <= cap else "…" + tail[-cap:]
+    except Exception:
+        return None
+
+
 def _headline(text):
     """First non-empty line of a refusal — the de-facto class gates already have."""
     try:
@@ -595,6 +605,12 @@ def main():
                            or _structured_reason(captured_out)),
             "deny_headline": (_clip(_headline(captured_err))
                               if outcome in ("deny", "ask", "error") else None),
+            # The last lines of stderr when the gate fell over. One headline
+            # was not enough: on 2026-09-23 two gates died at import on every
+            # call for a day and the row said only "Traceback (most recent
+            # call last):", which names nothing. The tail names the file and
+            # the exception.
+            "error_tail": (_error_tail(captured_err) if outcome == "error" else None),
             "pid": os.getpid(),
         }
         record["meter_ms"] = round(_time.monotonic() * 1000.0 - _T0 - elapsed, 2)

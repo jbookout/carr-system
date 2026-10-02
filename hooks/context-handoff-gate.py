@@ -2446,11 +2446,17 @@ def hook_main() -> int:
             announce("Claude continuity ownership evidence does not match; native Claude behavior continues.")
         return 0
     if event == "Stop" and signal.get("crossed"):
-        signal_reason = signal.get("reason")
-        reason_code = (signal_reason
-                       if signal_reason in {
-                           "WINDOW_CONFIG_INVALID", "CONTEXT_SIGNAL_AMBIGUOUS"}
-                       else "CONTEXT_HANDOFF_REQUIRED")
+        # Once per task, like the PostToolUse notice below. Announcing on every
+        # Stop re-woke the session after each reply, so an idle session kept
+        # replying to its own notice (2026-09-23, Mac Studio setup session).
+        notice_key = "STOP_HEADROOM_NOTICE"
+        if notice_key in set((state.get("signal") or {}).get("notices") or []):
+            return 0
+        try:
+            mutate_state(task_key, state["version"],
+                         lambda current: _add_notice(current, notice_key), manifest)
+        except LifecycleError:
+            return 0
         announce("Claude context headroom notice: checkpoint durable semantic progress when appropriate; native auto-compaction and Stop remain available.")
         return 0
     if event == "PostToolUse" and (signal.get("crossed") or not signal.get("available")):

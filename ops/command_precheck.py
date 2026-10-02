@@ -41,7 +41,7 @@ payload, unreadable repository — every one of those returns zero silently. A
 pre-check that turns somebody else's outage into this repository's outage has
 cost more than it will ever save.
 
-THREE FILTERS BEFORE ANY MONEY IS SPENT, in order, and each one is free:
+THREE FILTERS BEFORE THE GENERAL COMMAND JUDGMENT, in order, and each one is free:
 
   1. No literal shell command in Bash or Codex's exec wrapper: return.
   2. Every statement in the command is a known pure read: return. About two
@@ -54,6 +54,10 @@ THREE FILTERS BEFORE ANY MONEY IS SPENT, in order, and each one is free:
 Only what survives all three reaches a judgment, measured at roughly half a
 second. On the traffic this was built from that is about a third of commands,
 some eighty seconds and a fifth of a cent across an entire session.
+
+A separate, narrow preflight for an actual model CLI invocation reads Joe's
+Model Room route from AGENTS.md and gives it to Jev before that command runs.
+It never sees ordinary text searches or authentication readback as model work.
 
 KILL SWITCH: set CARR_PRECHECK=0. Anything in front of every shell call needs
 one, and that is engineering rather than caution.
@@ -102,6 +106,65 @@ SENSITIVE_COMMAND = re.compile(
     r"authorization|bearer|pgpassword|database_url)\b\s*(?:=|:|\s+)"
     r"|postgres(?:ql)?://|\b[a-z]+://[^/\s]+@)"
 )
+
+# The rule itself is read at the moment of use from the checkout's boot file.
+# This narrow detector runs before the ordinary command-failure precheck, so a
+# direct model invocation gets the route even when there are no filesystem
+# facts to judge. It does not match a read such as `rg claude`.
+MODEL_CLI = re.compile(
+    r"(?m)(?:^|[;&|]\s*)(?:\s*(?:env\s+)?(?:[A-Za-z_][\w]*=\S+\s+)*)?"
+    r"(?:\S*/)?(?:claude|grok|gemini|codex|opencode|ollama|aider)(?=\s|$)", re.I)
+MODEL_PACKAGE_CLI = re.compile(
+    r"(?m)(?:^|[;&|]\s*)\s*npx\s+(?:-y\s+)?"
+    r"(?:@anthropic-ai/claude-code|@google/gemini-cli|@openai/codex)(?=\s|$)", re.I)
+MODEL_CLI_AUTH = re.compile(r"^\s*(?:auth|login|logout|status|doctor|version|--version|--help)\b", re.I)
+MODEL_ROOM_START = "<!-- carr-model-room-route:start -->"
+MODEL_ROOM_END = "<!-- carr-model-room-route:end -->"
+
+
+def model_room_rule(repo=REPO):
+    """Pull the current source-controlled route instead of embedding a copy."""
+    # A model call may start while the shell is in doctorcre-app or another
+    # checkout. The installed hook still lives in CARR, so use its own boot
+    # rule when that checkout has no route section.
+    for root in dict.fromkeys((repo, REPO)):
+        try:
+            with open(os.path.join(root, "AGENTS.md"), encoding="utf-8") as handle:
+                source = handle.read()
+            return source.split(MODEL_ROOM_START, 1)[1].split(MODEL_ROOM_END, 1)[0].strip()
+        except (OSError, IndexError):
+            continue
+    return None
+
+
+def model_room_advisory(command, repo=REPO):
+    """Jev reads the route before a direct model CLI is attempted. Never deny."""
+    match = MODEL_CLI.search(command) or MODEL_PACKAGE_CLI.search(command)
+    if not match or MODEL_CLI_AUTH.match(command[match.end():]):
+        return None
+    rule = model_room_rule(repo)
+    if not rule:
+        return None
+    confidence = None
+    if not SENSITIVE_COMMAND.search(command):
+        try:
+            judge = _sibling("jev_judge")
+            client = _sibling("typesafe_client")
+            answer = judge.judge(
+                {"command": command[:500], "model_room_rule": rule},
+                {"direct_model_work": client.noul(
+                    "This command starts model work directly through a model CLI, "
+                    "rather than through the Model Room.",
+                    true="A model CLI is invoked to perform work.",
+                    false="The CLI use is only an authentication, health, or help read.")},
+                timeout=1.5)
+            confidence = float(answer["answers"]["direct_model_work"]["noul"])
+        except Exception:
+            pass
+    # The executable position is known deterministically. Jev's judgment is
+    # advisory context, not authority to override Joe's route or expose a key.
+    readback = f" Jev direct-work score {confidence:.2f}." if confidence is not None else ""
+    return "MODEL ROOM ROUTE — read the current rule before this CLI call: " + rule + readback
 
 
 def _sibling(name):
@@ -328,6 +391,10 @@ def advisory(payload):
         repo = repo_root(command_cwd)
         warnings = []
         for command in _commands(payload):
+            route = model_room_advisory(command, repo)
+            if route:
+                warnings.append(route)
+                break
             if not command.strip() or is_pure_read(command) or SENSITIVE_COMMAND.search(command):
                 continue
             probability, facts, reasons = check(command, repo)

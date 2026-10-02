@@ -97,9 +97,11 @@ export const V5_A02_LIFECYCLE_SCHEMA_VERSION = "doctorcre-v5-a02-lifecycle-assur
 
 /**
  * 2, not 1: version 1 answered from caller-supplied evidence objects. This
- * version answers `unavailable` and names what it is owed.
+ * version 2 answered `unavailable` and named what it was owed. Version 3 binds
+ * enforcement coverage to the server-owned record connection while leaving
+ * workflow state, lifecycle transition and activation unavailable.
  */
-export const V5_A02_LIFECYCLE_POLICY_VERSION = 2;
+export const V5_A02_LIFECYCLE_POLICY_VERSION = 3;
 
 function deepFreeze(value) {
   if (Array.isArray(value)) { value.forEach(deepFreeze); return Object.freeze(value); }
@@ -131,6 +133,7 @@ export const V5_A02_LIFECYCLE_REASON_IDS = deepFreeze([
   "mandatory_rule_without_machine_control",
   "rule_activation_seam_unavailable",
   "rule_control_mechanism_not_for_class",
+  "rule_coverage_record_invalid",
   "rule_presence_is_not_enforcement",
   "rule_registry_reader_unavailable",
   "rule_retirement_successor_absent",
@@ -496,17 +499,127 @@ export function readRuleLifecycleTransition() {
  * confirm that each named control is the code it claims to be — a supplied
  * `implementation_digest` is a claim about a file, not a reading of one.
  */
-export function readRuleEnforcementCoverage() {
+function unavailableRuleEnforcementCoverage(
+                                             reasonId = reason("control_implementation_reader_unavailable"),
+                                             because = "the authoritative rule coverage record cannot be read") {
   return unavailable(
     "rule_enforcement_coverage",
-    "control_implementation_reader_unavailable",
-    "no rule registry and no control-implementation reader exist, so coverage can only be asserted by its caller",
+    reasonId,
+    because,
     [V5_A02_RULE_REGISTRY_READER_SEAM, V5_A02_CONTROL_IMPLEMENTATION_READER_SEAM,
       V5_A02_TEST_RESULT_READER_SEAM],
     {
-      control_implementation_reader_bound:
-        boundSeam(V5_A02_CONTROL_IMPLEMENTATION_READER_SEAM, "readControl") !== null,
+      control_implementation_reader_bound: false,
+      authoritative_record_reader_bound: false,
     });
+}
+
+const V5_A02_COVERAGE_SCHEMA_VERSION =
+  "doctorcre-v5-a02-rule-enforcement-coverage.v2";
+const V5_A02_COVERAGE_GAP_REASONS = Object.freeze(new Set([
+  "active_rule_amended_needs_reapproval",
+  "active_rule_approved_control_not_installed",
+  "active_rule_control_unmapped",
+  "active_rule_fallback_absent",
+  "rule_test_evidence_changed_since_approval",
+  "rule_test_evidence_future_dated",
+  "rule_tests_not_passing",
+]));
+const V5_A02_COVERAGE_STATES = Object.freeze(new Set(["complete", "empty", "gaps"]));
+const V5_A02_COVERAGE_RECORD_KEYS = Object.freeze([
+  "active_rule_count", "coverage_complete", "coverage_state", "covered_rule_count",
+  "evidence_digest", "gap_count", "gaps", "observed_at", "schema_version",
+].sort().join(","));
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const SHA256_RE = /^sha256:[0-9a-f]{64}$/;
+
+function validCoverageGap(gap) {
+  return isPlainObject(gap)
+    && Object.keys(gap).sort().join(",") === "detail,reason_id,rule_id"
+    && typeof gap.rule_id === "string" && UUID_RE.test(gap.rule_id)
+    && V5_A02_COVERAGE_GAP_REASONS.has(gap.reason_id)
+    && typeof gap.detail === "string" && gap.detail.trim().length > 0;
+}
+
+/** The state the counts imply. Zero active rules is `empty`, never
+ * `complete`: an empty registry proves nothing is enforced. */
+function coverageStateFor(record) {
+  if (record.active_rule_count === 0) return "empty";
+  return record.gap_count > 0 ? "gaps" : "complete";
+}
+
+// Each invariant below is its own check, and each is killed by its own
+// planted-inconsistency test in a02-rule-enforcement-reader-mutants.test.mjs.
+function validCoverageRecord(record) {
+  if (!isPlainObject(record)) return false;
+  if (Object.keys(record).sort().join(",") !== V5_A02_COVERAGE_RECORD_KEYS) return false;
+  if (record.schema_version !== V5_A02_COVERAGE_SCHEMA_VERSION) return false;
+  if (typeof record.observed_at !== "string"
+      || !Number.isFinite(Date.parse(record.observed_at))
+      || !Number.isInteger(record.active_rule_count) || record.active_rule_count < 0
+      || !Number.isInteger(record.covered_rule_count) || record.covered_rule_count < 0
+      || !Number.isInteger(record.gap_count) || record.gap_count < 0
+      || typeof record.coverage_complete !== "boolean"
+      || !V5_A02_COVERAGE_STATES.has(record.coverage_state)
+      || !Array.isArray(record.gaps)
+      || !SHA256_RE.test(record.evidence_digest)) return false;
+  if (record.gap_count !== record.gaps.length) return false;
+  if (record.covered_rule_count + record.gap_count !== record.active_rule_count) return false;
+  if (record.coverage_state !== coverageStateFor(record)) return false;
+  if (record.coverage_complete !== (record.coverage_state === "complete")) return false;
+  const seen = new Set();
+  for (const gap of record.gaps) {
+    if (!validCoverageGap(gap)) return false;
+    if (seen.has(gap.rule_id)) return false;
+    seen.add(gap.rule_id);
+  }
+  return true;
+}
+
+async function readRuleEnforcementCoverageFromRecords(database) {
+  let result;
+  try {
+    result = await database.query(
+      "select ops.v5_a02_rule_enforcement_coverage() as coverage", []);
+  } catch {
+    return unavailableRuleEnforcementCoverage();
+  }
+  const record = result?.rows?.length === 1 ? result.rows[0]?.coverage : null;
+  if (!validCoverageRecord(record))
+    return unavailableRuleEnforcementCoverage(
+      reason("rule_coverage_record_invalid"),
+      "the authoritative rule coverage record failed its closed shape and count invariants");
+  return deepFreeze({
+    schema_version: V5_A02_LIFECYCLE_SCHEMA_VERSION,
+    policy_version: V5_A02_LIFECYCLE_POLICY_VERSION,
+    answer: "rule_enforcement_coverage",
+    tenant: ORGANIZATION_TENANT_ID,
+    status: "available",
+    decision: "report",
+    observed_at: record.observed_at,
+    active_rule_count: record.active_rule_count,
+    covered_rule_count: record.covered_rule_count,
+    gap_count: record.gap_count,
+    coverage_state: record.coverage_state,
+    coverage_complete: record.coverage_complete,
+    gaps: record.gaps,
+    evidence_digest: record.evidence_digest,
+    evidence_source: "ops.v5_a02_rule_enforcement_coverage()",
+    request_read: false,
+    caller_evidence_admitted: false,
+    decided_by: "authoritative_record_reader",
+    model_judgment_admitted: false,
+    effects: V5_NO_EFFECTS,
+  });
+}
+
+export function readRuleEnforcementCoverage(database) {
+  if (database === null || typeof database !== "object"
+      || Array.isArray(database) || typeof database.query !== "function")
+    return unavailableRuleEnforcementCoverage(
+      "control_implementation_reader_unavailable",
+      "no server-owned record connection was supplied to the lifecycle reader");
+  return readRuleEnforcementCoverageFromRecords(database);
 }
 
 // ---------------------------------------------------------------------------
@@ -597,8 +710,13 @@ export function v5A02LifecyclePolicyPreimage() {
     owed_seams: [...V5_A02_LIFECYCLE_OWED_SEAMS],
     rule_activation_seam: V5_A02_RULE_ACTIVATION_SEAM,
     rule_activation_controller_bound: false,
-    authoritative_readers_bound: false,
-    public_surface_answers: "unavailable",
+    authoritative_readers_bound: {
+      rule_enforcement_coverage: true,
+      rule_lifecycle_transition: false,
+      workflow_lifecycle: false,
+    },
+    public_surface_answers:
+      "rule_enforcement_coverage_record_or_unavailable;other_reads_unavailable",
   };
 }
 

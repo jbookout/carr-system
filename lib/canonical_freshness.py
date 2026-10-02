@@ -150,6 +150,22 @@ CANONICAL_BRANCH = "main"
 # on — logic branches on None, which no default can manufacture.
 UNOBSERVED = "unobserved"
 
+# SUBMODULES WHOSE CONTENT IS DIRTY BY DESIGN, named exactly (rule bd4a6d22: a
+# state Joe chose permanently is read as accepted, never routed around). On
+# 2026-09-23 the dictation rig's build applied its own tracked patch,
+# tools/dictation-rig/patches/0001-menubar-visible-recording.patch, inside the
+# quill submodule, and the running quill binary is built from that tree. Git
+# reports it as ` M tools/dictation-rig/vendor/quill`, and this job refused
+# every fast-forward for the rest of the day on it, so merged gate fixes never
+# reached the hooks that run from canonical.
+#
+# What is accepted is NARROW. The submodule's checked-out COMMIT must still be
+# the one the superproject records (only its working content differs), and a
+# fast-forward that would MOVE that recorded commit still refuses. A dirty
+# pointer, any other submodule, or any ordinary file edit refuses exactly as
+# before. Every run prints what it accepted, so the state stays visible.
+ACCEPTED_DIRTY_SUBMODULES = ("tools/dictation-rig/vendor/quill",)
+
 # The verb's own caps, copied from mcp-server/src/work-request-intake.js so a
 # page is never rejected for length. situation is capped at 1000 there; 900
 # leaves room for the framing the server adds and matches the ~926 ceiling
@@ -202,12 +218,40 @@ def _counts(git: _Git) -> dict[str, list[str] | None]:
     """
     tracked = git.out("status", "--porcelain", "--untracked-files=no")
     untracked = git.out("status", "--porcelain", "--untracked-files=normal")
+    lines = None if tracked is None else [line for line in tracked.splitlines() if line]
+    accepted = _accepted_submodule_dirt(git) if lines else []
     return {
-        "tracked": None if tracked is None
-        else [line for line in tracked.splitlines() if line],
+        "tracked": None if lines is None
+        # `out` strips the whole output, so the first line can lose its leading
+        # status space; the path is whatever follows the two status columns.
+        else [line for line in lines if line[2:].lstrip() not in accepted],
         "untracked": None if untracked is None
         else [line for line in untracked.splitlines() if line.startswith("??")],
+        "accepted": accepted,
     }
+
+
+def _accepted_submodule_dirt(git: _Git) -> list[str]:
+    """ACCEPTED_DIRTY_SUBMODULES paths whose dirt is content-only, proven by git.
+
+    Porcelain v2 spells a submodule's state as `S<c><m><u>`: c is `C` when its
+    checked-out commit differs from the recorded one, m is `M` for tracked
+    content changes. Only `.` for c counts. An unreadable status accepts
+    nothing, so a failed observation can never widen the exemption.
+    """
+    raw = git.out("status", "--porcelain=v2", "--untracked-files=no")
+    if raw is None:
+        return []
+    accepted = []
+    for line in raw.splitlines():
+        parts = line.split(" ", 8)
+        if len(parts) != 9 or parts[0] != "1":
+            continue
+        xy, sub, path = parts[1], parts[2], parts[8]
+        if (path in ACCEPTED_DIRTY_SUBMODULES and xy == ".M"
+                and len(sub) == 4 and sub[0] == "S" and sub[1] == "."):
+            accepted.append(path)
+    return accepted
 
 
 def _count_text(paths: list[str] | None) -> Any:
@@ -245,6 +289,9 @@ def _preflight(git: _Git, *, when: str, out: TextIO, err: TextIO) -> int | None:
     print(f"canonical-fast-forward: {when}: branch={branch} "
           f"tracked_modified={_count_text(state['tracked'])} "
           f"untracked={_count_text(state['untracked'])}", file=out)
+    for path in state["accepted"] or []:
+        print(f"canonical-fast-forward: accepted by name: {path} (submodule content "
+              f"dirty by design, recorded commit unchanged)", file=out)
 
     if branch != CANONICAL_BRANCH:
         print(f"canonical-fast-forward: REFUSED — canonical is on {branch!r}, not "
@@ -323,6 +370,18 @@ def fast_forward(repository: str | Path, *, dry_run: bool = False,
     refusal = _preflight(git, when="before merge", out=out, err=err)
     if refusal is not None:
         return refusal
+
+    # An accepted dirty submodule is only safe to carry across the merge while
+    # the merge leaves its recorded commit alone. If main moved it, the edit
+    # under it belongs to a build that is now out of date: refuse and say so.
+    for path in _counts(git)["accepted"] or []:
+        here = git.out("rev-parse", f"HEAD:{path}")
+        there = git.out("rev-parse", f"origin/main:{path}")
+        if here is None or there is None or here != there:
+            print(f"canonical-fast-forward: REFUSED — origin/main moves the recorded "
+                  f"commit of {path}, which carries accepted local content; rebuild it "
+                  f"from the new commit first.", file=err)
+            return REFUSED_TRACKED_DIRT
 
     merged = git("merge", "--ff-only", "origin/main")
     if merged.returncode != 0:

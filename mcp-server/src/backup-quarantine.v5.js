@@ -77,6 +77,11 @@
 // preimage, so the day any of them is written the policy digest moves and stale
 // readers are refused rather than silently reading a policy that now decides
 // more than it did.
+//
+// UPDATE: items 4, 5 and 6 are now decided in recovery-matrix.v5.js, against the
+// catalog's stated floor, with exact restore evidence produced by
+// bin/restore-rehearse.sh phase 5. This file still decides none of them itself;
+// its three clauses now name where they are decided, which moved this digest.
 
 import { canonicalJson, digest } from "./artifact-trust.js";
 import {
@@ -1225,9 +1230,9 @@ export function v5BackupQuarantinePolicyPreimage() {
     // The deferred clauses, hashed in. The day any is written this digest moves,
     // and a consumer pinned to the deferred policy is refused rather than
     // silently reading a policy that now decides more than it did.
-    restore_clause: "deferred",
-    recovery_matrix_clause: "deferred",
-    outbound_reconciliation_clause: "deferred",
+    restore_clause: "decided_in:recovery-matrix.v5.js",
+    recovery_matrix_clause: "decided_in:recovery-matrix.v5.js",
+    outbound_reconciliation_clause: "decided_in:recovery-matrix.v5.js",
     restore_and_recovery_matrix_seam: V5_RESTORE_AND_RECOVERY_MATRIX_SEAM,
     outbound_reconciliation_seam: V5_OUTBOUND_RECONCILIATION_SEAM,
     enumerated_source_roster_seam: V5_ENUMERATED_SOURCE_ROSTER_SEAM,
@@ -1289,9 +1294,9 @@ export function v5BackupQuarantineProjection(options = {}) {
       "Q034.D1 settled text: doctrine-store text, absent from global-boundaries.v5.js V5_SETTLED_DECISIONS",
       "the enumerated PHI-incapable source roster: a human assessment about real systems; none ships here",
       "the non-retaining source scanner: no scanner exists in this repository; its report is an input",
-      "restore verification and the independently controlled copy: V5_RESTORE_AND_RECOVERY_MATRIX_SEAM",
+      "restore verification and the independently controlled copy: V5_RESTORE_AND_RECOVERY_MATRIX_SEAM, decided in recovery-matrix.v5.js",
       "the RPO/RTO cells and the business-day calendar the adapter cell is measured against",
-      "outbound-queue release against external-effect reconciliation: V5_OUTBOUND_RECONCILIATION_SEAM",
+      "outbound-queue release against external-effect reconciliation: V5_OUTBOUND_RECONCILIATION_SEAM, decided in recovery-matrix.v5.js",
       "the independent restore oracle's gate member: independent_restore_oracle is a registered producer " +
         "role in benchmark-minimum.v5.js with no MINIMUM_REQUIRED_MEMBERS entry naming its step",
     ],

@@ -171,6 +171,24 @@ def threshold_and_window_cases():
         check("normal 54.9999 percent allows", proc.returncode == 0 and out is None,
               (proc.returncode, out))
 
+        # Sonnet 5.5 (claude-sonnet-5-5) has a 1M window. An unbound id falls
+        # through to the transcript/compact tiers and the gate cannot count it.
+        for model in ("claude-sonnet-5-5", "claude-sonnet-5"):
+            slug = model.replace("claude-", "")
+            t = write_jsonl(root / f"{slug}-low.jsonl",
+                            [usage_row(549_999, model=model)])
+            proc, out = run_hook(root, "Stop", t, session=f"{slug}-low")
+            check(f"{model} 54.9999 percent of a 1M window allows",
+                  proc.returncode == 0 and out is None, (proc.returncode, out))
+            t = write_jsonl(root / f"{slug}-edge.jsonl",
+                            [usage_row(550_000, model=model)])
+            proc, out = run_hook(root, "Stop", t, session=f"{slug}-edge")
+            why = reason(out)
+            check(f"{model} resolves a 1M window by model and refuses at 55 percent",
+                  why and why["signal"]["window"] == 1_000_000
+                  and why["signal"]["window_tier"] == "model"
+                  and why["signal"]["threshold"] == 55, out)
+
         t = write_jsonl(root / "normal-edge.jsonl",
                         [usage_row(550_000, model="claude-opus-4-1")])
         proc, out = run_hook(root, "Stop", t, session="normal-edge")
@@ -520,8 +538,15 @@ def fallback_and_hook_sequence():
               (typed_bad_proc.returncode, typed_bad_out,
                typed_bad_proc.stderr))
 
+        # The Stop headroom notice fires once per task, so a repeated Stop on
+        # the same task is silent; the spoof probe below therefore needs its
+        # own fresh task to observe which event the hook actually honored.
+        proc, repeat_stop = run_hook(root, "Stop", transcript, session="sequence")
+        check("Stop headroom notice fires once per task",
+              proc.returncode == 0 and repeat_stop is None, repeat_stop)
+
         spoofed_stop = json.dumps({
-            "hook_event_name": "PostToolUse", "session_id": "sequence",
+            "hook_event_name": "PostToolUse", "session_id": "spoofed-sequence",
             "prompt_id": "spoofed-stop", "tool_use_id": "spoofed-tool",
             "transcript_path": str(transcript),
         })
@@ -3262,6 +3287,10 @@ def exact_head_review_regressions():
 
 def static_contract_cases():
     print("protected contract and explicit exclusions")
+    windows = json.loads(MANIFEST.read_text())["surface_policies"]["claude"]["model_windows"]
+    check("Claude model windows bind Sonnet 5.5 and keep Sonnet 5 for old records",
+          windows.get("claude-sonnet-5-5") == 1_000_000
+          and windows.get("claude-sonnet-5") == 1_000_000, windows)
     hooks = json.loads((REPO / "ops/config/hooks.json").read_text())
     stop = json.dumps(hooks.get("Stop", []))
     post = json.dumps(hooks.get("PostToolUse", []))
@@ -3314,6 +3343,27 @@ def static_contract_cases():
     old_hooks = old_codex.get("hooks", {})
     current_hooks = current_codex.get("hooks", {})
     normalized_pretool = json.loads(json.dumps(current_hooks.get("PreToolUse")))
+    expected_boot = {
+        "matcher": ".*",
+        "hooks": [{
+            "type": "command",
+            "command": "{{REPO}}/.venv/bin/python {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/rule-boot-gate.py",
+            "timeout": 5,
+            "additionalContextLimit": 5000,
+        }],
+    }
+    actual_boot = normalized_pretool.pop(0) if normalized_pretool else None
+    check("Codex new boot hold group is exact", actual_boot == expected_boot)
+    old_pretool = old_hooks.get("PreToolUse", [])
+    if normalized_pretool and old_pretool:
+        expected_route = json.loads(json.dumps(old_pretool[0]))
+        expected_route["matcher"] = ".*"
+        expected_route["hooks"][0]["additionalContextLimit"] = 5000
+        check("Codex expanded rule route group is exact",
+              normalized_pretool[0] == expected_route)
+        normalized_pretool[0] = json.loads(json.dumps(old_pretool[0]))
+    else:
+        check("Codex expanded rule route group is exact", False)
     allowed_exec_matchers = {
         "^(Bash|exec_command|functions\\.exec)$": "^(Bash|functions\\.exec)$",
         "^(Bash|exec_command|Read|Grep|Glob|WebFetch|apply_patch|functions\\.(exec|apply_patch)|mcp__(carr|carr_records)__.*)$":
@@ -3321,9 +3371,18 @@ def static_contract_cases():
     }
     for group in normalized_pretool:
         group["matcher"] = allowed_exec_matchers.get(group.get("matcher"), group.get("matcher"))
+    # The rule-pack drift gate moved onto the repo interpreter through the hook
+    # meter on 2026-09-23 (ops/rule-delivery-cutover.py HOOK_TEMPLATE). The
+    # historical Stop group is otherwise unchanged; compare it with that one
+    # command spelled the historical way.
+    normalized_stop = json.loads(json.dumps(current_hooks.get("Stop")))
+    for group in normalized_stop or []:
+        for hook in group.get("hooks", []):
+            if hook.get("command") == "{{REPO}}/.venv/bin/python {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/rule-pack-drift-gate.py":
+                hook["command"] = "/usr/bin/env python3 {{REPO}}/hooks/rule-pack-drift-gate.py"
     check("Codex historical PreToolUse/Stop groups preserved",
           normalized_pretool == old_hooks.get("PreToolUse")
-          and current_hooks.get("Stop") == old_hooks.get("Stop"),
+          and normalized_stop == old_hooks.get("Stop"),
           {"historical": old_hooks, "current": {k: current_hooks.get(k) for k in ("PreToolUse", "Stop")}})
     check("Codex continuity lifecycle groups registered",
           all(event in current_hooks for event in ("PreCompact", "PostCompact", "SessionStart", "UserPromptSubmit")),

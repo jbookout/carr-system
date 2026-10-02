@@ -5,7 +5,6 @@ import importlib.util
 import json
 import tempfile
 from pathlib import Path
-from types import SimpleNamespace
 
 REPO=Path(__file__).resolve().parent.parent
 spec=importlib.util.spec_from_file_location("cutover",REPO/"ops/rule-delivery-cutover.py")
@@ -24,11 +23,10 @@ checks={
  "current database function returns eight":"activation target set is not exactly eight" in current_sql and "return query select p_mode,8::bigint,v_receipt" in current_sql,
  "exact 38 reviewed proposal ids":len(cutover.curation_ids())==38,
  "human reviewer is checked":"rp.status='approved' and a.kind='human'" in successor,
- "seven-day eligibility is checked":"shadow_eligible(eligibility_module, ledger_rows, identity)" in py and "eligibility[\"eligible\"]" in py,
- "live policy identity binds eligibility":"current_identity(REPO, row)" in py,
- "ledger lock spans atomic flip":"with locked_read(" in py and "ops.set_rule_delivery_mode" in py,
- "policy identity is rebound before write":"where singleton for update" in py and "final_identity" in py,
- "live hook parity runs before write":"if not live_hook_config_parity()" in py,
+ "partner-directed cutover no longer requires a shadow window":"shadow_eligible" not in py and "locked_read" not in py,
+ "all delivery tags must use the reviewed map":"count(distinct map_digest),min(map_digest),count(*)" in py and "tag_coherent" in py,
+ "policy and tag identity are rebound before write":"where singleton for update" in py and "final_policy != row" in py and "delivery tag identity changed" in py,
+ "live hook parity runs before write":"if not live_hook_config_parity(installed_repo=args.installed_repo)" in py,
  "production requires the Joe authority login":"CARR_DB_AUTHORITY_JOE_URL" in sh
     and "neondb_owner" not in sh and "--changed-by" not in sh,
  "runtime verifies the exact Joe login":"select session_user,current_user" in py
@@ -51,13 +49,12 @@ with tempfile.TemporaryDirectory() as directory:
  document={"hooks":{"Stop":[{"hooks":[{"command":command}]}]}}
  (home/".claude/settings.json").write_text(json.dumps(document))
  (home/".codex/hooks.json").write_text(json.dumps(document))
- green=lambda *args,**kwargs:SimpleNamespace(returncode=0)
  checks["exact Claude and Codex live readback passes"]=cutover.live_hook_config_parity(
-     REPO,home,green)
+     REPO,home,REPO)
  (home/".codex/hooks.json").write_text(json.dumps(
      {"hooks":{"Stop":[{"hooks":[{"command":command+".wrong"}]}]}}))
  checks["one trigger mismatch refuses cutover"]=not cutover.live_hook_config_parity(
-     REPO,home,green)
+     REPO,home,REPO)
 bad=[name for name,passed in checks.items() if not passed]
 if bad:
  print("rule-delivery-cutover-selftest: FAIL")

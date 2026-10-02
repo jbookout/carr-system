@@ -151,10 +151,22 @@ def main():
               r"for select to carr_backup using \(true\); end if",
               normalized_sql,
           ) is not None)
+    # EVERY carr_backup policy, not only 0475's. 0573 added one on
+    # public.memory_item; pg_dump rendered it unconditionally and hosted CI
+    # refused the snapshot with 'role "carr_backup" does not exist'.
+    check("the memory_item carr_backup policy is conditional on that role existing",
+          re.search(
+              r"if exists \(select 1 from pg_roles where rolname = 'carr_backup'\) then "
+              r"create policy carr_backup_full_read_memory_item on public\.memory_item "
+              r"for select to carr_backup using \(true\); end if",
+              normalized_sql,
+          ) is not None)
+    check("no carr_backup policy in the snapshot is unconditional",
+          re.search(r"^CREATE POLICY \S+ ON \S+ .*\bTO carr_backup\b", sql, re.M) is None)
     check("the generator owns the carr_backup policy rewrite instead of relying "
           "on a hand-patched snapshot",
-          '$0 == "CREATE POLICY carr_backup_full_read ON ops.work_request FOR SELECT TO carr_backup USING (true);"'
-          in generator
+          "FOR SELECT TO carr_backup USING" in generator
+          and "emit_carr_backup_policy(words[3], words[5])" in generator
           and 'print "do $carr_backup_snapshot_policy$"' in generator
           and 'pg_dump\'s exit status cannot be hidden behind a' in generator)
 
@@ -189,6 +201,17 @@ def main():
               sql[registry_entry_tail:registry_trigger_enable],
               re.I,
           ) is not None)
+    # 2026-09-23: rendering every sealed SCAC version's full entry set grew the
+    # file to 114.8 MB and GitHub refused the push (GH001, 100 MiB). The
+    # generator now writes each distinct entry once; this ceiling makes the
+    # next regression a test failure instead of a refused push.
+    snapshot_bytes = os.path.getsize(SNAPSHOT)
+    check("the snapshot stays far below GitHub's 100 MiB file limit",
+          snapshot_bytes < 50 * 1024 * 1024, f"{snapshot_bytes} bytes")
+    check("SCAC entries are restored from a deduplicated pool",
+          "create temporary table carr_scac_entry_pool" in sql
+          and sql.count("insert into ops.scac_mutation_registry_entry select r.* from") >= 1
+          and "drop table pg_temp.carr_scac_entry_pool;" in sql)
     check("the generator owns the deferred-trigger restore transaction",
           "CARR SNAPSHOT DATA RESTORE TRANSACTION BEGIN" in generator
           and "CARR SNAPSHOT DATA RESTORE TRANSACTION COMMIT" in generator

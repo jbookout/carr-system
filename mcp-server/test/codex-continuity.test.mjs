@@ -43,6 +43,40 @@ function tools() {
   });
 }
 
+test("list-my-codex-sessions reads only first-hand checkpoints for the authenticated sponsor", async () => {
+  const seen = [];
+  const nativeId = "01a0eca8-f7f3-7153-a0a9-7f53dffb25b0";
+  const client = { query: async (sql, params) => {
+    seen.push({ sql, params });
+    assert.match(sql, /from codex_continuity_checkpoint/);
+    assert.match(sql, /owner_actor_id=\(select id from actor where slug=\$2\)/);
+    assert.doesNotMatch(sql, /codex_continuity_event|session_identity/);
+    return { rows: params[1] === "joe" ? [{ native_task_id: nativeId,
+      checkpoint_version: "3", updated_at: "2026-09-29T12:00:00Z" }] : [] };
+  } };
+  const verb = tools()["list-my-codex-sessions"];
+  assert.deepEqual(verb.inputSchema.required ?? [], []);
+  assert.deepEqual(Object.keys(verb.inputSchema.properties), []);
+  const joe = await verb.handler(client, { id: "joe-id", slug: "joe", human: true }, {});
+  assert.deepEqual(joe.sessions, [{ native_session_id: nativeId, host: "codex_desktop",
+    availability: "checkpoint_recorded", checkpoint_version: 3,
+    updated_at: "2026-09-29T12:00:00Z" }]);
+  const sponsoredApp = await verb.handler(client, { id: "app-id", slug: "codex", human: false,
+    via: "oauth-google", sponsoring_human_slug: "joe", sponsor_required: true }, {});
+  assert.deepEqual(sponsoredApp.sessions, joe.sessions,
+    "the server-derived sponsor, not the app actor's own slug, owns the checkpoint");
+  const dell = await verb.handler(client, { id: "dell-id", slug: "dell", human: true }, {});
+  assert.deepEqual(dell.sessions, [], "Dell cannot see Joe's checkpoint");
+  assert.deepEqual(seen.map(call => call.params), [["carr-internal", "joe"],
+    ["carr-internal", "joe"], ["carr-internal", "dell"]]);
+  await assert.rejects(() => verb.handler(client, { id: "joe-id", slug: "joe", human: true },
+    { sponsoring_human_slug: "dell" }), error =>
+    error.payload?.error === "codex_session_list_arguments_invalid");
+  assert.equal(seen.length, 3, "caller supplied identity must be refused before any database query");
+  await assert.rejects(() => verb.handler(client, { id: "unbound", slug: "codex", human: false,
+    via: "oauth-google" }, {}), error => error.payload?.error === "codex_sponsor_required");
+});
+
 test("checkpoint normalizes the database bigint version and uses it in the revision", async () => {
   const statements = [];
   const events = [];

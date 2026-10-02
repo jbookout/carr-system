@@ -119,7 +119,7 @@ test("active typed registry slims boot to constitution plus applicable constrain
   const result = await standing(activeGuidanceClient(), actor("codex", "joe"), {
     workflow: "fixture-workflow", surface: "codex", tier: "shared",
   });
-  assert.equal(result.recite, `Rules loaded: ${SAMPLE_SHARED_RULE_COUNT} shared, 30 joe-personal`);
+  assert.equal(result.recite, `Rules loaded: 2 of ${SAMPLE_SHARED_RULE_COUNT} shared, 1 of 30 joe-personal`);
   assert.equal(result.shared_rules.length, 2);
   assert.equal(result.personal_rules.length, 1);
   assert.equal(result.guidance_registry.state, "active");

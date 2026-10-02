@@ -45,37 +45,33 @@ WARN_AT = 0.55
 # output is about to push and needs the command, not the lesson.
 TOLLS = {
     "inventory_reseal": (
-        "The changed files are in `change.files`. Does this change edit a file "
-        "that the sealed source inventory tracks as a script entrypoint -- "
-        "anything under hooks/, bin/, tools/, pipelines/, ops/ that carries a "
-        "shebang or a main guard, or any file under mcp-server/src/? Editing "
-        "one changes its digest and the seal must be re-derived.",
-        "union the row into current_source_review.upsert in ops/config/"
-        "scac-registry-source-inventory-fixtures.v1.json, then pin the digest "
-        "the ASSERTION reports, not the generator's. They are different "
-        "numbers: the generator prints a digest of the raw rows, while the "
-        "seal covers the REVIEWED set, which is the base version with the "
-        "upserts applied. Run it and read the observed value back: node "
-        "--input-type=module -e \"import "
-        "{assertCurrentSourceInventoryMatchesFixture} from "
+        "The changed files are in `change.files`. Does this change edit an MCP "
+        "verb -- its definition, input schema or write/human-only/authority "
+        "flags under mcp-server/src/ -- a NEW worker route or side-write, or a "
+        "scheduled job definition? Those rows are still sealed, because the "
+        "server refuses a verb whose contract drifts from the generated "
+        "registry. Editing server files such as mcp.js or index.js without "
+        "changing a verb contract needs no seal. Script entrypoints "
+        "(hooks/, bin/, tools/, pipelines/, ops/ scripts), GitHub workflows "
+        "and launchd plists are NOT sealed any more (decision 05e144eb, "
+        "2026-09-24): editing or adding one needs no registry successor.",
+        "only for a verb or job-definition change: cut a registry successor "
+        "by copying the most recent one (`git log --oneline -1 -i "
+        "--grep='as SCAC v[0-9]'`) and read the digest back from the "
+        "assertion, AFTER your last edit: node --input-type=module -e "
+        "\"import {assertCurrentSourceInventoryMatchesFixture} from "
         "'./ops/scac-mutation-inventory.mjs'; import {TOOLS} from "
         "'./mcp-server/src/tools.js'; "
-        "assertCurrentSourceInventoryMatchesFixture(TOOLS)\" -- and run it "
-        "AFTER your last edit, never before"),
+        "assertCurrentSourceInventoryMatchesFixture(TOOLS)\". A script, "
+        "workflow or plist edit needs nothing"),
 
     "new_ingress_admitted": (
-        "Does this change ADD a new file that carries a shebang line or an "
-        "`if __name__ == \"__main__\"` guard, under hooks/, ops/, bin/, tools/ "
-        "or pipelines/? A new file with either of those is a new sealed "
-        "ingress, which moves the frontier and costs a registry successor "
-        "rather than a re-digest. A new module with neither is a library and "
-        "costs nothing. TWO EXCEPTIONS THAT ARE NOT INGRESSES no matter what "
-        "they contain, because the generator excludes them by name: any file "
-        "whose name contains `selftest`, and anything under a `test/` "
-        "directory. A new selftest carrying a main guard costs nothing.",
-        "make it a library -- no shebang, no main guard -- and host the "
-        "dispatch inside an entrypoint that is already inventoried, or open a "
-        "registry successor for it"),
+        "Does this change ADD a new MCP verb or a new scheduled job "
+        "definition? A new verb is a new sealed row and costs a registry "
+        "successor. A new script, workflow or plist costs nothing any more "
+        "(decision 05e144eb, 2026-09-24).",
+        "for a new verb, cut a registry successor; for anything else, "
+        "nothing is owed"),
 
     "gate_rebless": (
         "Does this change edit a file under hooks/ that is one of the gates the "
@@ -159,7 +155,11 @@ def change(base="origin/main", repo=REPO):
     names += subprocess.run(["git", "status", "--porcelain=v1"],
                             capture_output=True, text=True, cwd=repo,
                             timeout=60).stdout.splitlines()
-    added, edited = [], []
+    # DELETED IS ITS OWN LIST. A removed path used to fall through to
+    # "edited", so the advisory described a deletion as an edit to a file
+    # that no longer exists, and the collector selftest's "every named path
+    # exists" property failed on any branch that deleted a tracked file.
+    added, edited, deleted = [], [], []
     for row in names:
         # Two shapes reach here. `git diff --name-status` gives "M\tpath";
         # `git status --porcelain` gives "?? path" or " M path". Untracked and
@@ -170,11 +170,38 @@ def change(base="origin/main", repo=REPO):
             status, path = parts[0], parts[-1]
         else:
             status, path = row[:2].strip() or "M", row[3:].strip()
+        # A RENAME IS A DELETE PLUS AN ADD. Porcelain prints "R  old -> new"
+        # (and --name-status "R100\told\tnew", whose last column is already
+        # the new path). Taken whole, "old -> new" was named as one path that
+        # does not exist, which the collector selftest's every-named-path-
+        # exists property caught on the first branch that renamed a migration.
+        if status.startswith(("R", "C")):
+            if " -> " in path:
+                old_path, path = path.split(" -> ", 1)
+            elif "\t" in row:
+                old_path = row.split("\t")[1]
+            else:
+                old_path = None
+            if status.startswith("R") and old_path and old_path not in deleted:
+                deleted.append(old_path)
+            status = "A"
         if not path:
             continue
-        target = added if status.startswith(("A", "??")) else edited
+        if status.startswith("D"):
+            target = deleted
+        else:
+            target = added if status.startswith(("A", "??")) else edited
         if path not in target:
             target.append(path)
+    # Committed and uncommitted rows are read together, so a file the branch
+    # added in an earlier commit and the working tree has since removed (a
+    # renumbered migration) arrives as both added and deleted. It is gone:
+    # only the deletion is true. The disk settles which way it ended, so a
+    # file deleted in a commit and re-created since stays added.
+    on_disk = {path for path in added + edited + deleted if os.path.exists(os.path.join(repo, path))}
+    added = [path for path in added if path not in deleted or path in on_disk]
+    edited = [path for path in edited if path not in deleted or path in on_disk]
+    deleted = [path for path in deleted if path not in on_disk]
     # Whether a file is an entrypoint is a fact the questions CANNOT see, so
     # it is gathered here for every touched file rather than inferred from a
     # path. Two mistakes in the first version of this function, both of which
@@ -199,7 +226,7 @@ def change(base="origin/main", repo=REPO):
     merged = subprocess.run(
         ["git", "log", "--merges", "--oneline", f"{base}..HEAD"],
         capture_output=True, text=True, cwd=repo, timeout=60).stdout.strip()
-    return {"files": {"added": added, "edited": edited},
+    return {"files": {"added": added, "edited": edited, "deleted": deleted},
             "added_files_with_a_shebang_or_main_guard": shebangs,
             "edited_files_that_are_script_entrypoints": edited_entrypoints,
             "this_branch_merged_another_branch": bool(merged)}

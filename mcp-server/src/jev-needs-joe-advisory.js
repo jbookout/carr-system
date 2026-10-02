@@ -1,8 +1,6 @@
 // Optional, read-only Jev advice for the authenticated Needs Joe projection.
 // The source queue is never changed by this module.
-const ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 const MODEL = "jev-1.13.0";
-const DEADLINE_MS = 1100;
 const MAX_ITEMS = 20;
 const MAX_REQUEST_CHARS = 52000;
 const CLASSES = Object.freeze({
@@ -111,7 +109,7 @@ function parseItem(answers, item, index) {
     ambiguity_probability: ambiguity.noul, calibration_status: "unverified_model_output" };
 }
 
-export async function needsJoeAdvisory(queue, { apiKey, fetchImpl = fetch, now = new Date() } = {}) {
+export async function needsJoeAdvisory(queue, { askJev, now = new Date() } = {}) {
   const observedAt = now.toISOString();
   const original = queue?.items;
   const snapshot = await digest(original);
@@ -122,7 +120,7 @@ export async function needsJoeAdvisory(queue, { apiKey, fetchImpl = fetch, now =
   if (items.some(item => !/^WR-[0-9]{1,12}$/.test(item.human_ref)) ||
       new Set(items.map(item => item.human_ref)).size !== items.length)
     return unavailable("invalid_projection", snapshot, observedAt, configDigest);
-  if (!apiKey) return unavailable("jev_unavailable", snapshot, observedAt, configDigest);
+  if (typeof askJev !== "function") return unavailable("jev_unavailable", snapshot, observedAt, configDigest);
   const questions = questionsFor(items);
   configDigest = await digest({ model: MODEL, questions });
   const payload = { model: MODEL, state: { items }, questions };
@@ -131,12 +129,7 @@ export async function needsJoeAdvisory(queue, { apiKey, fetchImpl = fetch, now =
     return unavailable("egress_limit", snapshot, observedAt, configDigest);
   const vendorStarted = performance.now();
   try {
-    const response = await fetchImpl(ENDPOINT, { method: "POST",
-      headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
-      body, signal: AbortSignal.timeout(DEADLINE_MS) });
-    if (!response.ok) return unavailable("jev_unavailable", snapshot, observedAt, configDigest,
-      Math.round(performance.now() - vendorStarted));
-    const result = await response.json();
+    const result = await askJev(payload);
     const answers = result?.answers;
     if (!answers || typeof answers !== "object" || Array.isArray(answers) ||
         result.model !== MODEL || Object.keys(answers).length !== Object.keys(questions).length ||

@@ -547,10 +547,13 @@ test("negative: a dealroom/test suite added and not imported fails", async () =>
 
   // The next suite someone adds to that directory, before they remember the shim.
   assert.deepEqual(orphanedSuites([...real, "tomorrows-suite.test.mjs"], shim), ["tomorrows-suite.test.mjs"]);
-  // And the exact four that were orphaned when this unit started.
+  // A shim importing only the original two Home suites orphans every other
+  // real suite on disk today — not a fixed historical count, since `real`
+  // above is read live: this list grows exactly when a suite is added to
+  // dealroom/test, the same event orphanedSuites exists to catch.
   const twoOnly = 'import "../../dealroom/test/workspace-command-center-model.test.mjs";\nimport "../../dealroom/test/workspace-command-center-static.test.mjs";';
   assert.deepEqual(orphanedSuites(real, twoOnly),
-    ["boot-mode.test.mjs", "lead-board-client.test.mjs", "lead-board-static.test.mjs", "system-work-branding.test.mjs"]);
+    real.filter((file) => !file.startsWith("workspace-command-center-")));
 });
 
 test("negative: an inventory entry naming a route the router does not serve fails", async () => {
