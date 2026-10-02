@@ -294,6 +294,7 @@ def _terminate(child: subprocess.Popen) -> None:
     except PermissionError:
         # Darwin can return EPERM after the last group member has exited.
         # A live group remains a failure; verify absence instead of swallowing.
+        child.poll()  # Reap an exited leader before asking ps about its group.
         probe = subprocess.run(['ps', '-axo', 'pgid='], capture_output=True, text=True, timeout=5)
         if probe.returncode or str(child.pid) in probe.stdout.split():
             raise

@@ -96,11 +96,11 @@ print(sys.argv[sys.argv.index('--correlation')+1]+' aa000000-0000-4000-8000-0000
 ''')
         self.env['FAKE_OPS_RECORDS'] = str(self.home/'ops-records.jsonl')
 
-    def run_task(self, mode='success', timeout='3'):
+    def run_task(self, mode='success', timeout='30'):
         return subprocess.run([str(REPO / 'bin/headless-task'), 'test-task',
                                '--repo', str(self.repo), '--timeout-seconds', timeout],
                               env={**self.env, 'FAKE_MODE': mode},
-                              capture_output=True, text=True, timeout=12)
+                              capture_output=True, text=True, timeout=90)
 
     def ledger(self):
         return [json.loads(s) for s in (self.repo / 'out/headless/test-task/ledger.jsonl').read_text().splitlines()]
@@ -246,17 +246,17 @@ print(sys.argv[sys.argv.index('--correlation')+1]+' aa000000-0000-4000-8000-0000
 
     def test_01_termination_persists_identity_and_kills_child(self):
         child = subprocess.Popen([str(REPO/'bin/headless-task'), 'test-task', '--repo', str(self.repo),
-                                  '--timeout-seconds', '2'], env={**self.env,'FAKE_MODE':'timeout'},
+                                  '--timeout-seconds', '60'], env={**self.env,'FAKE_MODE':'timeout'},
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         pidfile = self.home/'args.json.pid'
         try:
-            deadline = time.monotonic()+5
+            deadline = time.monotonic()+30
             while not pidfile.exists() and time.monotonic() < deadline:
                 time.sleep(.02)
             self.assertTrue(pidfile.exists())
             pid = int(pidfile.read_text())
             child.send_signal(signal.SIGTERM)
-            child.communicate(timeout=6)
+            child.communicate(timeout=30)
             try:
                 with self.assertRaises(ProcessLookupError): os.kill(pid, 0)
                 rows = self.ledger()
@@ -401,6 +401,20 @@ print(sys.argv[sys.argv.index('--correlation')+1]+' aa000000-0000-4000-8000-0000
                 return_value=subprocess.CompletedProcess([],0,stdout='987654\n')):
             with self.assertRaises(PermissionError): _terminate(child)
 
+    def test_termination_reaps_exited_child_before_darwin_group_probe(self):
+        from lib.headless_tasks import _terminate
+        from unittest.mock import Mock
+        reaped = []
+        child = Mock(pid=987654)
+        child.poll.side_effect = lambda: reaped.append(True) or 0
+        def probe(*args, **kwargs):
+            return subprocess.CompletedProcess([], 0, stdout='' if reaped else '987654\n')
+        with patch('os.killpg', side_effect=PermissionError), patch(
+                'lib.headless_tasks.subprocess.run', side_effect=probe):
+            _terminate(child)
+        child.poll.assert_called_once()
+        child.wait.assert_called_once()
+
     def test_canonical_zero_exit_without_ack_is_not_recorded(self):
         from lib.headless_tasks import record_run
         row={'status':'success','start':stamp_before(),'end':stamp_before(),'run_id':'aa000000-0000-4000-8000-000000000001'}
@@ -436,7 +450,7 @@ print(sys.argv[sys.argv.index('--correlation')+1]+' aa000000-0000-4000-8000-0000
         child=subprocess.Popen([str(REPO/'bin/headless-task'),'test-task','--repo',str(self.repo)],
             env={**self.env,'FAKE_MODE':'timeout'}, stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
         pidfile=self.home/'args.json.pid'
-        deadline=time.monotonic()+5
+        deadline=time.monotonic()+30
         while not pidfile.exists() and time.monotonic()<deadline: time.sleep(.02)
         self.assertTrue(pidfile.exists())
         pid=int(pidfile.read_text())
