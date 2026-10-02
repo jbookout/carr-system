@@ -337,7 +337,7 @@ async function withEnvelope(client, actor, verb, args, fn) {
   // reports a version conflict instead of the promised replay.
   // Keep this scoped until the shared envelope's existing fake-client suites
   // are migrated to model the extra query for every historical write verb.
-  if (verb === "whats-new" || verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "answer-work-request-for-joe" || verb === "decline-work-request" || verb === "supersede-work-request" || verb === "propose-ready-plan" || verb === "review-heavy-build-plan" || verb === "accept-ready-plan" || verb === "propose-ready-plan-amendment" || verb === "accept-ready-plan-amendment" || verb === "acknowledge-ready-plan-amendment" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease" || verb === "observe-memory" || verb === "promote-memory" || verb === "correct-memory" || verb === "forget-memory" || verb === "register-engineering-slice-plan" || verb === "admit-engineering-slice" || verb === "review-engineering-slice" || verb === "append-tour-rights-receipt" || verb === "revoke-tour-rights-receipt" || verb === "append-tour-source-evidence" || verb === "append-tour-field-assertion" || verb === "create-tour-public-projection-draft" || verb === "seal-tour-public-projection" || verb === "append-tour-property-identifier-assertion" || verb === "append-tour-coordinate-candidate" || verb === "append-tour-entrance-verification-receipt" || verb === "codex-checkpoint" || verb === "codex-record-event" || verb === "ask-jev" || TOUR_DOMAIN_SERIALIZED_WRITES.has(verb) || BOARD_ANSWER_WRITE_VERBS.has(verb) || MEETING_MODE_WRITE_VERBS.includes(verb))
+  if (verb === "teach" || verb === "whats-new" || verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "answer-work-request-for-joe" || verb === "decline-work-request" || verb === "supersede-work-request" || verb === "propose-ready-plan" || verb === "review-heavy-build-plan" || verb === "accept-ready-plan" || verb === "propose-ready-plan-amendment" || verb === "accept-ready-plan-amendment" || verb === "acknowledge-ready-plan-amendment" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease" || verb === "observe-memory" || verb === "promote-memory" || verb === "correct-memory" || verb === "forget-memory" || verb === "register-engineering-slice-plan" || verb === "admit-engineering-slice" || verb === "review-engineering-slice" || verb === "append-tour-rights-receipt" || verb === "revoke-tour-rights-receipt" || verb === "append-tour-source-evidence" || verb === "append-tour-field-assertion" || verb === "create-tour-public-projection-draft" || verb === "seal-tour-public-projection" || verb === "append-tour-property-identifier-assertion" || verb === "append-tour-coordinate-candidate" || verb === "append-tour-entrance-verification-receipt" || verb === "codex-checkpoint" || verb === "codex-record-event" || verb === "ask-jev" || TOUR_DOMAIN_SERIALIZED_WRITES.has(verb) || BOARD_ANSWER_WRITE_VERBS.has(verb) || MEETING_MODE_WRITE_VERBS.includes(verb))
     await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [key]);
   const prior = await client.query("select request_hash, response from tool_call where idempotency_key=$1", [key]);
   if (prior.rows.length) {
@@ -2875,6 +2875,9 @@ export const TOOLS = {
 
   "catch-me-up": {
     write: false,
+    // The canonical replay ledger is not granted to the views-only reader.
+    // This route supplies actor context inside a read-only transaction.
+    writerConnection: true,
     description: "The merged timeline (event + activity rows) for one deal, client, lead, or vendor, newest first, plus its narrative-file pointer (notes_path). Use before any conversation about a record.",
     inputSchema: { type: "object", properties: { ref: { type: "string", description: "L-204 / C-127 / V-CPA-006 / deal or party name" }, limit: { type: "integer", default: 20 } }, required: ["ref"] },
     handler: async (c, _a, args) => {
@@ -2883,12 +2886,21 @@ export const TOOLS = {
         `select entry_kind, occurred_at, actor, verb, summary, detail, owed
          from v_subject_timeline where subject_type=$1 and subject_id=$2
          order by occurred_at desc limit $3`, [s.type, s.id, args.limit || 20]);
-      return { subject: s, timeline: rows.rows };
+      const captured = await c.query(
+        `select t.idempotency_key as key, a.id::text as activity_id, a.summary
+           from tool_call t join activity a on a.id::text=t.response->>'activity_id'
+          where t.verb='log-activity' and t.actor_id=$1
+            and a.${FK[s.type]}=$2 and t.idempotency_key like 'calcap-%'
+          order by t.idempotency_key limit 5001`, [_a.id, s.id]);
+      if (captured.rows.length > 5000)
+        throw new ToolError({ error: "calendar_history_too_large" });
+      return { subject: s, timeline: rows.rows, calendar_history: captured.rows };
     },
   },
 
   "find-and-catch-up": {
     write: false,
+    writerConnection: true, // catch-me-up reads the actor-bound replay ledger.
     description: "Find one live person, practice, vendor, or deal by name and immediately return that record's catch-me-up timeline. This is the bounded read-only composition of find then catch-me-up: exactly one live match proceeds; zero returns not_found; multiple matches return needs_disambiguation and no timeline. Retired aliases, linked neighbours, and related deals are never selected as the target. It performs no model call, retry, write, send, or arbitrary tool dispatch.",
     inputSchema: { type: "object", additionalProperties: false, properties: {
       query: { type: "string", description: `name to find, at most ${FIND_CATCH_UP_QUERY_MAX} characters` },
@@ -2911,7 +2923,7 @@ export const TOOLS = {
         throw new ToolError({ error: "invalid_limit",
           hint: `limit must be an integer from 1 to ${FIND_CATCH_UP_LIMIT_MAX}` });
 
-      // Reuse the registered read handlers directly on the same reader client.
+      // Reuse the registered read handlers on the same read-only client.
       // This is not a generic composite dispatcher: the two names are fixed in
       // code, no callback/tool name/provider is accepted, and the second handler
       // is unreachable until the first yields exactly one live target.
@@ -2942,6 +2954,7 @@ export const TOOLS = {
 
   "prepare-conversation": {
     write: false,
+    writerConnection: true, // fixed composition includes catch-me-up.
     description: "Prepare for one conversation by resolving a name to exactly one live record, returning its recent catch-up timeline, and—when the target is a person or organization—showing the existing introduction paths to that exact ref. This is a fixed bounded read composition: ambiguous or missing identity stops before timeline/graph reads; deals receive timeline context but are never pretended to be intro-graph people. It performs no model call, retry, write, send, or arbitrary tool dispatch.",
     inputSchema: { type: "object", additionalProperties: false, properties: {
       query: { type: "string", description: `person, organization, vendor, or deal name; at most ${FIND_CATCH_UP_QUERY_MAX} characters` },
@@ -3125,7 +3138,9 @@ export const TOOLS = {
     write: false,
     description: "Open pipeline grouped by phase. Never exposes Salesforce commission/close-date placeholders (they are placeholders, not data).",
     inputSchema: { type: "object", properties: {} },
-    handler: async (c) => ({ deals: (await c.query("select * from v_deal_board where outcome is null order by phase_sort, name")).rows }),
+    handler: async (c) => ({ deals: (await c.query(`select b.*, d.operating_state, d.parking_note, to_jsonb(d.invoiced_on)#>>'{}' as invoiced_on
+      from v_deal_board b join v_deal_room_board d on d.id=b.id
+      order by b.phase_sort, b.name /* dealboard:operating-state */`)).rows }),
   },
 
   "deal-room-board": {
@@ -3167,6 +3182,8 @@ export const TOOLS = {
                 to_jsonb(b.last_touch)#>>'{}' as last_touch,
                 to_jsonb(b.last_review_at)#>>'{}' as last_review_at, b.workspace_kind,
                 b.operating_state, b.parking_reason, b.parking_note,
+                to_jsonb(b.invoiced_on)#>>'{}' as invoiced_on,
+                (select to_jsonb(pc) from v_deal_room_phase_change pc where pc.deal_id=b.id) as phase_change,
                 to_jsonb(b.parked_at)#>>'{}' as parked_at, b.parked_by,
                 coalesce((
                   select jsonb_object_agg(latest.field,
@@ -3198,7 +3215,7 @@ export const TOOLS = {
             and ($3::uuid is null or account_client_id=$3::uuid)
           order by started_at desc limit 1`,
         [actor.slug, workspace, args.account_client_id || null]);
-      return { actor: actor.slug, deals: deals.rows, accounts: accounts.rows,
+      return { schema_version: 'local-deals-board.v1', actor: actor.slug, deals: deals.rows, accounts: accounts.rows,
         open_session: session.rows[0] || null };
     },
   },
@@ -5305,6 +5322,7 @@ export const TOOLS = {
 
   "confirm-merge": {
     write: true,
+    humanOnly: true,
     description: "HUMAN-confirmed merge of two duplicate parties: sets merged_into on the loser so it becomes a pointer to the survivor. Only after a human has looked at both records — the Hovanian rule means nothing auto-merges, ever.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, survivor_party: { type: "string" }, merged_party: { type: "string" },
@@ -5344,6 +5362,23 @@ export const TOOLS = {
         throw new ToolError({ error: "match_basis_required",
           hint: "state the corroborating signal that established this duplicate; a name alone is never a merge basis" });
 
+      // Serialize overlapping merges before reading scores or moving roles.
+      // A stable UUID order also keeps reverse calls from deadlocking. The
+      // caller's transaction holds these locks through the mutation and event.
+      const endpoints = await c.query(
+        `/* merge_live_endpoints */
+         select id, merged_into from party where id = any($1::uuid[])
+          order by id for update`, [[surv.partyId, merg.partyId]]);
+      if (endpoints.rows.length !== 2)
+        throw new ToolError({ error: "merge_survivorship_unavailable",
+          hint: "both party rows must be readable before a merge can run" });
+      for (const endpoint of endpoints.rows) {
+        if (endpoint.merged_into)
+          throw new ToolError({ error: "party_already_merged", party_id: endpoint.id,
+            merged_into: endpoint.merged_into,
+            hint: "read the live party and confirm the duplicate pair again before merging" });
+      }
+
       // The human confirms THAT this pair is a duplicate. Code decides WHICH
       // row survives, with the rule's exact precedence, so a human cannot
       // accidentally retire the more-cited or better-evidenced record.
@@ -5355,7 +5390,12 @@ export const TOOLS = {
             or exists(select 1 from vendor v where v.party_id=p.id and v.vendor_ref is not null) as has_business_ref,
            (select count(distinct rf.kind) from record_flag rf where rf.subject_type='party' and rf.subject_id=p.id
              and rf.kind in ('verified','address','phone','email','npi','specialty') and coalesce(rf.value->>'found','true') <> 'false') as verified_identity_fields,
-           ((select count(*) from activity a where a.subject_type='party' and a.subject_id=p.id)
+           -- Activities attach to role rows, which move with the party below.
+           -- EXISTS counts a multi-role activity once, without multiplying it.
+           ((select count(*) from activity a
+              where exists(select 1 from client cl where cl.id=a.client_id and cl.party_id=p.id)
+                 or exists(select 1 from lead l where l.id=a.lead_id and l.party_id=p.id)
+                 or exists(select 1 from vendor v where v.id=a.vendor_id and v.party_id=p.id))
              + (select count(*) from deal_participant dp where dp.party_id=p.id)
              + (select count(*) from party_link pl where pl.from_party=p.id or pl.to_party=p.id or pl.via_party=p.id)) as linked_records
           from party p where p.id = any($1::uuid[])`, [[surv.partyId, merg.partyId]]);
@@ -5369,10 +5409,22 @@ export const TOOLS = {
       const sweep = await c.query(
         `/* merge_orphan_sweep */
          select 'party_link' as attachment, count(*)::int as count from party_link where from_party=$1 or to_party=$1 or via_party=$1
-         union all select 'activity', count(*)::int from activity where subject_type='party' and subject_id=$1
+         union all select 'activity', count(*)::int from activity a
+           where exists(select 1 from client cl where cl.id=a.client_id and cl.party_id=$1)
+              or exists(select 1 from lead l where l.id=a.lead_id and l.party_id=$1)
+              or exists(select 1 from vendor v where v.id=a.vendor_id and v.party_id=$1)
          union all select 'deal_participant', count(*)::int from deal_participant where party_id=$1
          union all select 'record_flag', count(*)::int from record_flag where subject_type='party' and subject_id=$1
          union all select 'child_party', count(*)::int from party where org_id=$1`, [merg.partyId]);
+
+      // Moving role rows cannot preserve graph endpoints or the broker. Until
+      // an attachment-preserving merge handles duplicate and self edges, refuse
+      // this pair before any write instead of retiring a still-cited party.
+      const graphCount = sweep.rows.find(row => row.attachment === "party_link")?.count;
+      if (Number(graphCount) > 0)
+        throw new ToolError({ error: "merge_graph_attachments_require_resolution",
+          party_id: merg.partyId, count: Number(graphCount),
+          hint: "the losing party has introduction links; preserve their endpoints and broker before confirming this merge" });
 
       // JOE'S RULING, in his words: "Okafor is a client now duh. everyone starts
       // as a lead." A lead record and a client record for the same person are
@@ -5708,14 +5760,48 @@ export const TOOLS = {
     }),
   },
 
+  "find-rule": {
+    description: "Find proposed, active, or retired rules by their words when the id is unknown. Matches a literal substring or all whitespace-separated words, case-insensitively. Returns bounded statement previews and full ids for amend-rule or retire-rule. Read-only; status defaults to any.",
+    inputSchema: { type: "object", properties: {
+      text: { type: "string", minLength: 1 },
+      status: { type: "string", enum: ["proposed", "active", "retired", "any"], default: "any" },
+      limit: { type: "integer", minimum: 1, maximum: 100, default: 20 },
+    }, required: ["text"] },
+    handler: async (c, actor, args) => {
+      const text = String(args.text || "").trim();
+      if (!text) throw new ToolError({ error: "rule_search_text_required" });
+      const status = args.status ?? "any";
+      if (!["proposed", "active", "retired", "any"].includes(status))
+        throw new ToolError({ error: "invalid_rule_status" });
+      const limit = args.limit ?? 20;
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100)
+        throw new ToolError({ error: "invalid_rule_search_limit" });
+      const personalScope = personalScopeForActor(actor);
+      if (personalScope.status === "error")
+        throw new ToolError({ error: personalScope.error });
+      const matches = await c.query(
+        `select id, left(id::text,8) as short_id, status, version, created_at,
+                scope, left(statement,200) as statement
+           from v_rule_lookup
+          where (personal_to is null or personal_to=$5::text)
+            and ($2='any' or status=$2)
+            and (strpos(lower(statement),lower($1))>0 or not exists (
+              select 1 from unnest($3::text[]) as terms(word)
+               where strpos(lower(statement),lower(word))=0))
+          order by created_at desc, id
+          limit $4`, [text, status, text.split(/\s+/u), limit, personalScope.sponsor]);
+      return { ok: true, rules: matches.rows };
+    },
+  },
+
   "teach": {
     write: true,
-    description: "Write a rule from the human's own words (status: proposed — after exact enforcement is built and verified, one explicit human approve-rule act atomically activates the enforced policy). Capture the verbatim quote. Personal-scope rules (voice, format) set personal_to. WHEN TO CALL IT — the test is 'would the system have to ask this again?', NOT whether the partner phrased it as 'always X' or 'never Y'. Standing lessons arrive as ordinary sentences: a modeling ruling ('cadence studio is one national account'), a correction to a fact in the record, a choice between options you offered with the reasoning attached, a rejection of a draft. Capture on the spot, never at 'session close' — the same event-not-session-close rule protocol 27b already settles. Pass supersedes when this rule replaces an earlier one; the old rule is NOT retired by that alone (use retire-rule), but the link is recorded so nobody re-litigates a settled point from a stale row. ENFORCEMENT-FIRST BIRTH (WR-000019 slice S10): every teach REQUIRES enforcement_home, one of 'gate' (a deny/stop control will carry it — name carrying_control), 'jit' (delivered just-in-time by pack/moment), 'core' (always-loaded), or 'judgment_advisory' (no mechanical control ever will — say why_no_machine in one line). This is a refusal, not a default: a rule captured with nobody having said where it will live is exactly how guidance debt piled up before this slice, and a silent default would be indistinguishable from a considered choice. THIS IS CLERICAL WORK, NOT SELF-MODIFICATION, AND IT IS NEVER REFUSED ON THAT GROUND. Joe's ruling 2026-08-10, verbatim: 'You didn't make your own rule. You applied my rule to the system.' A session INVENTING a standing rule for itself would be self-modification and would be gated. A session TRANSCRIBING what a partner just said is the entire purpose of this verb, and the gate is already built into it: the rule lands as PROPOSED, binds nobody, and takes effect through one human approve-rule act only when enforcement is ready. A session that declines to record a partner's instruction because writing rules 'feels like' changing itself has not been careful, it has lost the instruction — which is the one outcome this verb exists to prevent. Recorded because a session hit exactly this on the day the ruling was made and stopped three routes early.",
+    description: "Write a rule from the human's own words (status: proposed — after exact enforcement is built and verified, one explicit human approve-rule act atomically activates the enforced policy). Capture the verbatim quote. Personal-scope rules (voice, format) set personal_to. WHEN TO CALL IT — the test is 'would the system have to ask this again?', NOT whether the partner phrased it as 'always X' or 'never Y'. Standing lessons arrive as ordinary sentences: a modeling ruling ('cadence studio is one national account'), a correction to a fact in the record, a choice between options you offered with the reasoning attached, a rejection of a draft. Capture on the spot, never at 'session close' — the same event-not-session-close rule protocol 27b already settles. Pass supersedes when this rule replaces an earlier one; the old rule is retired with an immutable receipt in the same transaction. Superseding an ACTIVE rule requires a human caller and the same authority connection as retire-rule. ENFORCEMENT-FIRST BIRTH (WR-000019 slice S10): every teach REQUIRES enforcement_home, one of 'gate' (a deny/stop control will carry it — name carrying_control), 'jit' (delivered just-in-time by pack/moment), 'core' (always-loaded), or 'judgment_advisory' (no mechanical control ever will — say why_no_machine in one line). This is a refusal, not a default: a rule captured with nobody having said where it will live is exactly how guidance debt piled up before this slice, and a silent default would be indistinguishable from a considered choice. THIS IS CLERICAL WORK, NOT SELF-MODIFICATION, AND IT IS NEVER REFUSED ON THAT GROUND. Joe's ruling 2026-08-10, verbatim: 'You didn't make your own rule. You applied my rule to the system.' A session INVENTING a standing rule for itself would be self-modification and would be gated. A session TRANSCRIBING what a partner just said is the entire purpose of this verb, and the gate is already built into it: the rule lands as PROPOSED, binds nobody, and takes effect through one human approve-rule act only when enforcement is ready. A session that declines to record a partner's instruction because writing rules 'feels like' changing itself has not been careful, it has lost the instruction — which is the one outcome this verb exists to prevent. Recorded because a session hit exactly this on the day the ruling was made and stopped three routes early.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, statement: { type: "string" },
       human_quote: { type: "string" }, scope: { type: "object" },
       personal: { type: "boolean", description: "true = applies to this partner only" },
-      supersedes: { type: "string", description: "rule_id this one replaces; recorded as a link, does not retire it" },
+      supersedes: { type: "string", description: "rule_id this one replaces and retires atomically; ACTIVE rules require a human caller" },
       enforcement_home: { type: "string", enum: ["gate","jit","core","judgment_advisory"],
         description: "REQUIRED. Where this rule will be enforced: 'gate' (a deny/stop control — pass carrying_control), 'jit' (delivered just-in-time by pack/moment), 'core' (always-loaded), or 'judgment_advisory' (no mechanical control — pass why_no_machine)." },
       carrying_control: { type: "string", description: "REQUIRED when enforcement_home is 'gate'. The control this rule's enforcement will carry — an existing control_key, or the one about to be built." },
@@ -5740,15 +5826,21 @@ export const TOOLS = {
         throw new ToolError({ error: "why_no_machine_required",
           hint: "enforcement_home 'judgment_advisory' means no mechanical control will ever back this rule; say why not in why_no_machine, one line" });
 
+      let supersedes = args.supersedes || null;
       // A supersedes pointer at a rule that does not exist is a silent lie in the
       // audit trail, so it is checked rather than trusted.
-      if (args.supersedes) {
+      if (supersedes) {
         // Short form accepted (loop #261): the gist index prints 8 characters and
         // that is the only id a session can quote back.
-        args.supersedes = await resolveRuleId(c, args.supersedes, "supersedes");
-        const prior = await c.query("select id, status from rule where id=$1", [args.supersedes]);
+        supersedes = await resolveRuleId(c, supersedes, "supersedes");
+        const prior = await c.query("select id, status from rule where id=$1 for update", [supersedes]);
         if (!prior.rows.length) throw new ToolError({ error: "supersedes_not_found",
-          rule_id: args.supersedes, hint: "pass the id of a real rule, or omit supersedes" });
+          rule_id: supersedes, hint: "pass the id of a real rule, or omit supersedes" });
+        if (prior.rows[0].status === "retired")
+          throw new ToolError({ error: "already_retired", rule_id: supersedes });
+        if (prior.rows[0].status === "active" && actor.human !== true)
+          throw new ToolError({ error: "human_only", verb: "teach", rule_id: supersedes,
+            hint: "superseding an ACTIVE rule requires a human caller" });
       }
       const r = await c.query(
         `insert into rule (statement, human_quote, taught_by, scope, personal_to, supersedes)
@@ -5759,7 +5851,15 @@ export const TOOLS = {
          // belt-and-braces: it makes the storage line and the echo lines
          // structurally incapable of disagreeing, which is the disagreement that
          // stored a shared rule as personal while reporting otherwise.
-         args.personal === true ? actor.id : null, args.supersedes || null]);
+         args.personal === true ? actor.id : null, supersedes || null]);
+      // This definer door preserves retirement receipts and the active-rule
+      // authority guard. Failure rolls back the new rule and its envelope too.
+      let retirement = null;
+      if (supersedes) {
+        const retired = await c.query("select ops.retire_superseded_rule($1,$2) as result",
+          [r.rows[0].id, args.idempotency_key]);
+        retirement = retired.rows[0].result;
+      }
       // Capture precedes authority. Every proposed rule enters the same intake
       // state machine immediately, but this row is deliberately only CAPTURED:
       // neither a model nor the transcription verb can make it binding.
@@ -5769,7 +5869,7 @@ export const TOOLS = {
          values ('rule','human',$1,$2,'captured',$3)`,
         [`rule:${r.rows[0].id}`, args.statement, actor.id]);
       await writeEvent(c, actor, "teach", "rule", r.rows[0].id,
-        { new: { statement: args.statement, supersedes: args.supersedes || null,
+        { new: { statement: args.statement, supersedes: supersedes || null,
                  enforcement_home: enforcementHome,
                  carrying_control: enforcementHome === "gate" ? carryingControl : null,
                  why_no_machine: enforcementHome === "judgment_advisory" ? whyNoMachine : null },
@@ -5790,7 +5890,8 @@ export const TOOLS = {
                next_authority_action: "approve-rule",
                scope_applied: scopeApplied,
                personal_requested: args.personal === true,
-               supersedes: args.supersedes || null,
+               supersedes: supersedes || null,
+               retirement,
                enforcement_home: enforcementHome,
                carrying_control: enforcementHome === "gate" ? carryingControl : null,
                why_no_machine: enforcementHome === "judgment_advisory" ? whyNoMachine : null,
@@ -8465,10 +8566,15 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
   // The registry-wide test covers every present and future humanOnly verb.
   if (tool.humanOnly === true) {
     const actorClass = authorizationClassForActor(actor);
-    if (actorClass !== "verified_partner" && !canExercisePartnerAuthority(actor))
+    // Identity merges require the human caller even when a machine holds
+    // sponsor-scoped partner authority. Other partner-authority verbs retain
+    // their existing native/local agent route.
+    if (actorClass !== "verified_partner" &&
+        (name === "confirm-merge" || !canExercisePartnerAuthority(actor)))
       throw new ToolError({ error: "human_only_verb_requires_verified_partner",
         verb: name, actor_class: actorClass,
-        hint: "this verb records a partner-authority act and requires either the verified partner " +
+        hint: name === "confirm-merge" ? "confirm-merge requires a verified human partner; machine identities cannot confirm identity merges." :
+              "this verb records a partner-authority act and requires either the verified partner " +
               "or a server-verified native/local agent bound to that partner's sponsor-scoped " +
               "authority connection." });
   }
@@ -8690,6 +8796,8 @@ registerTools({
                 b.market_agent, to_jsonb(b.last_touch)#>>'{}' as last_touch,
                 to_jsonb(b.last_review_at)#>>'{}' as last_review_at, b.workspace_kind,
                 b.operating_state, b.parking_reason, b.parking_note,
+                to_jsonb(b.invoiced_on)#>>'{}' as invoiced_on,
+                (select to_jsonb(pc) from v_deal_room_phase_change pc where pc.deal_id=b.id) as phase_change,
                 to_jsonb(b.parked_at)#>>'{}' as parked_at, b.parked_by,
                 r.salesforce_id, r.base_version
            from v_deal_room_board b

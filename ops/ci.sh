@@ -1242,6 +1242,13 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     return
   fi
 
+  if ! CARR_RULE_TEST_DATABASE_URL="$dsn" run_quiet "$LOGDIR/migration-rule-supersession.log" \
+      node --test mcp-server/test/find-rule-supersedes.test.mjs; then
+    tail -30 "$LOGDIR/migration-rule-supersession.log" >&2
+    bad migration "rule lookup or atomic teach supersession database proof failed"
+    return
+  fi
+
   # Tour Operations carries database-owned rights, identity, route, digest,
   # ACL, and append-only invariants that cannot be proved by text-shape tests.
   # The DoctorCRE v5 portfolio proof joins the same loop for the same reason:
@@ -1259,7 +1266,8 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     mcp-server/test/tour-delivery-data-plane-postgres.sql \
     mcp-server/test/tour-client-share-allowlist-postgres.sql \
     mcp-server/test/assurance-health-store-postgres.sql \
-    mcp-server/test/work-portfolio-postgres.sql; do
+    mcp-server/test/work-portfolio-postgres.sql \
+    mcp-server/test/local-deals-postgres.sql; do
     [ -f "$tour_pg_proof" ] || continue
     tour_pg_log="$LOGDIR/$(basename "$tour_pg_proof" .sql).log"
     if ! run_quiet "$tour_pg_log" \
