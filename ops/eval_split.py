@@ -338,4 +338,3 @@ def main():
     except (SplitError, PermissionError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
-
