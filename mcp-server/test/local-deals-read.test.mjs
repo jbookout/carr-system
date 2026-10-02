@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { assertRegisteredOperation } from '../src/mutation-registry.js';
 import { TOOLS } from '../src/tools.js';
 
 test('deal-board exposes parking fields and excludes invoiced deals in its executed read', async () => {
@@ -33,4 +34,14 @@ test('phase evidence projection selects the latest change, dates evidence indepe
   assert.match(sql,/e\.verb <> 'revert-deal-field'/);
   assert.match(sql,/where d\.invoiced_on is null;/);
   assert.match(sql,/grant select on v_deal_room_phase_change to carr_reader, carr_writer/);
+});
+
+test('invoice read additions preserve sealed verb input schemas and authority flags', async () => {
+  for (const name of ['deal-board', 'deal-room-board', 'get-deal-room', 'read-deal-reconciliation']) {
+    const args = name.endsWith('board') ? {} : {deal: 'aa000000-0000-4000-8000-000000000004'};
+    const sealed = await assertRegisteredOperation(name, TOOLS[name], args);
+    assert.equal(sealed.write, false, name);
+    assert.equal(sealed.human_only, false, name);
+    assert.equal(sealed.authority_only, false, name);
+  }
 });

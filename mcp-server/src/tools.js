@@ -3138,7 +3138,8 @@ export const TOOLS = {
     write: false,
     description: "Open pipeline grouped by phase. Never exposes Salesforce commission/close-date placeholders (they are placeholders, not data).",
     inputSchema: { type: "object", properties: {} },
-    handler: async (c) => ({ deals: (await c.query(`select b.*, d.operating_state, d.parking_note, to_jsonb(d.invoiced_on)#>>'{}' as invoiced_on
+    handler: async (c) => ({ deals: (await c.query(`select b.*, d.operating_state, d.parking_note, to_jsonb(d.invoiced_on)#>>'{}' as invoiced_on,
+      to_jsonb(d.closed_on)#>>'{}' as closed_on, d.lane
       from v_deal_board b join v_deal_room_board d on d.id=b.id
       order by b.phase_sort, b.name /* dealboard:operating-state */`)).rows }),
   },
@@ -3183,6 +3184,7 @@ export const TOOLS = {
                 to_jsonb(b.last_review_at)#>>'{}' as last_review_at, b.workspace_kind,
                 b.operating_state, b.parking_reason, b.parking_note,
                 to_jsonb(b.invoiced_on)#>>'{}' as invoiced_on,
+                to_jsonb(b.closed_on)#>>'{}' as closed_on, b.lane, b.outcome,
                 (select to_jsonb(pc) from v_deal_room_phase_change pc where pc.deal_id=b.id) as phase_change,
                 to_jsonb(b.parked_at)#>>'{}' as parked_at, b.parked_by,
                 coalesce((
@@ -8797,6 +8799,7 @@ registerTools({
                 to_jsonb(b.last_review_at)#>>'{}' as last_review_at, b.workspace_kind,
                 b.operating_state, b.parking_reason, b.parking_note,
                 to_jsonb(b.invoiced_on)#>>'{}' as invoiced_on,
+                to_jsonb(b.closed_on)#>>'{}' as closed_on, b.lane, b.outcome,
                 (select to_jsonb(pc) from v_deal_room_phase_change pc where pc.deal_id=b.id) as phase_change,
                 to_jsonb(b.parked_at)#>>'{}' as parked_at, b.parked_by,
                 r.salesforce_id, r.base_version
@@ -8866,7 +8869,8 @@ registerTools({
       if (s.type !== "deal") throw new ToolError({ error: "not_a_deal", resolved: s });
       const r = await c.query(
         `select id, name, salesforce_id, base_version, phase, outcome,
-                to_jsonb(closed_on)#>>'{}' as closed_on
+                to_jsonb(closed_on)#>>'{}' as closed_on,
+                to_jsonb(invoiced_on)#>>'{}' as invoiced_on, lane
            from v_deal_reconciliation_read where id=$1`, [s.id]);
       if (!r.rows.length) throw new ToolError({ error: "not_found", table: "deal", id: s.id });
       return r.rows[0];

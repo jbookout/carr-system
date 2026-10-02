@@ -35,20 +35,21 @@ test('Local Deals PostgreSQL caller and evidence regressions', { skip: !bin && '
     await c.connect();
     await c.query('create role carr_reader; create role carr_writer;');
     // Use the committed table definitions and caller views, without production data.
-    for (const name of ['actor', 'party', 'client', 'deal', 'deal_phase', 'deal_participant', 'next_action', 'deal_note', 'national_account_owner', 'deal_market_assignment', 'deal_review_item', 'deal_review_session', 'event', 'tool_call', 'deal_conflict']) {
+    for (const name of ['actor', 'party', 'client', 'deal', 'deal_phase', 'deal_participant', 'next_action', 'deal_note', 'national_account_owner', 'deal_market_assignment', 'deal_review_item', 'deal_review_session', 'event', 'tool_call', 'deal_conflict', 'critical_date', 'activity', 'premises', 'negotiation_round', 'document', 'commission', 'capture_post_call_action', 'building', 'space', 'premises_space']) {
       const table = schema.match(new RegExp(`CREATE TABLE public\\.${name} \\([\\s\\S]*?\\n\\);`))?.[0];
       assert.ok(table, name);
       await c.query(table);
     }
     await c.query('alter table tool_call add primary key(idempotency_key);');
     await c.query("create view v_last_touch as select null::text subject_type, null::uuid subject_id, null::date last_touch where false;");
-    for (const name of ['v_client_account', 'v_deal_board', 'v_deal_room_account', 'v_deal_room_board', 'v_deal_room_event', 'v_deal_room_session']) {
+    for (const name of ['v_client_account', 'v_deal_board', 'v_deal_room_account', 'v_deal_room_board', 'v_deal_room_event', 'v_deal_room_session', 'v_deal_reconciliation_read', 'v_deal_room_note', 'v_deal_room_critical_date', 'v_deal_room_action', 'v_deal_room_activity', 'v_deal_room_participant', 'v_deal_room_premises', 'v_deal_room_negotiation', 'v_deal_room_document']) {
       const view = schema.match(new RegExp(`CREATE VIEW public\\.${name} AS[\\s\\S]*?;`))?.[0];
       assert.ok(view, name);
       await c.query(view);
       await c.query(`grant select on ${name} to carr_reader,carr_writer`);
     }
     await c.query("create view v_ref_index as select 'deal'::text subject_type, id subject_id from deal;");
+    await c.query("grant select on v_ref_index to carr_reader");
     await c.query("insert into actor(id,slug,display_name,kind,active) values($1,'joe','Synthetic Partner','human',true)", [actor.id]);
     for (const [slug, sort] of [['research', 1], ['negotiation', 2], ['legal', 3], ['closed', 4]]) {
       await c.query('insert into deal_phase(slug,label,sort) values($1,$1,$2)', [slug, sort]);
@@ -68,6 +69,71 @@ test('Local Deals PostgreSQL caller and evidence regressions', { skip: !bin && '
       await c.query('begin');
       try { await fn(); } finally { await c.query('rollback'); }
     };
+
+    await c.query(readFileSync(path.join(root, 'migrations/0782_deal_invoice_read_fields.sql'), 'utf8'));
+    const invoiceFields = ['invoiced_on', 'closed_on', 'lane', 'outcome'];
+    const readInvoiceDeals = async () => ({
+      'deal-board': await TOOLS['deal-board'].handler(c),
+      'deal-room-board': await TOOLS['deal-room-board'].handler(c, actor, {workspace: 'team'}),
+      'get-deal-room': await TOOLS['get-deal-room'].handler(c, actor, {deal: id(4)}),
+      'read-deal-reconciliation': await TOOLS['read-deal-reconciliation'].handler(c, actor, {deal: id(4)}),
+    });
+    const rowsOf = result => result.deals || [result];
+    const snapshotPath = path.join(root, 'mcp-server/test/fixtures/deal-invoice-reads-before.json');
+    for (const outcome of [null, 'won']) await t.test(
+      outcome ? 'invoice reads return null invoiced_on on a closed deal and preserve prior snapshots'
+        : 'invoice reads return four date and status fields and preserve prior snapshots',
+      async () => transaction(async () => {
+        await fixture(false);
+        await c.query("update deal set next_date='2026-10-03',phase=case when $1::text is null then 'research' else 'closed' end,outcome=$1,closed_on=case when $1::text is null then null else date '2026-10-01' end,lane='territory',won_value=120000 where id=$2", [outcome, id(4)]);
+        await c.query("insert into commission(id,deal_id,gross_amount,status,created_by,updated_by) values($1,$2,12000,'invoiced',$3,$3)", [id(7), id(4), actor.id]);
+        await c.query('set local role carr_reader');
+        const reads = await readInvoiceDeals();
+        const baseline = JSON.parse(readFileSync(snapshotPath, 'utf8'))[outcome || 'open'];
+        for (const [name, result] of Object.entries(reads)) {
+          assert.deepEqual(rowsOf(result).map(row => Object.fromEntries(invoiceFields.map(field => [field, row[field]]))), [{
+            invoiced_on: null, closed_on: outcome ? '2026-10-01' : null, lane: 'territory', outcome,
+          }], name);
+          const prior = structuredClone(result);
+          const oldRows = rowsOf(baseline[name]);
+          rowsOf(prior).forEach((row, index) => invoiceFields.forEach(field => {
+            if (!Object.hasOwn(oldRows[index], field)) delete row[field];
+          }));
+          assert.deepEqual(prior, baseline[name], `${name}: additive response only`);
+        }
+        await c.query('reset role');
+        assert.deepEqual((await c.query('select d.won_value::text, c.gross_amount::text from deal d join commission c on c.deal_id=d.id where d.id=$1', [id(4)])).rows, [{won_value: '120000.00', gross_amount: '12000.00'}], 'client benefit and commission stay separate');
+      }));
+
+    await t.test('reconciliation returns a populated invoice date and national lane after board removal', async () => transaction(async () => {
+      await fixture(false);
+      await c.query("update deal set phase='closed',outcome='won',closed_on='2026-10-01',invoiced_on='2026-10-02',lane='national' where id=$1", [id(4)]);
+      await c.query('set local role carr_reader');
+      const result = await TOOLS['read-deal-reconciliation'].handler(c, actor, {deal: id(4)});
+      assert.deepEqual(Object.fromEntries(invoiceFields.map(field => [field, result[field]])), {
+        invoiced_on: '2026-10-02', closed_on: '2026-10-01', lane: 'national', outcome: 'won',
+      });
+      assert.deepEqual((await TOOLS['deal-board'].handler(c)).deals, []);
+      assert.deepEqual((await TOOLS['deal-room-board'].handler(c, actor, {})).deals, []);
+    }));
+
+    await t.test('all invoice reads preserve national lane and separate client benefit from commission', async () => transaction(async () => {
+      await fixture(false);
+      await c.query("update deal set phase='closed',outcome='won',closed_on='2026-10-01',lane='national',won_value=120000 where id=$1", [id(4)]);
+      await c.query("insert into commission(id,deal_id,gross_amount,status,created_by,updated_by) values($1,$2,12000,'invoiced',$3,$3)", [id(7), id(4), actor.id]);
+      await c.query('set local role carr_reader');
+      for (const [name, result] of Object.entries(await readInvoiceDeals())) {
+        for (const row of rowsOf(result)) {
+          assert.equal(row.lane, 'national', name);
+          assert.equal(row.invoiced_on, null, name);
+          assert.equal(Object.hasOwn(row, 'won_value'), false, name);
+          assert.equal(Object.hasOwn(row, 'gross_amount'), false, name);
+          assert.equal(Object.values(row).some(value => [12000, 120000, '12000.00', '120000.00'].includes(value)), false, `${name}: no combined money field`);
+        }
+      }
+      await c.query('reset role');
+      assert.deepEqual((await c.query('select d.won_value::text, c.gross_amount::text from deal d join commission c on c.deal_id=d.id where d.id=$1', [id(4)])).rows, [{won_value: '120000.00', gross_amount: '12000.00'}]);
+    }));
 
     await t.test('actual legacy handler works as carr_reader, including an empty board', async () => transaction(async () => {
       assert.equal((await c.query("select has_table_privilege('carr_reader','deal','select') as allowed")).rows[0].allowed, false);
