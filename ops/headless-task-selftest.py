@@ -7,6 +7,9 @@ import plistlib
 import subprocess
 import sys
 import tempfile
+import signal
+import time
+from unittest.mock import patch
 import unittest
 from datetime import datetime, timedelta, timezone
 
@@ -32,16 +35,19 @@ class HeadlessTests(unittest.TestCase):
         self.fakebin.mkdir()
         fake = self.fakebin / 'claude'
         fake.write_text('''#!/usr/bin/env python3
-import json, os, pathlib, sys, time
+import hashlib, json, os, pathlib, sys, time
 if sys.argv[1:3] == ['auth', 'status']:
-    print(json.dumps({'loggedIn':True, 'authMethod':
-          'api_key' if os.environ.get('FAKE_MODE') == 'api-auth' else 'claude.ai'}))
+    print(json.dumps({'loggedIn':os.environ.get('FAKE_MODE') != 'token-auth' or bool(os.environ.get('CLAUDE_CODE_OAUTH_TOKEN')), 'authMethod':
+          'api_key' if os.environ.get('FAKE_MODE') == 'api-auth' else
+          ('oauth_token' if os.environ.get('FAKE_MODE') == 'token-auth' else 'claude.ai'),
+          'apiProvider':'firstParty'}))
     sys.exit(0)
 pathlib.Path(os.environ['FAKE_ARGS']).write_text(json.dumps({
     'argv': sys.argv[1:], 'prompt': sys.stdin.read(), 'cwd': os.getcwd(),
     'api_key_present': 'ANTHROPIC_API_KEY' in os.environ}))
 mode = os.environ.get('FAKE_MODE', 'success')
 if mode == 'timeout':
+    pathlib.Path(os.environ['FAKE_ARGS']+'.pid').write_text(str(os.getpid()))
     time.sleep(60)
 if mode == 'denied':
     print(json.dumps({'type':'system','subtype':'permission_denied'}), flush=True)
@@ -51,7 +57,18 @@ if mode == 'denied-result':
                      'permission_denials':[{'tool_name':'Bash'}]}))
 elif mode == 'invalid':
     print('not a result')
+elif mode == 'abort':
+    print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':'Required store unavailable; stopped without work'}))
+elif mode == 'null':
+    print(json.dumps({'type':'result','subtype':'success','result':None}))
 else:
+    if os.environ.get('CARR_HEADLESS_RECEIPT') and mode != 'failure':
+        artifact = pathlib.Path(os.environ['CARR_HEADLESS_RECEIPT']+'.artifact')
+        artifact.write_text('synthetic completed task artifact')
+        pathlib.Path(os.environ['CARR_HEADLESS_RECEIPT']).write_text(json.dumps({
+            'schema':'carr-headless-completion/v1', 'task_id':'test-task',
+            'run_id':os.environ['CARR_HEADLESS_RUN_ID'], 'outcome':'completed',
+            'artifacts':[{'path':str(artifact),'sha256':hashlib.sha256(artifact.read_bytes()).hexdigest()}]}))
     print(json.dumps({'type':'result','subtype':'success','is_error':False,
                      'permission_denials':[], 'result':'done'}))
 sys.exit(7 if mode == 'failure' else 0)
@@ -62,6 +79,7 @@ sys.exit(7 if mode == 'failure' else 0)
 import json, os, pathlib, sys
 p = pathlib.Path(os.environ['FAKE_RECORDS'])
 with p.open('a') as f: f.write(json.dumps(sys.argv[1:])+'\\n')
+if os.environ.get('FAKE_RECORD_FAIL'): sys.exit(1)
 print(json.dumps({'ok':True}))
 ''')
         recorder.chmod(0o755)
@@ -69,6 +87,14 @@ print(json.dumps({'ok':True}))
                     'PATH': str(self.fakebin) + os.pathsep + os.environ['PATH'],
                     'FAKE_ARGS': str(self.home / 'args.json'),
                     'FAKE_RECORDS': str(self.home / 'records.jsonl')}
+        (self.repo/'tools').mkdir()
+        ops_record = self.repo/'tools/ops-record.py'
+        ops_record.write_text('''import json, os, pathlib, sys
+p = pathlib.Path(os.environ['FAKE_OPS_RECORDS'])
+with p.open('a') as f: f.write(json.dumps(sys.argv[1:])+'\\n')
+print(sys.argv[sys.argv.index('--correlation')+1]+' aa000000-0000-4000-8000-000000000002')
+''')
+        self.env['FAKE_OPS_RECORDS'] = str(self.home/'ops-records.jsonl')
 
     def run_task(self, mode='success', timeout='3'):
         return subprocess.run([str(REPO / 'bin/headless-task'), 'test-task',
@@ -82,7 +108,7 @@ print(json.dumps({'ok':True}))
     def test_success_cli_and_private_log(self):
         result = self.run_task()
         self.assertEqual(result.returncode, 0, result.stderr)
-        row = self.ledger()[0]
+        row = self.ledger()[-1]
         self.assertEqual(row['exit_code'], 0)
         self.assertTrue(row['start'] <= row['end'])
         log = Path(row['log_path'])
@@ -94,14 +120,16 @@ print(json.dumps({'ok':True}))
         self.assertEqual(args['argv'][args['argv'].index('--permission-mode')+1], 'dontAsk')
         self.assertEqual(args['argv'][args['argv'].index('--permission-prompts')+1], 'none')
         self.assertIn('--allowedTools', args['argv'])
-        self.assertEqual(args['prompt'], 'Run the test prompt.\n')
+        self.assertIn('<scheduled-task name="test-task">', args['prompt'])
+        self.assertIn('Run the test prompt.\n', args['prompt'])
+        self.assertIn('carr-headless-completion/v1', args['prompt'])
         self.assertEqual(Path(args['cwd']), self.repo.resolve())
         self.assertFalse((self.home / 'records.jsonl').exists())
 
     def test_denial_event_fails_promptly(self):
         result = self.run_task('denied')
         self.assertEqual(result.returncode, 77, result.stderr)
-        self.assertEqual(self.ledger()[0]['exit_code'], 77)
+        self.assertEqual(self.ledger()[-1]['exit_code'], 77)
         self.assertIn('permission_denied', result.stdout)
         self.assertTrue((self.home / 'records.jsonl').exists())
 
@@ -114,17 +142,15 @@ print(json.dumps({'ok':True}))
 
     def test_timeout_is_logged_and_recorded(self):
         self.assertEqual(self.run_task('timeout', '0.15').returncode, 124)
-        self.assertEqual(self.ledger()[0]['exit_code'], 124)
+        self.assertEqual(self.ledger()[-1]['exit_code'], 124)
         self.assertTrue((self.home / 'records.jsonl').exists())
 
     def test_nonzero_preserved_and_failure_deduped_by_task(self):
         self.assertEqual(self.run_task('failure').returncode, 7)
         self.assertEqual(self.run_task('failure').returncode, 7)
         calls = [json.loads(s) for s in (self.home / 'records.jsonl').read_text().splitlines()]
-        self.assertEqual(len(calls), 2)
-        a, b = (json.loads(c[-1]) for c in calls)
-        self.assertEqual(a['idempotency_key'], b['idempotency_key'])
-        self.assertEqual(a, b)
+        self.assertEqual(len(calls), 1, 'delivered episodes are not sent again')
+        a = json.loads(calls[0][-1])
         self.assertIn('test-task', a['idempotency_key'])
         self.assertEqual(calls[0][:2], ['call', 'add-loop'])
 
@@ -136,7 +162,7 @@ print(json.dumps({'ok':True}))
         self.assertEqual(result.returncode, 0)
         self.assertIn('SKIP', result.stdout)
         self.assertFalse((self.home / 'args.json').exists())
-        self.assertEqual(len(self.ledger()), 3)
+        self.assertEqual(len({r['run_id'] for r in self.ledger()}), 3)
         self.assertEqual(self.ledger()[-1]['status'], 'skipped')
 
     def test_invalid_zero_exit_is_failure(self):
@@ -153,14 +179,14 @@ print(json.dumps({'ok':True}))
         for text in [json.dumps({'access_token': fixture_value}),
                      json.dumps({'result': 'PASSWORD='+fixture_value}),
                      'api_key='+fixture_value, 'known='+fixture_value]:
-            self.assertNotIn(fixture_value, log_text(text, [fixture_value]))
-        self.assertNotIn(fixture_value, log_text(json.dumps({'access_token': fixture_value}), []))
+            self.assertNotIn(fixture_value, log_text(text))
+        self.assertNotIn(fixture_value, log_text(json.dumps({'access_token': fixture_value})))
 
     def test_api_login_is_refused_before_model_work(self):
         result = self.run_task('api-auth')
         self.assertEqual(result.returncode, 78, result.stderr)
         self.assertFalse((self.home/'args.json').exists())
-        self.assertEqual(self.ledger()[0]['exit_code'], 78)
+        self.assertEqual(self.ledger()[-1]['exit_code'], 78)
 
     def test_missed_run_warn_names_action_and_install_grace(self):
         from lib.headless_tasks import health_rows
@@ -217,6 +243,215 @@ print(json.dumps({'ok':True}))
             self.assertEqual(plist['ProgramArguments'][-1], task_id)
             self.assertNotIn('RunAtLoad', plist)
             self.assertNotIn('KeepAlive', plist)
+
+    def test_01_termination_persists_identity_and_kills_child(self):
+        child = subprocess.Popen([str(REPO/'bin/headless-task'), 'test-task', '--repo', str(self.repo),
+                                  '--timeout-seconds', '2'], env={**self.env,'FAKE_MODE':'timeout'},
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        pidfile = self.home/'args.json.pid'
+        try:
+            deadline = time.monotonic()+5
+            while not pidfile.exists() and time.monotonic() < deadline:
+                time.sleep(.02)
+            self.assertTrue(pidfile.exists())
+            pid = int(pidfile.read_text())
+            child.send_signal(signal.SIGTERM)
+            child.communicate(timeout=6)
+            try:
+                with self.assertRaises(ProcessLookupError): os.kill(pid, 0)
+                rows = self.ledger()
+                self.assertEqual(rows[0]['status'], 'running')
+                self.assertEqual(rows[-1]['reason'], 'interrupted')
+                self.assertEqual(rows[0]['run_id'], rows[-1]['run_id'])
+            finally:
+                try: os.killpg(pid, signal.SIGKILL)
+                except ProcessLookupError: pass
+        finally:
+            if child.poll() is None: child.kill(); child.communicate()
+
+    def test_02_cli_success_without_work_receipt_does_not_suppress_retry(self):
+        self.assertEqual(self.run_task('abort').returncode, 65)
+        self.assertEqual(self.run_task('null').returncode, 65)
+        self.assertEqual(self.run_task().returncode, 0)
+
+    def test_03_projection_excludes_business_and_multiline_credentials(self):
+        from lib.headless_tasks import log_text
+        for text in [json.dumps({'type':'result','result':'synthetic@example.invalid'}),
+                     json.dumps({'type':'assistant','message':'-----BEGIN ' + 'PRIVATE KEY-----\nsynthetic-key\n-----END PRIVATE KEY-----'}),
+                     'synthetic@example.invalid', 'synthetic-key\n']:
+            projected = log_text(text)
+            self.assertNotIn('synthetic@example.invalid', projected)
+            self.assertNotIn('synthetic-key', projected)
+
+    def _install(self, launch):
+        from lib.headless_tasks import install_main
+        source = self.repo/'ops/headless-tasks/com.carr.headless.test-task.plist'
+        source.write_bytes(plistlib.dumps({'Label':'com.carr.headless.test-task',
+            'StartCalendarInterval':[{'Minute':0}],
+            'StandardOutPath':'{{REPO}}/out/headless/test-task/launchd.log',
+            'StandardErrorPath':'{{REPO}}/out/headless/test-task/launchd.log'}))
+        with patch('pathlib.Path.home', return_value=self.home), patch('lib.claude_scheduler_native.system_timezone', return_value='America/Chicago'), patch('lib.headless_tasks.subprocess.run', side_effect=launch):
+            return install_main(['install', 'test-task'])
+
+    def test_04_launchd_files_private_before_bootstrap(self):
+        def launch(cmd, **kwargs):
+            if cmd[1] == 'bootstrap':
+                plist = plistlib.loads(Path(cmd[-1]).read_bytes())
+                path = Path(plist['StandardOutPath'])
+                path.touch(exist_ok=True)
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+                self.assertEqual(plist['Umask'], 0o077)
+            return subprocess.CompletedProcess(cmd, 113 if cmd[1] == 'print' else 0)
+        old = os.umask(0o022)
+        try: self._install(launch)
+        finally: os.umask(old)
+
+    def test_05_failed_bootstrap_can_retry_and_unloaded_uninstall_recovers(self):
+        state = {'fail':True}
+        def launch(cmd, **kwargs):
+            code = 113 if cmd[1] in ('print', 'bootout') else (5 if state['fail'] else 0)
+            if kwargs.get('check') and code: raise subprocess.CalledProcessError(code, cmd)
+            return subprocess.CompletedProcess(cmd, code)
+        with self.assertRaises(subprocess.CalledProcessError): self._install(launch)
+        state['fail'] = False
+        self.assertEqual(self._install(launch), 0)
+        from lib.headless_tasks import install_main
+        with patch('pathlib.Path.home', return_value=self.home), patch('lib.headless_tasks.subprocess.run', side_effect=launch):
+            self.assertEqual(install_main(['uninstall','test-task']), 0)
+        self.assertFalse((self.home/'Library/LaunchAgents/com.carr.headless.test-task.plist').exists())
+
+    def test_06_pending_alert_replays_after_next_success(self):
+        self.env['FAKE_RECORD_FAIL'] = '1'
+        self.assertEqual(self.run_task('failure').returncode, 7)
+        self.env.pop('FAKE_RECORD_FAIL')
+        self.assertEqual(self.run_task().returncode, 0)
+        calls = [json.loads(s) for s in (self.home/'records.jsonl').read_text().splitlines()]
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(json.loads(calls[0][-1])['idempotency_key'], json.loads(calls[1][-1])['idempotency_key'])
+
+    def test_07_torn_ledger_recovers_and_corruption_is_reported(self):
+        folder = self.repo/'out/headless/test-task'
+        folder.mkdir(parents=True)
+        (folder/'ledger.jsonl').write_text('{"status":"failed"}\n{"status":')
+        self.assertEqual(self.run_task().returncode, 0)
+        self.assertTrue(list(folder.glob('ledger.corrupt.*')))
+        self.assertTrue((self.home/'records.jsonl').exists())
+        self.assertEqual(self.run_task().returncode, 0)
+        self.assertEqual(self.ledger()[-1]['status'], 'skipped')
+
+    def test_08_first_due_slot_not_full_install_interval(self):
+        from lib.headless_tasks import health_rows
+        settings = json.loads((self.repo/'ops/headless-tasks/tasks.json').read_text())
+        settings['tasks']['test-task']['cron'] = '0 9 * * 4'
+        (self.repo/'ops/headless-tasks/tasks.json').write_text(json.dumps(settings))
+        agents = self.home/'Library/LaunchAgents'; agents.mkdir(parents=True)
+        installed = agents/'com.carr.headless.test-task.plist'; installed.touch()
+        at = datetime(2026,10,1,13,59,tzinfo=timezone.utc).timestamp()
+        os.utime(installed, (at, at))
+        rows = health_rows(self.repo,self.home,datetime(2026,10,3,15,tzinfo=timezone.utc))
+        self.assertEqual(rows[0]['status'], 'WARN')
+
+    def test_09_unreadable_manifest_and_ledger_are_hard_nonrolling_findings(self):
+        from lib.headless_tasks import health_rows
+        path = self.repo/'ops/headless-tasks/tasks.json'
+        original = path.read_text(); path.write_text('{')
+        rows = health_rows(self.repo, self.home)
+        self.assertTrue(rows[0]['hard_error']); self.assertFalse(rows[0]['time_rolling'])
+        path.write_text(original)
+        agents = self.home/'Library/LaunchAgents'; agents.mkdir(parents=True)
+        (agents/'com.carr.headless.test-task.plist').touch()
+        folder = self.repo/'out/headless/test-task'; folder.mkdir(parents=True)
+        (folder/'ledger.jsonl').write_text('{')
+        rows = health_rows(self.repo,self.home)
+        self.assertTrue(rows[0]['hard_error']); self.assertFalse(rows[0]['time_rolling'])
+
+    def test_10_upstream_receipt_recorded_and_consumed_without_desktop_snapshot(self):
+        self.assertEqual(self.run_task().returncode, 0)
+        calls = [json.loads(s) for s in (self.home/'ops-records.jsonl').read_text().splitlines()]
+        self.assertTrue(any('scheduled-session' in c and 'succeeded' in c for c in calls))
+        result = subprocess.run([str(REPO/'bin/headless-task'),'test-task','--repo',str(self.repo),
+            '--check-fresh-since', stamp_before()],env=self.env,capture_output=True,text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_11_monthly_predicate_stops_before_model_and_does_not_refresh_success(self):
+        settings = json.loads((self.repo/'ops/headless-tasks/tasks.json').read_text())
+        settings['tasks']['test-task']['monthly'] = True
+        (self.repo/'ops/headless-tasks/tasks.json').write_text(json.dumps(settings))
+        (self.repo/'bin').mkdir()
+        (self.repo/'bin/monthly-gate.py').write_text('raise SystemExit(1)\n')
+        self.assertEqual(self.run_task().returncode, 0)
+        self.assertFalse((self.home/'args.json').exists())
+        self.assertEqual(self.ledger()[-1]['reason'], 'monthly_completed')
+        self.assertFalse(any(r['status']=='success' for r in self.ledger()))
+
+    def test_12_subscription_setup_token_is_forwarded_and_validated(self):
+        self.env['CLAUDE_CODE_OAUTH_TOKEN'] = 'synthetic-subscription-token'
+        self.assertEqual(self.run_task('token-auth').returncode, 0)
+
+    def test_termination_only_ignores_darwin_eperm_for_absent_group(self):
+        from lib.headless_tasks import _terminate
+        from unittest.mock import Mock
+        child = Mock(pid=987654)
+        with patch('os.killpg', side_effect=PermissionError), patch('lib.headless_tasks.subprocess.run',
+                return_value=subprocess.CompletedProcess([],0,stdout='1\n2\n')):
+            _terminate(child)
+        child.wait.assert_called_once()
+        with patch('os.killpg', side_effect=PermissionError), patch('lib.headless_tasks.subprocess.run',
+                return_value=subprocess.CompletedProcess([],0,stdout='987654\n')):
+            with self.assertRaises(PermissionError): _terminate(child)
+
+    def test_canonical_zero_exit_without_ack_is_not_recorded(self):
+        from lib.headless_tasks import record_run
+        row={'status':'success','start':stamp_before(),'end':stamp_before(),'run_id':'aa000000-0000-4000-8000-000000000001'}
+        with patch('lib.headless_tasks.subprocess.run', return_value=subprocess.CompletedProcess([],0,stdout='no receipt')):
+            self.assertFalse(record_run(self.repo,'test-task',row))
+
+    def test_monthly_success_remains_fresh_through_completed_window(self):
+        from lib.headless_tasks import health_rows
+        settings = json.loads((self.repo/'ops/headless-tasks/tasks.json').read_text())
+        settings['tasks']['test-task'].update(cron='0 9 15-21 * *', monthly=True)
+        (self.repo/'ops/headless-tasks/tasks.json').write_text(json.dumps(settings))
+        agents=self.home/'Library/LaunchAgents'; agents.mkdir(parents=True)
+        (agents/'com.carr.headless.test-task.plist').touch()
+        folder=self.repo/'out/headless/test-task'; folder.mkdir(parents=True)
+        (folder/'ledger.jsonl').write_text(json.dumps({'status':'success','exit_code':0,'end':'2026-10-15T15:00:00Z'})+'\n')
+        self.assertEqual(health_rows(self.repo,self.home,datetime(2026,10,20,16,tzinfo=timezone.utc))[0]['status'],'OK')
+        self.assertEqual(health_rows(self.repo,self.home,datetime(2026,11,16,16,tzinfo=timezone.utc))[0]['status'],'WARN')
+
+    def test_completion_reads_artifact_digest_and_rejects_wrong_run(self):
+        from lib.headless_tasks import verify_completion
+        import hashlib
+        artifact=self.home/'artifact.json'; artifact.write_text('{"synthetic":"done"}')
+        receipt=self.home/'receipt.json'
+        data={'schema':'carr-headless-completion/v1','task_id':'test-task','run_id':'this-run',
+              'outcome':'completed','artifacts':[{'path':str(artifact),'sha256':hashlib.sha256(artifact.read_bytes()).hexdigest()}]}
+        receipt.write_text(json.dumps(data))
+        self.assertEqual(verify_completion(receipt,'test-task','this-run'),'completed')
+        with self.assertRaises(ValueError): verify_completion(receipt,'test-task','other-run')
+        artifact.write_text('tampered')
+        with self.assertRaises(ValueError): verify_completion(receipt,'test-task','this-run')
+
+    def test_hard_killed_wrapper_reconciles_orphan_before_retry(self):
+        child=subprocess.Popen([str(REPO/'bin/headless-task'),'test-task','--repo',str(self.repo)],
+            env={**self.env,'FAKE_MODE':'timeout'}, stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        pidfile=self.home/'args.json.pid'
+        deadline=time.monotonic()+5
+        while not pidfile.exists() and time.monotonic()<deadline: time.sleep(.02)
+        self.assertTrue(pidfile.exists())
+        pid=int(pidfile.read_text())
+        try:
+            child.kill(); child.wait(timeout=5)
+            self.assertEqual(self.run_task().returncode,0)
+            self.assertTrue(any(r.get('reason')=='interrupted' for r in self.ledger()))
+        finally:
+            if child.poll() is None: child.kill(); child.wait()
+            try: os.killpg(pid,signal.SIGKILL)
+            except (ProcessLookupError,PermissionError): pass
+
+
+def stamp_before():
+    return (datetime.now(timezone.utc)-timedelta(minutes=5)).isoformat()
 
 
 if __name__ == '__main__':

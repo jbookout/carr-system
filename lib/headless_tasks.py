@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timedelta, timezone
 import fcntl
+import hashlib
 import itertools
 import json
 import os
@@ -17,39 +18,45 @@ import queue
 import re
 import signal
 import subprocess
+import sys
 import threading
+import tempfile
 import time
+import uuid
+from typing import Any
 from zoneinfo import ZoneInfo
-
-from lib.secret_redaction import redact_text, sensitive_env_values
 
 UTC = timezone.utc
 PREFIX = 'com.carr.headless.'
-DEFAULT_TOOLS = 'Read,Glob,Grep,Bash(./run.sh *),Bash(./bin/*),Bash(./ops/*),WebFetch,WebSearch'
+DEFAULT_TOOLS = 'Read,Write,Glob,Grep,Bash(./run.sh *),Bash(./bin/*),Bash(./ops/*),WebFetch,WebSearch'
 API_ENV = {'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL',
            'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
-           'CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_API_KEY_HELPER_TTL_MS'}
-SECRET_LABEL = re.compile(r'(?i)(password|secret|api[_-]?key|token|authorization|credential|private[_-]?key)')
+           'CLAUDE_CODE_API_KEY_HELPER_TTL_MS'}
 
 
-def log_text(text: str, secrets: list[str]) -> str:
-    """Redact before writing, including short credential assignments."""
-    text = redact_text(text, known_secrets=secrets)
-    def clean_string(value):
-        return re.sub(r'(?im)\b([\w-]*(?:password|secret|token|api[_-]?key)[\w-]*)\s*[:=]\s*[^\n]+',
-                      r'\1=[REDACTED]', value)
+def log_text(text: str) -> str:
+    """Project protocol diagnostics only; never retain arbitrary stream text.
+
+    A whitelist excludes business text and credentials, including multiline
+    secrets split across events or stderr lines and unknown environment values.
+    """
     try:
         value = json.loads(text)
     except json.JSONDecodeError:
-        return clean_string(text)
-    def clean(item):
-        if isinstance(item, dict):
-            return {key: '[REDACTED]' if SECRET_LABEL.search(key) else clean(val)
-                    for key, val in item.items()}
-        if isinstance(item, list):
-            return [clean(val) for val in item]
-        return clean_string(item) if isinstance(item, str) else item
-    return json.dumps(clean(value)) + '\n'
+        return 'STREAM non_protocol_text_omitted\n'
+    if not isinstance(value, dict):
+        return 'STREAM non_object_omitted\n'
+    projected = {}
+    for key, allowed in {'type': {'system', 'assistant', 'user', 'result'},
+                         'subtype': {'init', 'success', 'permission_denied', 'error_during_execution',
+                                     'error_max_turns', 'error_max_budget_usd'}}.items():
+        if isinstance(value.get(key), str) and value[key] in allowed:
+            projected[key] = value[key]
+    if type(value.get('is_error')) is bool:
+        projected['is_error'] = value['is_error']
+    if isinstance(value.get('permission_denials'), list):
+        projected['permission_denial_count'] = len(value['permission_denials'])
+    return json.dumps(projected) + '\n'
 
 
 def stamp(instant: datetime) -> str:
@@ -158,16 +165,143 @@ def append_ledger(path: Path, row: dict) -> None:
         os.fsync(handle.fileno())
 
 
+def private_folder(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.chmod(0o700)
+
+
+def write_json(path: Path, value: object) -> None:
+    temporary = path.with_name(path.name+'.tmp')
+    with temporary.open('w') as handle:
+        os.fchmod(handle.fileno(), 0o600)
+        json.dump(value, handle, sort_keys=True)
+        handle.flush()
+        os.fsync(handle.fileno())
+    temporary.replace(path)
+    directory = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def recover_ledger(path: Path) -> tuple[list[dict], bool]:
+    """Under run.lock, salvage only an incomplete final append.
+
+    Preserve the complete original bytes. Interior corruption stays a hard
+    failure; it must not erase a prior success and cause effects to repeat.
+    """
+    try:
+        return ledger_rows(path), False
+    except (ValueError, UnicodeError):
+        raw = path.read_bytes()
+        backup = path.with_name('ledger.corrupt.'+uuid.uuid4().hex)
+        with backup.open('xb') as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(raw)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if raw.endswith(b'\n'):
+            raise ValueError('ledger interior corruption') from None
+        prefix = raw[:raw.rfind(b'\n')+1]
+        rows = [json.loads(line) for line in prefix.splitlines() if line.strip()]
+        if any(not isinstance(row, dict) for row in rows):
+            raise ValueError('ledger interior corruption')
+        temp = path.with_name(path.name+'.repair')
+        with temp.open('wb') as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(prefix)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temp.replace(path)
+        return rows, True
+
+
+class InterruptedRun(BaseException):
+    def __init__(self, signum):
+        self.code = 128+signum
+
+
+def process_birth(pid: int) -> str:
+    result = subprocess.run(['ps', '-p', str(pid), '-o', 'lstart='],
+                            capture_output=True, text=True, timeout=5)
+    return result.stdout.strip() if result.returncode == 0 else ''
+
+
+def reconcile_runs(ledger: Path, prior: list[dict]) -> None:
+    ended = {r.get('run_id') for r in prior if r.get('end')}
+    latest = {r['run_id']: r for r in prior if r.get('run_id') and not r.get('end')}
+    for run_id, row in latest.items():
+        if run_id in ended:
+            continue
+        pid, birth = row.get('child_pid'), row.get('child_birth')
+        if pid and birth and process_birth(pid) == birth and os.getpgid(pid) == pid:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        append_ledger(ledger, {**row, 'end': stamp(datetime.now(UTC)), 'status':'failed',
+                               'exit_code': 130, 'reason': 'interrupted'})
+
+
+def verify_completion(path: Path, task_id: str, run_id: str) -> str:
+    """Read the task receipt AND every claimed artifact, bound to this run.
+
+    The prompt's done-condition remains authoritative; the receipt must cite
+    its retained output or record readback, never just conversation termination.
+    No-op receipts are kept distinct from work completion and freshness.
+    """
+    value = json.loads(path.read_text())
+    if (value.get('schema') != 'carr-headless-completion/v1' or
+            value.get('task_id') != task_id or value.get('run_id') != run_id or
+            value.get('outcome') not in ('completed', 'noop')):
+        raise ValueError('completion binding')
+    artifacts = value.get('artifacts')
+    if not isinstance(artifacts, list) or not artifacts:
+        raise ValueError('completion evidence missing')
+    for item in artifacts:
+        artifact = Path(item['path'])
+        if artifact.resolve() == path.resolve() or not artifact.is_file() or artifact.stat().st_size == 0:
+            raise ValueError('completion artifact missing')
+        if hashlib.sha256(artifact.read_bytes()).hexdigest() != item['sha256']:
+            raise ValueError('completion artifact digest')
+    return value['outcome']
+
+
+def record_run(repo: Path, task_id: str, row: dict) -> bool:
+    from lib.scheduled_run import build_run_args
+    argv = build_run_args(task_id, 'succeeded' if row['status'] == 'success' else 'failed',
+        None if row['status'] == 'success' else 'tool_error', row['start'], row['end'],
+        'headless verified work completion' if row['status'] == 'success' else 'headless execution failed',
+        row['run_id'], 'bin/headless-task')
+    python = repo/'.venv/bin/python'
+    result = subprocess.run([str(python) if python.exists() else sys.executable,
+        str(repo/'tools/ops-record.py'), *argv], cwd=repo, capture_output=True, text=True, timeout=30)
+    if result.returncode:
+        return False
+    parts = result.stdout.strip().split()
+    try:
+        return len(parts) == 2 and str(uuid.UUID(parts[0])) == row['run_id'] and bool(uuid.UUID(parts[1]))
+    except ValueError:
+        return False
+
+
 def _terminate(child: subprocess.Popen) -> None:
     try:
         os.killpg(child.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
+    except PermissionError:
+        # Darwin can return EPERM after the last group member has exited.
+        # A live group remains a failure; verify absence instead of swallowing.
+        probe = subprocess.run(['ps', '-axo', 'pgid='], capture_output=True, text=True, timeout=5)
+        if probe.returncode or str(child.pid) in probe.stdout.split():
+            raise
     child.wait(timeout=5)
 
 
 def _claude(prompt: Path, repo: Path, model: str, tools: str, timeout: float,
-            log, env: dict, secrets: list[str]) -> tuple[int, str]:
+            log, env: dict, started_child=None) -> tuple[int, str]:
     command = ['claude', '-p', '--model', model, '--permission-mode', 'dontAsk',
                '--permission-prompts', 'none', '--allowedTools', tools,
                '--no-session-persistence', '--output-format', 'stream-json', '--verbose']
@@ -190,7 +324,10 @@ def _claude(prompt: Path, repo: Path, model: str, tools: str, timeout: float,
         return 124, 'timeout'
     except (ValueError, OSError):
         return 78, 'subscription_login_unavailable'
-    if auth.returncode or status.get('loggedIn') is not True or status.get('authMethod') != 'claude.ai':
+    subscription = status.get('authMethod') == 'claude.ai' or (
+        status.get('authMethod') == 'oauth_token' and
+        status.get('apiProvider') == 'firstParty' and bool(child_env.get('CLAUDE_CODE_OAUTH_TOKEN')))
+    if auth.returncode or status.get('loggedIn') is not True or not subscription:
         return 78, 'subscription_login_required'
     # Auth readback may include account identifiers; none are written to logs.
     if time.monotonic()-started >= timeout:
@@ -203,7 +340,22 @@ def _claude(prompt: Path, repo: Path, model: str, tools: str, timeout: float,
         finally:
             stream.close()
             messages.put((channel, None))
-    with prompt.open() as input_handle:
+    task_id = env['CARR_HEADLESS_TASK_ID']
+    run_id = env['CARR_HEADLESS_RUN_ID']
+    receipt = env['CARR_HEADLESS_RECEIPT']
+    instruction = (f'<scheduled-task name="{task_id}">\n' + prompt.read_text() +
+        f'\n</scheduled-task>\nHEADLESS COMPLETION CONTRACT: run_id={run_id}. '
+        'Only after verifying the task done-condition, write a private JSON receipt at '+receipt+'. '
+        'Use schema carr-headless-completion/v1, task_id '+task_id+', run_id '+run_id+', '
+        'outcome completed or noop, and artifacts [{"path":"absolute retained artifact or '
+        'record readback path","sha256":"sha256 of its bytes"}]. '
+        'Evidence must be the output or readback that establishes the task done-condition; '
+        'an assertion that the conversation ended is insufficient. '
+        'A stopped, blocked, partial or failed task must not write a completion receipt. '
+        'Keep business content out of stdout and stderr.\n')
+    with tempfile.TemporaryFile(mode='w+') as input_handle:
+        input_handle.write(instruction)
+        input_handle.seek(0)
         child = subprocess.Popen(command, stdin=input_handle, stdout=subprocess.PIPE,
                                  stderr=subprocess.PIPE, text=True, errors='replace',
                                  cwd=repo, env=child_env, start_new_session=True)
@@ -216,6 +368,8 @@ def _claude(prompt: Path, repo: Path, model: str, tools: str, timeout: float,
     forced = None
     reason = ''
     try:
+        if started_child:
+            started_child(child)
         while done < 2 or child.poll() is None:
             if time.monotonic()-started >= timeout:
                 forced, reason = 124, 'timeout'
@@ -227,7 +381,7 @@ def _claude(prompt: Path, repo: Path, model: str, tools: str, timeout: float,
             if line is None:
                 done += 1
                 continue
-            log.write(log_text(line, secrets))
+            log.write(log_text(line))
             log.flush()
             if channel != 'stdout':
                 continue
@@ -247,9 +401,15 @@ def _claude(prompt: Path, repo: Path, model: str, tools: str, timeout: float,
         rc = child.wait()
         if rc:
             return rc if rc > 0 else 128-rc, 'claude_nonzero'
-        if not result or result.get('is_error') or result.get('subtype') != 'success':
+        if (not result or result.get('is_error') is not False or
+                result.get('subtype') != 'success' or
+                not isinstance(result.get('result'), str) or not result['result'].strip()):
             return 65, 'missing_or_failed_result'
-        return 0, 'success'
+        try:
+            outcome = verify_completion(Path(receipt), task_id, run_id)
+        except (OSError, ValueError, KeyError, TypeError):
+            return 65, 'invalid_completion_receipt'
+        return 0, outcome
     finally:
         # Kill surviving children even when the parent has already exited.
         _terminate(child)
@@ -258,13 +418,11 @@ def _claude(prompt: Path, repo: Path, model: str, tools: str, timeout: float,
         while not messages.empty():
             _, line = messages.get_nowait()
             if line is not None:
-                log.write(log_text(line, secrets))
+                log.write(log_text(line))
 
 
-def record_failure(repo: Path, task_id: str, code: int, reason: str, log_path: Path) -> bool:
-    successes = [r for r in ledger_rows(repo/'out/headless'/task_id/'ledger.jsonl')
-                 if r.get('status') == 'success' and r.get('exit_code') == 0]
-    episode = max((r['window'] for r in successes), default='initial')
+def record_failure(repo: Path, task_id: str, code: int, reason: str, log_path: Path,
+                   episode: str = 'initial') -> bool:
     # The live add-loop taxonomy has no defect kind. Use its supported
     # open_loop kind, explicitly titled as a defect. Success starts a new
     # failure episode; failures within one episode deduplicate by task.
@@ -292,6 +450,47 @@ def record_failure(repo: Path, task_id: str, code: int, reason: str, log_path: P
         return False
 
 
+def queue_alert(folder: Path, task_id: str, reason: str, episode: str) -> None:
+    path = folder/'alerts.json'
+    alerts = json.loads(path.read_text()) if path.exists() else []
+    key = f'{task_id}:{episode}:{reason}'
+    if not any(a['key'] == key for a in alerts):
+        alerts.append({'key':key, 'episode':episode+':'+reason, 'reason':reason, 'delivered':False})
+        write_json(path, alerts)
+
+
+def replay_alerts(repo: Path, task_id: str, folder: Path, log_path: Path) -> None:
+    path = folder/'alerts.json'
+    if not path.exists():
+        return
+    alerts = json.loads(path.read_text())
+    for alert in alerts:
+        if alert['delivered']:
+            continue
+        try:
+            delivered = record_failure(repo, task_id, 70, alert['reason'], log_path, alert['episode'])
+        except Exception:
+            delivered = False
+        if delivered:
+            alert['delivered'] = True
+            write_json(path, alerts)
+
+
+def replay_runs(repo: Path, task_id: str, folder: Path) -> None:
+    path = folder/'pending-runs.json'
+    pending = json.loads(path.read_text()) if path.exists() else []
+    for row in pending:
+        if row.get('canonical_recorded'):
+            continue
+        try:
+            row['canonical_recorded'] = record_run(repo, task_id, row)
+        except Exception:
+            row['canonical_recorded'] = False
+        if row['canonical_recorded']:
+            append_ledger(folder/'ledger.jsonl', row)
+    write_json(path, [row for row in pending if not row.get('canonical_recorded')])
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('task_id')
@@ -299,6 +498,7 @@ def main(argv=None) -> int:
     parser.add_argument('--timeout-seconds', type=float)
     parser.add_argument('--model', default='sonnet')
     parser.add_argument('--allowed-tools', default=DEFAULT_TOOLS)
+    parser.add_argument('--check-fresh-since')
     args = parser.parse_args(argv)
     if not re.fullmatch(r'[a-z0-9][a-z0-9-]*', args.task_id):
         parser.error('task id must contain lowercase letters, digits and hyphens')
@@ -310,60 +510,125 @@ def main(argv=None) -> int:
         parser.error('timeout must be finite and positive')
     os.umask(0o077)
     folder = repo/'out/headless'/args.task_id
-    folder.mkdir(parents=True, exist_ok=True)
+    private_folder(repo/'out/headless')
+    private_folder(folder)
+    launch_log = folder/'launchd.log'
+    launch_log.touch(exist_ok=True)
+    launch_log.chmod(0o600)
+    if args.check_fresh_since:
+        since = datetime.fromisoformat(args.check_fresh_since.replace('Z', '+00:00'))
+        fresh = any(r.get('status') == 'success' and r.get('canonical_recorded') is True and
+                    datetime.fromisoformat(r['end'].replace('Z', '+00:00')) >= since
+                    for r in ledger_rows(folder/'ledger.jsonl'))
+        print('FRESH verified canonical headless completion' if fresh else 'STALE no verified completion')
+        return 0 if fresh else 1
     start = datetime.now(UTC)
     window = stamp(schedule_window(task['cron'], start, settings['timezone']))
     log_path = folder/(start.strftime('%Y%m%dT%H%M%S.%fZ')+'.log')
     ledger = folder/'ledger.jsonl'
     with (folder/'run.lock').open('a') as lock, log_path.open('x') as log:
-        row: dict[str, object] = {'start': stamp(start), 'end': None, 'exit_code': None,
+        row: dict[str, Any] = {'run_id':str(uuid.uuid4()), 'start': stamp(start), 'end': None, 'exit_code': None,
                'log_path': str(log_path), 'window': window, 'status': 'running'}
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             row.update(end=stamp(datetime.now(UTC)), exit_code=0, status='skipped', reason='already_running')
-            append_ledger(ledger, row)
             log.write('SKIP already_running\n')
             print(f'SKIP {args.task_id}: already_running')
             return 0
         code, reason = 70, 'runner_error'
+        episode = 'initial'
+        old_handlers = {sig:signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
+        def interrupted(signum, frame):
+            raise InterruptedRun(signum)
+        for sig in old_handlers:
+            signal.signal(sig, interrupted)
         try:
+            try:
+                prior, repaired = recover_ledger(ledger)
+            except (ValueError, UnicodeError):
+                queue_alert(folder, args.task_id, 'ledger_corrupt', 'initial')
+                raise
+            if repaired:
+                queue_alert(folder, args.task_id, 'ledger_torn_append', 'initial')
+            reconcile_runs(ledger, prior)
             prior = ledger_rows(ledger)
+            for prior_row in prior:
+                if prior_row.get('reason') == 'interrupted':
+                    queue_alert(folder, args.task_id, 'interrupted', prior_row['run_id'])
+            replay_alerts(repo, args.task_id, folder, log_path)
+            replay_runs(repo, args.task_id, folder)
+            episode = max((r['window'] for r in prior if r.get('status') == 'success'), default='initial')
             if any(r.get('window') == window and r.get('status') == 'success' and r.get('exit_code') == 0 for r in prior):
                 row.update(end=stamp(datetime.now(UTC)), exit_code=0, status='skipped', reason='window_succeeded')
                 append_ledger(ledger, row)
                 log.write('SKIP window_succeeded\n')
                 print(f'SKIP {args.task_id}: window_succeeded')
                 return 0
+            if task.get('monthly'):
+                gate = subprocess.run([sys.executable, str(repo/'bin/monthly-gate.py'),
+                    args.task_id, '--quiet'], cwd=repo, capture_output=True, timeout=30)
+                if gate.returncode == 1:
+                    row.update(end=stamp(datetime.now(UTC)), exit_code=0, status='skipped', reason='monthly_completed')
+                    append_ledger(ledger, row)
+                    print(f'SKIP {args.task_id}: monthly_completed')
+                    return 0
+                if gate.returncode != 0:
+                    raise ValueError('monthly predicate failed')
+            row['wrapper_pid'] = os.getpid()
+            row['wrapper_birth'] = process_birth(os.getpid())
+            append_ledger(ledger, row)
             log.write(f'START {args.task_id} {stamp(start)} window={window}\n')
             log.flush()
             prompt = Path.home()/'.claude/scheduled-tasks'/args.task_id/'SKILL.md'
+            env = {**os.environ, 'CARR_HEADLESS_TASK_ID':args.task_id,
+                   'CARR_HEADLESS_RUN_ID':row['run_id'],
+                   'CARR_HEADLESS_RECEIPT':str(folder/(row['run_id']+'.completion.json'))}
+            def started_child(child):
+                row.update(child_pid=child.pid, child_birth=process_birth(child.pid))
+                append_ledger(ledger, row)
             code, reason = _claude(prompt, repo, args.model, args.allowed_tools, timeout,
-                                   log, dict(os.environ), sensitive_env_values(os.environ))
+                                   log, env, started_child)
+        except InterruptedRun as exc:
+            code, reason = exc.code, 'interrupted'
         except Exception as exc:
             # The exception type is diagnostic; exception text can quote a
             # secret, prompt, configuration, or raw provider response.
             log.write(f'RUNNER_ERROR {type(exc).__name__}\n')
+        finally:
+            for sig, handler in old_handlers.items():
+                signal.signal(sig, handler)
         row.update(end=stamp(datetime.now(UTC)), exit_code=code,
-                   status='success' if code == 0 else 'failed', reason=reason)
+                   status=('noop' if reason == 'noop' else 'success') if code == 0 else 'failed', reason=reason)
         append_ledger(ledger, row)
+        if row['status'] in ('success', 'failed'):
+            path = folder/'pending-runs.json'
+            pending = json.loads(path.read_text()) if path.exists() else []
+            pending.append(row)
+            write_json(path, pending)
+            replay_runs(repo, args.task_id, folder)
         log.write(f'END exit={code} reason={reason}\n')
         if code:
-            try:
-                recorded = record_failure(repo, args.task_id, code, reason, log_path)
-            except Exception:
-                recorded = False
-            notice = 'DEFECT_RECORDED' if recorded else 'ERROR defect_record_failed; retry record from ledger'
-            log.write(notice + '\n')
-            if not recorded:
-                print(notice, flush=True)
+            queue_alert(folder, args.task_id, reason, episode)
+            replay_alerts(repo, args.task_id, folder, log_path)
+            pending_alerts = any(not a['delivered'] for a in json.loads((folder/'alerts.json').read_text()))
+            log.write('ERROR pending_alert_delivery\n' if pending_alerts else 'DEFECT_RECORDED\n')
         print(f'{"OK" if code == 0 else "FAIL"} {args.task_id}: {reason}; exit={code}; log={log_path}')
         return code
 
 
 def health_rows(repo: Path, home: Path, now: datetime | None = None) -> list[dict]:
     now = now or datetime.now(UTC)
-    settings = config(repo)
+    try:
+        settings = config(repo)
+        if not isinstance(settings['tasks'], dict):
+            raise ValueError('manifest tasks')
+        ZoneInfo(settings['timezone'])
+    except Exception as exc:
+        return [{'task_id':'manifest', 'status':'WARN', 'reason':'manifest_unreadable',
+            'hard_error':True, 'time_rolling':False,
+            'line':f'WARN headless/manifest — unreadable manifest ({type(exc).__name__}) · owner: Claude · '
+                   'on breach: repair ops/headless-tasks/tasks.json · verify: ./run.sh health · auto-clear: readable valid manifest'}]
     rows = []
     for installed in sorted((home/'Library/LaunchAgents').glob(PREFIX+'*.plist')):
         task_id = installed.name[len(PREFIX):-len('.plist')]
@@ -374,18 +639,33 @@ def health_rows(repo: Path, home: Path, now: datetime | None = None) -> list[dic
             task = settings['tasks'][task_id]
             successes = [r for r in ledger_rows(repo/'out/headless'/task_id/'ledger.jsonl')
                          if r.get('status') == 'success' and r.get('exit_code') == 0]
-            # Skips/failures never refresh a success timestamp. Installation
-            # mtime is used only until the first success, so a new install has
-            # one complete interval in which to prove its first run.
+            # Installation is due at its first slot. A completed monthly
+            # window stays fresh until the next month's first slot.
             last = max((datetime.fromisoformat(r['end'].replace('Z', '+00:00')) for r in successes),
                        default=datetime.fromtimestamp(installed.stat().st_mtime, UTC))
-            bound = schedule_interval(task['cron'], last, settings['timezone']) + task.get('grace_seconds', 3600)
-            age = (now-last).total_seconds()
-            status = 'WARN' if age > bound or age < -60 else 'OK'
+            slots = _slots(task['cron'], last-timedelta(microseconds=1) if not successes else last,
+                           settings['timezone'], True)
+            due = next(slots)
+            if successes and task.get('monthly'):
+                tz = ZoneInfo(settings['timezone'])
+                completed_month = last.astimezone(tz).strftime('%Y-%m')
+                while due.astimezone(tz).strftime('%Y-%m') == completed_month:
+                    due = next(slots)
+            deadline = due+timedelta(seconds=task.get('grace_seconds', 3600))
+            status = 'WARN' if now > deadline or last > now+timedelta(seconds=60) else 'OK'
             detail = f'last success {stamp(last)}' if successes else 'awaiting first success (installation grace)'
+            reason, hard, rolling = 'missed_run', False, True
+            folder = repo/'out/headless'/task_id
+            alerts = json.loads((folder/'alerts.json').read_text()) if (folder/'alerts.json').exists() else []
+            pending = json.loads((folder/'pending-runs.json').read_text()) if (folder/'pending-runs.json').exists() else []
+            if any(not a['delivered'] for a in alerts) or pending:
+                status, detail = 'WARN', 'pending canonical run or defect delivery'
+                reason, hard, rolling = 'receipt_delivery_pending', True, False
         except Exception as exc:
             status, detail = 'WARN', f'unreadable task/ledger ({type(exc).__name__})'
-        rows.append({'task_id': task_id, 'status': status,
+            reason, hard, rolling = 'state_unreadable', True, False
+        rows.append({'task_id': task_id, 'status': status, 'reason':reason,
+                     'hard_error':hard, 'time_rolling':rolling,
                      'line': f'{status} headless/{task_id} — {detail} · {response}'})
     return rows
 
@@ -407,29 +687,65 @@ def install_main(argv=None) -> int:
     agents = home/'Library/LaunchAgents'
     agents.mkdir(parents=True, exist_ok=True)
     domain = f'gui/{os.getuid()}'
-    for task_id in selected:
-        label = PREFIX+task_id
-        target = agents/(label+'.plist')
-        if args.action == 'uninstall':
-            if not target.exists():
-                continue
-            subprocess.run(['launchctl', 'bootout', domain+'/'+label], check=True)
-            quarantine = repo/'out/headless/uninstalled'
-            quarantine.mkdir(parents=True, exist_ok=True)
-            target.replace(quarantine/(datetime.now(UTC).strftime('%Y%m%dT%H%M%S.%fZ')+'-'+target.name))
-        else:
-            if target.exists():
-                parser.error(f'{label} already installed; uninstall it before replacing')
-            prompt = home/'.claude/scheduled-tasks'/task_id/'SKILL.md'
-            if not prompt.is_file():
-                parser.error(f'{task_id} prompt is missing')
-            (repo/'out/headless'/task_id).mkdir(parents=True, exist_ok=True)
-            source = repo/'ops/headless-tasks'/(label+'.plist')
-            content = source.read_text().replace('{{HOME}}', str(home)).replace('{{REPO}}', str(repo))
-            plist = plistlib.loads(content.encode())
-            if plist['StartCalendarInterval'] != calendar_entries(settings['tasks'][task_id]['cron']):
-                parser.error('template schedule differs from reviewed manifest')
-            target.write_bytes(plistlib.dumps(plist))
-            subprocess.run(['launchctl', 'bootstrap', domain, str(target)], check=True)
-        print(f'{args.action} {task_id}')
+    private_folder(repo/'out/headless')
+    failures = []
+    # Serialize the entire read/bootout/write/bootstrap transition, including
+    # separate installer processes. A retry reconciles each selected service;
+    # successful batch members remain installed and are idempotent on retry.
+    with (repo/'out/headless/install.lock').open('a') as lock:
+        os.fchmod(lock.fileno(), 0o600)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        for task_id in selected:
+            try:
+                _install_task(args.action, task_id, home, repo, agents, domain, settings)
+                print(f'{args.action} {task_id}')
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                failures.append(exc)
+                print(f'FAIL {args.action} {task_id}: {type(exc).__name__}; retry selected batch to reconcile')
+    if failures:
+        raise failures[0]
     return 0
+
+
+def _install_task(action: str, task_id: str, home: Path, repo: Path,
+                  agents: Path, domain: str, settings: dict) -> None:
+    label = PREFIX+task_id
+    target = agents/(label+'.plist')
+    probe = subprocess.run(['launchctl', 'print', domain+'/'+label], capture_output=True)
+    if probe.returncode not in (0, 3, 113):
+        raise subprocess.CalledProcessError(probe.returncode, probe.args)
+    loaded = probe.returncode == 0
+    if action == 'uninstall':
+        if loaded:
+            subprocess.run(['launchctl', 'bootout', domain+'/'+label], check=True)
+        if target.exists():
+            quarantine = repo/'out/headless/uninstalled'
+            private_folder(quarantine)
+            target.replace(quarantine/(uuid.uuid4().hex+'-'+target.name))
+        return
+    if not (home/'.claude/scheduled-tasks'/task_id/'SKILL.md').is_file():
+        raise ValueError('task prompt missing')
+    folder = repo/'out/headless'/task_id
+    private_folder(folder)
+    launch_log = folder/'launchd.log'
+    launch_log.touch(mode=0o600, exist_ok=True)
+    launch_log.chmod(0o600)
+    source = repo/'ops/headless-tasks'/(label+'.plist')
+    content = source.read_text().replace('{{HOME}}', str(home)).replace('{{REPO}}', str(repo))
+    plist = plistlib.loads(content.encode())
+    if plist['StartCalendarInterval'] != calendar_entries(settings['tasks'][task_id]['cron']):
+        raise ValueError('template schedule differs from reviewed manifest')
+    plist['Umask'] = 0o077
+    expected = plistlib.dumps(plist)
+    if loaded and target.exists() and target.read_bytes() == expected:
+        return
+    if loaded:
+        subprocess.run(['launchctl', 'bootout', domain+'/'+label], check=True)
+    temporary = target.with_suffix('.tmp')
+    with temporary.open('wb') as handle:
+        os.fchmod(handle.fileno(), 0o600)
+        handle.write(expected)
+        handle.flush()
+        os.fsync(handle.fileno())
+    temporary.replace(target)
+    subprocess.run(['launchctl', 'bootstrap', domain, str(target)], check=True)

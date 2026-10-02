@@ -1371,8 +1371,9 @@ def _canonical_health():
         for headless_row in _headless_rows():
             print("  " + headless_row["line"])
             if headless_row["status"] == "WARN":
-                rc = _red("headless_missed_run", headless_row["line"],
-                          subject=headless_row["task_id"], time_rolling=True)
+                rc = _red("headless_"+headless_row["reason"], headless_row["line"],
+                          subject=headless_row["task_id"],
+                          hard_error=headless_row["hard_error"], time_rolling=headless_row["time_rolling"])
         print("Schedule drift — durable Control Plane job state")
         jobs = snap.get("jobs")
         definitions = snap.get("job_definitions")
