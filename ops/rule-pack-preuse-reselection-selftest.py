@@ -1363,7 +1363,14 @@ for cloud_command in (
         'claude --cloud "fix the bug"',
         'claude -p "fix the bug" --environment ccpool_synthetic',
         'claude --remote="fix the bug"',
-        'cd repo && claude --model sonnet --cloud "fix; the bug"'):
+        'cd repo && claude --model sonnet --cloud "fix; the bug"',
+        # A flag may end at a shell terminator, not only at a space or end of line.
+        'claude --remote; printf done',
+        'claude --remote&& printf done',
+        'claude --remote || printf failed',
+        '(claude --remote)',
+        'claude --cloud | tee launch.log',
+        'claude --remote\nprintf done'):
     check(f"cloud launch routes the model-choice rule: {cloud_command}",
           _cli_routed(cloud_command))
 for local_command in (
@@ -1373,6 +1380,9 @@ for local_command in (
         'claude -p "explain this file"',
         'claude --version && git remote add origin x',
         'git push --remote origin',
+        'claude --remote-control; printf done',
+        '(claude --remote-control)',
+        'claude --cloud-init; printf done',
         'echo done; ls --cloud-init'):
     check(f"local or unrelated command stays silent for the model-choice rule: {local_command}",
           not _cli_routed(local_command))
