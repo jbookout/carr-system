@@ -107,10 +107,8 @@ test("the read is bound to the session actor and the caller cannot name another 
   assert.equal(response.status, 403);
   assert.equal((await response.json()).error, "AUTHORIZATION_REFUSED");
   response = await strict.fetch(new Request(`https://${HOST}/api/v1/business/clients?owner=dell`, { headers: { cookie: strictSession } }), env, {});
-  assert.equal(response.status, 400);
-  const refusal = await response.json();
-  assert.equal(refusal.error, "QUERY_INVALID");
-  assert.deepEqual(refusal.detail, { parameter: "owner", reason: "unsupported" });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).viewer, "joe", "owner is a list filter, never an actor selector");
   response = await strict.fetch(new Request(`https://${HOST}/api/v1/business/clients?viewer=joe`, { headers: { cookie: strictSession } }), env, {});
   assert.equal(response.status, 200);
 });
