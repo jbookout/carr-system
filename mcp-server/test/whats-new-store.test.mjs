@@ -140,13 +140,34 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
     await identity('joe');
     assert.equal((await section('doc_suggestions',await context())).state,'ready');
     await c.query('reset role');
-    await c.query("update next_action set created_at=now()-interval '3 days',updated_at=now()-interval '3 days' where id=$1",[uuid(10)]);
-    await c.query("update critical_date set created_at=now()-interval '3 days',updated_at=now()-interval '3 days',due_on=current_date+14 where id=$1",[uuid(11)]);
-    await c.query("update ops.doc_suggestion set suggested_at=now()-interval '3 days',disposition='snoozed',snoozed_material_version=material_version,snoozed_until=current_date where id=$1",[uuid(21)]);
+    // Chicago midnight is still the previous day in Los Angeles. Neither the
+    // database session's current_date nor the test runner's clock defines it.
+    const threshold = '2026-10-02T05:00:00.000Z';
+    const oldWrite = '2026-09-29T05:00:00.000Z';
+    // Replace the fixture by insertion: the update trigger would refresh its
+    // timestamp and let a record write mask the time-only threshold behavior.
+    await c.query('delete from next_action where id=$1',[uuid(10)]);
+    await c.query("insert into next_action(id,subject_type,subject_id,owner_id,description,due_on,created_by,updated_by,created_at,updated_at) values($1,'deal',$2,$3,'Review synthetic terms','2026-10-02',$3,$3,$4,$4)",[uuid(10),uuid(5),uuid(1),oldWrite]);
+    await c.query("update critical_date set created_at=$2,updated_at=$2,due_on='2026-10-16' where id=$1",[uuid(11),oldWrite]);
+    await c.query("update ops.doc_suggestion set suggested_at=$2,disposition='snoozed',snoozed_material_version=material_version,snoozed_until='2026-10-02' where id=$1",[uuid(21),oldWrite]);
     await identity('joe');
     // Time crossing a due threshold counts even without a new record write.
-    const todayContext = { ...await context(), since:new Date(Date.now()-86400000).toISOString(),previous_snapshot:null };
-    for (const name of ['next_actions','critical_dates','doc_suggestions']) assert.equal((await section(name,todayContext)).state,'ready',name);
+    const thresholdContext = { since:'2026-10-01T05:00:00.000Z',high_water:threshold,previous_snapshot:null };
+    const originalZone = (await c.query('show TimeZone')).rows[0].TimeZone;
+    for (const zone of ['UTC','America/Chicago','America/Los_Angeles']) {
+      await c.query("select set_config('TimeZone',$1,false)",[zone]);
+      for (const name of ['next_actions','critical_dates','doc_suggestions']) {
+        const before = await section(name,{ ...thresholdContext,high_water:'2026-10-02T04:59:59.999Z' });
+        assert.equal(before.state,'empty',`${name} before Chicago midnight (${zone})`);
+        const crossed = await section(name,thresholdContext);
+        assert.equal(crossed.state,'ready',`${name} at Chicago midnight (${zone})`);
+        assert.equal(crossed.items.length,1);
+        assert.equal(Date.parse(crossed.items[0].at),Date.parse(threshold));
+        assert.equal((await section(name,{ ...thresholdContext,since:threshold })).state,'empty',
+          `${name} threshold is not repeated (${zone})`);
+      }
+    }
+    await c.query("select set_config('TimeZone',$1,false)",[originalZone]);
     await identity('dell');
     assert.equal((await section('new_leads',await context())).state,'empty');
     await c.query('reset role');
