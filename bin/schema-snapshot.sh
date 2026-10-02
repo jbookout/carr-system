@@ -1264,7 +1264,7 @@ if [ "$CONFIRM_MERGE_REGISTRY_APPLIED" = t ] && [ "$WHATS_NEW_REGISTRY_APPLIED" 
 fi
 
 FIND_RULE_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0770_find_rule_scac_successor.sql')" \
+  "select exists (select 1 from schema_migrations where filename='0773_find_rule_scac_successor.sql')" \
   2>/dev/null)"
 case "$FIND_RULE_REGISTRY_APPLIED" in
   t|f) ;;
