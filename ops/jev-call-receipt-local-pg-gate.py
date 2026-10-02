@@ -98,12 +98,14 @@ def record(cur: psycopg.Cursor[Any], actor: tuple[str, str], **overrides: Any) -
     return (*row, args["idempotency_key"])
 
 
-def ledger(cur: psycopg.Cursor[Any], actor_id: str, key: str, receipt_id: Any) -> None:
+def ledger(cur: psycopg.Cursor[Any], actor_id: str, key: str, receipt_id: Any,
+           cache_hit: bool = False) -> None:
     """The envelope row the Worker writes in the same transaction (as owner here)."""
     cur.execute(
         """insert into public.tool_call (idempotency_key, verb, actor_id, request_hash, response)
            values (%s, 'ask-jev', %s, 'gate', %s)""",
-        (key, actor_id, Jsonb({"ok": True, "receipt_id": str(receipt_id)})),
+        (key, actor_id, Jsonb({"ok": True, "receipt_id": str(receipt_id),
+                              "cache_hit": cache_hit})),
     )
 
 
@@ -160,6 +162,46 @@ def main() -> int:
             other = (make_actor(cur, other_slug), other_slug)
             baseline = integrity(cur)
 
+            # A pre-call attempt remains visible as unknown spend until its
+            # exact receipt is paired. A replay or another actor cannot settle it.
+            set_local_role(cur, "carr_writer")
+            attempt_key = f"jev-attempt:{uuid.uuid4()}"
+            attempt_receipt = record(cur, me, idempotency_key=attempt_key,
+                                     session_id=SESSION + "-attempt",
+                                     model_answered="jev-attempt-pending", answers=Jsonb({}), usage=None)
+            cur.execute("""insert into public.tool_call
+                 (idempotency_key, verb, actor_id, request_hash, response)
+                 values (%s, 'ask-jev-attempt', %s, %s, %s)""",
+                (attempt_key, me[0], H_STATE,
+                 Jsonb({"receipt_id": str(attempt_receipt[0]), "cache_hit": False})))
+            cur.execute("reset role")
+            pending_audit = integrity(cur)
+            if pending_audit["receipts_without_tool_call"] != baseline["receipts_without_tool_call"]:
+                raise RuntimeError("linked pending attempt was flagged as an integrity defect")
+            pending = pending_audit["daily_usage"]
+            if pending["unknown"] != baseline["daily_usage"]["unknown"] + 1 or \
+                    pending["pending_attempts"] != baseline["daily_usage"]["pending_attempts"] + 1:
+                raise RuntimeError(f"unsettled Jev attempt was not visible as unknown spend: {pending}")
+            set_local_role(cur, "carr_writer")
+            completed_receipt = record(cur, me, session_id=SESSION + "-attempt")
+            ledger(cur, me[0], completed_receipt[3], completed_receipt[0])
+            cur.execute("""update public.tool_call set response = %s
+                 where idempotency_key = %s and verb = 'ask-jev-attempt'
+                   and actor_id = %s and response->>'receipt_id' = %s
+                   and response->>'cache_hit' = 'false' returning idempotency_key""",
+                (Jsonb({"receipt_id": str(attempt_receipt[0]), "cache_hit": True,
+                        "settled_by": str(completed_receipt[0])}),
+                 attempt_key, me[0], str(attempt_receipt[0])))
+            if cur.fetchone() != (attempt_key,):
+                raise RuntimeError("pending attempt did not settle through the writer ledger")
+            cur.execute("reset role")
+            settled = integrity(cur)["daily_usage"]
+            if settled["unknown"] != baseline["daily_usage"]["unknown"] or \
+                    settled["pending_attempts"] != baseline["daily_usage"]["pending_attempts"]:
+                raise RuntimeError(f"settled Jev attempt still counted as unknown: {settled}")
+            # The extra receipt is not part of the historical gate assertions.
+            baseline = integrity(cur)
+
             # 1. The write door, as carr_writer, with the server clock and actor.
             set_local_role(cur, "carr_writer")
             before = cur.execute("select clock_timestamp()").fetchone()
@@ -169,7 +211,7 @@ def main() -> int:
                             facets=["architecture_or_design"], idempotency_key=advisory_key)
             replay = record(cur, me, purpose="build_advisory", prompt_sha256=H_PROMPT,
                             facets=["architecture_or_design"], idempotency_key=advisory_key)
-            third = record(cur, me)
+            third = record(cur, me, usage=None)  # a cache hit has no vendor charge
             forged = record(cur, me)  # never gets a tool_call partner
             theirs = record(cur, other)
             expect_refusal(
@@ -182,7 +224,13 @@ def main() -> int:
             if first[2] is not False or second[2] is not False or replay[2] is not True or replay[0] != second[0]:
                 raise RuntimeError(f"idempotent replay misbehaved: {first} {second} {replay}")
             for receipt, owner in ((first, me), (second, me), (third, me), (theirs, other)):
-                ledger(cur, owner[0], receipt[3], receipt[0])
+                ledger(cur, owner[0], receipt[3], receipt[0], cache_hit=receipt == third)
+
+            metered = integrity(cur).get("daily_usage")
+            if not isinstance(metered, dict) or metered.get("input_tokens") != baseline["daily_usage"]["input_tokens"] + 12 \
+                    or metered.get("calls") != baseline["daily_usage"]["calls"] + 4 \
+                    or metered.get("unknown") != baseline["daily_usage"]["unknown"]:
+                raise RuntimeError(f"daily Worker usage omitted calls or counted a cache hit: {metered}")
 
             # 2/3. The read door, as carr_reader: credited rows only, mine only.
             set_local_role(cur, "carr_reader")

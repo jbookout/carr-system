@@ -558,12 +558,13 @@ def client_routes_through_the_worker():
         return _Proc(0, json.dumps({
             "ok": True, "receipt_id": "srv-1", "recorded_at": ts(0), "purpose": "call",
             "session_id": "s", "model": "jev-1.13.0", "state_sha256": "a" * 64,
-            "prompt_sha256": None, "usage": {"input_tokens": 3},
-            "answers": {"q": {"type": "noul", "noul": 0.7}}}))
+            "prompt_sha256": None, "usage": {"input_tokens": 3, "output_tokens": 1},
+            "answers": {"diagnosis_q": {"type": "noul", "noul": 0.7}}}))
+    tsc.read_api_key = lambda *a: (_ for _ in ()).throw(AssertionError("server path read a local credential"))
     log = _write([], ".jsonl")
     try:
         result = tsc.ask({"x": 1}, {"diagnosis_q": tsc.noul("is it?")}, facets=["diagnosis"],
-                         calls_log=log, server_runner=runner)
+                         calls_log=log, server_runner=runner, cache_ttl_seconds=0)
         with open(log) as fh:
             rows = [json.loads(line) for line in fh if line.strip()]
     finally:
@@ -583,6 +584,8 @@ def client_falls_back_visibly():
         return _Proc(1, "", 'TOOL ERROR {"error": "unknown_tool", "name": "ask-jev"}')
 
     class _Resp(io.BytesIO):
+        status = 200
+
         def __enter__(self):
             return self
 
@@ -590,14 +593,15 @@ def client_falls_back_visibly():
             return False
     def fake_urlopen(req, timeout=None):
         return _Resp(json.dumps(
-            {"model": "jev-1.13.0", "answers": {"q": {"type": "noul", "noul": 0.2}}}).encode())
+            {"model": "jev-1.13.0", "usage": {"input_tokens": 3, "output_tokens": 1},
+             "answers": {"q": {"type": "noul", "noul": 0.2}}}).encode())
     original = urllib.request.urlopen
     setattr(urllib.request, "urlopen", fake_urlopen)
     original_key = tsc.read_api_key
     tsc.read_api_key = lambda path=None: "not-a-real-key"
     log = _write([], ".jsonl")
     try:
-        result = tsc.ask("s", {"q": tsc.noul("?")}, calls_log=log, server_runner=runner)
+        result = tsc.ask("s", {"q": tsc.noul("?")}, calls_log=log, server_runner=runner, cache_ttl_seconds=0)
         with open(log) as fh:
             rows = [json.loads(line) for line in fh if line.strip()]
     finally:
@@ -612,6 +616,55 @@ def client_falls_back_visibly():
                       "unverified); the key never reaches the row")
 
 
+def malformed_server_answer_is_not_credited():
+    tsc = _client()
+
+    def runner(argv, **_kw):
+        return _Proc(0, json.dumps({
+            "ok": True, "receipt_id": "srv-malformed", "model": "jev-1.13.0",
+            "usage": {"input_tokens": 3, "output_tokens": 1},
+            "answers": {"q": {"type": "noul", "noul": 1.5}}}))
+
+    log = _write([], ".jsonl")
+    raised = False
+    try:
+        try:
+            tsc.ask("synthetic", {"q": tsc.noul("Is the fixture valid?")},
+                    calls_log=log, server_runner=runner)
+        except tsc.TypeSafeError:
+            raised = True
+        with open(log) as fh:
+            rows = [json.loads(line) for line in fh if line.strip()]
+    finally:
+        os.unlink(log)
+    return report(raised and len(rows) == 1 and rows[0]["ok"] is False
+                  and rows[0]["schema_valid"] is False,
+                  "malformed server answers retain main's schema validation and no local credit")
+
+
+def server_cache_answer_preserves_no_spend():
+    tsc = _client()
+
+    def runner(argv, **_kw):
+        return _Proc(0, json.dumps({
+            "ok": True, "receipt_id": "srv-cached", "model": "jev-1.13.0",
+            "cache_hit": True, "usage": None,
+            "answers": {"q": {"type": "noul", "noul": 0.7}}}))
+
+    log = _write([], ".jsonl")
+    try:
+        result = tsc.ask("synthetic", {"q": tsc.noul("Is the fixture valid?")},
+                         calls_log=log, server_runner=runner)
+        with open(log) as fh:
+            rows = [json.loads(line) for line in fh if line.strip()]
+    finally:
+        os.unlink(log)
+    return report(result.get("cache_hit") is True and result["usage"] is None
+                  and result["server_receipt"]["receipt_id"] == "srv-cached"
+                  and rows[0]["cache_hit"] is True and rows[0]["ok"] is False,
+                  "Worker cache hits return typed answers and a bound receipt without claiming spend")
+
+
 def advisory_builder_asks_as_build_advisory():
     spec = importlib.util.spec_from_file_location(
         "jba2", os.path.join(REPO, "ops", "jev_build_advisory.py"))
@@ -623,7 +676,7 @@ def advisory_builder_asks_as_build_advisory():
         noul = staticmethod(lambda instructions, true=None, false=None: {
             "type": "noul", "instructions": instructions})
 
-        def ask(self, state, questions, timeout, purpose="call"):
+        def ask(self, state, questions, timeout, purpose="call", **kwargs):
             seen["purpose"] = purpose
             seen["state"] = state
             return {"model": "jev-1.13.0",
@@ -775,8 +828,10 @@ def budgets_sit_under_the_hook_timeouts():
         return None
     tsc = _client()
     import inspect
-    advise_src = open(os.path.join(REPO, "ops", "jev_build_advisory.py")).read()
-    advise_timeout = float(advise_src.split("timeout: float = ", 1)[1].split(",")[0])
+    spec = importlib.util.spec_from_file_location("budget_advisory", os.path.join(REPO, "ops", "jev_build_advisory.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    advise_timeout = inspect.signature(mod.advise).parameters["timeout"].default
     stop_t, etg_t = hook_timeout("completion-evidence-gate"), hook_timeout("executor-tier-gate")
     ups_t = hook_timeout("rule-pack-preuse-reselection")
     stop_b = const("hooks/completion-evidence-gate.py", "SERVER_READ_BUDGET_SECONDS")
@@ -819,10 +874,12 @@ def in_hook_calls_skip_the_server_but_the_advisory_does_not():
         return _Proc(0, json.dumps({
             "ok": True, "receipt_id": "srv-h", "recorded_at": ts(0), "purpose": "build_advisory",
             "session_id": "s", "model": "jev-1.13.0", "state_sha256": "a" * 64,
-            "prompt_sha256": "b" * 64, "usage": {},
+            "prompt_sha256": "b" * 64, "usage": {"input_tokens": 3, "output_tokens": 1},
             "answers": {"q": {"type": "noul", "noul": 0.7}}}))
 
     class _Resp(io.BytesIO):
+        status = 200
+
         def __enter__(self):
             return self
 
@@ -831,7 +888,8 @@ def in_hook_calls_skip_the_server_but_the_advisory_does_not():
 
     def fake_urlopen(req, timeout=None):
         return _Resp(json.dumps(
-            {"model": "jev-1.13.0", "answers": {"q": {"type": "noul", "noul": 0.2}}}).encode())
+            {"model": "jev-1.13.0", "usage": {"input_tokens": 3, "output_tokens": 1},
+             "answers": {"q": {"type": "noul", "noul": 0.2}}}).encode())
     original = urllib.request.urlopen
     setattr(urllib.request, "urlopen", fake_urlopen)
     original_key = tsc.read_api_key
@@ -840,7 +898,7 @@ def in_hook_calls_skip_the_server_but_the_advisory_does_not():
     os.environ[tsc.IN_HOOK_ENV] = "1"
     log = _write([], ".jsonl")
     try:
-        direct = tsc.ask("s", {"q": tsc.noul("?")}, calls_log=log, server_runner=runner)
+        direct = tsc.ask("s", {"q": tsc.noul("?")}, calls_log=log, server_runner=runner, cache_ttl_seconds=0)
         advisory = tsc.ask({"partner_request": "x"}, {"q": tsc.noul("?")}, calls_log=log,
                            server_runner=runner, purpose="build_advisory")
         with open(log) as fh:
@@ -881,6 +939,8 @@ def main():
         evaluate_without_server_is_unchanged(),
         client_routes_through_the_worker(),
         client_falls_back_visibly(),
+        malformed_server_answer_is_not_credited(),
+        server_cache_answer_preserves_no_spend(),
         advisory_builder_asks_as_build_advisory(),
         fetch_reads_every_session_id_within_one_budget(),
         fetch_partial_slow_or_truncated_is_unreachable(),

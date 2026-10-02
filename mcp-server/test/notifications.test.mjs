@@ -282,7 +282,7 @@ test("R03-SIGNAL-SURVIVES-MINT-FAILURE: a mint that cannot mint leaves the signa
     // The cheapest honest way to make the mint raise at the REAL call site: take
     // the grant away for the duration of this case, which produces a real 42501.
     await owner.query(
-      "revoke execute on function ops.mint_notification(text,uuid,text,text,text,text,text,text,text) from carr_writer");
+      "revoke execute on function ops.mint_notification(text,uuid,text,text,text,text,text,text,text,boolean,boolean) from carr_writer");
     try {
       await owner.query("begin");
       await owner.query("set local role carr_writer");
@@ -298,7 +298,7 @@ test("R03-SIGNAL-SURVIVES-MINT-FAILURE: a mint that cannot mint leaves the signa
       await owner.query("reset role").catch(() => {});
       await owner.query("rollback").catch(() => {});
       await owner.query(
-        "grant execute on function ops.mint_notification(text,uuid,text,text,text,text,text,text,text) to carr_writer");
+        "grant execute on function ops.mint_notification(text,uuid,text,text,text,text,text,text,text,boolean,boolean) to carr_writer");
     }
 
     // THE SIGNAL ROW IS COMMITTED. This is the whole clause: the notification is
@@ -308,6 +308,20 @@ test("R03-SIGNAL-SURVIVES-MINT-FAILURE: a mint that cannot mint leaves the signa
       [args.producer, args.signal_key]);
     assert.equal(stored.rows.length, 1);
   });
+
+function quietWindowAt(instant) {
+  // A two-hour window around the database clock includes the current instant
+  // at every time of day, including the wrap across midnight.
+  return [-1, 1].map(hours => new Date(instant + hours * 3600000).toISOString().slice(11, 19));
+}
+
+test("quiet-hours acceptance fixture includes midnight and the final minute", () => {
+  for (const clock of ["2026-10-01T00:00:00Z", "2026-10-01T23:59:30Z"]) {
+    const [start, end] = quietWindowAt(Date.parse(clock));
+    const local = clock.slice(11, 19);
+    assert.ok(start <= end ? local >= start && local < end : local >= start || local < end);
+  }
+});
 
 test("R03-QUIET-HOURS: suppressed is RECORDED, and an opt-out writes no device row at all",
   async t => {
@@ -331,12 +345,15 @@ test("R03-QUIET-HOURS: suppressed is RECORDED, and an opt-out writes no device r
     assert.deepEqual(await deliveries(`signal:${off.producer}:${off.signal_key}`),
       [{ channel: "in_app", state: "pending" }]);
 
-    // Opted in, inside a window that covers the whole day.
+    // Opted in, inside a window around this database's clock.
+    const clock = (await client.query("select now() as instant")).rows[0].instant;
+    const [quietStart, quietEnd] = quietWindowAt(new Date(clock).getTime());
     await client.query(
       `insert into ops.notification_preference(actor, device_opt_in, quiet_hours_start, quiet_hours_end, timezone)
-         values ($1,true,'00:00','23:59','UTC')
+         values ($1,true,$2,$3,'UTC')
        on conflict (actor) do update set device_opt_in = true,
-         quiet_hours_start = '00:00', quiet_hours_end = '23:59', timezone = 'UTC'`, [joe.id]);
+         quiet_hours_start = excluded.quiet_hours_start,
+         quiet_hours_end = excluded.quiet_hours_end, timezone = 'UTC'`, [joe.id, quietStart, quietEnd]);
     const quiet = signalArgs();
     await dispatched(client, () => verbs["record-signal"].handler(c, actor, quiet));
     assert.deepEqual(await deliveries(`signal:${quiet.producer}:${quiet.signal_key}`),

@@ -59,6 +59,13 @@ import sys
 import tempfile
 
 
+# WHICH COPY RUNS (2026-09-27, ops/config/delegation-gate-hook.json): the
+# canonical ~/carr-system copy whenever that checkout exists, so on a Mac no
+# worktree or branch can swap in its own gate. In a Claude Code cloud
+# container, which has no canonical checkout, the settings command runs the
+# copy under $CLAUDE_PROJECT_DIR instead. That is safe because this gate only
+# observes: its latch and telemetry need nothing but repository files and a
+# writable out/ beside them, and every path already fails open.
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from stop_latch import announce  # noqa: E402

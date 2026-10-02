@@ -4,7 +4,128 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v72 is the runtime selector after DoctorCRE V5-R02 (migration 0602,
+// v103 admits rule lookup and atomic teach supersession.
+// v102 seals confirm-merge as a human identity act; machines are refused.
+// v101 admits partner catch-up and its scoped watermark store.
+// v100 seals the authenticated published Progress board directory and the current catalog.
+// v96 admits Doc suggestion producer, decision, and correction verbs.
+// v95 admits the permission-scoped Operations schedule read.
+// v94 sealed tenant-scoped progress board answers.
+// v93 sealed the tenant-scoped Industry Events record
+// contract. Its 0739 successor chains after incident triage v92 (0737).
+//
+// Superseded note (v92): v92 was the runtime selector for the bounded incident-triage
+// transition and its exact incident-reference contract. It chains over v91
+// (0734) after the ordered 0733/0734/0735/0736 ledger; final numbering is
+// assigned at merge.
+//
+// Superseded note (v91): v91 (PROVISIONAL) was the runtime selector for DoctorCRE V5-RW02's safe-stop
+// run store. It registers the read-salesforce-autonomy-counter read, the
+// record-salesforce-run-outcome writer and the human-only
+// revoke-salesforce-read-consent writer, and reseals update-deal for its new
+// invoiced_on field. None carries a Salesforce or other provider effect. It
+// chains over v90's own seal (0731) with 0733/0734; final numbering is
+// assigned at merge.
+//
+// Superseded note (v90): v90 was the runtime selector after the rule-boot change to standing-context:
+// its input schema gained detail="boot" and an integer page (the paginated
+// rule boot served from rule-boot.js). The verb stays read-only; the runtime
+// compares its schema_digest before admitting it, so the selector has to read
+// the registry that sealed the new schema. It chains over v89's own seal
+// (0730) with 0731. v89 itself only sealed an external-admin script row, so
+// the selector moved straight from v88 to v90.
+//
+// Superseded note (v88): v88 (PROVISIONAL) was the runtime selector for DoctorCRE V5-RW02's attended
+// Salesforce reconciliation record layer. It registers three observation /
+// readback writers and one per-action evidence reader, while the store and
+// registry both preserve zero provider-effect authority. It chains over v87's
+// own seal (0725); final numbering is assigned at merge.
+//
+// Superseded note (v87): v87 (PROVISIONAL) was the runtime selector after DoctorCRE V5-F05's
+// authenticated rule-context runtime. Its sealed catalog admits the read-only
+// read-action-context and the authority-only bind-rule-context-contract write,
+// and preserves v86 and earlier as history. It chains over v86's own seal
+// (0723) with 0724/0725; final numbering is assigned at merge. v86 itself only
+// sealed a launchd row, so the selector moved straight from v85 to v87.
+//
+// Superseded note (v85): v85 (PROVISIONAL) was the runtime selector after DoctorCRE V5-A02: the
+// authoritative rule-enforcement coverage read and the Joe-authority-only
+// fallback receipt write. It chains over v84's own seal (0719/0720); final
+// numbering is assigned at merge.
+//
+// Superseded note (v84): v84 was the runtime selector after DoctorCRE V5-A03, the authoritative
+// complete-set review cycle. It admits six tools backed by the append-only
+// 0719 store and preserves v83 and earlier as history. It chains over v83's
+// own seal (0717/0718).
+//
+// Superseded note (v83): v83 was the runtime selector after DoctorCRE V5-A01, the exact-scope
+// assurance-health evidence store (record-assurance-health-evidence,
+// read-assurance-health). Its sealed catalog admits those two new verbs and
+// preserves v82 and earlier as history. It chains over v82's own seal
+// (0708/0709).
+//
+// Superseded note (v82): v82 was the runtime selector after DoctorCRE V5-D01, the inactive
+// action-specific autonomy successor registry (register-action-class-
+// successor, read-action-class-successors, read-action-class-gate). Its
+// sealed catalog admits those three new verbs and preserves v81 and earlier
+// as history. It chains over v81's own seal (0706/0707).
+//
+// Superseded note (v81): v81 was the runtime selector after amend-closed-loop, the append-only door
+// to correct a CLOSED loop's outcome (defect a2c04ffa, loop c7265238).
+// Its sealed catalog admits one new verb -- amend-closed-loop -- and
+// preserves v80 and earlier as history. It chains over #1270's v80
+// (0704/0705).
+//
+// Superseded note (v80): v80 was the runtime selector after DoctorCRE V5-J102's healthcare CRE
+// lifecycle (migrations 0704/0705). Its sealed catalog admits twenty-one new
+// verbs -- read-cre-lifecycle (a read on the writer connection) and twenty
+// writes, one humanOnly and six authorityOnly in all -- and preserves v79 and
+// earlier as history. It chains over #1266's v79 (0701).
+//
+// Superseded note (v79): v79 was the runtime selector after DoctorCRE V5-J103's governed
+// correspondence store (migrations 0700-0701). Its sealed catalog admits four
+// new verbs -- correspondence-readiness and read-correspondence-thread (reads),
+// and the humanOnly record- and revoke-correspondence-adapter-consent pair --
+// and preserves earlier versions as history. None of them sends: there is no
+// send verb, and a draft has no destination. It chains over #1265's v78 (0629).
+//
+// Superseded note (v78): v78 was the runtime selector after the DoctorCRE v5 slice done-record
+// (migration 0628, sealed by 0629 over v77). Its sealed catalog admits nine
+// new verbs -- register-slice-criteria-from-catalog,
+// bind-slice-criterion-evidence, record-release-slice-members,
+// propose-slice-completion, list-shipped-releases and
+// pending-slice-completion-proposals (writer/reader), and
+// rebind-slice-criterion-evidence, set-slice-mark-hold and
+// confirm-slice-completions (authorityOnly) -- and
+// register-slice-checkable-done's narrowed evidence kinds. Automation
+// proposes; only a partner confirms complete.
+//
+// Superseded note (v77): v77 was the runtime selector after DoctorCRE V5-F01's record homes, source
+// authority and document identity (migrations 0626/0627). Its sealed catalog
+// admits nine new verbs -- read-record-source-authority (a read) and the
+// eight record-source-authority writes, two of them humanOnly and
+// authorityOnly -- and preserves earlier versions as history.
+//
+// Superseded note (v76): v76 was the runtime selector after V5-S01's live door (migration 0625).
+// Its sealed catalog admits one new read verb, read-global-boundaries (the
+// read projection of the settled v5 global boundaries and the dispatch
+// door's shadow counters, mcp-server/src/global-boundaries-door.v5.js), and
+// preserves v75 and earlier as history. It chains over #1236's v75 (0618).
+//
+// Superseded note (v75): v75 was the runtime selector after V5-A05 delivery cadence (migration 0617,
+// cadence receipts, server-derived escalation routing, the held-until-morning
+// queue). Its sealed catalog admits three new verbs -- cadence-status,
+// record-cadence-receipt and raise-delivery-cadence-alert -- and preserves
+// earlier versions as history. It chains over #1262's v74 (migration 0614).
+//
+// Superseded note (v74): v74 was the runtime selector after DoctorCRE V5-M01's live door to the
+// Journey 1 clock runtime (migration 0614). Its sealed catalog admits two new
+// verbs -- read-journey-one-clock (a read) and advance-journey-one-clock (a
+// writer write that refuses before any query in every deployed Worker) -- and
+// preserves earlier versions as history; v73 (the bin/deploy-worker.sh
+// re-digest) registered no verb, so the selector stayed on v72 until v74.
+//
+// Superseded note (v72): v72 was the runtime selector after DoctorCRE V5-R02 (migration 0602,
 // workflow cutover, caller migration and retirement readiness). Its sealed
 // catalog admits ten new verbs -- open-, advance-, cancel- and
 // retire-workflow-cutover-plan, register-slice-checkable-done and
@@ -77,7 +198,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v72.generated.js";
+} from "./scac-mutation-registry.v103.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 

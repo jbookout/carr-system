@@ -1218,7 +1218,9 @@ class RehearsalReceiptGate(unittest.TestCase):
                 f"#!/bin/sh\nif [ \"$1\" = -c ]; then exec '{sys.executable}' \"$@\"; fi\n"
                 f"echo \"$*\" >> '{t}/verify.args'\n"
                 "armed=''; prev=''; for a in \"$@\"; do [ \"$prev\" = --armed-file ] && armed=\"$a\"; prev=\"$a\"; done\n"
-                + (f"echo armed > \"$armed\"; echo armed >> '{t}/order'\n" if arm else "exit 1\n")
+                # The file is the readiness signal. Log first so the parent cannot
+                # observe readiness and append branch-created before this marker.
+                + (f"echo armed >> '{t}/order'; echo armed > \"$armed\"\n" if arm else "exit 1\n")
                 + f"IFS= read -r branch; IFS= read -r admin; echo \"$branch|$admin\" > '{t}/handover'; "
                 f"echo handover >> '{t}/order'\n"
                 f"[ {verify_exit} -eq 0 ] && echo '{{\"bound\":1}}'; exit {verify_exit}\n")

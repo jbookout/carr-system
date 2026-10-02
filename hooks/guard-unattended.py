@@ -131,9 +131,15 @@ KNOWN_HOSTS = (
     # integrity-checked by npm from hashes already committed to this repo — the
     # lockfile is the review, not the network call.
     "nodejs.org", "registry.npmjs.org",
-    "api.practicecre.com", "api.doctorcre.com", "api.anthropic.com", "console.neon.tech",
+    # DoctorCRE's production app is CARR-owned infrastructure; release checks
+    # and the signed-out progress-board check read this exact host.
+    "api.practicecre.com", "api.doctorcre.com", "app.doctorcre.com",
+    "api.anthropic.com", "console.neon.tech",
     "neon.tech", "cloudflareapi.com", "cloudflare.com", "r2.cloudflarestorage.com",
     "googleapis.com", "github.com", "api.github.com", "hc-ping.com",
+    # Dot relay uses the Slack Web API; its user token stays in ~/.hermes/.env.
+    # This host is fixed infrastructure, not a record-derived practice domain.
+    "slack.com",
     "npiregistry.cms.hhs.gov", "download.cms.gov",
     # raw.githubusercontent.com: loop #163 named its absence as the gap forcing
     # the gh-api workaround for plain changelog reads. Added 2026-08-06 with the
@@ -321,6 +327,21 @@ KNOWN_HOSTS = (
     # SSH between his own Macs. Deliberately scoped to this one tailnet, not
     # the broad `ts.net` suffix: someone else's tailnet must stay blocked.
     "tailc8cc93.ts.net",
+    # census.gov: the U.S. Census Bureau's own federal domain. Added 2026-09-25
+    # on Joe's explicit in-chat approval to download two public files for the
+    # J302 Safe Harbor census tables behind the heat-map privacy builder: the
+    # 2020 county reference file and the 2020 DHC ZCTA population. The guard
+    # was refusing both www2.census.gov and api.census.gov.
+    #
+    # SCOPE, stated because an allowlist entry is a standing permission: this is
+    # read-only public statistical data from one federal owner, the same trust
+    # class as download.cms.gov and alabama.gov above. It is the whole domain
+    # rather than the two hosts because the job needs two subdomains of the same
+    # owner and the Bureau spreads one dataset across several of them. The
+    # anchored suffix match covers census.gov and *.census.gov only: lookalikes
+    # such as census.gov.<other> and notcensus.gov stay blocked, and
+    # ops/guard-selftest.py asserts both.
+    "census.gov",
 )
 
 # ── render-write protection over Bash (2026-08-06, Joe: "Fix both now") ──────
@@ -610,8 +631,8 @@ RULES = [
     # 4. destructive SQL
     (re.compile(r"\bdrop\s+(table|schema|database|view|index)\b", re.I), "DROP"),
     (re.compile(r"\btruncate\s+(table\s+)?\w", re.I), "TRUNCATE"),
-    (re.compile(r"\bdelete\s+from\s+\w+\s*(;|$)", re.I), "unqualified DELETE"),
-    (re.compile(r"\bupdate\s+\w+\s+set\b(?![\s\S]*\bwhere\b)", re.I), "unqualified UPDATE"),
+    (re.compile(r'\bdelete\s+from\s+(?:[\w".]+)\s*(;|$)', re.I), "unqualified DELETE"),
+    (re.compile(r'\bupdate\s+[\w".]+\s+set\b(?![^;]*\bwhere\b)', re.I), "unqualified UPDATE"),
 ]
 
 # ── IS THIS COMMAND ACTUALLY SENDING? (loop #283, fixed 2026-08-13) ───────────
@@ -734,7 +755,19 @@ def is_sql_context(cmd):
 
 def hosts_in(cmd):
     """Every host this command could reach: URL hosts plus remote-copy targets."""
-    return URL_RE.findall(cmd) + REMOTE_TARGET_RE.findall(cmd)
+    hosts = []
+    from cmd_text import shell_tokens
+    try:
+        tokens = shell_tokens(cmd)
+    except ValueError:
+        tokens = re.split(r'[\s;&|]', cmd)
+    for token in tokens:
+        for url in re.findall(r'https?://[^\s\'"<>]+', token, re.I):
+            try:
+                hosts.append(urlsplit(url).hostname or "invalid-url")
+            except ValueError:
+                hosts.append("invalid-url")
+    return hosts + REMOTE_TARGET_RE.findall(cmd)
 
 
 def is_send_context(cmd):
@@ -788,7 +821,15 @@ def derived_hosts():
 
 def host_allowlisted(host):
     """True if host is on the code list OR the record-derived list."""
-    host = (host or "").strip(".").lower()
+    host = (host or "").strip().lower()
+    normalized = host.strip(".")
+    # The app host is a single allowed origin. DNS permits one terminal dot;
+    # retaining the raw host here rejects extra dots and subdomains.
+    if normalized == "app.doctorcre.com":
+        return host in ("app.doctorcre.com", "app.doctorcre.com.")
+    if normalized.endswith(".app.doctorcre.com"):
+        return False
+    host = normalized
     if not host:
         return False
     for k in KNOWN_HOSTS:
@@ -919,7 +960,54 @@ def log(msg):
 
 
 def in_safe_zone(cmd):
-    return any(z in cmd for z in SAFE_ZONES)
+    from cmd_text import shell_tokens, shell_operands, SHELL_BOUNDARIES
+    try:
+        tokens, _ = shell_operands(shell_tokens(cmd))
+    except ValueError:
+        return False
+    targets = []
+    segments, segment = [], []
+    for token in tokens + [';']:
+        if token in SHELL_BOUNDARIES:
+            if segment:
+                segments.append(segment)
+            segment = []
+        else:
+            segment.append(token)
+    for words in segments:
+        while words and (words[0] in {'sudo', 'command', 'env'} or re.match(r'^\w+=', words[0])):
+            words = words[1:]
+        if not words:
+            continue
+        executable = os.path.basename(words[0])
+        if executable in {'rm', 'srm'}:
+            targets.extend(token for token in words[1:] if not token.startswith('-'))
+        elif executable == 'find' and '-delete' in words:
+            if any(token in {'-exec', '-execdir', '-ok', '-okdir'} for token in words):
+                return False  # executable predicates cannot establish a safe cleanup
+            roots = []
+            for token in words[1:]:
+                if token.startswith('-') or token in {'(', '!', ')'}:
+                    break
+                roots.append(token)
+            if not roots:
+                return False  # find defaults to an unbound working directory
+            targets.extend(roots)
+    def safe_target(target):
+        if '$' in target or '`' in target or '..' in target.split('/'):
+            return False
+        parts = target.split("/")
+        for zone in SAFE_ZONES:
+            if zone.startswith("/"):
+                if target.startswith(zone):
+                    return True
+            else:
+                zone_parts = zone.rstrip("/").split("/")
+                if any(parts[i:i + len(zone_parts)] == zone_parts
+                       for i in range(len(parts))):
+                    return True
+        return False
+    return bool(targets) and all(safe_target(target) for target in targets)
 
 
 # ── Rebasing your own branch in place ────────────────────────────────────────
@@ -1011,7 +1099,18 @@ def force_push_to_named_side_branch(cmd):
     # Stopping at the boundary is what keeps this honest: only THIS command's
     # arguments are read, so nothing chained after it can dress up its target.
     words = []
-    for token in text[match.end():].split():
+    # shlex separates an IO number from its operator (2, >&, 1). Remove only
+    # unquoted numbers adjacent to a redirect; `2 >` and `'2'>` are arguments.
+    remainder = re.sub(
+        r"'[^']*'|\"(?:\\.|[^\"\\])*\"|\\.|(?<!\S)\d+(?=[<>])",
+        lambda m: "" if m.group(0).isdigit() else m.group(0), text[match.end():])
+    try:
+        lexer = shlex.shlex(remainder, posix=True, punctuation_chars=";&|<>")
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return False
+    for token in tokens:
         if _SEPARATOR.match(token) or _REDIRECT.match(token):
             break             # this command's arguments end here
         if token.startswith("-"):
@@ -1319,7 +1418,7 @@ def main():
             # where a parser has no single URL to parse).
             try:
                 _p = urlsplit(url if url.startswith(("http://", "https://")) else f"https://{url}")
-                host = (_p.hostname or "").strip(".").lower()
+                host = (_p.hostname or "").lower()
             except Exception:
                 host = ""
             if host and not host_allowlisted(host):

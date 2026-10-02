@@ -336,6 +336,11 @@ const BOARD_LIMIT_DEFAULT = 60;
 const BOARD_LIMIT_MAX = 200;
 const FACT_LIMIT_DEFAULT = 50;
 const TRACE_CORRELATION_MAX = 25;
+// The allocator uses padStart(2), so its sequence is 01..99, 100, 101...
+// (not a fixed two-digit suffix). Share this with every schema and handler
+// that validates an incident ref so the hundredth row remains addressable.
+const INCIDENT_REF_PATTERN = "^INC-[0-9]{8}-(?:0[1-9]|[1-9][0-9]+)$";
+const INCIDENT_REF_RE = new RegExp(INCIDENT_REF_PATTERN);
 
 // OCCURRENCES: ONE NUMBER, TWO WRITERS, NEITHER OF THEM WRONG.
 //
@@ -840,6 +845,62 @@ export function incidentTools({ withEnvelope, writeEvent, ToolError, authorizati
       }),
     },
 
+    "triage-incident": {
+      write: true,
+      description:
+        "Move one detected operational incident into triaged with a concrete next action and " +
+        "a provisional business impact assessment. Use 'unknown' when impact has not been " +
+        "established. This records a workflow disposition, not a root cause, severity judgment, " +
+        "recovery, or closure. Read get-incident first to keep observed facts separate from " +
+        "hypotheses. Only detected -> triaged is allowed; a second transition needs a new action.",
+      inputSchema: { type: "object", additionalProperties: false, properties: {
+        idempotency_key: { type: "string" },
+        ref: { type: "string", pattern: INCIDENT_REF_PATTERN },
+        next_action: { type: "string", description: "the concrete next investigation or mitigation step" },
+        impact_assessment: { type: "string", description: "provisional business impact; 'unknown' is valid when evidence is insufficient" },
+      }, required: ["idempotency_key", "ref", "next_action", "impact_assessment"] },
+      handler: async (c, actor, args) => {
+        // Serialize a same-key first attempt before withEnvelope's replay read.
+        // Different keys still meet at the detected-state conditional update.
+        if (args.idempotency_key)
+          await c.query("select pg_advisory_xact_lock(hashtextextended($1,0))",
+            [String(args.idempotency_key)]);
+        return withEnvelope(c, actor, "triage-incident", args, async () => {
+        const ref = String(args.ref || "").trim();
+        const nextAction = String(args.next_action || "").trim();
+        const impact = String(args.impact_assessment || "").trim();
+        if (!INCIDENT_REF_RE.test(ref))
+          throw new ToolError({ error: "invalid_incident_ref", ref });
+        if (!nextAction || !impact)
+          throw new ToolError({ error: "triage_details_required", ref,
+            hint: "supply a next action and an impact assessment; use 'unknown' for impact when evidence is insufficient" });
+
+        // The conditional update is the state guard, including against a
+        // concurrent triage. No earlier read can safely substitute for it.
+        const changed = await c.query(
+          `update ops.incident
+              set state = 'triaged', next_action = $2, business_impact = $3
+            where ref = $1 and state = 'detected'
+          returning id, ref, state, next_action, business_impact`,
+          [ref, nextAction, impact]);
+        if (!changed.rows.length) {
+          const current = await c.query("select state from ops.incident where ref=$1", [ref]);
+          throw new ToolError(current.rows.length
+            ? { error: "incident_state_conflict", ref, expected: "detected", actual: current.rows[0].state }
+            : { error: "no_such_incident", ref });
+        }
+        const row = changed.rows[0];
+        await writeEvent(c, actor, "triage-incident", "incident", row.id, {
+          field: "state", old: { state: "detected" },
+          new: { state: "triaged", next_action: nextAction, business_impact: impact },
+          idempotency_key: args.idempotency_key,
+        });
+        return { ref: row.ref, state: row.state, next_action: row.next_action,
+          business_impact: row.business_impact };
+        });
+      },
+    },
+
     "link-incident-work-request": {
       write: true,
       description:
@@ -848,7 +909,7 @@ export function incidentTools({ withEnvelope, writeEvent, ToolError, authorizati
         "serialize before the existing envelope replay boundary.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
         idempotency_key: { type: "string", pattern: "^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$" },
-        incident_ref: { type: "string", pattern: "^INC-[0-9]{8}-[0-9]{2}$" },
+        incident_ref: { type: "string", pattern: INCIDENT_REF_PATTERN },
         work_request: { type: "string", pattern: "^WR-[0-9]{1,12}$" },
       }, required: ["idempotency_key", "incident_ref", "work_request"] },
       handler: async (c, actor, args) => {

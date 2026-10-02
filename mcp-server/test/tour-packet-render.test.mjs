@@ -8,10 +8,10 @@ const refs = {
 };
 const packet = Object.freeze({
   as_of: "2026-08-27T12:00:00Z",
-  caveat: "Facts are provided for tour planning and remain subject to change.",
+  caveat: null,
   properties: [
-    { property_ref: refs.zeta, route_sequence: 20, route_label: "Stop 2", name: "Zeta Medical Plaza", address: "200 Zeta Way, Pensacola, FL", property_type: "Medical office", size: { value: 4200, unit: "SF" }, availability: "Available" },
-    { property_ref: refs.alpha, route_sequence: 10, route_label: "Stop 1", name: "Alpha Health Center", address: "100 Alpha Drive, Pensacola, FL", suite: "Suite 120", property_type: "Medical office", asking_economics: { value: "24.00", currency: "USD", period: "NNN" }, availability: "Available", parking: "4.5/1,000 SF" },
+    { property_ref: refs.zeta, route_sequence: 20, route_label: "B", name: "Zeta Medical Plaza", address: "200 Zeta Way, Pensacola, FL", property_type: "Medical office", size: { value: 4200, unit: "SF" }, availability: "Available" },
+    { property_ref: refs.alpha, route_sequence: 10, route_label: "A", name: "Alpha Health Center", address: "100 Alpha Drive, Pensacola, FL", suite: "Suite 120", property_type: "Medical office", asking_economics: { value: "24.00", currency: "USD", period: "NNN" }, availability: "Available", parking: "4.5/1,000 SF" },
   ],
 });
 
@@ -46,9 +46,12 @@ test("Tour packet preserves allowlisted structured metrics with deterministic fo
   assert.throws(() => renderTourPacket({ ...packet, properties: [{ ...packet.properties[0], size: { value: { nested: "no" } } }] }), error => error instanceof TourPacketRenderError && error.code === "tour_packet_invalid_text");
 });
 
-test("Tour packet treats a null optional property caveat as absent", () => {
-  const result = renderTourPacket({ ...packet, properties: [{ ...packet.properties[0], caveat: null }] });
-  assert.equal(result.facts.properties[0].caveat, packet.caveat);
+test("Tour packet refuses any caveat: a per-property caveat key or a non-null packet caveat (V5-J303)", () => {
+  for (const caveat of [null, "Broker-only caveat about the roof"])
+    assert.throws(() => renderTourPacket({ ...packet, properties: [{ ...packet.properties[0], caveat }] }),
+      error => error instanceof TourPacketRenderError && error.code === "tour_packet_unknown_field");
+  assert.throws(() => renderTourPacket({ ...packet, caveat: "Facts are provided for tour planning." }),
+    error => error instanceof TourPacketRenderError && error.code === "tour_packet_forbidden_field");
 });
 
 test("Tour packet prints no caveat line at all when none is supplied anywhere", () => {
@@ -56,7 +59,7 @@ test("Tour packet prints no caveat line at all when none is supplied anywhere", 
   // availability and economics." boilerplate (migrations/0586): a packet
   // with no top-level caveat and no per-property caveat must render with no
   // caveat text anywhere, not fall back to any default line.
-  const noCaveat = { ...packet, caveat: undefined, properties: packet.properties.map(property => ({ ...property, caveat: undefined })) };
+  const noCaveat = { ...packet, caveat: undefined };
   const result = renderTourPacket(noCaveat);
   assert.equal(result.facts.caveat, null);
   for (const property of result.facts.properties) assert.equal("caveat" in property, false);

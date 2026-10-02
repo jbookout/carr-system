@@ -10,6 +10,8 @@
 // Nulls fail closed, as in root-trust-config.js: an absent reference table is
 // not permission, it is a denial naming what is missing.
 
+import { V5_J302_COUNTY_FIPS_2020_CODES } from "./tour-heat-map-census-2020-data-j302.v5.js";
+
 export const V5_J302_PRIVACY_CONFIG = Object.freeze({
   schema_version: "doctorcre-v5-j302-privacy-config.v1",
   provenance: "default_set_by_orchestrator_reversible",
@@ -54,22 +56,28 @@ export const V5_J302_PRIVACY_CONFIG = Object.freeze({
 
   // 4. A ZIP3 survives Safe Harbor only when NEITHER the 2000 Census (HHS's
   //    restricted list, held in the kernel) NOR the 2020 Census puts it at
-  //    20,000 or fewer. No 2020 ZIP3 table is available offline in this
-  //    repository, so the slot is explicitly unknown and every non-000 ZIP3
-  //    is denied until a reviewed table digest is pinned here.
+  //    20,000 or fewer. The 2020 reading is the table in
+  //    tour-heat-map-census-2020-data-j302.v5.js: 2020 DHC P1_001N summed over
+  //    ZCTA5s by three-digit prefix, derived on 2026-09-25 from the national DHC
+  //    summary file (us2020.dhc.zip, sha256 1a6f3aee...8c4cb). A receipt must
+  //    carry exactly the table under this digest; a prefix absent from it is
+  //    unknown and denies. Whether ZCTA-summed population is the right Safe
+  //    Harbor basis is the privacy owner's (Joe's) call; the pin is reversed by
+  //    setting this back to unavailable_offline with a null digest.
   census_2020_zip3_population: Object.freeze({
     vintage: "2020",
-    status: "unavailable_offline",
-    table_digest: null,
+    status: "pinned",
+    table_digest: "sha256:cb84fc0cc495609fd8c8f93e57fa5aa3c43915e95dafc5285c038badbd2be94c",
   }),
 
   // County-bearing geography (county, census tract, block group) is checked
   // against a bound list of county FIPS codes, because five digits alone cannot
-  // tell a county from a ZIP5. No reviewed list is available offline, so the
-  // slot is unknown and every county-bearing cell is denied until one is
-  // pinned. The kernel checks the two-digit state prefix on its own.
+  // tell a county from a ZIP5. The list is the 2020 national county reference
+  // file (national_county2020.txt, sha256 9f6e5f6e...2970d6): 3,235 rows less
+  // 74300 (U.S. Minor Outlying Islands, a state code the kernel does not bind),
+  // 3,234 codes. The kernel checks the two-digit state prefix on its own.
   county_fips_codes: Object.freeze({
-    status: "unavailable_offline",
-    codes: null,
+    status: "pinned",
+    codes: V5_J302_COUNTY_FIPS_2020_CODES,
   }),
 });

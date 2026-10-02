@@ -46,6 +46,9 @@ import {
   V5_J102_UNCLASSIFIED_FIELD_POLICY,
   assertLifecycleSubject,
   evaluateConcurrentEdit,
+  evaluateConcurrentTransition,
+  V5_J102_DERIVED_FIELDS,
+  v5J102TransitionWrites,
   evaluateLifecycleInitialization,
   evaluateLifecycleTransition, v5J102EvidenceContract,
   v5J102InitializationContract, v5J102TransitionContract,
@@ -94,7 +97,7 @@ const ctx = actor => ({ actor });
 
 const relationshipState = (over = {}) => ({
   subject_kind: "relationship", subject_id: "rel-synthetic-1",
-  relationship_state: "prospect", active_engagement_count: 0, ...over,
+  relationship_state: "prospect", active_engagement_count: 0, party_id: null, ...over,
 });
 const assignmentState = (over = {}) => ({
   subject_kind: "assignment", subject_id: "asg-synthetic-1",
@@ -220,12 +223,17 @@ class FakeDb {
     if (text === "ROLLBACK") { this.rolledBack += 1; return { rows: [] }; }
 
     if (text.includes("ops.f01_principal()") && text.includes("ops.f01_now_text()")) {
+      const principal = this.script.principal ?? {
+        actor_slug: "joe", human: true, authorization_class: "verified_partner",
+        derived_by: "server_established_transaction_context",
+      };
       return { rows: [{
-        principal: this.script.principal ?? {
-          actor_slug: "joe", human: true, authorization_class: "verified_partner",
-          derived_by: "server_established_transaction_context",
-        },
+        principal,
         server_now: this.script.server_now ?? SERVER_NOW,
+        // Ruling (c): what ops.j102_sponsoring_partner() derives — the partner
+        // itself, or (for every synthetic agent here) its sponsor, joe.
+        sponsoring_partner: "sponsoring_partner" in this.script ? this.script.sponsoring_partner
+          : principal.authorization_class === "verified_partner" ? principal.actor_slug : "joe",
       }] };
     }
     if (text.includes("ops.j102_replay_outcome(")) {
@@ -272,6 +280,11 @@ class FakeDb {
       return { rows: [{ body: this.script.read_body ?? { body: null } }] };
     }
 
+    // Owner ruling (b): the store's census of live sibling negotiations.
+    if (text.includes("SELECT subject_id FROM ops.j102_subject_current")) {
+      return { rows: (this.script.active_negotiations ?? []).map(subject_id => ({ subject_id })) };
+    }
+
     for (const fn of ["j102_apply_transition", "j102_initialize_subject",
       "j102_record_first_party_fact",
       "j102_record_evidence_subject_link", "j102_record_salesforce_reference",
@@ -315,6 +328,8 @@ class FakeDb {
         caller_reported_reason_id: diagnostics.reason_id,
         caller_reported_reason_id_scope:
           "kernel_result_diagnostic_asserted_by_the_caller_and_not_recomputed_here",
+        concurrent_merges: diagnostics.concurrent_merges ?? [],
+        concurrent_merges_scope: "caller_reported_merge_account_cas_enforced_on_current_row",
         coupled_facts_committed: diagnostics.coupled_facts,
         coupled_facts_committed_source: "derived_from_the_admission_contract",
         decision_refs: diagnostics.decision_refs,
@@ -461,15 +476,21 @@ const recordRef = (evidence_kind, over = {}) => ({
 
 test("the registration description is a description, and it says what the parent still owes", () => {
   const registrations = v5J102ToolRegistrations();
-  assert.equal(registrations.length, V5_J102_OPERATIONS.length);
+  // One verb per operation, plus the authority-routed door to the fact writer.
+  assert.equal(registrations.length, V5_J102_OPERATIONS.length + 1);
+  const partnerFact = registrations.find(e => e.name === "record-partner-lifecycle-fact");
+  assert.equal(partnerFact.store_operation, "record-lifecycle-fact");
+  assert.equal(partnerFact.handler, "recordLifecycleFact");
+  assert.equal(partnerFact.authorityOnly, true);
+  assert.equal(registrations.find(e => e.name === "record-lifecycle-fact").authorityOnly, false);
   for (const entry of registrations) {
-    assert.ok(V5_J102_OPERATIONS.includes(entry.name));
+    assert.ok(V5_J102_OPERATIONS.includes(entry.store_operation));
     assert.ok(entry.role.length > 0, `${entry.name} states its role`);
     assert.ok(entry.handler.length > 0);
-    // Four things this module deliberately did NOT do.
-    assert.equal(entry.registered_in_scac, false);
-    assert.equal(entry.registered_in_mutation_registry, false);
-    assert.equal(entry.migration_bound, false);
+    // Registered, sealed (v80) and migration-bound (0704); never accepted.
+    assert.equal(entry.registered_in_scac, true);
+    assert.equal(entry.registered_in_mutation_registry, true);
+    assert.equal(entry.migration_bound, true);
     assert.equal(entry.accepted, false);
   }
   const schemas = v5J102StoreOperationSchemas();
@@ -1204,6 +1225,37 @@ test("the parent chain must be named in full, and a related subject nothing read
   assert.equal(db.calls.length, 0);
 });
 
+test("OWNER RULING (c): the row and event carry the sponsoring partner, and a disagreeing database sponsor refuses", async () => {
+  const AGENT_PRINCIPAL = { actor_slug: "codex", human: false, authorization_class: "sponsored_agent" };
+  const db = new FakeDb({ subjects: {}, principal: AGENT_PRINCIPAL });
+  const made = await createCreLifecycleStore({ db }).initializeProspectRelationship({
+    idempotency_key: "j102-fixture-sponsor-1", declared: { new_subject_id: "rel-synthetic-7" },
+  }, ctx(AGENT));
+  assert.equal(made.decision, "allow");
+  const [, , subjectJson, eventJson] = db.paramsFor("j102_initialize_subject");
+  assert.equal(JSON.parse(subjectJson).record.sponsoring_partner, "joe");
+  assert.equal(JSON.parse(subjectJson).record.updated_by, "codex");
+  assert.equal(JSON.parse(eventJson).record.sponsoring_partner, "joe");
+
+  const disagreeing = new FakeDb({ subjects: {}, principal: AGENT_PRINCIPAL, sponsoring_partner: "dell" });
+  await assert.rejects(createCreLifecycleStore({ db: disagreeing }).initializeProspectRelationship({
+    idempotency_key: "j102-fixture-sponsor-2", declared: { new_subject_id: "rel-synthetic-8" },
+  }, ctx(AGENT)), e => e instanceof V5J102StoreError && e.code === "sponsor_context_mismatch");
+  assert.equal(disagreeing.callsTo("j102_initialize_subject").length, 0, "refused before any write");
+
+  await assert.rejects(createCreLifecycleStore({ db: new FakeDb({ subjects: {} }) })
+    .initializeProspectRelationship({ idempotency_key: "j102-fixture-sponsor-3",
+      sponsoring_partner: "dell", declared: { new_subject_id: "rel-synthetic-9" } }, ctx(JOE)),
+  e => e instanceof V5J102StoreError &&
+    ["caller_derived_field_refused", "unknown_field"].includes(e.code));
+
+  await assert.rejects(createCreLifecycleStore({ db: new FakeDb({ subjects: {} }) })
+    .initializeProspectRelationship({ idempotency_key: "j102-fixture-sponsor-4",
+      declared: { new_subject_id: "rel-synthetic-10" } },
+    ctx({ slug: "codex", display: "Codex", human: false, via: "oauth-google" })),
+  e => e instanceof V5J102StoreError);
+});
+
 test("a prospect and a negotiation are created by their own operations, with their own parents", async () => {
   // AS A SPONSORED AGENT throughout, because creating an empty prospect, a
   // negotiation draft or an assignment shell carries no evidence-bound fact and
@@ -1300,8 +1352,15 @@ test("a failing creation rolls back, and a replayed one reports what LANDED", as
 
 // --- refusals that never reach a write -------------------------------------
 
-test("a stale subject digest refuses and issues no write", async () => {
-  const db = leaseExecutionDb();
+test("a stale subject digest the store cannot characterize files a VISIBLE reconciliation item and moves nothing", async () => {
+  // Q103. The row names no prior digest equal to the caller's base, so the
+  // movement is uncharacterized: it is not a merge, it is not a silent
+  // refusal either, it is a conflict a person can see.
+  const db = leaseExecutionDb({ read_bodies: {
+    subject: subjectReadback(dealState(), { established_by_transition: "commit-winning-property",
+      prior_state_digest: null }),
+    subject_events: [],
+  } });
   const store = createCreLifecycleStore({ db });
   const answer = await store.recordDealExecution({
     idempotency_key: "j102-fixture-1",
@@ -1309,11 +1368,15 @@ test("a stale subject digest refuses and issues no write", async () => {
       expected_state_digest: D(99) },
     evidence_refs: [documentRef("executed_lease")],
   }, ctx(JOE));
-  assert.equal(answer.decision, "refuse");
-  assert.equal(answer.reason_id, "stale_subject_digest");
-  assert.equal(answer.stored_state_digest, digest(dealState()));
-  assert.equal(answer.expected_state_digest, D(99));
+  assert.equal(answer.decision, "reconcile");
+  assert.equal(answer.reason_id, "concurrent_change_not_characterized");
+  assert.equal(answer.current_version_digest, digest(dealState()));
+  assert.equal(answer.base_version_digest, D(99));
+  assert.equal(answer.auto_merged, false);
+  assert.equal(answer.last_writer_wins, false);
+  assert.equal(answer.advances_lifecycle_state, false);
   assert.equal(db.callsTo("j102_apply_transition").length, 0);
+  assert.equal(db.callsTo("j102_record_reconciliation_item").length, 1);
   assert.equal(db.callsTo("f01_read").length, 0, "evidence is not even loaded");
 });
 
@@ -1837,7 +1900,7 @@ test("H1/H3: what remains unwired is two FACTS, not two callers, and each names 
   // than only that one is required.
   const schemas = v5J102StoreOperationSchemas();
   for (const entry of v5J102ToolRegistrations()) {
-    if (!entry.write || schemas[entry.name].transition === null) continue;
+    if (!entry.write || schemas[entry.store_operation].transition === null) continue;
     assert.equal(entry.requires_existing_primary_subject, true,
       `${entry.name} advances a subject that must already exist`);
     assert.ok(V5_J102_OPERATIONS.includes(entry.primary_subject_created_by_operation),
@@ -1880,11 +1943,16 @@ test("H1/H3: what remains unwired is two FACTS, not two callers, and each names 
   assert.deepEqual([...V5_J102_COMPOSED_READ_KINDS], ["ownership_and_freshness"]);
 });
 
-test("the open owner questions are recorded as OPEN, and the rail still behaves as if unanswered", () => {
+test("the owner questions: rulings are recorded as ruled, and the one still open behaves as if unanswered", () => {
   const byStatus = kind => V5_J102_OPEN_OWNER_QUESTIONS.filter(q => q.status === kind);
-  assert.equal(V5_J102_OPEN_OWNER_QUESTIONS.length, 4);
-  assert.equal(byStatus("unsettled_pending_owner_ruling").length, 3);
-  assert.equal(byStatus("implementation_assumption_live_and_unratified").length, 1);
+  assert.equal(V5_J102_OPEN_OWNER_QUESTIONS.length, 6);
+  assert.equal(byStatus("unsettled_pending_owner_ruling").length, 1, "only mandate-before-LOI is open");
+  assert.equal(byStatus("ruled_by_owner").length, 5);
+  assert.equal(byStatus("implementation_assumption_live_and_unratified").length, 0);
+  for (const ruled of byStatus("ruled_by_owner")) {
+    assert.ok(ruled.ruling.length > 0 && ruled.ruled_on === "2026-09-25", "each ruling is quoted and dated");
+    assert.equal(ruled.encoded_without_a_ruling, false);
+  }
   for (const entry of V5_J102_OPEN_OWNER_QUESTIONS) {
     assert.ok(entry.question.length > 0);
     assert.ok(entry.today.length > 0, "each says what the rail does with no answer");
@@ -1912,9 +1980,9 @@ test("the open owner questions are recorded as OPEN, and the rail still behaves 
     v5J102InitializationContract("initialize-assignment").initial_state.assignment_phase,
     "research",
     "the created assignment is at research, so open-assignment is not forced by the phase alone");
-  // The one live assumption is labelled as one, and it is the actor-class parity.
-  const parity = byStatus("implementation_assumption_live_and_unratified")[0];
-  assert.equal(parity.encoded_without_a_ruling, true);
+  // The actor-class parity is now the owner's ruling (c), not an assumption.
+  const parity = V5_J102_OPEN_OWNER_QUESTIONS.find(q => q.question.includes("SPONSORED AGENT"));
+  assert.equal(parity.status, "ruled_by_owner");
   assert.deepEqual(
     v5J102InitializationContract("initialize-prospect-relationship").permitted_actor_classes,
     ["verified_partner", "sponsored_agent"]);
@@ -2552,12 +2620,22 @@ test("the store requires an injected handle and opens no connection of its own",
 // to feed. A map that is correct and unused would pass the first half and fail
 // the second.
 //
-// NOTHING HERE EXECUTES SQL. The candidate is source, has never been applied, and
-// these assertions are about its bytes.
+// NOTHING HERE EXECUTES SQL. These assertions are about the reviewed source's
+// bytes; the live suite and the db-gate execute it as migration 0704.
 // ---------------------------------------------------------------------------
 
 const CANDIDATE_SQL = readFileSync(
   new URL("../../ops/cre-lifecycle.candidate.sql", import.meta.url), "utf8");
+
+test("migration 0704 IS the reviewed candidate, byte for byte", () => {
+  // Everything this suite proves about the candidate is only a proof about what
+  // runs if the numbered migration is the same bytes. A hand edit to either one
+  // alone fails here.
+  const migration = readFileSync(
+    new URL("../../migrations/0704_cre_lifecycle.sql", import.meta.url), "utf8");
+  assert.equal(migration, CANDIDATE_SQL);
+  assert.match(CANDIDATE_SQL, /NUMBERED AS migrations\/0704_cre_lifecycle\.sql, byte for byte/);
+});
 
 /** The admission map, read out of the candidate SQL's dollar-quoted JSON. */
 function admissionPolicy() {
@@ -3102,8 +3180,13 @@ test("SQL parity: the map's INITIALIZATIONS are the kernel's initialization cont
       "subject_kind", "subject_id",
       ...(contract.parent_reference_field === null ? [] : [contract.parent_reference_field]),
       ...contract.declared_identifiers,
+      ...contract.optional_declared_identifiers,
       ...Object.keys(contract.initial_state),
     ])].sort(), `${id} creation shape covers exactly the created row`);
+    assert.deepEqual(admitted.optional_declared_identifiers, contract.optional_declared_identifiers,
+      `${id} optional_declared_identifiers`);
+    assert.equal(admitted.unique_active_per_property === true, contract.unique_active_per_property,
+      `${id} one-active-per-property`);
     for (const [field, value] of Object.entries(contract.initial_state)) {
       const effect = admitted.creation_shape[field];
       assert.ok(effect, `${id} fixes ${field} in the SQL creation shape too`);
@@ -3659,6 +3742,8 @@ function expectedValue(effect, ctx) {
     // says which layer answers which.
     case "declared_identifier":
       return { kind: "declared_identifier", field: effect.field };
+    case "optional_declared_identifier":
+      return { kind: "optional_declared_identifier", field: effect.field };
     case "proposed_subject_id":
       return { kind: "exact", value: orNull(at(ctx.ids, effect.subject)) };
     case "subject_field":
@@ -4047,7 +4132,7 @@ const canonicalReferences = evidence =>
   }));
 
 const REL = { subject_kind: "relationship", subject_id: "j102-rel-1",
-  relationship_state: "prospect", active_engagement_count: 0 };
+  relationship_state: "prospect", active_engagement_count: 0, party_id: null };
 const CLIENT = { ...REL, relationship_state: "client", active_engagement_count: 1 };
 const ENG = { subject_kind: "engagement", subject_id: "j102-eng-1",
   relationship_id: "j102-rel-1", engagement_state: "active",
@@ -4588,7 +4673,8 @@ test("SQL parity: the effect vocabulary in the map is exactly the one the SQL im
     CANDIDATE_SQL.indexOf("comment on function ops.j102_expected_value"));
   const sqlOps = [...new Set([...source.matchAll(/v_op = '([a-z_]+)'/g)].map(m => m[1]))].sort();
   const readable = ["case_on_evidence", "case_on_field", "const", "declared_identifier",
-    "evidence_fact", "one_of", "prior_plus", "prior_plus_conditional", "proposed_subject_id",
+    "evidence_fact", "one_of", "optional_declared_identifier", "prior_plus",
+    "prior_plus_conditional", "proposed_subject_id",
     "subject_field", "supplied_evidence_kind", "unbound"];
   assert.deepEqual(sqlOps, readable,
     "the SQL interpreter implements exactly the ops this suite can evaluate");
@@ -4701,6 +4787,8 @@ const runInitWalk = walk => evaluateLifecycleInitialization({
   declared: walk.declared,
   actor: walk.actor,
   now: NOW,
+  ...(walk.initialization_id === "initialize-property-negotiation"
+    ? { active_negotiations_for_property: walk.active_negotiations_for_property ?? [] } : {}),
 });
 
 /**
@@ -4721,6 +4809,7 @@ function proposedFor(walk) {
     subject_id: walk.declared.new_subject_id,
     ...parent,
     ...Object.fromEntries(contract.declared_identifiers.map(f => [f, walk.declared[f]])),
+    ...Object.fromEntries(contract.optional_declared_identifiers.map(f => [f, walk.declared[f] ?? null])),
     ...contract.initial_state,
   };
 }
@@ -4798,6 +4887,18 @@ function initializationComplaints(policy, walk, answer) {
   };
   const compare = (label, effect, actual) => {
     const expected = expectedValue(effect, ctx);
+    if (expected.kind === "optional_declared_identifier") {
+      // Null when the caller named nothing; otherwise the same identifier rule,
+      // bound to the declared value. (The writer also binds it to a real party.)
+      const declaredValue = walk.declared[expected.field] ?? null;
+      if (actual !== declaredValue) {
+        complaints.push(`${label}: the kernel bound ${show(actual)} and the caller declared ${show(declaredValue)}`);
+      }
+      if (actual !== null && (typeof actual !== "string" || !IDENT_SHAPE.test(actual))) {
+        complaints.push(`${label}: ${show(actual)} is not a permitted identifier`);
+      }
+      return;
+    }
     if (expected.kind === "declared_identifier") {
       // SQL holds the SHAPE; the kernel binds the VALUE. Both halves are asserted
       // here, and neither is asserted as the other.
@@ -5137,4 +5238,159 @@ test("SQL parity: the map's context conditions and identified_by ARE the kernel'
       }
     });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Q103 for typed transitions: evaluateConcurrentTransition and its write sets.
+// ---------------------------------------------------------------------------
+
+test("SQL parity: the kernel's transition write sets are a SUPERSET of the admission map's `writes`", () => {
+  // A merge is decided on these sets, so an under-reported write could merge
+  // over another partner's field. Over-reporting only turns a merge into a
+  // visible reconciliation.
+  const policy = admissionPolicy();
+  assert.deepEqual([...V5_J102_DERIVED_FIELDS].sort(), [...policy.derived_fields].sort(),
+    "the kernel and the SQL name the same derived counters and mirrors");
+  for (const id of V5_J102_TRANSITION_IDS) {
+    const kernel = v5J102TransitionWrites(id);
+    assert.deepEqual(Object.keys(kernel).sort(), Object.keys(policy.transitions[id].writes).sort(),
+      `${id} writes the same subject kinds in both`);
+    for (const [kind, fields] of Object.entries(policy.transitions[id].writes)) {
+      for (const field of fields) {
+        assert.ok(kernel[kind].includes(field),
+          `${id} may move ${kind}.${field} in SQL and the kernel's write set omits it`);
+      }
+    }
+  }
+});
+
+const CT = (over = {}) => ({
+  tenant: ORGANIZATION_TENANT_ID, transition_id: "record-invoice-issued", subject_kind: "deal",
+  base_version_digest: D(1), current_version_digest: D(2),
+  current_prior_state_digest: D(1),
+  current_established_by_transition: "record-commission-agreement", ...over,
+});
+
+test("Q103: a characterized, disjoint intervening transition merges — conditionally on re-admission", () => {
+  const v = evaluateConcurrentTransition(CT());
+  assert.equal(v.decision, "allow");
+  assert.equal(v.reason_id, "nonoverlapping_transition_merged_on_current_row");
+  assert.equal(v.merged, true);
+  assert.equal(v.readmission_required, true);
+  assert.deepEqual(v.incoming_fields, ["invoice_state"]);
+  assert.deepEqual(v.concurrent_fields, ["commission_agreement_state"]);
+  assert.equal(v.last_writer_wins, false);
+  assert.equal(v.silent_overwrite, false);
+});
+
+test("Q103: an overlapping intervening transition reconciles, naming the shared fields", () => {
+  const v = evaluateConcurrentTransition(CT({ transition_id: "record-payment",
+    current_established_by_transition: "record-payment" }));
+  assert.equal(v.decision, "reconcile");
+  assert.equal(v.conflict_kind, "overlapping_field_edit");
+  assert.deepEqual(v.overlapping_fields, ["payment_state"]);
+  assert.equal(v.merged, false);
+  // Closing and cancellation both write deal_state.
+  const w = evaluateConcurrentTransition(CT({ transition_id: "record-deal-closing",
+    current_established_by_transition: "cancel-pending-deal" }));
+  assert.equal(w.decision, "reconcile");
+  assert.deepEqual(w.overlapping_fields, ["deal_state"]);
+});
+
+test("Q103: anything not ONE declared transition away is uncharacterized and reconciles", () => {
+  for (const over of [
+    { current_prior_state_digest: D(9) },          // more than one write between
+    { current_prior_state_digest: null },          // a created row / no anchor
+    { current_established_by_transition: "record-lifecycle-correction" }, // not a transition
+    { current_established_by_transition: null },
+  ]) {
+    const v = evaluateConcurrentTransition(CT(over));
+    assert.equal(v.decision, "reconcile", JSON.stringify(over));
+    assert.equal(v.conflict_kind, "uncharacterized_concurrent_change");
+    assert.equal(v.characterized, false);
+    assert.equal(v.merged, false);
+  }
+});
+
+test("Q103: no movement is the ordinary optimistic path, and no merge is claimed", () => {
+  const v = evaluateConcurrentTransition(CT({ current_version_digest: D(1) }));
+  assert.equal(v.decision, "allow");
+  assert.equal(v.reason_id, "no_concurrent_movement");
+  assert.equal(v.merged, false);
+});
+
+test("Q103: the coupled subject is judged on ITS write sets, not the primary's", () => {
+  // An LOI submission writes the assignment's phase and counters; a concurrent
+  // commitment wrote the same assignment fields, so the related assignment
+  // reconciles even though the primary negotiation might not.
+  const v = evaluateConcurrentTransition(CT({ transition_id: "record-loi-submission",
+    subject_kind: "assignment", current_established_by_transition: "commit-winning-property" }));
+  assert.equal(v.decision, "reconcile");
+  assert.ok(v.overlapping_fields.includes("assignment_phase"));
+  // A read-only related subject (the engagement an open-assignment reads) has
+  // no write set, so any characterized change to it merges and is re-admitted.
+  const e = evaluateConcurrentTransition(CT({ transition_id: "open-assignment",
+    subject_kind: "engagement", current_established_by_transition: "establish-client-and-engagement" }));
+  assert.equal(e.decision, "allow");
+  assert.deepEqual(e.incoming_fields, []);
+});
+
+test("Q103: a characterized stale subject on the TRANSITION path merges, is re-judged on the current row, and says so", async () => {
+  const current = dealState({ execution_state: "executed", commission_agreement_state: "agreed" });
+  const db = new FakeDb({
+    subjects: { "deal:deal-synthetic-1": { ...storedSubject(current),
+      established_by_transition: "record-commission-agreement", prior_state_digest: D(42) } },
+    facts: { invoice: storedFact("invoice") },
+  });
+  const store = createCreLifecycleStore({ db });
+  const answer = await store.recordDealAxis({
+    idempotency_key: "j102-fixture-1",
+    subject_ref: { subject_kind: "deal", subject_id: "deal-synthetic-1", expected_state_digest: D(42) },
+    evidence_refs: [recordRef("invoice_issued")],
+    declared: { axis: "invoice_state" },
+  }, ctx(JOE));
+  assert.equal(answer.decision, "allow", JSON.stringify(answer).slice(0, 500));
+  assert.equal(answer.auto_merged, true);
+  assert.equal(answer.concurrent_merges[0].concurrent_transition_id, "record-commission-agreement");
+  // THE WRITE IS DECIDED AGAINST THE CURRENT ROW: its operand is the current
+  // digest, never the caller's stale base.
+  const cas = JSON.parse(db.paramsFor("j102_apply_transition")[1]);
+  assert.equal(cas["deal:deal-synthetic-1"], digest(current));
+  const subjects = JSON.parse(db.paramsFor("j102_apply_transition")[2]);
+  assert.equal(subjects[0].record.state.commission_agreement_state, "agreed",
+    "the other partner's field survives in what is written");
+  assert.equal(subjects[0].record.state.invoice_state, "invoiced");
+});
+
+test("Q103: an overlapping stale subject on the TRANSITION path files ONE visible item and applies nothing", async () => {
+  const current = dealState({ payment_state: "partially_paid" });
+  const db = new FakeDb({
+    subjects: { "deal:deal-synthetic-1": { ...storedSubject(current),
+      established_by_transition: "record-payment", prior_state_digest: D(42) } },
+    facts: { payment: storedFact("payment") },
+    read_bodies: {
+      subject: subjectReadback(current, { established_by_transition: "record-payment",
+        prior_state_digest: D(42), updated_by: "dell" }),
+      subject_events: [],
+    },
+  });
+  const store = createCreLifecycleStore({ db });
+  const answer = await store.recordDealAxis({
+    idempotency_key: "j102-fixture-1",
+    subject_ref: { subject_kind: "deal", subject_id: "deal-synthetic-1", expected_state_digest: D(42) },
+    evidence_refs: [recordRef("payment_received")],
+    declared: { axis: "payment_state", payment_level: "paid" },
+  }, ctx(JOE));
+  assert.equal(answer.decision, "reconcile");
+  assert.deepEqual(answer.overlapping_fields, ["payment_state"]);
+  assert.equal(db.callsTo("j102_apply_transition").length, 0);
+  assert.equal(db.callsTo("j102_record_reconciliation_item").length, 1);
+  const envelope = JSON.parse(db.paramsFor("j102_record_reconciliation_item")[0]);
+  assert.equal(envelope.record.conflict_kind, "overlapping_field_edit");
+  assert.deepEqual(envelope.record.concurrent_edits.map(e => [e.field, e.edited_by]),
+    [["payment_state", "dell"]]);
+  assert.equal(envelope.record.concurrent_change_evidence.characterized, true);
+  const diagnostics = JSON.parse(db.paramsFor("j102_record_reconciliation_item")[4]);
+  assert.equal(diagnostics.operation, "record-lifecycle-reconciliation",
+    "the governed writer is reached under its own operation name");
 });

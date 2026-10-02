@@ -36,6 +36,7 @@ exactly as they bind Joe, with zero mechanical enforcement on his side today.
     ops/config-as-code.py check      # drift report; exit 1 if any. THE DEFAULT.
     ops/config-as-code.py pull       # machine -> repo (capture what is live)
     ops/config-as-code.py install    # repo -> machine (deploy; needs --apply)
+    ops/config-as-code.py reinstall-launchd-calendar [--apply] [--kickstart]
     ops/config-as-code.py install-codex-continuity --apply
     ops/config-as-code.py verify-codex-continuity
     ops/config-as-code.py install-codex-continuity-mcp --apply
@@ -57,11 +58,14 @@ import subprocess
 import sys
 import tempfile
 import time
+import hashlib
+import secrets
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lib.machine_prerequisites import machine_prerequisites, prerequisite_failure_report
 from lib import claude_continuity_config as continuity_config
 from lib import machine_role
+from lib import launchd_calendar
 
 HOME = os.path.expanduser("~")
 # THE CHECKOUT THIS FILE SITS IN — the source of the tracked copies to compare.
@@ -265,6 +269,25 @@ PRIMARY_ONLY = {
     "com.carr.local-briefs.plist",
     "com.carr.partner-ping.plist",
     "com.carr.cutover-watch.plist",
+    # Joe 2026-09-26: the Mac Studio is the hub and the MacBook is a thin client
+    # into it, so work that acts on shared state runs on the primary alone.
+    # room-bridge: both Macs carried the same Model Room desks and raced for
+    # each turn; it also wakes the engineering controller, whose one Worker
+    # token lives on the primary.  release-pipeline and control-plane-tick
+    # would release and enqueue twice.  The cadence sweep would escalate twice.
+    # nightly-exports-daytime-retry is the safety net for nightly-record-layer,
+    # which is already primary-only.  timebomb-audit scans the same tracked
+    # source on every Mac.  Device-bound jobs (dictation, call mode, capture,
+    # keymap, local servers, spool flush, fleet sync) stay on every machine.
+    "com.carr.room-bridge.plist",
+    "com.carr.release-pipeline.plist",
+    "com.carr.control-plane-tick.plist",
+    "com.carr.delivery-cadence-a05-sweep.plist",
+    "com.carr.nightly-exports-daytime-retry.plist",
+    "com.carr.timebomb-audit.plist",
+    # WR-000178: the Studio's Tailscale stayed stopped ~6h after the 2026-09-30
+    # reboot and cut SSH to the MacBook. The hub is the node that must come up.
+    "com.carr.tailscale-up.plist",
 }
 
 
@@ -1438,6 +1461,55 @@ def definition_only_installed_plists():
     return [f for f in carr_plists() if f in DEFINITION_ONLY]
 
 
+def pending_launchd_reloads():
+    """CARR jobs whose disk render has not been verified as loaded."""
+    if not os.path.isdir(LAUNCHD_SRC):
+        return []
+    suffix = ".plist.pending-reload"
+    return sorted(name[:-len(".pending-reload")]
+                  for name in os.listdir(LAUNCHD_SRC)
+                  if name.startswith("com.carr.") and name.endswith(suffix))
+
+
+# STARTINTERVAL IS REFUSED IN EVERY CARR LAUNCHAGENT TEMPLATE (2026-09-26).
+# On the Mac Studio, macOS 27.0, launchd never fires an agent scheduled with
+# StartInterval: `launchctl print` shows `runs = 0` and `pended nondemand spawn
+# = speculative|interval`, RunAtLoad does not fire either, and only a manual
+# kickstart runs it. StartCalendarInterval agents on the same machine fire on
+# time. Fourteen CARR jobs were silently dead there while this check reported
+# "repo matches machine", because a dead schedule installed from the repo's own
+# bytes is not drift. So the template itself is judged: a live StartInterval is
+# refused (check reports it, install will not render it), and a converted
+# template must still hold exactly what lib/launchd_calendar.py renders for the
+# interval its marker names. Convert with
+# `python3 -m lib.launchd_calendar rewrite <template>`.
+def refused_launchd_templates(repo=None):
+    """(repo-relative path, problem) for every CARR template the converter refuses.
+
+    Judges the checkout this file sits in (REPO_HERE), not the canonical one the
+    machine installs from: a template's soundness is a property of the source
+    under review, so a worktree carrying the fix must not be failed by the main
+    checkout it has not reached yet. In the main checkout the two are the same
+    tree, and install separately refuses the exact source it would render."""
+    root = repo or REPO_HERE
+    out = []
+    for path in launchd_calendar.carr_templates(root):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            out.append((os.path.relpath(path, root), f"unreadable: {exc}"))
+            continue
+        for problem in launchd_calendar.audit_template(text):
+            out.append((os.path.relpath(path, root), problem))
+    return out
+
+
+def launchd_template_refusal(source_text):
+    """The first reason install must not render this template, or None."""
+    problems = launchd_calendar.audit_template(source_text or "")
+    return problems[0] if problems else None
+
+
 def cmd_check():
     # THE OBSERVATION TRAILS THE VERDICT. _cmd_check returns this command's
     # whole judgement; the core.hooksPath line is appended after it because it
@@ -1510,7 +1582,19 @@ def _cmd_check():
          f"installed in {LAUNCHD_SRC}; {DEFINITION_ONLY[name]}")
         for name in definition_only_installed_plists()
     ]
-    drift = missing + untracked + different + disallowed
+    # A template launchd would load and then never fire. Reported whatever the
+    # machine holds, because the machine matching it is exactly the failure.
+    refused = [
+        (f"launchd template {rel} (SCHEDULE REFUSED)", problem)
+        for rel, problem in refused_launchd_templates()
+    ]
+    pending_reloads = [
+        (f"launchd {name} (PENDING RELOAD)",
+         "disk bytes do not prove the new definition is loaded; retry installation "
+         "from an external process and verify launchd registration")
+        for name in pending_launchd_reloads()
+    ]
+    drift = missing + untracked + different + disallowed + refused + pending_reloads
     if not drift and not unversioned:
         prerequisite_report = prerequisite_failure_report(PREREQUISITE_CHECK(REPO))
         if prerequisite_report:
@@ -1538,7 +1622,8 @@ def _cmd_check():
     # intentionally omitted from normal pairs() on a secondary.  Otherwise
     # "16 of 4" could claim to have checked only four items while reporting
     # sixteen violations, which is operationally misleading.
-    checked_items = len(configured_pairs) + len(disallowed)
+    checked_items = (len(configured_pairs) + len(disallowed) + len(refused)
+                     + len(pending_reloads))
     headline = f"config-as-code: DRIFT — {len(drift)} of {checked_items} items"
     if missing:
         headline += f" — {len(missing)} MISSING FROM MACHINE: " + ", ".join(
@@ -1558,6 +1643,11 @@ def _cmd_check():
         print("\n  A secondary machine must not run CARR's primary-only scheduled-task "
               "catalogue. `install --apply` can quarantine an exact tracked render; "
               "a modified tracked task needs review and is never overwritten.")
+    if refused:
+        print("\n  A REFUSED template would load and never fire on macOS 27. Convert it in\n"
+              "  the repo, then re-render the installed agents:\n"
+              "      python3 -m lib.launchd_calendar rewrite <template>\n"
+              "      python3 ops/config-as-code.py reinstall-launchd-calendar --apply")
     # Reported even when settings drift is also present: the two have different
     # remedies (a pull versus a commit), so folding them together would hide one.
     if unversioned:
@@ -1623,13 +1713,144 @@ def retire_primary_only_plist(filename, live, apply):
     return "retired"
 
 
+# SELF-RELOAD HAND-OFF (2026-09-26). Hourly fleet-sync runs `install --apply`
+# from inside its own LaunchAgent. When fleet-sync's OWN plist changes (as it
+# does when the calendar conversion lands), reloading it here would kill the
+# wrapper mid-receipt, so this used to refuse and exit 1 -- every hour, on
+# every Mac, until someone ran install by hand. Instead the new body is staged
+# outside LaunchAgents and a detached one-shot (its own session, so launchd's
+# process-group cleanup of the finished job does not take it down) waits for
+# this job's whole process group to be gone, refuses if the installed plist
+# changed since staging (a newer install must never be overwritten by an
+# older staged body), then boots the old definition out, moves the staged
+# body into place, and bootstraps it. A failed bootstrap puts
+# the previous body back and loads that; if even that fails the log says
+# "RESTORE FAILED" with the manual command. Nothing is kickstarted.
+SELF_RELOAD_HANDOFF_DIR = os.path.join(HOME, ".config", "carr", "launchd-handoff")
+SELF_RELOAD_WAIT_SECONDS = 3600
+SELF_RELOAD_SHELL = "/bin/bash"
+LAUNCHCTL_BIN = "/bin/launchctl"
+SMOKE_LABEL_PREFIX = "com.carr.handoff-smoke-"
+SELF_RELOAD_SCRIPT = r"""
+pg="$1"; launchctl="$2"; domain="$3"; label="$4"; staged="$5"; dest="$6"; log="$7"; wait_max="$8"
+expected="$9"
+exec >>"$log" 2>&1
+installed_sha() {
+  if [ ! -e "$dest" ]; then echo absent
+  elif [ -x /usr/bin/shasum ]; then /usr/bin/shasum -a 256 "$dest" | cut -d' ' -f1
+  else /usr/bin/sha256sum "$dest" | cut -d' ' -f1; fi
+}
+# Wait on the WHOLE process group (-pg), not just its leader: a wrapper that
+# has exited can leave children still running under launchd's job. Spelled
+# `kill -0 -"$pg"`, never `kill -0 -- "-$pg"`: dash's builtin kill rejects
+# `--` (rc 2), which read as "the group is gone" and reloaded mid-run on the
+# Ubuntu CI runner. The helper is also started with /bin/bash explicitly, and
+# ops/config-as-code-launchd-selftest.py runs this script under bash and dash.
+waited=0
+while kill -0 -"$pg" 2>/dev/null; do
+  waited=$((waited + 1))
+  if [ "$waited" -ge "$wait_max" ]; then
+    echo "self-reload $label: GAVE UP waiting for process group $pg; staged body left at $staged"
+    exit 1
+  fi
+  sleep 1
+done
+# The installed plist must still be the one this body was staged against.
+# Anything newer (a later install, a hand edit) wins; the staged body is stale.
+found=$(installed_sha)
+if [ "$found" != "$expected" ]; then
+  echo "self-reload $label: REFUSED, $dest changed since staging (expected $expected, found $found); nothing booted out or loaded; stale staged body left at $staged"
+  exit 1
+fi
+cp -p "$dest" "$staged.previous" || { echo "self-reload $label: cannot back up $dest"; exit 1; }
+"$launchctl" bootout "$domain/$label" >/dev/null 2>&1
+found=$(installed_sha)
+if [ "$found" != "$expected" ]; then
+  echo "self-reload $label: REFUSED, $dest changed during bootout (expected $expected, found $found); loading what is installed, not the stale staged body"
+  if "$launchctl" bootstrap "$domain" "$dest"; then exit 1; fi
+  echo "self-reload $label: RESTORE FAILED, $label is unloaded; fix by hand: launchctl bootstrap $domain $dest"
+  exit 1
+fi
+mv -f "$staged" "$dest" || {
+  echo "self-reload $label: cannot move the staged body into place"
+  "$launchctl" bootstrap "$domain" "$dest" || echo "self-reload $label: RESTORE FAILED, $label is unloaded; fix by hand: launchctl bootstrap $domain $dest"
+  exit 1
+}
+if "$launchctl" bootstrap "$domain" "$dest"; then
+  echo "self-reload $label: loaded the new definition"
+  exit 0
+fi
+echo "self-reload $label: BOOTSTRAP FAILED; restoring the previous body"
+mv -f "$staged.previous" "$dest"
+if "$launchctl" bootstrap "$domain" "$dest"; then
+  echo "self-reload $label: restored the previous definition"
+else
+  echo "self-reload $label: RESTORE FAILED, $label is unloaded; fix by hand: launchctl bootstrap $domain $dest"
+fi
+exit 1
+"""
+
+
+def installed_sha256(path):
+    """sha256 of the installed file, or ``absent`` (the one-shot compares the same way)."""
+    try:
+        with open(path, "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()
+    except FileNotFoundError:
+        return "absent"
+
+
+def hand_off_self_reload(filename, dest, body, label, launchctl=LAUNCHCTL_BIN):
+    """Stage ``body`` and start the detached one-shot; ``deferred`` or ``failed``."""
+    try:
+        expected = installed_sha256(dest)
+        os.makedirs(SELF_RELOAD_HANDOFF_DIR, exist_ok=True)
+        staged = os.path.join(SELF_RELOAD_HANDOFF_DIR, filename + ".staged")
+        with open(staged, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        log = os.path.join(SELF_RELOAD_HANDOFF_DIR, filename + ".log")
+        subprocess.Popen(
+            [SELF_RELOAD_SHELL, "-c", SELF_RELOAD_SCRIPT, "carr-self-reload",
+             str(os.getpgrp()), launchctl, f"gui/{os.getuid()}", label, staged, dest,
+             log, str(SELF_RELOAD_WAIT_SECONDS), expected],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True, close_fds=True)
+    except OSError as exc:
+        print(f"      SELF-RELOAD HAND-OFF FAILED ({filename}: {exc}); destination left unchanged")
+        print("      remedy: run `python3 ops/config-as-code.py install --apply` "
+              "from an external process")
+        return "failed"
+    print(f"      self-reload deferred ({filename}: active installer job {label}; a detached "
+          f"one-shot reloads it after this run exits; log {log})")
+    return "deferred"
+
+
+def launchd_registration(label):
+    """Read the job's registered plist path, or distinguish absence from error."""
+    inspected = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+                               capture_output=True, text=True, check=False)
+    if inspected.returncode == 0:
+        path_match = re.search(r"(?m)^\s*path = (.+)$", inspected.stdout or "")
+        if path_match:
+            return "loaded", path_match.group(1).strip()
+        return "failed", "launchctl print omitted the registered path"
+    detail = ((inspected.stderr or "") + "\n" + (inspected.stdout or "")).strip()
+    if inspected.returncode == 113 and f'Could not find service "{label}"' in detail:
+        return "absent", ""
+    return "failed", detail[:80] or "unknown launchctl error"
+
+
 def install_launchd_plist(filename, dest, body, body_matches):
     """Render and load one plist without letting an active job unload itself.
 
-    Returns ``loaded``, ``kept``, or ``failed``.  A changed active plist cannot
-    be rendered honestly without also reloading it, and reloading it here kills
-    the receipt wrapper.  That case therefore leaves the destination untouched
-    and fails with the exact external-install remedy.
+    Returns ``loaded``, ``kept``, ``deferred`` or ``failed``.  A changed active
+    plist cannot be rendered honestly without also reloading it, and reloading
+    it here kills the receipt wrapper.  That case leaves the destination
+    untouched and hands the reload to a detached one-shot that runs only after
+    this job has exited (hand_off_self_reload); if the hand-off cannot be
+    started it fails with the exact external-install remedy. For other jobs,
+    a pending marker survives interrupted or failed reloads until launchd is
+    observed absent before load and registered at the installed path after it.
     """
     try:
         label = plistlib.loads(body.encode("utf-8")).get("Label", "")
@@ -1637,30 +1858,71 @@ def install_launchd_plist(filename, dest, body, body_matches):
         label = ""
     active_label = os.environ.get(ACTIVE_LAUNCHD_LABEL_ENV, "").strip()
     is_active_self = bool(label and active_label == label)
+    pending = dest + ".pending-reload"
+
+    if not label:
+        print(f"      INSPECT FAILED ({filename} has no valid launchd label); "
+              "destination left unchanged")
+        return "failed"
 
     if is_active_self:
+        if os.path.exists(pending):
+            print(f"      PENDING RELOAD ({label}; active installer cannot verify its own "
+                  "loaded definition); run install from an external process")
+            return "failed"
         if body_matches:
             print(f"      kept loaded (active installer job {label}; body unchanged)")
             return "kept"
-        print(f"      SELF-RELOAD REFUSED ({filename}: active installer job {label}; "
-              "destination left unchanged so loaded and installed state cannot diverge)")
-        print("      remedy: run `python3 ops/config-as-code.py install --apply` "
-              "from an external process")
-        return "failed"
+        return hand_off_self_reload(filename, dest, body, label)
 
+    # Every non-self mutation first proves this label is absent or belongs to
+    # this destination. A pending retry is an obligation to reconcile, not
+    # authority to unload a same-label job registered from another path.
+    state, detail = launchd_registration(label)
+    if state == "loaded" and detail != dest:
+        print(f"      INSPECT FAILED ({label} is loaded from an unexpected path); "
+              "destination left unchanged")
+        return "failed"
+    if state == "failed":
+        print(f"      INSPECT FAILED ({detail}); destination left unchanged")
+        return "failed"
+    if body_matches and not os.path.exists(pending) and state == "loaded":
+        # The hourly installer must not disturb a definition that is already
+        # loaded. Repeated unload/load cycles can strand a RunAtLoad/KeepAlive
+        # job in launchd's pending-spawn state even though its plist is right.
+        print(f"      kept loaded ({label}; body unchanged)")
+        return "kept"
+
+    # This marker is written before the disk plist changes. A failed or
+    # interrupted reload leaves it behind across installer processes, so a
+    # matching file and matching launchctl path cannot mask an old definition.
+    with open(pending, "w", encoding="utf-8") as fh:
+        fh.write(hashlib.sha256(body.encode("utf-8")).hexdigest() + "\n")
     if not body_matches:
         with open(dest, "w", encoding="utf-8") as fh:
             fh.write(body)
 
     subprocess.run(["launchctl", "unload", "-w", dest],
                    capture_output=True, check=False)
+    state, detail = launchd_registration(label)
+    if state != "absent":
+        print(f"      UNLOAD FAILED ({detail if state == 'failed' else 'job remains loaded'}); "
+              "pending reload retained")
+        return "failed"
     r = subprocess.run(["launchctl", "load", "-w", dest],
                        capture_output=True, text=True, check=False)
     if r.returncode == 0:
-        print("      loaded")
-        return "loaded"
+        state, detail = launchd_registration(label)
+        if (state == "loaded" and detail == dest
+                and launchd_texts_match(read(dest), body)):
+            os.unlink(pending)
+            print("      loaded")
+            return "loaded"
+        print(f"      LOAD UNVERIFIED ({detail if state == 'failed' else state}); "
+              "pending reload retained")
+        return "failed"
     print(f"      LOAD FAILED ({(r.stderr or r.stdout).strip()[:80]}) "
-          f"— migration will remain incomplete")
+          "— pending reload retained; migration will remain incomplete")
     return "failed"
 
 
@@ -1948,9 +2210,17 @@ def cmd_install(apply):
         if source is None:
             print(f"  ERROR  cannot render {f} because its tracked source is missing")
             return 1
+        refusal = launchd_template_refusal(source)
+        if refusal:
+            # Never install a schedule launchd will load and then never fire:
+            # the job would look installed and be dead (see the block above
+            # refused_launchd_templates). The installed copy is left as it is.
+            print(f"  REFUSED  {f}: {refusal}")
+            launchd_activation_failures.append(f)
+            continue
         body = concrete(source)
         body_matches = launchd_texts_match(read(dest), source)
-        if body_matches and not apply:
+        if body_matches and not apply and not os.path.exists(dest + ".pending-reload"):
             continue
         gone = missing_targets(body)
         if gone:
@@ -1965,9 +2235,9 @@ def cmd_install(apply):
             # e313a3ca). Writing the plist and stopping leaves the job on disk
             # and dead: on a fresh machine that means the nightly never runs,
             # so the record-derived fetch allowlist is generated once by the
-            # migration and then never refreshed as clients are added. unload
-            # is expected to fail when the job was never loaded; that is not
-            # an error, which is why only the load result is reported.
+            # migration and then never refreshed as clients are added. A
+            # pending marker keeps an interrupted reload visible until an
+            # absent-before/load/registered-after sequence verifies it.
             outcome = install_launchd_plist(f, dest, body, body_matches)
             if outcome == "failed":
                 launchd_activation_failures.append(f)
@@ -2144,6 +2414,358 @@ def config_selftest():
     return 0 if all(ok for _, ok in cases) else 1
 
 
+# REINSTALL-LAUNCHD-CALENDAR: the one-off repair for agents installed before
+# their templates moved from StartInterval to StartCalendarInterval (see
+# refused_launchd_templates). An installed agent keeps its dead StartInterval
+# body until it is rewritten AND bootstrapped again, and `install --apply` does
+# far more than that (hooks, tasks, every other agent). This mode touches only
+# an INSTALLED agent whose template carries the converter's marker and whose
+# installed body differs from the rendered template:
+#
+#   * an agent that already matches is not rewritten and not reloaded;
+#   * an agent that is not installed is not installed here (install owns
+#     machine scope and first installs);
+#   * definition-only, primary-only-on-a-secondary and not-built agents are
+#     skipped by the same rules install applies;
+#   * the label in CARR_CONFIG_AS_CODE_ACTIVE_LAUNCHD_LABEL is refused, since
+#     reloading the job running this would kill it mid-write.
+#
+# NOTHING IS KICKSTARTED unless --kickstart is given; a re-bootstrapped agent
+# with RunAtLoad true runs once at bootstrap because that is what RunAtLoad
+# means. DRY RUN unless --apply. A failed bootstrap restores the previous body
+# and bootstraps it again, and the exit status is 1.
+#
+#     ops/config-as-code.py reinstall-launchd-calendar            # plan only
+#     ops/config-as-code.py reinstall-launchd-calendar --apply
+#     ops/config-as-code.py reinstall-launchd-calendar --apply --kickstart
+#
+# --templates, --launch-agents and --launchctl exist for the hermetic selftest
+# (ops/reinstall-launchd-calendar-selftest.py).
+def launchd_calendar_reinstall_plan(templates_dir, agents_dir):
+    """One row per CARR template: what reinstall-launchd-calendar does with it and why."""
+    rows = []
+    active = os.environ.get(ACTIVE_LAUNCHD_LABEL_ENV, "").strip()
+    for name in sorted(os.listdir(templates_dir)) if os.path.isdir(templates_dir) else []:
+        if not (name.startswith("com.carr.") and name.endswith(".plist")):
+            continue
+        source = read(LAUNCHD_ALT_REPO.get(name, os.path.join(templates_dir, name))) or ""
+        dest = os.path.join(agents_dir, name)
+        row = {"name": name, "dest": dest, "action": "skip", "why": ""}
+        rows.append(row)
+        if launchd_calendar.MARKER not in source:
+            row["why"] = "not a converted interval schedule"
+            continue
+        refusal = launchd_template_refusal(source)
+        if refusal:
+            row.update(action="fail", why=f"template refused: {refusal}")
+            continue
+        if name in DEFINITION_ONLY:
+            row["why"] = "definition only"
+            continue
+        if name in PRIMARY_ONLY and not IS_PRIMARY:
+            row["why"] = "primary-only job on a secondary (install retires it)"
+            continue
+        if name in SECONDARY_ONLY and IS_PRIMARY:
+            row["why"] = "secondary-only job on the primary (install skips it)"
+            continue
+        installed = read(dest)
+        if installed is None:
+            row["why"] = "not installed here (install owns first installs)"
+            continue
+        if launchd_texts_match(installed, source):
+            row["why"] = "installed plist already matches"
+            continue
+        body = concrete(source)
+        gone = missing_targets(body)
+        if gone:
+            row["why"] = f"not built on this machine: {gone[0]}"
+            continue
+        label = launchd_calendar.plist_label(source)
+        if active and label == active:
+            row.update(action="fail", why=f"{label} is the job running this; run it from outside")
+            continue
+        row.update(action="reinstall", why="installed body differs from the calendar template",
+                   label=label, body=body, previous=installed)
+    return rows
+
+
+def _launchctl(launchctl, *args):
+    return subprocess.run([launchctl, *args], capture_output=True, text=True, check=False)
+
+
+def _atomic_write(path, text):
+    """Write ``text`` to ``path`` by rename, so a failure leaves the old file whole.
+
+    Refuses a read-only destination rather than replacing it: a plist someone
+    made read-only was protected on purpose, and os.replace would silently
+    defeat that. Raises OSError; nothing has been changed when it does."""
+    if os.path.exists(path) and not os.access(path, os.W_OK):
+        raise PermissionError(f"{path} is read-only; left as it is")
+    folder = os.path.dirname(path) or "."
+    fd, staged = tempfile.mkstemp(prefix=".carr-staged-", suffix=".tmp", dir=folder)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        if os.path.exists(path):
+            shutil.copymode(path, staged)
+        os.replace(staged, path)
+    except BaseException:
+        if os.path.exists(staged):
+            os.unlink(staged)
+        raise
+
+
+def _launchctl_detail(result):
+    return (result.stderr or result.stdout or "").strip()[:120]
+
+
+class AgentLeftUnloaded(RuntimeError):
+    """A restore failed: the agent is not loaded and needs a human."""
+
+
+def _restore_calendar_agent(row, launchctl, domain):
+    """Put the previous body back and load it. True only when it is loaded again."""
+    dest, label = row["dest"], row["label"]
+    try:
+        _atomic_write(dest, row["previous"])
+    except OSError as exc:
+        print(f"      RESTORE FAILED, {label} is unloaded: could not rewrite {dest}: {exc}")
+        print(f"      fix by hand: put the previous body back, then "
+              f"`launchctl bootstrap {domain} {dest}`")
+        return False
+    back = _launchctl(launchctl, "bootstrap", domain, dest)
+    if back.returncode != 0:
+        print(f"      RESTORE FAILED, {label} is unloaded ({_launchctl_detail(back)})")
+        print(f"      fix by hand: `launchctl bootstrap {domain} {dest}`")
+        return False
+    print(f"      restored the previous body; {label} is loaded as it was")
+    return True
+
+
+def reinstall_calendar_agent(row, launchctl, domain, kickstart):
+    """Stage the new body, then bootout, bootstrap and verify; restore on failure.
+
+    The write happens FIRST and atomically: a write that cannot happen (a
+    read-only plist, a full disk) raises before launchd is touched, so the job
+    stays loaded exactly as it was. Only then is the old job booted out."""
+    dest, label = row["dest"], row["label"]
+    target = f"{domain}/{label}"
+    _atomic_write(dest, row["body"])
+    _launchctl(launchctl, "bootout", target)   # fails when not loaded; fine
+    booted = _launchctl(launchctl, "bootstrap", domain, dest)
+    if booted.returncode != 0:
+        print(f"      BOOTSTRAP FAILED: {_launchctl_detail(booted)} — restoring the previous body")
+        if not _restore_calendar_agent(row, launchctl, domain):
+            raise AgentLeftUnloaded(label)
+        return False
+    shown = _launchctl(launchctl, "print", target)
+    if shown.returncode != 0:
+        # launchd accepted the NEW definition; it must be booted out before the
+        # old file goes back, or launchd keeps running what the disk no longer says.
+        print(f"      PRINT FAILED after a successful bootstrap: {_launchctl_detail(shown)}"
+              " — booting the new definition out and restoring the previous body")
+        _launchctl(launchctl, "bootout", target)
+        if not _restore_calendar_agent(row, launchctl, domain):
+            raise AgentLeftUnloaded(label)
+        return False
+    if kickstart:
+        kicked = _launchctl(launchctl, "kickstart", target)
+        if kicked.returncode != 0:
+            print(f"      kickstart failed: {_launchctl_detail(kicked)}")
+            return False
+    return True
+
+
+def _option(argv, flag, default):
+    if flag in argv:
+        index = argv.index(flag)
+        if index + 1 < len(argv):
+            return argv[index + 1]
+    return default
+
+
+def cmd_reinstall_launchd_calendar(argv):
+    apply = "--apply" in argv
+    kickstart = "--kickstart" in argv
+    templates_dir = _option(argv, "--templates", LAUNCHD_REPO)
+    agents_dir = _option(argv, "--launch-agents", LAUNCHD_SRC)
+    launchctl = _option(argv, "--launchctl", "/bin/launchctl")
+    domain = f"gui/{os.getuid()}"
+
+    rows = launchd_calendar_reinstall_plan(templates_dir, agents_dir)
+    failures = [r for r in rows if r["action"] == "fail"]
+    todo = [r for r in rows if r["action"] == "reinstall"]
+    for row in rows:
+        if row["action"] == "skip":
+            print(f"  ok    {row['name']}: {row['why']}")
+        elif row["action"] == "fail":
+            print(f"  FAIL  {row['name']}: {row['why']}")
+    done = 0
+    not_attempted = []
+    for index, row in enumerate(todo):
+        print(f"  {'REINSTALL' if apply else 'would reinstall'}  {row['name']}: {row['why']}")
+        if not apply:
+            continue
+        # An ordinary failure is reported and the run moves on: the job was
+        # restored and is loaded as before. A FAILED RESTORE is different --
+        # that agent is now unloaded, and whatever broke it (launchd refusing
+        # every bootstrap, say) would do the same to every agent after it. So
+        # the run stops there and names what it did not touch.
+        try:
+            ok = reinstall_calendar_agent(row, launchctl, domain, kickstart)
+        except AgentLeftUnloaded:
+            failures.append(row)
+            not_attempted = todo[index + 1:]
+            print(f"  STOPPING: {row['name']} is unloaded after a failed restore; "
+                  "not touching any other agent")
+            break
+        except Exception as exc:  # noqa: BLE001 - reported per job, run continues
+            print(f"      FAILED before launchd was touched: {exc}")
+            ok = False
+        if ok:
+            done += 1
+        else:
+            failures.append(row)
+    for row in not_attempted:
+        print(f"  not attempted  {row['name']}")
+    left_alone = sum(1 for r in rows if r["action"] == "skip")
+    if apply:
+        head = f"{done} reinstalled"
+    else:
+        head = f"{len(todo)} to reinstall (dry run; --apply to act)"
+    print(f"reinstall-launchd-calendar: {head}, {left_alone} left alone, "
+          f"{len(failures)} failed; kickstart {'on' if kickstart else 'off'}")
+    if failures:
+        print("  FAILED: " + ", ".join(r["name"] for r in failures))
+    if not_attempted:
+        print("  NOT ATTEMPTED: " + ", ".join(r["name"] for r in not_attempted))
+    return 1 if failures or not_attempted else 0
+
+
+# LAUNCHD-HANDOFF-SMOKE: an opt-in proof, on a real Mac, of the one thing the
+# hermetic tests cannot show -- that the detached one-shot survives launchd
+# booting out the job that started it, and then reloads that job. It uses a
+# throwaway label (com.carr.handoff-smoke-<random>) whose plist lives in its own
+# directory under the hand-off dir, never in ~/Library/LaunchAgents, and it
+# touches no other label. Version 1 of the plist runs this file's
+# `launchd-handoff-smoke-job`, which hands its own reload off exactly as
+# fleet-sync does and then sleeps; version 2 runs /bin/sleep. The smoke boots
+# the label out while the job is running (killing the job's process group), then
+# waits for the one-shot to load version 2. It always cleans up: bootout of the
+# throwaway label, then unlink of every file it created. Without --run it only
+# prints what it would do.
+def _smoke_plist(label, arguments, out_path):
+    return plistlib.dumps({
+        "Label": label, "ProgramArguments": arguments, "RunAtLoad": True,
+        "StandardOutPath": out_path, "StandardErrorPath": out_path,
+    }).decode("utf-8")
+
+
+def cmd_launchd_handoff_smoke(argv):
+    label = f"{SMOKE_LABEL_PREFIX}{secrets.token_hex(4)}"
+    domain = f"gui/{os.getuid()}"
+    work = os.path.join(SELF_RELOAD_HANDOFF_DIR, label)
+    dest = os.path.join(work, f"{label}.plist")
+    v2_path = os.path.join(work, "v2.plist")
+    job_out = os.path.join(work, "job.out")
+    staged = os.path.join(work, f"{label}.plist.staged")
+    log = os.path.join(work, f"{label}.plist.log")
+    print(f"launchd-handoff-smoke: throwaway label {label}; files under {work}")
+    if "--run" not in argv:
+        print("  dry run: pass --run to bootstrap the throwaway label for real")
+        return 0
+    v1 = _smoke_plist(label, [sys.executable, os.path.abspath(__file__),
+                              "launchd-handoff-smoke-job", label, dest, v2_path, work], job_out)
+    v2 = _smoke_plist(label, ["/bin/sleep", "600"], job_out)
+    verdict, why = 1, "did not finish"
+    try:
+        os.makedirs(work, exist_ok=False)
+        with open(dest, "w", encoding="utf-8") as fh:
+            fh.write(v1)
+        with open(v2_path, "w", encoding="utf-8") as fh:
+            fh.write(v2)
+        boot = subprocess.run([LAUNCHCTL_BIN, "bootstrap", domain, dest],
+                              capture_output=True, text=True, check=False)
+        if boot.returncode != 0:
+            why = f"bootstrap of the throwaway label failed: {_launchctl_detail(boot)}"
+            return 1
+        deadline = time.monotonic() + 60
+        while not os.path.exists(staged) and time.monotonic() < deadline:
+            time.sleep(0.5)
+        if not os.path.exists(staged):
+            why = "the job never staged its hand-off"
+            return 1
+        print("  job is running and has handed off its reload; booting it out")
+        subprocess.run([LAUNCHCTL_BIN, "bootout", f"{domain}/{label}"],
+                       capture_output=True, check=False)
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            logged = read(log) or ""
+            if "self-reload" in logged:
+                break
+            time.sleep(1)
+        logged = read(log) or ""
+        shown = subprocess.run([LAUNCHCTL_BIN, "print", f"{domain}/{label}"],
+                               capture_output=True, text=True, check=False)
+        if ("loaded the new definition" in logged and read(dest) == v2
+                and shown.returncode == 0 and "/bin/sleep" in shown.stdout):
+            verdict, why = 0, "the one-shot outlived the bootout and loaded version 2"
+        else:
+            why = (f"helper log {logged.strip()!r}; installed is v2: {read(dest) == v2}; "
+                   f"print rc {shown.returncode}")
+        return verdict
+    finally:
+        subprocess.run([LAUNCHCTL_BIN, "bootout", f"{domain}/{label}"],
+                       capture_output=True, check=False)
+        for path in (dest, v2_path, job_out, staged, staged + ".previous", log):
+            if os.path.exists(path):
+                os.unlink(path)
+        if os.path.isdir(work):
+            os.rmdir(work)
+        print(f"launchd-handoff-smoke: {'PASS' if verdict == 0 else 'FAIL'} — {why}; "
+              f"{label} booted out and its files removed")
+
+
+def smoke_job_refusal(label, dest, v2_path, work, handoff_root=None):
+    """Why the smoke job must not act on these arguments, or None.
+
+    The job reloads a label through launchctl, so it is held to exactly the
+    throwaway it was built for: a com.carr.handoff-smoke-* label whose files
+    all sit in its own directory directly under the hand-off root."""
+    root = os.path.realpath(handoff_root or SELF_RELOAD_HANDOFF_DIR)
+    if not (isinstance(label, str) and label.startswith(SMOKE_LABEL_PREFIX)
+            and re.fullmatch(r"[A-Za-z0-9.-]+", label)
+            and len(label) > len(SMOKE_LABEL_PREFIX)):
+        return f"label {label!r} is not a {SMOKE_LABEL_PREFIX}* throwaway"
+    own = os.path.join(root, label)
+    if os.path.realpath(work) != own:
+        return f"work directory {work!r} is not {own}"
+    if os.path.realpath(dest) != os.path.join(own, f"{label}.plist"):
+        return f"plist {dest!r} is not {label}.plist inside {own}"
+    if os.path.dirname(os.path.realpath(v2_path)) != own:
+        return f"replacement body {v2_path!r} is outside {own}"
+    return None
+
+
+def cmd_launchd_handoff_smoke_job(argv):
+    """Runs AS the throwaway launchd job: hand off its own reload, then keep running."""
+    global SELF_RELOAD_HANDOFF_DIR
+    if len(argv) < 4:
+        print("launchd-handoff-smoke-job: REFUSED — expects label dest v2 work")
+        return 64
+    label, dest, v2_path, work = argv[:4]
+    refusal = smoke_job_refusal(label, dest, v2_path, work)
+    if refusal:
+        print(f"launchd-handoff-smoke-job: REFUSED — {refusal}")
+        return 64
+    SELF_RELOAD_HANDOFF_DIR = work
+    outcome = hand_off_self_reload(os.path.basename(dest), dest, read(v2_path) or "", label)
+    if outcome != "deferred":
+        return 1
+    time.sleep(300)      # still running when the smoke boots the label out
+    return 0
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "check"
     apply = "--apply" in sys.argv
@@ -2165,6 +2787,12 @@ def main():
         return cmd_verify_codex_continuity()
     if mode == "install":
         return cmd_install(apply)
+    if mode == "reinstall-launchd-calendar":
+        return cmd_reinstall_launchd_calendar(sys.argv[2:])
+    if mode == "launchd-handoff-smoke":
+        return cmd_launchd_handoff_smoke(sys.argv[2:])
+    if mode == "launchd-handoff-smoke-job":
+        return cmd_launchd_handoff_smoke_job(sys.argv[2:])
     if mode == "set-role":
         # Writes ~/.config/carr/machine-role.json, then installs in a fresh
         # process: IS_PRIMARY is fixed at import, so this one would still
