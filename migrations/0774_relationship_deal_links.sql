@@ -8,9 +8,9 @@ create table public.party_link_deal (
   created_by uuid not null references public.actor(id),
   primary key(link_id,deal_id)
 );
-grant select on public.party_link_deal to carr_reader;
-grant select,insert on public.party_link_deal to carr_writer;
-grant select(id,party_id,registry_ref,segment,owner_id,notes,suppressed,stage) on public.lead to carr_reader;
+grant select on table public.party_link_deal to carr_reader;
+grant select,insert on table public.party_link_deal to carr_writer;
+grant select(id,party_id,registry_ref,segment,owner_id,notes,suppressed,stage) on table public.lead to carr_reader;
 
 create trigger scac_reference_monitor_guard_row before insert or update or delete
 on public.party_link_deal for each row execute function ops.scac_reference_monitor_guard();

@@ -4,7 +4,7 @@ declare v ops.scac_mutation_registry_version%rowtype; registration jsonb;
 begin
   if not exists(select 1 from public.schema_migrations where filename='0770_find_rule_scac_successor.sql' and sha256='afecd5bb4f3853311120a7460f824c8582b60da522b03ff7d6d947e8218c985d') then
     raise exception 'Relationship v104 requires exact applied predecessor'; end if;
-  if not exists(select 1 from public.schema_migrations where filename='0774_relationship_deal_links.sql' and sha256='4d1903a1a76041d5cf323ca9b199ef3a43acd5397427c80dc4dea059058b1d9c') then
+  if not exists(select 1 from public.schema_migrations where filename='0774_relationship_deal_links.sql' and sha256='e3abe3814c26758680b6106114c6cfc333843a210e8634bd5f9d4a90c797722f') then
     raise exception 'Relationship v104 requires exact relationship migration'; end if;
   select * into v from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v103';
   if v.registry_digest is distinct from 'sha256:6560a285ebd4a71d9ed3b63b644f13e06d0f1ccbddadf174d990f4f2453434b7' or v.entry_count<>2615
