@@ -1,3 +1,5 @@
+import { bindReferralDeal } from "./relationship-network.js";
+import { trustedOverride, dealEvidenceEntries, requireRelationshipPartner, mergeRelationshipFields } from "./vendor-relationship.js";
 // CARR MCP tool registry — Wave 1 verbs (tool-contracts-2026-07-30.md §2).
 // Every write runs the envelope: idempotency replay via tool_call, actor from
 // the verified token (never the payload), base_version conflicts ask and never
@@ -4677,9 +4679,9 @@ export const TOOLS = {
       // vendors unfixable (loop #199). category_slug, not free-text category: 0050
       // deprecated the free-text field after a stage value got stored as a
       // profession, and reopening it here would reopen that defect.
-      const allowed = ["stage","seeking","offers","referral_active","territory","rivalry_group","out_of_market","intro_notes","category_slug","verticals"];
+      const allowed = ["stage","seeking","offers","referral_active","territory","rivalry_group","out_of_market","intro_notes","category_slug","verticals","loan_programs","trust_override","deal_evidence"];
       const keys = Object.keys(args.fields).filter(k => allowed.includes(k));
-      if (!keys.length) throw new ToolError({ error: "no_updatable_fields", allowed });
+      if (!keys.length && !Object.hasOwn(args.fields,"deal_evidence") && !Object.hasOwn(args.fields,"verify_deal_history")) throw new ToolError({ error: "no_updatable_fields", allowed });
       // Pre-validate rather than letting the FK abort the transaction: a poisoned
       // transaction cannot even fetch the slug list to explain itself.
       if (keys.includes("category_slug") && args.fields.category_slug !== null) {
@@ -4693,10 +4695,36 @@ export const TOOLS = {
       if (keys.includes("verticals") && args.fields.verticals !== null &&
           !(Array.isArray(args.fields.verticals) && args.fields.verticals.every(v => typeof v === "string")))
         throw new ToolError({ error: "verticals_not_array", hint: 'pass an array of strings, e.g. ["dental","vet"]' });
-      const old = (await c.query(`select ${keys.join(",")} from vendor where id=$1`, [s.id])).rows[0];
+      if (keys.includes("trust_override")) {
+        try { args.fields.trust_override = trustedOverride(args.fields.trust_override, actor); }
+        catch (error) { throw new ToolError({ error: error.code }); }
+      }
+      if (keys.includes("loan_programs") && args.fields.loan_programs !== null &&
+          !(Array.isArray(args.fields.loan_programs) && args.fields.loan_programs.every(v => typeof v === "string" && v.length <= 200)))
+        throw new ToolError({ error: "loan_programs_invalid" });
+      let entries = [];
+      if (Object.hasOwn(args.fields, "deal_evidence")) {
+        try { entries = dealEvidenceEntries(args.fields.deal_evidence); }
+        catch (error) { throw new ToolError({ error: error.code }); }
+        for (const entry of entries) {
+          const live = await c.query("select d.id from public.deal d join public.client dc on dc.id=d.client_id join public.party dp on dp.id=dc.party_id where d.id=$1 and dc.merged_into is null and dp.merged_into is null and dp.deleted_at is null", [entry.deal_id]);
+          if (!live.rows.length) throw new ToolError({ error: "deal_evidence_deal_not_found" });
+        }
+        args.fields.deal_evidence = entries;
+      }
+      if (Object.hasOwn(args.fields, "verify_deal_history")) {
+        try { requireRelationshipPartner(actor, "deal_history_verification_refused"); }
+        catch (error) { throw new ToolError({ error: error.code }); }
+        if (args.fields.verify_deal_history !== true) throw new ToolError({ error: "deal_history_verification_refused" });
+        args.fields.deal_history_verified_at = new Date().toISOString();
+        keys.push("deal_history_verified_at");
+      } else if (Object.hasOwn(args.fields, "deal_evidence")) {
+        args.fields.deal_history_verified_at = null; keys.push("deal_history_verified_at");
+      }
+      const old = keys.length ? (await c.query(`select ${keys.join(",")} from vendor where id=$1`, [s.id])).rows[0] : {};
       const sets = keys.map((k, i) => `${k}=$${i + 2}`).join(", ");
-      await c.query(`update vendor set ${sets}, updated_by=$1 where id=$${keys.length + 2}`,
-        [actor.id, ...keys.map(k => args.fields[k]), s.id]);
+      await c.query(`update vendor set ${sets ? sets + ", " : ""}updated_by=$1 where id=$${keys.length + 2}`,
+        [actor.id, ...keys.map(k => k === "deal_evidence" ? JSON.stringify(args.fields[k]) : args.fields[k]), s.id]);
       for (const k of keys)
         await writeEvent(c, actor, "update-vendor", "vendor", s.id,
           { field: k, old: { [k]: old[k] }, new: { [k]: args.fields[k] }, idempotency_key: args.idempotency_key });
@@ -5211,6 +5239,7 @@ export const TOOLS = {
       idempotency_key: { type: "string" }, from_party: { type: "string" }, to_party: { type: "string" },
       kind: { type: "string", description: "a slug from party_link_kind: knows, works_with, can_introduce, intro_requested, introduced, referred" },
       via_party: { type: "string", description: "WHO made the connection — the broker in the middle. A ref (V-/C-/L-/T-/P-) or a party uuid. Omit ONLY for a genuinely direct edge with no third party; for 'a vendor sent us this client' the vendor goes HERE, not on an end. Refused if it resolves to either end, because a broker cannot be one of the two people being connected." },
+      deal_id: { type: "string", description: "Exact referred deal UUID; referral/referred only, destination must be its live client party, note required. Several deals may attach to one relationship." },
       occurred_on: { type: "string", description: "YYYY-MM-DD — when it happened. An offer and a completed introduction are different events and the gap between them is the follow-up." },
       note: { type: "string" } }, required: ["idempotency_key","from_party","to_party","kind"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "link-parties", args, async () => {
@@ -5269,6 +5298,12 @@ export const TOOLS = {
             hint: "occurred_on is a calendar date, YYYY-MM-DD" });
       }
 
+      const attachDeal = async linkId => {
+        let deal;
+        try { deal = await bindReferralDeal(c, actor, args, ends, kind, linkId); }
+        catch (error) { throw new ToolError({error:error.code || 'referral_deal_invalid'}); }
+        if (deal) await writeEvent(c,actor,'link-parties','party',ends.via_party || ends.from_party,{new:{link_id:linkId,deal_id:deal,kind:'referred'},idempotency_key:args.idempotency_key});
+      };
       // Upsert against 0020's unique index. Before it, two taps wrote two identical
       // edges and nothing complained. `do nothing` returns no row on conflict, so
       // the existing edge is read back and returned — the caller gets the edge it
@@ -5285,6 +5320,8 @@ export const TOOLS = {
           "select id, via_party, occurred_on from party_link where from_party=$1 and to_party=$2 and kind=$3",
           [ends.from_party, ends.to_party, kind]);
         const row = cur.rows[0];
+        if (args.deal_id && row.via_party && row.via_party !== ends.via_party) throw new ToolError({error:"referral_broker_mismatch"});
+        await attachDeal(row.id);
         // BACKFILL, not overwrite. Every edge written between 0051 and 2026-08-10
         // carries a null broker, because this verb had no via_party to pass — the
         // schema was ternary and the only writer was binary. Those edges are the
@@ -5316,6 +5353,7 @@ export const TOOLS = {
         { new: { kind, to: ends.to_party, via: ends.via_party, occurred_on: occurredOn,
                  from_input: args.from_party, to_input: args.to_party },
           idempotency_key: args.idempotency_key });
+      await attachDeal(ins.rows[0].id);
       return { ok: true, link_id: ins.rows[0].id, existing: false };
     }),
   },
@@ -5541,7 +5579,7 @@ export const TOOLS = {
         "referral_active","territory","offers","seeking","rivalry_group","originated",
         "intro_notes","links_label","last_touch","relationship_level"];
       const rows = (await c.query(
-        `select id, vendor_ref, party_id, merged_into, ${FIELDS.join(",")} from vendor where id = any($1)`,
+        `select id, vendor_ref, party_id, merged_into, loan_programs, deal_evidence, deal_history_verified_at, trust_override, ${FIELDS.join(",")} from vendor where id = any($1) order by id for update`,
         [[survId, mergId]])).rows;
       const surv = rows.find(r => r.id === survId), merg = rows.find(r => r.id === mergId);
       if (surv.merged_into || merg.merged_into)
@@ -5561,11 +5599,14 @@ export const TOOLS = {
         else if (!empty(a) && !empty(b) && JSON.stringify(a) !== JSON.stringify(b))
           conflicts.push({ field: f, survivor: a, merged: b });
       }
+      const relationship = mergeRelationshipFields(surv, merg);
+      Object.assign(filled, relationship.filled);
+      conflicts.push(...relationship.conflicts);
       const fk = Object.keys(filled);
       if (fk.length) {
         const sets = fk.map((k, i) => `${k}=$${i + 2}`).join(", ");
         await c.query(`update vendor set ${sets}, updated_by=$1 where id=$${fk.length + 2}`,
-          [actor.id, ...fk.map(k => filled[k]), survId]);
+          [actor.id, ...fk.map(k => k === "deal_evidence" ? JSON.stringify(filled[k]) : filled[k]), survId]);
       }
 
       // Dependents move; event rows stay where they happened (history is immutable).
