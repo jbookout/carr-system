@@ -49,7 +49,6 @@
       "6901cc3b",
       "c6f69dee",
       "e313a3ca",
-      "1e62c007",
       "fb110a39",
       "8c1e6057",
       "5be2f462",
@@ -96,10 +95,8 @@
       "f5bac101",
       "1b8e7f43",
       "a8c55a47",
-      "61551180",
       "17ffd587",
       "6a4e6283",
-      "708c2150",
       "b1521526",
       "c1547ed1",
       "f04a05aa",
@@ -131,7 +128,6 @@
       "def3e84e",
       "388cc81e",
       "df8f1da0",
-      "2dbb0ad8",
       "9873a0d2",
       "9e3fb6d0",
       "3578d799",
@@ -155,7 +151,6 @@
       "1f3a7372",
       "af7de070",
       "647f843d",
-      "aa411351",
       "e8868cbe",
       "d9874334",
       "740bb505",
@@ -210,7 +205,13 @@
       "6ec7312d",
       "893aeec5",
       "7b4ba3aa",
-      "1f750181"
+      "1f750181",
+      "1fcaa63a",
+      "737a68d6",
+      "a7784a18",
+      "204391be",
+      "a2e78f48",
+      "b7ec8f3b"
     ]
   },
   "categories": {
@@ -279,7 +280,6 @@
     "hard_pre_action": [
       "236ca227",
       "e313a3ca",
-      "1e62c007",
       "57d83b75",
       "ca841807",
       "4c21d86b",
@@ -296,7 +296,6 @@
       "308ef1de",
       "647f843d",
       "6cfb67f5",
-      "aa411351",
       "eaa31ac5",
       "cff429f5",
       "d7c69aa6",
@@ -321,7 +320,6 @@
       "97326357",
       "17ffd587",
       "6a4e6283",
-      "708c2150",
       "f04a05aa",
       "590b11e1",
       "b01edd26",
@@ -359,7 +357,6 @@
       "4f7c348f",
       "4a9188f3",
       "015183f5",
-      "2dbb0ad8",
       "185013c6",
       "fc21a431",
       "df55c398",
@@ -374,7 +371,9 @@
       "0156e9fa",
       "49533583",
       "557838a5",
-      "fb110a39"
+      "fb110a39",
+      "737a68d6",
+      "a7784a18"
     ],
     "transactional_schema": [
       "b42e217e",
@@ -425,6 +424,16 @@
       ],
       "test": [
         "ops/candidate-match-threshold-selftest.py"
+      ]
+    },
+    "canonical_edit": {
+      "failure_mode": "an Edit/Write/MultiEdit landing on a file git already tracks inside the shared canonical checkout ~/carr-system, before any commit, push or merge exists to refuse it",
+      "implementation": [
+        "hooks/canonical-edit-gate.py"
+      ],
+      "note": "REINSTATED 2026-09-01 by Joe's ruling 7f48abf6 (Repo Hygiene Program R02, WR-000040), reversing the retirement in WR-000019 slice S3 (2026-08-27) and migration 0348. It returns with three dispositions applied: the registered-worktree exemption widened to every worktree git registers for this repo, the untracked-file allowance KEPT (receipts and out/ are load-bearing, with ops/untracked-anomaly-report.py as the non-paging visibility control), and the CARR_ALLOW_CANONICAL_EDIT scoped-edit escape hatch REMOVED. HONESTLY SCOPED, and the gate's own docstring is the authority: it sees Write, Edit and MultiEdit only. NotebookEdit is in its tool tuple but no matcher delivers it, so it is not covered. Bash and Codex sessions are not covered at all -- the R04 canonical-dirt alarm is the planned compensating control and is NOT BUILT YET, so those paths are uncompensated today. This control does not replace pr_only_main_ruleset; it binds EARLIER, at the edit, and that control still binds at merge.",
+      "test": [
+        "ops/canonical-edit-gate-selftest.py"
       ]
     },
     "chat_lint": {
@@ -1105,13 +1114,6 @@
       "enforcement_class": "stop_gate",
       "exceptions": "the resend carries only the delta plus a pointer"
     },
-    "1e62c007": {
-      "binding_moment": "before away-mode write",
-      "category": "hard_pre_action",
-      "control": "no_send_worker",
-      "enforcement_class": "deny_gate",
-      "exceptions": "internal record work remains profile-scoped"
-    },
     "1f3a7372": {
       "binding_moment": "scheduled finding completion",
       "category": "post_action_verification",
@@ -1125,6 +1127,11 @@
       "planned_control": "A guest-list check that runs the same pairing predicate as e6e0b0e7 over an invite list, once events and vendor Category are both on the record.",
       "rule_surface": "intro_politics",
       "why_unenforceable": "No tool call represents 'introduce' or 'co-invite' \u2014 the pairing is chosen inside prose a human sends, and the vendor attributes these rules key on (Category, Stage, Vertical, Territory, Links, delivery tier) live in vendors.xlsx and deals.md rather than on a gated write path. Guest lists are assembled outside any tool call, and the rule hands the exception to Joe explicitly for a given event."
+    },
+    "1fcaa63a": {
+      "category": "judgment_advisory",
+      "enforcement_class": "judgment_ambient",
+      "why_unenforceable": "The admission validators already refuse a heavy proposal lacking shape, manifest, typed master plan and a resolving runbook section. The half THIS rule adds -- the upfront research fleet, cheapest-qualified routing per slice, genuinely fresh review seats, and dispatcher-managed execution -- is the half doctrine heavy-build-protocol marks as binding by law with no mechanical gate behind it."
     },
     "1fddcffb": {
       "category": "judgment_advisory",
@@ -1207,13 +1214,6 @@
       "category": "judgment_advisory",
       "enforcement_class": "judgment_ambient",
       "why_unenforceable": "Data-capture completeness judgment (what counts as 'useful')."
-    },
-    "2dbb0ad8": {
-      "binding_moment": "subagent staffing",
-      "category": "session_task_rail",
-      "control": "delegation_tripwire",
-      "enforcement_class": "surfacing",
-      "exceptions": "cheapest qualified seat"
     },
     "2e362970": {
       "category": "judgment_advisory",
@@ -1355,12 +1355,12 @@
       "why_unenforceable": "Research-discipline judgment."
     },
     "4a53ff82": {
-      "binding_moment": "before a change reaches main",
+      "binding_moment": "the first edit to a tracked canonical file",
       "category": "hard_pre_action",
-      "control": "pr_only_main_ruleset",
+      "control": "canonical_edit",
       "enforcement_class": "deny_gate",
       "exceptions": "registered worktrees; integration-lane work (nightly chain, merges/landings, pulls)",
-      "note": "Corrected 2026-08-15 (see history below), then reassigned 2026-08-27 (WR-000019 slice S3): hooks/canonical-edit-gate.py retired, and control moved from the retired edit-time gate to the server-side backstop that already carries the same property -- a canonical-tree edit cannot reach main without a reviewed PR under the PR-only ruleset with required CI. That binds later (at merge) than the retired gate's edit-time catch, which is a real reduction in how early a stray canonical edit is caught, stated plainly rather than hidden. HISTORY: this read unbuilt on 2026-08-15, with a planned_control describing a hook that had already been built the day before as hooks/canonical-edit-gate.py, blessed in the gate baseline and live in the PreToolUse set. A session working the unbuilt list came one step from building a second gate for an already-enforced rule. ops/enforcement-coverage-check.py now fails on any blessed gate no control names."
+      "note": "Reassigned 2026-08-27 (WR-000019 slice S3) to pr_only_main_ruleset when hooks/canonical-edit-gate.py retired, then RETURNED to canonical_edit on 2026-09-01 by Joe's ruling 7f48abf6 (Repo Hygiene Program R02) when that gate was reinstated. The 2026-08-27 reassignment reasoned that the server-side backstop carried the same property later; that reasoning is now void because the earlier control exists again. BOTH controls really do bind this rule now, at different moments -- canonical_edit at the edit, pr_only_main_ruleset at merge -- and this field holds ONE control key, so it names the EARLIEST binding moment, which is the one this rule is about. pr_only_main_ruleset is unchanged and still carries 308ef1de. HISTORY: this read unbuilt on 2026-08-15, with a planned_control describing a hook that had already been built the day before as hooks/canonical-edit-gate.py, blessed in the gate baseline and live in the PreToolUse set. A session working the unbuilt list came one step from building a second gate for an already-enforced rule. ops/enforcement-coverage-check.py now fails on any blessed gate no control names."
     },
     "4a9188f3": {
       "binding_moment": "partner correction",
@@ -1561,11 +1561,6 @@
       "enforcement_class": "judgment_ambient",
       "why_unenforceable": "Inference-quality judgment (did mail/calendar evidence actually establish contact)."
     },
-    "61551180": {
-      "category": "judgment_advisory",
-      "enforcement_class": "judgment_ambient",
-      "why_unenforceable": "Security/business tradeoff judgment (live vs speculative, reversible vs not)."
-    },
     "6172e7d5": {
       "category": "judgment_advisory",
       "enforcement_class": "judgment_ambient",
@@ -1623,17 +1618,17 @@
       "rule_surface": "intro_politics",
       "why_unenforceable": "No tool call represents 'introduce' or 'co-invite' \u2014 the pairing is chosen inside prose a human sends, and the vendor attributes these rules key on (Category, Stage, Vertical, Territory, Links, delivery tier) live in vendors.xlsx and deals.md rather than on a gated write path. Delivery tier is a tiebreaker that sits below hard blocks and vertical/state fit and above relationship stage; ordering three soft factors for one client's need is judgment."
     },
-    "708c2150": {
-      "binding_moment": "automation completion claim",
-      "category": "post_action_verification",
-      "control": "completion_evidence",
-      "enforcement_class": "stop_gate",
-      "exceptions": "read-only report"
-    },
     "70e372f0": {
       "category": "judgment_advisory",
       "enforcement_class": "judgment_ambient",
       "why_unenforceable": "Requires judging what counts as a personality assessment vs a design observation."
+    },
+    "737a68d6": {
+      "binding_moment": "whenever system work discovers a required record-layer capability has no verb",
+      "category": "session_task_rail",
+      "control": "session_boot",
+      "enforcement_class": "surfacing",
+      "exceptions": "none — create and register the missing verb in the same work"
     },
     "7105955b": {
       "binding_moment": "close-loop for a renumbered, superseded, merged or split row",
@@ -1871,6 +1866,13 @@
       "enforcement_class": "stop_gate",
       "exceptions": "no preexisting baseline"
     },
+    "a7784a18": {
+      "binding_moment": "before the first repository edit and through delivery completion",
+      "category": "session_task_rail",
+      "control": "session_boot",
+      "enforcement_class": "surfacing",
+      "exceptions": "the shared checkout is coordination-only; each coding session owns an isolated tree and the full merge path"
+    },
     "a8c55a47": {
       "category": "judgment_advisory",
       "enforcement_class": "judgment_ambient",
@@ -1887,13 +1889,6 @@
       "control": "completion_evidence",
       "enforcement_class": "stop_gate",
       "exceptions": "no tracked change"
-    },
-    "aa411351": {
-      "binding_moment": "before an internal approval question",
-      "category": "hard_pre_action",
-      "control": "escalation",
-      "enforcement_class": "deny_gate",
-      "exceptions": "client/public/money/destructive questions"
     },
     "ab814a26": {
       "binding_moment": "at explicit human approve-rule",
@@ -2316,6 +2311,21 @@
       "category": "judgment_advisory",
       "enforcement_class": "judgment_ambient",
       "why_unenforceable": "Structural-design judgment."
+    },
+    "204391be": {
+      "category": "judgment_advisory",
+      "enforcement_class": "judgment_ambient",
+      "why_unenforceable": "The task-specific instruction is delivered by its rule pack; no deterministic predicate can decide every application."
+    },
+    "a2e78f48": {
+      "category": "judgment_advisory",
+      "enforcement_class": "judgment_ambient",
+      "why_unenforceable": "The task-specific instruction is delivered by its rule pack; no deterministic predicate can decide every application."
+    },
+    "b7ec8f3b": {
+      "category": "judgment_advisory",
+      "enforcement_class": "judgment_ambient",
+      "why_unenforceable": "The task-specific instruction is delivered by its rule pack; no deterministic predicate can decide every application."
     }
   },
   "rule_load_layers": {
@@ -2436,13 +2446,6 @@
       "packs": [],
       "why": "An installed stop gate delivers this at its binding moment."
     },
-    "1e62c007": {
-      "load_layer": "control",
-      "packs": [
-        "scheduled-automation"
-      ],
-      "why": "An installed deny gate delivers this at its binding moment."
-    },
     "1f3a7372": {
       "load_layer": "control",
       "packs": [
@@ -2455,6 +2458,13 @@
       "packs": [
         "vendor-intros"
       ]
+    },
+    "1fcaa63a": {
+      "load_layer": "pack",
+      "packs": [
+        "governance-rules"
+      ],
+      "why": "Joe's ruling 554db63d, overruling a layer0 call: \"i would argue its triggered by me calling for a heavy build.\" Nothing task-specific belongs in layer0 (rule 1fddcffb), and the boot cap is 24 of 35 used; this rule fires on an occasion, not at every boot."
     },
     "1fddcffb": {
       "load_layer": "layer0",
@@ -2531,12 +2541,6 @@
       "load_layer": "pack",
       "packs": [
         "records-intake"
-      ]
-    },
-    "2dbb0ad8": {
-      "load_layer": "pack",
-      "packs": [
-        "delegation-council"
       ]
     },
     "2e362970": {
@@ -2677,7 +2681,7 @@
       "packs": [
         "engineering-git"
       ],
-      "why": "An installed deny gate delivered this at its binding moment; WR-000019 S3 (2026-08-27) reassigned the control from the retired hooks/canonical-edit-gate.py to the server-side PR-only main ruleset (control pr_only_main_ruleset), which is still an installed control that delivers this rule at ITS binding moment (merge, not the edit itself)."
+      "why": "An installed deny gate delivers this at its binding moment. WR-000019 S3 (2026-08-27) reassigned the control to the server-side PR-only main ruleset when hooks/canonical-edit-gate.py retired; Joe's ruling 7f48abf6 (2026-09-01) reinstated that gate, so the control returns to canonical_edit and the rule is delivered at the edit again, with the merge-time ruleset still behind it."
     },
     "4a9188f3": {
       "load_layer": "pack",
@@ -2826,11 +2830,6 @@
         "records-intake"
       ]
     },
-    "61551180": {
-      "load_layer": "layer0",
-      "packs": [],
-      "why": "The reversible-protection test applies to any live exposure found in any lane."
-    },
     "6172e7d5": {
       "load_layer": "pack",
       "packs": [
@@ -2893,18 +2892,16 @@
         "vendor-intros"
       ]
     },
-    "708c2150": {
-      "load_layer": "control",
-      "packs": [
-        "scheduled-automation"
-      ],
-      "why": "An installed stop gate delivers this at its binding moment."
-    },
     "70e372f0": {
       "load_layer": "pack",
       "packs": [
         "governance-rules"
       ]
+    },
+    "737a68d6": {
+      "load_layer": "layer0",
+      "packs": [],
+      "why": "A missing verb can be discovered in any system task, so the create-it-now rule must be present before work is routed."
     },
     "7105955b": {
       "load_layer": "control",
@@ -3140,6 +3137,11 @@
       ],
       "why": "An installed stop gate delivers this at its binding moment."
     },
+    "a7784a18": {
+      "load_layer": "layer0",
+      "packs": [],
+      "why": "Repository isolation and end-to-end delivery bind every coding session before its first edit."
+    },
     "a8c55a47": {
       "load_layer": "pack",
       "packs": [
@@ -3156,11 +3158,6 @@
       "load_layer": "control",
       "packs": [],
       "why": "An installed stop gate delivers this at its binding moment."
-    },
-    "aa411351": {
-      "load_layer": "layer0",
-      "packs": [],
-      "why": "The audience gate that decides escalation; the installed gate only sees AskUserQuestion."
     },
     "ab814a26": {
       "load_layer": "control",
@@ -3565,6 +3562,25 @@
       "load_layer": "pack",
       "packs": [
         "governance-rules"
+      ]
+    },
+    "204391be": {
+      "load_layer": "pack",
+      "packs": [
+        "engineering-git",
+        "governance-rules"
+      ]
+    },
+    "a2e78f48": {
+      "load_layer": "pack",
+      "packs": [
+        "engineering-git"
+      ]
+    },
+    "b7ec8f3b": {
+      "load_layer": "pack",
+      "packs": [
+        "surface-doctrine"
       ]
     }
   },

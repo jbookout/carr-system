@@ -49,6 +49,7 @@ USAGE
 
 import argparse
 import hashlib
+import importlib.util
 import io
 import json
 import re
@@ -60,11 +61,12 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
-# The deployed surface, from bin/deploy-worker.sh, which is the ONE sanctioned
-# way this ships. If that script's scope ever changes, this list changes with it
-# in the same commit — a manifest that digests the wrong paths is worse than
-# none, because it is confidently wrong.
-DEPLOYED_PATHS = ("mcp-server", "dealroom")
+# The pre-P2 artifact included editable browser source. P2 replaces it with a
+# separately content-addressed DoctorCRE artifact, while historical SHAs must
+# remain rebuildable under their original recipe.
+LEGACY_DEPLOYED_PATHS = ("mcp-server", "dealroom")
+PINNED_DEPLOYED_PATHS = ("mcp-server",)
+DOCTORCRE_PIN_PATH = "ops/config/doctorcre-artifact.v1.json"
 EXCLUDED_PATH_PARTS = ("node_modules", ".last-deployed-verb-count")
 
 # What the build recipe pins. A rebuild is only "identical" if the inputs were
@@ -104,6 +106,7 @@ ASSURANCE_PLAN_FIELDS = (
     "rollback_ready",
     "rollback_plan_ref",
 )
+DOCTORCRE_PLAN_FIELDS = ("doctorcre_artifact",)
 
 RECOVERY_STRATEGIES = (
     "rollback",
@@ -256,6 +259,22 @@ def path_exists(sha: str, path: str) -> bool:
     return out.returncode == 0
 
 
+def doctorcre_artifact_at(sha: str) -> dict | None:
+    """Read the external product identity from the immutable CARR commit."""
+    if not path_exists(sha, DOCTORCRE_PIN_PATH):
+        return None
+    try:
+        pin = json.loads(git("show", f"{sha}:{DOCTORCRE_PIN_PATH}"))
+    except json.JSONDecodeError as exc:
+        raise ValueError("DoctorCRE artifact pin is not valid JSON") from exc
+    required = {
+        "schema", "repository", "release_tag", "release_url", "source_commit",
+        "archive_url", "archive_bytes", "archive_sha256", "manifest_url",
+        "manifest_bytes", "manifest_sha256", "file_count", "entrypoint", "contracts",
+    }
+    if not isinstance(pin, dict) or set(pin) != required or pin.get("schema") != "carr-doctorcre-artifact-pin.v1":
+        raise ValueError("DoctorCRE artifact pin does not match the v1 contract")
+    return pin
 def expand_config_paths(sha: str) -> tuple[str, ...]:
     paths = list(CONFIG_PATHS)
     for glob in CONFIG_GLOBS:
@@ -468,9 +487,14 @@ def build(sha_ref: str, service: str, environment: str,
     except ValueError as exc:
         sys.exit(f"release-manifest: {exc}")
     sha = resolve_sha(sha_ref)
-    entries = tree_entries(sha, DEPLOYED_PATHS)
+    try:
+        doctorcre_artifact = doctorcre_artifact_at(sha)
+    except ValueError as exc:
+        sys.exit(f"release-manifest: {exc}")
+    deployed_paths = PINNED_DEPLOYED_PATHS if doctorcre_artifact is not None else LEGACY_DEPLOYED_PATHS
+    entries = tree_entries(sha, deployed_paths)
     if not entries:
-        sys.exit(f"release-manifest: no files under {DEPLOYED_PATHS} at {sha} — "
+        sys.exit(f"release-manifest: no files under {deployed_paths} at {sha} — "
                  "refusing to digest an empty artifact")
     migrations, basis = migration_set(sha, since)
     schema_applied_count, schema_highest_migration, schema_ledger_sha256 = (
@@ -495,7 +519,7 @@ def build(sha_ref: str, service: str, environment: str,
         "git_sha": sha,
         "artifact_digest": digest_entries(entries),
         "artifact_file_count": len(entries),
-        "artifact_paths": list(DEPLOYED_PATHS),
+        "artifact_paths": list(deployed_paths),
 
         "dependency_lock_digest": digest_files(sha, LOCK_PATHS),
         "dependency_lock_paths": list(LOCK_PATHS),
@@ -517,6 +541,8 @@ def build(sha_ref: str, service: str, environment: str,
         "commit_subject": git("log", "-1", "--format=%s", sha).strip(),
         "commit_authored_at": git("log", "-1", "--format=%aI", sha).strip(),
     }
+    if doctorcre_artifact is not None:
+        manifest["doctorcre_artifact"] = doctorcre_artifact
     manifest["plan_hash"] = plan_hash(manifest)
     return manifest
 
@@ -529,6 +555,8 @@ def plan_hash(manifest: dict) -> str:
     if any(manifest.get(k) is not None for k in ASSURANCE_PLAN_FIELDS
            if k != "rollback_ready"):
         material.update({k: manifest.get(k) for k in ASSURANCE_PLAN_FIELDS})
+    if manifest.get("doctorcre_artifact") is not None:
+        material.update({k: manifest.get(k) for k in DOCTORCRE_PLAN_FIELDS})
     blob = json.dumps(material, sort_keys=True, separators=(",", ":"))
     return "plan:" + hashlib.sha256(blob.encode()).hexdigest()[:32]
 
@@ -598,9 +626,10 @@ def verify(manifest: dict) -> int:
                     manifest.get("performance_budget_ms"),
                     manifest.get("recovery_strategy"),
                     manifest.get("rollback_plan_ref"))
-    compared = ("artifact_digest", "dependency_lock_digest", "config_fingerprint", "program6_actions",
+    compared = ("artifact_digest", "artifact_paths", "dependency_lock_digest", "config_fingerprint", "program6_actions",
                 "schema_highest_migration", "schema_applied_count",
-                "schema_ledger_sha256", "migration_set", "artifact_file_count")
+                "schema_ledger_sha256", "migration_set", "artifact_file_count",
+                "doctorcre_artifact")
 
     failures = []
     for field in compared:
@@ -633,10 +662,24 @@ def verify(manifest: dict) -> int:
     return 0
 
 
+def run_doctorcre_artifact(args: list[str]) -> int:
+    """Keep artifact mechanics in a library behind this registered release CLI."""
+    path = Path(__file__).with_name("doctorcre-artifact.py")
+    spec = importlib.util.spec_from_file_location("doctorcre_artifact", path)
+    if spec is None or spec.loader is None:
+        raise ValueError("DoctorCRE artifact library could not be loaded")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.run_cli(args)
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[1],
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    dc = sub.add_parser("doctorcre-artifact", help="verify, materialize, or activate the pinned DoctorCRE artifact")
+    dc.add_argument("doctorcre_args", nargs=argparse.REMAINDER)
 
     b = sub.add_parser("build", help="compute the manifest for a SHA")
     b.add_argument("--sha", default="HEAD")
@@ -675,6 +718,13 @@ def main() -> int:
     sc.add_argument("--sha", required=True)
 
     args = p.parse_args()
+
+    if args.cmd == "doctorcre-artifact":
+        try:
+            return run_doctorcre_artifact(args.doctorcre_args)
+        except (OSError, ValueError, tarfile.TarError) as exc:
+            print(f"doctorcre-artifact: {exc}", file=sys.stderr)
+            return 1
 
     if args.cmd == "source-contract":
         print(json.dumps(source_contract(args.sha), indent=2, sort_keys=True))

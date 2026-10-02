@@ -36,9 +36,16 @@ REAPER_RECEIPT_EXECUTABLE_SQL = f"""
 create or replace function ops.engineering_envelope_is_executable(p_envelope_id uuid,p_job_id uuid)
 returns boolean language plpgsql stable security definer set search_path=pg_catalog,ops,public
 as $$
+declare v_sleep_seconds double precision;
 begin
   perform pg_advisory_xact_lock(hashtextextended('{REAPER_RECEIPT_BARRIER}',0));
-  perform pg_sleep(5);
+  select greatest(0::numeric,extract(epoch from
+           (least(e.expires_at,s.lease_expires_at,j.leased_until)-clock_timestamp())))::double precision+0.5
+    into v_sleep_seconds from ops.engineering_execution_envelope e
+    join ops.capability_agent_session s on s.id=e.agent_session_id
+    join ops.job j on j.id=e.job_id
+   where e.id=p_envelope_id and e.job_id=p_job_id;
+  perform pg_sleep(coalesce(v_sleep_seconds,0.5));
   return coalesce((ops.engineering_envelope_currentness(p_envelope_id,p_job_id)->>'eligible')::boolean,false);
 end;
 $$
@@ -144,9 +151,24 @@ def reset_role(cur):
     cur.execute("reset role")
 
 
-def claim_one(conn, expected, worker, isolation_ids):
+def claim_one(conn, expected, worker):
+    """Claim exactly `expected` through the production claim.
+
+    The fence must cover every row the production claim can select, in the
+    same transaction as the claim: ops.engineering_claim_slice picks from
+    state in ('queued','retry_wait') with next_attempt_at<=now().  Gates share
+    one disposable cluster, and a row an earlier gate failed into retry_wait
+    becomes claimable again 30 seconds later (the constant engineering-slice
+    backoff).  Its fixture is scheduled earlier, so it wins the ordering.
+    Fencing only the caller's own queued rows let that leftover be selected
+    whenever a claim ran more than 30 seconds after the failure (WR-000164:
+    the A2 ownership gate's terminal engineering_fail_claim row stole the A3a
+    gate's claim on slow hosted runners).
+    """
     with conn.cursor() as cur:
-        cur.execute("update ops.job set next_attempt_at=now()+interval '1 day' where definition_key='engineering-slice' and state='queued' and id=any(%s)", (isolation_ids,))
+        cur.execute("""update ops.job set next_attempt_at=now()+interval '1 day'
+                        where definition_key='engineering-slice'
+                          and state in ('queued','retry_wait') and id<>%s""", (expected,))
         cur.execute("update ops.job set next_attempt_at=now()-interval '1 second' where id=%s", (expected,))
         set_jobs(cur)
         row = one(cur, "select job_id,lease_token,attempt from ops.engineering_claim_slice(%s,1,960)", (worker,))
@@ -753,6 +775,7 @@ def post_wait_expiry_case(conn, dsn, fixture_row, claim):
 def reaper_receipt_contention_case(conn, dsn, fixture_row, claim):
     """Maintenance must skip a job locked by the real receipt path."""
     with conn.cursor() as cur:
+        original_executable_sql = one(cur, "select pg_get_functiondef('ops.engineering_envelope_is_executable(uuid,uuid)'::regprocedure)")[0]
         cur.execute(REAPER_RECEIPT_EXECUTABLE_SQL)
     conn.commit()
     expiry = expiry_epoch(conn, fixture_row)
@@ -763,7 +786,7 @@ def reaper_receipt_contention_case(conn, dsn, fixture_row, claim):
             with psycopg.connect(dsn) as peer:
                 with peer.cursor() as cur:
                     cur.execute("set local lock_timeout='12000ms'")
-                    cur.execute("set local statement_timeout='15000ms'")
+                    cur.execute("set local statement_timeout='30000ms'")
                     set_jobs(cur)
                     try:
                         receipt(cur, fixture_row, claim, "claimed_complete")
@@ -780,7 +803,13 @@ def reaper_receipt_contention_case(conn, dsn, fixture_row, claim):
     peer_thread.start()
     barrier_seen = False
     with psycopg.connect(dsn) as maintenance:
-        deadline = time.monotonic() + 6
+        # The peer has to open a fresh PostgreSQL connection, assume carr_jobs,
+        # and enter the production receipt function before the deliberately
+        # injected advisory-lock barrier becomes visible. Six seconds was
+        # shorter than that setup path under ordinary concurrent local CI load,
+        # so the fixture could expire before it tested the lock ordering it was
+        # written to prove. Keep this bounded, but leave enough setup runway.
+        deadline = time.monotonic() + 12
         while time.monotonic() < deadline:
             with maintenance.cursor() as cur:
                 acquired = one(
@@ -823,7 +852,7 @@ def reaper_receipt_contention_case(conn, dsn, fixture_row, claim):
             if one(cur, "select count(*) from ops.job_receipt where job_id=%s", (fixture_row[0],))[0] != 0:
                 raise RuntimeError("maintenance bypassed the receipt lock with a job receipt")
         maintenance.rollback()
-    peer_thread.join(16)
+    peer_thread.join(40)
     if peer_thread.is_alive():
         raise RuntimeError("reaper-versus-receipt probe exceeded its bounded timeout")
     if errors:
@@ -837,9 +866,10 @@ def reaper_receipt_contention_case(conn, dsn, fixture_row, claim):
         if one(cur, "select count(*) from ops.job_receipt where job_id=%s", (fixture_row[0],))[0] != 0:
             raise RuntimeError("reaper-versus-receipt left a job receipt after rollback")
     conn.commit()
+    return original_executable_sql
 
 
-def delayed_append_expiry_case(conn, dsn, fixture_row, claim):
+def delayed_append_expiry_case(conn, dsn, fixture_row, claim, original_executable_sql):
     """Use only the disposable DB to force validation across the append clock."""
     with conn.cursor() as cur:
         cur.execute(DELAYED_EXECUTABLE_SQL)
@@ -856,6 +886,13 @@ def delayed_append_expiry_case(conn, dsn, fixture_row, claim):
                 if sqlstate in {"55P03", "40P01"} or "receipt append" not in detail:
                     raise RuntimeError(f"delayed append expiry refused unsafely: SQLSTATE {sqlstate}: {detail}")
                 assert_unfinalized(check_cur, fixture_row, "delayed append expiry")
+            conn.commit()
+            # This disposable database continues into the wrapper acceptance
+            # programs after the db-gate loop. Restore the exact helper the
+            # fixture observed rather than leaking a timing wrapper downstream.
+            with conn.cursor() as restore_cur:
+                reset_role(restore_cur)
+                restore_cur.execute(original_executable_sql)
             conn.commit()
             return
         except BaseException:
@@ -1136,11 +1173,10 @@ def main():
             reset_role(cur)
         conn.commit()  # committed fixtures are required for the peer connections below
 
-        isolation_ids = [good[0], dag_a[0], lineage_a[0], weak_missing[0], weak_malformed[0], malformed_deviation[0], malformed_envelope[0], duplicate_deviation[0], retry[0], dead[0], scoped_retry[0], scoped_dead[0], stale[0], hold_admission[0], hold_reverse[0], hold_successor[0], malformed_read_only[0], malformed_read_only_successor[0]] + [row[0][0] for row in negative_fixtures]
         with conn.cursor() as cur:
             if one(cur, "select supersedes_envelope_id from ops.engineering_execution_envelope where id=%s", (malformed_read_only_successor[1],))[0] != malformed_read_only[1]:
                 raise RuntimeError("malformed read_only predecessor was not superseded by the exact successor")
-        good_claim = claim_one(conn, good[0], "engineering-controller-receipt-good", isolation_ids)
+        good_claim = claim_one(conn, good[0], "engineering-controller-receipt-good")
         # Binding requires 930 seconds of runway from a 960-second claim.  Prove
         # the exact live binding at the launch boundary, before the deliberately
         # long negative-receipt fixture loop consumes that 30-second margin.
@@ -1149,26 +1185,26 @@ def main():
             if one(cur, "select ops.engineering_controller_binding(%s,%s,%s) is not null", (good[1], good[0], good_claim[1]))[0] is not True:
                 raise RuntimeError("actor lifecycle fixture could not read the exact live binding")
             reset_role(cur)
-        dag_a_claim = claim_one(conn, dag_a[0], "engineering-controller-dag-a", isolation_ids)
-        lineage_a_claim = claim_one(conn, lineage_a[0], "engineering-controller-lineage-a", isolation_ids)
-        weak_missing_claim = claim_one(conn, weak_missing[0], "engineering-controller-weak-missing", isolation_ids)
-        weak_malformed_claim = claim_one(conn, weak_malformed[0], "engineering-controller-weak-malformed", isolation_ids)
-        malformed_deviation_claim = claim_one(conn, malformed_deviation[0], "engineering-controller-malformed-deviation", isolation_ids)
+        dag_a_claim = claim_one(conn, dag_a[0], "engineering-controller-dag-a")
+        lineage_a_claim = claim_one(conn, lineage_a[0], "engineering-controller-lineage-a")
+        weak_missing_claim = claim_one(conn, weak_missing[0], "engineering-controller-weak-missing")
+        weak_malformed_claim = claim_one(conn, weak_malformed[0], "engineering-controller-weak-malformed")
+        malformed_deviation_claim = claim_one(conn, malformed_deviation[0], "engineering-controller-malformed-deviation")
         with conn.cursor() as cur:
             malformed_envelope_claim = manual_running_claim(cur, malformed_envelope)
-        duplicate_deviation_claim = claim_one(conn, duplicate_deviation[0], "engineering-controller-duplicate-deviation", isolation_ids)
-        retry_claim = claim_one(conn, retry[0], "engineering-controller-receipt-retry", isolation_ids)
-        dead_claim = claim_one(conn, dead[0], "engineering-controller-receipt-dead", isolation_ids)
-        scoped_retry_claim = claim_one(conn, scoped_retry[0], "engineering-controller-scoped-retry", isolation_ids)
-        scoped_dead_claim = claim_one(conn, scoped_dead[0], "engineering-controller-scoped-dead", isolation_ids)
-        stale_claim = claim_one(conn, stale[0], "engineering-controller-receipt-stale", isolation_ids)
-        hold_claim = claim_one(conn, hold_admission[0], "engineering-controller-lock-admission", isolation_ids)
-        reverse_claim = claim_one(conn, hold_reverse[0], "engineering-controller-lock-reverse", isolation_ids)
-        successor_claim = claim_one(conn, hold_successor[0], "engineering-controller-lock-successor", isolation_ids)
+        duplicate_deviation_claim = claim_one(conn, duplicate_deviation[0], "engineering-controller-duplicate-deviation")
+        retry_claim = claim_one(conn, retry[0], "engineering-controller-receipt-retry")
+        dead_claim = claim_one(conn, dead[0], "engineering-controller-receipt-dead")
+        scoped_retry_claim = claim_one(conn, scoped_retry[0], "engineering-controller-scoped-retry")
+        scoped_dead_claim = claim_one(conn, scoped_dead[0], "engineering-controller-scoped-dead")
+        stale_claim = claim_one(conn, stale[0], "engineering-controller-receipt-stale")
+        hold_claim = claim_one(conn, hold_admission[0], "engineering-controller-lock-admission")
+        reverse_claim = claim_one(conn, hold_reverse[0], "engineering-controller-lock-reverse")
+        successor_claim = claim_one(conn, hold_successor[0], "engineering-controller-lock-successor")
         with conn.cursor() as cur:
             reverse_claim = manual_running_claim(cur, reverse_successor)
         conn.commit()
-        negative_claims = [claim_one(conn, row[0][0], f"engineering-controller-negative-{index}", isolation_ids) for index, row in enumerate(negative_fixtures)]
+        negative_claims = [claim_one(conn, row[0][0], f"engineering-controller-negative-{index}") for index, row in enumerate(negative_fixtures)]
 
         null_digest_index = len(negative_fixtures) - 3
         invalid_digest_index = len(negative_fixtures) - 2
@@ -1254,7 +1290,7 @@ def main():
             seed_legacy_failed_predecessor_review(cur, lineage_a, lineage_failed_receipt_id)
         conn.commit()
         dag_b = create_dag_b(conn, dag_a, dag_a_claim, dag_b_ref)
-        dag_b_claim = claim_one(conn, dag_b[0], "engineering-controller-dag-b", isolation_ids + [dag_b[0]])
+        dag_b_claim = claim_one(conn, dag_b[0], "engineering-controller-dag-b")
         with conn.cursor() as cur:
             assert_dag_progression(cur, dag_a, dag_a_claim, dag_a_receipt_id, dag_b, dag_b_claim)
         conn.commit()
@@ -1273,7 +1309,7 @@ def main():
                 if one(cur, "select state from ops.capability_agent_session where id=%s", (fixture_row[2],))[0] not in ("claimed", "in_progress"):
                     raise RuntimeError("noncomplete receipt incorrectly retired its exact server session")
 
-        retry_success_claim = claim_one(conn, retry[0], "engineering-controller-receipt-retry-success", isolation_ids)
+        retry_success_claim = claim_one(conn, retry[0], "engineering-controller-receipt-retry-success")
         with conn.cursor() as cur:
             set_jobs(cur)
             receipt(cur, retry, retry_success_claim, "claimed_complete")
@@ -1330,7 +1366,7 @@ def main():
         with conn.cursor() as cur:
             lineage_successor = insert_successor(cur, lineage_a, cancel_prior=True)
         conn.commit()
-        lineage_successor_claim = claim_one(conn, lineage_successor[0], "engineering-controller-lineage-successor", isolation_ids + [lineage_successor[0]])
+        lineage_successor_claim = claim_one(conn, lineage_successor[0], "engineering-controller-lineage-successor")
         with conn.cursor() as cur:
             work_ref = one(cur, "select ref from ops.work_request where id=(select work_request_id from ops.engineering_execution_envelope where id=%s)", (lineage_successor[1],))[0]
             cur.execute("set local role carr_writer")
@@ -1386,7 +1422,7 @@ def main():
             cur.execute("reset role")
         conn.commit()
         lineage_b = create_dag_b_after_exact_review(conn, lineage_successor, lineage_b_ref)
-        lineage_b_claim = claim_one(conn, lineage_b[0], "engineering-controller-lineage-b", isolation_ids + [lineage_successor[0], lineage_b[0]])
+        lineage_b_claim = claim_one(conn, lineage_b[0], "engineering-controller-lineage-b")
         with conn.cursor() as cur:
             if one(cur, "select state from ops.job where id=%s", (lineage_b[0],))[0] != "running":
                 raise RuntimeError("exact successor review did not permit B claim")
@@ -1515,12 +1551,15 @@ def main():
         # maintenance functions run under bounded timeouts and skip the target.
         with conn.cursor() as cur:
             reset_role(cur)
-            near_reaper = fixture(cur, lease_offset="4 seconds")
+            # This is fixture runway, not the production lease contract. The
+            # prior four-second value could elapse while the peer connection
+            # was still starting, causing a false "barrier not reached" result.
+            near_reaper = fixture(cur, lease_offset="15 seconds")
         conn.commit()
         with conn.cursor() as cur:
             near_reaper_claim = manual_near_expiry_claim(cur, near_reaper)
         conn.commit()
-        reaper_receipt_contention_case(conn, dsn, near_reaper, near_reaper_claim)
+        original_executable_sql = reaper_receipt_contention_case(conn, dsn, near_reaper, near_reaper_claim)
 
         # This is deliberately the final production-path call.  The wrapper
         # exists only inside disposable carr_ci and forces the naturally
@@ -1533,7 +1572,7 @@ def main():
         with conn.cursor() as cur:
             near_append_claim = manual_near_expiry_claim(cur, near_append, job_lease_seconds=8)
         conn.commit()
-        delayed_append_expiry_case(conn, dsn, near_append, near_append_claim)
+        delayed_append_expiry_case(conn, dsn, near_append, near_append_claim, original_executable_sql)
 
     print("engineering controller concurrency gate passed: atomic receipt seam and production lock order are serialized")
 

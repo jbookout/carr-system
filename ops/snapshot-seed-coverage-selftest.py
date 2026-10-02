@@ -33,6 +33,11 @@ import io
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
+# INSERT provenance belongs to one live database's transactions. A rebuild
+# carries schema, never old xid8 values that could collide with its own xids.
+coverage = json.loads((REPO / "ops/config/snapshot-seed-coverage.json").read_text())
+assert "ops.rule_insert_provenance" in coverage["excluded"]
+
 
 def load_module():
     spec = importlib.util.spec_from_file_location(
@@ -127,6 +132,19 @@ def main():
                     "begin\n  insert into ops.never_seeded (k) values ('r');\nend $$;\n")
 
     with tempfile.TemporaryDirectory() as tmp:
+        # Lead UUIDs and creation transactions are business evidence, never
+        # reference vocabulary in a structure-only rebuild.
+        lead_table = "ops.doc_whats_new_lead_creation"
+        classification = json.loads((REPO / "ops/config/snapshot-seed-coverage.json").read_text())
+        reason = classification["excluded"].get(lead_table)
+        lead_repo = build_repo(tmp + "/catchup", {
+            "0766_doc_whats_new_repair.sql": (REPO / "migrations/0766_doc_whats_new_repair.sql").read_text(),
+        }, {"carried": {}, "excluded": {lead_table: reason} if reason else {}})
+        lead_artifact = artifact(["0766_doc_whats_new_repair.sql"])
+        case("catch-up creation evidence is classified and omitted from a rebuild",
+             module.check(lead_repo, lead_artifact) == [])
+        case("catch-up creation evidence refuses if copied into the snapshot",
+             "EXCLUDED" in summarise(module.check(lead_repo, lead_artifact + copy_block(lead_table))))
         # ---------------------------------------------------------------- 1
         repo = build_repo(tmp + "/a", {"0100_seed.sql": seeding},
                           {"carried": {}, "excluded": {}})
@@ -140,6 +158,67 @@ def main():
         found = module.check(repo, artifact([]))
         case("negative control: a PENDING seeding migration is not a finding "
              "(it still replays, so a rebuild loses nothing)", found == [])
+
+        pending_excluded = build_repo(
+            tmp + "/pending-excluded",
+            {"0100_seed.sql": seeding},
+            {"carried": {}, "excluded": {"ops.widget": "future runtime evidence"}},
+        )
+        case(
+            "excluded permits a decision before its seeding migration is applied",
+            module.check(pending_excluded, artifact([])) == [],
+        )
+
+        repo = build_repo(
+            tmp + "/pending-carried",
+            {"0100_seed.sql": seeding},
+            {
+                "carried": {},
+                "carried_after_apply": {"ops.widget": "bounded future config"},
+                "excluded": {},
+            },
+        )
+        case(
+            "carried_after_apply permits absence only while its seed migration is pending",
+            module.check(repo, artifact([])) == [],
+        )
+        case(
+            "carried_after_apply refuses data before the migration ledger entry",
+            any(
+                "PRESENT BEFORE ITS LEDGER ENTRY" in finding
+                for finding in module.check(repo, artifact([], [copy_block("ops.widget")]))
+            ),
+        )
+        case(
+            "carried_after_apply requires rows immediately after ledger application",
+            any(
+                "CARRIED AFTER APPLY BUT ABSENT" in finding
+                for finding in module.check(repo, artifact(["0100_seed.sql"]))
+            ),
+        )
+        case(
+            "carried_after_apply passes after the applied seed and bounded rows agree",
+            module.check(
+                repo,
+                artifact(["0100_seed.sql"], [copy_block("ops.widget")]),
+            ) == [],
+        )
+        stale_pending = build_repo(
+            tmp + "/pending-stale",
+            {"0100_runtime.sql": runtime_only},
+            {
+                "carried": {},
+                "carried_after_apply": {"ops.widget": "stale declaration"},
+                "excluded": {},
+            },
+        )
+        case(
+            "carried_after_apply refuses a declaration with no applied or pending seed",
+            any(
+                "HAS NO SOURCE SEED" in finding
+                for finding in module.check(stale_pending, artifact([]))
+            ),
+        )
 
         # ---------------------------------------------------------------- 3
         repo = build_repo(tmp + "/b", {"0100_seed.sql": seeding},
@@ -1030,6 +1109,20 @@ def main():
             case("a table in two buckets is rejected whichever pair it is", False)
         except ValueError:
             case("a table in two buckets is rejected whichever pair it is", True)
+        repo = build_repo(
+            tmp + "/j-after-apply",
+            {"0100_seed.sql": seeding},
+            {
+                "carried": {"ops.widget": "already carried"},
+                "carried_after_apply": {"ops.widget": "future carried"},
+                "excluded": {},
+            },
+        )
+        try:
+            module.check(repo, artifact(["0100_seed.sql"], [copy_block("ops.widget")]))
+            case("carried_after_apply cannot overlap another classification bucket", False)
+        except ValueError:
+            case("carried_after_apply cannot overlap another classification bucket", True)
 
     # -------------------------------------------------------------------- 9b
     # Carried-presence must be a ROW test, not a NAME test. pg_dump --data-only
@@ -1208,6 +1301,11 @@ def main():
     case("every live classification entry states a reason",
          all(str(v).strip() for v in
              list(carried.values()) + list(subset.values()) + list(excluded.values())))
+    case("source-merge plan scope is operational authority history, never snapshot seed",
+         "ops.source_merge_plan_scope" in excluded
+         and "accepted-plan" in excluded["ops.source_merge_plan_scope"]
+         and "ops.source_merge_plan_scope" not in carried
+         and "ops.source_merge_plan_scope" not in subset)
 
     if FAILURES:
         print(f"\nFAILED {len(FAILURES)}: {'; '.join(FAILURES)}")

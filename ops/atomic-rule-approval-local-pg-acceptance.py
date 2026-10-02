@@ -20,6 +20,24 @@ def refuse(message: str) -> NoReturn:
     raise RuntimeError(message)
 
 
+def install_pre_trigger_rule_shape(cur, statement: str, params: tuple) -> None:
+    """Reconstruct a pre-admission-trigger rule without owner DDL.
+
+    The local superuser uses a savepoint-scoped replication role so synthetic
+    historical rows do not create deferred events or conflict with pending
+    events from the real lifecycle probes around them.
+    """
+    cur.execute("savepoint pre_trigger_rule_shape")
+    try:
+        cur.execute("set local session_replication_role=replica")
+        cur.execute(statement, params)
+        cur.execute("set local session_replication_role=origin")
+    except psycopg.Error:
+        cur.execute("rollback to savepoint pre_trigger_rule_shape")
+        raise
+    cur.execute("release savepoint pre_trigger_rule_shape")
+
+
 def main() -> int:
     dsn = os.environ.get("CARR_LOCAL_PG_DSN", "").strip()
     parsed = urlparse(dsn)
@@ -91,6 +109,21 @@ def main() -> int:
                                'transactional_schema',true,now())""",
                     (control_key,),
                 )
+                # The SIEP-12 epoch snapshot is intentionally fail-closed when
+                # an active rule has no delivery layer. This fixture installs a
+                # real transactional control below, so declare that exact
+                # control-layer delivery before activation; otherwise the
+                # acceptance itself creates an untagged rule and can no longer
+                # settle its deferred epoch triggers.
+                cur.execute(
+                    """insert into ops.rule_load_layer
+                         (rule_id,short_id,load_layer,packs,scope,why,source,map_digest)
+                       values (%s,left(%s::text,8),'control','{}'::text[],'shared',
+                               'local atomic acceptance transactional control',
+                               'ops/atomic-rule-approval-local-pg-acceptance.py',
+                               repeat('0',64))""",
+                    (rule_id, rule_id),
+                )
                 cur.execute(
                     """insert into ops.rule_control_binding
                          (rule_id,control_key,statement_hash,binding_contract)
@@ -132,6 +165,54 @@ def main() -> int:
                 if finite_applicable is None or finite_applicable[0] != 1:
                     refuse("global approved rule did not apply to a finite context")
 
+                # ---- the REAL eval_receipt control (migration 0753) ----
+                # Rule 6cbaa63a names 'eval_receipt CI check' as its carrying
+                # control. Unlike the fixtures above, this does NOT insert a
+                # catalog row: it proves the row the migration set seeded is
+                # one approve-rule accepts, binding it from the catalog with no
+                # pre-written ops.rule_control_binding. Savepoint-scoped so the
+                # extra active rule leaves no deferred epoch work behind.
+                cur.execute("reset session authorization")
+                cur.execute("savepoint eval_receipt_control")
+                eval_rule_id = uuid.uuid4()
+                cur.execute(
+                    """insert into rule(id,statement,human_quote,taught_by,status)
+                       values (%s,'local eval-receipt control fixture',
+                               'Joe approved the eval receipt fixture',%s,'proposed')""",
+                    (eval_rule_id, actor[0]),
+                )
+                cur.execute(
+                    """insert into ops.rule_load_layer
+                         (rule_id,short_id,load_layer,packs,scope,why,source,map_digest)
+                       values (%s,left(%s::text,8),'control','{}'::text[],'shared',
+                               'local eval_receipt control acceptance',
+                               'ops/atomic-rule-approval-local-pg-acceptance.py',
+                               repeat('0',64))""",
+                    (eval_rule_id, eval_rule_id),
+                )
+                cur.execute("set session authorization carr_authority_joe")
+                cur.execute(
+                    "select ops.approve_rule(%s,'machine_enforceable',array['eval_receipt'],%s,%s)",
+                    (eval_rule_id, f"local-eval-receipt-{uuid.uuid4()}",
+                     "Joe local eval_receipt control acceptance"),
+                )
+                eval_approved = cur.fetchone()
+                if eval_approved is None or eval_approved[0].get("policy_status") != "active":
+                    refuse("approve-rule did not accept the seeded eval_receipt control")
+                cur.execute("reset session authorization")
+                cur.execute(
+                    """select binding_contract->>'implementation_ref'
+                         from ops.rule_control_binding
+                        where rule_id=%s and control_key='eval_receipt'""",
+                    (eval_rule_id,),
+                )
+                eval_binding = cur.fetchone()
+                if eval_binding is None or "ops/check-eval-receipt.py" not in (eval_binding[0] or ""):
+                    refuse("eval_receipt binding does not name ops/check-eval-receipt.py")
+                cur.execute("rollback to savepoint eval_receipt_control")
+                cur.execute("release savepoint eval_receipt_control")
+                cur.execute("set session authorization carr_authority_joe")
+
                 # ---- versioned amendment (WR-000019 slice S10) ----
                 # A SEPARATE rule/control fixture, deliberately never retired in
                 # this script: ops.retire_rule's own approval-receipt lookup
@@ -142,6 +223,7 @@ def main() -> int:
                 # above would conflate two different questions in one fixture.
                 amend_rule_id = uuid.uuid4()
                 amend_control_key = f"local-amend-acceptance-{uuid.uuid4()}"
+                amend_pack = f"local-amend-pack-{uuid.uuid4()}"
                 amend_approve_key = f"local-amend-approve-{uuid.uuid4()}"
                 amend_key = f"local-amend-{uuid.uuid4()}"
                 original_statement = "local exact amendment fixture, before wording fix"
@@ -163,6 +245,31 @@ def main() -> int:
                        values (%s,'local-pg-acceptance','ops/atomic-rule-approval-local-pg-acceptance.py',
                                'transactional_schema',true,now())""",
                     (amend_control_key,),
+                )
+                # This second fixture intentionally remains active after the
+                # first rule is retired. Make it a real pack-backed rule so
+                # SIEP-12 can settle the final deferred policy epoch with one
+                # non-empty pack and no untagged/orphaned delivery rows. The
+                # acceptance therefore proves retirement cleanup without
+                # weakening the live snapshot invariant or manufacturing a
+                # separate rule solely to satisfy the health check.
+                cur.execute(
+                    """insert into ops.rule_pack
+                         (pack,title,description,triggers,source)
+                       values (%s,'Local amendment acceptance',
+                               'Rollback-only active anchor for atomic lifecycle acceptance',
+                               array['local-amendment-acceptance'],
+                               'ops/atomic-rule-approval-local-pg-acceptance.py')""",
+                    (amend_pack,),
+                )
+                cur.execute(
+                    """insert into ops.rule_load_layer
+                         (rule_id,short_id,load_layer,packs,scope,why,source,map_digest)
+                       values (%s,left(%s::text,8),'pack',array[%s],'shared',
+                               'local amendment acceptance remains active after retirement test',
+                               'ops/atomic-rule-approval-local-pg-acceptance.py',
+                               repeat('0',64))""",
+                    (amend_rule_id, amend_rule_id, amend_pack),
                 )
                 cur.execute(
                     """insert into ops.rule_control_binding
@@ -402,25 +509,28 @@ def main() -> int:
                 # A local superuser can bypass row triggers; deliberately do so
                 # only inside this rollback-only acceptance to prove replay is
                 # not fooled by a corrupted tombstone it did not create.
+                # Settle pending deferred events before owner-only DDL, then
+                # restore deferred mode before the legacy-shape fixtures below.
+                cur.execute("set constraints all immediate")
                 cur.execute("savepoint altered_retirement_replay")
-                cur.execute("alter table rule disable trigger rule_activation_requires_admission")
                 try:
+                    cur.execute("alter table rule disable trigger rule_activation_requires_admission")
                     cur.execute("update rule set statement=statement||' altered' where id=%s", (rule_id,))
-                finally:
                     cur.execute("alter table rule enable trigger rule_activation_requires_admission")
-                cur.execute("set session authorization carr_authority_joe")
-                try:
+                    cur.execute("set session authorization carr_authority_joe")
                     cur.execute(
                         "select ops.retire_rule(%s,%s,null,%s)",
                         (rule_id, "Joe local authority retirement", retire_key),
                     )
-                    refuse("altered retirement replay was accepted")
                 except psycopg.Error as exc:
                     cur.execute("rollback to savepoint altered_retirement_replay")
+                    cur.execute("reset session authorization")
                     if "current retired rule no longer matches the immutable retirement" not in str(exc).lower():
                         refuse(f"altered retirement replay refused for the wrong reason: {exc}")
-                finally:
+                else:
+                    cur.execute("rollback to savepoint altered_retirement_replay")
                     cur.execute("reset session authorization")
+                    refuse("altered retirement replay was accepted")
                 cur.execute("release savepoint altered_retirement_replay")
                 cur.execute(
                     """select r.status='retired' and r.retired_by=rr.actor_id
@@ -434,6 +544,7 @@ def main() -> int:
                 retirement_binding = cur.fetchone()
                 if retirement_binding is None or retirement_binding[0] is not True:
                     refuse("retirement receipt is not exactly bound to the retired tombstone")
+                cur.execute("set constraints all deferred")
 
                 # A receipted retirement's row must NEVER read as legacy --
                 # migration 0351 must not have relaxed anything for a rule
@@ -501,16 +612,12 @@ def main() -> int:
                                'Joe taught this before receipts existed',%s,'proposed')""",
                     (legacy_retire_id, actor[0]),
                 )
-                cur.execute("alter table rule disable trigger rule_activation_requires_admission")
-                try:
-                    cur.execute(
-                        """update rule set status='active', activated_by=%s,
-                               activated_at='2020-01-01T00:00:00+00'
-                           where id=%s""",
-                        (actor[0], legacy_retire_id),
-                    )
-                finally:
-                    cur.execute("alter table rule enable trigger rule_activation_requires_admission")
+                install_pre_trigger_rule_shape(
+                    cur,
+                    """update rule set status='active', activated_by=%s,
+                           activated_at='2020-01-01T00:00:00+00' where id=%s""",
+                    (actor[0], legacy_retire_id),
+                )
                 cur.execute(
                     "select count(*) from ops.rule_approval_receipt where rule_id=%s",
                     (legacy_retire_id,),
@@ -584,14 +691,11 @@ def main() -> int:
                                'this one should still be refused',%s,'proposed')""",
                     (broken_rule_id, actor[0]),
                 )
-                cur.execute("alter table rule disable trigger rule_activation_requires_admission")
-                try:
-                    cur.execute(
-                        "update rule set status='active', activated_by=%s, activated_at=now() where id=%s",
-                        (actor[0], broken_rule_id),
-                    )
-                finally:
-                    cur.execute("alter table rule enable trigger rule_activation_requires_admission")
+                install_pre_trigger_rule_shape(
+                    cur,
+                    "update rule set status='active', activated_by=%s, activated_at=now() where id=%s",
+                    (actor[0], broken_rule_id),
+                )
                 cur.execute("set session authorization carr_authority_joe")
                 cur.execute("savepoint non_legacy_receiptless_still_refused")
                 try:
@@ -640,16 +744,12 @@ def main() -> int:
                        values (%s,%s,'Joe taught this before receipts existed',%s,'proposed')""",
                     (legacy_amend_id, legacy_original_statement, actor[0]),
                 )
-                cur.execute("alter table rule disable trigger rule_activation_requires_admission")
-                try:
-                    cur.execute(
-                        """update rule set status='active', activated_by=%s,
-                               activated_at='2020-01-01T00:00:00+00'
-                           where id=%s""",
-                        (actor[0], legacy_amend_id),
-                    )
-                finally:
-                    cur.execute("alter table rule enable trigger rule_activation_requires_admission")
+                install_pre_trigger_rule_shape(
+                    cur,
+                    """update rule set status='active', activated_by=%s,
+                           activated_at='2020-01-01T00:00:00+00' where id=%s""",
+                    (actor[0], legacy_amend_id),
+                )
 
                 cur.execute(
                     "select count(*) from ops.applicable_rules(null,null,null) where rule_id=%s",

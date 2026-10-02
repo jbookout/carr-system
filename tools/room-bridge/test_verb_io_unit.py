@@ -23,7 +23,8 @@ profile = os.environ.get('CARR_MCP_CLIENT_PROFILE')
 actor = 'hermes-pilot' if profile == 'hermes-projector' else 'joe-local'
 print(json.dumps({'ok': True, 'room': 'partner-line', 'sponsor': 'joe',
   'seat': 'hermes', 'kind': 'receipt', 'origin_channel': 'mcp',
-  'origin_actor': actor, 'msg_id': args['msg_id'], 'seq': 9}))
+  'origin_actor': actor, 'msg_id': args['msg_id'],
+  'idempotency_key': args['idempotency_key'], 'seq': 9}))
 """, encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
     return path
@@ -44,6 +45,16 @@ def test_normal_room_turn_stays_joe_local() -> None:
                                     msg_id="aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
                                     call_verb_path=path)
     assert out["origin_actor"] == "joe-local"
+
+
+def test_room_turn_accepts_stable_callback_idempotency() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path = fake_client(Path(directory))
+        out = verb_io.add_room_turn(
+            "{}", "claude", msg_id="aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            idempotency_key="queue-completion:t_queue0001", call_verb_path=path,
+        )
+    assert out["idempotency_key"] == "queue-completion:t_queue0001"
 
 
 def test_projector_rejects_reader_incompatible_append_response() -> None:

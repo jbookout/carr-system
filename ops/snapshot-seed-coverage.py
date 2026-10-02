@@ -12,9 +12,13 @@ was then patched one table at a time, by hand, in bin/schema-snapshot.sh.
 
 WHAT THIS CHECKS, and it is deliberately narrow: every table that an ALREADY
 APPLIED migration writes rows into AT MIGRATION TIME must be CLASSIFIED in
-ops/config/snapshot-seed-coverage.json -- carried, carried_subset, or explicitly
-excluded with a reason. A table that is none of those is the next instance, and
-the snapshot refuses to be written until someone classifies it.
+ops/config/snapshot-seed-coverage.json -- carried, carried_after_apply,
+carried_subset, or explicitly excluded with a reason. carried_after_apply is
+the two-phase source state: absence is allowed only while a repository migration
+that seeds the table remains outside the artifact ledger; once it enters the
+ledger, the same row-presence requirement as carried applies. A table that is
+none of those is the next instance, and the snapshot refuses to be written until
+someone classifies it.
 
 WHAT "AT MIGRATION TIME" MEANS, and the first version of this file got it wrong.
 It is NOT "appears in an INSERT statement in the file". An independent review of
@@ -59,6 +63,30 @@ import re
 import sys
 
 DOLLAR = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*|)\$")
+
+# THE OTHER HOT SPOT, alongside EXECUTE_ARGUMENT: scan_sql's main loop advanced
+# one character at a time even through long runs of perfectly ordinary text
+# (identifiers, keywords, whitespace -- the bulk of any SQL file), each such
+# character taking its own trip through append_top and the pending-chunk
+# bookkeeping. Profiling PR #1297's db/schema.sql (24MB, no unusually long
+# comments or literals) showed exactly that: tens of millions of one-character
+# append_top calls.
+#
+# ORDINARY_RUN finds the next position that could possibly start a construct
+# the scan needs to treat specially: a string literal ("'"), a dollar-quote or
+# dollar-quoted string ("$"), a line comment ("--") or a block comment ("/*").
+# Whenever the current position is none of those (the `else` branch below),
+# every character up to that next position is going to be appended verbatim
+# exactly as scan_sql already does one at a time -- so it is appended in one
+# slice instead. This changes nothing about which characters take which
+# branch, only how many Python-level steps it costs to get there: a run of
+# 10,000 ordinary characters becomes one slice-and-append instead of 10,000.
+#
+# A lone "-" or "/" that fails its own branch's more specific test (not part of
+# "--" or "/*") already falls into this same `else` branch today and is
+# appended as ordinary text, so folding it into a bulk slice changes nothing
+# about its handling either.
+ORDINARY_RUN = re.compile(r"'|\$|--|/\*")
 TABLE = r"(\"?[a-z_][a-z0-9_]*\"?(?:\s*\.\s*\"?[a-z_][a-z0-9_]*\"?)?)"
 LEDGER_COPY = re.compile(r"^COPY\s+public\.schema_migrations\s*\(", re.M)
 COPY_BLOCK = re.compile(r"^COPY\s+" + TABLE + r"\s*(?:\([^)]*\)\s*)?FROM\s+stdin\s*;", re.I | re.M)
@@ -78,6 +106,34 @@ COPY_BLOCK = re.compile(r"^COPY\s+" + TABLE + r"\s*(?:\([^)]*\)\s*)?FROM\s+stdin
 # format string is read exactly like any other.
 EXECUTE_ARGUMENT = re.compile(
     r"(?:^|[^A-Za-z0-9_])execute\s*(?:format\s*\(\s*)?$", re.I)
+
+# CHEAP PREFILTER FOR EXECUTE_ARGUMENT. This check runs on every string literal
+# and every dollar-quote in the file -- 100k+ times on a schema snapshot the
+# size PR #1297 committed -- and EXECUTE_ARGUMENT's anchored alternation
+# `(?:^|[^A-Za-z0-9_])...$` gives Python's re engine no fixed literal prefix to
+# fast-scan for, so it retries the match at every position of the up-to-4096-
+# character tail. Profiling against #1297's db/schema.sql showed this single
+# regex accounting for the majority of scan_sql's time.
+#
+# EXECUTE_ARGUMENT can only ever match a string that contains the substring
+# "execute" (case-insensitively) -- that is a necessary, not sufficient,
+# condition, by construction of the pattern. So a plain literal search for
+# "execute" is a correctness-preserving filter: when it finds nothing,
+# EXECUTE_ARGUMENT is guaranteed to find nothing either, and the expensive
+# pattern is skipped. A literal-only pattern (no anchors, no alternation) IS
+# something Python's re engine can fast-scan, so this prefilter itself is
+# several times cheaper per call than EXECUTE_ARGUMENT, and it almost always
+# is the only one that runs: real migrations use EXECUTE rarely (a dozen or so
+# in this repository's whole history), so the expensive pattern now runs only
+# on that small minority of tails instead of on every literal in the file.
+EXECUTE_LITERAL = re.compile(r"execute", re.I)
+
+
+def _is_execute_argument(text):
+    """bool(EXECUTE_ARGUMENT.search(text)), same result, cheaper on the common
+    case where "execute" does not appear at all -- see EXECUTE_LITERAL above."""
+    return bool(EXECUTE_LITERAL.search(text) and EXECUTE_ARGUMENT.search(text))
+
 
 CREATE_ROUTINE = re.compile(
     r"create\s+(?:or\s+replace\s+)?(?:function|procedure)\s+"
@@ -297,13 +353,84 @@ def scan_sql(sql):
     Returns (top_level_text, do_bodies, routines) with routines keyed by name.
     """
     top, do_bodies, routines = [], [], {}
+    # Keep the output as bounded chunks while scanning. The backward-looking
+    # checks need only the tail, but appending one character per iteration made
+    # every tail request walk thousands of list entries. Flushing before a tail
+    # request preserves the exact accumulated text while making that walk span
+    # chunks instead of characters.
+    pending_top, pending_size = [], 0
+
+    # DISTANCE SINCE THE LAST "execute", tracked incrementally instead of
+    # re-discovered by re-scanning a fresh HEAD_TAIL-sized window on every
+    # single literal and dollar-quote. That per-occurrence re-scan was the
+    # actual hot spot profiling found on PR #1297's larger db/schema.sql:
+    # quotes sit roughly a hundred characters apart in real SQL, so
+    # consecutive HEAD_TAIL=4096-character windows overlap by well over 95%,
+    # and EXECUTE_ARGUMENT's search was redoing that overlapping work from
+    # scratch each time.
+    #
+    # "execute" is rare -- a dozen or so migrations in this repository's whole
+    # history -- so tracking "how far back was the last one" turns almost
+    # every check into an integer comparison instead of a regex search: only
+    # a literal or dollar-quote that lands within HEAD_TAIL characters AFTER
+    # a real "execute" ever needs the full tail(HEAD_TAIL) + pattern check.
+    # That fallback path is unchanged and still exact -- this only decides
+    # WHETHER to take it, never changes what it returns.
+    #
+    # chars_since_execute is measured from the end of the accumulated buffer
+    # back to the END of the most recent "execute" match, in the same
+    # coordinates tail() reads in: each fresh scan_sql call (top level or a
+    # nested routine/DO body via _scanned) starts its own `top` from empty,
+    # so a fresh, "nothing seen yet" start here matches a fresh, empty buffer
+    # there -- neither can see past its own call's start.
+    chars_since_execute = HEAD_TAIL + 1
+    execute_carry = ""
+
+    def append_top(value):
+        nonlocal pending_size, chars_since_execute, execute_carry
+        if value:
+            pending_top.append(value)
+            pending_size += len(value)
+            # Only the last few characters of what came before `value` can
+            # combine with it to spell "execute" across the join; 6 is one
+            # short of len("execute"), which is exactly enough to complete a
+            # split match together with at least one character of `value`.
+            combined = execute_carry + value
+            found = combined.lower().rfind("execute")
+            if found == -1:
+                chars_since_execute += len(value)
+            else:
+                chars_since_execute = len(combined) - (found + len("execute"))
+            execute_carry = combined[-6:]
+            if pending_size >= 4096:
+                top.append("".join(pending_top))
+                pending_top.clear()
+                pending_size = 0
+
+    def maybe_execute_argument(text):
+        """_is_execute_argument(text), skipped entirely when chars_since_execute
+        already proves no "execute" can be in the window text represents."""
+        if chars_since_execute > HEAD_TAIL:
+            return False
+        return _is_execute_argument(text)
+
+    def flush_top():
+        nonlocal pending_size
+        if pending_top:
+            top.append("".join(pending_top))
+            pending_top.clear()
+            pending_size = 0
+
+    def tail(count):
+        flush_top()
+        return _tail(top, count)
     i, n = 0, len(sql)
     while i < n:
         ch = sql[i]
         if ch == "-" and sql.startswith("--", i):                 # line comment
             end = sql.find("\n", i)
             i = n if end == -1 else end
-            top.append(" ")
+            append_top(" ")
         elif ch == "/" and sql.startswith("/*", i):               # block comment, nestable
             depth, i = 1, i + 2
             while i < n and depth:
@@ -313,7 +440,7 @@ def scan_sql(sql):
                     depth, i = depth - 1, i + 2
                 else:
                     i += 1
-            top.append(" ")
+            append_top(" ")
         elif ch == "'":                                           # string literal
             # E'...' takes BACKSLASH escapes; a plain literal does not (server
             # default standard_conforming_strings). Knowing only the '' form let
@@ -321,11 +448,12 @@ def scan_sql(sql):
             # the rest of the migration was read inside-out and a plainly top-level
             # INSERT went unreported. That is the apostrophe class of R4 one escape
             # form over, and it swallowed real DML rather than only a call.
-            escaped = bool(re.search(r"(?:^|[^A-Za-z0-9_])[Ee]$", _tail(top, 4)))
+            escaped = bool(re.search(r"(?:^|[^A-Za-z0-9_])[Ee]$", tail(4)))
             # IS THIS LITERAL AN ARGUMENT TO EXECUTE? If so its text is not inert
             # -- it is SQL that runs. Decided BEFORE the literal is consumed,
             # because `top` still ends at the character before the quote here.
-            dynamic = bool(EXECUTE_ARGUMENT.search(_tail_significant(top, HEAD_TAIL)))
+            flush_top()
+            dynamic = _is_execute_argument(_tail_significant(top, HEAD_TAIL))
             opened = i
             i += 1
             while i < n:
@@ -343,21 +471,22 @@ def scan_sql(sql):
                 # The literal's own doubled quotes are how a quote is spelled
                 # inside it; undo that before reading the text as SQL.
                 inner = sql[opened + 1:i - 1].replace("''", "'")
-                top.append(" " + _scanned(inner) + " ")
+                append_top(" " + _scanned(inner) + " ")
             else:
-                top.append(" ")
+                append_top(" ")
         elif ch == "$":
             match = DOLLAR.match(sql, i)
             if not match:
-                top.append(ch)
+                append_top(ch)
                 i += 1
                 continue
             tag = match.group(0)
             end = sql.find(tag, match.end())
             if end == -1:                                         # unterminated: keep verbatim
-                top.append(sql[i:])
+                append_top(sql[i:])
                 break
             body = sql[match.end():end]
+            flush_top()
             head = _tail_significant(top, HEAD_TAIL)
             previous = re.search(r"([A-Za-z_]+)\s*$", head)
             keyword = previous.group(1).lower() if previous else ""
@@ -369,24 +498,27 @@ def scan_sql(sql):
             # `execute $$ ... $$` is the same statement as `execute '...'`, with the
             # other spelling of a string. Handled here rather than by widening the
             # literal branch, because a dollar-quote is consumed by this branch.
-            if keyword == "execute" or EXECUTE_ARGUMENT.search(head):
-                top.append(" " + _scanned(body) + " ")
+            if keyword == "execute" or _is_execute_argument(head):
+                append_top(" " + _scanned(body) + " ")
                 i = end + len(tag)
                 continue
             if keyword == "as":
-                headers = list(CREATE_ROUTINE.finditer(_tail(top, ROUTINE_TAIL)))
+                headers = list(CREATE_ROUTINE.finditer(tail(ROUTINE_TAIL)))
                 if headers:
                     routines.setdefault(normalise(headers[-1].group(1)), []).append(_scanned(body))
                 else:
-                    top.append(" " + _scanned(body) + " ")
+                    append_top(" " + _scanned(body) + " ")
             elif keyword == "do":
                 do_bodies.append(_scanned(body))
             else:
-                top.append(" ")                                   # dollar-quoted string literal
+                append_top(" ")                                   # dollar-quoted string literal
             i = end + len(tag)
         else:
-            top.append(ch)
-            i += 1
+            match = ORDINARY_RUN.search(sql, i)
+            end = match.start() if match else n
+            append_top(sql[i:end])
+            i = end
+    flush_top()
     return "".join(top), do_bodies, routines
 
 
@@ -632,10 +764,16 @@ def load_classification(repo):
     with open(path, encoding="utf-8") as handle:
         doc = json.load(handle)
     carried = dict(doc.get("carried") or {})
+    after_apply = dict(doc.get("carried_after_apply") or {})
     subset = dict(doc.get("carried_subset") or {})
     excluded = dict(doc.get("excluded") or {})
     forbidden = dict(doc.get("carried_subset_must_not_contain") or {})
-    buckets = (("carried", carried), ("carried_subset", subset), ("excluded", excluded))
+    buckets = (
+        ("carried", carried),
+        ("carried_after_apply", after_apply),
+        ("carried_subset", subset),
+        ("excluded", excluded),
+    )
     for index, (name_a, bucket_a) in enumerate(buckets):
         for name_b, bucket_b in buckets[index + 1:]:
             both = sorted(set(bucket_a) & set(bucket_b))
@@ -645,15 +783,21 @@ def load_classification(repo):
     if stray:
         raise ValueError("carried_subset_must_not_contain names a table that is not "
                          "carried_subset: " + ", ".join(stray))
-    return carried, subset, excluded, forbidden, path
+    return carried, after_apply, subset, excluded, forbidden, path
 
 
 def check(repo, artifact_text):
     """Return a list of human-readable failures; empty means the snapshot is sound."""
-    carried, subset, excluded, forbidden, config_path = load_classification(repo)
+    carried, after_apply, subset, excluded, forbidden, config_path = load_classification(repo)
     rel_config = os.path.relpath(config_path, repo)
     applied = applied_migrations(artifact_text)
     seeds, missing = seeded_tables(repo, applied)
+    migration_dir = os.path.join(repo, "migrations")
+    pending = {
+        name for name in os.listdir(migration_dir)
+        if name.endswith(".sql") and name not in applied
+    }
+    pending_seeds, _pending_missing = seeded_tables(repo, pending)
     present, carrying_rows = tables_with_data(artifact_text)
     failures = []
 
@@ -676,7 +820,10 @@ def check(repo, artifact_text):
             f"    It is applied, so a rebuild will not replay it, and its file is gone — so\n"
             f"    whatever it seeded cannot be checked. Restore the file or record the rename.")
 
-    for table in sorted(t for t in seeds if t not in carried and t not in subset and t not in excluded):
+    for table in sorted(
+        t for t in seeds
+        if t not in carried and t not in after_apply and t not in subset and t not in excluded
+    ):
         failures.append(
             f"UNCLASSIFIED SEEDED TABLE: {table}\n"
             f"    written at migration time by: {', '.join(seeds[table])}\n"
@@ -688,6 +835,12 @@ def check(repo, artifact_text):
 
     classified = set(carried) | set(subset) | set(excluded)
     for table in sorted(classified - set(seeds)):
+        # An exclusion is safe to decide before its source-only migration is
+        # absorbed: the pending migration still replays, and the artifact must
+        # remain empty for that runtime/business table. Keep refusing truly
+        # stale exclusions that have neither an applied nor pending seed.
+        if table in excluded and table in pending_seeds:
+            continue
         failures.append(
             f"CLASSIFICATION ENTRY NO LONGER APPLIES: {table}\n"
             f"    {rel_config} classifies this table, and no applied migration writes rows\n"
@@ -705,6 +858,28 @@ def check(repo, artifact_text):
                 f"    rebuild from this file would come up short. This check reads the ARTIFACT\n"
                 f"    and never the database, so it cannot tell you whether production still\n"
                 f"    holds the rows — do not read it as saying they are gone.")
+
+    for table in sorted(after_apply):
+        if table in seeds:
+            if table not in carrying_rows:
+                failures.append(
+                    f"""DECLARED CARRIED AFTER APPLY BUT ABSENT: {table}
+    An applied migration now seeds this table, so its two-phase allowance
+    is over and the artifact must carry rows for it.
+    Reason on file: {after_apply[table]}
+    Fix the bounded emit block in bin/schema-snapshot.sh; do not weaken
+    the classification or hand-edit the artifact.""")
+        elif table in pending_seeds:
+            if table in present:
+                failures.append(
+                    f"""CARRIED-AFTER-APPLY TABLE PRESENT BEFORE ITS LEDGER ENTRY: {table}
+    The artifact carries data for a table whose seeding migration is still
+    pending. Remove the premature data; source order must stay ledger-first.""")
+        else:
+            failures.append(
+                f"""CARRIED-AFTER-APPLY ENTRY HAS NO SOURCE SEED: {table}
+    No applied or pending migration seeds this table at migration time.
+    Remove the stale classification or restore the migration that justifies it.""")
 
     for table in sorted(excluded):
         if table in present:

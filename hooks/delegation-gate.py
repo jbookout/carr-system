@@ -59,6 +59,13 @@ import sys
 import tempfile
 
 
+# WHICH COPY RUNS (2026-09-27, ops/config/delegation-gate-hook.json): the
+# canonical ~/carr-system copy whenever that checkout exists, so on a Mac no
+# worktree or branch can swap in its own gate. In a Claude Code cloud
+# container, which has no canonical checkout, the settings command runs the
+# copy under $CLAUDE_PROJECT_DIR instead. That is safe because this gate only
+# observes: its latch and telemetry need nothing but repository files and a
+# writable out/ beside them, and every path already fails open.
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from stop_latch import announce  # noqa: E402
@@ -634,7 +641,44 @@ def stop_summary_message(row: dict) -> str:
     )
 
 
+def command_precheck(payload: dict) -> None:
+    """Warn, before a shell command runs, when a fact on disk says it will fail.
+
+    A SECOND CONCERN IN THIS FILE, DELIBERATELY AND CHEAPLY. The natural home is
+    a hook of its own, but a file under hooks/ with a shebang is a new sealed
+    ingress and admitting one costs a mutation-registry successor: a generated
+    registry, a production migration, a fixture rebuilt from origin/main, and a
+    disposable PostgreSQL round trip for the catalog digest. This gate already
+    runs PreToolUse on every Bash call, already never denies, and already fails
+    open, so hosting the dispatch here costs a re-digest of one row instead.
+    Every decision lives in ops/command_precheck.py where it is tested; this is
+    eleven lines of plumbing. If someone later wants the separation, lifting it
+    out is a successor and a deletion, not a rewrite.
+
+    IT CANNOT AFFECT THIS GATE. It runs before the delegation logic, catches
+    everything, and returns None on any failure — no credential, no service, bad
+    payload, missing library. The delegation path below is untouched either way.
+    """
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "command_precheck",
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         "ops", "command_precheck.py"))
+        if spec is None or spec.loader is None:
+            return
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        note = module.advisory(payload)
+        if note:
+            print(json.dumps({"hookSpecificOutput": {
+                "hookEventName": "PreToolUse", "additionalContext": note}}))
+    except Exception:
+        return
+
+
 def handle_pretooluse(payload: dict) -> int:
+    command_precheck(payload)
     if is_subagent_env():
         return 0
 

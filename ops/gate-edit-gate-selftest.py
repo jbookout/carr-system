@@ -116,6 +116,43 @@ BASH_CASES = [
     ("sh-selftest-write", f'echo x >> {REPO}/ops/gate-edit-gate-selftest.py', ALLOW),
     ("sh-ordinary",       f'echo x >> {REPO}/README.md', ALLOW),
 
+    # ── the INTERPRETER shapes (loop #484, 2026-08-21) ───────────────────────
+    # A session edited hooks/guard-unattended.py with `python3 - <<'PY' …
+    # open(path,"w").write(…) PY` and the write landed SILENTLY. The door's
+    # inline-python clause required the gate path to appear as a LITERAL inside
+    # the open() call, so a path held in a variable — the natural way to write a
+    # heredoc — walked straight past it, as did every interpreter that is not
+    # python. These five are the regression test for that finding: the path is
+    # named anywhere in the command, the write is named anywhere in the command,
+    # and that pairing is what must announce.
+    ("sh-py-heredoc-var",
+     f'python3 - <<\'PY\'\npath = "{REPO}/hooks/gate-integrity.py"\n'
+     'open(path, "w").write("x")\nPY', ANNOUNCE),
+    ("sh-py-c-var",
+     f'python3 -c \'p = "{REPO}/hooks/lint-gate.py"; open(p, "w").write(1)\'',
+     ANNOUNCE),
+    ("sh-py-pathlib",
+     f'python3 -c "from pathlib import Path; '
+     f'Path(\'{REPO}/hooks/escalation-gate.py\').write_text(\'x\')"', ANNOUNCE),
+    ("sh-node-write",
+     f'node -e \'require("fs").writeFileSync("{REPO}/hooks/lint-gate.py", "x")\'',
+     ANNOUNCE),
+    ("sh-perl-inplace",
+     f'perl -pi -e "s/a/b/" {REPO}/hooks/rule-shape-gate.py', ANNOUNCE),
+    ("sh-ruby-write",
+     f'ruby -e \'File.write("{REPO}/hooks/ledger-sweep.py", "x")\'', ANNOUNCE),
+
+    # …and the reads through the same interpreters stay silent. A door that
+    # fires on `python3 -c "print(open(gate).read())"` is a door people route
+    # around, which is the failure this whole file exists to avoid.
+    ("sh-py-read-inline",
+     f'python3 -c "print(open(\'{REPO}/hooks/lint-gate.py\').read())"', ALLOW),
+    ("sh-py-run-a-gate",
+     f'python3 {REPO}/hooks/gate-integrity.py --bless lint-gate.py', ALLOW),
+    ("sh-py-heredoc-selftest",
+     f'python3 - <<\'PY\'\np = "{REPO}/ops/guard-selftest.py"\n'
+     'open(p, "w").write("x")\nPY', ALLOW),
+
     # a stronger rule must still win — this is destructive, not a gate tweak
     ("sh-destructive",    f'rm -rf {HOME}/Documents/carr-gate-selftest-target', DENY),
 ]
