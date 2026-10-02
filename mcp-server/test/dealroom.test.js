@@ -1310,3 +1310,16 @@ test("patch-deal-field without a quote stays an automation job", async () => {
   assert.equal(db.events[1].human_quote, null);
   assert.equal(db.events[1].agent_rationale, null);
 });
+
+
+test('direct phase control retains manual intent without composing a human quote', async () => {
+  const c = new FakeClient();
+  const result = await TOOLS['patch-deal-field'].handler(c, actors.joe, {
+    deal: ids.deal, field: 'phase', value: 'legal', base_event_id: null,
+    idempotency_key: 'demo-manual-phase', intent_origin: 'manual_ui',
+  });
+  assert.equal(result.ok, true);
+  const event = c.events.find(e => e.idempotency_key === 'demo-manual-phase');
+  assert.equal(event.new_value.intent_origin, 'manual_ui');
+  assert.equal(event.human_quote, null);
+});

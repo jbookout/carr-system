@@ -2239,7 +2239,7 @@ async function applyDealRoomField(c, actor, dealId, field, value, idempotencyKey
     // let a writer that waited for the lock sort behind the write it replaced.
     recorded_at_after_lock: true,
     old: { [field]: oldRow.rows[0].value },
-    new: { [field]: value },
+    new: { [field]: value, ...(provenance.intent_origin ? {intent_origin: provenance.intent_origin} : {}) },
     human_quote: provenance.human_quote || null,
     agent_rationale: provenance.change_reason || null,
     idempotency_key: idempotencyKey,
@@ -3125,7 +3125,10 @@ export const TOOLS = {
     write: false,
     description: "Open pipeline grouped by phase. Never exposes Salesforce commission/close-date placeholders (they are placeholders, not data).",
     inputSchema: { type: "object", properties: {} },
-    handler: async (c) => ({ deals: (await c.query("select * from v_deal_board where outcome is null order by phase_sort, name")).rows }),
+    handler: async (c) => ({ deals: (await c.query(`select b.*, d.operating_state, d.parking_note, to_jsonb(d.invoiced_on)#>>'{}' as invoiced_on
+      from v_deal_board b join deal d on d.id=b.id
+      where d.invoiced_on is null and (b.outcome is null or b.outcome='won')
+      order by b.phase_sort, b.name /* dealboard:operating-state */`)).rows }),
   },
 
   "deal-room-board": {
@@ -3167,6 +3170,8 @@ export const TOOLS = {
                 to_jsonb(b.last_touch)#>>'{}' as last_touch,
                 to_jsonb(b.last_review_at)#>>'{}' as last_review_at, b.workspace_kind,
                 b.operating_state, b.parking_reason, b.parking_note,
+                to_jsonb(b.invoiced_on)#>>'{}' as invoiced_on,
+                (select to_jsonb(pc) from v_deal_room_phase_change pc where pc.deal_id=b.id) as phase_change,
                 to_jsonb(b.parked_at)#>>'{}' as parked_at, b.parked_by,
                 coalesce((
                   select jsonb_object_agg(latest.field,
@@ -3198,7 +3203,7 @@ export const TOOLS = {
             and ($3::uuid is null or account_client_id=$3::uuid)
           order by started_at desc limit 1`,
         [actor.slug, workspace, args.account_client_id || null]);
-      return { actor: actor.slug, deals: deals.rows, accounts: accounts.rows,
+      return { schema_version: 'local-deals-board.v1', actor: actor.slug, deals: deals.rows, accounts: accounts.rows,
         open_session: session.rows[0] || null };
     },
   },
@@ -8690,6 +8695,8 @@ registerTools({
                 b.market_agent, to_jsonb(b.last_touch)#>>'{}' as last_touch,
                 to_jsonb(b.last_review_at)#>>'{}' as last_review_at, b.workspace_kind,
                 b.operating_state, b.parking_reason, b.parking_note,
+                to_jsonb(b.invoiced_on)#>>'{}' as invoiced_on,
+                (select to_jsonb(pc) from v_deal_room_phase_change pc where pc.deal_id=b.id) as phase_change,
                 to_jsonb(b.parked_at)#>>'{}' as parked_at, b.parked_by,
                 r.salesforce_id, r.base_version
            from v_deal_room_board b
@@ -8795,6 +8802,7 @@ registerTools({
       idempotency_key: { type: "string" }, deal: { type: "string" },
       field: { type: "string", enum: DEAL_ROOM_FIELDS }, value: {},
       base_event_id: { anyOf: [{ type: "string" }, { type: "null" }] },
+      intent_origin: { type: "string", enum: ["manual_ui"], description: "A direct application control selection; retained on the event without inventing a human quote." },
       change_reason: { type: "string", description: "why this cell changed; lands on the event as agent_rationale" },
       human_quote: { type: "string", description: "the partner's verbatim words, when they directed the change" },
     }, required: ["idempotency_key", "deal", "field", "value", "base_event_id"] },
@@ -8820,7 +8828,7 @@ registerTools({
       }
       const applied = await applyDealRoomField(c, actor, s.id, args.field, args.value,
         args.idempotency_key, "patch-deal-field",
-        { change_reason: args.change_reason, human_quote: args.human_quote });
+        { change_reason: args.change_reason, human_quote: args.human_quote, intent_origin: args.intent_origin });
       return { ok: true, deal_id: s.id, field: args.field, ...applied };
     }),
   },
