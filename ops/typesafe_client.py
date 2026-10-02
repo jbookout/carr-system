@@ -67,10 +67,13 @@ import re
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from collections import Counter
+from pathlib import Path
 
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 KEY_PATH = os.path.expanduser("~/.config/carr/typesafe.env")
@@ -553,13 +556,12 @@ def _append_call_receipt(questions, facets, result, log_path, *, caller=None,
         pass
 
 
-def _logged_attempts(log_path, day):
+def _logged_attempt_rows(log_path, day):
     """Seed a new UTC day from pre-cap receipts, excluding free cache hits.
 
     Count attempts conservatively: failures may still have consumed credits.
     A missing log means no prior calls; unreadable evidence makes Jev unavailable.
     """
-    count = 0
     try:
         with open(log_path, encoding="utf-8") as fh:
             for line in fh:
@@ -570,10 +572,144 @@ def _logged_attempts(log_path, day):
                 if (isinstance(row, dict) and str(row.get("ts", "")).startswith(day)
                         and not row.get("cache_hit")
                         and row.get("error") != "daily_paid_call_cap"):
-                    count += 1
+                    yield row
     except FileNotFoundError:
         pass
-    return count
+
+
+def _logged_attempts(log_path, day):
+    return sum(1 for _ in _logged_attempt_rows(log_path, day))
+
+
+def _daily_cap_limit():
+    cap = JEV_COST_CONFIG.get("daily_paid_call_cap", 1500)
+    if type(cap) is not int or cap < 0:
+        raise TypeSafeError("Jev unavailable: invalid daily paid call cap")
+    return cap
+
+
+def _claim_spend_alerts(db, log_path, day, previous, allowed, cap, caller):
+    """Claim alarms and attribution in the cap transaction; alarm errors fail open.
+
+    Seed once from existing receipts, including upgrades of an AP counter. A
+    reservation with no receipt is retained as unknown, never guessed away.
+    Tie-break names lexically so attribution is repeatable across workers.
+    """
+    try:
+        db.execute("SAVEPOINT spend_alarm")
+    except Exception:
+        return []
+    try:
+        db.execute("CREATE TABLE IF NOT EXISTS daily_cap_alarms "
+                   "(day TEXT PRIMARY KEY, mask INTEGER NOT NULL)")
+        db.execute("CREATE TABLE IF NOT EXISTS daily_cap_counts "
+                   "(day TEXT, dimension TEXT, name TEXT, count INTEGER NOT NULL, "
+                   "PRIMARY KEY(day,dimension,name))")
+        row = db.execute("SELECT mask FROM daily_cap_alarms WHERE day=?", (day,)).fetchone()
+        if row is None:
+            receipts = list(_logged_attempt_rows(log_path, day))
+            for dimension, field in (("caller", "caller"), ("session", "session")):
+                counts = Counter(str(r.get(field) or "unknown") for r in receipts)
+                counts["unknown"] += max(0, previous - len(receipts))
+                db.executemany("INSERT INTO daily_cap_counts VALUES (?,?,?,?)",
+                               [(day, dimension, name, count) for name, count in counts.items() if count])
+            db.execute("DELETE FROM daily_cap_alarms WHERE day < ?", (day,))
+            db.execute("DELETE FROM daily_cap_counts WHERE day < ?", (day,))
+            db.execute("INSERT INTO daily_cap_alarms VALUES (?,0)", (day,))
+        if allowed:
+            for dimension, name in (("caller", caller), ("session", _session_id())):
+                db.execute("INSERT INTO daily_cap_counts VALUES (?,?,?,1) "
+                           "ON CONFLICT(day,dimension,name) DO UPDATE SET count=count+1",
+                           (day, dimension, str(name or "unknown")))
+        used = previous + int(allowed)
+        mask = row[0] if row else 0
+        alerts = []
+        for bit, threshold in enumerate((50, 80, 100)):
+            if used * 100 < cap * threshold or mask & (1 << bit):
+                continue
+            top = {}
+            for dimension in ("caller", "session"):
+                leader = db.execute("SELECT name,count FROM daily_cap_counts "
+                                    "WHERE day=? AND dimension=? ORDER BY count DESC,name LIMIT 1",
+                                    (day, dimension)).fetchone()
+                top[dimension] = list(leader or ("unknown", 0))
+            message = (f"Jev daily cap {threshold}% · {used}/{cap} paid calls on {day} UTC. "
+                       f"Top caller: {top['caller'][0]} ({top['caller'][1]}); "
+                       f"top session: {top['session'][0]} ({top['session'][1]}). "
+                       "Jev goes unavailable at the cap; resets at 00:00 UTC.")
+            alerts.append({"day": day, "threshold": threshold, "calls": used, "cap": cap,
+                           "top_caller": top["caller"], "top_session": top["session"],
+                           "message": message})
+            mask |= 1 << bit
+        db.execute("UPDATE daily_cap_alarms SET mask=? WHERE day=?", (mask, day))
+        db.execute("RELEASE spend_alarm")
+        return alerts
+    except Exception:
+        try:
+            db.execute("ROLLBACK TO spend_alarm")
+            db.execute("RELEASE spend_alarm")
+        except sqlite3.Error:
+            pass  # The mandatory counter commit still checks DB integrity.
+        return []
+
+
+def _emit_spend_alert(alert):
+    """Reuse cutover-watch/version-sentinel's local macOS notification path.
+
+    Runs on the alarm thread, with a bounded wait, never on the Jev call path.
+    No prompt, answer or credential crosses into the notification.
+    """
+    message = alert["message"].replace("\\", "\\\\").replace('"', '\\"')
+    message = message.replace("\n", " ").replace("\r", " ")
+    subprocess.run(["/usr/bin/osascript", "-e",
+                    f'display notification "{message}" with title "Jev spend alarm"'],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                   timeout=5, check=True)
+
+
+def _dispatch_spend_alerts(alerts):
+    if not alerts:
+        return
+    sink = _emit_spend_alert
+    def emit():
+        for alert in alerts:
+            try:
+                sink(alert)
+            except Exception:
+                pass
+    try:
+        # Non-daemon: a short-lived hook still gets its claimed alert submitted.
+        # The production sink has a deadline; ask() never joins this thread.
+        threading.Thread(target=emit, name="jev-spend-alarm").start()
+    except Exception:
+        pass
+
+
+PAID_CAP_ACTION = ("on breach: notify Joe once at 50%/80%/100% via macOS notification; "
+                   "cap refuses further paid calls · owner orchestrator · remediation "
+                   "reduce top caller/session demand · verify next UTC day below 50% "
+                   "· auto-clear at UTC rollover")
+
+
+def paid_cap_health(*, now=None):
+    """Read the same reservation counter as ask(), without writes or credentials."""
+    day = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        cap = _daily_cap_limit()
+        path = Path(os.fspath(JEV_DAILY_CAP_LOG) + ".daily-cap.sqlite3")
+        if path.exists():
+            db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
+            try:
+                row = db.execute("SELECT attempts FROM daily_cap WHERE day=?", (day,)).fetchone()
+            finally:
+                db.close()
+            used = row[0] if row else _logged_attempts(JEV_DAILY_CAP_LOG, day)
+        else:
+            used = _logged_attempts(JEV_DAILY_CAP_LOG, day)
+        status = "HIT" if used >= cap else "WARN" if used * 100 >= cap * 50 else "OK"
+        return f"{status} jev paid cap — {used}/{cap} paid calls · UTC {day} · {PAID_CAP_ACTION}"
+    except (OSError, sqlite3.Error, TypeSafeError) as exc:
+        return f"UNKNOWN jev paid cap — {type(exc).__name__} · {PAID_CAP_ACTION}"
 
 
 def _reserve_paid_call(questions, facets, caller, question_kind, prompt_sha256):
@@ -585,11 +721,10 @@ def _reserve_paid_call(questions, facets, caller, question_kind, prompt_sha256):
     uses the same TypeSafeError outage contract, so hooks retain their fallback.
     """
     log_path = JEV_DAILY_CAP_LOG
-    cap = JEV_COST_CONFIG.get("daily_paid_call_cap", 1500)
-    if type(cap) is not int or cap < 0:
-        raise TypeSafeError("Jev unavailable: invalid daily paid call cap")
+    cap = _daily_cap_limit()
     day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     notice = False
+    alerts = []
     try:
         os.makedirs(os.path.dirname(os.path.abspath(log_path)), exist_ok=True)
         db = sqlite3.connect(os.fspath(log_path) + ".daily-cap.sqlite3", timeout=1.0)
@@ -608,11 +743,13 @@ def _reserve_paid_call(questions, facets, caller, question_kind, prompt_sha256):
             elif not row[1]:
                 notice = True
                 db.execute("UPDATE daily_cap SET notified=1 WHERE day=?", (day,))
+            alerts = _claim_spend_alerts(db, log_path, day, row[0], allowed, cap, caller)
             db.commit()
         finally:
             db.close()
     except (OSError, sqlite3.Error) as exc:
         raise TypeSafeError(f"Jev unavailable: daily cap accounting failed ({type(exc).__name__})") from None
+    _dispatch_spend_alerts(alerts)
     if notice:
         _append_call_receipt(questions, facets, None, log_path, caller=caller,
                              question_kind=question_kind, prompt_sha256=prompt_sha256,

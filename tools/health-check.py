@@ -106,8 +106,8 @@ def _reader_args(argv):
         # A parent shell may carry this old ambient variable.  Normal health must
         # not pass it to any child or let a child silently choose a Drive reader.
         os.environ.pop("CARR_VAULT", None)
-    if section not in ("all", "exports", "jobs", "registry", "credentials", "jev-spend", "tailscale", "headless"):
-        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials|jev-spend|tailscale|headless")
+    if section not in ("all", "exports", "jobs", "registry", "credentials", "jev-spend", "jev-cap", "tailscale", "headless"):
+        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials|jev-spend|jev-cap|tailscale|headless")
     if fixture and recovery:
         raise SystemExit("health-check: --fixture is for hermetic canonical tests only")
     return recovery, reason, vault, section, fixture, findings_json, rest
@@ -143,6 +143,20 @@ def _jev_spend_row():
     return jev_spend_health, jev_spend_health.check_spend(
         extra_logs=[jev_spend_health.FACTORY_USAGE_LOG],
         worker_usage=jev_spend_health.read_worker_usage)
+
+
+def _jev_paid_cap_row():
+    client_path = os.path.join(REPO_ROOT, "ops", "typesafe_client.py")
+    spec = importlib.util.spec_from_file_location("jev_cap_client", client_path)
+    client = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(client)
+    return client.paid_cap_health()
+
+
+if CANONICAL_SECTION == "jev-cap":
+    _cap_line = _jev_paid_cap_row()
+    print(_cap_line)
+    sys.exit(int(_cap_line.startswith(("HIT", "UNKNOWN"))))
 
 
 if CANONICAL_SECTION == "jev-spend":
@@ -1578,6 +1592,7 @@ def _canonical_health():
                   "on breach: open/update one dedup loop · owner orchestrator · "
                   "remediation find caller in jev usage log · auto-clear when below threshold")
         # ── credential health (added 2026-09-24) ────────────────────────────
+        print("  " + _jev_paid_cap_row())
         # Daily liveness lane for every credential CARR needs to run
         # unattended — wrangler/Cloudflare, Neon, the two MCP machine-bearer
         # tokens, gh, the Claude and Codex CLI logins, and the Google OAuth
