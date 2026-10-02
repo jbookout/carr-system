@@ -3,7 +3,7 @@
 Draft by default; CARR_EXPORT_LIVE=1 activates vault paths (cutover only).
 """
 import argparse, os, sys
-from .common import EXPORT_HOME, LIVE, provider_running, run_export, wait_for_provider
+from .common import EXPORT_HOME, LIVE, run_export, wait_for_provider
 from .targets import TARGETS
 
 def select(only):
@@ -73,26 +73,17 @@ def main():
     # cloud-only, so every target needs the File Provider to be up. Waiting per
     # target spends six sequential 23.5s budgets on one shared outage and
     # reports six tracebacks for a single cause; waiting here spends one budget
-    # and names the cause. An exhausted budget does NOT abort the sweep: each
+    # and reports its observations. An exhausted budget does NOT abort the sweep: each
     # target still runs and records its own receipt, so a provider that never
     # wakes produces the same honest per-target failures it does today rather
     # than a new way for the step to die before it starts.
     if LIVE:
-        cold = wait_for_provider(EXPORT_HOME / rel for rel, _fn in targets.values())
-        if cold:
-            names = ", ".join(sorted(path.name for path, _e in cold))
-            alive = provider_running()
-            cause = {
-                True: "the provider is up and still not serving these files: the "
-                      "tree is cloud-only, so pin the OneDrive CARR folder or free disk",
-                False: "NO OneDrive PROCESS IS RUNNING — waiting could never have "
-                       "helped. OneDrive is a GUI login item and does not start for "
-                       "a 02:05 scheduled run; the launch attempt did not take",
-                None: "the provider's state could not be tested on this machine",
-            }[alive]
-            print(f"[provider] giving up the wait; {len(cold)} file(s) still "
-                  f"unreadable ({names}). {cause}. Each target will now try and "
-                  f"report for itself.", file=sys.stderr)
+        result = wait_for_provider(EXPORT_HOME / rel for rel, _fn in targets.values())
+        if result.cold:
+            names = ", ".join(sorted(path.name for path, _e in result.cold))
+            print(f"[provider] giving up the wait; {len(result.cold)} file(s) still "
+                  f"unreadable ({names}). {result.diagnostic()}. Each target will "
+                  f"now try and report for itself.", file=sys.stderr)
 
     # NOT `all(...)`: it short-circuits, so ONE failing target silently cancels every
     # target after it in dict order. That is exactly what bit on 2026-08-02 — an
