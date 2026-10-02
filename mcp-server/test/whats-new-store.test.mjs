@@ -31,7 +31,14 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
     execFileSync(path.join(bin,'initdb'), ['-D',dir,'-U','fixture','--auth=trust','--no-locale'], { stdio: 'pipe' });
     execFileSync(path.join(bin,'pg_ctl'), ['-D',dir,'-l',path.join(dir,'server.log'),'-o',`-k ${dir} -h ''`,'-w','start'], { stdio: 'pipe' });
     running = true;
-    const connect = async () => { const c = new pg.Client({ host: dir, user: 'fixture', database: 'postgres' }); await c.connect(); clients.push(c); return c; };
+    const connect = async () => {
+      const c = new pg.Client({ host: dir, user: 'fixture', database: 'postgres' });
+      await c.connect();
+      // Due-date transitions use the brokerage calendar in the store. UTC
+      // fixture dates fall one day ahead during Central evening CI runs.
+      await c.query("set time zone 'America/Chicago'");
+      clients.push(c); return c;
+    };
     const c = await connect();
     await c.query('create schema ops; create role carr_writer; create role carr_authority; create role carr_reader; grant usage on schema ops to carr_writer,carr_authority,carr_reader;');
     const schema = readFileSync(path.join(root,'db/schema.sql'),'utf8');
