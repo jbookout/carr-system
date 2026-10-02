@@ -1388,6 +1388,48 @@ with tempfile.TemporaryDirectory() as route_tmp:
         check("a neutral Bash command routes nothing",
               routed_for("Bash", {"command": "ls -la"}) == [])
 
+        # Model-choice advice follows cloud CLI arguments through the production
+        # route rail, including options before the dispatch flag.
+        for command in (
+                'claude --remote "fix the bug"',
+                'claude --model sonnet --remote "fix the bug"',
+                'claude --effort medium --remote',
+                'claude --cloud "fix the bug"',
+                'claude --model sonnet --cloud="fix the bug"',
+                'claude -p "fix the bug" --environment ccpool_synthetic',
+                'claude --environment=ccpool_synthetic -p "fix the bug"',
+                'claude -p "fix; the bug" --environment "ccpool_synthetic"',
+                '/opt/homebrew/bin/claude --effort medium --cloud "fix the bug"',
+                'git status && claude --model sonnet --cloud "fix the bug"'):
+            cloud_call = gen_payload(tool="Bash", tool_input={"command": command},
+                                     session="cloud-cli-" + command, tool_use_id="cloud-cli")
+            cloud_ids = rail.routed_rule_ids(cloud_call)
+            check("cloud CLI routes model-choice advice: " + command,
+                  "ede4b241" in cloud_ids, cloud_ids)
+            cloud_union = sorted(set(cloud_ids) | set(
+                contract.merge_trigger_delivery(rail.matched_triggers(cloud_call))[2]))
+            cloud_runner = Runner(route_result(cloud_union))
+            cloud_output = rail.process(cloud_call, runner=cloud_runner)
+            cloud_receipt = json.loads(context(cloud_output)) if cloud_output else {}
+            check("cloud CLI delivers model-choice advice in one validated receipt: " + command,
+                  len(cloud_runner.calls) == 1
+                  and "ede4b241" in cloud_receipt.get("rule_ids", [])
+                  and routes_lib.validate_route_receipt(cloud_receipt, repo=REPO))
+        for command in (
+                'claude --remote-control',
+                'claude --model sonnet --remote-control "local session"',
+                'claude --remote-control-session-name-prefix local',
+                'claude --remote-controlled',
+                'claude --cloudy',
+                'claude --environment',
+                'claude --model sonnet -p "fix the bug"',
+                'claude -p "mention --cloud in the answer"',
+                'claude --model sonnet; echo --cloud',
+                'claude --model sonnet && echo --remote',
+                'my-claude --cloud "fix the bug"'):
+            check("local CLI or flag prefix stays silent for model choice: " + command,
+                  "ede4b241" not in routed_for("Bash", {"command": command}))
+
         # Path globs, and the path_rule kind carries them.
         hook_ids = set(routed_for("Write", {"file_path": str(REPO / "hooks/x-gate.py"),
                                             "content": ""}))
