@@ -2430,7 +2430,10 @@ export const TOOLS = {
         // The column is lead_owner; `owner` never existed on this view, so this
         // query has always thrown. It stayed invisible because the query above it
         // threw first (amendment 11) — one bug hiding another.
-        "select name, phase, lead_owner as owner, client_ref from v_deal_board where name ilike $1 limit 5",
+        `select name, phase, lead_owner as owner, client_ref,
+                to_jsonb(invoiced_on)#>>'{}' as invoiced_on,
+                to_jsonb(closed_on)#>>'{}' as closed_on, lane, outcome
+           from v_deal_board where name ilike $1 limit 5`,
         [`%${q}%`]);
       // [ORDER 18] The intro graph, through v_party_graph — SAFE COLUMNS ONLY, the
       // same views-only posture as v_ref_index. Capped deliberately: a hub like
@@ -2499,7 +2502,9 @@ export const TOOLS = {
         const named = new Set(deals.rows.map(d => d.name));
         if (clientRefs.length) {
           const dr = await c.query(
-            `select name, phase, lead_owner as owner, client_ref
+            `select name, phase, lead_owner as owner, client_ref,
+                    to_jsonb(invoiced_on)#>>'{}' as invoiced_on,
+                    to_jsonb(closed_on)#>>'{}' as closed_on, lane, outcome
                from v_deal_board where client_ref = any($1)
               order by client_ref, name limit $2`, [clientRefs, LINK_CAP]);
           linkedDeals = dr.rows.filter(d => !named.has(d.name));
@@ -3138,7 +3143,10 @@ export const TOOLS = {
     write: false,
     description: "Open pipeline grouped by phase. Never exposes Salesforce commission/close-date placeholders (they are placeholders, not data).",
     inputSchema: { type: "object", properties: {} },
-    handler: async (c) => ({ deals: (await c.query(`select b.*, d.operating_state, d.parking_note, to_jsonb(d.invoiced_on)#>>'{}' as invoiced_on
+    handler: async (c) => ({ deals: (await c.query(`select b.id, b.name, b.client_ref, b.client_name, b.deal_type,
+      b.phase, b.phase_sort, b.segment, b.outcome, b.lead_owner, b.last_touch, b.notes_path,
+      d.operating_state, d.parking_note, to_jsonb(d.invoiced_on)#>>'{}' as invoiced_on,
+      to_jsonb(d.closed_on)#>>'{}' as closed_on, d.lane
       from v_deal_board b join v_deal_room_board d on d.id=b.id
       order by b.phase_sort, b.name /* dealboard:operating-state */`)).rows }),
   },
@@ -3183,6 +3191,7 @@ export const TOOLS = {
                 to_jsonb(b.last_review_at)#>>'{}' as last_review_at, b.workspace_kind,
                 b.operating_state, b.parking_reason, b.parking_note,
                 to_jsonb(b.invoiced_on)#>>'{}' as invoiced_on,
+                to_jsonb(b.closed_on)#>>'{}' as closed_on, b.lane, b.outcome,
                 (select to_jsonb(pc) from v_deal_room_phase_change pc where pc.deal_id=b.id) as phase_change,
                 to_jsonb(b.parked_at)#>>'{}' as parked_at, b.parked_by,
                 coalesce((
@@ -8797,6 +8806,7 @@ registerTools({
                 to_jsonb(b.last_review_at)#>>'{}' as last_review_at, b.workspace_kind,
                 b.operating_state, b.parking_reason, b.parking_note,
                 to_jsonb(b.invoiced_on)#>>'{}' as invoiced_on,
+                to_jsonb(b.closed_on)#>>'{}' as closed_on, b.lane, b.outcome,
                 (select to_jsonb(pc) from v_deal_room_phase_change pc where pc.deal_id=b.id) as phase_change,
                 to_jsonb(b.parked_at)#>>'{}' as parked_at, b.parked_by,
                 r.salesforce_id, r.base_version
@@ -8875,7 +8885,8 @@ registerTools({
       if (s.type !== "deal") throw new ToolError({ error: "not_a_deal", resolved: s });
       const r = await c.query(
         `select id, name, salesforce_id, base_version, phase, outcome,
-                to_jsonb(closed_on)#>>'{}' as closed_on
+                to_jsonb(closed_on)#>>'{}' as closed_on,
+                to_jsonb(invoiced_on)#>>'{}' as invoiced_on, lane
            from v_deal_reconciliation_read where id=$1`, [s.id]);
       if (!r.rows.length) throw new ToolError({ error: "not_found", table: "deal", id: s.id });
       return r.rows[0];
