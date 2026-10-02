@@ -483,6 +483,14 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0766_doc_whats_new_repair.sql",
         "0767_doc_whats_new_scac_successor.sql",
     ),
+    (
+        "0769_rule_teach_supersession.sql",
+        "0770_find_rule_scac_successor.sql",
+    ),
+    (
+        "0772_system_work_census_read_scope.sql",
+        "0773_system_work_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -609,6 +617,14 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0765_doc_whats_new.sql",
         "0766_doc_whats_new_repair.sql",
         "0767_doc_whats_new_scac_successor.sql",
+    ),
+    (
+        "0769_rule_teach_supersession.sql",
+        "0770_find_rule_scac_successor.sql",
+    ),
+    (
+        "0772_system_work_census_read_scope.sql",
+        "0773_system_work_scac_successor.sql",
     ),
 )
 

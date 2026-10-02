@@ -84179,15 +84179,52 @@
     {
       "version": "v102",
       "remove": [],
+      "upsert": [],
+      "row_replacements": {
+        "mcp-tool:confirm-merge": {
+          "human_only": true,
+          "principal_mode": "server_verified_human"
+        }
+      },
+      "expected_count": 1084,
+      "expected_sha256": "98054b8eb743d97fe1dba0bec67826bea0c359b82c6dd8a4041adb0653ea1bf7"
+    },
+    {
+      "version": "v103",
+      "reason": "Register find-rule, reseal teach supersedes semantics/schema, and bind atomic migration group.",
+      "remove": [],
       "upsert": [
         {
-          "ingress_key": "mcp-tool:unfinished-work",
+          "ingress_key": "external-admin:tools/migrate.py",
+          "ingress_kind": "external_admin",
+          "operation": "tools/migrate.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "tools/migrate.py",
+          "schema_digest": "b96e487b072c7e37d201f477ef5ea38da24bd63ef16aa072382af67628ee9dd9",
+          "handler_digest": "b96e487b072c7e37d201f477ef5ea38da24bd63ef16aa072382af67628ee9dd9",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "mcp-tool:find-rule",
           "ingress_kind": "mcp_tool",
-          "operation": "unfinished-work",
+          "operation": "find-rule",
           "effect_class": "audit_side_effect",
-          "source_locator": "mcp-server/src/system-work-census.v5.js",
-          "schema_digest": "126ebd4723150468d305a554501dcf6d3f15023849350468d33e1bb0d9154fb6",
-          "source_digest": "0849c194206ae4b741ca92814dcd020f651ac5855a66dbd00474ea6244fc1417",
+          "source_locator": "mcp-server/src/tools.js",
+          "schema_digest": "62d8d08c4fbc232594ac95bdd685d3c9c25435a6210ad1006ea9361cead2a8c2",
+          "source_digest": "334ca55d9b22ad9480aaebd59ca466f1020f2d2edc2ffbcb86a7a2918c29cd04",
           "write": false,
           "human_only": false,
           "authority_only": false,
@@ -84202,337 +84239,88 @@
           "owner_package": "11",
           "implementation_state": "source_guarded_not_deployed",
           "classification_authorizing": false
+        },
+        {
+          "ingress_key": "mcp-tool:teach",
+          "ingress_kind": "mcp_tool",
+          "operation": "teach",
+          "effect_class": "administrative_mutation",
+          "source_locator": "mcp-server/src/tools.js",
+          "schema_digest": "ac28ee6aec77dace4d0f7b0493edd9815f1171606bc04a94bcd8a39a735fc8e4",
+          "source_digest": "334ca55d9b22ad9480aaebd59ca466f1020f2d2edc2ffbcb86a7a2918c29cd04",
+          "write": true,
+          "human_only": false,
+          "authority_only": false,
+          "principal_mode": "authenticated_registered_principal",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.database",
+          "delegates_to": [],
+          "request_shape": "closed_top_level_schema",
+          "idempotency_mode": "operation_principal_manifest_bound",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "application_default_deny",
+          "owner_package": "11",
+          "implementation_state": "source_guarded_not_deployed",
+          "classification_authorizing": false
         }
       ],
-      "row_replacements": {
-        "mcp-tool:accept-workflow": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:activate-guidance-registry": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:activate-rule": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:add-critical-date": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:add-deal-note": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:add-industry-event": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:add-loop": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:add-party": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:add-premises": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:admit-rule": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:amend-closed-loop": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:amend-rule": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:applicable-rules": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:approve-rule": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:attach-to-campaign": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:call-verb": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:capture-queue": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:catch-me-up": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:claim-card": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:close-loop": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:complete-action": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:confirm-merge": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:counterparty-history": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:create-national-account": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:create-national-market-deal": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:deactivate-guidance-registry": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:deal-board": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:deal-room-board": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:decide-guidance-import-batch": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:decline-candidate": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:detach-decision": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:disable-legacy-schedule": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:edit-loop-header": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:end-deal-review": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:export-email-domains": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:find": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:find-and-catch-up": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:find-precedent": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:get-call-context": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:get-deal-room": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:governance-queue": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:integrity-digest": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:lead-board": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:lead-hot": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:link-parties": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:list-industry-events": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:list-verbs": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:log-activity": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:log-capture": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:log-decision": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:log-outreach": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:loop-board": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:loop-headers": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:measure-placement": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:merge-vendor-rows": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:morning-brief": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:new-client": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:new-deal": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:new-lead": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:new-vendor": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:open-campaign": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:patch-deal-field": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:prepare-conversation": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:prepare-document": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:presence-lease": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:promote-pool": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:read-deal-reconciliation": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:read-doc-outcome-cards": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:read-loop": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:read-v5-a02-rule-enforcement-coverage": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:reassign-deal": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:record-counter": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:record-defect": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:record-executed-lease": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:record-finding": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:record-gate-zero-read-only-outcome": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:record-rule-enforcement-fallback": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:register-template": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:resolve-candidate": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:resolve-conflict": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:resolve-post-call-candidate": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:retire-rule": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:revert-deal-field": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:review-deal": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:score-campaign": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:set-lead": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:set-market-agent": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:set-national-account-owner": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:set-next-action": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:set-next-step": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:source-attribution": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:stale-records": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:stamp-touch": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:start-deal-review": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:state-as-of": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:teach": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:today-triage": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:triage-item": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:update-deal": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:update-decision": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:update-document-status": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:update-industry-event": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:update-lead": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:update-loop": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:update-party-contact": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:update-vendor": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "mcp-tool:who-do-we-know": {
-          "source_digest": "1f8fb31dc9f3a9c6f12babce9eafd7d7ea83de37099bafc851e6df7a96b9d023"
-        },
-        "script-entrypoint:tools/progress_board.py": {
-          "schema_digest": "9fe44036f22a83a3865adb2324bd18863d31fe477907d86f6323c4cfb09939a3",
-          "handler_digest": "9fe44036f22a83a3865adb2324bd18863d31fe477907d86f6323c4cfb09939a3"
-        }
-      },
       "expected_count": 1085,
-      "expected_sha256": "68a8821b4d9d7587094ffcc4fc358e75fdbb4bc5cd858521c63c843e00144735"
+      "expected_sha256": "7e245615be93afe8b26322b640167b00876efc27eac60c647fb0beee4ba87ac5"
+    },
+    {
+      "version": "v104",
+      "reason": "Admit unfinished-work after shipped rule lookup v103 while preserving all historical source contracts.",
+      "remove": [],
+      "upsert": [
+        {
+          "ingress_key": "mcp-tool:unfinished-work",
+          "ingress_kind": "mcp_tool",
+          "operation": "unfinished-work",
+          "effect_class": "audit_side_effect",
+          "source_locator": "mcp-server/src/system-work-census.v5.js",
+          "schema_digest": "126ebd4723150468d305a554501dcf6d3f15023849350468d33e1bb0d9154fb6",
+          "source_digest": "de94f861371294d68e475d9798779619358dabc3822a35ded4df3b4d84fc9b2a",
+          "write": false,
+          "human_only": false,
+          "authority_only": false,
+          "principal_mode": "authenticated_registered_principal",
+          "mutation_kind": null,
+          "target_surface": "scac.surface.database",
+          "delegates_to": [],
+          "request_shape": "closed_top_level_schema",
+          "idempotency_mode": "not_applicable",
+          "rollback_class": "append_only_audit",
+          "admission_class": "application_default_deny",
+          "owner_package": "11",
+          "implementation_state": "source_guarded_not_deployed",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "external-admin:tools/migrate.py",
+          "ingress_kind": "external_admin",
+          "operation": "tools/migrate.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "tools/migrate.py",
+          "schema_digest": "2d7c5e5c92d5353962373210f651e8b3cab18e126c01e796fb19a703520771c0",
+          "handler_digest": "2d7c5e5c92d5353962373210f651e8b3cab18e126c01e796fb19a703520771c0",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        }
+      ],
+      "expected_count": 1086,
+      "expected_sha256": "211bb3730dc022907e85e472b58d817d0c480b2076d9505c9a8e08a78abe1a9c"
     }
   ],
   "current_source_review": {

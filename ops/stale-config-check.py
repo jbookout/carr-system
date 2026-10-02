@@ -28,8 +28,10 @@ textually; they silently overwrite each other. ops/config/gate-baseline.json
 took THIRTY-SIX commits on main in twenty-four hours. A hand-written source file
 would have conflicted loudly and been noticed.
 
-THE RULE: if your branch modifies a watched file, it must either contain
-origin/main's exact current file or include main's latest change in its history.
+THE RULE: if your branch differs from origin/main for a watched file, the
+newest commit on origin/main touching that file must already be in your
+history. An exact copy of main cannot overwrite unseen bytes, even when
+source was synchronized by cherry-pick rather than a merge.
 
 WHAT THIS DOES NOT CLOSE, stated plainly because a guard oversold is worse than
 none. It runs when CI runs. If main gains a new commit to a watched file AFTER
@@ -95,9 +97,11 @@ def main() -> int:
 
     stale = []
     for path in touched:
-        # A cherry-pick preserves content without preserving commit ancestry.
-        # Identical blobs cannot overwrite a generated change on main.
-        if git("diff", "--quiet", base_sha, "HEAD", "--", path)[0] == 0:
+        # A source copy can retain different ancestry while matching main.
+        # Compare committed bytes/mode, with no external diff or text conversion;
+        # errors and differences still take the existing ancestry-check path.
+        if git("diff", "--quiet", "--no-ext-diff", "--no-textconv",
+               base_sha, "HEAD", "--", path)[0] == 0:
             continue
         # The newest commit on main touching THIS path.
         rc, newest = git("rev-list", "-1", base_sha, "--", path)
