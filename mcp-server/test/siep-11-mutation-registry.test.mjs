@@ -3523,7 +3523,7 @@ test("credential rotation source review cannot widen authority or admit an ingre
     const read = fs.readFileSync;
     const fixturePath = "ops/config/scac-registry-source-inventory-fixtures.v1.json";
     const fixture = JSON.parse(read(fixturePath, "utf8"));
-    const review = fixture.current_source_reviews["scac-mutation-registry.v103"];
+    const review = fixture.current_source_reviews["scac-mutation-registry.v104"];
     const variant = process.argv[1];
     const errors = {
       authority: /changed an ingress contract/,
@@ -3537,7 +3537,7 @@ test("credential rotation source review cannot widen authority or admit an ingre
     if (variant === "locator") review.upsert[0].source_locator = "other.py";
     if (variant === "ingress") review.upsert[0].ingress_key = "external-admin:new.py";
     if (variant === "digest") review.expected_sha256 = "0".repeat(64);
-    if (variant === "base") review.base_version = "v102";
+    if (variant === "base") review.base_version = "v103";
     if (variant === "broad") review.source_digest_replacements = {"other.py": "0".repeat(64)};
     fs.readFileSync = (path, ...args) => String(path).endsWith(fixturePath)
       ? JSON.stringify(fixture) : read(path, ...args);
