@@ -171,18 +171,22 @@ with open(sys.argv[1], "w") as report:
         self.assertEqual(len(self.requests()), 1)
 
     def test_timeout_cancels_wrapper_chain_and_retains_pending(self):
+        self.check_timeout_cancels_wrapper_chain(startup_delay=0)
+
+    def test_timeout_cancellation_waits_for_slow_wrapper_startup(self):
+        self.check_timeout_cancels_wrapper_chain(startup_delay=0.35)
+
+    def check_timeout_cancels_wrapper_chain(self, startup_delay):
         path = self.report()
         filer = self.root / "bin/dot-file-reports"
-        source = filer.read_text()
-        self.assertEqual(source.count("timeout=60"), 1)
-        filer.write_text(source.replace("timeout=60", "timeout=0.2"))
         # run.sh -> Python wrapper -> Node HTTP-client stand-in, all holding
         # the inherited pipes. Cancellation must reach the delayed Node effect.
         node = '''const fs = require('node:fs');
 fs.writeFileSync(process.argv[1] + '/started', String(process.pid));
 setTimeout(() => fs.writeFileSync(process.argv[1] + '/late-effect', 'orphan'), 700);
 '''
-        child = "import subprocess,sys; subprocess.run(['node', '-e', sys.argv[1], sys.argv[2]])"
+        child = (f"import subprocess,sys,time; time.sleep({startup_delay!r}); "
+                 "subprocess.run(['node', '-e', sys.argv[1], sys.argv[2]])")
         wrapper = (
             "#!/usr/bin/env python3\nimport json,pathlib,subprocess,sys\n"
             "root = pathlib.Path(__file__).parent\n"
@@ -191,7 +195,33 @@ setTimeout(() => fs.writeFileSync(process.argv[1] + '/late-effect', 'orphan'), 7
             f"subprocess.run([sys.executable, '-c', {child!r}, {node!r}, str(root)])\n"
         )
         (self.root / "run.sh").write_text(wrapper)
-        self.run_filer(ok=False)
+        # Only the synthetic transport's deadline is shortened. Send its input
+        # first, then wait for Node readiness under a separate startup bound.
+        # Production still handles TimeoutExpired and kills its own group.
+        launcher = '''import pathlib, runpy, subprocess, sys, time
+filer = pathlib.Path(sys.argv[1])
+started = filer.parents[1] / "started"
+class ReadyTransport(subprocess.Popen):
+    def communicate(self, input=None, timeout=None):
+        if input is not None:
+            self.stdin.write(input)
+            self.stdin.close()
+            self.stdin = None
+            deadline = time.monotonic() + 5
+            while not started.exists():
+                if self.poll() is not None or time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired(self.args, 5)
+                time.sleep(0.01)
+            timeout = 0.2
+        return super().communicate(timeout=timeout)
+subprocess.Popen = ReadyTransport
+sys.argv = [str(filer)]
+runpy.run_path(str(filer), run_name="__main__")
+'''
+        proc = subprocess.run([sys.executable, "-c", launcher, str(filer)],
+                              capture_output=True, text=True, timeout=10)
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn("verb transport timed out", proc.stderr)
         self.assertEqual(self.entries()[path.stem]["status"], "pending")
         self.assertTrue((self.root / "started").exists(), "fixture must launch the Node descendant")
         time.sleep(1)
