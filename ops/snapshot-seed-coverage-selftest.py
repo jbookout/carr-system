@@ -33,6 +33,11 @@ import io
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
+# INSERT provenance belongs to one live database's transactions. A rebuild
+# carries schema, never old xid8 values that could collide with its own xids.
+coverage = json.loads((REPO / "ops/config/snapshot-seed-coverage.json").read_text())
+assert "ops.rule_insert_provenance" in coverage["excluded"]
+
 
 def load_module():
     spec = importlib.util.spec_from_file_location(
@@ -127,6 +132,19 @@ def main():
                     "begin\n  insert into ops.never_seeded (k) values ('r');\nend $$;\n")
 
     with tempfile.TemporaryDirectory() as tmp:
+        # Lead UUIDs and creation transactions are business evidence, never
+        # reference vocabulary in a structure-only rebuild.
+        lead_table = "ops.doc_whats_new_lead_creation"
+        classification = json.loads((REPO / "ops/config/snapshot-seed-coverage.json").read_text())
+        reason = classification["excluded"].get(lead_table)
+        lead_repo = build_repo(tmp + "/catchup", {
+            "0766_doc_whats_new_repair.sql": (REPO / "migrations/0766_doc_whats_new_repair.sql").read_text(),
+        }, {"carried": {}, "excluded": {lead_table: reason} if reason else {}})
+        lead_artifact = artifact(["0766_doc_whats_new_repair.sql"])
+        case("catch-up creation evidence is classified and omitted from a rebuild",
+             module.check(lead_repo, lead_artifact) == [])
+        case("catch-up creation evidence refuses if copied into the snapshot",
+             "EXCLUDED" in summarise(module.check(lead_repo, lead_artifact + copy_block(lead_table))))
         # ---------------------------------------------------------------- 1
         repo = build_repo(tmp + "/a", {"0100_seed.sql": seeding},
                           {"carried": {}, "excluded": {}})

@@ -88,7 +88,7 @@ chat-lint-carryover.py	UserPromptSubmit	scenarios:b2d3e4f5a6b7	announce	Keep rep
 chat-lint-gate.py	Stop	(all)	counts	allow=87
 close-before-open-gate.py	PreToolUse[Write|Edit|MultiEdit]	(all)	counts	allow=72 deny=1
 close-before-open-gate.py	PreToolUse[Write|Edit|MultiEdit]	scenarios:b2e5c3d4e5fa	deny	BLOCKED by the CARR close-before-open gate: CLOSE-BEFORE-OPEN: # open work request(s) block a new front: WR-AI-#, WR-AI-#, WR-AI-#, WR-AI-#,
-completion-evidence-gate.py	Stop	(all)	counts	allow=12 reopen=75
+completion-evidence-gate.py	Stop	(all)	counts	allow=40 reopen=47
 completion-evidence-gate.py	Stop	advisories:0b5544d0632d/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:1131c706f9fd/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:13676fdf59f5/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
@@ -96,70 +96,42 @@ completion-evidence-gate.py	Stop	advisories:157aa0d9648b/reports-evidence	reopen
 completion-evidence-gate.py	Stop	advisories:15eddbb266ab/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:18cbf8fa1991/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:1f526bf12615/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:231db862260e/plans-only	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required diagnosis, evidence_matching, next_action_priority, semantic_creation, v
 completion-evidence-gate.py	Stop	advisories:2668b0e59663/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:28aadf3ae8c4/asks-permission	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required diagnosis, evidence_matching, next_action_priority, verification_selecti
-completion-evidence-gate.py	Stop	advisories:2d809405bd14/asks-permission	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required evidence_matching, next_action_priority, verification_selection, and the
 completion-evidence-gate.py	Stop	advisories:2db5b2a34d05/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:2fd983d21c1e/plans-only	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required diagnosis, evidence_matching, semantic_creation, verification_selection,
-completion-evidence-gate.py	Stop	advisories:30318cbeebae/plans-only	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required architecture_or_design, diagnosis, next_action_priority, semantic_creati
 completion-evidence-gate.py	Stop	advisories:305e6bc66e9d/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:322a8b231016/plans-only	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required next_action_priority, semantic_creation, verification_selection, and the
 completion-evidence-gate.py	Stop	advisories:32f6412768c3/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:330ce8d71385/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:37e4fc352099/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:384e0e166e77/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:385e89e8bbc3/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:3b5d6e7b6490/asks-permission	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required architecture_or_design, next_action_priority, semantic_creation, and the
 completion-evidence-gate.py	Stop	advisories:3f2424e26ae7/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:3f71a896fe50/asks-permission	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required evidence_matching, verification_selection, and the turn shows neither a 
 completion-evidence-gate.py	Stop	advisories:44ddad936537/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:450a809b75ef/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:4fb2c03b427a/plans-only	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required architecture_or_design, evidence_matching, next_action_priority, semanti
-completion-evidence-gate.py	Stop	advisories:530699f5fcce/plans-only	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required architecture_or_design, diagnosis, next_action_priority, semantic_creati
-completion-evidence-gate.py	Stop	advisories:55b1f4e13560/asks-permission	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required diagnosis, evidence_matching, verification_selection, and the turn shows
 completion-evidence-gate.py	Stop	advisories:6252526ed7ad/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:62cb86d9f335/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:6c49f1bc4da1/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:6dd7a872272e/plans-only	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required architecture_or_design, semantic_creation, and the turn shows neither a 
 completion-evidence-gate.py	Stop	advisories:6f61bce71693/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:74bf32980ec8/asks-permission	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required architecture_or_design, diagnosis, evidence_matching, next_action_priori
 completion-evidence-gate.py	Stop	advisories:75dbf53df7d7/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:7a998cdf893d/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:9041b395ce99/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:9139143ededa/plans-only	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required evidence_matching, next_action_priority, semantic_creation, verification
 completion-evidence-gate.py	Stop	advisories:91a6d1a612eb/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:93e9000d9186/plans-only	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required verification_selection, and the turn shows neither a Jev call (ops/types
 completion-evidence-gate.py	Stop	advisories:94a5d5c0235b/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:95c7408fcc82/plans-only	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required diagnosis, evidence_matching, next_action_priority, semantic_creation, a
 completion-evidence-gate.py	Stop	advisories:98869106008f/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:ab119b74cec7/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:ab93044a82d9/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:ac850a637052/plans-only	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required architecture_or_design, and the turn shows neither a Jev call (ops/types
 completion-evidence-gate.py	Stop	advisories:aea07fc2bb4f/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:af3d957cb388/asks-permission	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required semantic_creation, and the turn shows neither a Jev call (ops/typesafe_c
 completion-evidence-gate.py	Stop	advisories:b20628fa6f81/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:b3f78091d839/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:bc247231850e/plans-only	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required diagnosis, evidence_matching, next_action_priority, semantic_creation, v
-completion-evidence-gate.py	Stop	advisories:bf272acb7394/asks-permission	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required architecture_or_design, semantic_creation, verification_selection, and t
 completion-evidence-gate.py	Stop	advisories:bf85b55a384d/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:c04be8393118/asks-permission	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required verification_selection, and the turn shows neither a Jev call (ops/types
 completion-evidence-gate.py	Stop	advisories:c1d1b5dc18d5/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:c238afd6be73/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:c53aa60b5c3d/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:c8ee324eb8ef/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:cc8e35a9c2c1/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:cc9fe9df7afc/asks-permission	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required next_action_priority, and the turn shows neither a Jev call (ops/typesaf
-completion-evidence-gate.py	Stop	advisories:d154f81f90ca/plans-only	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required next_action_priority, and the turn shows neither a Jev call (ops/typesaf
 completion-evidence-gate.py	Stop	advisories:d2d70bafa6c9/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:d7d1d8d033cf/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:da580b4a1adf/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:e107b3ec595c/asks-permission	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required next_action_priority, semantic_creation, and the turn shows neither a Je
 completion-evidence-gate.py	Stop	advisories:e1f51dde3b65/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:e66e6a9d3866/plans-only	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required diagnosis, evidence_matching, next_action_priority, verification_selecti
-completion-evidence-gate.py	Stop	advisories:e79083884848/asks-permission	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required diagnosis, next_action_priority, semantic_creation, and the turn shows n
-completion-evidence-gate.py	Stop	advisories:e9f80b77d08a/plans-only	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required semantic_creation, verification_selection, and the turn shows neither a 
-completion-evidence-gate.py	Stop	advisories:f274bfc032e8/asks-permission	reopen	JEV REQUIRED ACTIONS GATE — this turn's Jev build advisory required architecture_or_design, next_action_priority, semantic_creation, verific
 completion-evidence-gate.py	Stop	advisories:f510bb7f7997/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:f9556cac264d/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:fb34ec1f1d75/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
@@ -728,16 +700,110 @@ gate-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:cdbcf60040f0	announce	G
 gate-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:cdd65a0f0747	announce	GATE CHANGE ANNOUNCED — peer-broadcast-gate.py is enforcement, and edit just changed it.
 gate-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:d9316125677c	announce	GATE CHANGE ANNOUNCED — guard-unattended.py is enforcement, and edit just changed it.
 gate-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:fa39d0ae0973	announce	GATE CHANGE ANNOUNCED — executor-tier-gate.py is enforcement, and edit just changed it.
-guard-unattended.py	PreToolUse[Bash|WebFetch]	(all)	counts	allow=315 deny=7
+guard-unattended.py	PreToolUse[Bash|WebFetch]	(all)	counts	allow=312 deny=10
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:2f83845bddfc	deny	recursive/forced delete — blocked by the CARR unattended guard
 guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:33015ce0899d	deny	recursive/forced delete — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:56bed63903a1	deny	recursive/forced delete — blocked by the CARR unattended guard
 guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:66d774f88124	deny	force push — blocked by the CARR unattended guard
 guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:6dfb251d684c	deny	broad add (-A/--all/./:/) — blocked by the CARR unattended guard. Add explicit paths instead: `git add <path> [<path>...]`.
 guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:7ed14bfb5b26	deny	private key material — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:995d89a284a1	deny	recursive/forced delete — blocked by the CARR unattended guard
 guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:e3c7b98b9e56	deny	private key material — blocked by the CARR unattended guard
 guard-unattended.py	PreToolUse[Bash|WebFetch]	scenarios:5c0000000005	deny	recursive/forced delete — blocked by the CARR unattended guard
 guard-unattended.py	PreToolUse[Bash|WebFetch]	tool_calls:f53afacc66e2	deny	WebFetch to a non-standard port (#) on a host outside KNOWN_HOSTS — blocked by the CARR guard.
-jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	(all)	counts	allow=441
-jev-supervisor.py	Stop	(all)	counts	allow=87
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	(all)	counts	allow=375 announce=66
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:005d482ca566	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:010a4c03c18b	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:03e198646e6d	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:0a64781c385b	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:0ba2e8a87506	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:0ebaefe865cb	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:0f09b0fb8f85	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:106ba50bf4f1	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:12993081a8ac	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:1c14d7cd0107	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:2846baa603e1	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:2a66692e0056	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:2d46204312ac	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:35d9f017b2f2	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:37a4a6b3751c	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:3ea11d9f62a3	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:4ea164ba7c1a	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:4eeb44ad3d4f	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:50d0da61a891	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:52c30beb1863	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:5b6d0f1aa37c	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:5b9f3adbd9c3	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:5f1136cb8536	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:5fcdef5490e0	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:6a9898a282d3	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:6d024df913ba	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:7531ac48792e	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:77ec78177980	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:7a7a7df59adf	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:7adb3b4daa7b	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:7c8038af7afb	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:7f53c2334c84	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:82f56361511d	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:839237a8b67e	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:8b325b1e48d3	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:8cb3c1a0ec84	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:9040e248320f	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:936ead460a28	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:95954e0ba4f7	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:9c08586d67cf	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:a6bb8d7e4899	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:bd28a4705e8e	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:c44bca5616e8	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:cdbcf60040f0	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:cdd65a0f0747	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:cf9fe3e4634d	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:d1e2d11c38bf	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:d1f3ea015436	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:d2e9f981721e	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:d9316125677c	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:d9f8158e788a	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:e43bee54f105	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:e4504e612dc7	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:e6159e6e35df	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:e87f7bda8743	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:e9dc423af926	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:ed4bb40b7621	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:f04b9936c6a2	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:f47899fdbe4b	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:f5c0deb10c61	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:f66adb22dbc7	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:fa39d0ae0973	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:fcec80f23365	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:fd26ca56df4b	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	tool_calls:66875750858a	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	tool_calls:f53afacc66e2	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	Stop	(all)	counts	allow=62 announce=25
+jev-supervisor.py	Stop	advisories:0b5544d0632d/claims-done	announce	[jev stop_boundary] unavailable: Jev Stop judgment unavailable; inspect the claim and diff
+jev-supervisor.py	Stop	advisories:1131c706f9fd/claims-done	announce	[jev stop_boundary] unavailable: Jev Stop judgment unavailable; inspect the claim and diff
+jev-supervisor.py	Stop	advisories:13676fdf59f5/claims-done	announce	[jev stop_boundary] unavailable: Jev Stop judgment unavailable; inspect the claim and diff
+jev-supervisor.py	Stop	advisories:18cbf8fa1991/claims-done	announce	[jev stop_boundary] unavailable: Jev Stop judgment unavailable; inspect the claim and diff
+jev-supervisor.py	Stop	advisories:1f526bf12615/claims-done	announce	[jev stop_boundary] unavailable: Jev Stop judgment unavailable; inspect the claim and diff
+jev-supervisor.py	Stop	advisories:2db5b2a34d05/claims-done	announce	[jev stop_boundary] unavailable: Jev Stop judgment unavailable; inspect the claim and diff
+jev-supervisor.py	Stop	advisories:305e6bc66e9d/claims-done	announce	[jev stop_boundary] unavailable: Jev Stop judgment unavailable; inspect the claim and diff
+jev-supervisor.py	Stop	advisories:330ce8d71385/claims-done	announce	[jev stop_boundary] unavailable: Jev Stop judgment unavailable; inspect the claim and diff
+jev-supervisor.py	Stop	advisories:37e4fc352099/claims-done	announce	[jev stop_boundary] unavailable: Jev Stop judgment unavailable; inspect the claim and diff
+jev-supervisor.py	Stop	advisories:6252526ed7ad/claims-done	announce	[jev stop_boundary] unavailable: Jev Stop judgment unavailable; inspect the claim and diff
+jev-supervisor.py	Stop	advisories:62cb86d9f335/claims-done	announce	[jev stop_boundary] unavailable: Jev Stop judgment unavailable; inspect the claim and diff
+jev-supervisor.py	Stop	advisories:6c49f1bc4da1/claims-done	announce	[jev stop_boundary] unavailable: Jev Stop judgment unavailable; inspect the claim and diff
+jev-supervisor.py	Stop	advisories:7a998cdf893d/claims-done	announce	[jev stop_boundary] unavailable: Jev Stop judgment unavailable; inspect the claim and diff
+jev-supervisor.py	Stop	advisories:9041b395ce99/claims-done	announce	[jev stop_boundary] unavailable: Jev Stop judgment unavailable; inspect the claim and diff
+jev-supervisor.py	Stop	advisories:ab93044a82d9/claims-done	announce	[jev stop_boundary] unavailable: Jev Stop judgment unavailable; inspect the claim and diff
+jev-supervisor.py	Stop	advisories:b20628fa6f81/claims-done	announce	[jev stop_boundary] unavailable: Jev Stop judgment unavailable; inspect the claim and diff
+jev-supervisor.py	Stop	advisories:b3f78091d839/claims-done	announce	[jev stop_boundary] unavailable: Jev Stop judgment unavailable; inspect the claim and diff
+jev-supervisor.py	Stop	advisories:bf85b55a384d/claims-done	announce	[jev stop_boundary] unavailable: Jev Stop judgment unavailable; inspect the claim and diff
+jev-supervisor.py	Stop	advisories:c1d1b5dc18d5/claims-done	announce	[jev stop_boundary] unavailable: Jev Stop judgment unavailable; inspect the claim and diff
+jev-supervisor.py	Stop	advisories:c53aa60b5c3d/claims-done	announce	[jev stop_boundary] unavailable: Jev Stop judgment unavailable; inspect the claim and diff
+jev-supervisor.py	Stop	advisories:cc8e35a9c2c1/claims-done	announce	[jev stop_boundary] unavailable: Jev Stop judgment unavailable; inspect the claim and diff
+jev-supervisor.py	Stop	advisories:d2d70bafa6c9/claims-done	announce	[jev stop_boundary] unavailable: Jev Stop judgment unavailable; inspect the claim and diff
+jev-supervisor.py	Stop	advisories:e1f51dde3b65/claims-done	announce	[jev stop_boundary] unavailable: Jev Stop judgment unavailable; inspect the claim and diff
+jev-supervisor.py	Stop	advisories:f9556cac264d/claims-done	announce	[jev stop_boundary] unavailable: Jev Stop judgment unavailable; inspect the claim and diff
+jev-supervisor.py	Stop	advisories:fb34ec1f1d75/claims-done	announce	[jev stop_boundary] unavailable: Jev Stop judgment unavailable; inspect the claim and diff
 ledger-sweep.py	Stop	(all)	counts	allow=87 announce=1
 ledger-sweep.py	Stop	scenarios:c3f6a7b8c9d0	announce	LEDGER SWEEP — the partner's last turn matched triggers # · OVERRULED A RECOMMENDATION; # · RULED ON HOW SOMETHING IS STRUCTURED from rule <
 lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	(all)	counts	announce=72
@@ -1137,12 +1203,12 @@ rule-pack-preuse-reselection.py	PreToolUse[Bash|Write|Edit|MultiEdit|Agent|WebFe
 rule-pack-preuse-reselection.py	PreToolUse[Bash|Write|Edit|MultiEdit|Agent|WebFetch|WebSearch|Artifact|AskUserQuestion|mcp__.*]	tool_calls:e173a8c682ff	announce	RULE ROUTE DELIVERY FAILED (selector_unavailable): the rules below bind this tool call and were NOT delivered; you have not seen them. The t
 rule-pack-preuse-reselection.py	PreToolUse[Bash|Write|Edit|MultiEdit|Agent|WebFetch|WebSearch|Artifact|AskUserQuestion|mcp__.*]	tool_calls:f53afacc66e2	announce	RULE ROUTE DELIVERY FAILED (selector_unavailable): the rules below bind this tool call and were NOT delivered; you have not seen them. The t
 rule-pack-preuse-reselection.py	UserPromptSubmit	(all)	counts	announce=6
-rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:569a14d8e0fb	announce	json schema=jev-build-turn-receipt/v# schema=jev-build-advisory-unavailable/v# status=unavailable reason=unknown effect=visible_advisory_abs
-rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:5fd34f7d4ca1	announce	json schema=jev-build-turn-receipt/v# schema=jev-build-advisory-unavailable/v# status=unavailable reason=unknown effect=visible_advisory_abs
-rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:7674642d6663	announce	json schema=jev-build-turn-receipt/v# schema=jev-build-advisory-unavailable/v# status=unavailable reason=unknown effect=visible_advisory_abs
-rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:ab28e9ffe2a1	announce	json schema=jev-build-turn-receipt/v# schema=jev-build-advisory-unavailable/v# status=unavailable reason=unknown effect=visible_advisory_abs
-rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:c81467db0c27	announce	json schema=jev-build-turn-receipt/v# schema=jev-build-advisory-unavailable/v# status=unavailable reason=unknown effect=visible_advisory_abs
-rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:dd2a9a8193d4	announce	json schema=jev-build-turn-receipt/v# schema=jev-build-advisory-unavailable/v# status=unavailable reason=unknown effect=visible_advisory_abs
+rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:569a14d8e0fb	announce	json schema=jev-build-turn-receipt/v# schema=jev-build-advisory-skipped/v# status=skipped reason=boundary_deferred effect=no_prompt_obligati
+rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:5fd34f7d4ca1	announce	json schema=jev-build-turn-receipt/v# schema=jev-build-advisory-skipped/v# status=skipped reason=boundary_deferred effect=no_prompt_obligati
+rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:7674642d6663	announce	json schema=jev-build-turn-receipt/v# schema=jev-build-advisory-skipped/v# status=skipped reason=boundary_deferred effect=no_prompt_obligati
+rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:ab28e9ffe2a1	announce	json schema=jev-build-turn-receipt/v# schema=jev-build-advisory-skipped/v# status=skipped reason=boundary_deferred effect=no_prompt_obligati
+rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:c81467db0c27	announce	json schema=jev-build-turn-receipt/v# schema=jev-build-advisory-skipped/v# status=skipped reason=boundary_deferred effect=no_prompt_obligati
+rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:dd2a9a8193d4	announce	json schema=jev-build-turn-receipt/v# schema=jev-build-advisory-skipped/v# status=skipped reason=boundary_deferred effect=no_prompt_obligati
 rule-shape-gate.py	PreToolUse[mcp__.*__(teach|activate-rule)]	(all)	counts	allow=2 announce=1
 rule-shape-gate.py	PreToolUse[mcp__.*__(teach|activate-rule)]	tool_calls:0d9264aee317	announce	ENFORCEMENT CLASSIFICATION OBLIGATION — rule <hex> ("a rule ships with its enforcement decided at creation") applies to the rule you are abo
 scheduled-run-record.py	Stop	(all)	counts	allow=87
