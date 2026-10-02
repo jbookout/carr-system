@@ -102,7 +102,41 @@ def main() -> int:
         finally:
             os.chdir(old_cwd)
 
-    print(f"path-index-hygiene-selftest: {10 - len(failures)}/10 passed")
+    with tempfile.TemporaryDirectory(prefix="path-hygiene-merge-") as tmp:
+        root = Path(tmp)
+        git(root, "init", "-q")
+        git(root, "config", "user.email", "selftest@example.invalid")
+        git(root, "config", "user.name", "Selftest")
+        git(root, "config", "core.hooksPath", "/dev/null")
+        git(root, "commit", "--allow-empty", "-qm", "base")
+        git(root, "checkout", "-qb", "incoming")
+        inherited = "tool-v5-review.cjs"
+        (root / inherited).write_text("historical incoming file\n")
+        git(root, "add", inherited)
+        git(root, "commit", "-qm", "incoming historical name")
+        git(root, "checkout", "-qb", "topic", "HEAD~1")
+        git(root, "commit", "--allow-empty", "-qm", "topic")
+        git(root, "merge", "--no-commit", "--no-ff", "incoming")
+
+        def run_checker():
+            return subprocess.run(
+                [sys.executable, str(REPO / "ops/githooks/path-hygiene-check.py")],
+                cwd=root, env=fixture_env(), capture_output=True, text=True)
+
+        result = run_checker()
+        check("merge inherits a version-suffixed path without refusal",
+              result.returncode == 0, failures)
+        added = "added-v5-file.cjs"
+        (root / added).write_text("new during merge\n")
+        git(root, "add", added)
+        result = run_checker()
+        check("merge still refuses a brand-new version-suffixed path",
+              result.returncode == 1 and added in result.stderr, failures)
+        check("merge refusal does not reclassify the inherited path",
+              inherited not in result.stderr, failures)
+
+    print("path-index-hygiene-selftest: " +
+          (f"failed: {', '.join(failures)}" if failures else "all passed"))
     return 1 if failures else 0
 
 

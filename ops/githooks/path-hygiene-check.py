@@ -56,7 +56,22 @@ def staged_paths() -> list[str]:
         ["git", "diff", "--cached", "--name-only", "--diff-filter=ACR"],
         text=True, capture_output=True, check=True,
     )
-    return proc.stdout.splitlines()
+    paths = proc.stdout.splitlines()
+    merge = subprocess.run(
+        ["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"],
+        text=True, capture_output=True,
+    )
+    if merge.returncode == 1:  # no merge in progress
+        return paths
+    merge.check_returncode()
+    # A merge can add historical paths relative to HEAD. They already exist
+    # in the incoming tree, so their names are not new repository paths.
+    incoming = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", "-z", "MERGE_HEAD"],
+        text=True, capture_output=True, check=True,
+    )
+    existing = set(incoming.stdout.split("\0"))
+    return [path for path in paths if path not in existing]
 
 
 def main(argv: list[str]) -> int:
