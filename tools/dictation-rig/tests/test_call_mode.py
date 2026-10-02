@@ -751,13 +751,14 @@ class PostCallTests(unittest.TestCase):
         client = Mock()
         client.ask.return_value = {"answers": {"b0": {"noul": 0.9}}}
         segments = [{"speaker": "Speaker A", "text": "synthetic topic"}] * 3
-        with patch.object(post_call_jev, "_client", return_value=client):
+        with patch.object(post_call_jev, "_client", return_value=client), \
+             patch.object(post_call_jev.time, "monotonic", return_value=100.0):
             self.assertEqual(post_call_jev.topic_cut(segments, [1]), 1)
         kwargs = client.ask.call_args.kwargs
         self.assertEqual(kwargs["work_class"], "app_runtime")
         self.assertEqual(kwargs["retries"], 0)
         self.assertEqual(kwargs["timeout"], 5.0)
-        self.assertGreater(kwargs["deadline"], time.monotonic())
+        self.assertEqual(kwargs["deadline"], 105.0)
 
     def _transport_client(self, opener):
         # Fresh real client, pinned offline before credentials or transport.
