@@ -1,6 +1,5 @@
 -- Authenticated partner lease radar: recorded dates, explicit touch eligibility.
 -- Reader gets this projection only; it never gains SELECT on the lease ledger.
-begin;
 create view public.v_client_lease_radar as
 with clock as (select (now() at time zone 'America/Chicago')::date as today)
   select l.id, l.client_id, l.deal_id, p.name as client_name,
@@ -41,4 +40,3 @@ with clock as (select (now() at time zone 'America/Chicago')::date as today)
      and (l.expiration_on is null or l.expiration_on between clock.today and (clock.today + interval '24 months')::date);
 revoke all on public.v_client_lease_radar from public;
 grant select on public.v_client_lease_radar to carr_reader;
-commit;
