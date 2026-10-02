@@ -135,6 +135,41 @@ test('Local Deals PostgreSQL caller and evidence regressions', { skip: !bin && '
       assert.deepEqual((await c.query('select d.won_value::text, c.gross_amount::text from deal d join commission c on c.deal_id=d.id where d.id=$1', [id(4)])).rows, [{won_value: '120000.00', gross_amount: '12000.00'}]);
     }));
 
+    for (const linked of [false, true]) await t.test(
+      linked ? 'find returns invoice fields in deals reached through the client link'
+        : 'find returns invoice fields in name-matched deals',
+      async () => transaction(async () => {
+        await fixture(false);
+        await c.query("update client set roster_ref='C-SYN-1' where id=$1", [id(3)]);
+        await c.query("update deal set phase='closed',outcome='won',closed_on='2026-10-01',lane='national' where id=$1", [id(4)]);
+        // Other find domains are empty synthetic adapters. Its deal SELECTs
+        // still execute on PostgreSQL with the reader's granted views.
+        const finder = {query: async (sql, args) => {
+          if (sql.includes('from v_deal_board')) return c.query(sql, args);
+          if (sql.includes("subject_type in ('lead','client','vendor')")) return {rows: [{
+            name: 'Synthetic Contact', ref: 'L-SYN-1', kind: 'lead', merged: false,
+          }]};
+          if (sql.includes('from v_lead_client_best')) return {rows: [{
+            lead_ref: 'L-SYN-1', client_ref: 'C-SYN-1', link_basis: 'conversion',
+          }]};
+          return {rows: []};
+        }};
+        for (const invoiced of [null, '2026-10-02']) {
+          await c.query('update deal set invoiced_on=$1 where id=$2', [invoiced, id(4)]);
+          await c.query('set local role carr_reader');
+          const result = await TOOLS.find.handler(finder, actor, {query: linked ? 'Synthetic Contact' : 'Synthetic Assignment'});
+          const rows = linked ? result.deals_via_link : result.deals;
+          assert.deepEqual(rows.map(row => Object.fromEntries(invoiceFields.map(field => [field, row[field]]))), [{
+            invoiced_on: invoiced, closed_on: '2026-10-01', lane: 'national', outcome: 'won',
+          }]);
+          assert.deepEqual(rows.map(row => Object.fromEntries(Object.entries(row).filter(([field]) => !invoiceFields.includes(field)))), [{
+            name: 'Synthetic Assignment', phase: 'closed', owner: null, client_ref: 'C-SYN-1',
+          }], 'existing search projection remains unchanged');
+          assert.deepEqual(linked ? result.deals : result.deals_via_link, [], 'name/link deduplication remains unchanged');
+          await c.query('reset role');
+        }
+      }));
+
     await t.test('actual legacy handler works as carr_reader, including an empty board', async () => transaction(async () => {
       assert.equal((await c.query("select has_table_privilege('carr_reader','deal','select') as allowed")).rows[0].allowed, false);
       await c.query('set local role carr_reader');

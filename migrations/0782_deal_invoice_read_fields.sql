@@ -2,6 +2,19 @@
 -- Preserve invoice-eligible board membership and the existing column order.
 -- Client benefit (deal.won_value) and commission (commission.gross_amount)
 -- remain separate; neither is projected or derived here.
+create or replace view v_deal_board as
+select d.id, d.name, c.roster_ref as client_ref, pc.name as client_name,
+       d.deal_type, d.phase, ph.sort as phase_sort, d.segment, d.outcome,
+       lead_actor.slug as lead_owner, lt.last_touch,
+       d.notes_path, d.invoiced_on, d.closed_on, d.lane
+from deal d
+join client c on c.id = d.client_id
+join party pc on pc.id = c.party_id
+join deal_phase ph on ph.slug = d.phase
+left join deal_participant dp on dp.deal_id = d.id and dp.role = 'lead' and dp.to_at is null
+left join actor lead_actor on lead_actor.id = dp.actor_id
+left join v_last_touch lt on lt.subject_type = 'deal' and lt.subject_id = d.id;
+
 create or replace view v_deal_room_board as
 select d.id, d.name, d.deal_type as type, d.phase, d.owner, d.attention,
        d.next_date,

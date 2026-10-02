@@ -37,8 +37,8 @@ test('phase evidence projection selects the latest change, dates evidence indepe
 });
 
 test('invoice read additions preserve sealed verb input schemas and authority flags', async () => {
-  for (const name of ['deal-board', 'deal-room-board', 'get-deal-room', 'read-deal-reconciliation']) {
-    const args = name.endsWith('board') ? {} : {deal: 'aa000000-0000-4000-8000-000000000004'};
+  for (const name of ['find', 'deal-board', 'deal-room-board', 'get-deal-room', 'read-deal-reconciliation']) {
+    const args = name === 'find' ? {query: 'Synthetic'} : name.endsWith('board') ? {} : {deal: 'aa000000-0000-4000-8000-000000000004'};
     const sealed = await assertRegisteredOperation(name, TOOLS[name], args);
     assert.equal(sealed.write, false, name);
     assert.equal(sealed.human_only, false, name);
