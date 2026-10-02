@@ -19,7 +19,8 @@
 //     receipt_id. A row inserted straight into ops.jev_call_receipt has no
 //     such partner and is not credited.
 //   - read-jev-call-receipt-integrity (wired into ./run.sh health) counts
-//     receipts with no matching tool_call row and reports whether the
+//     receipts with no matching tool_call row (ask-jev-attempt for pending
+//     reservations, ask-jev for answers) and reports whether the
 //     append-only triggers are enabled right now. A disable-then-re-enable
 //     between two polls is not seen.
 //
@@ -44,6 +45,7 @@
 // string before it can reach a ToolError.
 
 import { ToolError as LeafToolError } from "./tool-error.js";
+import { judgeBinding, providerFor } from "./judge-provider.js";
 
 const ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 const USER_AGENT = "carr-worker-jev-proxy/1.0";
@@ -111,6 +113,91 @@ export async function canonicalSha256(value) {
 
 function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+// THE FULL DISTRIBUTION, NOT JUST THE PICK. Joe's ruling is that code decides
+// and Jev only judges, with thresholds calibrated per action. A pick cannot be
+// calibrated after the fact; the distribution it came from can. These mirror
+// answer_distribution() in ops/typesafe_client.py exactly, and both suites run
+// ops/fixtures/jev-calibration/distribution-vectors.v1.json. Entropy is in bits
+// over the renormalized distribution, null unless every probability is valid
+// and they sum to one within the tolerance (numeric sanity for rounded vendor
+// probabilities, not a decision boundary). Nothing here is a threshold.
+export const PROBABILITY_SUM_TOLERANCE = 0.02;
+
+export function modelIsPinned(model) {
+  return typeof model === "string" && model.trim() !== "" && !/(?:^|-)latest$/.test(model.trim());
+}
+
+function isProbability(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
+}
+
+export function answerDistribution(question, answer) {
+  const q = isPlainObject(question) ? question : {};
+  const a = isPlainObject(answer) ? answer : {};
+  const kind = q.type ?? a.type ?? null;
+  let distribution = null;
+  let top = null;
+  if (kind === "noul") {
+    if (isProbability(a.noul)) distribution = { true: a.noul, false: 1 - a.noul };
+  } else if (kind === "choice") {
+    const offered = isPlainObject(q.criteria) ? Object.keys(q.criteria)
+      : Array.isArray(q.choices) ? q.choices.map(String) : [];
+    top = typeof a.choice === "string" ? a.choice : null;
+    if (isPlainObject(a.probabilities)) {
+      distribution = {};
+      for (const key of [...offered, ...Object.keys(a.probabilities).filter(k => !offered.includes(k))])
+        distribution[key] = Object.hasOwn(a.probabilities, key) ? a.probabilities[key] : 0;
+    }
+  } else if (kind === "score") {
+    const levels = Array.isArray(q.criteria) ? q.criteria : [];
+    if (isPlainObject(a.probabilities)) {
+      const raw = a.probabilities;
+      const count = Math.max(levels.length,
+        ...Object.keys(raw).filter(k => /^\d+$/.test(k)).map(k => Number(k) + 1));
+      distribution = {};
+      for (let index = 0; index < count; index++) {
+        const level = index < levels.length ? levels[index] : null;
+        distribution[String(index)] = level !== null && Object.hasOwn(raw, level) ? raw[level]
+          : Object.hasOwn(raw, String(index)) ? raw[String(index)] : 0;
+      }
+    }
+  }
+  let complete = false, total = null, entropy = null, topProbability = null;
+  if (distribution) {
+    const values = Object.values(distribution);
+    if (values.length > 0 && values.every(isProbability)) {
+      total = values.reduce((sum, v) => sum + v, 0);
+      complete = Math.abs(total - 1) <= PROBABILITY_SUM_TOLERANCE;
+      if (complete && total > 0)
+        entropy = values.reduce((sum, v) => v > 0 ? sum - (v / total) * Math.log2(v / total) : sum, 0) + 0;
+      const best = Math.max(...values);
+      top = Object.keys(distribution).find(key => distribution[key] === best);
+      topProbability = best;
+    }
+  }
+  return { type: kind, distribution, distribution_complete: complete, probability_sum: total,
+    entropy_bits: entropy, top, top_probability: topProbability };
+}
+
+// What a later calibration needs about one Worker call. It rides in the
+// ask-jev response, so the envelope ledger (public.tool_call.response) keeps
+// it server-side beside the receipt, and every number in it is recomputable
+// from the receipt's own stored answers, model and state digest.
+// Recording must never turn a committed receipt into a failed ask-jev.
+function safeCalibrationBlock(...args) {
+  try { return calibrationBlock(...args); } catch { return null; }
+}
+
+export function calibrationBlock(questions, answered, modelRequested, stateSha) {
+  const answers = isPlainObject(answered?.answers) ? answered.answers : {};
+  const perQuestion = {};
+  for (const key of Object.keys(answers).sort(compareCodePoints))
+    perQuestion[key] = answerDistribution(questions?.[key], answers[key]);
+  return { schema: "carr.jev-calibration.v1", model_requested: modelRequested,
+    model_answered: answered?.model ?? null, model_pinned: modelIsPinned(modelRequested),
+    state_sha256: stateSha, questions: perQuestion };
 }
 
 function retryAfterMs(response) {
@@ -247,21 +334,33 @@ export function jevAskBinding(env, fetchImpl = fetch, options = {}) {
   return jevAsk;
 }
 
-// Existing append-only receipt door doubles as a pre-call attempt ledger.
-// It commits before fetch, so a later receipt failure remains visible as
-// missing usage. The settlement row is written in the final transaction.
+// Reserve the receipt and its pending ledger partner atomically before fetch.
+// Vendor failure leaves linked unknown spend, never an orphan or credited answer.
 export async function reserveJevCallAttempt(client, actor, args) {
   const { stateJson, questions, facets, model } = validateAskJevArgs(args);
   const key = `jev-attempt:${crypto.randomUUID()}`;
-  const row = (await client.query(
-    `select r.receipt_id from ops.record_jev_call_receipt($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) r`,
-    [args.session_id, "call", Object.keys(questions).sort(compareCodePoints), facets,
-      model, "jev-attempt-pending", await sha256Hex(stateJson),
-      await canonicalSha256(questions), await canonicalSha256({}), null,
-      JSON.stringify({}), null, actor.id, actor.slug, key],
-  )).rows[0];
-  if (!row?.receipt_id) throw new LeafToolError({ error: "jev_receipt_store_unavailable" });
-  return { key, receipt_id: row.receipt_id };
+  await client.query("begin");
+  try {
+    const row = (await client.query(
+      `select r.receipt_id from ops.record_jev_call_receipt($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) r`,
+      [args.session_id, "call", Object.keys(questions).sort(compareCodePoints), facets,
+        model, "jev-attempt-pending", await sha256Hex(stateJson),
+        await canonicalSha256(questions), await canonicalSha256({}), null,
+        JSON.stringify({}), null, actor.id, actor.slug, key],
+    )).rows[0];
+    if (!row?.receipt_id) throw new LeafToolError({ error: "jev_receipt_store_unavailable" });
+    await client.query(
+      `insert into tool_call (idempotency_key, verb, actor_id, request_hash, response)
+       values ($1,'ask-jev-attempt',$2,$3,$4)`,
+      [key, actor.id, await sha256Hex(key),
+        JSON.stringify({ receipt_id: row.receipt_id, cache_hit: false })],
+    );
+    await client.query("commit");
+    return { key, receipt_id: row.receipt_id };
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  }
 }
 
 function validateSessionId(ToolError, value) {
@@ -317,10 +416,11 @@ export function validateAskJevArgs(args, ToolError = LeafToolError) {
 // Validation failures throw; an upstream failure is returned (not thrown) so
 // the handler can raise it inside the envelope, where a same-key replay still
 // returns the stored response instead.
-export async function prefetchJevAnswer(args, ask) {
+export async function prefetchJevAnswer(args, ask, workClass = "system_work") {
   const { state, model, questions } = validateAskJevArgs(args);
+  providerFor(workClass);
   try {
-    return { ok: true, result: await ask({ state, model, questions }) };
+    return { ok: true, result: await judgeBinding(ask, workClass)({ state, model, questions }) };
   } catch (error) {
     if (error instanceof LeafToolError) return { ok: false, error: error.payload };
     return { ok: false, error: { error: "jev_upstream_failed", status: null, reason: "network" } };
@@ -334,7 +434,7 @@ export function jevCallReceiptTools({ withEnvelope, ToolError }) {
       // mcp.js asks Jev for tools carrying this flag before it opens the writer
       // transaction, and hands the answer over as client.jevPrefetched.
       jevProxy: true,
-      description: "Ask Jev (TypeSafe) through the Worker and record a server-timestamped, append-only receipt of the call before the answers are returned. The Worker holds the TypeSafe key; the caller never does. purpose 'call' is an ordinary Jev question set; purpose 'build_advisory' requires state.partner_request (a string) and also records prompt_sha256. Returns the answers, the answered model, usage, the receipt id and the server's recorded_at. Refuses jev_proxy_unconfigured when the Worker holds no key, jev_upstream_failed when Jev does not answer within 10 seconds.",
+      description: "Ask Jev (TypeSafe) through the Worker and record a server-timestamped, append-only receipt of the call before the answers are returned. The Worker holds the TypeSafe key; the caller never does. purpose 'call' is an ordinary Jev question set; purpose 'build_advisory' requires state.partner_request (a string) and also records prompt_sha256. Returns the answers, the answered model, usage, the receipt id, the server's recorded_at, and a calibration block (each answer's full distribution and entropy in bits, the requested and answered model, whether the requested model is pinned, and the state digest). Refuses jev_proxy_unconfigured when the Worker holds no key, jev_upstream_failed when Jev does not answer within 10 seconds.",
       inputSchema: {
         type: "object", additionalProperties: false,
         properties: {
@@ -377,13 +477,18 @@ export function jevCallReceiptTools({ withEnvelope, ToolError }) {
           )).rows[0];
           if (!row?.receipt_id) throw new ToolError({ error: "jev_call_receipt_refused" });
           if (answered.attempt) {
-            await c.query(
-              `insert into tool_call (idempotency_key, verb, actor_id, request_hash, response)
-               values ($1,'ask-jev-attempt',$2,$3,$4)`,
-              [answered.attempt.key, actor.id, await sha256Hex(answered.attempt.key),
+            const settlement = await c.query(
+              `update tool_call set response = $4::jsonb
+                where idempotency_key = $1 and verb = 'ask-jev-attempt'
+                  and actor_id = $2 and response->>'receipt_id' = $3
+                  and response->>'cache_hit' = 'false'
+                returning idempotency_key`,
+              [answered.attempt.key, actor.id, answered.attempt.receipt_id,
                 JSON.stringify({ receipt_id: answered.attempt.receipt_id,
                   cache_hit: true, settled_by: row.receipt_id })],
             );
+            if (settlement.rows.length !== 1)
+              throw new ToolError({ error: "jev_attempt_settlement_mismatch" });
           }
           return {
             ok: true,
@@ -397,6 +502,7 @@ export function jevCallReceiptTools({ withEnvelope, ToolError }) {
             cache_hit: answered.cache_hit === true,
             state_sha256: stateSha,
             prompt_sha256: promptSha,
+            calibration: safeCalibrationBlock(questions, answered, model, stateSha),
           };
         });
       },

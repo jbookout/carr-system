@@ -56,14 +56,14 @@ function harness() {
 
 test("MCP factory excludes public session paths and keeps only authority/internal reads", () => {
   const tools = harness().tools;
-  assert.deepEqual(Object.keys(tools).sort(), ["issue-tour-share-grant", "read-tour-sharing-library", "revoke-tour-share-grant", "rotate-tour-share-grant"]);
+  assert.deepEqual(Object.keys(tools).sort(), ["issue-tour-share-grant", "read-tour-feedback", "read-tour-sharing-library", "revoke-tour-share-grant", "rotate-tour-share-grant"]);
   for (const name of ["issue-tour-share-grant", "rotate-tour-share-grant", "revoke-tour-share-grant"])
     assert.equal(tools[name].authorityOnly, true);
   assert.equal(tools["read-tour-sharing-library"].writerConnection, true);
   assert.equal(tools["read-tour-sharing-library"].inputSchema.properties.cursor.pattern, "^[0-9]{1,9}$");
 });
 
-test("share authority lifecycle permits only foundation read scopes", async () => {
+test("share authority lifecycle permits narrow feedback scopes and rejects unrelated writes", async () => {
   const h = harness();
   const grant = { idempotency_key: idem, projection_id: ids.projection, token_digest: tokenDigest,
     permission_scopes: ["view_packet", "view_map"], expires_at: "2026-08-28T00:00:00Z", receipt_digest: receiptDigest };
@@ -74,17 +74,17 @@ test("share authority lifecycle permits only foundation read scopes", async () =
   assert.equal(h.calls.filter(call => call.sql.includes("issue_tour_share_grant")).length, 1);
   assert.equal(h.events.length, 1);
   await assert.rejects(
-    h.tools["issue-tour-share-grant"].handler(h.client, actor, { ...grant, idempotency_key: "60000000-0000-4000-8000-000000000002", permission_scopes: ["view_packet", "comment"] }),
+    h.tools["issue-tour-share-grant"].handler(h.client, actor, { ...grant, idempotency_key: "60000000-0000-4000-8000-000000000002", permission_scopes: ["view_packet", "edit_cheat_sheet"] }),
     error => error instanceof ToolError && error.payload.error === "tour_share_scope_invalid",
   );
 });
 
-test("browser exchange and reads are digest-only and expose no feedback or PDF authority", async () => {
+test("browser exchange and reads are digest-only and expose narrow feedback authority", async () => {
   const h = harness();
-  assert.deepEqual(Object.keys(h.browser).sort(), ["exchange", "readMap", "readPacket", "resolveAsset"]);
+  assert.deepEqual(Object.keys(h.browser).sort(), ["comment", "exchange", "readFeedback", "readMap", "readPacket", "resolveAsset", "shortlist"]);
   const exchange = await h.browser.exchange(h.client, { token_digest: tokenDigest, session_digest: sessionDigest,
     session_expires_at: "2026-08-28T00:00:00Z", audit_digest: auditDigest });
-  assert.deepEqual(exchange, { ok: true, expires_at: "2026-08-28T00:00:00Z", permission_scopes: ["view_packet", "view_map"] });
+  assert.deepEqual(exchange, { ok: true, expires_at: "2026-08-28T00:00:00Z", permission_scopes: ["view_packet", "view_map", "comment"] });
   const packet = await h.browser.readPacket(h.client, { session_digest: sessionDigest });
   const map = await h.browser.readMap(h.client, { session_digest: sessionDigest });
   const asset = await h.browser.resolveAsset(h.client, { session_digest: sessionDigest, asset_ref: "asset:public:abcdefghijklmnop" });
@@ -113,7 +113,7 @@ test("public and internal projections strip secrets and unsupported scopes", asy
     { asset_ref: "asset:public:abcdefghijklmnop", media_type: "image/jpeg" });
   const h = harness();
   const library = await h.tools["read-tour-sharing-library"].handler(h.client, actor, { projection_id: ids.projection, cursor: null, limit: 10 });
-  assert.deepEqual(library.library.grants, [{ share_grant_id: ids.grant, status: "active", permission_scopes: ["view_packet"], expires_at: "2026-08-28T00:00:00Z" }]);
+  assert.deepEqual(library.library.grants, [{ share_grant_id: ids.grant, status: "active", permission_scopes: ["view_packet", "comment"], expires_at: "2026-08-28T00:00:00Z" }]);
   assert.doesNotMatch(JSON.stringify(library), /provider|token_digest|session_digest|r2_key|rights|evidence/);
 });
 

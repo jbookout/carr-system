@@ -178,13 +178,14 @@ def parse_ts(value):
 LEADING_TS_RE = re.compile(r"^(\S+)\s")
 
 
-def read_rows(metric):
-    """(row, ts_or_None) pairs for a gate's catch_metric, both log formats.
+def read_rows(metric, status=None):
+    """Read timestamped rows and expose incomplete collection to the consumer.
 
-    Reads the log and its one rotation (path + ".1"), same convention as
-    ops/hook-telemetry-rollup.py's read_stream — a torn last line from a log
-    thirteen processes append to concurrently is skipped, never fatal.
+    A torn line remains nonfatal, but it makes coverage partial and cannot
+    establish a quiet window for an enforcement downgrade.
     """
+    status = status if status is not None else {}
+    status.update(files_read=0, unreadable_files=0, invalid_rows=0, invalid_timestamps=0)
     path = os.path.join(REPO, metric["log_path"])
     fmt = metric.get("log_format", "jsonl")
     ts_field = metric.get("ts_field")
@@ -193,33 +194,45 @@ def read_rows(metric):
     for candidate in (path + ".1", path):
         if not os.path.exists(candidate):
             continue
-        with open(candidate, "r", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                line = line.rstrip("\n")
-                if not line.strip():
-                    continue
-                if fmt == "text":
-                    if hook_filter and hook_filter.get("kind") == "text_prefix_field":
-                        parts = line.split()
-                        idx = hook_filter["field_index"]
-                        if len(parts) <= idx or parts[idx] != hook_filter["equals"]:
-                            continue
-                    ts = None
-                    if ts_field == "leading_iso":
-                        m = LEADING_TS_RE.match(line)
-                        if m:
-                            ts = parse_ts(m.group(1))
-                    rows.append((line, ts))
-                else:
-                    try:
-                        rec = json.loads(line)
-                    except Exception:
+        try:
+            with open(candidate, "r", encoding="utf-8", errors="strict") as fh:
+                status['files_read'] += 1
+                for line in fh:
+                    line = line.rstrip("\n")
+                    if not line.strip():
                         continue
-                    if hook_filter and hook_filter.get("field") is not None:
-                        if rec.get(hook_filter["field"]) != hook_filter["equals"]:
+                    if fmt == "text":
+                        if hook_filter and hook_filter.get("kind") == "text_prefix_field":
+                            parts = line.split()
+                            idx = hook_filter["field_index"]
+                            if len(parts) <= idx:
+                                status['invalid_rows'] += 1
+                                continue
+                            if parts[idx] != hook_filter["equals"]:
+                                continue
+                        match = LEADING_TS_RE.match(line) if ts_field == 'leading_iso' else None
+                        ts = parse_ts(match.group(1)) if match else None
+                        row = line
+                    else:
+                        try:
+                            row = json.loads(line)
+                        except ValueError:
+                            status['invalid_rows'] += 1
                             continue
-                    ts = parse_ts(rec.get(ts_field)) if ts_field else None
-                    rows.append((rec, ts))
+                        if not isinstance(row, dict):
+                            status['invalid_rows'] += 1
+                            continue
+                        if hook_filter and hook_filter.get("field") is not None:
+                            if row.get(hook_filter["field"]) != hook_filter["equals"]:
+                                continue
+                        ts = parse_ts(row.get(ts_field)) if ts_field else None
+                    if ts is None:
+                        status['invalid_timestamps'] += 1
+                    rows.append((row, ts))
+        except (OSError, UnicodeError):
+            status['unreadable_files'] += 1
+    status['coverage'] = ('missing' if not status['files_read'] else
+                          'partial' if any(status[key] for key in ('unreadable_files', 'invalid_rows', 'invalid_timestamps')) else 'complete')
     return rows
 
 
@@ -256,7 +269,9 @@ def windows_back(now, days, count):
 def evaluate_gate(gate, entry, days, now):
     metric = entry["catch_metric"]
     ts_field = metric.get("ts_field")
-    data_available = ts_field is not None
+    log_path = os.path.join(REPO, metric["log_path"])
+    data_available = (ts_field is not None and
+                      any(os.path.isfile(path) for path in (log_path, log_path + ".1")))
     result = {
         "gate": gate,
         "mode": entry["mode"],
@@ -269,7 +284,11 @@ def evaluate_gate(gate, entry, days, now):
         "proposal": None,
         "note": metric.get("note") or "",
     }
-    rows = read_rows(metric)
+    coverage = {}
+    rows = read_rows(metric, coverage)
+    data_available = data_available and coverage['coverage'] == 'complete'
+    result['data_available'] = data_available
+    result['telemetry_status'] = coverage
     if not data_available:
         result["total_rows_seen"] = len(rows)
         return result

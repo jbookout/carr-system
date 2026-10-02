@@ -39,13 +39,10 @@ test('Codex session read has its own sealed successor', () => {
   assert.match(runtime, /mcp-tool:list-my-codex-sessions/);
 });
 
-test('Observatory room read has the live sealed successor', () => {
-  const migrationNames = readdirSync(resolve(root, 'migrations'));
-  assert.equal(migrationNames.filter(name => name.startsWith('0752_')).length, 1);
-  const sql = read('migrations/0752_observatory_room_read_scac_successor.sql');
-  assert.match(sql, /scac-mutation-registry\.v97/);
-  assert.match(sql, /scac-mutation-registry\.v98/);
-  const runtime = read('mcp-server/src/scac-mutation-registry.v98.generated.js');
-  assert.match(runtime, /mcp-tool:read-room-latest/);
-  assert.match(read('mcp-server/src/mutation-registry.js'), /scac-mutation-registry\.v98\.generated\.js/);
+test('Observatory read has a forward seal after the current main history', () => {
+  const sql = read('migrations/0772_observatory_room_read_scac_successor.sql');
+  assert.match(sql, /scac-mutation-registry\.v103/);
+  assert.match(sql, /scac-mutation-registry\.v104/);
+  assert.match(read('mcp-server/src/scac-mutation-registry.v104.generated.js'), /mcp-tool:read-room-latest/);
+  assert.match(read('mcp-server/src/mutation-registry.js'), /scac-mutation-registry\.v104\.generated\.js/);
 });

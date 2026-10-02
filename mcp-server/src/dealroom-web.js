@@ -867,7 +867,7 @@ async function jevDealReadingResponse(request, env, session, dependencies) {
       callTool(env, session.actor, "ask-jev", {
         idempotency_key: crypto.randomUUID(), session_id: `worker-deal-reading-${crypto.randomUUID()}`,
         purpose: "call", ...request,
-      }, "full") : undefined }));
+      }, "full", "app_runtime") : undefined }));
   } catch {
     return json({ error: "DEPENDENCY_UNAVAILABLE" }, 503);
   }

@@ -1468,6 +1468,7 @@
     },
     {
      "kind": "path_rule",
+     "read_only": true,
      "path_globs": [
       "*.html",
       "*dealroom/*",
@@ -2037,6 +2038,7 @@
     },
     {
      "kind": "path_rule",
+     "read_only": true,
      "path_globs": [
       "*control-room/public/*",
       "*workspace/public/*",
@@ -2526,6 +2528,7 @@
     },
     {
      "kind": "path_rule",
+     "read_only": true,
      "path_globs": [
       "*control-room/public/*",
       "*.html",
@@ -2935,6 +2938,7 @@
     },
     {
      "kind": "path_rule",
+     "read_only": true,
      "path_globs": [
       "*/Marketing/*",
       "*.css"
@@ -3270,6 +3274,7 @@
     },
     {
      "kind": "path_rule",
+     "read_only": true,
      "path_globs": [
       "*dealroom/*",
       "*design/*",
