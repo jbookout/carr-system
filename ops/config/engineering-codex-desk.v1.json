@@ -3,7 +3,7 @@
   "name": "engineering-codex",
   "kind": "codex-session",
   "model": "gpt-5.6-sol",
-  "effort": "high",
+  "effort": "xhigh",
   "cwd": "{{REPO}}",
   "sandbox": "workspace-write",
   "room_seat": null

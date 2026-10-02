@@ -271,17 +271,44 @@ def main():
         check("the new-branch range starts at the merge base, not origin/main",
               ancestor, f"base={base!r} is not an ancestor of {tip[:12]}")
 
-        # 6. The escape hatches still work.
+        # 6. The escape hatch now needs a reason (bypass audit item 10,
+        # 2026-09-24). CARR_SKIP_CI=1 alone used to skip a red floor
+        # unconditionally, with no trail of who used it or why -- exactly the
+        # "quiet door" the audit named. It now requires a non-empty
+        # CARR_SKIP_CI_REASON to be honoured at all.
         (repo / "d.txt").write_text("d\n")
         git(repo, "add", "d.txt", check_rc=True)
         git(repo, "commit", "-qm", "fourth", check_rc=True)
         log.write_text("")
         r = push(repo, "feature-d", rc="1", log=log,
                  extra={"CARR_SKIP_CI": "1"})
-        check("CARR_SKIP_CI=1 still skips a red floor",
+        check("CARR_SKIP_CI=1 with NO reason is refused, not honoured",
+              r.returncode != 0, r.stderr)
+        check("and the suite WAS invoked (the skip did not take)",
+              log.read_text().strip() != "", log.read_text())
+        check("the refusal names the missing CARR_SKIP_CI_REASON",
+              "CARR_SKIP_CI_REASON" in r.stderr, r.stderr)
+
+        # 6b. WITH a non-empty reason, the skip is honoured exactly as before
+        # -- and now leaves a receipt.
+        receipts = repo / "out" / "ci-skip-receipts.jsonl"
+        if receipts.exists():
+            receipts.unlink()
+        (repo / "e.txt").write_text("e\n")
+        git(repo, "add", "e.txt", check_rc=True)
+        git(repo, "commit", "-qm", "fifth", check_rc=True)
+        log.write_text("")
+        r = push(repo, "feature-e", rc="1", log=log,
+                 extra={"CARR_SKIP_CI": "1", "CARR_SKIP_CI_REASON": "selftest exercising the honoured skip"})
+        check("CARR_SKIP_CI=1 WITH a reason still skips a red floor",
               r.returncode == 0, r.stderr)
         check("and the suite was genuinely not invoked",
               log.read_text().strip() == "", log.read_text())
+        check("a receipt was appended to out/ci-skip-receipts.jsonl",
+              receipts.exists() and "selftest exercising the honoured skip" in receipts.read_text(),
+              receipts.read_text() if receipts.exists() else "(no file)")
+        check("the failure text's skip-command line is gone",
+              "CARR_SKIP_CI=1 git push" not in r.stderr, r.stderr)
 
     # 7. PORTABILITY, asserted statically because the runner that catches it is
     #    not the machine that runs this hook. `mktemp -t <prefix>` is BSD

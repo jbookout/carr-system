@@ -37,12 +37,14 @@ function handler(overrides = {}) {
   });
 }
 
-test("reports adapter is limited to the reports origin and scoped read-only routes", async () => {
+test("reports adapter is limited to the reports origin and scoped routes", async () => {
   assert.equal(isReportsRequest(request("/share")), true);
   assert.equal(isReportsRequest(request("/api/share/report")), true);
   assert.equal(isReportsRequest(request("/api/share/map")), true);
-  for (const path of ["/api/share/pdf", "/api/share/comment", "/api/share/reaction", "/sw.js"])
+  for (const path of ["/api/share/pdf", "/api/share/reaction", "/sw.js"])
     assert.equal(isReportsRequest(request(path)), false, path);
+  for (const path of ["/api/share/feedback", "/api/share/shortlist", "/api/share/comment"])
+    assert.equal(isReportsRequest(request(path)), true, path);
   assert.equal(isReportsRequest(new Request("https://app.doctorcre.com/share")), false);
   assert.equal(isReportsHostRequest(request("/mcp")), true);
   assert.equal(isReportsHostRequest(request("/oauth/authorize")), true);
@@ -116,8 +118,8 @@ test("static bootstrap removes the fragment and exposes no ungoverned client mut
   assert.match(script, /\/api\/share\/exchange/);
   assert.match(script, /route_sequence/);
   assert.match(script, /property:public/);
-  assert.match(script, /maplibre-gl-6\.1\.0/);
-  assert.match(script, /setWorkerUrl\("\/vendor\/maplibre-gl-6\.1\.0\/maplibre-gl-worker\.mjs"\)/);
+  assert.match(script, /maplibre-gl-6\.4\.1/);
+  assert.match(script, /setWorkerUrl\("\/vendor\/maplibre-gl-6\.4\.1\/maplibre-gl-worker\.mjs"\)/);
   assert.match(script, /\/api\/share\/map/);
   assert.match(script, /Promise\.allSettled\(\[fetchReport\(\), fetchMap\(\)\]\)/);
   assert.match(script, /if \(!shareToken\)[\s\S]*void loadTour\(\)/);
@@ -126,7 +128,7 @@ test("static bootstrap removes the fragment and exposes no ungoverned client mut
   assert.doesNotMatch(script, /propertyies/);
   assert.doesNotMatch(script, /report\?\.(?:tour_name|title|name|summary)/);
   assert.match(script, /interactive map only/);
-  assert.match(script, /await import\("\/vendor\/maplibre-gl-6\.1\.0\/maplibre-gl\.mjs"\)/);
+  assert.match(script, /await import\("\/vendor\/maplibre-gl-6\.4\.1\/maplibre-gl\.mjs"\)/);
   assert.doesNotMatch(script, /LineString|addSource\("tour-route"|addLayer\(\{ id: "tour-route"/);
   assert.match(html, /id="tour-map"/);
   assert.doesNotMatch(script + html, /\/api\/share\/(?:pdf|comment|reaction)|allow_(?:comments|reactions|pdf_download)|latest_reaction/);

@@ -49,6 +49,24 @@ would let a session spend an unlimited budget on anything named like a hex
 token, and #70 already showed what keying identity on spelling does. No
 transcript, or an unreadable one, means no exemption — the gate keeps its
 protection rather than guessing.
+
+SUBAGENTS SHARE THE PARENT'S SESSION_ID (2026-09-23, Joe's order after it
+refused him). A subagent's hook payload carries its parent's session_id, so its
+sends were charged to the PARENT's budget: a seal helper messaging "main" and
+its own nested helper filled the ledger, and the parent's single Joe-directed
+message to the Orchestrator was refused as the third name. Two holes, two
+proofs, no patterns:
+
+  - "main" is the harness address a subagent uses to reach ITS OWN parent. The
+    reply lands in the same session, so it is exempt: neither refused nor
+    charged.
+  - own_subagent() read only the payload's transcript, which is the PARENT's,
+    so a helper spawned by a subagent was never proven. The harness writes
+    <transcript without .jsonl>/subagents/agent-<id>.jsonl for EVERY agent
+    spawned anywhere in this session's tree, nested helpers included. That file
+    is ground truth like the spawn record is, and it now proves ownership too.
+    The id is used in a path, so only [A-Za-z0-9_-]+ may use it; any other
+    spelling ("/", "..") gets no exemption.
 """
 import json
 import os
@@ -78,6 +96,10 @@ MAX_NAMED_PEERS = 2     # the third distinct named peer is a broadcast
 # ref-shaped characters is stripped, so a name that merely contains a bracket is
 # untouched. Reply addresses return before this is ever consulted.
 REF_SUFFIX = re.compile(r"\s*\[[0-9A-Za-z._:-]+\]\s*$")
+# An agent id is spliced into a path, so it may only be these characters.
+AGENT_ID = re.compile(r"[A-Za-z0-9_-]+")
+# The harness address a subagent uses to reach its own parent session.
+PARENT_ADDRESS = "main"
 
 
 def peer_identity(to: str) -> str:
@@ -103,6 +125,12 @@ def own_subagent(who: str, transcript_path: str) -> bool:
     """
     if not transcript_path:
         return False
+    # A nested helper's spawn is in its spawner's transcript, not this one; the
+    # harness's own per-agent file under this session's subagents/ proves it.
+    if AGENT_ID.fullmatch(who or ""):
+        base = transcript_path[:-6] if transcript_path.endswith(".jsonl") else transcript_path
+        if os.path.isfile(os.path.join(base, "subagents", f"agent-{who}.jsonl")):
+            return True
     try:
         with open(transcript_path, errors="ignore") as fh:
             for line in fh:
@@ -197,6 +225,11 @@ def main():
 
     # Identity is the name; `x` and `x [d7e9b2]` are one peer. See REF_SUFFIX.
     who = peer_identity(to)
+
+    # A subagent reaching its own parent: same session, same context, nobody
+    # external pays. Exempt before the ledger is even read, so it is never charged.
+    if who == PARENT_ADDRESS:
+        return 0
 
     # The budget belongs to THIS session, keyed off the harness payload — see
     # state_path() for why a shared ledger was the wrong shape.

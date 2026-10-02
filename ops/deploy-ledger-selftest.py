@@ -128,6 +128,9 @@ def exercise_program5_failure(failure: str, *, posture: str = "enabled") -> subp
             tool = Path(args[0]).name if args else ""
             rest = args[1:]
             if tool == "ops-record.py":
+                if rest[:2] == ["release", "locate"]:
+                    print("release-test " + "a" * 40)
+                    raise SystemExit(0)
                 if rest[:2] == ["release", "require"]:
                     print("release-test " + "a" * 40)
                     raise SystemExit(0)
@@ -162,6 +165,12 @@ def exercise_program5_failure(failure: str, *, posture: str = "enabled") -> subp
         ''')
         write_executable(root / "mcp-server" / "node_modules" / ".bin" / "wrangler",
                          "#!/bin/sh\nexit 0\n")
+        # deploy-worker.sh validates the checked Wrangler manifest before it
+        # reaches any mocked boundary. Keep this fixture's issuer runtime
+        # explicitly inert, matching the source manifest's safety contract.
+        (root / "mcp-server" / "wrangler.toml").write_text(
+            'CANONICAL_OWNERSHIP_RUNTIME_MODE = "disabled"\n',
+            encoding="utf-8")
         write_executable(root / "bin" / "smoke-and-record.sh",
                          "#!/bin/sh\nexit 0\n")
         fake_bin = root / "fake-bin"

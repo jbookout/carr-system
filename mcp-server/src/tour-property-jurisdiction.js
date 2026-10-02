@@ -1,6 +1,8 @@
-// Typed adapter for the three reviewed Tour Slice 3 persistence seams.
-// It intentionally exposes neither property creation nor unreviewed identity,
-// lineage, jurisdiction, map, route, publication, or promotion capabilities.
+// Typed adapter for the three reviewed Tour Slice 3 persistence seams, plus
+// the 0565 registration door that mints a property TOGETHER WITH its first
+// rights-bound identifier assertion (there is no bare create-property path).
+// It intentionally exposes no unreviewed identity, lineage, jurisdiction, map,
+// route, publication, or promotion capabilities.
 
 import { authorizationClassForActor, organizationTenantForActor } from "./identity.js";
 import { requiredTimestamp } from "./tour-operations-contract.js";
@@ -23,6 +25,7 @@ const IDENTIFIER_FIELDS = new Set([
   "idempotency_key", "property_id", "identifier_scheme", "identifier_value", "normalized_identifier",
   "source_evidence_id", "rights_receipt_id", "observed_at", "confidence", "review_state", "assertion_digest",
 ]);
+const REGISTRATION_FIELDS = new Set([...IDENTIFIER_FIELDS].filter(field => field !== "property_id"));
 const COORDINATE_FIELDS = new Set([
   "idempotency_key", "property_id", "coordinate_role", "latitude", "longitude", "precision_class",
   "source_evidence_id", "rights_receipt_id", "provider", "observed_at", "review_state", "access_notes",
@@ -162,6 +165,51 @@ export function tourPropertyJurisdictionTools({ withEnvelope, writeEvent, ToolEr
             idempotency_key: args.idempotency_key,
           });
           return { ok: true, property_identifier_assertion_id: id };
+        });
+      },
+    },
+
+    "register-tour-property": {
+      write: true,
+      authorityOnly: true,
+      description: "Authority-only registration of one canonical Tour property together with its first rights-bound identifier assertion (0565). Tenant and authority are server-derived. Refuses a duplicate live identifier in the tenant. This does not choose an identity among aliases, merge lineage, assert an address or coordinate, put the property on a Tour, or publish anything.",
+      inputSchema: schema({ ...idempotencyProperty,
+        identifier_scheme: { type: "string" }, identifier_value: { type: "string" }, normalized_identifier: { type: "string" },
+        source_evidence_id: { type: "string" }, rights_receipt_id: { type: "string" }, observed_at: { type: "string" },
+        confidence: { type: "string" }, review_state: { type: "string" }, assertion_digest: { type: "string" },
+      }, ["idempotency_key", "identifier_scheme", "identifier_value", "normalized_identifier", "source_evidence_id", "rights_receipt_id", "observed_at", "confidence", "review_state", "assertion_digest"]),
+      handler: async (c, actor, args) => {
+        exactFields(args, REGISTRATION_FIELDS, ToolError);
+        uuid(args.idempotency_key, "idempotency_key", ToolError);
+        const normalized = text(args.normalized_identifier, "normalized_identifier", ToolError);
+        if (normalized !== normalized.toLowerCase()) fail(ToolError, { error: "tour_identifier_not_normalized" });
+        const payload = {
+          organization_tenant_id: tenantFor(actor, ToolError),
+          identifier_scheme: oneOf(args.identifier_scheme, "identifier_scheme", IDENTIFIER_SCHEMES, ToolError),
+          identifier_value: text(args.identifier_value, "identifier_value", ToolError),
+          normalized_identifier: normalized,
+          source_evidence_id: uuid(args.source_evidence_id, "source_evidence_id", ToolError),
+          rights_receipt_id: uuid(args.rights_receipt_id, "rights_receipt_id", ToolError),
+          observed_at: timestamp(args.observed_at, "observed_at", ToolError),
+          confidence: oneOf(args.confidence, "confidence", CONFIDENCE, ToolError),
+          review_state: oneOf(args.review_state, "review_state", ASSERTION_REVIEW, ToolError),
+          assertion_digest: digest(args.assertion_digest, "assertion_digest", ToolError),
+        };
+        return withEnvelope(c, actor, "register-tour-property", args, async () => {
+          const result = await c.query(
+            "select ops.register_tour_property($1::jsonb) as registration /* tour-registration:0565 */",
+            [JSON.stringify(payload)]);
+          const registration = result.rows[0]?.registration;
+          const propertyId = registration?.property_id;
+          const assertionId = registration?.property_identifier_assertion_id;
+          if (!UUID.test(propertyId || "") || !UUID.test(assertionId || ""))
+            fail(ToolError, { error: "tour_write_refused", entity: "tour_property" });
+          await writeEvent(c, actor, "register-tour-property", "tour_property", propertyId, {
+            field: payload.identifier_scheme,
+            new: { property_identifier_assertion_id: assertionId, source_evidence_id: payload.source_evidence_id, rights_receipt_id: payload.rights_receipt_id, review_state: payload.review_state },
+            idempotency_key: args.idempotency_key,
+          });
+          return { ok: true, property_id: propertyId, property_identifier_assertion_id: assertionId };
         });
       },
     },

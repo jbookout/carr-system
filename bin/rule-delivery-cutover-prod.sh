@@ -1,7 +1,7 @@
 #!/bin/zsh
 # The sole Production caller for ops.set_rule_delivery_mode.  Dry-run by
-# default; --apply still cannot cross the exact human-curation or seven-day
-# scoped-shadow gates enforced by ops/rule-delivery-cutover.py.
+# default; --apply verifies the current source map, delivery tags, reviewed
+# curation, installed hooks and exact Joe authority before changing policy.
 set -eu
 REPO="${0:A:h:h}"
 APPLY=0
@@ -22,6 +22,7 @@ done
 if (( APPLY )); then
   dirty=$(cd "$REPO" && git status --porcelain -- \
     ops/config/rule-delivery-activation-overlay.v1.json \
+    ops/config/rule-enforcement-map.json \
     hooks/rule-pack-drift-gate.py lib/rule_delivery_shadow.py \
     ops/rule-delivery-cutover.py ops/rule-delivery-shadow-eligibility.py \
     ops/rule-delivery-shadow-ledger.py ops/rule-delivery-shadow-watch.py \
@@ -38,7 +39,7 @@ if [[ -z "${CARR_DB_AUTHORITY_JOE_URL:-}" && -f "$HOME/.config/carr/db.env" ]]; 
 fi
 [[ -n "${CARR_DB_AUTHORITY_JOE_URL:-}" ]] || {
   print -u2 "REFUSED: CARR_DB_AUTHORITY_JOE_URL is required"; exit 78; }
-args=(--mode "$MODE" --reason "$REASON")
+args=(--mode "$MODE" --reason "$REASON" --installed-repo "$HOME/carr-system")
 (( APPLY )) && args+=(--apply)
 DATABASE_URL="$CARR_DB_AUTHORITY_JOE_URL" \
   "$REPO/.venv/bin/python" "$REPO/ops/rule-delivery-cutover.py" "${args[@]}"
