@@ -8,7 +8,11 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const VERSION = /^[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?$/;
 const ARTIFACT_REF = /^artifact:tour-pdf:[A-Za-z0-9_-]{16,128}$/;
-const STORAGE_REF = /^tour-pdf\/[A-Za-z0-9._/-]{16,400}\.pdf$/;
+// PostgreSQL's regex engine caps a repetition count at 255 (RE_DUP_MAX); this
+// bound must never exceed the database's matching constraint (migration
+// 0583) or a value this check accepts can still raise SQLSTATE 2201B
+// (invalid_regular_expression) in ops.record_tour_pdf_render_result.
+const STORAGE_REF = /^tour-pdf\/[A-Za-z0-9._/-]{16,255}\.pdf$/;
 const STATUSES = new Set(["queued", "rendering", "qc_blocked", "review_ready", "rejected", "available", "failed"]);
 const DECISIONS = new Set(["accept", "reject"]);
 const AUTHORITY = new Set(["tenant", "tenant_id", "organization_tenant_id", "actor", "actor_id", "reviewer", "identity", "authorization", "authorization_class", "sponsor", "human_slug"]);

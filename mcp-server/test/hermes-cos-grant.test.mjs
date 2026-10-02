@@ -5,8 +5,16 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   hermesActorForToken, hermesActorForTokenMaps, hermesCosActorForToken,
-  agentActorForToken, permittedActionOwnerSlugs, actorFromProps, propsForSlug,
+  agentActorForToken, permittedActionOwnerSlugs, authenticatedIdentity, propsForSlug,
 } from "../src/identity.js";
+
+// `actorFromProps` is module-private under amendment 8 (PR 1013). The exported
+// grant door is `authenticatedIdentity.connectionForGrant`; called without the
+// server's witness it returns exactly the same actor, unbranded, which is what
+// every case in this file is about.
+const actorFromProps = (props, bindings = null) =>
+  authenticatedIdentity.connectionForGrant(props, bindings);
+
 import {
   PROFILES, allowedIn, profileForActor, hermesCosDealFieldRefusal,
   hermesCosPremisesRefusal, HERMES_COS_DEAL_FIELDS,
@@ -17,7 +25,7 @@ const PLAIN = JSON.stringify({ "hermes-pilot": "plain-secret" });
 const COS = JSON.stringify({ "hermes-pilot": "cos-secret" });
 const PROJECTOR = JSON.stringify({ "hermes-pilot": "projector-secret" });
 const WRITE = { write: true };
-const PELHAM = "Pelham Tire — Pensacola distribution warehouse";
+const HALBERD = "Halberd Tire — Pensacola distribution warehouse";
 const IDS = Object.freeze({ joe: "10000000-0000-0000-0000-000000000002",
   hermes: "10000000-0000-0000-0000-000000000009",
   deal: "20000000-0000-0000-0000-00000000f459", joeBall: "30000000-0000-0000-0000-000000000001",
@@ -63,6 +71,7 @@ test("ordinary Hermes and projector credentials retain their exact existing door
   assert.equal(PROFILES.hermes.has("update-deal"), false);
   assert.equal(PROFILES.hermes.has("add-premises"), false);
   assert.equal(PROFILES.hermes.has("project-room-queue"), true);
+  assert.equal(PROFILES.hermes.has("record-dispatch-link"), true);
 });
 
 test("the CoS profile is server-locked and differs from Hermes by exactly two verbs", () => {
@@ -70,7 +79,7 @@ test("the CoS profile is server-locked and differs from Hermes by exactly two ve
   assert.equal(profileForActor(cos(), req), "hermes-cos");
   assert.deepEqual([...PROFILES.hermes].sort(), [
     "add-critical-date", "add-loop", "complete-action", "log-activity", "project-room-queue",
-    "record-defect", "record-finding", "set-next-action", "stamp-touch", "update-loop",
+    "record-defect", "record-dispatch-link", "record-finding", "set-next-action", "stamp-touch", "update-loop",
   ]);
   assert.deepEqual([...PROFILES["hermes-cos"]].filter(v => !PROFILES.hermes.has(v)).sort(),
     ["add-premises", "update-deal"]);
@@ -122,7 +131,7 @@ class FakeDB {
       return { rows: prior ? [prior] : [] };
     }
     if (sql.includes("from v_ref_index where subject_type='deal'"))
-      return { rows: [{ subject_id: IDS.deal, display_name: PELHAM, status: "site_selection", client_ref: "C-127" }] };
+      return { rows: [{ subject_id: IDS.deal, display_name: HALBERD, status: "site_selection", client_ref: "C-127" }] };
     if (sql.startsWith("select id from actor where slug=$1")) {
       const id = { joe: IDS.joe, "hermes-pilot": IDS.hermes }[params[0]];
       return { rows: id ? [{ id }] : [] };
@@ -152,10 +161,10 @@ class FakeDB {
   }
 }
 
-test("Pelham CoS handoff selects Joe, replaces Joe's ball, and keeps runtime provenance", async () => {
+test("Halberd CoS handoff selects Joe, replaces Joe's ball, and keeps runtime provenance", async () => {
   const db = new FakeDB();
   const result = await TOOLS["set-next-action"].handler(db, cos(), {
-    idempotency_key: "cos-459-pelham", ref: PELHAM, owner: "joe",
+    idempotency_key: "cos-459-halberd", ref: HALBERD, owner: "joe",
     description: "Confirm lease-vs-purchase preference before the tour", due_on: "2026-08-27",
   });
   assert.equal(result.owner, "joe");
@@ -171,7 +180,7 @@ test("Pelham CoS handoff selects Joe, replaces Joe's ball, and keeps runtime pro
 test("CoS handoff refuses Dell before any write", async () => {
   const db = new FakeDB();
   await assert.rejects(() => TOOLS["set-next-action"].handler(db, cos(), {
-    idempotency_key: "cos-459-dell", ref: PELHAM, owner: "dell", description: "forbidden",
+    idempotency_key: "cos-459-dell", ref: HALBERD, owner: "dell", description: "forbidden",
   }), (e) => e instanceof ToolError && e.payload.error === "owner_not_permitted");
   assert.equal(db.inserted, undefined);
   assert.equal(db.events.length, 0);
@@ -180,7 +189,7 @@ test("CoS handoff refuses Dell before any write", async () => {
 test("CoS defaults to its own ball when owner is omitted", async () => {
   const db = new FakeDB();
   const result = await TOOLS["set-next-action"].handler(db, cos(), {
-    idempotency_key: "cos-459-default", ref: PELHAM, description: "Doc keeps this one",
+    idempotency_key: "cos-459-default", ref: HALBERD, description: "Doc keeps this one",
   });
   assert.equal(result.owner, "hermes-pilot");
   assert.equal(db.inserted.owner_id, IDS.hermes);
@@ -199,7 +208,7 @@ test("update-deal CoS field lock is exact and whole-call", () => {
 
 test("add-premises CoS payload lock refuses new_party but allows party_ref", () => {
   assert.equal(hermesCosPremisesRefusal("hermes-cos", "add-premises",
-    { ownership: [{ kind: "owner", new_party: { name: "Pelham Holdings" } }] }), true);
+    { ownership: [{ kind: "owner", new_party: { name: "Halberd Holdings" } }] }), true);
   assert.equal(hermesCosPremisesRefusal("hermes-cos", "add-premises",
     { ownership: [{ kind: "owner", party_ref: "P-0948" }] }), false);
   assert.equal(hermesCosPremisesRefusal("hermes", "add-premises",

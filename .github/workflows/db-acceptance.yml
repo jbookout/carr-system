@@ -42,9 +42,16 @@ on:
     paths:
       - "migrations/**"
       - "db/**"
+      - "bin/schema-snapshot.sh"
       - "ops/**"
       - "lib/**"
       - "tools/**"
+      - "mcp-server/src/**"
+      - "mcp-server/test/codex-continuity.test.mjs"
+      - "mcp-server/test/codex-continuity-migration.test.mjs"
+      - "mcp-server/test/codex-continuity-postgres.sql"
+      - "mcp-server/package.json"
+      - "mcp-server/package-lock.json"
       - "run.sh"
       - ".github/workflows/db-acceptance.yml"
   schedule:
@@ -52,6 +59,12 @@ on:
     # here lands next to that run rather than racing it.
     - cron: "45 6 * * *"
   workflow_dispatch:
+    inputs:
+      export_candidate:
+        description: "Export and independently restore a disposable PG17 schema candidate"
+        type: boolean
+        required: true
+        default: false
 
 concurrency:
   group: db-acceptance-${{ github.ref }}
@@ -85,6 +98,22 @@ jobs:
         with:
           python-version-file: .python-version
 
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Install Node dependencies from the lock
+        run: npm --prefix mcp-server ci
+
+      - name: Install zsh
+        # ops/gate-zero-scheduler-canary-gate.py runs the Gate Zero canary
+        # LaunchAgent's own ProgramArguments, and both the wrapper
+        # (bin/run-scheduled.sh) and the canary carry a #!/bin/zsh shebang. A
+        # runner without zsh would fail that gate for the environment rather
+        # than for the code — the same three seconds of apt ci.yml already
+        # spends for bin/review-council-runner.sh.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh
+
       - name: Install Python dependencies from the lock
         # The lock, not requirements.txt — same reasoning as ci.yml. The
         # acceptance programs need psycopg; ops/local-pg-ci.py runs them with
@@ -112,6 +141,22 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq postgresql-17
           /usr/lib/postgresql/17/bin/initdb --version
+          # THE SERVER IS 17; THE DUMP CLIENT IS 18, AND THEY ARE NOT THE SAME
+          # DECISION. The disposable cluster this lane initdbs stays on 17,
+          # because matching the local lane is what makes a hosted red mean the
+          # same thing as a local red. But bin/schema-snapshot.sh pins the
+          # pg_dump MAJOR (see its PG_DUMP_MAJOR) so db/schema.sql is
+          # reproducible rather than decided by whichever client a machine
+          # happened to resolve first: pg_dump 18 emits every NOT NULL as a
+          # named table constraint and 17 emits a bare one, a 256-line diff with
+          # no schema change behind it. main's committed snapshot is an 18 dump,
+          # so a runner carrying only 17 fails the pin and exits 69 — which is
+          # exactly what happened on run 35375307125. Installing the 18 CLIENT
+          # satisfies the pin without moving the server. The script probes this
+          # absolute path by major, so no PATH change is needed. Same PGDG repo
+          # already configured above; backup-nightly.yml does the same thing.
+          sudo apt-get install -y -qq postgresql-client-18
+          /usr/lib/postgresql/18/bin/pg_dump --version
           # THE SOCKET DIRECTORY IS THE ONE REAL PLATFORM DIFFERENCE.
           # ops/local-pg-ci.py starts the server with only -h/-p and leaves
           # unix_socket_directories at the build default. Homebrew compiles that
@@ -125,6 +170,7 @@ jobs:
           sudo install -d -m 0775 -o "$USER" -g "$(id -gn)" /var/run/postgresql
 
       - name: Run the disposable-Postgres migration lane
+        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.export_candidate }}
         env:
           # ops/local-pg-ci.py refuses hosted runners by DEFAULT and still does.
           # This is the declared opt-in — the module additionally requires the
@@ -144,3 +190,20 @@ jobs:
         # the same arguments. The default port 55432 is contended on a developer
         # Mac and free on a fresh runner.
         run: python ops/local-pg-ci.py --class migration
+
+      - name: Export and restore a disposable schema candidate
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.export_candidate }}
+        env:
+          CARR_LOCAL_PG_ALLOW_HOSTED: "1"
+          CARR_LOCAL_PG_BIN_DIR: /usr/lib/postgresql/17/bin
+          LC_ALL: C
+        run: python ops/local-pg-ci.py --export-candidate "$RUNNER_TEMP/carr-schema-candidate"
+
+      - name: Upload verified schema candidate and manifest
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.export_candidate }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: carr-schema-candidate-${{ github.sha }}
+          path: ${{ runner.temp }}/carr-schema-candidate/
+          if-no-files-found: error
+          retention-days: 3

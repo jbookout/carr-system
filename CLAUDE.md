@@ -1,15 +1,12 @@
 # carr-system — repo pointer for sessions
 
-Code lives here. Business, brand, persona, and deal context does NOT — by
-design. Before concluding something "doesn't exist," query the CARR Record
-Layer (the MCP connector's verbs, or `./run.sh retrieve "<question>"` locally):
-it is the source of truth for doctrine, records, and brand.
+Code lives here. The CARR Record Layer owns business, brand, persona, deal
+context and doctrine. Query its verbs or `./run.sh retrieve "<question>"`
+before declaring anything absent.
 
-The cutoff fired 2026-08-19: the generated Drive .md files are GONE, moved to
-`_to_delete/md-renders-cutoff-20260819` in the vault, and the exporter now
-prints RETIRED instead of rewriting them. There is no compiled-rules file and
-no vault CLAUDE.md to fall back on — a session that cannot reach the store has
-no second surface to read, and must say so rather than working from memory.
+The 2026-08-19 cutoff retired the generated Drive .md files; there is no
+compiled-rules file or vault CLAUDE.md to fall back on. A session that cannot
+reach the store must say so rather than work from memory.
 
 Naming trap that cost a real search (2026-08-08): the app persona is
 **Dr. CRE** — "Doc" is only the spoken nickname. Search "Dr. CRE" or the
@@ -22,6 +19,15 @@ was never recovered — loop #250 documents that gap).
 Drive gotcha: Google Drive File Stream serves online-only placeholders; a
 grep over the Drive mirror can miss content that exists. Materialize files
 offline before trusting a negative grep there.
+
+## "carr needs authentication" is not a reason to ask Joe to sign in
+
+Desktop sessions show the user-config `carr` server as needs_auth even while its
+CLI login works; they use the claude.ai "CARR Record Layer" connector instead.
+On that notice, check the connector (session_connectors_status) and
+`claude mcp get carr`. If both are connected, say nothing about signing in. Tell
+Joe once, naming which, only if one is down. Never remove the `carr` server:
+the allowlist, gates and Model Room dispatcher depend on its name.
 
 ## A capture-verb denial has a fallback door
 
@@ -39,19 +45,24 @@ no credential (the receipted break-glass close stays a human's call) and it is
 not `call-verb` — never reach for that generic passthrough to get at a verb
 the classifier declined; that is working around a denial rather than filing it.
 
+## Migration and release state
+Read current canonical migration/release state before naming frontier/blocker.
+Dated incidents/WRs are history; source/CI grants no live authority.
+
+## Steering evals
+
+Surfaces in `evals/surfaces.json`: `/claude-api build-eval`, then
+`/claude-api hillclimb`; ship per `evals/README.md`.
+
 ## Map work has one mandatory front door
 
 For any request to recommend, design, build, revise, review, or publish a map,
 GIS analysis, route, day trip, or Tour surface, call the live `map-architecture`
 verb first. It returns the current doctrine and machine-contract pointer.
 
-The configured Stop gate no longer holds the turn open on this. Joe's 2026-08-23
-Stop-gate rationing, off that day's gates-audit council, left only three hooks
-able to reopen a turn (core conduct, completion-evidence, drift-assertion), and
-this one now ANNOUNCES instead: a governed session that skips the verb is told
-so, and the skip is recorded in `out/map-architecture-gate.jsonl`, but nothing
-stops the session ending. So the front door is still mandatory and it is now
-enforced by the session making the call, with a loud record when it does not.
+The Stop gate only announces this now (Joe's 2026-08-23 gate rationing): a
+skip is recorded in `out/map-architecture-gate.jsonl` but does not block, so
+the session making the call enforces it.
 
 ## Dell migration trigger
 
@@ -91,5 +102,6 @@ silently treated as absent.
    A17 back as closed. Only then report the migration complete to Dell in plain
    language.
 
-There is no local fallback any more. The doctrine store is the only doctrine
-surface; if it is unreachable, stop and say so.
+## PR design and debt
+
+Read and follow [the required PR policy](AGENTS.md#before-every-pr-design-and-debt-pass).

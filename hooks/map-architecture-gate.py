@@ -38,6 +38,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from stop_latch import announce  # noqa: E402
+sys.path.insert(0, REPO)
+from lib.transcript_read import load_transcript  # noqa: E402
 LOG = os.path.join(REPO, "out", "map-architecture-gate.jsonl")
 CARR_PATH_MARKERS = ("/carr-system/", "/carr-system", "my drive/carr ai")
 SYNTHETIC_PREFIXES = ("The following is the Codex agent history", "<environment_context>",
@@ -286,8 +288,12 @@ def main():
         path = payload.get("transcript_path") or payload.get("transcriptPath")
         if not path or not os.path.exists(path):
             return 0
-        with open(path, errors="replace") as handle:
-            records = [json.loads(line) for line in handle if line.strip()]
+        # One bad line in the session's own transcript must not switch the
+        # gate off (bypass hunt, PR #1224): lib/transcript_read.py skips it
+        # and records a transcript_tamper event instead of raising.
+        records = load_transcript(path, hook="map-architecture-gate",
+                                  session=payload.get("session_id") or payload.get("sessionId"),
+                                  log_path=LOG)
         blocked, reason = evaluate(records)
         if not blocked:
             return 0

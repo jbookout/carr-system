@@ -17,6 +17,8 @@ arguments and reads the staged index.
 """
 from __future__ import annotations
 
+import os
+from pathlib import Path
 import re
 import subprocess
 import sys
@@ -44,11 +46,43 @@ def violations(paths: list[str]) -> list[str]:
 
 
 def staged_paths() -> list[str]:
+    # ACR, not ACMR, and the M is the whole point: this check judges the SHAPE
+    # of a path, so only a path that is new to the repository can violate it.
+    # With M in the filter, editing a file whose name predates the rule —
+    # tools/doctorcre-v5-review.cjs, say — was refused as if the edit had just
+    # created it, which is exactly the "silently reclassified as a new
+    # violation" case the docstring above promises does not happen.
+    # ops/ci-selftest.py's git stub already distinguishes the two filters and
+    # names this checker as the ACR caller.
     proc = subprocess.run(
-        ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR"],
+        ["git", "diff", "--cached", "--name-only", "-z", "--diff-filter=ACR"],
+        capture_output=True, check=True,
+    )
+    paths = [os.fsdecode(path) for path in proc.stdout.split(b"\0") if path]
+    merge = subprocess.run(
+        ["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"],
+        text=True, capture_output=True,
+    )
+    if merge.returncode == 1:  # no merge in progress
+        return paths
+    merge.check_returncode()
+    # MERGE_HEAD can hold several incoming commits during an octopus merge.
+    # Read its worktree-specific path instead of resolving only its first ID.
+    merge_path = subprocess.run(
+        ["git", "rev-parse", "--git-path", "MERGE_HEAD"],
         text=True, capture_output=True, check=True,
     )
-    return proc.stdout.splitlines()
+    parents = Path(merge_path.stdout.strip()).read_text(encoding="ascii").splitlines()
+    existing: set[str] = set()
+    for parent in parents:
+        incoming = subprocess.run(
+            ["git", "ls-tree", "-r", "--name-only", "-z", parent],
+            capture_output=True, check=True,
+        )
+        # Both sources use literal NUL-delimited filenames. fsdecode preserves
+        # non-UTF-8 bytes through surrogateescape instead of skipping the check.
+        existing.update(os.fsdecode(path) for path in incoming.stdout.split(b"\0") if path)
+    return [path for path in paths if path not in existing]
 
 
 def main(argv: list[str]) -> int:
