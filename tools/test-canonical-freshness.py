@@ -727,7 +727,7 @@ class CanonicalFreshnessTests(unittest.TestCase):
         }
         expected = {
             "com.carr.canonical-fast-forward.plist": ("fast-forward", "StartCalendarInterval"),
-            "com.carr.canonical-dirty-watchdog.plist": ("watchdog", "StartInterval"),
+            "com.carr.canonical-dirty-watchdog.plist": ("watchdog", "StartCalendarInterval"),
         }
         for name, (mode, trigger) in expected.items():
             path = REPO_ROOT / "ops" / "launchd" / name

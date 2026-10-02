@@ -368,7 +368,13 @@ test("Clients and Vendors is a real read journey with distinguishable states", a
   assert.match(js, /matchMedia\("\(max-width: 767px\)"\)/);
   assert.match(js, /setAttribute\("role", modal \? "dialog" : "complementary"\)/);
   assert.match(js, /setAttribute\("aria-modal", "true"\)/);
-  assert.match(js, /region\.inert = modal/);
+  // V5-J101 round 3: the record panel no longer writes region.inert directly
+  // (that let it stomp a still-active claim Doc holds on the same shared
+  // region, or be stomped by Doc, whichever wrote second) — it claims/
+  // releases through the shared reference-counted registry instead.
+  assert.match(js, /claimInert\(region, PANEL_OWNER\)/);
+  assert.match(js, /releaseInert\(region, PANEL_OWNER\)/);
+  assert.doesNotMatch(js, /region\.inert = modal/);
   assert.match(js, /function containPanelFocus/);
   // Every position is decided, including the heading the panel opens on, which
   // is inside the dialog but is not one of the tab stops.

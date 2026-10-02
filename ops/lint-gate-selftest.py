@@ -44,8 +44,6 @@ from lib.rule_delivery_preuse import (  # noqa:E402
 )
 
 RETIRED_EFFECTS = {"advisory_only", "shadow_would_block_advisory_only"}
-VAULT_TAIL = ("Library", "CloudStorage",
-              "GoogleDrive-joe.bookout.carr.us@gmail.com", "My Drive", "CARR AI")
 
 
 def load_hook():
@@ -57,6 +55,7 @@ def load_hook():
 
 
 lint = load_hook()
+VAULT_TAIL = Path(lint.VAULT).relative_to(Path.home()).parts
 
 # Swapped in for ops/typesafe_client.py at the one seam the reviewer loads it
 # through. Loaded by sitecustomize in the child, so the real hook runs unedited.
@@ -115,7 +114,7 @@ class SurfaceScopingTests(unittest.TestCase):
         self.assertEqual(lint.surface_for(self.v("OUTREACH/x.md")), "email")
 
     def test_internal_folders_beat_any_surface(self):
-        for rel in ("DNA/Deal Management/record-layer/dell-onboarding-runbook.md",
+        for rel in ("DNA/Deal Management/record-layer/synthetic-onboarding-runbook.md",
                     "DNA/Team/Marketing/starter-kit.md",
                     "00_Context/Outreach/notes.md",
                     "Automation/Outreach/job.md",

@@ -168,6 +168,7 @@
         "claude-opus-4-1-20250805": 1000000,
         "claude-opus-5": 1000000,
         "claude-sonnet-5": 1000000,
+        "claude-sonnet-5-5": 1000000,
         "claude-haiku-4-5-20251001": 200000,
         "claude-fable-5": 1000000,
         "claude-fable-5-1": 1000000

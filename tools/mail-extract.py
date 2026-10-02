@@ -21,6 +21,11 @@ backfill burned two wrong theories on, loop #305). Read each property as a
 WHOLE LIST in one Apple event -- `sender of messages of m` -- then assemble the
 records in Python. Measured on Joe's Sent Items: 1,342 messages, three
 properties, 0.4 seconds.
+
+Mailbox discovery is separate from extraction. A short account-count probe
+distinguishes an unresponsive Mail process from a responsive one whose account
+enumeration is slow. Each account's mailbox names are requested independently,
+so one slow account cannot hide which phase failed.
 """
 from __future__ import annotations
 
@@ -49,25 +54,32 @@ US = "\x1f"   # between fields
 RS = "\x1e"   # between records
 AS_SEP = ","  # between addresses inside one field
 
-LIST_SCRIPT = '''
+MAIL_LIVENESS_TIMEOUT = 5
+ACCOUNT_ENUM_TIMEOUT = 20
+
+LIVENESS_SCRIPT = '''
 tell application "Mail"
+  return count of every account
+end tell
+'''
+
+ACCOUNT_MAILBOX_SCRIPT = '''
+on run argv
+  set ai to (item 1 of argv) as integer
+  tell application "Mail"
+    set acct to account ai
+    set accountName to name of acct
+    -- Names only. Message counts and message properties belong to extraction.
+    set mailboxNames to name of every mailbox of acct
+  end tell
   set out to ""
-  set ai to 0
-  repeat with acct in (every account)
-    set ai to ai + 1
-    try
-      set bi to 0
-      repeat with m in (every mailbox of acct)
-        set bi to bi + 1
-        try
-          set c to (count of messages of m)
-          if c > 0 then set out to out & (ai as string) & "@@US@@" & (bi as string) & "@@US@@" & (name of acct) & "@@US@@" & (name of m) & "@@US@@" & (c as string) & "@@RS@@"
-        end try
-      end repeat
-    end try
+  set bi to 0
+  repeat with mailboxName in mailboxNames
+    set bi to bi + 1
+    set out to out & (ai as string) & "@@US@@" & (bi as string) & "@@US@@" & accountName & "@@US@@" & (contents of mailboxName) & "@@RS@@"
   end repeat
   return out
-end tell
+end run
 '''
 
 # THE MAILBOX IS ADDRESSED BY INDEX, never by name: Mail nests mailboxes inside
@@ -137,20 +149,53 @@ def osa(script: str, *args: str, timeout: int = 600) -> str:
     return p.stdout
 
 
+def _is_apple_event_timeout(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (isinstance(exc, subprocess.TimeoutExpired) or
+            "-1712" in text or "timed out" in text)
+
+
 def list_mailboxes():
+    """Return (boxes, status, problem_count) without reading message data."""
+    try:
+        account_count = int(osa(LIVENESS_SCRIPT,
+                                timeout=MAIL_LIVENESS_TIMEOUT).strip())
+    except Exception as exc:
+        # Do not print the AppleScript error: it may contain mailbox/account
+        # details. The aggregate status is enough for the nightly diagnosis.
+        status = "mail_unresponsive" if _is_apple_event_timeout(exc) else "mail_probe_failed"
+        return [], status, 0
+
     boxes = []
-    for rec in osa(LIST_SCRIPT).split(RS):
-        cols = rec.split(US)
-        if len(cols) != 5:
-            continue
-        ai, bi, account, name, count = (c.strip() for c in cols)
-        if not account or name.lower() in SKIP_MAILBOXES:
-            continue
+    slow_accounts = 0
+    failed_accounts = 0
+    for ai in range(1, account_count + 1):
         try:
-            boxes.append((int(ai), int(bi), account, name, int(count)))
-        except ValueError:
+            raw = osa(ACCOUNT_MAILBOX_SCRIPT, str(ai),
+                      timeout=ACCOUNT_ENUM_TIMEOUT)
+        except Exception as exc:
+            if _is_apple_event_timeout(exc):
+                slow_accounts += 1
+            else:
+                failed_accounts += 1
             continue
-    return boxes
+        for rec in raw.split(RS):
+            cols = rec.split(US)
+            if len(cols) != 4:
+                continue
+            account_index, mailbox_index, account, name = (c.strip() for c in cols)
+            if not account or name.lower() in SKIP_MAILBOXES:
+                continue
+            try:
+                boxes.append((int(account_index), int(mailbox_index), account, name))
+            except ValueError:
+                continue
+
+    if slow_accounts:
+        return boxes, "enumeration_slow", slow_accounts + failed_accounts
+    if failed_accounts:
+        return boxes, "enumeration_failed", failed_accounts
+    return boxes, "ready", 0
 
 
 def addr_of(value: str) -> str:
@@ -210,7 +255,17 @@ def main() -> int:
     since = datetime.now() - timedelta(days=args.days)
     wanted = {m.lower() for m in (args.mailbox or [])}
 
-    boxes = list_mailboxes()
+    boxes, enumeration_status, problem_accounts = list_mailboxes()
+    if enumeration_status != "ready":
+        print(json.dumps({
+            "status": enumeration_status,
+            "mailboxes_discovered": len(boxes),
+            "problem_accounts": problem_accounts,
+            "messages_written": 0,
+            "bodies_captured": 0,
+            "output_file_written": False,
+        }, indent=1))
+        return 1
     if wanted:
         boxes = [b for b in boxes if b[3].lower() in wanted]
     if not boxes:
@@ -218,7 +273,7 @@ def main() -> int:
         return 1
 
     messages, failures = [], []
-    for ai, bi, account, name, count in boxes:
+    for ai, bi, account, name in boxes:
         try:
             messages.extend(extract_mailbox(ai, bi, account, name, since))
         except Exception as exc:                     # one bad mailbox is not the run

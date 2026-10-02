@@ -597,12 +597,14 @@ def payload(inv: Invocation, worker: Worker) -> Dict[str, Any]:
     repo, home = str(worker.repo), str(worker.home)
     data: Dict[str, Any] = {"session_id": SESSION_ID, "transcript_path": str(worker.transcript),
                             "cwd": repo, "permission_mode": "default", "hook_event_name": inv.event}
-    if inv.event in ("PreToolUse", "PostToolUse"):
+    if inv.event in ("PreToolUse", "PostToolUse", "PostToolUseFailure"):
         tool_input = substitute(inv.record["tool_input"], repo, home)
         data.update(tool_name=inv.record["tool_name"], tool_input=tool_input,
                     tool_use_id=f"toolu_replay_{inv.record['id']}")
         if inv.event == "PostToolUse":
             data["tool_response"] = tool_response(inv.record["tool_name"], tool_input)
+        elif inv.event == "PostToolUseFailure":
+            data["error"] = "replayed tool failure"
     elif inv.event == "UserPromptSubmit":
         data["prompt"] = inv.record["prompt"]
     elif inv.event in ("Stop", "SubagentStop"):
@@ -1188,7 +1190,7 @@ def run_only(manifest: Dict[str, Any], args: argparse.Namespace) -> int:
     errors = [e for e in behaviour_errors(manifest, report.results) if e.startswith("SCENARIO")]
     for line in errors:
         print(line)
-    return 1 if errors else 0
+    return 1 if errors or any(r.verdict == "error" for r in report.results) else 0
 
 
 def main(argv: Optional[List[str]] = None) -> int:
