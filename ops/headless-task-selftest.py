@@ -494,6 +494,15 @@ print(sys.argv[sys.argv.index('--correlation')+1]+' aa000000-0000-4000-8000-0000
             wrapper.kill(); wrapper.wait(timeout=5)
             self.assertFalse((self.home/'args.json').exists(),
                 'effect-capable CLI started before its identity was journaled')
+            deadline = time.monotonic()+5
+            while True:
+                probe = subprocess.run(['ps','-p',str(pid),'-o','pid='],
+                    capture_output=True,text=True,timeout=5)
+                self.assertIn(probe.returncode, (0,1), probe.stderr)
+                if not probe.stdout.strip() or time.monotonic()>=deadline:
+                    break
+                time.sleep(.02)
+            self.assertFalse(probe.stdout.strip(), 'unjournaled launcher survived wrapper death')
             self.assertEqual(self.run_task().returncode, 0)
             self.assertTrue(any(r.get('reason')=='interrupted' for r in self.ledger()))
         finally:
