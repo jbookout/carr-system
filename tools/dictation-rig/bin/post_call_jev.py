@@ -297,7 +297,9 @@ def topic_cut(segments: list[Any], options: list[int], *,
     """
     try:
         tsc = _client()
-        live_ask = ask if ask is not None else tsc.ask
+        live_ask = ask if ask is not None else (
+            lambda state, questions: tsc.ask(state, questions, work_class="app_runtime")
+        )
         state = {"boundaries": {
             f"b{j}": {"before": _cut_side(segments[k - 1]), "after": _cut_side(segments[k])}
             for j, k in enumerate(options)
@@ -370,7 +372,7 @@ def check_distillation(result: dict[str, Any], context: dict[str, Any],
     except Exception:
         tsc = None
     live_ask = ask if ask is not None else (
-        (lambda state, questions: tsc.ask(state, questions)) if tsc is not None else None
+        (lambda state, questions: tsc.ask(state, questions, work_class="app_runtime")) if tsc is not None else None
     )
 
     if tsc is None or live_ask is None:

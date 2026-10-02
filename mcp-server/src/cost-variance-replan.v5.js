@@ -59,7 +59,11 @@
 import { digest } from "./artifact-trust.js";
 import { ORGANIZATION_TENANT_ID, isKnownPartner } from "./identity.js";
 import { V5_NO_EFFECTS } from "./global-boundaries.v5.js";
-import { V5_OVERDRAWN_REMEDIES } from "./hierarchical-cost-ledger.v5.js";
+import {
+  V5_OVERDRAWN_REMEDIES,
+  ledgerVersion,
+  projectLedger,
+} from "./hierarchical-cost-ledger.v5.js";
 
 export const V5_VARIANCE_SCHEMA_VERSION = "doctorcre-v5-cost-variance-replan.v1";
 export const V5_VARIANCE_RESULT_SCHEMA_VERSION = "cost-variance-assessment.v1";
@@ -547,6 +551,229 @@ export function measureQ115Dimensions(components) {
 }
 
 // ---------------------------------------------------------------------------
+// Firing: a warning or a replan is an EVENT at a crossing, not a state.
+// ---------------------------------------------------------------------------
+//
+// `evaluateReplan` answers "where is this node now?" and has no memory, so a
+// caller who asks it twice is told "warn" twice. Q128 says to WARN at 150 and
+// REPLAN at 200, which happens once when the line is crossed rather than on
+// every read. So a signal FIRES when, and only when, one committed operation
+// moves a node's band UPWARD across a threshold.
+//
+// WHY THIS IS IDEMPOTENT BY CONSTRUCTION, not by a dedupe table:
+//   - a crossing is computed from two ADJACENT ledger values, the one before an
+//     operation and the one after it, and each operation produces exactly one
+//     version, so each crossing belongs to exactly one version;
+//   - a replay, a refusal and a race loser all leave the incurred totals
+//     unchanged, so their before and after bands are equal and nothing fires;
+//   - a signal id is `budget-signal:<scope>:<node>:<kind>:v<version>`, so two
+//     readers of the same commit derive the same id and a persisting caller can
+//     keep the first and drop the rest;
+//   - staying above a threshold fires nothing. Falling back below it and then
+//     crossing again is a NEW crossing at a NEW version and fires again with a
+//     distinct id. That is the definition of "once per crossing", not a lapse.
+//
+// A jump from under 150 straight to 200 or more crosses BOTH lines in one
+// operation and fires both, warning and replan, each once: both thresholds were
+// crossed, and a reader counting warnings must not find one missing because the
+// replan happened in the same step.
+//
+// A qualification failure fires a replan on the TRANSITION from qualified to
+// qualification_failed. Staying failed fires nothing; recovering and failing
+// again fires again. This module holds no qualification record of its own (see
+// the projection), so the caller supplies both sides of the transition.
+
+export const V5_BUDGET_SIGNAL_SCHEMA_VERSION = "cost-budget-signal.v1";
+
+/** What a fired signal is, C-sorted. */
+export const V5_BUDGET_SIGNAL_KINDS = Object.freeze(["replan", "warning"]);
+
+/** Why it fired, C-sorted. */
+export const V5_BUDGET_SIGNAL_TRIGGERS = Object.freeze([
+  "cost_reached_replan_threshold",
+  "cost_reached_warning_threshold",
+  "qualification_failure",
+]);
+
+const BAND = Object.freeze({ continue: 0, warn: 1, replan: 2 });
+
+const COST_CROSSINGS = Object.freeze([
+  Object.freeze({ band: BAND.warn, kind: "warning", trigger: "cost_reached_warning_threshold",
+    threshold_basis_points: V5_WARNING_THRESHOLD_BASIS_POINTS }),
+  Object.freeze({ band: BAND.replan, kind: "replan", trigger: "cost_reached_replan_threshold",
+    threshold_basis_points: V5_REPLAN_THRESHOLD_BASIS_POINTS }),
+]);
+
+/** Basis points as a percentage with two decimals, floored like the ratio. */
+function percentText(basisPoints) {
+  return `${Math.floor(basisPoints / 100)}.${String(basisPoints % 100).padStart(2, "0")}%`;
+}
+
+const REPLAN_OPTIONS_TEXT =
+  "Choose one: re-estimate and get it re-approved, cut scope, ask for more authority, or stop. Switching to an unqualified route or lowering the quality bar is not allowed.";
+
+function warningMessage(nodeId, variance) {
+  return `Cost warning: ${nodeId} has now spent ${variance.incurred_units} units, ${percentText(variance.variance_basis_points)} of its ${variance.expected_total_cost_units}-unit estimate (the warning line is 150%). Work can continue. Check the estimate now: at 200% the work must be replanned.`;
+}
+
+function costReplanMessage(nodeId, variance) {
+  return `Replan required: ${nodeId} has now spent ${variance.incurred_units} units, ${percentText(variance.variance_basis_points)} of its ${variance.expected_total_cost_units}-unit estimate (the replan line is 200%). ${REPLAN_OPTIONS_TEXT} Work continues only if it is still worth doing at the required quality.`;
+}
+
+function qualificationReplanMessage(nodeId) {
+  return `Replan required: the route doing the work for ${nodeId} is no longer qualified, so the work must be replanned no matter how little has been spent. ${REPLAN_OPTIONS_TEXT}`;
+}
+
+function bandOf(variance) {
+  return variance.available === true ? BAND[variance.directive] : BAND.continue;
+}
+
+function nodeVariance(projection, nodeId) {
+  const node = projection.by_node[nodeId];
+  return assessVariance({
+    expected_total_cost_units: node.rolled_up.estimate_units,
+    incurred_units: node.rolled_up.incurred_units,
+  });
+}
+
+function replanFields() {
+  return {
+    permitted_levers: [...V5_REPLAN_LEVERS],
+    permits_unqualified_routing: false,
+    permits_quality_downgrade: false,
+    continue_permitted_only_if: "value_and_quality_remain_justified",
+  };
+}
+
+function sameEntry(a, b) {
+  return b !== undefined && a.entry_id === b.entry_id && a.kind === b.kind
+    && a.node_id === b.node_id && a.amount_units === b.amount_units;
+}
+
+/**
+ * The cost signals ONE committed operation fired.
+ *
+ * Takes the ledger value before the operation and the value after it. The two
+ * must be ADJACENT — the same tree, `after` extending `before`'s log, and at
+ * most one applied operation ahead — because a signal is pinned to the version
+ * that crossed, and comparing across several operations would pin a crossing
+ * to whichever version the caller happened to stop at. Equal versions (a
+ * replay) fire nothing. A gap, a different tree or a rewritten history THROWS.
+ *
+ * `scope_ref` names the stored ledger the signal belongs to (the durable
+ * path's tree_ref, which is unique where tree_id is not). Without one the id
+ * is scoped by tree_id and tree_version, which is unique only in-process.
+ */
+export function detectCostThresholdCrossings({
+  before_ledger: before, after_ledger: after, scope_ref: scopeRefInput,
+} = {}) {
+  const beforeVersion = ledgerVersion(before);
+  const afterVersion = ledgerVersion(after);
+  // The tree digest covers tree_id, tree_version, every node and every
+  // ceiling: two ledgers over different trees are never one lineage.
+  if (before.tree.tree_digest !== after.tree.tree_digest) {
+    fail("ledger_lineage_mismatch", "before_ledger and after_ledger are not the same scope tree",
+      { before_tree_id: before.tree.tree_id, after_tree_id: after.tree.tree_id });
+  }
+  const scopeRef = scopeRefInput === undefined
+    ? `${after.tree.tree_id}:t${after.tree.tree_version}`
+    : assertRef(scopeRefInput, "scope_ref");
+  const delta = afterVersion - beforeVersion;
+  if (delta !== 0 && delta !== 1) {
+    fail("ledger_versions_not_adjacent",
+      "a crossing is detected across exactly one operation; after_ledger must be at before_ledger's version or one ahead",
+      { before_version: beforeVersion, after_version: afterVersion });
+  }
+  if (after.entries.length < before.entries.length
+    || before.entries.some((entry, index) => !sameEntry(entry, after.entries[index]))) {
+    fail("ledger_lineage_mismatch", "after_ledger does not extend before_ledger's entry log",
+      { before_entries: before.entries.length, after_entries: after.entries.length });
+  }
+  const newOperationIds = Object.keys(after.applied)
+    .filter(id => before.applied[id] === undefined).sort();
+  if (newOperationIds.length !== delta
+    || Object.keys(before.applied).some(id => after.applied[id] === undefined)) {
+    fail("ledger_lineage_mismatch", "after_ledger's applied operations do not extend before_ledger's",
+      { new_operation_ids: newOperationIds });
+  }
+  if (delta === 0) return deepFreeze([]);
+
+  const beforeProjection = projectLedger(before);
+  const afterProjection = projectLedger(after);
+  const treeId = after.tree.tree_id;
+  const operationId = newOperationIds[0];
+  const signals = [];
+  for (const nodeId of after.tree.node_ids) {
+    const was = nodeVariance(beforeProjection, nodeId);
+    const now = nodeVariance(afterProjection, nodeId);
+    const wasBand = bandOf(was);
+    const nowBand = bandOf(now);
+    for (const crossing of COST_CROSSINGS) {
+      if (!(wasBand < crossing.band && crossing.band <= nowBand)) continue;
+      signals.push({
+        schema_version: V5_BUDGET_SIGNAL_SCHEMA_VERSION,
+        tenant: ORGANIZATION_TENANT_ID,
+        signal_id: `budget-signal:${scopeRef}:${nodeId}:${crossing.kind}:v${afterVersion}`,
+        kind: crossing.kind,
+        trigger: crossing.trigger,
+        tree_id: treeId,
+        node_id: nodeId,
+        scope_kind: after.tree.nodes[nodeId].scope_kind,
+        ledger_version: afterVersion,
+        operation_id: operationId,
+        threshold_basis_points: crossing.threshold_basis_points,
+        variance_basis_points_before: was.available === true ? was.variance_basis_points : null,
+        variance_basis_points_after: now.variance_basis_points,
+        expected_total_cost_units: now.expected_total_cost_units,
+        incurred_units: now.incurred_units,
+        message: crossing.kind === "warning"
+          ? warningMessage(nodeId, now)
+          : costReplanMessage(nodeId, now),
+        ...(crossing.kind === "replan" ? replanFields() : {}),
+      });
+    }
+  }
+  return deepFreeze(signals);
+}
+
+const QUALIFICATION_SIGNAL_KEYS = Object.freeze([
+  "tree_id", "node_id", "before_state", "after_state", "observation_ref",
+]);
+
+/**
+ * The replan a qualification failure fired, if it fired one.
+ *
+ * Fires only on `qualified` -> `qualification_failed`. `observation_ref` names
+ * the observation that saw the failure and is part of the signal id, so the
+ * same observation reported twice derives the same id.
+ */
+export function detectQualificationReplan(input) {
+  assertObject(input, "qualification");
+  assertClosedKeys(input, QUALIFICATION_SIGNAL_KEYS, "qualification");
+  assertRequiredKeys(input, QUALIFICATION_SIGNAL_KEYS, "qualification");
+  const treeId = assertRef(input.tree_id, "qualification.tree_id");
+  const nodeId = assertRef(input.node_id, "qualification.node_id");
+  const before = assertMember(input.before_state, V5_QUALIFICATION_STATES,
+    "qualification.before_state", "unknown_qualification_state");
+  const after = assertMember(input.after_state, V5_QUALIFICATION_STATES,
+    "qualification.after_state", "unknown_qualification_state");
+  const observationRef = assertRef(input.observation_ref, "qualification.observation_ref");
+  if (!(before === "qualified" && after === "qualification_failed")) return deepFreeze([]);
+  return deepFreeze([{
+    schema_version: V5_BUDGET_SIGNAL_SCHEMA_VERSION,
+    tenant: ORGANIZATION_TENANT_ID,
+    signal_id: `budget-signal:${treeId}:${nodeId}:replan:qualification:${observationRef}`,
+    kind: "replan",
+    trigger: "qualification_failure",
+    tree_id: treeId,
+    node_id: nodeId,
+    observation_ref: observationRef,
+    message: qualificationReplanMessage(nodeId),
+    ...replanFields(),
+  }]);
+}
+
+// ---------------------------------------------------------------------------
 // The honest, zero-effect projection.
 // ---------------------------------------------------------------------------
 
@@ -563,6 +790,9 @@ const PREIMAGE = deepFreeze({
   human_escalation_change_kinds: [...V5_HUMAN_ESCALATION_CHANGE_KINDS],
   q115_measured_dimensions: [...V5_Q115_MEASURED_DIMENSIONS],
   variance_unavailable_reasons: [...V5_VARIANCE_UNAVAILABLE_REASONS],
+  budget_signal_schema_version: V5_BUDGET_SIGNAL_SCHEMA_VERSION,
+  budget_signal_kinds: [...V5_BUDGET_SIGNAL_KINDS],
+  budget_signal_triggers: [...V5_BUDGET_SIGNAL_TRIGGERS],
 });
 
 /** The exact bytes every closed vocabulary and threshold in this module is hashed over. */
@@ -586,6 +816,8 @@ export function v5CostVarianceProjection() {
     replan_can_permit_unqualified_routing: false,
     replan_can_weaken_quality: false,
     numerator_is_incurred_not_committed: true,
+    signal_fires_once_per_upward_crossing: true,
+    signal_fires_on_replay_or_refusal: false,
     escalation_scoped_by_which_partner: false,
     partner_vocabulary_owner: "identity.js#isKnownPartner",
     overdrawn_remedy_owner: "hierarchical-cost-ledger.v5.js#V5_OVERDRAWN_REMEDIES",
@@ -594,6 +826,7 @@ export function v5CostVarianceProjection() {
       "an incident opener: an overdrawn hierarchy requires an incident, and open-incident is an authority-bound record-layer verb no pure module can call; the requirement is reported on every overdrawn projection and never satisfied here",
       "a qualification-state feed: this module takes qualification_state as a declared input and cannot itself tell a currently-qualified route from one whose record expired; that judgement belongs to expected-total-cost.v5.js's admission, which in turn needs the trusted verifier that does not exist yet",
       "a durable directive record: nothing this module returns is persisted, so a replan it directs leaves no trace the next process could read",
+      "a durable signal record: a fired warning or replan is returned to the committing caller (commitLedgerOperation carries it) with a deterministic id, but no table stores it yet; persisting it needs its own migration and SCAC successor seal",
     ],
     effects: V5_NO_EFFECTS,
   });

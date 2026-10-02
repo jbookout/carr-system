@@ -40,7 +40,12 @@
   <!-- Every 30 minutes. The control plane's own jobs land on the scale of
        minutes to hours, and the whole point is not needing a live session
        watching in between. -->
-  <key>StartInterval</key><integer>1800</integer>
+  <!-- carr-launchd-interval-seconds: 1800 | rendered by lib/launchd_calendar.py; macOS 27 launchd never fires StartInterval -->
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Minute</key><integer>30</integer></dict>
+  </array>
 
   <!-- Catch a change that landed while the Mac was asleep or shut, rather
        than waiting for the next half-hour boundary. -->

@@ -607,6 +607,37 @@
     "refused_content.py": {
       "role": "helper"
     },
+    "rule-boot-gate.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "PreToolUse",
+          "matcher": ".*",
+          "fixtures": [
+            "reads",
+            "edits",
+            "agent",
+            "tool_calls"
+          ]
+        },
+        {
+          "event": "PostToolUse",
+          "matcher": "Bash|mcp__.*__standing-context",
+          "fixtures": [
+            "bash"
+          ],
+          "allow_only": "PostToolUse and PostToolUseFailure only READ a boot fetch's answer (lib/rule_boot_gate.py observe()): they never deny, and they speak only when the call is a standing-context detail=boot fetch whose answer is an error, a rejection, or not the whole requested page. No real fixture is such a fetch, and the fetch paths are covered end to end by ops/rule-boot-gate-selftest.py."
+        },
+        {
+          "event": "PostToolUseFailure",
+          "matcher": "Bash|mcp__.*__standing-context",
+          "fixtures": [
+            "bash"
+          ],
+          "allow_only": "PostToolUse and PostToolUseFailure only READ a boot fetch's answer (lib/rule_boot_gate.py observe()): they never deny, and they speak only when the call is a standing-context detail=boot fetch whose answer is an error, a rejection, or not the whole requested page. No real fixture is such a fetch, and the fetch paths are covered end to end by ops/rule-boot-gate-selftest.py."
+        }
+      ]
+    },
     "rule-pack-drift-gate.py": {
       "role": "gate",
       "wirings": [
@@ -625,7 +656,7 @@
       "wirings": [
         {
           "event": "PreToolUse",
-          "matcher": "Bash|Write|Edit|MultiEdit|Agent|WebFetch|WebSearch|mcp__.*",
+          "matcher": "Bash|Write|Edit|MultiEdit|Agent|WebFetch|WebSearch|Artifact|AskUserQuestion|mcp__.*",
           "fixtures": [
             "bash",
             "edits",
@@ -684,6 +715,33 @@
           "fixtures": [],
           "wired_in": "project-settings",
           "no_replay": "SessionStart has no per-record input to replay: the gate inspects the machine (live settings, installed hooks, the checkout's own plumbing) rather than a payload, so there is no real record, and running it in the sandbox would only exercise the sandbox. It is wired in the tracked project settings under claude-tree/settings/, which the check reads and verifies."
+        }
+      ]
+    },
+    "session-presence-hook.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "SessionStart",
+          "matcher": "",
+          "fixtures": [],
+          "no_replay": "SessionStart has no per-record input to replay: the hook reads only the session id and its own environment, and its effect is a room post the sandbox must never make."
+        },
+        {
+          "event": "SessionEnd",
+          "matcher": "",
+          "fixtures": [
+            "scenarios"
+          ],
+          "allow_only": "A presence recorder that NEVER BLOCKS: run_hook always returns 0, prints nothing, and holds no block, deny or announce call; its only effect is a per-session outbox file, and under gate replay it never spawns the child that posts to the Model Room."
+        },
+        {
+          "event": "UserPromptSubmit",
+          "matcher": "",
+          "fixtures": [
+            "prompts"
+          ],
+          "allow_only": "A presence recorder that NEVER BLOCKS: run_hook always returns 0, prints nothing, and holds no block, deny or announce call; its only effect is a per-session outbox file, and under gate replay it never spawns the child that posts to the Model Room."
         }
       ]
     },
@@ -828,8 +886,10 @@
     "lib/loadpy.py",
     "lib/local_principal.py",
     "lib/machine_prerequisites.py",
+    "lib/rule_boot_gate.py",
     "lib/rule_delivery_preuse.py",
     "lib/rule_delivery_shadow.py",
+    "lib/rule_routes.py",
     "lib/scheduled_run.py",
     "lib/transcript_read.py"
   ]

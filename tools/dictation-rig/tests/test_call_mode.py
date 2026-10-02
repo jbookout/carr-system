@@ -14,8 +14,6 @@ import sys
 import tempfile
 import time
 import unittest
-import urllib.error
-import urllib.request
 from email.message import Message
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -41,28 +39,24 @@ capture_bridge = load_module("capture_bridge_under_test", "capture-bridge.py")
 post_call_jev = load_module("post_call_jev_under_test", "post_call_jev.py")
 
 
-_REAL_URLOPEN = urllib.request.urlopen
-_PAID_CALLS_REFUSED: list[str] = []
-
-
-def _refuse_paid_jev(request: object, *args: object, **kwargs: object) -> object:
-    """process_session runs the live Jev checks, and ops/typesafe_client.ask
-    reads the real key on this Mac -- so this offline suite once spent about
-    twenty paid Jev calls per run. Refuse the vendor host; let everything else
-    (the loopback fakes these tests build) through unchanged."""
-    url = str(getattr(request, "full_url", request))
-    if "typesafe.ai" in url:
-        _PAID_CALLS_REFUSED.append(url)
-        raise urllib.error.URLError("paid Jev call refused inside the offline suite")
-    return _REAL_URLOPEN(request, *args, **kwargs)
+_OFFLINE_CLIENT = post_call_jev._client()
+_OFFLINE_CLIENT.ask = Mock(side_effect=RuntimeError("live judge refused inside the offline suite"))
+_CLIENT_PATCHES = (
+    patch.object(post_call_jev, "_client", return_value=_OFFLINE_CLIENT),
+    patch.object(post_call.post_call_jev, "_client", return_value=_OFFLINE_CLIENT),
+)
 
 
 def setUpModule() -> None:
-    urllib.request.urlopen = _refuse_paid_jev  # type: ignore[assignment]
+    # Stop before provider selection, credential reads, or network transport.
+    # Injected ask functions and loopback distiller fakes still run normally.
+    for client_patch in _CLIENT_PATCHES:
+        client_patch.start()
 
 
 def tearDownModule() -> None:
-    urllib.request.urlopen = _REAL_URLOPEN  # type: ignore[assignment]
+    for client_patch in reversed(_CLIENT_PATCHES):
+        client_patch.stop()
 
 
 class CallModeTests(unittest.TestCase):
@@ -751,6 +745,14 @@ class PostCallTests(unittest.TestCase):
         segments = self.long_segments(6)
         tie = lambda _state, _q: {"answers": {"b0": {"type": "noul", "noul": 0.7}, "b1": {"type": "noul", "noul": 0.7}}}
         self.assertEqual(post_call_jev.topic_cut(segments, [2, 4], ask=tie), 4)
+
+    def test_topic_cut_uses_the_app_runtime_provider_route(self) -> None:
+        client = Mock()
+        client.ask.return_value = {"answers": {"b0": {"noul": 0.9}}}
+        segments = [{"speaker": "Speaker A", "text": "synthetic topic"}] * 3
+        with patch.object(post_call_jev, "_client", return_value=client):
+            self.assertEqual(post_call_jev.topic_cut(segments, [1]), 1)
+        self.assertEqual(client.ask.call_args.kwargs, {"work_class": "app_runtime"})
 
     def test_draft_creator_is_injectable_and_requires_a_confirmed_candidate(self) -> None:
         post_call.store_context(self.session, self.context)

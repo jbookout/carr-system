@@ -38,6 +38,7 @@ RUNNING IT. No database, no network, no production access:
 from __future__ import annotations
 
 import importlib.util
+import itertools
 import json
 import os
 import subprocess
@@ -60,9 +61,12 @@ def assistant(text):
     return {"type": "assistant", "message": {"role": "assistant", "content": text}}
 
 
+CALL_IDS = itertools.count()
+
+
 def tool(name, value=None):
     return {"type": "assistant", "message": {"content": [
-        {"type": "tool_use", "name": name, "input": value or {}}
+        {"type": "tool_use", "id": f"fixture-{next(CALL_IDS)}", "name": name, "input": value or {}}
     ]}}
 
 
@@ -85,7 +89,7 @@ def codex_wrapper(value):
 
 def codex_tool(name, value):
     return {"type": "response_item", "payload": {
-        "type": "custom_tool_call", "name": name, "input": value,
+        "type": "custom_tool_call", "call_id": f"fixture-{next(CALL_IDS)}", "name": name, "input": value,
     }}
 
 
@@ -95,6 +99,29 @@ def codex_assistant(value):
             {"type": "output_text", "text": value},
         ],
     }}
+
+
+def completed_fixture(records):
+    """Expand legacy sequential fixtures into paired terminal-success events.
+
+    These fixtures exercise completed work, rather than the pending/failed and
+    concurrent boundaries covered separately in the Dot regression suite.
+    """
+    expanded = []
+    for record in records:
+        expanded.append(record)
+        payload = record.get('payload') or {}
+        if payload.get('type') == 'custom_tool_call':
+            expanded.append({'type':'response_item', 'payload':{
+                'type':'custom_tool_call_output', 'call_id':payload['call_id'],
+                'output':json.dumps({'exit_code':0, 'output':'fixture completed'})}})
+        content = (record.get('message') or {}).get('content')
+        for block in content if isinstance(content, list) else []:
+            if block.get('type') == 'tool_use' and str(block.get('id','')).startswith('fixture-'):
+                expanded.append({'type':'user','message':{'content':[{
+                    'type':'tool_result','tool_use_id':block['id'], 'is_error':False,
+                    'content':'fixture completed successfully'}]}})
+    return expanded
 
 
 CASES = [
@@ -495,7 +522,7 @@ def dual_precision():
              ("an unbuilt COUNT is not an absence claim", metric)]
     outcomes = []
     for name, recs in cases:
-        got, reason = mod.evaluate(recs)
+        got, reason = mod.evaluate(completed_fixture(recs))
         outcomes.append(not got)
         print(f"{'PASS' if not got else 'FAIL'}  {name} ({reason})")
     return all(outcomes)
@@ -534,7 +561,7 @@ def floor_preserved():
     for name, recs, expected in CASES:
         if not expected:
             continue
-        got, _ = mod.evaluate(recs)
+        got, _ = mod.evaluate(completed_fixture(recs))
         outcomes.append(got)
         if not got:
             print(f"FAIL  widening silenced an original fire: {name}")
@@ -585,6 +612,50 @@ def review_portfolio_revision_is_a_write():
     return passed
 
 
+def evaluate_artifact_deletion_is_a_write():
+    """V5-F01's deletion evaluation persists a receipt, so it is a write; the
+    word "evaluate" is not thereby promoted to a prefix (same shape as the
+    cancel-capability-session and review-portfolio-revision pairs above)."""
+    write = mod.is_write_action("evaluate-artifact-deletion")
+    not_a_prefix = not mod.is_write_action("evaluate-something-that-does-not-exist")
+    passed = write and not_a_prefix
+    print(f"{'PASS' if passed else 'FAIL'}  evaluate-artifact-deletion classifies as a write "
+          f"without making 'evaluate' a blanket prefix")
+    return passed
+
+
+def cre_lifecycle_writes_are_writes():
+    """V5-J102's lifecycle writers whose first word is not a write prefix are
+    exact entries; none of those first words is thereby promoted to a prefix."""
+    names = ("initialize-prospect-relationship", "initialize-assignment",
+             "initialize-property-negotiation", "open-cre-assignment",
+             "commit-winning-property", "cancel-pending-deal", "run-migration-shadow")
+    writes = {name: mod.is_write_action(name) for name in names}
+    reads = {name: mod.is_write_action(name) for name in
+             ("initialize-something-that-does-not-exist", "open-something-else",
+              "commit-something-else", "cancel-something-else", "run-something-else",
+              "read-cre-lifecycle")}
+    passed = all(writes.values()) and not any(reads.values())
+    print(f"{'PASS' if passed else 'FAIL'}  V5-J102 lifecycle writers classify as writes "
+          f"without making initialize/open/commit/cancel/run blanket prefixes"
+          + ("" if passed else f"; writes={writes} reads={reads}"))
+    return passed
+
+
+def f05_rule_contract_binder_is_a_write():
+    """V5-F05's binder is exact; its context read and future bind reads stay reads."""
+    write = mod.is_write_action("bind-rule-context-contract")
+    negatives = {
+        name: mod.is_write_action(name)
+        for name in ("read-action-context", "bind-rule-context-preview")
+    }
+    passed = write and not any(negatives.values())
+    print(f"{'PASS' if passed else 'FAIL'}  V5-F05 rule contract binder classifies as a write "
+          "without making bind a blanket prefix"
+          + ("" if passed else f"; write={write} negatives={negatives}"))
+    return passed
+
+
 def registry_prefix_coverage():
     """Keep the family classifier honest against the local live registry when present."""
     registry = os.path.join(REPO, "mcp-server", "src", "tools.js")
@@ -607,7 +678,7 @@ def registry_prefix_coverage():
     # stay False: a prefix that captured either would make every future read named
     # the same way a write.
     reads = ["review-queue", "get-deal", "list-verbs", "catch-me-up", "deal-board", "find",
-             "notification-feed", "read-doc-conversation"]
+             "notification-feed", "read-doc-conversation", "read-journey-one-clock"]
     false_writes = [name for name in reads if mod.is_write_action(name)]
     ok = not missing and not false_writes
     print(f"{'PASS' if ok else 'FAIL'}  live registry write coverage: "
@@ -648,8 +719,8 @@ def doc_conversation_write_door_classification():
     would turn both of them into writes and fail this case.
     """
     positives = ["create-doc-conversation", "share-doc-conversation",
-                 "rename-doc-conversation"]
-    negatives = ["read-doc-conversation", "share-preview", "rename-preview"]
+                 "rename-doc-conversation", "whats-new"]
+    negatives = ["read-doc-conversation", "share-preview", "rename-preview", "whats-new-preview"]
     missing = [action for action in positives if not mod.is_write_action(action)]
     false_writes = [action for action in negatives if mod.is_write_action(action)]
     ok = not missing and not false_writes
@@ -686,7 +757,7 @@ def real_hook_case(kind, non_carr=False):
     else:
         records = [user("reconcile"), tool("mcp__carr__update-deal"), assistant("Done.")]
     with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as fh:
-        for row in records:
+        for row in completed_fixture(records):
             fh.write(json.dumps(row) + "\n")
         path = fh.name
     try:
@@ -771,7 +842,7 @@ def latch_cases():
 
     def fires(records, session, state, name):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as fh:
-            for row in records:
+            for row in completed_fixture(records):
                 fh.write(json.dumps(row) + "\n")
             path = fh.name
         try:
@@ -924,7 +995,7 @@ def latch_cases():
 def main():
     outcomes = []
     for name, recs, expected in CASES:
-        got, reason = mod.evaluate(recs)
+        got, reason = mod.evaluate(completed_fixture(recs))
         ok = got == expected
         outcomes.append(ok)
         print(f"{'PASS' if ok else 'FAIL'}  {name}: {got} ({reason})")
@@ -937,7 +1008,7 @@ def main():
     print(f"{'PASS' if non_carr else 'FAIL'}  non-CARR cwd is out of scope")
     outcomes.append(checkout_scope_is_clone_name_independent())
     for name, recs, expected, reason_part in CLAUSE_CASES + DUAL_CASES:
-        got, reason = mod.evaluate(recs)
+        got, reason = mod.evaluate(completed_fixture(recs))
         ok = got == expected and (not expected or reason_part in reason)
         outcomes.append(ok)
         print(f"{'PASS' if ok else 'FAIL'}  {name}: {got} ({reason})")
@@ -948,6 +1019,9 @@ def main():
     outcomes.append(floor_preserved())
     outcomes.append(cancel_capability_session_is_a_write())
     outcomes.append(review_portfolio_revision_is_a_write())
+    outcomes.append(evaluate_artifact_deletion_is_a_write())
+    outcomes.append(cre_lifecycle_writes_are_writes())
+    outcomes.append(f05_rule_contract_binder_is_a_write())
     outcomes.append(registry_prefix_coverage())
     outcomes.append(authority_family_coverage())
     outcomes.append(r03_notification_classification())
@@ -956,6 +1030,11 @@ def main():
     print(f"completion-evidence-gate-selftest: {sum(outcomes)}/{len(outcomes)} passed")
     return 0 if all(outcomes) else 1
 
+
+
+# Independently reproduced Dot cases share the offline behavioral fixtures.
+import runpy as _dot_runpy
+_dot_runpy.run_path(str(__import__("pathlib").Path(__file__).with_name("dot-review-selftest.py")))["run_regressions"](['test_b21', 'test_b22'])
 
 if __name__ == "__main__":
     raise SystemExit(main())

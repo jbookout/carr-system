@@ -83,14 +83,35 @@ test("the registry still carries the humanOnly verbs this gate was built for", (
     "accept-ready-plan",
     "accept-ready-plan-amendment",
     "adjudicate-incident",
+    "answer-board-question",
     "answer-work-request-for-joe",
     "assign-execution-route",
     "attest-attempt-evaluation",
     "attest-execution-environment-conformance",
     "close-incident",
+    "confirm-merge",
+    "decide-doc-suggestion",
+    "propose-doc-correction",
+    // V5-F01: installing the field-authority/retention policy and appending a
+    // preservation hold are partner acts on the authority connection.
+    "record-artifact-preservation-hold",
+    // DoctorCRE V5-J103: a partner's own consent for the local mail and
+    // calendar adapter to READ their own carr.us mailbox, and its withdrawal.
+    "record-correspondence-adapter-consent",
+    // V5-J102: a lifecycle correction rewrites recorded history, so it is a
+    // partner act on the authority connection.
+    "record-lifecycle-correction",
     "record-tour-map-promotion-receipt",
     "record-tour-pdf-human-review",
+    // V5-D01: registering an action-class successor permanently fixes its
+    // owner and activation_predicate (unique, append-only, immutable), so the
+    // first registration is a partner act on the authority connection.
+    "register-action-class-successor",
+    "register-record-source-authority-policy",
     "review-and-triage",
+    "revoke-correspondence-adapter-consent",
+    // V5-RW02: only a verified partner revokes Dell's Salesforce read consent.
+    "revoke-salesforce-read-consent",
     "transition-execution-environment-provider",
   ]);
 });
@@ -123,8 +144,8 @@ test("accept-portfolio-revision admits the verified nonhuman joe-local principal
   assert.equal(out.receipt_id, receiptId);
 });
 
-test("verified sponsor-bound agents pass every humanOnly identity gate", async () => {
-  for (const verb of humanOnlyVerbs) {
+test("verified sponsor-bound agents pass partner-authority gates except human identity merges", async () => {
+  for (const verb of humanOnlyVerbs.filter(name => name !== "confirm-merge")) {
     for (const [label, actor] of SPONSORED_PARTNER_ACTORS) {
       const error = await executeRegisteredTool(forbiddenClient, actor, verb, {})
         .then(() => null, (e) => e);

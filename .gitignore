@@ -20,10 +20,12 @@ _to_delete/
 frozen-sources/
 exporters/templates/
 
-# PII output baselines — full HTML stays local, only sha256 tracked (ORDER 42b, 2026-08-06)
+# PII output baselines — full file stays local, only sha256 tracked (ORDER 42b, 2026-08-06;
+# renewal-radar.json added 2026-09-26 — tenant/landlord names, addresses and phones).
 # See baselines/SHA256SUMS. Regenerate locally: tools/check.sh --out <name> tells you how.
 baselines/lead-board.html
 baselines/deal-room-panhandle.html
+baselines/renewal-radar.json
 
 # Encrypted DB dumps — archived to R2 instead of git (ORDER 42b, 2026-08-06). See bin/backup-dump.sh.
 backups/*.sql.age
@@ -107,6 +109,7 @@ _ci_selftest_seed_journal.json
 # is arch-specific, so both are rebuilt locally rather than shipped in git.
 tools/CARR Calendar Access.app/Contents/_CodeSignature/
 tools/CARR Calendar Access.app/Contents/MacOS/carr-calendar-access
+tools/.calendar-access-stub.sha256
 
 # npm installs are per machine; mcp-server/package-lock.json is the review surface.
 node_modules/
