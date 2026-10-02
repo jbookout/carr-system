@@ -40,6 +40,8 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
       clients.push(c); return c;
     };
     const c = await connect();
+    // Hosted PostgreSQL uses UTC; business-day thresholds use Chicago.
+    await c.query("set time zone 'UTC'");
     await c.query('create schema ops; create role carr_writer; create role carr_authority; create role carr_reader; grant usage on schema ops to carr_writer,carr_authority,carr_reader;');
     const schema = readFileSync(path.join(root,'db/schema.sql'),'utf8');
     const authorityFunction = schema.match(/CREATE FUNCTION ops.authority_login_slug\([^\n]+\)[\s\S]*?\n\$\$;/)?.[0];
@@ -146,14 +148,29 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
     await c.query('insert into ops.doc_suggestion_scan(idempotency_key,conversation_id,through_sequence) values($1,$2,0)',[uuid(23),uuid(20)]);
     await identity('joe');
     assert.equal((await section('doc_suggestions',await context())).state,'ready');
+    // Use one reader high-water for both the fixture dates and catch-up window.
+    const todayContext = { ...await context(), previous_snapshot:null };
+    todayContext.since = new Date(Date.parse(todayContext.high_water)-86400000).toISOString();
     await c.query('reset role');
-    await c.query("update next_action set created_at=now()-interval '3 days',updated_at=now()-interval '3 days' where id=$1",[uuid(10)]);
-    await c.query("update critical_date set created_at=now()-interval '3 days',updated_at=now()-interval '3 days',due_on=current_date+14 where id=$1",[uuid(11)]);
-    await c.query("update ops.doc_suggestion set suggested_at=now()-interval '3 days',disposition='snoozed',snoozed_material_version=material_version,snoozed_until=current_date where id=$1",[uuid(21)]);
+    await c.query("update next_action set created_at=$2::timestamptz-interval '3 days',updated_at=$2::timestamptz-interval '3 days',due_on=($2::timestamptz at time zone 'America/Chicago')::date where id=$1",[uuid(10),todayContext.high_water]);
+    await c.query("update critical_date set created_at=$2::timestamptz-interval '3 days',updated_at=$2::timestamptz-interval '3 days',due_on=($2::timestamptz at time zone 'America/Chicago')::date+14 where id=$1",[uuid(11),todayContext.high_water]);
+    await c.query("update ops.doc_suggestion set suggested_at=$2::timestamptz-interval '3 days',disposition='snoozed',snoozed_material_version=material_version,snoozed_until=($2::timestamptz at time zone 'America/Chicago')::date where id=$1",[uuid(21),todayContext.high_water]);
     await identity('joe');
     // Time crossing a due threshold counts even without a new record write.
-    const todayContext = { ...await context(), since:new Date(Date.now()-86400000).toISOString(),previous_snapshot:null };
     for (const name of ['next_actions','critical_dates','doc_suggestions']) assert.equal((await section(name,todayContext)).state,'ready',name);
+    // Pin the UTC/Chicago date gap and both DST transitions, regardless of run time.
+    for (const high_water of ['2026-10-02T00:20:00Z','2026-10-02T18:00:00Z','2026-03-08T08:30:00Z','2026-11-01T07:30:00Z']) {
+      const thresholdContext = { high_water, since:new Date(Date.parse(high_water)-86400000).toISOString(), previous_snapshot:null };
+      for (const timezone of ['UTC','America/Chicago']) {
+        await c.query('reset role');
+        await c.query("select set_config('TimeZone',$1,false)",[timezone]);
+        await c.query("update critical_date set updated_at=$2::timestamptz-interval '3 days',due_on=($2::timestamptz at time zone 'America/Chicago')::date+14 where id=$1",[uuid(11),high_water]);
+        await identity('joe');
+        const dates = await section('critical_dates',thresholdContext);
+        assert.ok(dates.items.some(i => i.ref === `critical-date:${uuid(11)}`),`${timezone} at ${high_water}: Chicago threshold must be visible`);
+      }
+    }
+    await c.query("set time zone 'UTC'");
     await identity('dell');
     assert.equal((await section('new_leads',await context())).state,'empty');
     await c.query('reset role');

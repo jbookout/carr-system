@@ -23,6 +23,24 @@ function processAlive(pid) {
   catch (error) { if (error.code === "ESRCH") return false; throw error; }
 }
 
+test("Chrome waits through an exiting process group's transient EPERM probe", { skip: process.platform === "win32" }, async (t) => {
+  const fake = fakeChrome(["ready"]);
+  const browser = await launchChrome("fake-chrome", { spawnChrome: fake.spawnChrome, timeoutMs: 1500 });
+  t.after(() => browser.close());
+  const kill = process.kill;
+  let probes = 0;
+  t.mock.method(process, "kill", (pid, signal) => {
+    if (pid === -fake.calls[0].child.pid && signal === 0 && ++probes <= 2) {
+      throw Object.assign(new Error("exiting group"), { code: "EPERM" });
+    }
+    return kill.call(process, pid, signal);
+  });
+  await browser.close();
+  assert.ok(probes >= 3, "EPERM is pending cleanup, never proof that the group is gone");
+  assert.equal(processAlive(fake.calls[0].child.pid), false);
+  assert.equal(existsSync(fake.calls[0].profile), false);
+});
+
 for (const scenario of ["ready-helper", "hang-helper"]) {
   test(`Chrome reaps a SIGTERM-resistant helper after its leader exits (${scenario})`, { skip: process.platform === "win32" }, async (t) => {
     let helperPid;
