@@ -21,23 +21,21 @@ from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connec
 
 REPO = Path(__file__).resolve().parents[1]
 
-# 0758 installs the database repair v101 and seals property evidence v99.
-# The independently reserved v100 is not a prerequisite of this source.
+# 0769 installs database repair v102 and preserves catch-up v101 as history.
 # Both are pinned: an unreviewed frontier or a rewritten predecessor must fail closed.
-LIVE_REGISTRY_VERSION = "scac-mutation-registry.v101"
-LIVE_REGISTRY_ORDINAL = 101
-LIVE_REGISTRY_VERSIONS = (*range(1, 100), 101)
-SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v99"
-SEALED_PREDECESSOR_ORDINAL = 99
+LIVE_REGISTRY_VERSION = "scac-mutation-registry.v102"
+LIVE_REGISTRY_ORDINAL = 102
+SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v101"
+SEALED_PREDECESSOR_ORDINAL = LIVE_REGISTRY_ORDINAL - 1
 SEALED_PREDECESSOR_DIGEST = (
-    "sha256:b8c963310dae7cf990e046f6b022b01c76b3ac0b487994d5bea0eff679a32ec9"
+    "sha256:3cf9de91d2c7cac129fd653bc1a140f530a6bb68f0e036ad354bed87b6bc7bbc"
 )
-SEALED_PREDECESSOR_ENTRY_COUNTS = (2511, 1007)
+SEALED_PREDECESSOR_ENTRY_COUNTS = (2602, 1084)
 SEALED_PREDECESSOR_MIGRATION = (
-    "migrations/0755_property_evidence_scac_successor.sql"
+    "migrations/0767_doc_whats_new_scac_successor.sql"
 )
 LIVE_REGISTRY_MIGRATION = (
-    "migrations/0758_dot_database_design_scac_successor.sql"
+    "migrations/0769_dot_database_design_scac_successor.sql"
 )
 
 LIVE_CATALOG_CURRENT_FN = f"ops.scac_mutation_catalog_v{LIVE_REGISTRY_ORDINAL}_current()"
@@ -1292,7 +1290,7 @@ def main() -> int:
             installed_names = {row[0] for row in installed_catalog_functions}
             expected_current_names = {
                 f"scac_mutation_catalog_v{version}_current"
-                for version in LIVE_REGISTRY_VERSIONS if version >= 2
+                for version in range(2, LIVE_REGISTRY_ORDINAL + 1)
             }
             if not expected_current_names.issubset(installed_names):
                 raise RuntimeError(
@@ -1305,7 +1303,7 @@ def main() -> int:
             # One full role-authority validator per version from v4 to the live
             # frontier: v4-v20 survive under `*_live_at_seal` and the frontier
             # carries its own `*_current`. Each successor adds exactly one.
-            expected_validator_count = len([v for v in LIVE_REGISTRY_VERSIONS if v >= 4])
+            expected_validator_count = LIVE_REGISTRY_ORDINAL - 3
             if len(installed_validators) != expected_validator_count:
                 raise RuntimeError(
                     f"canonical migration chain did not retain the expected "

@@ -328,7 +328,7 @@ fail_tail() {  # fail_tail <logfile>
 # that HAS Python are all unchanged.
 check_unit() {
   local failed_pkgs=""
-  for pkg in mcp-server control-room workspace; do
+  for pkg in mcp-server control-room workspace practice-plugin; do
     [ -f "$pkg/package.json" ] || continue
     local unit_env=""
     [ "$pkg" = "mcp-server" ] && unit_env="F03_PARITY_REQUIRE_PYTHON=1"
@@ -342,7 +342,7 @@ check_unit() {
   if [ -n "$failed_pkgs" ]; then
     bad unit "node suites failed:$failed_pkgs"
   else
-    ok unit "mcp-server, control-room, workspace suites pass"
+    ok unit "Node package suites pass"
   fi
 }
 
