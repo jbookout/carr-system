@@ -52,6 +52,7 @@ def _run_verb(name, payload):
 
 def _loop_version(run_verb, loop_id):
     current = run_verb("read-loop", {"loop_id": loop_id})
+    current = current.get("loop", current)
     if current.get("loop_id") != loop_id or type(current.get("version")) is not int:
         raise RuntimeError("read-loop returned no matching version")
     return current["version"]

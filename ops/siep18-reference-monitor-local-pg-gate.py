@@ -21,21 +21,21 @@ from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connec
 
 REPO = Path(__file__).resolve().parents[1]
 
-# 0750 installs Tour feedback v98 and seals Codex session read v97 as history.
+# 0770 installs rule lookup v103 and seals human-only merges v102 as history.
 # Both are pinned: an unreviewed frontier or a rewritten predecessor must fail closed.
-LIVE_REGISTRY_VERSION = "scac-mutation-registry.v98"
-LIVE_REGISTRY_ORDINAL = 98
-SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v97"
+LIVE_REGISTRY_VERSION = "scac-mutation-registry.v103"
+LIVE_REGISTRY_ORDINAL = 103
+SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v102"
 SEALED_PREDECESSOR_ORDINAL = LIVE_REGISTRY_ORDINAL - 1
 SEALED_PREDECESSOR_DIGEST = (
-    "sha256:4412db9db6068341f9dfb2e8bd3e654ed6f528d4088c093c4d68e434b0e2bd88"
+    "sha256:e4d54f752db9af067b65e84eb45f4297acad7100b54553f763bd981609830dc9"
 )
-SEALED_PREDECESSOR_ENTRY_COUNTS = (2494, 1006)
+SEALED_PREDECESSOR_ENTRY_COUNTS = (2606, 1084)
 SEALED_PREDECESSOR_MIGRATION = (
-    "migrations/0748_codex_session_read_scac_successor.sql"
+    "migrations/0768_confirm_merge_human_only_scac_successor.sql"
 )
 LIVE_REGISTRY_MIGRATION = (
-    "migrations/0750_tour_client_feedback_scac_successor.sql"
+    "migrations/0770_find_rule_scac_successor.sql"
 )
 
 LIVE_CATALOG_CURRENT_FN = f"ops.scac_mutation_catalog_v{LIVE_REGISTRY_ORDINAL}_current()"

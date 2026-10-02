@@ -137,6 +137,9 @@ KNOWN_HOSTS = (
     "api.anthropic.com", "console.neon.tech",
     "neon.tech", "cloudflareapi.com", "cloudflare.com", "r2.cloudflarestorage.com",
     "googleapis.com", "github.com", "api.github.com", "hc-ping.com",
+    # Dot relay uses the Slack Web API; its user token stays in ~/.hermes/.env.
+    # This host is fixed infrastructure, not a record-derived practice domain.
+    "slack.com",
     "npiregistry.cms.hhs.gov", "download.cms.gov",
     # raw.githubusercontent.com: loop #163 named its absence as the gap forcing
     # the gh-api workaround for plain changelog reads. Added 2026-08-06 with the
@@ -628,8 +631,8 @@ RULES = [
     # 4. destructive SQL
     (re.compile(r"\bdrop\s+(table|schema|database|view|index)\b", re.I), "DROP"),
     (re.compile(r"\btruncate\s+(table\s+)?\w", re.I), "TRUNCATE"),
-    (re.compile(r"\bdelete\s+from\s+\w+\s*(;|$)", re.I), "unqualified DELETE"),
-    (re.compile(r"\bupdate\s+\w+\s+set\b(?![\s\S]*\bwhere\b)", re.I), "unqualified UPDATE"),
+    (re.compile(r'\bdelete\s+from\s+(?:[\w".]+)\s*(;|$)', re.I), "unqualified DELETE"),
+    (re.compile(r'\bupdate\s+[\w".]+\s+set\b(?![^;]*\bwhere\b)', re.I), "unqualified UPDATE"),
 ]
 
 # ── IS THIS COMMAND ACTUALLY SENDING? (loop #283, fixed 2026-08-13) ───────────
@@ -752,7 +755,19 @@ def is_sql_context(cmd):
 
 def hosts_in(cmd):
     """Every host this command could reach: URL hosts plus remote-copy targets."""
-    return URL_RE.findall(cmd) + REMOTE_TARGET_RE.findall(cmd)
+    hosts = []
+    from cmd_text import shell_tokens
+    try:
+        tokens = shell_tokens(cmd)
+    except ValueError:
+        tokens = re.split(r'[\s;&|]', cmd)
+    for token in tokens:
+        for url in re.findall(r'https?://[^\s\'"<>]+', token, re.I):
+            try:
+                hosts.append(urlsplit(url).hostname or "invalid-url")
+            except ValueError:
+                hosts.append("invalid-url")
+    return hosts + REMOTE_TARGET_RE.findall(cmd)
 
 
 def is_send_context(cmd):
@@ -945,7 +960,54 @@ def log(msg):
 
 
 def in_safe_zone(cmd):
-    return any(z in cmd for z in SAFE_ZONES)
+    from cmd_text import shell_tokens, shell_operands, SHELL_BOUNDARIES
+    try:
+        tokens, _ = shell_operands(shell_tokens(cmd))
+    except ValueError:
+        return False
+    targets = []
+    segments, segment = [], []
+    for token in tokens + [';']:
+        if token in SHELL_BOUNDARIES:
+            if segment:
+                segments.append(segment)
+            segment = []
+        else:
+            segment.append(token)
+    for words in segments:
+        while words and (words[0] in {'sudo', 'command', 'env'} or re.match(r'^\w+=', words[0])):
+            words = words[1:]
+        if not words:
+            continue
+        executable = os.path.basename(words[0])
+        if executable in {'rm', 'srm'}:
+            targets.extend(token for token in words[1:] if not token.startswith('-'))
+        elif executable == 'find' and '-delete' in words:
+            if any(token in {'-exec', '-execdir', '-ok', '-okdir'} for token in words):
+                return False  # executable predicates cannot establish a safe cleanup
+            roots = []
+            for token in words[1:]:
+                if token.startswith('-') or token in {'(', '!', ')'}:
+                    break
+                roots.append(token)
+            if not roots:
+                return False  # find defaults to an unbound working directory
+            targets.extend(roots)
+    def safe_target(target):
+        if '$' in target or '`' in target or '..' in target.split('/'):
+            return False
+        parts = target.split("/")
+        for zone in SAFE_ZONES:
+            if zone.startswith("/"):
+                if target.startswith(zone):
+                    return True
+            else:
+                zone_parts = zone.rstrip("/").split("/")
+                if any(parts[i:i + len(zone_parts)] == zone_parts
+                       for i in range(len(parts))):
+                    return True
+        return False
+    return bool(targets) and all(safe_target(target) for target in targets)
 
 
 # ── Rebasing your own branch in place ────────────────────────────────────────
@@ -1037,7 +1099,18 @@ def force_push_to_named_side_branch(cmd):
     # Stopping at the boundary is what keeps this honest: only THIS command's
     # arguments are read, so nothing chained after it can dress up its target.
     words = []
-    for token in text[match.end():].split():
+    # shlex separates an IO number from its operator (2, >&, 1). Remove only
+    # unquoted numbers adjacent to a redirect; `2 >` and `'2'>` are arguments.
+    remainder = re.sub(
+        r"'[^']*'|\"(?:\\.|[^\"\\])*\"|\\.|(?<!\S)\d+(?=[<>])",
+        lambda m: "" if m.group(0).isdigit() else m.group(0), text[match.end():])
+    try:
+        lexer = shlex.shlex(remainder, posix=True, punctuation_chars=";&|<>")
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return False
+    for token in tokens:
         if _SEPARATOR.match(token) or _REDIRECT.match(token):
             break             # this command's arguments end here
         if token.startswith("-"):

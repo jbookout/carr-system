@@ -478,7 +478,8 @@ def reap_main(argv):
                 detail = " ".join((p.stdout + " " + p.stderr).split())[:200]
                 say(f"KEEP  {name} — --remove refused: {detail}")
                 kept += 1
-        run_git(["worktree", "prune"], canon)
+        if not dry:
+            run_git(["worktree", "prune"], canon)
         say(f"reap done: {reaped} {'would be ' if dry else ''}reaped, {kept} kept")
     finally:
         try:
@@ -535,6 +536,14 @@ def maybe_spawn_reaper(canon, current_wt):
 
 
 def main():
+    sys.path.insert(0, REPO)
+    if os.environ.get("CARR_GROK_RUN_READ_ONLY") == "1":
+        try:
+            from hooks.grok_invocation import bounded_grok_read_only
+            if bounded_grok_read_only():
+                return 0
+        except ImportError:
+            pass  # an unavailable optional probe retains ordinary processing
     if "--reap" in sys.argv[1:]:
         # Detached child (or a hand/selftest run) — no SessionStart payload.
         try:

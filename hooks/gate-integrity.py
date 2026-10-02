@@ -52,6 +52,7 @@ git log rather than a side effect.
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from collections import Counter
@@ -805,7 +806,9 @@ def main():
         got = now.get(name)
         if got is None:
             content(f"MISSING: hooks/{name} is GONE — that gate is off")
-        elif want and got != want:
+        elif not isinstance(want, str) or not re.fullmatch(r"[0-9a-f]{64}", want):
+            content(f"INVALID: hooks/{name} has no valid SHA-256 baseline")
+        elif got != want:
             content(f"CHANGED: hooks/{name} no longer matches the blessed baseline")
     for name, got in now.items():
         if name not in base and got:
@@ -814,7 +817,9 @@ def main():
         got = now_contracts.get(name)
         if got is None:
             content(f"MISSING: ops/config/{name} is GONE — its wiring contract is off")
-        elif want and got != want:
+        elif not isinstance(want, str) or not re.fullmatch(r"[0-9a-f]{64}", want):
+            content(f"INVALID: ops/config/{name} has no valid SHA-256 baseline")
+        elif got != want:
             content(f"CHANGED: ops/config/{name} no longer matches the blessed baseline")
     for name, got in now_contracts.items():
         if name not in base_contracts and got:

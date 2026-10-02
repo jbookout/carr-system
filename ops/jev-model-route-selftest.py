@@ -152,11 +152,24 @@ class Dispatch(unittest.TestCase):
         out = dispatch({"beyond": 0.9})
         self.assertEqual((out["route"], out["target"], out["subagent_model"]), ("escalate", "claude-desktop", "opus"))
 
-    def test_pin_overrides_the_route_and_says_why(self):
-        out = dispatch({"direct": 0.9}, pin="merge_review")
+    def test_pin_skips_paid_route_and_preserves_opus_policy(self):
+        judge = FakeJudge(error=AssertionError("pin must skip Jev"))
+        out = route.dispatch("review PR", policy=POLICY, judge=judge, pin="merge_review", log_path=None)
+        self.assertEqual(judge.subjects, [])
         self.assertEqual((out["target"], out["subagent_model"], out["pin"]), ("claude-desktop", "opus", "merge_review"))
         self.assertIn("merge", out["pin_reason"])
-        self.assertEqual(out["routed"], {"route": "direct", "target": "flash", "subagent_model": "haiku"})
+        self.assertIsNone(out["routed"])
+
+    def test_pin_sampled_audit_routes_for_comparison(self):
+        judge = FakeJudge({"direct": 0.9})
+        out = route.dispatch("review PR", policy=POLICY, judge=judge, pin="merge_review",
+                             audit_pin=True, log_path=None)
+        self.assertEqual(len(judge.subjects), 1)
+        self.assertEqual(out["routed"]["route"], "direct")
+
+    def test_unused_typed_override_is_removed(self):
+        import inspect
+        self.assertNotIn("work_kind", inspect.signature(route.dispatch).parameters)
 
     def test_sol_pin_is_a_desk_only(self):
         out = dispatch({"beyond": 0.9}, pin="sol_allowance")
@@ -169,7 +182,7 @@ class Dispatch(unittest.TestCase):
     def test_jev_down_still_honours_a_pin(self):
         out = dispatch(error=TimeoutError("down"), pin="gate_authority_code")
         self.assertEqual((out["target"], out["subagent_model"]), ("claude-desktop", "opus"))
-        self.assertIn("TimeoutError", out["jev_error"])
+        self.assertIsNone(out["jev_error"])
 
     def test_flash_busy_spawns_on_overflow_and_queues_to_fallback(self):
         out = dispatch({"direct": 0.9}, flash_free=False)
@@ -177,7 +190,7 @@ class Dispatch(unittest.TestCase):
         self.assertTrue(out["overflow"])
         self.assertEqual(out["effort"], POLICY["overflow"]["effort"])
 
-    def test_flash_busy_never_lowers_a_code_task_off_opus(self):
+    def test_flash_busy_keeps_code_on_opus_desk(self):
         # Code and script spawns go to the Opus desk; Flash being busy has nothing to do with them.
         out = dispatch({"code": 0.9}, flash_free=False)
         self.assertEqual((out["target"], out["subagent_model"], out["effort"]), ("claude-desktop", "opus", "high"))
@@ -210,8 +223,8 @@ class Dispatch(unittest.TestCase):
             route.dispatch("t", policy=POLICY, judge=FakeJudge({"direct": 0.9}), pin="merge_review", log_path=path)
             rows = [json.loads(line) for line in open(path)]
             self.assertEqual(len(rows), 1)
-            self.assertEqual((rows[0]["kind"], rows[0]["pin"], rows[0]["routed"]["route"]),
-                             ("dispatch", "merge_review", "direct"))
+            self.assertEqual((rows[0]["kind"], rows[0]["pin"], rows[0]["routed"]),
+                             ("dispatch", "merge_review", None))
 
 
 class Handoff(unittest.TestCase):

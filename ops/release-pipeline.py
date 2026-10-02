@@ -185,6 +185,8 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO))
+from lib.secret_redaction import redact_text, sensitive_env_values  # noqa: E402
 CONFIG_PATH = REPO / "ops" / "config" / "release-pipeline.v1.json"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -649,8 +651,8 @@ def queue_turn(lane: str, sha: str, step: str, rc: int, log: str, record_path: s
     SHA must never share an id with the first. The queue key gains a suffix on
     later attempts for the same reason at the Hermes queue."""
     key = f"release-fix-{sha[:8]}" + (f"-{attempt}" if attempt > 1 else "")
-    ahead = ("PRODUCTION MIGRATIONS WERE APPLIED in this run before it stopped "
-             "(db_ahead_of_worker: true): the database is ahead of the serving Worker, so the fix "
+    ahead = ("PRODUCTION MIGRATIONS WERE ATTEMPTED in this run before it stopped "
+             "(db_ahead_of_worker: true): the database may be ahead of the serving Worker, so the fix "
              "must keep the new schema working with the currently deployed Worker.\n"
              if db_ahead_of_worker else "")
     if do_migration:
@@ -675,9 +677,13 @@ def queue_turn(lane: str, sha: str, step: str, rc: int, log: str, record_path: s
 
 
 def blocker_loop(capability: str, detail: str) -> dict:
+    health_repair = capability in {"health_baseline_hard_error", "health_baseline_stalled"}
+    blocker_detail = (f"The authorized release-repair lane must restore and verify the health baseline: {detail}"
+                      if health_repair else
+                      f"Joe is the provisioning decider for the named unattended credential: {detail}")
     return {"idempotency_key": str(uuid.uuid5(ROOM_NAMESPACE, "release-pipeline-blocker:" + capability)),
-            "kind": "open_loop", "owner": "Joe", "domain": "system", "marker": "none",
-            "blocker": "capability", "blocker_detail": detail,
+            "kind": "open_loop", "owner": "Claude" if health_repair else "Joe", "domain": "system", "marker": "none",
+            "blocker": "other_lane" if health_repair else "capability", "blocker_detail": blocker_detail,
             "body": (f"The scripted release pipeline (ops/release-pipeline.py) cannot run "
                      f"unattended: {detail}. It stops at that step every tick until this "
                      f"exists; nothing is released meanwhile."),
@@ -726,8 +732,11 @@ class Pipeline:
         except Exception as exc:  # noqa: BLE001 — a failed filing is reported, not raised
             return False, f"{type(exc).__name__}: {exc}"
         if proc.returncode != 0:
-            tail = (proc.stderr or proc.stdout or "").strip().splitlines()
-            return False, f"run.sh call {verb} exit {proc.returncode}: {tail[-1] if tail else ''}"
+            # TOOL ERROR is multiline JSON; its last line is only `}`.
+            # Keep both streams so a stderr identity banner cannot hide stdout.
+            detail = "\n".join(part.strip() for part in (proc.stderr, proc.stdout) if part and part.strip())
+            detail = redact_text(detail, known_secrets=sensitive_env_values(self.env))
+            return False, f"run.sh call {verb} exit {proc.returncode}: {detail[:4000]}"
         try:
             return True, json.loads(proc.stdout)
         except ValueError:
@@ -1059,8 +1068,10 @@ class Pipeline:
             return 1
         finally:
             self.remove_worktrees()
-        ok = baseline_complete and live_complete and not any(
-            f.get("hard_error") for f in baseline_findings)
+        ok = (baseline_complete and live_complete
+              and (baseline_res.rc == 0 or (baseline_res.rc == 1 and baseline_findings))
+              and (live_res.rc == 0 or (live_res.rc == 1 and live_findings)) and not any(
+                  f.get("hard_error") for f in baseline_findings + live_findings))
         self.out("  health-preflight: " + ("OK" if ok else "FAILED — see rc/findings above"))
         return 0 if ok else 1
 
@@ -1360,11 +1371,13 @@ class Pipeline:
 
     def ci_run(self, gh: Any, lane_cfg: dict, pr: int, head_sha: str) -> int:
         ci = [r for r in gh.runs_for(head_sha)
-              if r.get("name") == lane_cfg["ci_workflow_name"] and r.get("event") == "pull_request"
-              and r.get("conclusion") == "success"]
+              if r.get("name") == lane_cfg["ci_workflow_name"] and r.get("event") == "pull_request"]
         if not ci:
             raise Blocked("ci_not_green", f"PR #{pr} has no successful {lane_cfg['ci_workflow_name']} run")
         run_id = max(int(r["id"]) for r in ci)
+        newest = max(ci, key=lambda r: (int(r["id"]), int(r.get("run_attempt", 1))))
+        if newest.get("conclusion") != "success":
+            raise Blocked("ci_not_green", f"PR #{pr} newest CI run {run_id} is not successful")
         jobs = gh.jobs(run_id)
         if not any(j.get("name") == lane_cfg["ci_required_job"] and j.get("conclusion") == "success" for j in jobs):
             raise Blocked("ci_not_green", f"PR #{pr} run {run_id} lacks a green `{lane_cfg['ci_required_job']}`")
@@ -1506,6 +1519,9 @@ class Pipeline:
             return rc
 
     def run_lane(self, lane: str) -> int:
+        self.mutated = False
+        self.db_ahead_of_worker = False
+        self.do_migration = None
         lane_cfg = self.cfg[lane]
         why = kill_switch(self.cfg, lane)
         if why:
@@ -1755,9 +1771,11 @@ class Pipeline:
         if pending or self.dry_run:
             if self.dry_run:
                 self.out("  [dry-run] next line runs only when migrate-plan lists pending > 0")
-            self.step("migrate-apply", ["bin/migrate-prod.sh", "--apply"], wt)
             if not self.dry_run:
+                # Batches commit separately. Once apply starts, a failure can
+                # leave production changed; retain the warning on every exit.
                 self.db_ahead_of_worker = True
+            self.step("migrate-apply", ["bin/migrate-prod.sh", "--apply"], wt)
 
         # 5. upload the immutable candidate, verifier bound at upload time
         key = ("<next free r-%s-NN>" % self.today) if self.dry_run else next_release_key(
