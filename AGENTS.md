@@ -320,3 +320,12 @@ For this R06 validator the source projection carries no R09 operator_assignment;
 This is a zero-source-edit registered validation of already delivered source. The historical ten-path owner write lease and failed registered attempts governed their own source-authoring envelopes only: do not replay them, import or upgrade their receipts, reinterpret that lease as a validator write cap, or retroactively claim that the later ordinary R3 fifteen-path delivery was authored by an old registered task. Preserve the source delivery's actual author models, authorship and author-session evidence separately from the fresh validator's model, identity and session. The current intent's exact-source manifest is read-only evidence, not source_merge or permission to change any path.
 
 Independently establish all six declared R06 checks: check:r06-packet-bindings, check:r06-model-route, check:r06-assurance-route, check:r06-two-hook-resolution, check:r06-overwrite-fake-sink and check:r06-baseline-and-seals. Exact-head hosted results and immutable artifacts may be independently authenticated, but never copy an assertion as evidence. Validate and submit only one new current-task receipt; claim complete only when all six checks pass, and retain the requirement for a distinct independent reviewer fact. This block grants no source edit, plan change, model-route change, old-receipt rewrite, live notification or page, settings install, controller action, R04, production migration, packet-close, merge, deploy, activation or release authority.
+
+## Before every PR: design and debt pass
+
+Before opening or updating any pull request, apply both skills to the diff:
+
+1. `codebase-design`: deep modules, real seams, design the interface twice when it matters.
+2. `zero-tech-debt`: rework the change from its intended end state; delete dead compatibility paths and duplicated rules.
+
+Both are installed at `~/.agents/skills/` (sources: github.com/mattpocock/skills `skills/engineering/codebase-design`, github.com/jnsahaj/skills `skills/zero-tech-debt`). The PR reviewer checks both, so all two are required.

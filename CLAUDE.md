@@ -102,3 +102,12 @@ silently treated as absent.
    `./.venv/bin/python ops/config-as-code.py check </dev/null`. Read A15 and
    A17 back as closed. Only then report the migration complete to Dell in plain
    language.
+
+## Before every PR: design and debt pass
+
+Before opening or updating any pull request, apply both skills to the diff:
+
+1. `codebase-design`: deep modules, real seams, design the interface twice when it matters.
+2. `zero-tech-debt`: rework the change from its intended end state; delete dead compatibility paths and duplicated rules.
+
+Both are installed at `~/.agents/skills/` (sources: github.com/mattpocock/skills `skills/engineering/codebase-design`, github.com/jnsahaj/skills `skills/zero-tech-debt`). The PR reviewer checks both, so all two are required.
