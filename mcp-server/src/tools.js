@@ -43,7 +43,7 @@ import { tourSharingTools } from "./tour-sharing.js";
 import { tourMapPromotionTools } from "./tour-map-promotion.js";
 import { actionClassSuccessorRegistryTools } from "./action-class-successor-registry.v5.js";
 import { tourArtifactTools } from "./tour-artifacts.js";
-import { stripDealPlaceholders } from "./dealroom.js";
+import { DEAL_ROOM_FIELDS, assertDealRoomField, stripDealPlaceholders } from "./dealroom.js";
 import { authenticatedIdentity, authorizationClassForActor, organizationTenantForActor,
          permittedActionOwnerSlugs, personalScopeForActor } from "./identity.js";
 import { canExercisePartnerAuthority, partnerAuthoritySlugForActor } from "./partner-authority.js";
@@ -2117,34 +2117,6 @@ function assertSingleOwner(owner) {
 
 // ---------- Deal Room helpers (field-base concurrency, not record version) ----------
 
-const DEAL_ROOM_FIELDS = Object.freeze(["phase", "owner", "attention", "next_date", "operating_state"]);
-const PARKING_REASONS = Object.freeze(["prospect_never_active", "client_paused", "other"]);
-
-function assertDealRoomField(field, value) {
-  if (!DEAL_ROOM_FIELDS.includes(field))
-    throw new ToolError({ error: "field_not_patchable", field, allowed: DEAL_ROOM_FIELDS });
-  if (field === "attention" && typeof value !== "boolean")
-    throw new ToolError({ error: "invalid_field_value", field, expected: "boolean" });
-  if (field === "phase" && (typeof value !== "string" || !value.trim()))
-    throw new ToolError({ error: "invalid_field_value", field, expected: "non-empty string" });
-  if (field === "owner" && value !== null && !["joe", "dell"].includes(value))
-    throw new ToolError({ error: "invalid_field_value", field, expected: "joe, dell, or null" });
-  if (field === "next_date" && value !== null &&
-      (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)))
-    throw new ToolError({ error: "invalid_field_value", field, expected: "YYYY-MM-DD or null" });
-  if (field === "operating_state") {
-    if (!value || typeof value !== "object" || Array.isArray(value) ||
-        !["active", "parked"].includes(value.state))
-      throw new ToolError({ error: "invalid_field_value", field,
-        expected: "{state: active|parked, reason?: prospect_never_active|client_paused|other, note?: string}" });
-    if (value.state === "parked" && !PARKING_REASONS.includes(value.reason))
-      throw new ToolError({ error: "parking_reason_required", allowed: PARKING_REASONS });
-    if (value.state === "active" && (value.reason != null || value.note != null))
-      throw new ToolError({ error: "active_deal_has_no_parking_reason" });
-    if (value.note != null && (typeof value.note !== "string" || value.note.trim().length > 500))
-      throw new ToolError({ error: "invalid_parking_note", max_length: 500 });
-  }
-}
 
 async function lockDealField(c, dealId, field) {
   // Same-field writers serialize; different fields deliberately use different
@@ -2187,7 +2159,7 @@ async function latestFieldConflict(c, dealId, field, baseEventId) {
 // carried them (WR-000109), and never synthesises a cause — writeEvent derives
 // it from the presence of a verbatim quote, and that derivation is the point.
 async function applyDealRoomField(c, actor, dealId, field, value, idempotencyKey, verb, provenance = {}) {
-  assertDealRoomField(field, value);
+  assertDealRoomField(field, value, ToolError);
   if (field === "operating_state") value = {
     state: value.state,
     reason: value.state === "parked" ? value.reason : null,
@@ -8841,7 +8813,7 @@ registerTools({
       human_quote: { type: "string", description: "the partner's verbatim words, when they directed the change" },
     }, required: ["idempotency_key", "deal", "field", "value", "base_event_id"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "patch-deal-field", args, async () => {
-      assertDealRoomField(args.field, args.value);
+      assertDealRoomField(args.field, args.value, ToolError);
       const s = await resolveSubject(c, args.deal);
       if (s.type !== "deal") throw new ToolError({ error: "not_a_deal", resolved: s });
       await lockDealField(c, s.id, args.field);
@@ -8899,7 +8871,7 @@ registerTools({
       const s = await resolveSubject(c, args.deal);
       if (s.type !== "deal") throw new ToolError({ error: "not_a_deal", resolved: s });
       if (typeof args.text !== "string" || !args.text.trim()) throw new ToolError({ error: "text_required" });
-      assertDealRoomField("next_date", args.next_date ?? null);
+      assertDealRoomField("next_date", args.next_date ?? null, ToolError);
       // The step also changes next_date. Take that cell's lock first so its
       // field history cannot race a direct date edit or undo.
       await lockDealField(c, s.id, "next_date");

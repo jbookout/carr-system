@@ -21,21 +21,21 @@ from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connec
 
 REPO = Path(__file__).resolve().parents[1]
 
-# 0768 installs human-only merges v102 and seals catch-up v101 as history.
+# 0769 admits the activity reader v103 and seals human-only merges v102 as history.
 # Both are pinned: an unreviewed frontier or a rewritten predecessor must fail closed.
-LIVE_REGISTRY_VERSION = "scac-mutation-registry.v102"
-LIVE_REGISTRY_ORDINAL = 102
-SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v101"
+LIVE_REGISTRY_VERSION = "scac-mutation-registry.v103"
+LIVE_REGISTRY_ORDINAL = 103
+SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v102"
 SEALED_PREDECESSOR_ORDINAL = LIVE_REGISTRY_ORDINAL - 1
 SEALED_PREDECESSOR_DIGEST = (
-    "sha256:3cf9de91d2c7cac129fd653bc1a140f530a6bb68f0e036ad354bed87b6bc7bbc"
+    "sha256:e4d54f752db9af067b65e84eb45f4297acad7100b54553f763bd981609830dc9"
 )
-SEALED_PREDECESSOR_ENTRY_COUNTS = (2602, 1084)
+SEALED_PREDECESSOR_ENTRY_COUNTS = (2606, 1084)
 SEALED_PREDECESSOR_MIGRATION = (
-    "migrations/0767_doc_whats_new_scac_successor.sql"
+    "migrations/0768_confirm_merge_human_only_scac_successor.sql"
 )
 LIVE_REGISTRY_MIGRATION = (
-    "migrations/0768_confirm_merge_human_only_scac_successor.sql"
+    "migrations/0769_doc_activity_scac_successor.sql"
 )
 
 LIVE_CATALOG_CURRENT_FN = f"ops.scac_mutation_catalog_v{LIVE_REGISTRY_ORDINAL}_current()"

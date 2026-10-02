@@ -84188,6 +84188,37 @@
       },
       "expected_count": 1084,
       "expected_sha256": "98054b8eb743d97fe1dba0bec67826bea0c359b82c6dd8a4041adb0653ea1bf7"
+    },
+    {
+      "version": "v103",
+      "remove": [],
+      "upsert": [
+        {
+          "ingress_key": "mcp-tool:read-doc-activity",
+          "ingress_kind": "mcp_tool",
+          "operation": "read-doc-activity",
+          "effect_class": "audit_side_effect",
+          "source_locator": "mcp-server/src/doc-activity.js",
+          "schema_digest": "48a8b4cc6443fc0dd85860cadfb1a1faee8ac2c8a2bf4452634a270ab9789440",
+          "source_digest": "52f8f01d0c749f12a5a66f6a801467f45b756b27bf905ef1d8cb5668f1852c8b",
+          "write": false,
+          "human_only": false,
+          "authority_only": false,
+          "principal_mode": "authenticated_registered_principal",
+          "mutation_kind": null,
+          "target_surface": "scac.surface.database",
+          "delegates_to": [],
+          "request_shape": "closed_top_level_schema",
+          "idempotency_mode": "not_applicable",
+          "rollback_class": "append_only_audit",
+          "admission_class": "application_default_deny",
+          "owner_package": "11",
+          "implementation_state": "source_guarded_not_deployed",
+          "classification_authorizing": false
+        }
+      ],
+      "expected_count": 1085,
+      "expected_sha256": "2c28fb20a8d85aafbda00cb1f482d7140e191a4550b22a2bbcf4b0c3cd80d46b"
     }
   ],
   "current_source_review": {

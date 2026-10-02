@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { pipelineChanges } from "../src/dealroom.js";
 import { TOOLS } from "../src/tools.js";
+import { docActivityEntry } from "../src/doc-activity.js";
 import {
   createFieldWriteState, performFieldWrite, nextCellBase,
 } from "../../dealroom/js/field-write-reconciliation.mjs";
@@ -1337,4 +1338,28 @@ test("patch-deal-field without a quote stays an automation job", async () => {
   assert.equal(db.events[1].cause, "automation_job");
   assert.equal(db.events[1].human_quote, null);
   assert.equal(db.events[1].agent_rationale, null);
+});
+
+test('feed eligibility matches writer-produced events for every reversible field', async () => {
+  const values = { phase: 'legal', owner: 'dell', attention: true, next_date: '2026-10-12',
+    operating_state: { state: 'parked', reason: 'client_paused', note: 'Synthetic pause' } };
+  for (const [field, value] of Object.entries(values)) {
+    const db = new FakeClient();
+    await call('patch-deal-field', db, actors.joe, {
+      idempotency_key: `feed-${field}`, deal: 'Deal Alpha', field, value, base_event_id: null,
+    });
+    const e = db.events[0];
+    const feed = docActivityEntry({ ...e, has_old_value: true, is_latest: true });
+    assert.equal(feed.undo.state, 'available', field);
+    assert.deepEqual(feed.before, e.old_value[field]);
+    assert.deepEqual(feed.after, e.new_value[field]);
+    await call('revert-deal-field', db, actors.joe, { event_id: e.id, idempotency_key: `undo-feed-${field}` });
+  }
+  for (const [field, value] of Object.entries({ attention: 'true', owner: 'other', phase: '',
+    next_date: 'tomorrow', operating_state: { state: 'parked', reason: 'unknown' } })) {
+    const db = new FakeClient();
+    const e = db.addEvent({ field, old_value: { [field]: value }, new_value: { [field]: value } });
+    assert.equal(docActivityEntry({ ...e, has_old_value: true, is_latest: true }).undo.state, 'unavailable', field);
+    await assert.rejects(call('revert-deal-field', db, actors.joe, { event_id: e.id, idempotency_key: `bad-${field}` }));
+  }
 });

@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { docActivityEntry, docActivityTools } from '../src/doc-activity.js';
+import { TOOLS, executeRegisteredTool } from '../src/tools.js';
+import { connectionRouteForTool } from '../src/mcp.js';
+import { frozenInventory } from '../../ops/scac-mutation-inventory.mjs';
+import { SCAC_MUTATION_REGISTRY_VERSION, registeredOperation } from '../src/mutation-registry.js';
 const tools = docActivityTools({ ToolError: class extends Error { constructor(p) { super(p.error); this.payload = p; } } });
 const actor = { slug: 'joe', human: true };
 const event = { id: '10000000-0000-4000-8000-000000000001', recorded_at: '2026-10-01T15:00:00Z',
@@ -30,6 +34,51 @@ test('closed read schema, runtime input checks, dates and authority cannot be su
     { since: '2026-10-02T00:00:00Z', until: '2026-10-01T00:00:00Z' }]) {
     await assert.rejects(tool.handler({ query() { assert.fail('invalid input reached database'); } }, actor, args), /input_invalid/);
   }
+});
+test('activity successor adds only its reader and preserves every historical source contract', () => {
+  const before = frozenInventory('scac-mutation-registry.v102');
+  const after = frozenInventory('scac-mutation-registry.v103');
+  assert.equal(after.length, before.length + 1);
+  assert.deepEqual(after.filter(row => row.ingress_key !== 'mcp-tool:read-doc-activity'), before);
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, 'scac-mutation-registry.v103');
+  const entry = registeredOperation('read-doc-activity');
+  assert.equal(entry.write, false);
+  assert.equal(after.find(row => row.ingress_key === entry.ingress_key).principal_mode, 'authenticated_registered_principal');
+});
+test('feed selects the scoped read-only writer route', () => {
+  assert.equal(connectionRouteForTool(TOOLS['read-doc-activity']), 'writer_read_only');
+});
+test('registered feed reaches the database', async () => {
+  await assert.rejects(executeRegisteredTool({ query() { throw new Error('query reached'); } }, actor,
+    'read-doc-activity', {}), /query reached/);
+});
+test('feed rejects unsupported inverse values rather than advertising Undo', () => {
+  assert.equal(docActivityEntry({ ...event, field: 'attention', old_value: { attention: 'true' } }).undo.state, 'unavailable');
+});
+test('harmless scalar evidence survives for fields without an inverse', () => {
+  const row = docActivityEntry({ ...event, subject_type: 'party', field: 'name',
+    old_value: { name: 'Synthetic A' }, new_value: { name: 'Synthetic B' } });
+  assert.equal(row.before, 'Synthetic A'); assert.equal(row.after, 'Synthetic B');
+  assert.equal(row.undo.state, 'unavailable');
+});
+test('invalid JSON types and calendar timestamps refuse before any query', async () => {
+  const dates = ['2026-02-30T00:00:00Z', '2026-02-29T00:00:00Z', '2026-10-01T00:00:00',
+    '2026-10-01', '2026-10-01T24:00:00Z', '2026-10-01T00:00:00+24:00',
+    '2026-10-01T00:00:00.1234567Z', '2026-10-01T00:00:00-00:00'];
+  const invalid = [{ record_type: ['deal'] }, { record_type: null }, { limit: null },
+    { cursor: { at: event.recorded_at, id: [event.id] } },
+    { cursor: { id: event.id } }, ...dates.flatMap(at => [{ since: at }, { until: at }, { cursor: { at, id: event.id } }])];
+  for (const args of invalid) {
+    await assert.rejects(tools['read-doc-activity'].handler({ query() { assert.fail('queried invalid input'); } }, actor, args),
+      /input_invalid/, JSON.stringify(args));
+  }
+});
+test('valid fractional intervals and timezone offsets retain microsecond ordering', async () => {
+  const c = { async query(sql) { return { rows: sql.includes(':clock') ? [{ as_of: event.recorded_at }] : [] }; } };
+  for (const [since, until] of [
+    ['2026-10-01T00:00:00.123100Z', '2026-10-01T00:00:00.123900Z'],
+    ['2024-02-29T00:00:00+01:00', '2024-02-28T23:00:00.000001Z'],
+  ]) assert.equal((await tools['read-doc-activity'].handler(c, actor, { since, until })).ok, true);
 });
 test('parameterized tenant/personal scope, cause classification and keyset paging cover every type', async () => {
   const calls = [];
