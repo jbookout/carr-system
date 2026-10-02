@@ -51,7 +51,8 @@ select distinct on (e.subject_id) e.subject_id as deal_id, e.id as event_id,
        e.old_value->>'phase' as prior_phase, e.new_value->>'phase' as phase,
        e.cause in ('ingest_email','ingest_calendar','ingest_webhook','automation_job','system')
          and e.verb <> 'revert-deal-field'
-         and coalesce(e.new_value->>'intent_origin','') <> 'manual_ui' as automatic,
+         and not (e.verb='patch-deal-field' and coalesce(e.via,'')='dealroom-cookie'
+           and coalesce(e.client_id,'')='dealroom-pwa') as automatic,
        coalesce(nullif(e.agent_rationale,''),'phase changed') as reason,
        to_jsonb(e.occurred_at)#>>'{}' as evidence_date,
        to_jsonb(e.recorded_at)#>>'{}' as recorded_at

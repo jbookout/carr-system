@@ -141,8 +141,8 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
     assert.equal((await section('doc_suggestions',await context())).state,'ready');
     await c.query('reset role');
     await c.query("update next_action set created_at=now()-interval '3 days',updated_at=now()-interval '3 days' where id=$1",[uuid(10)]);
-    await c.query("update critical_date set created_at=now()-interval '3 days',updated_at=now()-interval '3 days',due_on=current_date+14 where id=$1",[uuid(11)]);
-    await c.query("update ops.doc_suggestion set suggested_at=now()-interval '3 days',disposition='snoozed',snoozed_material_version=material_version,snoozed_until=current_date where id=$1",[uuid(21)]);
+    await c.query("update critical_date set created_at=now()-interval '3 days',updated_at=now()-interval '3 days',due_on=(now() at time zone 'America/Chicago')::date+14 where id=$1",[uuid(11)]);
+    await c.query("update ops.doc_suggestion set suggested_at=now()-interval '3 days',disposition='snoozed',snoozed_material_version=material_version,snoozed_until=(now() at time zone 'America/Chicago')::date where id=$1",[uuid(21)]);
     await identity('joe');
     // Time crossing a due threshold counts even without a new record write.
     const todayContext = { ...await context(), since:new Date(Date.now()-86400000).toISOString(),previous_snapshot:null };

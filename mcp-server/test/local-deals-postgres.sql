@@ -16,8 +16,8 @@ begin
     values(a,'deal',d,'patch-deal-field','phase','{"phase":"negotiation"}','{"phase":"legal"}','ingest_email','Draft prepared','2026-10-03','2026-10-04') returning id into e;
   select * into row from v_deal_room_phase_change where deal_id=d;
   if row.event_id<>e or not row.automatic or row.prior_phase<>'negotiation' or row.reason<>'Draft prepared' or row.evidence_date::date<>'2026-10-03'::date then raise exception 'Phase identity, evidence date or reason lost'; end if;
-  insert into event(actor_id,subject_type,subject_id,verb,field,old_value,new_value,cause,occurred_at,recorded_at)
-    values(a,'deal',d,'patch-deal-field','phase','{"phase":"legal"}','{"phase":"closing","intent_origin":"manual_ui"}','automation_job','2026-10-04','2026-10-05') returning id into e;
+  insert into event(actor_id,subject_type,subject_id,verb,field,old_value,new_value,cause,occurred_at,recorded_at,via,client_id)
+    values(a,'deal',d,'patch-deal-field','phase','{"phase":"legal"}','{"phase":"closing"}','automation_job','2026-10-04','2026-10-05','dealroom-cookie','dealroom-pwa') returning id into e;
   select * into row from v_deal_room_phase_change where deal_id=d;
   if row.event_id<>e or row.automatic then raise exception 'Manual correction retained automatic badge'; end if;
   insert into event(actor_id,subject_type,subject_id,verb,field,old_value,new_value,cause,occurred_at,recorded_at)

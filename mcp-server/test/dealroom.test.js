@@ -1312,14 +1312,15 @@ test("patch-deal-field without a quote stays an automation job", async () => {
 });
 
 
-test('direct phase control retains manual intent without composing a human quote', async () => {
-  const c = new FakeClient();
-  const result = await TOOLS['patch-deal-field'].handler(c, actors.joe, {
+test('direct phase control retains authenticated browser provenance without composing a human quote', async () => {
+  const c = new FakeClient(); const inserts = []; const query = c.query.bind(c);
+  c.query = async (sql,params) => { if(sql.trim().startsWith('insert into event')) inserts.push(params); return query(sql,params); };
+  const result = await TOOLS['patch-deal-field'].handler(c, {...actors.joe,via:'dealroom-cookie',client_id:'dealroom-pwa'}, {
     deal: ids.deal, field: 'phase', value: 'legal', base_event_id: null,
-    idempotency_key: 'demo-manual-phase', intent_origin: 'manual_ui',
+    idempotency_key: 'demo-manual-phase',
   });
   assert.equal(result.ok, true);
+  assert.equal(inserts[0][11], 'dealroom-cookie'); assert.equal(inserts[0][12], 'dealroom-pwa');
   const event = c.events.find(e => e.idempotency_key === 'demo-manual-phase');
-  assert.equal(event.new_value.intent_origin, 'manual_ui');
   assert.equal(event.human_quote, null);
 });

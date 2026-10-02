@@ -2239,7 +2239,7 @@ async function applyDealRoomField(c, actor, dealId, field, value, idempotencyKey
     // let a writer that waited for the lock sort behind the write it replaced.
     recorded_at_after_lock: true,
     old: { [field]: oldRow.rows[0].value },
-    new: { [field]: value, ...(provenance.intent_origin ? {intent_origin: provenance.intent_origin} : {}) },
+    new: { [field]: value },
     human_quote: provenance.human_quote || null,
     agent_rationale: provenance.change_reason || null,
     idempotency_key: idempotencyKey,
@@ -8802,7 +8802,6 @@ registerTools({
       idempotency_key: { type: "string" }, deal: { type: "string" },
       field: { type: "string", enum: DEAL_ROOM_FIELDS }, value: {},
       base_event_id: { anyOf: [{ type: "string" }, { type: "null" }] },
-      intent_origin: { type: "string", enum: ["manual_ui"], description: "A direct application control selection; retained on the event without inventing a human quote." },
       change_reason: { type: "string", description: "why this cell changed; lands on the event as agent_rationale" },
       human_quote: { type: "string", description: "the partner's verbatim words, when they directed the change" },
     }, required: ["idempotency_key", "deal", "field", "value", "base_event_id"] },
@@ -8828,7 +8827,7 @@ registerTools({
       }
       const applied = await applyDealRoomField(c, actor, s.id, args.field, args.value,
         args.idempotency_key, "patch-deal-field",
-        { change_reason: args.change_reason, human_quote: args.human_quote, intent_origin: args.intent_origin });
+        { change_reason: args.change_reason, human_quote: args.human_quote });
       return { ok: true, deal_id: s.id, field: args.field, ...applied };
     }),
   },
