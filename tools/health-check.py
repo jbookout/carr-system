@@ -106,8 +106,8 @@ def _reader_args(argv):
         # A parent shell may carry this old ambient variable.  Normal health must
         # not pass it to any child or let a child silently choose a Drive reader.
         os.environ.pop("CARR_VAULT", None)
-    if section not in ("all", "exports", "jobs", "registry", "credentials", "jev-spend", "tailscale"):
-        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials|jev-spend|tailscale")
+    if section not in ("all", "exports", "jobs", "registry", "credentials", "jev-spend", "grok-session", "tailscale", "headless"):
+        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials|jev-spend|grok-session|tailscale|headless")
     if fixture and recovery:
         raise SystemExit("health-check: --fixture is for hermetic canonical tests only")
     return recovery, reason, vault, section, fixture, findings_json, rest
@@ -116,6 +116,22 @@ def _reader_args(argv):
 RECOVERY_MODE, RECOVERY_REASON, VAULT, CANONICAL_SECTION, CANONICAL_FIXTURE, FINDINGS_JSON_PATH, \
     _READER_REST = _reader_args(sys.argv[1:])
 sys.argv[1:] = _READER_REST
+
+
+def _headless_rows():
+    sys.path.insert(0, REPO_ROOT)
+    from pathlib import Path
+    from lib.headless_tasks import health_rows
+    return health_rows(Path(REPO_ROOT), Path.home())
+
+
+if CANONICAL_SECTION == "headless":
+    _rows = _headless_rows()
+    for _row in _rows:
+        print(_row["line"])
+    if not _rows:
+        print("OK headless — no installed headless task plists")
+    sys.exit(int(any(row["status"] == "WARN" for row in _rows)))
 
 
 def _jev_spend_row():
@@ -127,6 +143,19 @@ def _jev_spend_row():
     return jev_spend_health, jev_spend_health.check_spend(
         extra_logs=[jev_spend_health.FACTORY_USAGE_LOG],
         worker_usage=jev_spend_health.read_worker_usage)
+
+
+def _grok_session_row():
+    sys.path.insert(0, os.path.join(REPO_ROOT, "ops"))
+    from grok_session import health_row
+    line = health_row()
+    return line, int(line.startswith("FAIL") or "FAILED" in line)
+
+
+if CANONICAL_SECTION == "grok-session":
+    _grok_line, _grok_rc = _grok_session_row()
+    print(_grok_line)
+    sys.exit(_grok_rc)
 
 
 if CANONICAL_SECTION == "jev-spend":
@@ -1352,6 +1381,12 @@ def _canonical_health():
                       f"all receipted inside 26h{_carried}")
 
     if CANONICAL_SECTION in ("all", "jobs"):
+        for headless_row in _headless_rows():
+            print("  " + headless_row["line"])
+            if headless_row["status"] == "WARN":
+                rc = _red("headless_"+headless_row["reason"], headless_row["line"],
+                          subject=headless_row["task_id"],
+                          hard_error=headless_row["hard_error"], time_rolling=headless_row["time_rolling"])
         print("Schedule drift — durable Control Plane job state")
         jobs = snap.get("jobs")
         definitions = snap.get("job_definitions")
@@ -1546,6 +1581,10 @@ def _canonical_health():
                 rc = _red("repo_loose_work", f"{len(_actionable)} actionable path(s)", count=len(_actionable))
 
     if CANONICAL_SECTION in ("all", "credentials"):
+        _grok_line, _grok_rc = _grok_session_row()
+        print("  " + _grok_line)
+        if _grok_rc:
+            rc = _red("grok_session", "Grok credential health or alert failed", time_rolling=True)
         # The source log is canonical across worktrees. The row carries its
         # response action on both OK and WARN, and the helper owns one loop.
         try:
