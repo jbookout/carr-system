@@ -3523,7 +3523,6 @@ test("credential rotation source review cannot widen authority or admit an ingre
   const probe = `
     import assert from "node:assert/strict";
     import fs from "node:fs";
-import { tmpdir } from "node:os";
     import { syncBuiltinESMExports } from "node:module";
     const read = fs.readFileSync;
     const fixturePath = "ops/config/scac-registry-source-inventory-fixtures.v1.json";
