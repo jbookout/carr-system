@@ -155,6 +155,7 @@ def test_start_turn_sends_follower_request_with_turn_shape():
     turn = start["params"]["turnStart"]["request"]
     assert start["params"]["conversationId"] == THREAD
     assert turn["threadId"] == THREAD
+    assert "approvalPolicy" not in turn
     assert turn["input"] == [{"type": "text", "text": "hello sol", "text_elements": []}]
 
 
