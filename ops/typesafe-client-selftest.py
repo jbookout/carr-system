@@ -384,6 +384,46 @@ class DailyCapMailTests(unittest.TestCase):
         self.assertEqual(self.drain(), [])
         self.assertEqual(len(self.requests), 6)
 
+    def test_paused_old_day_reservation_cannot_repeat_mail_after_rollover(self):
+        for i in range(5):
+            self.ask(str(i))
+        self.assertEqual([(a["day"], a["threshold"]) for a in self.drain()],
+                         [("2026-10-02", 50)])
+        paused, resume = threading.Event(), threading.Event()
+        connect = client.sqlite3.connect
+        reservation_thread = None
+
+        def delayed_connect(*args, **kwargs):
+            if threading.get_ident() == reservation_thread:
+                paused.set()
+                if not resume.wait(2):
+                    raise TimeoutError("old-day reservation was not resumed")
+            return connect(*args, **kwargs)
+
+        def reserve_old_day():
+            nonlocal reservation_thread
+            reservation_thread = threading.get_ident()
+            return self.ask("paused old-day caller")
+
+        with patch.object(client.sqlite3, "connect", delayed_connect):
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(reserve_old_day)
+                try:
+                    self.assertTrue(paused.wait(1), "caller captured its day before connecting")
+                    self.clock.now.return_value = datetime(2026, 10, 3, tzinfo=timezone.utc)
+                    self.ask("first new-day caller")
+                finally:
+                    resume.set()
+                self.assertEqual(future.result(timeout=2)["model"], ANSWER["model"])
+            self.assertEqual(self.drain(), [], "old-day mail claim must survive rollover")
+
+        # Retaining old claims must not suppress a new day's threshold mail.
+        for i in range(4):
+            self.ask(f"new-day-{i}")
+        self.assertEqual([(a["day"], a["threshold"]) for a in self.drain()],
+                         [("2026-10-03", 50)])
+        self.assertEqual(len(self.requests), 11)
+
     def test_pending_alarm_recovery_uses_same_worker_for_both_sinks(self):
         workers = []
         for i in range(4):

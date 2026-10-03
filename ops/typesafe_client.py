@@ -749,7 +749,9 @@ def _claim_spend_alerts(db, log_path, day, previous, allowed, cap, caller):
             db.execute("DELETE FROM daily_cap_attribution WHERE day < ?", (day,))
             db.execute("DELETE FROM daily_cap_counts WHERE day < ?", (day,))
             db.execute("DELETE FROM daily_cap_delivery WHERE day < ?", (day,))
-            db.execute("DELETE FROM daily_cap_mail_delivery WHERE day < ?", (day,))
+            # Keep mail tombstones: a caller paused before its cap transaction
+            # can resume with an old UTC day and recreate that day's alarm.
+            # Deleting its claim would permit a second external send.
             db.execute("INSERT INTO daily_cap_attribution VALUES (?)", (day,))
         if allowed:
             for dimension, name in (("caller", caller), ("session", _session_id())):
