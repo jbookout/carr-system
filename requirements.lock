@@ -8,7 +8,7 @@
 
 Pygments==2.20.0
 ast_serialize==0.7.0 ; python_version >= "3.10"
-cffi==2.1.1
+cffi==2.0.0
 cryptography==50.0.2
 et_xmlfile==2.0.0
 iniconfig==2.3.0
@@ -24,7 +24,7 @@ pillow==12.3.0
 pluggy==1.6.0
 psycopg-binary==3.3.4
 psycopg==3.3.4
-pycparser==3.0
+pycparser==2.23
 pymupdf==1.28.2
 pyobjc-core==12.2.2 ; sys_platform == "darwin"
 pyobjc-framework-Cocoa==12.2.2 ; sys_platform == "darwin"
