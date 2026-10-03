@@ -1,8 +1,8 @@
 {
  "counts": {
   "residual": 3,
-  "rules": 105,
-  "triggered": 102
+  "rules": 106,
+  "triggered": 103
  },
  "generated_note": "Written only by ops/rule-trigger-compile.py: one Jev request per pack-layer rule, keyed to the rule's statement digest. ops/rule-jit-compile.py turns these into rows of ops/config/rule-jit-triggers.v1.json. Never hand-edit.",
  "rules": {
@@ -2833,6 +2833,34 @@
      "verticals": 0.57,
      "veterinary-only": 0.67,
      "whitelisting": 0.71
+    },
+    "paths": {},
+    "tools": {},
+    "verbs": {}
+   }
+  },
+  "ede4b241": {
+   "always_on_probability": 0.05,
+   "id": "ede4b241",
+   "mode": "triggered",
+   "model": "jev-1.13.0",
+   "negatives": {
+    "staffing model": 0.72
+   },
+   "no_cue_probability": 0.19,
+   "packs": [
+    "delegation-council"
+   ],
+   "statement_sha256": "1d64a4910ca6904e925ac5944bbb71ed11e79bb4a0e3c7151e89b7b2dee2af6d",
+   "triggers": {
+    "commands": {},
+    "keywords": {
+     "batches": 0.5,
+     "cloud model": 0.52,
+     "cloud pick": 0.54,
+     "model choice": 0.54,
+     "pick model": 0.55,
+     "work's shape": 0.56
     },
     "paths": {},
     "tools": {},
