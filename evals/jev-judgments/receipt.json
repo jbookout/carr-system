@@ -13,7 +13,7 @@
     "provider_id": "local",
     "model_id": "none-programmatic",
     "native_session_ref": "01a0ff81-760f-7463-848d-6158c765f240",
-    "configuration_fingerprint": "sha256:d7d17a7b50ba824b3630d26314a52a136b56241062d9047c213ab3924005191c"
+    "configuration_fingerprint": "sha256:bc2b65c2e9c65754088bcce8c9079ee1384c78c56335445a075917ae0b523421"
   },
   "cases": {
     "total": 1946,

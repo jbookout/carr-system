@@ -1,16 +1,16 @@
 {
  "counts": {
-  "jev_compiled_triggers": 118,
+  "jev_compiled_triggers": 119,
   "pack_fallback_triggers": 7,
-  "seeded_detector_rule_ids": 50,
-  "seeded_detector_triggers": 14,
+  "seeded_detector_rule_ids": 51,
+  "seeded_detector_triggers": 15,
   "structural_extra_triggers": 2,
-  "triggers": 147
+  "triggers": 149
  },
  "generated_from": {
-  "jev_triggers_sha256": "95e621173933986656ebd916e206badadad54d8f7122c5d731ff85d76fed8c31",
-  "map_sha256": "c6e89d64de575b9c6e39c8c88cd6a32e97e494b381a7ac4433026c4a3fe63c2a",
-  "triage_sha256": "2b2a18859cc64dc2da00d7eece2768667ac92859e5d5af0bb54e30b527670876"
+  "jev_triggers_sha256": "e64514d2711b5ecb4dad9b0a2524c480237fd41ef3cd85b256b7cf819f0e0f00",
+  "map_sha256": "43ac7f513c173114b1723a886baf56a83ec40e7fef8b187ed3dead7d16d90ada",
+  "triage_sha256": "61976718a46b0c94a49a7e9251ecbc9ed85eb429135633ad8cebbadcbed8391c"
  },
  "generated_note": "Compiled by ops/rule-jit-compile.py from ops/config/rule-triage.v1.json's per-rule `detector` fields and ops/config/rule-enforcement-map.json's rule_packs/rule_load_layers. Never hand-edit this file \u2014 run the compiler again after changing either input, and `--check` verifies the two never drift apart.",
  "max_rules_per_trigger": 5,
@@ -1281,6 +1281,19 @@
   },
   {
    "kind": "prompt_regex",
+   "negative_pattern": "\\bstaffing\\s+model\\b",
+   "packs": [
+    "delegation-council"
+   ],
+   "pattern": "\\bmodel\\s+choice\\b|\\bwork's\\s+shape\\b|\\bcloud\\s+model\\b|\\bcloud\\s+pick\\b|\\bpick\\s+model\\b|\\bbatches\\b",
+   "rule_ids": [
+    "ede4b241"
+   ],
+   "source": "jev_compiled",
+   "trigger_id": "7f7cac8d1070"
+  },
+  {
+   "kind": "prompt_regex",
    "negative_pattern": "\\bjob\\s+description\\b|\\bfeeds\\s+link\\b",
    "packs": [
     "source-study"
@@ -1735,6 +1748,18 @@
    ],
    "source": "structural_extra",
    "trigger_id": "edbc364a81f9"
+  },
+  {
+   "kind": "verb",
+   "packs": [
+    "delegation-council"
+   ],
+   "pattern": "^(?:Agent|mcp__[\\w-]*[Rr]emote__create[_-](?:session|trigger))$",
+   "rule_ids": [
+    "ede4b241"
+   ],
+   "source": "seeded_detector",
+   "trigger_id": "c373f0cf37e7"
   },
   {
    "kind": "verb",
