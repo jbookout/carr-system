@@ -106,8 +106,8 @@ def _reader_args(argv):
         # A parent shell may carry this old ambient variable.  Normal health must
         # not pass it to any child or let a child silently choose a Drive reader.
         os.environ.pop("CARR_VAULT", None)
-    if section not in ("all", "exports", "jobs", "registry", "credentials", "jev-spend"):
-        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials|jev-spend")
+    if section not in ("all", "exports", "jobs", "registry", "credentials", "jev-spend", "tailscale", "headless"):
+        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials|jev-spend|tailscale|headless")
     if fixture and recovery:
         raise SystemExit("health-check: --fixture is for hermetic canonical tests only")
     return recovery, reason, vault, section, fixture, findings_json, rest
@@ -116,6 +116,22 @@ def _reader_args(argv):
 RECOVERY_MODE, RECOVERY_REASON, VAULT, CANONICAL_SECTION, CANONICAL_FIXTURE, FINDINGS_JSON_PATH, \
     _READER_REST = _reader_args(sys.argv[1:])
 sys.argv[1:] = _READER_REST
+
+
+def _headless_rows():
+    sys.path.insert(0, REPO_ROOT)
+    from pathlib import Path
+    from lib.headless_tasks import health_rows
+    return health_rows(Path(REPO_ROOT), Path.home())
+
+
+if CANONICAL_SECTION == "headless":
+    _rows = _headless_rows()
+    for _row in _rows:
+        print(_row["line"])
+    if not _rows:
+        print("OK headless — no installed headless task plists")
+    sys.exit(int(any(row["status"] == "WARN" for row in _rows)))
 
 
 def _jev_spend_row():
@@ -1262,6 +1278,16 @@ def _red(key, detail, *, subject="", count=1, hard_error=False, time_rolling=Fal
     return 1
 
 
+def _tailscale_row():
+    spec = importlib.util.spec_from_file_location(
+        "tailscale_health", os.path.join(REPO_ROOT, "ops", "tailscale_health.py"))
+    if spec is None or spec.loader is None:
+        raise ImportError("Tailscale health loader unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.row(binary=os.environ.get("TAILSCALE_BIN", module.TAILSCALE_BIN))
+
+
 def _canonical_health():
     """The normal health surface: record/control-plane/local truth only."""
     _FINDINGS.clear()
@@ -1342,6 +1368,12 @@ def _canonical_health():
                       f"all receipted inside 26h{_carried}")
 
     if CANONICAL_SECTION in ("all", "jobs"):
+        for headless_row in _headless_rows():
+            print("  " + headless_row["line"])
+            if headless_row["status"] == "WARN":
+                rc = _red("headless_"+headless_row["reason"], headless_row["line"],
+                          subject=headless_row["task_id"],
+                          hard_error=headless_row["hard_error"], time_rolling=headless_row["time_rolling"])
         print("Schedule drift — durable Control Plane job state")
         jobs = snap.get("jobs")
         definitions = snap.get("job_definitions")
@@ -1757,6 +1789,18 @@ def _canonical_health():
             _detail = f"check failed ({type(e).__name__}: {e})"
             print(f"  ⚠︎ {'jev receipts':<18} {_detail}")
             rc = _red("jev_call_receipt_integrity", _detail, hard_error=True)
+
+    if CANONICAL_SECTION in ("all", "tailscale"):
+        try:
+            line, failed = _tailscale_row()
+            print(line)
+            if failed:
+                rc = _red("tailscale", line.strip(), subject="local-node", hard_error=True)
+        except Exception as exc:
+            detail = (f"Tailscale check unavailable ({type(exc).__name__}) · on breach: "
+                      "owner orchestrator · fix: restore ops/tailscale_health.py · "
+                      "verify: rerun health · auto-clear: next successful node read")
+            rc = _red("tailscale", detail, subject="local-node", hard_error=True)
 
     # WHOLE-RUN backstop, alongside the static AST proof in tools/health-
     # check-findings-selftest.py (round 8 of an independent review of PR

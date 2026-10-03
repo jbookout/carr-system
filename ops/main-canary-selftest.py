@@ -118,6 +118,18 @@ def test_it_runs_the_measured_four_and_not_the_ten():
           "ops/ci.sh --strict --only" in y)
 
 
+def test_role_migration_fixtures_have_postgresql_17_server_binaries():
+    for path in (CANARY, CI_YML):
+        y = path.read_text(encoding="utf-8")
+        install = y.find("sudo apt-get install -y -qq postgresql-17")
+        check(f"{path.name} installs PG17 for owned role-migration fixtures", install >= 0)
+        check(f"{path.name} exposes PG17 binaries to the shared discovery helper",
+              'echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"' in y)
+        check(f"{path.name} provisions PG17 before check execution",
+              0 <= install < y.find("run: ops/ci.sh --strict") if path == CI_YML else
+              0 <= install < y.find("for class in gates"))
+
+
 def test_a_red_canary_stays_red_and_names_main():
     y = CANARY.read_text(encoding="utf-8")
     check("a failing class fails the run", "exit 1" in y)
@@ -266,6 +278,7 @@ def main():
                test_a_running_canary_finishes_before_the_newest_pending_run,
                test_the_debounce_is_real_and_comes_first,
                test_it_runs_the_measured_four_and_not_the_ten,
+               test_role_migration_fixtures_have_postgresql_17_server_binaries,
                test_a_red_canary_stays_red_and_names_main,
                test_the_canary_setup_has_not_drifted_from_ci_yml,
                test_freeze_reads_a_verdict_not_a_cancellation,

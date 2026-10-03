@@ -64,6 +64,7 @@ def fixture_git_env():
 # and the test drift apart, which is the two-homes disease.
 COPIES = [
     "hooks/machine-converge.py",
+    "hooks/grok_invocation.py",
     "lib/claude_continuity_config.py",
     "lib/machine_prerequisites.py",
     "lib/launchd_calendar.py",
@@ -206,8 +207,35 @@ def build_fixture(root, email, actor_slug=None, behind=True, dirty=False,
                   "w", encoding="utf-8") as fh:
             fh.write(DRIFTED_PLIST.format(repo=repo))
 
-    write_exec(os.path.join(stubs, "launchctl"),
-               "#!/bin/zsh\necho \"$@\" >> \"$LAUNCHCTL_LOG\"\nexit 0\n")
+    installed = os.path.join(agents, "com.carr.dictation-consent.plist")
+    with open(os.path.join(root, "launchctl-state.json"), "w", encoding="utf-8") as fh:
+        json.dump({"com.carr.dictation-consent": installed} if seed_drifted_plist else {}, fh)
+    write_exec(os.path.join(stubs, "launchctl"), """#!/usr/bin/env python3
+import json, os, plistlib, sys
+from pathlib import Path
+args = sys.argv[1:]
+state_path = Path(os.environ['LAUNCHCTL_STATE'])
+state = json.loads(state_path.read_text())
+with open(os.environ['LAUNCHCTL_LOG'], 'a', encoding='utf-8') as log:
+    log.write(' '.join(args) + '\\n')
+if args[0] == 'print':
+    label = args[1].rsplit('/', 1)[-1]
+    if label in state:
+        print(f'path = {state[label]}')
+        sys.exit(0)
+    print(f'Could not find service "{label}" in domain for user gui: 501', file=sys.stderr)
+    sys.exit(113)
+if args[0] in ('load', 'unload'):
+    dest = args[-1]
+    label = plistlib.loads(Path(dest).read_bytes())['Label']
+    if args[0] == 'load':
+        state[label] = dest
+    else:
+        state.pop(label, None)
+    state_path.write_text(json.dumps(state))
+    sys.exit(0)
+sys.exit(64)
+""")
     return repo, home, stubs
 
 
@@ -220,7 +248,8 @@ def run_hook(repo, home, stubs, root):
     # real checkout that the hook must not be able to discover.
     env = dict(fixture_git_env(), HOME=home,
                PATH=stubs + os.pathsep + os.environ.get("PATH", ""),
-               LAUNCHCTL_LOG=os.path.join(root, "launchctl.log"))
+               LAUNCHCTL_LOG=os.path.join(root, "launchctl.log"),
+               LAUNCHCTL_STATE=os.path.join(root, "launchctl-state.json"))
     env.pop("CLAUDE_PROJECT_DIR", None)
     return sh([sys.executable, os.path.join(repo, "hooks", "machine-converge.py")],
               cwd=root, env=env)

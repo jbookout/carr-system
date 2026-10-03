@@ -68,6 +68,25 @@ function sponsor(actor) {
   return slug;
 }
 
+export function progressBoardSummary(row) {
+  const data = row.snapshot_json ?? {};
+  const tasks = data.tasks && typeof data.tasks === "object" && !Array.isArray(data.tasks)
+    ? Object.values(data.tasks) : [];
+  const counts = new Map();
+  for (const task of tasks) {
+    if (!task || typeof task !== "object" || Array.isArray(task)) continue;
+    const status = typeof task.status === "string" && task.status.trim() ? task.status : "queued";
+    counts.set(status, (counts.get(status) ?? 0) + 1);
+  }
+  return {
+    board_id: row.board_id,
+    title: typeof data.title === "string" && data.title.trim() ? data.title : row.board_id,
+    project: typeof data.project === "string" && data.project.trim() ? data.project : row.board_id,
+    updated_at: row.updated_at,
+    task_counts: Object.fromEntries([...counts].sort(([a], [b]) => a.localeCompare(b))),
+  };
+}
+
 export function boardAnswerTools({ withEnvelope, writeEvent }) {
   return {
     "publish-board-snapshot": {
@@ -169,6 +188,21 @@ export function boardAnswerTools({ withEnvelope, writeEvent }) {
               idempotency_key: args.idempotency_key });
           return { ok: true, question: rows.rows[0] };
         });
+      },
+    },
+
+    "list-progress-boards": {
+      write: false,
+      description: "List published progress boards visible to the authenticated tenant and sponsor, with publication time and task counts by status. Returns progress-board-directory.v1; snapshots and questions are read separately.",
+      inputSchema: { type: "object", additionalProperties: false, properties: {} },
+      handler: async (c, actor) => {
+        const tenant = organizationTenantForActor(actor), principal = sponsor(actor);
+        const result = await c.query(
+          `select board_id,snapshot_json,updated_at from board_snapshot
+            where organization_tenant_id=$1 and sponsoring_human_slug=$2
+            order by case when board_id='carr-v5' then 0 else 1 end,board_id`,
+          [tenant, principal]);
+        return { ok: true, schema: "progress-board-directory.v1", boards: result.rows.map(progressBoardSummary) };
       },
     },
 
