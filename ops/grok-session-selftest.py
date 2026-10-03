@@ -106,8 +106,8 @@ runpy.run_path(path, run_name="__main__")
 
     def test_finding1_six_hour_and_refreshable_expired_access(self):
         with tempfile.TemporaryDirectory() as directory:
-            for hours in (6, -1):
-                row = session.inspect_session(self.fixture(directory, hours, age=2), now=NOW,
+            for hours, age in ((6, 0), (-1, 7)):
+                row = session.inspect_session(self.fixture(directory, hours, age=age), now=NOW,
                                               authenticate=lambda: "succeeded")
                 self.assertEqual(row["status"], "OK")
             row = session.inspect_session(self.fixture(directory, 6), now=NOW,
