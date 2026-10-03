@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import unquote, urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from lib.machine_prerequisites import openssl_executable  # noqa: E402
+from lib.calendar_signatures import verify as verify_signature  # noqa: E402
 
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -148,42 +148,8 @@ def verify_envelope(value: Mapping[str, Any], public_key: Path, contract: Mappin
         raise Refusal("collector public key or signature is invalid") from exc
     if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or not signature or len(signature) > 4096 or hashlib.sha256(key_bytes).hexdigest() != fingerprint:
         raise Refusal("collector public key or signature is invalid")
-    read_fd, write_fd = os.pipe()
-    payload_fd = signature_fd = -1
-    try:
-        signature_path = f"/dev/fd/{read_fd}"
-        signed = {key: value[key] for key in value if key != "signature"}
-        payload = _canonical(signed)
-        input_path = "/dev/stdin"
-        input_data: bytes | None = payload
-        if hasattr(os, "memfd_create"):
-            payload_fd = os.memfd_create("carr-calendar-envelope")
-            signature_fd = os.memfd_create("carr-calendar-signature")
-            remaining = memoryview(payload)
-            while remaining:
-                written = os.write(payload_fd, remaining)
-                if written < 1:
-                    raise Refusal("collector envelope could not be buffered")
-                remaining = remaining[written:]
-            os.lseek(payload_fd, 0, os.SEEK_SET)
-            os.write(signature_fd, signature)
-            os.lseek(signature_fd, 0, os.SEEK_SET)
-            input_path, input_data = f"/dev/fd/{payload_fd}", None
-            signature_path = f"/dev/fd/{signature_fd}"
-        else:
-            os.write(write_fd, signature)
-        os.close(write_fd)
-        verified = subprocess.run([openssl_executable(), "pkeyutl", "-verify", "-pubin", "-inkey", str(public_key), "-rawin", "-in", input_path, "-sigfile", signature_path], input=input_data, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, pass_fds=tuple(item for item in (read_fd, payload_fd, signature_fd) if item >= 0), check=False)
-    finally:
-        try: os.close(read_fd)
-        except OSError: pass
-        try: os.close(write_fd)
-        except OSError: pass
-        for item in (payload_fd, signature_fd):
-            if item >= 0:
-                try: os.close(item)
-                except OSError: pass
-    if verified.returncode != 0:
+    signed = {key: value[key] for key in value if key != "signature"}
+    if not verify_signature(key_bytes, _canonical(signed), signature):
         raise Refusal("collector envelope signature verification failed")
     return raw, {"collector_key_fingerprint": fingerprint, "signature_sha256": hashlib.sha256(signature).hexdigest(), "collector_version": version}
 

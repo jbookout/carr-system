@@ -2,13 +2,17 @@
 """Subprocess proof for the signed EventKit collector with no live Calendar."""
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import importlib.util
 import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -72,22 +76,44 @@ class EKEventStore:
     key = root / "collector.pem"
     subprocess.run([OPENSSL, "genpkey", "-algorithm", "ED25519", "-out", str(key)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     key.chmod(0o600)
-    if not hasattr(collector.os, "memfd_create"):
-        def fixture_memfd(_name: str) -> int:
-            with tempfile.TemporaryFile() as anonymous:
-                return os.dup(anonymous.fileno())
-        collector.os.memfd_create = fixture_memfd
+    real_run = subprocess.run
+
+    def delayed_signer(command, **kwargs):
+        if "pkeyutl" not in command:
+            return real_run(command, **kwargs)
+        payload = kwargs.pop("input")
+        kwargs.pop("check")
+        timeout = kwargs.pop("timeout")
+        with subprocess.Popen(command, stdin=subprocess.PIPE if payload is not None else subprocess.DEVNULL, **kwargs) as process:
+            # Force OpenSSL to inspect its input before communicate writes.
+            time.sleep(0.1)
+            stdout, stderr = process.communicate(payload, timeout=timeout)
+            return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+    with patch.object(subprocess, "run", side_effect=delayed_signer):
         try:
-            portable_signature = collector.sign(key, b"portable fixture")
-        finally:
-            delattr(collector.os, "memfd_create")
-    else:
-        portable_signature = collector.sign(key, b"portable fixture")
-    check("anonymous seekable Ed25519 input is portable", bool(portable_signature))
+            delayed_signature = collector.sign(key, b"synthetic delayed signing input")
+        except collector.Refusal:
+            delayed_signature = ""
+    check("Ed25519 signing is independent of stdin scheduling", bool(delayed_signature))
     environment = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(fake), "CARR_CALENDAR_PREBRIEF_ALLOWLIST": str(allowlist), "CARR_CALENDAR_PREBRIEF_COLLECTOR_PRIVATE_KEY": str(key), "CARR_CALENDAR_PREBRIEF_COLLECTOR_VERSION": "fixture-1"}
     run = subprocess.run([sys.executable, str(COLLECTOR)], input=json.dumps(contract()), text=True, capture_output=True, env=environment, check=False)
     envelope = json.loads(run.stdout) if run.returncode == 0 else {}
     check("real collector subprocess signs DB-bound EventKit capture", bool(run.returncode == 0 and envelope.get("challenge_id") == contract()["challenge_id"] and envelope.get("raw_payload_count") == 1 and envelope.get("signature")))
+    public = real_run([OPENSSL, "pkey", "-in", str(key), "-pubout"], capture_output=True, check=True).stdout
+    public_file = root / "public.pem"
+    public_file.write_bytes(public)
+    verified = False
+    if envelope:
+        # Only synthetic fixture bytes reach these anonymous test files.
+        with tempfile.TemporaryFile() as body, tempfile.TemporaryFile() as signature:
+            body.write(collector.canonical({name: value for name, value in envelope.items() if name != "signature"}))
+            signature.write(base64.b64decode(envelope["signature"], validate=True))
+            body.flush(); body.seek(0)
+            signature.flush(); signature.seek(0)
+            proof = real_run([OPENSSL, "pkeyutl", "-verify", "-pubin", "-inkey", str(public_file), "-rawin", "-in", f"/dev/fd/{body.fileno()}", "-sigfile", f"/dev/fd/{signature.fileno()}"], capture_output=True, pass_fds=(body.fileno(), signature.fileno()), check=False)
+            verified = proof.returncode == 0 and envelope["key_fingerprint"] == hashlib.sha256(public).hexdigest()
+    check("signature and key fingerprint match independent OpenSSL", verified)
     check("raw attendee appears only in the allowed collector stdout pipe", "raw.attendee@example.test" not in run.stderr and "raw.attendee@example.test" in run.stdout)
     changed = contract(); changed["calendar_keys"] = ["a" * 64]
     mismatch = subprocess.run([sys.executable, str(COLLECTOR)], input=json.dumps(changed), text=True, capture_output=True, env=environment, check=False)

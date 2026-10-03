@@ -4,6 +4,7 @@
 openpyxl>=3.1
 Pillow>=10.0   # used by the write-content card crop step + image handling in space-search
 psycopg[binary]>=3.2   # record layer: tools/migrate.py + (build day) the MCP server's DB path
+cryptography>=46.0   # calendar envelopes: in-memory Ed25519 signing and verification
 
 # UNDECLARED UNTIL 2026-08-13, found by ops/ci-dep-check.py on its first run. The
 # repo convention line above ("everything else is stdlib by design") had quietly
