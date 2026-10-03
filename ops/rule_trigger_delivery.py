@@ -34,12 +34,10 @@ TWO KINDS OF PROMPT, TWO POLICIES (2026-09-25 design ruling on #1276 review):
         words against each rule's statement and compiled keywords, ties by
         rule id) chooses the shortlist instead, and it is judged the same way
         (rank_status "unavailable_overlap_fallback");
-      - binding is ONE RULE PER REQUEST with the old path's own question.
-        Measured 2026-09-25 on the 15 in-capacity misses of the review set:
-        batched questions scored them 0.23-0.71, the same rules asked one at a
-        time scored 0.76-0.85 on 14 of 15. Batching was the defect.
-    HARD BUDGET: MAX_JEV_CALLS = 1 ranking + BIND_TOP_K binding = 8 requests
-    per human prompt, enforced here and counted in the log. HARD CLOCK:
+      - binding is one shared-state request with one explicitly scoped Noul
+        per shortlisted rule. Failed or partial batches remain visibly
+        unavailable, without additional binding requests.
+    HARD BUDGET: at most one ranking plus one batch request. HARD CLOCK:
     DEADLINE_SECONDS (12 s, under the hook's 20 s timeout); once it is near,
     no further request starts, and the matches plus whatever was judged are
     returned, with deadline_hit and the unjudged rules in the log.
@@ -67,6 +65,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TRIGGERS_PATH = os.path.join(REPO, "ops", "config", "rule-jit-triggers.v1.json")
 OUT = os.path.join(REPO, "out")
 DELIVERED_CACHE = os.path.join(OUT, "rule-prompt-delivered.json")
+JUDGMENT_CACHE = os.path.join(OUT, "rule-prompt-judgments.json")
 LOG_PATH = os.path.join(OUT, "rule-trigger-delivery.jsonl")
 
 # A message that surfaces twenty rules has surfaced none; same cap and reason
@@ -76,14 +75,11 @@ MAX_SURFACED = 5
 # statement again on every message is what the dedupe prevents. Two hours
 # bounds how long a compaction could have dropped it.
 DEDUPE_TTL_SECONDS = 2 * 3600
-BIND_AT = 0.75
 MESSAGE_CHARS = 90_000
 
-# THE BUDGET. One ranking request plus at most BIND_TOP_K single-rule binding
-# requests. k = 7 is the largest the 8-request cap allows, and the smallest
-# the logged ranks of the review set say reaches 80% recall (k = 6: 77%).
+# THE BUDGET. Seven candidates fit one shared-state binding request.
 BIND_TOP_K = 7
-MAX_JEV_CALLS = 1 + BIND_TOP_K
+MAX_JEV_CALLS = 2
 RUBRIC_CHARS = 150
 
 # THE CLOCK. The prompt hook runs under a 20 s timeout (ops/config/hooks.json,
@@ -205,7 +201,7 @@ def _default_rank(text, pool, limit, client, timeout=None, deadline=None):
         # retries=0: a 429's retry-after is unbounded, and three retries at
         # the full timeout each escaped the clock (#1281 review: one ranking
         # request took 15.1 s against the 12 s deadline).
-        extra = {"retries": 0, "deadline": deadline}
+        extra = {"retries": 0, "deadline": deadline, "model": jrs.EVALUATED_MODEL}
         if timeout is not None:
             extra["timeout"] = timeout
         answer = ranker.judge({"situation": text},
@@ -236,8 +232,8 @@ def _overlap_rank(text, pool, limit, keywords):
     """Deterministic fallback when the ranking request is unavailable: rules
     ordered by how many distinct words of the prompt appear in the rule's
     statement or its compiled keywords, ties broken by rule id. Rules with no
-    overlap are not picked. No Jev call; the binding requests it feeds are
-    the same single-rule requests a ranked shortlist gets."""
+    overlap are not picked. No Jev call; the shortlist feeds the same scoped
+    binding batch a ranked shortlist gets."""
     try:
         stop = set(_sibling("rule_trigger_compile").STOPWORDS)
     except Exception:
@@ -254,15 +250,11 @@ def _overlap_rank(text, pool, limit, keywords):
     return [rule_id for _, rule_id in sorted(scored)][:limit]
 
 
-def _binding_question(client):
-    """The old path's single-rule question (ops/jev_rule_select), verbatim."""
-    return _sibling("jev_rule_select").binding_question(client)
-
-
 def _default_bind(subject, questions, client, timeout=None, deadline=None):
-    """One single-rule binding request through ops/jev_judge (logged there),
+    """One binding request through ops/jev_judge (logged there),
     with no rate-limit retries and the caller's deadline passed to the client."""
-    extra = {"deadline": deadline, "retries": 0}
+    extra = {"deadline": deadline, "retries": 0,
+             "model": _sibling("jev_rule_select").EVALUATED_MODEL}
     if timeout is not None:
         extra["timeout"] = timeout
     return _sibling("jev_rule_select")._sibling("jev_judge").judge(
@@ -270,8 +262,7 @@ def _default_bind(subject, questions, client, timeout=None, deadline=None):
 
 
 def _rule_titles():
-    """{rule id: (title, context)} from the old path's corpus loader, so a
-    single-rule question carries exactly what it carried before."""
+    """{rule id: (title, context)} from the shared corpus loader."""
     try:
         return {row["id"]: (row.get("gist") or "", row.get("context") or "")
                 for row in _sibling("jev_rule_select").load_rules()}
@@ -281,14 +272,13 @@ def _rule_titles():
 
 def judge_budgeted(text, rules, always, *, rank=None, ask=None, client=None, titles=None,
                    keywords=None, deadline=None, clock=time.monotonic):
-    """Judge `always` (stale rules) plus the best-ranked of `rules`, one
-    single-rule request each, within MAX_JEV_CALLS.
+    """Judge stale and ranked rules in one scoped batch.
 
     Returns (selected rows, report). `always` is judged first, up to
     BIND_TOP_K; the ranking call fills what is left and is skipped when
     nothing is left or when the pool already fits. When the ranking request
     is unavailable the binding budget is not wasted: _overlap_rank picks the
-    shortlist deterministically and it is judged exactly as a ranked one.
+    shortlist deterministically and it is judged with the same batch contract.
 
     `deadline` is a `clock()` time (default: DEADLINE_SECONDS from now). Once
     fewer than MIN_CALL_SECONDS remain no further request starts: the rules
@@ -337,51 +327,56 @@ def judge_budgeted(text, rules, always, *, rank=None, ask=None, client=None, tit
         sys.path.insert(0, os.path.join(REPO, "ops"))
         import typesafe_client as client  # noqa: E402
     titles = _rule_titles() if titles is None else titles
-    question = {"binds": _binding_question(client)}
     failures = 0
     to_judge = to_judge[:BIND_TOP_K]
-    for position, rule_id in enumerate(to_judge):
-        left = deadline - clock()
-        if left < MIN_CALL_SECONDS:
-            report["deadline_hit"] = True
-            report["unjudged"] = to_judge[position:]
-            break
-        report["judged"].append(rule_id)
+    if deadline - clock() < MIN_CALL_SECONDS:
+        report["deadline_hit"] = True
+        report["unjudged"] = to_judge
+        report["bind_status"] = "deadline"
+        return selected, report
+    state = {"situation": text[:SITUATION_CHARS], "rules": {}}
+    questions = {}
+    selection = _sibling("jev_rule_select")
+    for rule_id in to_judge:
         rule = by_id[rule_id]
         title, context = titles.get(rule_id, ("", ""))
         statement = (rule.get("statement") or "")[:STATEMENT_CHARS]
-        subject = {"situation": text[:SITUATION_CHARS],
-                   "rule_title": title or statement[:RUBRIC_CHARS],
-                   "rule": statement or title,
-                   "rule_context": context}
-        report["calls"] += 1
+        state["rules"][rule_id] = {"title": title or statement[:RUBRIC_CHARS],
+                                   "statement": statement or title,
+                                   "context": context}
+        questions[f"bind_{rule_id}"] = selection.batch_binding_question(rule_id, client)
+    report["judged"] = list(to_judge)
+    report["calls"] += 1
+    try:
+        answer = (ask(state, questions) if ask is not None else
+                  _default_bind(state, questions, client,
+                                timeout=deadline - clock(), deadline=deadline))
+        answers = answer["answers"]
+    except Exception:
+        report["bind_status"] = "unavailable"
+        return selected, report
+    for rule_id in to_judge:
         try:
-            answer = (ask(subject, question, rule_id=rule_id) if ask is not None
-                      else _default_bind(subject, question, client, timeout=left,
-                                         deadline=deadline))
-            value = float(answer["answers"]["binds"]["noul"])
-        except Exception:
+            value = float(answers[f"bind_{rule_id}"]["noul"])
+            if not 0 <= value <= 1:
+                raise ValueError("invalid Noul")
+        except (KeyError, TypeError, ValueError):
             failures += 1
             continue
-        if value >= BIND_AT:
+        if value >= selection.BATCH_BIND_AT:
             selected[rule_id] = {
                 "id": rule_id, "probability": value,
                 "ranking_model": None if rule_id in always else ranking_model,
                 "binding_model": answer.get("model") or "jev",
                 "source": "stale_judged" if rule_id in always else "ranked_judged"}
-    asked = len(report["judged"])
-    report["bind_status"] = ("deadline" if not asked else
-                             "judged" if not failures else
-                             "partial" if failures < asked else "unavailable")
-    if report["calls"] > MAX_JEV_CALLS:  # pragma: no cover - guarded by construction
-        raise AssertionError("Jev budget exceeded")
+    report["bind_status"] = "judged" if not failures else "partial"
     return selected, report
 
 
 def advise(situation, *, session_id=None, now=None, triggers_path=TRIGGERS_PATH,
            compiled=None, rules=None, ask=None, client=None, rank=None,
            delivered_cache=DELIVERED_CACHE, log_path=LOG_PATH, envelope=None,
-           deadline=None):
+           deadline=None, judgment_cache=None):
     """The rules this message surfaces, within the Jev budget and the clock.
 
     `deadline` is a time.monotonic() value; by default DEADLINE_SECONDS from
@@ -439,9 +434,32 @@ def advise(situation, *, session_id=None, now=None, triggers_path=TRIGGERS_PATH,
         always = sorted(rule["id"] for rule in unmatched if rule["id"] in stale)
         keywords = {rule_id: list(((entry.get("triggers") or {}).get("keywords") or {}))
                     for rule_id, entry in entries.items() if isinstance(entry, dict)}
-        judged, report = judge_budgeted(text, unmatched, always, rank=rank, ask=ask,
-                                        client=client, keywords=keywords,
-                                        deadline=deadline)
+        # Human intent changes invalidate both ranking and binding. The roster
+        # includes rule text, so a re-taught rule invalidates the reuse too.
+        cache_path = judgment_cache if judgment_cache is not None else (
+            JUDGMENT_CACHE if ask is None and rank is None and client is None else None)
+        verdict_cache = _sibling("jev_verdict_cache") if cache_path else None
+        cache_key = (verdict_cache.key({"prompt": text, "roster": [
+            [r["id"], r.get("gist"), r.get("statement"), r.get("context")]
+            for r in unmatched], "always": always, "matched": sorted(selected),
+            "source": verdict_cache.source_digest("ops/rule_trigger_delivery.py",
+                                                  "ops/jev_rule_select.py", "ops/jev_judge.py")})
+                     if verdict_cache else None)
+        cached = verdict_cache.get(cache_path, cache_key, now=now) if verdict_cache else None
+        if isinstance(cached, dict) and isinstance(cached.get("judged"), dict):
+            judged = cached["judged"]
+            report = {"calls": 0, "rank_status": "cached", "bind_status": "cached",
+                      "judged": cached.get("ids", []), "overflow": [], "unjudged": [],
+                      "deadline_hit": False}
+        else:
+            judged, report = judge_budgeted(text, unmatched, always, rank=rank, ask=ask,
+                                            client=client, keywords=keywords,
+                                            deadline=deadline)
+            if (verdict_cache and not report.get("deadline_hit")
+                    and report["rank_status"] in ("ok", "not_needed")
+                    and report["bind_status"] in ("judged", "none")):
+                verdict_cache.put(cache_path, cache_key,
+                                  {"judged": judged, "ids": report["judged"]}, now=now)
         for rule_id, row in judged.items():
             selected.setdefault(rule_id, row)
 
