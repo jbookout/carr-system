@@ -1264,7 +1264,7 @@ if [ "$CONFIRM_MERGE_REGISTRY_APPLIED" = t ] && [ "$WHATS_NEW_REGISTRY_APPLIED" 
 fi
 
 FIND_RULE_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0770_find_rule_scac_successor.sql')" \
+  "select exists (select 1 from schema_migrations where filename='0786_find_rule_scac_successor.sql')" \
   2>/dev/null)"
 case "$FIND_RULE_REGISTRY_APPLIED" in
   t|f) ;;
@@ -1277,7 +1277,7 @@ fi
 
 
 JEV_CAP_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0773_jev_cap_scac_successor.sql')" \
+  "select exists (select 1 from schema_migrations where filename='0787_jev_cap_scac_successor.sql')" \
   2>/dev/null)"
 case "$JEV_CAP_REGISTRY_APPLIED" in
   t|f) ;;
@@ -1288,7 +1288,7 @@ if [ "$JEV_CAP_REGISTRY_APPLIED" = t ] && [ "$FIND_RULE_REGISTRY_APPLIED" != t ]
   exit 1
 fi
 
-INVOICE_TRACKER_REGISTRY_APPLIED="$("$PSQL" -Atqc "select exists(select 1 from schema_migrations where filename='0784_invoice_tracker_scac_successor.sql')" 2>/dev/null)"
+INVOICE_TRACKER_REGISTRY_APPLIED="$("$PSQL" -Atqc "select exists(select 1 from schema_migrations where filename='0794_invoice_tracker_scac_successor.sql')" 2>/dev/null)"
 case "$INVOICE_TRACKER_REGISTRY_APPLIED" in
   t|f) ;;
   *) echo "schema-snapshot: could not read invoice tracker registry state" >&2; exit 1 ;;

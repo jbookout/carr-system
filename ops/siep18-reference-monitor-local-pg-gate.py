@@ -21,7 +21,7 @@ from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connec
 
 REPO = Path(__file__).resolve().parents[1]
 
-# 0784 installs invoice v105 and seals the shipped Jev cap v104 as history.
+# 0794 installs invoice v105 and seals the shipped Jev cap v104 as history.
 # Both are pinned: an unreviewed frontier or a rewritten predecessor must fail closed.
 LIVE_REGISTRY_VERSION = "scac-mutation-registry.v105"
 LIVE_REGISTRY_ORDINAL = 105
@@ -32,10 +32,10 @@ SEALED_PREDECESSOR_DIGEST = (
 )
 SEALED_PREDECESSOR_ENTRY_COUNTS = (2619, 1085)
 SEALED_PREDECESSOR_MIGRATION = (
-    "migrations/0773_jev_cap_scac_successor.sql"
+    "migrations/0787_jev_cap_scac_successor.sql"
 )
 LIVE_REGISTRY_MIGRATION = (
-    "migrations/0784_invoice_tracker_scac_successor.sql"
+    "migrations/0794_invoice_tracker_scac_successor.sql"
 )
 
 LIVE_CATALOG_CURRENT_FN = f"ops.scac_mutation_catalog_v{LIVE_REGISTRY_ORDINAL}_current()"

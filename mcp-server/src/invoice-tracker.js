@@ -1,3 +1,5 @@
+import { isCalendarDate } from './calendar-date.js';
+
 // One read owns the closed-deal/commission join for Invoices and Home.
 // Recording a receipt changes the existing commission only; it moves no money.
 export function invoiceTrackerTools({ ToolError, withEnvelope, writeEvent }) {
@@ -28,7 +30,7 @@ export function invoiceTrackerTools({ ToolError, withEnvelope, writeEvent }) {
       }, required: ['idempotency_key', 'commission_id', 'base_version', 'received_on'] },
       handler: async (c, actor, args) => withEnvelope(c, actor, 'record-commission-receipt', args, async () => {
         const day = args.received_on;
-        if (typeof day !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(day) || !Number.isFinite(Date.parse(day + 'T00:00:00Z')) || new Date(day + 'T00:00:00Z').toISOString().slice(0, 10) !== day)
+        if (!isCalendarDate(day))
           throw new ToolError({ error: 'invalid_received_on' });
         const row = (await c.query(`select id, deal_id, status, version,
           to_jsonb(invoiced_on)#>>'{}' as invoiced_on, to_jsonb(received_on)#>>'{}' as received_on,

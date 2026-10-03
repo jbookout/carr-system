@@ -9,7 +9,7 @@ class ToolError extends Error { constructor(payload) { super(payload.error); thi
 function harness(patch={}) {
   const row={id:'demo-commission',deal_id:'demo-deal',status:'invoiced',version:4,invoiced_on:'2026-09-01',received_on:null,today:'2026-10-02',...patch};
   const calls=[],events=[];const tools=invoiceTrackerTools({ToolError,withEnvelope:async(_c,_a,_v,_args,fn)=>fn(),writeEvent:async(...args)=>events.push(args)});
-  const c={query:async(sql,args)=>{calls.push({sql,args}); if(sql.includes('for update'))return{rows:[row]}; if(sql.includes('update commission'))return{rows:[{id:row.id,base_version:5,received_on:args[1]}]};return{rows:[row]};}};
+  const c={query:async(sql,args)=>{calls.push({sql,args}); if(sql.includes('for update'))return{rows:patch.missing?[]:[row]}; if(sql.includes('update commission'))return{rows:[{id:row.id,base_version:5,received_on:args[1]}]};return{rows:[row]};}};
   return{row,calls,events,c,tools};
 }
 const actor={id:'demo-actor',slug:'joe'};const args={commission_id:'demo-commission',base_version:4,received_on:'2026-10-01',idempotency_key:'demo-receipt'};
@@ -26,7 +26,7 @@ test('paid date changes only one commission and records its attributed deal even
  assert.doesNotMatch(h.calls[1].sql,/gross_amount|deal set|won_value/);
 });
 test('invalid dates, future dates, pre-invoice dates, stale versions and expected/received entries never write',async()=>{
- for(const [patch,change,error] of [[{},{received_on:'2026-02-30'},'invalid_received_on'],[{},{received_on:'2026-10-03'},'payment_date_out_of_range'],[{},{received_on:'2026-08-31'},'payment_date_out_of_range'],[{},{base_version:3},'version_conflict'],[{status:'expected'},{},'invoice_not_unpaid'],[{status:'received'},{},'invoice_not_unpaid']]){
+ for(const [patch,change,error] of [[{},{received_on:'2026-02-30'},'invalid_received_on'],[{},{received_on:'2026-10-03'},'payment_date_out_of_range'],[{},{received_on:'2026-08-31'},'payment_date_out_of_range'],[{},{base_version:3},'version_conflict'],[{status:'expected'},{},'invoice_not_unpaid'],[{status:'received'},{},'invoice_not_unpaid'],[{invoiced_on:null},{},'invoice_not_unpaid'],[{missing:true},{},'invoice_not_found']]){
   const h=harness(patch);await assert.rejects(h.tools['record-commission-receipt'].handler(h.c,actor,{...args,...change}),e=>e.payload.error===error);assert.ok(h.calls.every(c=>!c.sql.includes('update commission')));assert.equal(h.events.length,0);
  }
 });
@@ -55,8 +55,8 @@ test('reference-monitor acceptance uses the live invoice frontier and exact seal
  assert.equal(value('SEALED_PREDECESSOR_VERSION'),predecessor.version);
  assert.equal(value('SEALED_PREDECESSOR_DIGEST'),predecessor.digest);
  assert.match(gate,new RegExp(`SEALED_PREDECESSOR_ENTRY_COUNTS = \\(${predecessor.entryCount}, ${predecessor.sourceEntryCount}\\)`));
- assert.equal(value('LIVE_REGISTRY_MIGRATION'),'migrations/0784_invoice_tracker_scac_successor.sql');
- assert.equal(value('SEALED_PREDECESSOR_MIGRATION'),'migrations/0773_jev_cap_scac_successor.sql');
+ assert.equal(value('LIVE_REGISTRY_MIGRATION'),'migrations/0794_invoice_tracker_scac_successor.sql');
+ assert.equal(value('SEALED_PREDECESSOR_MIGRATION'),'migrations/0787_jev_cap_scac_successor.sql');
 });
 
 // Parallel registry additions must form one ordered history, preserving both contracts.
@@ -75,8 +75,8 @@ test('invoice successor preserves the shipped Jev cap frontier', async()=>{
   assert.deepEqual(boundAfter.find(next=>next.ingress_key===row.ingress_key),row,row.ingress_key);
  assert.deepEqual(boundAfter.filter(row=>!boundBefore.some(previous=>previous.ingress_key===row.ingress_key)).map(row=>row.ingress_key).sort(),
   ['mcp-tool:read-invoice-tracker','mcp-tool:record-commission-receipt']);
- const sql=readFileSync(new URL('../../migrations/0784_invoice_tracker_scac_successor.sql',import.meta.url),'utf8');
- assert.match(sql,/0773_jev_cap_scac_successor.sql/);
+ const sql=readFileSync(new URL('../../migrations/0794_invoice_tracker_scac_successor.sql',import.meta.url),'utf8');
+ assert.match(sql,/0787_jev_cap_scac_successor.sql/);
  assert.match(sql,/scac_mutation_registry_v104_seal_available/);
  assert.match(sql,/scac_mutation_registry_v105_seal_available/);
 });

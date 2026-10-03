@@ -86836,8 +86836,12 @@
         }
       ],
       "expected_count": 1087,
-      "expected_sha256": "18bfb91dedabef4f78a58af9bd0c444cfab6132269430d2bd6319e752325e3b5",
-      "reason": "W15 admits the invoice tracker and receipt record; reads gain lifecycle dates, lane and outcome. No money or provider effect."
+      "expected_sha256": "9dcbc021e2a767cb7e7cc38bb9fbc177f8461e397f743ba49943ba28bf88a7ba",
+      "reason": "W15 admits the invoice tracker and receipt record; reads gain lifecycle dates, lane and outcome. No money or provider effect.",
+      "source_digest_replacements": {
+        "mcp-server/src/tools.js": "e322e5750fea4b1e2a9adb8260934dca3992ebe8e9bde7b2223ff418c0542bcd",
+        "mcp-server/src/invoice-tracker.js": "cdd08adf8e2b673668f85bd4013788c6e96ee78b958a50b6c54294431b47dbbd"
+      }
     }
   ],
   "current_source_review": {
@@ -89456,11 +89460,34 @@
           "owner_package": "11",
           "implementation_state": "inventoried_not_atomically_mediated",
           "classification_authorizing": false
+        },
+        {
+          "ingress_key": "external-admin:tools/migrate.py",
+          "ingress_kind": "external_admin",
+          "operation": "tools/migrate.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "tools/migrate.py",
+          "schema_digest": "63f25941c34f3bd4df19ad630830618f5b3af53a5dd7aeee624e2b3b87ceff0c",
+          "handler_digest": "63f25941c34f3bd4df19ad630830618f5b3af53a5dd7aeee624e2b3b87ceff0c",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
         }
       ],
       "expected_count": 1085,
-      "expected_sha256": "2329a14f6c2761a8f54578def76f00895974c192f8d0edb45140115b26bc12c2",
-      "reason": "PR 865 source-only review: re-derive the existing credential rotation external-admin row after enabling scoped verifier rotation, validating URIs, valid port ranges and targets before mutation, and verifying the complete caller identity contract. No new ingress, authority, grant, runtime selector or historical seal change. PR 1384 source-only review: re-derive the existing Dell migration external-admin receipt writer after correcting its JSON trailing newline. Preserve the registered ingress contract, authority fields, runtime selector, database catalog and all historical seals."
+      "expected_sha256": "316c9c9b41191ba8a0a00a0f0463fd5a6d417c6e5085a2d50adc90d37eb7a0e1",
+      "reason": "PR 865 source-only review: re-derive the existing credential rotation external-admin row after enabling scoped verifier rotation, validating URIs, valid port ranges and targets before mutation, and verifying the complete caller identity contract. No new ingress, authority, grant, runtime selector or historical seal change. PR 1384 source-only review: re-derive the existing Dell migration external-admin receipt writer after correcting its JSON trailing newline. Preserve the registered ingress contract, authority fields, runtime selector, database catalog and all historical seals. Release fix-forward: retain the reviewed migration runner atomic group for the renamed find-rule pair 0785/0786; same authority contract and unchanged historical seals."
     },
     "scac-mutation-registry.v104": {
       "base_version": "v104",
@@ -89510,11 +89537,34 @@
           "owner_package": "11",
           "implementation_state": "inventoried_not_atomically_mediated",
           "classification_authorizing": false
+        },
+        {
+          "ingress_key": "external-admin:tools/migrate.py",
+          "ingress_kind": "external_admin",
+          "operation": "tools/migrate.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "tools/migrate.py",
+          "schema_digest": "63f25941c34f3bd4df19ad630830618f5b3af53a5dd7aeee624e2b3b87ceff0c",
+          "handler_digest": "63f25941c34f3bd4df19ad630830618f5b3af53a5dd7aeee624e2b3b87ceff0c",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
         }
       ],
       "expected_count": 1085,
-      "expected_sha256": "d521f73c2d7a32e7a464c774c8c50b5e2488e7a78d32864805dbec64c9e1baad",
-      "reason": "Carry the credential-rotation and Dell migration receipt source reviews forward to v104. Only existing external-admin rows are re-digested; ingress and authority contracts and all historical seals remain unchanged."
+      "expected_sha256": "0abfa16c3295bb472da24a14028adb88d5e15aa18cd629b562951ba0b65dbe40",
+      "reason": "Carry the credential-rotation and Dell migration receipt source reviews forward to v104. Only existing external-admin rows are re-digested; ingress and authority contracts and all historical seals remain unchanged. Release fix-forward: retain the reviewed migration runner atomic group for the renamed find-rule pair 0785/0786; same authority contract and unchanged historical seals."
     },
     "scac-mutation-registry.v105": {
       "base_version": "v105",
@@ -89564,11 +89614,34 @@
           "owner_package": "11",
           "implementation_state": "inventoried_not_atomically_mediated",
           "classification_authorizing": false
+        },
+        {
+          "ingress_key": "external-admin:tools/migrate.py",
+          "ingress_kind": "external_admin",
+          "operation": "tools/migrate.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "tools/migrate.py",
+          "schema_digest": "63f25941c34f3bd4df19ad630830618f5b3af53a5dd7aeee624e2b3b87ceff0c",
+          "handler_digest": "63f25941c34f3bd4df19ad630830618f5b3af53a5dd7aeee624e2b3b87ceff0c",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
         }
       ],
       "expected_count": 1087,
-      "expected_sha256": "0ea26b9af9d4b222052e6825027ff813f4c820f5ea96bb2f2ce033d2677fa395",
-      "reason": "Carry forward the existing rotate-credential source-only review at the invoice frontier; no ingress or authority change."
+      "expected_sha256": "71a61437d5149bed5c5f09688fb2b5866816e41cea76f6f571574d5315f44ce3",
+      "reason": "Carry the reviewed migration runner renumbering to the invoice frontier without changing its authority contract."
     }
   }
 }
