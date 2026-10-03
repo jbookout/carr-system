@@ -2315,6 +2315,15 @@ class Robustness(Base):
 
 
 class Blockers(Base):
+    def test_changed_notification_does_not_reuse_an_incompatible_record_key(self):
+        held = rp.blocker_loop("CLOUDFLARE_API_TOKEN", "token missing")
+        failed = rp.blocker_loop("CLOUDFLARE_API_TOKEN", "token missing", recovery="Clear the failed SHA.")
+        # withEnvelope rejects the same key for changed request bytes. Retry
+        # stability comes from the stored pending payload, including its key.
+        self.assertNotEqual(held["idempotency_key"], failed["idempotency_key"])
+        self.assertEqual(failed, rp.blocker_loop("CLOUDFLARE_API_TOKEN", "token missing",
+                                               recovery="Clear the failed SHA."))
+
     def test_nonzero_auth_rejection_files_the_credential_loop(self):
         for response in ("Authentication error [code: 10000]",
                          "A request to the Cloudflare API (/user/tokens/verify) failed.\nInvalid access token [code: 9109]"):

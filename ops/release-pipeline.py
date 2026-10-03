@@ -689,12 +689,18 @@ def blocker_loop(capability: str, detail: str, *, remedy: str = "", recovery: st
     blocker_detail = (f"The authorized release-repair lane must restore and verify the health baseline: {detail}"
                       if health_repair else
                       f"Joe is the provisioning decider for the named unattended credential: {detail}; Joe grants it")
-    return {"idempotency_key": str(uuid.uuid5(ROOM_NAMESPACE, "release-pipeline-blocker:" + capability)),
-            "kind": "open_loop", "owner": "Claude" if health_repair else "Joe", "domain": "system", "marker": "none",
+    args = {"kind": "open_loop", "owner": "Claude" if health_repair else "Joe", "domain": "system", "marker": "none",
             "blocker": "other_lane" if health_repair else "capability", "blocker_detail": blocker_detail,
             "body": (f"The scripted release pipeline (ops/release-pipeline.py) cannot run "
                      f"unattended: {detail}. {continuation} {remedy}".rstrip()),
             "unblocks": "unattended Worker/app release on every merge to main"}
+    # The record envelope refuses key reuse with different request bytes.
+    # Dedup by capability remains in filed_blockers; retries replay the pending
+    # payload verbatim, while a revised remedy gets its own operation key.
+    args["idempotency_key"] = str(uuid.uuid5(
+        ROOM_NAMESPACE, "release-pipeline-blocker:" + capability + ":" +
+        json.dumps(args, sort_keys=True, separators=(",", ":"))))
+    return args
 
 
 # ── the pipeline ──────────────────────────────────────────────────────────────
