@@ -229,7 +229,8 @@ function validTelemetryMeasurement(value) {
 function validId(value) { return string(value) && /^[A-Za-z][A-Za-z0-9._:-]{2,127}$/.test(value); }
 function validEvidence(value, required = false) {
   return list(value) && (required ? value.length > 0 : true) && value.every((row) => exactKeys(row, ["ref", "redaction_class", "content_digest"])
-    && validId(row.ref) && ["metadata_only", "redacted_evidence"].includes(row.redaction_class) && DIGEST.test(row.content_digest));
+    && validId(row.ref) && ["metadata_only", "redacted_evidence"].includes(row.redaction_class)
+    && typeof row.content_digest === "string" && DIGEST.test(row.content_digest));
 }
 function sameSet(a, b) { return list(a) && list(b) && a.length === b.length && [...a].sort().every((item, index) => item === [...b].sort()[index]); }
 function validBinding(value) { return exactKeys(value, ["id", "state_version", "canonical_record_digest"]) && validId(value.id) && number(value.state_version) && DIGEST.test(value.canonical_record_digest); }

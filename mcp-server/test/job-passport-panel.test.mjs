@@ -4,6 +4,7 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import { deriveJobPassports, jobPassportStatusLabel, parseJobPassportReceipt } from "../../dealroom/js/job-passport.js";
 import { activationReliabilityWire, strictAttemptReceiptShape } from "../src/evidence-activation.js";
+import { requirePlan } from "../src/engineering-runtime.js";
 
 const helperMode = process.argv.includes("--evidence-activation-joined-path");
 const testCase = helperMode ? () => {} : test;
@@ -80,11 +81,167 @@ const reseal = (typedPassport) => {
   delete typedPassport.slice_plan.plan_digest;
   typedPassport.slice_plan.plan_digest = seal(typedPassport.slice_plan);
   typedPassport.plan_digest = typedPassport.slice_plan.plan_digest;
-  typedPassport.receipts[0].plan_digest = typedPassport.plan_digest;
+  for (const receipt of typedPassport.receipts) receipt.plan_digest = typedPassport.plan_digest;
   delete typedPassport.projection_digest;
   typedPassport.projection_digest = seal(typedPassport);
   return typedPassport;
 };
+
+// Build unexecuted public-wire projections so plan mutations cannot be refused
+// accidentally by unrelated receipt or derived-state bindings.
+const unexecutedV2 = (configure = () => {}) => {
+  const passport = engineeringForV2();
+  configure(passport.slice_plan.slices);
+  passport.receipts = [];
+  passport.execution_envelopes = [];
+  passport.slices = passport.slice_plan.slices.map((slice) => ({
+    slice_ref: slice.slice_ref, ordinal: slice.ordinal, dependency_refs: slice.dependency_refs,
+    state: slice.dependency_refs.length ? "blocked" : "eligible",
+    planned_check_refs: slice.planned_checks.map((check) => check.check_ref), deviation_refs: [],
+    manual_qa_required: slice.manual_qa_required, release_requirement: slice.release_requirement,
+  }));
+  passport.operator_receipt.evidence_refs = [];
+  passport.operator_receipt.remaining_risk = passport.slices.map((slice) => slice.slice_ref);
+  passport.operator_receipt.manual_qa_items = passport.slices.filter((slice) => slice.manual_qa_required).map((slice) => slice.slice_ref);
+  return reseal(passport);
+};
+class PlanError extends Error {
+  constructor(payload) { super(payload.error); Object.assign(this, payload); }
+}
+const assertV2Parity = (passport, accepted) => {
+  if (accepted) assert.equal(requirePlan(passport.slice_plan, PlanError), passport.slice_plan);
+  else assert.throws(() => requirePlan(passport.slice_plan, PlanError), PlanError);
+  const model = deriveJobPassports([turn(wrap("observatory_projection", fixture), 1), turn(wrap("engineering_passport", passport), 2)]);
+  assert.equal(model.passports.length, 1);
+  if (accepted) {
+    assert.deepEqual(model.passports[0].engineering_passport, passport);
+    assert.deepEqual(model.rejected, []);
+  } else {
+    assert.equal(model.passports[0].engineering_passport, null);
+    assert.deepEqual(model.rejected, [{ seq: 2, reason: "invalid_engineering_passport" }]);
+  }
+};
+const modelStep = () => ({
+  step_ref: "step:synthetic-read", responsibility_class: "classification",
+  input_contract_ref: "contract:input", output_contract_ref: "contract:output",
+  rationale: "classify typed uncertainty", selection_basis: ["quality_gain"],
+});
+const modelV2 = () => unexecutedV2(([slice]) => {
+  slice.design_contract.routing.executor_class = "model_assisted";
+  slice.design_contract.code_model_decision.model_judgment_steps = [modelStep()];
+});
+const orderedV2 = (dependencies = [[], []], resources = ["resource:a", "resource:b"]) => unexecutedV2((slices) => {
+  const prototype = slices[0];
+  slices.splice(0, slices.length, ...dependencies.map((refs, index) => {
+    const slice = structuredClone(prototype);
+    slice.slice_ref = `slice:${index}`;
+    slice.ordinal = index + 1;
+    slice.dependency_refs = refs;
+    slice.declared_resource_refs = [resources[index]];
+    slice.design_contract = designContractFor(slice);
+    return slice;
+  }));
+});
+const mutateV2 = (passport, mutation) => {
+  mutation(passport.slice_plan.slices);
+  return reseal(passport);
+};
+
+testCase("v2 public wire refuses coercible non-string evidence digests like the server", () => {
+  const passport = unexecutedV2(([slice]) => {
+    const evidence = slice.design_contract.evidence.evidence_refs[0];
+    evidence.content_digest = [evidence.content_digest];
+  });
+  assert.throws(() => requirePlan(passport.slice_plan, PlanError), { error: "engineering_design_contract_field_invalid" });
+  assertV2Parity(passport, false);
+});
+
+testCase("v2 public wire and server agree on short/full depth and model-assisted success", () => {
+  assertV2Parity(unexecutedV2(), true);
+  assertV2Parity(unexecutedV2(([slice]) => {
+    slice.release_requirement = "not_required";
+    slice.design_contract = designContractFor(slice);
+  }), true);
+  assertV2Parity(modelV2(), true);
+  assertV2Parity(unexecutedV2(([slice]) => {
+    slice.manual_qa_required = true;
+    slice.design_contract = designContractFor(slice);
+    slice.design_contract.authority = { read_only: true, capability_profile: "capability:read", environment: "production" };
+  }), true);
+});
+
+const nestedV2Failures = [
+  ["full depth cannot use short template", (s) => { s.design_contract.full_design_refs = null; s.design_contract.short_template = { template_ref: "template:short", objective_summary: "bounded", verification_ref: "verification:short" }; }],
+  ["short depth cannot use full template", (s) => { s.release_requirement = "not_required"; s.design_contract.deployment.release_requirement = "not_required"; s.design_contract.deployment.rollback_ref = null; }],
+  ["cost alone cannot select executor", (s) => { s.design_contract.code_model_decision.selection_basis = ["cost"]; }],
+  ["deterministic executor cannot own model step", (s) => { s.design_contract.code_model_decision.model_judgment_steps = [modelStep()]; }],
+  ["model executor requires step", (s) => { s.design_contract.routing.executor_class = "model_assisted"; }],
+  ["model cannot own validation", (s) => { s.design_contract.routing.executor_class = "model_assisted"; s.design_contract.code_model_decision.model_judgment_steps = [{ ...modelStep(), responsibility_class: "validation" }]; }],
+  ["model step must be declared", (s) => { s.design_contract.routing.executor_class = "model_assisted"; s.design_contract.code_model_decision.model_judgment_steps = [{ ...modelStep(), step_ref: "step:undeclared" }]; }],
+  ["model steps cannot duplicate", (s) => { s.design_contract.routing.executor_class = "model_assisted"; s.design_contract.code_model_decision.model_judgment_steps = [modelStep(), modelStep()]; }],
+  ["write requires repository capability", (s) => { s.design_contract.authority.capability_profile = "capability:read"; }],
+  ["authority read_only is typed", (s) => { s.design_contract.authority.read_only = "false"; }],
+  ["authority environment is closed", (s) => { s.design_contract.authority.environment = "unknown"; }],
+  ["worktree isolation is mandatory", (s) => { s.design_contract.isolation.worktree_required = false; }],
+  ["branch isolation is mandatory", (s) => { s.design_contract.isolation.branch_required = false; }],
+  ["shared resource must be declared", (s) => { s.design_contract.isolation.shared_resource_refs = ["resource:undeclared"]; }],
+  ["parallel-safe cannot share a resource", (s) => { s.design_contract.isolation.shared_resource_refs = [...s.declared_resource_refs]; }],
+  ["check refs must match plan", (s) => { s.design_contract.tests.planned_check_refs = ["check:other"]; }],
+  ["manual QA lane must match slice", (s) => { s.design_contract.tests.verification_lanes.push("manual_qa"); }],
+  ["independent review required", (s) => { s.design_contract.review.independent_review_required = false; }],
+  ["failure modes required", (s) => { s.design_contract.failure.failure_modes = []; }],
+  ["failure mode refs unique", (s) => { s.design_contract.failure.failure_modes.push(structuredClone(s.design_contract.failure.failure_modes[0])); }],
+  ["evidence redaction must match", (s) => { s.design_contract.evidence.evidence_refs[0].redaction_class = "metadata_only"; }],
+  ["release requirement must match", (s) => { s.design_contract.deployment.release_requirement = "not_required"; }],
+  ["release needs rollback", (s) => { s.design_contract.deployment.rollback_ref = null; }],
+  ["high risk requires confirmation", (s) => { s.risk_class = "R4"; s.design_contract.deployment.confirmation_required = false; }],
+  ["completion verifier matches QA", (s) => { s.design_contract.completion.verified_by = "independent_review_and_manual_qa"; }],
+  ["new module needs justification", (s) => { s.design_contract.seam_decision.mode = "new_module"; }],
+  ["replacement retires predecessor", (s) => { s.design_contract.seam_decision.mode = "replace"; }],
+  ["replacement leaves no residual authority", (s) => { Object.assign(s.design_contract.seam_decision, { mode: "replace", replaced_seam_refs: ["seam:old"], residual_authority_refs: ["authority:old"] }); }],
+];
+for (const [name, mutation] of nestedV2Failures) {
+  testCase(`v2 parity rejects: ${name}`, () => assertV2Parity(unexecutedV2(([slice]) => mutation(slice)), false));
+}
+
+testCase("v2 parity refuses missing, extra and null fields inside every contract facet", () => {
+  const contract = unexecutedV2().slice_plan.slices[0].design_contract;
+  for (const [facet, value] of Object.entries(contract).filter(([, value]) => value && typeof value === "object")) {
+    for (const field of Object.keys(value)) {
+      for (const kind of ["missing", "null"]) {
+        if (kind === "null" && value[field] === null) continue;
+        const passport = unexecutedV2(([slice]) => {
+          if (kind === "missing") delete slice.design_contract[facet][field];
+          else slice.design_contract[facet][field] = null;
+        });
+        assertV2Parity(passport, false);
+      }
+    }
+    assertV2Parity(unexecutedV2(([slice]) => { slice.design_contract[facet].unexpected = true; }), false);
+  }
+});
+
+testCase("v2 parity validates seam ownership, retirement and replacement across slices", () => {
+  const own = (slice, target) => Object.assign(slice.design_contract.seam_decision, { mode: "new_module", target_seam_ref: target, new_module_justification: "authority" });
+  const replace = (slice, target, retired) => Object.assign(slice.design_contract.seam_decision, { mode: "replace", target_seam_ref: target, replaced_seam_refs: [retired] });
+  assertV2Parity(mutateV2(orderedV2(), ([a, b]) => { own(a, "seam:a"); own(b, "seam:b"); }), true);
+  assertV2Parity(mutateV2(orderedV2(), ([a, b]) => { own(a, "seam:a"); own(b, "seam:a"); }), false);
+  assertV2Parity(mutateV2(orderedV2(), ([a, b]) => { replace(a, "seam:a", "seam:old"); replace(b, "seam:b", "seam:old"); }), false);
+  for (const mode of ["reuse", "extend"]) {
+    assertV2Parity(mutateV2(orderedV2(), ([a, b]) => { replace(a, "seam:a", "seam:old"); Object.assign(b.design_contract.seam_decision, { mode, target_seam_ref: "seam:old" }); }), false);
+  }
+  assertV2Parity(mutateV2(orderedV2(), ([a]) => replace(a, "seam:a", "seam:old")), true);
+});
+
+testCase("v2 parity enforces direct/transitive ordering for contended parallel resources", () => {
+  assertV2Parity(orderedV2(), true);
+  assertV2Parity(orderedV2([[], []], ["resource:shared", "resource:shared"]), false);
+  assertV2Parity(orderedV2([[], ["slice:0"]], ["resource:shared", "resource:shared"]), true);
+  assertV2Parity(orderedV2([["slice:1"], []], ["resource:shared", "resource:shared"]), true);
+  assertV2Parity(orderedV2([[], ["slice:0"], ["slice:1"]], ["resource:shared", "resource:middle", "resource:shared"]), true);
+  assertV2Parity(orderedV2([[], ["slice:0"], []], ["resource:shared", "resource:middle", "resource:shared"]), false);
+  assertV2Parity(orderedV2([["slice:1"], ["slice:0"]]), false);
+});
 
 export function joined_activation_reliability_wire_and_model_room_path({ db_projection, activation_read_projection, admitted_receipt, observatory_projection }) {
   const canonicalBinding = db_projection?.canonical_binding;
