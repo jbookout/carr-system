@@ -211,7 +211,8 @@
       "a7784a18",
       "204391be",
       "a2e78f48",
-      "b7ec8f3b"
+      "b7ec8f3b",
+      "ede4b241"
     ]
   },
   "categories": {
@@ -2198,6 +2199,11 @@
       "enforcement_class": "deny_gate",
       "exceptions": "explicitly unverified/failed disclosure"
     },
+    "ede4b241": {
+      "category": "judgment_advisory",
+      "enforcement_class": "judgment_ambient",
+      "why_unenforceable": "Whether a job is well-scoped with a checkable done-condition, or is design, gate, eval-design or review work, is a judgment about the job. No predicate over a dispatch call can decide it. The half a machine can carry is delivery: the rule is put in front of the session at the moment it dispatches work to another model or launches a cloud session (pack delegation-council, verb trigger compiled from the rule-triage detector), and the floors Joe set for specific lanes stay enforced by hooks/model-floor-gate.py."
+    },
     "ede4c735": {
       "binding_moment": "at each write, when the surface is classified",
       "category": "session_task_rail",
@@ -3455,6 +3461,13 @@
       "load_layer": "control",
       "packs": [],
       "why": "An installed deny gate delivers this at its binding moment."
+    },
+    "ede4b241": {
+      "load_layer": "pack",
+      "packs": [
+        "delegation-council"
+      ],
+      "why": "Model choice is made at the moment of dispatch, not at every boot. Delivered by pack delegation-council on the Agent tool and on Claude Code Remote create_session / create_trigger."
     },
     "ede4c735": {
       "load_layer": "pack",

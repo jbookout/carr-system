@@ -38,15 +38,14 @@ class FakeJudge:
 
     def judge(self, subject, questions, **kwargs):
         self.subjects.append(subject)
-        gist = subject["rule"]
-        if gist in self.fail_on:
-            raise self.JudgeUnavailable("synthetic outage")
-        value = self.by_gist.get(gist, self.default)
-        # The real judge returns the decoded response, so the answer sits under
-        # "answers". A caller reading one level too shallow is the defect this
-        # envelope exists to catch.
-        return {"answers": {"binds": {"type": "noul", "noul": value}},
-                "usage": {"input_tokens": 1}, "model": "fake", "elapsed_ms": 1}
+        answers = {}
+        for rid, rule in subject["rules"].items():
+            gist = rule["statement"]
+            if gist not in self.fail_on:
+                answers["bind_" + rid] = {"type": "noul", "noul": self.by_gist.get(gist, self.default)}
+        return {"answers": answers, "usage": {"input_tokens": 1},
+                "model": "fake", "elapsed_ms": 1}
+
 
 
 class FakeClient:
@@ -66,6 +65,45 @@ RULES = [
 
 
 class SelectionTests(unittest.TestCase):
+    def test_default_batches_independent_rules_on_shared_state(self):
+        class BatchJudge:
+            JudgeUnavailable = RuntimeError
+            def __init__(self):
+                self.calls = []
+            def judge(self, subject, questions, **kwargs):
+                self.calls.append((subject, questions, kwargs))
+                return {"model": "jev-1.13.0", "answers": {
+                    "bind_aaaaaaaa": {"noul": 0.66},
+                    "bind_bbbbbbbb": {"noul": 0.10},
+                    "bind_cccccccc": {"noul": 0.10},
+                }}
+        judge = BatchJudge()
+        selected = sel.select("this moment", RULES, client=FakeClient, judge=judge)
+        self.assertEqual([r["id"] for r in selected], ["aaaaaaaa"])
+        self.assertEqual(len(judge.calls), 1)
+        self.assertEqual(judge.calls[0][2]["model"], "jev-1.13.0")
+        self.assertEqual(set(judge.calls[0][0]["rules"]),
+                         {"aaaaaaaa", "bbbbbbbb", "cccccccc"})
+
+    def test_changed_roster_rejudges_the_whole_shared_state(self):
+        class BatchJudge:
+            JudgeUnavailable = RuntimeError
+            def __init__(self): self.states = []
+            def judge(self, subject, questions, **kwargs):
+                self.states.append(subject)
+                return {"model": "jev-1.13.0", "answers": {
+                    key: {"noul": 0.1} for key in questions}}
+        with tempfile.TemporaryDirectory() as tmp:
+            judge = BatchJudge(); cache = os.path.join(tmp, "cache.json")
+            base = dict(client=FakeClient, judge=judge, session_id="s1",
+                        cache_path=cache, now=1000.0)
+            sel.select("same intent", RULES, **base)
+            changed = [dict(rule) for rule in RULES]
+            changed[0]["statement"] = "changed trigger and shared context"
+            sel.select("same intent", changed, **base)
+            self.assertEqual(len(judge.states), 2)
+            self.assertEqual(set(judge.states[1]["rules"]), {r["id"] for r in RULES})
+
     def test_only_rules_over_the_floor_are_surfaced(self):
         judge = FakeJudge({"binds here": 0.95, "also binds": 0.88,
                            "does not bind": 0.40})
@@ -97,16 +135,11 @@ class SelectionTests(unittest.TestCase):
                          client=FakeClient, judge=judge)
         self.assertEqual(len([r for r in out if r["probability"] is not None]), 5)
 
-    def test_one_request_per_rule_and_no_rule_sees_another(self):
+    def test_one_scoped_batch_carries_all_shortlisted_rules(self):
         judge = FakeJudge(default=0.9)
         sel.select("a moment", RULES, floor=0.5, client=FakeClient, judge=judge)
-        self.assertEqual(len(judge.subjects), len(RULES))
-        for subject in judge.subjects:
-            serialized = json.dumps(subject)
-            others = [r["gist"] for r in RULES if r["gist"] != subject["rule"]]
-            for other in others:
-                self.assertNotIn(other, serialized,
-                                 "a rule's request must not carry a competitor")
+        self.assertEqual(len(judge.subjects), 1)
+        self.assertEqual(set(judge.subjects[0]["rules"]), {r["id"] for r in RULES})
 
     def test_a_failed_judgment_is_reported_not_dropped(self):
         judge = FakeJudge(default=0.99, fail_on={"also binds"})
@@ -116,20 +149,15 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual([r["id"] for r in failed], ["bbbbbbbb"],
                          "a rule that could not be judged must stay visible")
 
-    def test_concurrency_does_not_change_the_answer(self):
-        """The whole corpus asked serially took over a minute on the first live
-        run, so select() asks in parallel. The risk that introduces is order:
-        a pool that returns out of sequence would silently reshuffle ties."""
+    def test_multiple_batches_keep_probability_order(self):
         rules = [{"id": f"{i:08d}", "gist": f"rule {i}", "context": ""}
-                 for i in range(30)]
-        scores = {f"rule {i}": 0.5 + i / 100 for i in range(30)}
-        serial = sel.select("a moment", rules, floor=0.5, limit=30,
-                            client=FakeClient, judge=FakeJudge(scores), workers=1)
-        parallel = sel.select("a moment", rules, floor=0.5, limit=30,
-                              client=FakeClient, judge=FakeJudge(scores), workers=16)
-        self.assertEqual([r["id"] for r in serial], [r["id"] for r in parallel])
-        self.assertEqual([r["probability"] for r in serial],
-                         [r["probability"] for r in parallel])
+                 for i in range(20)]
+        scores = {f"rule {i}": 0.5 + i / 100 for i in range(20)}
+        judge = FakeJudge(scores)
+        out = sel.select("moment", rules, floor=0.5, limit=20,
+                         client=FakeClient, judge=judge)
+        self.assertEqual([r["id"] for r in out], [r["id"] for r in reversed(rules)])
+        self.assertEqual(len(judge.subjects), 3)
 
     def test_an_outage_does_not_raise_at_the_caller(self):
         judge = FakeJudge(default=0.99, fail_on={r["gist"] for r in RULES})
@@ -141,14 +169,14 @@ class QuestionShapeTests(unittest.TestCase):
     def test_the_false_criterion_excuses_a_sound_but_irrelevant_rule(self):
         """Without this the answer drifts to 'is this a good rule', which every
         active rule passes, which selects everything, which selects nothing."""
-        question = sel.binding_question(client=FakeClient)
+        question = sel.batch_binding_question("aaaaaaaa", client=FakeClient)
         false = question["criteria"]["false"].casefold()
         self.assertIn("excellent rule", false)
         self.assertIn("not bind", false)
 
     def test_the_question_asks_about_binding_not_about_quality(self):
-        question = sel.binding_question(client=FakeClient)
-        self.assertIn("binds", question["instructions"].casefold())
+        question = sel.batch_binding_question("aaaaaaaa", client=FakeClient)
+        self.assertIn("bind", question["instructions"].casefold())
 
     def test_already_complying_is_named_as_the_boundary_case(self):
         """The regression that motivates this. The first criterion scored ONE
@@ -157,13 +185,13 @@ class QuestionShapeTests(unittest.TestCase):
         topic while the session was already complying with it. Naming the
         boundary case is what separates 'this rule is about commands' from
         'this rule's condition is met now'."""
-        question = sel.binding_question(client=FakeClient)
+        question = sel.batch_binding_question("aaaaaaaa", client=FakeClient)
         false = question["criteria"]["false"].casefold()
         self.assertIn("already", false)
         self.assertIn("topic overlap is not binding", false)
 
     def test_the_condition_not_the_subject_is_what_is_asked(self):
-        question = sel.binding_question(client=FakeClient)
+        question = sel.batch_binding_question("aaaaaaaa", client=FakeClient)
         self.assertIn("condition", question["instructions"].casefold())
 
 
@@ -254,8 +282,7 @@ class AdviceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             result = sel.advise(
                 "a moment", log_path=os.path.join(tmp, "live.jsonl"),
-                rules=RULES, client=FakeClient, judge=FakeJudge(default=0.1),
-                workers=1)
+                rules=RULES, client=FakeClient, judge=FakeJudge(default=0.1))
         self.assertEqual(result, [])
 
     def test_an_unavailable_candidate_is_not_misreported_as_no_binding(self):
@@ -264,7 +291,8 @@ class AdviceTests(unittest.TestCase):
             log = os.path.join(tmp, "live.jsonl")
             with self.assertRaises(sel.SelectionUnavailable):
                 sel.advise("a moment", log_path=log, rules=RULES,
-                           client=FakeClient, judge=judge, workers=1)
+                           client=FakeClient, judge=judge,
+                           )
             written = json.loads(Path(log).read_text(encoding="utf-8").strip())
         self.assertEqual(written["unavailable"], ["bbbbbbbb"])
 
@@ -429,7 +457,7 @@ class VerdictCacheTests(unittest.TestCase):
     def _select(self, judge, cache, situation="a moment", now=1000.0, **kw):
         kw.setdefault("session_id", "s1")
         return sel.select(situation, RULES, floor=0.75, client=FakeClient,
-                          judge=judge, workers=1, cache_path=cache, now=now, **kw)
+                          judge=judge, cache_path=cache, now=now, **kw)
 
     def test_repeated_identical_calls_ask_once(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -439,21 +467,21 @@ class VerdictCacheTests(unittest.TestCase):
             info = {}
             second = self._select(judge, cache, now=1060.0, cache_info=info)
             third = self._select(judge, cache, now=1200.0)
-            self.assertEqual(len(judge.subjects), len(RULES))
+            self.assertEqual(len(judge.subjects), 1)
             self.assertTrue(info["hit"])
             self.assertEqual(info["verdicts_reused"], len(RULES))
             self.assertEqual([r["id"] for r in first], ["aaaaaaaa"])
             self.assertEqual([r["id"] for r in second], ["aaaaaaaa"])
             self.assertEqual([r["id"] for r in third], ["aaaaaaaa"])
 
-    def test_notifications_of_one_class_share_verdicts(self):
+    def test_changed_intent_of_one_class_asks_again(self):
         with tempfile.TemporaryDirectory() as tmp:
             cache = os.path.join(tmp, "c.json")
             judge = FakeJudge(self.JUDGED)
             self._select(judge, cache, situation=AGENT_DONE)
             out = self._select(judge, cache, situation=OTHER_AGENT_DONE, now=1100.0)
             self.assertEqual(sel.input_class(AGENT_DONE), sel.input_class(OTHER_AGENT_DONE))
-            self.assertEqual(len(judge.subjects), len(RULES))
+            self.assertEqual(len(judge.subjects), 2)
             self.assertEqual([r["id"] for r in out], ["aaaaaaaa"])
 
     def test_a_changed_signature_asks_again(self):
@@ -464,14 +492,14 @@ class VerdictCacheTests(unittest.TestCase):
             self._select(judge, cache, situation=COMMAND_FAILED, now=1010.0)
             self._select(judge, cache, situation="a partner message", now=1020.0)
             self._select(judge, cache, situation="another partner message", now=1030.0)
-            self.assertEqual(len(judge.subjects), 4 * len(RULES))
-            # A re-taught rule is a different key; only it is asked again.
+            self.assertEqual(len(judge.subjects), 4)
+            # A re-taught rule changes the shared roster; the batch is asked again.
             changed = [dict(r) for r in RULES]
             changed[0]["statement"] = "the rule was re-taught"
             sel.select("a partner message", changed, floor=0.75, client=FakeClient,
-                       judge=judge, workers=1, cache_path=cache, now=1040.0,
+                       judge=judge, cache_path=cache, now=1040.0,
                        session_id="s1")
-            self.assertEqual(len(judge.subjects), 4 * len(RULES) + 1)
+            self.assertEqual(len(judge.subjects), 5)
 
     def test_sessions_do_not_share_verdicts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -479,7 +507,7 @@ class VerdictCacheTests(unittest.TestCase):
             judge = FakeJudge(self.JUDGED)
             self._select(judge, cache, situation=AGENT_DONE, session_id="s1")
             self._select(judge, cache, situation=AGENT_DONE, now=1001.0, session_id="s2")
-            self.assertEqual(len(judge.subjects), 2 * len(RULES))
+            self.assertEqual(len(judge.subjects), 2)
 
     def test_cache_expiry_asks_again(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -487,20 +515,19 @@ class VerdictCacheTests(unittest.TestCase):
             judge = FakeJudge(self.JUDGED)
             self._select(judge, cache)
             self._select(judge, cache, now=1000.0 + sel.CACHE_TTL_SECONDS - 1)
-            self.assertEqual(len(judge.subjects), len(RULES))
+            self.assertEqual(len(judge.subjects), 1)
             self._select(judge, cache, now=1000.0 + sel.CACHE_TTL_SECONDS + 1)
-            self.assertEqual(len(judge.subjects), 2 * len(RULES))
+            self.assertEqual(len(judge.subjects), 2)
 
-    def test_a_binding_verdict_stays_delivered_for_the_window(self):
+    def test_a_binding_verdict_is_not_reused_for_changed_intent(self):
         with tempfile.TemporaryDirectory() as tmp:
             cache = os.path.join(tmp, "c.json")
             self._select(FakeJudge(self.JUDGED), cache, situation=AGENT_DONE)
-            # Even if a later notification would have judged it lower, the
-            # bound verdict is reused: the cache errs toward delivering.
+            # A later notification with the same broad class has new intent.
             later = FakeJudge({"binds here": 0.10})
             out = self._select(later, cache, situation=OTHER_AGENT_DONE, now=1100.0)
-            self.assertEqual([r["id"] for r in out], ["aaaaaaaa"])
-            self.assertEqual(later.subjects, [])
+            self.assertEqual([r["id"] for r in out], [])
+            self.assertEqual(len(later.subjects), 1)
 
     def test_an_unwritable_cache_still_delivers(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -512,7 +539,7 @@ class VerdictCacheTests(unittest.TestCase):
             second = self._select(judge, cache, now=1001.0)
             self.assertEqual([r["id"] for r in first], ["aaaaaaaa"])
             self.assertEqual(second, first)
-            self.assertEqual(len(judge.subjects), 2 * len(RULES))
+            self.assertEqual(len(judge.subjects), 2)
 
     def test_a_corrupt_cache_is_a_miss_not_a_silence(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -530,18 +557,17 @@ class VerdictCacheTests(unittest.TestCase):
             self.assertIn(None, [r["probability"] for r in first])
             healthy = FakeJudge(self.JUDGED)
             second = self._select(healthy, cache, now=1001.0)
-            self.assertEqual([s["rule"] for s in healthy.subjects], ["also binds"])
+            self.assertEqual([r["statement"] for r in healthy.subjects[0]["rules"].values()], ["also binds"])
             self.assertNotIn(None, [r["probability"] for r in second])
 
     def test_an_injected_judge_never_touches_the_shared_cache(self):
         judge = FakeJudge(self.JUDGED)
         before = os.path.exists(sel.CACHE_PATH) and os.path.getmtime(sel.CACHE_PATH)
-        sel.select("selftest-only moment", RULES, client=FakeClient, judge=judge,
-                   workers=1)
+        sel.select("selftest-only moment", RULES, client=FakeClient, judge=judge)
         after = os.path.exists(sel.CACHE_PATH) and os.path.getmtime(sel.CACHE_PATH)
         self.assertEqual(before, after)
 
-    def test_the_ranking_is_reused_for_a_class(self):
+    def test_the_ranking_is_not_reused_for_changed_intent(self):
         roster = [{"id": f"r{i:07d}", "gist": f"rule {i}", "context": ""} for i in range(30)]
         calls = {"rank": 0}
 
@@ -564,10 +590,10 @@ class VerdictCacheTests(unittest.TestCase):
             judge = RankingJudge()
             for step, text in enumerate((AGENT_DONE, OTHER_AGENT_DONE)):
                 sel.select(text, roster, floor=0.75, client=RankingClient, judge=judge,
-                           workers=1, cache_path=cache, now=1000.0 + step,
+                           cache_path=cache, now=1000.0 + step,
                            session_id="s1", shortlist=5)
-            self.assertEqual(calls["rank"], 1)
-            self.assertEqual(len(judge.subjects), 5)
+            self.assertEqual(calls["rank"], 2)
+            self.assertEqual(len(judge.subjects), 2)
 
     def test_no_session_means_no_cache(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -581,7 +607,7 @@ class VerdictCacheTests(unittest.TestCase):
                              session_id="  ")
             # The environment is not a session and there is no shared default
             # key: every call asks, and nothing is written.
-            self.assertEqual(len(judge.subjects), 3 * len(RULES))
+            self.assertEqual(len(judge.subjects), 3)
             self.assertFalse(os.path.exists(cache))
 
     def test_mixed_prompts_never_reuse_a_pure_notification_verdict(self):
@@ -595,7 +621,7 @@ class VerdictCacheTests(unittest.TestCase):
                 # prompt's fresh judgment says it does, and must be asked.
                 fresh = FakeJudge({"binds here": 0.95, "also binds": 0.95})
                 out = self._select(fresh, cache, situation=spoof, now=1002.0)
-                self.assertEqual(len(fresh.subjects), len(RULES))
+                self.assertEqual(len(fresh.subjects), 1)
                 self.assertEqual({r["id"] for r in out}, {"aaaaaaaa", "bbbbbbbb"})
                 self.assertTrue(sel.input_class(spoof).startswith("text|"))
 
@@ -639,7 +665,8 @@ class VerdictCacheTests(unittest.TestCase):
             judge = FakeJudge(self.JUDGED)
             for _ in range(2):
                 sel.advise("a moment", log_path=log, rules=RULES, client=FakeClient,
-                           judge=judge, workers=1, cache_path=cache, session_id="s1")
+                           judge=judge, cache_path=cache, session_id="s1",
+                           )
             rows = [json.loads(line) for line in Path(log).read_text().splitlines()]
             self.assertEqual([r["cache_hit"] for r in rows], [False, True])
             self.assertEqual(rows[1]["cache"]["verdicts_asked"], 0)

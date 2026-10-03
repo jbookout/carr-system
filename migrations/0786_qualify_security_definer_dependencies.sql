@@ -1,30 +1,70 @@
--- 0771_qualify_security_definer_dependencies.sql
--- Forward fix for the Dot's database-hardening review, finding 2 ("every
--- object is qualified" is not satisfied).
---
--- 0768 pinned every public/ops SECURITY DEFINER search_path with pg_temp last,
--- which stops temporary-object substitution. It deliberately preserved bodies,
--- so 52 definers still named application tables, row types and helper
--- routines (actor, rule, memory_item%rowtype, digest(), similarity(),
--- normalize_retrieval_phrase(), ...) without a schema and so still depended on
--- search_path to resolve them. This migration re-creates exactly those 52
--- routines with every such reference schema-qualified to the object the
--- routine's own pinned path already resolved it to. Nothing else changes:
--- each statement is pg_get_functiondef() of the installed routine with only
--- the body edited, so signature, return type, language, volatility, SECURITY
--- DEFINER, search_path and every other attribute are reproduced, and
--- CREATE OR REPLACE keeps the routine's owner, ACL and comment. No grant,
--- table, trigger or registry row changes, so the SCAC v101 catalog seal
--- (which covers ACLs, configs and owners, not bodies) stays current and no
--- registry successor is owed.
---
--- Generated from the 0766 catalog on a disposable loopback database by the
--- audit in ops/definer-hardening-local-pg-gate.py (path-aware resolver), then
--- checked: re-auditing the edited bodies finds nothing, and the gate runs
--- against the migrated database in CI. Never hand-edit an applied copy;
--- write a new migration instead.
---
--- The migration runner owns the transaction.
+-- 0786_qualify_security_definer_dependencies.sql
+-- Qualify application dependencies using the merged schema after hardening.
+-- Generated from pg_get_functiondef on disposable PostgreSQL with the path-aware
+-- resolver in ops/definer-hardening-local-pg-gate.py. Only bodies change;
+-- CREATE OR REPLACE retains signatures, attributes, owners, ACLs and comments.
+-- The v105 catalog seals metadata, so qualification leaves that seal current.
+
+CREATE OR REPLACE FUNCTION public.log_retrieval_query(p_query text, p_result_count integer, p_section_ids uuid[], p_score_bands jsonb, p_policy_id text, p_policy_version bigint, p_explicit_hit boolean, p_scope_ref text DEFAULT 'carr-internal'::text)
+ RETURNS uuid
+ LANGUAGE sql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+  insert into public.retrieval_query_log
+    (normalized_hash, result_count, score_bands, selected_row_ids,
+     policy_id, policy_version, explicit_hit, scope_ref)
+  values (
+    encode(public.digest(convert_to(public.normalize_retrieval_phrase(p_query), 'UTF8'), 'sha256'), 'hex'),
+    greatest(coalesce(p_result_count, 0), 0),
+    coalesce(p_score_bands, jsonb_build_object('high', 0, 'medium', 0, 'low', 0)),
+    coalesce(p_section_ids, '{}'),
+    p_policy_id, p_policy_version,
+    coalesce(p_explicit_hit, false),
+    coalesce(p_scope_ref, 'carr-internal'))
+  returning id
+$function$;
+
+CREATE OR REPLACE FUNCTION public.memory_item_insert_valid()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+AS $function$
+declare prior public.memory_item%rowtype; expected_root uuid;
+begin
+  -- Timestamps are server-owned; caller-supplied values are ignored.
+  new.created_at := now();
+  new.updated_at := new.created_at;
+  if new.status <> 'candidate' or new.version <> 1
+     or new.promoted_by_actor_id is not null or new.promoted_at is not null
+     or new.corrected_by_actor_id is not null or new.correction_reason is not null or new.corrected_at is not null
+     or new.forgotten_by_actor_id is not null or new.forget_reason is not null or new.forgotten_at is not null then
+    raise exception 'new memory rows must start as clean candidate version 1';
+  end if;
+  if new.predecessor_id is null or new.lineage_root_id is null then
+    if new.predecessor_id is not null or new.lineage_root_id is not null then
+      raise exception 'new memory roots cannot carry partial lineage';
+    end if;
+    return new;
+  end if;
+  select * into prior from public.memory_item where id=new.predecessor_id;
+  expected_root := coalesce(prior.lineage_root_id, prior.id);
+  if not found or prior.status <> 'corrected'
+     or prior.organization_tenant_id is distinct from new.organization_tenant_id
+     or prior.scope is distinct from new.scope
+     or prior.owner_actor_id is distinct from new.owner_actor_id
+     or prior.kind is distinct from new.kind
+     or prior.context is distinct from new.context
+     or prior.confidence is distinct from new.confidence
+     or prior.work_request_id is distinct from new.work_request_id
+     or prior.work_request_version is distinct from new.work_request_version
+     or prior.plan_id is distinct from new.plan_id
+     or new.lineage_root_id is distinct from expected_root then
+    raise exception 'memory successor lineage does not match corrected predecessor';
+  end if;
+  return new;
+end $function$;
 
 CREATE OR REPLACE FUNCTION ops.acquire_canonical_ownership_lease(p_work_request_id uuid, p_work_request_version integer, p_work_request_digest text, p_accepted_plan_id uuid, p_accepted_plan_digest text, p_slice_plan_id uuid, p_slice_plan_digest text, p_slice_ref text, p_contract_digest text, p_path_claims jsonb, p_resource_claims jsonb, p_dependencies jsonb, p_ttl_seconds integer DEFAULT 900)
  RETURNS jsonb
@@ -2510,7 +2550,7 @@ begin
   return query select 'environment-provider:'||row_out.provider_key||':v'||row_out.provider_version,row_out.manifest_digest,'discovered',false;
 end $function$;
 
-CREATE OR REPLACE FUNCTION ops.renewal_decision_candidate_digest(p_candidate public.candidate_pool)
+CREATE OR REPLACE FUNCTION ops.renewal_decision_candidate_digest(p_candidate candidate_pool)
  RETURNS text
  LANGUAGE sql
  STABLE SECURITY DEFINER
@@ -3311,67 +3351,6 @@ begin
 end;
 $function$;
 
-CREATE OR REPLACE FUNCTION public.log_retrieval_query(p_query text, p_result_count integer, p_section_ids uuid[], p_score_bands jsonb, p_policy_id text, p_policy_version bigint, p_explicit_hit boolean, p_scope_ref text DEFAULT 'carr-internal'::text)
- RETURNS uuid
- LANGUAGE sql
- SECURITY DEFINER
- SET search_path TO 'public', 'pg_temp'
-AS $function$
-  insert into public.retrieval_query_log
-    (normalized_hash, result_count, score_bands, selected_row_ids,
-     policy_id, policy_version, explicit_hit, scope_ref)
-  values (
-    encode(public.digest(convert_to(public.normalize_retrieval_phrase(p_query), 'UTF8'), 'sha256'), 'hex'),
-    greatest(coalesce(p_result_count, 0), 0),
-    coalesce(p_score_bands, jsonb_build_object('high', 0, 'medium', 0, 'low', 0)),
-    coalesce(p_section_ids, '{}'),
-    p_policy_id, p_policy_version,
-    coalesce(p_explicit_hit, false),
-    coalesce(p_scope_ref, 'carr-internal'))
-  returning id
-$function$;
-
-CREATE OR REPLACE FUNCTION public.memory_item_insert_valid()
- RETURNS trigger
- LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'pg_catalog', 'public', 'pg_temp'
-AS $function$
-declare prior public.memory_item%rowtype; expected_root uuid;
-begin
-  -- Timestamps are server-owned; caller-supplied values are ignored.
-  new.created_at := now();
-  new.updated_at := new.created_at;
-  if new.status <> 'candidate' or new.version <> 1
-     or new.promoted_by_actor_id is not null or new.promoted_at is not null
-     or new.corrected_by_actor_id is not null or new.correction_reason is not null or new.corrected_at is not null
-     or new.forgotten_by_actor_id is not null or new.forget_reason is not null or new.forgotten_at is not null then
-    raise exception 'new memory rows must start as clean candidate version 1';
-  end if;
-  if new.predecessor_id is null or new.lineage_root_id is null then
-    if new.predecessor_id is not null or new.lineage_root_id is not null then
-      raise exception 'new memory roots cannot carry partial lineage';
-    end if;
-    return new;
-  end if;
-  select * into prior from public.memory_item where id=new.predecessor_id;
-  expected_root := coalesce(prior.lineage_root_id, prior.id);
-  if not found or prior.status <> 'corrected'
-     or prior.organization_tenant_id is distinct from new.organization_tenant_id
-     or prior.scope is distinct from new.scope
-     or prior.owner_actor_id is distinct from new.owner_actor_id
-     or prior.kind is distinct from new.kind
-     or prior.context is distinct from new.context
-     or prior.confidence is distinct from new.confidence
-     or prior.work_request_id is distinct from new.work_request_id
-     or prior.work_request_version is distinct from new.work_request_version
-     or prior.plan_id is distinct from new.plan_id
-     or new.lineage_root_id is distinct from expected_root then
-    raise exception 'memory successor lineage does not match corrected predecessor';
-  end if;
-  return new;
-end $function$;
-
 CREATE OR REPLACE FUNCTION public.retrieval_visibility_actor_id(p_sponsor_slug text)
  RETURNS uuid
  LANGUAGE sql
@@ -3542,9 +3521,11 @@ select l.section_id, l.section_key, l.section_title, l.doc_slug, l.content_class
 $function$;
 
 do $qualified_definers$
-declare signature text; missing text[] := '{}';
+declare signature text;
 begin
   foreach signature in array array[
+    'log_retrieval_query(text,integer,uuid[],jsonb,text,bigint,boolean,text)',
+    'memory_item_insert_valid()',
     'ops.acquire_canonical_ownership_lease(uuid,integer,text,uuid,text,uuid,text,text,text,jsonb,jsonb,jsonb,integer)',
     'ops.activate_context_bundle(text,text,jsonb,uuid)',
     'ops.activate_guidance_registry(uuid,text,text,text)',
@@ -3580,7 +3561,7 @@ begin
     'ops.record_guidance_decision(uuid,text,text,text)',
     'ops.record_workflow_acceptance(text,text,text,text,text)',
     'ops.register_execution_environment_provider(jsonb,uuid)',
-    'ops.renewal_decision_candidate_digest(public.candidate_pool)',
+    'ops.renewal_decision_candidate_digest(candidate_pool)',
     'ops.replace_calendar_prebrief_allowlist(text[])',
     'ops.require_rule_approval_lifecycle_anchor()',
     'ops.resolve_calendar_prebrief_email_ref(text)',
@@ -3593,21 +3574,12 @@ begin
     'ops.transition_execution_environment_provider(text,text,text,jsonb,uuid)',
     'ops.transition_proposed_eval_candidate(text,text,text,jsonb,uuid)',
     'ops.v5_a05_assurance_cadence_batch(text)',
-    'public.log_retrieval_query(text,integer,uuid[],jsonb,text,bigint,boolean,text)',
-    'public.memory_item_insert_valid()',
-    'public.retrieval_visibility_actor_id(text)',
-    'public.search_doctrine_situations(text,uuid,text[],integer,text,boolean)'
+    'retrieval_visibility_actor_id(text)',
+    'search_doctrine_situations(text,uuid,text[],integer,text,boolean)'
   ] loop
-    if not exists (
-      select 1 from pg_proc p
-       where p.oid = to_regprocedure(signature) and p.prosecdef
-         and exists (select 1 from unnest(p.proconfig) s
-                      where s like 'search_path=%' and s like '%pg_temp')
-    ) then
-      missing := missing || signature;
+    if not exists (select 1 from pg_proc p where p.oid=to_regprocedure(signature) and p.prosecdef
+      and exists(select 1 from unnest(p.proconfig) s where s like 'search_path=%' and s like '%pg_temp')) then
+      raise exception 'qualified definer lost identity or pinned path: %',signature;
     end if;
   end loop;
-  if cardinality(missing) > 0 then
-    raise exception '0767 FAILED: qualified definer lost its identity, SECURITY DEFINER or pinned path: %', missing;
-  end if;
 end $qualified_definers$;

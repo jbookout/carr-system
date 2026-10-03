@@ -20,7 +20,7 @@ do $coherence$
 declare snapshot jsonb; version text;
 begin
   snapshot:=ops.scac_policy_epoch_snapshot();
-  if snapshot->>'registry_version'<>'scac-mutation-registry.v102' then
+  if snapshot->>'registry_version'<>'scac-mutation-registry.v105' then
     raise exception 'hardening successor is not the current policy registry';
   end if;
   foreach version in array array(select registry_version from ops.scac_mutation_registry_version) loop
@@ -28,7 +28,7 @@ begin
       raise exception 'registry seal invalid: %',version;
     end if;
   end loop;
-  if not ops.scac_mutation_catalog_v102_current() then
+  if not ops.scac_mutation_catalog_v105_current() then
     raise exception 'hardening successor does not match the live catalog';
   end if;
 end $coherence$;
@@ -36,7 +36,7 @@ end $coherence$;
 alter function ops.engineering_admission_source(text) set search_path=pg_catalog,ops,public;
 do $drift$
 begin
-  if ops.scac_mutation_catalog_v102_current() then
+  if ops.scac_mutation_catalog_v105_current() then
     raise exception 'hardening successor accepted unsealed metadata';
   end if;
   begin

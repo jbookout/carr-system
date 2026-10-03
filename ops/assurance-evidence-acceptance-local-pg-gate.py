@@ -82,7 +82,7 @@ EXPECTED_A3A_FUNCTIONS = sorted([
     "ops.record_assurance_review_extension(uuid,uuid,uuid,jsonb,text,uuid)",
     "ops.refuse_assurance_persistence_rewrite()",
 ])
-# 0760 explicitly searches pg_temp last on definers; invoker paths stay pinned.
+# 0783 explicitly searches pg_temp last on definers; invoker paths stay pinned.
 EXPECTED_A3A_FUNCTION_POSTURE = {
     "ops.assurance_all_tokens_absent(jsonb)": (True, "s", "search_path=pg_catalog, ops, pg_temp"),
     "ops.assurance_digest(jsonb)": (False, "i", "search_path=pg_catalog, ops, public"),

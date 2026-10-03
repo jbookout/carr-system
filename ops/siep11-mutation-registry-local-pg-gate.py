@@ -28,14 +28,9 @@ JOB_DEFINITION_CATALOG = {
     "digest": "sha256:152742893824c64275a99326335f2b8ca97cf592153c5cb280b353adfa15eb91",
 }
 
-# Every reviewed live frontier this gate can validate. A successor ADDS its
-# version here and never replaces its predecessor: the gate must still accept
-# a database that has not yet applied the newest successor (v101 before the
-# definer-hardening v102 lands), or a pre-upgrade database fails a check whose
-# only job is to validate it. Anything outside the enumerated range -- an
-# unreviewed future frontier or the v1 seed itself -- still fails closed.
+# Reviewed frontiers share this check between the live gate and its regression.
 SUPPORTED_LIVE_SUCCESSORS = frozenset(
-    f"scac-mutation-registry.v{ordinal}" for ordinal in range(2, 103)
+    f"scac-mutation-registry.v{version}" for version in range(2, 106)
 )
 
 
