@@ -702,14 +702,8 @@ export function createWorkspaceBusinessReader() {
 
 // The lease projection shares the existing authenticated business HTTP door.
 // Dates are recorded facts, never synthesized from term_months or market data.
-export const LEASE_RADAR_SQL = `with clock as (
-  select (now() at time zone 'America/Chicago')::date as today
-)
-select (select today::text from clock) as starts_on,
-       (select (today + interval '24 months')::date::text from clock) as ends_on,
-       coalesce(jsonb_agg(to_jsonb(e) order by e.expiration_on nulls last,e.id)
-         filter (where e.id is not null),'[]'::jsonb) as leases
-  from public.v_client_lease_radar e`;
+export const LEASE_RADAR_SQL = `select starts_on::text, ends_on::text, leases
+  from public.v_client_lease_radar`;
 
 export async function readLeaseRadar({ client, actor, tenant = organizationTenantForActor(actor), correlationId, now = () => new Date() }) {
   assertAudience(actor, tenant);

@@ -28,7 +28,8 @@ test('audience and tenant refusal run before query; missing data never turns int
   await assert.rejects(readLeaseRadar({...args(),client:{query:async()=>{throw {code:'42501'};}}}),e=>e.code==='DEPENDENCY_NOT_PROVISIONED');
 });
 test('query includes full calendar horizon, every client status, null gaps, current lease versions and existing touch/notice facts', () => {
-  assert.match(LEASE_RADAR_SQL,/interval '24 months'/);
+  assert.match(migration,/interval '24 months'/);
+  assert.doesNotMatch(LEASE_RADAR_SQL,/interval|America\/Chicago|now\(/);
   assert.match(migration,/expiration_on is null/);
   assert.match(migration,/l.status <> 'superseded'/);
   assert.match(migration,/c.merged_into is null/);
