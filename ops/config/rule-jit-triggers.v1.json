@@ -880,12 +880,12 @@
    "packs": [
     "client-deal"
    ],
-   "pattern": "\\bconsultative\\s+aggressive\\-sales\\b|\\beducational\\s+consultative\\b|\\baggressive\\-sales\\s+assume\\b|\\bexperts\\s+unfamiliar\\b|\\bhealthcare\\s+experts\\b|\\bassume\\s+they've\\b|\\bunfamiliar\\s+cre\\b|\\bcarr\\b",
+   "pattern": "\\bconsultative\\s+aggressive\\-sales\\b|\\beducational\\s+consultative\\b|\\baggressive\\-sales\\s+assume\\b|\\bexperts\\s+unfamiliar\\b|\\bhealthcare\\s+experts\\b|\\bassume\\s+they've\\b|\\bunfamiliar\\s+cre\\b",
    "rule_ids": [
     "51d9f05f"
    ],
    "source": "jev_compiled",
-   "trigger_id": "636def7a507f"
+   "trigger_id": "63ee8ca94182"
   },
   {
    "kind": "prompt_regex",
@@ -919,12 +919,12 @@
    "packs": [
     "delegation-council"
    ],
-   "pattern": "\\bcopilot\\s+microsoft\\-native\\b|\\bclaude\\s+everything\\b|\\bmicrosoft\\-native\\b|\\bcalendar\\s+teams\\b|\\bsummaries\\b|\\bcopilot\\b|\\boutlook\\b|\\bclaude\\b|\\btriage\\b|\\bteams\\b",
+   "pattern": "\\bcopilot\\s+microsoft\\-native\\b|\\bclaude\\s+everything\\b|\\bmicrosoft\\-native\\b|\\bcalendar\\s+teams\\b|\\bsummaries\\b|\\bcopilot\\b|\\boutlook\\b|\\btriage\\b|\\bteams\\b",
    "rule_ids": [
     "8aefcdce"
    ],
    "source": "jev_compiled",
-   "trigger_id": "fc87b7218ff1"
+   "trigger_id": "5be7ffcb60d7"
   },
   {
    "kind": "prompt_regex",
@@ -1529,12 +1529,12 @@
    "packs": [
     "surface-doctrine"
    ],
-   "pattern": "\\brestyles\\s+reviews\\b|\\bbuilds\\s+restyles\\b|\\bcommand\\s+center\\b|\\bmoment\\s+builds\\b|\\bsurface\\s+board\\b|\\bcarr\\s+surface\\b|\\bcontrol\\s+room\\b|\\broom\\s+command\\b|\\bboard\\s+deal\\b|\\bdeal\\s+board\\b|\\blead\\s+board\\b|\\bcinematic\\b|\\bdashboard\\b|\\bdeal\\s+room\\b|\\bartifact\\b|\\bregister\\b|\\brestyles\\b|\\bcontrol\\b|\\breviews\\b|\\bboard\\b|\\bcarr\\b",
+   "pattern": "\\brestyles\\s+reviews\\b|\\bbuilds\\s+restyles\\b|\\bcommand\\s+center\\b|\\bmoment\\s+builds\\b|\\bsurface\\s+board\\b|\\bcarr\\s+surface\\b|\\bcontrol\\s+room\\b|\\broom\\s+command\\b|\\bboard\\s+deal\\b|\\bdeal\\s+board\\b|\\blead\\s+board\\b|\\bcinematic\\b|\\bdashboard\\b|\\bdeal\\s+room\\b|\\bartifact\\b|\\bregister\\b|\\brestyles\\b|\\bcontrol\\b|\\breviews\\b|\\bboard\\b",
    "rule_ids": [
     "67580c28"
    ],
    "source": "jev_compiled",
-   "trigger_id": "b18e185d62e3"
+   "trigger_id": "e5720a97c320"
   },
   {
    "kind": "prompt_regex",
