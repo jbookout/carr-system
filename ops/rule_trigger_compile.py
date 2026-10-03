@@ -65,16 +65,6 @@ MAX_NEAR_MISS = 8
 SURFACE_AT = 0.50
 NEAR_MISS_AT = 0.60
 
-# The floor a compiled KEYWORD must clear to become part of a prompt_regex row
-# (R2, 2026-09-26 rule-delivery eval, ops/rule_delivery_eval.py). SURFACE_AT
-# still decides what the compiled document records, so Jev's 0.50-0.60
-# answers stay on file and this floor can move without asking Jev again; the
-# prompt rows use this one. Measured on 79 labelled real situations: keywords
-# Jev scored in 0.50-0.60 were mostly the common words that fired everywhere
-# ("claude" 0.57 on the Copilot rule, "carr" 0.58 on the prospects rule).
-# Verb, command, path and tool rows (the PreToolUse rail) keep SURFACE_AT.
-PROMPT_SURFACE_AT = 0.60
-
 # Words that name the house and its assistants rather than any rule's moment:
 # nearly every partner message and notification carries one, so as a
 # single-word statement candidate they fire a rule everywhere. A phrase that
@@ -462,12 +452,14 @@ def _alternation(terms):
 
 
 def prompt_keywords(entry):
-    """{keyword: probability} an entry's prompt_regex row is built from: at
-    or above PROMPT_SURFACE_AT, and never a bare house word (an entry compiled
-    before HOUSE_WORDS existed may still carry one)."""
+    """Keep compiled cues at SURFACE_AT, excluding bare house words.
+
+    The same cues feed rows and runtime probability attribution. Required
+    human actions must still surface when runtime judgment is unavailable.
+    """
     keywords = ((entry or {}).get("triggers") or {}).get("keywords") or {}
     return {k: p for k, p in keywords.items()
-            if isinstance(p, (int, float)) and p >= PROMPT_SURFACE_AT and k not in HOUSE_WORDS}
+            if isinstance(p, (int, float)) and p >= SURFACE_AT and k not in HOUSE_WORDS}
 
 
 def trigger_rows(doc):

@@ -691,15 +691,36 @@ def prop_envelope_no_compiled_rules(rtc_m, rtd_m):
 
 
 def prop_prompt_floor(rtc_m, rtd_m):
-    """A compiled keyword joins a prompt row only at PROMPT_SURFACE_AT (0.60)
-    or above, and never as a bare house word; a phrase holding one still can."""
-    doc = rtc_m.document([entry(RULES[0], keywords={"git push": 0.6, "push": 0.59,
+    """Compiled cues retain the inclusive 0.50 floor; bare house words stay quiet."""
+    doc = rtc_m.document([entry(RULES[0], keywords={"git push": 0.6, "push": 0.5, "quiet": 0.49,
                                                     "carr": 0.9, "carr surface": 0.9})])
     rows = [r for r in rtc_m.trigger_rows(doc) if r["kind"] == "prompt_regex"]
     return (len(rows) == 1 and re.search(rows[0]["pattern"], "git push now")
             and re.search(rows[0]["pattern"], "the carr surface")
-            and not re.search(rows[0]["pattern"], "push it")
+            and re.search(rows[0]["pattern"], "push it")
+            and not re.search(rows[0]["pattern"], "quiet")
             and not re.search(rows[0]["pattern"], "carr is fine"))
+
+
+def prop_required_cues_degraded(rtc_m, rtd_m):
+    """Production cues survive both a spent deadline and provider failures."""
+    rules = rtc_m.pack_rules()
+    doc = rtc_m.load_compiled()
+    cases = [("Convene a red team of three reviewers for this design.", "81709f57"),
+             ("Look at this https://x.com/someone/status/1234567890", "557838a5"),
+             ("Which terms on the LOI template are negotiable?", "4399df76")]
+    with tempfile.TemporaryDirectory() as tmp:
+        table = os.path.join(tmp, "table.json")
+        Path(table).write_text(json.dumps({"triggers": rtc_m.trigger_rows(doc)}))
+        for prompt, required in cases:
+            for deadline in (0, None):
+                rows = rtd_m.advise(prompt, session_id=None, compiled=doc, rules=rules,
+                    triggers_path=table, ask=Asker(fail=True), rank=Ranker(fail=True),
+                    client=Client, deadline=deadline, log_path=os.devnull)
+                if not any(row["id"] == required and row["source"] == "compiled_trigger"
+                           for row in rows):
+                    return False
+    return True
 
 
 def prop_no_house_word_candidate(rtc_m, rtd_m):
@@ -712,9 +733,10 @@ def prop_no_house_word_candidate(rtc_m, rtd_m):
 
 
 PROPERTIES = {
+    "required human cues survive exhausted deadlines and provider outages": prop_required_cues_degraded,
     "a machine envelope gets zero compiled-trigger rules; a human prompt with the same words "
     "still does": prop_envelope_no_compiled_rules,
-    "a prompt keyword needs PROMPT_SURFACE_AT and is never a bare house word": prop_prompt_floor,
+    "a prompt keyword keeps SURFACE_AT and excludes bare house words": prop_prompt_floor,
     "a house word is never a single-word candidate": prop_no_house_word_candidate,
     "unchanged human intent and roster reuse judgments":
         lambda _rtc, rtd_m: prop_human_intent_cache(rtd_m),
@@ -943,12 +965,12 @@ MUTANTS = [
      "still does", RTD_PATH,
      ("human = not (_is_envelope(situation) if envelope is None else envelope)",
       "human = True")),
-    # The prompt floor lowered back to the compile floor, and the house-word
-    # filter removed from rows and from candidates.
-    ("a prompt keyword needs PROMPT_SURFACE_AT and is never a bare house word", RTC_PATH,
-     ("p >= PROMPT_SURFACE_AT and k not in HOUSE_WORDS", "p >= SURFACE_AT and k not in HOUSE_WORDS")),
-    ("a prompt keyword needs PROMPT_SURFACE_AT and is never a bare house word", RTC_PATH,
-     ("p >= PROMPT_SURFACE_AT and k not in HOUSE_WORDS", "p >= PROMPT_SURFACE_AT")),
+    # Raising the prompt floor loses required cues; removing the house-word
+    # filter brings back generic matches.
+    ("a prompt keyword keeps SURFACE_AT and excludes bare house words", RTC_PATH,
+     ("p >= SURFACE_AT and k not in HOUSE_WORDS", "p >= 0.60 and k not in HOUSE_WORDS")),
+    ("a prompt keyword keeps SURFACE_AT and excludes bare house words", RTC_PATH,
+     ("p >= SURFACE_AT and k not in HOUSE_WORDS", "p >= SURFACE_AT")),
     ("a house word is never a single-word candidate", RTC_PATH,
      ("singles = [(w, c) for w, c in tf.items() if w not in HOUSE_WORDS]",
       "singles = list(tf.items())")),
