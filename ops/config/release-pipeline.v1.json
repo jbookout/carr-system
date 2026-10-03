@@ -59,6 +59,7 @@
     "block_markers": [
       "independent review: block",
       "independent review: fail",
+      "review: blocked",
       "block"
     ],
     "review_author_associations": [
@@ -95,6 +96,7 @@
     "block_markers": [
       "independent review: block",
       "independent review: fail",
+      "review: blocked",
       "block"
     ],
     "review_author_associations": [
