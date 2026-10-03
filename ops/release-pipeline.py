@@ -1693,8 +1693,11 @@ class Pipeline:
                     remedy = entry["replacement_plan"].replace(entry["probe"]["path"], str(checked_path))
                 recovery = (f"The {lane} lane failed for SHA {failed_sha} and will not retry it. "
                             "After repairing and verifying the credential, run "
-                            f"ops/release-pipeline.py clear-failed --lane {lane} --sha {failed_sha} "
-                            '--reason "credential restored and verified"; the next tick retries that SHA. '
+                            "ops/release-pipeline.py report to read every currently failed lane, "
+                            "its full SHA and its exact clear-failed command. Other lanes may fail "
+                            "on this same credential after this notification. Run the reported "
+                            "command for each lane paused by this credential; the next tick retries "
+                            "those SHAs. "
                             "A fix-forward merge with a new main SHA also resumes the lane."
                             if failed_sha else "")
                 pending[capability] = {"lane": lane, "args": blocker_loop(
@@ -2395,9 +2398,8 @@ def parse_provider_version(res: Result) -> str:
 
 def report(store: Store, day: str) -> str:
     rows = [r for r in store.records() if str(r.get("ts", "")).startswith(day)]
-    if not rows:
-        return f"release-pipeline {day}: nothing shipped, failed or blocked."
-    lines = [f"release-pipeline {day}:"]
+    lines = ([f"release-pipeline {day}:"] if rows else
+             [f"release-pipeline {day}: nothing shipped, failed or blocked."])
     for r in rows:
         if r.get("status") == "shipped":
             extra = f" release {r.get('release_key')}" if r.get("release_key") else ""
@@ -2407,6 +2409,17 @@ def report(store: Store, day: str) -> str:
                          f"(exit {r.get('rc')}; log {r.get('log')}; dispatched={r.get('dispatched')})")
         elif r.get("status") == "blocked":
             lines.append(f"  BLOCKED {r['lane']} {str(r.get('sha'))[:12]}: {r.get('reason')} — {r.get('detail')}")
+    # Daily history can be empty or old; recovery must read the current lane
+    # state, including failures suppressed by the credential's single loop.
+    state = store.load()
+    for lane in ("worker", "app"):
+        failed = state.get(lane) or {}
+        sha = failed.get("failed_sha")
+        if sha:
+            lines.append(f"  CURRENT FAILED {lane} {sha} at {failed.get('failed_step')}")
+            lines.append("  After repairing and verifying this lane's failure, clear it with:")
+            lines.append(f"  ops/release-pipeline.py clear-failed --lane {lane} --sha {sha} "
+                         '--reason "external repair verified"')
     return "\n".join(lines)
 
 

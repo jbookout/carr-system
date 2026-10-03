@@ -30,6 +30,7 @@ import json
 import os
 import re
 import subprocess
+import shlex
 import sys
 import tempfile
 import unittest
@@ -2627,7 +2628,9 @@ class DeployCredential(unittest.TestCase):
                 body = verbs[0][1]["body"]
                 self.assertIn(f"{lane} lane", body)
                 self.assertIn(sha, body)
-                self.assertIn(f"clear-failed --lane {lane} --sha {sha}", body)
+                self.assertIn("ops/release-pipeline.py report", body)
+                self.assertIn(f"clear-failed --lane {lane} --sha {sha}",
+                              rp.report(store, "2099-01-01"))
                 self.assertNotIn("every tick", body)
                 self.write_tokens(f"CLOUDFLARE_API_TOKEN={CF_TOKEN}\n")
                 paused = FakeRunner()
@@ -2654,6 +2657,62 @@ class DeployCredential(unittest.TestCase):
                     runner.run = run
                 self.assertEqual(pipe.tick([lane]), 0)
                 self.assertEqual(self.fx.state()[lane]["last_released_sha"], sha)
+
+    def test_combined_lanes_recover_from_one_notification_without_resetting_dedup(self):
+        sha = self.fx.commit({"mcp-server/src/a.js": "both", "src/worker.js": "both"})
+        cfg = self.fx.config(credential_dir="~/.config/carr")
+        cfg["app"].update(enabled=True, review_required_after="2000-01-01T00:00:00Z")
+        live = {"worker": self.fx.base, "app": self.fx.base}
+        verbs: list = []
+
+        def pipeline(runner):
+            pipe = self.fx.pipeline(runner, cfg=cfg, verbs=verbs)
+            pipe.http = lambda url: ({"git_sha": {"value": live["worker"]}}
+                                     if url == cfg["worker"]["live_release_url"] else
+                                     {"source_commit": live["app"], "environment": "production"})
+            return pipe
+
+        self.assertEqual(pipeline(FakeRunner()).tick(["worker", "app"]), 1)
+        for lane in live:
+            self.assertEqual(self.fx.state()[lane]["failed_sha"], sha)
+        loops = [args for verb, args in verbs if verb == "add-loop"]
+        self.assertEqual(len(loops), 1)
+        self.assertIn("ops/release-pipeline.py report", loops[0]["body"])
+        self.assertIn("every currently failed lane", loops[0]["body"])
+
+        self.write_tokens(f"CLOUDFLARE_API_TOKEN={CF_TOKEN}\n")
+        paused = FakeRunner()
+        self.assertEqual(pipeline(paused).tick(["worker", "app"]), 0)
+        self.assertEqual(paused.calls, [])
+        store = rp.Store(self.fx.repo / "out/release-pipeline")
+        # Recovery must come from current state even after the failure's day.
+        recovery = rp.report(store, "2099-01-01")
+        commands = [shlex.split(line.strip()) for line in recovery.splitlines()
+                    if line.strip().startswith("ops/release-pipeline.py clear-failed ")]
+        self.assertEqual(len(commands), 2)
+        self.assertEqual({cmd[cmd.index("--lane") + 1] for cmd in commands}, set(live))
+        for cmd in commands:
+            self.assertEqual(cmd[cmd.index("--sha") + 1], sha)
+            rp.clear_failed(store, cmd[cmd.index("--lane") + 1],
+                            cmd[cmd.index("--sha") + 1], cmd[cmd.index("--reason") + 1])
+
+        worker_live = {"sha": self.fx.base}
+        runner = FakeRunner(live=worker_live)
+        original_run = runner.run
+        def run(argv, **kw):
+            result = original_run(argv, **kw)
+            live["worker"] = worker_live["sha"]
+            if argv[:3] == ["npm", "run", "release:production"]:
+                live["app"] = sha
+            return result
+        runner.run = run
+        self.assertEqual(pipeline(runner).tick(["worker", "app"]), 0)
+        for lane in live:
+            self.assertEqual(self.fx.state()[lane]["last_released_sha"], sha)
+        self.assertEqual(len([v for v, _ in verbs if v == "add-loop"]), 1)
+        self.assertIn("CLOUDFLARE_API_TOKEN", self.fx.state()["filed_blockers"])
+        self.assertNotIn("clear-failed", rp.report(store, "2099-01-01"))
+        self.assert_never_echoed()
 
     def test_dry_run_reports_the_missing_token_and_records_nothing(self):
         self.fx.commit({"mcp-server/src/a.js": "1"})
