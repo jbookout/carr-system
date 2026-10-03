@@ -3,7 +3,7 @@
     "core": 20,
     "gate": 60,
     "gone": 0,
-    "jit": 129
+    "jit": 130
   },
   "fallback_narrowing": {
     "delegation-council": {
@@ -27,7 +27,7 @@
       ]
     }
   },
-  "generated_note": "Triage of the 219 active rules into gate/jit/core/gone homes. Classification and tooling only per S7 scope boundary; no rule was retired, amended, or taught by producing this file. Source data: standing-context (205 rules, full text) + ops/config/rule-enforcement-map.json rule_controls (all 219, including the 14 vendor-intros-pack rules that standing-context does not surface to this session -- see defect ad4e25bd-3c98-4334-a7d3-f53c8158711f). ROWS PRUNED 2026-08-27 (WR-000019 rule-retirement batch): Joe accepted and executed the batch this slice's 11 GONE rows named (each already carrying its merge_target in this file); the 11 rows are removed from `rules` and `counts.gone` moves 11 -> 0, keeping this file in exact id-for-id parity with the now-208-row ops/config/rule-enforcement-map.json rule_controls, per ops/rule-triage-selftest.py's coverage checks. The 219/205 figures above describe the file as generated at S7 time and are left as historical record. LIVE PARITY REPAIRED 2026-09-23: removed five retired ids and added three active rules (204391be, a2e78f48, b7ec8f3b) with their existing production pack memberships; current map and triage each carry 209 active rules.",
+  "generated_note": "Triage of the 219 active rules into gate/jit/core/gone homes. Classification and tooling only per S7 scope boundary; no rule was retired, amended, or taught by producing this file. Source data: standing-context (205 rules, full text) + ops/config/rule-enforcement-map.json rule_controls (all 219, including the 14 vendor-intros-pack rules that standing-context does not surface to this session -- see defect ad4e25bd-3c98-4334-a7d3-f53c8158711f). ROWS PRUNED 2026-08-27 (WR-000019 rule-retirement batch): Joe accepted and executed the batch this slice's 11 GONE rows named (each already carrying its merge_target in this file); the 11 rows are removed from `rules` and `counts.gone` moves 11 -> 0, keeping this file in exact id-for-id parity with the now-208-row ops/config/rule-enforcement-map.json rule_controls, per ops/rule-triage-selftest.py's coverage checks. The 219/205 figures above describe the file as generated at S7 time and are left as historical record. LIVE PARITY REPAIRED 2026-09-23: removed five retired ids and added three active rules (204391be, a2e78f48, b7ec8f3b) with their existing production pack memberships; current map and triage each carry 209 active rules. 2026-09-29: rule ede4b241 (cloud model choice) added as a JIT row with a delegation-council dispatch detector; current map and triage each carry 210 active rules.",
   "rules": [
     {
       "home": "jit",
@@ -1534,6 +1534,17 @@
       "id": "eaa31ac5",
       "reason": "Already machine-enforced via control 'completion_evidence' (hooks/completion-evidence-gate.py); binds before delivery claim. Failure mode on violation: Stop block",
       "title_gist": "CONSTRAINT, binding at the moment a session is about to say it HANDED OFF, SENT, DELIVERED, NOTIFIED or"
+    },
+    {
+      "detector": {
+        "kind": "verb",
+        "pattern": "^(?:Agent|mcp__[\\w-]*[Rr]emote__create[_-](?:session|trigger))$"
+      },
+      "home": "jit",
+      "id": "ede4b241",
+      "jit_trigger_hint": "Delivered by pack(s) delegation-council \u2014 fires when a session dispatches work to another model or launches a Claude Code cloud session (the Agent tool, or create_session / create_trigger on the Claude Code Remote server).",
+      "reason": "Fires on an occasion, not at every boot: the choice of model for a dispatched job is made at the moment of dispatch, so the rule is delivered by pack and moment. No gate can judge whether a job is well-scoped with a checkable done-condition; the delivery puts the routing rule in front of the session at that decision.",
+      "title_gist": "CLOUD MODEL CHOICE: pick the model by the work's shape; Sonnet 5.5 for well-scoped checkable work, Opus 5.5 for design, gates, eval design and reviews"
     },
     {
       "home": "jit",

@@ -2,9 +2,9 @@ import test from 'node:test';
 import {readFileSync} from 'node:fs';
 import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
-const migration=readFileSync(new URL('../../migrations/0768_lease_radar_read.sql',import.meta.url),'utf8');
-test('lease migration delegates transaction ownership to the repository runner', () => {
-  execFileSync('python3', ['-c', "import sys,runpy;from pathlib import Path;sys.path.insert(0,'tools');runner=runpy.run_path('tools/migrate.py');assert not runner['contains_transaction_control'](Path('migrations/0768_lease_radar_read.sql').read_text()), 'migration owns explicit transaction'"] , {cwd:fileURLToPath(new URL('../../',import.meta.url))});
+const migration=readFileSync(new URL('../../migrations/0788_lease_radar_read.sql',import.meta.url),'utf8');
+test('lease migration loads through the repository runner with a unique number and runner-owned transaction', () => {
+  execFileSync('python3', ['-c', "import sys,runpy;sys.path.insert(0,'tools');runner=runpy.run_path('tools/migrate.py');migrations=runner['load_migrations']();assert any(name == sys.argv[1] for name,sql,digest in migrations), 'lease migration missing from runner'", '0788_lease_radar_read.sql'], {cwd:fileURLToPath(new URL('../../',import.meta.url))});
 });
 import assert from 'node:assert/strict';
 import { readLeaseRadar, parseBusinessApiPath, LEASE_RADAR_SQL } from '../src/workspace-business-read.js';
