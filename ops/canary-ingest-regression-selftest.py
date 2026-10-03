@@ -16,7 +16,7 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
@@ -191,15 +191,38 @@ class Regressions(unittest.TestCase):
                 result = (0, b'')
         self.assertEqual(result, (413, b''))
 
+    def test_5_connection_rejected_before_send_is_closed_and_workers_recover(self):
+        connect = socket.create_connection
+        rejected = Mock()
+        rejected.sendall.side_effect = BrokenPipeError('worker limit rejected connection')
+        rejected.recv.return_value = b''
+        first = True
+
+        def connect_or_reject(*args, **kwargs):
+            nonlocal first
+            if first:
+                first = False
+                return rejected
+            return connect(*args, **kwargs)
+
+        with patch.object(socket, 'create_connection', side_effect=connect_or_reject):
+            self.test_5_abandoned_headers_and_bodies_release_bounded_workers()
+        rejected.close.assert_called_once()
+
     def test_5_abandoned_headers_and_bodies_release_bounded_workers(self):
         with serving(self.ledger, read_timeout=0.2, max_workers=2) as server:
             stalled = []
             try:
                 for i in range(8):
                     sock = socket.create_connection(server.server_address, timeout=2)
-                    sock.sendall(b'POST /ingest HTTP/1.0\r\n' if i % 2 == 0 else
-                                 b'POST /ingest HTTP/1.0\r\nAuthorization: Bearer synthetic-token\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{')
                     stalled.append(sock)
+                    try:
+                        sock.sendall(b'POST /ingest HTTP/1.0\r\n' if i % 2 == 0 else
+                                     b'POST /ingest HTTP/1.0\r\nAuthorization: Bearer synthetic-token\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{')
+                    except (BrokenPipeError, ConnectionResetError):
+                        # A full worker pool may reject before this sender runs.
+                        # Keep the socket in the closure/recovery proof below.
+                        pass
                 time.sleep(0.08)
                 workers = sum('process_request_thread' in t.name
                               for t in threading.enumerate() if t.is_alive())
