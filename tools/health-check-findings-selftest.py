@@ -581,9 +581,17 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
                   CANONICAL_SECTION="credentials", CANONICAL_FIXTURE=None, timedelta=timedelta,
                   _HEALTH_COMPLETION_MARKER="HEALTH_COMPLETE", importlib=__import__("importlib"),
                   _canonical_snapshot=lambda: {}, _jev_spend_row=lambda: (None, "OK spend"),
+                  _grok_session_row=lambda: ("OK fixture Grok session", 0),
                   subprocess=Mock(run=Mock(return_value=subprocess.CompletedProcess([], 0, "SKIP fixture", ""))))
         exec(compile(mod, str(HEALTH_CHECK_PATH), "exec"), ns)
         return ns
+
+    def test_grok_failure_remains_a_finding_with_healthy_paid_cap(self):
+        ns = self.namespace()
+        ns["_grok_session_row"] = lambda: ("FAIL fixture Grok session", 1)
+        ns["_jev_paid_cap_row"] = lambda: "OK jev paid cap"
+        self.assertEqual(ns["_canonical_health"](), 1)
+        self.assertEqual([row["key"] for row in ns["_FINDINGS"]], ["grok_session"])
 
     def all_namespace(self):
         from unittest.mock import Mock

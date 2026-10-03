@@ -106,8 +106,8 @@ def _reader_args(argv):
         # A parent shell may carry this old ambient variable.  Normal health must
         # not pass it to any child or let a child silently choose a Drive reader.
         os.environ.pop("CARR_VAULT", None)
-    if section not in ("all", "exports", "jobs", "registry", "credentials", "jev-spend", "jev-cap", "tailscale", "headless"):
-        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials|jev-spend|jev-cap|tailscale|headless")
+    if section not in ("all", "exports", "jobs", "registry", "credentials", "jev-spend", "jev-cap", "grok-session", "tailscale", "headless"):
+        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials|jev-spend|jev-cap|grok-session|tailscale|headless")
     if fixture and recovery:
         raise SystemExit("health-check: --fixture is for hermetic canonical tests only")
     return recovery, reason, vault, section, fixture, findings_json, rest
@@ -156,6 +156,19 @@ def _jev_paid_cap_row():
         return (f"UNKNOWN jev paid cap — {type(exc).__name__} · on breach: "
                 "owner orchestrator · remediation restore the cap reader/configuration · "
                 "verify rerun health · auto-clear on successful read")
+
+
+def _grok_session_row():
+    sys.path.insert(0, os.path.join(REPO_ROOT, "ops"))
+    from grok_session import health_row
+    line = health_row()
+    return line, int(line.startswith("FAIL") or "FAILED" in line)
+
+
+if CANONICAL_SECTION == "grok-session":
+    _grok_line, _grok_rc = _grok_session_row()
+    print(_grok_line)
+    sys.exit(_grok_rc)
 
 
 if CANONICAL_SECTION == "jev-spend":
@@ -1589,6 +1602,10 @@ def _canonical_health():
                 rc = _red("repo_loose_work", f"{len(_actionable)} actionable path(s)", count=len(_actionable))
 
     if CANONICAL_SECTION in ("all", "credentials"):
+        _grok_line, _grok_rc = _grok_session_row()
+        print("  " + _grok_line)
+        if _grok_rc:
+            rc = _red("grok_session", "Grok credential health or alert failed", time_rolling=True)
         # The source log is canonical across worktrees. The row carries its
         # response action on both OK and WARN, and the helper owns one loop.
         try:

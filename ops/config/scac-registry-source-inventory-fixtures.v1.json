@@ -86853,13 +86853,13 @@
       "base_version": "v103",
       "upsert": [
         {
-          "ingress_key": "external-admin:tools/rotate-credential.py",
+          "ingress_key": "external-admin:bin/migrate-dell.sh",
           "ingress_kind": "external_admin",
-          "operation": "tools/rotate-credential.py",
+          "operation": "bin/migrate-dell.sh",
           "effect_class": "administrative_mutation",
-          "source_locator": "tools/rotate-credential.py",
-          "schema_digest": "4ed693be3967044d4c2080e6385df47c955adebe91ed2800c6e584220aa58672",
-          "handler_digest": "4ed693be3967044d4c2080e6385df47c955adebe91ed2800c6e584220aa58672",
+          "source_locator": "bin/migrate-dell.sh",
+          "schema_digest": "b05259d04b52887f3d1d516fbe7bdd87da5a44635e33f2dfa849f39c1706d4a0",
+          "handler_digest": "b05259d04b52887f3d1d516fbe7bdd87da5a44635e33f2dfa849f39c1706d4a0",
           "write": true,
           "human_only": false,
           "authority_only": true,
@@ -86874,15 +86874,7 @@
           "owner_package": "11",
           "implementation_state": "inventoried_not_atomically_mediated",
           "classification_authorizing": false
-        }
-      ],
-      "expected_count": 1085,
-      "expected_sha256": "e755569a7105467219e95e79d1cceaa768cc9710f499e58f94025c040f44f956",
-      "reason": "PR 865 source-only review: re-derive the existing credential rotation external-admin row after enabling scoped verifier rotation, validating URIs, valid port ranges and targets before mutation, and verifying the complete caller identity contract. No new ingress, authority, grant, runtime selector or historical seal change."
-    },
-    "scac-mutation-registry.v104": {
-      "base_version": "v104",
-      "upsert": [
+        },
         {
           "ingress_key": "external-admin:tools/rotate-credential.py",
           "ingress_kind": "external_admin",
@@ -86908,8 +86900,62 @@
         }
       ],
       "expected_count": 1085,
-      "expected_sha256": "f974566249a65580fdf6455cd519f846579ad76fbce18fed7c53e2181881acb4",
-      "reason": "Carry the independently delivered PR 865 credential-rotation source review forward to v104. Only the existing external-admin row is re-digested; its ingress and authority contract and all historical seals remain unchanged."
+      "expected_sha256": "2329a14f6c2761a8f54578def76f00895974c192f8d0edb45140115b26bc12c2",
+      "reason": "PR 865 source-only review: re-derive the existing credential rotation external-admin row after enabling scoped verifier rotation, validating URIs, valid port ranges and targets before mutation, and verifying the complete caller identity contract. No new ingress, authority, grant, runtime selector or historical seal change. PR 1384 source-only review: re-derive the existing Dell migration external-admin receipt writer after correcting its JSON trailing newline. Preserve the registered ingress contract, authority fields, runtime selector, database catalog and all historical seals."
+    },
+    "scac-mutation-registry.v104": {
+      "base_version": "v104",
+      "upsert": [
+        {
+          "ingress_key": "external-admin:bin/migrate-dell.sh",
+          "ingress_kind": "external_admin",
+          "operation": "bin/migrate-dell.sh",
+          "effect_class": "administrative_mutation",
+          "source_locator": "bin/migrate-dell.sh",
+          "schema_digest": "b05259d04b52887f3d1d516fbe7bdd87da5a44635e33f2dfa849f39c1706d4a0",
+          "handler_digest": "b05259d04b52887f3d1d516fbe7bdd87da5a44635e33f2dfa849f39c1706d4a0",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "external-admin:tools/rotate-credential.py",
+          "ingress_kind": "external_admin",
+          "operation": "tools/rotate-credential.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "tools/rotate-credential.py",
+          "schema_digest": "4ed693be3967044d4c2080e6385df47c955adebe91ed2800c6e584220aa58672",
+          "handler_digest": "4ed693be3967044d4c2080e6385df47c955adebe91ed2800c6e584220aa58672",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        }
+      ],
+      "expected_count": 1085,
+      "expected_sha256": "d521f73c2d7a32e7a464c774c8c50b5e2488e7a78d32864805dbec64c9e1baad",
+      "reason": "Carry the credential-rotation and Dell migration receipt source reviews forward to v104. Only existing external-admin rows are re-digested; ingress and authority contracts and all historical seals remain unchanged."
     }
   }
 }

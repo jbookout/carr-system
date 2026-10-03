@@ -20921,7 +20921,7 @@ export function renderGeneratedFrontier() {
   artifacts["mcp-server/src/scac-mutation-registry.v104.generated.js"] =
     renderRuntimeProjection(v104Rows, { version: REGISTRY_V104_VERSION,
       dbCatalogBaseline: JEV_CAP_V104_DB_CATALOG_BASELINE });
-  artifacts["migrations/0772_jev_cap_scac_successor.sql"] =
+  artifacts["migrations/0773_jev_cap_scac_successor.sql"] =
     renderJevCapRegistrySql(v104Rows, artifacts["migrations/0770_find_rule_scac_successor.sql"]);
 
 
@@ -21966,7 +21966,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     await writeFile(resolve("mcp-server/src/scac-mutation-registry.v104.generated.js"),
       renderRuntimeProjection(rows, { version: REGISTRY_V104_VERSION,
         dbCatalogBaseline: JEV_CAP_V104_DB_CATALOG_BASELINE }));
-    await writeFile(resolve("migrations/0772_jev_cap_scac_successor.sql"), renderJevCapRegistrySql(rows));
+    await writeFile(resolve("migrations/0773_jev_cap_scac_successor.sql"), renderJevCapRegistrySql(rows));
     process.stdout.write("Jev cap v104 frontier generated\n");
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools(), REGISTRY_V104_VERSION);

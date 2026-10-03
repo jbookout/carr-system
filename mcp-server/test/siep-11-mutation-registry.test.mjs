@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -3021,7 +3022,7 @@ test("the complete source-only frontier is byte-reproducible from frozen inputs"
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
   assert.equal(migrations.length, 110);
   assert.deepEqual(migrations.map(path => path.match(/migrations\/(\d{4})_/)[1]),
-    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545", "0547", "0548", "0549", "0550", "0551", "0552", "0553", "0555", "0557", "0558", "0559", "0560", "0561", "0562", "0563", "0564", "0566", "0567", "0568", "0569", "0570", "0572", "0576", "0578", "0581", "0582", "0584", "0585", "0588", "0589", "0600", "0603", "0609", "0614", "0618", "0625", "0627", "0629", "0701", "0705", "0707", "0709", "0718", "0720", "0722", "0723", "0725", "0727", "0730", "0731", "0734", "0737", "0739", "0741", "0743", "0745", "0748", "0750", "0755", "0763", "0767", "0768", "0770", "0772"]);
+    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545", "0547", "0548", "0549", "0550", "0551", "0552", "0553", "0555", "0557", "0558", "0559", "0560", "0561", "0562", "0563", "0564", "0566", "0567", "0568", "0569", "0570", "0572", "0576", "0578", "0581", "0582", "0584", "0585", "0588", "0589", "0600", "0603", "0609", "0614", "0618", "0625", "0627", "0629", "0701", "0705", "0707", "0709", "0718", "0720", "0722", "0723", "0725", "0727", "0730", "0731", "0734", "0737", "0739", "0741", "0743", "0745", "0748", "0750", "0755", "0763", "0767", "0768", "0770", "0773"]);
   assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 101);
   assert.equal(paths.length, 211);
   // 0502 IS DELIBERATELY ABSENT FROM THIS LIST. It is a hand-authored domain
@@ -3034,12 +3035,15 @@ test("the complete source-only frontier is byte-reproducible from frozen inputs"
 
 test("the complete frontier renders when every generated target is absent", () => {
   const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
-  const isolatedRoot = fs.mkdtempSync(path.join(repoRoot, ".tmp.wr48-targetless-"));
+  const isolatedRoot = fs.realpathSync(fs.mkdtempSync(path.join(tmpdir(), "carr-frontier-targetless-")));
   const outputRoot = path.join(isolatedRoot, "generated");
   const frontier = renderGeneratedFrontier();
   const frontierPaths = Object.keys(frontier);
   const frontierSet = new Set(frontierPaths);
   try {
+    // Coverage discovery must never walk a concurrently copied fixture tree.
+    assert.ok(path.relative(repoRoot, isolatedRoot).startsWith(`..${path.sep}`),
+      "targetless fixture must be outside the source tree");
     const trackedPaths = parseGitIndexEntries(execFileSync("git", ["ls-files", "--stage", "-z"], {
       cwd: repoRoot,
       encoding: "buffer",
@@ -3519,6 +3523,7 @@ test("credential rotation source review cannot widen authority or admit an ingre
   const probe = `
     import assert from "node:assert/strict";
     import fs from "node:fs";
+import { tmpdir } from "node:os";
     import { syncBuiltinESMExports } from "node:module";
     const read = fs.readFileSync;
     const fixturePath = "ops/config/scac-registry-source-inventory-fixtures.v1.json";
@@ -3549,4 +3554,21 @@ test("credential rotation source review cannot widen authority or admit an ingre
   for (const variant of ["authority", "locator", "ingress", "digest", "base", "broad"])
     execFileSync(process.execPath, ["--input-type=module", "-e", probe, variant],
       { cwd: fileURLToPath(new URL("../../", import.meta.url)), stdio: "pipe" });
+});
+
+
+test("Dell receipt source review binds its live bytes without changing the sealed frontier", () => {
+  const fixture = JSON.parse(fs.readFileSync(new URL(
+    "../../ops/config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url), "utf8"));
+  const sealed = frozenInventory("scac-mutation-registry.v103");
+  const key = "external-admin:bin/migrate-dell.sh";
+  const review = fixture.current_source_reviews["scac-mutation-registry.v103"];
+  const reviewed = review.upsert.find(row => row.ingress_key === key);
+  const current = fullInventory(TOOLS).find(row => row.ingress_key === key);
+  assert.deepEqual(reviewed, current);
+  assert.notEqual(sealed.find(row => row.ingress_key === key).handler_digest, reviewed.handler_digest);
+  const contract = row => Object.fromEntries(Object.entries(row)
+    .filter(([field]) => !["schema_digest", "handler_digest", "source_digest"].includes(field)));
+  assert.deepEqual(contract(reviewed), contract(sealed.find(row => row.ingress_key === key)));
+  assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
 });

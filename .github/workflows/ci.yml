@@ -92,6 +92,7 @@ name: CI
 # workdays for either partner, so that is exactly the window with no other cover.
 on:
   pull_request:
+    types: [opened, synchronize, reopened, edited]
   schedule:
     # 06:20 UTC daily. Sits after the nightly backup (02:35 UTC) and the 05:10
     # edge-liveness slot, and before the automerge pilot (08:30 UTC weekdays), so
@@ -261,6 +262,9 @@ jobs:
           # reason in the output; nothing is dropped silently.
           CARR_CI_PORTABLE_ONLY: "1"
         run: ops/ci.sh --strict --only "${{ matrix.classes }}"
+      - name: Require a written pull request description
+        if: ${{ github.event_name == 'pull_request' && matrix.classes == 'gates' }}
+        run: python3 ops/pr-description-check.py
 
   checks:
     # THE REQUIRED CONTEXT. Its name is what the ruleset requires, so it must
