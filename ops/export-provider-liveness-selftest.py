@@ -121,11 +121,20 @@ class RecoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             fifo = Path(directory) / "wedged.xlsx"
             os.mkfifo(fifo)
-            started = time.monotonic()
-            with redirect_stderr(io.StringIO()):
-                result = common.wait_for_provider([fifo], budget_seconds=.3, poll_seconds=.01,
-                                                 running=self.running, launch=self.launch)
-            self.assertLess(time.monotonic() - started, .8)
+            # Exercise the real wedged read and child timeout separately from
+            # the recovery policy's clock. Process startup/descheduling can
+            # consume a tiny wall-clock budget before recovery may run.
+            cold = common.probe_provider_files([fifo], timeout=.03)
+            self.assertEqual(cold[0][1].errno, errno.ETIMEDOUT)
+
+            def timed_out_probe(paths, *, timeout):
+                self.assertEqual(paths, [fifo])
+                self.clock.now += timeout
+                return cold
+
+            self.path = fifo
+            result = self.wait(probe=timed_out_probe)
+            self.assertEqual(self.clock.now, 1)
             self.assertEqual(result.cold[0][0], fifo)
             self.assertEqual(result.cold[0][1].errno, errno.ETIMEDOUT)
             self.assertTrue(self.probes)

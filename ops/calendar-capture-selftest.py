@@ -372,17 +372,34 @@ check("failed reader cannot write from a stale dump", p.returncode == 1 and "log
 
 # Regression 5: a second capture must not complete the paused first reader.
 root, stub = fixture(matcher_json=json.dumps(exact_only))
-(stub / "open").write_text("#!/bin/sh\nexit 0\n")
+reader_started = root / "reader-started"
+reader_release = root / "reader-release"
+os.mkfifo(reader_release)
+(stub / "open").write_text(
+    "#!/usr/bin/env python3\nfrom pathlib import Path\n"
+    f"Path({str(reader_started)!r}).write_text('ready')\n"
+    f"with open({str(reader_release)!r}) as gate: gate.read()\n")
 env = dict(os.environ, CARR_REPO=str(root), PATH=f"{stub}:{os.environ['PATH']}",
            CARR_CALENDAR_CAPTURE_WAIT_SECONDS="3")
 a = subprocess.Popen(["sh", str(SCRIPT), "--dry-run"], env=env,
                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 import time
-time.sleep(0.4)
-(stub / "open").write_text("#!/bin/sh\nfor target do :; done\nmkdir -p \"$target\"\necho '{}' > \"$target/calendar-attendees.json\"\necho exit=0 >> \"$target/calendar-access.log\"\n")
-b = run(root, stub)
+ready_deadline = time.monotonic() + 10
+while not reader_started.exists() and a.poll() is None and time.monotonic() < ready_deadline:
+    time.sleep(.01)
+try:
+    assert reader_started.exists(), "first reader never acquired the capture lock"
+    (stub / "open").write_text("#!/bin/sh\nfor target do :; done\nmkdir -p \"$target\"\necho '{}' > \"$target/calendar-attendees.json\"\necho exit=0 >> \"$target/calendar-access.log\"\n")
+    b = run(root, stub)
+finally:
+    if reader_started.exists():
+        with reader_release.open("w") as gate:
+            gate.write("continue")
+    else:
+        a.kill()
 aout, aerr = a.communicate(timeout=10)
-check("concurrent dry/live capture cannot acknowledge another read", a.returncode == 1 and b.returncode != 0 and "source=eventkit" not in aout)
+check("concurrent dry/live capture cannot acknowledge another read",
+      a.returncode == 1 and b.returncode == 75 and "source=eventkit" not in aout)
 
 # A timed-out reader completes during the next invocation. Its private exit/dump
 # must never promote the next reader, which has not completed at all.
