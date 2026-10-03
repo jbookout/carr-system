@@ -92,6 +92,7 @@ name: CI
 # workdays for either partner, so that is exactly the window with no other cover.
 on:
   pull_request:
+    types: [opened, synchronize, reopened, edited]
   schedule:
     # 06:20 UTC daily. Sits after the nightly backup (02:35 UTC) and the 05:10
     # edge-liveness slot, and before the automerge pilot (08:30 UTC weekdays), so

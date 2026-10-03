@@ -3,6 +3,7 @@
 
 import importlib.util
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +14,22 @@ SCRIPT = Path(__file__).with_name("pr-description-check.py")
 
 
 class PRDescriptionCheckTest(unittest.TestCase):
+    def test_description_edits_trigger_validation_without_a_push(self):
+        repo = SCRIPT.parent.parent
+        result = subprocess.run(
+            ["node", "-e", "const fs=require('fs'); const yaml=require('js-yaml');"
+             "console.log(JSON.stringify(yaml.load(fs.readFileSync(process.argv[1], 'utf8'))));",
+             str(repo / ".github/workflows/ci.yml")],
+            cwd=repo / "mcp-server", capture_output=True, text=True, check=True)
+        workflow = json.loads(result.stdout)
+        trigger = workflow["on"]["pull_request"] or {}
+        self.assertEqual(set(trigger.get("types", [])),
+                         {"opened", "synchronize", "reopened", "edited"})
+        steps = workflow["jobs"]["classes"]["steps"]
+        step = next(step for step in steps if step.get("run") == "python3 ops/pr-description-check.py")
+        self.assertIn("github.event_name == 'pull_request'", step["if"])
+        self.assertIn("matrix.classes == 'gates'", step["if"])
+
     def test_empty_and_template_only_fail(self):
         spec = importlib.util.spec_from_file_location("pr_description_check", SCRIPT)
         module = importlib.util.module_from_spec(spec)

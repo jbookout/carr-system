@@ -182,8 +182,6 @@ def executor_metadata(executor: str) -> tuple[str, str, str]:
     lower = value.lower()
     effort_match = re.search(r"\b(low|medium|high|xhigh|max|ultra)\b", lower)
     effort = effort_match.group(1) if effort_match else "unknown"
-    if "orchestrator" in lower:
-        return "Anthropic", "Claude Opus 5.5", effort
     gpt = re.search(r"\bgpt-[\w.-]+", value, re.IGNORECASE)
     if gpt:
         return "Codex", gpt.group(0).lower(), effort
@@ -194,7 +192,7 @@ def executor_metadata(executor: str) -> tuple[str, str, str]:
     pool = executor_pool(value)
     provider = {"codex": "Codex", "claude-cloud": "Anthropic", "grok": "xAI",
                 "flash-next": "Google"}.get(pool, "Unknown")
-    return provider, value if value else "unknown", effort
+    return provider, "unknown", effort
 
 
 def task_identity(task: dict[str, Any]) -> tuple[str, str, str]:

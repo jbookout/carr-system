@@ -31,8 +31,15 @@ class ProgressBoardCLI(unittest.TestCase):
             "gpt-6-sol high (Codex)": ("Codex", "gpt-6-sol", "high"),
             "codex gpt-6-sol high": ("Codex", "gpt-6-sol", "high"),
             "Codex gpt-6-sol high x2": ("Codex", "gpt-6-sol", "high"),
-            "orchestrator": ("Anthropic", "Claude Opus 5.5", "unknown"),
+            "orchestrator": ("Unknown", "unknown", "unknown"),
+            "Codex orchestrator gpt-5.5 xhigh": ("Codex", "gpt-5.5", "xhigh"),
             "Claude Opus 5.5 (orchestrator)": ("Anthropic", "Claude Opus 5.5", "unknown"),
+            "Claude Sonnet 4.6 orchestrator high": ("Anthropic", "Claude Sonnet 4.6", "high"),
+            "codex": ("Codex", "unknown", "unknown"),
+            "claude high": ("Anthropic", "unknown", "high"),
+            "grok": ("xAI", "unknown", "unknown"),
+            "flash-next": ("Google", "unknown", "unknown"),
+            "": ("Unknown", "unknown", "unknown"),
         }
         for executor, expected in cases.items():
             with self.subTest(executor=executor):
@@ -51,14 +58,16 @@ class ProgressBoardCLI(unittest.TestCase):
         self.assertIn("Coordinate the delivery review.", html)
         self.assertIn("Codex", html)
         self.assertIn("gpt-6-sol · high", html)
-        self.assertIn("Anthropic", html)
-        self.assertIn("Claude Opus 5.5 · unknown", html)
+        self.assertIn("Unknown", html)
+        self.assertIn("unknown · unknown", html)
         self.assertIn('id="task-detail"', html)
         state = self.read_state("demo")
         self.assertEqual(state["tasks"]["codex"]["provider"], "Codex")
         self.assertEqual(state["tasks"]["codex"]["model"], "gpt-6-sol")
         self.assertEqual(state["tasks"]["codex"]["effort"], "high")
         self.assertEqual(state["tasks"]["codex"]["summary"], "Show the delivery details on each card.")
+        self.assertEqual((state["tasks"]["orchestrator"]["provider"],
+                          state["tasks"]["orchestrator"]["model"]), ("Unknown", "unknown"))
 
     def test_explicit_metadata_overrides_executor(self):
         self.run_board("init", "demo", "--title", "Demo")
@@ -88,7 +97,8 @@ class ProgressBoardCLI(unittest.TestCase):
         self.assertEqual(state["tasks"]["pr"]["summary"], "Show model and effort on board cards.")
         self.assertEqual(state["tasks"]["pr"]["stage_history"], [{"stage": "review", "at": "earlier"}])
         self.assertEqual(state["tasks"]["other"]["summary"], "Verify that captured mail reaches the CRM.")
-        self.assertEqual(state["tasks"]["other"]["provider"], "Anthropic")
+        self.assertEqual(state["tasks"]["other"]["provider"], "Unknown")
+        self.assertEqual(state["tasks"]["other"]["model"], "unknown")
 
     def test_review_verdict_requires_trusted_comment_on_current_head(self):
         head = "a" * 40
