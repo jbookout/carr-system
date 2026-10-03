@@ -938,19 +938,10 @@ def test_gates_treats_only_78_as_not_configured():
     """Exit 78 in the gates loop must mean "not configured", and nothing else.
 
     The loop used to count every nonzero alike, so a selftest that correctly
-    declined for want of a local dependency read as a red gate, and the only way
-    past it was CARR_SKIP_CI on every push. The risk in the fix is that it
-    widens: if an ordinary crash ever
-    skipped too, this class would go quiet exactly when it should shout.
-
-    THIS TEST IS STRUCTURAL, AND THAT IS A DELIBERATE DOWNGRADE — say so rather
-    than pretend otherwise. The behavioural version (seed a fixture that exits 78
-    beside one that exits 1, run the gates class, assert only the second is
-    named) cannot work here for two independent reasons, both measured
-    2026-08-19: the gates loop globs ops/*-selftest.py, so it re-enters THIS file
-    recursively and the nested run exercises the entire checker again; and even if
-    they survived, the nested re-entry runs the slowest class in ci.sh a second
-    and third time, costing more on every push forever than the bug it guards.
+    declined for want of a local dependency read as a red gate. The risk in
+    the fix is swallowing exit 1 together with exit 78. The structural check
+    binds both branches; running the gates class here would recursively run
+    this checker and the slowest CI class again on every push.
 
     This structural check binds the narrowness of the exception without adding
     a recursively executing fixture to the slowest CI class.
