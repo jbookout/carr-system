@@ -161,6 +161,9 @@ class HookFixture(unittest.TestCase):
         (stub / "sitecustomize.py").write_text(SITECUSTOMIZE)
         (stub / "typesafe_client.py").write_text(FAKE_CLIENT)
         self.env = fixture_env()
+        # Attended fake reviews run regardless of the parent worker mode.
+        # Individual worker fixtures explicitly override this child setting.
+        self.env.pop("CARR_JEV_WORKER", None)
         self.env.update({
             "HOME": str(self.home), "CARR_ROOT": str(self.carr),
             "CARR_HOOK_GUARD_LOG": str(self.guard_log),
@@ -228,6 +231,14 @@ class LintPathTests(HookFixture):
         self.assertIn("HARD BAN HIT on Marketing/Social Media/post.md", msgs[0])
         self.assertIn("(surface: social)", msgs[0])
         self.assertIn("lint-gate REPORT", self.guard_log.read_text())
+
+    def test_worker_mode_skips_judgment_and_preserves_writing_lint(self):
+        path = self.vault_file("Outreach/intro.md")
+        self.reply("FAIL hard-ban: em dash\n")
+        out = self.spawn(self.write_payload(path), CARR_JEV_WORKER="off")
+        self.assertEqual(self.receipts(out), [])
+        self.assertEqual(len(self.lint_messages(out)), 1)
+        self.assertEqual(self.calls(), [f"lint {path} --surface email"])
 
     def test_review_items_get_the_review_message(self):
         path = self.vault_file("Outreach/intro.md")
@@ -342,6 +353,15 @@ class PostWriteReceiptTests(HookFixture):
         receipt = self.only_receipt(self.spawn(self.write_payload(path)))
         self.assertEqual(receipt["status"], "skipped")
         self.assertEqual(receipt["reason"], "no_supported_code_paths")
+
+    def test_worker_off_launcher_still_runs_attended_receipt_fixtures(self):
+        result = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve()),
+             "PostWriteReceiptTests.test_below_threshold_is_reviewed_with_no_findings"],
+            env={**fixture_env(), "CARR_JEV_WORKER": "off"},
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_no_retired_effect_label_survives_in_the_hook(self):
         source = HOOK.read_text()

@@ -1276,15 +1276,27 @@ if [ "$FIND_RULE_REGISTRY_APPLIED" = t ] && [ "$CONFIRM_MERGE_REGISTRY_APPLIED" 
 fi
 
 
+JEV_CAP_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0773_jev_cap_scac_successor.sql')" \
+  2>/dev/null)"
+case "$JEV_CAP_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read Jev cap v104 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$JEV_CAP_REGISTRY_APPLIED" = t ] && [ "$FIND_RULE_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: Jev cap v104 is applied without v103 predecessor" >&2
+  exit 1
+fi
+
 LEADS_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0784_leads_scac_successor.sql')" \
   2>/dev/null)"
 case "$LEADS_REGISTRY_APPLIED" in
   t|f) ;;
-  *) echo "schema-snapshot: could not read Leads v104 registry ledger state" >&2; exit 1 ;;
+  *) echo "schema-snapshot: could not read Leads v105 registry ledger state" >&2; exit 1 ;;
 esac
-if [ "$LEADS_REGISTRY_APPLIED" = t ] && [ "$FIND_RULE_REGISTRY_APPLIED" != t ]; then
-  echo "schema-snapshot: Leads v104 is applied without v103 predecessor" >&2
+if [ "$LEADS_REGISTRY_APPLIED" = t ] && [ "$JEV_CAP_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: Leads v105 is applied without v104 predecessor" >&2
   exit 1
 fi
 
@@ -3122,7 +3134,7 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                                        SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v102'"
                                        SCAC_FULL_SET_SEAL_COUNT=102
                                        SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v103_current()"
-                                     if [ "$LEADS_REGISTRY_APPLIED" = t ]; then
+                                     if [ "$JEV_CAP_REGISTRY_APPLIED" = t ]; then
                                        SCAC_CURRENT_NUMBER=104
                                        SCAC_VERSION_COUNT=104
                                        SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v104'")"
@@ -3132,6 +3144,17 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                                        SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v103'"
                                        SCAC_FULL_SET_SEAL_COUNT=103
                                        SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v104_current()"
+                                       if [ "$LEADS_REGISTRY_APPLIED" = t ]; then
+                                         SCAC_CURRENT_NUMBER=105
+                                         SCAC_VERSION_COUNT=105
+                                         SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v105'")"
+                                         SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v105'")"
+                                         SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v105.generated.js"
+                                         SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v105'"
+                                         SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v104'"
+                                         SCAC_FULL_SET_SEAL_COUNT=104
+                                         SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v105_current()"
+                                       fi
                                      fi
                                      fi
                                      fi

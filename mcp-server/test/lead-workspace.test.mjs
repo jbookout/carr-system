@@ -63,14 +63,14 @@ test('Archived stage migration is explicit and never rewrites history',async()=>
 
 test('actor switch between read and command refuses all three writes before mutation',async()=>{for(const verb of ['claim-lead','link-lead-client','update-lead']){const db=new Fake();await assert.rejects(()=>TOOLS[verb].handler(db,human,args({expected_actor:'dell',client_id:id(800),confirmed:true,fields:{stage:'qualified'}})),e=>e.payload.error==='account_changed');assert.equal(db.updated,undefined)}});
 
- test('Leads frontier follows immutable human-only confirm-merge registry', async()=>{
+ test('Leads frontier follows the immutable capped Worker registry', async()=>{
   const { SCAC_MUTATION_REGISTRY_VERSION, registeredOperation } = await import('../src/mutation-registry.js');
-  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, 'scac-mutation-registry.v104');
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, 'scac-mutation-registry.v105');
   assert.equal(registeredOperation('confirm-merge').human_only, true);
   for (const name of ['claim-lead','link-lead-client','update-lead','lead-board'])
     assert.ok(registeredOperation(name));
   const migration = await readFile(new URL('../../migrations/0784_leads_scac_successor.sql',import.meta.url),'utf8');
-  assert.match(migration,/0770_find_rule_scac_successor.sql/);
+  assert.match(migration,/0773_jev_cap_scac_successor.sql/);
   assert.match(migration,/0783_lead_archived_stage.sql/);
  });
 

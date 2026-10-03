@@ -233,8 +233,30 @@ event fails the check.
 
 ## Progress board
 
-For work >5 steps or >30 min, update `out/boards/<project>.html` via
-`tools/progress_board.py` after each step; record Joe questions with defaults.
+For work >5 steps or >30 min, update the board via `tools/progress_board.py`
+after each step; record Joe questions with defaults, and give a blocked task
+`--reason` and `--next-action`. Every `init`, `task`, `ask`, `answer`,
+`deliver` and `note` writes `out/boards/<project>.json` under a per-board lock
+and publishes it; the only board UI is https://app.doctorcre.com/progress-board
+(`?board=<project>`, or `?board=all-repos` for every jbookout PR). A failed
+publish exits nonzero with the local state kept and names the retry
+(`render <project> --publish`); `PROGRESS_BOARD_LOCAL_ONLY=1` skips publishing
+and says so. There is no static HTML copy. The launchd job runs
+`ops/progress-board-render.sh` from a repository checkout, which binds
+`CARR_REPO_ROOT` and the repo's `.venv` Python; never run an extracted copy.
+The installer defaults to the canonical checkout. Before a PR merges,
+`install-progress-board --repo <retained-checkout> --apply` and
+`verify-progress-board --repo <retained-checkout>` can bind and verify its
+runner without changing main. Keep that checkout available until reinstalling
+from canonical main; the installer preserves canonical `out/boards` state.
+A `done` card with no PR is Live (complete). A project card with a merged PR
+stays Merged until production shows it: only `--delivery-target worker`
+(carr-system) or `app` (doctorcre-app) completes from the release readback;
+any other target, or none (a local tool, a LaunchAgent), needs `--stage live
+--evidence` naming its operational receipt. An all-repos card goes Live once
+a verified release of a lane that deploys every path it changed contains its
+merge commit. `failed` and `superseded` need
+`--reason` and leave the pipeline for the History list.
 
 ## Git discipline on a shared tree
 
