@@ -40,7 +40,7 @@ test('Codex session read has its own sealed successor', () => {
 });
 
 test('Observatory read has a forward seal after the current main history', () => {
-  const sql = read('migrations/0772_observatory_room_read_scac_successor.sql');
+  const sql = read('migrations/0783_observatory_room_read_scac_successor.sql');
   assert.match(sql, /scac-mutation-registry\.v103/);
   assert.match(sql, /scac-mutation-registry\.v104/);
   assert.match(read('mcp-server/src/scac-mutation-registry.v104.generated.js'), /mcp-tool:read-room-latest/);
