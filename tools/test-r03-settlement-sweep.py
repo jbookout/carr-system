@@ -13,6 +13,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -30,13 +31,7 @@ RUNNER = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = RUNNER
 SPEC.loader.exec_module(RUNNER)
 
-RESTORE_PATH = ROOT / "tools" / "r03_settlement_restore_set.py"
-RESTORE_SPEC = importlib.util.spec_from_file_location("r03_settlement_restore_set", RESTORE_PATH)
-if RESTORE_SPEC is None or RESTORE_SPEC.loader is None:
-    raise RuntimeError("could not load R03 restore-set module")
-RESTORE = importlib.util.module_from_spec(RESTORE_SPEC)
-sys.modules[RESTORE_SPEC.name] = RESTORE
-RESTORE_SPEC.loader.exec_module(RESTORE)
+RESTORE = sys.modules["r03_settlement_restore_set"]
 
 
 def checked(argv: list[str], cwd: Path) -> str:
@@ -107,6 +102,10 @@ class Fixture:
                 "argv": ["git", "clean", "-fd", "--", *paths],
                 "pathspecs": paths,
             })
+        if manifest["restore"]:
+            restore_paths = [entry["path"] for entry in manifest["restore"]]
+            argv = RUNNER.restore_command(manifest["pinned_origin_main"], restore_paths)
+            commands.append({"id": "stage5.restore", "argv": argv, "pathspecs": restore_paths})
         # Stage 3 pushes every backed-up branch tip to the remote in one atomic
         # command, so the allowlist has to carry it whenever any branch declares
         # a backup ref. Mirrors what the real manifest authoring emits.
@@ -257,12 +256,7 @@ def test_branch_law_retains_unmerged_and_unbacked_squash(root: Path) -> None:
 
 
 # ── RESTORE-SET DERIVATION ───────────────────────────────────────────────────
-# These live here rather than in their own tools/test-*.py on purpose. Any
-# tracked .py carrying an `if __name__ == "__main__":` block is discovered by
-# ops/scac-mutation-inventory.mjs as a script entrypoint, so a NEW test file
-# would move the sealed non-MCP source count (531 -> 532) and oblige a
-# regeneration of reviewed registry seals. This file is already inventoried, so
-# adding cases to it costs nothing.
+# These cases exercise the authoring module and the versioned runner together.
 
 
 def restore_repo(root: Path, name: str) -> Path:
@@ -275,7 +269,7 @@ def restore_repo(root: Path, name: str) -> Path:
     (repository / "hooks").mkdir()
     (repository / "hooks" / "worktree-self-plumb.py").write_text("original\n", encoding="utf-8")
     (repository / "keep.txt").write_text("keep\n", encoding="utf-8")
-    git(repository, "add", "-A")
+    git(repository, "add", "hooks", "keep.txt")
     git(repository, "commit", "-m", "restore fixture base")
     return repository
 
@@ -306,7 +300,9 @@ def test_restore_approved_dirty_path_carries_its_pinned_blob(root: Path) -> None
     pin = pin_of(repository)
     expected = git(repository, "rev-parse", f"{pin}:{path}").strip()
     (repository / path).write_text("changed\n", encoding="utf-8")
-    assert RESTORE.build_restore_set(repository, pin, [path]) == [{"path": path, "blob_oid": expected}]
+    entry = RESTORE.build_restore_set(repository, pin, [path])[0]
+    assert entry["path"] == path and entry["blob_oid"] == expected
+    assert entry["observed_state"].startswith("sha256:")
 
 
 def test_restore_first_dirty_path_is_not_truncated(root: Path) -> None:
@@ -327,7 +323,7 @@ def test_restore_path_containing_a_space_survives(root: Path) -> None:
     repository = restore_repo(root, "restore-spaced")
     noisy = "hooks/two words.py"
     (repository / noisy).write_text("x\n", encoding="utf-8")
-    git(repository, "add", "-A")
+    git(repository, "add", noisy)
     git(repository, "commit", "-m", "add spaced path")
     pin = pin_of(repository)
     (repository / noisy).write_text("y\n", encoding="utf-8")
@@ -607,6 +603,267 @@ def test_empty_clean_set_never_cleans_whole_tree(root: Path) -> None:
     print("PASS empty_clean_set_never_cleans_whole_tree")
 
 
+
+def test_review_poisoned_environment(root: Path) -> None:
+    repository = restore_repo(root, "poison-target")
+    other = restore_repo(root, "poison-decoy")
+    (repository / "keep.txt").write_text("unapproved edit\n")
+    with patch.dict(os.environ, {"GIT_DIR": str(other / ".git"), "GIT_WORK_TREE": str(other),
+                                 "GIT_INDEX_FILE": str(other / ".git/index")}):
+        try:
+            RESTORE.build_restore_set(repository, pin_of(repository), [])
+        except RESTORE.RestoreSetRefusal:
+            return
+    raise AssertionError("poisoned environment hid the target's dirty path")
+
+
+def test_review_authoring_to_execution_drift(root: Path) -> None:
+    for index_only in (False, True):
+        fixture = Fixture(root / f"approved-state-{index_only}")
+        tracked = fixture.repository / "tracked.txt"
+        tracked.write_text("approved edit\n")
+        manifest = fixture.manifest(clean_pathspecs=[], clean_expected=[])
+        manifest["restore"] = RESTORE.build_restore_set(fixture.repository, fixture.pin, ["tracked.txt"])
+        tracked.write_text("later edit\n")
+        if index_only:
+            git(fixture.repository, "add", "tracked.txt")
+            tracked.write_text("approved edit\n")
+        before = tracked.read_bytes()
+        try:
+            invoke(fixture, manifest, execute=True)
+        except RUNNER.SweepError as exc:
+            assert "observed state" in str(exc), str(exc)
+        else:
+            raise AssertionError("authoring authorization survived a later worktree/index edit")
+        assert tracked.read_bytes() == before
+
+
+def test_review_literal_checkout_scope(root: Path) -> None:
+    repository = restore_repo(root, "literal-pathspec")
+    for name in ("*.txt", ":(glob)*.txt"):
+        (repository / name).write_text("pinned\n")
+    git(repository, "add", "--", ":(literal)*.txt", ":(literal):(glob)*.txt")
+    git(repository, "commit", "-m", "literal names")
+    pin = pin_of(repository)
+    (repository / "*.txt").write_text("approved\n")
+    entries = RESTORE.build_restore_set(repository, pin, ["*.txt"])
+    (repository / "keep.txt").write_text("later unrelated edit\n")
+    argv = RUNNER.restore_command(pin, [e["path"] for e in entries])
+    checked(argv, repository)
+    assert (repository / "keep.txt").read_text() == "later unrelated edit\n", "wildcard expanded restoration"
+    assert (repository / "*.txt").read_text() == "pinned\n"
+    (repository / ":(glob)*.txt").write_text("approved magic\n")
+    argv = RUNNER.restore_command(pin, [":(glob)*.txt"])
+    checked(argv, repository)
+    assert (repository / "keep.txt").read_text() == "later unrelated edit\n"
+
+
+def test_review_filename_bytes(root: Path) -> None:
+    repository = restore_repo(root, "filename-bytes")
+    names = ["hooks/x\ry.py", "hooks/x\r\ny.py", "hooks/x\ny.py"]
+    for name in names:
+        (repository / name).write_bytes(b"pinned\n")
+        git(repository, "add", "--", name)
+    git(repository, "commit", "-m", "filename bytes")
+    pin = pin_of(repository)
+    for name in names:
+        (repository / name).write_bytes(b"edit\n")
+        assert RESTORE.dirty_paths(repository) == [name], repr(RESTORE.dirty_paths(repository))
+        assert RESTORE.build_restore_set(repository, pin, [name])[0]["path"] == name
+        try:
+            RESTORE.build_restore_set(repository, pin, [names[(names.index(name) + 1) % len(names)]])
+        except RESTORE.RestoreSetRefusal:
+            pass
+        else:
+            raise AssertionError("filename alias bypassed approval")
+        (repository / name).write_bytes(b"pinned\n")
+
+    # APFS rejects invalid UTF-8 filenames. Exercise the raw Git output seam
+    # here as well, so the same lossless parser is covered on every platform.
+    raw = b" M hooks/non-utf8-\xff.py\0"
+    with patch.object(RESTORE.subprocess, "run", return_value=subprocess.CompletedProcess(["git"], 0, raw, b"")):
+        assert RESTORE.dirty_paths(repository) == [os.fsdecode(b"hooks/non-utf8-\xff.py")]
+
+
+def test_review_rename_refusal(root: Path) -> None:
+    for existing_destination in (True, False):
+        repository = restore_repo(root, f"rename-{existing_destination}")
+        if existing_destination:
+            (repository / "renamed.txt").write_text("keep\n")
+            git(repository, "add", "renamed.txt")
+            git(repository, "commit", "-m", "pinned destination")
+        pin = pin_of(repository)
+        if existing_destination:
+            git(repository, "rm", "renamed.txt")
+            git(repository, "commit", "-m", "remove destination")
+        git(repository, "mv", "keep.txt", "renamed.txt")
+        for allowed in (["renamed.txt"], ["keep.txt", "renamed.txt"]):
+            try:
+                RESTORE.build_restore_set(repository, pin, allowed)
+            except RESTORE.RestoreSetRefusal as exc:
+                assert "rename" in str(exc) or "copy" in str(exc), str(exc)
+            else:
+                raise AssertionError("rename silently dropped its source deletion")
+
+
+def test_review_versioned_authoring_route(root: Path) -> None:
+    fixture = Fixture(root / "author-route")
+    (fixture.repository / "tracked.txt").write_text("approved edit\n")
+    template = fixture.manifest(clean_pathspecs=[], clean_expected=[])
+    template["approved"] = False
+    template_path = root / "template.json"
+    template_path.write_text(json.dumps(template))
+    stdout = io.StringIO()
+    with contextlib.redirect_stdout(stdout):
+        result = RUNNER.main(["--repository", str(fixture.repository), "--author-template", str(template_path),
+                              "--approve-restore-path", "tracked.txt"])
+    assert result == 0
+    manifest = json.loads(stdout.getvalue())
+    assert manifest["approved"] is False, "authoring may not grant admission"
+    assert "observed_state" in manifest["restore"][0]
+    manifest["approved"] = True  # simulated operator admission of these exact bytes
+    assert "STAGE 6 closing readback passed" in invoke(fixture, manifest, execute=True)
+    assert (fixture.repository / "tracked.txt").read_text() == "tracked\n"
+    # A manually prebuilt old entry cannot bypass the same admission predicate.
+    (fixture.repository / "tracked.txt").write_text("unapproved edit\n")
+    manifest["restore"] = [{"path": "tracked.txt", "blob_oid": git(fixture.repository, "rev-parse", f"{fixture.pin}:tracked.txt").strip()}]
+    try:
+        invoke(fixture, manifest, execute=True)
+    except RUNNER.SweepError:
+        return
+    raise AssertionError("prebuilt manifest bypassed authoring state binding")
+
+
+def test_review_git_timeout(root: Path) -> None:
+    # The bounded executable blocks only one selected Git operation, while
+    # all fixture setup and the other calls remain real Git.
+    import shutil
+    real_git = shutil.which("git")
+    assert real_git
+    repository = restore_repo(root, "git-timeout")
+    (repository / "keep.txt").write_text("edit\n")
+    wrapper_dir = root / "git-wrapper"
+    wrapper_dir.mkdir()
+    wrapper = wrapper_dir / "git"
+    wrapper.write_text("#!/usr/bin/env python3\nimport os,sys,time\n"
+                       "if os.environ['STALL_GIT'] in sys.argv: time.sleep(10)\n"
+                       f"os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])\n")
+    wrapper.chmod(0o755)
+    pin = pin_of(repository)
+    for operation in ("status", "ls-tree"):
+        with patch.dict(os.environ, {"PATH": str(wrapper_dir) + os.pathsep + os.environ["PATH"], "STALL_GIT": operation}), \
+             patch.object(RESTORE, "GIT_TIMEOUT_SECONDS", 0.1, create=True):
+            try:
+                RESTORE.build_restore_set(repository, pin, ["keep.txt"])
+            except RESTORE.RestoreSetRefusal as exc:
+                assert "timed out" in str(exc), str(exc)
+            else:
+                raise AssertionError(f"{operation} wait had no fail-closed bound")
+
+
+
+def test_restore_authoring_failures_publish_nothing(root: Path) -> None:
+    fixture = Fixture(root / "author-refusal")
+    (fixture.repository / "tracked.txt").write_text("unapproved\n")
+    template = fixture.manifest(clean_pathspecs=[], clean_expected=[])
+    template["approved"] = False
+    template_path = root / "refused-template.json"
+    template_path.write_text(json.dumps(template))
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        assert RUNNER.main(["--repository", str(fixture.repository), "--author-template", str(template_path)]) == 78
+    assert stdout.getvalue() == "", "refusal published a partial manifest"
+    assert "approved restore allow-list" in stderr.getvalue()
+    with patch.object(RESTORE, "GIT_TIMEOUT_SECONDS", 0.01), \
+         patch.object(RESTORE.subprocess, "run", side_effect=subprocess.TimeoutExpired(["git"], 0.01)), \
+         contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        assert RUNNER.main(["--repository", str(fixture.repository), "--author-template", str(template_path),
+                            "--approve-restore-path", "tracked.txt"]) == 78
+    assert stdout.getvalue() == "", "timeout published a partial manifest"
+
+
+def test_restore_special_names_execute(root: Path) -> None:
+    # Keep ignored-file cleaning denied while names after -- remain literal.
+    fixture_check = Fixture(root / "ignored-clean-denial")
+    allowlist = fixture_check.allowlist(fixture_check.manifest(clean_pathspecs=["scratch"], clean_expected=[]), execute=False)
+    allowlist["commands"][0]["argv"] = ["git", "clean", "-fx", "--", "scratch"]
+    try:
+        RUNNER.validate_allowlist(allowlist)
+    except RUNNER.SweepError:
+        pass
+    else:
+        raise AssertionError("ignored-file cleaning was admitted")
+    fixture = Fixture(root / "special-execute")
+    names = ["*.txt", ":(glob)*.txt", "-option.txt", " leading.txt", "cr\rname.txt", "crlf\r\nname.txt", "lf\nname.txt"]
+    for name in names:
+        (fixture.repository / name).write_bytes(b"pinned\n")
+        git(fixture.repository, "--literal-pathspecs", "add", "--", name)
+    git(fixture.repository, "commit", "-m", "special tracked names")
+    git(fixture.repository, "push", "origin", "main")
+    git(fixture.repository, "fetch", "origin", "main")
+    for name in names:
+        (fixture.repository / name).write_bytes(b"approved edit\n")
+    manifest = fixture.manifest(clean_pathspecs=[], clean_expected=[])
+    manifest["restore"] = RESTORE.build_restore_set(fixture.repository, fixture.pin, names)
+    assert "STAGE 6 closing readback passed" in invoke(fixture, manifest, execute=True)
+    assert all((fixture.repository / name).read_bytes() == b"pinned\n" for name in names)
+
+
+def test_restore_midrun_index_change_aborts(root: Path) -> None:
+    fixture = Fixture(root / "restore-index-race")
+    tracked = fixture.repository / "tracked.txt"
+    tracked.write_text("approved edit\n")
+    manifest = fixture.manifest(clean_pathspecs=[], clean_expected=[])
+    manifest["restore"] = RESTORE.build_restore_set(fixture.repository, fixture.pin, ["tracked.txt"])
+    def change_index_only() -> None:
+        tracked.write_text("later staged edit\n")
+        git(fixture.repository, "add", "tracked.txt")
+        tracked.write_text("approved edit\n")
+    try:
+        invoke(fixture, manifest, execute=True, before_disposal=change_index_only)
+    except RUNNER.SweepError as exc:
+        assert "observed state" in str(exc) or "fingerprint changed" in str(exc), str(exc)
+    else:
+        raise AssertionError("disposal failed to protect a changed index")
+    assert tracked.read_text() == "approved edit\n"
+    assert git(fixture.repository, "show", ":tracked.txt") == "later staged edit\n"
+
+
+
+def test_restore_unsupported_pinned_objects_refuse(root: Path) -> None:
+    repository = restore_repo(root, "unsupported-pinned")
+    (repository / "pinned-link").symlink_to("keep.txt")
+    git(repository, "add", "pinned-link")
+    git(repository, "commit", "-m", "pinned symlink")
+    pin = pin_of(repository)
+    (repository / "pinned-link").unlink()
+    (repository / "pinned-link").symlink_to("other.txt")
+    try:
+        RESTORE.build_restore_set(repository, pin, ["pinned-link"])
+    except RESTORE.RestoreSetRefusal:
+        return
+    raise AssertionError("authoring enrolled a pinned object its readback cannot verify")
+
+
+REVIEW_TESTS = [test_review_poisoned_environment, test_review_authoring_to_execution_drift,
+               test_review_literal_checkout_scope, test_review_filename_bytes, test_review_rename_refusal,
+               test_review_versioned_authoring_route, test_review_git_timeout,
+               test_restore_authoring_failures_publish_nothing, test_restore_special_names_execute,
+               test_restore_midrun_index_change_aborts, test_restore_unsupported_pinned_objects_refuse]
+
+
+def review_regressions(root: Path) -> None:
+    failures = []
+    for test in REVIEW_TESTS:
+        try:
+            test(root)
+            print(f"PASS {test.__name__}")
+        except (Exception, SystemExit) as exc:
+            failures.append(test.__name__)
+            print(f"FAIL {test.__name__}: {type(exc).__name__}: {exc}")
+    assert not failures, failures
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="r03-settlement-sweep-") as temporary:
         root = Path(temporary)
@@ -635,6 +892,7 @@ def main() -> int:
         test_branch_identity_survives_concurrent_tag_collision(root)
         test_declared_branch_identity_survives_existing_tag_collision(root)
         test_empty_clean_set_never_cleans_whole_tree(root)
+        review_regressions(root)
     print("r03-settlement-sweep-selftest: PASS")
     return 0
 

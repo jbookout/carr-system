@@ -1,122 +1,106 @@
-"""Derive the R03 settlement's RESTORE set, fail-closed.
+"""State-bound R03 restore authoring and admission.
 
-WHY THIS IS ITS OWN MODULE AND NOT A LOOP INSIDE THE AUTHORING SCRIPT.
-On 2026-09-02 the authoring script built the restore set by taking every path
-`git status --porcelain` reported as dirty in the canonical checkout. The
-settlement then restores each of those paths to its pinned blob. On a checkout
-that a dozen sessions write continuously, "dirty" does not mean "debris" — it
-means SOMEBODY IS MID-EDIT. The manifest authored that day would have reverted
-two files belonging to another session (its in-flight fix to the worktree
-reaper), which is the precise thing decision bf48e5aa had ruled out hours
-earlier: a partner authorisation to fire the sweep does not extend to
-discarding another session's uncommitted work.
-
-That rule existed only as prose in a decision record. Prose does not run. This
-module is that decision expressed as a check, in the one place the set is built.
-
-THE PROCEDURE, ordered, so a second reader reaches the same answer:
-
-  1. Read `git status --porcelain -z` from RAW stdout.
-  2. Every reported path is a CANDIDATE.
-  3. A candidate enters the restore set ONLY if it is on the operator's
-     explicitly approved allow-list.
-  4. A candidate that is NOT on the allow-list REFUSES the whole authoring run.
-     It is never silently enrolled and never silently skipped.
-  5. A clean tree with an empty allow-list yields an empty restore set. That is
-     the normal, healthy case, and it is what the branch-only settlement uses.
-
-WHY REFUSE RATHER THAN SKIP. Skipping would author a manifest that quietly did
-less than the operator believed, and the operator would find out by reading a
-diff that never came. Refusing costs one re-run on a quiet tree and cannot
-destroy anything.
-
-WHY NOT DECIDE OWNERSHIP WITH ops/worktree-attribution.py. That tool answers
-"which WORKTREE has this path dirty", and it was measured against the very case
-that motivated this module: for hooks/worktree-self-plumb.py, dirty in CANONICAL
-itself rather than in any worktree, it reports `owner UNKNOWN`. An
-attribution-based predicate would therefore have MISSED the exact file it was
-written to protect. Attribution is still valuable — it names a human-readable
-owner in the refusal message — but it is reporting, not the gate. The gate is
-the allow-list, because "no worktree claims it" is not evidence that nobody is
-editing it.
+Only explicitly approved tracked dirt may be restored to a pinned regular
+file. Unapproved paths, renames/copies, added paths without a pinned blob and
+unsupported pinned objects refuse the whole set. Attribution is diagnostic.
+Git calls are bounded and use the shared repository-location scrubber; status
+and index bytes preserve literal filenames, including newline and non-UTF-8
+bytes. Each entry binds the current index stages, filesystem mode/type and
+worktree bytes, which the runner rechecks before any restoration.
 """
 from __future__ import annotations
 
+import hashlib
+import os
+import stat
 import subprocess
+import sys
 from pathlib import Path
 from typing import Iterable, Sequence
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "ops"))
+from git_env import scrubbed_env
+
+GIT_TIMEOUT_SECONDS = 60
+
 
 class RestoreSetRefusal(RuntimeError):
-    """Raised when the live tree carries a dirty path the operator did not approve."""
+    """The restore set cannot safely be authored or consumed."""
 
 
-def _git_stdout(repository: Path, *args: str) -> str:
-    """Return git's stdout VERBATIM.
-
-    Deliberately does not .strip(). `git status --porcelain` encodes the
-    worktree status in column 2, so an unstaged modification begins with a
-    SPACE: " M hooks/x.py". A helper that strips the whole captured blob eats
-    that leading space on the FIRST line only; a parser slicing line[3:] then
-    starts one character late and records "ooks/x.py", a path that does not
-    exist. That shipped in a real manifest on 2026-09-02, and it is invisible
-    on every line but the first, which is why review passed it.
-    """
-    result = subprocess.run(
-        ["git", "-C", str(repository), *args],
-        capture_output=True, text=True, check=True,
-    )
+def _git_stdout(repository: Path, *args: str) -> bytes:
+    """Bounded, repository-local Git output without text/newline translation."""
+    try:
+        result = subprocess.run(
+            ["git", "--literal-pathspecs", "-C", str(repository), *args],
+            env=scrubbed_env(), capture_output=True, check=True,
+            timeout=GIT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RestoreSetRefusal("Git timed out; no restore set was authored") from exc
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RestoreSetRefusal(f"Git failed; no restore set was authored: {exc}") from exc
     return result.stdout
 
 
 def dirty_paths(repository: Path) -> list[str]:
-    """Every path git reports as modified, added, deleted or conflicted.
+    """Tracked dirty literal names, decoded losslessly; refuse renames/copies.
 
-    Uses -z so a path containing a space, a quote or a newline cannot be
-    mis-split. Untracked entries are excluded: the settlement's restore stage
-    rewrites tracked content to a pinned blob, and an untracked file has no
-    pinned blob to be restored to.
+    Restoration only supports existing pinned files. A rename/copy carries a
+    second path and different operations, so refuse it rather than omit a side.
+    Untracked files belong to the separately admitted clean/park sets.
     """
-    raw = _git_stdout(repository, "status", "--porcelain", "-z")
-    out: list[str] = []
-    fields = raw.split("\0")
-    i = 0
-    while i < len(fields):
-        entry = fields[i]
-        i += 1
+    raw = _git_stdout(repository, "status", "--porcelain=v1", "-z", "--untracked-files=no")
+    out = []
+    for entry in raw.split(b"\0"):
         if not entry:
             continue
-        # Porcelain v1 -z: two status characters, one space, then the path.
         status, path = entry[:2], entry[3:]
-        if status == "??":
-            continue
-        if "R" in status or "C" in status:
-            # A rename/copy is followed by its ORIGIN path as the next field.
-            i += 1
-        if path:
-            out.append(path)
+        if b"R" in status or b"C" in status:
+            raise RestoreSetRefusal("unsupported rename/copy; no restore set was authored")
+        if len(entry) < 4 or entry[2:3] != b" ":
+            raise RestoreSetRefusal("malformed Git status; no restore set was authored")
+        if status != b"??":
+            out.append(path.decode("utf-8", "surrogateescape"))
     return sorted(set(out))
 
 
-def attribute(repository: Path, paths: Sequence[str]) -> dict[str, str]:
-    """Best-effort human-readable owner per path, for the refusal message only.
+def _observed_state(repository: Path, path: str) -> str:
+    """Bind the exact index stages, filesystem type/mode and worktree bytes."""
+    index = _git_stdout(repository, "ls-files", "--stage", "-z", "--", path)
+    target = repository / path
+    try:
+        metadata = target.lstat()
+    except FileNotFoundError:
+        worktree = b"missing"
+    else:
+        if stat.S_ISLNK(metadata.st_mode):
+            body = os.fsencode(os.readlink(target))
+        elif stat.S_ISREG(metadata.st_mode):
+            body = target.read_bytes()
+        else:
+            raise RestoreSetRefusal(f"unsupported restore file type: {path!r}")
+        worktree = str(metadata.st_mode).encode("ascii") + b"\0" + body
+    return "sha256:" + hashlib.sha256(index + b"\0" + worktree).hexdigest()
 
-    Never decides anything. If the attribution tool is missing or fails, every
-    path maps to a plain 'unattributed' and the refusal still fires — a
-    reporting aid that breaks must not be able to open the gate.
-    """
+
+def attribute(repository: Path, paths: Sequence[str]) -> dict[str, str]:
+    """Best-effort diagnostic only; failures never grant restore authority."""
     tool = repository / "ops" / "worktree-attribution.py"
+    owners = {p: "unattributed" for p in paths}
     if not paths or not tool.exists():
-        return {p: "unattributed" for p in paths}
+        return owners
     try:
         result = subprocess.run(
-            ["python3", str(tool), *paths],
-            capture_output=True, text=True, cwd=str(repository), timeout=60,
+            ["python3", str(tool), *paths], env=scrubbed_env(),
+            capture_output=True, text=True, errors="surrogateescape",
+            cwd=str(repository), timeout=60,
         )
     except (OSError, subprocess.SubprocessError):
-        return {p: "unattributed" for p in paths}
-    owners: dict[str, str] = {p: "unattributed" for p in paths}
-    current: str | None = None
+        return owners
+    if result.returncode:
+        return owners
+    current = None
     for line in result.stdout.splitlines():
         stripped = line.strip()
         if stripped in owners:
@@ -129,30 +113,34 @@ def attribute(repository: Path, paths: Sequence[str]) -> dict[str, str]:
 
 def build_restore_set(repository: Path, pin: str,
                       allowed: Iterable[str]) -> list[dict[str, str]]:
-    """The restore set, or a refusal naming every unapproved dirty path.
+    """Author only explicitly allowed tracked dirt, bound to observed state.
 
-    `allowed` is the operator's explicit list of paths this settlement is
-    entitled to restore. An allowed path that is not currently dirty is simply
-    absent from the result — there is nothing to restore — which keeps a stale
-    allow-list from inventing work.
+    No result escapes on failure, timeout, unsupported operations or a changing
+    tree. Approved-but-clean names add nothing. Consumers compare the complete
+    authored entries again at admission and immediately before disposal.
     """
+    if len(pin) not in (40, 64) or any(c not in "0123456789abcdef" for c in pin):
+        raise RestoreSetRefusal("restore pin must be a full hexadecimal object id")
     allow = set(allowed)
     candidates = dirty_paths(repository)
     unapproved = [p for p in candidates if p not in allow]
     if unapproved:
         owners = attribute(repository, unapproved)
-        lines = "\n".join(f"    {p}\n        {owners.get(p, 'unattributed')}"
-                          for p in unapproved)
-        raise RestoreSetRefusal(
-            f"{len(unapproved)} dirty path(s) are not on the approved restore "
-            f"allow-list, so this settlement will not be authored:\n{lines}\n"
-            "  A dirty path in the shared checkout means someone is mid-edit. "
-            "Restoring it to the pinned blob would destroy that work. Either "
-            "wait for a quiet tree, or approve each path deliberately."
-        )
-    restored: list[dict[str, str]] = []
+        lines = "\n".join(f"    {p!r}: {owners[p]}" for p in unapproved)
+        raise RestoreSetRefusal(f"dirty paths are not on the approved restore allow-list:\n{lines}")
+    states = {path: _observed_state(repository, path) for path in candidates}
+    restored = []
     for path in candidates:
-        blob = _git_stdout(repository, "rev-parse", f"{pin}:{path}").strip()
-        if blob:
-            restored.append({"path": path, "blob_oid": blob})
+        raw = _git_stdout(repository, "ls-tree", "-z", pin, "--", path)
+        records = [record for record in raw.split(b"\0") if record]
+        if len(records) != 1:
+            raise RestoreSetRefusal(f"restore path has no single pinned blob: {path!r}")
+        header, found = records[0].split(b"\t", 1)
+        mode, kind, oid = header.split(b" ")
+        if found != os.fsencode(path) or kind != b"blob" or mode not in (b"100644", b"100755"):
+            raise RestoreSetRefusal(f"unsupported pinned restore object: {path!r}")
+        restored.append({"path": path, "blob_oid": oid.decode("ascii"), "observed_state": states[path]})
+    if dirty_paths(repository) != candidates or any(
+            _observed_state(repository, path) != states[path] for path in candidates):
+        raise RestoreSetRefusal("observed state changed during authoring; no restore set was authored")
     return restored
