@@ -38,13 +38,13 @@ Every figure here came out of a query run against production on 2026-08-02.
 
 **The mis-attachment.** 40 deals. 13 carry `segment = 'Example Organization 38'`. All 13 have
 `client_id` = C-900004, whose party is P-900034 Example Organization 65. That is correct for exactly one
-of them, "Trambadia – Marietta/Smyrna GA". The other 12 belong to 12 different franchisees
+of them, "Example Organization 01bf4c3d". The other 12 belong to 12 different franchisees
 who each already had their own person party AND their own client row, all holding **zero**
 deals:
 
 | franchisee | party | client | deal |
 |---|---|---|---|
-| Example Organization 65 | P-900034 | C-900004 | Trambadia – Marietta/Smyrna GA *(already correct)* |
+| Example Organization 65 | P-900034 | C-900004 | Example Organization 01bf4c3d *(already correct)* |
 | Example Organization 10 | P-900037 | C-900005 | Example Organization 11 |
 | Example Organization 89 | P-900032 | C-900012 | Example Organization 130 |
 | Example Organization 160 | P-900047 | C-900006 | Example Organization 6 |
@@ -75,9 +75,9 @@ on the parent, `franchise` on the 13 franchisees.
 
 ---
 
-## 3. The "Ryan Lehman" problem does not exist, and finding that out mattered
+## 3. The "Example Organization b18f0aa7" problem does not exist, and finding that out mattered
 
-I was warned that `deal.name` says "Ryan Lehman" while the party is "Example Organization 98" (double
+I was warned that `deal.name` says "Example Organization b18f0aa7" while the party is "Example Organization 98" (double
 n), that this was the one fuzzy match in the set, and that Joe's standing rule forbids
 asserting an identity link on inference — anything not exactly matchable must be left alone
 and reported.
@@ -175,7 +175,7 @@ should be chosen by a migration:
 Note that Example Organization 38 is arguably not healthcare at all, which is a separate and more
 interesting question than which vertical string to write. CARR's stated verticals are dental,
 medical, veterinary, chiropractic, therapy, vision, fitness and wellness; the pipeline also
-holds a Legal deal (AMA Law Office). Whether music education belongs in this book at all is
+holds a Legal deal (Example Organization 99f6800b). Whether music education belongs in this book at all is
 Joe's call and nothing here presumes an answer.
 
 ---
@@ -270,7 +270,7 @@ update deal set segment = 'national'
 
 **Still open, for Joe:**
 
-1. Whether Moorman and Tadepalli are national accounts in the sense of this ruling — i.e.
+1. Whether Example Organization 1370ea72 and Example Organization efecbbd6 are national accounts in the sense of this ruling — i.e.
    whether each has a brand above them that should become a parent org + national_account
    client the way Example Organization 38 just did. Their `lane` is `national` in the source, which is
    evidence they are national-lane deals, and that is a different claim from being national
@@ -295,7 +295,7 @@ update deal d set client_id = r.from_client
   from deal_reattach_log r where r.deal_id = d.id;
 
 -- 2. every segment goes back to its own source row. This covers all 15 touched deals
---    (13 Example Organization 38 + Moorman + Tadepalli) in one statement and needs no log at all,
+--    (13 Example Organization 38 + Example Organization 1370ea72 + Example Organization efecbbd6) in one statement and needs no log at all,
 --    because deal.source_row is never modified by anything and holds the import verbatim.
 update deal set segment = nullif(source_row->>'seg', '')
  where segment is null and source_row->>'seg' is not null;
@@ -315,10 +315,10 @@ drop table deal_lane;
 ```
 
 **Why segment reverts from `source_row` and not from `deal_reattach_log`.** The log holds
-`from_segment`, but it only has rows for the 12 deals that MOVED — the Trambadia deal was
+`from_segment`, but it only has rows for the 12 deals that MOVED — the Example Organization ee5ed70d deal was
 already on the right client, so it has no log row while its segment was still cleared. Rather
 than log a non-move to paper over that, the revert reads `source_row->>'seg'`, which is the
 untouched Salesforce import and is present on all 40 deals. `from_segment` stays in the log
 because it is the cheaper answer for the 12 and because a log row that records only half of
-what changed is a trap for whoever reads it next. The `nullif(..., '')` matters: Moorman and
-Tadepalli have an empty-string `seg`, which is why they need the second statement.
+what changed is a trap for whoever reads it next. The `nullif(..., '')` matters: Example Organization 1370ea72 and
+Example Organization efecbbd6 have an empty-string `seg`, which is why they need the second statement.

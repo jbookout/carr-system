@@ -22,7 +22,7 @@ it moved identity from role to person.
 | Patterson Dental 10, Example Organization 38 13 | **confirmed** | 10 and 13 |
 | every org row has exactly ONE person pointing at it via `party.org_id` | **confirmed, with no exceptions at all** | the inbound-count distribution over all 415 org rows is a single bucket: `1 → 415`. Not one org has two people; not one has zero |
 | 157 is a RUNNING TOTAL, not a fixed backlog | **confirmed at the code level, not merely inferred** | `add-party` (`mcp-server/src/tools.js:1156`) and `add-premises` (`:1281`) both do an unconditional `insert into party (kind,name,...) values ('org', $1, ...)` whenever an `org_name` is supplied. There is no lookup on either path. Every promotion that carries an employer mints a fresh org row by construction |
-| one org party is literally named `thrivedentalassociates.com` | **true but understated** | **22** org rows are bare domains (`3mg.com`, `smileology.com`, `hpruettdds.com`, `mcgilvraydmd.gccoxmail.com`, …), not one |
+| one org party is literally named `example-6343f421.invalid` | **true but understated** | **22** org rows are bare domains (`example-b00c0fa1.invalid`, `example-50352747.invalid`, `example-e5f57802.invalid`, `example-73bf0a66.invalid`, …), not one |
 
 **The person half of the number does not survive contact with the data.** 115 of the surplus
 is org; the remaining **57** is person, not the 42 that `0046` recorded. 0046 counted
@@ -187,7 +187,7 @@ have no such coupling and can go ahead on their own.
 
 - **Domain matching.** 22 org rows are bare domains. Those rows already hold identity *by
   domain*; they simply are not labelled as such, and some of them almost certainly name the
-  same organisation as a text-named row (`hpruettdds.com` and a Example Organization 109 practice, to
+  same organisation as a text-named row (`example-e5f57802.invalid` and a Example Organization 109 practice, to
   pick the obvious one). Reconciling them needs a verified name↔domain mapping this system
   does not have, so the migration does not guess. The enrichment plan that intends to use
   domain as an exact match key should extend `org_identity_key` in a later migration rather

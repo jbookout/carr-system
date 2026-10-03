@@ -236,6 +236,14 @@ if [ -f "$LOCAL_FIXTURES" ]; then
   . "$LOCAL_FIXTURES"
 fi
 
+# Private fixture inputs are optional; an absent fixture skips its probe.
+# Frozen mutation payloads must be the entire historically recorded request.
+smoke_json() {
+  python3 -c 'import json,sys; print(json.dumps({sys.argv[1]:sys.argv[2]}))' "$1" "$2"
+}
+
+SMOKE_SUPPLIER_ZERO_PATTERN=$(python3 -c 'import json,re,sys; print(re.escape(json.dumps(json.dumps(sys.argv[1]))[1:-1]) + r",[^}]*\\\"retired_aliases\\\":0")' "${SMOKE_SUPPLIER_NAME:-}")
+
 # check <label> <verb> <args> [grep-pattern] [second-grep-pattern]
 # Passes when every rep is non-error, not isError, and (if given) matches the
 # pattern(s). A verb returning an empty-but-valid result still passes: this is a
@@ -317,9 +325,9 @@ fi
 # target C-900019 containing V-ATT-009's name (SMOKE_GRAPH_TWO_HOP_NAME, local
 # fixture) can only have come from the recursive walk joining two separate
 # edges. If the traversal ever breaks, this goes red. (The refs stay tracked.)
-if [ -n "${SMOKE_GRAPH_CLIENT_SURNAME:-}" ] && [ -n "${SMOKE_GRAPH_TWO_HOP_NAME:-}" ]; then
+if [ -n "${SMOKE_GRAPH_CLIENT_SURNAME:-}" ] && [ -n "${SMOKE_GRAPH_TWO_HOP_NAME:-}" ] && [ -n "${SMOKE_GRAPH_CLIENT_REF:-}" ]; then
   check "who-do-we-know: the two-hop V-ATT-009 -> V-BNK-013 -> client path" \
-        who-do-we-know '{"target":"C-900019"}' "$SMOKE_GRAPH_TWO_HOP_NAME" '\\"hops\\":2'
+        who-do-we-know "$(smoke_json target "$SMOKE_GRAPH_CLIENT_REF")" "$SMOKE_GRAPH_TWO_HOP_NAME" '\\"hops\\":2'
 else
   echo
   echo "  SKIP  graph probe (who-do-we-know two-hop) — no smoke-reads.local.env"
@@ -466,10 +474,12 @@ if [ "$PROBE_MODE" -eq 1 ]; then
   echo "  SKIP  auto-edge path — log-activity links[] is outside the locked 'probe' profile"
   echo "        (server returns not_in_profile). Not a failure — that is the lock working."
   echo "        Run under a partner's OAuth session to exercise the auto-edge path."
+elif [ -z "${SMOKE_LINKS_PROBE_ARGS:-}" ]; then
+  echo "  SKIP  auto-edge path — private frozen SMOKE_LINKS_PROBE_ARGS is absent"
 else
 _l_ok=1; _l_why=""
 for i in $(seq 1 "$REPS"); do
-  call log-activity '{"idempotency_key":"smoke-links-probe-permanent","ref":"V-BNK-013","kind":"note","summary":"smoke links probe — edge already exists, replayed for ever after","links":[{"from_ref":"V-BNK-013","to_ref":"C-900019","kind":"intro"}]}'
+  call log-activity "$SMOKE_LINKS_PROBE_ARGS"
   if echo "$RESULT" | grep -q '"error"'; then _l_ok=0; _l_why="transport/protocol error"; break; fi
   if echo "$RESULT" | grep -q '"isError":true'; then _l_ok=0; _l_why="verb returned isError (ref resolution under carr_writer?)"; break; fi
   if ! echo "$RESULT" | grep -q '\\"ok\\":true'; then _l_ok=0; _l_why="no ok:true in the envelope response"; break; fi
@@ -613,14 +623,21 @@ echo "--- negative-answer probes: a WRONG answer must fail, not just a dead verb
 # simply not done yet. Key present but WRONG CONTENT is a real regression and
 # goes red. CAP_ORG carries that decision to the second probe so the two cannot
 # disagree about whether the feature exists.
+CAP_ORG=0
+if [ -n "${SMOKE_SUPPLIER_NAME:-}" ] && [ -n "${SMOKE_SUPPLIER_SURVIVOR_REF:-}" ] \
+    && [ -n "${SMOKE_SUPPLIER_TOMBSTONE_REF:-}" ]; then
 CAP_ORG=1
-call find '{"query":"Example Organization 25"}'
+call find "$(smoke_json query "$SMOKE_SUPPLIER_NAME")"
 if ! echo "$RESULT" | grep -q '\\"organizations\\"'; then
   CAP_ORG=0
   echo "  SKIP  org visibility — this Worker has no \"organizations\" block in its find response."
   echo "        That means migration 0056 (v_ref_index party branch) and/or the widened"
   echo "        subject_type filter in mcp-server/src/tools.js has not reached production."
   echo "        Apply 0056 and deploy the Worker, then these two probes go live. Not a failure."
+fi
+
+else
+  echo "  SKIP  supplier visibility — private SMOKE_SUPPLIER_* fixtures are absent"
 fi
 
 if [ "$CAP_ORG" -eq 1 ]; then
@@ -632,13 +649,13 @@ if [ "$CAP_ORG" -eq 1 ]; then
   # red when someone cleans up the data is a probe that teaches people to delete
   # probes.
   refute "find 'Example Organization 25' surfaces the ORG, not a trigram hit on 'Henry'" \
-         find '{"query":"Example Organization 25"}' '\\"organizations\\":\[\]' 'Example Organization 25'
+         find "$(smoke_json query "$SMOKE_SUPPLIER_NAME")" '\\"organizations\\":\[\]' "$SMOKE_SUPPLIER_NAME"
 
   # The false-absence half, and the worse of the two symptoms. This verb used to
   # answer "No record and no graph node matches that name" for an org carrying
   # 17 live rows. That sentence must never appear for a name the book holds.
   refute "who-do-we-know 'Example Organization 25' does NOT claim absence" \
-         who-do-we-know '{"target":"Example Organization 25"}' 'No record and no graph node matches' \
+         who-do-we-know "$(smoke_json target "$SMOKE_SUPPLIER_NAME")" 'No record and no graph node matches' \
          '\\"matching_records\\"'
 fi
 
@@ -713,7 +730,7 @@ fi
 CAP_SPLIT=0
 if [ "$CAP_ORG" -eq 1 ]; then
   CAP_SPLIT=1
-  call find '{"query":"Example Organization 25"}'
+  call find "$(smoke_json query "$SMOKE_SUPPLIER_NAME")"
   if echo "$RESULT" | grep -q '\\"duplicate_rows\\"'; then
     CAP_SPLIT=0
     echo
@@ -728,7 +745,7 @@ if [ "$CAP_SPLIT" -eq 1 ]; then
   # merely accompanied by better ones, because a caller reading the old key would
   # still be reading the wrong answer.
   refute "find 'Example Organization 25': one LIVE org row, and no blended duplicate count" \
-         find '{"query":"Example Organization 25"}' '\\"duplicate_rows\\"' '\\"live_rows\\":1'
+         find "$(smoke_json query "$SMOKE_SUPPLIER_NAME")" '\\"duplicate_rows\\"' '\\"live_rows\\":1'
   # …and the tombstones are still counted rather than deleted from the answer.
   # Paired with the zero-side probe below: together they prove retired_aliases is
   # read from the data and is not a constant in either direction.
@@ -743,10 +760,14 @@ if [ "$CAP_SPLIT" -eq 1 ]; then
   # P- tombstone is listed rather than a specific count, because the count grows
   # with every merge and a hardcoded 16 would just be tomorrow's false failure.
   refute "…and its retired aliases are counted, not dropped" \
-         find '{"query":"Example Organization 25"}' \
-         '\\"name\\":\\"Example Organization 25\\",[^}]*\\"retired_aliases\\":0' '\\"retired_refs\\":\[\\"P-'
-  check  "…and retired_aliases really reads 0 for an org that has no tombstones" \
-         find '{"query":"1st Med Transitions"}' '\\"retired_aliases\\":0' '1st Med Transitions'
+         find "$(smoke_json query "$SMOKE_SUPPLIER_NAME")" \
+         "$SMOKE_SUPPLIER_ZERO_PATTERN" '\\"retired_refs\\":\[\\"P-'
+  if [ -n "${SMOKE_SUPPLIER_ZERO_ALIAS_NAME:-}" ]; then
+    check "…and retired_aliases reads 0 for an org that has no tombstones" \
+          find "$(smoke_json query "$SMOKE_SUPPLIER_ZERO_ALIAS_NAME")" '\\\"retired_aliases\\\":0' "$SMOKE_SUPPLIER_ZERO_ALIAS_NAME"
+  else
+    echo "  SKIP  supplier zero-alias probe — private fixture is absent"
+  fi
 
   # The merged-org fixture: 13 party rows, 12 retired, and the survivor NO
   # LONGER HAS A PARTY REF. WR-000049: real name/refs live only in
@@ -788,7 +809,7 @@ if [ "$CAP_SPLIT" -eq 1 ]; then
     echo "        refs. Not a failure: see the fixture note near the top."
   fi
   refute "who-do-we-know 'Example Organization 25' names the survivor and never a tombstone" \
-         who-do-we-know '{"target":"Example Organization 25"}' 'P-900028' 'P-900027'
+         who-do-we-know "$(smoke_json target "$SMOKE_SUPPLIER_NAME")" "$SMOKE_SUPPLIER_TOMBSTONE_REF" "$SMOKE_SUPPLIER_SURVIVOR_REF"
   # Refusing to OFFER a tombstone must not mean pretending it is not there.
   if [ -n "${SMOKE_ORG_MERGE_NAME:-}" ] && [ -n "${SMOKE_ORG_MERGE_TOMBSTONE_COUNT:-}" ]; then
     check  "…and it still says how many retired aliases it declined to offer" \

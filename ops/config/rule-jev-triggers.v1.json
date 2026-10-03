@@ -597,7 +597,7 @@
    }
   },
   "3b0cd546": {
-   "always_on_probability": 0.1,
+   "always_on_probability": 0.13,
    "id": "3b0cd546",
    "mode": "triggered",
    "model": "jev-1.13.0",
@@ -610,14 +610,12 @@
    "triggers": {
     "commands": {},
     "keywords": {
-     "banks competing": 0.51,
-     "block named": 0.53,
-     "broker patterson": 0.64,
-     "competing healthcare": 0.51,
-     "name-dropping": 0.65,
-     "named-rivalry": 0.69,
-     "patterson": 0.71,
-     "rivalry": 0.51
+     "banks competing": 0.55,
+     "block named": 0.51,
+     "broker patterson": 0.59,
+     "name-dropping": 0.62,
+     "named-rivalry": 0.66,
+     "patterson": 0.67
     },
     "paths": {},
     "tools": {},
@@ -1024,12 +1022,12 @@
    }
   },
   "5d44d3f3": {
-   "always_on_probability": 0.05,
+   "always_on_probability": 0.06,
    "id": "5d44d3f3",
    "mode": "triggered",
    "model": "jev-1.13.0",
    "negatives": {
-    "gets tier": 0.68
+    "gets tier": 0.71
    },
    "no_cue_probability": 0.14,
    "packs": [
@@ -1039,16 +1037,18 @@
    "triggers": {
     "commands": {},
     "keywords": {
-     "backfill": 0.74,
-     "c-900002": 0.62,
-     "gets open-source": 0.62,
-     "harborline pelvic therapy (fka bayline pelvic floor)": 0.58,
-     "intake": 0.53,
-     "open-source": 0.52,
-     "open-source verification": 0.74,
-     "stamp": 0.64,
-     "unverified": 0.56,
-     "verification backfill": 0.8,
+     "already system": 0.5,
+     "backfill": 0.75,
+     "c-900002": 0.51,
+     "gets open-source": 0.63,
+     "harborline pelvic therapy (fka bayline pelvic floor)": 0.54,
+     "intake": 0.56,
+     "nppes": 0.5,
+     "open-source": 0.55,
+     "open-source verification": 0.71,
+     "stamp": 0.63,
+     "unverified": 0.59,
+     "verification backfill": 0.81,
      "verification stamp": 0.71
     },
     "paths": {},
@@ -1625,7 +1625,7 @@
    }
   },
   "83b9a362": {
-   "always_on_probability": 0.09,
+   "always_on_probability": 0.08,
    "id": "83b9a362",
    "mode": "triggered",
    "model": "jev-1.13.0",
@@ -1638,10 +1638,10 @@
    "triggers": {
     "commands": {},
     "keywords": {
-     "avoid gets": 0.68,
-     "caveat": 0.5,
+     "avoid gets": 0.64,
+     "caveat": 0.51,
      "confirm this pairing logic": 0.74,
-     "suggest caveat": 0.71
+     "suggest caveat": 0.7
     },
     "paths": {},
     "tools": {},

@@ -4064,11 +4064,11 @@ path = pathlib.Path(sys.argv[2])
 try:
     corpus = pii_guard.load_corpus(
         pathlib.Path(sys.argv[1]) / "ops/config/public-source-identities.v1.json")
-    projected = pii_guard.sanitize_snapshot(path.read_text(encoding="utf-8"), corpus)
+    projected = pii_guard.sanitize_snapshot(path.read_bytes().decode("utf-8"), corpus)
 except (OSError, ValueError):
     print("db/schema.sql:1", file=sys.stderr)
     raise SystemExit(1)
-path.write_text(projected, encoding="utf-8")
+path.write_bytes(projected.encode("utf-8"))
 PUBLIC_SNAPSHOT_PROJECTION
 then
   exit 1

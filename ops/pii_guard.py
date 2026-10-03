@@ -5,7 +5,6 @@ It is not encryption and does not prevent guessing a known name. Refresh the
 corpus with read-only record-layer calls on the private operator machine.
 """
 import hashlib
-import io
 import json
 import pathlib
 import re
@@ -53,105 +52,201 @@ def check(source, corpus_path, *, output):
     return _check_corpus(source, corpus, output=output)
 
 
-def _check_corpus(source, corpus, *, output):
+def _text_views(text):
+    """Raw text and JSON string values, each mapped to original source offsets."""
+    # JSON string literals occur in JSON files, code, and COPY reference prose.
+    for match in re.finditer(r'"(?:[^"\\]|\\.)*"', text):
+        raw = match[0]
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            continue
+        positions = []
+        i = 1
+        while i < len(raw) - 1:
+            begin = i
+            if raw[i] == "\\":
+                i += 6 if raw[i + 1] == "u" else 2
+                # JSON surrogate pairs represent one Unicode character.
+                if (raw[begin:begin + 2] == "\\u" and i + 6 <= len(raw) - 1
+                        and raw[i:i + 2] == "\\u"
+                        and 0xD800 <= int(raw[begin + 2:begin + 6], 16) <= 0xDBFF
+                        and 0xDC00 <= int(raw[i + 2:i + 6], 16) <= 0xDFFF):
+                    i += 6
+            else:
+                i += 1
+            positions.append((match.start() + begin, match.start() + i))
+        if len(value) == len(positions):
+            yield value, positions
+
+
+def identity_spans(text, corpus):
+    """One matcher for detection and projection, including serialized strings."""
     banned = set(corpus["hashes"])
     found = set()
-    for path, text in source:
-        words = [(word, line) for line, value in enumerate(text.split("\n"), 1)
-                 for word in tokens(value)]
-        for start, (_, line) in enumerate(words):
+    raw_words = [(word, m.start(), m.end()) for m in re.finditer(r"(?:[^\W_]|[\u0300-\u036f\u1ab0-\u1aff\u1dc0-\u1dff\u20d0-\u20ff\ufe20-\ufe2f])+", text)
+                 for word in tokens(m[0])]
+    views = [raw_words]
+    for value, positions in _text_views(text):
+        words = [(word, positions[m.start()][0], positions[m.end() - 1][1])
+                 for m in re.finditer(r"(?:[^\W_]|[\u0300-\u036f\u1ab0-\u1aff\u1dc0-\u1dff\u20d0-\u20ff\ufe20-\ufe2f])+", value) for word in tokens(m[0])]
+        views.append(words)
+    for words in views:
+        for start, (_, begin, _) in enumerate(words):
             phrase = ""
-            for word, _ in words[start:start + corpus["max_tokens"]]:
+            for word, _, end in words[start:start + corpus["max_tokens"]]:
                 phrase += word
                 digest = hashlib.sha256((corpus["salt"] + "\0" + phrase).encode()).hexdigest()
                 if digest in banned:
-                    found.add((path, line))
+                    found.add((begin, end, digest))
+    return sorted(found, key=lambda row: (row[0], -row[1]))
+
+
+def _check_corpus(source, corpus, *, output):
+    found = set()
+    for path, text in source:
+        for begin, _, _ in identity_spans(text, corpus):
+            found.add((path, text.count("\n", 0, begin) + 1))
     for path, line in sorted(found):
         output.write(f"{path}:{line}\n")
     return int(bool(found))
 
 
 def synthetic_prose(text, corpus):
-    """Replace matched identity spans with deterministic synthetic stand-ins."""
-    words = [("".join(tokens(m[0])), m.start(), m.end())
-             for m in re.finditer(r"[^\W_]+", text) if tokens(m[0])]
-    hashes = set(corpus["hashes"])
+    """Replace identities through the detector's source-mapped spans."""
     replacements = []
     consumed = 0
-    for start, (_, begin, _) in enumerate(words):
+    for begin, end, digest in identity_spans(text, corpus):
         if begin < consumed:
             continue
-        phrase = ""
-        match = None
-        for word, _, end in words[start:start + corpus["max_tokens"]]:
-            phrase += word
-            digest = hashlib.sha256((corpus["salt"] + "\0" + phrase).encode()).hexdigest()
-            if digest in hashes:
-                match = (end, digest)
-        if match:
-            end, digest = match
-            original = text[begin:end]
-            replacement = (original[0] + "-900" + str(int(digest[:8], 16))
-                           if re.fullmatch(r"[CLVP]-\d+", original) else
-                           "Example Organization " + digest[:8])
-            replacements.append((begin, end, replacement))
-            consumed = end
+        original = text[begin:end]
+        replacement = (original[0] + "-900" + str(int(digest[:8], 16))
+                       if re.fullmatch(r"[CLVP]-\d+", original) else
+                       "Example Organization " + digest[:8])
+        # Keep line-comment delimiters/newlines when a name spans comments.
+        if "\n" in original:
+            replacement += "".join("\n" + re.match(r"[ \t]*(?:--)?[ \t]*", line)[0]
+                                   for line in original.split("\n")[1:])
+        replacements.append((begin, end, replacement))
+        consumed = end
     for begin, end, replacement in reversed(replacements):
         text = text[:begin] + replacement + text[end:]
     return text
 
 
-def sanitize_snapshot(text, corpus):
-    """Project public prose only; never rewrite executable SQL or sealed rows.
+def _sql_regions(text):
+    """Yield (begin, end, projectable) using PostgreSQL dump lexical state.
 
-    The only data-row projection is retrieval_proposal, a reference-vocabulary
-    table already exported by schema-snapshot.sh. Primary keys, provenance
-    pointers and registry seals are preserved. Any identity outside comments,
-    COMMENT metadata and that table refuses the export.
+    Executable strings, identifiers and dollar bodies are opaque. COPY rows
+    are opaque except the explicitly exported retrieval reference vocabulary.
+    Only comments and COMMENT ON literal metadata can be projected.
     """
+    i = 0
+    statement = []
+    copy_rx = re.compile(r"COPY\s+([^\s(]+)[^;]*FROM stdin;[^\n]*\n", re.I)
+    dollar_rx = re.compile(r"\$(?:[a-zA-Z_][a-zA-Z_0-9]*)?\$")
+    while i < len(text):
+        begin = i
+        copy = copy_rx.match(text, i) if text[i] in "Cc" else None
+        if copy and not "".join(statement).strip():
+            header_end = copy.end()
+            end = re.search(r"(?m)^\\\.\r?$", text[header_end:])
+            if end is None:
+                raise ValueError("unterminated COPY")
+            rows_end = header_end + end.start()
+            yield i, header_end, False
+            yield header_end, rows_end, copy[1] == "public.retrieval_proposal"
+            i = header_end + end.end()
+            yield rows_end, i, False
+            statement = []
+            continue
+        if text.startswith("--", i):
+            # Group adjacent comments so the matcher sees line-spanning names.
+            end = text.find("\n", i)
+            i = len(text) if end < 0 else end + 1
+            while i < len(text) and re.match(r"[ \t]*--", text[i:]):
+                end = text.find("\n", i)
+                i = len(text) if end < 0 else end + 1
+            yield begin, i, True
+            continue
+        if text.startswith("/*", i):
+            depth = 1
+            i += 2
+            while i < len(text) and depth:
+                if text.startswith("/*", i):
+                    depth += 1
+                    i += 2
+                elif text.startswith("*/", i):
+                    depth -= 1
+                    i += 2
+                else:
+                    i += 1
+            if depth:
+                raise ValueError("unterminated comment")
+            yield begin, i, True
+            continue
+        dollar = dollar_rx.match(text, i) if text[i] == "$" else None
+        if dollar:
+            end = text.find(dollar[0], dollar.end())
+            if end < 0:
+                raise ValueError("unterminated dollar body")
+            i = end + len(dollar[0])
+            declaration = "".join(statement)
+            procedural = (re.match(r"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:FUNCTION|PROCEDURE)\b",
+                                   declaration, re.I) and
+                          re.search(r"\bLANGUAGE\s+(?:sql|plpgsql)\b", declaration, re.I))
+            if procedural:
+                body_start = dollar.end()
+                yield begin, body_start, False
+                for a, b, allowed in _sql_regions(text[body_start:end]):
+                    yield body_start + a, body_start + b, allowed
+                yield end, i, False
+            else:
+                yield begin, i, False
+            statement.append(" body ")
+            continue
+        if text[i] in "'\"":
+            quote = text[i]
+            escaped = quote == "'" and bool(re.search(r"(?:^|[^a-zA-Z_0-9])E$", "".join(statement), re.I))
+            metadata = quote == "'" and bool(re.match(r"^\s*COMMENT\s+ON\b", "".join(statement), re.I))
+            i += 1
+            while i < len(text):
+                if escaped and text[i] == "\\":
+                    i += 2
+                elif text[i] == quote:
+                    i += 1
+                    if i < len(text) and text[i] == quote:
+                        i += 1
+                    else:
+                        break
+                else:
+                    i += 1
+            else:
+                raise ValueError("unterminated quote")
+            yield begin, i, metadata
+            statement.append(" literal ")
+            continue
+        # Accumulate statement text so COMMENT and COPY are recognized only
+        # at SQL statement scope, never in strings or another COPY block.
+        i += 1
+        if text[begin] == ";":
+            statement = []
+        else:
+            statement.append(text[begin])
+        yield begin, i, False
+
+
+def sanitize_snapshot(text, corpus):
+    """Project permitted prose; refuse identities in executable or sealed data."""
     projected = []
-    copy_table = None
-    comment_metadata = False
-    for line in text.split("\n"):
-        if line.startswith("COPY "):
-            copy_table = line.split(" ", 2)[1]
-        elif line == "\\.":
-            copy_table = None
-        if line.startswith("COMMENT ON "):
-            comment_metadata = True
-        if copy_table == "public.retrieval_proposal" and not line.startswith("COPY "):
-            fields = line.split("\t")
-            # id and UUID provenance/authority fields are not identity prose.
-            fields = [field if re.fullmatch(r"[0-9a-f-]{36}", field) else
-                      synthetic_prose(field, corpus) for field in fields]
-            line = "\t".join(fields)
-        elif line.lstrip().startswith("--") or comment_metadata:
-            line = synthetic_prose(line, corpus)
-        elif "--" in line:
-            # Only an unquoted SQL line-comment is metadata. Quoted strings
-            # stay executable; dollar bodies retain their SQL comment syntax.
-            quoted = False
-            comment = None
-            i = 0
-            while i < len(line):
-                if line[i] == "'":
-                    if quoted and i + 1 < len(line) and line[i + 1] == "'":
-                        i += 2
-                        continue
-                    quoted = not quoted
-                elif not quoted and line[i:i + 2] == "--":
-                    comment = i
-                    break
-                i += 1
-            if comment is not None:
-                line = line[:comment] + synthetic_prose(line[comment:], corpus)
-        projected.append(line)
-        if comment_metadata and line.rstrip().endswith("';"):
-            comment_metadata = False
-    result = "\n".join(projected)
-    # Reuse the same detector, rather than asserting that the projection worked.
-    # The in-memory corpus has already been validated by the caller.
-    sink = io.StringIO()
-    if _check_corpus([("db/schema.sql", result)], corpus, output=sink):
+    untouched_start = 0
+    for begin, end, allowed in _sql_regions(text):
+        if allowed:
+            projected.append(text[untouched_start:begin])
+            projected.append(synthetic_prose(text[begin:end], corpus))
+            untouched_start = end
+    projected.append(text[untouched_start:])
+    result = "".join(projected)
+    if identity_spans(result, corpus):
         raise ValueError("snapshot identity outside permitted prose")
     return result
