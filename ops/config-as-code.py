@@ -41,6 +41,8 @@ exactly as they bind Joe, with zero mechanical enforcement on his side today.
     ops/config-as-code.py verify-codex-continuity
     ops/config-as-code.py install-codex-continuity-mcp --apply
     ops/config-as-code.py verify-codex-continuity-mcp
+    ops/config-as-code.py install-progress-board --apply
+    ops/config-as-code.py verify-progress-board
     ops/config-as-code.py remove-codex-continuity --apply
 
 `check` is what belongs in run.sh health: it answers "is the live config still
@@ -1856,6 +1858,54 @@ def install_launchd_plist(filename, dest, body, body_matches):
     return "failed"
 
 
+def cmd_install_progress_board(apply=False):
+    """Migrate the existing board agent to the repository wrapper, then read
+    launchd's arguments back. This does not create a new schedule or label.
+    It refuses until the canonical checkout contains the delivered wrapper.
+    """
+    wrapper = os.path.join(REPO, "ops", "progress-board-render.sh")
+    python = os.path.join(REPO, ".venv", "bin", "python")
+    if not os.path.isfile(wrapper) or not os.access(python, os.X_OK):
+        print("progress-board: canonical wrapper or repository interpreter unavailable; "
+              "deliver the PR to the canonical checkout before migration")
+        return 1
+    label = "local.carr-progress-board"
+    dest = os.path.join(HOME, "Library", "LaunchAgents", label + ".plist")
+    try:
+        with open(dest, "rb") as handle:
+            current = plistlib.load(handle)
+        if not isinstance(current, dict) or current.get("Label") != label:
+            raise ValueError("unexpected board agent label")
+    except (OSError, ValueError, plistlib.InvalidFileException) as exc:
+        print(f"progress-board: existing agent unavailable: {exc}; no schedule created")
+        return 1
+    desired = dict(current)
+    desired["ProgramArguments"] = ["/bin/bash", wrapper]
+    desired["WorkingDirectory"] = REPO
+    def registered_arguments():
+        observed = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+                                  capture_output=True, text=True, check=False, timeout=15)
+        args = re.search(r"(?ms)^\s*arguments = \{\n(.*?)^\s*\}", observed.stdout or "")
+        return ([line.strip() for line in args.group(1).splitlines()]
+                if observed.returncode == 0 and args else [])
+
+    matches = desired == current and registered_arguments() == desired["ProgramArguments"]
+    if apply:
+        outcome = install_launchd_plist(os.path.basename(dest), dest,
+                                       plistlib.dumps(desired).decode("utf-8"), matches)
+        if outcome not in {"loaded", "kept"}:
+            return 1
+    elif not matches:
+        print("progress-board: existing agent needs migration: "
+              "ops/config-as-code.py install-progress-board --apply")
+        return 1
+    if registered_arguments() != desired["ProgramArguments"]:
+        print("progress-board: launchd arguments unverified; migration is incomplete")
+        return 1
+    print(f"progress-board: verified registered repository wrapper: {wrapper}")
+    return 0
+
+
 def write_claude_settings(path, document, before, sink=None):
     """Write the settings render, optionally exposing one redacted fake witness.
 
@@ -2717,6 +2767,10 @@ def main():
         return cmd_verify_codex_continuity()
     if mode == "install":
         return cmd_install(apply)
+    if mode == "install-progress-board":
+        return cmd_install_progress_board(apply)
+    if mode == "verify-progress-board":
+        return cmd_install_progress_board(False)
     if mode == "reinstall-launchd-calendar":
         return cmd_reinstall_launchd_calendar(sys.argv[2:])
     if mode == "launchd-handoff-smoke":

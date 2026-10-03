@@ -14,5 +14,5 @@ root="$(cd "$(dirname "$0")/.." && pwd -P)"
 export CARR_REPO_ROOT="$root"
 cd "$root"
 python="$root/.venv/bin/python"
-[ -x "$python" ] || python="$(command -v python3)"
+[ -x "$python" ] || { echo "progress-board: repository interpreter unavailable: $python" >&2; exit 1; }
 exec "$python" tools/progress_board.py render carr-v5 --publish
