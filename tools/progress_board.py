@@ -1216,6 +1216,7 @@ def build_all_repos() -> dict[str, Any]:
     unlocked = read_json_file(path)
     prior_repos = [str(row.get("repo")) for row in unlocked.get("repos") or [] if isinstance(row, dict)]
     since = (now_utc() - RECENT_MERGED).date().isoformat()
+    started = read_stamp()
     reads: dict[str, tuple[list[dict[str, Any]], list[dict[str, Any]]] | str] = {}
     for repo in list_repositories(prior_repos):
         try:
@@ -1229,7 +1230,11 @@ def build_all_repos() -> dict[str, Any]:
             latest_release(repo)  # any live probe happens before the lock
     with board_lock(ALL_REPOS_BOARD):
         prior = read_json_file(path)
+        if superseded(prior.get("github_sync"), started):
+            log("all-repos: a newer build already committed; this older read is discarded")
+            return prior
         state = assemble_all_repos(prior, reads)
+        state["github_sync"]["read_started_at"] = started
         write_json(state)
     return state
 
@@ -1415,6 +1420,16 @@ def deployment_evidence(info: dict[str, Any], release: tuple[Path, str, str] | N
     return None
 
 
+def read_stamp() -> str:
+    """When a GitHub read began: the order overlapping renders commit in."""
+    return now_utc().isoformat(timespec="microseconds")
+
+
+def superseded(sync: Any, started: str) -> bool:
+    """True when a read that began later than `started` already committed."""
+    return isinstance(sync, dict) and str(sync.get("read_started_at") or "") > started
+
+
 def render(project: str) -> None:
     """Sync every PR card from GitHub, refresh release and health facts, and
     write the JSON. GitHub is read first, without the board lock; the result
@@ -1426,6 +1441,7 @@ def render(project: str) -> None:
     if project == ALL_REPOS_BOARD:
         build_all_repos()
         return
+    started = read_stamp()
     tasks = read_state(project).get("tasks", {}).values()
     keys = {pr_key(task) for task in tasks if task.get("pr") is not None}
     fetched = {key: fetch_pr(key[1], key[0]) for key in sorted(keys)}
@@ -1446,7 +1462,7 @@ def render(project: str) -> None:
             evidence[key] = deployment_evidence(info, releases[key[0]])
     with board_lock(project):
         state = read_state(project)
-        if apply_sync(state, fetched, evidence):
+        if apply_sync(state, fetched, evidence, started):
             state["updated_at"] = max((str(task.get("updated_at") or "") for task in state["tasks"].values()),
                                       default=state.get("updated_at"))
             write_json(state)
@@ -1456,7 +1472,12 @@ def render(project: str) -> None:
 
 def apply_sync(state: dict[str, Any],
                fetched: dict[tuple[str, int], tuple[dict[str, Any] | None, str | None]],
-               evidence: dict[tuple[str, int], str | None] | None = None) -> bool:
+               evidence: dict[tuple[str, int], str | None] | None = None,
+               started: str | None = None) -> bool:
+    """Apply one GitHub read to the board. A read older than one already
+    committed (an overlapping render that finished first) never replaces the
+    newer facts: such cards are skipped, and the sync record is left alone."""
+    started = started or read_stamp()
     changed = False
     failed: list[dict[str, str]] = []
     synced = 0
@@ -1471,6 +1492,8 @@ def apply_sync(state: dict[str, Any],
         key = pr_key(task)
         if key not in fetched:
             continue  # added after GitHub was read; the next run syncs it
+        if str(task.get("pr_read_at") or "") > started:
+            continue  # a newer render already applied a later read of this PR
         info, error = fetched[key]
         if info is None:
             label = f"{key[0].split('/', 1)[1]}#{key[1]}"
@@ -1478,15 +1501,17 @@ def apply_sync(state: dict[str, Any],
             failed.append({"card": task_id, "pr": label, "error": str(error)[:200]})
             continue
         synced += 1
+        task["pr_read_at"] = started
         if sync_pr_task(task, info, at):
             changed = True
         if delivered_live(task, task_repo(task), at, (evidence or {}).get(key)):
             changed = True
-    if fetched and not os.environ.get("PROGRESS_BOARD_SKIP_GH"):
+    if fetched and not os.environ.get("PROGRESS_BOARD_SKIP_GH") and not superseded(state.get("github_sync"), started):
         raw_sync = state.get("github_sync")
         previous: dict[str, Any] = raw_sync if isinstance(raw_sync, dict) else {}
         state["github_sync"] = {"checked_at": at, "synced": synced, "failed": failed,
-                                "last_verified_at": at if not failed else previous.get("last_verified_at")}
+                                "last_verified_at": at if not failed else previous.get("last_verified_at"),
+                                "read_started_at": started}
         changed = True
     return changed
 
@@ -1596,7 +1621,8 @@ def board_snapshot(state: dict[str, Any]) -> dict[str, Any]:
         if is_retired(task):
             continue
         provider, model, effort = task_identity(task)
-        tasks[task_id] = {**task, "provider": provider, "model": model, "effort": effort}
+        card = {key: value for key, value in task.items() if key != "pr_read_at"}
+        tasks[task_id] = {**card, "provider": provider, "model": model, "effort": effort}
     decisions = [
         {"id": qid, "question": q.get("question"), "answer": q.get("answer"), "default": q.get("default"),
          "answered_at": q.get("answered_at") or q.get("updated_at")}

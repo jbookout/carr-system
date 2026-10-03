@@ -1425,6 +1425,57 @@ class ReviewRound1420(BoardCase):
         winner = codes.index(0)
         self.assertEqual(self.read_state("race")["title"], f"T{winner}")
 
+    def test_1_an_overlapping_render_never_replaces_newer_github_facts(self):
+        """Render A reads GitHub, pauses; render B reads newer facts and
+        commits; A resumes. A's older read must not overwrite B's."""
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("task", "demo", "a", "--title", "A", "--status", "running", "--executor", "Codex", "--pr", "42")
+        head_b = "b" * 40
+        approve_a = {**self.OPEN, "comments": [{"author": {"login": "jbookout"}, "authorAssociation": "OWNER",
+                                                "body": "APPROVE\nReviewed-SHA: " + SHA_A,
+                                                "createdAt": "2026-09-30T10:00:00Z"}]}
+        blocked_b = {**self.OPEN, "headRefOid": head_b,
+                     "comments": [{"author": {"login": "jbookout"}, "authorAssociation": "OWNER",
+                                   "body": "REVIEW: BLOCKED\nReviewed-SHA: " + head_b,
+                                   "createdAt": "2026-09-30T11:00:00Z"}]}
+        calls = []
+
+        def fetch(number, repo):
+            calls.append(number)
+            if len(calls) == 1:  # render A has read; render B runs to completion
+                BOARD.render("demo")
+                return copy.deepcopy(approve_a), None
+            return copy.deepcopy(blocked_b), None
+        with self.in_process(PROGRESS_BOARD_LOCAL_ONLY="1", PROGRESS_BOARD_SKIP_GH=""), \
+             patch.object(BOARD, "fetch_pr", fetch), patch("sys.stderr", new_callable=io.StringIO):
+            BOARD.render("demo")
+        state = self.read_state("demo")
+        task = state["tasks"]["a"]
+        self.assertEqual((task["pr_head"], task["pr_phase"], task["review_verdict"]),
+                         (head_b, "Review blocked", "BLOCK"))
+        self.assertEqual(len(calls), 2)
+        # B's verification stands; A's older read is not stamped as fresh.
+        self.assertEqual(state["github_sync"]["read_started_at"], task["pr_read_at"])
+
+    def test_1_an_overlapping_all_repos_build_never_replaces_newer_reads(self):
+        old = AllRepositoriesBoard.pr(self, 1, headRefOid=SHA_A)
+        new = AllRepositoriesBoard.pr(self, 1, headRefOid="b" * 40)
+        calls = []
+
+        def read_repository(repo, since):
+            calls.append(repo)
+            if len(calls) == 1:  # build A has read; build B runs to completion
+                BOARD.build_all_repos()
+                return [copy.deepcopy(old)], []
+            return [copy.deepcopy(new)], []
+        with self.in_process(), patch.object(BOARD, "gh_available", lambda: True), \
+             patch.object(BOARD, "list_repositories", lambda prior: ["jbookout/carr-system"]), \
+             patch.object(BOARD, "read_repository", read_repository), \
+             patch("sys.stderr", new_callable=io.StringIO):
+            BOARD.build_all_repos()
+        self.assertEqual(self.read_state("all-repos")["tasks"]["carr-system-1"]["pr_head"], "b" * 40)
+        self.assertEqual(len(calls), 2)
+
     # 2 ── complete enumeration
     def test_2_every_recent_merged_pr_is_listed_with_true_counts(self):
         merged = [self.pr(n, mergedAt=iso(timedelta(hours=1)), mergeCommit={"oid": f"{n:040x}"})
