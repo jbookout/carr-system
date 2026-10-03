@@ -206,6 +206,61 @@ def post_tool_use(payload, run):
             run.do(watch.watch_progress, transcript, task)
 
 
+NOTIFICATION_WRAPPER = re.compile(
+    r"(?:<task-notification(?:\s[^>]*)?>[\s\S]*</task-notification>|"
+    r"<ci-monitor-event(?:\s[^>]*)?>[\s\S]*</ci-monitor-event>|"
+    r"\[SYSTEM NOTIFICATION(?:\s[^\]]*)?\][\s\S]*)")
+
+
+def _request_provenance(rec):
+    """Classify a user request; tool results are not requests.
+
+    Provenance flags and origins take precedence over text. Only a leading
+    notification wrapper counts; mentioning its name in human prose does not.
+    """
+    if rec.get("type") != "user":
+        return None
+    message = rec.get("message")
+    if not isinstance(message, dict):
+        return "unknown"
+    content = message.get("content")
+    if isinstance(content, list):
+        blocks = [b for b in content if isinstance(b, dict)]
+        if any(b.get("type") == "tool_result" for b in blocks):
+            return None
+        content = "\n".join(b["text"] for b in blocks
+                            if b.get("type") == "text" and isinstance(b.get("text"), str))
+    origin = rec.get("origin") if isinstance(rec.get("origin"), dict) else {}
+    if (rec.get("isMeta") or rec.get("isSidechain") or rec.get("isCompactSummary")
+            or origin.get("kind") not in (None, "", "human", "user", "keyboard")):
+        return "notification"
+    if not isinstance(content, str) or not content.strip():
+        return "unknown"
+    if NOTIFICATION_WRAPPER.fullmatch(content.strip()):
+        return "notification"
+    return "human"
+
+
+def _transcript_records(transcript):
+    """Read a bounded tail once per consumer; unavailable provenance stays unknown."""
+    try:
+        with open(transcript, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 2_000_000))
+            lines = fh.read().decode("utf-8", errors="replace").splitlines()
+    except (OSError, TypeError, ValueError):
+        return []
+    records = []
+    for raw in lines:
+        try:
+            rec = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(rec, dict):
+            records.append(rec)
+    return records
+
+
 def _last_test_evidence(transcript):
     """Completed tests after the latest human request in the tail.
 
@@ -213,41 +268,17 @@ def _last_test_evidence(transcript):
     risk attributing an earlier task's test to this one.
     """
     evidence = {}
-    try:
-        with open(transcript, "rb") as fh:
-            fh.seek(0, os.SEEK_END)
-            size = fh.tell()
-            fh.seek(max(0, size - 2_000_000))
-            lines = fh.read().decode("utf-8", errors="replace").splitlines()
-    except OSError:
-        return evidence
     commands = {}
     tests = []
     saw_request = False
-    for raw in lines:
-        try:
-            rec = json.loads(raw)
-        except ValueError:
+    for rec in _transcript_records(transcript):
+        message = rec.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if _request_provenance(rec) == "human":
+            saw_request = True
+            commands.clear()
+            tests.clear()
             continue
-        if not isinstance(rec, dict):
-            continue
-        content = (rec.get("message") or {}).get("content")
-        origin = rec.get("origin") if isinstance(rec.get("origin"), dict) else {}
-        if (rec.get("type") == "user" and not rec.get("isMeta")
-                and not rec.get("isSidechain") and not rec.get("isCompactSummary")
-                and origin.get("kind") in (None, "", "human", "user", "keyboard")):
-            human_text = (isinstance(content, str) and bool(content.strip()))
-            if isinstance(content, list):
-                blocks = [b for b in content if isinstance(b, dict)]
-                human_text = (not any(b.get("type") == "tool_result" for b in blocks)
-                              and any(b.get("type") == "text" and
-                                      isinstance(b.get("text"), str) and b["text"].strip()
-                                      for b in blocks))
-            if human_text:
-                saw_request = True
-                commands.clear()
-                tests.clear()
-                continue
         if not saw_request:
             continue
         if not isinstance(content, list):
@@ -362,7 +393,7 @@ def fact_boundary(payload, run):
 # text is full of "never"/"always") and turn-end claim checks on background
 # notification turns. A tool result is a judgment point only when it brings in
 # outside content or failed; a turn end only when a human spoke since the last
-# assistant turn. A hard per-session hourly cap bounds whatever remains.
+# assistant turn. The shared daily paid-call cap owns the spending bound.
 EXTERNAL_TOOLS = {"webfetch", "websearch"}
 EXTERNAL_TOOL_MARKERS = ("get_page_text", "read_page", "browser_", "claude-in-chrome", "claude_browser")
 # Writing code is a judgment point: duplicate-function and test-quality checks
@@ -370,35 +401,6 @@ EXTERNAL_TOOL_MARKERS = ("get_page_text", "read_page", "browser_", "claude-in-ch
 FILE_WRITE_TOOLS = {"edit", "write", "multiedit", "notebookedit"}
 FAILED_OUTPUT = re.compile(r"(Exit code [1-9]\d*|Traceback \(most recent call last\)|"
                            r"command not found|No such file or directory|\bE[A-Z]+:|\berror:)", re.I)
-HOURLY_CAP = int(os.environ.get("CARR_JEV_SUPERVISOR_HOURLY_CAP", "20"))
-NOTIFICATION_MARKERS = ("<task-notification>", "[SYSTEM NOTIFICATION", "<ci-monitor-event>")
-
-
-def _last_user_text(transcript):
-    """Text of the newest user record that is not a tool result, from the tail."""
-    try:
-        with open(transcript, "rb") as fh:
-            fh.seek(0, os.SEEK_END)
-            fh.seek(max(0, fh.tell() - 1_000_000))
-            lines = fh.read().decode("utf-8", errors="replace").splitlines()
-    except OSError:
-        return None
-    for raw in reversed(lines):
-        try:
-            rec = json.loads(raw)
-        except ValueError:
-            continue
-        if not isinstance(rec, dict) or rec.get("type") != "user" or rec.get("isMeta"):
-            continue
-        content = (rec.get("message") or {}).get("content")
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            blocks = [b for b in content if isinstance(b, dict)]
-            if any(b.get("type") == "tool_result" for b in blocks):
-                continue
-            return "\n".join(str(b.get("text") or "") for b in blocks if b.get("type") == "text")
-    return None
 
 
 def judgment_point(event, payload):
@@ -415,37 +417,12 @@ def judgment_point(event, payload):
         tail = _text(response)[-4000:]
         return bool(FAILED_OUTPUT.search(tail) or MISSING_FILE.search(tail))
     if event == "Stop":
-        transcript = payload.get("transcript_path") or ""
-        if not transcript:
-            return True  # nothing to tell a human turn from a notification by
-        text = _last_user_text(transcript)
-        return bool(text and text.strip()) and not any(m in text for m in NOTIFICATION_MARKERS)
+        for rec in reversed(_transcript_records(payload.get("transcript_path") or "")):
+            provenance = _request_provenance(rec)
+            if provenance is not None:
+                return provenance != "notification"
+        return True  # unknown provenance retains completion checking
     return False
-
-
-def within_hourly_cap(session_id, *, state_dir=None, now=None, cap=None):
-    """Reserve one slot in this session's rolling hour; False once the cap is spent."""
-    cap = HOURLY_CAP if cap is None else cap
-    now = time.time() if now is None else now
-    state_dir = (state_dir or os.environ.get("CARR_JEV_SUPERVISOR_BUDGET_DIR")
-                 or os.path.join(REPO, "out", "jev-supervisor-budget"))
-    safe = re.sub(r"[^A-Za-z0-9._-]", "_", session_id or "unbound")[:120]
-    path = os.path.join(state_dir, safe + ".json")
-    try:
-        with open(path, encoding="utf-8") as fh:
-            stamps = [t for t in json.load(fh) if isinstance(t, (int, float)) and now - t < 3600]
-    except (OSError, ValueError):
-        stamps = []
-    if len(stamps) >= cap:
-        return False
-    stamps.append(now)
-    try:
-        os.makedirs(state_dir, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump(stamps, fh)
-    except OSError:
-        pass
-    return True
 
 
 def main():
@@ -453,23 +430,19 @@ def main():
         payload = json.load(sys.stdin)
     except Exception:
         return 0
-    if MODE == "off" or payload.get("session_id") == "selftest":
+    if not isinstance(payload, dict) or MODE == "off" or payload.get("session_id") == "selftest":
         return 0
     event = payload.get("hook_event_name") or payload.get("hookEventName") or ""
     if event == "Stop" and payload.get("stop_hook_active"):
         return 0
-    if not judgment_point(event, payload):
-        return 0
-    if not within_hourly_cap(payload.get("session_id") or ""):
-        return 0
     run = Run()
     try:
+        if not judgment_point(event, payload):
+            return 0
         if event == "PostToolUse":
             post_tool_use(payload, run)
             fact_boundary(payload, run)
         elif event == "Stop":
-            if payload.get("stop_hook_active"):
-                return 0
             stop(payload, run)
             fact_boundary(payload, run)
     except Exception:

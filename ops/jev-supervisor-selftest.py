@@ -13,6 +13,7 @@ network or the vendor credential.
 Run:  python3 ops/jev-supervisor-selftest.py
 """
 import importlib.util
+import ast
 import io
 import json
 import os
@@ -118,7 +119,6 @@ class DispatcherTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = self.tmp.name
-        os.environ["CARR_JEV_SUPERVISOR_BUDGET_DIR"] = os.path.join(self.dir, "budget")
         with open(os.path.join(self.dir, "calc.py"), "w") as fh:
             fh.write("def add(a, b):\n    return a - b\n\nassert add(2, 3) == 5\n")
 
@@ -441,7 +441,6 @@ class JudgmentPointTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = self.tmp.name
-        os.environ["CARR_JEV_SUPERVISOR_BUDGET_DIR"] = os.path.join(self.dir, "budget")
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -503,24 +502,100 @@ class JudgmentPointTests(unittest.TestCase):
         run_main(m, payload)
         self.assertIn("inspect_stop_boundary", fake.calls)
 
-    def test_hourly_cap_stops_paid_checks(self):
-        m = load("shadow")
-        state = os.path.join(self.dir, "cap")
-        allowed = [m.within_hourly_cap("s", state_dir=state, now=1000.0 + i, cap=3) for i in range(5)]
-        self.assertEqual(allowed, [True, True, True, False, False])
-        self.assertTrue(m.within_hourly_cap("s", state_dir=state, now=1000.0 + 3601, cap=3))
-        self.assertTrue(m.within_hourly_cap("other", state_dir=state, now=1004.0, cap=3))
 
-    def test_main_honours_the_cap(self):
+
+class ReviewRegressionTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = self.tmp.name
+
+    def stop_with_records(self, records):
+        transcript = os.path.join(self.dir, "request.jsonl")
+        Path(transcript).write_text("\n".join(json.dumps(r) for r in records) + "\n")
         m = load("shadow")
         fake = FakeLibs()
         m._lib = fake
-        m.HOURLY_CAP = 2
-        payload = {"hook_event_name": "PostToolUse", "session_id": "cap", "cwd": self.dir,
-                   "tool_name": "WebFetch", "tool_input": {}, "tool_response": "page"}
-        for _ in range(4):
-            run_main(m, payload)
-        self.assertEqual(fake.calls.count("inspect_tool_event"), 2)
+        code, _ = run_main(m, {"hook_event_name": "Stop", "session_id": "review",
+                              "cwd": self.dir, "transcript_path": transcript,
+                              "last_assistant_message": "All tests pass."})
+        self.assertEqual(code, 0)
+        return "inspect_stop_boundary" in fake.calls
+
+    def test_notification_provenance_through_main(self):
+        human = {"type": "user", "message": {"content": "Fix the build"}}
+        for metadata in ({"origin": {"kind": "task-notification"}},
+                         {"origin": {"kind": "peer"}}, {"isMeta": True},
+                         {"isSidechain": True}, {"isCompactSummary": True}):
+            with self.subTest(metadata=metadata):
+                self.assertFalse(self.stop_with_records([
+                    human, {**human, **metadata, "message": {"content": "Completed work"}}]))
+
+    def test_notification_names_in_human_discussion_are_checked(self):
+        for text in ("Fix the <task-notification> handler.",
+                     "Explain [SYSTEM NOTIFICATION to me", "Review <ci-monitor-event> parsing",
+                     "<task-notification> is the handler name to fix."):
+            for origin in (None, "", "human", "user", "keyboard"):
+                with self.subTest(text=text, origin=origin):
+                    self.assertTrue(self.stop_with_records([
+                        {"type": "user", "origin": {"kind": origin},
+                         "message": {"content": [{"type": "text", "text": text}]}}]))
+
+    def test_unknown_transcript_provenance_keeps_stop_checks(self):
+        for transcript in ("", os.path.join(self.dir, "missing"), self.dir):
+            with self.subTest(transcript=transcript):
+                m = load("shadow")
+                fake = FakeLibs()
+                m._lib = fake
+                self.assertEqual(run_main(m, {"hook_event_name": "Stop", "session_id": "review",
+                    "cwd": self.dir, "transcript_path": transcript,
+                    "last_assistant_message": "All tests pass."})[0], 0)
+                self.assertIn("inspect_stop_boundary", fake.calls)
+
+    def test_human_request_outside_tail_keeps_stop_checks(self):
+        self.assertTrue(self.stop_with_records([
+            {"type": "user", "message": {"content": "Fix the build"}},
+            {"type": "assistant", "message": {"content": "x" * 2_100_000}}]))
+
+    def test_malformed_user_record_remains_nonblocking_and_checked(self):
+        self.assertTrue(self.stop_with_records([{"type": "user", "message": "bad shape"}]))
+
+    def test_unknown_latest_request_does_not_reuse_old_notification(self):
+        self.assertTrue(self.stop_with_records([
+            {"type": "user", "origin": {"kind": "peer"},
+             "message": {"content": "Earlier notification"}},
+            {"type": "user", "message": "bad shape"}]))
+
+    def test_meta_notification_without_text_does_not_reuse_old_human(self):
+        self.assertFalse(self.stop_with_records([
+            {"type": "user", "message": {"content": "Fix the build"}},
+            {"type": "user", "isMeta": True, "message": {"content": ""}}]))
+
+    def test_hourly_ledger_is_removed(self):
+        m = load("shadow")
+        for name in ("within_hourly_cap", "HOURLY_CAP"):
+            self.assertFalse(hasattr(m, name), name)
+
+    def test_invalid_retired_cap_configuration_exits_zero(self):
+        for cap in ("", "invalid"):
+            with self.subTest(cap=cap):
+                env = dict(os.environ, CARR_JEV_SUPERVISOR="off",
+                           CARR_JEV_SUPERVISOR_HOURLY_CAP=cap)
+                done = subprocess.run([sys.executable, HOOK], input="{}", env=env,
+                                      capture_output=True, text=True, timeout=30)
+                self.assertEqual((done.returncode, done.stdout, done.stderr), (0, "", ""))
+
+    def test_baseline_attribution_has_no_email(self):
+        baseline = json.loads(Path(REPO, "ops/config/gate-baseline.json").read_text())
+        self.assertTrue("@" not in baseline["blessed_by"], "baseline attribution contains an email")
+
+    def test_stop_reentrancy_has_one_guard(self):
+        tree = ast.parse(Path(HOOK).read_text())
+        guards = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                  and isinstance(n.func, ast.Attribute) and n.func.attr == "get"
+                  and n.args and isinstance(n.args[0], ast.Constant)
+                  and n.args[0].value == "stop_hook_active"]
+        self.assertEqual(len(guards), 1)
 
 
 if __name__ == "__main__":
