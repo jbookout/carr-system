@@ -1555,6 +1555,11 @@ class Pipeline:
                            "capability": capability, "run_id": self.run_id}
                     self.deliver_blocker(state, capability, row)
                     self.store.record(row)
+                for capability, pending in list(state.get("pending_diagnoses", {}).items()):
+                    row = {"status": "capability_diagnosis", "lane": pending["lane"],
+                           "sha": pending["sha"], "capability": capability, "run_id": self.run_id}
+                    self.deliver_diagnosis(state, capability, row)
+                    self.store.record(row)
             for lane in lanes:
                 rc = max(rc, self.run_lane(lane))
             return rc
@@ -1651,13 +1656,8 @@ class Pipeline:
             self.store.record(row)
             return 3 if b.capability else 0
         except StepFailed as f:
-            # A missing deploy credential burns the SHA and dispatches like any
-            # failure, but no fix-forward PR can supply it: it also names the
-            # credential to Joe in one loop, as the header promises.
-            extra: dict[str, Any] = {}
-            if f.capability and not self.dry_run:
-                self.file_blocker(state, lane, f.capability, f.detail, extra, failed_sha=sha)
-            return self.fail(lane, state, sha, base, f.step, f.rc, f.log, f.detail, extra=extra)
+            return self.fail(lane, state, sha, base, f.step, f.rc, f.log, f.detail,
+                             capability=f.capability)
         except Exception as exc:  # noqa: BLE001 — an unexpected error is recorded and dispatched, never lost
             detail = f"{type(exc).__name__}: {str(exc)[:300]}"
             self.out(f"release-pipeline[{lane}]: UNEXPECTED {detail}")
@@ -1734,28 +1734,69 @@ class Pipeline:
             self.store.save(state)
         return ok, res
 
+    def deliver_diagnosis(self, state: dict, capability: str, row: dict) -> None:
+        """Replay the saved first turn until acknowledged, then suppress by capability."""
+        pending = state["pending_diagnoses"][capability]
+        try:
+            # Unlike a newly composed failure turn, this is an exact replay of
+            # the same msg_id and operation key. A lost acknowledgement may
+            # therefore return deduplicated without losing any turn content.
+            ok, res = self.dispatch(state, pending["lane"], pending["sha"],
+                                    pending["args"], allow_dedup=True)
+        except Exception as exc:  # noqa: BLE001 — preserve the request for a later tick
+            ok, res = False, type(exc).__name__
+        row["dispatched"] = ok
+        if ok:
+            state.setdefault("diagnosed_capabilities", {})[capability] = self.today
+            del state["pending_diagnoses"][capability]
+            self.store.save(state)
+        else:
+            self.out(f"release-pipeline[{pending['lane']}]: diagnosis dispatch FAILED: {res}")
+
     def fail(self, lane: str, state: dict, sha: str, base: str, step: str, rc: int, log: str,
-             detail: str, *, extra: dict | None = None) -> int:
+             detail: str, *, capability: str | None = None) -> int:
         self.out(f"release-pipeline[{lane}]: FAILED at {step} (exit {rc}); log {log or '-'}")
         if self.dry_run:
             return 1
         state.setdefault(lane, {}).update({
             "failed_sha": sha, "failed_step": step,
             "failed_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")})
-        self.store.save(state)
         attempt = int((state[lane].get("dispatches") or {}).get(sha, 0)) + 1
-        ok, res = (False, "no SHA") if not sha else self.dispatch(
-            state, lane, sha, queue_turn(lane, sha, step, rc, log, str(self.store.records_path),
-                                         db_ahead_of_worker=self.db_ahead_of_worker,
-                                         do_migration=self.do_migration,
-                                         run_id=self.run_id, attempt=attempt))
+        extra: dict[str, Any] = {}
+        if capability:
+            pending = state.setdefault("pending_diagnoses", {})
+            diagnosed = capability in state.get("diagnosed_capabilities", {})
+            if not diagnosed and capability not in pending and sha:
+                pending[capability] = {"lane": lane, "sha": sha, "args": queue_turn(
+                    lane, sha, step, rc, log, str(self.store.records_path),
+                    db_ahead_of_worker=self.db_ahead_of_worker, do_migration=self.do_migration,
+                    run_id=self.run_id, attempt=attempt)}
+            # Save the failed SHA and first turn together, before even filing
+            # the loop: a crash after its acknowledgement cannot lose diagnosis.
+            self.store.save(state)
+            self.file_blocker(state, lane, capability, detail, extra, failed_sha=sha)
+            if diagnosed:
+                extra["dispatch_skipped"] = "capability_already_diagnosed"
+                extra["dispatched"] = False
+                self.out(f"release-pipeline[{lane}]: no fix session dispatched; "
+                         "the capability's first diagnosis was already delivered")
+            elif capability in pending:
+                self.deliver_diagnosis(state, capability, extra)
+            ok = extra.get("dispatched", False)
+        else:
+            self.store.save(state)
+            ok, res = (False, "no SHA") if not sha else self.dispatch(
+                state, lane, sha, queue_turn(lane, sha, step, rc, log, str(self.store.records_path),
+                                             db_ahead_of_worker=self.db_ahead_of_worker,
+                                             do_migration=self.do_migration,
+                                             run_id=self.run_id, attempt=attempt))
         self.store.record({"lane": lane, "sha": sha, "from_sha": base, "status": "failed",
                            "step": step, "rc": rc, "log": log, "detail": detail,
                            "db_ahead_of_worker": self.db_ahead_of_worker,
                            "do_migration": self.do_migration,
                            "run_dir": str(self.run_dir), "executed": list(self.executed),
-                           "dispatched": ok, "run_id": self.run_id, **(extra or {})})
-        if not ok:
+                           "dispatched": ok, "run_id": self.run_id, **extra})
+        if not capability and not ok:
             self.out(f"release-pipeline[{lane}]: diagnosis dispatch FAILED: {res}")
         return 1
 
