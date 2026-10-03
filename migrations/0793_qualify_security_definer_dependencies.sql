@@ -1,4 +1,4 @@
--- 0786_qualify_security_definer_dependencies.sql
+-- 0793_qualify_security_definer_dependencies.sql
 -- Qualify application dependencies using the merged schema after hardening.
 -- Generated from pg_get_functiondef on disposable PostgreSQL with the path-aware
 -- resolver in ops/definer-hardening-local-pg-gate.py. Only bodies change;

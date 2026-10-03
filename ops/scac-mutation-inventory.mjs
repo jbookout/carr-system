@@ -19725,7 +19725,7 @@ export function renderFindRuleRegistrySql(rows, predecessorSql = null) {
   const preflight = `do $find_rule_v103_preflight$\ndeclare v ops.scac_mutation_registry_version%rowtype; registration jsonb;\nbegin\n` +
     `  if not exists(select 1 from public.schema_migrations where filename='${predecessorPath.split("/").at(-1)}' and sha256='${predecessorDigest}') then\n` +
     `    raise exception 'Find rule v103 requires exact applied 0768'; end if;\n` +
-    `  if not exists(select 1 from public.schema_migrations where filename='0769_rule_teach_supersession.sql' and sha256='${sha256(readFileSync(resolve(REPO_ROOT, "migrations/0769_rule_teach_supersession.sql"), "utf8"))}') then\n` +
+    `  if not exists(select 1 from public.schema_migrations where filename='0785_rule_teach_supersession.sql' and sha256='${sha256(readFileSync(resolve(REPO_ROOT, "migrations/0785_rule_teach_supersession.sql"), "utf8"))}') then\n` +
     `    raise exception 'Find rule v103 requires exact supersession migration'; end if;\n` +
     `  select * into v from ops.scac_mutation_registry_version where registry_version='${REGISTRY_V102_VERSION}';\n` +
     `  if v.registry_digest is distinct from '${oldSeal.digest}' or v.entry_count<>${oldSeal.entryCount}\n` +
@@ -19741,9 +19741,9 @@ export function renderFindRuleRegistrySql(rows, predecessorSql = null) {
 }
 
 export function renderJevCapRegistrySql(rows, predecessorSql = null) {
-  const predecessorPath = "migrations/0770_find_rule_scac_successor.sql";
+  const predecessorPath = "migrations/0786_find_rule_scac_successor.sql";
   const predecessor = predecessorSql ?? readFileSync(resolve(REPO_ROOT, predecessorPath), "utf8");
-  const predecessorDigest = "afecd5bb4f3853311120a7460f824c8582b60da522b03ff7d6d947e8218c985d";
+  const predecessorDigest = "bd404c059c1fde5ce7d881e0d2470be108909d73ff7de7a73b4334a1a25c3271";
   if (sha256(predecessor) !== predecessorDigest)
     throw new Error("v104 predecessor migration pin drifted");
   const oldCatalogBaseline = FIND_RULE_V103_DB_CATALOG_BASELINE;
@@ -19822,8 +19822,8 @@ export function renderJevCapRegistrySql(rows, predecessorSql = null) {
   sql = `${sql.slice(0, seedStart)}$jev_cap_v104_source$${seed}$jev_cap_v104_source$${sql.slice(seedEnd + "]$jev_cap_v104_source$".length)}`;
   const preflight = `do $jev_cap_v104_preflight$\ndeclare v ops.scac_mutation_registry_version%rowtype; registration jsonb;\nbegin\n` +
     `  if not exists(select 1 from public.schema_migrations where filename='${predecessorPath.split("/").at(-1)}' and sha256='${predecessorDigest}') then\n` +
-    `    raise exception 'Jev cap v104 requires exact applied 0770'; end if;\n` +
-    `  if not exists(select 1 from public.schema_migrations where filename='0769_rule_teach_supersession.sql' and sha256='${sha256(readFileSync(resolve(REPO_ROOT, "migrations/0769_rule_teach_supersession.sql"), "utf8"))}') then\n` +
+    `    raise exception 'Jev cap v104 requires exact applied 0786'; end if;\n` +
+    `  if not exists(select 1 from public.schema_migrations where filename='0785_rule_teach_supersession.sql' and sha256='${sha256(readFileSync(resolve(REPO_ROOT, "migrations/0785_rule_teach_supersession.sql"), "utf8"))}') then\n` +
     `    raise exception 'Jev cap v104 requires exact supersession migration'; end if;\n` +
     `  select * into v from ops.scac_mutation_registry_version where registry_version='${REGISTRY_V103_VERSION}';\n` +
     `  if v.registry_digest is distinct from '${oldSeal.digest}' or v.entry_count<>${oldSeal.entryCount}\n` +
@@ -20923,23 +20923,23 @@ export function renderGeneratedFrontier() {
   artifacts["mcp-server/src/scac-mutation-registry.v103.generated.js"] =
     renderRuntimeProjection(v103Rows, { version: REGISTRY_V103_VERSION,
       dbCatalogBaseline: FIND_RULE_V103_DB_CATALOG_BASELINE });
-  artifacts["migrations/0770_find_rule_scac_successor.sql"] =
+  artifacts["migrations/0786_find_rule_scac_successor.sql"] =
     renderFindRuleRegistrySql(v103Rows, artifacts["migrations/0768_confirm_merge_human_only_scac_successor.sql"]);
 
   const v104Rows = frozenInventory(REGISTRY_V104_VERSION);
   artifacts["mcp-server/src/scac-mutation-registry.v104.generated.js"] =
     renderRuntimeProjection(v104Rows, { version: REGISTRY_V104_VERSION,
       dbCatalogBaseline: JEV_CAP_V104_DB_CATALOG_BASELINE });
-  artifacts["migrations/0773_jev_cap_scac_successor.sql"] =
-    renderJevCapRegistrySql(v104Rows, artifacts["migrations/0770_find_rule_scac_successor.sql"]);
+  artifacts["migrations/0787_jev_cap_scac_successor.sql"] =
+    renderJevCapRegistrySql(v104Rows, artifacts["migrations/0786_find_rule_scac_successor.sql"]);
 
 
   const v105Rows = frozenInventory(REGISTRY_V105_VERSION);
   artifacts["mcp-server/src/scac-mutation-registry.v105.generated.js"] =
     renderRuntimeProjection(v105Rows, { version: REGISTRY_V105_VERSION,
       dbCatalogBaseline: DEFINER_HARDENING_V105_DB_CATALOG_BASELINE });
-  artifacts["migrations/0785_dot_hardening_scac_successor.sql"] =
-    renderDefinerHardeningRegistrySql(v105Rows, artifacts["migrations/0773_jev_cap_scac_successor.sql"]);
+  artifacts["migrations/0792_dot_hardening_scac_successor.sql"] =
+    renderDefinerHardeningRegistrySql(v105Rows, artifacts["migrations/0787_jev_cap_scac_successor.sql"]);
 
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
@@ -20950,8 +20950,8 @@ export function renderGeneratedFrontier() {
 
 export function renderDefinerHardeningRegistrySql(rows, predecessorSql = null) {
   const predecessor = predecessorSql ?? readFileSync(resolve(REPO_ROOT,
-    "migrations/0773_jev_cap_scac_successor.sql"), "utf8");
-  const predecessorDigest = "b02e1cb7220a7109fa36511de6006f2f2d3859f1d9923e3cff31f5eb4650b3fb";
+    "migrations/0787_jev_cap_scac_successor.sql"), "utf8");
+  const predecessorDigest = "125557a059796ad9be94580e26b4f3c22101cd2193cea13931ca8e9a52bfe666";
   if (sha256(predecessor) !== predecessorDigest)
     throw new Error("v105 predecessor migration pin drifted");
   const oldSeal = registrySeal(REGISTRY_V104_VERSION,
@@ -20983,7 +20983,8 @@ export function renderDefinerHardeningRegistrySql(rows, predecessorSql = null) {
       `,${newSeal.entryCount},${newSeal.sourceEntryCount},`)
     .replaceAll(`observed_count<>${JEV_CAP_V104_DB_CATALOG_BASELINE.secdef_execute.count}`,
       `observed_count<>${DEFINER_HARDENING_V105_DB_CATALOG_BASELINE.secdef_execute.count}`)
-    .replaceAll("Jev cap v104", "Definer hardening v105");
+    .replaceAll("Jev cap v104", "Definer hardening v105")
+    .replaceAll("Jev cap v37", "Definer hardening v105");
   // Only the live v104 catalog becomes historical. Earlier declarations and
   // their sealed digests remain byte-identical in this forward successor.
   sql = replaceExactlyOnce(sql,
@@ -21042,9 +21043,9 @@ export function renderDefinerHardeningRegistrySql(rows, predecessorSql = null) {
     "where registry_version='scac-mutation-registry.v105' and ingress_key='external-admin:tools/migrate.py';\n\n" + sql.slice(seedEnd);
   sql = sql.replace(/(security definer set search_path=[^\n]+) as \$fn\$/g, "$1,pg_temp as $fn$");
   const bindings = [
-    ["0773_jev_cap_scac_successor.sql", predecessorDigest],
-    ["0783_dot_security_definer_hardening.sql", "bfc7d0546ed77ea97d07213e88722e843de5cad4298b9cf4c8470cecf9431b37"],
-    ["0784_completion_tenant_security_barriers.sql", "0ea21b3190a6940bd7b4b350d703eb7ea99d78fd9583249ea563c1ecf9021dc1"],
+    ["0787_jev_cap_scac_successor.sql", predecessorDigest],
+    ["0790_dot_security_definer_hardening.sql", "bfc7d0546ed77ea97d07213e88722e843de5cad4298b9cf4c8470cecf9431b37"],
+    ["0791_completion_tenant_security_barriers.sql", "0ea21b3190a6940bd7b4b350d703eb7ea99d78fd9583249ea563c1ecf9021dc1"],
   ];
   const preflight = "do $definer_hardening_v105_preflight$\nbegin\n" +
     bindings.map(([name, digest]) =>
@@ -22083,21 +22084,21 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     await writeFile(resolve("mcp-server/src/scac-mutation-registry.v103.generated.js"),
       renderRuntimeProjection(rows, { version: REGISTRY_V103_VERSION,
         dbCatalogBaseline: FIND_RULE_V103_DB_CATALOG_BASELINE }));
-    await writeFile(resolve("migrations/0770_find_rule_scac_successor.sql"), renderFindRuleRegistrySql(rows));
+    await writeFile(resolve("migrations/0786_find_rule_scac_successor.sql"), renderFindRuleRegistrySql(rows));
     process.stdout.write("Find rule v103 frontier generated\n");
   } else if (process.argv[2] === "--write-jev-cap-frontier") {
     const rows = frozenInventory(REGISTRY_V104_VERSION);
     await writeFile(resolve("mcp-server/src/scac-mutation-registry.v104.generated.js"),
       renderRuntimeProjection(rows, { version: REGISTRY_V104_VERSION,
         dbCatalogBaseline: JEV_CAP_V104_DB_CATALOG_BASELINE }));
-    await writeFile(resolve("migrations/0773_jev_cap_scac_successor.sql"), renderJevCapRegistrySql(rows));
+    await writeFile(resolve("migrations/0787_jev_cap_scac_successor.sql"), renderJevCapRegistrySql(rows));
     process.stdout.write("Jev cap v104 frontier generated\n");
   } else if (process.argv[2] === "--write-definer-hardening-frontier") {
     const rows = frozenInventory(REGISTRY_V105_VERSION);
     await writeFile(resolve("mcp-server/src/scac-mutation-registry.v105.generated.js"),
       renderRuntimeProjection(rows, { version: REGISTRY_V105_VERSION,
         dbCatalogBaseline: DEFINER_HARDENING_V105_DB_CATALOG_BASELINE }));
-    await writeFile(resolve("migrations/0785_dot_hardening_scac_successor.sql"), renderDefinerHardeningRegistrySql(rows));
+    await writeFile(resolve("migrations/0792_dot_hardening_scac_successor.sql"), renderDefinerHardeningRegistrySql(rows));
     process.stdout.write("Definer hardening v105 frontier generated\n");
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools(), REGISTRY_V105_VERSION);

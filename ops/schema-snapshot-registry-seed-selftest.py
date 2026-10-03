@@ -771,7 +771,7 @@ assert "SCAC_VERSION_COUNT=102" in GENERATOR
 assert "SCAC_FULL_SET_SEAL_COUNT=101" in GENERATOR
 assert "ops.scac_mutation_catalog_v102_current()" in GENERATOR
 assert 'scac-mutation-registry.v102.generated.js' in GENERATOR
-assert "0770_find_rule_scac_successor.sql" in GENERATOR
+assert "0786_find_rule_scac_successor.sql" in GENERATOR
 assert "FIND_RULE_REGISTRY_APPLIED" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=103" in GENERATOR
 assert "SCAC_VERSION_COUNT=103" in GENERATOR
@@ -780,7 +780,7 @@ assert "ops.scac_mutation_catalog_v103_current()" in GENERATOR
 assert 'scac-mutation-registry.v103.generated.js' in GENERATOR
 registry_gate.require_supported_successor("scac-mutation-registry.v102")
 registry_gate.require_supported_successor("scac-mutation-registry.v103")
-assert "0773_jev_cap_scac_successor.sql" in GENERATOR
+assert "0787_jev_cap_scac_successor.sql" in GENERATOR
 assert "JEV_CAP_REGISTRY_APPLIED" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=104" in GENERATOR
 assert "SCAC_VERSION_COUNT=104" in GENERATOR
@@ -814,8 +814,8 @@ predecessor_seal = json.loads(subprocess.run(
     """], cwd=ROOT, capture_output=True, text=True, check=True).stdout)
 assert monitor_pins["SEALED_PREDECESSOR_ENTRY_COUNTS"] == (
     predecessor_seal["entryCount"], predecessor_seal["sourceEntryCount"])
-assert monitor_pins["SEALED_PREDECESSOR_MIGRATION"] == "migrations/0773_jev_cap_scac_successor.sql"
-assert monitor_pins["LIVE_REGISTRY_MIGRATION"] == "migrations/0785_dot_hardening_scac_successor.sql"
+assert monitor_pins["SEALED_PREDECESSOR_MIGRATION"] == "migrations/0787_jev_cap_scac_successor.sql"
+assert monitor_pins["LIVE_REGISTRY_MIGRATION"] == "migrations/0792_dot_hardening_scac_successor.sql"
 
 assert "0720_doctorcre_a03_review_scac_successor.sql" in GENERATOR
 assert "V5_A03_REVIEW_REGISTRY_APPLIED" in GENERATOR

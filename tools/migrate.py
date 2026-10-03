@@ -484,14 +484,14 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0767_doc_whats_new_scac_successor.sql",
     ),
     (
-        "0769_rule_teach_supersession.sql",
-        "0770_find_rule_scac_successor.sql",
+        "0785_rule_teach_supersession.sql",
+        "0786_find_rule_scac_successor.sql",
     ),
     # Harden metadata and install its successor before deferred epoch checks.
     (
-        "0783_dot_security_definer_hardening.sql",
-        "0784_completion_tenant_security_barriers.sql",
-        "0785_dot_hardening_scac_successor.sql",
+        "0790_dot_security_definer_hardening.sql",
+        "0791_completion_tenant_security_barriers.sql",
+        "0792_dot_hardening_scac_successor.sql",
     ),
 )
 
@@ -621,14 +621,14 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0767_doc_whats_new_scac_successor.sql",
     ),
     (
-        "0769_rule_teach_supersession.sql",
-        "0770_find_rule_scac_successor.sql",
+        "0785_rule_teach_supersession.sql",
+        "0786_find_rule_scac_successor.sql",
     ),
     # Harden metadata and install its successor before deferred epoch checks.
     (
-        "0783_dot_security_definer_hardening.sql",
-        "0784_completion_tenant_security_barriers.sql",
-        "0785_dot_hardening_scac_successor.sql",
+        "0790_dot_security_definer_hardening.sql",
+        "0791_completion_tenant_security_barriers.sql",
+        "0792_dot_hardening_scac_successor.sql",
     ),
 )
 
