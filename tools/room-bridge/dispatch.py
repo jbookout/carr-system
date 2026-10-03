@@ -137,6 +137,7 @@ def _to_codex(
     fresh: bool = False,
     config_overrides: tuple[str, ...] = (),
     live_desktop: bool = False,
+    provider_run=None,
 ) -> dict:
     """Send one task to a standing Codex thread, resuming it when there is one.
 
@@ -227,7 +228,7 @@ def _to_codex(
             # pipe makes the run hang or swallow whatever the caller was fed.
             # It is the same reason every command in CLAUDE.md carries
             # `</dev/null`.
-            proc = subprocess.run(
+            proc = (provider_run or subprocess.run)(
                 argv, env=env or os.environ.copy(), capture_output=True,
                 text=True, timeout=CODEX_TIMEOUT_S, stdin=subprocess.DEVNULL,
             )
@@ -285,6 +286,7 @@ def dispatch(
     config_overrides: tuple[str, ...] = (),
     cwd: str | None = None,
     live_desktop: bool = False,
+    provider_run=None,
 ) -> dict:
     """Send one task to one desk. Raises DeskError when the desk is not usable.
 
@@ -294,10 +296,15 @@ def dispatch(
 
     `cwd` (codex-session desks only) runs this one task in that directory on a FRESH
     thread and leaves the desk's standing thread untouched: flash-run's escalation gives
-    the Sol fixer desk a throwaway copy per task (2026-09-24)."""
+    the Sol fixer desk a throwaway copy per task (2026-09-24).
+
+    `provider_run` lets a bounded adapter confine the Codex/Grok child while
+    retaining this module's dispatch and result contract. Ordinary callers
+    keep the default runner."""
     registry = registry or Registry()
     results_path = Path(results_path or DEFAULT_RESULTS)
     entry = registry.resolve(name)          # every refusal happens here
+    runner_kwargs = {"provider_run": provider_run} if provider_run is not None else {}
     original_task = task
     # The background wire validates the original task before adding its own
     # instruction. Prepending here would turn a blank task into valid work.
@@ -325,7 +332,8 @@ def dispatch(
     elif entry["kind"] == "claude-desktop":
         outcome = _to_claude_desktop(entry, task)
     elif entry["kind"] == "grok-cli":
-        outcome = grok_wire.run_task(entry, task)
+        outcome = (grok_wire.run_task(entry, task, run=provider_run) if provider_run is not None
+                   else grok_wire.run_task(entry, task))
     elif entry["kind"] == "flash-local":
         outcome = flash_wire.run_task(task)
     elif entry["kind"] == "codex-live":
@@ -339,11 +347,13 @@ def dispatch(
     elif cwd:
         outcome = _to_codex(
             {**entry, "cwd": cwd}, task, env, fresh=True, config_overrides=config_overrides,
+            **runner_kwargs,
         )
     else:
         outcome = _to_codex(
             entry, task, env, fresh=fresh, config_overrides=config_overrides,
             live_desktop=live_desktop,
+            **runner_kwargs,
         )
         # pin the desk to its thread so the next task lands in the same one
         if outcome.get("thread_id"):
