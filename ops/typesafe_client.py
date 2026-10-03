@@ -59,6 +59,7 @@ KNOWN_HOSTS in hooks/guard-unattended.py.
 """
 
 import hashlib
+import glob
 import importlib.util
 import json
 import math
@@ -81,6 +82,9 @@ from functools import partial
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 KEY_PATH = os.path.expanduser("~/.config/carr/typesafe.env")
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Entry points may import with only ops/ on sys.path.
+if REPO not in sys.path:
+    sys.path.insert(0, REPO)
 _judge_spec = importlib.util.spec_from_file_location(
     "carr_judge_interface", os.path.join(REPO, "tools", "judge", "interface.py"))
 assert _judge_spec and _judge_spec.loader
@@ -138,8 +142,8 @@ with open(os.path.join(REPO, "ops", "config", "jev-cost-guard.v1.json"), encodin
 JUDGE_CACHE_TTL_SECONDS = JEV_COST_CONFIG["judge_cache_ttl_seconds"]
 # The env vars a caller's own session id is found under, same set
 # ops/settlement-run-token.py's NATIVE_SESSION_KEYS already uses.
-SESSION_ID_ENV_KEYS = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_HOST_SESSION_ID",
-                       "CODEX_THREAD_ID")
+SESSION_ID_ENV_KEYS = ("CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID",
+                       "CLAUDE_CODE_HOST_SESSION_ID")
 KEY_NAME = "TYPESAFE_API_KEY"
 
 # jev-latest is an alias and MOVES when a release ships, so answers can change
@@ -358,6 +362,47 @@ def _session_id():
         if value and value.strip():
             return value.strip()
     return None
+
+
+def _dispatch_binding(transcript_path=None, session=None):
+    """Snapshot the human owner before sending, never when the answer arrives.
+
+    Hook callers can pass their transcript path; shell callers discover the
+    exact native session file. An absent, unreadable or ambiguous transcript
+    leaves the receipt unbound and therefore unable to pay required actions.
+    Native Codex identity takes precedence over inherited Claude environment.
+    """
+    session = session or _session_id()
+    try:
+        from lib.jev_required_actions import human_turn_scope
+        from lib.transcript_read import load_transcript
+
+        if not session:
+            return session, None
+        path = transcript_path or os.environ.get("CARR_JEV_TRANSCRIPT_PATH")
+        if not path:
+            # Session IDs are path components, never glob patterns or paths.
+            if not re.fullmatch(r"[A-Za-z0-9_-]+", session):
+                return session, None
+            if os.environ.get("CODEX_THREAD_ID") == session:
+                home = os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
+                paths = glob.glob(os.path.join(home, "sessions", "**",
+                                               f"rollout-*-{session}.jsonl"), recursive=True)
+            else:
+                paths = glob.glob(os.path.expanduser(f"~/.claude/projects/*/{session}.jsonl"))
+            if len(paths) != 1:
+                return session, None
+            path = paths[0]
+        records = load_transcript(path, hook="jev-dispatch", session=session)
+        for record in records:
+            if record.get("sessionId") and record["sessionId"] != session:
+                return session, None
+            if record.get("type") == "session_meta":
+                if (record.get("payload") or {}).get("id") != session:
+                    return session, None
+        return session, human_turn_scope(records, session).identity
+    except Exception:
+        return session, None
 
 
 # System-work calls use the Worker's append-only call log. The authenticated
@@ -602,7 +647,7 @@ def _store_cached_result(path, cache_key, result, ttl):
 def _append_call_receipt(questions, facets, result, log_path, *, caller=None,
                          question_kind=None, prompt_sha256=None, ok=True,
                          cache_hit=False, error=None, calibration=None,
-                         server_error=None, session=None):
+                         server_error=None, session=None, dispatch_binding=None):
     """Best-effort, APPEND-ONLY JSONL row, never storing the request or the
     answers, never able to turn a successful ask() into a failure. See
     JEV_CALLS_LOG above.
@@ -630,7 +675,8 @@ def _append_call_receipt(questions, facets, result, log_path, *, caller=None,
                   else bool(ok and usage))
         row = {
             "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "session": session or _session_id(),
+            "session": dispatch_binding[0] if dispatch_binding else session or _session_id(),
+            "human_turn_id": dispatch_binding[1] if dispatch_binding else None,
             "question_ids_sha256": [hashlib.sha256(qid.encode("utf-8")).hexdigest()
                                     for qid in sorted(questions)],
             "caller": caller,
@@ -999,7 +1045,8 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
         api_key=None, retries=RATE_LIMIT_RETRIES, endpoint=ENDPOINT, opener=None,
         facets=None, calls_log=JEV_CALLS_LOG, deadline=None, caller=None,
         cache_ttl_seconds=JUDGE_CACHE_TTL_SECONDS, cache_path=JUDGE_CACHE_PATH, account=None,
-        work_class="system_work", purpose="call", server_runner=None, session_id=None):
+        work_class="system_work", purpose="call", server_runner=None, session_id=None,
+        transcript_path=None):
     """Compatibility entrypoint: all existing callers cross the class switch.
 
     The original transport retains its wire, retry, cache and receipt contract.
@@ -1011,7 +1058,8 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
                          endpoint=endpoint, opener=opener, facets=facets, calls_log=calls_log,
                          deadline=deadline, caller=caller or _caller_name(),
                          cache_ttl_seconds=cache_ttl_seconds, cache_path=cache_path, account=account,
-                         purpose=purpose, server_runner=server_runner, session_id=session_id)
+                         purpose=purpose, server_runner=server_runner, session_id=session_id,
+                         transcript_path=transcript_path)
     except JUDGE.JudgeUnavailable as exc:
         raise TypeSafeError(str(exc)) from None
 
@@ -1020,7 +1068,8 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
              api_key=None, retries=RATE_LIMIT_RETRIES, endpoint=ENDPOINT, opener=None,
              facets=None, calls_log=JEV_CALLS_LOG, deadline=None, caller=None,
              cache_ttl_seconds=JUDGE_CACHE_TTL_SECONDS, cache_path=JUDGE_CACHE_PATH, account=None,
-             purpose="call", server_runner=None, session_id=None, work_class="system_work"):
+             purpose="call", server_runner=None, session_id=None, work_class="system_work",
+             transcript_path=None):
     """Evaluate `state` against a map of questions in ONE request.
 
     `state` is a string, or a mapping when the context has several parts —
@@ -1029,12 +1078,10 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
     id to a question built by noul/choice/score; the ids come back unchanged and
     are never sent to the model, so the instruction must carry its full meaning.
 
-    `facets` is optional: the names of any decision-0b11c89b required actions
-    (ops/jev_build_advisory.py's FACETS, e.g. "architecture_or_design") this
-    call is meant to satisfy. Pass it, or name the facet in a question id,
-    when the call is meant to count as this turn's Jev use for that facet —
-    lib/jev_required_actions.py's reader matches on either. Neither is
-    required for an ask() that has nothing to do with a required action.
+    `facets` labels the judgments for diagnostic and historical receipt readers.
+    It never imposes per-turn obligations. `transcript_path` optionally binds
+    receipts to the dispatching human; otherwise the native session is discovered.
+    Retries and late answers keep that owner. Unknown owners stay unbound.
 
     Returns the decoded response: {"model": ..., "answers": {...},
     "usage": {...}}. `opener` is for the offline selftest and is not used in
@@ -1091,6 +1138,7 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
         raise TypeSafeError("cache_ttl_seconds must be a finite nonnegative number")
     server_error = None
     reservation_error = None
+    dispatch_binding = _dispatch_binding(transcript_path, session_id)
     started = time.monotonic()
     in_hook = os.environ.get(IN_HOOK_ENV) == "1" and purpose != "build_advisory"
     if opener is None and api_key is None and not in_hook and work_class != "app_runtime":
@@ -1102,7 +1150,7 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
         server_deadline = started + server_timeout * SERVER_SHARE_OF_TIMEOUT
         served, server_error = server_ask(
             state, questions, model=model, facets=facets, purpose=purpose,
-            session_id=session_id or _session_id() or "unbound",
+            session_id=dispatch_binding[0] or "unbound",
             timeout=server_deadline - time.monotonic(), transport_mode="cache_only", runner=server_runner)
         if served is not None and served.get("cache_hit") is not True:
             raise TypeSafeError("Jev unavailable: Worker cache-only contract violated")
@@ -1119,10 +1167,10 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
                     raise TypeSafeError("deadline passed during daily cap accounting")
                 served, server_error = server_ask(
                     state, questions, model=model, facets=facets, purpose=purpose,
-                    session_id=session_id or _session_id() or "unbound",
+                    session_id=dispatch_binding[0] or "unbound",
                     timeout=remaining, transport_mode="paid_once", runner=server_runner)
                 if served is None:
-                    _append_call_receipt(questions, facets, None, calls_log, caller=caller,
+                    _append_call_receipt(questions, facets, None, calls_log, dispatch_binding=dispatch_binding, caller=caller,
                         question_kind=question_kind, prompt_sha256=prompt_sha256,
                         ok=False, error=server_error, server_error=server_error, session=session_id)
                 elif served.get("cache_hit") is True:
@@ -1138,7 +1186,7 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
             calibration = (_safe_calibration_block(state, questions, served, model)
                            if valid else None)
             _append_call_receipt(questions, facets,
-                {**served, "schema_valid": valid, "usable": valid}, calls_log,
+                {**served, "schema_valid": valid, "usable": valid}, calls_log, dispatch_binding=dispatch_binding,
                 caller=caller, question_kind=question_kind, prompt_sha256=prompt_sha256,
                 ok=valid, cache_hit=cache_hit, calibration=calibration, session=session_id)
             if not valid:
@@ -1167,7 +1215,7 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
         hit = _cached_result(cache_path, cache_key)
         if hit is not None:
             hit["calibration"] = _safe_calibration_block(state, questions, hit, model)
-            _append_call_receipt(questions, facets, hit, calls_log, caller=caller,
+            _append_call_receipt(questions, facets, hit, calls_log, dispatch_binding=dispatch_binding, caller=caller,
                                  question_kind=question_kind, prompt_sha256=prompt_sha256,
                                  ok=False, cache_hit=True, calibration=hit["calibration"])
             return hit
@@ -1213,7 +1261,7 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
                     if opener is None:
                         _append_call_receipt(questions, facets,
                             {"http_status": http_status, "schema_valid": False,
-                             "usable": False}, calls_log, caller=caller,
+                             "usable": False}, calls_log, dispatch_binding=dispatch_binding, caller=caller,
                             question_kind=question_kind, prompt_sha256=prompt_sha256,
                             ok=False, error="invalid_json")
                     raise
@@ -1233,7 +1281,7 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
                            if isinstance(result, dict) else
                            {"http_status": http_status, "schema_valid": False,
                             "usable": False})
-                _append_call_receipt(questions, facets, receipt, calls_log,
+                _append_call_receipt(questions, facets, receipt, calls_log, dispatch_binding=dispatch_binding,
                                      caller=caller, question_kind=question_kind,
                                      prompt_sha256=prompt_sha256, ok=usable,
                                      calibration=calibration,
@@ -1249,7 +1297,7 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
             return result
         except urllib.error.HTTPError as err:
             if opener is None:
-                _append_call_receipt(questions, facets, None, calls_log, caller=caller,
+                _append_call_receipt(questions, facets, None, calls_log, dispatch_binding=dispatch_binding, caller=caller,
                                      question_kind=question_kind, prompt_sha256=prompt_sha256,
                                      ok=False, error=f"HTTP {err.code}")
             # 429 is documented as expected under load, and the service's own
@@ -1279,7 +1327,7 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
             raise TypeSafeError(f"TypeSafe returned HTTP {err.code}: {detail}") from None
         except urllib.error.URLError as err:
             if opener is None:
-                _append_call_receipt(questions, facets, None, calls_log, caller=caller,
+                _append_call_receipt(questions, facets, None, calls_log, dispatch_binding=dispatch_binding, caller=caller,
                                      question_kind=question_kind, prompt_sha256=prompt_sha256,
                                      ok=False, error="network")
             raise TypeSafeError(
@@ -1291,7 +1339,7 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
             raise
         except Exception as err:
             if opener is None:
-                _append_call_receipt(questions, facets, None, calls_log, caller=caller,
+                _append_call_receipt(questions, facets, None, calls_log, dispatch_binding=dispatch_binding, caller=caller,
                                      question_kind=question_kind, prompt_sha256=prompt_sha256,
                                      ok=False, error=type(err).__name__)
             raise

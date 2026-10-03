@@ -1015,6 +1015,100 @@ class LibraryShapeTests(unittest.TestCase):
         self.assertIsNone(self.MAIN_GUARD.search("a docstring mentioning __main__"))
 
 
+class DispatchOwnershipTests(unittest.TestCase):
+    def test_runtime_router_preserves_explicit_transcript_owner(self):
+        session = 'dispatch-runtime'
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / 'transcript.jsonl'
+            transcript.write_text(json.dumps({'type': 'user',
+                'timestamp': '2026-09-29T12:00:00Z',
+                'message': {'role': 'user', 'content': 'judge this'}}) + '\n')
+            log = Path(directory) / 'calls.jsonl'
+            with patch.dict(os.environ, {'CODEX_THREAD_ID': session}), patch.object(
+                    client.urllib.request, 'urlopen', responder(ANSWER)):
+                result = client.ask('state', {'q': client.noul('judge')},
+                    api_key='offline', cache_ttl_seconds=0, calls_log=str(log),
+                    work_class='app_runtime', transcript_path=str(transcript))
+            row = json.loads(log.read_text())
+            self.assertEqual(result['answers'], ANSWER['answers'])
+            self.assertEqual(row['session'], session)
+            self.assertTrue(row['human_turn_id'].startswith('human-turn:v1:'))
+            self.assertTrue(row['ok'])
+
+    def test_standalone_ask_captures_owner_outside_repo(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / "transcript.jsonl"
+            session = "dispatch-standalone"
+            records = [{"type": "user", "timestamp": "2026-09-29T12:00:00Z",
+                        "message": {"role": "user", "content": "design the seam"}}]
+            transcript.write_text(json.dumps(records[0]) + "\n")
+            log = Path(directory) / "calls.jsonl"
+            code = r"""
+import importlib.util, io, json, sys
+from unittest.mock import patch
+spec = importlib.util.spec_from_file_location('standalone_client', sys.argv[1])
+client = importlib.util.module_from_spec(spec); spec.loader.exec_module(client)
+class Response(io.StringIO):
+    status = 200
+    def __init__(self):
+        super().__init__(json.dumps({'model':'jev-test',
+            'answers':{'architecture_or_design':{'type':'noul','noul':0.9}},
+            'usage':{'input_tokens':20,'output_tokens':6}}))
+with patch.object(client.urllib.request, 'urlopen', lambda *a, **k: Response()):
+    client.ask('state', {'architecture_or_design':client.noul('judge design')},
+               api_key='offline', cache_ttl_seconds=0, calls_log=sys.argv[2])
+"""
+            result = subprocess.run([__import__('sys').executable, '-c', code,
+                                     str(MODULE_PATH.resolve()), str(log)],
+                cwd=directory, env={**os.environ, "CODEX_THREAD_ID": session,
+                                    "CARR_JEV_TRANSCRIPT_PATH": str(transcript)},
+                capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            row = json.loads(log.read_text())
+            self.assertEqual(row['session'], session)
+            self.assertIsInstance(row['human_turn_id'], str)
+            self.assertTrue(row['human_turn_id'].startswith('human-turn:v1:'))
+
+    def test_ask_discovers_exact_native_session_and_keeps_unknown_owner_unbound(self):
+        session = 'dispatch-discovery'
+        for runtime in ('codex', 'claude'):
+            with self.subTest(runtime=runtime), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory)
+                if runtime == 'codex':
+                    transcript = home / '.codex/sessions/2026/09/29' / f'rollout-2026-09-29T12-00-00-{session}.jsonl'
+                    header = {'type':'session_meta', 'payload':{'id':session}}
+                    human = {'type':'response_item', 'timestamp':'2026-09-29T12:00:00Z',
+                        'payload':{'type':'message','role':'user','content':[{'type':'input_text','text':'design this'}]}}
+                else:
+                    transcript = home / '.claude/projects/project' / f'{session}.jsonl'
+                    header = {'type':'system','sessionId':session}
+                    human = {'type':'user','sessionId':session,'timestamp':'2026-09-29T12:00:00Z',
+                        'message':{'role':'user','content':'design this'}}
+                transcript.parent.mkdir(parents=True)
+                transcript.write_text(json.dumps(header)+'\n'+json.dumps(human)+'\n')
+                env = {k:v for k,v in os.environ.items() if k not in (
+                    'CODEX_THREAD_ID', 'CODEX_HOME', 'CLAUDE_CODE_SESSION_ID',
+                    'CLAUDE_CODE_HOST_SESSION_ID', 'CARR_JEV_TRANSCRIPT_PATH')}
+                env.update({'CODEX_THREAD_ID':session} if runtime=='codex' else {'CLAUDE_CODE_SESSION_ID':session})
+                # A native Codex caller must not inherit the outer Claude owner.
+                if runtime=='codex':
+                    env['CLAUDE_CODE_SESSION_ID']='parent-claude'
+                log = home/'calls.jsonl'
+                with patch.dict(os.environ, env, clear=True), patch.object(
+                        client.os.path, 'expanduser', lambda path: path.replace('~/', directory+'/', 1)), patch.object(
+                        client.urllib.request, 'urlopen', responder(ANSWER)):
+                    client.ask('state', {'q':client.noul('judge')}, api_key='offline',
+                               cache_ttl_seconds=0, calls_log=str(log))
+                    transcript.write_text(json.dumps(header)+'\n')
+                    client.ask('state', {'q':client.noul('judge')}, api_key='offline',
+                               cache_ttl_seconds=0, calls_log=str(log))
+                rows = [json.loads(line) for line in log.read_text().splitlines()]
+                self.assertEqual(rows[0]['session'], session)
+                self.assertIsInstance(rows[0]['human_turn_id'], str)
+                self.assertIsNone(rows[1]['human_turn_id'])
+                self.assertTrue(all(row['ok'] for row in rows))
+
+
 class CredentialTests(unittest.TestCase):
     def _write(self, text):
         path = Path(self.enterContext(__import__("tempfile").TemporaryDirectory()))
