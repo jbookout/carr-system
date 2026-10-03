@@ -3,6 +3,7 @@
 
 import ast
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -758,7 +759,10 @@ assert "SCAC_VERSION_COUNT=101" in GENERATOR
 assert "SCAC_FULL_SET_SEAL_COUNT=100" in GENERATOR
 assert "ops.scac_mutation_catalog_v101_current()" in GENERATOR
 assert 'scac-mutation-registry.v101.generated.js' in GENERATOR
-registry_gate = (ROOT / 'ops/siep11-mutation-registry-local-pg-gate.py').read_text()
+registry_spec = importlib.util.spec_from_file_location(
+    "siep11_registry_gate", ROOT / "ops/siep11-mutation-registry-local-pg-gate.py")
+registry_gate = importlib.util.module_from_spec(registry_spec)
+registry_spec.loader.exec_module(registry_gate)
 assert "0768_confirm_merge_human_only_scac_successor.sql" in GENERATOR
 assert "CONFIRM_MERGE_REGISTRY_APPLIED" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=102" in GENERATOR
@@ -773,8 +777,8 @@ assert "SCAC_VERSION_COUNT=103" in GENERATOR
 assert "SCAC_FULL_SET_SEAL_COUNT=102" in GENERATOR
 assert "ops.scac_mutation_catalog_v103_current()" in GENERATOR
 assert 'scac-mutation-registry.v103.generated.js' in GENERATOR
-assert '"scac-mutation-registry.v102"' in registry_gate
-assert '"scac-mutation-registry.v103"' in registry_gate
+registry_gate.require_supported_successor("scac-mutation-registry.v102")
+registry_gate.require_supported_successor("scac-mutation-registry.v103")
 assert "0773_jev_cap_scac_successor.sql" in GENERATOR
 assert "JEV_CAP_REGISTRY_APPLIED" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=104" in GENERATOR
@@ -782,7 +786,7 @@ assert "SCAC_VERSION_COUNT=104" in GENERATOR
 assert "SCAC_FULL_SET_SEAL_COUNT=103" in GENERATOR
 assert "ops.scac_mutation_catalog_v104_current()" in GENERATOR
 assert 'scac-mutation-registry.v104.generated.js' in GENERATOR
-assert '"scac-mutation-registry.v104"' in registry_gate
+registry_gate.require_supported_successor("scac-mutation-registry.v104")
 
 # The reference-monitor acceptance must follow the same live frontier and
 # independently pin its sealed predecessor's generated contract.
