@@ -34,6 +34,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 from lib.loadpy import load_module_from_path  # noqa: E402
 from lib import launchd_calendar  # noqa: E402
+from lib.launchd_scope import PRIMARY_ONLY  # noqa: E402
 
 cw = load_module_from_path("cutover_watch", str(REPO / "tools" / "cutover-watch.py"))
 st = load_module_from_path("scheduler_truth", str(REPO / "tools" / "scheduler-truth.py"))
@@ -248,12 +249,8 @@ case("tools/scheduler-truth.py exempts the not-yet-installed cutover-watch plist
 # ops/config-as-code.py keeps this primary-only (a shared-record writer)
 # ---------------------------------------------------------------------------
 
-_cac_text = (REPO / "ops" / "config-as-code.py").read_text(encoding="utf-8")
-
 case("ops/config-as-code.py keeps cutover-watch PRIMARY_ONLY (writes the shared record)",
-     lambda: bool(re.search(
-         r'PRIMARY_ONLY\s*=\s*\{.*?"com\.carr\.cutover-watch\.plist".*?\}',
-         _cac_text, re.S)))
+     lambda: "com.carr.cutover-watch.plist" in PRIMARY_ONLY)
 
 
 def main() -> int:
