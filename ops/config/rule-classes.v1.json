@@ -1521,6 +1521,14 @@
    "summary": "Never claim something was handed off, sent, or delivered without naming the specific recipient.",
    "when": "completion_evidence gate (delivery claim)"
   },
+  "ede4b241": {
+   "always_on": false,
+   "chars": 485,
+   "class": "b",
+   "moment": "dispatching work to another model or launching a cloud session (model choice)",
+   "summary": "When launching a cloud session, pick Sonnet 5.5 for well-scoped checkable work and Opus 5.5 for design, gates and reviews.",
+   "when": "dispatching work to another model or launching a cloud session (model choice)"
+  },
   "ede4c735": {
    "always_on": false,
    "chars": 1071,
