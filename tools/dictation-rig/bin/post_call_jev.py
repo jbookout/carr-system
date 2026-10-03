@@ -22,7 +22,9 @@ and for the detector that enforces it; the same rule applies to this file.
 PRIVACY: a short evidence excerpt, the handful of transcript segments nearest
 that excerpt, and a short list of candidate deal names go to TypeSafe
 (api.typesafe.ai) for this check -- never the full transcript, never the full
-recorded-deal list, never an email body. This rides the same 2026-09-17
+recorded-deal list, never an email body. Choosing where a long transcript is
+split (topic_cut) sends, per split, at most four candidate boundaries of one
+trimmed segment on each side -- never the transcript. This rides the same 2026-09-17
 authority ops/typesafe_client.py records for sending CARR records to a
 third-party model API.
 """
@@ -32,6 +34,7 @@ import hashlib
 import importlib.util
 import os
 import re
+import time
 from typing import Any, Callable
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -265,6 +268,79 @@ def _check_item(tsc: Any, ask: Callable[..., Any], kind: str, list_partner: str 
         "flagged": bool(reasons),
         "reasons": reasons,
     }
+
+
+# Topic cuts: each candidate sends the one segment before and the one after it,
+# each trimmed, so a cut never shows TypeSafe more than eight short segments.
+CUT_SEGMENT_CHARS = 600
+# Optional topic selection gets this much time for the whole transcript,
+# irrespective of how many cuts it needs. Local distillation remains primary.
+TOPIC_CUT_BUDGET_SECONDS = 5.0
+# Below this, no candidate looks like a topic change and the size-limit cut
+# stands. A noul's probability IS the answer, so 0.5 means "more likely a new
+# topic than not"; a starting point to replace once real calls are measured.
+TOPIC_CUT_MIN = 0.5
+
+
+def _cut_side(segment: Any, *, before: bool = False) -> dict[str, str]:
+    if not isinstance(segment, dict):
+        return {"speaker": "", "text": ""}
+    text = str(segment.get("text", ""))
+    return {"speaker": str(segment.get("speaker", "")),
+            "text": text[-CUT_SEGMENT_CHARS:] if before else text[:CUT_SEGMENT_CHARS]}
+
+
+def topic_cut(segments: list[Any], options: list[int], *,
+              ask: Callable[..., Any] | None = None,
+              deadline: float | None = None) -> int | None:
+    """Pick which of `options` (cut before that segment index) falls where the
+    conversation changes topic, for post_call.transcript_chunks.
+
+    One batched request: one noul per candidate, each reading only its own
+    before/after pair. Returns the most likely topic change, the later cut on
+    a tie, or None when nothing clears TOPIC_CUT_MIN or Jev is unreachable --
+    the caller then keeps its size-limit cut. Never raises. `deadline` is an
+    absolute monotonic time shared by every cut of a transcript; standalone
+    calls get TOPIC_CUT_BUDGET_SECONDS. No rate-limit retries.
+    """
+    try:
+        now = time.monotonic()
+        call_deadline = now + TOPIC_CUT_BUDGET_SECONDS
+        deadline = min(deadline, call_deadline) if deadline is not None else call_deadline
+        if now >= deadline:
+            return None
+        tsc = _client()
+        live_ask = ask if ask is not None else (
+            lambda state, questions: tsc.ask(state, questions, work_class="app_runtime",
+                timeout=TOPIC_CUT_BUDGET_SECONDS, deadline=deadline, retries=0)
+        )
+        state = {"boundaries": {
+            f"b{j}": {"before": _cut_side(segments[k - 1], before=True), "after": _cut_side(segments[k])}
+            for j, k in enumerate(options)
+        }}
+        questions = {
+            f"b{j}": tsc.noul(
+                f"In `boundaries.b{j}`, does `after` start a new topic of the "
+                "call, rather than continue the thought in `before`?",
+                true="`after` moves on to a different topic, deal, or agenda item.",
+                false="`after` continues, answers, or refers back to what `before` was discussing.",
+            )
+            for j in range(len(options))
+        }
+        response = live_ask(state, questions)
+        answers = response.get("answers") if isinstance(response, dict) else None
+        if not isinstance(answers, dict):
+            return None
+        best: tuple[float, int] | None = None
+        for j, k in enumerate(options):
+            probability = float(answers[f"b{j}"]["noul"])
+            if best is None or probability >= best[0]:
+                best = (probability, k)
+        if best is None or best[0] < TOPIC_CUT_MIN:
+            return None
+        return best[1]
+    except Exception:
+        return None
 
 
 def _unavailable() -> dict[str, Any]:
