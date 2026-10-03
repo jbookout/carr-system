@@ -21,7 +21,7 @@ from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connec
 
 REPO = Path(__file__).resolve().parents[1]
 
-# 0772 admits Observatory room reads v104 and preserves rule lookup v103.
+# 0783 admits Observatory room reads v104 and preserves rule lookup v103.
 # Both are pinned: an unreviewed frontier or a rewritten predecessor must fail closed.
 LIVE_REGISTRY_VERSION = "scac-mutation-registry.v104"
 LIVE_REGISTRY_ORDINAL = 104
@@ -35,7 +35,7 @@ SEALED_PREDECESSOR_MIGRATION = (
     "migrations/0770_find_rule_scac_successor.sql"
 )
 LIVE_REGISTRY_MIGRATION = (
-    "migrations/0772_observatory_room_read_scac_successor.sql"
+    "migrations/0783_observatory_room_read_scac_successor.sql"
 )
 
 LIVE_CATALOG_CURRENT_FN = f"ops.scac_mutation_catalog_v{LIVE_REGISTRY_ORDINAL}_current()"

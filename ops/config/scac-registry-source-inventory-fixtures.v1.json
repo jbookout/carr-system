@@ -86898,6 +86898,37 @@
       "expected_count": 1085,
       "expected_sha256": "e755569a7105467219e95e79d1cceaa768cc9710f499e58f94025c040f44f956",
       "reason": "PR 865 source-only review: re-derive the existing credential rotation external-admin row after enabling scoped verifier rotation, validating URIs, valid port ranges and targets before mutation, and verifying the complete caller identity contract. No new ingress, authority, grant, runtime selector or historical seal change."
+    },
+    "scac-mutation-registry.v104": {
+      "base_version": "v104",
+      "upsert": [
+        {
+          "ingress_key": "external-admin:tools/rotate-credential.py",
+          "ingress_kind": "external_admin",
+          "operation": "tools/rotate-credential.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "tools/rotate-credential.py",
+          "schema_digest": "4ed693be3967044d4c2080e6385df47c955adebe91ed2800c6e584220aa58672",
+          "handler_digest": "4ed693be3967044d4c2080e6385df47c955adebe91ed2800c6e584220aa58672",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        }
+      ],
+      "expected_count": 1086,
+      "expected_sha256": "ab0d36e0eb7cefb51b9eb3e6e0a990e252e79274cbe28f4ea6131b91d36680b1",
+      "reason": "PR 865 source-only review: re-derive the existing credential rotation external-admin row after enabling scoped verifier rotation, validating URIs, valid port ranges and targets before mutation, and verifying the complete caller identity contract. No new ingress, authority, grant, runtime selector or historical seal change. Carry the independently compared source-only row from merged main into the Observatory v104 comparison; the frozen v104 seal remains unchanged."
     }
   }
 }

@@ -20920,7 +20920,7 @@ export function renderGeneratedFrontier() {
   artifacts["mcp-server/src/scac-mutation-registry.v104.generated.js"] =
     renderRuntimeProjection(v104Rows, { version: REGISTRY_V104_VERSION,
       dbCatalogBaseline: OBSERVATORY_V104_DB_CATALOG_BASELINE });
-  artifacts["migrations/0772_observatory_room_read_scac_successor.sql"] =
+  artifacts["migrations/0783_observatory_room_read_scac_successor.sql"] =
     renderObservatoryRegistrySql(v104Rows, artifacts["migrations/0770_find_rule_scac_successor.sql"]);
 
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
@@ -21964,7 +21964,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     await writeFile(resolve("mcp-server/src/scac-mutation-registry.v104.generated.js"),
       renderRuntimeProjection(rows, { version: REGISTRY_V104_VERSION,
         dbCatalogBaseline: OBSERVATORY_V104_DB_CATALOG_BASELINE }));
-    await writeFile(resolve("migrations/0772_observatory_room_read_scac_successor.sql"), renderObservatoryRegistrySql(rows));
+    await writeFile(resolve("migrations/0783_observatory_room_read_scac_successor.sql"), renderObservatoryRegistrySql(rows));
     process.stdout.write("Observatory v104 frontier generated\n");
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools(), REGISTRY_V104_VERSION);

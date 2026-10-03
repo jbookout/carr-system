@@ -1046,7 +1046,7 @@ assert FULL_SET_SEALS["scac-mutation-registry.v19"] == (
     "sha256:9f350292253eaf1d0b57f6c453b92330ceeee7f9c3a3c372a1d61968fc22c9f3"
 )
 
-assert "0772_observatory_room_read_scac_successor.sql" in GENERATOR
+assert "0783_observatory_room_read_scac_successor.sql" in GENERATOR
 assert "OBSERVATORY_ROOM_READ_REGISTRY_APPLIED" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=104" in GENERATOR
 assert "ops.scac_mutation_catalog_v104_current()" in GENERATOR

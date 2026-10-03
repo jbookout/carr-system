@@ -1275,7 +1275,7 @@ if [ "$FIND_RULE_REGISTRY_APPLIED" = t ] && [ "$CONFIRM_MERGE_REGISTRY_APPLIED" 
   exit 1
 fi
 OBSERVATORY_ROOM_READ_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0772_observatory_room_read_scac_successor.sql')" \
+  "select exists (select 1 from schema_migrations where filename='0783_observatory_room_read_scac_successor.sql')" \
   2>/dev/null)"
 case "$OBSERVATORY_ROOM_READ_REGISTRY_APPLIED" in
   t|f) ;;
