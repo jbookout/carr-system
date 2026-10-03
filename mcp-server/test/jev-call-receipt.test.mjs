@@ -55,8 +55,12 @@ test("the cap successor changes only ask-jev's bound schema and preserves the pr
   assert.equal(changed.length, 1);
   assert.equal(changed[0].ingress_key, "mcp-tool:ask-jev");
   assert.equal(inventory.assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
-  assert.equal((await import("../src/mutation-registry.js")).SCAC_MUTATION_REGISTRY_VERSION,
-    "scac-mutation-registry.v104");
+  // Later successors retain the cap contract; a global version pin would
+  // reject an unrelated admitted reader while proving nothing about the cap.
+  const { registeredOperation } = await import("../src/mutation-registry.js");
+  const liveCap = registeredOperation("ask-jev");
+  for (const field of inventory.MCP_TOOL_BOUND_FIELDS)
+    assert.deepEqual(liveCap[field], changed[0][field], field);
 });
 
 test("budgeted cache-only misses never reserve or fetch, including a broken cache", async () => {
