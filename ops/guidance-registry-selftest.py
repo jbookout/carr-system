@@ -412,8 +412,11 @@ def main():
     # the three retired judgment_ambient ids -- each drop one of their
     # manifest-declared type. No rule was reclassified; every dropped count
     # is a whole rule leaving the active set, not a type change.
+    # procedure 77 -> 78 on 2026-09-29: rule ede4b241 (cloud model choice) is a
+    # judgment_ambient rule and owes a manifest row (procedure); one whole rule
+    # ENTERING the active set, nothing reclassified.
     reviewed_counts = {
-        "constraint": 70, "procedure": 77, "doctrine": 12, "rubric": 35,
+        "constraint": 70, "procedure": 78, "doctrine": 12, "rubric": 35,
         "preference": 12, "precedent": 3, "example": 0,
     }
     split_compile_pass = (
@@ -451,7 +454,7 @@ def main():
         "source_manifest_provenance": {
             "path": "audits/guidance-migration-manifest.v1.tsv", "sha256": "a" * 64,
             "manifest": "carr-guidance-migration", "schema_version": "1.0.0",
-            "source_classification": "judgment_ambient", "entry_count": 93,
+            "source_classification": "judgment_ambient", "entry_count": 94,
         },
         "base_inventory": {
             "path": "ops/config/rule-enforcement-map.json", "sha256": "b" * 64,

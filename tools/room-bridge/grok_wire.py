@@ -8,6 +8,7 @@ No token is loaded here, and no other provider is a fallback.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 
 MODEL = "grok-4.7"
@@ -15,7 +16,6 @@ PROVIDER_MODEL = "grok-4.7-build"
 EFFORT = "high"
 TIMEOUT_S = 180.0
 MAX_TURNS = 60
-
 
 def validate_entry(entry: dict) -> None:
     if (entry.get("model") != MODEL or entry.get("effort") != EFFORT
@@ -34,7 +34,12 @@ def model_usage_error(models) -> str | None:
 
 
 def parse_stream(lines, returncode: int = 0) -> dict:
-    """Keep the final assistant message in a stream with exactly one end."""
+    """Keep the latest assistant response with exactly one end.
+
+    These events do not identify which task produced each response. Prose
+    cannot establish lifecycle provenance or authorize reusing an older answer.
+    The verified read-only invocation suppresses lifecycle hooks at the source.
+    """
     chunks = []
     final_chunks = []
     end: dict = {}
@@ -70,6 +75,9 @@ def parse_stream(lines, returncode: int = 0) -> dict:
                 chunks = []
         elif event.get("type") == "end":
             end = event
+    if chunks:
+        final_chunks = chunks
+    text = "".join(final_chunks)
     code = 0
     if detail:
         end = {**end, "stopReason": "invalid_stream"}
@@ -82,7 +90,7 @@ def parse_stream(lines, returncode: int = 0) -> dict:
         detail = model_usage_error(end.get("modelUsage"))
         if detail:
             code = 5
-    return {"text": "".join(chunks or final_chunks), "end": end, "detail": detail, "code": code}
+    return {"text": text, "end": end, "detail": detail, "code": code}
 
 
 def parse_result(stdout: str, returncode: int) -> dict:
@@ -112,8 +120,12 @@ def invoke_cli(prompt: str, *, cwd=None, effort=EFFORT, max_turns=MAX_TURNS,
             "--max-turns", str(max_turns), "--always-approve",
             "--sandbox", "workspace" if writable else "read-only",
             "--output-format", "streaming-json", "--print", prompt]
+    env = dict(os.environ)
+    env.pop("CARR_GROK_RUN_READ_ONLY", None)
+    if not writable:
+        env["CARR_GROK_RUN_READ_ONLY"] = "1"
     return run(argv, cwd=cwd, capture_output=True, text=True,
-               stdin=subprocess.DEVNULL, timeout=timeout_seconds)
+               stdin=subprocess.DEVNULL, timeout=timeout_seconds, env=env)
 
 
 def run_task(entry: dict, task: str, *, run=subprocess.run) -> dict:
