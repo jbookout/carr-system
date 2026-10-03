@@ -100,6 +100,19 @@ class SplittingSlack(FakeSlack):
         return [m for m in self.messages if m["ts"] == thread or m["thread_ts"] == thread]
 
 
+def posted_brief(posts):
+    """Strip the documented multipart notices to compare original brief content."""
+    texts = [text for text, _ in posts]
+    if len(texts) > 1:
+        start = "\nMultipart brief: wait for DOT-BRIEF-END before responding.\n"
+        end = "\nDOT-BRIEF-END\n"
+        assert texts[0].endswith(start)
+        assert texts[-1].endswith(end)
+        texts[0] = texts[0][:-len(start)]
+        texts[-1] = texts[-1][:-len(end)]
+    return "".join(texts)
+
+
 class RelayTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -111,6 +124,97 @@ class RelayTests(unittest.TestCase):
         self.state = self.root / "state"
         self.slack = FakeSlack()
         self.engine = relay.Relay(self.slack, self.state, self.repo, "agent", cwd=self.repo)
+
+    def test_healthy_root_send_does_not_terminate_another_job_watcher(self):
+        import threading
+        from unittest.mock import patch
+        slack = SplittingSlack()
+        engine = relay.Relay(slack, self.state, self.repo, "agent")
+        thread = engine.send_job("Job A")
+        started, release = threading.Event(), threading.Event()
+        original_post = slack.post
+        failures = []
+        def post(text, parent=None):
+            if parent is None:
+                started.set()
+                if not release.wait(5):
+                    raise AssertionError("send was never released")
+            return original_post(text, parent)
+        def send():
+            try:
+                engine.send_job("Job B")
+            except BaseException as exc:
+                failures.append(exc)
+        def resume(_):
+            release.set()
+            worker.join(5)
+            self.assertFalse(worker.is_alive())
+            slack.messages.append({"ts": "2.000001", "thread_ts": thread,
+                                   "user": "agent", "text": "Done A.\nDOT-REPORT-END"})
+        with patch.object(slack, "post", side_effect=post):
+            worker = threading.Thread(target=send)
+            worker.start()
+            try:
+                self.assertTrue(started.wait(5))
+                self.assertEqual(relay.watch(engine, thread, max_polls=2, sleep=resume), 0)
+            finally:
+                release.set()
+                worker.join(5)
+        self.assertEqual(failures, [])
+        self.assertFalse((self.state / "send-job.json").exists())
+
+    def test_multipart_send_respects_slack_channel_rate_budget(self):
+        from unittest.mock import patch
+        now, attempts = [0.0], []
+        def sleep(delay):
+            self.assertGreater(delay, 0)
+            now[0] += delay
+        def api(method, payload):
+            self.assertEqual(method, "chat.postMessage")
+            previous = attempts[-1] if attempts else None
+            attempts.append(now[0])
+            if previous is not None and now[0] - previous < 1:
+                return {"ok": False, "error": "ratelimited"}
+            return {"ok": True, "ts": f"1.{len(attempts):06d}"}
+        slack = relay.SlackTransport("synthetic", "destination", api=api)
+        engine = relay.Relay(slack, self.state, self.repo, "agent")
+        with patch.object(relay.time, "monotonic", side_effect=lambda: now[0]), \
+                patch.object(relay.time, "sleep", side_effect=sleep):
+            thread = engine.send_job("Header\n" + "x" * 8000)
+            slack.post("A distinct subsequent write", thread)
+        self.assertGreaterEqual(len(attempts), 4)
+        self.assertTrue(all(b - a >= 1 for a, b in zip(attempts, attempts[1:])))
+        self.assertNotIn("posting_pending", json.loads((self.state / thread / "state.json").read_text()))
+
+    def test_early_multipart_report_and_commands_cannot_complete_job(self):
+        from unittest.mock import patch
+        slack = SplittingSlack()
+        engine = relay.Relay(slack, self.state, self.repo, "agent")
+        original_post = slack.post
+        def post(text, thread=None):
+            ts = original_post(text, thread)
+            if thread is None:
+                slack.messages.append({"ts": "1.0000015", "thread_ts": ts, "user": "agent",
+                                       "text": "```mac-run\ncat example.txt\n```\nEarly.\nDOT-REPORT-END"})
+            return ts
+        with patch.object(slack, "post", side_effect=post):
+            thread = engine.send_job("Header\n" + "x" * 8000)
+        restarted = relay.Relay(slack, self.state, self.repo, "agent")
+        self.assertFalse(restarted.poll(thread, execute=True))
+        self.assertFalse((self.state / thread / "ledger.jsonl").exists())
+        self.assertFalse((self.state / thread / "report.txt").exists())
+        self.assertIn("wait for DOT-BRIEF-END", slack.posts[0][0])
+        self.assertTrue(slack.posts[-1][0].endswith("\nDOT-BRIEF-END\n"))
+        stored = json.loads((self.state / thread / "state.json").read_text())
+        self.assertEqual(stored["brief_complete_ts"], slack.messages[-1]["ts"])
+        slack.messages.append({"ts": "2.000001", "thread_ts": thread, "user": "agent",
+                               "text": "Complete specification received.\nDOT-REPORT-END"})
+        self.assertTrue(restarted.poll(thread, execute=True))
+
+    def test_timestamp_acceptance_rule_has_one_definition(self):
+        # Policy regression: the exact format must have one module-local home.
+        source = Path(relay.__file__).read_text()
+        self.assertEqual(source.count(r"[0-9]{1,20}\.[0-9]{1,10}"), 1)
 
     def test_long_brief_returns_header_thread_and_continues_in_that_thread(self):
         slack = SplittingSlack()
@@ -125,7 +229,7 @@ class RelayTests(unittest.TestCase):
         self.assertGreater(len(slack.posts), 1)
         self.assertTrue(all(len(text) < 3500 for text, _ in slack.posts))
         self.assertTrue(all(text.endswith("\n") for text, _ in slack.posts))
-        self.assertEqual("".join(text for text, _ in slack.posts), brief)
+        self.assertEqual(posted_brief(slack.posts), brief)
 
     def test_short_brief_posts_once_and_returns_unchanged_thread(self):
         brief = "[orch] JOB synthetic-short\nSynthetic specification.\n"
@@ -145,7 +249,7 @@ class RelayTests(unittest.TestCase):
                 engine = relay.Relay(slack, self.state / str(index), self.repo, "agent")
                 thread = engine.send_job(brief)
                 self.assertEqual(thread, slack.messages[0]["ts"])
-                self.assertEqual("".join(text for text, _ in slack.posts), brief)
+                self.assertEqual(posted_brief(slack.posts), brief)
                 self.assertTrue(all(len(text) < 3500 for text, _ in slack.posts))
                 if len(brief) < 3500:
                     self.assertEqual(slack.posts, [(brief, None)])
@@ -164,7 +268,7 @@ class RelayTests(unittest.TestCase):
             self.assertNotIn(shaped, text)
             self.assertLess(len(text), 3500)
         expected = "Header\n" + "x" * 3490 + "[REDACTED]\n" + ("[REDACTED] [REDACTED]\n") * 150
-        self.assertEqual("".join(text for text, _ in slack.posts), expected)
+        self.assertEqual(posted_brief(slack.posts), expected)
         self.assertNotIn(known, (self.state / thread / "state.json").read_text())
 
     def test_own_continuations_cannot_inject_commands_or_reports_after_restart(self):
@@ -607,6 +711,21 @@ class RelayTests(unittest.TestCase):
 
 
 class TransportTests(unittest.TestCase):
+    def test_pacing_clock_can_advance_past_deadline_between_reads(self):
+        from unittest.mock import patch
+        times = iter((0.0, 0.0, 0.9, 1.1, 1.1))
+        waits = []
+        def sleep(delay):
+            self.assertGreater(delay, 0)
+            waits.append(delay)
+        slack = relay.SlackTransport("synthetic", "destination",
+                                     api=lambda *_: {"ok": True, "ts": "1.000001"})
+        with patch.object(relay.time, "monotonic", side_effect=lambda: next(times)), \
+                patch.object(relay.time, "sleep", side_effect=sleep):
+            slack.post("first")
+            slack.post("second")
+        self.assertTrue(all(delay > 0 for delay in waits))
+
     def test_pagination_and_plain_text_posts(self):
         calls = []
         def api(method, payload):

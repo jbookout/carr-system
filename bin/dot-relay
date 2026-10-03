@@ -29,7 +29,11 @@ USAGE (global options precede the subcommand):
 
 PROTOCOL:
   Long briefs post as a root message plus in-thread continuation parts;
-  send-job returns the root timestamp used for Dot replies.
+  send-job returns the root timestamp used for Dot replies. Multipart roots
+  say to wait; the final continuation ends with DOT-BRIEF-END. Dot must wait
+  for that final part before requesting commands or reporting completion.
+  Replies at or before the persisted final-part timestamp are ignored.
+  Slack writes are paced at one per second; ambiguous writes are never retried.
   In the same Slack thread, the trusted sender requests one command per line:
     ```mac-run
     git status --short
@@ -64,7 +68,9 @@ STATE:
   interruption; inspect pending.jsonl before requesting a NEW command. Posts
   have no automatic write retry: reconcile an ambiguous send against Slack.
   A pending root claim in the state directory's send-job.json blocks new jobs
-  and polling until reconciled; continuation claims live in thread state.json.
+  and polling until reconciled after the sender releases its lock. Healthy
+  active root sends leave other job watchers running. Continuation claims and
+  the final brief timestamp live in thread state.json.
   An interrupted result post also stops resume until private state is reconciled.
   Never commit local state, reports, credentials or live message contents.
 

@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import time
+import threading
 from pathlib import Path, PurePosixPath
 from lib.secret_redaction import redact_text
 
@@ -343,9 +344,16 @@ def _protocol(text):
     return commands, "\n".join(report_lines).strip() + "\n" if finished else None
 
 
-def _brief_parts(text):
+def _timestamp_key(value):
+    """One fail-closed Slack timestamp rule, with exact numeric ordering."""
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9]{1,20}\.[0-9]{1,10}", value):
+        return None
+    seconds, fraction = value.split(".")
+    return int(seconds), int(fraction.ljust(10, "0"))
+
+
+def _brief_parts(text, limit=3499):
     """Keep lines intact where possible; bound even a single oversized line."""
-    limit = 3499
     parts, current = [], ""
     for line in text.splitlines(keepends=True):
         if current and len(current) + len(line) > limit:
@@ -381,13 +389,20 @@ class Relay:
                         "repo": str(self.repo), "cwd": str(self.cwd), "scratch_roots": list(map(str, self.scratch_roots))}
 
     def _directory(self, thread):
-        if not re.fullmatch(r"[0-9]{1,20}\.[0-9]{1,10}", thread):
+        if _timestamp_key(thread) is None:
             raise ValueError("invalid Slack thread timestamp")
         return _private_dir(self.state_dir / thread)
 
     def send_job(self, brief):
         # Redact before splitting: a secret spanning a cut must never leak.
-        parts = _brief_parts(redact_text(brief, known_secrets=self.secrets))
+        text = redact_text(brief, known_secrets=self.secrets)
+        parts = _brief_parts(text)
+        if len(parts) > 1:
+            start = "\nMultipart brief: wait for DOT-BRIEF-END before responding.\n"
+            end = "\nDOT-BRIEF-END\n"
+            parts = _brief_parts(text, 3499 - max(len(start), len(end)))
+            parts[0] += start
+            parts[-1] += end
         pending_file = self.state_dir / "send-job.json"
         fd = os.open(self.state_dir / "send-job.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "w") as lock:
@@ -398,7 +413,7 @@ class Relay:
             pending = {"posting_pending": "job:0", "binding": self.binding}
             _write_json(pending_file, pending)
             thread = self.transport.post(parts[0])
-            if not isinstance(thread, str) or not re.fullmatch(r"[0-9]{1,20}\.[0-9]{1,10}", thread):
+            if _timestamp_key(thread) is None:
                 raise SlackError("Slack post timestamp invalid")
             pending["thread"] = thread
             _write_json(pending_file, pending)
@@ -418,19 +433,29 @@ class Relay:
                 _sync_directory(self.state_dir)
                 for index, part in enumerate(parts[1:], 1):
                     posted_ts = self.transport.post(part, thread)
-                    if not isinstance(posted_ts, str) or not re.fullmatch(r"[0-9]{1,20}\.[0-9]{1,10}", posted_ts):
+                    if _timestamp_key(posted_ts) is None:
                         raise SlackError("Slack post timestamp invalid")
                     state["outgoing"].append(posted_ts)
                     if index + 1 < len(parts):
                         state["posting_pending"] = f"job:{index + 1}"
                     else:
                         del state["posting_pending"]
+                        state["brief_complete_ts"] = posted_ts
                     _write_json(state_file, state)
             return thread
 
     def poll(self, thread, *, execute=False):
-        if (self.state_dir / "send-job.json").exists():
-            raise ValueError("interrupted job post requires reconciliation")
+        pending_file = self.state_dir / "send-job.json"
+        if pending_file.exists():
+            fd = os.open(self.state_dir / "send-job.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "w") as send_lock:
+                try:
+                    fcntl.flock(send_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    pass  # A healthy sender owns this claim; other jobs can poll.
+                else:
+                    if pending_file.exists():
+                        raise ValueError("interrupted job post requires reconciliation")
         directory = self._directory(thread)
         # flock covers execution AND checkpoints; two relay processes cannot race.
         fd = os.open(directory / "lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
@@ -447,14 +472,19 @@ class Relay:
                 raise ValueError("interrupted post requires reconciliation")
             if state.get("finished"):
                 return True
+            complete = state.get("brief_complete_ts")
+            if complete is not None and _timestamp_key(complete) is None:
+                raise ValueError("invalid brief completion timestamp")
             messages = self.transport.replies(thread)
             _validate_messages(messages)
-            for message in sorted(messages, key=lambda m: m["ts"]):
+            for message in sorted(messages, key=lambda m: _timestamp_key(m["ts"])):
                 ts = message["ts"]
                 if ts == thread or ts in state["messages"] or ts in state.get("outgoing", []):
                     continue
                 if self.sender not in (message.get("user"), message.get("bot_id")) or message.get("edited") or message.get("subtype") not in (None, "bot_message"):
                     continue
+                if complete is not None and _timestamp_key(ts) <= _timestamp_key(complete):
+                    continue  # Neither commands nor reports may precede the full brief.
                 commands, report = _protocol(message["text"])
                 if commands and not execute:
                     continue  # watch does not consume requests needed by relay
@@ -480,7 +510,7 @@ class Relay:
                     state["posting_pending"] = key
                     _write_json(state_file, state)
                     posted_ts = self.transport.post(output, thread)
-                    if not isinstance(posted_ts, str) or not re.fullmatch(r"[0-9]{1,20}\.[0-9]{1,10}", posted_ts):
+                    if _timestamp_key(posted_ts) is None:
                         raise SlackError("Slack post timestamp invalid")
                     state.setdefault("outgoing", []).append(posted_ts)
                     del state["posting_pending"]
@@ -518,7 +548,7 @@ def _validate_messages(messages):
         if not isinstance(message, dict):
             raise SlackError("Slack message invalid")
         ts, text = message.get("ts"), message.get("text")
-        if (not isinstance(ts, str) or not re.fullmatch(r"[0-9]{1,20}\.[0-9]{1,10}", ts)
+        if (_timestamp_key(ts) is None
                 or not isinstance(text, str) or ts in seen):
             raise SlackError("Slack message invalid")
         seen.add(ts)
@@ -548,6 +578,8 @@ class SlackTransport:
         self.token, self.channel = token, channel
         self.api = api
         self.client = None
+        self._post_lock = threading.Lock()
+        self._next_post_at = 0.0
         if api is None and use_sdk:
             try:
                 from slack_sdk import WebClient
@@ -613,9 +645,17 @@ class SlackTransport:
                    "unfurl_links": False, "unfurl_media": False}
         if thread:
             payload["thread_ts"] = thread
-        response = self._call("chat.postMessage", payload)
+        # Pace distinct writes, including result posts, without retrying any write.
+        with self._post_lock:
+            while True:
+                delay = self._next_post_at - time.monotonic()
+                if delay <= 0:
+                    break
+                time.sleep(delay)
+            self._next_post_at = time.monotonic() + 1
+            response = self._call("chat.postMessage", payload)
         ts = response.get("ts")
-        if not isinstance(ts, str) or not re.fullmatch(r"[0-9]{1,20}\.[0-9]{1,10}", ts):
+        if _timestamp_key(ts) is None:
             raise SlackError("Slack post did not return a thread timestamp")
         return ts
 
@@ -738,7 +778,7 @@ def main(argv=None, *, repo=None, transport_factory=SlackTransport):
             return 0
         if not 1 <= args.max_polls <= 10000:
             raise ValueError("max polls outside supported range")
-        if not re.fullmatch(r"[0-9]{1,20}\.[0-9]{1,10}", args.thread):
+        if _timestamp_key(args.thread) is None:
             raise ValueError("invalid thread timestamp")
         job_file = state_dir / args.thread / "job.json"
         if job_file.exists():
