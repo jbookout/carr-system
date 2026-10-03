@@ -1767,6 +1767,11 @@ class SquashGitHub(FakeGitHub):
         self.merged, self.number, self.real_head = merged, number, head
         self.comment_map = {number: [approve(number, reviewed=reviewed)]}
 
+    def pr_number(self, sha):
+        # Main commits must not inherit the squash PR's review by a hash collision.
+        number = super().pr_number(sha)
+        return number + 1 if number == self.number else number
+
     def pr_for_commit(self, sha):
         if sha == self.merged:
             self.heads[self.real_head] = self.number
@@ -1783,6 +1788,20 @@ class UpdateBranchReview(Base):
     pipeline's checkout has neither R nor H until it fetches refs/pull/N/head."""
 
     N = 777
+
+    def test_squash_fixture_reserves_its_explicit_pr_number(self):
+        main_commit = "02a5" + "0" * 36
+        gh = SquashGitHub("a" * 40, self.N, "b" * 40, "b" * 40)
+        self.assertEqual(FakeGitHub().pr_number(main_commit), self.N)
+        self.assertNotEqual(gh.pr_for_commit(main_commit)["number"], self.N)
+
+    def test_exact_review_ships_when_main_hash_collides_with_squash_pr(self):
+        reviewed, head, merged = self.build()
+        with mock.patch.object(FakeGitHub, "pr_number", return_value=self.N):
+            rc, runner = self.tick(merged, head, head)
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.fx.records()[-1]["status"], "shipped")
+        self.assertIn("promote", runner.names())
 
     def build(self, *, merge_touches_pr_file=False, merge_touches_other_file=False,
               pr_rel="mcp-server/src/pr.js", main_extra=None):
