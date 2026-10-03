@@ -33,6 +33,11 @@ import io
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
+# INSERT provenance belongs to one live database's transactions. A rebuild
+# carries schema, never old xid8 values that could collide with its own xids.
+coverage = json.loads((REPO / "ops/config/snapshot-seed-coverage.json").read_text())
+assert "ops.rule_insert_provenance" in coverage["excluded"]
+
 
 def load_module():
     spec = importlib.util.spec_from_file_location(

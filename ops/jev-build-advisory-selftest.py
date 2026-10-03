@@ -59,20 +59,22 @@ class AdvisoryTests(unittest.TestCase):
     def test_one_batched_request_returns_every_typed_facet(self):
         client = FakeClient()
         result = advisory.advise("Design and verify the change", client=client)
-        self.assertEqual(result["schema"], "jev-build-advisory/v1")
+        self.assertEqual(result["schema"], "jev-build-advisory/v2")
         self.assertEqual(result["model"], "jev-test")
         self.assertEqual(set(result["facets"]), set(advisory.FACETS))
         self.assertEqual(set(client.questions),
-                         set(advisory.FACETS) | set(advisory.GUIDANCE_TEXT))
-        self.assertEqual(set(result["guidance"]), set(advisory.GUIDANCE_TEXT))
+                         set(advisory.FACETS))
         self.assertEqual(client.state, {"partner_request": "Design and verify the change"})
-        self.assertEqual(result["authority"], "required")
-        self.assertIn("permissions_and_authority", result["deterministic_exclusions"])
-        self.assertEqual(
-            [row["facet"] for row in result["required_actions"]],
-            [facet for i, facet in enumerate(advisory.FACETS) if i % 2 == 0])
-        self.assertTrue(all("Jev" in row["instruction"]
-                            for row in result["required_actions"]))
+        self.assertNotIn("required_actions", result)
+        self.assertNotIn("authority", result)
+        self.assertNotIn("guidance", result)
+
+    def test_human_intent_defers_judgment_without_prompt_obligation(self):
+        from lib.rule_delivery_preuse import validate_build_advisory
+        receipt = advisory.deferred()
+        self.assertEqual(receipt["effect"], "no_prompt_obligation")
+        self.assertTrue(validate_build_advisory(receipt, prompt_sha256="x"))
+        self.assertNotIn("required_actions", receipt)
 
     def test_missing_or_invalid_answers_are_unavailable(self):
         class Broken(FakeClient):
@@ -236,7 +238,7 @@ class MachineEnvelopeTests(unittest.TestCase):
     def test_a_partner_request_is_still_advised(self):
         client = FakeClient()
         result = advisory.advise("Please redesign the rule compiler.", client=client)
-        self.assertEqual(result["schema"], "jev-build-advisory/v1")
+        self.assertEqual(result["schema"], "jev-build-advisory/v2")
         mixed = "<system-reminder>context</system-reminder>\nPlease fix the gate."
         self.assertFalse(advisory.is_machine_envelope(mixed))
 
@@ -277,7 +279,7 @@ class MachineEnvelopeTests(unittest.TestCase):
             Path(blocker).write_text("x", encoding="utf-8")
             result = advisory.advise("Request", client=FakeClient(),
                                      cache_path=os.path.join(blocker, "c.json"))
-            self.assertEqual(result["schema"], "jev-build-advisory/v1")
+            self.assertEqual(result["schema"], "jev-build-advisory/v2")
 
 
 class EditCoverageTests(unittest.TestCase):
