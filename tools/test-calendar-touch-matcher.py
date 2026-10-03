@@ -149,6 +149,34 @@ class LiveExports(unittest.TestCase):
         self.assertIn("Near synthetic meeting", output.getvalue())
         self.assertNotIn("Far synthetic meeting", output.getvalue())
 
+    def test_nearest_same_day_future_meeting_uses_start_instant(self):
+        self.seed_live()
+        now = datetime.datetime(2026, 10, 2, 12, tzinfo=datetime.timezone.utc)
+        # Offset spellings deliberately reverse lexical and instant ordering.
+        for near, far in (("2026-10-02T13:00:00+00:00", "2026-10-02T18:00:00+00:00"),
+                          ("2026-10-02T15:00:00+02:00", "2026-10-02T14:00:00-04:00")):
+            meetings = [
+                {"event_id": "near", "start_at": near, "title": "Near future meeting",
+                 "emails": ["one@clinic-a.example.test"]},
+                {"event_id": "far", "start_at": far, "title": "Far future meeting",
+                 "emails": ["one@clinic-a.example.test"]},
+            ]
+            for ordered in (meetings, meetings[::-1]):
+                with self.subTest(near=near, first=ordered[0]["event_id"]):
+                    dump = self.root / "dump.json"
+                    dump.write_text(json.dumps({"schema": "calendar-events/v2", "events": ordered}))
+                    output = io.StringIO()
+                    with mock.patch.object(matcher.time, "time", return_value=now.timestamp()), \
+                            mock.patch.object(matcher, "export_home", return_value=str(self.root)), \
+                            mock.patch.object(sys, "argv", ["matcher", "7", "--from-dump", str(dump)]), \
+                            redirect_stdout(output), redirect_stderr(io.StringIO()):
+                        self.assertEqual(matcher.main(), 0)
+                    report = output.getvalue()
+                    self.assertIn("UPCOMING", report)
+                    self.assertIn("Near future meeting", report)
+                    self.assertNotIn("Far future meeting", report)
+                    self.assertIn("distinct attendee emails: 0", report)
+
     def test_timestamped_dump_excludes_later_today_and_preserves_occurrences(self):
         now = datetime.datetime(2026, 10, 1, 23, 30, tzinfo=datetime.timezone.utc)
         dump = self.root / "dump.json"

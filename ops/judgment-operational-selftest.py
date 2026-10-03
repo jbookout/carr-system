@@ -64,6 +64,10 @@ def recent_commits(limit=40):
 
 
 def has_credential():
+    # Offline replay and CI verification must not spend live Jev calls even
+    # when this workstation happens to hold an operational credential.
+    if os.environ.get("CARR_JEV_OFFLINE_REPLAY") == "1":
+        return False
     if os.environ.get("TYPESAFE_API_KEY"):
         return True
     path = os.path.expanduser("~/.config/carr/typesafe.env")
@@ -75,7 +79,7 @@ SKIP = "LOCAL-ONLY: needs the live credential and the live service"
 
 @unittest.skipUnless(has_credential(), SKIP)
 class MessageBoundaryJevTests(unittest.TestCase):
-    """The installed prompt hook must deliver both Jev judgments, not just call them."""
+    """The prompt hook delivers matching rules and defers build judgment."""
 
     @classmethod
     def setUpClass(cls):
@@ -99,7 +103,7 @@ class MessageBoundaryJevTests(unittest.TestCase):
         self.assertIsNotNone(output, "the prompt hook returned no context")
         return json.loads(output["hookSpecificOutput"]["additionalContext"])
 
-    def test_binding_pack_rule_is_delivered_with_a_live_build_receipt(self):
+    def test_binding_pack_rule_is_delivered_with_deferred_build_receipt(self):
         row = self.receipt(
             "My working tree is dirty. I am about to tell Joe another session "
             "is blocking my change. I only compared against HEAD and have not "
@@ -109,8 +113,9 @@ class MessageBoundaryJevTests(unittest.TestCase):
         self.assertIn("engineering-git", row["packs"])
         self.assertTrue(row["model_provenance"]["173119a8"]["binding_model"])
         self.assertEqual(row["build_receipt"]["advisory"]["schema"],
-                         "jev-build-advisory/v1")
-        self.assertTrue(row["build_receipt"]["advisory"]["model"])
+                         "jev-build-advisory-skipped/v1")
+        self.assertEqual(row["build_receipt"]["advisory"]["reason"],
+                         "boundary_deferred")
 
     def test_plain_read_receives_no_rule_and_no_invented_build_action(self):
         row = self.receipt(
@@ -118,8 +123,9 @@ class MessageBoundaryJevTests(unittest.TestCase):
             "jev-negative")
         self.assertEqual(row["schema"], "jev-build-turn-receipt/v1")
         self.assertEqual(row["semantic_rule_delivery"], "not_applicable")
-        self.assertEqual(row["advisory"]["schema"], "jev-build-advisory/v1")
-        self.assertEqual(row["advisory"]["required_actions"], [])
+        self.assertEqual(row["advisory"]["schema"], "jev-build-advisory-skipped/v1")
+        self.assertEqual(row["advisory"]["reason"], "boundary_deferred")
+        self.assertNotIn("required_actions", row["advisory"])
 
 
 @unittest.skipUnless(has_credential(), SKIP)

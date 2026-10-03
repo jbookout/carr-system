@@ -98,10 +98,12 @@ def selector_result(*, mode: str = "shadow", ids: list[str] | None = None,
 
 class Runner:
     def __init__(self, result: dict | None = None, *, returncode: int = 0,
-                 stderr: str = "", error: Exception | None = None):
+                 stderr: str = "", error: Exception | None = None,
+                 stdout: str | None = None):
         self.result = selector_result() if result is None else result
         self.returncode = returncode
         self.stderr = stderr
+        self.stdout = stdout
         self.error = error
         self.calls: list[tuple[tuple, dict]] = []
 
@@ -111,7 +113,7 @@ class Runner:
             raise self.error
         return SimpleNamespace(
             returncode=self.returncode,
-            stdout=json.dumps(self.result),
+            stdout=json.dumps(self.result) if self.stdout is None else self.stdout,
             stderr=self.stderr,
         )
 
@@ -260,27 +262,81 @@ check("Codex structured exec receives the same rail",
       receipt(rail.process(payload(tool="functions.exec", client="codex"), runner=Runner()))["client"]
       == "codex")
 
-# Selector responses are strict; failures are fixed/redacted and never block.
-bad_cases = [
-    ("nonzero", Runner(returncode=1, stderr="token=SUPER-SECRET")),
-    ("exception", Runner(error=RuntimeError("postgres://SUPER-SECRET"))),
-    ("unknown pack", Runner(selector_result(unknown=["scheduled-automation"]))),
-    ("wrong mode", Runner(selector_result(mode="mystery"))),
-    ("extra declared pack", Runner(selector_result(
-        declared=["scheduled-automation", "engineering-git"]))),
-    ("missing rule", Runner(selector_result(ids=EXPECTED_IDS[:-1]))),
-    ("mismatched local sponsor", Runner(selector_result(sponsor="dell"))),
-    ("mismatched runtime and agent", Runner(selector_result(runtime="codex"))),
-    ("unknown local identity", Runner(selector_result(
-        agent="some-local", sponsor="joe"))),
-]
-for label, fake in bad_cases:
-    failed = rail.process(payload(), runner=fake)
-    rendered = context(failed)
-    check(f"{label} is fixed redacted nonblocking failure",
-          rendered == rail.FAILURE_CONTEXT
-          and "SUPER-SECRET" not in json.dumps(failed)
-          and "decision" not in failed and "updatedInput" not in failed, failed)
+# Exercise the caller's process() interface, including parsing, validation and
+# rendering. Each fixture has an independent expected cause: accepting merely
+# any safe cause would allow the diagnostic to collapse to one generic reason.
+def check_failure_cases(label: str, call: dict, response: dict, missing_cause: str,
+                        base: str) -> None:
+    def changed(**patch):
+        result = copy.deepcopy(response)
+        result.update(patch)
+        return result
+
+    delivery = dict(response["rule_delivery"], mode="mystery")
+    duplicate = response["shared_rules"] + response["shared_rules"][:1]
+    nonbinding = copy.deepcopy(response["shared_rules"])
+    nonbinding[0]["statement"] = " "
+    identity = response["identity"]
+    plan = response["rule_delivery"]
+    cases = [
+        ("nonzero", Runner(response, returncode=1, stderr="token=SUPER-SECRET"),
+         "selector returned nonzero"),
+        ("malformed JSON", Runner(response, stdout="SUPER-SECRET{"),
+         "selector returned malformed JSON"),
+        ("not ok", Runner(changed(ok=False)), "selector response was not ok"),
+        ("non-object response", Runner(stdout="[]"), "selector response was not ok"),
+        ("identity", Runner(changed(identity={})), "selector identity is incomplete"),
+        ("mismatched local sponsor", Runner(changed(identity=dict(identity,
+            sponsoring_human_id="dell"))), "selector identity is incomplete"),
+        ("mismatched runtime and agent", Runner(changed(identity=dict(identity,
+            runtime_principal="codex"))), "selector identity is incomplete"),
+        ("unknown local identity", Runner(changed(identity=dict(identity,
+            agent_principal_id="some-local", runtime_principal="some-local"))),
+         "selector identity is incomplete"),
+        ("unknown pack", Runner(changed(rule_delivery=dict(plan,
+            packs_not_found=["unknown-pack"]))), "selector delivery plan is not exact"),
+        ("extra declared pack", Runner(changed(rule_delivery=dict(plan,
+            declared_packs=plan["declared_packs"] + ["unknown-pack"]))),
+         "selector delivery plan is not exact"),
+        ("delivery plan", Runner(changed(rule_delivery=delivery)),
+         "selector delivery plan is not exact"),
+        ("rule pools", Runner(changed(personal_rules=None)),
+         "selector rule pools are malformed"),
+        ("shared rule pool", Runner(changed(shared_rules=None)),
+         "selector rule pools are malformed"),
+        ("malformed rule", Runner(changed(shared_rules=[None])),
+         "selector returned a malformed rule"),
+        ("duplicate rule", Runner(changed(shared_rules=duplicate)),
+         "selector returned duplicate or nonbinding rule"),
+        ("nonbinding rule", Runner(changed(shared_rules=nonbinding)),
+         "selector returned duplicate or nonbinding rule"),
+        ("missing rule", Runner(changed(shared_rules=response["shared_rules"][:-1])),
+         missing_cause),
+        ("timeout", Runner(error=subprocess.TimeoutExpired("SUPER-SECRET", 15)),
+         "unexpected TimeoutExpired"),
+        ("unknown exception", Runner(error=RuntimeError("SUPER-SECRET")),
+         "unexpected RuntimeError"),
+        ("unknown typed selector reason", Runner(error=rail.SelectorError("SUPER-SECRET")),
+         "unexpected SelectorError"),
+        ("typed selector subclass", Runner(error=type("SneakySelector", (rail.SelectorError,), {})(
+            "nonzero")), "unexpected SneakySelector"),
+        ("RuntimeError subclass", Runner(error=type("Sneaky", (RuntimeError,), {})(
+            "selector returned nonzero")), "unexpected Sneaky"),
+    ]
+    for name, fake, cause in cases:
+        original_call = copy.deepcopy(call)
+        failed = rail.process(call, runner=fake)
+        expected = {"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": f"{base} Cause: {cause}.",
+        }}
+        check(f"{label}: {name} renders its exact redacted nonblocking cause",
+              failed == expected and call == original_call and len(fake.calls) == 1,
+              failed)
+
+
+check_failure_cases("scheduled rail", payload(), selector_result(),
+                    "selector did not return every scheduled rule", rail.FAILURE_CONTEXT)
 
 # Stop telemetry credits only a platform-proven receipt bound to the exact tool call.
 def claude_tool_call() -> dict:
@@ -935,43 +991,13 @@ def fake_adviser(_situation):
 
 
 def fake_build_adviser(situation):
-    return {
-        "schema": "jev-build-advisory/v1",
-        "partner_request_sha256": rail.digest(situation),
-        "model": "jev-test-build",
-        "facets": {
-            "architecture_or_design": 0.81,
-            "semantic_creation": 0.84,
-            "diagnosis": 0.12,
-            "verification_selection": 0.67,
-            "evidence_matching": 0.34,
-            "next_action_priority": 0.58,
-        },
-        "guidance": {
-            "extend_existing_seam": 0.88,
-            "prefer_reversible_slice": 0.71,
-            "define_typed_contract_first": 0.84,
-            "gather_more_evidence_before_diagnosis": 0.22,
-            "prefer_behavioral_verification": 0.79,
-            "require_fresh_exact_evidence": 0.66,
-            "prioritize_blocker_removal": 0.45,
-        },
-        "required_actions": [
-            {"facet": facet, "instruction": contract.BUILD_ACTIONS[facet]}
-            for facet in contract.BUILD_ACTIONS
-            if {
-                "architecture_or_design": 0.81,
-                "semantic_creation": 0.84,
-                "diagnosis": 0.12,
-                "verification_selection": 0.67,
-                "evidence_matching": 0.34,
-                "next_action_priority": 0.58,
-            }[facet] >= contract.BUILD_ACTION_THRESHOLD
-        ],
-        "usage": {"input_tokens": 10, "output_tokens": 6},
-        "authority": "required",
-        "deterministic_exclusions": ["authority", "execution", "completion_proof"],
-    }
+    return {"schema": "jev-build-advisory-skipped/v1", "status": "skipped",
+            "reason": "boundary_deferred", "effect": "no_prompt_obligation"}
+
+
+check("default prompt build adviser defers without a Jev call",
+      rail._build_adviser("Inspect the hook configuration read-only.") ==
+      fake_build_adviser(""))
 
 
 semantic_runner = Runner(gen_selector_result(packs=semantic_packs, ids=[semantic_id]))
@@ -992,7 +1018,7 @@ check("semantic receipt uses authoritative text and keeps the Jev probability",
       semantic_row["rules"] == [{"id": semantic_id,
                                   "statement": f"binding jit rule {semantic_id}"}]
       and semantic_row["probabilities"] == {semantic_id: 0.91}
-      and semantic_row["build_receipt"]["advisory"]["model"] == "jev-test-build"
+      and semantic_row["build_receipt"]["advisory"]["effect"] == "no_prompt_obligation"
       and semantic_row["build_receipt"]["semantic_rule_delivery"] == "delivered"
       and semantic_row["model_provenance"] == {
           semantic_id: {"ranking_model": "jev-test-ranker",
@@ -1202,27 +1228,10 @@ bg_row = json.loads(context(bg_output))
 check("the original exact background shape still takes the original rail, not the generalized one",
       bg_row["schema"] == rail.RECEIPT_SCHEMA and bg_row.get("pack") == rail.PACK)
 
-# Selector-failure paths are fixed, redacted, and never block, matching the
-# original rail's own guarantee for its own failures.
-gen_bad_cases = [
-    ("nonzero", Runner(returncode=1, stderr="token=SUPER-SECRET")),
-    ("exception", Runner(error=RuntimeError("postgres://SUPER-SECRET"))),
-    ("wrong mode", Runner(gen_selector_result(
-        packs=council_row["packs"], ids=council_row["rule_ids"], mode="mystery"))),
-    ("extra declared pack", Runner(gen_selector_result(
-        packs=council_row["packs"] + ["engineering-git"], ids=council_row["rule_ids"]))),
-    ("missing rule", Runner(gen_selector_result(
-        packs=council_row["packs"], ids=council_row["rule_ids"][:-1]))),
-    ("mismatched local sponsor", Runner(gen_selector_result(
-        packs=council_row["packs"], ids=council_row["rule_ids"], sponsor="dell"))),
-]
-for label, fake in gen_bad_cases:
-    failed = rail.process(agent_call, runner=fake)
-    rendered = context(failed)
-    check(f"generalized rail: {label} is fixed redacted nonblocking failure",
-          rendered == rail.GENERALIZED_FAILURE_CONTEXT
-          and "SUPER-SECRET" not in json.dumps(failed)
-          and "decision" not in failed and "updatedInput" not in failed, failed)
+check_failure_cases(
+    "generalized rail", agent_call,
+    gen_selector_result(packs=council_row["packs"], ids=council_row["rule_ids"]),
+    "selector did not return every triggered rule", rail.GENERALIZED_FAILURE_CONTEXT)
 
 # Tampering with a generalized receipt's content fails validate_generalized_receipt.
 tamper_cases = [
