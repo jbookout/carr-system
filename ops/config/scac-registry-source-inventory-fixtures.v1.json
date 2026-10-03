@@ -86884,11 +86884,57 @@
           "owner_package": "11",
           "implementation_state": "inventoried_not_atomically_mediated",
           "classification_authorizing": false
+        },
+        {
+          "ingress_key": "external-admin:bin/migrate-prod.sh",
+          "ingress_kind": "external_admin",
+          "operation": "bin/migrate-prod.sh",
+          "effect_class": "administrative_mutation",
+          "source_locator": "bin/migrate-prod.sh",
+          "schema_digest": "6dd59622bfe283fabab9d3c9eabc0263c4b46ad73bd5c5e6afc2b70f4c81ec88",
+          "handler_digest": "6dd59622bfe283fabab9d3c9eabc0263c4b46ad73bd5c5e6afc2b70f4c81ec88",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "external-admin:tools/migrate-prod-support.py",
+          "ingress_kind": "external_admin",
+          "operation": "tools/migrate-prod-support.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "tools/migrate-prod-support.py",
+          "schema_digest": "65bf66fe43dcd9bc79cd84c431243ff50e142232dc26026f0ddfee839bf59d8e",
+          "handler_digest": "65bf66fe43dcd9bc79cd84c431243ff50e142232dc26026f0ddfee839bf59d8e",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
         }
       ],
       "expected_count": 1085,
-      "expected_sha256": "2329a14f6c2761a8f54578def76f00895974c192f8d0edb45140115b26bc12c2",
-      "reason": "PR 865 source-only review: re-derive the existing credential rotation external-admin row after enabling scoped verifier rotation, validating URIs, valid port ranges and targets before mutation, and verifying the complete caller identity contract. No new ingress, authority, grant, runtime selector or historical seal change. PR 1384 source-only review: re-derive the existing Dell migration external-admin receipt writer after correcting its JSON trailing newline. Preserve the registered ingress contract, authority fields, runtime selector, database catalog and all historical seals."
+      "expected_sha256": "0cf891bbfefa5ab877984b3abb682ea1e400499f80c5def08d08eef4b586e1de",
+      "reason": "PR 865 source-only review: re-derive the existing credential rotation external-admin row after enabling scoped verifier rotation, validating URIs, valid port ranges and targets before mutation, and verifying the complete caller identity contract. No new ingress, authority, grant, runtime selector or historical seal change. PR 1484 also re-derives the existing production migration wrapper and diagnostic helper after failure capture and redaction repair; no new ingress or authority. PR 1384 source-only review: re-derive the existing Dell migration external-admin receipt writer after correcting its JSON trailing newline. Preserve the registered ingress contract, authority fields, runtime selector, database catalog and all historical seals."
     }
   }
 }

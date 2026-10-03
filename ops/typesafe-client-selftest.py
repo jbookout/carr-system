@@ -84,17 +84,18 @@ class SpendHealthTests(unittest.TestCase):
         self.assertIn('if CANONICAL_SECTION == "jev-spend":', health)
         self.assertIn('sys.exit(_spend_module.nightly_exit_status(_spend_line))', health)
 
-    def test_nightly_alarm_fails_closed_when_usage_or_loop_action_is_unknown(self):
+    def test_nightly_alarm_fails_only_when_reader_or_loop_action_fails(self):
         spend = importlib.util.module_from_spec(SPEND_SPEC)
         SPEND_SPEC.loader.exec_module(spend)
         self.assertEqual(spend.nightly_exit_status("OK jev spend — $0.000"), 0)
         self.assertEqual(spend.nightly_exit_status("WARN jev spend — $0.600"), 0)
-        for line in ("UNKNOWN jev spend — missing usage",
+        self.assertEqual(spend.nightly_exit_status("UNKNOWN jev spend — missing usage"), 0)
+        for line in ("UNKNOWN jev spend — Worker usage unavailable",
                      "UNAVAILABLE jev spend — Worker unreachable",
                      "WARN jev spend — $0.600 · loop action FAILED (RuntimeError)"):
             self.assertEqual(spend.nightly_exit_status(line), 1)
 
-    def test_unsettled_worker_attempt_keeps_nightly_alarm_unknown(self):
+    def test_unsettled_worker_attempt_is_informational_for_nightly(self):
         spend = importlib.util.module_from_spec(SPEND_SPEC)
         SPEND_SPEC.loader.exec_module(spend)
         with tempfile.TemporaryDirectory() as d:
@@ -107,6 +108,30 @@ class SpendHealthTests(unittest.TestCase):
                 worker_usage=lambda _day: {"calls": 0, "input_tokens": 0,
                                             "unknown": 1, "pending_attempts": 1})
             self.assertIn("1 call or attempt missing usage", line)
+            self.assertEqual(spend.nightly_exit_status(line), 0)
+
+    def test_abandoned_attempts_are_reported_separately(self):
+        spend = importlib.util.module_from_spec(SPEND_SPEC)
+        SPEND_SPEC.loader.exec_module(spend)
+        with tempfile.TemporaryDirectory() as d:
+            line = spend.check_spend(Path(d) / "absent", MODULE_PATH.parent / "config" / "jev-cost-guard.v1.json",
+                Path(d) / "loop", lambda *_: None,
+                worker_usage=lambda _day: {"calls": 0, "input_tokens": 0, "unknown": 0,
+                    "pending_attempts": 1, "abandoned_attempts": 2, "abandon_after_seconds": 3600})
+            self.assertIn("2 abandoned attempts", line)
+            self.assertIn("older than 3600s", line)
+            self.assertIn("owner orchestrator", line)
+            self.assertEqual(spend.nightly_exit_status(line), 0)
+
+    def test_unreadable_local_log_fails_with_named_response(self):
+        spend = importlib.util.module_from_spec(SPEND_SPEC)
+        SPEND_SPEC.loader.exec_module(spend)
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "calls.jsonl"
+            log.write_bytes(b"\xff")
+            line = spend.check_spend(log, MODULE_PATH.parent / "config" / "jev-cost-guard.v1.json", Path(d) / "loop")
+            self.assertIn("UNAVAILABLE", line)
+            self.assertIn("owner orchestrator", line)
             self.assertEqual(spend.nightly_exit_status(line), 1)
 
     def test_narrow_health_cli_exits_before_unrelated_checks(self):
