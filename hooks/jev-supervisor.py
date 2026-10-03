@@ -394,7 +394,8 @@ def fact_boundary(payload, run):
 # text is full of "never"/"always") and turn-end claim checks on background
 # notification turns. A tool result is a judgment point only when it brings in
 # outside content or failed. Unknown tool provenance retains the library's
-# deterministic security floor; only simple local reads bypass inspection.
+# deterministic security floor; local Read/Grep and simple shell readers
+# bypass inspection when they carry no failure evidence.
 # A turn end is checked unless the latest request is a known notification.
 # The shared daily paid-call cap owns the spending bound.
 LOCAL_READ_COMMANDS = {"cat", "ls", "pwd", "head", "tail", "wc"}
@@ -418,7 +419,9 @@ def judgment_point(event, payload):
     """Whether this hook event is worth a paid Jev request at all."""
     if event == "PostToolUse":
         name = (payload.get("tool_name") or "").lower()
-        if name != "bash" or not _local_shell_read(payload.get("tool_input")):
+        if name not in {"bash", "read", "grep"}:
+            return True
+        if name == "bash" and not _local_shell_read(payload.get("tool_input")):
             return True
         response = payload.get("tool_response")
         code = _exit_code(response)
@@ -426,7 +429,7 @@ def judgment_point(event, payload):
             return True
         output = _text(response)[-MAX_OUTPUT_CHARS:]
         watch = _lib("jev_session_watch")
-        return bool(watch.FAILURE_MARKERS.search(output) or MISSING_FILE.search(output))
+        return bool(MISSING_FILE.search(output) or watch.FAILURE_MARKERS.search(output))
     if event == "Stop":
         for rec in reversed(_transcript_records(payload.get("transcript_path") or "")):
             provenance = _request_provenance(rec)
