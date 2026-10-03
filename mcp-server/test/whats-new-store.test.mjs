@@ -29,8 +29,7 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
   const clients = [];
   try {
     execFileSync(path.join(bin,'initdb'), ['-D',dir,'-U','fixture','--auth=trust','--no-locale'], { stdio: 'pipe' });
-    // Hosted Postgres uses UTC; the catchup date contract uses America/Chicago.
-    execFileSync(path.join(bin,'pg_ctl'), ['-D',dir,'-l',path.join(dir,'server.log'),'-o',`-k ${dir} -h '' -c timezone=UTC`,'-w','start'], { stdio: 'pipe' });
+    execFileSync(path.join(bin,'pg_ctl'), ['-D',dir,'-l',path.join(dir,'server.log'),'-o',`-k ${dir} -h ''`,'-w','start'], { stdio: 'pipe' });
     running = true;
     const connect = async () => {
       const c = new pg.Client({ host: dir, user: 'fixture', database: 'postgres' });
@@ -41,8 +40,6 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
       clients.push(c); return c;
     };
     const c = await connect();
-    // Hosted PostgreSQL uses UTC; business-day thresholds use Chicago.
-    await c.query("set time zone 'UTC'");
     await c.query('create schema ops; create role carr_writer; create role carr_authority; create role carr_reader; grant usage on schema ops to carr_writer,carr_authority,carr_reader;');
     const schema = readFileSync(path.join(root,'db/schema.sql'),'utf8');
     const authorityFunction = schema.match(/CREATE FUNCTION ops.authority_login_slug\([^\n]+\)[\s\S]*?\n\$\$;/)?.[0];
@@ -149,27 +146,48 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
     await c.query('insert into ops.doc_suggestion_scan(idempotency_key,conversation_id,through_sequence) values($1,$2,0)',[uuid(23),uuid(20)]);
     await identity('joe');
     assert.equal((await section('doc_suggestions',await context())).state,'ready');
-    // Use the reader clock and pin the UTC/Chicago gap and both DST transitions.
-    // Each case binds fixture dates and the catch-up window to one high-water.
-    const liveContext = await context();
-    for (const high_water of [liveContext.high_water,'2026-10-02T00:20:00Z','2026-10-02T18:00:00Z','2026-03-08T08:30:00Z','2026-11-01T07:30:00Z']) {
-      const thresholdContext = { high_water, since:new Date(Date.parse(high_water)-86400000).toISOString(), previous_snapshot:null };
-      for (const timezone of ['UTC','America/Chicago']) {
+    // No-write thresholds use Chicago calendar days, regardless of the database
+    // session zone or the wall clock when CI runs. Cover both DST offsets.
+    const windows = [
+      ['2026-10-02T04:00:00Z', '2026-10-01T05:00:00Z'],
+      ['2026-02-02T04:00:00Z', '2026-02-01T06:00:00Z'],
+      ['2026-03-09T04:00:00Z', '2026-03-08T06:00:00Z'],
+      ['2026-11-02T04:00:00Z', '2026-11-01T05:00:00Z'],
+    ];
+    const originalZone = (await c.query('show TimeZone')).rows[0].TimeZone;
+    let fixtureId = 80;
+    try {
+      for (const zone of ['UTC', 'America/Chicago', 'Pacific/Kiritimati']) for (const [until, threshold] of windows) {
         await c.query('reset role');
-        await c.query("select set_config('TimeZone',$1,false)",[timezone]);
-        await c.query("update next_action set created_at=$2::timestamptz-interval '3 days',updated_at=$2::timestamptz-interval '3 days',due_on=($2::timestamptz at time zone 'America/Chicago')::date where id=$1",[uuid(10),high_water]);
-        await c.query("update critical_date set created_at=$2::timestamptz-interval '3 days',updated_at=$2::timestamptz-interval '3 days',due_on=($2::timestamptz at time zone 'America/Chicago')::date+14 where id=$1",[uuid(11),high_water]);
-        await c.query("update ops.doc_suggestion set suggested_at=$2::timestamptz-interval '3 days',disposition='snoozed',snoozed_material_version=material_version,snoozed_until=($2::timestamptz at time zone 'America/Chicago')::date where id=$1",[uuid(21),high_water]);
+        await c.query("select set_config('TimeZone',$1,false)", [zone]);
+        const fixtureDay = (await c.query("select ($1::timestamptz at time zone 'America/Chicago')::date::text as day", [until])).rows[0].day;
+        const actionId = uuid(fixtureId++);
+        const old = new Date(Date.parse(threshold) - 3 * 86400000).toISOString();
+        // INSERT preserves the old timestamps; UPDATE would fire next_action_touch
+        // and let a recent-write path mask a broken due-date threshold.
+        await c.query("insert into next_action(id,subject_type,subject_id,owner_id,description,due_on,created_by,updated_by,created_at,updated_at) values($1,'deal',$2,$3,'Synthetic threshold action',$4,$3,$3,$5,$5)", [actionId,uuid(5),uuid(1),fixtureDay,old]);
+        await c.query("update critical_date set created_at=$1,updated_at=$1,due_on=$2::date+14 where id=$3", [old,fixtureDay,uuid(11)]);
+        await c.query("update ops.doc_suggestion set suggested_at=$1,disposition='snoozed',snoozed_material_version=material_version,snoozed_until=$2 where id=$3", [old,fixtureDay,uuid(21)]);
         await identity('joe');
-        // Time crossing a due threshold counts even without a new record write.
-        for (const [name,ref] of [['next_actions',`next-action:${uuid(10)}`],['critical_dates',`critical-date:${uuid(11)}`],['doc_suggestions',`doc-suggestion:${uuid(21)}`]]) {
-          const result = await section(name,thresholdContext);
-          assert.equal(result.state,'ready',`${name} in ${timezone} at ${high_water}`);
-          assert.ok(result.items.some(i => i.ref === ref),`${name} in ${timezone} at ${high_water}: Chicago threshold must be visible`);
+        const thresholdContext = { since:old, high_water:until, previous_snapshot:null };
+        const refs = { next_actions:`next-action:${actionId}`, critical_dates:`critical-date:${uuid(11)}`, doc_suggestions:`doc-suggestion:${uuid(21)}` };
+        for (const [name, ref] of Object.entries(refs)) {
+          const item = (await section(name,thresholdContext)).items.find(i => i.ref === ref);
+          assert.ok(item, `${zone} ${until}: ${name} must appear without a recent write`);
+          assert.equal(Date.parse(item.at),Date.parse(threshold),name);
+          const before = { ...thresholdContext, high_water:new Date(Date.parse(threshold)-1).toISOString() };
+          assert.equal((await section(name,before)).items.some(i => i.ref === ref),false,`${name} before threshold`);
+          const at = { ...thresholdContext, high_water:threshold };
+          assert.ok((await section(name,at)).items.some(i => i.ref === ref),`${name} at threshold`);
+          const seen = { ...thresholdContext, since:threshold };
+          assert.equal((await section(name,seen)).items.some(i => i.ref === ref),false,`${name} after acknowledgement`);
         }
       }
+    } finally {
+      await c.query("select set_config('TimeZone',$1,false)", [originalZone]);
     }
-    await c.query("set time zone 'UTC'");
+    assert.equal((await c.query('show TimeZone')).rows[0].TimeZone,originalZone,
+      'threshold matrix must restore the session timezone');
     await identity('dell');
     assert.equal((await section('new_leads',await context())).state,'empty');
     await c.query('reset role');

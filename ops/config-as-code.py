@@ -41,6 +41,8 @@ exactly as they bind Joe, with zero mechanical enforcement on his side today.
     ops/config-as-code.py verify-codex-continuity
     ops/config-as-code.py install-codex-continuity-mcp --apply
     ops/config-as-code.py verify-codex-continuity-mcp
+    ops/config-as-code.py install-progress-board [--repo CHECKOUT] --apply
+    ops/config-as-code.py verify-progress-board [--repo CHECKOUT]
     ops/config-as-code.py remove-codex-continuity --apply
 
 `check` is what belongs in run.sh health: it answers "is the live config still
@@ -221,79 +223,9 @@ CODEX_PERMISSIONS_END = "# <<< CARR managed permissions <<<"
 TOKENS = [(tok, real) for tok, real in
           (("{{VAULT}}", VAULT), ("{{REPO}}", REPO), ("{{HOME}}", HOME)) if real]
 
-# RUNS ON EXACTLY ONE MACHINE. Not a statement about Joe; a statement about what
-# the job writes. Each of these mutates state that is SHARED between the two
-# machines, so a second copy is either duplicated work or a two-writer conflict.
-# Widened 2026-08-10 during the Dell migration audit, when the set held only the
-# video pipeline and the other five would have been installed on his Mac:
-#
-#   videopipeline       — Joe's Movies folder; Dell has no video pipeline.
-#   nightly-record-layer— pushes the corpus to the shared vault and mirrors
-#                         doctrine to a path hardcoded to Joe's Google Drive
-#                         (bin/nightly.sh:154), which cannot resolve on another
-#                         machine. The cadence engine inside it IS idempotent,
-#                         so the risk is the vault writes, not double-spawning.
-#   rules-refresh       — writes the shared compiled-rules renders, and the cost
-#                         ruling in its own plist is decisive: Neon free is
-#                         100 CU-h/month at ~5 min per wake, so a second Mac
-#                         waking it hourly doubles the burn and can SUSPEND the
-#                         database for the rest of the month.
-#   local-briefs        — maintains Joe's local review queue. Legacy brief files
-#                         are explicit recovery only; a second scheduler would
-#                         duplicate the same owner-specific maintenance.
-#   partner-ping        — writes the shared record. One pinger is the point.
-#   cutover-watch       — writes the shared record (a loop update on #532) and
-#                         holds its own sentinel of what it last reported under
-#                         out/cutover-watch/, which is per-machine and would
-#                         make two Macs disagree about what is "new" — the
-#                         same partner-ping shape (one watcher, one shared
-#                         record) with the added risk of two update-loop calls
-#                         racing on the same loop's base_version.
-#
-# What the second machine still needs from the nightly is the record-derived
-# fetch allowlist, which is per-machine and gitignored. That is why
-# com.carr.fetch-allowlist.plist exists as its own job rather than being
-# inherited from the nightly chain.
-PRIMARY_ONLY = {
-    "com.carr.videopipeline.plist",
-    # com.carr.preflight-watch.plist was listed here until 2026-08-22. It watched
-    # DELL's migration packet from Joe's Mac and was built to remove itself once
-    # his A15 closed. A15 is closed, the watcher unloaded and deleted its own
-    # plist as designed, and bin/preflight-watch.sh is retired with this entry —
-    # which had been naming a plist that exists in neither ops/launchd/ nor
-    # ~/Library/LaunchAgents. A lifecycle that completes should leave nothing
-    # behind pointing at it (rule def3e84e, artifact tombstones: nothing
-    # silently rots).
-    "com.carr.nightly-record-layer.plist",
-    "com.carr.rules-refresh.plist",
-    "com.carr.local-briefs.plist",
-    "com.carr.partner-ping.plist",
-    "com.carr.cutover-watch.plist",
-    # Joe 2026-09-26: the Mac Studio is the hub and the MacBook is a thin client
-    # into it, so work that acts on shared state runs on the primary alone.
-    # room-bridge: both Macs carried the same Model Room desks and raced for
-    # each turn; it also wakes the engineering controller, whose one Worker
-    # token lives on the primary.  release-pipeline and control-plane-tick
-    # would release and enqueue twice.  The cadence sweep would escalate twice.
-    # nightly-exports-daytime-retry is the safety net for nightly-record-layer,
-    # which is already primary-only.  timebomb-audit scans the same tracked
-    # source on every Mac.  Device-bound jobs (dictation, call mode, capture,
-    # keymap, local servers, spool flush, fleet sync) stay on every machine.
-    "com.carr.room-bridge.plist",
-    "com.carr.release-pipeline.plist",
-    "com.carr.control-plane-tick.plist",
-    "com.carr.delivery-cadence-a05-sweep.plist",
-    "com.carr.nightly-exports-daytime-retry.plist",
-    "com.carr.timebomb-audit.plist",
-    # WR-000178: the Studio's Tailscale stayed stopped ~6h after the 2026-09-30
-    # reboot and cut SSH to the MacBook. The hub is the node that must come up.
-    "com.carr.tailscale-up.plist",
-}
+from lib.launchd_scope import PRIMARY_ONLY, SECONDARY_ONLY
 
 
-# The mirror image: jobs only the SECOND machine needs, because the primary
-# already gets the same effect from a chain the second machine must not run.
-SECONDARY_ONLY = {"com.carr.fetch-allowlist.plist"}
 
 
 # Versioned definitions that deliberately must not become live merely because
@@ -1926,6 +1858,60 @@ def install_launchd_plist(filename, dest, body, body_matches):
     return "failed"
 
 
+def cmd_install_progress_board(apply=False, repo=None):
+    """Migrate the existing board agent to the repository wrapper, then read
+    launchd's arguments back. This does not create a new schedule or label.
+    Defaults to the canonical checkout. An explicit repository checkout allows
+    the installed consumer to be verified before its PR merges; keep that
+    checkout available until migrating back to the canonical checkout. Board
+    state remains in the canonical out directory across either migration.
+    """
+    runtime_repo = os.path.abspath(os.path.expanduser(repo)) if repo else REPO
+    wrapper = os.path.join(runtime_repo, "ops", "progress-board-render.sh")
+    python = os.path.join(runtime_repo, ".venv", "bin", "python")
+    if not os.path.isfile(wrapper) or not os.access(python, os.X_OK):
+        print("progress-board: selected checkout wrapper or repository interpreter unavailable; "
+              "select a repository checkout containing the wrapper and interpreter")
+        return 1
+    label = "local.carr-progress-board"
+    dest = os.path.join(HOME, "Library", "LaunchAgents", label + ".plist")
+    try:
+        with open(dest, "rb") as handle:
+            current = plistlib.load(handle)
+        if not isinstance(current, dict) or current.get("Label") != label:
+            raise ValueError("unexpected board agent label")
+    except (OSError, ValueError, plistlib.InvalidFileException) as exc:
+        print(f"progress-board: existing agent unavailable: {exc}; no schedule created")
+        return 1
+    desired = dict(current)
+    desired["ProgramArguments"] = ["/bin/bash", wrapper]
+    desired["WorkingDirectory"] = runtime_repo
+    desired["EnvironmentVariables"] = dict(current.get("EnvironmentVariables", {}))
+    desired["EnvironmentVariables"]["PROGRESS_BOARD_ROOT"] = os.path.join(REPO, "out")
+    def registered_arguments():
+        observed = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+                                  capture_output=True, text=True, check=False, timeout=15)
+        args = re.search(r"(?ms)^\s*arguments = \{\n(.*?)^\s*\}", observed.stdout or "")
+        return ([line.strip() for line in args.group(1).splitlines()]
+                if observed.returncode == 0 and args else [])
+
+    matches = desired == current and registered_arguments() == desired["ProgramArguments"]
+    if apply:
+        outcome = install_launchd_plist(os.path.basename(dest), dest,
+                                       plistlib.dumps(desired).decode("utf-8"), matches)
+        if outcome not in {"loaded", "kept"}:
+            return 1
+    elif not matches:
+        print("progress-board: existing agent needs migration: "
+              "ops/config-as-code.py install-progress-board --apply")
+        return 1
+    if registered_arguments() != desired["ProgramArguments"]:
+        print("progress-board: launchd arguments unverified; migration is incomplete")
+        return 1
+    print(f"progress-board: verified registered repository wrapper: {wrapper}")
+    return 0
+
+
 def write_claude_settings(path, document, before, sink=None):
     """Write the settings render, optionally exposing one redacted fake witness.
 
@@ -2787,6 +2773,14 @@ def main():
         return cmd_verify_codex_continuity()
     if mode == "install":
         return cmd_install(apply)
+    if mode in {"install-progress-board", "verify-progress-board"}:
+        import argparse
+        parser = argparse.ArgumentParser(prog=f"config-as-code.py {mode}")
+        parser.add_argument("--repo", help="repository checkout to run; defaults to canonical checkout")
+        parser.add_argument("--apply", action="store_true")
+        options = parser.parse_args(sys.argv[2:])
+        return cmd_install_progress_board(options.apply if mode == "install-progress-board" else False,
+                                          repo=options.repo)
     if mode == "reinstall-launchd-calendar":
         return cmd_reinstall_launchd_calendar(sys.argv[2:])
     if mode == "launchd-handoff-smoke":

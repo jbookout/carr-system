@@ -36,11 +36,11 @@ test('closed read schema, runtime input checks, dates and authority cannot be su
   }
 });
 test('activity successor adds only its reader and preserves every historical source contract', () => {
-  const before = frozenInventory('scac-mutation-registry.v102');
-  const after = frozenInventory('scac-mutation-registry.v103');
+  const before = frozenInventory('scac-mutation-registry.v104');
+  const after = frozenInventory('scac-mutation-registry.v105');
   assert.equal(after.length, before.length + 1);
   assert.deepEqual(after.filter(row => row.ingress_key !== 'mcp-tool:read-doc-activity'), before);
-  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, 'scac-mutation-registry.v103');
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, 'scac-mutation-registry.v105');
   const entry = registeredOperation('read-doc-activity');
   assert.equal(entry.write, false);
   assert.equal(after.find(row => row.ingress_key === entry.ingress_key).principal_mode, 'authenticated_registered_principal');
