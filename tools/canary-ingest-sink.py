@@ -118,8 +118,8 @@ class Ledger:
     front, so a long-running canary sink cannot grow this file without bound.
 
     Dedup itself is tracked by an in-memory `seen` set seeded from the ledger
-    at startup, not by scanning the (trimmed) file per request — so trimming
-    the ledger for disk-size reasons never resurrects a duplicate as "new"
+    at startup, with a disk check for publication whose directory sync failed.
+    Trimming for disk-size reasons never resurrects a duplicate as "new"
     within one process lifetime. Only a process restart after the ledger has
     been trimmed past LEDGER_MAX_LINES entries can forget an old external_id,
     which is the accepted cost of a bounded ledger on a canary destination.
@@ -231,9 +231,8 @@ def make_handler(token: str, ingest_path: str, ledger: Ledger) -> type:
 
         def log_message(self, fmt: str, *args: object) -> None:  # noqa: D401
             # Never log request bodies, headers, or the token — only that a
-            # request happened. BaseHTTPRequestHandler's default already
-            # avoids body/header content; this override just keeps stderr
-            # quiet in the common (successful) case and still reports errors.
+            # request happened. Suppress the base handler's logging entirely,
+            # including malformed requests; failures use content-free responses.
             pass
 
         def _reply(self, code: int, payload: dict | None = None) -> None:

@@ -80,7 +80,7 @@ WRAPPER_EXEMPT = {
     # run row from the wrapper can ask it.
     #
     # THE MISSING SIGNAL IS NO LONGER MISSING (2026-08-14). bin/probe-keepalive.py
-    # asks the question every 10 minutes and records the answer, so these three
+    # asks the question every 10 minutes and records the answer, so these servers
     # are exempt from the WRAPPER while being fully observed — which is a
     # different state from the one this list described when it was written, and
     # worth spelling out so nobody "fixes" the exemption by wrapping them.
