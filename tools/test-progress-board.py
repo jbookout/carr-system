@@ -346,7 +346,15 @@ class ProgressBoardCLI(BoardCase):
             "Claude Opus 5.5 (orchestrator)": ("Anthropic", "Claude Opus 5.5", "unknown"),
             "gpt-6-sol high (orchestrator)": ("Codex", "gpt-6-sol", "high"),
             "Claude Sonnet 4.5 high (orchestrator)": ("Anthropic", "Claude Sonnet 4.5", "high"),
-            "grok 4.7 medium": ("xAI", "grok 4.7 medium", "medium"),
+            # No explicit model means "unknown", never the raw label (#1405).
+            "grok 4.7 medium": ("xAI", "unknown", "medium"),
+            "Codex orchestrator gpt-5.5 xhigh": ("Codex", "gpt-5.5", "xhigh"),
+            "Claude Sonnet 4.6 orchestrator high": ("Anthropic", "Claude Sonnet 4.6", "high"),
+            "codex": ("Codex", "unknown", "unknown"),
+            "claude high": ("Anthropic", "unknown", "high"),
+            "grok": ("xAI", "unknown", "unknown"),
+            "flash-next": ("Google", "unknown", "unknown"),
+            "": ("Unknown", "unknown", "unknown"),
         }
         for executor, expected in cases.items():
             with self.subTest(executor=executor):
@@ -361,6 +369,37 @@ class ProgressBoardCLI(BoardCase):
         self.assertEqual((task["provider"], task["model"], task["effort"], task["summary"]),
                          ("Codex", "gpt-6-sol", "xhigh", "Check the route."))
         self.assertEqual(task["stage_history"][0]["stage"], "queued")
+
+    def test_backfill_uses_pr_title_and_retains_existing_task_history(self):
+        state = {"tasks": {
+            "pr": {"title": "PR 42", "executor": "gpt-6-sol high (Codex)",
+                   "pr": 42, "repo": "jbookout/carr-system", "status": "done",
+                   "stage_history": [{"stage": "review", "at": "earlier"}]},
+            "other": {"title": "Check CRM capture", "executor": "orchestrator",
+                      "status": "running", "note": "Verify that captured mail reaches the CRM."},
+        }}
+        calls = []
+        def lookup(number, repo):
+            calls.append((number, repo))
+            return {"title": "Show model and effort on board cards", "body": "The board now names each model.",
+                    "url": "https://github.com/jbookout/carr-system/pull/42", "headRefOid": "a" * 40}
+        self.assertEqual(BOARD.backfill_state(state, lookup), 2)
+        self.assertEqual(calls, [(42, "jbookout/carr-system")])
+        self.assertEqual(state["tasks"]["pr"]["summary"], "Show model and effort on board cards.")
+        self.assertEqual(state["tasks"]["pr"]["stage_history"], [{"stage": "review", "at": "earlier"}])
+        self.assertEqual(state["tasks"]["other"]["summary"], "Verify that captured mail reaches the CRM.")
+        self.assertEqual(state["tasks"]["other"]["provider"], "Unknown")
+        self.assertEqual(state["tasks"]["other"]["model"], "unknown")
+
+    def test_review_verdict_requires_trusted_comment_on_current_head(self):
+        head = "a" * 40
+        payload = {"headRefOid": head, "author": {"login": "builder"},
+                   "comments": [{"author": {"login": "reviewer"}, "authorAssociation": "COLLABORATOR",
+                                 "createdAt": "2026-09-29T10:00:00Z",
+                                 "body": "APPROVE\nReviewed-SHA: " + head}]}
+        self.assertEqual(BOARD.review_verdict(payload), "APPROVE")
+        payload["headRefOid"] = "b" * 40
+        self.assertEqual(BOARD.review_verdict(payload), "Not recorded")
 
     def test_pr_summary_is_one_plain_line(self):
         body = ("<!-- template -->\n## Summary\n\n- **Show** the [board](https://x.example) on phones.\n"

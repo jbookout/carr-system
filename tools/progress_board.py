@@ -321,7 +321,7 @@ def executor_metadata(executor: str | None) -> tuple[str, str, str]:
         return "Unknown", "unknown", effort
     provider = {"codex": "Codex", "claude-cloud": "Anthropic", "grok": "xAI",
                 "flash-next": "Google"}.get(executor_pool(value), "Unknown")
-    return provider, value or "unknown", effort
+    return provider, "unknown", effort
 
 
 def task_identity(task: dict[str, Any]) -> tuple[str, str, str]:
@@ -501,6 +501,38 @@ def task_summary(task: dict[str, Any]) -> str:
         return summary
     return str(task.get("title") or "This task").strip().rstrip(".") + "."
 
+
+
+def one_sentence(value: str) -> str:
+    text = re.sub(r"\s+", " ", re.sub(r"(?m)^\s*(?:[-*]\s+|#+\s+)", "", value or "")).strip()
+    text = re.split(r"(?<=[.!?])\s+", text, maxsplit=1)[0].rstrip(".")
+    return text + "." if text else ""
+
+
+def backfill_state(state: dict[str, Any], lookup: Any) -> int:
+    """Fill legacy task metadata without changing recorded status or timestamps."""
+    changed = 0
+    for task in state.get("tasks", {}).values():
+        before = dict(task)
+        provider, model, effort = task_identity(task)
+        task.setdefault("provider", provider)
+        task.setdefault("model", model)
+        task.setdefault("effort", effort)
+        if not task.get("summary"):
+            if task.get("pr") is not None:
+                info = lookup(int(task["pr"]), task_repo(task))
+                if not info or not info.get("title") or not info.get("body"):
+                    raise RuntimeError(f"PR {task['pr']} title/body unavailable for summary backfill")
+                task["summary"] = one_sentence(info["title"])
+            else:
+                task["summary"] = one_sentence(task.get("note") or task.get("title") or "")
+        if not task.get("stage_history"):
+            task["stage_history"] = [{"stage": task_stage(task), "status": task.get("status"),
+                                      "at": task.get("updated_at") or task.get("created_at"),
+                                      "source": "observed snapshot"}]
+        if task != before:
+            changed += 1
+    return changed
 
 def pr_summary(body: str | None, limit: int = 160) -> str:
     """First plain line of a PR body: no headings, tables, code or markup."""
