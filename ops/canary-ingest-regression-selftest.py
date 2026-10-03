@@ -144,6 +144,35 @@ class Regressions(unittest.TestCase):
                 self.ledger.record('new', b'synthetic')
         self.assertEqual(self.ledger.path.read_bytes(), prior)
 
+    def test_existing_partial_ledger_recovers_over_http_and_restart(self):
+        self.ledger.record('prior', b'synthetic prior')
+        prior = self.ledger.path.read_bytes()
+        self.ledger.path.write_bytes(prior + b'{"external_id":')
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            recovered = sink.Ledger(str(self.ledger.dir))
+            with serving(recovered) as server:
+                self.assertEqual(post(server, b'{"external_id":"prior"}'),
+                                 (200, b'{"duplicate": true}'))
+                for identifier in ('new-one', 'new-two'):
+                    body = json.dumps({'external_id': identifier,
+                                       'note_text': 'private-marker'}).encode()
+                    self.assertEqual(post(server, body),
+                                     (200, b'{"duplicate": false}'))
+            restarted = sink.Ledger(str(self.ledger.dir))
+            with serving(restarted) as server:
+                for identifier in ('prior', 'new-one', 'new-two'):
+                    body = json.dumps({'external_id': identifier}).encode()
+                    self.assertEqual(post(server, body),
+                                     (200, b'{"duplicate": true}'))
+        receipts = self.ledger.path.read_bytes()
+        self.assertTrue(receipts.startswith(prior))
+        self.assertEqual([json.loads(line)['external_id']
+                          for line in receipts.splitlines()],
+                         ['prior', 'new-one', 'new-two'])
+        self.assertNotIn(b'private-marker', receipts)
+        self.assertEqual(stdout.getvalue() + stderr.getvalue(), '')
+
     def test_4_negative_and_incomplete_framing(self):
         with serving(self.ledger) as server:
             body = b'{"external_id":"short"}'

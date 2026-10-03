@@ -132,16 +132,25 @@ class Ledger:
         self.path = self.dir / "ledger.jsonl"
         self.max_lines = max_lines
         self.lock = threading.Lock()
-        self.seen: set[str] = set()
-        if self.path.exists():
-            for line in self.path.read_text(encoding="utf-8").splitlines():
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                ext_id = row.get("external_id")
-                if isinstance(ext_id, str):
-                    self.seen.add(ext_id)
+        self.seen = {external_id for _, external_id in self._read_receipts()}
+
+    def _read_receipts(self) -> list[tuple[str, str]]:
+        """Read valid receipt lines and identifiers, ignoring incomplete rows.
+
+        Startup and publication retries use the same parser. Keep each valid
+        line intact so replacing a legacy partial ledger preserves its receipts.
+        """
+        if not self.path.exists():
+            return []
+        receipts = []
+        for line in self.path.read_text(encoding="utf-8").splitlines():
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(row, dict) and isinstance(row.get("external_id"), str):
+                receipts.append((line, row["external_id"]))
+        return receipts
 
     def record(self, external_id: str, raw_body: bytes) -> bool:
         """Durably accept a receipt and return its duplicate decision under one lock.
@@ -161,15 +170,14 @@ class Ledger:
         with self.lock:
             if external_id in self.seen:
                 return True
-            lines = []
-            if self.path.exists():
-                lines = self.path.read_text(encoding="utf-8").splitlines()
+            receipts = self._read_receipts()
             # A directory fsync can fail after replace published the receipt.
             # Retrying must confirm that receipt instead of appending it twice.
-            if any(json.loads(item).get("external_id") == external_id for item in lines):
+            if any(identifier == external_id for _, identifier in receipts):
                 self._sync_directory()
                 self.seen.add(external_id)
                 return True
+            lines = [item for item, _ in receipts]
             lines.append(line)
             if len(lines) > self.max_lines:
                 lines = lines[-self.max_lines :]
