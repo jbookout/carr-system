@@ -732,6 +732,9 @@ def _claim_spend_alerts(db, log_path, day, previous, allowed, cap, caller):
                    "(day TEXT, threshold INTEGER, alert_json TEXT NOT NULL, "
                    "state TEXT NOT NULL, attempts INTEGER NOT NULL, lease_until REAL NOT NULL, "
                    "error TEXT, PRIMARY KEY(day,threshold))")
+        db.execute("CREATE TABLE IF NOT EXISTS daily_cap_mail_delivery "
+                   "(day TEXT, threshold INTEGER, state TEXT NOT NULL, error TEXT, "
+                   "PRIMARY KEY(day,threshold))")
         row = db.execute("SELECT day FROM daily_cap_attribution WHERE day=?", (day,)).fetchone()
         if row is None:
             receipts = list(_logged_attempt_rows(log_path, day))
@@ -746,6 +749,7 @@ def _claim_spend_alerts(db, log_path, day, previous, allowed, cap, caller):
             db.execute("DELETE FROM daily_cap_attribution WHERE day < ?", (day,))
             db.execute("DELETE FROM daily_cap_counts WHERE day < ?", (day,))
             db.execute("DELETE FROM daily_cap_delivery WHERE day < ?", (day,))
+            db.execute("DELETE FROM daily_cap_mail_delivery WHERE day < ?", (day,))
             db.execute("INSERT INTO daily_cap_attribution VALUES (?)", (day,))
         if allowed:
             for dimension, name in (("caller", caller), ("session", _session_id())):
@@ -801,6 +805,15 @@ def _emit_spend_alert(alert):
                    timeout=5, check=True)
 
 
+def _email_spend_alert(alert):
+    """Use the existing self-mail command; it owns recipient and credentials."""
+    subprocess.run([sys.executable, os.path.join(REPO, "bin", "gmail-handover.py"),
+                    "--to", "joe", "--subject", "Jev spend alarm",
+                    "--body", alert["message"]],
+                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL, timeout=35, check=True)
+
+
 def _deliver_pending_spend_alerts(path, day):
     """One bounded delivery pass, in a detached process, with durable leases.
 
@@ -808,6 +821,8 @@ def _deliver_pending_spend_alerts(path, day):
     leases, up to three attempts per threshold. OS submission is acknowledged
     only after the sink returns successfully. Death after submission but before
     acknowledgement can cause a repeat; exactly-once OS delivery is unavailable.
+    Mail is attempted once per threshold/day, claimed before any external send.
+    An ambiguous timeout or process death cannot safely be retried by SMTP.
     """
     for threshold in (50, 80, 100):
         with closing(sqlite3.connect(path, timeout=1)) as db, db:
@@ -821,6 +836,9 @@ def _deliver_pending_spend_alerts(path, day):
             attempt = row[1] + 1
             db.execute("UPDATE daily_cap_delivery SET state='sending',attempts=?,lease_until=? "
                        "WHERE day=? AND threshold=?", (attempt, time.time() + 30, day, threshold))
+            mail_claimed = db.execute(
+                "INSERT OR IGNORE INTO daily_cap_mail_delivery VALUES (?,?,'attempted',NULL)",
+                (day, threshold)).rowcount == 1
         error = None
         try:
             _emit_spend_alert(json.loads(row[0]))
@@ -830,6 +848,18 @@ def _deliver_pending_spend_alerts(path, day):
             db.execute("UPDATE daily_cap_delivery SET state=?,lease_until=0,error=? "
                        "WHERE day=? AND threshold=? AND attempts=? AND state='sending'",
                        ("failed" if error else "delivered", error, day, threshold, attempt))
+        # Use the same worker, even when the local notification failed. Its
+        # retries never resend mail; the durable claim precedes both sinks.
+        if mail_claimed:
+            mail_error = None
+            try:
+                _email_spend_alert(json.loads(row[0]))
+            except Exception as exc:
+                mail_error = type(exc).__name__
+            with closing(sqlite3.connect(path, timeout=1)) as db, db:
+                db.execute("UPDATE daily_cap_mail_delivery SET state=?,error=? "
+                           "WHERE day=? AND threshold=?",
+                           ("failed" if mail_error else "sent", mail_error, day, threshold))
 
 
 def _launch_spend_alert_worker(path, day):
@@ -864,11 +894,14 @@ def _dispatch_spend_alerts(alerts):
             pass  # Durable pending rows remain visible to the read-only health path.
 
 
-PAID_CAP_ACTION = ("on breach: notify Joe at 50%/80%/100% via macOS notification; "
+PAID_CAP_ACTION = ("on breach: notify Joe at 50%/80%/100% via macOS notification and "
+                   "email to his own CARR address (one mail attempt per threshold/day); "
                    "cap refuses further paid calls · owner orchestrator · remediation "
-                   "reduce top caller/session demand; pending/failed alarms recover on next "
+                   "reduce top caller/session demand; pending/failed macOS alarms recover on next "
                    "reservation, at most three attempts (stale lease after 30s); inspect "
-                   "notification sink if exhausted · verify next UTC day below 50% "
+                   "notification sink if exhausted; inspect self-mail sink and confirm inbox "
+                   "on mail failure or unconfirmed submission "
+                   "· verify next UTC day below 50% "
                    "· auto-clear at UTC rollover")
 
 
@@ -878,6 +911,7 @@ def paid_cap_health(*, now=None):
     try:
         cap = _daily_cap_limit()
         deliveries = []
+        mail_deliveries = []
         path = Path(os.fspath(JEV_DAILY_CAP_LOG) + ".daily-cap.sqlite3")
         if path.exists():
             db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
@@ -885,6 +919,9 @@ def paid_cap_health(*, now=None):
                 row = db.execute("SELECT attempts FROM daily_cap WHERE day=?", (day,)).fetchone()
                 deliveries = db.execute("SELECT state,attempts,lease_until,error FROM daily_cap_delivery "
                                         "WHERE day=?", (day,)).fetchall()
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name='daily_cap_mail_delivery'").fetchone():
+                    mail_deliveries = db.execute("SELECT state,error FROM daily_cap_mail_delivery WHERE day=?",
+                                                 (day,)).fetchall()
             finally:
                 db.close()
             used = row[0] if row else _logged_attempts(JEV_DAILY_CAP_LOG, day)
@@ -895,11 +932,16 @@ def paid_cap_health(*, now=None):
                      for state, attempts, lease, error in deliveries)
         pending = sum(state in ("pending", "sending") for state, _, _, _ in deliveries)
         delivered = sum(state == "delivered" for state, _, _, _ in deliveries)
-        if status == "OK" and (failed or pending):
+        mail_failed = sum(state == "failed" for state, _ in mail_deliveries)
+        mail_unconfirmed = sum(state == "attempted" for state, _ in mail_deliveries)
+        mail_sent = sum(state == "sent" for state, _ in mail_deliveries)
+        if status == "OK" and (failed or pending or mail_failed or mail_unconfirmed):
             status = "WARN"
         errors = sorted({error for _, _, _, error in deliveries if error})
+        errors = sorted(set(errors) | {error for _, error in mail_deliveries if error})
         return (f"{status} jev paid cap — {used}/{cap} paid calls · UTC {day} · "
                 f"alarms pending={pending} failed={failed} delivered={delivered} "
+                f"mail_failed={mail_failed} mail_sent={mail_sent} mail_unconfirmed={mail_unconfirmed} "
                 f"errors={','.join(errors) or 'none'} · {PAID_CAP_ACTION}")
     except (OSError, sqlite3.Error, TypeSafeError) as exc:
         return f"UNKNOWN jev paid cap — {type(exc).__name__} · {PAID_CAP_ACTION}"

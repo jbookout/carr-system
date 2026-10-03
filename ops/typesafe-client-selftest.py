@@ -41,6 +41,7 @@ assert SPEC and SPEC.loader
 client = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(client)
 REAL_ALERT_SINK = client._emit_spend_alert
+REAL_MAIL_SINK = getattr(client, "_email_spend_alert", None)
 
 
 class FakeResponse(io.BytesIO):
@@ -79,6 +80,9 @@ class DailyCapTests(unittest.TestCase):
                                        responder(ANSWER, self.requests)))
         self.enterContext(patch.dict(client.JEV_COST_CONFIG, daily_paid_call_cap=2))
         self.alerts = queue.Queue()
+        self.mail = queue.Queue()
+        self.mail_sink_patch = patch.object(client, "_email_spend_alert", self.mail.put, create=True)
+        self.enterContext(self.mail_sink_patch)
         self.sink_patch = patch.object(client, "_emit_spend_alert", self.alerts.put, create=True)
         self.enterContext(self.sink_patch)
         self.delivery_threads = []
@@ -339,6 +343,115 @@ class WorkerDailyCapTests(unittest.TestCase):
             thread.join(2)
         alerts = [self.alerts.get_nowait() for _ in range(self.alerts.qsize())]
         self.assertEqual(sorted(alert["threshold"] for alert in alerts), [50, 80, 100])
+
+
+class DailyCapMailTests(unittest.TestCase):
+    ask = DailyCapTests.ask
+
+    def setUp(self):
+        DailyCapTests.setUp(self)
+        client.JEV_COST_CONFIG["daily_paid_call_cap"] = 10
+        self.options["cache_ttl_seconds"] = 0
+
+    def drain(self):
+        for thread in self.delivery_threads:
+            thread.join(2)
+            self.assertFalse(thread.is_alive())
+        return [self.mail.get_nowait() for _ in range(self.mail.qsize())]
+
+    def test_email_once_per_threshold_per_utc_day_none_below_half(self):
+        for day in (2, 3):
+            self.clock.now.return_value = datetime(2026, 10, day, tzinfo=timezone.utc)
+            for i in range(4):
+                self.ask(f"{day}-{i}")
+            self.assertEqual(self.drain(), [])
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                list(pool.map(self.ask, [f"{day}-{i}" for i in range(4, 10)]))
+            for _ in range(3):
+                with self.assertRaises(client.TypeSafeError):
+                    self.ask("over cap")
+            alerts = self.drain()
+            self.assertEqual(sorted(a["threshold"] for a in alerts), [50, 80, 100])
+            self.assertEqual({a["day"] for a in alerts}, {f"2026-10-{day:02}"})
+
+    def test_notification_retry_does_not_repeat_mail(self):
+        for i in range(4):
+            self.ask(str(i))
+        with patch.object(client, "_emit_spend_alert", side_effect=TimeoutError):
+            self.ask("threshold")
+            self.assertEqual(len(self.drain()), 1)
+        self.ask("retry notification")
+        self.assertEqual(self.drain(), [])
+        self.assertEqual(len(self.requests), 6)
+
+    def test_pending_alarm_recovery_uses_same_worker_for_both_sinks(self):
+        workers = []
+        for i in range(4):
+            self.ask(str(i))
+        with patch.object(client, "_dispatch_spend_alerts"):
+            self.ask("committed before worker launch")
+        self.assertEqual(self.drain(), [])
+        def notify(alert):
+            workers.append(threading.get_ident())
+        def mail(alert):
+            self.assertEqual(workers[-1], threading.get_ident())
+            self.mail.put(alert)
+        with patch.object(client, "_emit_spend_alert", notify), patch.object(client, "_email_spend_alert", mail):
+            self.ask("recover committed threshold")
+            self.assertEqual(len(self.drain()), 1)
+        self.assertIn("mail_sent=1", client.paid_cap_health())
+
+    def test_failed_slow_mail_does_not_block_call_or_retry_email(self):
+        entered, release = threading.Event(), threading.Event()
+        def sink(alert):
+            self.mail.put(alert)
+            entered.set()
+            release.wait(2)
+            raise TimeoutError("fake mail timeout")
+        for i in range(4):
+            self.ask(str(i))
+        try:
+            with patch.object(client, "_email_spend_alert", sink):
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(self.ask, "threshold")
+                    result = future.result(timeout=0.5)
+                    self.assertTrue(entered.wait(1))
+                    release.set()
+                self.assertEqual(result["model"], ANSWER["model"])
+                self.assertEqual(len(self.drain()), 1)
+        finally:
+            release.set()
+        self.ask("after failure")
+        self.assertEqual(self.drain(), [])
+        self.assertEqual(len(self.requests), 6)
+        self.assertIn("mail_failed=1", client.paid_cap_health())
+
+    def test_mail_reuses_handover_self_config_with_deadline(self):
+        spec = importlib.util.spec_from_file_location("handover", MODULE_PATH.parent.parent / "bin/gmail-handover.py")
+        handover = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(handover)
+        messages = []
+        class FakeSMTP:
+            def __init__(self, *args, **kwargs): pass
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def starttls(self): pass
+            def login(self, *args): pass
+            def send_message(self, msg): messages.append(msg)
+        def run(command, **kwargs):
+            self.assertEqual(command[:2], [os.sys.executable, str(MODULE_PATH.parent.parent / "bin/gmail-handover.py")])
+            self.assertEqual(command[2:4], ["--to", "joe"])
+            self.assertEqual(kwargs["timeout"], 35)
+            self.assertTrue(kwargs["check"])
+            self.assertEqual(kwargs["stderr"], subprocess.DEVNULL)
+            with patch.object(os.sys, "argv", command[1:]), patch.object(handover, "creds", return_value=("fixture@example.invalid", "fixture")), patch.object(handover.smtplib, "SMTP", FakeSMTP), patch("sys.stdout", io.StringIO()):
+                handover.main()
+        alert = {"message": "Jev daily cap 50% · 5/10 paid calls", "threshold": 50}
+        with patch.dict(handover.ALLOWED, joe="self-config@carr.us"), patch.object(client.subprocess, "run", run):
+            REAL_MAIL_SINK(alert)
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["To"], "self-config@carr.us")
+        self.assertIn(alert["message"], messages[0].get_content())
 
 
 class DailyCapAlarmTests(unittest.TestCase):
