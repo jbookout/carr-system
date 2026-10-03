@@ -355,6 +355,99 @@ def fact_boundary(payload, run):
     return run.do(lib.check_boundary, boundary, budget_seconds=run.left() - 1.0)
 
 
+# JUDGMENT POINTS ONLY (Joe, 2026-09-25: Jev at judgment calls, not every turn;
+# 2026-10-03: "fix whatever is causing the heavy usage now"). Measured that
+# morning: one orchestrator session paid for ~300 Jev requests in an hour, most
+# of them the injection screen re-reading its own local command output (rule
+# text is full of "never"/"always") and turn-end claim checks on background
+# notification turns. A tool result is a judgment point only when it brings in
+# outside content or failed; a turn end only when a human spoke since the last
+# assistant turn. A hard per-session hourly cap bounds whatever remains.
+EXTERNAL_TOOLS = {"webfetch", "websearch"}
+EXTERNAL_TOOL_MARKERS = ("get_page_text", "read_page", "browser_", "claude-in-chrome", "claude_browser")
+# Writing code is a judgment point: duplicate-function and test-quality checks
+# ask only when the edit adds a definition or touches a test.
+FILE_WRITE_TOOLS = {"edit", "write", "multiedit", "notebookedit"}
+FAILED_OUTPUT = re.compile(r"(Exit code [1-9]\d*|Traceback \(most recent call last\)|"
+                           r"command not found|No such file or directory|\bE[A-Z]+:|\berror:)", re.I)
+HOURLY_CAP = int(os.environ.get("CARR_JEV_SUPERVISOR_HOURLY_CAP", "20"))
+NOTIFICATION_MARKERS = ("<task-notification>", "[SYSTEM NOTIFICATION", "<ci-monitor-event>")
+
+
+def _last_user_text(transcript):
+    """Text of the newest user record that is not a tool result, from the tail."""
+    try:
+        with open(transcript, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 1_000_000))
+            lines = fh.read().decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    for raw in reversed(lines):
+        try:
+            rec = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict) or rec.get("type") != "user" or rec.get("isMeta"):
+            continue
+        content = (rec.get("message") or {}).get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            blocks = [b for b in content if isinstance(b, dict)]
+            if any(b.get("type") == "tool_result" for b in blocks):
+                continue
+            return "\n".join(str(b.get("text") or "") for b in blocks if b.get("type") == "text")
+    return None
+
+
+def judgment_point(event, payload):
+    """Whether this hook event is worth a paid Jev request at all."""
+    if event == "PostToolUse":
+        name = (payload.get("tool_name") or "").lower()
+        if (name in EXTERNAL_TOOLS or name in FILE_WRITE_TOOLS
+                or any(m in name for m in EXTERNAL_TOOL_MARKERS)):
+            return True
+        response = payload.get("tool_response")
+        code = _exit_code(response)
+        if code not in (None, 0):
+            return True
+        tail = _text(response)[-4000:]
+        return bool(FAILED_OUTPUT.search(tail) or MISSING_FILE.search(tail))
+    if event == "Stop":
+        transcript = payload.get("transcript_path") or ""
+        if not transcript:
+            return True  # nothing to tell a human turn from a notification by
+        text = _last_user_text(transcript)
+        return bool(text and text.strip()) and not any(m in text for m in NOTIFICATION_MARKERS)
+    return False
+
+
+def within_hourly_cap(session_id, *, state_dir=None, now=None, cap=None):
+    """Reserve one slot in this session's rolling hour; False once the cap is spent."""
+    cap = HOURLY_CAP if cap is None else cap
+    now = time.time() if now is None else now
+    state_dir = (state_dir or os.environ.get("CARR_JEV_SUPERVISOR_BUDGET_DIR")
+                 or os.path.join(REPO, "out", "jev-supervisor-budget"))
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", session_id or "unbound")[:120]
+    path = os.path.join(state_dir, safe + ".json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            stamps = [t for t in json.load(fh) if isinstance(t, (int, float)) and now - t < 3600]
+    except (OSError, ValueError):
+        stamps = []
+    if len(stamps) >= cap:
+        return False
+    stamps.append(now)
+    try:
+        os.makedirs(state_dir, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(stamps, fh)
+    except OSError:
+        pass
+    return True
+
+
 def main():
     try:
         payload = json.load(sys.stdin)
@@ -363,6 +456,12 @@ def main():
     if MODE == "off" or payload.get("session_id") == "selftest":
         return 0
     event = payload.get("hook_event_name") or payload.get("hookEventName") or ""
+    if event == "Stop" and payload.get("stop_hook_active"):
+        return 0
+    if not judgment_point(event, payload):
+        return 0
+    if not within_hourly_cap(payload.get("session_id") or ""):
+        return 0
     run = Run()
     try:
         if event == "PostToolUse":
