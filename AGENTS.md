@@ -242,8 +242,13 @@ and publishes it; the only board UI is https://app.doctorcre.com/progress-board
 publish exits nonzero with the local state kept and names the retry
 (`render <project> --publish`); `PROGRESS_BOARD_LOCAL_ONLY=1` skips publishing
 and says so. There is no static HTML copy. The launchd job runs
-`ops/progress-board-render.sh` from the canonical checkout, which binds
+`ops/progress-board-render.sh` from a repository checkout, which binds
 `CARR_REPO_ROOT` and the repo's `.venv` Python; never run an extracted copy.
+The installer defaults to the canonical checkout. Before a PR merges,
+`install-progress-board --repo <retained-checkout> --apply` and
+`verify-progress-board --repo <retained-checkout>` can bind and verify its
+runner without changing main. Keep that checkout available until reinstalling
+from canonical main; the installer preserves canonical `out/boards` state.
 A `done` card with no PR is Live (complete). A project card with a merged PR
 stays Merged until production shows it: only `--delivery-target worker`
 (carr-system) or `app` (doctorcre-app) completes from the release readback;

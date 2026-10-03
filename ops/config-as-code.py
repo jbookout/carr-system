@@ -41,8 +41,8 @@ exactly as they bind Joe, with zero mechanical enforcement on his side today.
     ops/config-as-code.py verify-codex-continuity
     ops/config-as-code.py install-codex-continuity-mcp --apply
     ops/config-as-code.py verify-codex-continuity-mcp
-    ops/config-as-code.py install-progress-board --apply
-    ops/config-as-code.py verify-progress-board
+    ops/config-as-code.py install-progress-board [--repo CHECKOUT] --apply
+    ops/config-as-code.py verify-progress-board [--repo CHECKOUT]
     ops/config-as-code.py remove-codex-continuity --apply
 
 `check` is what belongs in run.sh health: it answers "is the live config still
@@ -1858,16 +1858,20 @@ def install_launchd_plist(filename, dest, body, body_matches):
     return "failed"
 
 
-def cmd_install_progress_board(apply=False):
+def cmd_install_progress_board(apply=False, repo=None):
     """Migrate the existing board agent to the repository wrapper, then read
     launchd's arguments back. This does not create a new schedule or label.
-    It refuses until the canonical checkout contains the delivered wrapper.
+    Defaults to the canonical checkout. An explicit repository checkout allows
+    the installed consumer to be verified before its PR merges; keep that
+    checkout available until migrating back to the canonical checkout. Board
+    state remains in the canonical out directory across either migration.
     """
-    wrapper = os.path.join(REPO, "ops", "progress-board-render.sh")
-    python = os.path.join(REPO, ".venv", "bin", "python")
+    runtime_repo = os.path.abspath(os.path.expanduser(repo)) if repo else REPO
+    wrapper = os.path.join(runtime_repo, "ops", "progress-board-render.sh")
+    python = os.path.join(runtime_repo, ".venv", "bin", "python")
     if not os.path.isfile(wrapper) or not os.access(python, os.X_OK):
-        print("progress-board: canonical wrapper or repository interpreter unavailable; "
-              "deliver the PR to the canonical checkout before migration")
+        print("progress-board: selected checkout wrapper or repository interpreter unavailable; "
+              "select a repository checkout containing the wrapper and interpreter")
         return 1
     label = "local.carr-progress-board"
     dest = os.path.join(HOME, "Library", "LaunchAgents", label + ".plist")
@@ -1881,7 +1885,9 @@ def cmd_install_progress_board(apply=False):
         return 1
     desired = dict(current)
     desired["ProgramArguments"] = ["/bin/bash", wrapper]
-    desired["WorkingDirectory"] = REPO
+    desired["WorkingDirectory"] = runtime_repo
+    desired["EnvironmentVariables"] = dict(current.get("EnvironmentVariables", {}))
+    desired["EnvironmentVariables"]["PROGRESS_BOARD_ROOT"] = os.path.join(REPO, "out")
     def registered_arguments():
         observed = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{label}"],
                                   capture_output=True, text=True, check=False, timeout=15)
@@ -2767,10 +2773,14 @@ def main():
         return cmd_verify_codex_continuity()
     if mode == "install":
         return cmd_install(apply)
-    if mode == "install-progress-board":
-        return cmd_install_progress_board(apply)
-    if mode == "verify-progress-board":
-        return cmd_install_progress_board(False)
+    if mode in {"install-progress-board", "verify-progress-board"}:
+        import argparse
+        parser = argparse.ArgumentParser(prog=f"config-as-code.py {mode}")
+        parser.add_argument("--repo", help="repository checkout to run; defaults to canonical checkout")
+        parser.add_argument("--apply", action="store_true")
+        options = parser.parse_args(sys.argv[2:])
+        return cmd_install_progress_board(options.apply if mode == "install-progress-board" else False,
+                                          repo=options.repo)
     if mode == "reinstall-launchd-calendar":
         return cmd_reinstall_launchd_calendar(sys.argv[2:])
     if mode == "launchd-handoff-smoke":
