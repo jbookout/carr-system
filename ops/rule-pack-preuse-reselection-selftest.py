@@ -98,10 +98,12 @@ def selector_result(*, mode: str = "shadow", ids: list[str] | None = None,
 
 class Runner:
     def __init__(self, result: dict | None = None, *, returncode: int = 0,
-                 stderr: str = "", error: Exception | None = None):
+                 stderr: str = "", error: Exception | None = None,
+                 stdout: str | None = None):
         self.result = selector_result() if result is None else result
         self.returncode = returncode
         self.stderr = stderr
+        self.stdout = stdout
         self.error = error
         self.calls: list[tuple[tuple, dict]] = []
 
@@ -111,7 +113,7 @@ class Runner:
             raise self.error
         return SimpleNamespace(
             returncode=self.returncode,
-            stdout=json.dumps(self.result),
+            stdout=json.dumps(self.result) if self.stdout is None else self.stdout,
             stderr=self.stderr,
         )
 
@@ -260,27 +262,81 @@ check("Codex structured exec receives the same rail",
       receipt(rail.process(payload(tool="functions.exec", client="codex"), runner=Runner()))["client"]
       == "codex")
 
-# Selector responses are strict; failures are fixed/redacted and never block.
-bad_cases = [
-    ("nonzero", Runner(returncode=1, stderr="token=SUPER-SECRET")),
-    ("exception", Runner(error=RuntimeError("postgres://SUPER-SECRET"))),
-    ("unknown pack", Runner(selector_result(unknown=["scheduled-automation"]))),
-    ("wrong mode", Runner(selector_result(mode="mystery"))),
-    ("extra declared pack", Runner(selector_result(
-        declared=["scheduled-automation", "engineering-git"]))),
-    ("missing rule", Runner(selector_result(ids=EXPECTED_IDS[:-1]))),
-    ("mismatched local sponsor", Runner(selector_result(sponsor="dell"))),
-    ("mismatched runtime and agent", Runner(selector_result(runtime="codex"))),
-    ("unknown local identity", Runner(selector_result(
-        agent="some-local", sponsor="joe"))),
-]
-for label, fake in bad_cases:
-    failed = rail.process(payload(), runner=fake)
-    rendered = context(failed)
-    check(f"{label} is fixed redacted nonblocking failure",
-          rendered == rail.FAILURE_CONTEXT
-          and "SUPER-SECRET" not in json.dumps(failed)
-          and "decision" not in failed and "updatedInput" not in failed, failed)
+# Exercise the caller's process() interface, including parsing, validation and
+# rendering. Each fixture has an independent expected cause: accepting merely
+# any safe cause would allow the diagnostic to collapse to one generic reason.
+def check_failure_cases(label: str, call: dict, response: dict, missing_cause: str,
+                        base: str) -> None:
+    def changed(**patch):
+        result = copy.deepcopy(response)
+        result.update(patch)
+        return result
+
+    delivery = dict(response["rule_delivery"], mode="mystery")
+    duplicate = response["shared_rules"] + response["shared_rules"][:1]
+    nonbinding = copy.deepcopy(response["shared_rules"])
+    nonbinding[0]["statement"] = " "
+    identity = response["identity"]
+    plan = response["rule_delivery"]
+    cases = [
+        ("nonzero", Runner(response, returncode=1, stderr="token=SUPER-SECRET"),
+         "selector returned nonzero"),
+        ("malformed JSON", Runner(response, stdout="SUPER-SECRET{"),
+         "selector returned malformed JSON"),
+        ("not ok", Runner(changed(ok=False)), "selector response was not ok"),
+        ("non-object response", Runner(stdout="[]"), "selector response was not ok"),
+        ("identity", Runner(changed(identity={})), "selector identity is incomplete"),
+        ("mismatched local sponsor", Runner(changed(identity=dict(identity,
+            sponsoring_human_id="dell"))), "selector identity is incomplete"),
+        ("mismatched runtime and agent", Runner(changed(identity=dict(identity,
+            runtime_principal="codex"))), "selector identity is incomplete"),
+        ("unknown local identity", Runner(changed(identity=dict(identity,
+            agent_principal_id="some-local", runtime_principal="some-local"))),
+         "selector identity is incomplete"),
+        ("unknown pack", Runner(changed(rule_delivery=dict(plan,
+            packs_not_found=["unknown-pack"]))), "selector delivery plan is not exact"),
+        ("extra declared pack", Runner(changed(rule_delivery=dict(plan,
+            declared_packs=plan["declared_packs"] + ["unknown-pack"]))),
+         "selector delivery plan is not exact"),
+        ("delivery plan", Runner(changed(rule_delivery=delivery)),
+         "selector delivery plan is not exact"),
+        ("rule pools", Runner(changed(personal_rules=None)),
+         "selector rule pools are malformed"),
+        ("shared rule pool", Runner(changed(shared_rules=None)),
+         "selector rule pools are malformed"),
+        ("malformed rule", Runner(changed(shared_rules=[None])),
+         "selector returned a malformed rule"),
+        ("duplicate rule", Runner(changed(shared_rules=duplicate)),
+         "selector returned duplicate or nonbinding rule"),
+        ("nonbinding rule", Runner(changed(shared_rules=nonbinding)),
+         "selector returned duplicate or nonbinding rule"),
+        ("missing rule", Runner(changed(shared_rules=response["shared_rules"][:-1])),
+         missing_cause),
+        ("timeout", Runner(error=subprocess.TimeoutExpired("SUPER-SECRET", 15)),
+         "unexpected TimeoutExpired"),
+        ("unknown exception", Runner(error=RuntimeError("SUPER-SECRET")),
+         "unexpected RuntimeError"),
+        ("unknown typed selector reason", Runner(error=rail.SelectorError("SUPER-SECRET")),
+         "unexpected SelectorError"),
+        ("typed selector subclass", Runner(error=type("SneakySelector", (rail.SelectorError,), {})(
+            "nonzero")), "unexpected SneakySelector"),
+        ("RuntimeError subclass", Runner(error=type("Sneaky", (RuntimeError,), {})(
+            "selector returned nonzero")), "unexpected Sneaky"),
+    ]
+    for name, fake, cause in cases:
+        original_call = copy.deepcopy(call)
+        failed = rail.process(call, runner=fake)
+        expected = {"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": f"{base} Cause: {cause}.",
+        }}
+        check(f"{label}: {name} renders its exact redacted nonblocking cause",
+              failed == expected and call == original_call and len(fake.calls) == 1,
+              failed)
+
+
+check_failure_cases("scheduled rail", payload(), selector_result(),
+                    "selector did not return every scheduled rule", rail.FAILURE_CONTEXT)
 
 # Stop telemetry credits only a platform-proven receipt bound to the exact tool call.
 def claude_tool_call() -> dict:
@@ -812,27 +868,44 @@ check("process() returns None (no injection, no selector call) for a non-match",
 
 # Verb match injects: the Agent tool exactly matches the council trigger.
 agent_call = gen_payload(tool="Agent", tool_input={"description": "spawn helper", "prompt": "zzz"})
-check("matched_triggers finds exactly the council verb trigger for an Agent call",
-      [r["trigger_id"] for r in rail.matched_triggers(agent_call)] == [council_row["trigger_id"]])
-agent_runner = Runner(gen_selector_result(packs=council_row["packs"], ids=council_row["rule_ids"]))
+# Rule ede4b241 (cloud model choice) adds a second verb trigger on the same
+# dispatch moment, so an Agent call hits the council trigger AND the model-choice
+# trigger; the council trigger alone still carries its own five rules.
+model_choice_row = next(row for row in TRIGGER_ROWS.values()
+                        if row["kind"] == "verb" and "ede4b241" in row["rule_ids"])
+check("model-choice trigger delivers only rule ede4b241 via delegation-council",
+      model_choice_row["rule_ids"] == ["ede4b241"]
+      and model_choice_row["packs"] == ["delegation-council"])
+check("matched_triggers finds the council and model-choice verb triggers for an Agent call",
+      sorted(r["trigger_id"] for r in rail.matched_triggers(agent_call))
+      == sorted([council_row["trigger_id"], model_choice_row["trigger_id"]]))
+agent_rows = [council_row, model_choice_row]
+agent_packs = sorted({p for r in agent_rows for p in r["packs"]})
+agent_ids = sorted({i for r in agent_rows for i in r["rule_ids"]})
+agent_trigger_ids = sorted(r["trigger_id"] for r in agent_rows)
+agent_runner = Runner(gen_selector_result(packs=agent_packs, ids=agent_ids))
 agent_output = rail.process(agent_call, runner=agent_runner)
 agent_row = json.loads(context(agent_output))
 check("verb-match Agent call fires exactly one selector call",
       len(agent_runner.calls) == 1)
-check("generalized selector call declares the matched trigger's exact packs and rule_ids",
+check("generalized selector call declares the matched triggers' merged packs and rule_ids",
       agent_runner.calls[0][0][0] == [
           str(REPO / "run.sh"), "call", "standing-context",
-          json.dumps({"packs": council_row["packs"], "rule_ids": council_row["rule_ids"]},
+          json.dumps({"packs": agent_packs, "rule_ids": agent_ids},
                      sort_keys=True, separators=(",", ":"))])
 check("generalized receipt uses the new schema and passes its own validator",
       agent_row["schema"] == rail.GENERALIZED_RECEIPT_SCHEMA
       and contract.validate_generalized_receipt(agent_row, repo=REPO))
-check("generalized receipt binds exactly the matched trigger, packs, and rule_ids",
-      agent_row["trigger_ids"] == [council_row["trigger_id"]]
-      and agent_row["packs"] == council_row["packs"]
-      and agent_row["rule_ids"] == council_row["rule_ids"])
+check("generalized receipt binds exactly the matched triggers, packs, and rule_ids",
+      agent_row["trigger_ids"] == agent_trigger_ids
+      and agent_row["packs"] == agent_packs
+      and agent_row["rule_ids"] == agent_ids)
+# The cap lives per trigger in the compiler (lib/rule_delivery_preuse.py,
+# merge_trigger_delivery): an Agent call hits two triggers, so the merged set
+# may exceed one trigger's cap, and each matched trigger must stay inside it.
 check("over-delivery stays inside the compiler's per-trigger cap",
-      len(agent_row["rule_ids"]) <= MAX_PER_TRIGGER)
+      all(len(r["rule_ids"]) <= MAX_PER_TRIGGER for r in agent_rows)
+      and set(agent_row["rule_ids"]) == set(agent_ids))
 check("original scheduled-automation receipt fields are absent from the generalized shape",
       "pack" not in agent_row and "triggers_digest" in agent_row)
 
@@ -846,6 +919,36 @@ write_output = rail.process(
 write_row = json.loads(context(write_output))
 check("path_pattern match delivers exactly the structural extra rule",
       write_row["rule_ids"] == path_row["rule_ids"] and write_row["packs"] == path_row["packs"])
+# Cloud model choice fires on a cloud-session dispatch and stays silent on
+# routine reads, including the read-only calls of the same remote server.
+for dispatch_tool in ("mcp__Claude_Code_Remote__create_session",
+                      "mcp__Claude_Code_Remote__create_trigger"):
+    dispatch_call = gen_payload(tool=dispatch_tool, tool_input={"prompt": "fix the bug", "model": "sonnet"})
+    check(f"{dispatch_tool} hits the model-choice trigger",
+          model_choice_row["trigger_id"]
+          in [r["trigger_id"] for r in rail.matched_triggers(dispatch_call)])
+model_runner = Runner(gen_selector_result(packs=model_choice_row["packs"], ids=model_choice_row["rule_ids"]))
+model_output = rail.process(
+    gen_payload(tool="mcp__Claude_Code_Remote__create_session",
+                tool_input={"prompt": "fix the bug", "model": "sonnet"}), runner=model_runner)
+model_receipt = json.loads(context(model_output))
+check("a cloud-session dispatch delivers rule ede4b241 in one selector call",
+      len(model_runner.calls) == 1 and "ede4b241" in model_receipt["rule_ids"]
+      and model_receipt["trigger_ids"] == [model_choice_row["trigger_id"]], model_receipt)
+for routine_tool, routine_input in (
+        ("Read", {"file_path": "README.md"}), ("Grep", {"pattern": "model"}),
+        ("Glob", {"pattern": "*.py"}), ("Bash", {"command": "git status"}),
+        ("mcp__Claude_Code_Remote__list_sessions", {}),
+        ("mcp__Claude_Code_Remote__get_session", {"session_id": "x"}),
+        ("mcp__Claude_Code_Remote__list_repos", {})):
+    routine_hits = [r["trigger_id"] for r in
+                    rail.matched_triggers(gen_payload(tool=routine_tool, tool_input=routine_input))]
+    check(f"{routine_tool} stays silent for the model-choice trigger",
+          model_choice_row["trigger_id"] not in routine_hits, routine_hits)
+silent_runner = Runner()
+check("a routine Read delivers nothing and makes no selector call",
+      rail.process(gen_payload(tool="Read", tool_input={"file_path": "README.md"}),
+                   runner=silent_runner) is None and silent_runner.calls == [])
 missing_session = gen_payload(tool="Agent", tool_input={"description": "spawn helper", "prompt": "zzz"})
 missing_session["session_id"] = ""
 missing_session_runner = Runner()
@@ -935,43 +1038,13 @@ def fake_adviser(_situation):
 
 
 def fake_build_adviser(situation):
-    return {
-        "schema": "jev-build-advisory/v1",
-        "partner_request_sha256": rail.digest(situation),
-        "model": "jev-test-build",
-        "facets": {
-            "architecture_or_design": 0.81,
-            "semantic_creation": 0.84,
-            "diagnosis": 0.12,
-            "verification_selection": 0.67,
-            "evidence_matching": 0.34,
-            "next_action_priority": 0.58,
-        },
-        "guidance": {
-            "extend_existing_seam": 0.88,
-            "prefer_reversible_slice": 0.71,
-            "define_typed_contract_first": 0.84,
-            "gather_more_evidence_before_diagnosis": 0.22,
-            "prefer_behavioral_verification": 0.79,
-            "require_fresh_exact_evidence": 0.66,
-            "prioritize_blocker_removal": 0.45,
-        },
-        "required_actions": [
-            {"facet": facet, "instruction": contract.BUILD_ACTIONS[facet]}
-            for facet in contract.BUILD_ACTIONS
-            if {
-                "architecture_or_design": 0.81,
-                "semantic_creation": 0.84,
-                "diagnosis": 0.12,
-                "verification_selection": 0.67,
-                "evidence_matching": 0.34,
-                "next_action_priority": 0.58,
-            }[facet] >= contract.BUILD_ACTION_THRESHOLD
-        ],
-        "usage": {"input_tokens": 10, "output_tokens": 6},
-        "authority": "required",
-        "deterministic_exclusions": ["authority", "execution", "completion_proof"],
-    }
+    return {"schema": "jev-build-advisory-skipped/v1", "status": "skipped",
+            "reason": "boundary_deferred", "effect": "no_prompt_obligation"}
+
+
+check("default prompt build adviser defers without a Jev call",
+      rail._build_adviser("Inspect the hook configuration read-only.") ==
+      fake_build_adviser(""))
 
 
 semantic_runner = Runner(gen_selector_result(packs=semantic_packs, ids=[semantic_id]))
@@ -992,7 +1065,7 @@ check("semantic receipt uses authoritative text and keeps the Jev probability",
       semantic_row["rules"] == [{"id": semantic_id,
                                   "statement": f"binding jit rule {semantic_id}"}]
       and semantic_row["probabilities"] == {semantic_id: 0.91}
-      and semantic_row["build_receipt"]["advisory"]["model"] == "jev-test-build"
+      and semantic_row["build_receipt"]["advisory"]["effect"] == "no_prompt_obligation"
       and semantic_row["build_receipt"]["semantic_rule_delivery"] == "delivered"
       and semantic_row["model_provenance"] == {
           semantic_id: {"ranking_model": "jev-test-ranker",
@@ -1202,27 +1275,10 @@ bg_row = json.loads(context(bg_output))
 check("the original exact background shape still takes the original rail, not the generalized one",
       bg_row["schema"] == rail.RECEIPT_SCHEMA and bg_row.get("pack") == rail.PACK)
 
-# Selector-failure paths are fixed, redacted, and never block, matching the
-# original rail's own guarantee for its own failures.
-gen_bad_cases = [
-    ("nonzero", Runner(returncode=1, stderr="token=SUPER-SECRET")),
-    ("exception", Runner(error=RuntimeError("postgres://SUPER-SECRET"))),
-    ("wrong mode", Runner(gen_selector_result(
-        packs=council_row["packs"], ids=council_row["rule_ids"], mode="mystery"))),
-    ("extra declared pack", Runner(gen_selector_result(
-        packs=council_row["packs"] + ["engineering-git"], ids=council_row["rule_ids"]))),
-    ("missing rule", Runner(gen_selector_result(
-        packs=council_row["packs"], ids=council_row["rule_ids"][:-1]))),
-    ("mismatched local sponsor", Runner(gen_selector_result(
-        packs=council_row["packs"], ids=council_row["rule_ids"], sponsor="dell"))),
-]
-for label, fake in gen_bad_cases:
-    failed = rail.process(agent_call, runner=fake)
-    rendered = context(failed)
-    check(f"generalized rail: {label} is fixed redacted nonblocking failure",
-          rendered == rail.GENERALIZED_FAILURE_CONTEXT
-          and "SUPER-SECRET" not in json.dumps(failed)
-          and "decision" not in failed and "updatedInput" not in failed, failed)
+check_failure_cases(
+    "generalized rail", agent_call,
+    gen_selector_result(packs=council_row["packs"], ids=council_row["rule_ids"]),
+    "selector did not return every triggered rule", rail.GENERALIZED_FAILURE_CONTEXT)
 
 # Tampering with a generalized receipt's content fails validate_generalized_receipt.
 tamper_cases = [
@@ -1333,6 +1389,47 @@ def rules_routed_by(predicate) -> set[str]:
             if any(predicate(route) for route in entry["routes"])}
 
 
+# The Bash route (production route rail) fires on every supported cloud launch
+# form, wherever the flag sits among the options, and not on a local session.
+def _cli_routed(command):
+    return "ede4b241" in routed_for("Bash", {"command": command})
+
+
+for cloud_command in (
+        'claude --remote "fix the bug"',
+        'claude --model sonnet --remote "fix the bug"',
+        'claude --effort medium --remote',
+        'claude --cloud "fix the bug"',
+        'claude -p "fix the bug" --environment ccpool_synthetic',
+        'claude --remote="fix the bug"',
+        'cd repo && claude --model sonnet --cloud "fix; the bug"',
+        # A flag may end at a shell terminator, not only at a space or end of line.
+        'claude --remote; printf done',
+        'claude --remote&& printf done',
+        'claude --remote || printf failed',
+        '(claude --remote)',
+        'claude --cloud | tee launch.log',
+        'claude --remote>launch.log',
+        'claude --cloud<input.txt',
+        'claude --remote\nprintf done'):
+    check(f"cloud launch routes the model-choice rule: {cloud_command}",
+          _cli_routed(cloud_command))
+for local_command in (
+        'claude --remote-control',
+        'claude --remote-control "name"',
+        'claude --model sonnet',
+        'claude -p "explain this file"',
+        'claude --version && git remote add origin x',
+        'git push --remote origin',
+        'claude --remote-control; printf done',
+        '(claude --remote-control)',
+        'claude --cloud-init; printf done',
+        'claude --remote-control>launch.log',
+        'claude --cloud-init<input.txt',
+        'echo done; ls --cloud-init'):
+    check(f"local or unrelated command stays silent for the model-choice rule: {local_command}",
+          not _cli_routed(local_command))
+
 with tempfile.TemporaryDirectory() as route_tmp:
     saved_env = dict(os.environ)
     os.environ["CARR_RULE_ROUTE_DEDUPE_DIR"] = str(Path(route_tmp) / "dedupe")
@@ -1370,6 +1467,48 @@ with tempfile.TemporaryDirectory() as route_tmp:
               sorted(push_ids))
         check("a neutral Bash command routes nothing",
               routed_for("Bash", {"command": "ls -la"}) == [])
+
+        # Model-choice advice follows cloud CLI arguments through the production
+        # route rail, including options before the dispatch flag.
+        for command in (
+                'claude --remote "fix the bug"',
+                'claude --model sonnet --remote "fix the bug"',
+                'claude --effort medium --remote',
+                'claude --cloud "fix the bug"',
+                'claude --model sonnet --cloud="fix the bug"',
+                'claude -p "fix the bug" --environment ccpool_synthetic',
+                'claude --environment=ccpool_synthetic -p "fix the bug"',
+                'claude -p "fix; the bug" --environment "ccpool_synthetic"',
+                '/opt/homebrew/bin/claude --effort medium --cloud "fix the bug"',
+                'git status && claude --model sonnet --cloud "fix the bug"'):
+            cloud_call = gen_payload(tool="Bash", tool_input={"command": command},
+                                     session="cloud-cli-" + command, tool_use_id="cloud-cli")
+            cloud_ids = rail.routed_rule_ids(cloud_call)
+            check("cloud CLI routes model-choice advice: " + command,
+                  "ede4b241" in cloud_ids, cloud_ids)
+            cloud_union = sorted(set(cloud_ids) | set(
+                contract.merge_trigger_delivery(rail.matched_triggers(cloud_call))[2]))
+            cloud_runner = Runner(route_result(cloud_union))
+            cloud_output = rail.process(cloud_call, runner=cloud_runner)
+            cloud_receipt = json.loads(context(cloud_output)) if cloud_output else {}
+            check("cloud CLI delivers model-choice advice in one validated receipt: " + command,
+                  len(cloud_runner.calls) == 1
+                  and "ede4b241" in cloud_receipt.get("rule_ids", [])
+                  and routes_lib.validate_route_receipt(cloud_receipt, repo=REPO))
+        for command in (
+                'claude --remote-control',
+                'claude --model sonnet --remote-control "local session"',
+                'claude --remote-control-session-name-prefix local',
+                'claude --remote-controlled',
+                'claude --cloudy',
+                'claude --environment',
+                'claude --model sonnet -p "fix the bug"',
+                'claude -p "mention --cloud in the answer"',
+                'claude --model sonnet; echo --cloud',
+                'claude --model sonnet && echo --remote',
+                'my-claude --cloud "fix the bug"'):
+            check("local CLI or flag prefix stays silent for model choice: " + command,
+                  "ede4b241" not in routed_for("Bash", {"command": command}))
 
         # Path globs, and the path_rule kind carries them.
         hook_ids = set(routed_for("Write", {"file_path": str(REPO / "hooks/x-gate.py"),
