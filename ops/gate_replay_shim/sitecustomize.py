@@ -15,8 +15,11 @@ fresh Linux runner and on a developer Mac. Three inputs would otherwise differ:
     last 14 days", and any of them can print a date. time.time, time.time_ns,
     the no-argument forms of localtime/gmtime/ctime/strftime, and
     datetime.now/utcnow/today plus date.today all read a pinned instant that
-    still advances with the monotonic clock, so a gate that waits on a deadline
-    cannot spin forever.
+    advances with process CPU time. Deadline clocks use the same CPU clock:
+    host scheduling and offline subprocess waits cannot choose a different
+    budget branch under load. CPU work still exhausts a gate's budget. The
+    parent replay runner retains its real wall-clock invocation timeout, so
+    a blocked or sleeping gate still fails rather than hanging CI.
   * THE NETWORK. socket connect and name resolution raise OSError, so a gate
     that would call a vendor or the record layer takes its offline path in the
     same way everywhere and in milliseconds.
@@ -39,6 +42,10 @@ if _EPOCH:
     import time as _time
 
     _PINNED = float(_EPOCH)
+    # This offline harness owns the simulated clock; production hooks retain
+    # wall-clock budgets. Keep the parent's subprocess timeout outside it.
+    _time.monotonic = _time.process_time
+    _time.monotonic_ns = _time.process_time_ns
     _MONO0 = _time.monotonic()
     _real_localtime = _time.localtime
     _real_gmtime = _time.gmtime
