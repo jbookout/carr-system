@@ -1286,7 +1286,8 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     mcp-server/test/tour-client-share-allowlist-postgres.sql \
     mcp-server/test/assurance-health-store-postgres.sql \
     mcp-server/test/work-portfolio-postgres.sql \
-    mcp-server/test/local-deals-postgres.sql; do
+    mcp-server/test/local-deals-postgres.sql \
+    mcp-server/test/invoice-tracker-postgres.sql; do
     [ -f "$tour_pg_proof" ] || continue
     tour_pg_log="$LOGDIR/$(basename "$tour_pg_proof" .sql).log"
     if ! run_quiet "$tour_pg_log" \

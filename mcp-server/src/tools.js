@@ -1,3 +1,4 @@
+import { invoiceTrackerTools } from "./invoice-tracker.js";
 // CARR MCP tool registry — Wave 1 verbs (tool-contracts-2026-07-30.md §2).
 // Every write runs the envelope: idempotency replay via tool_call, actor from
 // the verified token (never the payload), base_version conflicts ask and never
@@ -8761,6 +8762,7 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "schedule-board": "mcp-server/src/schedule-board.js",
   "doc-suggestions": "mcp-server/src/doc-suggestions.js",
   "whats-new": "mcp-server/src/whats-new.js",
+  "invoice-tracker": "mcp-server/src/invoice-tracker.js",
 });
 
 function bindToolSource(tool, source) {
@@ -8788,6 +8790,8 @@ function registerTools(additions, source) {
   for (const tool of Object.values(additions)) bindToolSource(tool, source);
   Object.assign(TOOLS, additions);
 }
+
+registerTools(invoiceTrackerTools({ ToolError, withEnvelope, writeEvent }), "invoice-tracker");
 
 // Deal Room contract. Durable writes use the same envelope and event helper as
 // the rest of this registry; the one explicit exception is the ephemeral lease.
