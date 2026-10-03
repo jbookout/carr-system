@@ -2315,6 +2315,83 @@ class Robustness(Base):
 
 
 class Blockers(Base):
+    def test_nonzero_auth_rejection_files_the_credential_loop(self):
+        for response in ("Authentication error [code: 10000]",
+                         "A request to the Cloudflare API (/user/tokens/verify) failed.\nInvalid access token [code: 9109]"):
+            with self.subTest(response=response):
+                self.fx.commit({"mcp-server/src/a.js": response})
+                verbs: list = []
+                runner = FakeRunner(fail_at="wrangler-auth", outputs={"wrangler-auth": response})
+                self.assertEqual(self.fx.pipeline(runner, verbs=verbs).tick(["worker"]), 1)
+                self.assertEqual(self.fx.records()[-1]["step"], "credential-missing")
+                self.assertEqual(self.fx.records()[-1]["rc"], 7)
+                self.assertIn("credential rejected", self.fx.records()[-1]["detail"])
+                self.assertIn("CLOUDFLARE_API_TOKEN:rejected", self.fx.state()["filed_blockers"])
+                self.assertNotIn("worktree-add", runner.names())
+
+    def test_nonzero_auth_network_failure_does_not_name_a_rejected_token(self):
+        for response in ("fetch failed: network timeout", "Cloudflare API unavailable [code: 10001]"):
+            with self.subTest(response=response):
+                self.fx.commit({"mcp-server/src/a.js": response})
+                verbs: list = []
+                runner = FakeRunner(fail_at="wrangler-auth", outputs={"wrangler-auth": response})
+                self.assertEqual(self.fx.pipeline(runner, verbs=verbs).tick(["worker"]), 1)
+                self.assertEqual(self.fx.records()[-1]["step"], "wrangler-auth")
+                self.assertEqual([v for v, _ in verbs], ["add-room-turn"])
+
+    def test_failed_loop_delivery_retries_without_retrying_the_failed_sha(self):
+        (self.fx.cred / "tokens.env").unlink()
+        sha = self.fx.commit({"mcp-server/src/a.js": "1"})
+        first_calls: list = []
+        pipe = self.fx.pipeline(FakeRunner())
+        def unavailable(verb, args):
+            first_calls.append((verb, args))
+            return (False, "temporary network outage") if verb == "add-loop" else (True, {})
+        pipe.call_verb = unavailable
+        self.assertEqual(pipe.tick(["worker"]), 1)
+        self.assertFalse(self.fx.records()[-1]["loop_filed"])
+        self.assertEqual(self.fx.state()["worker"]["failed_sha"], sha)
+        retry_calls: list = []
+        runner = FakeRunner()
+        self.assertEqual(self.fx.pipeline(runner, verbs=retry_calls).tick(["worker"]), 0)
+        self.assertEqual([v for v, _ in retry_calls], ["add-loop"])
+        self.assertEqual(first_calls[0][1], retry_calls[0][1])
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(self.fx.state()["worker"]["failed_sha"], sha)
+        self.assertIn("CLOUDFLARE_API_TOKEN", self.fx.state()["filed_blockers"])
+        self.assertFalse(self.fx.state().get("pending_blockers"))
+        final_calls: list = []
+        self.fx.pipeline(FakeRunner(), verbs=final_calls).tick(["worker"])
+        self.assertEqual(final_calls, [])
+
+    def test_cloudflare_recipe_tracks_the_inventory_and_checked_directory(self):
+        (self.fx.cred / "tokens.env").unlink()
+        inventory = self.fx.tmp / "credential-inventory.json"
+        inventory.write_text(json.dumps({"credentials": [{
+            "name": "cloudflare-deploy-token", "probe": {"path": "~/canonical/tokens.env"},
+            "replacement_plan": "Grant fixture scope only; store in ~/canonical/tokens.env; chmod 600 ~/canonical/tokens.env."
+        }]}))
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        verbs: list = []
+        with mock.patch.object(rp, "CREDENTIAL_INVENTORY_PATH", inventory, create=True):
+            self.assertEqual(self.fx.pipeline(FakeRunner(), verbs=verbs).tick(["worker"]), 1)
+        body = verbs[0][1]["body"]
+        self.assertIn("Grant fixture scope only", body)
+        self.assertIn(f"store in {self.fx.cred / 'tokens.env'}", body)
+        self.assertIn(f"chmod 600 {self.fx.cred / 'tokens.env'}", body)
+        self.assertNotIn("~/canonical/tokens.env", body)
+        self.assertNotIn("~/.config/carr/tokens.env", body)
+        self.assertNotIn("Workers Scripts:Edit", body)
+
+    def test_hold_loop_keeps_automatic_retry_instructions(self):
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        (self.fx.cred / "db.env").write_text("")
+        verbs: list = []
+        self.assertEqual(self.fx.pipeline(FakeRunner(), verbs=verbs).tick(["worker"]), 3)
+        body = verbs[0][1]["body"]
+        self.assertIn("every tick", body)
+        self.assertNotIn("clear-failed", body)
+
     def test_health_blocker_names_the_authorized_repair_lane(self):
         args = rp.blocker_loop("health_baseline_hard_error", "Jev receipt integrity is broken")
         self.assertEqual(args["blocker"], "other_lane")
@@ -2523,6 +2600,51 @@ class DeployCredential(unittest.TestCase):
         self.assertEqual([v for v, _ in verbs], ["add-loop", "add-room-turn", "add-room-turn"])
         self.assertNotIn("loop_filed", self.fx.records()[-1])
         self.assertIn("CLOUDFLARE_API_TOKEN", self.fx.state()["filed_blockers"])
+
+    def test_token_restoration_requires_the_notified_clearance_for_both_lanes(self):
+        for lane in ("worker", "app"):
+            with self.subTest(lane=lane):
+                self.write_tokens("")
+                sha = self.fx.commit({"mcp-server/src/a.js": lane, "src/worker.js": lane})
+                store = rp.Store(self.fx.repo / "out/release-pipeline")
+                state = store.load()
+                state.pop("filed_blockers", None)
+                store.save(state)
+                verbs: list = []
+                failing = self.pipeline(FakeRunner(), verbs=verbs, app=lane == "app")
+                if lane == "app":
+                    failing.http = lambda _u: {"source_commit": self.fx.base, "environment": "production"}
+                self.assertEqual(failing.tick([lane]), 1)
+                body = verbs[0][1]["body"]
+                self.assertIn(f"{lane} lane", body)
+                self.assertIn(sha, body)
+                self.assertIn(f"clear-failed --lane {lane} --sha {sha}", body)
+                self.assertNotIn("every tick", body)
+                self.write_tokens(f"CLOUDFLARE_API_TOKEN={CF_TOKEN}\n")
+                paused = FakeRunner()
+                paused_pipe = self.pipeline(paused, app=lane == "app")
+                if lane == "app":
+                    paused_pipe.http = lambda _u: {"source_commit": self.fx.base, "environment": "production"}
+                self.assertEqual(paused_pipe.tick([lane]), 0)
+                self.assertEqual(paused.calls, [])
+                self.assertEqual(self.fx.state()[lane]["failed_sha"], sha)
+                rp.clear_failed(store, lane, sha, "credential restored and verified")
+                live = {"sha": self.fx.base}
+                runner = FakeRunner(live=live)
+                pipe = self.pipeline(runner, app=lane == "app")
+                if lane == "worker":
+                    pipe.http = lambda _u: {"git_sha": {"value": live["sha"]}}
+                else:
+                    pipe.http = lambda _u: {"source_commit": live["sha"], "environment": "production"}
+                    original_run = runner.run
+                    def run(argv, **kw):
+                        result = original_run(argv, **kw)
+                        if argv[:3] == ["npm", "run", "release:production"]:
+                            live["sha"] = sha
+                        return result
+                    runner.run = run
+                self.assertEqual(pipe.tick([lane]), 0)
+                self.assertEqual(self.fx.state()[lane]["last_released_sha"], sha)
 
     def test_dry_run_reports_the_missing_token_and_records_nothing(self):
         self.fx.commit({"mcp-server/src/a.js": "1"})
