@@ -28,6 +28,8 @@ USAGE (global options precede the subcommand):
   --max-polls bounds a run (default 720); exit 2 means no final report received.
 
 PROTOCOL:
+  Long briefs post as a root message plus in-thread continuation parts;
+  send-job returns the root timestamp used for Dot replies.
   In the same Slack thread, the trusted sender requests one command per line:
     ```mac-run
     git status --short
@@ -61,6 +63,8 @@ STATE:
   A lock prevents concurrent execution. Durable claims prevent replay after
   interruption; inspect pending.jsonl before requesting a NEW command. Posts
   have no automatic write retry: reconcile an ambiguous send against Slack.
+  A pending root claim in the state directory's send-job.json blocks new jobs
+  and polling until reconciled; continuation claims live in thread state.json.
   An interrupted result post also stops resume until private state is reconciled.
   Never commit local state, reports, credentials or live message contents.
 

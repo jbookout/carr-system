@@ -343,6 +343,23 @@ def _protocol(text):
     return commands, "\n".join(report_lines).strip() + "\n" if finished else None
 
 
+def _brief_parts(text):
+    """Keep lines intact where possible; bound even a single oversized line."""
+    limit = 3499
+    parts, current = [], ""
+    for line in text.splitlines(keepends=True):
+        if current and len(current) + len(line) > limit:
+            parts.append(current)
+            current = ""
+        while len(line) > limit:
+            parts.append(line[:limit])
+            line = line[limit:]
+        current += line
+    if current or not parts:
+        parts.append(current)
+    return parts
+
+
 class Relay:
     """Transport seam: post(text, thread=None) -> ts; replies(thread) -> messages.
 
@@ -369,13 +386,51 @@ class Relay:
         return _private_dir(self.state_dir / thread)
 
     def send_job(self, brief):
-        thread = self.transport.post(redact_text(brief, known_secrets=self.secrets))
-        directory = self._directory(thread)
-        _write_json(directory / "job.json", {"thread": thread, "cwd": str(self.cwd),
-                    "scratch_roots": list(map(str, self.scratch_roots)), "binding": self.binding})
-        return thread
+        # Redact before splitting: a secret spanning a cut must never leak.
+        parts = _brief_parts(redact_text(brief, known_secrets=self.secrets))
+        pending_file = self.state_dir / "send-job.json"
+        fd = os.open(self.state_dir / "send-job.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if pending_file.exists():
+                raise ValueError("interrupted job post requires reconciliation")
+            # The root has no thread directory yet. Persist its claim here.
+            pending = {"posting_pending": "job:0", "binding": self.binding}
+            _write_json(pending_file, pending)
+            thread = self.transport.post(parts[0])
+            if not isinstance(thread, str) or not re.fullmatch(r"[0-9]{1,20}\.[0-9]{1,10}", thread):
+                raise SlackError("Slack post timestamp invalid")
+            pending["thread"] = thread
+            _write_json(pending_file, pending)
+            directory = self._directory(thread)
+            fd = os.open(directory / "lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "w") as thread_lock:
+                fcntl.flock(thread_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                state_file = directory / "state.json"
+                state = {"commands": {}, "messages": [], "binding": self.binding, "outgoing": [thread]}
+                if len(parts) > 1:
+                    state["posting_pending"] = "job:1"
+                _write_json(directory / "job.json", {"thread": thread, "cwd": str(self.cwd),
+                            "scratch_roots": list(map(str, self.scratch_roots)), "binding": self.binding})
+                _write_json(state_file, state)
+                # The known root and remaining claims now live in thread state.
+                pending_file.unlink()
+                _sync_directory(self.state_dir)
+                for index, part in enumerate(parts[1:], 1):
+                    posted_ts = self.transport.post(part, thread)
+                    if not isinstance(posted_ts, str) or not re.fullmatch(r"[0-9]{1,20}\.[0-9]{1,10}", posted_ts):
+                        raise SlackError("Slack post timestamp invalid")
+                    state["outgoing"].append(posted_ts)
+                    if index + 1 < len(parts):
+                        state["posting_pending"] = f"job:{index + 1}"
+                    else:
+                        del state["posting_pending"]
+                    _write_json(state_file, state)
+            return thread
 
     def poll(self, thread, *, execute=False):
+        if (self.state_dir / "send-job.json").exists():
+            raise ValueError("interrupted job post requires reconciliation")
         directory = self._directory(thread)
         # flock covers execution AND checkpoints; two relay processes cannot race.
         fd = os.open(directory / "lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
