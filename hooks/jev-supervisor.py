@@ -40,6 +40,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -392,30 +393,43 @@ def fact_boundary(payload, run):
 # of them the injection screen re-reading its own local command output (rule
 # text is full of "never"/"always") and turn-end claim checks on background
 # notification turns. A tool result is a judgment point only when it brings in
-# outside content or failed; a turn end only when a human spoke since the last
-# assistant turn. The shared daily paid-call cap owns the spending bound.
-EXTERNAL_TOOLS = {"webfetch", "websearch"}
-EXTERNAL_TOOL_MARKERS = ("get_page_text", "read_page", "browser_", "claude-in-chrome", "claude_browser")
-# Writing code is a judgment point: duplicate-function and test-quality checks
-# ask only when the edit adds a definition or touches a test.
-FILE_WRITE_TOOLS = {"edit", "write", "multiedit", "notebookedit"}
-FAILED_OUTPUT = re.compile(r"(Exit code [1-9]\d*|Traceback \(most recent call last\)|"
-                           r"command not found|No such file or directory|\bE[A-Z]+:|\berror:)", re.I)
+# outside content or failed. Unknown tool provenance retains the library's
+# deterministic security floor; local Read/Grep and simple shell readers
+# bypass inspection when they carry no failure evidence.
+# A turn end is checked unless the latest request is a known notification.
+# The shared daily paid-call cap owns the spending bound.
+LOCAL_READ_COMMANDS = {"cat", "ls", "pwd", "head", "tail", "wc"}
+
+
+def _local_shell_read(tool_input):
+    """Trust only a single known reader without shell evaluation or chaining."""
+    if not isinstance(tool_input, dict):
+        return False
+    command = tool_input.get("command")
+    if not isinstance(command, str) or any(c in command for c in "$`;|&><\n()"):
+        return False
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return False
+    return bool(words) and words[0] in LOCAL_READ_COMMANDS
 
 
 def judgment_point(event, payload):
     """Whether this hook event is worth a paid Jev request at all."""
     if event == "PostToolUse":
         name = (payload.get("tool_name") or "").lower()
-        if (name in EXTERNAL_TOOLS or name in FILE_WRITE_TOOLS
-                or any(m in name for m in EXTERNAL_TOOL_MARKERS)):
+        if name not in {"bash", "read", "grep"}:
+            return True
+        if name == "bash" and not _local_shell_read(payload.get("tool_input")):
             return True
         response = payload.get("tool_response")
         code = _exit_code(response)
         if code not in (None, 0):
             return True
-        tail = _text(response)[-4000:]
-        return bool(FAILED_OUTPUT.search(tail) or MISSING_FILE.search(tail))
+        output = _text(response)[-MAX_OUTPUT_CHARS:]
+        watch = _lib("jev_session_watch")
+        return bool(MISSING_FILE.search(output) or watch.FAILURE_MARKERS.search(output))
     if event == "Stop":
         for rec in reversed(_transcript_records(payload.get("transcript_path") or "")):
             provenance = _request_provenance(rec)
@@ -437,12 +451,13 @@ def main():
         return 0
     run = Run()
     try:
-        if not judgment_point(event, payload):
-            return 0
         if event == "PostToolUse":
-            post_tool_use(payload, run)
+            if judgment_point(event, payload):
+                post_tool_use(payload, run)
+            # The optional fact library owns its record-write trigger, including
+            # successful acknowledgements through Bash and MCP.
             fact_boundary(payload, run)
-        elif event == "Stop":
+        elif event == "Stop" and judgment_point(event, payload):
             stop(payload, run)
             fact_boundary(payload, run)
     except Exception:
