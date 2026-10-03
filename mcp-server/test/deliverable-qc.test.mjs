@@ -9,10 +9,10 @@ const refs = {
 };
 const facts = {
   as_of: "2026-08-27T12:00:00Z",
-  caveat: "Facts are provided for tour planning and remain subject to change.",
+  caveat: null,
   properties: [
-    { property_ref: refs.zeta, route_sequence: 20, route_label: "Stop 2", name: "Zeta Medical Plaza", address: "200 Zeta Way", availability: "Available" },
-    { property_ref: refs.alpha, route_sequence: 10, route_label: "Stop 1", name: "Alpha Health Center", address: "100 Alpha Drive", availability: "Available" },
+    { property_ref: refs.zeta, route_sequence: 20, route_label: "B", name: "Zeta Medical Plaza", address: "200 Zeta Way", availability: "Available" },
+    { property_ref: refs.alpha, route_sequence: 10, route_label: "A", name: "Alpha Health Center", address: "100 Alpha Drive", availability: "Available" },
   ],
 };
 
@@ -29,8 +29,9 @@ test("Tour QC verifies per-page public identity/fact parity and remains review-o
 
 test("Tour QC seeded negatives block leakage, unsafe URLs, duplicate public refs, and swapped page facts", () => {
   const rendered = renderTourPacket(facts);
+  // No caveat to strip: a client Tour packet carries none (V5-J303), so
+  // QC-FACT-002 (supplied caveat missing) has nothing to fire on here.
   const bad = rendered.html
-    .split(facts.caveat).join("")
     .replace(refs.zeta, refs.alpha)
     .replace("100 Alpha Drive", "temporary-address")
     .replace("200 Zeta Way", "100 Alpha Drive")
@@ -40,7 +41,7 @@ test("Tour QC seeded negatives block leakage, unsafe URLs, duplicate public refs
   const result = inspectDeliverable({ artifactType: "tour-packet", html: bad, facts: rendered.facts, expected: { markers: rendered.markers, pageCount: rendered.propertyCount } });
   assert.equal(result.blocked, true);
   const rules = new Set(result.findings.map(item => item.ruleId));
-  for (const rule of ["QC-LEAKAGE-001", "QC-URL-001", "QC-FACT-002", "QC-PAGE-002", "QC-PAGE-003", "QC-PARITY-002", "QC-IDENTITY-001"]) assert.equal(rules.has(rule), true, rule);
+  for (const rule of ["QC-LEAKAGE-001", "QC-URL-001", "QC-PAGE-002", "QC-PAGE-003", "QC-PARITY-002", "QC-IDENTITY-001"]) assert.equal(rules.has(rule), true, rule);
 });
 
 test("generic non-Tour adapter applies the same versioned QC without Tour coupling", () => {

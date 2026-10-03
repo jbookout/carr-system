@@ -21,6 +21,7 @@ DESK KINDS:
   claude-desktop   a queue-only Claude background session, handed to Desktop
   codex-session    a standing Codex thread, resumed per task through the CLI
   codex-live       a live Codex app-server, addressed by its unix socket
+  flash-local      the local Flash model itself, answering direct questions (flash_wire.py)
 
 BOTH KINDS KEEP THEIR CONTEXT, and that is the whole point. Joe, 2026-08-20:
 "codex should be able to do the same thing as you. It has its own context. I
@@ -51,10 +52,29 @@ NAME_OK = re.compile(r"^[a-z0-9][a-z0-9-]{1,40}$")
 # /tmp/cc-socks/79534.sock — a process, not a desk
 PID_SOCKET = re.compile(r"^\d+\.sock$")
 
-KINDS = ("claude-session", "claude-desktop", "codex-session", "codex-live")
+KINDS = ("claude-session", "claude-desktop", "codex-session", "codex-live", "flash-local", "grok-cli")
 # the old name for the Codex kind, before it carried a thread
 KIND_ALIASES = {"codex-exec": "codex-session"}
 EFFORT_CHOICES = ("minimal", "low", "medium", "high", "xhigh")
+
+DESK_INSTRUCTION = (
+    "Model Room desk instruction: If you need approvals, permissions, or decisions, "
+    "send them to the orchestrator session via send_message in one message, then "
+    "end the turn. Never ask Joe."
+)
+
+
+def desk_prompt(task: str) -> str:
+    """Carry the fixed instruction on first turns and every resumed task."""
+    if task.startswith("[Hermes queue "):
+        # Queue identity/provenance occupy fixed header positions. Decorate
+        # the body, after the header separator, so Flash still reads them.
+        headers, separator, body = task.partition("\n\n")
+        if separator:
+            return headers + separator + desk_prompt(body)
+    if task == DESK_INSTRUCTION or task.startswith(DESK_INSTRUCTION + "\n\n"):
+        return task
+    return DESK_INSTRUCTION + ("\n\n" + task if task else "")
 
 DEFAULT_REGISTRY = Path(
     os.environ.get(
@@ -70,6 +90,19 @@ class DeskError(Exception):
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
+
+
+def dispatched_permission_mode(value: object = None) -> str:
+    """Dispatched work denies permission needs instead of prompting a human."""
+    mode = "dontAsk" if value is None else value
+    if mode != "dontAsk":
+        raise DeskError(
+            "unsafe_permission_mode",
+            f"dispatched desk permission mode {mode!r} is refused: use dontAsk "
+            "(default). auto and acceptEdits can still prompt. Approvals and "
+            "permission needs belong to the orchestrator; never ask Joe.",
+        )
+    return str(mode)
 
 
 def is_live(sock_path: str, timeout: float = 0.25) -> bool:
@@ -164,7 +197,8 @@ class Registry:
             if not socket:
                 raise DeskError("missing_socket", "a claude-session desk needs --socket")
             refuse_pid_socket(socket)
-            entry = {"kind": kind, "socket": str(socket)}
+            entry = {"kind": kind, "socket": str(socket),
+                     "permission_mode": dispatched_permission_mode(permission_mode)}
         elif kind == "claude-desktop":
             if not model:
                 raise DeskError("missing_model", "a claude-desktop desk needs --model")
@@ -178,8 +212,17 @@ class Registry:
                 # Background work cannot stop on a terminal approval dialog.
                 # dontAsk denies unapproved actions instead of widening the
                 # session's authority or leaving a hidden prompt waiting.
-                "permission_mode": str(permission_mode or "dontAsk"),
+                "permission_mode": dispatched_permission_mode(permission_mode),
             }
+        elif kind == "grok-cli":
+            if model != "grok-4.7" or effort != "high" or sandbox != "read-only":
+                raise DeskError("bad_grok_posture", "Grok requires grok-4.7/high/read-only")
+            entry = {"kind": kind, "model": model, "effort": effort,
+                     "sandbox": sandbox, "cwd": str(cwd or Path.cwd())}
+        elif kind == "flash-local":
+            # The model and effort are fixed by the direct protocol (ops/config/model-routes.v1.json): Flash,
+            # thinking off. Recorded on the entry so a dispatch still names both, as every delegation must.
+            entry = {"kind": kind, "model": "flash", "effort": "minimal"}
         elif kind == "codex-live":
             if not socket:
                 raise DeskError("missing_socket", "a codex-live desk needs --socket")
@@ -238,6 +281,12 @@ class Registry:
         entry = {**entry, "kind": kind}
         if kind not in KINDS:
             raise DeskError("bad_kind", f"desk {name!r} has kind {kind!r}")
+        if kind in ("claude-session", "claude-desktop"):
+            # Recheck edited/legacy entries at the dispatch boundary.
+            entry["permission_mode"] = dispatched_permission_mode(entry.get("permission_mode"))
+        if kind == "grok-cli" and (entry.get("model") != "grok-4.7"
+                or entry.get("effort") != "high" or entry.get("sandbox") != "read-only"):
+            raise DeskError("bad_grok_posture", "Grok requires grok-4.7/high/read-only")
         if kind in ("claude-session", "codex-live"):
             sock = entry.get("socket", "")
             # second refusal: the file is editable, the guard is not

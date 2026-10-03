@@ -207,8 +207,13 @@ def _add_room_turn_and_readback(run_door: str, body: str) -> bool:
         return False
 
     try:
-        seq = json.loads(out)["seq"]
-    except (json.JSONDecodeError, KeyError, TypeError):
+        raw_seq = json.loads(out)["seq"]
+        if isinstance(raw_seq, bool):
+            return False
+        seq = int(raw_seq)
+        if seq < 1:
+            return False
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError, OverflowError):
         return False
 
     rc2, out2, _err2 = _call_verb(run_door, "read-room", {"room": ROOM, "after_seq": seq - 1})
@@ -219,7 +224,18 @@ def _add_room_turn_and_readback(run_door: str, body: str) -> bool:
     except (json.JSONDecodeError, KeyError, TypeError):
         return False
 
-    return any(t.get("seq") == seq and t.get("body") == body for t in turns)
+    def exact_turn(turn: object) -> bool:
+        if not isinstance(turn, dict):
+            return False
+        turn_seq = turn.get("seq")
+        if isinstance(turn_seq, bool) or not isinstance(turn_seq, (str, int)):
+            return False
+        try:
+            return int(turn_seq) == seq and turn.get("body") == body
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+    return any(exact_turn(turn) for turn in turns)
 
 
 def _update_receipt_escalation(receipt_path: Path, field: str, value: str) -> None:

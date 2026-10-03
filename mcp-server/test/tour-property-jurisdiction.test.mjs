@@ -26,6 +26,7 @@ function harness() {
     async query(sql, params) {
       calls.push({ sql, params });
       if (sql.includes("append_tour_property_identifier_assertion")) return { rows: [{ property_identifier_assertion_id: ids.identifier }] };
+      if (sql.includes("register_tour_property")) return { rows: [{ registration: { property_id: ids.property, property_identifier_assertion_id: ids.identifier } }] };
       if (sql.includes("append_tour_coordinate_candidate")) return { rows: [{ coordinate_candidate_id: ids.candidate }] };
       if (sql.includes("append_tour_entrance_verification_receipt")) return { rows: [{ verification_receipt_id: ids.receipt }] };
       throw new Error(`unexpected query: ${sql}`);
@@ -48,12 +49,52 @@ const source = {
   observed_at: "2026-08-27T12:00:00Z",
 };
 
-test("Slice 3 exposes only the three reviewed 0428 seams and sends exact database payload keys", async () => {
+test("0565 registration mints a property with its first identifier assertion and never accepts a caller property_id", async () => {
+  const h = harness();
+  assert.equal(h.tools["register-tour-property"].authorityOnly, true);
+  assert.equal(h.tools["register-tour-property"].write, true);
+  assert.deepEqual(h.tools["register-tour-property"].inputSchema.required.includes("property_id"), false);
+  assert.deepEqual(await h.tools["register-tour-property"].handler(h.client, actor, {
+    idempotency_key: idempotency, identifier_scheme: "listing",
+    identifier_value: "CoStar 9998 A Hutchison Blvd", normalized_identifier: "costar:9998-a-hutchison-blvd",
+    ...source, confidence: "high", review_state: "reviewed", assertion_digest: digest("d"),
+  }), { ok: true, property_id: ids.property, property_identifier_assertion_id: ids.identifier });
+  assert.match(h.calls.at(-1).sql, /ops\.register_tour_property\(\$1::jsonb\)/);
+  const payload = JSON.parse(h.calls.at(-1).params[0]);
+  assert.deepEqual(Object.keys(payload).sort(), [
+    "assertion_digest", "confidence", "identifier_scheme", "identifier_value", "normalized_identifier",
+    "observed_at", "organization_tenant_id", "review_state", "rights_receipt_id", "source_evidence_id",
+  ]);
+  assert.equal(payload.organization_tenant_id, "carr-internal");
+  assert.equal(h.envelopes.at(-1).verb, "register-tour-property");
+  assert.equal(h.events.at(-1)[3], "tour_property");
+  assert.equal(h.events.at(-1)[4], ids.property);
+
+  await assert.rejects(h.tools["register-tour-property"].handler(h.client, actor, {
+    idempotency_key: idempotency, property_id: ids.property, identifier_scheme: "listing",
+    identifier_value: "x", normalized_identifier: "x", ...source, confidence: "high", review_state: "reviewed", assertion_digest: digest("d"),
+  }), error => error instanceof ToolError && error.payload.error === "tour_input_unknown_field");
+  await assert.rejects(h.tools["register-tour-property"].handler(h.client, actor, {
+    idempotency_key: idempotency, identifier_scheme: "listing",
+    identifier_value: "x", normalized_identifier: "Costar:X", ...source, confidence: "high", review_state: "reviewed", assertion_digest: digest("d"),
+  }), error => error instanceof ToolError && error.payload.error === "tour_identifier_not_normalized");
+
+  const refused = harness();
+  refused.client.query = async () => ({ rows: [{ registration: { property_id: "not-a-uuid" } }] });
+  await assert.rejects(refused.tools["register-tour-property"].handler(refused.client, actor, {
+    idempotency_key: idempotency, identifier_scheme: "listing",
+    identifier_value: "x", normalized_identifier: "x", ...source, confidence: "high", review_state: "reviewed", assertion_digest: digest("d"),
+  }), error => error instanceof ToolError && error.payload.error === "tour_write_refused");
+  assert.equal(refused.events.length, 0);
+});
+
+test("Slice 3 exposes only the three reviewed 0428 seams plus 0565 registration and sends exact database payload keys", async () => {
   const h = harness();
   assert.deepEqual(Object.keys(h.tools).sort(), [
     "append-tour-coordinate-candidate",
     "append-tour-entrance-verification-receipt",
     "append-tour-property-identifier-assertion",
+    "register-tour-property",
   ]);
   assert.equal(h.tools["append-tour-property-identifier-assertion"].authorityOnly, true);
   assert.equal(h.tools["append-tour-entrance-verification-receipt"].authorityOnly, true);

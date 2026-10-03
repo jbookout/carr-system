@@ -6,6 +6,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import inspect
 import json
 import os
 from pathlib import Path
@@ -105,6 +106,16 @@ class Fixture:
                 "id": "stage5.clean.execute",
                 "argv": ["git", "clean", "-fd", "--", *paths],
                 "pathspecs": paths,
+            })
+        # Stage 3 pushes every backed-up branch tip to the remote in one atomic
+        # command, so the allowlist has to carry it whenever any branch declares
+        # a backup ref. Mirrors what the real manifest authoring emits.
+        refspecs = [f"refs/heads/{b['name']}:{b['tip_backup_ref']}"
+                    for b in manifest["branches"] if b["tip_backup_ref"]]
+        if refspecs:
+            commands.append({
+                "id": "stage3.branch-backup.push",
+                "argv": ["git", "push", "--atomic", "origin", *refspecs], "pathspecs": [],
             })
         for branch in manifest["branches"]:
             if branch["classification"] == "ancestry_merged" and branch["tip_backup_ref"] is not None:
@@ -347,6 +358,254 @@ def test_restore_stale_allowlist_invents_nothing(root: Path) -> None:
     assert RESTORE.build_restore_set(
         repository, pin_of(repository), ["hooks/worktree-self-plumb.py"]) == []
 
+def _advance_origin_main(fixture: Fixture) -> str:
+    """Land a new commit on origin/main while the checkout stays where it was.
+
+    This is the ordinary state of a repository other sessions merge into, and the
+    case a manifest must survive rather than expire on.
+    """
+    stay = git(fixture.repository, "rev-parse", "HEAD").strip()
+    (fixture.repository / "landed-elsewhere.txt").write_text("another session's merge\n", encoding="utf-8")
+    git(fixture.repository, "add", "landed-elsewhere.txt")
+    git(fixture.repository, "commit", "-m", "unrelated PR landing on main")
+    git(fixture.repository, "push", "origin", "main")
+    git(fixture.repository, "reset", "--hard", stay)
+    git(fixture.repository, "fetch", "origin", "main")
+    return stay
+
+
+def test_freshness_accepts_advanced_origin_main(root: Path) -> None:
+    """origin/main moving forward must NOT expire an otherwise-valid manifest."""
+    fixture = Fixture(root / "freshness-advance")
+    pin = fixture.pin
+    manifest = fixture.manifest(clean_pathspecs=["scratch"], clean_expected=[])
+    stayed = _advance_origin_main(fixture)
+    assert stayed == pin and fixture.pin != pin, "fixture did not advance origin/main past the pin"
+    output = invoke(fixture, manifest, execute=True)
+    assert "origin/main advanced" in output, output
+    assert "STAGE 6 closing readback passed" in output, output
+    print("PASS freshness_accepts_advanced_origin_main")
+
+
+def test_freshness_refuses_rewound_origin_main(root: Path) -> None:
+    """A pin that origin/main can no longer reach invalidates every ancestry claim."""
+    fixture = Fixture(root / "freshness-rewind")
+    manifest = fixture.manifest(clean_pathspecs=["scratch"], clean_expected=[])
+    git(fixture.repository, "checkout", "--orphan", "rewritten")
+    (fixture.repository / "rewritten.txt").write_text("rewritten history\n", encoding="utf-8")
+    git(fixture.repository, "add", "rewritten.txt")
+    git(fixture.repository, "commit", "-m", "rewritten history")
+    git(fixture.repository, "push", "--force", "origin", "rewritten:main")
+    git(fixture.repository, "checkout", "main")
+    git(fixture.repository, "fetch", "origin", "main")
+    try:
+        invoke(fixture, manifest, execute=True)
+    except RUNNER.SweepError as exc:
+        assert "does not descend from manifest pin" in str(exc), str(exc)
+    else:
+        raise AssertionError("a rewound origin/main did not abort the settlement")
+    print("PASS freshness_refuses_rewound_origin_main")
+
+
+def test_precondition_refuses_stale_head(root: Path) -> None:
+    """A checkout behind the pin can never satisfy stage 6, so it is refused up front."""
+    fixture = Fixture(root / "stale-head")
+    debris = fixture.repository / "scratch" / "remove-me.txt"
+    debris.parent.mkdir()
+    debris.write_text("fixture debris\n", encoding="utf-8")
+    _advance_origin_main(fixture)
+    # manifest pins the NEW origin/main while the checkout still sits on the old commit
+    manifest = fixture.manifest(clean_pathspecs=["scratch"], clean_expected=["scratch"])
+    assert manifest["pinned_origin_main"] != git(fixture.repository, "rev-parse", "HEAD").strip()
+    try:
+        invoke(fixture, manifest, execute=True)
+    except RUNNER.SweepHeld as exc:
+        assert "is not the settled pin" in str(exc), str(exc)
+    else:
+        raise AssertionError("a stale checkout was not refused before destructive work")
+    assert debris.exists(), "refused run still reached git clean"
+    # and the dry-run must SAY so rather than implying the run would succeed
+    output = invoke(fixture, manifest, execute=False)
+    assert "PRECONDITION NOT MET" in output, output
+    print("PASS precondition_refuses_stale_head")
+
+
+def test_closing_detects_collateral_branch_loss(root: Path) -> None:
+    """A branch this settlement never declared must not disappear during it."""
+    fixture = Fixture(root / "collateral-loss")
+    git(fixture.repository, "branch", "bystander")
+    manifest = fixture.manifest(clean_pathspecs=["scratch"], clean_expected=[], branch_count=2)
+    def drop_bystander() -> None:
+        git(fixture.repository, "branch", "-D", "bystander")
+    try:
+        invoke(fixture, manifest, execute=True, before_disposal=drop_bystander)
+    except RUNNER.SweepError as exc:
+        assert "vanished that this settlement never deleted" in str(exc), str(exc)
+        assert "bystander" in str(exc), str(exc)
+    else:
+        raise AssertionError("collateral branch loss was not detected by the closing readback")
+    print("PASS closing_detects_collateral_branch_loss")
+
+
+def test_closing_detects_undeleted_branch(root: Path) -> None:
+    """A branch the runner believes it deleted must not still exist.
+
+    End-to-end this cannot be staged -- if the delete ran, the branch is gone --
+    so the closing assertion is exercised directly rather than shipped unproven.
+    """
+    fixture = Fixture(root / "undeleted-branch")
+    git(fixture.repository, "branch", "still-here")
+    manifest = fixture.manifest(clean_pathspecs=["scratch"], clean_expected=[], branch_count=2)
+    parsed = RUNNER.validate_manifest(manifest)
+    try:
+        RUNNER._stage6_readback(
+            fixture.repository, manifest, parsed,
+            starting_branches={"main", "still-here"}, deleted={"still-here"},
+        )
+    except RUNNER.SweepError as exc:
+        assert "deleted branches still present" in str(exc), str(exc)
+        assert "still-here" in str(exc), str(exc)
+    else:
+        raise AssertionError("closing readback accepted a branch that was never actually deleted")
+    print("PASS closing_detects_undeleted_branch")
+
+
+def test_canonical_execution_has_no_opt_in(root: Path) -> None:
+    fixture = Fixture(root / "canonical-refusal")
+    assert "authorized_production_canonical" not in inspect.signature(RUNNER.run_settlement).parameters
+    help_text = checked([sys.executable, str(RUNNER_PATH), "--help"], ROOT)
+    assert "--authorized-production-canonical-sweep" not in help_text
+    previous = RUNNER.CANONICAL_CHECKOUT
+    try:
+        for canonical in (fixture.repository, fixture.root):
+            setattr(RUNNER, "CANONICAL_CHECKOUT", canonical)
+            try:
+                invoke(fixture, fixture.manifest(clean_pathspecs=[], clean_expected=[]), execute=True)
+            except RUNNER.SweepError as exc:
+                assert "disposable fixtures only" in str(exc), str(exc)
+            else:
+                raise AssertionError("canonical execution did not refuse")
+    finally:
+        setattr(RUNNER, "CANONICAL_CHECKOUT", previous)
+    assert not git(fixture.repository, "for-each-ref", "refs/backup")
+    print("PASS canonical_execution_has_no_opt_in")
+
+
+def test_empty_operations_preserve_closing_contract(root: Path) -> None:
+    fixture = Fixture(root / "empty-operations-contract")
+    keep = fixture.repository / "keep.txt"
+    keep.write_text("untracked fixture content\n", encoding="utf-8")
+    manifest = fixture.manifest(clean_pathspecs=[], clean_expected=[])
+    try:
+        invoke(fixture, manifest, execute=True)
+    except RUNNER.SweepError as exc:
+        assert "remaining tracked/untracked dirt" in str(exc), str(exc)
+    else:
+        raise AssertionError("empty operations waived the manifest clean-tree contract")
+    assert keep.exists()
+    _advance_origin_main(fixture)
+    manifest = fixture.manifest(clean_pathspecs=[], clean_expected=[])
+    dry = invoke(fixture, manifest, execute=False)
+    assert "PRECONDITION NOT MET" in dry, dry
+    assert "PRECONDITION OK" not in dry, dry
+    try:
+        invoke(fixture, manifest, execute=True)
+    except RUNNER.SweepHeld as exc:
+        assert "is not the settled pin" in str(exc), str(exc)
+    else:
+        raise AssertionError("empty operations admitted a stale HEAD")
+    print("PASS empty_operations_preserve_closing_contract")
+
+
+def test_empty_operations_racing_write_aborts(root: Path) -> None:
+    fixture = Fixture(root / "empty-operations-race")
+    manifest = fixture.manifest(clean_pathspecs=[], clean_expected=[])
+    def write_unrelated() -> None:
+        (fixture.repository / "concurrent.txt").write_text("concurrent fixture write\n", encoding="utf-8")
+    try:
+        invoke(fixture, manifest, execute=True, before_disposal=write_unrelated)
+    except RUNNER.SweepError as exc:
+        assert "fingerprint changed" in str(exc), str(exc)
+    else:
+        raise AssertionError("concurrent write escaped the fixture fingerprint contract")
+    # The same dirt present at closing must also fail, independent of file operations.
+    parsed = RUNNER.validate_manifest(manifest)
+    try:
+        RUNNER._stage6_readback(fixture.repository, manifest, parsed, {"main"}, set())
+    except RUNNER.SweepError as exc:
+        assert "remaining tracked/untracked dirt" in str(exc), str(exc)
+    else:
+        raise AssertionError("closing waived concurrent dirt for empty operations")
+    assert (fixture.repository / "concurrent.txt").exists()
+    print("PASS empty_operations_racing_write_aborts")
+
+
+def test_stale_head_refuses_new_pin_branch_before_backup(root: Path) -> None:
+    fixture = Fixture(root / "stale-head-new-branch")
+    _advance_origin_main(fixture)
+    git(fixture.repository, "branch", "merged-at-new-pin", fixture.pin)
+    backup = "refs/backup/fixture-r03-stage5/branch/merged-at-new-pin"
+    branch = {"name": "merged-at-new-pin", "tip": fixture.pin, "classification": "ancestry_merged",
+              "tip_backup_ref": backup, "host_confirmation": None}
+    manifest = fixture.manifest(clean_pathspecs=[], clean_expected=[], branches=[branch])
+    try:
+        invoke(fixture, manifest, execute=True)
+    except RUNNER.SweepHeld as exc:
+        assert "is not the settled pin" in str(exc), str(exc)
+    else:
+        raise AssertionError("stale HEAD reached branch deletion instead of admission refusal")
+    assert git(fixture.repository, "rev-parse", "refs/heads/merged-at-new-pin").strip() == fixture.pin
+    assert not git(fixture.repository, "for-each-ref", "refs/backup")
+    assert not git(fixture.repository, "ls-remote", "--refs", "origin", backup)
+    print("PASS stale_head_refuses_new_pin_branch_before_backup")
+
+
+def test_branch_identity_survives_concurrent_tag_collision(root: Path) -> None:
+    fixture = Fixture(root / "retained-tag-collision")
+    git(fixture.repository, "branch", "bystander")
+    manifest = fixture.manifest(clean_pathspecs=[], clean_expected=[], branch_count=2)
+    def add_tag() -> None:
+        git(fixture.repository, "tag", "bystander")
+    output = invoke(fixture, manifest, execute=True, before_disposal=add_tag)
+    assert "closing readback passed" in output, output
+    assert RUNNER._branch_set(fixture.repository) == {"main", "bystander"}
+    print("PASS branch_identity_survives_concurrent_tag_collision")
+
+
+def test_declared_branch_identity_survives_existing_tag_collision(root: Path) -> None:
+    fixture = Fixture(root / "deleted-tag-collision")
+    git(fixture.repository, "branch", "merged")
+    git(fixture.repository, "tag", "merged")
+    backup = "refs/backup/fixture-r03-stage5/branch/merged"
+    branch = {"name": "merged", "tip": fixture.pin, "classification": "ancestry_merged",
+              "tip_backup_ref": backup, "host_confirmation": None}
+    output = invoke(fixture, fixture.manifest(clean_pathspecs=[], clean_expected=[],
+                                            branches=[branch], branch_count=1), execute=True)
+    assert "closing readback passed" in output, output
+    assert RUNNER._branch_set(fixture.repository) == {"main"}
+    assert git(fixture.repository, "rev-parse", "refs/tags/merged").strip() == fixture.pin
+    print("PASS declared_branch_identity_survives_existing_tag_collision")
+
+
+def test_empty_clean_set_never_cleans_whole_tree(root: Path) -> None:
+    """An empty pathspec list means clean nothing; `git clean -fd --` means clean everything."""
+    fixture = Fixture(root / "empty-clean")
+    keep = fixture.repository / "keep-me.txt"
+    keep.write_text("untracked but not condemned\n", encoding="utf-8")
+    nested = fixture.repository / "nested" / "deep.txt"
+    nested.parent.mkdir()
+    nested.write_text("also not condemned\n", encoding="utf-8")
+    manifest = fixture.manifest(clean_pathspecs=[], clean_expected=[], branch_count=1)
+    try:
+        invoke(fixture, manifest, execute=True)
+    except RUNNER.SweepError as exc:
+        assert "remaining tracked/untracked dirt" in str(exc), str(exc)
+    else:
+        raise AssertionError("untracked dirt was accepted by the closing readback")
+    assert keep.exists(), "empty clean set widened into deleting untracked files"
+    assert nested.exists(), "empty clean set widened into a recursive tree clean"
+    print("PASS empty_clean_set_never_cleans_whole_tree")
+
 
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="r03-settlement-sweep-") as temporary:
@@ -363,6 +622,19 @@ def main() -> int:
         test_restore_untracked_file_neither_refuses_nor_enrols(root)
         test_restore_staged_deletion_refuses(root)
         test_restore_stale_allowlist_invents_nothing(root)
+
+        test_freshness_accepts_advanced_origin_main(root)
+        test_freshness_refuses_rewound_origin_main(root)
+        test_precondition_refuses_stale_head(root)
+        test_closing_detects_collateral_branch_loss(root)
+        test_closing_detects_undeleted_branch(root)
+        test_canonical_execution_has_no_opt_in(root)
+        test_empty_operations_preserve_closing_contract(root)
+        test_empty_operations_racing_write_aborts(root)
+        test_stale_head_refuses_new_pin_branch_before_backup(root)
+        test_branch_identity_survives_concurrent_tag_collision(root)
+        test_declared_branch_identity_survives_existing_tag_collision(root)
+        test_empty_clean_set_never_cleans_whole_tree(root)
     print("r03-settlement-sweep-selftest: PASS")
     return 0
 

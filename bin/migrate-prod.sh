@@ -53,6 +53,14 @@ LAST_DETAIL=""
 LAST_MIGRATION=""
 COMPLETED=0
 SIGNAL_HANDLED=0
+MIGRATE_TRACE=""
+
+cleanup_migrate_trace() {
+  if [[ -n "$MIGRATE_TRACE" && -f "$MIGRATE_TRACE" ]]; then
+    rm -f "$MIGRATE_TRACE"
+  fi
+  MIGRATE_TRACE=""
+}
 
 write_refusal_receipt() {   # write_refusal_receipt <reason_class> <detail> [migration_name]
   local reason_class="$1" detail="$2" migration="${3:-}"
@@ -119,6 +127,7 @@ on_signal() {   # on_signal <signal-name> <signal-number>
                    "${LAST_MIGRATION:-}")" \
     || receipt_path="$REPO/out/refusal-receipt-unwritten"
   escalate_refusal "$receipt_path"
+  cleanup_migrate_trace
   SIGNAL_HANDLED=1
   trap - EXIT   # the receipt is written; do not let the EXIT trap double-fire
   exit $((128 + $2))
@@ -138,6 +147,7 @@ on_exit() {
                    "${LAST_MIGRATION:-}")" \
     || receipt_path="$REPO/out/refusal-receipt-unwritten"
   escalate_refusal "$receipt_path"
+  cleanup_migrate_trace
 }
 trap on_exit EXIT
 # ── end prevention wiring setup; the wrapper's existing body runs below,
@@ -266,7 +276,12 @@ if [[ -n "$THROUGH" ]]; then
 fi
 
 if (( APPLY )); then
-  if DATABASE_URL="$DSN" "$REPO/.venv/bin/python" "$REPO/tools/migrate.py" --apply --yes "${migrate_args[@]}"; then
+  MIGRATE_TRACE="$(mktemp "${TMPDIR:-/tmp}/carr-migrate-prod.XXXXXX")"
+  setopt pipefail
+  if DATABASE_URL="$DSN" "$REPO/.venv/bin/python" "$REPO/tools/migrate.py" \
+       --apply --yes "${migrate_args[@]}" 2>&1 | tee "$MIGRATE_TRACE"; then
+    unsetopt pipefail
+    cleanup_migrate_trace
     stamp "OK applied${THROUGH:+ through $THROUGH}"
     # THE SNAPSHOT REFRESH RIDES WITH THE APPLY, and this is the only place it
     # can. db/schema.sql is a picture of production's structure, and THIS is the
@@ -303,13 +318,21 @@ if (( APPLY )); then
     fi
   else
     rc=$?
+    unsetopt pipefail
     stamp "FAIL apply rc=$rc"
     LAST_REASON_CLASS="apply_refused"
-    LAST_DETAIL="FAIL apply rc=$rc"
-    LAST_MIGRATION="$THROUGH"   # best-effort: the exact refusing file inside a
-                                # multi-migration apply is not otherwise known
-                                # to this wrapper; --through, when passed, is
-                                # the closest thing to a name it has.
+    migrate_error="$(grep '^ERROR:' "$MIGRATE_TRACE" | tail -1)"
+    LAST_DETAIL="${migrate_error:-FAIL apply rc=$rc}"
+    # Prefer the explicit commit-batch attribution emitted by migrate.py; for
+    # an execute-time refusal, use the last file whose apply line began. Never
+    # substitute --through: that is an authorization boundary, not evidence of
+    # which migration failed (the 2026-09-05 refusal incorrectly named 0483
+    # when the database had actually rolled back 0480).
+    LAST_MIGRATION="$(sed -n \
+      -e 's/^ERROR: commit refused for migration batch \[\([^]]*\)\].*/\1/p' \
+      -e 's/^applying \([^ ]*\.sql\) \.\.\..*/\1/p' \
+      "$MIGRATE_TRACE" | tail -1)"
+    cleanup_migrate_trace
     exit $rc
   fi
 else
