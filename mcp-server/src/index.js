@@ -1,3 +1,5 @@
+import INGEST_TRANSPORT from "./ingest-transport.v1.json" with { type: "json" };
+
 // CARR MCP server — Worker entrypoint.
 //
 // The Worker's fetch IS an OAuthProvider (Cloudflare's workers-oauth-provider).
@@ -171,7 +173,7 @@ async function ingest(request, env) {
   const source = Object.keys(tokens).find((s) => tokens[s] && tokens[s] === token);
   if (!source) return json({ error: "unauthorized" }, 401);
   const len = parseInt(request.headers.get("content-length") || "0", 10);
-  if (len > 1048576) return json({ error: "payload_too_large" }, 413);
+  if (len > INGEST_TRANSPORT.max_body_bytes) return json({ error: "payload_too_large" }, 413);
   let payload;
   try {
     payload = await request.json();

@@ -226,7 +226,13 @@ def sandbox_profile(work):
     home = os.path.realpath(os.path.expanduser("~"))
     interp = os.path.dirname(os.path.dirname(os.path.realpath(sys.executable)))
     reads = sorted({work, interp, *(os.path.realpath(p) for p in (sys.prefix, sys.base_prefix))})
-    execs = sorted({sys.executable, os.path.realpath(sys.executable)})
+    interpreter_execs = {sys.executable, os.path.realpath(sys.executable)}
+    # Framework Python launchers spawn this installed interpreter binary.
+    # Admit that exact file; sibling programs stay outside the execution grant.
+    framework_python = os.path.join(sys.base_prefix, "Resources", "Python.app", "Contents", "MacOS", "Python")
+    if sys.platform == "darwin" and os.path.isfile(framework_python):
+        interpreter_execs.add(os.path.realpath(framework_python))
+    execs = sorted(interpreter_execs)
     # Homebrew's var/etc hold the local Postgres cluster (data files, pg_hba.conf) and service configs.
     # The sandbox matches resolved paths, so each is resolved first: /etc is a link to /private/etc on macOS, and an
     # unresolved "/etc/ssh" rule matched nothing.

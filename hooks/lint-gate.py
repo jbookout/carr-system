@@ -253,7 +253,13 @@ def code_review(payload):
     cannot block, cannot refuse, and cannot lose work. It returns on every
     failure -- no credential, no network, no git, bad payload -- and a session
     editing while the judgment is down edits exactly as it does today.
+
+    CARR_JEV_WORKER=off suppresses this automatic review in unattended Codex
+    workers. Deterministic writing lint below still runs; an explicit review
+    requested by a brief uses the shared client directly and retains its cap.
     """
+    if os.environ.get("CARR_JEV_WORKER") == "off":
+        return
     tool = payload.get("tool_name") or payload.get("toolName") or ""
     ti = payload.get("tool_input") or payload.get("toolInput") or {}
     paths = _changed_code_paths(payload)
@@ -400,7 +406,13 @@ def main():
     except Exception:
         sys.exit(0)
 
-    code_review(payload)
+    # The receipt half fails open too (ops/lint-gate-selftest.py): a payload
+    # with no session_id, or a tool_input that is not a dict, used to raise
+    # out of here with a traceback and exit 1 -- before the lint ever ran.
+    try:
+        code_review(payload)
+    except Exception as exc:
+        log(f"RECEIPT(internal-error) {type(exc).__name__}: {exc}")
 
     try:
         tool = payload.get("tool_name") or payload.get("toolName") or ""
