@@ -86840,6 +86840,29 @@
       "base_version": "v103",
       "upsert": [
         {
+          "ingress_key": "external-admin:bin/migrate-dell.sh",
+          "ingress_kind": "external_admin",
+          "operation": "bin/migrate-dell.sh",
+          "effect_class": "administrative_mutation",
+          "source_locator": "bin/migrate-dell.sh",
+          "schema_digest": "b05259d04b52887f3d1d516fbe7bdd87da5a44635e33f2dfa849f39c1706d4a0",
+          "handler_digest": "b05259d04b52887f3d1d516fbe7bdd87da5a44635e33f2dfa849f39c1706d4a0",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
           "ingress_key": "external-admin:tools/rotate-credential.py",
           "ingress_kind": "external_admin",
           "operation": "tools/rotate-credential.py",
@@ -86910,8 +86933,8 @@
         }
       ],
       "expected_count": 1085,
-      "expected_sha256": "5ed26a1388b957f8dbcfc930a5183c45a88807b165bc931a7541f1b9449c1a9e",
-      "reason": "PR 865 source-only review: re-derive the existing credential rotation external-admin row after enabling scoped verifier rotation, validating URIs, valid port ranges and targets before mutation, and verifying the complete caller identity contract. No new ingress, authority, grant, runtime selector or historical seal change. PR 1484 also re-derives the existing production migration wrapper and diagnostic helper after failure capture and redaction repair; no new ingress or authority."
+      "expected_sha256": "0cf891bbfefa5ab877984b3abb682ea1e400499f80c5def08d08eef4b586e1de",
+      "reason": "PR 865 source-only review: re-derive the existing credential rotation external-admin row after enabling scoped verifier rotation, validating URIs, valid port ranges and targets before mutation, and verifying the complete caller identity contract. No new ingress, authority, grant, runtime selector or historical seal change. PR 1484 also re-derives the existing production migration wrapper and diagnostic helper after failure capture and redaction repair; no new ingress or authority. PR 1384 source-only review: re-derive the existing Dell migration external-admin receipt writer after correcting its JSON trailing newline. Preserve the registered ingress contract, authority fields, runtime selector, database catalog and all historical seals."
     }
   }
 }

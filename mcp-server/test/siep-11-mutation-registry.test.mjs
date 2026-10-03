@@ -3569,3 +3569,20 @@ test("credential rotation source review cannot widen authority or admit an ingre
     execFileSync(process.execPath, ["--input-type=module", "-e", probe, variant],
       { cwd: fileURLToPath(new URL("../../", import.meta.url)), stdio: "pipe" });
 });
+
+
+test("Dell receipt source review binds its live bytes without changing the sealed frontier", () => {
+  const fixture = JSON.parse(fs.readFileSync(new URL(
+    "../../ops/config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url), "utf8"));
+  const sealed = frozenInventory("scac-mutation-registry.v103");
+  const key = "external-admin:bin/migrate-dell.sh";
+  const review = fixture.current_source_reviews["scac-mutation-registry.v103"];
+  const reviewed = review.upsert.find(row => row.ingress_key === key);
+  const current = fullInventory(TOOLS).find(row => row.ingress_key === key);
+  assert.deepEqual(reviewed, current);
+  assert.notEqual(sealed.find(row => row.ingress_key === key).handler_digest, reviewed.handler_digest);
+  const contract = row => Object.fromEntries(Object.entries(row)
+    .filter(([field]) => !["schema_digest", "handler_digest", "source_digest"].includes(field)));
+  assert.deepEqual(contract(reviewed), contract(sealed.find(row => row.ingress_key === key)));
+  assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
+});
