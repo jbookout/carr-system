@@ -2,9 +2,9 @@
 do $jev_cap_v104_preflight$
 declare v ops.scac_mutation_registry_version%rowtype; registration jsonb;
 begin
-  if not exists(select 1 from public.schema_migrations where filename='0770_find_rule_scac_successor.sql' and sha256='afecd5bb4f3853311120a7460f824c8582b60da522b03ff7d6d947e8218c985d') then
-    raise exception 'Jev cap v104 requires exact applied 0770'; end if;
-  if not exists(select 1 from public.schema_migrations where filename='0769_rule_teach_supersession.sql' and sha256='a30147f6806cffacd26f3cec76420cfe088782675bc201b8cb180ac3ba8db124') then
+  if not exists(select 1 from public.schema_migrations where filename='0786_find_rule_scac_successor.sql' and sha256='bd404c059c1fde5ce7d881e0d2470be108909d73ff7de7a73b4334a1a25c3271') then
+    raise exception 'Jev cap v104 requires exact applied 0786'; end if;
+  if not exists(select 1 from public.schema_migrations where filename='0785_rule_teach_supersession.sql' and sha256='a30147f6806cffacd26f3cec76420cfe088782675bc201b8cb180ac3ba8db124') then
     raise exception 'Jev cap v104 requires exact supersession migration'; end if;
   select * into v from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v103';
   if v.registry_digest is distinct from 'sha256:6560a285ebd4a71d9ed3b63b644f13e06d0f1ccbddadf174d990f4f2453434b7' or v.entry_count<>2615
