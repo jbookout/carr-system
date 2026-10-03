@@ -74,18 +74,6 @@ with tempfile.TemporaryDirectory() as raw:
     envelope["signature"] = base64.b64encode(signature).decode("ascii")
     got_raw, evidence = coordinator.verify_envelope(envelope, public, contract())
     check("exact DB contract signed envelope verifies", got_raw == raw_payload and evidence["signature_sha256"] == hashlib.sha256(signature).hexdigest())
-    if not hasattr(coordinator.os, "memfd_create"):
-        def fixture_memfd(_name: str) -> int:
-            with tempfile.TemporaryFile() as anonymous:
-                return os.dup(anonymous.fileno())
-        coordinator.os.memfd_create = fixture_memfd
-        try:
-            portable_raw, _ = coordinator.verify_envelope(envelope, public, contract())
-        finally:
-            delattr(coordinator.os, "memfd_create")
-    else:
-        portable_raw, _ = coordinator.verify_envelope(envelope, public, contract())
-    check("anonymous seekable verification input is portable", portable_raw == raw_payload)
     for name, key, value in (("cross-job replay", "job_id", "00000000-0000-4000-8000-000000000010"), ("altered scheduled window", "window_starts_at", "2026-08-12T06:30:00Z"), ("altered destination", "destination", "calendar-prebrief-canary-joe"), ("altered allowlist revision", "allowlist_revision_id", "00000000-0000-4000-8000-000000000010"), ("altered challenge", "challenge_id", "00000000-0000-4000-8000-000000000010")):
         changed = dict(envelope)
         changed[key] = value

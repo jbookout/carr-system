@@ -32,7 +32,6 @@ purpose, to the exact artifact that proved why.
     .venv/bin/python ops/ci-selftest.py     # exit 0 = all pass
 """
 
-import atexit
 import contextlib
 import inspect
 import json
@@ -41,7 +40,6 @@ import pathlib
 import re
 import shlex
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -52,13 +50,7 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from git_env import scrubbed_env  # noqa: E402
 
-# WHY scrubbed_env AND NOT fixture_env. The Git read and scanner subprocess
-# below must act on REPO ON PURPOSE — this file seeds a real defect into the
-# real tree to prove CI catches it. What they must never do is inspect somewhere
-# ELSE: GIT_DIR outranks cwd and every git hook exports it, and ops/githooks/
-# pre-push runs ops/ci.sh which runs this file. scrubbed_env makes the scanner's
-# internal `git ls-files` and our visibility check address this worktree. See
-# ops/git_env.py. Loop #371.
+# Git reads and disposable clones use the same scrubber as the CI hook.
 CI = REPO / "ops" / "ci.sh"
 
 # Assembled at runtime so this source file does not itself contain a
@@ -117,149 +109,45 @@ def mypy_pin_excludes_this_machine():
     return type_check_interpreter_version() < MYPY_PIN_MIN_PYTHON
 
 
-# ---------------------------------------------------------------- seed safety
-# THIS FILE SEEDS REAL DAMAGE INTO THE LIVE WORKING TREE — that is the point of
-# it, because a check is only proven by making it fail. The danger is what
-# happens if the process does not reach its own cleanup line.
-#
-# It already did happen, on 2026-08-13 (loop #368). A seeded defect was left
-# behind — the `state-as-of` verb missing from mcp-server/src/tools.js, 46
-# deletions in one hunk — and the marker file that would have said so had
-# already been removed. ops/ci.sh --only artifact then failed with "would REMOVE
-# 1 verb(s): deployed 105, tree has 104", and because the pre-push hook runs the
-# full ci.sh, that blocked EVERY session on this machine from pushing anything,
-# for a reason unrelated to their own work. The failure names a verb deletion,
-# so the natural first read is that a person deleted a verb on purpose.
-#
-# WHY try/finally IS NOT ENOUGH, which is what this file relied on before.
-# `finally` runs on an exception and on a normal exit. It does NOT run on
-# SIGKILL, on a machine losing power, or when a parent harness kills the process
-# group on timeout — and a CI selftest is exactly the kind of long job something
-# else kills. A harness that seeds real damage and relies on reaching its own
-# cleanup line is one crash away from doing this again.
-#
-# WHAT REPLACES IT. The original bytes are written to a JOURNAL BEFORE anything
-# is modified, and the journal is removed only after a successful restore. So
-# the damage is never un-recorded: either the journal is absent (nothing is
-# seeded) or it names every path and holds its original content. Recovery then
-# needs no memory of what the run was doing.
-#
-#   * seeded_paths() restores on any ordinary exit path — normal, exception,
-#     SIGINT, SIGTERM — via finally plus atexit plus signal handlers.
-#   * On a kill that outruns all of those, the journal survives on disk, and the
-#     NEXT run finds it, restores every path from it, and REFUSES to start.
-#     Refusing matters: a run that silently repaired and continued would hide a
-#     crash that has already cost this machine a full push outage once.
-SEED_JOURNAL = REPO / "_ci_selftest_seed_journal.json"
-
-
-def _restore_from_journal(journal_data):
-    """Write every recorded path back to its original bytes. Returns the paths."""
-    restored = []
-    for rel, original in (journal_data.get("paths") or {}).items():
-        target = REPO / rel
-        if original is None:
-            # Path did not exist before the seed: the seed created it, so the
-            # restore is removal, not a write of the string "None".
-            if target.exists():
-                target.unlink()
-                restored.append(rel)
-            continue
-        if not target.exists() or target.read_text() != original:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(original)
-            restored.append(rel)
-    return restored
-
-
-def _recover_stale_journal():
-    """Called at import. A journal on disk means a previous run was killed."""
-    if not SEED_JOURNAL.exists():
-        return
-    try:
-        data = json.loads(SEED_JOURNAL.read_text())
-    except (OSError, ValueError) as exc:
-        print(f"FATAL: {SEED_JOURNAL.name} exists but is unreadable ({exc}).\n"
-              f"  A previous run seeded real damage into this tree and was killed before\n"
-              f"  restoring it. The journal is the only record of what was changed, so it\n"
-              f"  cannot be repaired automatically. Inspect the file and the tree by hand.",
-              file=sys.stderr)
-        sys.exit(1)
-    restored = _restore_from_journal(data)
-    SEED_JOURNAL.unlink(missing_ok=True)
-    # THE SHAPE OF THIS OUTPUT IS LOAD-BEARING, not decoration. ops/ci.sh's
-    # gates class runs each suite quietly and, on failure, prints the whole of
-    # a short log or its last 80 lines. So a recovery and a genuinely broken
-    # check reach the terminal looking identical, and telling them apart is the difference
-    # between a thirty-second re-run and another evening like 2026-08-13. The
-    # banner is repeated at the END as well as the start, because the tail is
-    # what gets shown, and the last line is the ACTION rather than the diagnosis.
-    bar = "=" * 68
-    for line in (bar, "NOT A TEST FAILURE — a stale seed was recovered.", bar):
-        print(line, file=sys.stderr)
-    print("A previous run was killed while a seeded defect was live in the working",
-          file=sys.stderr)
-    print("tree. Every path it recorded has been restored from the journal:",
-          file=sys.stderr)
-    for rel in restored:
-        print(f"    restored  {rel}", file=sys.stderr)
-    if not restored:
-        print("    (every recorded path was already correct — nothing to undo)",
-              file=sys.stderr)
-    print("\nRefusing to start is deliberate: a silent repair would hide a crash that",
-          file=sys.stderr)
-    print("blocked every push on this machine for hours on 2026-08-13.", file=sys.stderr)
-    for line in (bar, "NOTHING IS BROKEN. RE-RUN THIS SUITE TO PROCEED.", bar):
-        print(line, file=sys.stderr)
-    # 75 is EX_TEMPFAIL — a transient condition the caller should retry, and
-    # distinct from 1. ci.sh treats any nonzero as a failed class, which stays
-    # correct because the push must still be blocked; the code simply carries
-    # the distinction for any caller that wants "retry me" rather than "a check
-    # is broken".
-    sys.exit(75)
-
-
+# ---------------------------------------------------------------- seed isolation
 @contextlib.contextmanager
-def seeded_paths(*rels):
-    """Seed real damage into the named repo-relative paths, safely.
+def checker_fixture():
+    """Run seeded checks against a private copy of the current source.
 
-    Records each path's original bytes to the journal BEFORE yielding, and
-    restores on every exit path this process can still control. A path that does
-    not exist yet is recorded as None so its restore is a deletion.
+    Each invocation owns its index and files. A crash can leave only a temp
+    fixture behind; no journal or restore writes touch the source checkout.
+    Overlay tracked edits so local checks exercise the code being developed.
     """
-    originals = {}
-    for rel in rels:
-        p = REPO / rel
-        originals[rel] = p.read_text() if p.exists() else None
-    SEED_JOURNAL.write_text(json.dumps(
-        {"pid": os.getpid(), "paths": originals}, indent=2))
-
-    done = {"restored": False}
-
-    def restore(*_args):
-        if done["restored"]:
-            return
-        done["restored"] = True
-        _restore_from_journal({"paths": originals})
-        SEED_JOURNAL.unlink(missing_ok=True)
-
-    prev = {}
-    for sig in (signal.SIGINT, signal.SIGTERM):
+    global REPO, CI
+    source, source_ci = REPO, CI
+    env = scrubbed_env()
+    with tempfile.TemporaryDirectory(prefix="ci-selftest-source-") as tmp:
+        fixture = pathlib.Path(tmp) / "repo"
+        subprocess.run(["git", "clone", "--quiet", "--shared", str(source), str(fixture)],
+                       env=env, check=True, capture_output=True)
+        changed = subprocess.check_output(
+            ["git", "diff", "HEAD", "--name-only", "-z"], cwd=source, env=env).decode().split("\0")
+        for rel in filter(None, changed):
+            target = fixture / rel
+            if (source / rel).is_file():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source / rel, target)
+                subprocess.run(["git", "add", "--", rel], cwd=fixture, env=env,
+                               check=True, capture_output=True)
+            elif target.exists():
+                target.unlink()
+        main = subprocess.run(["git", "rev-parse", "--verify", "origin/main"],
+                              cwd=source, env=env, capture_output=True, text=True)
+        if main.returncode == 0:
+            subprocess.run(["git", "update-ref", "refs/remotes/origin/main", main.stdout.strip()],
+                           cwd=fixture, env=env, check=True, capture_output=True)
+        if (source / ".venv").exists():
+            (fixture / ".venv").symlink_to(source / ".venv", target_is_directory=True)
+        REPO, CI = fixture, fixture / "ops/ci.sh"
         try:
-            prev[sig] = signal.getsignal(sig)
-            signal.signal(sig, lambda s, f: (restore(), sys.exit(130)))
-        except (ValueError, OSError):
-            pass  # not on the main thread, or the platform refuses — finally still covers it
-    atexit.register(restore)
-    try:
-        yield
-    finally:
-        restore()
-        for sig, handler in prev.items():
-            try:
-                signal.signal(sig, handler)
-            except (ValueError, OSError):
-                pass
+            yield
+        finally:
+            REPO, CI = source, source_ci
 
 
 def run(args, env=None, shell_cmd=None, timeout=600):
@@ -397,25 +285,21 @@ def test_tracked_scripts_are_executable_in_git():
 
 # ---------------------------------------------------------------- 5. the scanners
 def test_secret_scanner_catches_and_respects_allow():
-    scan = [sys.executable, str(REPO / "ops" / "ci-secret-scan.py")]
-    rc, _ = subprocess.run(scan, cwd=REPO, env=scrubbed_env(), capture_output=True, text=True).returncode, None
-    check("the tree is currently clean of shaped credentials", rc == 0, f"rc={rc}")
+    with checker_fixture():
+        scan = [sys.executable, str(REPO / "ops" / "ci-secret-scan.py")]
+        rc, _ = subprocess.run(scan, cwd=REPO, env=scrubbed_env(), capture_output=True, text=True).returncode, None
+        check("the tree is currently clean of shaped credentials", rc == 0, f"rc={rc}")
 
-    # The scanner only visits `git ls-files`, so seed a file that is already
-    # tracked instead of changing the index. This dedicated fixture has no
-    # operational consumer; the journal records its original bytes before the
-    # write and restores them on ordinary exit, signals, or stale-journal
-    # recovery on the next independent run.
-    seeded_rel = "ops/ci-secret-scan-fixture.txt"
-    seeded = REPO / seeded_rel
-    listed = subprocess.run(
-        ["git", "ls-files", "--error-unmatch", "--", seeded_rel],
-        cwd=REPO, env=scrubbed_env(), capture_output=True,
-    )
-    tracked = listed.returncode == 0
-    check("the credential fixture path is tracked for the scan", tracked,
-          f"git ls-files rc={listed.returncode}")
-    with seeded_paths(seeded_rel):
+        # Seed a tracked path so the scanner exercises its ordinary file selection.
+        seeded_rel = "ops/ci-secret-scan-fixture.txt"
+        seeded = REPO / seeded_rel
+        listed = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", "--", seeded_rel],
+            cwd=REPO, env=scrubbed_env(), capture_output=True,
+        )
+        tracked = listed.returncode == 0
+        check("the credential fixture path is tracked for the scan", tracked,
+              f"git ls-files rc={listed.returncode}")
         seeded.write_text(SEED_DSN + "\n")
         p = subprocess.run(scan, cwd=REPO, env=scrubbed_env(), capture_output=True, text=True)
         check("a seeded credential is caught", tracked and p.returncode == 1,
@@ -431,10 +315,10 @@ def test_secret_scanner_catches_and_respects_allow():
 
 
 def test_dep_check_detects_a_stale_lock():
-    req = REPO / "requirements.txt"
-    original = req.read_text()
-    dep = [sys.executable, str(REPO / "ops" / "ci-dep-check.py")]
-    with seeded_paths("requirements.txt"):
+    with checker_fixture():
+        req = REPO / "requirements.txt"
+        original = req.read_text()
+        dep = [sys.executable, str(REPO / "ops" / "ci-dep-check.py")]
         p = subprocess.run(dep, cwd=REPO, capture_output=True, text=True)
         check("dependency check passes on the committed tree", p.returncode == 0)
 
@@ -482,7 +366,7 @@ def test_types_class_catches_a_seeded_type_error():
         return
 
     fixture = "tools/_ci_selftest_types_fixture.py"
-    with seeded_paths(fixture):
+    with checker_fixture():
         rc, out = run(["--only", "types"])
         check("types passes on the committed tree", rc == 0,
               f"rc={rc} out={out[-400:]}")
@@ -1054,20 +938,10 @@ def test_gates_treats_only_78_as_not_configured():
     """Exit 78 in the gates loop must mean "not configured", and nothing else.
 
     The loop used to count every nonzero alike, so a selftest that correctly
-    declined for want of a local dependency read as a red gate, and the only way
-    past it was CARR_SKIP_CI on every push. The risk in the fix is that it
-    widens: if an ordinary crash ever
-    skipped too, this class would go quiet exactly when it should shout.
-
-    THIS TEST IS STRUCTURAL, AND THAT IS A DELIBERATE DOWNGRADE — say so rather
-    than pretend otherwise. The behavioural version (seed a fixture that exits 78
-    beside one that exits 1, run the gates class, assert only the second is
-    named) cannot work here for two independent reasons, both measured
-    2026-08-19: the gates loop globs ops/*-selftest.py, so it re-enters THIS file
-    recursively and the nested run's crash-safety restores the outer run's seeded
-    paths — the fixtures are deleted before the loop reaches them; and even if
-    they survived, the nested re-entry runs the slowest class in ci.sh a second
-    and third time, costing more on every push forever than the bug it guards.
+    declined for want of a local dependency read as a red gate. The risk in
+    the fix is swallowing exit 1 together with exit 78. The structural check
+    binds both branches; running the gates class here would recursively run
+    this checker and the slowest CI class again on every push.
 
     This structural check binds the narrowness of the exception without adding
     a recursively executing fixture to the slowest CI class.
@@ -1507,9 +1381,4 @@ def main():
 
 
 if __name__ == "__main__":
-    # BEFORE ANY TEST RUNS. A journal on disk means a previous run was killed
-    # with seeded damage live in the tree; this restores it and refuses to
-    # start. Deliberately not inside main(), so no future reordering of the
-    # test list can end up running a test before the tree is known good.
-    _recover_stale_journal()
     sys.exit(main())

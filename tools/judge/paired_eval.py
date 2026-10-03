@@ -2,7 +2,8 @@
 
 Library entrypoints: freeze(receipts), run(corpus, jev, decisions), cli(argv).
 CLI via python -c 'from tools.judge.paired_eval import cli; cli()'. Receipts
-need request (state/questions/model), its digest and provenance. Digest-only
+need request (state/questions/model), its digest and provenance. Derived gold
+fixtures are accepted separately from live receipts. Digest-only
 usage logs cannot be replayed. No synthetic reconstruction of missing inputs.
 No promotion side effects: a report never changes the provider switch.
 """
@@ -211,7 +212,9 @@ def run(corpus, jev, decisions, *, rates=None, repeats=1, clock=time.perf_counte
 
 def cli(argv=None):
     parser = argparse.ArgumentParser(description="Paired judge evaluation; never flips routing")
-    parser.add_argument("receipts", help="JSON array of frozen, input-bearing real receipts")
+    parser.add_argument("receipts", help="JSON receipt array or hash-bound gold corpus")
+    parser.add_argument("--split", choices=("dev", "final"), default="dev", help="Gold split; default dev keeps final held out")
+    parser.add_argument("--dry-run", action="store_true", help="Offline fake providers; measures plumbing only")
     parser.add_argument("--output", required=True)
     parser.add_argument("--rates", help="JSON provider token prices, supplied explicitly")
     parser.add_argument("--repeats", type=int, default=1)
@@ -219,8 +222,31 @@ def cli(argv=None):
     ts = _client()
     def live_jev(state, questions, **options):
         return ts._ask_jev(state, questions, caller="judge_paired_eval", cache_ttl_seconds=0, **options)
-    report = run(freeze(json.loads(Path(args.receipts).read_text())), live_jev,
-                 ts.JUDGE.provider_decisions, repeats=args.repeats,
+    data = json.loads(Path(args.receipts).read_text())
+    if isinstance(data, dict):
+        from tools.judge.corpus import load_corpus
+        corpus = load_corpus(args.receipts, split=args.split)
+    else:
+        corpus = freeze(data)
+    def fake_provider(name):
+        def answer(state, questions, **options):
+            answers = {}
+            for qid, question in questions.items():
+                kind = question["type"]
+                if kind == "noul":
+                    answers[qid] = {"type": kind, "noul": .5}
+                else:
+                    labels = (list(question["criteria"]) if kind == "choice" else
+                              [str(i) for i in range(len(question["criteria"]))])
+                    value = labels[0] if kind == "choice" else 0
+                    answers[qid] = {"type": kind, kind: value, "confidence": 1 / len(labels),
+                                    "probabilities": {label: 1 / len(labels) for label in labels}}
+            return {"model": name, "answers": answers, "usage": {"input_tokens": 0, "output_tokens": 0}}
+        return answer
+    baseline = fake_provider("fake-jev") if args.dry_run else live_jev
+    candidate = fake_provider("fake-decisions") if args.dry_run else ts.JUDGE.provider_decisions
+    report = run(corpus, baseline, candidate, repeats=args.repeats,
                  rates=json.loads(Path(args.rates).read_text()) if args.rates else None)
+    report["execution_mode"] = "offline_plumbing" if args.dry_run else "live"
     Path(args.output).write_text(json.dumps(report, indent=2) + "\n")
     return report

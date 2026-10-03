@@ -5,6 +5,7 @@ The Jev transport is injected so its retries, caches and receipts stay intact.
 No credential or provider endpoint is owned by this interface.
 """
 import json
+import sys
 from pathlib import Path
 
 CONFIG = Path(__file__).resolve().parents[2] / "mcp-server/src/judge-providers.v1.json"
@@ -41,6 +42,20 @@ def provider_decisions(state, questions, **options):
 
 
 def ask(state, questions, *, jev, work_class="system_work", config=None, **options):
-    if provider_for(work_class, config) == "decisions":
-        return provider_decisions(state, questions, **options)
-    return provider_jev(state, questions, transport=jev, **options)
+    provider = provider_for(work_class, config)
+    # Legacy clients load this file by absolute path while sys.path contains
+    # only ops/. Make the repository package available to the local capture.
+    root = str(Path(__file__).resolve().parents[2])
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from tools.judge import capture
+    receipt = capture.prepare(state, questions, model=options.get("model", "jev-latest"),
+                              caller=options.get("caller"), provider=provider, work_class=work_class)
+    try:
+        result = (provider_decisions(state, questions, **options) if provider == "decisions" else
+                  provider_jev(state, questions, transport=jev, **options))
+    except Exception:
+        capture.append(receipt, failed=True)
+        raise
+    capture.append(receipt)
+    return result

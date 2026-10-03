@@ -14,13 +14,12 @@ import json
 import os
 import re
 import stat
-import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from lib.machine_prerequisites import openssl_executable  # noqa: E402
+from lib import calendar_signatures  # noqa: E402
 
 MAX_PIPE = 1_048_576
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -116,52 +115,21 @@ def _secure_private_key(path: Path) -> None:
         raise Refusal("collector private key must be a 0600 regular non-symlink")
 
 
-def _openssl_with_key(path: Path, args: list[str], payload: bytes, *, key_flag: str = "-inkey") -> bytes:
-    _secure_private_key(path)
-    fd = os.open(path, os.O_RDONLY)
-    payload_fd = -1
-    try:
-        input_data: bytes | None = payload
-        portable_args = list(args)
-        # OpenSSL's Linux Ed25519 provider requires a seekable one-shot input;
-        # macOS accepts the existing stdin pipe.  memfd keeps the raw capture
-        # RAM-only while giving Linux the seekable descriptor it requires.
-        if "/dev/stdin" in portable_args and hasattr(os, "memfd_create"):
-            payload_fd = os.memfd_create("carr-calendar-envelope")
-            remaining = memoryview(payload)
-            while remaining:
-                written = os.write(payload_fd, remaining)
-                if written < 1:
-                    raise Refusal("collector signing input could not be buffered")
-                remaining = remaining[written:]
-            os.lseek(payload_fd, 0, os.SEEK_SET)
-            portable_args = [f"/dev/fd/{payload_fd}" if item == "/dev/stdin" else item for item in portable_args]
-            input_data = None
-        result = subprocess.run(
-            [openssl_executable(), *portable_args, key_flag, f"/dev/fd/{fd}"], input=input_data,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            pass_fds=tuple(item for item in (fd, payload_fd) if item >= 0), timeout=10, check=False,
-        )
-    finally:
-        os.close(fd)
-        if payload_fd >= 0:
-            os.close(payload_fd)
-    if result.returncode != 0:
-        raise Refusal("collector signing key cannot perform the requested operation")
-    return result.stdout
-
-
 def key_fingerprint(path: Path) -> str:
-    public = _openssl_with_key(path, ["pkey", "-pubout"], b"", key_flag="-in")
-    if not public.startswith(b"-----BEGIN PUBLIC KEY-----"):
-        raise Refusal("collector public key derivation failed")
+    _secure_private_key(path)
+    try:
+        public = calendar_signatures.public_key_pem(path.read_bytes())
+    except (TypeError, ValueError) as exc:
+        raise Refusal("collector public key derivation failed") from exc
     return hashlib.sha256(public).hexdigest()
 
 
 def sign(path: Path, payload: bytes) -> str:
-    signature = _openssl_with_key(path, ["pkeyutl", "-sign", "-rawin", "-in", "/dev/stdin"], payload)
-    if not signature or len(signature) > 4096:
-        raise Refusal("collector signature is invalid")
+    _secure_private_key(path)
+    try:
+        signature = calendar_signatures.sign(path.read_bytes(), payload)
+    except (TypeError, ValueError) as exc:
+        raise Refusal("collector signing key cannot perform the requested operation") from exc
     return base64.b64encode(signature).decode("ascii")
 
 
@@ -235,7 +203,7 @@ def main() -> int:
     except Refusal:
         print("calendar prebrief collector: REFUSE", file=sys.stderr)
         return 78
-    except (OSError, subprocess.SubprocessError):
+    except OSError:
         print("calendar prebrief collector: FAIL", file=sys.stderr)
         return 1
 
