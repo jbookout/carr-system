@@ -147,10 +147,9 @@ def _jev_spend_row():
 
 def _grok_session_row():
     sys.path.insert(0, os.path.join(REPO_ROOT, "ops"))
-    from grok_session import inspect_session, health_row
-    row = inspect_session()
-    line = health_row(row)
-    return line, int(row["status"] == "FAIL" or "FAILED" in line)
+    from grok_session import health_row
+    line = health_row()
+    return line, int(line.startswith("FAIL") or "FAILED" in line)
 
 
 if CANONICAL_SECTION == "grok-session":

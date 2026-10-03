@@ -1113,7 +1113,7 @@ step "Jev daily spend alarm" \
      ./.venv/bin/python tools/health-check.py --section jev-spend
 
 # Authentication readback only; no model work and no interactive login.
-step "Grok session expiry alarm" \
+step "Grok authentication health" \
      ./.venv/bin/python tools/health-check.py --section grok-session
 
 step "encrypted backup -> R2"                        env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh
