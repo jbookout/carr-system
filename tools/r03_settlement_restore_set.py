@@ -6,7 +6,8 @@ unsupported pinned objects refuse the whole set. Attribution is diagnostic.
 Git calls are bounded and use the shared repository-location scrubber; status
 and index bytes preserve literal filenames, including newline and non-UTF-8
 bytes. Each entry binds the current index stages, filesystem mode/type and
-worktree bytes, which the runner rechecks before any restoration.
+worktree bytes, which the runner rechecks at admission. Execution with a
+nonempty restore set is held until enforced writer exclusion is implemented.
 """
 from __future__ import annotations
 
@@ -117,7 +118,8 @@ def build_restore_set(repository: Path, pin: str,
 
     No result escapes on failure, timeout, unsupported operations or a changing
     tree. Approved-but-clean names add nothing. Consumers compare the complete
-    authored entries again at admission and immediately before disposal.
+    authored entries again at admission. State binding detects earlier drift;
+    it does not exclude writers during disposal or authorize restoration alone.
     """
     if len(pin) not in (40, 64) or any(c not in "0123456789abcdef" for c in pin):
         raise RestoreSetRefusal("restore pin must be a full hexadecimal object id")

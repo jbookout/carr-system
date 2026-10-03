@@ -10,6 +10,7 @@ import inspect
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -102,10 +103,6 @@ class Fixture:
                 "argv": ["git", "clean", "-fd", "--", *paths],
                 "pathspecs": paths,
             })
-        if manifest["restore"]:
-            restore_paths = [entry["path"] for entry in manifest["restore"]]
-            argv = RUNNER.restore_command(manifest["pinned_origin_main"], restore_paths)
-            commands.append({"id": "stage5.restore", "argv": argv, "pathspecs": restore_paths})
         # Stage 3 pushes every backed-up branch tip to the remote in one atomic
         # command, so the allowlist has to carry it whenever any branch declares
         # a backup ref. Mirrors what the real manifest authoring emits.
@@ -638,7 +635,7 @@ def test_review_authoring_to_execution_drift(root: Path) -> None:
         assert tracked.read_bytes() == before
 
 
-def test_review_literal_checkout_scope(root: Path) -> None:
+def test_review_literal_restore_scope(root: Path) -> None:
     repository = restore_repo(root, "literal-pathspec")
     for name in ("*.txt", ":(glob)*.txt"):
         (repository / name).write_text("pinned\n")
@@ -647,15 +644,10 @@ def test_review_literal_checkout_scope(root: Path) -> None:
     pin = pin_of(repository)
     (repository / "*.txt").write_text("approved\n")
     entries = RESTORE.build_restore_set(repository, pin, ["*.txt"])
-    (repository / "keep.txt").write_text("later unrelated edit\n")
-    argv = RUNNER.restore_command(pin, [e["path"] for e in entries])
-    checked(argv, repository)
-    assert (repository / "keep.txt").read_text() == "later unrelated edit\n", "wildcard expanded restoration"
-    assert (repository / "*.txt").read_text() == "pinned\n"
+    assert [entry["path"] for entry in entries] == ["*.txt"]
     (repository / ":(glob)*.txt").write_text("approved magic\n")
-    argv = RUNNER.restore_command(pin, [":(glob)*.txt"])
-    checked(argv, repository)
-    assert (repository / "keep.txt").read_text() == "later unrelated edit\n"
+    entries = RESTORE.build_restore_set(repository, pin, ["*.txt", ":(glob)*.txt"])
+    assert {entry["path"] for entry in entries} == {"*.txt", ":(glob)*.txt"}
 
 
 def test_review_filename_bytes(root: Path) -> None:
@@ -722,8 +714,31 @@ def test_review_versioned_authoring_route(root: Path) -> None:
     assert manifest["approved"] is False, "authoring may not grant admission"
     assert "observed_state" in manifest["restore"][0]
     manifest["approved"] = True  # simulated operator admission of these exact bytes
-    assert "STAGE 6 closing readback passed" in invoke(fixture, manifest, execute=True)
-    assert (fixture.repository / "tracked.txt").read_text() == "tracked\n"
+    output = invoke(fixture, manifest, execute=False)
+    assert "writer exclusion" in output and "DRY-RUN:" in output
+    assert (fixture.repository / "tracked.txt").read_text() == "approved edit\n"
+    allowlist = fixture.allowlist(manifest, execute=True)
+    receipt = {
+        "schema_version": RUNNER.RECEIPT_SCHEMA, "capability_key": RUNNER.CAPABILITY_KEY,
+        "token_digest": "fixture-token", "operator_binding_digest": "fixture-operator",
+        "approved_manifest_digest": RUNNER._sha256(json.dumps(
+            manifest, sort_keys=True, separators=(",", ":")).encode()),
+        "repository_identity_digest": "fixture-repository", "starting_object_id": fixture.pin,
+        "allowlist_digest": "fixture-allowlist", "consumed_at_ns": 1,
+    }
+    fds = [fd_for(value) for value in (manifest, allowlist, receipt)]
+    stdout = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(stdout):
+            assert RUNNER.main(["--repository", str(fixture.repository), "--execute",
+                                "--manifest-fd", str(fds[0]), "--allowlist-fd", str(fds[1]),
+                                "--capability-receipt-fd", str(fds[2])]) == 75
+    finally:
+        for fd in fds:
+            os.close(fd)
+    assert "HELD:" in stdout.getvalue() and "writer exclusion" in stdout.getvalue()
+    assert "STAGE 3" not in stdout.getvalue() and "closing readback passed" not in stdout.getvalue()
+    assert (fixture.repository / "tracked.txt").read_text() == "approved edit\n"
     # A manually prebuilt old entry cannot bypass the same admission predicate.
     (fixture.repository / "tracked.txt").write_text("unapproved edit\n")
     manifest["restore"] = [{"path": "tracked.txt", "blob_oid": git(fixture.repository, "rev-parse", f"{fixture.pin}:tracked.txt").strip()}]
@@ -782,7 +797,7 @@ def test_restore_authoring_failures_publish_nothing(root: Path) -> None:
     assert stdout.getvalue() == "", "timeout published a partial manifest"
 
 
-def test_restore_special_names_execute(root: Path) -> None:
+def test_restore_special_names_refuse_execution(root: Path) -> None:
     # Keep ignored-file cleaning denied while names after -- remain literal.
     fixture_check = Fixture(root / "ignored-clean-denial")
     allowlist = fixture_check.allowlist(fixture_check.manifest(clean_pathspecs=["scratch"], clean_expected=[]), execute=False)
@@ -805,29 +820,76 @@ def test_restore_special_names_execute(root: Path) -> None:
         (fixture.repository / name).write_bytes(b"approved edit\n")
     manifest = fixture.manifest(clean_pathspecs=[], clean_expected=[])
     manifest["restore"] = RESTORE.build_restore_set(fixture.repository, fixture.pin, names)
-    assert "STAGE 6 closing readback passed" in invoke(fixture, manifest, execute=True)
-    assert all((fixture.repository / name).read_bytes() == b"pinned\n" for name in names)
+    assert "writer exclusion" in invoke(fixture, manifest, execute=False)
+    try:
+        invoke(fixture, manifest, execute=True)
+    except RUNNER.SweepHeld as exc:
+        assert "writer exclusion" in str(exc)
+    else:
+        raise AssertionError("special-name restore execution bypassed writer exclusion")
+    assert all((fixture.repository / name).read_bytes() == b"approved edit\n" for name in names)
+    assert (fixture.repository / "tracked.txt").read_text() == "tracked\n"
 
 
-def test_restore_midrun_index_change_aborts(root: Path) -> None:
+def test_restore_refusal_precedes_disposal(root: Path) -> None:
     fixture = Fixture(root / "restore-index-race")
     tracked = fixture.repository / "tracked.txt"
     tracked.write_text("approved edit\n")
     manifest = fixture.manifest(clean_pathspecs=[], clean_expected=[])
     manifest["restore"] = RESTORE.build_restore_set(fixture.repository, fixture.pin, ["tracked.txt"])
-    def change_index_only() -> None:
-        tracked.write_text("later staged edit\n")
-        git(fixture.repository, "add", "tracked.txt")
-        tracked.write_text("approved edit\n")
+    def disposal_reached() -> None:
+        raise AssertionError("unsafe restore reached disposal")
     try:
-        invoke(fixture, manifest, execute=True, before_disposal=change_index_only)
-    except RUNNER.SweepError as exc:
-        assert "observed state" in str(exc) or "fingerprint changed" in str(exc), str(exc)
+        invoke(fixture, manifest, execute=True, before_disposal=disposal_reached)
+    except RUNNER.SweepHeld as exc:
+        assert "writer exclusion" in str(exc), str(exc)
     else:
-        raise AssertionError("disposal failed to protect a changed index")
+        raise AssertionError("unsafe restore was not held")
     assert tracked.read_text() == "approved edit\n"
-    assert git(fixture.repository, "show", ":tracked.txt") == "later staged edit\n"
+    assert git(fixture.repository, "show", ":tracked.txt") == "tracked\n"
 
+
+
+def test_restore_late_editor_cannot_be_overwritten(root: Path) -> None:
+    fixture = Fixture(root / "late-restore-editor")
+    tracked = fixture.repository / "tracked.txt"
+    tracked.write_text("approved edit\n")
+    manifest = fixture.manifest(clean_pathspecs=[], clean_expected=[])
+    manifest["restore"] = RESTORE.build_restore_set(fixture.repository, fixture.pin, ["tracked.txt"])
+    before_refs = git(fixture.repository, "show-ref")
+    git(fixture.repository, "status", "--porcelain=v1")
+    before_index = (fixture.repository / ".git/index").read_bytes()
+    before_head = git(fixture.repository, "rev-parse", "HEAD")
+    real_git = shutil.which("git")
+    assert real_git
+    wrapper_dir = root / "late-editor-bin"
+    wrapper_dir.mkdir()
+    marker = root / "checkout-reached"
+    wrapper = wrapper_dir / "git"
+    editor_source = f"from pathlib import Path; Path({str(tracked)!r}).write_text('later editor change\\n')"
+    # Real subprocess edits after the last verification, then delegates the
+    # unchanged checkout argv. No Git output is forged by the wrapper.
+    wrapper.write_text(
+        f"#!{sys.executable}\nimport os, subprocess, sys\nfrom pathlib import Path\n"
+        f"if 'checkout' in sys.argv[1:]:\n"
+        f"    Path({str(marker)!r}).touch()\n"
+        f"    subprocess.run([sys.executable, '-c', {editor_source!r}], check=True)\n"
+        f"os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])\n")
+    wrapper.chmod(0o755)
+    with patch.dict(os.environ, {"PATH": str(wrapper_dir) + os.pathsep + os.environ["PATH"]}):
+        try:
+            output = invoke(fixture, manifest, execute=True)
+        except RUNNER.SweepHeld as exc:
+            assert "writer exclusion" in str(exc), str(exc)
+        else:
+            assert marker.exists() and tracked.read_text() == "tracked\n"
+            assert "STAGE 6 closing readback passed" in output
+            raise AssertionError("settlement can overwrite an edit after its final verification")
+    assert not marker.exists(), "unsafe checkout was reached"
+    assert tracked.read_text() == "approved edit\n"
+    assert (fixture.repository / ".git/index").read_bytes() == before_index
+    assert git(fixture.repository, "show-ref") == before_refs, "refusal mutated backup refs"
+    assert git(fixture.repository, "rev-parse", "HEAD") == before_head
 
 
 def test_restore_unsupported_pinned_objects_refuse(root: Path) -> None:
@@ -846,10 +908,11 @@ def test_restore_unsupported_pinned_objects_refuse(root: Path) -> None:
 
 
 REVIEW_TESTS = [test_review_poisoned_environment, test_review_authoring_to_execution_drift,
-               test_review_literal_checkout_scope, test_review_filename_bytes, test_review_rename_refusal,
+               test_review_literal_restore_scope, test_review_filename_bytes, test_review_rename_refusal,
                test_review_versioned_authoring_route, test_review_git_timeout,
-               test_restore_authoring_failures_publish_nothing, test_restore_special_names_execute,
-               test_restore_midrun_index_change_aborts, test_restore_unsupported_pinned_objects_refuse]
+               test_restore_authoring_failures_publish_nothing, test_restore_special_names_refuse_execution,
+               test_restore_refusal_precedes_disposal, test_restore_unsupported_pinned_objects_refuse,
+               test_restore_late_editor_cannot_be_overwritten]
 
 
 def review_regressions(root: Path) -> None:

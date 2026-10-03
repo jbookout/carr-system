@@ -9,6 +9,9 @@ Authoring uses ``--author-template`` with repeated ``--approve-restore-path``
 literal names. It emits an unapproved v2 manifest only after full validation;
 the operator admits those bytes through the existing settlement capability.
 Restore entries bind pinned blobs and the approved observed index/worktree state.
+Execution with a nonempty restore set is held: this runner has no enforced
+writer exclusion spanning verification and restoration. Authoring and dry-run
+do not grant that missing guarantee.
 
 Without ``--execute`` this runner only obtains and validates the manifest's
 ``git clean -nd`` diff, prints the full planned sequence, and exits without
@@ -661,11 +664,6 @@ def _stage6_readback(repository: Path, manifest: Mapping[str, Any], parsed: Mapp
     print(f"STAGE 6 closing readback passed: head={head} deleted={len(deleted)} surviving={len(surviving)}")
 
 
-def restore_command(pin: str, paths: list[str]) -> list[str]:
-    """The allowlist and consumer share one literal-path checkout command."""
-    return ["git", "--literal-pathspecs", "checkout", pin, "--", *paths]
-
-
 def _verify_restore_state(repository: Path, manifest: Mapping[str, Any]) -> None:
     try:
         actual = build_restore_set(repository, manifest["pinned_origin_main"],
@@ -753,6 +751,8 @@ def run_settlement(*, repository: Path, manifest_fd: int, allowlist_fd: int, cap
         print("  stage 5 gate: re-verify capability, approval, and production-backup preconditions")
         print(f"  stage 5 clean diff: {candidates}")
         print(f"  stage 5 restore paths: {parsed['restore_paths']}")
+        if parsed["restore_paths"]:
+            print("  PRECONDITION NOT MET -- restore execution requires enforced writer exclusion")
         print(f"  stage 5 park paths: {parsed['park_paths']}")
         print("  stage 5 branch law: ancestry safe-delete; host-confirmed squash + backup force-delete; unmerged retained")
         print("  stage 6 closing readback: pinned head, clean tree, deleted-set gone, no collateral loss")
@@ -764,6 +764,12 @@ def run_settlement(*, repository: Path, manifest_fd: int, allowlist_fd: int, cap
 
     if not head_is_pinned:
         raise SweepHeld(precondition)
+    # State checks cannot exclude an editor between verification and checkout.
+    # Refuse before stage 3 writes refs or archives, even for admitted bytes.
+    # No bypass or cooperative-lock assertion can enable unsafe restoration.
+    if parsed["restore_paths"]:
+        raise SweepHeld("restore execution requires enforced writer exclusion; "
+                        "authoring and dry-run remain available, repository unchanged")
     starting_branches = _branch_set(repository)
 
     if _is_canonical_or_child(repository):
@@ -778,15 +784,6 @@ def run_settlement(*, repository: Path, manifest_fd: int, allowlist_fd: int, cap
         raise SweepError("tree fingerprint changed between stage 4 and disposal")
 
     _verify_restore_state(repository, manifest)
-    restore_paths = parsed["restore_paths"]
-    if restore_paths:
-        restore_argv = restore_command(parsed["pinned"], restore_paths)
-        _require_allowed(allowlist, "stage5.restore", restore_argv, restore_paths)
-        _run(restore_argv, cwd=repository)
-        for item in manifest["restore"]:
-            actual = _git(repository, "hash-object", "--", item["path"]).stdout.strip().lower()
-            if actual != item["blob_oid"]:
-                raise SweepError(f"restored blob differs from manifest: {item['path']}")
 
     if parsed["park_paths"]:
         for pathspec in parsed["park_paths"]:
