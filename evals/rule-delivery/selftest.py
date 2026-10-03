@@ -59,8 +59,8 @@ def main():
         with open(os.path.join(scratch, "candidate", "results.jsonl"), encoding="utf-8") as handle:
             saved = [json.loads(line) for line in handle]
         check("final test run preserves frozen train results", saved == [test_row, train_row])
-    check("receipt source commit resolves and binds shipped source", M.receipt_source_matches())
-    with open(os.path.join(HERE, "receipt.json"), encoding="utf-8") as handle:
+    check("historical receipt source commit resolves and binds original source", M.receipt_source_matches())
+    with open(os.path.join(HERE, "historical-receipt.json"), encoding="utf-8") as handle:
         forged = json.load(handle)
     check("receipt discloses contaminated historical holdout",
           forged.get("evaluation_status") == "exploratory_test_used_for_candidate_selection")

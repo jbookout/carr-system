@@ -285,11 +285,18 @@ export async function main(args = [], {
     // Only the existing fixed TypeSafe bridge may spawn while tuning. It reads
     // the client/key, not case files, and receives development state on stdin.
     const credentialCode = "import sys\nsys.path.insert(0, 'ops')\nimport typesafe_client\ntypesafe_client.read_api_key()";
-    return withTuningAccess([resolve(dirname(manifestPath), manifest.partitions.final.path),
-      ...manifest.blocked_sources], () => main(args, { stdout, spawn, writeReport, fixturePath,
+    let pendingReport;
+    const { result, audit } = await withTuningAccess([resolve(dirname(manifestPath), manifest.partitions.final.path),
+      ...manifest.blocked_sources], () => main(args, { stdout: () => {}, spawn,
+      writeReport: (path, body) => { pendingReport = { path, body }; }, fixturePath,
       tuningFixture: { suite_id: manifest.source, doctrine_generation: null,
         cases: JSON.parse(run.stdout), split_manifest_digest: manifest.digest } }),
-    [["python3", ["-c", PYTHON_BRIDGE]], ["python3", ["-c", credentialCode]]]);
+    [["python3", ["-c", PYTHON_BRIDGE]], ["python3", ["-c", credentialCode]]], manifestPath);
+    result.tuning_access = audit;
+    if (pendingReport) writeReport(pendingReport.path,
+      `${JSON.stringify({ ...JSON.parse(pendingReport.body), tuning_access: audit }, null, 1)}\n`);
+    stdout(`${JSON.stringify(result, null, 1)}\n`);
+    return result;
   }
   const fixture = tuningFixture || loadFixture(fixturePath);
   const measured = opts.live || opts.replay;

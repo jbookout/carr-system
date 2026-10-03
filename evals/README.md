@@ -76,9 +76,14 @@ Nothing here is a second evaluation system; extend the kernel, not this file.
 8. **Select variants on development only.** Run Python tuning through
    `evals/rule-delivery/freeze_split.py tune`; it blocks reads of final and mixed source files,
    checks resolved paths and file identities, and fails even if the tuner catches
-   the denial. Unmonitored child/native execution is refused. The rerank runner
+   the denial. Inherited final/raw handles are refused before work starts.
+   Every attempt, including failures and normal CLI exits, is recorded in
+   `tuning-attempts/`; `tuning-access.json` aggregates the entire selection
+   history. A failure or interruption requires a fresh cohort. Unmonitored child/native execution is refused. The rerank runner
    uses `--split-manifest` and `--partition train|development` with the matching
-   Node guard; only its fixed existing TypeSafe bridge may spawn. One change
+   Node guard; only its fixed existing TypeSafe bridge may spawn. Its returned,
+   printed and saved report includes `tuning_access` in the same contract as
+   Python, so either runner can supply final consumption evidence. One change
    per round; record the reason for keep/revert from development results.
 9. **Never paste failures into prompts.** Fix the behaviour the failing cases
    share. Copying a failing case's text into the prompt is overfitting with
@@ -89,7 +94,8 @@ Nothing here is a second evaluation system; extend the kernel, not this file.
 11. **Consume final once after selection, per dimension, with confidence
     intervals.** `eval_split.final_evaluation()` persists an exclusive final lock
     binding baseline, candidate configuration digest, harness digest, model and
-    clean tuning access audit BEFORE opening final cases. An interrupted or failed
+    clean aggregate tuning access audit covering every selection attempt BEFORE
+   opening final cases. An older clean round cannot cover later work. An interrupted or failed
     final attempt consumes the cohort: verify its lock; never auto-retry or select
     another candidate on those cases. Every dimension gets its own baseline, candidate and paired
     delta interval. A critical dimension that fails or regresses blocks, even

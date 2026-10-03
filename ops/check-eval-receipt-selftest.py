@@ -59,7 +59,7 @@ def good_receipt():
     """A clear, attributable win on the primary dimension, nothing critical lost."""
     global _BUNDLE_NUMBER
     _BUNDLE_NUMBER += 1
-    cases = [{"id": str(i), "input": str(i), "label": i % 2} for i in range(80)]
+    cases = [{"id": str(i), "group": f"synthetic-{i}", "input": str(i), "label": i % 2} for i in range(80)]
     manifest = E.freeze(cases, Path(_BUNDLES.name) / str(_BUNDLE_NUMBER), seed="test",
                         source="human judged fresh cases", previously_seen=[])
     with E.tuning_guard(manifest) as audit:
@@ -178,6 +178,19 @@ class Globs(unittest.TestCase):
 
 
 class Receipts(unittest.TestCase):
+    def test_rehashed_invalid_lock_contract_cannot_pass_shipping_gate(self):
+        for field, value in (("schema", "unrelated"), ("baseline_digest", ""), ("harness_digest", [])):
+            r = good_receipt()
+            p = r["split"]["provenance"]
+            path = Path(p["final_lock"])
+            lock = json.loads(path.read_text())
+            lock[field] = value
+            lock["digest"] = E.digest({k: v for k, v in lock.items() if k != "digest"})
+            path.write_text(json.dumps(lock))
+            p[field] = value
+            p["final_lock_digest"] = lock["digest"]
+            self.assertTrue(cer.validate_receipt(r, "jev-judgments", ROOT), field)
+
     def test_boolean_seal_cannot_replace_frozen_final_provenance(self):
         r = good_receipt()
         r["split"].pop("provenance", None)
