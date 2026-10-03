@@ -163,6 +163,43 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(failures, [])
         self.assertFalse((self.state / "send-job.json").exists())
 
+    def test_observed_root_cannot_be_polled_before_sender_checkpoints_job(self):
+        import threading
+        from unittest.mock import patch
+        slack = SplittingSlack()
+        engine = relay.Relay(slack, self.state, self.repo, "agent")
+        posted, release = threading.Event(), threading.Event()
+        original_post = slack.post
+        failures = []
+        def post(text, parent=None):
+            ts = original_post(text, parent)
+            if parent is None:
+                slack.messages.append({"ts": "1.0000015", "thread_ts": ts, "user": "agent",
+                                       "text": "```mac-run\ncat example.txt\n```\nEarly.\nDOT-REPORT-END"})
+                posted.set()
+                if not release.wait(5):
+                    raise AssertionError("send was never released")
+            return ts
+        def send():
+            try:
+                engine.send_job("Header\n" + "x" * 8000)
+            except BaseException as exc:
+                failures.append(exc)
+        with patch.object(slack, "post", side_effect=post):
+            worker = threading.Thread(target=send)
+            worker.start()
+            try:
+                self.assertTrue(posted.wait(5))
+                thread = slack.messages[0]["ts"]
+                self.assertFalse(engine.poll(thread, execute=True))
+                self.assertFalse((self.state / thread / "ledger.jsonl").exists())
+            finally:
+                release.set()
+                worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(failures, [])
+        self.assertFalse(engine.poll(thread, execute=True))
+
     def test_multipart_send_respects_slack_channel_rate_budget(self):
         from unittest.mock import patch
         now, attempts = [0.0], []

@@ -445,6 +445,8 @@ class Relay:
             return thread
 
     def poll(self, thread, *, execute=False):
+        if _timestamp_key(thread) is None:
+            raise ValueError("invalid Slack thread timestamp")
         pending_file = self.state_dir / "send-job.json"
         if pending_file.exists():
             fd = os.open(self.state_dir / "send-job.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
@@ -452,7 +454,11 @@ class Relay:
                 try:
                     fcntl.flock(send_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
-                    pass  # A healthy sender owns this claim; other jobs can poll.
+                    # Only an initialized job can be known to predate this send.
+                    # The root may be visible remotely before its ack is stored.
+                    if not (self.state_dir / thread / "job.json").exists():
+                        return False
+                    # A healthy sender owns this claim; other jobs can poll.
                 else:
                     if pending_file.exists():
                         raise ValueError("interrupted job post requires reconciliation")
