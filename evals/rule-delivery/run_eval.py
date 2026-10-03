@@ -44,6 +44,8 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, REPO)
+sys.path.insert(0, os.path.join(REPO, "ops"))
+import eval_split as E  # noqa: E402
 
 V2_CASES = os.path.join(REPO, "ops", "fixtures", "rule-delivery-eval", "cases.v2.json")
 HARD_CASES = os.path.join(HERE, "hard_cases.v1.json")
@@ -72,6 +74,11 @@ def load_cases(split=None):
     disputed, kind, note}. v2 cases keep the split the repo fixed on
     2026-09-27 (ops/rule_gold_label.assign_splits); hard cases are split by
     hash of their id above."""
+    if os.environ.get("CARR_EVAL_SPLIT"):
+        partition = split or "train"
+        return [{**case, "split": partition} for case in E.load_partition(os.environ["CARR_EVAL_SPLIT"], partition)]
+    if split == "final":
+        raise E.SplitError("historical exposed cases cannot produce a final score")
     ev = _load(os.path.join(REPO, "ops", "rule_delivery_eval.py"), "rde_cases")
     cases = []
     for case in ev.load_cases(V2_CASES):
@@ -272,6 +279,7 @@ def grade(world, case, events):
             "over_cap_events": sum(1 for ev in events if ev["overflow"])}
 
 
+@E.guarded_tuning
 def run(split, variant, out_dir=None):
     world = World()
     rows = []
@@ -397,30 +405,26 @@ STATS = {
 
 
 def verdict(base, new, goal):
-    """Keep/revert call for one round, from the TRAIN paired intervals.
-
-    goal "recall": recall_micro must rise (train interval lower bound above 0)
-    while false deliveries on should-not-fire cases and false deliveries per
-    event do not rise. goal "tokens": tokens_per_event must fall (test interval
-    upper bound below 0) while recall does not fall and neither false measure
-    rises. The test split is for one final report, never candidate selection."""
+    """Select frozen candidates on development; historical runs remain train-only."""
+    partition = "development" if os.environ.get("CARR_EVAL_SPLIT") else "train"
     reasons, keep = [], True
-    b, n = load_run(base, "train"), load_run(new, "train")
-    d = {"train": {name: paired_bootstrap(b, n, stat) for name, stat in STATS.items()}}
+    b, n = load_run(base, partition), load_run(new, partition)
+    d = {partition: {name: paired_bootstrap(b, n, stat) for name, stat in STATS.items()}}
+    stats = d[partition]
     target, sign = (("recall_micro", 1) if goal == "recall" else ("tokens_per_event", -1))
-    t_pt, t_lo, t_hi = d["train"][target]
+    t_pt, t_lo, t_hi = stats[target]
     if not ((t_lo > 0) if sign > 0 else (t_hi < 0)):
         keep = False
-        reasons.append(f"train {target} delta {t_pt:+.4f} [{t_lo:+.4f}, {t_hi:+.4f}] not clear of zero")
-    if d["train"]["sn_false_rules"][0] > 0:
+        reasons.append(f"{partition} {target} delta {t_pt:+.4f} [{t_lo:+.4f}, {t_hi:+.4f}] not clear of zero")
+    if stats["sn_false_rules"][0] > 0:
         keep = False
-        reasons.append(f"train should-not-fire false deliveries rose {d['train']['sn_false_rules'][0]:+.0f}")
-    if d["train"]["false_per_event"][0] > 1e-9:
+        reasons.append(f"{partition} should-not-fire false deliveries rose {stats['sn_false_rules'][0]:+.0f}")
+    if stats["false_per_event"][0] > 1e-9:
         keep = False
-        reasons.append(f"train false deliveries per event rose {d['train']['false_per_event'][0]:+.4f}")
-    if goal == "tokens" and d["train"]["recall_micro"][0] < -1e-9:
+        reasons.append(f"{partition} false deliveries per event rose {stats['false_per_event'][0]:+.4f}")
+    if goal == "tokens" and stats["recall_micro"][0] < -1e-9:
         keep = False
-        reasons.append(f"train recall fell {d['train']['recall_micro'][0]:+.4f}")
+        reasons.append(f"{partition} recall fell {stats['recall_micro'][0]:+.4f}")
     return keep, reasons, d
 
 
@@ -434,7 +438,7 @@ def load_run(variant, split=None):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--variant", default="baseline")
-    parser.add_argument("--split", default="all", choices=("train", "test", "all"))
+    parser.add_argument("--split", default="development" if os.environ.get("CARR_EVAL_SPLIT") else "train", choices=("train", "development", "test", "all"))
     parser.add_argument("--compare", nargs=2, metavar=("BASE", "NEW"))
     parser.add_argument("--print", action="store_true", help="print the summary only; write nothing")
     parser.add_argument("--verdict", nargs=3, metavar=("BASE", "NEW", "GOAL"),
@@ -446,7 +450,8 @@ def main(argv=None):
         return 0
     if args.compare:
         base, new = args.compare
-        for split in (("train", "test") if args.split == "all" else (args.split,)):
+        partitions = ("train", "development") if os.environ.get("CARR_EVAL_SPLIT") else ("train", "test")
+        for split in (partitions if args.split == "all" else (args.split,)):
             b, n = load_run(base, split), load_run(new, split)
             print(f"== {split}: {base} -> {new}")
             for name, stat in STATS.items():
@@ -454,7 +459,7 @@ def main(argv=None):
                 print(f"  {name:18s} {stat(b):9.4f} -> {stat(n):9.4f}  delta {point:+.4f}  [{lo:+.4f}, {hi:+.4f}]")
         return 0
     rows = run(args.split, args.variant, None if args.print else RUNS)
-    for split in ("train", "test"):
+    for split in sorted({r["split"] for r in rows}):
         sub = [r for r in rows if r["split"] == split]
         if sub:
             print(split, json.dumps(summarize(sub), sort_keys=True, default=str))

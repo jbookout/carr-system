@@ -129,6 +129,15 @@ class FixtureTests(unittest.TestCase):
 
 
 class OutcomeTests(unittest.TestCase):
+    def test_final_cases_are_not_threshold_selection_inputs(self):
+        with self.assertRaisesRegex(cal.FixtureError, "final"):
+            cal.materialize_fixture(inline_fixture([case("final-only", True, "final")]))
+
+    def test_calibration_report_cannot_claim_final_quality(self):
+        report = cal.report([])
+        self.assertEqual(report["split_provenance"]["evaluation_use"], "development_only")
+        self.assertFalse(report["split_provenance"]["final_score_eligible"])
+
     def setUp(self):
         self.dir = self.enterContext(tempfile.TemporaryDirectory())
         self.log = str(Path(self.dir) / "out" / "jev-outcomes.jsonl")

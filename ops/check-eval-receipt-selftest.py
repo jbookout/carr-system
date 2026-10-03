@@ -11,6 +11,7 @@ its fixtures proves nothing about what it refuses.
 from __future__ import annotations
 
 import copy
+import atexit
 import importlib.util
 import json
 import subprocess
@@ -21,6 +22,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "ops"))
+import eval_split as E
 from git_env import fixture_env  # noqa: E402
 
 SPEC = importlib.util.spec_from_file_location("check_eval_receipt", ROOT / "ops" / "check-eval-receipt.py")
@@ -49,8 +51,22 @@ def dimension(dim_id, *, critical, base, cand, delta, direction, status="passed"
     }
 
 
+_BUNDLES = tempfile.TemporaryDirectory()
+atexit.register(_BUNDLES.cleanup)
+_BUNDLE_NUMBER = 0
+
 def good_receipt():
     """A clear, attributable win on the primary dimension, nothing critical lost."""
+    global _BUNDLE_NUMBER
+    _BUNDLE_NUMBER += 1
+    cases = [{"id": str(i), "group": f"synthetic-{i}", "input": str(i), "label": i % 2} for i in range(80)]
+    manifest = E.freeze(cases, Path(_BUNDLES.name) / str(_BUNDLE_NUMBER), seed="test",
+                        source="human judged fresh cases", previously_seen=[])
+    with E.tuning_guard(manifest) as audit:
+        E.load_partition(manifest, "development")
+    _, provenance = E.final_evaluation(manifest, {"candidate_digest": E.digest("candidate"),
+        "baseline_digest": E.digest("baseline"), "harness_digest": E.digest("harness"),
+        "model": "model:claude-sonnet-5-5"}, audit)
     return {
         "schema_version": 1,
         "surface": "jev-judgments",
@@ -66,11 +82,11 @@ def good_receipt():
             "provider_id": "provider:anthropic",
             "model_id": "model:claude-sonnet-5-5",
             "native_session_ref": "session:hillclimb-jev-v3",
-            "configuration_fingerprint": "sha256:" + "a" * 64,
+            "configuration_fingerprint": E.digest("candidate"),
         },
-        "cases": {"total": 80, "train": 40, "test": 40, "should_not_fire": 16,
+        "cases": {"total": 80, "train": 48, "development": 16, "final": 16, "should_not_fire": 16,
                   "sources": ["production_trace", "human_judged_hard_case"]},
-        "split": {"method": "random, stratified by first tag", "seed": 11, "sealed_test": True},
+        "split": {"method": "random, stratified by first tag", "seed": 11, "sealed_test": True, "provenance": provenance},
         "repeats": 3,
         "grader": {"kind": "programmatic",
                    "validation": {"graded_twice": True, "agreement": 0.98, "oracle_pass_rate": 1.0,
@@ -162,6 +178,24 @@ class Globs(unittest.TestCase):
 
 
 class Receipts(unittest.TestCase):
+    def test_rehashed_invalid_lock_contract_cannot_pass_shipping_gate(self):
+        for field, value in (("schema", "unrelated"), ("baseline_digest", ""), ("harness_digest", [])):
+            r = good_receipt()
+            p = r["split"]["provenance"]
+            path = Path(p["final_lock"])
+            lock = json.loads(path.read_text())
+            lock[field] = value
+            lock["digest"] = E.digest({k: v for k, v in lock.items() if k != "digest"})
+            path.write_text(json.dumps(lock))
+            p[field] = value
+            p["final_lock_digest"] = lock["digest"]
+            self.assertTrue(cer.validate_receipt(r, "jev-judgments", ROOT), field)
+
+    def test_boolean_seal_cannot_replace_frozen_final_provenance(self):
+        r = good_receipt()
+        r["split"].pop("provenance", None)
+        self.assertTrue(any("provenance" in e for e in cer.validate_receipt(r, "jev-judgments")))
+
     def errors(self, receipt, surface="jev-judgments"):
         return cer.validate_receipt(receipt, surface, ROOT)
 
@@ -270,7 +304,7 @@ class Receipts(unittest.TestCase):
         self.assertTrue(self.errors(r))
         r = good_receipt(); r["split"]["sealed_test"] = False
         self.assertTrue(any("sealed" in e for e in self.errors(r)))
-        r = good_receipt(); r["cases"]["test"] = 0; r["cases"]["train"] = 80
+        r = good_receipt(); r["cases"]["final"] = 0; r["cases"]["train"] = 80
         self.assertTrue(self.errors(r))
 
     def test_should_not_fire_and_real_sources_are_required(self):
