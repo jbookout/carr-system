@@ -457,6 +457,9 @@
     "hook_meter.py": {
       "role": "helper"
     },
+    "grok_invocation.py": {
+      "role": "helper"
+    },
     "jev-supervisor.py": {
       "role": "gate",
       "wirings": [
@@ -469,8 +472,7 @@
             "reads",
             "tool_calls",
             "scenarios"
-          ],
-          "allow_only": "Every non-allow output is gated behind CARR_JEV_SUPERVISOR=advise; no production wiring sets it, so MODE is always shadow for Claude Code sessions. Forcing advise here would assert behaviour production does not have."
+          ]
         },
         {
           "event": "Stop",
@@ -478,8 +480,7 @@
           "fixtures": [
             "advisories",
             "scenarios"
-          ],
-          "allow_only": "Every non-allow output is gated behind CARR_JEV_SUPERVISOR=advise; no production wiring sets it, so MODE is always shadow for Claude Code sessions. Forcing advise here would assert behaviour production does not have."
+          ]
         }
       ]
     },

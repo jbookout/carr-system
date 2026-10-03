@@ -1,4 +1,10 @@
-"""lib/jev_required_actions.py — read a turn's Jev build-advisory
+"""RETIRED runtime contract: decision c136a8e1-c135-4553-9e50-64c9640d12b7
+(2026-09-25) narrows 0b11c89b to judgment points. The orchestrator's
+2026-10-02 PR 1407 ruling retires generated per-turn obligations in favor
+of hooks/jev-supervisor.py boundary checks. Kept only for historical receipt
+and machine-envelope regression fixtures; production hooks must not use it.
+
+lib/jev_required_actions.py — read a turn's Jev build-advisory
 `required_actions` back out of the transcript, and judge whether the turn
 satisfied decision 0b11c89b (2026-09-24, Joe: "Jev is not advisory only. It's
 in our hard rules or it is supposed to be.") for each listed facet.
@@ -31,21 +37,21 @@ its own build advisory, but only the human prompt's own advisory binds
 (prompt_advisory_receipt); the continuations' advisories are not consulted,
 so they can neither add a facet nor remove one.
 
-CURRENT TURN ONLY. The advisory is read only from `latest_user_turn_index(recs)`
-onward (with a one-record lookback for the observed off-by-one: in the sampled
-transcript the `hook_additional_context` attachment for a turn's advisory was
-recorded immediately AFTER that turn's own `type: "user"` record, never
-before an EARLIER one) — never from a stale, earlier turn's advisory.
+CURRENT TURN ONLY. HumanTurnScope owns every evaluator and Stop-latch input.
+Its records begin at the genuine human prompt, with no lookback. The observed
+advisory attachments follow that prompt. A prior record cannot provide an
+advisory, refusal, mutation, review, or provenance interval for this turn.
 
 WHAT COUNTS AS EVIDENCE JEV WAS CALLED — rewritten. The first cut treated any
 Bash command merely naming `typesafe_client` as a call, which a bare `echo
 typesafe_client` or `grep ask ops/typesafe_client.py` satisfies without ever
 reaching the vendor. ops/typesafe_client.py's `ask()` now appends a receipt
-(session, ts, hashed question ids, facets, model, ok) to out/jev-calls.jsonl on every
+(session, human_turn_id, ts, hashed question ids, facets, model, ok) to out/jev-calls.jsonl on every
 SUCCESSFUL response, and this module matches a required facet against that
-file: same session, a timestamp from this turn's start to now, and a
+file: same session and exact dispatching human identity, a sane timestamp, and a
 facet inferred from a question id before logging (or an explicit `facets`
-list on the call) naming the facet. Legacy receipts still carry raw ids. One
+list on the call) naming the facet. Identity-less legacy receipts earn no
+action credit. Some older receipts still carry raw question ids. One
 batched `ask()` still evaluates several facets at once (ops/typesafe_client.py's
 own "ASK TOGETHER" rule) — attribution is per named facet, not automatically
 "any call clears everything".
@@ -65,6 +71,7 @@ every other gate in this repository.
 Fixtures: ops/jev-required-actions-selftest.py
 """
 
+import hashlib
 import json
 import re
 from datetime import datetime, timezone
@@ -75,13 +82,12 @@ BUILD_ADVISORY_SKIPPED_SCHEMA = "jev-build-advisory-skipped/v1"
 MESSAGE_DELIVERY_SCHEMA = "rule-jev-message-delivery/v2"
 POSTWRITE_RECEIPT_SCHEMA = "jev-post-write-review/v2"
 
-# A call counts for this turn when its receipt in out/jev-calls.jsonl is bound
-# to this session id and its timestamp falls between the turn's own boundary
-# (less CALL_CLOCK_SKEW_SECONDS) and NOW (plus the same skew). There is no
+# Ownership comes only from the producer's dispatch-time human_turn_id.
+# Timestamps check clock sanity, never choose a human owner. There is no
 # upper duration cap any more: round 3 (2026-09-24) found 26 of 327 folded
 # real turns ran past 60 minutes, and a real call at minute 90 was rejected by
-# the old fixed 3600-second window. The session id is the binding; the turn
-# boundary is the lower edge; "now" (the Stop time) is the upper edge.
+# the old fixed 3600-second window. One-second receipt precision may round a
+# current call slightly before its human boundary; the skew admits that.
 CALL_CLOCK_SKEW_SECONDS = 5
 
 # Known facet keys (ops/jev_build_advisory.py's FACETS) — used both to parse
@@ -210,13 +216,11 @@ def _first_text_block(msg):
 
 
 def is_real_user_turn(rec):
-    """A genuine human-prompt boundary: role user/human, and not a synthetic
-    wrapper (the Codex history/environment preamble). Used as the FALLBACK
-    turn-boundary signal for a client whose transcript carries no `promptId`
-    (see latest_user_turn_index) — Claude's own transcripts carry one, and
-    for those `is_synthetic_continuation` is the more precise signal, because
-    a Stop-hook reopen is role "user" with real (non-empty) text and would
-    otherwise pass this check."""
+    """A candidate human boundary: user/human text, excluding the Codex
+    history/environment preamble. latest_user_turn_index also excludes
+    synthetic continuations, since Stop feedback has the same role and
+    text shape as a human prompt. Native prompt IDs alone do not decide it.
+    """
     msg, role = _record_message(rec)
     if role not in ("user", "human") or not isinstance(msg, dict):
         return False
@@ -263,74 +267,123 @@ def is_synthetic_continuation(rec):
     return bool(first.strip()) and not without_reminders
 
 
-def _user_prompt_runs(recs):
-    """Consecutive-by-index runs of type:"user" records sharing one
-    `promptId`, in transcript order: [{"pid": ..., "start": i, "first_rec":
-    rec}, ...]. Claude's transcript stamps every type:"user" record
-    (a genuine prompt, its tool results, and any Stop-hook-feedback reopen
-    of it) with the SAME promptId — verified directly against a real
-    session — so a run is exactly "the records belonging to one submitted
-    prompt", independent of the text-based heuristics below.
-    """
-    runs = []
-    current_pid = object()  # sentinel that cannot equal a real promptId
-    for i, rec in enumerate(recs or ()):
-        if not isinstance(rec, dict) or rec.get("type") != "user" or "promptId" not in rec:
-            continue
-        pid = rec.get("promptId")
-        if pid != current_pid:
-            runs.append({"pid": pid, "start": i, "first_rec": rec})
-            current_pid = pid
-    return runs
-
-
 def latest_user_turn_index(recs):
-    """Index of the record where the CURRENT turn begins.
+    """Latest genuine human prompt; -1 for a machine-only transcript."""
+    # A promptId is metadata, not a boundary: a client can reuse it, and a
+    # notification can mint one. Only a genuine human prompt starts a turn.
+    return max((i for i, rec in enumerate(recs or ())
+                if is_real_user_turn(rec) and not is_synthetic_continuation(rec)), default=-1)
 
-    Primary signal: `promptId` runs (see _user_prompt_runs). Starting from
-    the LAST run, fold backward through any run whose own first record is a
-    synthetic continuation (a Stop-hook reopen that was, for whatever
-    reason, stamped with its own fresh promptId; a task notification; a
-    system-reminder-only message) — the boundary keeps moving to that
-    earlier run's start. It stops at the first run (walking backward) whose
-    first record is a genuine, non-synthetic prompt; that run's start index
-    is the turn boundary.
 
-    FALLBACK for a transcript with no `promptId` at all (a non-Claude
-    client): the old text-prefix heuristic, `is_real_user_turn`.
+class HumanTurnScope:
+    """The sole ownership boundary for required-action and latch inputs.
 
-    Returns -1 when no boundary can be found at all.
+    Identity uses session + transcript boundary + native record metadata,
+    never prompt content, advisory/cache IDs, or the missing-facet set.
+    Record position distinguishes prompts even when native IDs are absent
+    or reused. Feedback and notifications belong to the preceding human.
+    A notification-only transcript has no human scope and cannot block.
     """
-    recs = list(recs or ())
-    runs = _user_prompt_runs(recs)
-    if not runs:
-        idx = -1
-        for i, rec in enumerate(recs):
-            if is_real_user_turn(rec):
-                idx = i
-        return idx
-    boundary = runs[-1]["start"]
-    for run in reversed(runs):
-        boundary = run["start"]
-        if not is_synthetic_continuation(run["first_rec"]):
-            break
-    return boundary
+
+    def __init__(self, recs, session_id=None):
+        recs = tuple(recs or ())
+        self.session_id = session_id
+        self.boundary = latest_user_turn_index(recs)
+        self.records = recs[self.boundary:] if self.boundary >= 0 else ()
+        human = self.records[0] if self.records else {}
+        binding = {"session": session_id, "record_index": self.boundary,
+                   "record_id": human.get("uuid") or human.get("id"),
+                   "prompt_id": human.get("promptId"), "timestamp": human.get("timestamp")}
+        self.identity = ("human-turn:v1:" + hashlib.sha256(json.dumps(
+            binding, sort_keys=True).encode()).hexdigest()) if self.records else None
+        self.boundary_ts = _record_timestamp(human)
+
+    def advisory_receipt(self):
+        for i, rec in enumerate(self.records):
+            if i and is_synthetic_continuation(rec):
+                break
+            receipts = _advisory_receipts([rec])
+            if receipts:
+                return receipts[0]
+        return None
+
+    def assistant_texts(self):
+        texts = []
+        for rec in self.records:
+            msg, role = _record_message(rec)
+            if role != "assistant":
+                continue
+            content = msg.get("content")
+            if isinstance(content, str):
+                texts.append(content)
+            elif isinstance(content, list):
+                texts.extend(block["text"] for block in content if isinstance(block, dict)
+                             and block.get("type") in ("text", "output_text")
+                             and isinstance(block.get("text"), str))
+        return texts
+
+    def written_paths(self):
+        paths = set()
+        for rec in self.records:
+            payload = rec.get("payload")
+            if isinstance(payload, dict) and payload.get("type") == "custom_tool_call":
+                calls = [(payload.get("name"), payload.get("input"))]
+            else:
+                msg, _role = _record_message(rec)
+                content = msg.get("content") if msg else None
+                calls = [(b.get("name"), b.get("input")) for b in content or ()
+                         if isinstance(b, dict) and b.get("type") == "tool_use"]
+            for name, value in calls:
+                if name not in ("Write", "Edit", "MultiEdit", "apply_patch", "functions.apply_patch"):
+                    continue
+                if isinstance(value, dict) and value.get("file_path"):
+                    paths.add(str(value["file_path"]))
+                else:
+                    patch = (value.get("command") or value.get("cmd") or "") if isinstance(value, dict) else value
+                    if isinstance(patch, str):
+                        paths.update(p.strip() for p in re.findall(
+                            r"^(?:\+\+\+ b/|\*\*\* (?:Update|Add) File: )(.+)$", patch, re.M) if p.strip())
+        return sorted(paths)
+
+    def call_receipts(self, path, now=None):
+        if not self.identity or not self.session_id:
+            return []
+        upper = now or datetime.now(timezone.utc)
+        owned = []
+        for row in load_jev_call_receipts(path):
+            if row.get("session") != self.session_id and row.get("session_id") != self.session_id:
+                continue
+            bound = row.get("human_turn_id")
+            # Completion time cannot identify who dispatched an async call.
+            # Legacy rows without the producer's dispatch identity earn no
+            # credit, even when their timestamp falls inside this turn.
+            if bound != self.identity:
+                continue
+            timestamp = _parse_ts(row.get("ts"))
+            if timestamp is None:
+                continue
+            if (timestamp - upper).total_seconds() > CALL_CLOCK_SKEW_SECONDS:
+                continue
+            owned.append(row)
+        return owned
+
+    def postwrite_missing(self):
+        return semantic_creation_receipt_missing(self.records, self.written_paths())
+
+    def ledger_mentions(self):
+        return jev_calls_log_mentions(self.records)
+
+    def unexplained(self, credited):
+        return unexplained_receipts(self.records, credited)
+
+
+def human_turn_scope(recs, session_id=None):
+    return HumanTurnScope(recs, session_id)
 
 
 def current_turn_slice(recs):
-    """This turn's records: from the latest real user-turn boundary onward.
-
-    Starts one record early (an off-by-one lookback) because the sampled real
-    transcript showed the build-advisory attachment for a turn recorded
-    immediately AFTER that turn's own user record, and never before an
-    earlier one — the lookback only protects against the opposite ordering
-    without reaching back into a whole prior turn.
-    """
-    idx = latest_user_turn_index(recs)
-    if idx < 0:
-        return []
-    start = max(0, idx - 1)
-    return list(recs or ())[start:]
+    """Compatibility view of the human scope's records, with no lookback."""
+    return list(human_turn_scope(recs).records)
 
 
 def _record_timestamp(rec):
@@ -345,10 +398,7 @@ def _record_timestamp(rec):
 
 def turn_boundary_timestamp(recs):
     """The timestamp of the current turn's own user record, or None."""
-    idx = latest_user_turn_index(recs)
-    if idx < 0:
-        return None
-    return _record_timestamp((recs or ())[idx])
+    return human_turn_scope(recs).boundary_ts
 
 
 def _advisory_receipts(turn_recs):
@@ -382,19 +432,7 @@ def prompt_advisory_receipt(recs):
     reopened again. Continuation advisories are now not consulted at all, so
     they can neither add a facet nor remove one.
     """
-    recs = list(recs or ())
-    idx = latest_user_turn_index(recs)
-    if idx < 0:
-        return None
-    for i in range(max(0, idx - 1), len(recs)):
-        rec = recs[i]
-        if i > idx and isinstance(rec, dict) and rec.get("type") == "user" \
-                and is_synthetic_continuation(rec):
-            return None
-        receipts = _advisory_receipts([rec])
-        if receipts:
-            return receipts[0]
-    return None
+    return human_turn_scope(recs).advisory_receipt()
 
 
 def turn_required_facets(recs):
@@ -748,26 +786,29 @@ def _call_covers_facet(row, facet):
     return False
 
 
-def facets_called_this_turn(call_rows, session_id, boundary_ts, required, now=None):
+def facets_called_this_turn(call_rows, session_id, boundary_ts, required, now=None,
+                           *, human_turn_id=None):
     """The subset of `required` for which out/jev-calls.jsonl shows a
-    successful call bound to this session, timestamped from this turn's start
-    to `now` (default: the current time), whose question ids (or explicit
-    facets list) name that facet. No upper duration cap — see
+    successful call bound to this session and dispatching human identity,
+    whose question ids (or explicit facets list) name that facet. Missing
+    identity earns no credit. No upper duration cap — see
     CALL_CLOCK_SKEW_SECONDS."""
-    covered, _rows = credited_calls_this_turn(call_rows, session_id, boundary_ts, required, now)
+    covered, _rows = credited_calls_this_turn(call_rows, session_id, boundary_ts, required, now,
+                                             human_turn_id=human_turn_id)
     return covered
 
 
-def answered_calls_this_turn(call_rows, session_id, boundary_ts, now=None):
-    """Every successful (ok true) receipt bound to this session and this turn's
-    window, whatever facets it names: evidence that Jev answered this turn."""
-    if boundary_ts is None or not session_id:
+def answered_calls_this_turn(call_rows, session_id, boundary_ts, now=None, *, human_turn_id=None):
+    """Successful receipts for this exact human owner, whatever their facets."""
+    if not human_turn_id or boundary_ts is None or not session_id:
         return []
     if now is None:
         now = datetime.now(timezone.utc)
     upper = (now - boundary_ts).total_seconds() + CALL_CLOCK_SKEW_SECONDS
     rows = []
     for row in call_rows:
+        if row.get("human_turn_id") != human_turn_id:
+            continue
         if row.get("session") != session_id and row.get("session_id") != session_id:
             continue
         if row.get("ok") is not True:
@@ -781,18 +822,26 @@ def answered_calls_this_turn(call_rows, session_id, boundary_ts, now=None):
     return rows
 
 
-def credited_calls_this_turn(call_rows, session_id, boundary_ts, required, now=None):
-    """(covered facets, the receipt rows that credited at least one of them)."""
-    if not required or boundary_ts is None or not session_id:
+def credited_calls_this_turn(call_rows, session_id, boundary_ts, required, now=None,
+                            *, human_turn_id=None):
+    """Credit successful substantive judgments, excluding intake and cache reuse.
+
+    Intake still belongs in answered_calls_this_turn: it proves Jev answered,
+    but deciding which actions are required does not perform those actions.
+    """
+    if not human_turn_id or not required or boundary_ts is None or not session_id:
         return set(), []
     if now is None:
         now = datetime.now(timezone.utc)
     upper = (now - boundary_ts).total_seconds() + CALL_CLOCK_SKEW_SECONDS
     covered, credited = set(), []
     for row in call_rows:
+        if row.get("human_turn_id") != human_turn_id:
+            continue
         if row.get("session") != session_id and row.get("session_id") != session_id:
             continue
-        if row.get("ok") is False:
+        if (row.get("ok") is not True or row.get("cache_hit") is True
+                or row.get("caller") == "jev_build_advisory"):
             continue
         ts = row.get("ts")
         row_dt = None
@@ -888,43 +937,58 @@ def semantic_creation_receipt_missing(turn_recs, written_paths):
     return any_unavailable or bool(uncovered)
 
 
-def evaluate_required_actions(recs, window_texts, jev_calls_path, session_id, written_paths,
-                              now=None):
+def evaluate_required_actions(turn, jev_calls_path, now=None):
     """One-call summary for a Stop-time caller.
 
-    `recs` is the WHOLE transcript (this module scopes to the current turn
-    itself); `window_texts` is the current turn's assistant text blocks (for
-    JEV-REFUSED matching); `jev_calls_path` is out/jev-calls.jsonl;
-    `written_paths` is the set of file paths mutated this turn. Returns:
+    `turn` must be a HumanTurnScope built from the whole transcript and
+    session. Assistant texts, writes, advisories and receipt rows can only
+    be read through that scope; callers cannot supply unscoped evidence.
+    `jev_calls_path` is out/jev-calls.jsonl. Returns:
 
         {"status": "required" | "none" | "unavailable",
          "required": [...], "missing": [...], "refused": [...],
          "turn_key": <str or None>}
 
     "unavailable" means fail-open: the advisory itself could not be read for
-    this turn, so nothing here is enforceable and the caller must log that
-    rather than reopen. "none" means a real, readable advisory that required
-    nothing this turn. "required" means at least one facet was required, and
+    this turn, so nothing here is enforceable and the caller must log and
+    visibly announce `unavailable_reason` rather than reopen. "none" means a
+    real, readable advisory that required nothing this turn. "required"
+    means at least one facet was required, and
     `missing` (possibly empty) lists the facets neither refused nor covered
     by a per-facet Jev call this turn, PLUS (folded in under the
     "semantic_creation" name) a receipt gap on a turn that wrote code.
-    `turn_key` is a value unique to THIS turn's advisory (its receipt id, or
-    its prompt hash) for callers that need a per-turn latch identity rather
-    than a per-session one.
+    `human_turn_id` owns all input and the Stop latch. `turn_key` remains
+    advisory provenance only; cache reuse never establishes turn identity.
     """
-    turn_slice = current_turn_slice(recs)
-    required, turn_key = turn_required_facets(recs)
+    if not isinstance(turn, HumanTurnScope):
+        raise TypeError("required-actions evaluation needs a HumanTurnScope")
+    if turn.identity is None:
+        return {"status": "none", "required": [], "missing": [], "refused": [],
+                "turn_key": None, "human_turn_id": None}
+    receipt = turn.advisory_receipt()
+    required = required_facets(receipt)
+    turn_key = (receipt.get("receipt_id") or receipt.get("prompt_sha256")) if receipt else None
+    binding = {"turn_key": turn_key, "human_turn_id": turn.identity}
     if required is None:
+        unavailable_reason = "receipt_absent" if receipt is None else "receipt_malformed"
+        advisory = receipt.get("advisory") if isinstance(receipt, dict) else None
+        if (isinstance(advisory, dict)
+                and advisory.get("schema") == BUILD_ADVISORY_UNAVAILABLE_SCHEMA):
+            reason = advisory.get("reason")
+            if isinstance(reason, str) and reason.strip():
+                unavailable_reason = " ".join(reason.split())
         return {"status": "unavailable", "required": [], "missing": [],
-                "refused": [], "turn_key": turn_key}
+                "refused": [], **binding,
+                "unavailable_reason": unavailable_reason}
     if not required:
         return {"status": "none", "required": [], "missing": [],
-                "refused": [], "turn_key": turn_key}
-    refusals = refusals_in_texts(window_texts)
-    boundary_ts = turn_boundary_timestamp(recs)
-    call_rows = load_jev_call_receipts(jev_calls_path)
+                "refused": [], **binding}
+    required = list(dict.fromkeys(required))
+    refusals = refusals_in_texts(turn.assistant_texts())
+    call_rows = turn.call_receipts(jev_calls_path, now=now)
     called, credited = credited_calls_this_turn(
-        call_rows, session_id, boundary_ts, required, now=now)
+        call_rows, turn.session_id, turn.boundary_ts, required, now=now,
+        human_turn_id=turn.identity)
     # FALSE-OUTAGE REFUSALS (bypass hunt, PR #1224). A refusal whose every
     # reason claims Jev was unreachable/unavailable/down/402 does not satisfy
     # its facet when this turn shows Jev answering: a successful receipt in
@@ -933,7 +997,8 @@ def evaluate_required_actions(recs, window_texts, jev_calls_path, session_id, wr
     # facets come only from a readable advisory). Refusals giving any other
     # reason still count. The facet then stays missing and the gate names the
     # contradiction.
-    answered = answered_calls_this_turn(call_rows, session_id, boundary_ts, now=now)
+    answered = answered_calls_this_turn(call_rows, turn.session_id, turn.boundary_ts, now=now,
+                                       human_turn_id=turn.identity)
     jev_answered = {"advisory_answered": True, "receipts_ok": len(answered)}
     contradicted = sorted(
         facet for facet, reasons in refusals.items()
@@ -941,14 +1006,13 @@ def evaluate_required_actions(recs, window_texts, jev_calls_path, session_id, wr
     refused = {f for f in refusals if f not in contradicted}
     missing = set(missing_facets(required, refused, called))
     if ("semantic_creation" in required and "semantic_creation" not in refused
-            and "semantic_creation" not in called
-            and semantic_creation_receipt_missing(turn_slice, written_paths)):
+            and turn.postwrite_missing()):
         missing.add("semantic_creation")
     return {"status": "required", "required": required,
             "missing": sorted(missing), "refused": sorted(refused),
-            "turn_key": turn_key,
+            **binding,
             "contradicted_refusals": [f for f in contradicted if f in missing],
             "jev_answered": jev_answered,
             "credited_receipts": [
-                {k: row.get(k) for k in ("ts", "session", "facets", "question_ids")}
+                {k: row.get(k) for k in ("ts", "session", "human_turn_id", "facets", "question_ids")}
                 for row in credited]}

@@ -90,7 +90,7 @@ if [ "${1:-}" = "--preflight" ]; then
     bin/sync-settings.sh bin/type-check.sh ops/store-markup-scan.py
     generators/build-open-items-dashboard.py ops/nightly-verb-probe.py
     bin/smoke-and-record.sh tools/ops-record.py ops/staging-observed-prune.py
-    tools/health-check.py ops/jev_spend_health.py
+    tools/health-check.py ops/jev_spend_health.py ops/grok_session.py
     # bin/routine-canonical-seam-refusal.sh came off this list on 2026-08-23: the
     # chain stopped launching it when the refusals became tombstones, and a
     # preflight that requires a file no step runs is checking the wrong thing.
@@ -1112,6 +1112,10 @@ step "credential health (reports, never rotates; loops on a finding)" \
 step "Jev daily spend alarm" \
      ./.venv/bin/python tools/health-check.py --section jev-spend
 
+# Authentication readback only; no model work and no interactive login.
+step "Grok authentication health" \
+     ./.venv/bin/python tools/health-check.py --section grok-session
+
 step "encrypted backup -> R2"                        env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh
 # CAPTURED HERE, ON THE NEXT LINE, AND THAT IS THE WHOLE POINT (fixed 2026-08-23).
 # This assignment used to sit at the bottom of the portability mirror below, so
@@ -1212,6 +1216,12 @@ step "portability mirror (md+csv, 2 locations)" \
 # Shortcuts drop files, so archiving survives a dead Shortcut. Exit 78 = SKIP
 # when ~/.config/carr/calendar.env is absent, same contract as the other steps.
 step "calendar archive (both partners' feeds)"       ./bin/archive-calendar.sh
+
+# The archive is a participant-stripped schedule, not meeting-touch evidence.
+# Use the attendee-aware EventKit capture after the live contact exports above.
+# Unknown attendees remain queued separately; exact write failures fail the step.
+step "calendar meetings to touches (EventKit)" \
+  ./bin/calendar-eventkit-capture.sh --days 7
 
 # MAIL, loop #169. The calendar lane proves a meeting happened; most follow-up
 # never becomes one, so a calendar-only view of the relationship sees a fraction
