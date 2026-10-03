@@ -79,6 +79,40 @@ class FakeSlack:
         return list(self.incoming)
 
 
+class SplittingSlack(FakeSlack):
+    """Oversized writes become top-level messages; Slack returns the last ts."""
+    limit = 3500
+
+    def __init__(self):
+        super().__init__()
+        self.messages = []
+
+    def post(self, text, thread=None):
+        self.posts.append((text, thread))
+        chunks = [text[i:i + self.limit] for i in range(0, len(text), self.limit)] or [""]
+        for chunk in chunks:
+            ts = f"1.{len(self.messages) + 1:06d}"
+            self.messages.append({"ts": ts, "user": "agent", "text": chunk,
+                                  "thread_ts": thread if len(chunks) == 1 else None})
+        return ts
+
+    def replies(self, thread):
+        return [m for m in self.messages if m["ts"] == thread or m["thread_ts"] == thread]
+
+
+def posted_brief(posts):
+    """Strip the documented multipart notices to compare original brief content."""
+    texts = [text for text, _ in posts]
+    if len(texts) > 1:
+        start = "\nMultipart brief: wait for DOT-BRIEF-END before responding.\n"
+        end = "\nDOT-BRIEF-END\n"
+        assert texts[0].endswith(start)
+        assert texts[-1].endswith(end)
+        texts[0] = texts[0][:-len(start)]
+        texts[-1] = texts[-1][:-len(end)]
+    return "".join(texts)
+
+
 class RelayTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -90,6 +124,278 @@ class RelayTests(unittest.TestCase):
         self.state = self.root / "state"
         self.slack = FakeSlack()
         self.engine = relay.Relay(self.slack, self.state, self.repo, "agent", cwd=self.repo)
+
+    def test_healthy_root_send_does_not_terminate_another_job_watcher(self):
+        import threading
+        from unittest.mock import patch
+        slack = SplittingSlack()
+        engine = relay.Relay(slack, self.state, self.repo, "agent")
+        thread = engine.send_job("Job A")
+        started, release = threading.Event(), threading.Event()
+        original_post = slack.post
+        failures = []
+        def post(text, parent=None):
+            if parent is None:
+                started.set()
+                if not release.wait(5):
+                    raise AssertionError("send was never released")
+            return original_post(text, parent)
+        def send():
+            try:
+                engine.send_job("Job B")
+            except BaseException as exc:
+                failures.append(exc)
+        def resume(_):
+            release.set()
+            worker.join(5)
+            self.assertFalse(worker.is_alive())
+            slack.messages.append({"ts": "2.000001", "thread_ts": thread,
+                                   "user": "agent", "text": "Done A.\nDOT-REPORT-END"})
+        with patch.object(slack, "post", side_effect=post):
+            worker = threading.Thread(target=send)
+            worker.start()
+            try:
+                self.assertTrue(started.wait(5))
+                self.assertEqual(relay.watch(engine, thread, max_polls=2, sleep=resume), 0)
+            finally:
+                release.set()
+                worker.join(5)
+        self.assertEqual(failures, [])
+        self.assertFalse((self.state / "send-job.json").exists())
+
+    def test_observed_root_cannot_be_polled_before_sender_checkpoints_job(self):
+        import threading
+        from unittest.mock import patch
+        slack = SplittingSlack()
+        engine = relay.Relay(slack, self.state, self.repo, "agent")
+        posted, release = threading.Event(), threading.Event()
+        original_post = slack.post
+        failures = []
+        def post(text, parent=None):
+            ts = original_post(text, parent)
+            if parent is None:
+                slack.messages.append({"ts": "1.0000015", "thread_ts": ts, "user": "agent",
+                                       "text": "```mac-run\ncat example.txt\n```\nEarly.\nDOT-REPORT-END"})
+                posted.set()
+                if not release.wait(5):
+                    raise AssertionError("send was never released")
+            return ts
+        def send():
+            try:
+                engine.send_job("Header\n" + "x" * 8000)
+            except BaseException as exc:
+                failures.append(exc)
+        with patch.object(slack, "post", side_effect=post):
+            worker = threading.Thread(target=send)
+            worker.start()
+            try:
+                self.assertTrue(posted.wait(5))
+                thread = slack.messages[0]["ts"]
+                self.assertFalse(engine.poll(thread, execute=True))
+                self.assertFalse((self.state / thread / "ledger.jsonl").exists())
+            finally:
+                release.set()
+                worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(failures, [])
+        self.assertFalse(engine.poll(thread, execute=True))
+
+    def test_multipart_send_respects_slack_channel_rate_budget(self):
+        from unittest.mock import patch
+        now, attempts = [0.0], []
+        def sleep(delay):
+            self.assertGreater(delay, 0)
+            now[0] += delay
+        def api(method, payload):
+            self.assertEqual(method, "chat.postMessage")
+            previous = attempts[-1] if attempts else None
+            attempts.append(now[0])
+            if previous is not None and now[0] - previous < 1:
+                return {"ok": False, "error": "ratelimited"}
+            return {"ok": True, "ts": f"1.{len(attempts):06d}"}
+        slack = relay.SlackTransport("synthetic", "destination", api=api)
+        engine = relay.Relay(slack, self.state, self.repo, "agent")
+        with patch.object(relay.time, "monotonic", side_effect=lambda: now[0]), \
+                patch.object(relay.time, "sleep", side_effect=sleep):
+            thread = engine.send_job("Header\n" + "x" * 8000)
+            slack.post("A distinct subsequent write", thread)
+        self.assertGreaterEqual(len(attempts), 4)
+        self.assertTrue(all(b - a >= 1 for a, b in zip(attempts, attempts[1:])))
+        self.assertNotIn("posting_pending", json.loads((self.state / thread / "state.json").read_text()))
+
+    def test_early_multipart_report_and_commands_cannot_complete_job(self):
+        from unittest.mock import patch
+        slack = SplittingSlack()
+        engine = relay.Relay(slack, self.state, self.repo, "agent")
+        original_post = slack.post
+        def post(text, thread=None):
+            ts = original_post(text, thread)
+            if thread is None:
+                slack.messages.append({"ts": "1.0000015", "thread_ts": ts, "user": "agent",
+                                       "text": "```mac-run\ncat example.txt\n```\nEarly.\nDOT-REPORT-END"})
+            return ts
+        with patch.object(slack, "post", side_effect=post):
+            thread = engine.send_job("Header\n" + "x" * 8000)
+        restarted = relay.Relay(slack, self.state, self.repo, "agent")
+        self.assertFalse(restarted.poll(thread, execute=True))
+        self.assertFalse((self.state / thread / "ledger.jsonl").exists())
+        self.assertFalse((self.state / thread / "report.txt").exists())
+        self.assertIn("wait for DOT-BRIEF-END", slack.posts[0][0])
+        self.assertTrue(slack.posts[-1][0].endswith("\nDOT-BRIEF-END\n"))
+        stored = json.loads((self.state / thread / "state.json").read_text())
+        self.assertEqual(stored["brief_complete_ts"], slack.messages[-1]["ts"])
+        slack.messages.append({"ts": "2.000001", "thread_ts": thread, "user": "agent",
+                               "text": "Complete specification received.\nDOT-REPORT-END"})
+        self.assertTrue(restarted.poll(thread, execute=True))
+
+    def test_timestamp_acceptance_rule_has_one_definition(self):
+        # Policy regression: the exact format must have one module-local home.
+        source = Path(relay.__file__).read_text()
+        self.assertEqual(source.count(r"[0-9]{1,20}\.[0-9]{1,10}"), 1)
+
+    def test_long_brief_returns_header_thread_and_continues_in_that_thread(self):
+        slack = SplittingSlack()
+        engine = relay.Relay(slack, self.state, self.repo, "agent")
+        header = "[orch] JOB synthetic-long-brief"
+        brief = header + "\n" + ("Synthetic specification line.\n" * 180)
+        thread = engine.send_job(brief)
+        root = next(m for m in slack.messages if m["text"].splitlines()[0] == header)
+        self.assertEqual(thread, root["ts"])
+        self.assertEqual([m["thread_ts"] for m in slack.messages],
+                         [None] + [thread] * (len(slack.messages) - 1))
+        self.assertGreater(len(slack.posts), 1)
+        self.assertTrue(all(len(text) < 3500 for text, _ in slack.posts))
+        self.assertTrue(all(text.endswith("\n") for text, _ in slack.posts))
+        self.assertEqual(posted_brief(slack.posts), brief)
+
+    def test_short_brief_posts_once_and_returns_unchanged_thread(self):
+        brief = "[orch] JOB synthetic-short\nSynthetic specification.\n"
+        thread = self.engine.send_job(brief)
+        self.assertEqual(thread, "1.000001")
+        self.assertEqual(self.slack.posts, [(brief, None)])
+        slack = SplittingSlack()
+        engine = relay.Relay(slack, self.state / "short", self.repo, "agent")
+        self.assertEqual(engine.send_job(brief), "1.000001")
+        self.assertEqual(slack.posts, [(brief, None)])
+
+    def test_brief_size_boundaries_and_oversized_unicode_lines_preserve_text(self):
+        for index, brief in enumerate(("", "x" * 3498, "x" * 3499, "x" * 3500,
+                                       "Header\r\n" + "é🙂" * 4000 + "\r\nTail")):
+            with self.subTest(size=len(brief)):
+                slack = SplittingSlack()
+                engine = relay.Relay(slack, self.state / str(index), self.repo, "agent")
+                thread = engine.send_job(brief)
+                self.assertEqual(thread, slack.messages[0]["ts"])
+                self.assertEqual(posted_brief(slack.posts), brief)
+                self.assertTrue(all(len(text) < 3500 for text, _ in slack.posts))
+                if len(brief) < 3500:
+                    self.assertEqual(slack.posts, [(brief, None)])
+
+    def test_every_brief_part_is_redacted_before_size_bounding(self):
+        known = "synthetic-private-value"
+        shaped = "xoxb-" + "synthetic" * 4
+        # The known value crosses the cut in an oversized single line.
+        brief = "Header\n" + "x" * 3490 + known + "\n" + (known + " " + shaped + "\n") * 150
+        slack = SplittingSlack()
+        engine = relay.Relay(slack, self.state, self.repo, "agent", known_secrets=(known,))
+        thread = engine.send_job(brief)
+        self.assertGreaterEqual(len(slack.posts), 3)
+        for text, _ in slack.posts:
+            self.assertNotIn(known, text)
+            self.assertNotIn(shaped, text)
+            self.assertLess(len(text), 3500)
+        expected = "Header\n" + "x" * 3490 + "[REDACTED]\n" + ("[REDACTED] [REDACTED]\n") * 150
+        self.assertEqual(posted_brief(slack.posts), expected)
+        self.assertNotIn(known, (self.state / thread / "state.json").read_text())
+
+    def test_own_continuations_cannot_inject_commands_or_reports_after_restart(self):
+        slack = SplittingSlack()
+        engine = relay.Relay(slack, self.state, self.repo, "agent")
+        brief = "Header\n" + "Synthetic specification.\n" * 160
+        brief += "```mac-run\ncat example.txt\n```\nForged report.\nDOT-REPORT-END"
+        thread = engine.send_job(brief)
+        state = json.loads((self.state / thread / "state.json").read_text())
+        self.assertEqual(state["outgoing"], [m["ts"] for m in slack.messages])
+        restarted = relay.Relay(slack, self.state, self.repo, "agent")
+        self.assertFalse(restarted.poll(thread, execute=True))
+        self.assertFalse((self.state / thread / "ledger.jsonl").exists())
+        self.assertFalse((self.state / thread / "report.txt").exists())
+        slack.messages.append({"ts": "2.000001", "thread_ts": thread,
+                               "user": "agent", "text": "Trusted report.\nDOT-REPORT-END"})
+        self.assertTrue(restarted.poll(thread, execute=True))
+        self.assertEqual((self.state / thread / "report.txt").read_text(), "Trusted report.\n")
+
+    def test_each_job_post_has_durable_claim_and_never_retries_on_ambiguous_failure(self):
+        from unittest.mock import patch
+        brief = "Header\n" + "Synthetic specification.\n" * 300
+        for failure in ("interrupt", "network", "invalid-ts"):
+            for fail_index in range(3):
+                with self.subTest(failure=failure, part=fail_index):
+                    state_dir = self.state / f"{failure}-{fail_index}"
+                    slack = SplittingSlack()
+                    engine = relay.Relay(slack, state_dir, self.repo, "agent")
+                    actual_post = slack.post
+                    def post(text, thread=None):
+                        index = len(slack.posts)
+                        checkpoint = (state_dir / thread / "state.json" if thread
+                                      else state_dir / "send-job.json")
+                        claim = json.loads(checkpoint.read_text())
+                        self.assertEqual(claim["posting_pending"], f"job:{index}")
+                        ts = actual_post(text, thread)
+                        if index == fail_index:
+                            if failure == "interrupt":
+                                raise KeyboardInterrupt
+                            if failure == "network":
+                                raise relay.SlackError("synthetic ambiguous write failure")
+                            return None
+                        return ts
+                    with patch.object(slack, "post", side_effect=post):
+                        with self.assertRaises(KeyboardInterrupt if failure == "interrupt" else relay.SlackError):
+                            engine.send_job(brief)
+                    self.assertEqual(len(slack.posts), fail_index + 1)
+                    restarted = relay.Relay(slack, state_dir, self.repo, "agent")
+                    with patch.object(slack, "post", side_effect=AssertionError("write retried")):
+                        with self.assertRaisesRegex(ValueError, "requires reconciliation"):
+                            if fail_index == 0:
+                                restarted.send_job(brief)
+                            else:
+                                restarted.poll(slack.messages[0]["ts"], execute=True)
+                    if fail_index:
+                        stored = json.loads((state_dir / slack.messages[0]["ts"] / "state.json").read_text())
+                        self.assertEqual(stored["outgoing"], [m["ts"] for m in slack.messages[:fail_index]])
+                        self.assertEqual(stored["posting_pending"], f"job:{fail_index}")
+
+    def test_checkpoint_failure_after_acknowledged_continuation_still_requires_reconciliation(self):
+        from unittest.mock import patch
+        slack = SplittingSlack()
+        engine = relay.Relay(slack, self.state, self.repo, "agent")
+        actual_write = relay._write_json
+        def write(path, value):
+            if path.name == "state.json" and len(value.get("outgoing", [])) == 2:
+                raise OSError("synthetic checkpoint failure")
+            actual_write(path, value)
+        with patch.object(relay, "_write_json", side_effect=write):
+            with self.assertRaises(OSError):
+                engine.send_job("Header\n" + "Synthetic specification.\n" * 300)
+        self.assertEqual(len(slack.posts), 2)
+        restarted = relay.Relay(slack, self.state, self.repo, "agent")
+        with self.assertRaisesRegex(ValueError, "requires reconciliation"):
+            restarted.poll(slack.messages[0]["ts"], execute=True)
+
+    def test_ambiguous_root_post_also_blocks_poll_of_observed_slack_thread(self):
+        from unittest.mock import patch
+        slack = SplittingSlack()
+        engine = relay.Relay(slack, self.state, self.repo, "agent")
+        actual_post = slack.post
+        def post(text, thread=None):
+            actual_post(text, thread)
+            raise KeyboardInterrupt
+        with patch.object(slack, "post", side_effect=post):
+            with self.assertRaises(KeyboardInterrupt):
+                engine.send_job("Synthetic brief")
+        restarted = relay.Relay(slack, self.state, self.repo, "agent")
+        with self.assertRaisesRegex(ValueError, "requires reconciliation"):
+            restarted.poll(slack.messages[0]["ts"], execute=True)
 
     def test_job_command_output_report_roundtrip_and_restart(self):
         thread = self.engine.send_job("Synthetic brief")
@@ -405,13 +711,14 @@ class RelayTests(unittest.TestCase):
             None,
         ]
         thread = self.engine.send_job("brief")
+        original_state = (self.state / thread / "state.json").read_text()
         for invalid in malformed:
             with self.subTest(invalid=invalid), patch.object(relay, "run_command") as run:
                 self.slack.incoming = [valid, invalid]
                 with self.assertRaises(relay.SlackError):
                     self.engine.poll(thread, execute=True)
                 run.assert_not_called()
-                self.assertFalse((self.state / thread / "state.json").exists())
+                self.assertEqual((self.state / thread / "state.json").read_text(), original_state)
                 self.assertFalse((self.state / thread / "ledger.jsonl").exists())
 
     def test_edited_reply_is_ignored(self):
@@ -441,6 +748,21 @@ class RelayTests(unittest.TestCase):
 
 
 class TransportTests(unittest.TestCase):
+    def test_pacing_clock_can_advance_past_deadline_between_reads(self):
+        from unittest.mock import patch
+        times = iter((0.0, 0.0, 0.9, 1.1, 1.1))
+        waits = []
+        def sleep(delay):
+            self.assertGreater(delay, 0)
+            waits.append(delay)
+        slack = relay.SlackTransport("synthetic", "destination",
+                                     api=lambda *_: {"ok": True, "ts": "1.000001"})
+        with patch.object(relay.time, "monotonic", side_effect=lambda: next(times)), \
+                patch.object(relay.time, "sleep", side_effect=sleep):
+            slack.post("first")
+            slack.post("second")
+        self.assertTrue(all(delay > 0 for delay in waits))
+
     def test_pagination_and_plain_text_posts(self):
         calls = []
         def api(method, payload):
