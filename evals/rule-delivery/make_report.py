@@ -8,9 +8,12 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(HERE)), "ops"))
+from git_env import fixture_env
 
 SOURCE_PATHS = (
     "lib/rule_routes.py", "ops/config/rule-routes.v1.json", "ops/rule-jit-compile.py",
@@ -38,7 +41,7 @@ def receipt_source_matches(receipt=None):
     # The archive contains the original commit, path trees and pinned blobs.
     # Resolve only those objects in an isolated database: neither local history
     # nor a network fetch supplies missing evidence in a clean checkout.
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env = fixture_env()
     try:
         with tempfile.TemporaryDirectory() as objects:
             def git(*args, **kwargs):

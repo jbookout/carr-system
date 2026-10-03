@@ -14,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import eval_split as E
+from git_env import fixture_env
 
 
 def rule_runner():
@@ -202,7 +203,8 @@ class SplitTests(unittest.TestCase):
         source_dir = Path(E.__file__).parents[1] / "evals/rule-delivery"
         receipt = json.loads((source_dir / "historical-receipt.json").read_text())
         clean = self.root / "clean-checkout"
-        subprocess.run(["git", "init", str(clean)], capture_output=True, check=True)
+        env = fixture_env()
+        subprocess.run(["git", "init", str(clean)], env=env, capture_output=True, check=True)
         evidence = clean / "evals/rule-delivery"
         evidence.mkdir(parents=True)
         for name in ("make_report.py", "historical-receipt.json", "historical-source.pack"):
@@ -213,7 +215,7 @@ class SplitTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         missing = subprocess.run(["git", "cat-file", "-e", receipt["code_sha"]],
-                                 cwd=clean, capture_output=True)
+                                 cwd=clean, env=env, capture_output=True)
         self.assertNotEqual(missing.returncode, 0)
         self.assertTrue(module.receipt_source_matches(receipt))
         self.assertFalse(module.receipt_source_matches({**receipt, "code_sha": "0" * 40}))
