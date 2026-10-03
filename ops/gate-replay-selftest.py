@@ -94,6 +94,7 @@ except subprocess.TimeoutExpired:
 '''
 with subprocess.Popen([sys.executable, "-c", clock_probe], env=clock_env,
                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as probe:
+    assert probe.stdout is not None
     try:
         assert probe.stdout.readline().strip() == "ready"
         _, status = os.waitpid(probe.pid, os.WUNTRACED)
