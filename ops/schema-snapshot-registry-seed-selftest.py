@@ -761,6 +761,7 @@ assert "ops.scac_mutation_catalog_v101_current()" in GENERATOR
 assert 'scac-mutation-registry.v101.generated.js' in GENERATOR
 registry_spec = importlib.util.spec_from_file_location(
     "siep11_registry_gate", ROOT / "ops/siep11-mutation-registry-local-pg-gate.py")
+assert registry_spec is not None and registry_spec.loader is not None
 registry_gate = importlib.util.module_from_spec(registry_spec)
 registry_spec.loader.exec_module(registry_gate)
 assert "0768_confirm_merge_human_only_scac_successor.sql" in GENERATOR
