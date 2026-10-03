@@ -141,7 +141,7 @@ export async function readDealWithJev(record, { askJev, now = new Date() } = {})
     return { ...base, judged: false, reason: "insufficient_recorded_evidence" };
   if (typeof askJev !== "function") return { ...base, judged: false, reason: "jev_unavailable" };
   try {
-    const result = await askJev({ model: "jev-latest", state, questions: dealReadingQuestions() });
+    const result = await askJev({ model: "jev-1.13.0", state, questions: dealReadingQuestions() });
     const answers = result?.answers;
     const movement = answers?.movement?.score;
     const waiting = answers?.waiting_on?.choice;

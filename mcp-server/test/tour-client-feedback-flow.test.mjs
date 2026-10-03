@@ -120,6 +120,20 @@ function pageFor(surface, env) {
   };
   const jar = { cookie: "" };
   const trace = [];
+  // Advance browser deadlines explicitly. Real crypto and request handling
+  // must not race a compressed wall-clock timeout on a loaded CI runner.
+  let clockMs = 0, nextTimer = 0;
+  const timers = new Map();
+  const clock = {
+    advance(ms) {
+      clockMs += ms;
+      for (const [id, timer] of timers) {
+        if (timer.at > clockMs) continue;
+        timers.delete(id);
+        timer.fn();
+      }
+    },
+  };
   const fetchBridge = async (path, options = {}) => {
     const headers = { origin: REPORTS_ORIGIN, "sec-fetch-site": "same-origin", ...(options.headers || {}), ...(jar.cookie ? { cookie: jar.cookie } : {}) };
     trace.push({ path, method: options.method || "GET", body: options.body });
@@ -130,23 +144,12 @@ function pageFor(surface, env) {
     if (set) jar.cookie = set.split(";")[0];
     return response;
   };
-  // Advance browser deadlines explicitly. Async crypto and response handling
-  // must finish independently of the host scheduler's load.
-  const deadlines = new Map();
-  let timerId = 0;
   const context = createContext({ document: doc, fetch: fetchBridge, crypto, Promise, JSON, Number, String, Array, RegExp, Error, TypeError, Math, Date, URL, AbortController,
-    setTimeout: (fn, ms) => { const id = ++timerId; deadlines.set(id, { fn, ms }); return id; },
-    clearTimeout: id => deadlines.delete(id) });
+    setTimeout: (fn, ms) => { const id = ++nextTimer; timers.set(id, { at: clockMs + ms, fn }); return id; },
+    clearTimeout: id => timers.delete(id) });
   context.globalThis = context;
   context.__CARR_TOUR_TAKE_SHARE_TOKEN__ = () => TOKEN;
-  const expireFeedbackDeadline = () => {
-    assert.equal(deadlines.size, 1, "one feedback deadline is pending");
-    const [id, timer] = [...deadlines][0];
-    assert.equal(timer.ms, 8000, "the browser feedback deadline remains eight seconds");
-    deadlines.delete(id);
-    timer.fn();
-  };
-  return { doc, ids, jar, trace, context, deadlines, expireFeedbackDeadline };
+  return { doc, ids, jar, trace, context, clock };
 }
 async function openShare(w, { waitFeedback = true } = {}) {
   runInContext(await readFile(SHARE_JS, "utf8"), w.context);
@@ -449,7 +452,9 @@ test("the feedback read never gates the packet: pending, timeout and 503 leave t
     if (name === "pending forever") {
       assert.equal(list.dataset.feedbackState, "loading");
       assert.equal(feedbackSignal.aborted, false);
-      w.expireFeedbackDeadline();
+      w.clock.advance(7999);
+      assert.equal(list.dataset.feedbackState, "loading", "deadline has not elapsed");
+      w.clock.advance(1);
       await until(() => list.dataset.feedbackState === "unavailable", "feedback deadline reported");
       assert.equal(feedbackSignal.aborted, true);
       assert.equal(list.children.length, 2, "packet remains usable after timeout");
@@ -485,18 +490,32 @@ test("a delayed feedback retry waits for its response without a shortened fixtur
   hold.release();
   await until(() => list.dataset.feedbackState === "ready", "delayed feedback ready after retry");
   assert.ok(controls(list.children[0]).pick);
-  assert.equal(w.deadlines.size, 0, "completed feedback clears its deadline");
+  w.clock.advance(8000);
+  assert.equal(list.dataset.feedbackState, "ready", "completed feedback clears its deadline");
 });
 
 test("a failed feedback read can be retried and then works", async () => {
   const { env, w } = await setup();
   let down = true;
-  env.intercept = { "/api/share/feedback": async call => down ? new Response("{}", { status: 503 }) : call() };
+  let release, retrySignal;
+  const responseReady = new Promise(resolve => { release = resolve; });
+  env.intercept = { "/api/share/feedback": async (call, options) => {
+    if (down) return new Response("{}", { status: 503 });
+    retrySignal = options.signal;
+    await responseReady;
+    return call();
+  } };
   const list = await openShare(w);
   assert.equal(list.dataset.feedbackState, "unavailable");
   down = false;
   await w.doc.querySelector("#retry-feedback").click();
+  w.clock.advance(7999);
+  assert.equal(list.dataset.feedbackState, "loading", "healthy retry can remain pending before the deadline");
+  assert.equal(retrySignal.aborted, false);
+  release();
   await until(() => list.dataset.feedbackState === "ready", "feedback ready after retry");
+  w.clock.advance(1);
+  assert.equal(retrySignal.aborted, false, "successful read cancels its deadline");
   assert.ok(controls(list.children[0]).pick);
   assert.equal(w.doc.querySelector("#retry-feedback").hidden, true);
 });
