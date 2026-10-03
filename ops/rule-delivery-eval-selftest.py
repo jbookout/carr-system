@@ -306,7 +306,12 @@ class FakeClient:
                 answers[qid] = {"probabilities": {
                     o: (0.9 / len(hits) if o in hits else rest) for o in options}}
             else:
-                rid = self.by_statement.get((state or {}).get("rule"))
+                scoped = (state or {}).get("rules") or {}
+                if qid.startswith("bind_") and isinstance(scoped, dict):
+                    candidate = qid.removeprefix("bind_")
+                    rid = candidate if isinstance(scoped.get(candidate), dict) else None
+                else:
+                    rid = self.by_statement.get((state or {}).get("rule"))
                 answers[qid] = {"noul": 0.93 if rid in self.binds else 0.05}
         return {"answers": answers, "model": "fake-jev", "usage": {}}
 
