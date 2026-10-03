@@ -1,4 +1,10 @@
-"""lib/jev_required_actions.py — read a turn's Jev build-advisory
+"""RETIRED runtime contract: decision c136a8e1-c135-4553-9e50-64c9640d12b7
+(2026-09-25) narrows 0b11c89b to judgment points. The orchestrator's
+2026-10-02 PR 1407 ruling retires generated per-turn obligations in favor
+of hooks/jev-supervisor.py boundary checks. Kept only for historical receipt
+and machine-envelope regression fixtures; production hooks must not use it.
+
+lib/jev_required_actions.py — read a turn's Jev build-advisory
 `required_actions` back out of the transcript, and judge whether the turn
 satisfied decision 0b11c89b (2026-09-24, Joe: "Jev is not advisory only. It's
 in our hard rules or it is supposed to be.") for each listed facet.

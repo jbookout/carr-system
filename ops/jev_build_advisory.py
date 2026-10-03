@@ -1,15 +1,8 @@
-"""Typed Jev intake for judgment-shaped engineering work.
+"""Typed Jev facet classifier for explicit callers; prompt hooks defer it.
 
-The partner request is the earliest common seam shared by Codex and Claude.
-This module asks narrow, independent questions there so a build session receives
-an attributable Jev reading before it starts choosing an architecture, writing
-semantically meaningful code or prose, diagnosing a failure, selecting checks,
-matching evidence, or prioritizing the next action.
-
-The output is advisory.  It does not authorize a write, select a tool, replace
-deterministic checks, or prove completion.  Code owns those consequences.  A
-missing Jev response is represented by the hook as a visible unavailable state;
-it is never silently replaced with an agent's unrecorded judgment.
+The UserPromptSubmit hook records human intent without creating an obligation.
+Tool-result and Stop checks ask bounded questions once the evidence exists.
+This optional classifier remains for offline calibration and direct callers.
 """
 
 from __future__ import annotations
@@ -26,10 +19,7 @@ from typing import Any
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
-from lib.rule_delivery_preuse import (  # noqa:E402
-    BUILD_ACTIONS, BUILD_ACTION_THRESHOLD,
-)
-SCHEMA = "jev-build-advisory/v1"
+SCHEMA = "jev-build-advisory/v2"
 UNAVAILABLE_SCHEMA = "jev-build-advisory-unavailable/v1"
 FACETS = (
     "architecture_or_design",
@@ -40,9 +30,7 @@ FACETS = (
     "next_action_priority",
 )
 MAX_MESSAGE_CHARS = 90_000
-# The prompt hook (hooks/rule-pack-preuse-reselection.py) runs this before the
-# rule judgment, inside one 20 s hook timeout: ONE attempt, no rate-limit
-# retries, at most this long. A slower Jev leaves a visible abstention.
+# An explicit caller is bounded to one attempt and this timeout.
 TIMEOUT_SECONDS = 6.0
 
 QUESTION_TEXT = {
@@ -71,36 +59,6 @@ QUESTION_TEXT = {
         "Does answering `partner_request` require prioritizing among several "
         "reasonable next actions based on meaning, impact, blockage, or fit, "
         "rather than following one deterministic authorized next step?",
-}
-GUIDANCE_TEXT = {
-    "extend_existing_seam": (
-        "Given `partner_request`, is extending an existing proven seam or deep module "
-        "more likely to fit than creating a parallel mechanism?"
-    ),
-    "prefer_reversible_slice": (
-        "Given `partner_request`, should the implementation favor a small reversible "
-        "slice because uncertainty, blast radius, or future learning is material?"
-    ),
-    "define_typed_contract_first": (
-        "Given `partner_request`, would defining the typed input/output or receipt "
-        "contract before implementation materially improve correctness and clarity?"
-    ),
-    "gather_more_evidence_before_diagnosis": (
-        "Does `partner_request` currently lack enough evidence to settle a diagnosis "
-        "without first gathering another concrete observation?"
-    ),
-    "prefer_behavioral_verification": (
-        "Given `partner_request`, is behavior or integration evidence more probative "
-        "than unit-level or shape-only checks by themselves?"
-    ),
-    "require_fresh_exact_evidence": (
-        "Given `partner_request`, should the conclusion rely on fresh exact bindings "
-        "rather than reusing earlier evidence without revalidation?"
-    ),
-    "prioritize_blocker_removal": (
-        "Given `partner_request`, should the next action prioritize removing a concrete "
-        "blocker or uncertainty before expanding implementation scope?"
-    ),
 }
 
 
@@ -185,15 +143,7 @@ def questions(client: Any) -> dict[str, dict]:
         )
         for key, text in QUESTION_TEXT.items()
     }
-    guidance = {
-        key: client.noul(
-            text,
-            true=f"The build should follow the {key} direction.",
-            false=f"The build should not assume the {key} direction.",
-        )
-        for key, text in GUIDANCE_TEXT.items()
-    }
-    return {**facets, **guidance}
+    return facets
 
 
 def _probability(answer: Any) -> float:
@@ -235,6 +185,12 @@ def skipped() -> dict:
     """The fixed record for a machine envelope: nothing asked, nothing owed."""
     return {"schema": SKIPPED_SCHEMA, "status": "skipped",
             "reason": "machine_envelope", "effect": "no_advice_required"}
+
+
+def deferred() -> dict:
+    """Human intent is recorded; semantic questions wait for evidence at use."""
+    return {"schema": SKIPPED_SCHEMA, "status": "skipped",
+            "reason": "boundary_deferred", "effect": "no_prompt_obligation"}
 
 
 def _cache():
@@ -308,7 +264,6 @@ def _advise(partner_request: str, *, client: Any | None = None,
     if not isinstance(answers, dict) or not isinstance(model, str) or not model.strip():
         raise AdvisoryUnavailable("Jev omitted answers or model provenance")
     facets = {key: _probability(answers.get(key)) for key in FACETS}
-    guidance = {key: _probability(answers.get(key)) for key in GUIDANCE_TEXT}
     return {
         "schema": SCHEMA,
         "partner_request_sha256": hashlib.sha256(
@@ -316,20 +271,5 @@ def _advise(partner_request: str, *, client: Any | None = None,
                        ensure_ascii=False).encode("utf-8")).hexdigest(),
         "model": model,
         "facets": facets,
-        "guidance": guidance,
-        "required_actions": [
-            {"facet": facet, "instruction": BUILD_ACTIONS[facet]}
-            for facet in FACETS if facets[facet] >= BUILD_ACTION_THRESHOLD
-        ],
         "usage": response.get("usage") if isinstance(response.get("usage"), dict) else {},
-        # Decision 0b11c89b (2026-09-24, Joe): "Jev is not advisory only. It's
-        # in our hard rules or it is supposed to be." lib/rule_delivery_preuse
-        # .py's validate_build_advisory() checks this literal string in
-        # lockstep; hooks/completion-evidence-gate.py's JEV REQUIRED ACTIONS
-        # GATE is what makes "required" mean something rather than a label.
-        "authority": "required",
-        "deterministic_exclusions": [
-            "arithmetic", "dates_and_counts", "identity", "permissions_and_authority",
-            "invariants", "execution", "writes", "completion_proof",
-        ],
     }

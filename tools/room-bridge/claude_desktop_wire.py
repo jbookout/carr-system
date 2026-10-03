@@ -26,6 +26,8 @@ import time
 import uuid
 from pathlib import Path
 
+from desks import DeskError, desk_prompt, dispatched_permission_mode
+
 
 UUID = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
@@ -70,7 +72,10 @@ def launch_background(
     model = str(entry.get("model") or "").strip()
     effort = str(entry.get("effort") or "").strip()
     cwd = str(entry.get("cwd") or "").strip()
-    permission_mode = str(entry.get("permission_mode") or "dontAsk").strip()
+    try:
+        permission_mode = dispatched_permission_mode(entry.get("permission_mode"))
+    except DeskError as exc:
+        raise ClaudeDesktopError(exc.code, str(exc)) from exc
     if not model or not effort or not cwd or not task.strip():
         raise ClaudeDesktopError(
             "invalid_background_contract",
@@ -87,7 +92,7 @@ def launch_background(
         "--model", model,
         "--effort", effort,
         "--permission-mode", permission_mode,
-        task,
+        desk_prompt(task),
     ]
     try:
         proc = run(
