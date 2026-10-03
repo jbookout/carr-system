@@ -239,7 +239,7 @@ def create_json(state: dict[str, Any]) -> None:
 
 
 @contextlib.contextmanager
-def board_lock(project: str) -> Iterator[None]:
+def board_lock(project: str) -> Iterator[int]:
     """One transaction at a time per board: read, change and write under an
     exclusive lock. Never held across a GitHub read, and never nested."""
     path = board_dir() / f"{safe_project(project)}.lock"
@@ -247,7 +247,7 @@ def board_lock(project: str) -> Iterator[None]:
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
+        yield fd
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
@@ -1213,7 +1213,7 @@ def build_all_repos() -> dict[str, Any]:
     if not gh_available():
         raise RuntimeError("gh CLI unavailable; the all-repos board was not rebuilt")
     path = state_path(ALL_REPOS_BOARD)
-    unlocked = read_json_file(path)
+    generation, unlocked = begin_refresh(ALL_REPOS_BOARD)
     prior_repos = [str(row.get("repo")) for row in unlocked.get("repos") or [] if isinstance(row, dict)]
     since = (now_utc() - RECENT_MERGED).date().isoformat()
     reads: dict[str, tuple[list[dict[str, Any]], list[dict[str, Any]]] | str] = {}
@@ -1229,6 +1229,8 @@ def build_all_repos() -> dict[str, Any]:
             latest_release(repo)  # any live probe happens before the lock
     with board_lock(ALL_REPOS_BOARD):
         prior = read_json_file(path)
+        if refresh_generation(ALL_REPOS_BOARD) != generation:
+            return prior
         state = assemble_all_repos(prior, reads)
         write_json(state)
     return state
@@ -1415,18 +1417,41 @@ def deployment_evidence(info: dict[str, Any], release: tuple[Path, str, str] | N
     return None
 
 
+def refresh_generation(project: str) -> int:
+    """Read the generation from the lock file while holding the board lock.
+    An empty pre-existing lock file represents a board not yet refreshed."""
+    return int((board_dir() / f"{safe_project(project)}.lock").read_text() or "0")
+
+
+def begin_refresh(project: str) -> tuple[int, dict[str, Any]]:
+    """Reserve a board generation before reading external evidence. Only the
+    latest started refresh may commit; local mutations keep this generation.
+    The reservation and the input snapshot are one locked transaction."""
+    with board_lock(project) as lock_fd:
+        state = read_json_file(state_path(project)) if project == ALL_REPOS_BOARD else read_state(project)
+        generation = refresh_generation(project) + 1
+        # Reservations belong to the transaction metadata, not the published
+        # board: a failed fetch must leave the last known board untouched.
+        os.ftruncate(lock_fd, 0)
+        os.write(lock_fd, str(generation).encode("ascii"))
+        os.fsync(lock_fd)
+        return generation, state
+
+
 def render(project: str) -> None:
     """Sync every PR card from GitHub, refresh release and health facts, and
     write the JSON. GitHub is read first, without the board lock; the result
     is applied to a fresh read under the lock, so a note or task written
-    meanwhile is kept. A gh failure never stops the run: the card keeps its
+    meanwhile is kept. A superseded refresh cannot replace newer evidence.
+    A gh failure never stops the run: the card keeps its
     last known state and github_sync names the failure, when it was checked
     and when every card was last verified. The name is kept for the launchd
     job; nothing here renders a page."""
     if project == ALL_REPOS_BOARD:
         build_all_repos()
         return
-    tasks = read_state(project).get("tasks", {}).values()
+    generation, initial = begin_refresh(project)
+    tasks = initial.get("tasks", {}).values()
     keys = {pr_key(task) for task in tasks if task.get("pr") is not None}
     fetched = {key: fetch_pr(key[1], key[0]) for key in sorted(keys)}
     # Every network and git read happens here, before the lock: the release
@@ -1446,6 +1471,8 @@ def render(project: str) -> None:
             evidence[key] = deployment_evidence(info, releases[key[0]])
     with board_lock(project):
         state = read_state(project)
+        if refresh_generation(project) != generation:
+            return
         if apply_sync(state, fetched, evidence):
             state["updated_at"] = max((str(task.get("updated_at") or "") for task in state["tasks"].values()),
                                       default=state.get("updated_at"))

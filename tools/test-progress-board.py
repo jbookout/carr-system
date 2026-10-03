@@ -1378,6 +1378,34 @@ class ReviewRound1420(BoardCase):
         return patch.dict(os.environ, env)
 
     # 1 ── concurrent writers
+    def test_1_superseded_project_render_cannot_replace_newer_review_evidence(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("task", "demo", "a", "--title", "A", "--status", "running",
+                       "--executor", "Codex", "--pr", "42")
+        old = copy.deepcopy(self.OPEN)
+        old["comments"] = [{"author": {"login": "jbookout"}, "authorAssociation": "OWNER",
+                            "body": "APPROVE\nReviewed-SHA: " + SHA_A,
+                            "createdAt": "2026-10-03T10:00:00Z"}]
+        new = copy.deepcopy(old)
+        new["headRefOid"] = "b" * 40
+        new["comments"][0]["body"] = "REVIEW: BLOCKED\nReviewed-SHA: " + "b" * 40
+        completed = []
+
+        def fetch(number, repo):
+            # A has read head A but pauses before applying it. B finishes first.
+            with patch.object(BOARD, "fetch_pr", return_value=(new, None)):
+                BOARD.render("demo")
+            completed.append(self.read_state("demo"))
+            return old, None
+
+        with self.in_process(PROGRESS_BOARD_SKIP_GH=""), patch.object(BOARD, "fetch_pr", fetch):
+            BOARD.render("demo")
+        winner = completed[0]
+        self.assertEqual(winner["tasks"]["a"]["review_verdict"], "BLOCK")
+        after = self.read_state("demo")
+        self.assertEqual(after["tasks"], winner["tasks"])
+        self.assertEqual(after["github_sync"], winner["github_sync"])
+
     def test_1_overlapping_writes_use_their_own_temporary_files(self):
         real_replace = os.replace
         nested = []
@@ -1391,6 +1419,31 @@ class ReviewRound1420(BoardCase):
             BOARD.write_json({"project": "demo", "title": "A", "tasks": {}})
         self.assertEqual(self.read_state("demo")["title"], "A")
         self.assertEqual([p.name for p in (self.root / "boards").iterdir() if p.suffix == ".tmp"], [])
+
+    def test_1_superseded_all_repos_render_keeps_newer_cards_and_sync_time(self):
+        repo = "jbookout/carr-system"
+        old = self.pr(42, comments=[{
+            "author": {"login": "jbookout"}, "authorAssociation": "OWNER",
+            "body": "APPROVE\nReviewed-SHA: " + f"{42:040d}",
+            "createdAt": "2026-10-03T10:00:00Z"}])
+        new = copy.deepcopy(old)
+        new["headRefOid"] = "b" * 40
+        new["comments"][0]["body"] = "REVIEW: BLOCKED\nReviewed-SHA: " + "b" * 40
+        completed = []
+
+        def read(name, since):
+            with patch.object(BOARD, "read_repository", return_value=([new], [])):
+                BOARD.build_all_repos()
+            completed.append(self.read_state("all-repos"))
+            return [old], []
+
+        with self.in_process(), patch.object(BOARD, "gh_available", return_value=True), \
+             patch.object(BOARD, "list_repositories", return_value=[repo]), \
+             patch.object(BOARD, "read_repository", side_effect=read):
+            BOARD.build_all_repos()
+        winner = completed[0]
+        self.assertEqual(winner["tasks"]["carr-system-42"]["review_verdict"], "BLOCK")
+        self.assertEqual(self.read_state("all-repos"), winner)
 
     def test_1_a_note_written_while_render_reads_github_survives(self):
         self.run_board("init", "demo", "--title", "Demo")
