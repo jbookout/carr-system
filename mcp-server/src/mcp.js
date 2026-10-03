@@ -12,6 +12,7 @@
 // NO SEND CAPABILITY EXISTS OR WILL EXIST IN THIS WORKER.
 
 import { neon, Pool } from "@neondatabase/serverless";
+import { mcpOriginRefusal } from "./oauth-policy.js";
 import { DOC_TOOL_NAMES, DOC_INSTRUCTIONS, docToolAnnotations } from "./doc-profile.js";
 import { TOOLS, ToolError, executeRegisteredTool, assertRegisteredToolInput,
   auditIdentity, assertNoCallerAuthorityFields, coerceArgsToSchema,
@@ -1059,6 +1060,8 @@ export async function callTool(env, actor, name, args, profile = "full", judgeWo
 }
 
 export async function dispatch(request, env, ctx, actor) {
+  const originRefused = mcpOriginRefusal(request, env);
+  if (originRefused) return originRefused;
   // PROBE LOCK (loop #192, 2026-08-06): a probe-authenticated actor's profile
   // is decided here, server-side, and NEVER by ?profile= — actor.probe is set
   // in exactly one place (index.js's probeActorFor, on a PROBE_TOKENS bearer
