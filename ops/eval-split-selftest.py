@@ -9,6 +9,7 @@ import unittest
 import unittest.mock
 import importlib.util
 import ast
+import shutil
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -89,6 +90,15 @@ class SplitTests(unittest.TestCase):
             with self.assertRaisesRegex(E.SplitError, "previously.*seen"):
                 E.freeze(rows, self.root / "historical", seed="x", source="x", previously_seen=[])
 
+    def test_historical_scored_inputs_remain_exposed_after_metadata_changes(self):
+        replay = rule_runner().replay_cases()[:12]
+        for field in ("note", "source", "stratum", "kind"):
+            with self.subTest(field=field):
+                rows = [{**c, "id": f"new-{i}", "group": f"independent-{i}",
+                         field: f"new description {i}"} for i, c in enumerate(replay)]
+                with self.assertRaisesRegex(E.SplitError, "previously.*seen"):
+                    E.freeze(rows, self.root / field, seed="fresh", source="fresh", previously_seen=[])
+
     def test_inherited_final_handles_and_descriptors_refuse_clean_audit(self):
         for opener in (lambda p: p.open(), lambda p: os.fdopen(os.open(p, os.O_RDONLY))):
             with opener(self.manifest.parent / "final.json") as handle:
@@ -167,6 +177,12 @@ class SplitTests(unittest.TestCase):
         with self.assertRaisesRegex(E.SplitError, "duplicate.*content"):
             E.freeze(relabeled, self.root / "relabeled-rerank", seed="x", source="x", previously_seen=[])
 
+    def test_report_notes_do_not_change_rerank_exposure_identity(self):
+        case = {"id": "rerank", "situation": "query", "note": "original explanation",
+                "candidates": [{"id": "a", "text": "scored candidate", "relevance": 1}]}
+        self.assertEqual(E._content(case), E._content({**case, "note": "new explanation"}))
+        self.assertNotEqual(E._content(case), E._content({**case, "candidates": [{"id": "b", "text": "other"}]}))
+
     def test_explicit_valid_source_groups_required(self):
         for invalid in (None, "", "  ", 12, []):
             rows = [{**c, "group": invalid} for c in self.cases]
@@ -183,13 +199,28 @@ class SplitTests(unittest.TestCase):
         self.assertIn("receipt_source_matches", functions)
 
     def test_historical_verifier_authenticates_original_blobs_after_runtime_evolves(self):
-        spec = importlib.util.spec_from_file_location("historical_report", Path(E.__file__).parents[1] / "evals/rule-delivery/make_report.py")
+        source_dir = Path(E.__file__).parents[1] / "evals/rule-delivery"
+        receipt = json.loads((source_dir / "historical-receipt.json").read_text())
+        clean = self.root / "clean-checkout"
+        subprocess.run(["git", "init", str(clean)], capture_output=True, check=True)
+        evidence = clean / "evals/rule-delivery"
+        evidence.mkdir(parents=True)
+        for name in ("make_report.py", "historical-receipt.json", "historical-source.pack"):
+            source = source_dir / name
+            if source.exists():
+                shutil.copyfile(source, evidence / name)
+        spec = importlib.util.spec_from_file_location("historical_report", evidence / "make_report.py")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        original = subprocess.run(["git", "show", "c74fc21a703428c1345049fa398a35b5eca8504f:evals/rule-delivery/receipt.json"],
-                                  capture_output=True, text=True, check=True)
-        receipt = json.loads(original.stdout)
+        missing = subprocess.run(["git", "cat-file", "-e", receipt["code_sha"]],
+                                 cwd=clean, capture_output=True)
+        self.assertNotEqual(missing.returncode, 0)
         self.assertTrue(module.receipt_source_matches(receipt))
+        self.assertFalse(module.receipt_source_matches({**receipt, "code_sha": "0" * 40}))
+        archive = evidence / "historical-source.pack"
+        data = archive.read_bytes()
+        archive.write_bytes(data[:-1] + bytes([data[-1] ^ 1]))
+        self.assertFalse(module.receipt_source_matches(receipt))
 
     def test_final_is_separate_and_never_loaded_by_tuning(self):
         train = E.load_partition(self.manifest, "train")

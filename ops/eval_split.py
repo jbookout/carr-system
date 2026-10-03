@@ -46,11 +46,16 @@ def _write(path, doc):
 
 
 def _content(case):
-    # Every harness input counts. Only declared identity, partition and grader
-    # fields are excluded; adding an input must not silently weaken identity.
+    # Every harness input counts. Identity, partition, grader labels and report
+    # notes do not. Renaming a description must never make scored input fresh.
+    excluded = {"id", "case_id", "split", "group", "label", "gold", "expected",
+                "required", "acceptable", "disputed", "note", "why"}
+    if "prompt" in case and "tool_calls" in case:
+        # The rule-delivery reader copies these into report tags only. Keep
+        # unknown inputs (and all tool/candidate fields) in identity by default.
+        excluded.update({"source", "stratum", "kind"})
     inputs = {k: v for k, v in case.items()
-                   if k not in {"id", "case_id", "split", "group", "label", "gold", "expected",
-                                "required", "acceptable", "disputed"}}
+              if k not in excluded}
     # Rerank relevance is a per-candidate grading label, not an input. Candidate
     # IDs, text, ranks and every other scored input remain part of identity.
     if isinstance(inputs.get("candidates"), list):
