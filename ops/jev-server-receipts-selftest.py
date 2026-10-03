@@ -16,6 +16,11 @@ from unittest.mock import patch
 REPO = str(Path(__file__).resolve().parents[1])
 sys.path.insert(0, REPO)
 NOW = datetime.now(timezone.utc)
+_FIXTURE_STORAGE = tempfile.TemporaryDirectory(prefix="jev-server-receipts-selftest-")
+
+
+def tearDownModule():
+    _FIXTURE_STORAGE.cleanup()
 
 
 def ts(offset_seconds=0):
@@ -40,6 +45,9 @@ def _client():
         "tsc_server_selftest", os.path.join(REPO, "ops", "typesafe_client.py"))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    # Production-shaped fake transports exercise real reservation code, but
+    # their synthetic attempts must never read or change the live counter.
+    mod.JEV_DAILY_CAP_LOG = Path(tempfile.mkdtemp(dir=_FIXTURE_STORAGE.name)) / "jev-calls.jsonl"
     return mod
 
 class _Proc:
@@ -51,6 +59,8 @@ def client_routes_through_the_worker():
     seen = {}
 
     def runner(argv, **_kw):
+        if json.loads(argv[3]).get("transport_mode") == "cache_only":
+            return _Proc(1, "", '{"error":"jev_cache_miss"}')
         seen["verb"] = argv[2]
         seen["args"] = json.loads(argv[3])
         return _Proc(0, json.dumps({
@@ -119,6 +129,8 @@ def malformed_server_answer_is_not_credited():
     tsc = _client()
 
     def runner(argv, **_kw):
+        if json.loads(argv[3]).get("transport_mode") == "cache_only":
+            return _Proc(1, "", '{"error":"jev_cache_miss"}')
         return _Proc(0, json.dumps({
             "ok": True, "receipt_id": "srv-malformed", "model": "jev-1.13.0",
             "usage": {"input_tokens": 3, "output_tokens": 1},
@@ -186,6 +198,8 @@ def in_hook_calls_skip_the_server_but_the_advisory_does_not():
     calls = []
 
     def runner(argv, **_kw):
+        if json.loads(argv[3]).get("transport_mode") == "cache_only":
+            return _Proc(1, "", '{"error":"jev_cache_miss"}')
         calls.append(json.loads(argv[3])["purpose"])
         return _Proc(0, json.dumps({
             "ok": True, "receipt_id": "srv-h", "recorded_at": ts(0), "purpose": "build_advisory",

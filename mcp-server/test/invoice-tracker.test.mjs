@@ -4,7 +4,7 @@ import { invoiceTrackerTools } from '../src/invoice-tracker.js';
 import { TOOLS } from '../src/tools.js';
 import { readFileSync } from 'node:fs';
 import { SCAC_MUTATION_REGISTRY_VERSION } from '../src/mutation-registry.js';
-import { frozenInventory, registrySeal, FIND_RULE_V103_DB_CATALOG_BASELINE } from '../../ops/scac-mutation-inventory.mjs';
+import { frozenInventory, registrySeal, JEV_CAP_V104_DB_CATALOG_BASELINE } from '../../ops/scac-mutation-inventory.mjs';
 class ToolError extends Error { constructor(payload) { super(payload.error); this.payload=payload; } }
 function harness(patch={}) {
   const row={id:'demo-commission',deal_id:'demo-deal',status:'invoiced',version:4,invoiced_on:'2026-09-01',received_on:null,today:'2026-10-02',...patch};
@@ -51,10 +51,32 @@ test('reference-monitor acceptance uses the live invoice frontier and exact seal
  const value=name=>gate.match(new RegExp(`${name}\\s*=\\s*(?:\\(\\s*)?"([^"]+)"`))?.[1];
  assert.equal(value('LIVE_REGISTRY_VERSION'),SCAC_MUTATION_REGISTRY_VERSION);
  assert.equal(Number(gate.match(/LIVE_REGISTRY_ORDINAL = (\d+)/)?.[1]),Number(SCAC_MUTATION_REGISTRY_VERSION.split('.v')[1]));
- const predecessor=registrySeal('scac-mutation-registry.v103',frozenInventory('scac-mutation-registry.v103'),FIND_RULE_V103_DB_CATALOG_BASELINE);
+ const predecessor=registrySeal('scac-mutation-registry.v104',frozenInventory('scac-mutation-registry.v104'),JEV_CAP_V104_DB_CATALOG_BASELINE);
  assert.equal(value('SEALED_PREDECESSOR_VERSION'),predecessor.version);
  assert.equal(value('SEALED_PREDECESSOR_DIGEST'),predecessor.digest);
  assert.match(gate,new RegExp(`SEALED_PREDECESSOR_ENTRY_COUNTS = \\(${predecessor.entryCount}, ${predecessor.sourceEntryCount}\\)`));
  assert.equal(value('LIVE_REGISTRY_MIGRATION'),'migrations/0784_invoice_tracker_scac_successor.sql');
- assert.equal(value('SEALED_PREDECESSOR_MIGRATION'),'migrations/0770_find_rule_scac_successor.sql');
+ assert.equal(value('SEALED_PREDECESSOR_MIGRATION'),'migrations/0773_jev_cap_scac_successor.sql');
+});
+
+// Parallel registry additions must form one ordered history, preserving both contracts.
+test('invoice successor preserves the shipped Jev cap frontier', async()=>{
+ const inventory=await import('../../ops/scac-mutation-inventory.mjs');
+ assert.equal(SCAC_MUTATION_REGISTRY_VERSION,'scac-mutation-registry.v105');
+ assert.equal(inventory.REGISTRY_V105_VERSION,SCAC_MUTATION_REGISTRY_VERSION);
+ const invoices=inventory.frozenInventory(SCAC_MUTATION_REGISTRY_VERSION);
+ const jev=inventory.frozenInventory('scac-mutation-registry.v104');
+ for(const key of ['mcp-tool:read-invoice-tracker','mcp-tool:record-commission-receipt'])
+  assert.ok(invoices.some(row=>row.ingress_key===key),key);
+ for(const row of jev) assert.ok(invoices.some(next=>next.ingress_key===row.ingress_key),row.ingress_key);
+ const boundBefore=inventory.boundInventoryRows(jev);
+ const boundAfter=inventory.boundInventoryRows(invoices);
+ for(const row of boundBefore)
+  assert.deepEqual(boundAfter.find(next=>next.ingress_key===row.ingress_key),row,row.ingress_key);
+ assert.deepEqual(boundAfter.filter(row=>!boundBefore.some(previous=>previous.ingress_key===row.ingress_key)).map(row=>row.ingress_key).sort(),
+  ['mcp-tool:read-invoice-tracker','mcp-tool:record-commission-receipt']);
+ const sql=readFileSync(new URL('../../migrations/0784_invoice_tracker_scac_successor.sql',import.meta.url),'utf8');
+ assert.match(sql,/0773_jev_cap_scac_successor.sql/);
+ assert.match(sql,/scac_mutation_registry_v104_seal_available/);
+ assert.match(sql,/scac_mutation_registry_v105_seal_available/);
 });
