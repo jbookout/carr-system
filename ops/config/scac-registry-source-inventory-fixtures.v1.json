@@ -84279,6 +84279,60 @@
       },
       "expected_count": 1085,
       "expected_sha256": "44fcd33c7b5dad52e33e49759553add468464060ac46900623a373729edd8d97"
+    },
+    {
+      "version": "v105",
+      "remove": [],
+      "upsert": [
+        {
+          "ingress_key": "mcp-tool:acknowledge-dispatch",
+          "ingress_kind": "mcp_tool",
+          "operation": "acknowledge-dispatch",
+          "effect_class": "administrative_mutation",
+          "source_locator": "mcp-server/src/dispatch-spine.js",
+          "schema_digest": "8a2f036ce4faad712a557b4f336f8e991737485f338d349847660b5af0c552cc",
+          "source_digest": "650236341f7d6fd604929e73000b911fe0398342f029e697f3b379c5a9946767",
+          "write": true,
+          "human_only": false,
+          "authority_only": false,
+          "principal_mode": "authenticated_registered_principal",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.database",
+          "delegates_to": [],
+          "request_shape": "closed_top_level_schema",
+          "idempotency_mode": "operation_principal_manifest_bound",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "application_default_deny",
+          "owner_package": "11",
+          "implementation_state": "source_guarded_not_deployed",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "mcp-tool:record-dispatch-link",
+          "ingress_kind": "mcp_tool",
+          "operation": "record-dispatch-link",
+          "effect_class": "administrative_mutation",
+          "source_locator": "mcp-server/src/dispatch-spine.js",
+          "schema_digest": "c26cf30b62954f502d18cdf3c7c17921b4f9b375a3bc558bf86343d2e5bf6f33",
+          "source_digest": "650236341f7d6fd604929e73000b911fe0398342f029e697f3b379c5a9946767",
+          "write": true,
+          "human_only": false,
+          "authority_only": false,
+          "principal_mode": "authenticated_registered_principal",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.database",
+          "delegates_to": [],
+          "request_shape": "closed_top_level_schema",
+          "idempotency_mode": "operation_principal_manifest_bound",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "application_default_deny",
+          "owner_package": "11",
+          "implementation_state": "source_guarded_not_deployed",
+          "classification_authorizing": false
+        }
+      ],
+      "expected_count": 1085,
+      "expected_sha256": "5633e26c527fe18b7a6c4b32998f08d7dc7cce49cbbbd7f6f16b924865507641"
     }
   ],
   "current_source_review": {
@@ -86956,6 +87010,60 @@
       "expected_count": 1085,
       "expected_sha256": "d521f73c2d7a32e7a464c774c8c50b5e2488e7a78d32864805dbec64c9e1baad",
       "reason": "Carry the credential-rotation and Dell migration receipt source reviews forward to v104. Only existing external-admin rows are re-digested; ingress and authority contracts and all historical seals remain unchanged."
+    },
+    "scac-mutation-registry.v105": {
+      "base_version": "v105",
+      "upsert": [
+        {
+          "ingress_key": "external-admin:bin/migrate-dell.sh",
+          "ingress_kind": "external_admin",
+          "operation": "bin/migrate-dell.sh",
+          "effect_class": "administrative_mutation",
+          "source_locator": "bin/migrate-dell.sh",
+          "schema_digest": "b05259d04b52887f3d1d516fbe7bdd87da5a44635e33f2dfa849f39c1706d4a0",
+          "handler_digest": "b05259d04b52887f3d1d516fbe7bdd87da5a44635e33f2dfa849f39c1706d4a0",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "external-admin:tools/rotate-credential.py",
+          "ingress_kind": "external_admin",
+          "operation": "tools/rotate-credential.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "tools/rotate-credential.py",
+          "schema_digest": "4ed693be3967044d4c2080e6385df47c955adebe91ed2800c6e584220aa58672",
+          "handler_digest": "4ed693be3967044d4c2080e6385df47c955adebe91ed2800c6e584220aa58672",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        }
+      ],
+      "expected_count": 1085,
+      "expected_sha256": "ad202c3f66517641b62ff09f22b1b2b25a97332c0eb05363e17c2df03d126e85",
+      "reason": "Carry the credential-rotation and Dell migration receipt source reviews forward to v105. Only existing external-admin rows are re-digested; ingress and authority contracts and all historical seals remain unchanged."
     }
   }
 }

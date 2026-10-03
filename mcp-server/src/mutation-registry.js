@@ -191,6 +191,7 @@ import {
 // requests installed the producer
 // cost ledger, the Doc conversation store and the R03 notification store.
 // The line below is the ONE place the runtime version is chosen.
+// v105 seals the dispatch writers' shared write-envelope replay key.
 // v104 seals ask-jev cache-only and single-paid-attempt transport modes.
 // Superseded note (WR-000110): v29 was the selector because that request
 // installed the V5-F02
@@ -199,7 +200,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v104.generated.js";
+} from "./scac-mutation-registry.v105.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 

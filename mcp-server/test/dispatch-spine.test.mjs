@@ -25,6 +25,38 @@ import { dispatchSpineTools, dispatchLinkProjection, dispatchAckProjection }
   from "../src/dispatch-spine.js";
 import { sessionDispatchProjection } from "../src/session-identity.js";
 import { TOOLS } from "../src/tools.js";
+import { assertRegisteredOperation } from "../src/mutation-registry.js";
+
+const BRIDGE_PATH = fileURLToPath(new URL("../../tools/room-bridge/", import.meta.url));
+
+for (const name of ["record-dispatch-link", "acknowledge-dispatch"]) {
+  test(`dispatch caller contract: ${name} accepts the Python-produced replay payload`, async () => {
+    const script = `
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import bridge, dispatch
+def capture(verb, args, **kwargs):
+    print(json.dumps({"verb": verb, "args": args}))
+    return {"ok": True}
+if sys.argv[2] == "record-dispatch-link":
+    bridge.record_dispatch_link(turn_msg_id="11111111-1111-4111-8111-111111111111",
+        session_id="codex-contract-fixture", call_verb=capture)
+else:
+    dispatch.acknowledge_received("33333333-3333-4333-8333-333333333333",
+        desk="codex-contract-fixture", log_offset=0, call_verb=capture)
+`;
+    const payload = JSON.parse(execFileSync("python3", ["-c", script, BRIDGE_PATH, name],
+      { encoding: "utf8" }));
+    assert.equal(payload.verb, name);
+    assert.ok(payload.args.idempotency_key);
+    await assertRegisteredOperation(name, TOOLS[name], payload.args);
+    assert.deepEqual(TOOLS[name].inputSchema.properties.idempotency_key, { type: "string" });
+    assert.ok(TOOLS[name].inputSchema.required.includes("idempotency_key"));
+    await assert.rejects(assertRegisteredOperation(name, TOOLS[name],
+      { ...payload.args, actor: "forged-actor" }),
+    e => e.error === "unregistered_operation_fields" && e.fields.includes("actor"));
+  });
+}
 
 // The probe below runs python3 as a child process. The node class runs it from
 // mcp-server/, the migration class from the repository root, so a cwd-relative
