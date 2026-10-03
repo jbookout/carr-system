@@ -19,6 +19,59 @@ from git_env import fixture_env
 
 
 class PublicSourceGuardTests(unittest.TestCase):
+    def test_repeated_snapshot_text_reuses_hash_work_without_losing_locations(self):
+        corpus = self.synthetic_corpus()
+        corpus["max_tokens"] = 16
+        row = ('CREATE TABLE synthetic_table (synthetic_id int, synthetic_value text);\n'
+               '-- Example Dental Group\n'
+               '{"name": "\\u00c9xample Dental\\nGroup"}\n')
+        source = row * 200
+        with mock.patch.object(pii_guard.hashlib, "sha256", wraps=hashlib.sha256) as digest:
+            spans = pii_guard.identity_spans(source, corpus)
+        expected = []
+        for index in range(200):
+            begin = index * len(row) + row.index("Example")
+            expected.append((begin, begin + len("Example Dental Group"), corpus["hashes"][0]))
+            begin = index * len(row) + row.index("\\u00c9")
+            end = index * len(row) + row.index('Group"') + len("Group")
+            expected.append((begin, end, corpus["hashes"][0]))
+        self.assertEqual(spans, expected)
+        self.assertLess(digest.call_count, 1500,
+                        "repeated snapshot vocabulary must not rehash every occurrence")
+
+    def test_cache_eviction_long_tokens_and_changed_corpus_preserve_detection(self):
+        corpus = self.synthetic_corpus()
+        source = ("Example Dental Group\n" +
+                  " ".join("synthetic%d" % index for index in range(9000)) +
+                  "\nExample Dental Group")
+        spans = pii_guard.identity_spans(source, corpus)
+        self.assertEqual([(begin, end) for begin, end, _ in spans],
+                         [(0, 20), (len(source) - 20, len(source))])
+        changed = dict(corpus, hashes=[pii_guard.fingerprint("Synthetic Clinic", corpus["salt"])])
+        self.assertEqual(pii_guard.identity_spans(source, changed), [])
+        long_token = "synthetic" * 200
+        long_corpus = dict(corpus, max_tokens=1,
+                           hashes=[pii_guard.fingerprint(long_token, corpus["salt"])])
+        self.assertEqual(pii_guard.identity_spans(long_token, long_corpus),
+                         [(0, len(long_token), long_corpus["hashes"][0])])
+
+    def test_ci_scanner_selftest_uses_its_own_repository_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            event = pathlib.Path(tmp) / "event.json"
+            event.write_text(json.dumps({"pull_request": {"base": {"sha": "a" * 40}}}))
+            env = fixture_env()
+            env["GITHUB_EVENT_PATH"] = str(event)
+            program = ("import importlib.util, sys; "
+                       "spec=importlib.util.spec_from_file_location('ci_selftest', sys.argv[1]); "
+                       "module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module); "
+                       "module.test_secret_scanner_catches_and_respects_allow(); "
+                       "sys.exit(any(not ok for _, ok, _ in module.RESULTS))")
+            result = subprocess.run([sys.executable, "-c", program, str(REPO / "ops/ci-selftest.py")],
+                                    cwd=REPO, env=env, capture_output=True, text=True, timeout=120)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("a seeded credential is caught", result.stdout)
+            self.assertIn("an inline allow marker on the same line suppresses it", result.stdout)
+
     def test_snapshot_export_sanitizes_prose_preserving_sql_and_row_identity(self):
         salt = "d" * 64
         corpus = {"schema": "public-source-identities/v1", "salt": salt,

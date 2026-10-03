@@ -5,6 +5,8 @@ It is not encryption and does not prevent guessing a known name. Refresh the
 corpus with read-only record-layer calls on the private operator machine.
 """
 import hashlib
+import functools
+import itertools
 import json
 import pathlib
 import re
@@ -57,6 +59,10 @@ def _text_views(text):
     # JSON string literals occur in JSON files, code, and COPY reference prose.
     for match in re.finditer(r'"(?:[^"\\]|\\.)*"', text):
         raw = match[0]
+        if "\\" not in raw:
+            # Its normalized words and source offsets already occur in the raw
+            # view. Only escapes can add a represented identity to that view.
+            continue
         try:
             value = json.loads(raw)
         except ValueError:
@@ -84,20 +90,31 @@ def identity_spans(text, corpus):
     """One matcher for detection and projection, including serialized strings."""
     banned = set(corpus["hashes"])
     found = set()
+
+    def matching_digest(phrase):
+        digest = hashlib.sha256((corpus["salt"] + "\0" + phrase).encode()).hexdigest()
+        return digest if digest in banned else None
+
+    # Dumps repeat SQL vocabulary and reference prose millions of times. Reuse
+    # the judgment, never its offsets; every occurrence still yields its span.
+    # Both entry count and key length are bounded. Larger phrases are checked
+    # uncached, so arbitrary source text cannot inflate retained cache memory.
+    cached_digest = functools.lru_cache(maxsize=8192)(matching_digest)
     raw_words = [(word, m.start(), m.end()) for m in re.finditer(r"(?:[^\W_]|[\u0300-\u036f\u1ab0-\u1aff\u1dc0-\u1dff\u20d0-\u20ff\ufe20-\ufe2f])+", text)
                  for word in tokens(m[0])]
-    views = [raw_words]
-    for value, positions in _text_views(text):
-        words = [(word, positions[m.start()][0], positions[m.end() - 1][1])
-                 for m in re.finditer(r"(?:[^\W_]|[\u0300-\u036f\u1ab0-\u1aff\u1dc0-\u1dff\u20d0-\u20ff\ufe20-\ufe2f])+", value) for word in tokens(m[0])]
-        views.append(words)
-    for words in views:
+
+    def represented_words():
+        for value, positions in _text_views(text):
+            yield [(word, positions[m.start()][0], positions[m.end() - 1][1])
+                   for m in re.finditer(r"(?:[^\W_]|[\u0300-\u036f\u1ab0-\u1aff\u1dc0-\u1dff\u20d0-\u20ff\ufe20-\ufe2f])+", value) for word in tokens(m[0])]
+
+    for words in itertools.chain([raw_words], represented_words()):
         for start, (_, begin, _) in enumerate(words):
             phrase = ""
             for word, _, end in words[start:start + corpus["max_tokens"]]:
                 phrase += word
-                digest = hashlib.sha256((corpus["salt"] + "\0" + phrase).encode()).hexdigest()
-                if digest in banned:
+                digest = cached_digest(phrase) if len(phrase) <= 1024 else matching_digest(phrase)
+                if digest is not None:
                     found.add((begin, end, digest))
     return sorted(found, key=lambda row: (row[0], -row[1]))
 
