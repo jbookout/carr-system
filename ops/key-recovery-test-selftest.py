@@ -244,10 +244,37 @@ def assert_no_leak(proc_or_output, secret: str, label: str) -> None:
           secret not in err)
 
 
+def interruptible_child(command: list[str], env: dict) -> subprocess.Popen:
+    # CI's background shell can pass SIG_IGN through Python and exec into zsh.
+    # A new session changes the process group, not that inherited disposition;
+    # zsh then cannot install the Ctrl-C trap this fixture is meant to exercise.
+    # Spawn with the terminal's default disposition and restore this single-
+    # threaded harness immediately, including when process creation fails.
+    previous = signal.signal(signal.SIGINT, signal.SIG_DFL)
+    try:
+        return subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, env=env, cwd=REPO, start_new_session=True)
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
 def tier1_portable() -> None:
     print("\nTIER 1a — portable checks that need no external tool")
     check("the script exists and is executable",
           os.access(SCRIPT, os.X_OK), SCRIPT)
+    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        probe = interruptible_child([
+            sys.executable, "-c",
+            "import signal; print(signal.getsignal(signal.SIGINT) == signal.SIG_IGN)",
+        ], os.environ.copy())
+        out, err = probe.communicate(timeout=10)
+        check("interrupt child handles SIGINT even when the CI parent ignores it",
+              probe.returncode == 0 and out.strip() == "False", out + err)
+        check("interrupt child launch preserves the parent's signal disposition",
+              signal.getsignal(signal.SIGINT) == signal.SIG_IGN)
+    finally:
+        signal.signal(signal.SIGINT, previous)
 
 
 def tier1_age(workdir: str) -> None:
@@ -393,8 +420,7 @@ def tier1_age(workdir: str) -> None:
         # under load: it could fire before the script reached the pause.
         "CARR_KEY_RECOVERY_TEST_SELFTEST_READY_FILE": ready_file,
     })
-    proc2 = subprocess.Popen([SCRIPT], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              text=True, env=env, cwd=REPO, start_new_session=True)
+    proc2 = interruptible_child([SCRIPT], env)
     # WAIT FOR THE READY MARKER, NOT FOR THE CLOCK. Poll up to 90s for the
     # script to arrive at its pause; under heavy load startup can take far
     # longer than any fixed sleep, and signalling early makes THIS suite red
