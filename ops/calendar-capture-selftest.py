@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -372,17 +373,42 @@ check("failed reader cannot write from a stale dump", p.returncode == 1 and "log
 
 # Regression 5: a second capture must not complete the paused first reader.
 root, stub = fixture(matcher_json=json.dumps(exact_only))
-(stub / "open").write_text("#!/bin/sh\nexit 0\n")
+reader_started = root / "out/reader-started"
+reader_release = root / "out/reader-release"
+(stub / "open").write_text(
+    "#!/usr/bin/env python3\nimport os,sys,time\nfrom pathlib import Path\n"
+    "if os.environ.get('CALCAP_TEST_PAUSE_READER') == '1':\n"
+    f" Path({str(reader_started)!r}).touch()\n"
+    " deadline = time.monotonic() + 10\n"
+    f" while not Path({str(reader_release)!r}).exists():\n"
+    "  if time.monotonic() >= deadline: sys.exit(1)\n"
+    "  time.sleep(0.01)\n"
+    "else:\n"
+    " target = Path(sys.argv[-1])\n"
+    " (target / 'calendar-attendees.json').write_text('{}')\n"
+    " with (target / 'calendar-access.log').open('a') as log: log.write('exit=0\\n')\n")
 env = dict(os.environ, CARR_REPO=str(root), PATH=f"{stub}:{os.environ['PATH']}",
-           CARR_CALENDAR_CAPTURE_WAIT_SECONDS="3")
-a = subprocess.Popen(["sh", str(SCRIPT), "--dry-run"], env=env,
-                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-import time
-time.sleep(0.4)
-(stub / "open").write_text("#!/bin/sh\nfor target do :; done\nmkdir -p \"$target\"\necho '{}' > \"$target/calendar-attendees.json\"\necho exit=0 >> \"$target/calendar-access.log\"\n")
-b = run(root, stub)
-aout, aerr = a.communicate(timeout=10)
-check("concurrent dry/live capture cannot acknowledge another read", a.returncode == 1 and b.returncode != 0 and "source=eventkit" not in aout)
+           CARR_CALENDAR_CAPTURE_WAIT_SECONDS="3", CALCAP_TEST_PAUSE_READER="1")
+# Model a slow process start so a wall-clock guess cannot establish ordering.
+a = subprocess.Popen([
+    sys.executable, "-c",
+    "import os,sys,time; time.sleep(1); os.execvp('sh',['sh',*sys.argv[1:]])",
+    str(SCRIPT), "--dry-run",
+], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+try:
+    # The bundle launch follows lock acquisition. Hold it there so scheduling
+    # cannot let the first capture finish before the competing capture starts.
+    deadline = time.monotonic() + 10
+    while not reader_started.exists() and a.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert reader_started.exists(), "first capture never reached the paused reader"
+    b = run(root, stub, extra_env={"CALCAP_TEST_PAUSE_READER": "0"})
+finally:
+    reader_release.touch()
+    aout, aerr = a.communicate(timeout=10)
+check("concurrent dry/live capture cannot acknowledge another read",
+      a.returncode == 1 and b.returncode == 75
+      and "another capture is still reading" in b.stderr and "source=eventkit" not in aout)
 
 # A timed-out reader completes during the next invocation. Its private exit/dump
 # must never promote the next reader, which has not completed at all.
