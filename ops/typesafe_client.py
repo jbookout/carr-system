@@ -172,7 +172,9 @@ class TypeSafeError(RuntimeError):
 class JevCallRefused(TypeSafeError):
     """A paid call this client declined before any transport ran.
 
-    `code` is one of REFUSAL_CODES. A refusal is never billable, so it is
+    `code` is one of REFUSAL_CODES. vendor_spend_unknown declines only the
+    retry: the Worker attempt it follows is receipted separately and keeps
+    its reservation. A refusal is never billable, so it is
     excluded from the daily-cap seed. `resets_at` is the UTC instant a budget
     refusal lifts (None for policy refusals, which do not lift on a clock).
     """
@@ -196,7 +198,10 @@ JEV_CALL_SITES_PATH = os.path.join(REPO, "ops", "config", "jev-call-sites.v1.jso
 BUDGET_REFUSALS = ("hourly_paid_call_cap", "site_hourly_budget", "site_daily_budget")
 POLICY_REFUSALS = ("fixture_offline", "unregistered_caller", "unattributed_call", "unattended_worker_off",
                    "call_site_registry_invalid")
-REFUSAL_CODES = ("daily_paid_call_cap",) + BUDGET_REFUSALS + POLICY_REFUSALS
+# Declined because of what the vendor already said: its account is out of
+# credit (HTTP 402), or a Worker attempt may already have been billed.
+VENDOR_REFUSALS = ("vendor_credit_exhausted", "vendor_spend_unknown")
+REFUSAL_CODES = ("daily_paid_call_cap",) + BUDGET_REFUSALS + POLICY_REFUSALS + VENDOR_REFUSALS
 ATTRIBUTIONS = ("session", "session_or_job")
 UNATTENDED_POLICIES = ("off", "allowed")
 _SITE_FIELDS = {"caller", "trigger", "runs_in", "attribution", "unattended",
@@ -575,11 +580,31 @@ def _server_error_category(stderr):
     return "server_call_failed"
 
 
+def _worker_upstream(stderr):
+    """(vendor HTTP status, reason) from local-verb's jev_upstream_failed
+    refusal, else (None, None). Only an integer status and a short snake_case
+    reason are kept; the vendor body the Worker quotes is never read."""
+    text = stderr or ""
+    start = text.find("TOOL ERROR ")
+    if start < 0:
+        return None, None
+    try:
+        payload, _ = json.JSONDecoder().raw_decode(text, start + len("TOOL ERROR "))
+    except ValueError:
+        return None, None
+    if not isinstance(payload, dict) or payload.get("error") != "jev_upstream_failed":
+        return None, None
+    status, reason = payload.get("status"), payload.get("reason")
+    return (status if type(status) is int and 100 <= status <= 599 else None,
+            reason if isinstance(reason, str) and re.fullmatch(r"[a-z_]{1,40}", reason) else None)
+
+
 def server_ask(state, questions, *, model, facets, purpose, session_id, timeout,
-               transport_mode, runner=None):
+               transport_mode, runner=None, upstream=None):
     """Ask the Worker's ask-jev verb. Returns (result, None) on success, where
     result is {"model", "answers", "usage", "server_receipt": {...}}, or
-    (None, <category>) on any failure. Never raises."""
+    (None, <category>) on any failure. Never raises. When the Worker's own
+    vendor call failed, a passed `upstream` dict gets its status and reason."""
     script = _local_verb_script()
     node = _node_binary()
     if runner is None and (script is None or node is None):
@@ -606,7 +631,10 @@ def server_ask(state, questions, *, model, facets, purpose, session_id, timeout,
     except Exception:
         return None, "server_call_failed"
     if proc.returncode != 0:
-        return None, _server_error_category(proc.stderr)
+        category = _server_error_category(proc.stderr)
+        if category == "vendor_failed_at_worker" and upstream is not None:
+            upstream["status"], upstream["reason"] = _worker_upstream(proc.stderr)
+        return None, category
     try:
         out = json.loads(proc.stdout)
     except ValueError:
@@ -624,6 +652,39 @@ def server_ask(state, questions, *, model, facets, purpose, session_id, timeout,
             "receipt_id", "recorded_at", "purpose", "session_id",
             "state_sha256", "prompt_sha256")},
     }, None
+
+
+# Mirrors the Worker's validateAskJevArgs (MAX_QUESTIONS, JEV_QUESTION_TYPES in
+# mcp-server/src/jev-call-receipt.js) plus the builders' own option floors, so
+# the direct route refuses what the Worker would, before any spend.
+MAX_QUESTIONS = 64
+
+
+def malformed_request(state, questions):
+    """Why this request cannot get a usable answer, or None when it can."""
+    if not isinstance(state, (str, dict)):
+        return "state must be a string or a mapping"
+    if len(questions) > MAX_QUESTIONS:
+        return f"{len(questions)} questions, over the {MAX_QUESTIONS} one request holds"
+    for key, question in questions.items():
+        if not isinstance(key, str) or not key:
+            return "question ids must be non-empty strings"
+        if not isinstance(question, dict):
+            return f"question {key!r} is not a mapping"
+        kind = question.get("type")
+        if kind not in ("noul", "choice", "score"):
+            return f"question {key!r} has unknown type {kind!r}"
+        instructions = question.get("instructions")
+        if not isinstance(instructions, str) or not instructions.strip():
+            return f"question {key!r} has no instructions"
+        criteria = question.get("criteria")
+        if kind == "noul" and criteria is not None and not isinstance(criteria, dict):
+            return f"noul {key!r} criteria must map true/false to text"
+        if kind == "choice" and (not isinstance(criteria, dict) or len(criteria) < 2):
+            return f"choice {key!r} needs at least two options"
+        if kind == "score" and (not isinstance(criteria, list) or len(criteria) < 2):
+            return f"score {key!r} needs at least two levels"
+    return None
 
 
 def usable_judgment(result, questions):
@@ -804,7 +865,11 @@ def _append_call_receipt(questions, facets, result, log_path, *, caller=None,
             "input_tokens": usage.get("input_tokens") if usage else None,
             "output_tokens": usage.get("output_tokens") if usage else None,
             "http_status": answered.get("http_status"),
-            "schema_valid": answered.get("schema_valid") is True,
+            # None when no answer came back to validate (a refusal, a 402, a
+            # network fault): those are transport failures, not bad answers.
+            "schema_valid": (answered["schema_valid"] if type(answered.get("schema_valid")) is bool
+                             else None),
+            "upstream_reason": answered.get("upstream_reason"),
             "usable": usable,
             "ok": bool(ok and usable and not cache_hit),
             "cache_hit": cache_hit,
@@ -1222,25 +1287,62 @@ def _record_refusal(questions, facets, caller, question_kind, prompt_sha256, cod
 # long; while open, a cache miss goes straight to the direct route.
 WORKER_BREAKER_SECONDS = 15 * 60
 
+# CREDIT HOLD. 2026-09-28..10-03: TypeSafe answered HTTP 402 (no API credit)
+# to 16,927 calls across two windows of 22h and 18h, because nothing stopped
+# the next call after the first refusal. Every one was logged as an unusable
+# answer and reserved a daily-cap slot. One 402 now holds every paid route
+# for this long; cache hits are still served, and when it lapses the next
+# call is the probe that finds out whether credit is back.
+CREDIT_HOLD_SECONDS = 5 * 60
 
-def _worker_breaker_open():
+
+def _hold_open(table):
+    """Whether a timed hold (worker_breaker, credit_hold) is in force. Fails open."""
     try:
         with closing(sqlite3.connect(_cap_db_path(), timeout=1.0)) as db:
-            db.execute("CREATE TABLE IF NOT EXISTS worker_breaker (id INTEGER PRIMARY KEY, until REAL NOT NULL)")
-            row = db.execute("SELECT until FROM worker_breaker WHERE id=1").fetchone()
+            db.execute(f"CREATE TABLE IF NOT EXISTS {table} (id INTEGER PRIMARY KEY, until REAL NOT NULL)")
+            row = db.execute(f"SELECT until FROM {table} WHERE id=1").fetchone()
     except (OSError, sqlite3.Error):
         return False
     return bool(row) and row[0] > time.time()
 
 
-def _trip_worker_breaker():
+def _open_hold(table, seconds):
     try:
         with closing(sqlite3.connect(_cap_db_path(), timeout=1.0)) as db, db:
-            db.execute("CREATE TABLE IF NOT EXISTS worker_breaker (id INTEGER PRIMARY KEY, until REAL NOT NULL)")
-            db.execute("INSERT OR REPLACE INTO worker_breaker VALUES (1, ?)",
-                       (time.time() + WORKER_BREAKER_SECONDS,))
+            db.execute(f"CREATE TABLE IF NOT EXISTS {table} (id INTEGER PRIMARY KEY, until REAL NOT NULL)")
+            db.execute(f"INSERT OR REPLACE INTO {table} VALUES (1, ?)", (time.time() + seconds,))
     except (OSError, sqlite3.Error):
         pass
+
+
+REJECTED_REQUEST_STATUSES = (400, 413, 422)
+
+
+def _after_worker_vendor_failure(status, reason, caller):
+    """Decide the direct retry from the vendor status the Worker saw.
+
+    1,405 vendor_failed_at_worker rows (2026-10-03..04) were each followed by
+    a second paid direct attempt, whatever the Worker had seen. Now:
+      402               -> hold for credit, refuse; the direct key is the same account
+      400/413/422       -> refuse; the request itself was rejected and would be again
+      timeout, or a 2xx
+      with a bad body   -> refuse vendor_spend_unknown; that attempt may be billed
+      429/5xx/network/
+      unknown           -> trip the breaker and allow the one direct retry
+    """
+    if status == 402:
+        _open_hold("credit_hold", CREDIT_HOLD_SECONDS)
+        raise TypeSafeError("TypeSafe returned HTTP 402 at the Worker: no API credit; "
+                            "paid calls are held") from None
+    if status in REJECTED_REQUEST_STATUSES:
+        raise TypeSafeError(f"TypeSafe returned HTTP {status} at the Worker: the request was "
+                            "rejected and is not resent") from None
+    _open_hold("worker_breaker", WORKER_BREAKER_SECONDS)
+    if reason == "timeout" or (status is not None and 200 <= status < 300):
+        raise JevCallRefused("Jev unavailable: vendor_spend_unknown (the Worker's vendor attempt "
+                             f"may have been billed: {reason or status}); not retried direct",
+                             code="vendor_spend_unknown", site=caller)
 
 
 def _admit_paid_call(caller, session, questions, facets, question_kind, prompt_sha256):
@@ -1293,6 +1395,11 @@ def _reserve_paid_call(questions, facets, caller, question_kind, prompt_sha256,
     budget. 2026-10-04's 300-475 calls an hour overnight ran under an "hourly
     cap" that #1502's own review had removed again; this one is the counter.
     """
+    if _hold_open("credit_hold"):
+        _record_refusal(questions, facets, caller, question_kind, prompt_sha256,
+                        "vendor_credit_exhausted", _session_id())
+        raise JevCallRefused("Jev unavailable: vendor_credit_exhausted (TypeSafe answered HTTP 402; "
+                             "Joe must add API credits)", code="vendor_credit_exhausted", site=caller)
     log_path = JEV_DAILY_CAP_LOG
     cap = _daily_cap_limit()
     now = datetime.now(timezone.utc)
@@ -1559,6 +1666,9 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
     """
     if not isinstance(questions, dict) or not questions:
         raise TypeSafeError("ask needs a non-empty map of questions")
+    problem = malformed_request(state, questions)
+    if problem:
+        raise TypeSafeError(f"malformed Jev request, nothing sent: {problem}")
 
     payload = {"state": state, "model": model, "questions": questions}
     body = json.dumps(payload).encode("utf-8")
@@ -1599,7 +1709,7 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
             timeout=server_deadline - time.monotonic(), transport_mode="cache_only", runner=server_runner)
         if served is not None and served.get("cache_hit") is not True:
             raise TypeSafeError("Jev unavailable: Worker cache-only contract violated")
-        if served is None and server_error == "cache_miss" and _worker_breaker_open():
+        if served is None and server_error == "cache_miss" and _hold_open("worker_breaker"):
             # The Worker's own vendor call has been failing: go direct with ONE
             # reservation instead of paying a doomed Worker attempt first.
             server_error = "worker_breaker_open"
@@ -1615,16 +1725,21 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
                 remaining = server_deadline - time.monotonic()
                 if remaining <= 0:
                     raise TypeSafeError("deadline passed during daily cap accounting")
+                upstream = {}
                 served, server_error = server_ask(
                     state, questions, model=model, facets=facets, purpose=purpose,
                     session_id=dispatch_binding[0] or "unbound",
-                    timeout=remaining, transport_mode="paid_once", runner=server_runner)
+                    timeout=remaining, transport_mode="paid_once", runner=server_runner,
+                    upstream=upstream)
                 if served is None:
-                    if server_error == "vendor_failed_at_worker":
-                        _trip_worker_breaker()
-                    _append_call_receipt(questions, facets, None, calls_log, dispatch_binding=dispatch_binding, caller=caller,
+                    status, reason = upstream.get("status"), upstream.get("reason")
+                    _append_call_receipt(questions, facets,
+                        {"http_status": status, "upstream_reason": reason}, calls_log,
+                        dispatch_binding=dispatch_binding, caller=caller,
                         question_kind=question_kind, prompt_sha256=prompt_sha256,
                         ok=False, error=server_error, server_error=server_error, session=session_id)
+                    if server_error == "vendor_failed_at_worker":
+                        _after_worker_vendor_failure(status, reason, caller)
                 elif served.get("cache_hit") is True:
                     raise TypeSafeError("Jev unavailable: Worker paid-once contract violated")
         if served is not None:
@@ -1749,9 +1864,12 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
             return result
         except urllib.error.HTTPError as err:
             if opener is None:
-                _append_call_receipt(questions, facets, None, calls_log, dispatch_binding=dispatch_binding, caller=caller,
+                _append_call_receipt(questions, facets, {"http_status": err.code}, calls_log,
+                                     dispatch_binding=dispatch_binding, caller=caller,
                                      question_kind=question_kind, prompt_sha256=prompt_sha256,
                                      ok=False, error=f"HTTP {err.code}")
+                if err.code == 402:
+                    _open_hold("credit_hold", CREDIT_HOLD_SECONDS)
             # 429 is documented as expected under load, and the service's own
             # limits "can change without notice". Honour retry-after when it is
             # sent; fall back to a short backoff when it is not.

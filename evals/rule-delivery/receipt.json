@@ -2,11 +2,11 @@
   "adapter": {
     "adapter_id": "rule-delivery-production-functions",
     "adapter_version": "1",
-    "configuration_fingerprint": "sha256:097fe58946cd1680c2539e6ce71d80a4133e209160adfdecbf6ad3a6b039a8cd",
+    "configuration_fingerprint": "sha256:1ee90d02692c11a162e9f129a67160d0c3af419ff00defd1eab110f0b075c3af",
     "harness_id": "evals/rule-delivery/run_eval.py",
     "harness_version": "e7662e16e2007982b67031209807aac4340b2135c4c8000a947dbfd212477a6e",
     "model_id": "deterministic-no-model",
-    "native_session_ref": "01a104c4-0b26-7453-90d7-aae39dad146b",
+    "native_session_ref": "bc8be775-4cce-4333-b689-7ef4190508d5",
     "provider_id": "none",
     "surface": "offline_programmatic"
   },
@@ -167,7 +167,7 @@
       "ops/rule_delivery_eval.py": "7c846223ccc026f4f16a51dca0f695986cefadfc5f412c23adf73f57d08d022a",
       "ops/rule_trigger_compile.py": "356aed19e2c4fc0f90da04e2d0461bdedf5820e88c97c9f3a70fc88f3d43fcb1",
       "ops/rule_trigger_delivery.py": "64746e5fc5c65e2ff67a72dfb0217598964448283e1c7f7d0fb56dde0c3bc3f3",
-      "ops/typesafe_client.py": "4d09c1378d6f5544c595cd85c80987f1c35beb1ddf296a583faa98ab5276ec9d",
+      "ops/typesafe_client.py": "7ed3ddedd4a7ff68a8d5a1b5ddeba33cfd67d79db9351587ea060e1a1fe521d7",
       "tools/judge/interface.py": "2e0440cc85660f83f4456829006f3f00a956e414c4c72e8217ab1a22622f3ed2"
     },
     "expectations": {

@@ -2,11 +2,11 @@
  "adapter": {
   "adapter_id": "jev-judgments-admission-replay",
   "adapter_version": "1",
-  "configuration_fingerprint": "sha256:3794d926640b38f54b4504d2996a31cd30b882f9669f6a540125f31eda5e3381",
+  "configuration_fingerprint": "sha256:c6f6edc7dfcc9e3017f78307fb79fc0e74f1ad069558c9e7a4a72c3385dffda1",
   "harness_id": "evals/jev-judgments/run_eval.py",
   "harness_version": "327cfc98e87fd5bd99bfde86b05b8aadb2f25c94b933e22c94c6ed8aaf218d26",
   "model_id": "deterministic-no-model",
-  "native_session_ref": "9c7378ff-74e6-4e2a-ae9b-31d35ab1c08a",
+  "native_session_ref": "bc8be775-4cce-4333-b689-7ef4190508d5",
   "provider_id": "none",
   "surface": "offline_programmatic"
  },
@@ -95,7 +95,7 @@
    "mcp-server/src/judge-providers.v1.json": "48b8ca8b4defec4b82fd36f708498c707eab5f861ae0046f857ae06ae8d981ab",
    "ops/config/jev-call-sites.v1.json": "805ce9f514cc9bbb9f354389af038f1bde05674e90edf9dadf4a6228cac36ad8",
    "ops/config/jev-cost-guard.v1.json": "f8da9d20d6019c5bd9528683c61594dca09f07488d66ce998c53ae8bc3c24089",
-   "ops/typesafe_client.py": "4d09c1378d6f5544c595cd85c80987f1c35beb1ddf296a583faa98ab5276ec9d",
+   "ops/typesafe_client.py": "7ed3ddedd4a7ff68a8d5a1b5ddeba33cfd67d79db9351587ea060e1a1fe521d7",
    "tools/judge/interface.py": "2e0440cc85660f83f4456829006f3f00a956e414c4c72e8217ab1a22622f3ed2"
   },
   "expectations": {

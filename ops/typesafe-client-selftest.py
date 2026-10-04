@@ -370,6 +370,240 @@ class WorkerDailyCapTests(unittest.TestCase):
         self.assertEqual(sorted(alert["threshold"] for alert in alerts), [50, 80, 100])
 
 
+def vendor_refusal(status):
+    def opener(request, timeout=None):
+        raise urllib.error.HTTPError("https://fixture.invalid", status, "refused",
+                                     {}, io.BytesIO(b'{"error":"fixture"}'))
+    return opener
+
+
+def worker_vendor_failure(status, reason):
+    payload = json.dumps({"error": "jev_upstream_failed", "status": status, "reason": reason},
+                         indent=2)
+    return f"local-verb identity -> fixture\nTOOL ERROR {payload}\n"
+
+
+class UnusableResponseTests(unittest.TestCase):
+    """Each failure class behind 2026-09-28..10-04's 30% unusable rate.
+
+    Replayed from out/jev-calls.jsonl: 16,927 non-cached calls came back HTTP
+    402 (credits exhausted) in two windows of 22h and 18h. The client logged
+    each as schema_valid=false and kept sending. The 1,405
+    vendor_failed_at_worker rows were the Worker's single paid_once vendor
+    attempt failing (the vendor was throttling: 429), each then paid again
+    direct. Zero rows ever had HTTP 200 with an answer that failed validation.
+    """
+    ask = DailyCapTests.ask
+    worker = WorkerDailyCapTests.worker
+    count = WorkerDailyCapTests.count
+
+    def setUp(self):
+        DailyCapTests.setUp(self)
+        client.JEV_COST_CONFIG["daily_paid_call_cap"] = 1000
+        self.options["cache_ttl_seconds"] = 60
+
+    def rows(self):
+        return [json.loads(line) for line in self.log.read_text().splitlines()]
+
+    def use_worker(self, stderr=None):
+        WorkerDailyCapTests.setUp(self)
+        client.JEV_COST_CONFIG["daily_paid_call_cap"] = 1000
+        if stderr is not None:
+            def failing(argv, **kwargs):
+                mode = json.loads(argv[3]).get("transport_mode")
+                self.worker_calls.append(mode)
+                if mode == "cache_only":
+                    return subprocess.CompletedProcess(argv, 1, "", '{"error":"jev_cache_miss"}')
+                return subprocess.CompletedProcess(argv, 1, "", stderr)
+            self.options["server_runner"] = failing
+
+    # -- Class 1: HTTP 402, logged as a schema failure and never stopped ----
+
+    def test_vendor_402_is_logged_as_a_refusal_with_its_status_not_a_schema_failure(self):
+        with patch.object(client.urllib.request, "urlopen", vendor_refusal(402)):
+            with self.assertRaisesRegex(client.TypeSafeError, "HTTP 402"):
+                self.ask("credit gone")
+        [row] = self.rows()
+        self.assertEqual(row["http_status"], 402)
+        self.assertIsNone(row["schema_valid"], "no answer came back, so nothing was validated")
+        self.assertIsNone(row["usage"])
+        self.assertFalse(row["usable"])
+
+    def test_vendor_402_stops_further_requests_until_the_credit_hold_lapses(self):
+        sent = []
+        def refused(request, timeout=None):
+            sent.append(1)
+            return vendor_refusal(402)(request, timeout)
+        with patch.object(client.urllib.request, "urlopen", refused):
+            with self.assertRaisesRegex(client.TypeSafeError, "HTTP 402"):
+                self.ask("first")
+            for i in range(50):
+                with self.assertRaises(client.JevCallRefused) as caught:
+                    self.ask(f"burst {i}")
+                self.assertEqual(caught.exception.code, "vendor_credit_exhausted")
+        self.assertEqual(len(sent), 1, "one 402 is enough to know the account is empty")
+        refusals = [r for r in self.rows() if r.get("error") == "vendor_credit_exhausted"]
+        self.assertEqual(len(refusals), 1, "the hold is logged once per hour, not per call")
+        self.assertEqual(client._logged_attempts(str(self.log), "2026-10-02"), 1,
+                         "refusals never count toward the daily cap")
+        # The hold lapses on a clock; then exactly one probe goes out.
+        client._open_hold("credit_hold", 0)
+        self.ask("credit restored")
+        self.assertEqual(len(self.requests), 1)
+
+    def test_cached_answers_are_still_served_during_a_credit_hold(self):
+        self.ask("answered earlier")
+        with patch.object(client.urllib.request, "urlopen", vendor_refusal(402)):
+            with self.assertRaises(client.TypeSafeError):
+                self.ask("credit gone")
+        self.assertTrue(self.ask("answered earlier")["cache_hit"])
+
+    # -- Class 2: vendor_failed_at_worker, then a second paid direct attempt -
+
+    def test_worker_402_refuses_without_a_second_paid_attempt(self):
+        self.use_worker(worker_vendor_failure(402, "http_status"))
+        with self.assertRaisesRegex(client.TypeSafeError, "HTTP 402"):
+            self.ask("worker credit gone")
+        self.assertEqual(self.requests, [], "no direct call after a 402")
+        self.assertEqual(self.count(), 1)
+        [row] = self.rows()
+        self.assertEqual(row["http_status"], 402)
+        self.assertEqual(row["server_error"], "vendor_failed_at_worker")
+        with self.assertRaises(client.JevCallRefused):
+            self.ask("next call")
+        self.assertEqual(self.worker_calls.count("paid_once"), 1)
+
+    def test_worker_throttle_gets_one_bounded_direct_retry(self):
+        self.use_worker(worker_vendor_failure(429, "http_status"))
+        result = self.ask("throttled at the worker")
+        self.assertEqual(result["answers"]["q"]["noul"], 0.91)
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(self.count(), 2, "the Worker attempt and the one retry")
+        worker_row, direct_row = self.rows()
+        self.assertEqual(worker_row["http_status"], 429)
+        self.assertEqual(worker_row["upstream_reason"], "http_status")
+        self.assertTrue(direct_row["usable"])
+
+    def test_worker_timeout_is_not_paid_for_twice(self):
+        # The vendor may have answered and billed after the Worker gave up.
+        self.use_worker(worker_vendor_failure(None, "timeout"))
+        with self.assertRaises(client.JevCallRefused) as caught:
+            self.ask("slow at the worker")
+        self.assertEqual(caught.exception.code, "vendor_spend_unknown")
+        self.assertEqual(self.requests, [])
+        self.assertEqual(self.count(), 1)
+        [row] = self.rows()
+        self.assertEqual(row["upstream_reason"], "timeout")
+
+    def test_worker_answer_with_bad_shape_is_not_paid_for_twice(self):
+        self.use_worker(worker_vendor_failure(200, "invalid_answer_shape"))
+        with self.assertRaises(client.JevCallRefused):
+            self.ask("garbled at the worker")
+        self.assertEqual(self.requests, [])
+
+    def test_request_the_vendor_rejected_at_the_worker_is_not_resent(self):
+        for status in (400, 413, 422):
+            with self.subTest(status=status):
+                self.use_worker(worker_vendor_failure(status, "http_status"))
+                with self.assertRaisesRegex(client.TypeSafeError, f"HTTP {status}"):
+                    self.ask(f"rejected {status}")
+                self.assertEqual(self.requests, [])
+
+    def test_worker_error_detail_is_parsed_from_local_verb_stderr(self):
+        self.assertEqual(client._worker_upstream(worker_vendor_failure(429, "http_status")),
+                         (429, "http_status"))
+        self.assertEqual(client._worker_upstream(worker_vendor_failure(None, "network")),
+                         (None, "network"))
+        self.assertEqual(client._worker_upstream("could not reach the deployed Worker"),
+                         (None, None))
+        self.assertEqual(client._worker_upstream('TOOL ERROR {"error":"jev_upstream_failed",'
+                                                 '"status":"500","reason":"http_status"}'),
+                         (None, "http_status"), "a non-integer status is not trusted")
+
+    # -- Class 3: malformed requests were sent and paid for -----------------
+
+    def test_malformed_requests_are_refused_before_any_transport(self):
+        self.use_worker()
+        cases = {
+            "unknown type": {"q": {"type": "rank", "instructions": "x"}},
+            "empty instructions": {"q": {"type": "noul", "instructions": "  "}},
+            "one-option choice": {"q": {"type": "choice", "instructions": "x", "criteria": {"a": "A"}}},
+            "choice without options": {"q": {"type": "choice", "instructions": "x"}},
+            "one-level score": {"q": {"type": "score", "instructions": "x", "criteria": ["low"]}},
+            "noul criteria not a map": {"q": {"type": "noul", "instructions": "x", "criteria": ["yes"]}},
+            "too many questions": {f"q{i}": client.noul("x") for i in range(65)},
+            "question not a map": {"q": "is it?"},
+        }
+        for name, questions in cases.items():
+            with self.subTest(name):
+                with self.assertRaisesRegex(client.TypeSafeError, "malformed"):
+                    client.ask("state", questions, **self.options)
+        with self.assertRaisesRegex(client.TypeSafeError, "malformed"):
+            client.ask(["not", "a", "string", "or", "map"], {"q": client.noul("x")}, **self.options)
+        self.assertEqual(self.worker_calls, [])
+        self.assertEqual(self.requests, [])
+        self.assertFalse(self.log.exists())
+
+    # -- The validator is not the cause, and stays strict -------------------
+
+    def test_every_valid_answer_kind_validates(self):
+        questions = {"n": client.noul("x", true="yes", false="no"),
+                     "c": client.choice("x", {"a": "A", "b": "B"}),
+                     "s": client.score("x", ["low", "mid", "high"])}
+        answer = {"model": "jev-1.13.0", "usage": {"input_tokens": 9, "output_tokens": 3},
+                  "answers": {"n": {"type": "noul", "noul": 0.0},
+                              "c": {"type": "choice", "choice": "b", "confidence": 1},
+                              "s": {"type": "score", "score": 2, "confidence": 0.4}}}
+        for keys in (("n",), ("c",), ("s",), ("n", "c"), ("n", "c", "s")):
+            with self.subTest(keys=keys):
+                subset = {k: questions[k] for k in keys}
+                self.assertTrue(client.usable_judgment(
+                    {**answer, "answers": {k: answer["answers"][k] for k in keys}}, subset))
+
+    def test_real_bad_answers_still_fail_validation(self):
+        questions = {"c": client.choice("x", {"a": "A", "b": "B"})}
+        base = {"model": "jev-1.13.0", "usage": {"input_tokens": 1, "output_tokens": 1}}
+        for bad in ({"type": "choice", "choice": "z", "confidence": 0.9},
+                    {"type": "choice", "choice": "a"},
+                    {"type": "noul", "noul": 0.5}):
+            with self.subTest(bad=bad):
+                self.assertFalse(client.usable_judgment({**base, "answers": {"c": bad}}, questions))
+
+    # -- Replay of the logged request shapes --------------------------------
+
+    def test_replayed_402_window_sends_one_request_instead_of_every_call(self):
+        """The 2026-10-02 window in miniature: a credit outage across mixed
+        question kinds, then credit restored. Before this fix every call in
+        the window was sent and came back 402, so usable/sent was 0 inside it."""
+        shapes = [{"q": client.noul("x")},
+                  {"q": client.choice("x", {"a": "A", "b": "B"})},
+                  {"q": client.noul("x"), "r": client.choice("x", {"a": "A", "b": "B"})}]
+        sent = []
+        def outage(request, timeout=None):
+            sent.append(1)
+            raise urllib.error.HTTPError("https://fixture.invalid", 402, "refused", {}, io.BytesIO(b""))
+        with patch.object(client.urllib.request, "urlopen", outage):
+            for i in range(300):
+                with self.assertRaises(client.TypeSafeError):
+                    client.ask(f"window {i}", shapes[i % 3], **self.options)
+        self.assertEqual(len(sent), 1)
+        client._open_hold("credit_hold", 0)
+        by_kind = {"noul": {"type": "noul", "noul": 0.7},
+                   "choice": {"type": "choice", "choice": "a", "confidence": 0.8}}
+        def restored(request, timeout=None):
+            asked = json.loads(request.data)["questions"]
+            sent.append(1)
+            return FakeResponse(json.dumps({**ANSWER, "answers": {
+                key: by_kind[question["type"]] for key, question in asked.items()}}).encode())
+        with patch.object(client.urllib.request, "urlopen", restored):
+            for i in range(30):
+                client.ask(f"after {i}", shapes[i % 3], **self.options)
+        paid = [r for r in self.rows() if not r.get("cache_hit")
+                and r.get("error") not in client.REFUSAL_CODES]
+        self.assertEqual(len(paid), 31)
+        self.assertEqual(sum(1 for r in paid if r["usable"]), 30)
+
+
 class DailyCapMailTests(unittest.TestCase):
     ask = DailyCapTests.ask
 
