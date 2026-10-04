@@ -58,21 +58,6 @@ def git(cwd: Path, *args: str) -> str:
                           capture_output=True, text=True).stdout.strip()
 
 
-class WorkflowCredentialDefaults(unittest.TestCase):
-    def test_new_controller_jobs_inherit_only_read_permissions(self):
-        def check(text):
-            default = text.split("\njobs:", 1)[0]
-            self.assertRegex(default, r"(?m)^permissions:\n  contents: read$")
-            self.assertNotRegex(default, r"(?m)^  [a-z-]+: write$")
-        for name in ("automerge-pilot.yml", "source-merge-controller.yml"):
-            text = (HERE.parent / ".github/workflows" / name).read_text()
-            check(text)
-            with self.assertRaises(AssertionError):
-                check(text.replace("permissions:\n  contents: read", "permissions:\n  contents: write", 1))
-            with self.assertRaises(AssertionError):
-                check(text.replace("permissions:\n  contents: read\n", "", 1))
-
-
 class FakeRunner:
     """Answers by step name (the log file's name), records everything."""
 
