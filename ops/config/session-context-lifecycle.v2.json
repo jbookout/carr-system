@@ -122,6 +122,7 @@
         "worker_starts": 3
       },
       "model_windows": {
+        "gpt-6.1-sol": 258400,
         "gpt-5.6-sol": 258400,
         "gpt-5.6-terra": 258400,
         "gpt-5.6-luna": 258400

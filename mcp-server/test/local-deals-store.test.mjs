@@ -35,25 +35,27 @@ test('Local Deals PostgreSQL caller and evidence regressions', { skip: !bin && '
     await c.connect();
     await c.query('create role carr_reader; create role carr_writer;');
     // Use the committed table definitions and caller views, without production data.
-    for (const name of ['actor', 'party', 'client', 'deal', 'deal_phase', 'deal_participant', 'next_action', 'deal_note', 'national_account_owner', 'deal_market_assignment', 'deal_review_item', 'deal_review_session', 'event', 'tool_call', 'deal_conflict']) {
+    for (const name of ['actor', 'party', 'client', 'deal', 'deal_phase', 'deal_participant', 'next_action', 'deal_note', 'national_account_owner', 'deal_market_assignment', 'deal_review_item', 'deal_review_session', 'event', 'tool_call', 'deal_conflict', 'critical_date', 'lease', 'activity', 'premises', 'negotiation_round', 'document', 'commission', 'capture_post_call_action', 'building', 'space', 'premises_space']) {
       const table = schema.match(new RegExp(`CREATE TABLE public\\.${name} \\([\\s\\S]*?\\n\\);`))?.[0];
       assert.ok(table, name);
       await c.query(table);
     }
     await c.query('alter table tool_call add primary key(idempotency_key);');
     await c.query("create view v_last_touch as select null::text subject_type, null::uuid subject_id, null::date last_touch where false;");
-    for (const name of ['v_client_account', 'v_deal_board', 'v_deal_room_board', 'v_deal_room_account', 'v_deal_room_event', 'v_deal_room_session']) {
+    for (const name of ['v_client_account', 'v_deal_board', 'v_deal_room_account', 'v_deal_room_board', 'v_deal_room_event', 'v_deal_room_session', 'v_deal_reconciliation_read', 'v_deal_room_note', 'v_deal_room_critical_date', 'v_deal_room_action', 'v_deal_room_activity', 'v_deal_room_participant', 'v_deal_room_premises', 'v_deal_room_negotiation', 'v_deal_room_document']) {
       const view = schema.match(new RegExp(`CREATE VIEW public\\.${name} AS[\\s\\S]*?;`))?.[0];
       assert.ok(view, name);
       await c.query(view);
       await c.query(`grant select on ${name} to carr_reader,carr_writer`);
     }
     await c.query("create view v_ref_index as select 'deal'::text subject_type, id subject_id from deal;");
+    await c.query("grant select on v_ref_index to carr_reader");
     await c.query("insert into actor(id,slug,display_name,kind,active) values($1,'joe','Synthetic Partner','human',true)", [actor.id]);
     for (const [slug, sort] of [['research', 1], ['negotiation', 2], ['legal', 3], ['closed', 4]]) {
       await c.query('insert into deal_phase(slug,label,sort) values($1,$1,$2)', [slug, sort]);
     }
     await c.query(readFileSync(path.join(root, 'migrations/0771_local_deal_board_evidence.sql'), 'utf8'));
+    await c.query(readFileSync(path.join(root, 'migrations/0783_deal_timeline_lease_read.sql'), 'utf8'));
     const fixture = async national => {
       await c.query("insert into party(id,kind,name,created_by,updated_by) values($1,'org','Synthetic Practice',$2,$2)", [id(2), actor.id]);
       await c.query('insert into client(id,party_id,created_by,updated_by) values($1,$2,$3,$3)', [id(3), id(2), actor.id]);
@@ -68,6 +70,130 @@ test('Local Deals PostgreSQL caller and evidence regressions', { skip: !bin && '
       await c.query('begin');
       try { await fn(); } finally { await c.query('rollback'); }
     };
+
+    await c.query(readFileSync(path.join(root, 'migrations/0782_deal_invoice_read_fields.sql'), 'utf8'));
+    const invoiceFields = ['invoiced_on', 'closed_on', 'lane', 'outcome'];
+    const readInvoiceDeals = async () => ({
+      'deal-board': await TOOLS['deal-board'].handler(c),
+      'deal-room-board': await TOOLS['deal-room-board'].handler(c, actor, {workspace: 'team'}),
+      'get-deal-room': await TOOLS['get-deal-room'].handler(c, actor, {deal: id(4)}),
+      'read-deal-reconciliation': await TOOLS['read-deal-reconciliation'].handler(c, actor, {deal: id(4)}),
+    });
+    const rowsOf = result => result.deals || [result];
+    const snapshotPath = path.join(root, 'mcp-server/test/fixtures/deal-invoice-reads-before.json');
+    for (const outcome of [null, 'won']) await t.test(
+      outcome ? 'invoice reads return null invoiced_on on a closed deal and preserve prior snapshots'
+        : 'invoice reads return four date and status fields and preserve prior snapshots',
+      async () => transaction(async () => {
+        await fixture(false);
+        await c.query("update deal set next_date='2026-10-03',phase=case when $1::text is null then 'research' else 'closed' end,outcome=$1,closed_on=case when $1::text is null then null else date '2026-10-01' end,lane='territory',won_value=120000 where id=$2", [outcome, id(4)]);
+        await c.query("insert into commission(id,deal_id,gross_amount,status,created_by,updated_by) values($1,$2,12000,'invoiced',$3,$3)", [id(7), id(4), actor.id]);
+        await c.query('set local role carr_reader');
+        const reads = await readInvoiceDeals();
+        const baseline = JSON.parse(readFileSync(snapshotPath, 'utf8'))[outcome || 'open'];
+        for (const [name, result] of Object.entries(reads)) {
+          assert.deepEqual(rowsOf(result).map(row => Object.fromEntries(invoiceFields.map(field => [field, row[field]]))), [{
+            invoiced_on: null, closed_on: outcome ? '2026-10-01' : null, lane: 'territory', outcome,
+          }], name);
+          const prior = structuredClone(result);
+          if (name === 'get-deal-room') {
+            assert.equal(prior.schema_version,'deal-timeline.v1');
+            assert.equal(prior.lease,null);
+            delete prior.schema_version;
+            delete prior.lease;
+          }
+          const oldRows = rowsOf(baseline[name]);
+          rowsOf(prior).forEach((row, index) => invoiceFields.forEach(field => {
+            if (!Object.hasOwn(oldRows[index], field)) delete row[field];
+          }));
+          assert.deepEqual(prior, baseline[name], `${name}: additive response only`);
+        }
+        await c.query('reset role');
+        assert.deepEqual((await c.query('select d.won_value::text, c.gross_amount::text from deal d join commission c on c.deal_id=d.id where d.id=$1', [id(4)])).rows, [{won_value: '120000.00', gross_amount: '12000.00'}], 'client benefit and commission stay separate');
+      }));
+
+    await t.test('reconciliation returns a populated invoice date and national lane after board removal', async () => transaction(async () => {
+      await fixture(false);
+      await c.query("update deal set phase='closed',outcome='won',closed_on='2026-10-01',invoiced_on='2026-10-02',lane='national' where id=$1", [id(4)]);
+      await c.query('set local role carr_reader');
+      const result = await TOOLS['read-deal-reconciliation'].handler(c, actor, {deal: id(4)});
+      assert.deepEqual(Object.fromEntries(invoiceFields.map(field => [field, result[field]])), {
+        invoiced_on: '2026-10-02', closed_on: '2026-10-01', lane: 'national', outcome: 'won',
+      });
+      assert.deepEqual((await TOOLS['deal-board'].handler(c)).deals, []);
+      assert.deepEqual((await TOOLS['deal-room-board'].handler(c, actor, {})).deals, []);
+    }));
+
+    await t.test('all invoice reads preserve national lane and separate client benefit from commission', async () => transaction(async () => {
+      await fixture(false);
+      await c.query("update deal set phase='closed',outcome='won',closed_on='2026-10-01',lane='national',won_value=120000 where id=$1", [id(4)]);
+      await c.query("insert into commission(id,deal_id,gross_amount,status,created_by,updated_by) values($1,$2,12000,'invoiced',$3,$3)", [id(7), id(4), actor.id]);
+      await c.query('set local role carr_reader');
+      for (const [name, result] of Object.entries(await readInvoiceDeals())) {
+        for (const row of rowsOf(result)) {
+          assert.equal(row.lane, 'national', name);
+          assert.equal(row.invoiced_on, null, name);
+          assert.equal(Object.hasOwn(row, 'won_value'), false, name);
+          assert.equal(Object.hasOwn(row, 'gross_amount'), false, name);
+          assert.equal(Object.values(row).some(value => [12000, 120000, '12000.00', '120000.00'].includes(value)), false, `${name}: no combined money field`);
+        }
+      }
+      await c.query('reset role');
+      assert.deepEqual((await c.query('select d.won_value::text, c.gross_amount::text from deal d join commission c on c.deal_id=d.id where d.id=$1', [id(4)])).rows, [{won_value: '120000.00', gross_amount: '12000.00'}]);
+    }));
+
+    for (const linked of [false, true]) await t.test(
+      linked ? 'find returns invoice fields in deals reached through the client link'
+        : 'find returns invoice fields in name-matched deals',
+      async () => transaction(async () => {
+        await fixture(false);
+        await c.query("update client set roster_ref='C-SYN-1' where id=$1", [id(3)]);
+        await c.query("update deal set phase='closed',outcome='won',closed_on='2026-10-01',lane='national' where id=$1", [id(4)]);
+        // Other find domains are empty synthetic adapters. Its deal SELECTs
+        // still execute on PostgreSQL with the reader's granted views.
+        const finder = {query: async (sql, args) => {
+          if (sql.includes('from v_deal_board')) return c.query(sql, args);
+          if (sql.includes("subject_type in ('lead','client','vendor')")) return {rows: [{
+            name: 'Synthetic Contact', ref: 'L-SYN-1', kind: 'lead', merged: false,
+          }]};
+          if (sql.includes('from v_lead_client_best')) return {rows: [{
+            lead_ref: 'L-SYN-1', client_ref: 'C-SYN-1', link_basis: 'conversion',
+          }]};
+          return {rows: []};
+        }};
+        for (const invoiced of [null, '2026-10-02']) {
+          await c.query('update deal set invoiced_on=$1 where id=$2', [invoiced, id(4)]);
+          await c.query('set local role carr_reader');
+          const result = await TOOLS.find.handler(finder, actor, {query: linked ? 'Synthetic Contact' : 'Synthetic Assignment'});
+          const rows = linked ? result.deals_via_link : result.deals;
+          assert.deepEqual(rows.map(row => Object.fromEntries(invoiceFields.map(field => [field, row[field]]))), [{
+            invoiced_on: invoiced, closed_on: '2026-10-01', lane: 'national', outcome: 'won',
+          }]);
+          assert.deepEqual(rows.map(row => Object.fromEntries(Object.entries(row).filter(([field]) => !invoiceFields.includes(field)))), [{
+            name: 'Synthetic Assignment', phase: 'closed', owner: null, client_ref: 'C-SYN-1',
+          }], 'existing search projection remains unchanged');
+          assert.deepEqual(linked ? result.deals : result.deals_via_link, [], 'name/link deduplication remains unchanged');
+          await c.query('reset role');
+        }
+      }));
+
+    await t.test('timeline reader returns exact current lease and excludes unverified history', async () => transaction(async () => {
+      await fixture(false);
+      await c.query("insert into lease(id,deal_id,status,executed_on,commencement_on,expiration_on,evidence_kind,evidence_ref,source,created_by) values($1,$2,'current','2026-10-01','2026-11-01','2031-10-31','executed_lease','Synthetic clause 3','Synthetic abstract',$3)", [id(21),id(4),actor.id]);
+      await c.query("insert into lease(id,deal_id,status,expiration_on,created_by) values($1,$2,'legacy_unverified','2040-01-01',$3)", [id(22),id(4),actor.id]);
+      await c.query('set local role carr_reader');
+      assert.equal((await c.query("select has_table_privilege('carr_reader','lease','select') as allowed")).rows[0].allowed,false);
+      const read = await TOOLS['get-deal-room'].handler(c,actor,{deal:id(4)});
+      assert.equal(read.schema_version,'deal-timeline.v1');
+      assert.equal(read.lease.id,id(21));
+      assert.equal(read.lease.commencement_on,'2026-11-01');
+      assert.equal(read.lease.expiration_on,'2031-10-31');
+      assert.equal(Object.hasOwn(read.lease,'rent_start_on'),false);
+      await c.query('reset role');
+      await c.query("update lease set status='superseded' where id=$1",[id(21)]);
+      await c.query('set local role carr_reader');
+      assert.equal((await TOOLS['get-deal-room'].handler(c,actor,{deal:id(4)})).lease,null);
+    }));
 
     await t.test('actual legacy handler works as carr_reader, including an empty board', async () => transaction(async () => {
       assert.equal((await c.query("select has_table_privilege('carr_reader','deal','select') as allowed")).rows[0].allowed, false);

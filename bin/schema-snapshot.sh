@@ -1264,7 +1264,7 @@ if [ "$CONFIRM_MERGE_REGISTRY_APPLIED" = t ] && [ "$WHATS_NEW_REGISTRY_APPLIED" 
 fi
 
 FIND_RULE_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0770_find_rule_scac_successor.sql')" \
+  "select exists (select 1 from schema_migrations where filename='0786_find_rule_scac_successor.sql')" \
   2>/dev/null)"
 case "$FIND_RULE_REGISTRY_APPLIED" in
   t|f) ;;
@@ -1276,18 +1276,29 @@ if [ "$FIND_RULE_REGISTRY_APPLIED" = t ] && [ "$CONFIRM_MERGE_REGISTRY_APPLIED" 
 fi
 
 
-SYSTEM_WORK_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0773_system_work_scac_successor.sql')" \
+JEV_CAP_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0787_jev_cap_scac_successor.sql')" \
   2>/dev/null)"
-case "$SYSTEM_WORK_REGISTRY_APPLIED" in
+case "$JEV_CAP_REGISTRY_APPLIED" in
   t|f) ;;
-  *) echo "schema-snapshot: could not read system-work v104 registry ledger state" >&2; exit 1 ;;
+  *) echo "schema-snapshot: could not read Jev cap v104 registry ledger state" >&2; exit 1 ;;
 esac
-if [ "$SYSTEM_WORK_REGISTRY_APPLIED" = t ] && [ "$FIND_RULE_REGISTRY_APPLIED" != t ]; then
-  echo "schema-snapshot: system-work v104 is applied without v103 predecessor" >&2
+if [ "$JEV_CAP_REGISTRY_APPLIED" = t ] && [ "$FIND_RULE_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: Jev cap v104 is applied without v103 predecessor" >&2
   exit 1
 fi
 
+SYSTEM_WORK_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0789_system_work_scac_successor.sql')" \
+  2>/dev/null)"
+case "$SYSTEM_WORK_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read system-work v105 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$SYSTEM_WORK_REGISTRY_APPLIED" = t ] && [ "$JEV_CAP_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: system-work v105 is applied without v104 predecessor" >&2
+  exit 1
+fi
 
 # WR-000117. 0530 is the registry successor half of the atomic (0529,0530)
 # group, so probing the SUCCESSOR and not the domain migration is what says the
@@ -1535,10 +1546,10 @@ function emit_carr_backup_policy(policy, table) {
 $0 ~ /^CREATE POLICY [a-z_][a-z0-9_]* ON [a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]* FOR SELECT TO carr_backup USING \(true\);$/ {
   split($0, words, " ")
   emit_carr_backup_policy(words[3], words[5])
-  carr_backup_policy_seen[words[5]] = 1
+  if (words[5] == "ops.work_request") carr_backup_policy_seen = 1
   next
 }
-$0 == "-- Name: work_request; Type: ROW SECURITY; Schema: ops; Owner: -" && !carr_backup_policy_seen["ops.work_request"] {
+$0 == "-- Name: work_request; Type: ROW SECURITY; Schema: ops; Owner: -" && !carr_backup_policy_seen {
   print "-- Name: work_request carr_backup_full_read; Type: POLICY; Schema: ops; Owner: -"
   print "--"
   print ""
@@ -1546,11 +1557,7 @@ $0 == "-- Name: work_request; Type: ROW SECURITY; Schema: ops; Owner: -" && !car
   print ""
   print ""
   print "--"
-  carr_backup_policy_seen["ops.work_request"] = 1
-}
-$0 == "-- Name: memory_item; Type: ROW SECURITY; Schema: public; Owner: -" && !carr_backup_policy_seen["public.memory_item"] {
-  emit_carr_backup_policy("carr_backup_full_read_memory_item", "public.memory_item")
-  carr_backup_policy_seen["public.memory_item"] = 1
+  carr_backup_policy_seen = 1
 }
 { print }
 ' "$SCHEMA_BODY" >> "$TMP"; then
@@ -3127,7 +3134,7 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                                        SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v102'"
                                        SCAC_FULL_SET_SEAL_COUNT=102
                                        SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v103_current()"
-                                     if [ "$SYSTEM_WORK_REGISTRY_APPLIED" = t ]; then
+                                     if [ "$JEV_CAP_REGISTRY_APPLIED" = t ]; then
                                        SCAC_CURRENT_NUMBER=104
                                        SCAC_VERSION_COUNT=104
                                        SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v104'")"
@@ -3137,6 +3144,17 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                                        SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v103'"
                                        SCAC_FULL_SET_SEAL_COUNT=103
                                        SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v104_current()"
+                                     if [ "$SYSTEM_WORK_REGISTRY_APPLIED" = t ]; then
+                                       SCAC_CURRENT_NUMBER=105
+                                       SCAC_VERSION_COUNT=105
+                                       SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v105'")"
+                                       SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v105'")"
+                                       SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v105.generated.js"
+                                       SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v105'"
+                                       SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v104'"
+                                       SCAC_FULL_SET_SEAL_COUNT=104
+                                       SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v105_current()"
+                                     fi
                                      fi
                                      fi
                                      fi
