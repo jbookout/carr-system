@@ -1268,6 +1268,15 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     return
   fi
 
+  # The timeline verbs run as carr_writer; prove that role can read every view
+  # their real handlers touch (the 42501 that failed r-2026-10-03-01).
+  if ! CARR_WRITER_READ_TEST_DATABASE_URL="$dsn" run_quiet "$LOGDIR/migration-writer-read-route.log" \
+      node --test mcp-server/test/catch-me-up-writer-route.test.mjs; then
+    tail -30 "$LOGDIR/migration-writer-read-route.log" >&2
+    bad migration "timeline verbs cannot read their views as carr_writer"
+    return
+  fi
+
   # Tour Operations carries database-owned rights, identity, route, digest,
   # ACL, and append-only invariants that cannot be proved by text-shape tests.
   # The DoctorCRE v5 portfolio proof joins the same loop for the same reason:
