@@ -1168,28 +1168,36 @@ def _push_floor_body():
 
 
 @contextlib.contextmanager
-def _stub_git_answering_the_floor(changed_paths):
+def _stub_git_answering_the_floor(changed_paths, *, main_paths=None, added_paths=(),
+                                  main_tree_paths=(), main_readable=True):
     """PATH-shadow git so the floor sees a chosen diff, and real git does the rest.
 
-    The floor decides what to run from `git diff --name-only ... $CARR_CI_RANGE`.
-    Feeding that one question is enough to drive the branch under test, and doing
-    it here rather than from history keeps the fixture hermetic: no commit is
-    made, no path is written into the tree, and the repository is not touched.
-    Every other git call — the branch name, HEAD, status — passes straight
-    through, so ci.sh still runs against the real checkout.
+    Model the pushed diff, the final diff from main, and main's admitted paths.
+    Keeping those separate exercises imported files and branch-owned changes
+    without creating commits or changing repository files. Other git calls,
+    including the branch name, HEAD and status, pass through to the real git.
     """
     real = shutil.which("git")
+    if main_paths is None:
+        main_paths = changed_paths
+    quoted_main = " ".join(shlex.quote(path) for path in main_paths)
+    quoted_added = " ".join(shlex.quote(path) for path in added_paths)
+    quoted_tree = " ".join(shlex.quote(path) for path in main_tree_paths)
+    main_exit = "" if main_readable else "exit 7; "
     with tempfile.TemporaryDirectory(prefix="ci-selftest-stub-git-") as td:
         stub = pathlib.Path(td) / "git"
         stub.write_text(
             "#!/bin/sh\n"
-            f'case " $* " in *" {FIXTURE_RANGE} "*)\n'
+            'case " $* " in *" diff --name-only origin/main HEAD "*)\n'
+            f'  {main_exit}printf "%s\\n" {quoted_main}; exit 0 ;;\n'
+            '  *" ls-tree -r --name-only origin/main "*)\n'
+            f'  {main_exit}printf "%s\\n" {quoted_tree}; exit 0 ;;\n'
+            f'*" {FIXTURE_RANGE} "*)\n'
             '  case " $* " in *--diff-filter=ACMR*)\n'
             f'    printf "%s\\n" {" ".join(changed_paths)}; exit 0 ;;\n'
-            # ACR drives path-hygiene, which reads the files it is given. The
-            # fixture path does not exist, so report nothing ADDED rather than
-            # handing a checker a path it cannot open.
-            '  *--diff-filter=ACR*) exit 0 ;;\n'
+            # Filename admission independently reads newly pushed paths.
+            # Ordinary fixtures add none; integration fixtures declare them.
+            f'  *--diff-filter=ACR*) printf "%s\\n" {quoted_added}; exit 0 ;;\n'
             '  esac ;;\n'
             'esac\n'
             f'exec {shlex.quote(real or "git")} "$@"\n'
@@ -1244,6 +1252,46 @@ def test_push_floor_defers_the_gates_class_instead_of_running_it():
     check("the floor returns promptly on the unpaired-gate shape",
           elapsed < FLOOR_BUDGET_SECONDS, f"{elapsed:.0f}s")
     check("naming a deferred gate is not itself a failure", rc == 0, f"rc={rc}")
+
+
+def test_push_floor_distinguishes_imported_main_paths_from_branch_changes():
+    inherited_name = "mcp-server/test/doctorcre-v5-review.test.mjs"
+    inherited_gate = "hooks/zz-ci-selftest-fixture-inherited-gate.py"
+    with _stub_git_answering_the_floor(
+            [inherited_name, inherited_gate, FIXTURE_GATE],
+            main_paths=[FIXTURE_GATE], added_paths=[inherited_name],
+            main_tree_paths=[inherited_name, inherited_gate]) as stub_env:
+        rc, out = run(["--only", "pushfloor"],
+                      env={"CARR_CI_RANGE": FIXTURE_RANGE, **stub_env},
+                      timeout=FLOOR_BUDGET_SECONDS)
+    check("importing admitted main paths does not fail the push floor", rc == 0, out[-900:])
+    check("main-identical gates are excluded but the branch's gate remains checked",
+          pathlib.Path(inherited_gate).stem not in out
+          and pathlib.Path(FIXTURE_GATE).stem in out, out[-900:])
+    owned_name = "ops/report-v2.json"
+    with _stub_git_answering_the_floor(
+            [owned_name], main_paths=[owned_name], added_paths=[owned_name]) as stub_env:
+        rc, out = run(["--only", "pushfloor"],
+                      env={"CARR_CI_RANGE": FIXTURE_RANGE, **stub_env},
+                      timeout=FLOOR_BUDGET_SECONDS)
+    check("a branch-owned forbidden filename is still refused",
+          rc != 0 and owned_name in out and "path-hygiene" in out, out[-900:])
+    historical_gate = "hooks/zz-ci-selftest-historical-v2.py"
+    with _stub_git_answering_the_floor(
+            [historical_gate], main_paths=[historical_gate],
+            added_paths=[historical_gate], main_tree_paths=[historical_gate]) as stub_env:
+        rc, out = run(["--only", "pushfloor"],
+                      env={"CARR_CI_RANGE": FIXTURE_RANGE, **stub_env},
+                      timeout=FLOOR_BUDGET_SECONDS)
+    check("editing an imported historical path is checked without rejudging its name",
+          rc == 0 and pathlib.Path(historical_gate).stem in out, out[-900:])
+    with _stub_git_answering_the_floor(
+            [owned_name], added_paths=[owned_name], main_readable=False) as stub_env:
+        rc, out = run(["--only", "pushfloor"],
+                      env={"CARR_CI_RANGE": FIXTURE_RANGE, **stub_env},
+                      timeout=FLOOR_BUDGET_SECONDS)
+    check("an unreadable main preserves the full push-floor scope",
+          rc != 0 and owned_name in out and "path-hygiene" in out, out[-900:])
 
 
 def test_strict_still_owns_the_gates_class():
@@ -1438,6 +1486,7 @@ def main():
                test_gates_treats_only_78_as_not_configured,
                test_gates_selftests_have_a_process_group_watchdog,
                test_push_floor_defers_the_gates_class_instead_of_running_it,
+               test_push_floor_distinguishes_imported_main_paths_from_branch_changes,
                test_strict_still_owns_the_gates_class,
                test_hosted_ci_runs_classes_in_parallel_behind_one_required_context,
                test_hosted_migration_budget_covers_observed_acceptance_runtime,
