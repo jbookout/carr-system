@@ -233,8 +233,30 @@ event fails the check.
 
 ## Progress board
 
-For work >5 steps or >30 min, update `out/boards/<project>.html` via
-`tools/progress_board.py` after each step; record Joe questions with defaults.
+For work >5 steps or >30 min, update the board via `tools/progress_board.py`
+after each step; record Joe questions with defaults, and give a blocked task
+`--reason` and `--next-action`. Every `init`, `task`, `ask`, `answer`,
+`deliver` and `note` writes `out/boards/<project>.json` under a per-board lock
+and publishes it; the only board UI is https://app.doctorcre.com/progress-board
+(`?board=<project>`, or `?board=all-repos` for every jbookout PR). A failed
+publish exits nonzero with the local state kept and names the retry
+(`render <project> --publish`); `PROGRESS_BOARD_LOCAL_ONLY=1` skips publishing
+and says so. There is no static HTML copy. The launchd job runs
+`ops/progress-board-render.sh` from a repository checkout, which binds
+`CARR_REPO_ROOT` and the repo's `.venv` Python; never run an extracted copy.
+The installer defaults to the canonical checkout. Before a PR merges,
+`install-progress-board --repo <retained-checkout> --apply` and
+`verify-progress-board --repo <retained-checkout>` can bind and verify its
+runner without changing main. Keep that checkout available until reinstalling
+from canonical main; the installer preserves canonical `out/boards` state.
+A `done` card with no PR is Live (complete). A project card with a merged PR
+stays Merged until production shows it: only `--delivery-target worker`
+(carr-system) or `app` (doctorcre-app) completes from the release readback;
+any other target, or none (a local tool, a LaunchAgent), needs `--stage live
+--evidence` naming its operational receipt. An all-repos card goes Live once
+a verified release of a lane that deploys every path it changed contains its
+merge commit. `failed` and `superseded` need
+`--reason` and leave the pipeline for the History list.
 
 ## Git discipline on a shared tree
 
@@ -320,3 +342,14 @@ For this R06 validator the source projection carries no R09 operator_assignment;
 This is a zero-source-edit registered validation of already delivered source. The historical ten-path owner write lease and failed registered attempts governed their own source-authoring envelopes only: do not replay them, import or upgrade their receipts, reinterpret that lease as a validator write cap, or retroactively claim that the later ordinary R3 fifteen-path delivery was authored by an old registered task. Preserve the source delivery's actual author models, authorship and author-session evidence separately from the fresh validator's model, identity and session. The current intent's exact-source manifest is read-only evidence, not source_merge or permission to change any path.
 
 Independently establish all six declared R06 checks: check:r06-packet-bindings, check:r06-model-route, check:r06-assurance-route, check:r06-two-hook-resolution, check:r06-overwrite-fake-sink and check:r06-baseline-and-seals. Exact-head hosted results and immutable artifacts may be independently authenticated, but never copy an assertion as evidence. Validate and submit only one new current-task receipt; claim complete only when all six checks pass, and retain the requirement for a distinct independent reviewer fact. This block grants no source edit, plan change, model-route change, old-receipt rewrite, live notification or page, settings install, controller action, R04, production migration, packet-close, merge, deploy, activation or release authority.
+
+## Before every PR: design and debt pass
+
+Before opening or updating any pull request, apply both skills to the diff:
+
+1. `~/.agents/skills/codebase-design/SKILL.md`: deep modules, real seams, design the interface twice when it matters.
+2. `~/.agents/skills/zero-tech-debt/SKILL.md`: rework the change from its intended end state; delete dead compatibility paths and duplicated rules.
+
+Both passes are required. Read the skill files before applying them; if either
+is unavailable, report the missing skill instead of claiming the pass.
+This section is the canonical policy for both client entry points.

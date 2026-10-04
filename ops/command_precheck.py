@@ -61,6 +61,13 @@ It never sees ordinary text searches or authentication readback as model work.
 
 KILL SWITCH: set CARR_PRECHECK=0. Anything in front of every shell call needs
 one, and that is engineering rather than caution.
+
+UNATTENDED WORKERS: the orchestrator sets CARR_JEV_WORKER=off in a Codex
+worker's environment. Automatic command judgments then use the deterministic
+hook path only. Model Room route text still appears when applicable. This flag
+does not disable explicit judgment calls requested by a brief: those call the
+shared client directly and remain subject to its daily cap. Use an explicit
+flag because inherited session ids cannot identify which process is attended.
 """
 
 import json
@@ -146,7 +153,7 @@ def model_room_advisory(command, repo=REPO):
     if not rule:
         return None
     confidence = None
-    if not SENSITIVE_COMMAND.search(command):
+    if os.environ.get("CARR_JEV_WORKER") != "off" and not SENSITIVE_COMMAND.search(command):
         try:
             judge = _sibling("jev_judge")
             client = _sibling("typesafe_client")
@@ -396,6 +403,8 @@ def advisory(payload):
                 warnings.append(route)
                 break
             if not command.strip() or is_pure_read(command) or SENSITIVE_COMMAND.search(command):
+                continue
+            if os.environ.get("CARR_JEV_WORKER") == "off":
                 continue
             probability, facts, reasons = check(command, repo)
             if probability is None:

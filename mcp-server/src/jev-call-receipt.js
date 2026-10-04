@@ -235,13 +235,13 @@ export function jevAskBinding(env, fetchImpl = fetch, options = {}) {
   const reserveAttempt = options.reserveAttempt;
   const cacheKeyFor = async body =>
     new Request(`https://jev-cache-v2.invalid/${await sha256Hex(`${key}\n${body}`)}`);
-  const jevAsk = async function ({ state, model, questions }) {
+  const jevAsk = async function ({ state, model, questions, transport_mode }) {
     const body = JSON.stringify({ state, model, questions });
     // The Cache API is shared across Worker isolates in a colo. Only the
     // answer is cached; the key contains digests of the request and account.
     // A hit has no billable usage and still gets a server receipt as a replay.
     let cacheKey;
-    if (cache) {
+    if (cache && transport_mode !== "paid_once") {
       cacheKey = await cacheKeyFor(body);
       try {
         const hit = await cache.match(cacheKey);
@@ -253,6 +253,11 @@ export function jevAskBinding(env, fetchImpl = fetch, options = {}) {
         }
       } catch { /* A broken cache must not hide the vendor's answer. */ }
     }
+    // A cache probe never reserves or spends, even when caching is unavailable.
+    // The capped client reserves locally before selecting paid_once; that mode
+    // skips cache reads and permits exactly one vendor attempt.
+    if (transport_mode === "cache_only")
+      throw new LeafToolError({ error: "jev_cache_miss" });
     let reservedAttempt;
     if (reserveAttempt) {
       try { reservedAttempt = await reserveAttempt(); }
@@ -286,7 +291,7 @@ export function jevAskBinding(env, fetchImpl = fetch, options = {}) {
           ? "timeout" : "network", "", key);
       }
       try {
-        if (response.status === 429 && attempt < MAX_429_RETRIES) {
+        if (transport_mode !== "paid_once" && response.status === 429 && attempt < MAX_429_RETRIES) {
           const wait = retryAfterMs(response);
           if (deadline - now() - wait >= MIN_ATTEMPT_MS) {
             clearTimeout(timer);
@@ -389,6 +394,8 @@ function validateQuestions(ToolError, questions) {
 // request never reaches Jev.
 export function validateAskJevArgs(args, ToolError = LeafToolError) {
   validateSessionId(ToolError, args?.session_id);
+  if (args.transport_mode !== undefined && !["cache_only", "paid_once"].includes(args.transport_mode))
+    throw new ToolError({ error: "jev_transport_mode_invalid" });
   if (!JEV_PURPOSES.includes(args.purpose))
     throw new ToolError({ error: "jev_purpose_invalid", allowed: [...JEV_PURPOSES] });
   const state = args.state;
@@ -420,7 +427,8 @@ export async function prefetchJevAnswer(args, ask, workClass = "system_work") {
   const { state, model, questions } = validateAskJevArgs(args);
   providerFor(workClass);
   try {
-    return { ok: true, result: await judgeBinding(ask, workClass)({ state, model, questions }) };
+    return { ok: true, result: await judgeBinding(ask, workClass)({ state, model, questions,
+      ...(args.transport_mode !== undefined ? { transport_mode: args.transport_mode } : {}) }) };
   } catch (error) {
     if (error instanceof LeafToolError) return { ok: false, error: error.payload };
     return { ok: false, error: { error: "jev_upstream_failed", status: null, reason: "network" } };
@@ -445,6 +453,7 @@ export function jevCallReceiptTools({ withEnvelope, ToolError }) {
           questions: { type: "object" },
           facets: { type: "array", items: { type: "string", enum: [...JEV_FACETS] } },
           model: { type: "string" },
+          transport_mode: { type: "string", enum: ["cache_only", "paid_once"] },
         },
         required: ["idempotency_key", "session_id", "purpose", "state", "questions"],
       },
