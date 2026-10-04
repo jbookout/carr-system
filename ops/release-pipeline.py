@@ -54,9 +54,11 @@ TWO LANES, one tick:
               marker can never delay the next tick. It never fails, blocks or
               retries the release it follows.
   app     the DoctorCRE app (its own repository). Released when its origin/main
-          moves by anything other than docs/tests: `npm ci` and
-          `npm run release:production` from a clean detached origin/main
-          checkout, then /app-release reads the SHA back.
+          moves by anything other than docs/tests: `npm ci`, the
+          credential-free `node scripts/prepare-release.mjs`, then
+          `node scripts/release-production.mjs` (the only step holding the
+          deploy credential) from a clean detached origin/main checkout, then
+          /app-release reads the SHA back.
 
 BATCHING. Each lane releases the LATEST main SHA, never each merge separately.
 The last released SHA per lane lives in out/release-pipeline/state.json; when it
