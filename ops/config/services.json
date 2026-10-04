@@ -1030,6 +1030,25 @@
     },
 
     {
+      "key": "job-watchdog",
+      "name": "Job watchdog",
+      "purpose": "Scan registered jobs, head-bound pull requests, merge-queue failures and release logs; report findings to the orchestrator and dispatch deterministic recovery actions.",
+      "family": "Local Mac edge",
+      "criticality": "medium",
+      "owner_actor": "joe",
+      "repo_path": "tools/job-watchdog.py",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.job-watchdog.plist",
+          "expected_cadence_seconds": 120,
+          "cadence_grace_seconds": 300,
+          "notes": "Primary-only schedule. Cadence is a checked projection of ops/config/job-watchdog.json. This draft ships source definitions; the orchestrator owns activation and replacement of the scratch auto-enqueue process. Findings and dated scan completion ledger are durable; scanner makes no model judgments."
+        }
+      ]
+    },
+    {
       "key": "session-trace-archive",
       "name": "Session trace archive",
       "purpose": "Nightly local archive of CARR-scoped Claude Code and Codex session transcripts (lib/carr_session_scope.py decides scope; nothing else is archived) as gzip .jsonl.gz into ~/carr-local/session-trace-archive/, so old sessions the clients prune are not lost. Streams bytes only; reads no transcript content beyond a Codex session's cwd metadata line.",
@@ -1051,6 +1070,7 @@
   ],
 
   "dependencies": [
+    { "service": "job-watchdog", "depends_on": "neon-record-layer" },
     { "service": "carr-mcp", "depends_on": "neon-record-layer" },
     { "service": "nightly-record-layer", "depends_on": "neon-record-layer" },
     { "service": "rules-refresh", "depends_on": "neon-record-layer" },
