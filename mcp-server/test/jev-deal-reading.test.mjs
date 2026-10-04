@@ -34,7 +34,7 @@ test('one bounded request returns typed advice without source text', async () =>
       } };
     },
   });
-  assert.equal(payload.model, 'jev-latest');
+  assert.equal(payload.model, 'jev-1.13.0');
   assert.equal(Object.keys(payload.questions).length, 3);
   assert.equal(answer.judged, true);
   assert.equal(answer.movement_rung, 4);
@@ -57,7 +57,7 @@ test('eligible Deal Room advice uses the receipt-backed Jev door', async () => {
     },
   });
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].model, 'jev-latest');
+  assert.equal(calls[0].model, 'jev-1.13.0');
   assert.equal(answer.judged, true);
 });
 

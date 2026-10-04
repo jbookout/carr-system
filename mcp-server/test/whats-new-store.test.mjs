@@ -150,7 +150,7 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
     const originalZone = (await c.query('show TimeZone')).rows[0].TimeZone;
     let fixtureId = 80;
     try {
-      for (const zone of ['UTC', 'America/Chicago']) for (const [until, threshold] of windows) {
+      for (const zone of ['UTC', 'America/Chicago', 'Pacific/Kiritimati']) for (const [until, threshold] of windows) {
         await c.query('reset role');
         await c.query("select set_config('TimeZone',$1,false)", [zone]);
         const fixtureDay = (await c.query("select ($1::timestamptz at time zone 'America/Chicago')::date::text as day", [until])).rows[0].day;
