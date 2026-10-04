@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Contract tests for flash-run's per-task rule delivery (pick_rules / rules_block).
 
-Jev (ops/jev_rule_select.advise) picks the taught rules that bind to ONE Flash task;
+The compiled/residual route (ops/rule_trigger_delivery.advise) picks the taught rules that bind to ONE Flash task;
 flash-run appends them to each attempt's system prompt. Delivery must fail open:
 a Jev outage leaves the attempt without rules, never without an attempt.
 """
@@ -34,6 +34,9 @@ def check(name, fn):
 class FakeSelector:
     def __init__(self, result=None, raises=None):
         self.result, self.raises, self.seen = result or [], raises, []
+
+    def load_rules(self):
+        return [RULE]
 
     def advise(self, situation, **kwargs):
         self.seen.append(situation)
@@ -75,6 +78,14 @@ def block_carries_statement_and_caps_length():
     assert "WRITE THE TEST BEFORE THE THING" in block
 
 
+def compiled_rows_receive_corpus_statements():
+    sel = FakeSelector([{"id": RULE["id"], "probability": .91, "source": "compiled_trigger"}])
+    rules, note = fr.pick_rules("write tests", selector=sel)
+    assert note is None, note
+    assert rules[0].get("statement") == RULE["statement"], rules
+    assert RULE["statement"] in fr.rules_block(rules)
+
+check("compiled delivery hydrates full rule text", compiled_rows_receive_corpus_statements)
 check("picks rules and describes Flash's real situation", picks_rules_and_describes_the_real_situation)
 check("fails open when Jev is down", fails_open_when_jev_is_down)
 check("no rules -> no block", block_is_empty_without_rules)

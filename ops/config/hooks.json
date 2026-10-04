@@ -302,11 +302,6 @@
         },
         {
           "type": "command",
-          "command": "{{REPO}}/.venv/bin/python {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/stale-claim-gate.py",
-          "timeout": 20
-        },
-        {
-          "type": "command",
           "command": "{{REPO}}/.venv/bin/python {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/loose-work-gate.py"
         },
         {

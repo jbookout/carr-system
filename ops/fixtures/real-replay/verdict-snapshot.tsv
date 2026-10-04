@@ -714,7 +714,7 @@ guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:995d89a284a1	deny	recursive/f
 guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:e3c7b98b9e56	deny	private key material — blocked by the CARR unattended guard
 guard-unattended.py	PreToolUse[Bash|WebFetch]	scenarios:5c0000000005	deny	recursive/forced delete — blocked by the CARR unattended guard
 guard-unattended.py	PreToolUse[Bash|WebFetch]	tool_calls:f53afacc66e2	deny	WebFetch to a non-standard port (#) on a host outside KNOWN_HOSTS — blocked by the CARR guard.
-jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	(all)	counts	allow=375 announce=66
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	(all)	counts	allow=377 announce=64
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:005d482ca566	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:010a4c03c18b	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:03e198646e6d	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
@@ -779,8 +779,6 @@ jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:fa39d0ae0973	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:fcec80f23365	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:fd26ca56df4b	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
-jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	tool_calls:66875750858a	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
-jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	tool_calls:f53afacc66e2	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
 jev-supervisor.py	Stop	(all)	counts	allow=62 announce=25
 jev-supervisor.py	Stop	advisories:0b5544d0632d/claims-done	announce	[jev stop_boundary] unavailable: Jev Stop judgment unavailable; inspect the claim and diff
 jev-supervisor.py	Stop	advisories:1131c706f9fd/claims-done	announce	[jev stop_boundary] unavailable: Jev Stop judgment unavailable; inspect the claim and diff
@@ -1206,13 +1204,9 @@ rule-pack-preuse-reselection.py	PreToolUse[Bash|Write|Edit|MultiEdit|Agent|WebFe
 rule-pack-preuse-reselection.py	PreToolUse[Bash|Write|Edit|MultiEdit|Agent|WebFetch|WebSearch|Artifact|AskUserQuestion|mcp__.*]	tool_calls:cecc21cf0cee	announce	RULE ROUTE DELIVERY FAILED (selector_unavailable): the rules below bind this tool call and were NOT delivered; you have not seen them. The t
 rule-pack-preuse-reselection.py	PreToolUse[Bash|Write|Edit|MultiEdit|Agent|WebFetch|WebSearch|Artifact|AskUserQuestion|mcp__.*]	tool_calls:e173a8c682ff	announce	RULE ROUTE DELIVERY FAILED (selector_unavailable): the rules below bind this tool call and were NOT delivered; you have not seen them. The t
 rule-pack-preuse-reselection.py	PreToolUse[Bash|Write|Edit|MultiEdit|Agent|WebFetch|WebSearch|Artifact|AskUserQuestion|mcp__.*]	tool_calls:f53afacc66e2	announce	RULE ROUTE DELIVERY FAILED (selector_unavailable): the rules below bind this tool call and were NOT delivered; you have not seen them. The t
-rule-pack-preuse-reselection.py	UserPromptSubmit	(all)	counts	announce=6
-rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:569a14d8e0fb	announce	json schema=jev-build-turn-receipt/v# schema=jev-build-advisory-skipped/v# status=skipped reason=boundary_deferred effect=no_prompt_obligati
-rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:5fd34f7d4ca1	announce	json schema=jev-build-turn-receipt/v# schema=jev-build-advisory-skipped/v# status=skipped reason=boundary_deferred effect=no_prompt_obligati
-rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:7674642d6663	announce	json schema=jev-build-turn-receipt/v# schema=jev-build-advisory-skipped/v# status=skipped reason=boundary_deferred effect=no_prompt_obligati
-rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:ab28e9ffe2a1	announce	json schema=jev-build-turn-receipt/v# schema=jev-build-advisory-skipped/v# status=skipped reason=boundary_deferred effect=no_prompt_obligati
-rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:c81467db0c27	announce	json schema=jev-build-turn-receipt/v# schema=jev-build-advisory-skipped/v# status=skipped reason=boundary_deferred effect=no_prompt_obligati
-rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:dd2a9a8193d4	announce	json schema=jev-build-turn-receipt/v# schema=jev-build-advisory-skipped/v# status=skipped reason=boundary_deferred effect=no_prompt_obligati
+rule-pack-preuse-reselection.py	UserPromptSubmit	(all)	counts	allow=4 announce=2
+rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:7674642d6663	announce	RULE DELIVERY FAILED: selector_call (nonzero); read the applicable rules before acting.
+rule-pack-preuse-reselection.py	UserPromptSubmit	prompts:ab28e9ffe2a1	announce	RULE DELIVERY FAILED: selector_call (nonzero); read the applicable rules before acting.
 rule-shape-gate.py	PreToolUse[mcp__.*__(teach|activate-rule)]	(all)	counts	allow=2 announce=1
 rule-shape-gate.py	PreToolUse[mcp__.*__(teach|activate-rule)]	tool_calls:0d9264aee317	announce	ENFORCEMENT CLASSIFICATION OBLIGATION — rule <hex> ("a rule ships with its enforcement decided at creation") applies to the rule you are abo
 scheduled-run-record.py	Stop	(all)	counts	allow=87
@@ -1222,8 +1216,6 @@ settings-change-gate.py	PostToolUse[Bash]	(all)	counts	allow=320
 settings-change-gate.py	PreToolUse[Bash]	(all)	counts	allow=320
 staging-observation-tracker.py	PostToolUse[Bash]	(all)	counts	allow=320
 staging-observation-tracker.py	PreToolUse[Bash]	(all)	counts	allow=320
-stale-claim-gate.py	Stop	(all)	counts	allow=87 announce=1
-stale-claim-gate.py	Stop	scenarios:d4a000000003	announce	STALE CLAIM — SOMETHING SHIPPED ABOUT THIS SUBJECT IN THE LAST # DAYS. Check it before this reaches Joe.
 unread-artifact-gate.py	Stop	(all)	counts	allow=87 announce=1
 unread-artifact-gate.py	Stop	scenarios:d4a000000004	announce	UNREAD ARTIFACT — you are describing what a file DOES, and this session never opened it:
 weekend-quiet-gate.py	PreToolUse[PushNotification|mcp__.*__(send_message|create_draft|update_draft)]	(all)	counts	allow=7 deny=1

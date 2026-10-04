@@ -107,29 +107,16 @@ class MessageBoundaryJevTests(unittest.TestCase):
         self.assertIsNotNone(output, "the prompt hook returned no context")
         return json.loads(output["hookSpecificOutput"]["additionalContext"])
 
-    def test_binding_pack_rule_is_delivered_with_deferred_build_receipt(self):
+    def test_binding_pack_rule_is_delivered_without_build_annotation(self):
         row = self.receipt(
             "My working tree is dirty. I am about to tell Joe another session "
             "is blocking my change. I only compared against HEAD and have not "
             "fetched origin/main. Can I say that?", "jev-positive")
-        self.assertEqual(row["schema"], "rule-jev-message-delivery/v2")
+        self.assertEqual(row["schema"], "rule-jev-message-delivery/v3")
         self.assertIn("173119a8", row["rule_ids"])
         self.assertIn("engineering-git", row["packs"])
         self.assertTrue(row["model_provenance"]["173119a8"]["binding_model"])
-        self.assertEqual(row["build_receipt"]["advisory"]["schema"],
-                         "jev-build-advisory-skipped/v1")
-        self.assertEqual(row["build_receipt"]["advisory"]["reason"],
-                         "boundary_deferred")
-
-    def test_plain_read_receives_no_rule_and_no_invented_build_action(self):
-        row = self.receipt(
-            "I need to inspect the current hook configuration read-only.",
-            "jev-negative")
-        self.assertEqual(row["schema"], "jev-build-turn-receipt/v1")
-        self.assertEqual(row["semantic_rule_delivery"], "not_applicable")
-        self.assertEqual(row["advisory"]["schema"], "jev-build-advisory-skipped/v1")
-        self.assertEqual(row["advisory"]["reason"], "boundary_deferred")
-        self.assertNotIn("required_actions", row["advisory"])
+        self.assertNotIn("build_receipt", row)
 
 
 class ShellPreCheckTests(unittest.TestCase):
@@ -157,35 +144,6 @@ class ShellPreCheckTests(unittest.TestCase):
                         f"a plain command must not be flagged (got {probability}); "
                         "a high score here means the check now warns about "
                         "everything, which is the same as warning about nothing")
-
-
-@unittest.skipUnless(has_credential(), SKIP)
-class StaleClaimJudgeTests(unittest.TestCase):
-    """Fires at Stop, on any claim that something is missing or unbuilt."""
-
-    def setUp(self):
-        self.module = load("stale_claim_judge")
-        self.commits = recent_commits()
-
-    def test_it_still_finds_the_commit_that_answers_a_claim(self):
-        # Keep the known positive subject as a stable live-service probe.
-        # It eventually falls outside the recent-commit window, even though
-        # the judgment still answers correctly.
-        hits = self.module.refuting_commits(
-            "no session warns before a shell command runs",
-            [("c39ed3bf", "Warn before a shell command runs, in every session (#1086)")])
-        self.assertIsNotNone(hits, "the judgment was unavailable")
-        self.assertTrue(hits, "the known commit subject answers this "
-                              "claim outright; finding none means the judgment "
-                              "has gone silent")
-
-    def test_it_still_returns_nothing_for_a_claim_no_commit_answers(self):
-        hits = self.module.refuting_commits(
-            "the moon is made of green cheese", self.commits)
-        self.assertIsNotNone(hits, "the judgment was unavailable")
-        self.assertEqual(hits, [], "nothing in this repository speaks to this; "
-                                   "matching anything means it now matches "
-                                   "everything")
 
 
 @unittest.skipUnless(has_credential(), SKIP)

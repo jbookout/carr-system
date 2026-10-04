@@ -16,20 +16,8 @@
       "sources": ["ops/rule_trigger_delivery.py"]
     },
     {
-      "caller": "jev_rule_select",
-      "trigger": "legacy per-message rule binding (jev_rule_select.advise); the live prompt path moved to rule_trigger_delivery on 2026-10-03",
-      "runs_in": "interactive sessions only, when a caller still invokes advise()",
-      "attribution": "session",
-      "unattended": "off",
-      "hourly_budget": 5,
-      "daily_budget": 20,
-      "owner": "orchestrator",
-      "value": "15,663 calls in 7 days before retirement, 14 on 2026-10-04; kept registered at a token budget so a stray caller is bounded rather than silent",
-      "sources": ["ops/jev_rule_select.py"]
-    },
-    {
       "caller": "jev_session_watch",
-      "trigger": "PostToolUse, only when the tool result failed (non-zero exit or failure markers) or brought in outside content (WebFetch/WebSearch/external shell); the stuck/drift watch is throttled by its own state files",
+      "trigger": "PostToolUse, only when the tool result failed (non-zero exit or failure markers) or triggers a repair/diagnosis candidate; the stuck/drift watch is throttled by its own state files",
       "runs_in": "interactive Claude sessions via hooks/jev-supervisor.py",
       "attribution": "session",
       "unattended": "off",
@@ -74,18 +62,6 @@
       "owner": "orchestrator",
       "value": "acts only where Jev says the message hands work to Joe and the keyword scan missed it; 56% of its 7-day calls were selftest fixtures, now refused",
       "sources": ["ops/jev_handoff.py"]
-    },
-    {
-      "caller": "stale_claim_judge",
-      "trigger": "Stop, only on a staleness claim in the reply; falls back to the stem matcher",
-      "runs_in": "interactive Claude sessions via hooks/stale-claim-gate.py",
-      "attribution": "session",
-      "unattended": "off",
-      "hourly_budget": 10,
-      "daily_budget": 60,
-      "owner": "orchestrator",
-      "value": "sends a turn back when it claims something is stale against commits that say otherwise",
-      "sources": ["ops/stale_claim_judge.py"]
     },
     {
       "caller": "jev_defect_class",
@@ -266,18 +242,6 @@
       "owner": "orchestrator",
       "value": "flash desk only",
       "sources": ["tools/flash-script.py"]
-    },
-    {
-      "caller": "jev_build_advisory",
-      "trigger": "none: prompt intake defers it (#1407) and no live caller remains",
-      "runs_in": "nowhere",
-      "attribution": "session",
-      "unattended": "off",
-      "hourly_budget": 0,
-      "daily_budget": 0,
-      "owner": "orchestrator",
-      "value": "1,740 calls in 7 days, none since 2026-10-03; registered at zero so a revived caller is refused until someone budgets it on evidence",
-      "sources": ["ops/jev_build_advisory.py"]
     },
     {
       "caller": "rule_gold_label",

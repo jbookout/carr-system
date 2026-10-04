@@ -473,14 +473,16 @@ RULE_SITUATION = ("A local coding model (Flash) is about to write code for ONE s
 
 
 def pick_rules(task, selector=None):
-    """Jev's pick of the taught rules that bind to this one task: (rules, error_note).
+    """The compiled/residual route's pick of the taught rules that bind to this one task: (rules, error_note).
 
     Fails open: a Jev outage or a partially judged roster costs the attempt its rules,
     never the attempt itself, and the note lands in the run log so the gap is visible."""
     try:
-        selector = selector or _lib("jev_rule_select")
+        selector = selector or _lib("rule_trigger_delivery")
         rules = selector.advise(RULE_SITUATION + task)
-        return list(rules)[:MAX_TASK_RULES], None
+        corpus = {rule["id"]: rule for rule in selector.load_rules()}
+        return [{**corpus[rule["id"]], **rule}
+                for rule in list(rules)[:MAX_TASK_RULES]], None
     except Exception as exc:
         return [], f"{type(exc).__name__}: {exc}"[:300]
 
