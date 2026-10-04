@@ -39,6 +39,7 @@ import subprocess
 import sys
 import time
 import tempfile
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -130,6 +131,30 @@ def _codex_events(stdout: str) -> list[dict]:
     return out
 
 
+def _run_codex_streamed(argv, env, timeout):
+    """Preserve result parsing while exposing actual executor output to its job log."""
+    proc = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    chunks = []
+    def relay():
+        with proc.stdout:
+            for line in proc.stdout:
+                chunks.append(line)
+                print(line, end="", flush=True)
+    reader = threading.Thread(target=relay, daemon=True)
+    reader.start()
+    try:
+        code = proc.wait(timeout=timeout)
+    except BaseException:
+        proc.kill()
+        proc.wait()
+        raise
+    reader.join(timeout=timeout)
+    if reader.is_alive():
+        raise subprocess.TimeoutExpired(argv, timeout)
+    return subprocess.CompletedProcess(argv, code, "".join(chunks), "")
+
+
 def _to_codex(
     entry: dict,
     task: str,
@@ -137,6 +162,7 @@ def _to_codex(
     fresh: bool = False,
     config_overrides: tuple[str, ...] = (),
     live_desktop: bool = False,
+    stream_output: bool = False,
 ) -> dict:
     """Send one task to a standing Codex thread, resuming it when there is one.
 
@@ -227,10 +253,13 @@ def _to_codex(
             # pipe makes the run hang or swallow whatever the caller was fed.
             # It is the same reason every command in CLAUDE.md carries
             # `</dev/null`.
-            proc = subprocess.run(
-                argv, env=env or os.environ.copy(), capture_output=True,
-                text=True, timeout=CODEX_TIMEOUT_S, stdin=subprocess.DEVNULL,
-            )
+            if stream_output:
+                proc = _run_codex_streamed(argv, env or os.environ.copy(), CODEX_TIMEOUT_S)
+            else:
+                proc = subprocess.run(
+                    argv, env=env or os.environ.copy(), capture_output=True,
+                    text=True, timeout=CODEX_TIMEOUT_S, stdin=subprocess.DEVNULL,
+                )
         except FileNotFoundError:
             return {"status": "failed", "detail": "codex is not on PATH"}
         except subprocess.TimeoutExpired:
@@ -285,6 +314,7 @@ def dispatch(
     config_overrides: tuple[str, ...] = (),
     cwd: str | None = None,
     live_desktop: bool = False,
+    stream_output: bool = False,
 ) -> dict:
     """Send one task to one desk. Raises DeskError when the desk is not usable.
 
@@ -298,6 +328,9 @@ def dispatch(
     registry = registry or Registry()
     results_path = Path(results_path or DEFAULT_RESULTS)
     entry = registry.resolve(name)          # every refusal happens here
+    if stream_output and entry["kind"] not in ("codex-session", "codex-exec"):
+        raise DeskError("unsupported_stream", "stream output requires a headless Codex desk")
+    stream_options = {"stream_output": True} if stream_output else {}
     original_task = task
     # The background wire validates the original task before adding its own
     # instruction. Prepending here would turn a blank task into valid work.
@@ -339,11 +372,13 @@ def dispatch(
     elif cwd:
         outcome = _to_codex(
             {**entry, "cwd": cwd}, task, env, fresh=True, config_overrides=config_overrides,
+            **stream_options,
         )
     else:
         outcome = _to_codex(
             entry, task, env, fresh=fresh, config_overrides=config_overrides,
             live_desktop=live_desktop,
+            **stream_options,
         )
         # pin the desk to its thread so the next task lands in the same one
         if outcome.get("thread_id"):
@@ -696,6 +731,8 @@ def main(argv: list[str]) -> int:
     s.add_argument("task")
     s.add_argument("--fresh", action="store_true",
                    help="start a new Codex thread instead of resuming the desk's")
+    s.add_argument("--stream-output", action="store_true",
+                   help="tee headless Codex events into the caller's registered job log")
 
     a = p.parse_args(argv)
     reg = Registry(a.registry) if a.registry else Registry()
@@ -754,7 +791,7 @@ def main(argv: list[str]) -> int:
             return 0
 
         row = dispatch(a.name, a.task, registry=reg, results_path=results,
-                       fresh=getattr(a, "fresh", False))
+                       fresh=getattr(a, "fresh", False), stream_output=a.stream_output)
         print(json.dumps(row, indent=2))
         return 0 if row["status"] in ("delivered", "completed") else 1
 

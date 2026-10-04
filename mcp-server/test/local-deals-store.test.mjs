@@ -35,7 +35,7 @@ test('Local Deals PostgreSQL caller and evidence regressions', { skip: !bin && '
     await c.connect();
     await c.query('create role carr_reader; create role carr_writer;');
     // Use the committed table definitions and caller views, without production data.
-    for (const name of ['actor', 'party', 'client', 'deal', 'deal_phase', 'deal_participant', 'next_action', 'deal_note', 'national_account_owner', 'deal_market_assignment', 'deal_review_item', 'deal_review_session', 'event', 'tool_call', 'deal_conflict', 'critical_date', 'activity', 'premises', 'negotiation_round', 'document', 'commission', 'capture_post_call_action', 'building', 'space', 'premises_space']) {
+    for (const name of ['actor', 'party', 'client', 'deal', 'deal_phase', 'deal_participant', 'next_action', 'deal_note', 'national_account_owner', 'deal_market_assignment', 'deal_review_item', 'deal_review_session', 'event', 'tool_call', 'deal_conflict', 'critical_date', 'lease', 'activity', 'premises', 'negotiation_round', 'document', 'commission', 'capture_post_call_action', 'building', 'space', 'premises_space']) {
       const table = schema.match(new RegExp(`CREATE TABLE public\\.${name} \\([\\s\\S]*?\\n\\);`))?.[0];
       assert.ok(table, name);
       await c.query(table);
@@ -55,6 +55,7 @@ test('Local Deals PostgreSQL caller and evidence regressions', { skip: !bin && '
       await c.query('insert into deal_phase(slug,label,sort) values($1,$1,$2)', [slug, sort]);
     }
     await c.query(readFileSync(path.join(root, 'migrations/0771_local_deal_board_evidence.sql'), 'utf8'));
+    await c.query(readFileSync(path.join(root, 'migrations/0783_deal_timeline_lease_read.sql'), 'utf8'));
     const fixture = async national => {
       await c.query("insert into party(id,kind,name,created_by,updated_by) values($1,'org','Synthetic Practice',$2,$2)", [id(2), actor.id]);
       await c.query('insert into client(id,party_id,created_by,updated_by) values($1,$2,$3,$3)', [id(3), id(2), actor.id]);
@@ -95,6 +96,12 @@ test('Local Deals PostgreSQL caller and evidence regressions', { skip: !bin && '
             invoiced_on: null, closed_on: outcome ? '2026-10-01' : null, lane: 'territory', outcome,
           }], name);
           const prior = structuredClone(result);
+          if (name === 'get-deal-room') {
+            assert.equal(prior.schema_version,'deal-timeline.v1');
+            assert.equal(prior.lease,null);
+            delete prior.schema_version;
+            delete prior.lease;
+          }
           const oldRows = rowsOf(baseline[name]);
           rowsOf(prior).forEach((row, index) => invoiceFields.forEach(field => {
             if (!Object.hasOwn(oldRows[index], field)) delete row[field];
@@ -169,6 +176,24 @@ test('Local Deals PostgreSQL caller and evidence regressions', { skip: !bin && '
           await c.query('reset role');
         }
       }));
+
+    await t.test('timeline reader returns exact current lease and excludes unverified history', async () => transaction(async () => {
+      await fixture(false);
+      await c.query("insert into lease(id,deal_id,status,executed_on,commencement_on,expiration_on,evidence_kind,evidence_ref,source,created_by) values($1,$2,'current','2026-10-01','2026-11-01','2031-10-31','executed_lease','Synthetic clause 3','Synthetic abstract',$3)", [id(21),id(4),actor.id]);
+      await c.query("insert into lease(id,deal_id,status,expiration_on,created_by) values($1,$2,'legacy_unverified','2040-01-01',$3)", [id(22),id(4),actor.id]);
+      await c.query('set local role carr_reader');
+      assert.equal((await c.query("select has_table_privilege('carr_reader','lease','select') as allowed")).rows[0].allowed,false);
+      const read = await TOOLS['get-deal-room'].handler(c,actor,{deal:id(4)});
+      assert.equal(read.schema_version,'deal-timeline.v1');
+      assert.equal(read.lease.id,id(21));
+      assert.equal(read.lease.commencement_on,'2026-11-01');
+      assert.equal(read.lease.expiration_on,'2031-10-31');
+      assert.equal(Object.hasOwn(read.lease,'rent_start_on'),false);
+      await c.query('reset role');
+      await c.query("update lease set status='superseded' where id=$1",[id(21)]);
+      await c.query('set local role carr_reader');
+      assert.equal((await TOOLS['get-deal-room'].handler(c,actor,{deal:id(4)})).lease,null);
+    }));
 
     await t.test('actual legacy handler works as carr_reader, including an empty board', async () => transaction(async () => {
       assert.equal((await c.query("select has_table_privilege('carr_reader','deal','select') as allowed")).rows[0].allowed, false);
