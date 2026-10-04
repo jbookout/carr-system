@@ -130,3 +130,4 @@ try {
 await import('./lead-automation-concurrency.postgres.mjs');
 
 await import('./automation-undo-archive-invoice.postgres.mjs');
+await import('./invoice-review-regressions.postgres.mjs');

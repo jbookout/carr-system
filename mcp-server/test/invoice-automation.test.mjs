@@ -59,3 +59,11 @@ test('capture preserves offset email date and refuses malformed local evidence',
   for(const bad of [{native_ref:'remote-mail:synthetic'},{occurred_at:'2026-02-30T12:00:00Z'},{from_address:'bad'},{occurred_at:'2030-01-01T12:00:00Z'}])
     await assert.rejects(()=>tools['record-deal-invoice'].handler(db,{id:'synthetic'},{...args,...bad}),/invalid_invoice/);
 });
+test('ordered invoice planning simulates closes without mutating caller snapshots',()=>{
+  const second={...invoice,id:'second',email_date:'2026-10-04',occurred_at:now};
+  const batch=planInvoiceCloses([invoice,second],[deal],mailbox,now);
+  assert.equal(batch[1].status,'proposed');
+  assert.equal(batch[1].needs_confirmation,'Deal has a different invoice date');
+  assert.equal(batch[1].from_phase,'closed');
+  assert.equal(deal.phase,'legal');assert.equal(deal.version,4);
+});

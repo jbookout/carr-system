@@ -279,9 +279,24 @@ export function leadAutomationTools({ withEnvelope, writeEvent, ToolError, invoi
         const m=(await c.query(`select m.*,l.stage,l.version from lead_stage_move m join lead l on l.id=m.lead_id
           where m.id=$1 for update of l,m`,[args.move_id])).rows[0];
         if (!m || m.status!=="applied" || m.stage!==m.to_stage || m.version!==args.base_version) fail("stale_lead_undo");
-        const latest=(await c.query(`select new_value from event where subject_type='lead' and subject_id=$1 and field='stage'
+        const latest=(await c.query(`select id,new_value from event where subject_type='lead' and subject_id=$1 and field='stage'
           order by recorded_at desc,id desc limit 1`,[m.lead_id])).rows[0];
-        if (latest?.new_value?.move_id!==m.id) fail("newer_stage_change_exists");
+        let associated=latest?.new_value?.move_id===m.id;
+        if(latest && !Object.hasOwn(latest.new_value||{},"move_id")) {
+          // Delivered predecessor approvals had no move_id. Authenticate the
+          // latest event against the unique persisted approval, without changing
+          // history or accepting a later same-stage edit as that approval.
+          associated=(await c.query(`select count(*)=1 and bool_and(m.id=$2) as associated
+            from event e join lead_stage_move m on m.lead_id=e.subject_id
+            join actor a on a.id=e.actor_id and a.kind='human'
+            where e.id=$1 and e.verb='approve-lead-move' and e.cause='human_stated'
+              and m.status='applied' and m.approved_by=e.actor_id
+              and m.approved_at=e.occurred_at and e.recorded_at>=m.approved_at
+              and e.old_value->>'stage'=m.from_stage and e.new_value->>'stage'=m.to_stage
+              and e.new_value->>'activity_id'=m.activity_id::text
+              and e.new_value->>'evidence_ref'=m.evidence_ref`,[latest.id,m.id])).rows[0].associated;
+        }
+        if(!associated) fail("newer_stage_change_exists");
         const changed=await c.query("update lead set stage=$1,updated_by=$2 where id=$3 returning id",[m.from_stage,actor.id,m.lead_id]);
         if (changed.rowCount!==1) fail("lead_undo_not_applied");
         await c.query("update lead_stage_move set status='undone',undone_at=now(),undone_by=$2 where id=$1",[m.id,actor.id]);

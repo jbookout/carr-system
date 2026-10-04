@@ -1,5 +1,6 @@
 // Local readers submit derived invoice facts. No provider, raw message or send path.
 const normal = value => typeof value === "string" ? value.trim().replace(/\s+/g, " ").toLowerCase() : "";
+const candidateDeals = (invoice,deals) => deals.filter(d=>normal(d.name)===normal(invoice.deal_name));
 const dateText = value => value instanceof Date ? value.toISOString().slice(0, 10) : value;
 const schema = properties => ({type:"object",additionalProperties:false,properties});
 
@@ -7,9 +8,10 @@ const schema = properties => ({type:"object",additionalProperties:false,properti
 // address is necessary too. Contradictory supplied fields and multiple matches
 // refuse automation, regardless of how many other fields happen to agree.
 export function planInvoiceCloses(invoices, deals, mailbox, now) {
+  const simulated=deals.map(d=>({...d}));
   return invoices.filter(i=>i.status === "captured").map(i=>{
     i={...i,email_date:dateText(i.email_date)};
-    const candidates=deals.filter(d=>normal(d.name)===normal(i.deal_name));
+    const candidates=candidateDeals(i,simulated);
     const matches=candidates.filter(d=>{
       const client=normal(i.client_name), address=normal(i.property_address);
       return (client || address) && (!client || client===normal(d.client_name)) &&
@@ -23,16 +25,20 @@ export function planInvoiceCloses(invoices, deals, mailbox, now) {
     const explanation=!trusted ? "Confirm invoicing mailbox" : !dated ? "Confirm email date" :
       matches.length>1 ? "Multiple deals match" : !d ? "Confirm deal and client or property" :
       conflict ? "Deal has a different invoice date" : null;
-    return {invoice_id:i.id,deal_id:d?.id || null,deal_name:i.deal_name,candidate_deal_ids:candidates.map(d=>d.id),
+    const move={invoice_id:i.id,deal_id:d?.id || null,deal_name:i.deal_name,candidate_deal_ids:candidates.map(d=>d.id),
       base_version:d?.version || null,from_phase:d?.phase || null,to_phase:"closed",invoiced_on:i.email_date,
       reason:`Invoice received ${i.email_date}`,evidence_ref:i.evidence_ref,
       status:confident ? "applied" : "proposed",needs_confirmation:explanation};
+    if(confident) {d.phase="closed";d.invoiced_on=i.email_date;d.version++;}
+    return move;
   });
 }
 const DEALS_SQL=`select d.id,d.name,d.phase,d.invoiced_on,d.version,p.name as client_name,
-  coalesce((select array_agg(distinct b.address) from premises pr join premises_space ps on ps.premises_id=pr.id
+  coalesce((select array_agg(distinct concat_ws(', ',b.address,nullif(trim(s.suite),''),b.city,concat_ws(' ',b.state,b.zip))) from premises pr join premises_space ps on ps.premises_id=pr.id
     join space s on s.id=ps.space_id join building b on b.id=s.building_id
-    where pr.deal_id=d.id and b.merged_into is null),'{}') as property_addresses
+    where pr.deal_id=d.id and b.merged_into is null
+      and nullif(trim(b.address),'') is not null and nullif(trim(b.city),'') is not null
+      and nullif(trim(b.state),'') is not null and nullif(trim(b.zip),'') is not null),'{}') as property_addresses
   from deal d join client cl on cl.id=d.client_id join party p on p.id=cl.party_id
   where cl.merged_into is null and p.merged_into is null and p.deleted_at is null order by d.id`;
 
@@ -58,9 +64,31 @@ export function invoiceAutomation({withEnvelope,writeEvent,ToolError,updateDeal,
     // acquires invoice rows in occurrence order, serializing competing runs.
     const initial=await snapshot(c);
     for(const d of initial.deals) await lockDealField(c,d.id,"phase");
+    // Membership tables prevent phantoms; reference rows protect every matching
+    // fact, including currently retired rows that could become candidates.
+    // Order: phase advisory locks, membership tables, party/space/building rows,
+    // invoice/deal rows. No new phase lock is acquired under a table lock.
+    await c.query("lock table client,deal,premises,premises_space in share mode");
+    await c.query(`select p.id from party p where exists(select 1 from client cl where cl.party_id=p.id)
+      order by p.id for share of p`);
+    await c.query(`select s.id from space s where exists(select 1 from premises_space ps where ps.space_id=s.id)
+      order by s.id for share of s`);
+    await c.query(`select b.id from building b where exists(select 1 from space s join premises_space ps on ps.space_id=s.id where s.building_id=b.id)
+      order by b.id for share of b`);
     const s=await snapshot(c,true), results=[];
+    const priorCandidates=new Map(s.invoices.map(i=>[i.id,candidateDeals(i,initial.deals).map(d=>d.id)]));
+    // Replan over the entire current set. Changed membership cannot silently
+    // introduce a close whose phase lock was absent from the initial census.
+    const stableInvoices=s.invoices.filter(i=>{
+      const ids=candidateDeals(i,s.deals).map(d=>d.id);
+      return JSON.stringify(ids)===JSON.stringify(priorCandidates.get(i.id));
+    });
+    const planned=new Map(planInvoiceCloses(stableInvoices,s.deals,invoicingMailbox,s.now).map(m=>[m.invoice_id,m]));
     for(const invoice of s.invoices) {
-      const [move]=planInvoiceCloses([invoice],s.deals.filter(d=>initial.deals.some(old=>old.id===d.id)),invoicingMailbox,s.now);
+      const move=planned.get(invoice.id)||planInvoiceCloses([invoice],s.deals,invoicingMailbox,s.now)[0];
+      if(!planned.has(invoice.id)&&move.status==="applied") {
+        move.status="proposed";move.needs_confirmation="Deal candidates changed; preview again";
+      }
       if(move.status!=="applied") {results.push(move);continue;}
       const d=s.deals.find(d=>d.id===move.deal_id);
       await updateDeal(c,actor,{idempotency_key:`${args.idempotency_key}:invoice:${move.invoice_id}`,
