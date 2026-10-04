@@ -519,9 +519,8 @@ def collect(root, config, now=None):
         try:
             pages = json.loads(command(["gh", "api", "--paginate", "--slurp", f"repos/{repo}/pulls?state=open&per_page=100"], config))
             # Closed PRs leave the cache; an unlisted repository keeps its entries.
-            cache = {k: v for k, v in cache.items() if not k.startswith(repo + "#")} | {
-                f"{repo}#{pr['number']}": cache[f"{repo}#{pr['number']}"]
-                for page in pages for pr in page if f"{repo}#{pr['number']}" in cache}
+            listed = {f"{repo}#{pr['number']}" for page in pages for pr in page}
+            cache = {k: v for k, v in cache.items() if k in listed or not k.startswith(repo + "#")}
             for page in pages:
                 for pr in page:
                     key, version = f"{repo}#{pr['number']}", [pr["head"]["sha"], pr["updated_at"]]
