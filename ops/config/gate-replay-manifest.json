@@ -484,6 +484,19 @@
         }
       ]
     },
+    "job-watchdog-digest.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "UserPromptSubmit",
+          "matcher": "",
+          "fixtures": [
+            "prompts"
+          ],
+          "allow_only": "Read-only orchestrator context reporter: returns 0 and emits additionalContext from the finding ledger; never blocks, scans, dispatches or mutates findings."
+        }
+      ]
+    },
     "ledger-sweep.py": {
       "role": "gate",
       "wirings": [
@@ -883,6 +896,8 @@
   "lib_helpers": [
     "lib/claude_continuity_config.py",
     "lib/claude_rule_delivery_dedupe.py",
+    "lib/jev_required_actions.py",
+    "lib/job_watchdog.py",
     "lib/loadpy.py",
     "lib/local_principal.py",
     "lib/machine_prerequisites.py",

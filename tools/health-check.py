@@ -106,8 +106,8 @@ def _reader_args(argv):
         # A parent shell may carry this old ambient variable.  Normal health must
         # not pass it to any child or let a child silently choose a Drive reader.
         os.environ.pop("CARR_VAULT", None)
-    if section not in ("all", "exports", "jobs", "registry", "credentials", "jev-spend", "grok-session", "tailscale", "headless"):
-        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials|jev-spend|grok-session|tailscale|headless")
+    if section not in ("all", "exports", "jobs", "registry", "credentials", "jev-spend", "jev-cap", "grok-session", "tailscale", "headless"):
+        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials|jev-spend|jev-cap|grok-session|tailscale|headless")
     if fixture and recovery:
         raise SystemExit("health-check: --fixture is for hermetic canonical tests only")
     return recovery, reason, vault, section, fixture, findings_json, rest
@@ -145,17 +145,29 @@ def _jev_spend_row():
         worker_usage=jev_spend_health.read_worker_usage)
 
 
+def _jev_paid_cap_row():
+    try:
+        client_path = os.path.join(REPO_ROOT, "ops", "typesafe_client.py")
+        spec = importlib.util.spec_from_file_location("jev_cap_client", client_path)
+        client = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(client)
+        return client.paid_cap_health()
+    except Exception as exc:
+        return (f"UNKNOWN jev paid cap — {type(exc).__name__} · on breach: "
+                "owner orchestrator · remediation restore the cap reader/configuration · "
+                "verify rerun health · auto-clear on successful read")
+
+
 def _grok_session_row():
-    sys.path.insert(0, os.path.join(REPO_ROOT, "ops"))
-    from grok_session import health_row
-    line = health_row()
-    return line, int(line.startswith("FAIL") or "FAILED" in line)
-
-
-if CANONICAL_SECTION == "grok-session":
-    _grok_line, _grok_rc = _grok_session_row()
-    print(_grok_line)
-    sys.exit(_grok_rc)
+    try:
+        sys.path.insert(0, os.path.join(REPO_ROOT, "ops"))
+        from grok_session import health_row
+        line = health_row()
+        return line, int(line.startswith("FAIL") or "FAILED" in line)
+    except Exception as exc:
+        return (f"UNAVAILABLE Grok session — {type(exc).__name__} · on breach: "
+                "owner orchestrator · remediation restore the Grok reader/lock storage · "
+                "verify rerun health · auto-clear on successful read", 1)
 
 
 if CANONICAL_SECTION == "jev-spend":
@@ -1305,8 +1317,16 @@ def _canonical_health():
     """The normal health surface: record/control-plane/local truth only."""
     _FINDINGS.clear()
     rc = 0
+    if CANONICAL_SECTION in ("all", "credentials", "jev-cap"):
+        _cap_line = _jev_paid_cap_row()
+        print("  " + _cap_line)
+        if _cap_line.startswith(("HIT", "UNKNOWN")):
+            rc = _red("jev_paid_cap", _cap_line, hard_error=_cap_line.startswith("UNKNOWN"))
+        for _subject, _count in re.findall(r"(pending|failed)=(\d+)", _cap_line):
+            if int(_count):
+                rc = _red("jev_spend_alert", _cap_line, subject=_subject, count=int(_count))
     try:
-        snap = _canonical_snapshot()
+        snap = {} if CANONICAL_SECTION in ("jev-cap", "grok-session") else _canonical_snapshot()
     except Exception as exc:
         print(f"canonical health: REFUSED ({type(exc).__name__}: {exc})")
         _red("canonical_health_refused", f"{type(exc).__name__}: {exc}", hard_error=True)
@@ -1580,11 +1600,14 @@ def _canonical_health():
             if _needs_attention:
                 rc = _red("repo_loose_work", f"{len(_actionable)} actionable path(s)", count=len(_actionable))
 
-    if CANONICAL_SECTION in ("all", "credentials"):
+    if CANONICAL_SECTION in ("all", "credentials", "grok-session"):
         _grok_line, _grok_rc = _grok_session_row()
         print("  " + _grok_line)
         if _grok_rc:
-            rc = _red("grok_session", "Grok credential health or alert failed", time_rolling=True)
+            rc = _red("grok_session", _grok_line,
+                      hard_error=_grok_line.startswith("UNAVAILABLE"), time_rolling=True)
+
+    if CANONICAL_SECTION in ("all", "credentials"):
         # The source log is canonical across worktrees. The row carries its
         # response action on both OK and WARN, and the helper owns one loop.
         try:

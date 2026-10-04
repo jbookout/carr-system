@@ -64,6 +64,7 @@
         "hooks/blocker-decider-gate.py",
         "hooks/canonical-edit-gate.py",
         "hooks/chat-lint-carryover.py",
+        "hooks/job-watchdog-digest.py",
         "hooks/completion-evidence-gate.py",
         "hooks/delegation-gate.py",
         "hooks/draft-export-gate.py",
@@ -114,6 +115,7 @@
         "tools/room-bridge/evaluation_rubrics.py",
         "tools/doc-convo/prompt",
         "tools/doc-convo/prompt/**",
+        "ops/config/job-watchdog.json",
         "tools/dictation-rig/vocab-prompt.txt"
       ]
     },
