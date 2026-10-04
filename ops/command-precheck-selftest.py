@@ -108,9 +108,9 @@ class NeverDeniesTests(AttendedFixture):
 
     def test_the_warning_names_the_reason(self):
         _, out = run({"tool_name": "Bash", "tool_input": {"command": "x"}},
-                     check=lambda command, repo=None: (0.95, {"guard_refusals": ["the guard refuses this"]}, {"guard_refusal": 0.95}),
+                     check=lambda command, repo=None: (0.95, {"paths_that_do_not_exist": ["ops/gone-for-good.py"]}, {"missing_path": 0.95}),
                      _log=lambda record: None)
-        self.assertIn("the guard refuses this", out,
+        self.assertIn("ops/gone-for-good.py", out,
                       "a warning without its reason is noise a session learns to skip")
 
 
@@ -135,7 +135,7 @@ class FailsOpenTests(AttendedFixture):
         def boom(record):
             raise OSError("disk full")
         code, _ = run({"tool_name": "Bash", "tool_input": {"command": "git push"}},
-                      check=lambda command, repo=None: (0.99, {"guard_refusals": ["y"]}, {"guard_refusal": 0.99}), _log=boom)
+                      check=lambda command, repo=None: (0.99, {"paths_that_do_not_exist": ["y"]}, {"missing_path": 0.99}), _log=boom)
         self.assertEqual(code, 0)
 
 
@@ -262,9 +262,14 @@ class DeterministicCheckTests(AttendedFixture):
             p, _, _ = self.check(command, {"paths_that_do_not_exist": [missing]})
             self.assertIsNone(p, command)
 
-    def test_a_guard_refusal_always_warns(self):
-        p, _, reasons = self.check("rm -rf build", {"guard_refusals": ["the guard refuses rm -rf"]})
-        self.assertEqual((p, reasons), (1.0, {"guard_refusal": 1.0}))
+    def test_a_guard_refusal_is_left_to_the_guard(self):
+        """jev_precheck's guard list is a regex copy that over-reads the real
+        guard (it flags sudo and scratch-zone rm -rf, which the guard allows),
+        and where the guard does refuse, its own PreToolUse denial already says
+        so. Jev warned on this fact 6 times in 7 days; a predicate here would
+        warn on every rm -rf."""
+        p, _, reasons = self.check("rm -rf /tmp/scratch-x", {"guard_refusals": ["the guard refuses rm -rf"]})
+        self.assertEqual((p, reasons), (None, {}))
 
     def test_interface_import_and_option_facts_alone_say_nothing(self):
         """Jev warned on 0 of 394 undeclared-option facts and 2% of interface
@@ -351,7 +356,7 @@ class ThresholdTests(AttendedFixture):
     def test_below_the_floor_is_silent_but_still_logged(self):
         logged = []
         code, out = run({"tool_name": "Bash", "tool_input": {"command": "git push"}},
-                        check=lambda command, repo=None: (hook.WARN_AT - 0.01, {"guard_refusals": ["b"]}, {"guard_refusal": hook.WARN_AT - 0.01}),
+                        check=lambda command, repo=None: (hook.WARN_AT - 0.01, {"paths_that_do_not_exist": ["b"]}, {"missing_path": hook.WARN_AT - 0.01}),
                         _log=logged.append)
         self.assertEqual(out, "", "below the floor nothing is said")
         self.assertEqual(len(logged), 1, "but it is recorded, so the floor can be re-derived")
@@ -359,7 +364,7 @@ class ThresholdTests(AttendedFixture):
 
     def test_the_floor_is_inclusive(self):
         _, out = run({"tool_name": "Bash", "tool_input": {"command": "git push"}},
-                     check=lambda command, repo=None: (hook.WARN_AT, {"guard_refusals": ["b"]}, {"guard_refusal": hook.WARN_AT}),
+                     check=lambda command, repo=None: (hook.WARN_AT, {"paths_that_do_not_exist": ["b"]}, {"missing_path": hook.WARN_AT}),
                      _log=lambda record: None)
         self.assertIn("PRE-CHECK", out)
 

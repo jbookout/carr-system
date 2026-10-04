@@ -216,15 +216,16 @@ def repo_root(cwd):
 # what earned a warning. Of 3,170 judged commands 348 warned; 287 of those were
 # a missing path, 57 a module interface (2% of the 2,518 times that fact was
 # present), 6 a guard refusal, and 0 of 394 an undeclared option. A missing
-# path and a guard refusal are facts, not judgments (rule 5e89c211), so they
-# are decided here by predicate. Replayed over the same log, the missing-path
+# path is a fact, not a judgment (rule 5e89c211), so it is decided here by
+# predicate. A guard refusal is left to the guard: jev_precheck's list is a
+# regex copy that over-reads it (sudo, scratch-zone rm -rf), and where the
+# guard does refuse, its own PreToolUse denial already says so. Replayed over the same log, the missing-path
 # predicate below warns on 263 commands against Jev's 287, and the commands it
 # alone flags are real failures (an rg or git add of a file that is not there).
 # The interface, import and option facts alone no longer produce a warning.
 #
 # (facts key, reason id, label)
 REASONS = (
-    ("guard_refusals", "guard_refusal", "a guard refuses this command"),
     ("paths_that_do_not_exist", "missing_path", "the command reads a path that does not exist"),
 )
 
@@ -263,8 +264,6 @@ def check(command, repo=REPO):
     if not facts:
         return None, {}, {}
     reasons = {}
-    if facts.get("guard_refusals"):
-        reasons["guard_refusal"] = 1.0
     missing = facts.get("paths_that_do_not_exist") or []
     operands = missing_operands(command, missing) if missing and not CREATES.search(command) else []
     if operands:
