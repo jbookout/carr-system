@@ -2,11 +2,11 @@
   "adapter": {
     "adapter_id": "rule-delivery-production-functions",
     "adapter_version": "1",
-    "configuration_fingerprint": "sha256:e859bc9b2dd6b96fcc3162e29ff060cb3fa72ed626ad6adf0ed495f3b8765cfb",
+    "configuration_fingerprint": "sha256:1630b01d6d0de3244a12a38508b67095e0eb41a7ff35866cddcea8c472ecc4a4",
     "harness_id": "evals/rule-delivery/run_eval.py",
     "harness_version": "e7662e16e2007982b67031209807aac4340b2135c4c8000a947dbfd212477a6e",
     "model_id": "deterministic-no-model",
-    "native_session_ref": "01a107e1-e0ac-7ac3-aa56-bc9f34a931ef",
+    "native_session_ref": "01a10808-641a-7bc2-be33-d2c95c730c75",
     "provider_id": "none",
     "surface": "offline_programmatic"
   },
@@ -151,6 +151,7 @@
       "lib/rule_delivery_preuse.py": "8a356537cac8c476aee4fa70d0fb3287af2e304fad08a0840e7849464db90a74",
       "lib/rule_delivery_shadow.py": "b39b504ff0bf77819b578a12f97821bc3da2e8226e90b5f17d3a40ccb1cb7417",
       "lib/rule_routes.py": "e3c6a77bb3cbdfc64482cf9cee0da32857b0c019160e4e558127079dd46bb760",
+      "mcp-server/src/jev-request-contract.v1.json": "0687a4cda641c5f08bb856de5b9f234f7e8a097e21e92762b5ed3f582ddca185",
       "ops/config/jev-cost-guard.v1.json": "f8da9d20d6019c5bd9528683c61594dca09f07488d66ce998c53ae8bc3c24089",
       "ops/config/rule-classes.v1.json": "8f8d24ddf0c1d012db9f31aa250bd30da45ee6f1156ec98bc9a194381fdc5f23",
       "ops/config/rule-enforcement-map.json": "43ac7f513c173114b1723a886baf56a83ec40e7fef8b187ed3dead7d16d90ada",
@@ -167,7 +168,7 @@
       "ops/rule_delivery_eval.py": "7c846223ccc026f4f16a51dca0f695986cefadfc5f412c23adf73f57d08d022a",
       "ops/rule_trigger_compile.py": "356aed19e2c4fc0f90da04e2d0461bdedf5820e88c97c9f3a70fc88f3d43fcb1",
       "ops/rule_trigger_delivery.py": "64746e5fc5c65e2ff67a72dfb0217598964448283e1c7f7d0fb56dde0c3bc3f3",
-      "ops/typesafe_client.py": "13fc2ad80f1959bb6d8f95e11602328a760565a3a390faefbf844b6e31bac386",
+      "ops/typesafe_client.py": "b5a0555d7b2a787ae18629882664f308153fcb1ff3aae1d587b56e169eeb5641",
       "tools/judge/interface.py": "2e0440cc85660f83f4456829006f3f00a956e414c4c72e8217ab1a22622f3ed2"
     },
     "expectations": {
