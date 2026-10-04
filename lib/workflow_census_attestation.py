@@ -313,10 +313,9 @@ def verify_census_chain(answer: Any, config: Mapping[str, Any]) -> dict[str, Any
             or not isinstance(anchored_hash, str) or not _HEX64.match(anchored_hash)):
         return refusal(REASON_UNPROVABLE, "anchor_unavailable")
     if anchored_seq != latest["seq"] or anchored_hash != latest["row_hash"]:
-        # The one legitimate disagreement: the chain is exactly one row past the
-        # anchored head and still holds that head unchanged, so the new row
-        # links to it.  The write door refuses every further append in this
-        # state, so the chain can never be more than one such row ahead.
+        # A single pending advance leaves one linked row beyond the live
+        # anchor. The sampled anchor may lag by more when separate reads span
+        # completed writes; the route re-observes before declaring tampering.
         if (anchored_seq == latest["seq"] - 1 and anchored_seq >= 1
                 and chain[anchored_seq - 1]["row_hash"] == anchored_hash):
             return refusal(REASON_ANCHOR_GAP, "chain_one_linked_row_ahead_of_anchor",

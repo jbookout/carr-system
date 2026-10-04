@@ -28,8 +28,9 @@ WHAT MUST HOLD, one check each:
     missing payload, a truncated answer) and an unreachable or malformed server
     answer each fail closed with the named reason;
   * a broken chain outranks an unknown writer, which outranks staleness;
-  * the route re-reads exactly once on ``anchor_gap``, a gap that persists
-    stays ``anchor_gap``, and ``tampered`` is never re-read;
+  * the route re-reads once for snapshot races, including multiple completed
+    writes and genesis; persistent disagreement stays refused, while guard
+    replacement and hash mismatches are refused immediately;
   * the writer re-sends the SAME key on any transport failure, accepts a late
     ``replayed``, and never retries a definitive refusal;
   * the route's answer is deep-frozen, takes no argument, and ignores anything
@@ -520,6 +521,33 @@ def main() -> int:
               out["available"] is False and out["reason"] == "handle_integrity_unprovable"
               and out["detail"] == detail and out["item_disposition"] == "not_proven",
               repr(out))
+    # Snapshot observations can span multiple completed writes or genesis advance.
+    for label, racing in (
+        ("two completed writes", fresh()),
+        ("genesis commit before advance", chain([NOW - timedelta(hours=1)])),
+    ):
+        if label == "two completed writes":
+            racing["anchor"].update(seq=1, row_hash=racing["chain"][0]["row_hash"])
+            current = fresh()
+        else:
+            current = copy.deepcopy(racing)
+            racing["anchor"] = {"state": "absent", "last_reanchor": None}
+        queued = [racing, current]
+        calls_for_race = []
+        def race_transport(_m):
+            calls_for_race.append(1)
+            return copy.deepcopy(queued.pop(0)), None
+        routed = reader._census_answer(race_transport, lambda: CONFIG, pause=lambda: None)
+        check(f"{label} stabilizes before a tampering verdict",
+              routed["available"] is True and len(calls_for_race) == 2 and not queued, repr(routed)[:200])
+        calls_for_race.clear()
+        def persistent_race(_m):
+            calls_for_race.append(1)
+            return copy.deepcopy(racing), None
+        routed = reader._census_answer(persistent_race, lambda: CONFIG, pause=lambda: None)
+        check(f"persistent disagreement after {label} remains tampered",
+              routed["reason"] == "tampered" and len(calls_for_race) == 2, repr(routed)[:200])
+
     # ---- ONE RE-READ, FOR ONE RACE --------------------------------------------
     racing = fresh()
     racing["anchor"].update(seq=2, row_hash=racing["chain"][1]["row_hash"])
@@ -542,8 +570,6 @@ def main() -> int:
           repr(routed)[:200])
     for label, mutate in (
         ("anchor hash mismatch", lambda a: a["anchor"].update(row_hash="f" * 64)),
-        ("chain two rows past the anchor",
-         lambda a: a["anchor"].update(seq=1, row_hash=a["chain"][0]["row_hash"])),
         ("replaced guard function",
          lambda a: a["guard_functions"].update(workflow_census_record_append_only="0" * 64)),
     ):
@@ -698,8 +724,8 @@ def main() -> int:
             gave_up = len(keys) == writer.ATTEMPTS and len(set(keys)) == 1
         check(f"a transport failure on every one of {writer.ATTEMPTS} attempts fails the run, "
               "all under one key", gave_up, json.dumps(keys))
-        for name in ("workflow_census_key_reuse", "workflow_census_tampered",
-                     "workflow_census_anchor_gap"):
+        for name in sorted(set(writer.DEFINITIVE_REFUSALS) | {
+                "workflow_census_row_unverified", "workflow_census_payload_unsafe_integer_refused"}):
             keys, writer.subprocess.run = scripted(_Proc(1, err=f"ToolError {name}"))
             try:
                 writer.record_census(census("w"), pause=no_wait)
@@ -707,6 +733,24 @@ def main() -> int:
             except writer.WriterRefusal:
                 refused_once = len(keys) == 1
             check(f"a definitive refusal ({name}) is not retried", refused_once, json.dumps(keys))
+        refusal_body = {"error": "workflow_census_tampered", "detail": "database_head_is_not_anchored_head",
+                        "hint": "Investigate before re-anchoring"}
+        for stream in ("stderr", "stdout"):
+            output = "TOOL ERROR\n" + json.dumps(refusal_body, indent=2) + "\n"
+            proc = _Proc(1, err=output if stream == "stderr" else "", out=output if stream == "stdout" else "")
+            keys, writer.subprocess.run = scripted(*[proc] * writer.ATTEMPTS)
+            try:
+                writer.record_census(census("w"), pause=no_wait)
+                diagnosis = ""
+            except writer.WriterRefusal as refusal:
+                diagnosis = str(refusal)
+            check(f"multiline CLI refusal from {stream} keeps code, detail and hint and is not retried",
+                  len(keys) == 1 and all(value in diagnosis for value in refusal_body.values()), diagnosis)
+        # Installation uses the same primary-only policy and activation checks as other agents.
+        recipe = (REPO / "ops" / "launchd" / "com.carr.workflow-census-writer.plist").read_text()
+        check("census writer installation delegates to the canonical installer",
+              "./.venv/bin/python ops/config-as-code.py install --apply" in recipe
+              and "launchctl bootstrap" not in recipe and 'sed "s|{{REPO}}|' not in recipe)
         keys, writer.subprocess.run = scripted(
             *[_Proc(0, json.dumps({"ok": True, "seq": 1, "row_hash": "1" * 64}))] * writer.ATTEMPTS)
         try:

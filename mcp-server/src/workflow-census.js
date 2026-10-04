@@ -41,6 +41,8 @@
 // freshness window from config-as-code, so the one component that decides
 // "available" is the one that checks.
 
+import { partnerAuthoritySlugForActor } from "./partner-authority.js";
+
 const CENSUS_SCHEMA_VERSION = "control-plane-workflow-truth.v1";
 const MAX_CENSUS_CHARS = 4 * 1024 * 1024;
 const READ_MAX_ROWS_DEFAULT = 20000;
@@ -204,13 +206,45 @@ async function anchoredHead(c) {
   const anchor = typeof c.workflowCensusAnchor === "function"
     ? await c.workflowCensusAnchor()
     : { state: "unavailable", detail: "anchor_not_bound" };
-  if (anchor?.state === "absent") return { seq: null, row_hash: null };
+  if (anchor?.state === "absent") return { seq: null, row_hash: null, last_reanchor: anchor.last_reanchor };
   if (anchor?.state === "present" && Number.isSafeInteger(anchor.seq) && typeof anchor.row_hash === "string")
-    return { seq: anchor.seq, row_hash: anchor.row_hash };
+    return { seq: anchor.seq, row_hash: anchor.row_hash, last_reanchor: anchor.last_reanchor };
   return null;
 }
 
 const HEX64 = /^[0-9a-f]{64}$/;
+
+function sameCensusHead(a, b) {
+  return (a?.seq ?? null) === (b?.seq ?? null) && (a?.row_hash ?? null) === (b?.row_hash ?? null);
+}
+
+// Neither the owner-replaceable door nor its envelope cache is authority for
+// the head and attribution this request authorized. Check fresh receipts
+// before caching/commit, and cached receipts before post-commit application.
+function checkReanchorReceipt(receipt, actor, args, observed, ToolError, appliedReplay = false) {
+  const refuse = field => { throw new ToolError({ error: "workflow_census_reanchor_unverified", field,
+    hint: "the re-anchor receipt does not match the authorized request; investigate before retrying" }); };
+  const validHead = head => head === null || (isPlainObject(head) && Number.isSafeInteger(head.seq)
+    && head.seq >= 1 && typeof head.row_hash === "string" && HEX64.test(head.row_hash));
+  if (!isPlainObject(receipt)) refuse("receipt");
+  if (typeof receipt.receipt_id !== "string"
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(receipt.receipt_id)) refuse("receipt_id");
+  if (typeof receipt.recorded_at !== "string" || !RECORDED_AT_FORMAT.test(receipt.recorded_at)
+      || !Number.isFinite(Date.parse(receipt.recorded_at))) refuse("recorded_at");
+  if (receipt.actor !== actor?.slug) refuse("actor");
+  const partner = partnerAuthoritySlugForActor(actor);
+  if (!partner || receipt.verified_partner !== partner) refuse("verified_partner");
+  if (receipt.reason !== args.reason) refuse("reason");
+  if (!Number.isSafeInteger(receipt.rows_reattested) || receipt.rows_reattested < 0) refuse("rows_reattested");
+  if (!validHead(receipt.new_head) || !sameCensusHead(receipt.new_head, args.accept_head)) refuse("new_head");
+  if (!validHead(receipt.old_head) || sameCensusHead(receipt.old_head, receipt.new_head)) refuse("old_head");
+  if (!sameCensusHead(receipt.old_head, observed)) {
+    const last = observed.last_reanchor;
+    if (!appliedReplay || last?.receipt_id !== receipt.receipt_id
+        || !sameCensusHead(receipt.new_head, observed)
+        || !sameCensusHead(receipt.old_head, last.old_head)) refuse("old_head");
+  }
+}
 
 export function workflowCensusTools({ withEnvelope, ToolError }) {
   return {
@@ -364,11 +398,11 @@ export function workflowCensusTools({ withEnvelope, ToolError }) {
             hint: "accept_head is null or {seq, row_hash} exactly as read-workflow-census served the head" });
         if (typeof args.reason !== "string" || !args.reason.trim())
           throw new ToolError({ error: "workflow_census_reanchor_reason_required" });
-        return withEnvelope(c, actor, "record-workflow-census-reanchor", args, async () => {
-          const head = await anchoredHead(c);
-          if (!head)
-            throw new ToolError({ error: "workflow_census_anchor_unavailable",
-              hint: "the external anchor could not be read; nothing was recorded" });
+        const head = await anchoredHead(c);
+        if (!head)
+          throw new ToolError({ error: "workflow_census_anchor_unavailable",
+            hint: "the external anchor could not be read; nothing was recorded" });
+        const result = await withEnvelope(c, actor, "record-workflow-census-reanchor", args, async () => {
           let row;
           try {
             row = (await c.query(
@@ -382,8 +416,8 @@ export function workflowCensusTools({ withEnvelope, ToolError }) {
             throw doorRefusal(ToolError, error) ?? error;
           }
           if (!row?.receipt_id) throw new ToolError({ error: "workflow_census_reanchor_refused" });
-          const headOf = (seq, hash) => seq === null || seq === undefined ? null : { seq: Number(seq), row_hash: hash };
-          return {
+          const headOf = (seq, hash) => seq === null && hash === null ? null : { seq: Number(seq), row_hash: hash };
+          const response = {
             ok: true,
             replayed: row.replayed === true,
             receipt: {
@@ -397,7 +431,11 @@ export function workflowCensusTools({ withEnvelope, ToolError }) {
               rows_reattested: Number(row.rows_reattested),
             },
           };
+          checkReanchorReceipt(response.receipt, actor, args, head, ToolError);
+          return response;
         });
+        checkReanchorReceipt(result?.receipt, actor, args, head, ToolError, true);
+        return result;
       },
     },
   };

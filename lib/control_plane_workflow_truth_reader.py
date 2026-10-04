@@ -53,13 +53,13 @@ agent credential also carries (recorded and named in the claim: detected,
 not prevented).  The A01 label route
 (``lib/assurance_health_sources``) still derives no health label from it.
 
-ONE RE-READ, FOR ONE RACE.  The read verb reads the anchor before the chain, so
-a census write that commits between the two leaves the chain one row ahead of
-the anchor it was served beside.  On exactly that reason (``anchor_gap``) the
-route pauses and asks once more; a gap that is not that race (a write whose
-anchor advance failed, or a forged row appended to the anchored head) does not
-go away on a second read, and ``tampered`` is never re-read, so the re-read
-cannot turn tampering into an attestation.
+ONE RE-READ FOR SNAPSHOT RACES. The read verb reads the anchor before the
+chain. Completed writes between those reads can leave the sampled anchor
+several rows behind, and genesis can commit before its initial advance.
+The route pauses and re-verifies once for anchor_gap, anchor_behind_chain or
+anchor_absent. Persistent disagreement stays refused. Hash mismatches,
+replaced guards and broken chains are refused immediately; every fresh
+answer still passes the complete verifier before it can be attested.
 
 THE THREAT THIS DOES NOT CLOSE, NAMED.  A caller that rewrites this process's
 code (rebinding ``subprocess.run``, or the verifier) can still forge what this
@@ -157,7 +157,13 @@ def _census_answer(transport: _Callable[[int], tuple[_Any, str | None]],
                                            "attestation_config_unavailable")
         else:
             verdict = _one_verdict(transport, config)
-            if verdict.get("reason") == _attestation.REASON_ANCHOR_GAP:
+            # Separate anchor/chain reads can span multiple completed writes
+            # or the first commit before genesis advance. Re-observe these
+            # timing disagreements once before raising a tampering finding;
+            # persistent disagreement retains the verifier's refusal.
+            if (verdict.get("reason") == _attestation.REASON_ANCHOR_GAP
+                    or (verdict.get("reason") == _attestation.REASON_TAMPERED
+                        and verdict.get("detail") in ("anchor_behind_chain", "anchor_absent"))):
                 pause()
                 verdict = _one_verdict(transport, config)
     except Exception:

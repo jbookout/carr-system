@@ -144,6 +144,7 @@ DEFINITIVE_REFUSALS = (
     "workflow_census_tampered", "workflow_census_anchor_gap", "workflow_census_key_reuse",
     "workflow_census_payload_invalid", "workflow_census_payload_shape_refused",
     "workflow_census_payload_too_large", "workflow_census_payload_fraction_refused",
+    "workflow_census_payload_unsafe_integer_refused", "workflow_census_row_unverified",
     "workflow_census_principal_unavailable", "workflow_census_principal_forged",
     "workflow_census_session_principal_forged", "workflow_census_chain_splice_refused",
     "workflow_census_time_regression_refused", "workflow_census_anchor_invalid",
@@ -183,6 +184,17 @@ def _record_once(args: dict) -> dict:
     except Exception as exc:  # noqa: BLE001
         raise WriterRefusal(f"write_door_unreachable: {type(exc).__name__}") from None
     if proc.returncode != 0:
+        # local-verb emits TOOL ERROR followed by pretty-printed JSON. Retain
+        # its code, detail and hint rather than reducing the refusal to `}`.
+        for output in (proc.stderr or "", proc.stdout or ""):
+            marker = output.find("TOOL ERROR")
+            encoded = output[marker + len("TOOL ERROR"):].lstrip() if marker >= 0 else output.strip()
+            try:
+                payload, _ = json.JSONDecoder().raw_decode(encoded)
+            except ValueError:
+                continue
+            if isinstance(payload, dict) and isinstance(payload.get("error"), str):
+                raise WriterRefusal(f"write_door_refused: {json.dumps(payload, sort_keys=True)}")
         tail = (proc.stderr or proc.stdout or "").strip().splitlines()
         raise WriterRefusal(f"write_door_refused: {tail[-1][:300] if tail else '(no output)'}")
     try:

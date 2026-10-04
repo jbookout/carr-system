@@ -38,6 +38,7 @@ function slowCtx(ctx) {
     delete: (...args) => storage.delete(...args),
     list: async (...args) => { const value = await storage.list(...args); await new Promise(r => setTimeout(r, 5)); return value; },
     deleteAll: () => storage.deleteAll(),
+    transaction: fn => storage.transaction(fn),
   };
   return { storage: slow, blockConcurrencyWhile: fn => ctx.blockConcurrencyWhile(fn) };
 }
@@ -46,6 +47,33 @@ export class SlowAnchor extends WorkflowCensusAnchor {
 }
 export class UnserializedAnchor extends SlowAnchor {
   serialized(fn) { return fn(); }
+}
+// Inject a replacement failure through the same storage interface under workerd.
+export class FaultAnchor extends WorkflowCensusAnchor {
+  constructor(ctx, env) {
+    const storage = ctx.storage;
+    let armed = false, fault = false;
+    const wrap = target => ({
+      get: (...args) => target.get(...args),
+      list: (...args) => target.list(...args),
+      delete: async (...args) => { const out = await target.delete(...args); armed = true; return out; },
+      deleteAll: async () => { await target.deleteAll(); armed = true; },
+      put: async (...args) => {
+        if (fault && armed && typeof args[0] === "object" && args[0].last_reanchor) {
+          armed = false; fault = false;
+          throw new Error("replacement_put_fault");
+        }
+        return target.put(...args);
+      },
+      transaction: fn => storage.transaction(txn => fn(wrap(txn))),
+    });
+    super({ storage: wrap(storage), blockConcurrencyWhile: fn => ctx.blockConcurrencyWhile(fn) }, env);
+    this.armFault = () => { fault = true; };
+  }
+  async fetch(request) {
+    if (request.headers.get("x-fault") === "put") this.armFault();
+    return super.fetch(request);
+  }
 }
 export default {
   async fetch(request, env) {
@@ -71,6 +99,7 @@ async function withRuntime(fn) {
       REAL: { className: "WorkflowCensusAnchor", useSQLite: true },
       SLOW: { className: "SlowAnchor", useSQLite: true },
       CONTROL: { className: "UnserializedAnchor", useSQLite: true },
+      FAULT: { className: "FaultAnchor", useSQLite: true },
     },
   }));
   try { return await fn(mf); } finally { await mf.dispose(); }
@@ -94,6 +123,32 @@ const CONCURRENT = 12;
 const keyOf = p => `k-${p.seq}-${p.row_hash.slice(0, 4)}`;
 const register = (mf, binding, name, p, key = keyOf(p)) => post(mf, binding, name, "pending", { ...p, idempotency_key: key });
 const advance = (mf, binding, name, p, key = keyOf(p)) => post(mf, binding, name, "advance", { ...p, idempotency_key: key });
+
+test("under workerd, a failed replacement keeps the entire old anchor and same-receipt retry recovers", async () => {
+  await withRuntime(async mf => {
+    const r1 = { seq: 1, row_hash: H(1), prev_hash: null };
+    const r2 = { seq: 2, row_hash: H(2), prev_hash: H(1) };
+    await register(mf, "FAULT", "f", r1);
+    await advance(mf, "FAULT", "f", r1);
+    await register(mf, "FAULT", "f", r2);
+    const before = await head(mf, "FAULT", "f");
+    const receipt = { receipt_id: "failed-replacement", actor: "joe", recorded_at: "2026-09-24T05:00:00.000000Z",
+      rows_reattested: 1, old_head: { seq: 1, row_hash: H(1) }, new_head: { seq: 2, row_hash: H(9) } };
+    const failed = await mf.dispatchFetch(`http://anchor.test/FAULT/f/reanchor`, {
+      method: "POST", headers: { "content-type": "application/json", "x-fault": "put" },
+      body: JSON.stringify(receipt),
+    });
+    assert.equal(failed.status, 500);
+    assert.deepEqual(await head(mf, "FAULT", "f"), before, "head, receipt and pending entries survive replacement failure");
+    assert.equal((await advance(mf, "FAULT", "f", r1)).state, "replayed", "the old per-seq history survives");
+    assert.equal((await post(mf, "FAULT", "f", "reanchor", receipt)).state, "reanchored");
+    const after = await head(mf, "FAULT", "f");
+    assert.equal(after.head.row_hash, H(9));
+    assert.equal(after.last_reanchor.receipt_id, receipt.receipt_id);
+    assert.equal(after.pending_entries, 0);
+    assert.equal((await post(mf, "FAULT", "f", "reanchor", receipt)).state, "replayed");
+  });
+});
 
 test("under workerd, concurrent genesis proposals: the unserialized control loses updates, the anchor does not", async () => {
   await withRuntime(async mf => {

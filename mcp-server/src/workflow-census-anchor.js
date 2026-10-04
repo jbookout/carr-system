@@ -320,13 +320,18 @@ export class WorkflowCensusAnchor {
         if (decided.write) {
           // A re-anchor replaces what the object vouches for: the old per-seq
           // history no longer describes the chain it now anchors.
-          await storage.deleteAll();
           const entries = { [REANCHOR_KEY]: decided.record };
           if (decided.head) {
             entries[HEAD_KEY] = decided.head;
             entries[seqKey(decided.head.seq)] = decided.head.row_hash;
           }
-          await storage.put(entries);
+          // deleteAll is atomic only on its own. Delete keys and install the
+          // replacement within one transaction, so a failed put preserves the
+          // old head, history, pending entries and receipt for same-key retry.
+          await storage.transaction(async txn => {
+            for (const key of (await txn.list()).keys()) await txn.delete(key);
+            await txn.put(entries);
+          });
         }
         return decided;
       });

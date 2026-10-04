@@ -33,10 +33,10 @@
   record-workflow-census has merged AND the Worker carrying it is deployed
   (before that, every run is refused by the write door and exits non-zero).
   From the canonical checkout:
-    sed "s|{{REPO}}|$PWD|g" ops/launchd/com.carr.workflow-census-writer.plist \
-      > ~/Library/LaunchAgents/com.carr.workflow-census-writer.plist
-    plutil -lint ~/Library/LaunchAgents/com.carr.workflow-census-writer.plist
-    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.carr.workflow-census-writer.plist
+-->
+<?carr-install-command ./.venv/bin/python ops/config-as-code.py install --apply ?>
+<!--
+  The installer enforces primary-machine scope, target checks and activation.
   Once installed, ops/config-as-code.py check holds the installed body to this
   file like every other CARR LaunchAgent.
 -->

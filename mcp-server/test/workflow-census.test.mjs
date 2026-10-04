@@ -108,7 +108,7 @@ class CensusFake {
         recorded_at: "2026-09-24T09:20:00.000000Z", actor: "joe", verified_partner: "joe", reason,
         old_seq: oldSeq === null ? null : String(oldSeq), old_row_hash: oldHash,
         new_seq: newSeq === null ? null : String(newSeq), new_row_hash: newHash,
-        rows_reattested: "1", replayed: false }] };
+        rows_reattested: "1", replayed: false, ...this.receiptLie }] };
     }
     throw new Error(`CensusFake: unhandled query: ${sql}`);
   }
@@ -426,4 +426,46 @@ test("a census holding an integer past 2^53 is refused before the door", async (
     { idempotency_key: "k-big", census }));
   assert.equal(refusal.error, "workflow_census_payload_unsafe_integer_refused");
   assert.ok(!c.calls.some(call => call.sql.includes("ops.record_workflow_census")));
+});
+
+// The re-anchor door is owner-replaceable, just like the append door.
+test("re-anchor rejects substituted receipt fields before caching or applying, including door replays", async () => {
+  const old = { state: "present", seq: 1, row_hash: "1".repeat(64) };
+  const args = { idempotency_key: "receipt-binding", reason: "recover the committed row",
+    accept_head: { seq: 2, row_hash: "2".repeat(64) } };
+  for (const replayed of [false, true]) {
+    for (const lie of [
+      { old_seq: "8" }, { old_row_hash: "8".repeat(64) },
+      { new_seq: "9" }, { new_row_hash: "9".repeat(64) },
+      { actor: "dell" }, { verified_partner: "dell" }, { reason: "substituted reason" },
+      { rows_reattested: "-1" }, { rows_reattested: "9007199254740992" },
+      { recorded_at: "yesterday" }, { receipt_id: "not-a-receipt-id" },
+    ]) {
+      const c = new CensusFake({ anchor: old });
+      c.receiptLie = { ...lie, replayed };
+      const refusal = await rejected(() => executeRegisteredTool(c, JOE, "record-workflow-census-reanchor", args));
+      assert.equal(refusal.error, "workflow_census_reanchor_unverified", JSON.stringify(lie));
+      assert.equal(c.toolCalls.size, 0, "unverified receipts never enter the envelope cache");
+    }
+  }
+});
+
+test("re-anchor validates cached envelope receipts and permits an applied same-key replay", async () => {
+  const c = new CensusFake({ anchor: { state: "present", seq: 1, row_hash: "1".repeat(64) } });
+  const args = { idempotency_key: "cached-reanchor", reason: "recover", accept_head: { seq: 2, row_hash: "2".repeat(64) } };
+  const first = await executeRegisteredTool(c, JOE, "record-workflow-census-reanchor", args);
+  const prior = c.toolCalls.get(args.idempotency_key);
+  const original = structuredClone(prior.response);
+  for (const lie of [{ actor: "dell" }, { verified_partner: "dell" }, { reason: "other" },
+    { old_head: { seq: 9, row_hash: "9".repeat(64) } },
+    { new_head: { seq: 9, row_hash: "9".repeat(64) } }]) {
+    prior.response = { ...original, receipt: { ...original.receipt, ...lie } };
+    assert.equal((await rejected(() => executeRegisteredTool(c, JOE, "record-workflow-census-reanchor", args))).error,
+      "workflow_census_reanchor_unverified");
+  }
+  prior.response = original;
+  c.workflowCensusAnchor = async () => ({ state: "present", ...args.accept_head,
+    last_reanchor: first.receipt });
+  assert.deepEqual((await executeRegisteredTool(c, JOE, "record-workflow-census-reanchor", args)).receipt, first.receipt);
+  assert.equal(c.calls.filter(call => call.sql.includes("ops.reanchor_workflow_census")).length, 1);
 });

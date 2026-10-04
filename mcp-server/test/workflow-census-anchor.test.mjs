@@ -28,6 +28,11 @@ class FakeStorage {
     else for (const [k, v] of Object.entries(keyOrEntries)) this.map.set(k, structuredClone(v));
   }
   async deleteAll() { this.map.clear(); }
+  async transaction(fn) {
+    const before = structuredClone(this.map);
+    try { return await fn(this); }
+    catch (error) { this.map = before; throw error; }
+  }
 }
 
 // blockConcurrencyWhile, modelled: one callback at a time, in arrival order.
@@ -239,7 +244,7 @@ test("the object runs every read-modify-write inside blockConcurrencyWhile", () 
   const source = fs.readFileSync(new URL("../src/workflow-census-anchor.js", import.meta.url), "utf8");
   const fetchBody = source.slice(source.indexOf("  async fetch(request) {"), source.indexOf("function anchorStub"));
   assert.ok(fetchBody.includes("this.serialized(async () => {"));
-  assert.equal(fetchBody.split("storage.put(").length - 1, 3, "every put sits inside the serialized block");
+  assert.equal((fetchBody.match(/(?:storage|txn)\.put\(/g) ?? []).length, 3, "every put sits inside the serialized block");
   assert.equal(fetchBody.split("storage.delete(").length - 1, 2, "every delete sits inside the serialized block");
   // Every storage call in fetch sits inside one of the two serialized blocks
   // (GET /head, and the POST routes), never before them.
