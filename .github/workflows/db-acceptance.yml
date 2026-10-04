@@ -36,6 +36,7 @@ name: DB acceptance
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review, closed]
     # Only the paths that can actually break the disposable-Postgres lane: the
     # migrations themselves, the committed snapshot they apply onto, the CI
     # entry points, and the libraries/tools the acceptance programs import.
@@ -67,14 +68,17 @@ on:
         default: false
 
 concurrency:
-  group: db-acceptance-${{ github.ref }}
-  cancel-in-progress: true
+  # PR validation supersedes by workflow + PR. Non-PR verdicts are independent:
+  # sharing a non-cancelling group would still replace older pending runs.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
   acceptance:
+    if: ${{ github.event_name != 'pull_request' || github.event.action != 'closed' }}
     name: local-db-ci --class migration
     runs-on: ubuntu-latest
     # The canonical migration class plus this lane's own acceptance programs
