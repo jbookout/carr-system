@@ -87,11 +87,11 @@ export function mergeRelationshipFields(survivor, loser) {
 // vendor worked a deal. Historical Salesforce records remain canonical deals.
 // Counts come from the party's exact associations, the same set the network
 // snapshot reads. Coverage holds only while every live vendor row for the party
-// is verified and no relationship attachment was recorded after the oldest.
+// is verified. Association writes invalidate those attestations atomically.
 export const vendorRelationshipJoin = `left join lateral (
   select max(e.occurred_at) as last_deal_at,
     json_build_object(
-      'coverage_verified_at', case when max(c.oldest) >= coalesce(max(e.recorded_at),'-infinity') then max(c.oldest) end,
+      'coverage_verified_at', max(c.oldest),
       'deals_referred', count(distinct e.deal_id) filter (where e.role='referred'),
       'deals_worked', count(distinct e.deal_id) filter (where e.role='worked'),
       'won', count(distinct e.deal_id) filter (where e.role='worked' and e.outcome='won'),

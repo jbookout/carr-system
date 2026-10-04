@@ -28,6 +28,81 @@ const link=async(db,actor,args)=>{await db.query('savepoint action');await db.qu
 const network=async db=>{await db.query('savepoint read');await db.query('set local role carr_reader');try{return projectNetwork((await db.query(networkStatement)).rows[0].snapshot,new Date().toISOString());}finally{await db.query('rollback to savepoint read');await db.query('reset role');}};
 const referredDeals=(snapshot,party)=>snapshot.edges.filter(e=>e.kind==='referred'&&e.from==='party:'+party&&e.to.startsWith('deal:')).map(e=>e.to).sort();
 
+test('W14 PostgreSQL: coverage and exact attachments serialize in both commit orders', async t => {
+  const setup=loopback(t,'CARR_RELATIONSHIP_DB_REQUIRED');if(!setup)return;
+  const attachment=new pg.Client({connectionString:process.env.DATABASE_URL}),verification=new pg.Client({connectionString:process.env.DATABASE_URL});
+  await setup.connect();await attachment.connect();await verification.connect();
+  try {
+    const f=await fixtures(setup);
+    const directory=async vid=>(await readBusinessRecord({client:setup,actor:f.actor,dataset:'vendors',id:vid,contract:'vendor-directory.v1',correlationId:'coverage-race'})).record.relationship;
+    const pending=(conn,work)=>{const state={done:false,conn};state.result=work().then(ok=>({ok}),error=>({error})).finally(()=>{state.done=true;});return state;};
+    const parked=async state=>{
+      const pid=(await setup.query('select pid from pg_stat_activity where pid=$1',[state.conn.processID])).rows[0].pid;
+      for(let i=0;i<400;i++){
+        if(state.done)return 'done';
+        if((await setup.query('select wait_event_type from pg_stat_activity where pid=$1',[pid])).rows[0]?.wait_event_type==='Lock')return 'waiting';
+        await new Promise(r=>setTimeout(r,25));
+      }
+      throw new Error('coverage caller neither finished nor waited');
+    };
+    for(const order of ['verification first','attachment first'])await t.test(order,async()=>{
+      const vp=await f.party('coverage vendor'),source=await f.party('coverage source'),target=await f.party('coverage target');
+      const vid=await f.vendor(vp),secondVid=await f.vendor(vp),deal=await f.deal(await f.client(target),'won');
+      const args={from_party:source,to_party:target,via_party:vp,kind:'referred',deal_id:deal,note:'Demo coverage ordering',idempotency_key:randomUUID()};
+      const verifyArgs={vendor:vid,base_version:(await setup.query('select version from public.vendor where id=$1',[vid])).rows[0].version,fields:{verify_deal_history:true},idempotency_key:randomUUID()};
+      await attachment.query('begin');await attachment.query('select transaction_timestamp()');
+      await setup.query('update public.vendor set deal_history_verified_at=clock_timestamp() where id=$1',[secondVid]);
+      await attachment.query('set local role carr_writer');
+      await verification.query('begin');await verification.query('set local role carr_writer');
+      let release,reached;
+      const gate=new Promise(r=>release=r),atGate=new Promise(r=>reached=r);
+      const leader=order==='verification first'?verification:attachment;
+      const gated={query:async(sql,values)=>{
+        const result=await leader.query(sql,values);
+        if(order==='verification first'?sql==='select version from vendor where id=$1 for update':sql.includes('insert into public.party_link_deal')){reached();await gate;}
+        return result;
+      }};
+      let first,second;
+      try {
+        first=pending(leader,()=>order==='verification first'?TOOLS['update-vendor'].handler(gated,f.actor,verifyArgs):TOOLS['link-parties'].handler(gated,f.actor,args));
+        await Promise.race([atGate,first.result.then(r=>{throw r.error||new Error('caller finished without reaching ordering gate');})]);
+        second=pending(order==='verification first'?attachment:verification,()=>order==='verification first'?TOOLS['link-parties'].handler(attachment,f.actor,args):TOOLS['update-vendor'].handler(verification,f.actor,verifyArgs));
+        const secondState=await parked(second);
+        release();
+        const firstResult=await first.result;await leader.query(firstResult.ok?'commit':'rollback');
+        const secondResult=await second.result;await second.conn.query(secondResult.ok?'commit':'rollback');
+        assert.ok(firstResult.ok,firstResult.error?.message);
+        assert.equal((await directory(vid)).coverage_verified_at,null);
+        assert.equal((await directory(vid)).deals_referred,null);
+        assert.equal(secondState,'waiting','verification and attachment must share a row lock');
+        if(order==='verification first')assert.ok(secondResult.ok,secondResult.error?.message);
+        else assert.equal(secondResult.error?.payload?.error,'version_conflict','an attestation of the old set is refused');
+        assert.ok((await setup.query('select deal_history_verified_at from public.vendor where party_id=$1',[vp])).rows.every(r=>r.deal_history_verified_at===null),'every live role row loses coverage');
+        assert.equal((await setup.query('select count(*)::int n from public.party_link_deal where deal_id=$1',[deal])).rows[0].n,1);
+        // Fresh attestations cover the new set. A duplicate attachment must not
+        // invalidate it, and rollback must restore coverage with the association.
+        for(const id of [vid,secondVid]){
+          await setup.query('begin');
+          try {
+            await TOOLS['update-vendor'].handler(setup,f.actor,{...verifyArgs,vendor:id,base_version:(await setup.query('select version from public.vendor where id=$1',[id])).rows[0].version,idempotency_key:randomUUID()});
+            await setup.query('commit');
+          } catch(e){await setup.query('rollback');throw e;}
+        }
+        assert.equal((await directory(vid)).deals_referred,1);
+        await setup.query('begin');await link(setup,f.actor,{...args,idempotency_key:randomUUID()});await setup.query('commit');
+        assert.equal((await directory(vid)).deals_referred,1,'duplicate keeps coverage');
+        const other=await f.deal((await setup.query('select client_id from public.deal where id=$1',[deal])).rows[0].client_id,'won');
+        await setup.query('begin');await link(setup,f.actor,{...args,deal_id:other,idempotency_key:randomUUID()});await setup.query('rollback');
+        assert.equal((await directory(vid)).deals_referred,1,'rolled back attachment keeps coverage');
+      } finally {
+        release();
+        await first?.result;await leader.query('rollback');
+        await second?.result;await (leader===attachment?verification:attachment).query('rollback');
+      }
+    });
+  } finally {await attachment.end();await verification.end();await setup.end();}
+});
+
 test('W14 PostgreSQL: a concurrent attachment never credits a deal to the other caller\'s broker', async t => {
   const setup=loopback(t,'CARR_RELATIONSHIP_DB_REQUIRED');if(!setup)return;
   const first=new pg.Client({connectionString:process.env.DATABASE_URL}),second=new pg.Client({connectionString:process.env.DATABASE_URL});

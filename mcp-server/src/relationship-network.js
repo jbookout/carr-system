@@ -7,14 +7,12 @@ export const REFERRAL_KINDS = ['referral', 'referred'];
 // row for a party, and referral deals attached to a relationship, credited to
 // the referrer accepted when that deal was attached. Live client deals only.
 // A date is UTC midnight, as vendor evidence stores one, whatever the session zone.
-// recorded_at is when an attachment was written; vendor evidence carries none
-// because its own writes already clear that row's verified coverage.
-export const exactDealAssociations = `select e.party_id,e.deal_id,e.role,e.occurred_at,e.detail,e.recorded_at,d.outcome from (
- select v.party_id,x.deal_id,x.role,x.occurred_at,x.evidence_ref detail,null::timestamptz recorded_at
+export const exactDealAssociations = `select e.party_id,e.deal_id,e.role,e.occurred_at,e.detail,d.outcome from (
+ select v.party_id,x.deal_id,x.role,x.occurred_at,x.evidence_ref detail
  from public.vendor v cross join lateral jsonb_to_recordset(coalesce(v.deal_evidence,'[]'::jsonb)) x(deal_id uuid,role text,occurred_at timestamptz,evidence_ref text)
  where v.merged_into is null
  union all
- select r.referred_by,r.deal_id,'referred',coalesce(r.occurred_on::timestamp at time zone 'UTC',r.created_at),r.note,r.created_at from public.party_link_deal r
+ select r.referred_by,r.deal_id,'referred',coalesce(r.occurred_on::timestamp at time zone 'UTC',r.created_at),r.note from public.party_link_deal r
 ) e join public.deal d on d.id=e.deal_id join public.client dc on dc.id=d.client_id and dc.merged_into is null
  join public.party dp on dp.id=dc.party_id and dp.merged_into is null and dp.deleted_at is null`;
 export const networkStatement = `with live as (
@@ -94,8 +92,14 @@ export async function bindReferralDeal(client, actor, args, ends, kind, link) {
   if (!REFERRAL_KINDS.includes(kind) || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(args.deal_id) || typeof args.note !== 'string' || !args.note.trim()) throw Object.assign(new Error('referral_deal_invalid'),{code:'referral_deal_invalid'});
   const found = await client.query(`select d.id from public.deal d join public.client c on c.id=d.client_id and c.merged_into is null join public.party p on p.id=c.party_id and p.merged_into is null and p.deleted_at is null where d.id=$1::uuid and p.id=$2::uuid`,[args.deal_id,ends.to_party]);
   if (!found.rows.length) throw Object.assign(new Error('referral_deal_target_mismatch'),{code:'referral_deal_target_mismatch'});
+  // update-vendor's verification locks the same rows via versionGuard. Lock in
+  // UUID order (as vendor merges do), then clear coverage with the insertion.
+  // Transaction/statement timestamps cannot order concurrent commits. A stale
+  // verification waits and fails its version check; a prior one is invalidated.
+  const vendors = await client.query(`select id from public.vendor where party_id=$1 and merged_into is null order by id for update`,[link.referred_by]);
   const result = await client.query(`insert into public.party_link_deal(link_id,deal_id,created_by,note,referred_by,occurred_on)
     values($1,$2,$3,$4,$5,coalesce($6::date,(select occurred_on from public.party_link where id=$1))) on conflict do nothing returning deal_id,referred_by`,
     [link.id,args.deal_id,actor.id,args.note.trim(),link.referred_by,link.occurred_on]);
+  if (result.rows.length && vendors.rows.length) await client.query(`update public.vendor set deal_history_verified_at=null,updated_by=$2 where id=any($1::uuid[])`,[vendors.rows.map(v=>v.id),actor.id]);
   return result.rows[0] || null;
 }

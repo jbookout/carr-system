@@ -22,6 +22,8 @@ test('referral binding checks exact destination before writing and deduplicates'
  const calls=[],client={query:async(text,args)=>{calls.push({text,args});return {rows:text.startsWith('select')?[{id:'demo'}]:[{deal_id:'00000000-0000-4000-8000-000000000001'}]};}};
  const args={deal_id:'00000000-0000-4000-8000-000000000001',note:'Demo exact attribution'},ends={to_party:'00000000-0000-4000-8000-000000000002'},link={id:'link',referred_by:'00000000-0000-4000-8000-000000000003',occurred_on:'2026-01-05'};
  for (const deal_id of ['',false,0,'invalid']) await assert.rejects(bindReferralDeal(client,{id:'actor'},{...args,deal_id},ends,'referral',link),e=>e.code==='referral_deal_invalid');
- assert.deepEqual(await bindReferralDeal(client,{id:'actor'},args,ends,'referral',link),{deal_id:args.deal_id});assert.deepEqual(calls[0].args,[args.deal_id,ends.to_party]);assert.match(calls[1].text,/on conflict do nothing/);assert.deepEqual(calls[1].args,['link',args.deal_id,'actor',args.note,link.referred_by,link.occurred_on]);
+ assert.deepEqual(await bindReferralDeal(client,{id:'actor'},args,ends,'referral',link),{deal_id:args.deal_id});assert.deepEqual(calls[0].args,[args.deal_id,ends.to_party]);
+ const insert=calls.find(call=>call.text.startsWith('insert into public.party_link_deal'));
+ assert.match(insert.text,/on conflict do nothing/);assert.deepEqual(insert.args,['link',args.deal_id,'actor',args.note,link.referred_by,link.occurred_on]);
  await assert.rejects(bindReferralDeal({query:async()=>({rows:[]})},{id:'actor'},args,ends,'referral',link),e=>e.code==='referral_deal_target_mismatch');await assert.rejects(bindReferralDeal(client,{id:'actor'},args,ends,'knows',link),e=>e.code==='referral_deal_invalid');
 });
