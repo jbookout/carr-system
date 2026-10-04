@@ -751,7 +751,10 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
             self.assertEqual(exited.exception.code, 1)
             self.assertIn("UNKNOWN jev paid cap", narrow.getvalue())
             self.assertIn("ImportError", narrow.getvalue())
-            [finding] = json.loads(findings.read_text())["findings"]
+            rows = json.loads(findings.read_text())["findings"]
+            self.assertEqual({row["key"] for row in rows}, {"jev_paid_cap", "jev_site_budget"})
+            self.assertTrue(all(row["hard_error"] for row in rows))
+            [finding] = [row for row in rows if row["key"] == "jev_paid_cap"]
             self.assertEqual(finding["key"], "jev_paid_cap")
             self.assertTrue(finding["hard_error"])
 
