@@ -153,13 +153,15 @@ class RecordingAttributionTests(Harness):
             self.requests.append(request)
             return FakeResponse(json.dumps({**ANSWER, "answers": answers}).encode())
         self.enterContext(patch.object(client.urllib.request, "urlopen", opener))
-        self.enterContext(patch.dict(client.ask.__kwdefaults__, cache_path=str(self.root / "cache.json")))
+        self.enterContext(patch.dict(client.ask.__kwdefaults__, cache_path=str(self.root / "cache.json"),
+                                     calls_log=str(self.log)))
         pack = {"session": "recording-fixture", "joe_tasks": [
             {"id": "item-fixture", "deal_id": "deal-fixture", "task": "send details", "evidence": "send details"}]}
         post.check_distillation(pack, {"deals": [{"id": "deal-fixture", "name": "Fixture"}]},
                                 {"segments": [{"speaker": "Me", "text": "send details"}]})
         self.assertEqual(len(self.requests), 1)
         self.assertNotIn("unavailable", pack["joe_tasks"][0]["checks"])
+        self.assertTrue(self.rows(), "recording receipts stay in the isolated fixture log")
         self.assertEqual(client._job_label(), "com.digimata.quill")
         with patch.dict(os.environ, {"XPC_SERVICE_NAME": "com.unrelated.service"}):
             self.assertIsNone(client._job_label())
