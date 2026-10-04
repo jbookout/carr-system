@@ -293,11 +293,13 @@ class Fixture:
             slice_marker = lambda key, sha: (self.slice_marks.append((key, sha)) or {"rc": 0})  # noqa: E731
         env = rp.child_env(FIXTURE_ENV)
         env.update({k: FIXTURE_ENV[k] for k in ("GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL")})
-        return rp.Pipeline(cfg or self.config(), repo=self.repo, runner=runner,
+        pipe = rp.Pipeline(cfg or self.config(), repo=self.repo, runner=runner,
                            github=lambda _r: github or FakeGitHub(),
                            http=lambda _u: {"git_sha": {"value": live["sha"]}},
                            call_verb=lambda verb, args: (verbs.append((verb, args)) or (True, {"ok": True})),
                            slice_marker=slice_marker, dry_run=dry_run, env=env, today="2026-09-30", out=lambda _s: None)
+        pipe.staging_ledger = lambda: {"candidate": "fixture", "ledger": {"fixture": "digest"}}
+        return pipe
 
     def state(self) -> dict:
         p = self.repo / "out/release-pipeline/state.json"
@@ -315,6 +317,153 @@ class Base(unittest.TestCase):
 
     def tearDown(self):
         self._tmp.cleanup()
+
+
+class RejectionReconciliation(Base):
+    def setUp(self):
+        super().setUp()
+        self.sha = self.fx.commit({"mcp-server/src/a.js": "1"})
+        self.gh = FakeGitHub(approve_all=False)
+        self.clock = 1000.0
+        self.runner = FakeRunner()
+        self.pipe = self.fx.pipeline(self.runner, github=self.gh)
+        self.pipe.now = lambda: self.clock
+
+    def test_unchanged_review_rejection_executes_once_across_restart(self):
+        with mock.patch.object(self.pipe, "release_worker", wraps=self.pipe.release_worker) as release:
+            self.pipe.tick(["worker"])
+            self.pipe.tick(["worker"])
+            self.assertEqual(release.call_count, 1)
+        again = self.fx.pipeline(self.runner, github=self.gh)
+        again.now = lambda: self.clock
+        with mock.patch.object(again, "release_worker", wraps=again.release_worker) as release:
+            again.tick(["worker"])
+            self.assertEqual(release.call_count, 0)
+        self.assertEqual(len([r for r in self.fx.records() if r["status"] == "blocked"]), 1)
+        self.assertIn("repair", self.fx.state()["worker"]["rejection"])
+
+    def test_each_comment_edit_and_body_edit_permits_one_evaluation(self):
+        self.pipe.tick(["worker"])
+        number = self.gh.pr_number(self.sha)
+        self.gh.comment_map[number] = [{"body": "REVIEW: BLOCKED\nReviewed-SHA: " + pr_head(number),
+            "author_association": "OWNER", "id": 99}]
+        with mock.patch.object(self.pipe, "release_worker", wraps=self.pipe.release_worker) as release:
+            self.pipe.tick(["worker"])
+            self.pipe.tick(["worker"])
+            self.assertEqual(release.call_count, 1)
+        original = self.gh.pr_for_commit
+        self.gh.pr_for_commit = lambda sha: {**original(sha), "body": "changed no-eval evidence"}
+        with mock.patch.object(self.pipe, "release_worker", wraps=self.pipe.release_worker) as release:
+            self.pipe.tick(["worker"])
+            self.pipe.tick(["worker"])
+            self.assertEqual(release.call_count, 1)
+
+    def test_check_completion_wakes_but_does_not_bypass_review(self):
+        cfg = self.fx.config(); cfg["app"]["enabled"] = True
+        self.gh.checks = [{"name": "test", "status": "in_progress", "conclusion": None}]
+        pipe = self.fx.pipeline(self.runner, cfg=cfg, github=self.gh)
+        pipe.now = lambda: self.clock
+        pipe.http = lambda _url: {"source_commit": self.fx.base}
+        pipe.tick(["app"]); pipe.tick(["app"])
+        self.gh.checks[0].update(status="completed", conclusion="success")
+        with mock.patch.object(pipe, "release_app", wraps=pipe.release_app) as release:
+            pipe.tick(["app"]); pipe.tick(["app"])
+            self.assertEqual(release.call_count, 1)
+        self.assertEqual(self.runner.calls, [])
+        self.assertNotIn("last_released_sha", self.fx.state()["app"])
+
+    def test_health_recheck_is_bounded_and_recovery_runs_all_release_guards(self):
+        self.gh.approve_all = True
+        self.runner.health_baseline_findings = [{"key": "reader", "subject": "", "count": 1,
+            "hard_error": True, "time_rolling": False}]
+        self.pipe.tick(["worker"])
+        count = self.runner.names().count("health-baseline")
+        self.pipe.tick(["worker"])
+        self.assertEqual(self.runner.names().count("health-baseline"), count)
+        self.clock += self.pipe.REJECTION_RECHECK_SECONDS
+        self.runner.health_baseline_findings = []
+        self.runner.fail_at = "staging"
+        self.assertEqual(self.pipe.tick(["worker"]), 1)
+        self.assertIn("staging", self.runner.names())
+        self.assertNotIn("promote", self.runner.names())
+        self.assertEqual(self.fx.state()["worker"]["failed_sha"], self.sha)
+
+    def test_unreadable_reconciliation_stays_refused(self):
+        self.pipe.tick(["worker"])
+        self.gh.raise_on = "pr_for_commit"
+        with mock.patch.object(self.pipe, "release_worker", wraps=self.pipe.release_worker) as release:
+            self.pipe.tick(["worker"])
+            self.assertEqual(release.call_count, 0)
+        self.assertEqual(self.runner.calls, [])
+
+    def test_canonical_staging_observer_hashes_real_provider_scope_and_exact_ledger(self):
+        from decimal import Decimal
+        module = rp.runpy.run_path(str(HERE.parent / "tools/staging-project-replacement.py"))
+        scope = module["ProviderScope"]("project", "candidate", "branch", "endpoint", "host",
+            17, "region", Decimal("0.25"), Decimal("1"))
+        module["resolve_existing_scopes"] = mock.Mock(return_value=(None, None, scope))
+        module["derive_dsn"] = mock.Mock(return_value=module["SecretDsn"](scope, "private-dsn-canary"))
+        cursor = mock.MagicMock()
+        cursor.__enter__.return_value = cursor
+        cursor.fetchone.return_value = ("schema_migrations",)
+        cursor.fetchall.return_value = [("0001_fixture.sql", "a" * 64)]
+        conn = mock.MagicMock()
+        conn.__enter__.return_value = conn
+        conn.cursor.return_value = cursor
+        psycopg = mock.Mock(); psycopg.connect.return_value = conn
+        module["psycopg"] = psycopg
+        with mock.patch.object(rp.runpy, "run_path", return_value=module):
+            snapshot = rp.Pipeline.staging_ledger(self.pipe)
+        digest = rp.evidence_digest(snapshot)
+        self.assertRegex(digest, r"^[0-9a-f]{64}$")
+        self.assertEqual(snapshot["ledger"]["migration_ledger"], {"0001_fixture.sql": "a" * 64})
+        self.assertNotIn("private-dsn-canary", json.dumps(snapshot))
+        self.assertIn("default_transaction_read_only=on", psycopg.connect.call_args.kwargs["options"])
+        cursor.execute.assert_any_call('select filename,sha256 from public.schema_migrations order by filename collate "C"')
+
+    def test_staging_ledger_reconciliation_permits_one_retry_and_retains_checks(self):
+        self.gh.approve_all = True
+        self.runner.fail_at = "staging-prepare"
+        ledger = {"candidate": "fixture", "ledger": {"migration": "old"}}
+        self.pipe.staging_ledger = lambda: dict(ledger)
+        self.assertEqual(self.pipe.tick(["worker"]), 1)
+        self.pipe.tick(["worker"])
+        self.assertEqual(self.runner.names().count("staging-prepare"), 1)
+        self.clock += self.pipe.REJECTION_RECHECK_SECONDS
+        ledger["ledger"] = {"migration": "reconciled"}
+        self.assertEqual(self.pipe.tick(["worker"]), 1)
+        self.pipe.tick(["worker"])
+        self.assertEqual(self.runner.names().count("staging-prepare"), 2)
+        self.assertNotIn("promote", self.runner.names())
+        rejection = self.fx.state()["worker"]["rejection"]
+        self.assertEqual(rejection["repair"]["owner"], "tools/staging-project-replacement.py")
+        self.assertIn("staging_ledger_digest", rejection)
+
+    def test_staging_observation_failures_never_wake_a_failed_release(self):
+        self.gh.approve_all = True
+        self.runner.fail_at = "staging-prepare"
+        self.pipe.staging_ledger = lambda: {"candidate": "fixture", "ledger": "before"}
+        self.pipe.tick(["worker"])
+        for error in [ValueError("empty acknowledgement"), RuntimeError("REFUSED"),
+                      subprocess.CalledProcessError(7, "probe", stderr="private-error-canary"),
+                      OSError("private-error-canary")]:
+            with self.subTest(error=type(error).__name__):
+                self.clock += self.pipe.REJECTION_RECHECK_SECONDS
+                self.pipe.staging_ledger = mock.Mock(side_effect=error)
+                self.pipe.tick(["worker"])
+                self.assertEqual(self.runner.names().count("staging-prepare"), 1)
+                self.assertNotIn("private-error-canary", self.pipe.store.state_path.read_text())
+                self.assertNotIn("private-error-canary", self.pipe.store.records_path.read_text())
+
+    def test_fingerprint_sink_keeps_no_body_or_exception_canaries(self):
+        secret = "invented-client-identifier-canary"
+        original = self.gh.pr_for_commit
+        self.gh.pr_for_commit = lambda sha: {**original(sha), "body": secret}
+        self.pipe.tick(["worker"])
+        self.gh.pr_for_commit = mock.Mock(side_effect=ValueError(secret))
+        self.pipe.tick(["worker"])
+        raw = (self.pipe.store.state_path.read_bytes() + self.pipe.store.records_path.read_bytes())
+        self.assertNotIn(secret.encode(), raw)
 
 
 class Classification(unittest.TestCase):
@@ -1199,12 +1348,16 @@ class HealthGate(Base):
         verbs: list = []
         for attempt in range(1, n):
             runner = FakeRunner(live=live, health_baseline_marker=False)
-            rc = self.fx.pipeline(runner, live=live, verbs=verbs).tick(["worker"])
+            pipe = self.fx.pipeline(runner, live=live, verbs=verbs)
+            pipe.now = lambda: attempt * 10000
+            rc = pipe.tick(["worker"])
             self.assertEqual(rc, 0, f"attempt {attempt} should still be a clean, silent hold")
             self.assertEqual(self.fx.records()[-1]["reason"], "health_baseline_unavailable")
             self.assertEqual(verbs, [], f"no loop should be filed before attempt {n}")
         runner = FakeRunner(live=live, health_baseline_marker=False)
-        rc = self.fx.pipeline(runner, live=live, verbs=verbs).tick(["worker"])
+        pipe = self.fx.pipeline(runner, live=live, verbs=verbs)
+        pipe.now = lambda: n * 10000
+        rc = pipe.tick(["worker"])
         self.assertEqual(rc, 3, "the Nth consecutive incomplete baseline must escalate")
         rec = self.fx.records()[-1]
         self.assertEqual(rec["reason"], "health_baseline_stalled")
@@ -1218,11 +1371,15 @@ class HealthGate(Base):
         sha = self.fx.commit({"mcp-server/src/a.js": "1"})
         live = {"sha": self.fx.base}
         n = rp.Pipeline.HEALTH_BASELINE_ESCALATE_AFTER
-        for _ in range(n - 1):
+        for attempt in range(n - 1):
             runner = FakeRunner(live=live, health_baseline_marker=False)
-            self.fx.pipeline(runner, live=live).tick(["worker"])
+            pipe = self.fx.pipeline(runner, live=live)
+            pipe.now = lambda: attempt * 10000
+            pipe.tick(["worker"])
         good_runner = FakeRunner(live=live)
-        self.assertEqual(self.fx.pipeline(good_runner, live=live).tick(["worker"]), 0)
+        pipe = self.fx.pipeline(good_runner, live=live)
+        pipe.now = lambda: n * 10000
+        self.assertEqual(pipe.tick(["worker"]), 0)
         self.assertEqual(self.fx.state()["worker"].get("health_baseline_incomplete", {}).get(sha),
                          None)
 
