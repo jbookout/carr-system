@@ -932,6 +932,17 @@ check_pushfloor() {
   local changed=""
   if [ -n "${CARR_CI_RANGE:-}" ]; then
     changed="$(git diff --name-only --diff-filter=ACMR "$CARR_CI_RANGE" 2>/dev/null || true)"
+    # Updating an existing branch imports main's admitted files into the
+    # pushed range. Predict only files whose final content/mode differs from
+    # main; those identical to main cannot be this branch's change. Keep the
+    # original range on an unreadable main, and never narrow CARR_CI_RANGE:
+    # the secret scanner must still inspect every blob this push carries.
+    local main_changed=""
+    if main_changed="$(git diff --name-only origin/main HEAD 2>/dev/null)"; then
+      changed="$(LC_ALL=C comm -12 \
+        <(printf '%s\n' "$changed" | LC_ALL=C sort -u) \
+        <(printf '%s\n' "$main_changed" | LC_ALL=C sort -u))"
+    fi
   fi
 
   floor_fail() {  # floor_fail <name> <remedy>
@@ -960,6 +971,14 @@ check_pushfloor() {
   if [ -n "$changed" ] && [ -f ops/githooks/path-hygiene-check.py ]; then
     local added
     added="$(git diff --name-only --diff-filter=ACR "$CARR_CI_RANGE" 2>/dev/null || true)"
+    # Filename admission depends on whether the path already exists on main,
+    # independently of whether this branch changed that file's contents.
+    local main_paths=""
+    if main_paths="$(git ls-tree -r --name-only origin/main 2>/dev/null)"; then
+      added="$(LC_ALL=C comm -23 \
+        <(printf '%s\n' "$added" | LC_ALL=C sort -u) \
+        <(printf '%s\n' "$main_paths" | LC_ALL=C sort -u))"
+    fi
     if [ -n "$added" ]; then
       # shellcheck disable=SC2086
       run_quiet "$LOGDIR/pushfloor-path-hygiene.log" \
@@ -1242,6 +1261,13 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     return
   fi
 
+  if ! CARR_RULE_TEST_DATABASE_URL="$dsn" run_quiet "$LOGDIR/migration-rule-supersession.log" \
+      node --test mcp-server/test/find-rule-supersedes.test.mjs; then
+    tail -30 "$LOGDIR/migration-rule-supersession.log" >&2
+    bad migration "rule lookup or atomic teach supersession database proof failed"
+    return
+  fi
+
   # Tour Operations carries database-owned rights, identity, route, digest,
   # ACL, and append-only invariants that cannot be proved by text-shape tests.
   # The DoctorCRE v5 portfolio proof joins the same loop for the same reason:
@@ -1259,7 +1285,8 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     mcp-server/test/tour-delivery-data-plane-postgres.sql \
     mcp-server/test/tour-client-share-allowlist-postgres.sql \
     mcp-server/test/assurance-health-store-postgres.sql \
-    mcp-server/test/work-portfolio-postgres.sql; do
+    mcp-server/test/work-portfolio-postgres.sql \
+    mcp-server/test/local-deals-postgres.sql; do
     [ -f "$tour_pg_proof" ] || continue
     tour_pg_log="$LOGDIR/$(basename "$tour_pg_proof" .sql).log"
     if ! run_quiet "$tour_pg_log" \

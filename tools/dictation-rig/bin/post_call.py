@@ -386,25 +386,76 @@ def command_distiller(request: dict[str, Any], command: str | None = None, runne
     return parsed
 
 
-def transcript_chunks(transcript: dict[str, Any], limit: int = 24000) -> list[dict[str, Any]]:
-    """Split only at transcript segments, never in the middle of a speaker turn."""
+# A judged cut may land anywhere in the last quarter of a full chunk, so a
+# chunk never shrinks below three quarters of the limit to follow a topic.
+CUT_WINDOW_FRACTION = 0.75
+MAX_CUT_CANDIDATES = 4
+
+
+def _spread_cut_options(options: list[int], limit: int) -> list[int]:
+    """At most `limit` evenly spaced options, always keeping the last one --
+    the size-limit cut the splitter would have made anyway."""
+    if len(options) <= limit:
+        return options
+    step = (len(options) - 1) / (limit - 1)
+    return sorted({options[round(i * step)] for i in range(limit)})
+
+
+def transcript_chunks(transcript: dict[str, Any], limit: int = 24000,
+                      choose_cut: Callable[[list[Any], list[int]], int | None] | None = None) -> list[dict[str, Any]]:
+    """Split only at transcript segments, never in the middle of a speaker turn.
+
+    Without `choose_cut` a chunk ends wherever the size limit falls, which can
+    cut one discussion in half: the second chunk then lacks the setup (which
+    deal "it" is), and the same item can be distilled from both halves.
+
+    `choose_cut(segments, options)` may instead pick where the topic changes.
+    `options` are segment indexes to cut before, all inside the last quarter of
+    the full chunk and always including the size-limit cut. Anything it returns
+    outside `options`, None, or an exception keeps the size-limit cut, so a
+    judge can move a boundary but can never fail the split.
+    """
     segments = transcript.get("segments")
     if not isinstance(segments, list):
         raise ContractError("transcript segments must be an array")
+
+    def size(lo: int, hi: int) -> int:
+        return len(json.dumps({"segments": segments[lo:hi]}, ensure_ascii=False))
+
     chunks: list[dict[str, Any]] = []
-    current: list[Any] = []
-    for segment in segments:
-        candidate = {"segments": current + [segment]}
-        if len(json.dumps(candidate, ensure_ascii=False)) > limit:
-            if not current:
-                raise RuntimeError("a transcript segment exceeds bounded local distiller context")
-            chunks.append({"segments": current})
-            current = [segment]
-        else:
-            current.append(segment)
-    if current or not chunks:
-        chunks.append({"segments": current})
+    start = end = 0
+    while end < len(segments):
+        if size(start, end + 1) <= limit:
+            end += 1
+            continue
+        if end == start:
+            raise RuntimeError("a transcript segment exceeds bounded local distiller context")
+        cut = end
+        if choose_cut is not None:
+            floor = limit * CUT_WINDOW_FRACTION
+            options = _spread_cut_options(
+                [k for k in range(start + 1, end + 1) if size(start, k) >= floor],
+                MAX_CUT_CANDIDATES,
+            )
+            if len(options) > 1:
+                try:
+                    picked = choose_cut(segments, options)
+                except Exception:
+                    picked = None
+                if picked in options:
+                    cut = picked
+        chunks.append({"segments": segments[start:cut]})
+        start = cut
+    if start < len(segments) or not chunks:
+        chunks.append({"segments": segments[start:]})
     return chunks
+
+
+def _topic_chunks(transcript: dict[str, Any]) -> list[dict[str, Any]]:
+    """Share one optional judgment budget across every cut, then split greedily."""
+    deadline = time.monotonic() + post_call_jev.TOPIC_CUT_BUDGET_SECONDS
+    return transcript_chunks(transcript, choose_cut=lambda segments, options:
+        post_call_jev.topic_cut(segments, options, deadline=deadline))
 
 
 def merge_chunk_outputs(outputs: list[dict[str, Any]]) -> dict[str, Any]:
@@ -538,7 +589,7 @@ def llama_distiller(request: dict[str, Any], popen: Callable[..., Any] = subproc
     context_json = json.dumps(request["context"], ensure_ascii=False)
     if len(context_json) > 28000:
         raise RuntimeError("call-context index exceeds bounded local distiller context")
-    chunks = transcript_chunks(request["transcript"])
+    chunks = _topic_chunks(request["transcript"])
     child = popen([
         LLAMA_SERVER, "-m", str(LLAMA_MODEL), "--host", "127.0.0.1",
         "--port", str(LLAMA_PORT), "-c", "16384", "--threads", "4",
@@ -611,7 +662,7 @@ def resident_flash_distiller(request: dict[str, Any], opener: Callable[..., Any]
         raise DistillerUnavailable(
             f"the resident local model server at {FLASH_SERVER_URL} is unreachable"
         )
-    chunks = transcript_chunks(request["transcript"])
+    chunks = _topic_chunks(request["transcript"])
     outputs: list[dict[str, Any]] = []
     try:
         for chunk in chunks:

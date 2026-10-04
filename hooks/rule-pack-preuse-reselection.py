@@ -135,11 +135,9 @@ SEMANTIC_FAILURE_CONTEXT = (
 MESSAGE_LIMIT_CHARS = 90_000
 
 # ONE CLOCK FOR THE WHOLE PROMPT HOOK. ops/config/hooks.json kills this hook at
-# 20 s, and a killed hook delivers nothing. The three slow steps run in order
-# — the build advisory (ops/jev_build_advisory.py: one attempt, at most 6 s,
-# no rate-limit retries), the rule judgment (ops/rule_trigger_delivery.py:
-# its own 12 s clock, cut short here so SELECTOR_RESERVE_SECONDS stay for the
-# last step), and the standing-context door — and all of them end by
+# 20 s, and a killed hook delivers nothing. The two slow steps run in order:
+# rule judgment (ops/rule_trigger_delivery.py, with its own 12 s clock) and
+# the standing-context door. Both end by
 # HOOK_BUDGET_SECONDS after the process started, leaving ~2 s for the
 # interpreter and the receipt.
 HOOK_BUDGET_SECONDS = 18.0
@@ -149,6 +147,49 @@ _HOOK_STARTED = time.monotonic()
 
 def _hook_deadline() -> float:
     return _HOOK_STARTED + HOOK_BUDGET_SECONDS
+
+
+SELECTOR_REASONS = frozenset({
+    "selector delivery plan is not exact",
+    "selector did not return every scheduled rule",
+    "selector did not return every triggered rule",
+    "selector identity is incomplete",
+    "selector response was not ok",
+    "selector returned a malformed rule",
+    "selector returned duplicate or nonbinding rule",
+    "selector returned malformed JSON",
+    "selector returned nonzero",
+    "selector rule pools are malformed",
+})
+
+
+def _failure_reason(exc: BaseException) -> str:
+    """Name the cause without ever echoing untrusted exception text.
+
+    An allowlist, not a denylist: redaction that tries to strip secrets out of
+    arbitrary text is a guess, and a guess that is wrong once puts a bearer in
+    the transcript permanently. `type(exc) is RuntimeError` rather than
+    isinstance, so a subclass carrying a coincidentally-matching message
+    cannot pass.
+    """
+    # Main's generalized selector uses a typed taxonomy shared with the
+    # semantic rail. Translate only its three closed transport reasons.
+    if type(exc) is SelectorError:
+        reason = {
+            "nonzero": "selector returned nonzero",
+            "invalid_json": "selector returned malformed JSON",
+            "not_ok": "selector response was not ok",
+        }.get(exc.reason)
+        if reason is not None:
+            return reason
+    if type(exc) is RuntimeError and str(exc) in SELECTOR_REASONS:
+        return str(exc)
+    return f"unexpected {type(exc).__name__}"
+
+
+def _failed(base: str, exc: BaseException) -> dict:
+    """The fixed non-blocking failure line, plus the one safe word for why."""
+    return _context(f"{base} Cause: {_failure_reason(exc)}.")
 
 
 def scheduled_rule_ids() -> list[str]:
@@ -477,7 +518,7 @@ def _build_adviser(situation: str) -> dict:
         raise RuntimeError("build advisory unavailable")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.advise(situation)
+    return module.deferred()
 
 
 def _build_unavailable(error: Exception | None = None) -> dict:
@@ -784,11 +825,10 @@ def process(payload: dict, *, runner: Callable = subprocess.run,
                 return _context(notice if rule_routes.within_cap(notice)
                                 else rule_routes.notice_too_large(ids))
             return _deduped_context(payload, row)
-        except Exception:
-            # Never surface provider/auth/network exception text: it may contain a
-            # bearer, URL, or local path.  The fixed category is enough for Stop to
-            # preserve the miss and for the operator to reproduce through the door.
-            return _context(FAILURE_CONTEXT)
+        except Exception as exc:
+            # Known selector failures retain their safe cause; arbitrary
+            # provider/auth/network exception text never reaches the transcript.
+            return _failed(FAILURE_CONTEXT, exc)
 
     # THE ROUTE AND GENERALIZED RAILS (WR-000019 slice S9). Only reached when
     # the original exact shape did not match, so a background
@@ -825,8 +865,8 @@ def _table_delivery(payload: dict, rows: list[dict], runner: Callable) -> dict |
         response = _run_generalized_selector(packs, ids, runner)
         return _deduped_context(payload,
                                 _generalized_receipt(payload, response, trigger_ids, packs, ids))
-    except Exception:
-        return _context(GENERALIZED_FAILURE_CONTEXT)
+    except Exception as exc:
+        return _failed(GENERALIZED_FAILURE_CONTEXT, exc)
 
 
 def _route_file_unreadable(payload: dict, rows: list[dict], runner: Callable,

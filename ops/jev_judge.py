@@ -141,7 +141,7 @@ def _client():
 
 
 def judge(subject, questions, *, timeout=20.0, client=None, api_key=None,
-          retries=None, deadline=None):
+          retries=None, deadline=None, model=None):
     """Ask every question in `questions` about ONE subject, in one request.
 
     `subject` is a mapping describing the single thing being judged — a diff, a
@@ -169,6 +169,8 @@ def judge(subject, questions, *, timeout=20.0, client=None, api_key=None,
             extra["retries"] = retries
         if deadline is not None:
             extra["deadline"] = deadline
+        if model is not None:
+            extra["model"] = model
         if hasattr(tsc, "JUDGE_CACHE_TTL_SECONDS"):
             extra.update(caller="jev_judge", cache_ttl_seconds=tsc.JUDGE_CACHE_TTL_SECONDS)
         answer = tsc.ask(subject, questions, timeout=timeout, api_key=api_key, **extra)
