@@ -321,6 +321,7 @@ class FakeClient {
         parked_at: deal.parked_at, parked_by: deal.parked_by,
         salesforce_id: deal.salesforce_id, base_version: deal.version }] : [] };
     }
+    if (sql.includes("from v_deal_room_current_lease where deal_id=$1")) return { rows: this.currentLease ? [this.currentLease] : [] };
     if (sql.includes("from v_deal_room_note")) {
       const rows = this.notes.filter(n => n.deal_id === params[0])
         .sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id))
@@ -1375,4 +1376,21 @@ test('direct phase control retains authenticated browser provenance without comp
   assert.equal(inserts[0][11], 'dealroom-cookie'); assert.equal(inserts[0][12], 'dealroom-pwa');
   const event = c.events.find(e => e.idempotency_key === 'demo-manual-phase');
   assert.equal(event.human_quote, null);
+});
+
+
+test("deal timeline returns exact current lease dates and explicit absence without deriving obligations", async () => {
+  const db = new FakeClient();
+  const empty = await call("get-deal-room", db, actors.joe, { deal: "Deal Alpha" });
+  assert.equal(empty.schema_version, "deal-timeline.v1");
+  assert.equal(empty.lease, null);
+  db.currentLease = { id: "demo-lease", version: 2, status: "current", executed_on: "2026-10-01",
+    commencement_on: "2026-11-01", expiration_on: "2031-10-31", options_note: "Notice period requires review",
+    evidence_kind: "lease_abstract", evidence_ref: "synthetic clause 3", source: "synthetic abstract" };
+  const page = await call("get-deal-room", db, actors.joe, { deal: "Deal Alpha" });
+  assert.deepEqual(page.lease, db.currentLease);
+  assert.equal(Object.hasOwn(page.lease, "rent_start_on"), false);
+  assert.equal(Object.hasOwn(page.lease, "option_on"), false);
+  const source = await readFile(new URL("../src/tools.js", import.meta.url), "utf8");
+  assert.match(source, /from v_deal_room_current_lease where deal_id=\$1/);
 });

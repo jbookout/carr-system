@@ -77,7 +77,11 @@ jobs:
   acceptance:
     name: local-db-ci --class migration
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # The canonical migration class plus this lane's own acceptance programs
+    # routinely took 22-24 minutes by 2026-10-04, and a slow runner pushed six
+    # all-green runs past a 25-minute cap. ci.yml's migration budget must stay
+    # at least this one (ops/ci-selftest.py checks both).
+    timeout-minutes: 35
 
     steps:
       # Actions are pinned to commit SHAs, not tags, for the supply-chain reason

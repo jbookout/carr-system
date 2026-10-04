@@ -1288,17 +1288,43 @@ if [ "$JEV_CAP_REGISTRY_APPLIED" = t ] && [ "$FIND_RULE_REGISTRY_APPLIED" != t ]
   exit 1
 fi
 
+OBSERVATORY_ROOM_READ_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0807_observatory_room_read_scac_successor.sql')" \
+  2>/dev/null)"
+case "$OBSERVATORY_ROOM_READ_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read Observatory room read v105 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$OBSERVATORY_ROOM_READ_REGISTRY_APPLIED" = t ] && [ "$JEV_CAP_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: Observatory room read v105 is applied without v104 predecessor" >&2
+  exit 1
+fi
+
+LEAD_AUTOMATION_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0812_lead_automation_scac_successor.sql')" \
+  2>/dev/null)"
+case "$LEAD_AUTOMATION_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read lead automation v106 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$LEAD_AUTOMATION_REGISTRY_APPLIED" = t ] && [ "$OBSERVATORY_ROOM_READ_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: lead automation v106 is applied without v105 predecessor" >&2
+  exit 1
+fi
+
 DOC_ACTIVITY_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0788_doc_activity_scac_successor.sql')" \
+  "select exists (select 1 from schema_migrations where filename='0813_doc_activity_scac_successor.sql')" \
   2>/dev/null)"
 case "$DOC_ACTIVITY_REGISTRY_APPLIED" in
   t|f) ;;
-  *) echo "schema-snapshot: could not read Doc activity v105 registry ledger state" >&2; exit 1 ;;
+  *) echo "schema-snapshot: could not read Doc activity v107 registry ledger state" >&2; exit 1 ;;
 esac
-if [ "$DOC_ACTIVITY_REGISTRY_APPLIED" = t ] && [ "$JEV_CAP_REGISTRY_APPLIED" != t ]; then
-  echo "schema-snapshot: Doc activity v105 is applied without v104 predecessor" >&2
+if [ "$DOC_ACTIVITY_REGISTRY_APPLIED" = t ] && [ "$LEAD_AUTOMATION_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: Doc activity v107 is applied without v106 predecessor" >&2
   exit 1
 fi
+
+
 
 # WR-000117. 0530 is the registry successor half of the atomic (0529,0530)
 # group, so probing the SUCCESSOR and not the domain migration is what says the
@@ -3144,7 +3170,7 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                                        SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v103'"
                                        SCAC_FULL_SET_SEAL_COUNT=103
                                        SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v104_current()"
-                                     if [ "$DOC_ACTIVITY_REGISTRY_APPLIED" = t ]; then
+                                     if [ "$OBSERVATORY_ROOM_READ_REGISTRY_APPLIED" = t ]; then
                                        SCAC_CURRENT_NUMBER=105
                                        SCAC_VERSION_COUNT=105
                                        SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v105'")"
@@ -3154,6 +3180,28 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                                        SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v104'"
                                        SCAC_FULL_SET_SEAL_COUNT=104
                                        SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v105_current()"
+                                     if [ "$LEAD_AUTOMATION_REGISTRY_APPLIED" = t ]; then
+                                       SCAC_CURRENT_NUMBER=106
+                                       SCAC_VERSION_COUNT=106
+                                       SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v106'")"
+                                       SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v106'")"
+                                       SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v106.generated.js"
+                                       SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v106'"
+                                       SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v105'"
+                                       SCAC_FULL_SET_SEAL_COUNT=105
+                                       SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v106_current()"
+                                     if [ "$DOC_ACTIVITY_REGISTRY_APPLIED" = t ]; then
+                                       SCAC_CURRENT_NUMBER=107
+                                       SCAC_VERSION_COUNT=107
+                                       SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v107'")"
+                                       SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v107'")"
+                                       SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v107.generated.js"
+                                       SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v107'"
+                                       SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v106'"
+                                       SCAC_FULL_SET_SEAL_COUNT=106
+                                       SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v107_current()"
+                                     fi
+                                     fi
                                      fi
                                      fi
                                      fi

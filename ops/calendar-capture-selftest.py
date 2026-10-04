@@ -372,34 +372,46 @@ check("failed reader cannot write from a stale dump", p.returncode == 1 and "log
 
 # Regression 5: a second capture must not complete the paused first reader.
 root, stub = fixture(matcher_json=json.dumps(exact_only))
-reader_started = root / "reader-started"
-reader_release = root / "reader-release"
-os.mkfifo(reader_release)
 (stub / "open").write_text(
-    "#!/usr/bin/env python3\nfrom pathlib import Path\n"
-    f"Path({str(reader_started)!r}).write_text('ready')\n"
-    f"with open({str(reader_release)!r}) as gate: gate.read()\n")
+    "#!/bin/sh\n"
+    'if [ "${CALCAP_TEST_HOLD_READER:-0}" = "1" ]; then\n'
+    '  touch "$CARR_REPO/out/reader-started"\n'
+    '  while [ ! -f "$CARR_REPO/out/release-reader" ]; do sleep 0.01; done\n'
+    'else\n'
+    '  for target do :; done\n'
+    '  mkdir -p "$target"\n'
+    '  echo {} > "$target/calendar-attendees.json"\n'
+    '  echo exit=0 >> "$target/calendar-access.log"\n'
+    'fi\n')
+# Delayed process startup reproduces a loaded CI runner before lock acquisition.
+(stub / "python3").write_text(
+    "#!/bin/sh\n"
+    'if [ "${CALCAP_TEST_DELAY_START:-0}" = "1" ]; then sleep 1; fi\n'
+    f'exec "{sys.executable}" "$@"\n')
+(stub / "python3").chmod(0o755)
 env = dict(os.environ, CARR_REPO=str(root), PATH=f"{stub}:{os.environ['PATH']}",
-           CARR_CALENDAR_CAPTURE_WAIT_SECONDS="3")
+           CARR_CALENDAR_CAPTURE_WAIT_SECONDS="3", CALCAP_TEST_DELAY_START="1",
+           CALCAP_TEST_HOLD_READER="1")
 a = subprocess.Popen(["sh", str(SCRIPT), "--dry-run"], env=env,
                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 import time
-ready_deadline = time.monotonic() + 10
-while not reader_started.exists() and a.poll() is None and time.monotonic() < ready_deadline:
-    time.sleep(.01)
+# Wait for the reader itself, then keep it paused while the competing invocation
+# reaches the lock. Process launch time is not evidence of lock acquisition.
 try:
-    assert reader_started.exists(), "first reader never acquired the capture lock"
-    (stub / "open").write_text("#!/bin/sh\nfor target do :; done\nmkdir -p \"$target\"\necho '{}' > \"$target/calendar-attendees.json\"\necho exit=0 >> \"$target/calendar-access.log\"\n")
+    deadline = time.monotonic() + 10
+    started = root / "out/reader-started"
+    while not started.exists() and a.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert started.exists(), "first capture never reached its reader"
     b = run(root, stub)
 finally:
-    if reader_started.exists():
-        with reader_release.open("w") as gate:
-            gate.write("continue")
-    else:
-        a.kill()
-aout, aerr = a.communicate(timeout=10)
+    (root / "out/release-reader").touch()
+    aout, aerr = a.communicate(timeout=10)
 check("concurrent dry/live capture cannot acknowledge another read",
-      a.returncode == 1 and b.returncode == 75 and "source=eventkit" not in aout)
+      a.returncode == 1 and "read did not finish" in aerr
+      and b.returncode == 75 and "another capture is still reading" in b.stderr
+      and "source=eventkit" not in aout,
+      f"first={a.returncode}, second={b.returncode}; {aerr.strip()}; {b.stderr.strip()}")
 
 # A timed-out reader completes during the next invocation. Its private exit/dump
 # must never promote the next reader, which has not completed at all.
