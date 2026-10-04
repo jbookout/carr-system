@@ -19,6 +19,8 @@ from psycopg.types.json import Jsonb
 
 from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connection, set_local_role
 
+from policy_epoch_fixture import analyze_rule_projection
+
 REPO = Path(__file__).resolve().parents[1]
 
 # 0787 installs the capped Worker contract v104 and seals rule lookup v103 as history.
@@ -206,6 +208,7 @@ def seed_reviewed_rule_projection(cur) -> None:
                 map_digest,
             ),
         )
+    analyze_rule_projection(cur)
     cur.execute("set constraints all immediate")
     cur.execute("set constraints all deferred")
 

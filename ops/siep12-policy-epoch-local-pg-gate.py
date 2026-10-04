@@ -14,6 +14,7 @@ from pathlib import Path
 
 from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connection, set_local_role
 from scac_mutation_db_inventory import project, project_escalation, project_role_authority, summarize
+from policy_epoch_fixture import analyze_rule_projection
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -124,6 +125,7 @@ def seed_reviewed_rule_projection(cur) -> None:
              scope_by_short[short], contract.get("why"),
              "ops/config/rule-enforcement-map.json", map_digest),
         )
+    analyze_rule_projection(cur)
     cur.execute("set constraints all immediate")
     cur.execute("set constraints all deferred")
 
