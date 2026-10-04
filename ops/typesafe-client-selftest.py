@@ -42,6 +42,16 @@ client = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(client)
 REAL_ALERT_SINK = client._emit_spend_alert
 REAL_MAIL_SINK = getattr(client, "_email_spend_alert", None)
+_CAP_ROOT = tempfile.TemporaryDirectory()
+
+
+def setUpModule():
+    # The production cap counter is canonical and shared by every session, so
+    # a test that reached it would spend the real daily Jev budget.
+    unittest.addModuleCleanup(_CAP_ROOT.cleanup)
+    patcher = patch.object(client, "JEV_DAILY_CAP_LOG", os.path.join(_CAP_ROOT.name, "calls.jsonl"))
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
 
 
 class FakeResponse(io.BytesIO):
@@ -1041,6 +1051,11 @@ class LibraryShapeTests(unittest.TestCase):
 
 
 class DispatchOwnershipTests(unittest.TestCase):
+    def test_tests_never_reserve_against_the_canonical_daily_cap(self):
+        canonical = os.path.join(client.CANONICAL_REPO, "out")
+        self.assertNotEqual(os.path.commonpath([os.path.abspath(client.JEV_DAILY_CAP_LOG), canonical]),
+                            canonical, "a selftest ask would spend the real daily Jev cap")
+
     def test_runtime_router_preserves_explicit_transcript_owner(self):
         session = 'dispatch-runtime'
         with tempfile.TemporaryDirectory() as directory:
@@ -1073,6 +1088,7 @@ import importlib.util, io, json, sys
 from unittest.mock import patch
 spec = importlib.util.spec_from_file_location('standalone_client', sys.argv[1])
 client = importlib.util.module_from_spec(spec); spec.loader.exec_module(client)
+client.JEV_DAILY_CAP_LOG = sys.argv[2]
 class Response(io.StringIO):
     status = 200
     def __init__(self):
