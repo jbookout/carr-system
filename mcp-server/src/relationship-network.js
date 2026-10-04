@@ -92,6 +92,11 @@ export async function bindReferralDeal(client, actor, args, ends, kind, link) {
   if (!REFERRAL_KINDS.includes(kind) || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(args.deal_id) || typeof args.note !== 'string' || !args.note.trim()) throw Object.assign(new Error('referral_deal_invalid'),{code:'referral_deal_invalid'});
   const found = await client.query(`select d.id from public.deal d join public.client c on c.id=d.client_id and c.merged_into is null join public.party p on p.id=c.party_id and p.merged_into is null and p.deleted_at is null where d.id=$1::uuid and p.id=$2::uuid`,[args.deal_id,ends.to_party]);
   if (!found.rows.length) throw Object.assign(new Error('referral_deal_target_mismatch'),{code:'referral_deal_target_mismatch'});
+  // Coverage spans every live vendor row of the referrer, including rows that
+  // do not exist yet. FOR UPDATE on the party conflicts with the KEY SHARE lock
+  // a vendor insert's (or re-point's) foreign-key check takes, so no role row
+  // can appear between this lookup and commit; one created first is seen here.
+  await client.query(`select 1 from public.party where id=$1 for update`,[link.referred_by]);
   // update-vendor's verification locks the same rows via versionGuard. Lock in
   // UUID order (as vendor merges do), then clear coverage with the insertion.
   // Transaction/statement timestamps cannot order concurrent commits. A stale

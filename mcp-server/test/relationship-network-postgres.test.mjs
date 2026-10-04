@@ -103,6 +103,46 @@ test('W14 PostgreSQL: coverage and exact attachments serialize in both commit or
   } finally {await attachment.end();await verification.end();await setup.end();}
 });
 
+test('W14 PostgreSQL: a vendor role created after an empty lookup waits for the attachment', async t => {
+  const setup=loopback(t,'CARR_RELATIONSHIP_DB_REQUIRED');if(!setup)return;
+  const attachment=new pg.Client({connectionString:process.env.DATABASE_URL}),creation=new pg.Client({connectionString:process.env.DATABASE_URL});
+  await setup.connect();await attachment.connect();await creation.connect();
+  let release=()=>{},attached,created;
+  try {
+    const f=await fixtures(setup);
+    const vp=await f.party('future vendor'),source=await f.party('empty source'),target=await f.party('empty target');
+    const deal=await f.deal(await f.client(target),'won');
+    // Pause the attachment after its vendor lookup finds no role row.
+    let reached;const gate=new Promise(r=>release=r),atLookup=new Promise(r=>reached=r);
+    const gated={query:async(sql,values)=>{const r=await attachment.query(sql,values);if(sql.includes('from public.vendor where party_id=$1')){reached();await gate;}return r;}};
+    await attachment.query('begin');await attachment.query('set local role carr_writer');
+    attached=TOOLS['link-parties'].handler(gated,f.actor,{from_party:source,to_party:target,via_party:vp,kind:'referred',deal_id:deal,note:'Demo empty-row ordering',idempotency_key:randomUUID()}).then(ok=>({ok}),error=>({error}));
+    await Promise.race([atLookup,attached.then(r=>{throw r.error||new Error('attachment finished without reaching its vendor lookup');})]);
+    await creation.query('begin');
+    const state={done:false};
+    created=creation.query("insert into public.vendor(party_id,vendor_ref,category,territory,owner_id,created_by,updated_by) values($1,$2,'banker','Demo North',$3,$3,$3) returning id",[vp,'V-DEMO-'+randomUUID(),f.actor.id]).then(r=>r.rows[0].id).finally(()=>{state.done=true;});
+    let waited=false;
+    for(let i=0;i<400&&!state.done;i++){
+      if((await setup.query('select wait_event_type from pg_stat_activity where pid=$1',[creation.processID])).rows[0]?.wait_event_type==='Lock'){waited=true;break;}
+      await new Promise(r=>setTimeout(r,25));
+    }
+    release();
+    const result=await attached;await attachment.query(result.ok?'commit':'rollback');
+    assert.ok(result.ok,result.error?.message);
+    const vid=await created;await creation.query('commit');
+    assert.ok(waited,'a new vendor role must wait for an uncommitted attachment on its party');
+    // A verification after both commits attests the set that includes the deal.
+    await setup.query('begin');
+    await TOOLS['update-vendor'].handler(setup,f.actor,{vendor:vid,base_version:(await setup.query('select version from public.vendor where id=$1',[vid])).rows[0].version,fields:{verify_deal_history:true},idempotency_key:randomUUID()});
+    await setup.query('commit');
+    const relationship=(await readBusinessRecord({client:setup,actor:f.actor,dataset:'vendors',id:vid,contract:'vendor-directory.v1',correlationId:'empty-row-race'})).record.relationship;
+    assert.equal(relationship.deals_referred,1);
+  } finally {
+    release();await attached;await attachment.query('rollback');await created?.catch(()=>{});await creation.query('rollback');
+    await attachment.end();await creation.end();await setup.end();
+  }
+});
+
 test('W14 PostgreSQL: a concurrent attachment never credits a deal to the other caller\'s broker', async t => {
   const setup=loopback(t,'CARR_RELATIONSHIP_DB_REQUIRED');if(!setup)return;
   const first=new pg.Client({connectionString:process.env.DATABASE_URL}),second=new pg.Client({connectionString:process.env.DATABASE_URL});
