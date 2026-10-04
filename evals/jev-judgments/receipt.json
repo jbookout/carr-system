@@ -2,11 +2,11 @@
  "adapter": {
   "adapter_id": "jev-judgments-admission-replay",
   "adapter_version": "1",
-  "configuration_fingerprint": "sha256:c6f6edc7dfcc9e3017f78307fb79fc0e74f1ad069558c9e7a4a72c3385dffda1",
+  "configuration_fingerprint": "sha256:66a313c71312a52c6e1dba4f287eca01aae5c12120ecd0e038a5e809cc15439c",
   "harness_id": "evals/jev-judgments/run_eval.py",
-  "harness_version": "327cfc98e87fd5bd99bfde86b05b8aadb2f25c94b933e22c94c6ed8aaf218d26",
+  "harness_version": "49749d5ebb4e7a134b1a5f5143c566a9dc9e821d5994db4542b587ce4a6466ac",
   "model_id": "deterministic-no-model",
-  "native_session_ref": "bc8be775-4cce-4333-b689-7ef4190508d5",
+  "native_session_ref": "9300cddb-0fd7-4985-b5f8-b7fc02a2fd41",
   "provider_id": "none",
   "surface": "offline_programmatic"
  },
@@ -92,10 +92,11 @@
    "evals/jev-judgments/expectations.v1.json": "fbf78aaede01d2871dd055f2c66e625b5e00f816915ca19a5ce67cc7a9b34211",
    "lib/jev_required_actions.py": "23be831932b418a6540bb25da42b9954090a232c85a8697cfa47d2410b82ddcd",
    "lib/transcript_read.py": "17f34e6288557340d70e5cff18927a6274f61b5c802afb5848b7d71c3f1210a2",
+   "mcp-server/src/jev-request-contract.v1.json": "0687a4cda641c5f08bb856de5b9f234f7e8a097e21e92762b5ed3f582ddca185",
    "mcp-server/src/judge-providers.v1.json": "48b8ca8b4defec4b82fd36f708498c707eab5f861ae0046f857ae06ae8d981ab",
    "ops/config/jev-call-sites.v1.json": "805ce9f514cc9bbb9f354389af038f1bde05674e90edf9dadf4a6228cac36ad8",
    "ops/config/jev-cost-guard.v1.json": "f8da9d20d6019c5bd9528683c61594dca09f07488d66ce998c53ae8bc3c24089",
-   "ops/typesafe_client.py": "7ed3ddedd4a7ff68a8d5a1b5ddeba33cfd67d79db9351587ea060e1a1fe521d7",
+   "ops/typesafe_client.py": "75d35b089d02e65dcf2b369d39672cabe8ef4e41b7f7277233e3bb688334cbef",
    "tools/judge/interface.py": "2e0440cc85660f83f4456829006f3f00a956e414c4c72e8217ab1a22622f3ed2"
   },
   "expectations": {
@@ -108,7 +109,7 @@
    "path": "evals/jev-judgments/score.py"
   },
   "source": {
-   "evals/jev-judgments/run_eval.py": "327cfc98e87fd5bd99bfde86b05b8aadb2f25c94b933e22c94c6ed8aaf218d26",
+   "evals/jev-judgments/run_eval.py": "49749d5ebb4e7a134b1a5f5143c566a9dc9e821d5994db4542b587ce4a6466ac",
    "evals/jev-judgments/score.py": "71511dc3ab33fc63455ada0e3f26f2d1a3cd0b09dfa21fcd121a5835cff4ca65"
   }
  },

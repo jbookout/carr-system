@@ -458,6 +458,162 @@ class UnusableResponseTests(unittest.TestCase):
                 self.ask("credit gone")
         self.assertTrue(self.ask("answered earlier")["cache_hit"])
 
+    def test_expired_credit_hold_admits_only_one_concurrent_probe(self):
+        client._open_hold("credit_hold", 0)
+        start = threading.Barrier(8)
+        entered = threading.Event()
+        release = threading.Event()
+        sent = []
+        def transport(request, timeout=None):
+            sent.append(1)
+            entered.set()
+            release.wait(3)
+            return vendor_refusal(402)(request, timeout)
+        def attempt(i):
+            start.wait(3)
+            try:
+                self.ask(f"concurrent probe {i}")
+            except client.TypeSafeError:
+                pass
+        with patch.object(client.urllib.request, "urlopen", transport):
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                futures = [pool.submit(attempt, i) for i in range(8)]
+                self.assertTrue(entered.wait(3))
+                # The other admissions finish while the exclusive probe waits.
+                time.sleep(0.2)
+                release.set()
+                for future in futures:
+                    future.result(5)
+        self.assertEqual(len(sent), 1)
+
+    def test_hold_opened_between_preflight_and_transaction_refuses_transport(self):
+        original = client._daily_cap_limit
+        def open_before_admission():
+            client._open_hold("credit_hold", 300)
+            return original()
+        with patch.object(client, "_daily_cap_limit", open_before_admission):
+            with self.assertRaises(client.TypeSafeError):
+                self.ask("hold opened at admission")
+        self.assertEqual(self.requests, [])
+
+    def test_abandoned_credit_probe_has_a_bounded_lease(self):
+        client._open_hold("credit_hold", 0)
+        # A process can die after reserving and before any transport outcome.
+        client._reserve_paid_call({"q": client.noul("Fixture")}, None,
+                                  "cap-test", "noul", "fixture")
+        with self.assertRaises(client.TypeSafeError):
+            self.ask("probe abandoned")
+        self.assertEqual(self.requests, [])
+        with patch.object(client.time, "time", return_value=time.time() + 3600):
+            self.ask("probe lease expired")
+        self.assertEqual(len(self.requests), 1)
+        self.ask("recovery verified")
+        self.assertEqual(len(self.requests), 2, "success clears the recovered hold")
+
+    def test_credit_read_storage_error_refuses_paid_transport(self):
+        client._open_hold("credit_hold", 300)
+        self.options["cache_ttl_seconds"] = 0
+        connect = client.sqlite3.connect
+        calls = []
+        def fail_first(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise client.sqlite3.OperationalError("offline fixture")
+            return connect(*args, **kwargs)
+        with patch.object(client.sqlite3, "connect", fail_first):
+            with self.assertRaises(client.TypeSafeError):
+                self.ask("untrusted credit read")
+        self.assertEqual(self.requests, [])
+
+    def test_credit_write_storage_error_survives_storage_recovery(self):
+        with patch.object(client.sqlite3, "connect",
+                          side_effect=client.sqlite3.OperationalError("offline fixture")):
+            with self.assertRaises(client.TypeSafeError):
+                client._open_hold("credit_hold", 300)
+        self.assertTrue(client._credit_marker().exists())
+        client._CREDIT_STATE_UNSAFE.discard(client._cap_db_path())
+        with self.assertRaises(client.TypeSafeError):
+            self.ask("storage restored after lost credit write")
+        self.assertEqual(self.requests, [])
+
+    def test_first_worker_credit_failure_still_serves_existing_local_cache(self):
+        self.ask("answered earlier")
+        self.options.pop("api_key")
+        self.enterContext(patch.dict(os.environ, CARR_JEV_IN_HOOK="0"))
+        self.enterContext(patch.object(client, "read_api_key", return_value="offline-fixture"))
+        worker_calls = []
+        def worker(argv, **kwargs):
+            mode = json.loads(argv[3])["transport_mode"]
+            worker_calls.append(mode)
+            error = ('{"error":"jev_cache_miss"}' if mode == "cache_only"
+                     else worker_vendor_failure(402, "http_status"))
+            return subprocess.CompletedProcess(argv, 1, "", error)
+        self.options["server_runner"] = worker
+        result = self.ask("answered earlier")
+        self.assertTrue(result["cache_hit"])
+        self.assertEqual(worker_calls, ["cache_only", "paid_once"])
+        self.assertEqual(len(self.requests), 1, "only the cache-priming transport")
+
+    def test_builders_copy_criteria_before_returning(self):
+        options = {"a": "A", "b": "B"}
+        levels = ["a", "b"]
+        choice = client.choice("Fixture", options)
+        score = client.score("Fixture", levels)
+        options.clear()
+        levels.clear()
+        self.assertEqual(len(choice["criteria"]), 2)
+        self.assertEqual(len(score["criteria"]), 2)
+
+    def test_request_contract_matches_worker_and_builders(self):
+        cases = [
+            ({"type": "choice", "instructions": "Fixture", "criteria": {"a": "A"}}, False),
+            ({"type": "choice", "instructions": "Fixture"}, False),
+            ({"type": "score", "instructions": "Fixture", "criteria": ["a"]}, False),
+            ({"type": "score", "instructions": "Fixture"}, False),
+            ({"type": "noul", "instructions": "Fixture", "criteria": []}, False),
+            ({"type": "choice", "instructions": "Fixture", "criteria": {"a": "A", "b": "B"}}, True),
+            ({"type": "score", "instructions": "Fixture", "criteria": ["a", "b"]}, True),
+            ({"type": "noul", "instructions": "Fixture"}, True),
+            ({"type": "noul", "instructions": " "}, False),
+            ({"type": "unknown", "instructions": "Fixture"}, False),
+            ({"type": ["noul"], "instructions": "Fixture"}, False),
+        ]
+        requests = [{"state": "fixture", "questions": {"q": question},
+                     "purpose": "call", "session_id": "fixture"} for question, _ in cases]
+        script = """import {validateAskJevArgs} from './mcp-server/src/jev-call-receipt.js';
+          let data=''; for await (const chunk of process.stdin) data+=chunk;
+          console.log(JSON.stringify(JSON.parse(data).map(args=>{
+            try {validateAskJevArgs(args); return true;} catch {return false;}
+          })));"""
+        result = subprocess.run(["node", "--input-type=module", "-e", script],
+                                input=json.dumps(requests), text=True, capture_output=True,
+                                cwd=MODULE_PATH.parent.parent, check=True)
+        expected = [valid for _, valid in cases]
+        self.assertEqual(json.loads(result.stdout), expected)
+        self.assertEqual([client.malformed_request("fixture", {"q": q}) is None
+                          for q, _ in cases], expected)
+        for builder, criteria in [(client.choice, {"a": "A"}), (client.score, ["a"])]:
+            with self.assertRaises(client.TypeSafeError):
+                builder("Fixture", criteria)
+
+    def test_malformed_question_diagnostics_never_echo_caller_fields(self):
+        sentinel = "CONFIDENTIAL_fixture_sentinel"
+        for question in [{"type": "noul", "instructions": ""},
+                         {"type": sentinel, "instructions": "Fixture"}]:
+            with self.assertRaises(client.TypeSafeError) as caught:
+                client.ask("fixture", {sentinel: question}, **self.options)
+            self.assertNotIn(sentinel, str(caught.exception))
+        # Judge logs persist the same exception text; exercise that sink too.
+        spec = importlib.util.spec_from_file_location("jev_judge", MODULE_PATH.with_name("jev_judge.py"))
+        judge = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(judge)
+        with self.assertRaises(judge.JudgeUnavailable) as caught:
+            judge.judge("fixture", {sentinel: {"type": "noul", "instructions": ""}},
+                        client=client, api_key="offline-fixture")
+        log = self.log.with_name("judge-errors.jsonl")
+        judge.record("fixture", "fixture", None, error=str(caught.exception), log_path=log)
+        self.assertNotIn(sentinel, log.read_text())
+
     # -- Class 2: vendor_failed_at_worker, then a second paid direct attempt -
 
     def test_worker_402_refuses_without_a_second_paid_attempt(self):

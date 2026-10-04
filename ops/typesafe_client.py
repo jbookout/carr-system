@@ -328,6 +328,9 @@ def noul(instructions, true=None, false=None):
         criteria["false"] = false
     if criteria:
         question["criteria"] = criteria
+    problem = malformed_request("", {"built": question})
+    if problem:
+        raise TypeSafeError(problem)
     return question
 
 
@@ -339,9 +342,7 @@ def choice(instructions, options):
     check that the candidates actually cover the answer before blaming the
     judgment.
     """
-    if not isinstance(options, dict) or len(options) < 2:
-        raise TypeSafeError("a choice needs a mapping of at least two options")
-    return {"type": "choice", "instructions": instructions, "criteria": dict(options)}
+    return _built_question("choice", instructions, options)
 
 
 def score(instructions, levels):
@@ -352,10 +353,7 @@ def score(instructions, levels):
     for comparing against a threshold and NOT for reconstructing an exact
     number by interpolating between levels — the docs call that out directly.
     """
-    levels = list(levels)
-    if len(levels) < 2:
-        raise TypeSafeError("a score needs at least two ordered levels")
-    return {"type": "score", "instructions": instructions, "criteria": levels}
+    return _built_question("score", instructions, list(levels))
 
 
 # THE FULL DISTRIBUTION, NOT JUST THE PICK (Joe's ruling: code decides, Jev
@@ -654,37 +652,46 @@ def server_ask(state, questions, *, model, facets, purpose, session_id, timeout,
     }, None
 
 
-# Mirrors the Worker's validateAskJevArgs (MAX_QUESTIONS, JEV_QUESTION_TYPES in
-# mcp-server/src/jev-call-receipt.js) plus the builders' own option floors, so
-# the direct route refuses what the Worker would, before any spend.
-MAX_QUESTIONS = 64
+# Both transports consume the same maintained request policy. Adapter code
+# only maps JSON shapes to each language's object/array predicates.
+REQUEST_CONTRACT = json.loads((Path(__file__).resolve().parent.parent /
+    "mcp-server/src/jev-request-contract.v1.json").read_text())
 
 
 def malformed_request(state, questions):
-    """Why this request cannot get a usable answer, or None when it can."""
+    """A fixed diagnostic with a positional reference; never caller data."""
     if not isinstance(state, (str, dict)):
-        return "state must be a string or a mapping"
-    if len(questions) > MAX_QUESTIONS:
-        return f"{len(questions)} questions, over the {MAX_QUESTIONS} one request holds"
-    for key, question in questions.items():
-        if not isinstance(key, str) or not key:
-            return "question ids must be non-empty strings"
-        if not isinstance(question, dict):
-            return f"question {key!r} is not a mapping"
+        return "state_invalid"
+    if not isinstance(questions, dict) or not (
+            REQUEST_CONTRACT["min_questions"] <= len(questions) <= REQUEST_CONTRACT["max_questions"]):
+        return "question_count_invalid"
+    for index, (key, question) in enumerate(questions.items()):
+        ref = f"question[{index}]"
+        if not isinstance(key, str) or not key or not isinstance(question, dict):
+            return f"{ref}: question_invalid"
         kind = question.get("type")
-        if kind not in ("noul", "choice", "score"):
-            return f"question {key!r} has unknown type {kind!r}"
+        rule = REQUEST_CONTRACT["question_types"].get(kind) if isinstance(kind, str) else None
+        if rule is None:
+            return f"{ref}: type_invalid"
         instructions = question.get("instructions")
         if not isinstance(instructions, str) or not instructions.strip():
-            return f"question {key!r} has no instructions"
+            return f"{ref}: instructions_invalid"
         criteria = question.get("criteria")
-        if kind == "noul" and criteria is not None and not isinstance(criteria, dict):
-            return f"noul {key!r} criteria must map true/false to text"
-        if kind == "choice" and (not isinstance(criteria, dict) or len(criteria) < 2):
-            return f"choice {key!r} needs at least two options"
-        if kind == "score" and (not isinstance(criteria, list) or len(criteria) < 2):
-            return f"score {key!r} needs at least two levels"
+        if criteria is None and rule["optional"]:
+            continue
+        shape = dict if rule["criteria"] == "object" else list
+        if not isinstance(criteria, shape) or len(criteria) < rule["min_items"]:
+            return f"{ref}: criteria_invalid"
     return None
+
+
+def _built_question(kind, instructions, criteria):
+    question = {"type": kind, "instructions": instructions, "criteria": criteria}
+    problem = malformed_request("", {"built": question})
+    if problem:
+        raise TypeSafeError(problem)
+    question["criteria"] = criteria.copy()
+    return question
 
 
 def usable_judgment(result, questions):
@@ -1294,26 +1301,73 @@ WORKER_BREAKER_SECONDS = 15 * 60
 # for this long; cache hits are still served, and when it lapses the next
 # call is the probe that finds out whether credit is back.
 CREDIT_HOLD_SECONDS = 5 * 60
+CREDIT_PROBE_SECONDS = 60
+_CREDIT_STATE_UNSAFE: set[str] = set()
 
 
 def _hold_open(table):
-    """Whether a timed hold (worker_breaker, credit_hold) is in force. Fails open."""
+    """Advisory Worker breaker read; credit admission uses its transaction."""
     try:
         with closing(sqlite3.connect(_cap_db_path(), timeout=1.0)) as db:
             db.execute(f"CREATE TABLE IF NOT EXISTS {table} (id INTEGER PRIMARY KEY, until REAL NOT NULL)")
             row = db.execute(f"SELECT until FROM {table} WHERE id=1").fetchone()
     except (OSError, sqlite3.Error):
+        if table == "credit_hold":
+            raise TypeSafeError("Jev unavailable: vendor_credit_state_untrusted") from None
         return False
     return bool(row) and row[0] > time.time()
 
 
+def _credit_tables(db):
+    db.execute("CREATE TABLE IF NOT EXISTS credit_hold (id INTEGER PRIMARY KEY, until REAL NOT NULL)")
+    db.execute("CREATE TABLE IF NOT EXISTS credit_probe "
+               "(id INTEGER PRIMARY KEY, token TEXT NOT NULL, until REAL NOT NULL)")
+
+
+def _credit_marker():
+    return Path(_cap_db_path() + ".credit-unsafe")
+
+
 def _open_hold(table, seconds):
+    credit = table == "credit_hold"
+    path = _cap_db_path()
+    if credit:
+        # Persist a latch before SQLite. A failed write survives process exit;
+        # restored storage repairs the latch into a hold, never paid traffic.
+        _CREDIT_STATE_UNSAFE.add(path)
+    try:
+        if credit:
+            marker = _credit_marker()
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch(mode=0o600)
+        with closing(sqlite3.connect(path, timeout=1.0)) as db, db:
+            if credit:
+                _credit_tables(db)
+                db.execute("BEGIN IMMEDIATE")
+                db.execute("DELETE FROM credit_probe WHERE id=1")
+            else:
+                db.execute(f"CREATE TABLE IF NOT EXISTS {table} (id INTEGER PRIMARY KEY, until REAL NOT NULL)")
+            db.execute(f"INSERT OR REPLACE INTO {table} VALUES (1, ?)", (time.time() + seconds,))
+        if credit:
+            _credit_marker().unlink(missing_ok=True)
+            _CREDIT_STATE_UNSAFE.discard(path)
+    except (OSError, sqlite3.Error):
+        if credit:
+            raise TypeSafeError("Jev unavailable: vendor_credit_state_untrusted; paid calls held") from None
+        # The Worker breaker is advisory; credit protection is mandatory.
+
+
+def _finish_credit_probe(token):
+    """Only a verified successful lease owner can clear the recovered hold."""
+    if token is None:
+        return
     try:
         with closing(sqlite3.connect(_cap_db_path(), timeout=1.0)) as db, db:
-            db.execute(f"CREATE TABLE IF NOT EXISTS {table} (id INTEGER PRIMARY KEY, until REAL NOT NULL)")
-            db.execute(f"INSERT OR REPLACE INTO {table} VALUES (1, ?)", (time.time() + seconds,))
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("DELETE FROM credit_probe WHERE id=1 AND token=?", (token,)).rowcount:
+                db.execute("DELETE FROM credit_hold WHERE id=1")
     except (OSError, sqlite3.Error):
-        pass
+        pass  # Retain the bounded lease; an unverified clear never enables traffic.
 
 
 REJECTED_REQUEST_STATUSES = (400, 413, 422)
@@ -1395,11 +1449,6 @@ def _reserve_paid_call(questions, facets, caller, question_kind, prompt_sha256,
     budget. 2026-10-04's 300-475 calls an hour overnight ran under an "hourly
     cap" that #1502's own review had removed again; this one is the counter.
     """
-    if _hold_open("credit_hold"):
-        _record_refusal(questions, facets, caller, question_kind, prompt_sha256,
-                        "vendor_credit_exhausted", _session_id())
-        raise JevCallRefused("Jev unavailable: vendor_credit_exhausted (TypeSafe answered HTTP 402; "
-                             "Joe must add API credits)", code="vendor_credit_exhausted", site=caller)
     log_path = JEV_DAILY_CAP_LOG
     cap = _daily_cap_limit()
     now = datetime.now(timezone.utc)
@@ -1407,6 +1456,8 @@ def _reserve_paid_call(questions, facets, caller, question_kind, prompt_sha256,
     notice = False
     alerts = []
     refused = None
+    probe_token = None
+    repair_credit = False
     try:
         os.makedirs(os.path.dirname(os.path.abspath(log_path)), exist_ok=True)
         db = sqlite3.connect(_cap_db_path(), timeout=1.0)
@@ -1415,6 +1466,16 @@ def _reserve_paid_call(questions, facets, caller, question_kind, prompt_sha256,
                        "(day TEXT PRIMARY KEY, attempts INTEGER NOT NULL, notified INTEGER NOT NULL)")
             _budget_tables(db)
             db.execute("BEGIN IMMEDIATE")
+            _credit_tables(db)
+            instant = time.time()
+            repair_credit = _credit_marker().exists() or _cap_db_path() in _CREDIT_STATE_UNSAFE
+            if repair_credit:
+                db.execute("INSERT OR REPLACE INTO credit_hold VALUES (1,?)",
+                           (instant + CREDIT_HOLD_SECONDS,))
+                db.execute("DELETE FROM credit_probe WHERE id=1")
+            hold = db.execute("SELECT until FROM credit_hold WHERE id=1").fetchone()
+            lease = db.execute("SELECT until FROM credit_probe WHERE id=1").fetchone()
+            credit_blocked = bool(hold and (hold[0] > instant or (lease and lease[0] > instant)))
             row = db.execute("SELECT attempts, notified FROM daily_cap WHERE day=?", (day,)).fetchone()
             if row is None:
                 row = (_logged_attempts(log_path, day), 0)
@@ -1422,8 +1483,12 @@ def _reserve_paid_call(questions, facets, caller, question_kind, prompt_sha256,
                 db.execute("INSERT INTO daily_cap VALUES (?,?,0)", (day, row[0]))
                 db.execute("DELETE FROM site_usage WHERE day < ?", (day,))
                 db.execute("DELETE FROM budget_pause WHERE resets_at <= ?", (now.strftime("%Y-%m-%dT%H:%M:%SZ"),))
-            allowed = row[0] < cap
-            if not allowed and not row[1]:
+            allowed = row[0] < cap and not credit_blocked
+            if credit_blocked:
+                refused = ("vendor_credit_exhausted", caller,
+                           datetime.fromtimestamp(max(hold[0], lease[0] if lease else 0),
+                                                  timezone.utc).isoformat())
+            if row[0] >= cap and not row[1]:
                 notice = True
                 db.execute("UPDATE daily_cap SET notified=1 WHERE day=?", (day,))
             if allowed and registry is not None and site is not None:
@@ -1443,6 +1508,10 @@ def _reserve_paid_call(questions, facets, caller, question_kind, prompt_sha256,
                     allowed = False
                     db.execute("INSERT OR IGNORE INTO budget_pause VALUES (?,?,?)", refused)
             if allowed:
+                if hold:
+                    probe_token = str(uuid.uuid4())
+                    db.execute("INSERT OR REPLACE INTO credit_probe VALUES (1,?,?)",
+                               (probe_token, instant + CREDIT_PROBE_SECONDS))
                 db.execute("UPDATE daily_cap SET attempts=attempts+1 WHERE day=?", (day,))
                 db.execute("INSERT INTO site_usage VALUES (?,?,?,1) ON CONFLICT(day,hour,site) "
                            "DO UPDATE SET count=count+1", (day, hour, caller))
@@ -1452,6 +1521,12 @@ def _reserve_paid_call(questions, facets, caller, question_kind, prompt_sha256,
             db.close()
     except (OSError, sqlite3.Error) as exc:
         raise TypeSafeError(f"Jev unavailable: daily cap accounting failed ({type(exc).__name__})") from None
+    if repair_credit:
+        try:
+            _credit_marker().unlink(missing_ok=True)
+            _CREDIT_STATE_UNSAFE.discard(_cap_db_path())
+        except OSError:
+            pass  # A durable latch that cannot be removed continues to refuse.
     _dispatch_spend_alerts(alerts)
     if refused:
         scope, _, resets_at = refused
@@ -1467,6 +1542,7 @@ def _reserve_paid_call(questions, facets, caller, question_kind, prompt_sha256,
         raise JevCallRefused(f"Jev unavailable: daily paid call cap reached ({cap}, UTC {day})",
                              code="daily_paid_call_cap", site=caller, scope="daily_paid_call_cap",
                              resets_at=next_day)
+    return probe_token
 
 
 def active_pause(*, sites=None, now=None):
@@ -1715,8 +1791,8 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
             server_error = "worker_breaker_open"
         elif served is None and server_error == "cache_miss":
             try:
-                _reserve_paid_call(questions, facets, caller, question_kind, prompt_sha256,
-                                   registry, site)
+                worker_probe = _reserve_paid_call(questions, facets, caller, question_kind, prompt_sha256,
+                                                  registry, site)
             except TypeSafeError as error:
                 # A free direct-cache answer may still exist after a Worker
                 # cache miss. No transport may run if this reservation failed.
@@ -1739,7 +1815,10 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
                         question_kind=question_kind, prompt_sha256=prompt_sha256,
                         ok=False, error=server_error, server_error=server_error, session=session_id)
                     if server_error == "vendor_failed_at_worker":
-                        _after_worker_vendor_failure(status, reason, caller)
+                        try:
+                            _after_worker_vendor_failure(status, reason, caller)
+                        except TypeSafeError as error:
+                            reservation_error = error
                 elif served.get("cache_hit") is True:
                     raise TypeSafeError("Jev unavailable: Worker paid-once contract violated")
         if served is not None:
@@ -1758,6 +1837,8 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
                 ok=valid, cache_hit=cache_hit, calibration=calibration, session=session_id)
             if not valid:
                 raise TypeSafeError("TypeSafe returned an unusable judgment")
+            if not cache_hit:
+                _finish_credit_probe(worker_probe)
             served["calibration"] = calibration
             return served
         # Preserve the caller's total budget through the direct fallback.
@@ -1809,9 +1890,10 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
             if remaining <= 0:
                 raise TypeSafeError("deadline passed before the request could be sent")
             attempt_timeout = min(timeout, remaining)
+        probe_token = None
         if opener is None:
-            _reserve_paid_call(questions, facets, caller,
-                               question_kind, prompt_sha256, registry, site)
+            probe_token = _reserve_paid_call(questions, facets, caller,
+                                             question_kind, prompt_sha256, registry, site)
             # Accounting can wait on another worker's transaction. Preserve
             # the caller's absolute deadline before starting any transport.
             if deadline is not None:
@@ -1855,6 +1937,7 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
                                      server_error=server_error or "direct_call", session=session_id)
             if not usable:
                 raise TypeSafeError("TypeSafe returned an unusable judgment")
+            _finish_credit_probe(probe_token)
             if use_cache:
                 _store_cached_result(cache_path, cache_key, result,
                                      cache_ttl_seconds)

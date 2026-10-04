@@ -181,6 +181,7 @@ def build(log_path):
 ARM_FILES = ("ops/typesafe_client.py", "ops/config/jev-cost-guard.v1.json",
              "ops/config/jev-call-sites.v1.json", "tools/judge/interface.py",
              "mcp-server/src/judge-providers.v1.json", "lib/jev_required_actions.py",
+             "mcp-server/src/jev-request-contract.v1.json",
              "lib/transcript_read.py", "lib/__init__.py")
 
 
