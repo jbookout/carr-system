@@ -387,6 +387,7 @@ def run_local_ci(
     ci_class: str,
     port: int,
     runner: CommandRunner | None = None,
+    integration_base: str | None = None,
 ) -> int:
     validate_port(port)
     refuse_hosted_execution()
@@ -404,6 +405,14 @@ def run_local_ci(
             f"127.0.0.1:{port} is already in use — almost always another session's "
             f"disposable cluster on this machine, not a problem with yours. "
             f"Re-run on a free port: ./run.sh local-db-ci --class {ci_class} --port {port + 8}")
+    integration_source = None
+    if integration_base is not None:
+        sys.path.insert(0, str(repo / "tools"))
+        from integration_candidate import validate_candidate
+        try:
+            integration_source = validate_candidate(repo, integration_base)
+        except ValueError as exc:
+            raise LocalPGRefusal(str(exc)) from exc
     binaries = find_postgres_binaries()
     command_runner = runner or SubprocessRunner()
     root = Path(tempfile.mkdtemp(prefix="carr-local-pg-ci."))
@@ -548,6 +557,44 @@ def run_local_ci(
                 file=sys.stderr,
             )
             return 78
+        if integration_base is not None:
+            # Restore current main into a separate disposable database, then
+            # forward the candidate and execute real consumers on that union.
+            # The ordinary canonical lane below still uses a fresh database.
+            from integration_candidate import git, validate_candidate
+            schema = root / "integration-main-schema.sql"
+            schema.write_bytes(git(repo, "show", f"{integration_base}:db/schema.sql"))
+            integration_dsn = f"postgres://carr_ci@127.0.0.1:{port}/carr_ci_integration"
+            integration_commands: tuple[tuple[str, list[str | Path]], ...] = (
+                ("create", [binaries.createdb, "-h", "127.0.0.1", "-p", str(port), "-U", "carr_ci", "carr_ci_integration"]),
+                ("restore", [binaries.psql, integration_dsn, "-v", "ON_ERROR_STOP=1", "-q", "-f", schema]),
+            )
+            for stage, command in integration_commands:
+                result = command_runner.run(command, env=clean_env, cwd=repo, capture=True)
+                if result.returncode:
+                    print(f"local-db-ci: integrated {stage} failed (exit {result.returncode})", file=sys.stderr)
+                    return result.returncode
+            forward_env = dict(clean_env)
+            forward_env["DATABASE_URL"] = integration_dsn
+            forward = command_runner.run([acceptance_python, repo / "tools/migrate.py", "--apply", "--yes"],
+                                         env=forward_env, cwd=repo, capture=True)
+            if forward.returncode:
+                print("local-db-ci: current-main restore to candidate forward migration failed", file=sys.stderr)
+                return forward.returncode
+            for test_file, dsn_key in (
+                ("find-rule-supersedes.test.mjs", "CARR_RULE_TEST_DATABASE_URL"),
+                ("catch-me-up-writer-route.test.mjs", "CARR_WRITER_READ_TEST_DATABASE_URL"),
+            ):
+                consumer_env = dict(clean_env)
+                consumer_env[dsn_key] = integration_dsn
+                proof = command_runner.run(["node", "--test", f"mcp-server/test/{test_file}"],
+                                           env=consumer_env, cwd=repo, capture=True)
+                if proof.returncode:
+                    print(f"local-db-ci: integrated consumer proof failed: {test_file}", file=sys.stderr)
+                    return proof.returncode
+            if validate_candidate(repo, integration_base) != integration_source:
+                raise LocalPGRefusal("integration source changed during restore/forward/consumer proof")
+            print("local-db-ci: " + json.dumps(integration_source, sort_keys=True))
         ci_env = dict(clean_env)
         ci_env["CARR_CI_DATABASE_URL"] = dsn
         ci_command: list[str | Path] = [repo / "ops/ci.sh"]
@@ -899,6 +946,7 @@ def main() -> int:
         metavar="ARTIFACT_DIR",
         help="manual hosted-only PG17 candidate export and independent restore",
     )
+    parser.add_argument("--integration-base", help="exact current-main SHA for restore/forward/consumer union proof")
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[1]
     try:
@@ -908,7 +956,7 @@ def main() -> int:
                 runner=SubprocessRunner(),
             )
         return run_local_ci(
-            repo=repo, ci_class=args.ci_class, port=args.port, runner=SubprocessRunner()
+            repo=repo, ci_class=args.ci_class, port=args.port, runner=SubprocessRunner(), integration_base=args.integration_base
         )
     except LocalPGRefusal as exc:
         print(f"local-db-ci refused: {exc}", file=sys.stderr)

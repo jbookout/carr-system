@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""Replay ordered seals using the real Git, allocator, generator guard and DB adapter."""
+import importlib.util
+import io
+from contextlib import redirect_stdout, redirect_stderr
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+REPO=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(REPO/'tools'))
+import integration_candidate as integration
+from migration_number_contract import MigrationNumberError
+
+class CandidateTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory(prefix='integration-candidate-')
+        self.addCleanup(self.tmp.cleanup)
+        self.root=Path(self.tmp.name); self.repo=self.root/'repo'; self.repo.mkdir()
+        from git_env import fixture_env
+        self.env=fixture_env()
+        self.g('init','-q'); self.g('config','user.name','Fixture'); self.g('config','user.email','fixture@example.invalid')
+        (self.repo/'migrations').mkdir(); (self.repo/'mcp-server/src').mkdir(parents=True)
+        (self.repo/'db').mkdir(); (self.repo/'db/schema.sql').write_text('-- fixture restore\n')
+        self.write('migrations/0748_base.sql','select 1;')
+        self.registry(97)
+        self.commit(); self.base=self.g('rev-parse','HEAD')
+        self.g('update-ref','refs/remotes/origin/main',self.base)
+        self.receipt=self.root/'receipt.json'
+        self.generator=self.root/'generator.py'
+        self.generator.write_text('''import json,os,pathlib
+p=json.loads(os.environ['CARR_INTEGRATION_ALLOCATION']);root=pathlib.Path('.')
+count=pathlib.Path(__file__).parent/'integration-render-count'
+count.write_text(str(int(count.read_text())+1) if count.exists() else '1')
+for old,new in p['migration_names'].items():
+ source=root/'migrations'/old; data=source.read_text(); source.unlink()
+ (root/'migrations'/new).write_text(data)
+v=p['registry_successor']
+(root/f'mcp-server/src/scac-mutation-registry.v{v}.generated.js').write_text(f'export const SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v{v}";\\n')
+''')
+    def g(self,*args):
+        return subprocess.check_output(['git',*args],cwd=self.repo,env=self.env,text=True,stderr=subprocess.DEVNULL).strip()
+    def write(self,p,value): (self.repo/p).write_text(value)
+    def registry(self,v): self.write(f'mcp-server/src/scac-mutation-registry.v{v}.generated.js',f'export const SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v{v}";\n')
+    def commit(self):
+        self.g('add','migrations','mcp-server','db'); self.g('commit','-qm','Fixture source')
+    def render(self,pending,argv=None):
+        with patch.dict(os.environ,{'CANARY_TOKEN':'private-canary-123'}):
+            return integration.regenerate_once(self.repo,self.base,pending,argv or [sys.executable,str(self.generator)],self.receipt)
+    def test_same_number_and_version_contenders_render_once_in_order(self):
+        self.write('migrations/0749_first.sql','select 2;')
+        first=self.render(['0749_first.sql']); self.assertEqual(first['allocation']['registry_successor'],98)
+        # Retry authenticates outputs, never reexecutes the generator.
+        self.assertEqual(self.render(['0749_first.sql']),first)
+        self.assertEqual((self.root/'integration-render-count').read_text(),'1')
+        self.commit(); self.base=self.g('rev-parse','HEAD'); self.g('update-ref','refs/remotes/origin/main',self.base)
+        sealed=(self.repo/'mcp-server/src/scac-mutation-registry.v98.generated.js').read_bytes()
+        self.write('migrations/0749_second.sql','select 3;')
+        second=self.render(['0749_second.sql'])
+        self.assertEqual(second['allocation']['migration_names'],{'0749_second.sql':'0750_second.sql'})
+        self.assertEqual(second['allocation']['registry_predecessor'],98)
+        self.assertEqual(second['allocation']['registry_successor'],99)
+        self.assertEqual((self.repo/'mcp-server/src/scac-mutation-registry.v98.generated.js').read_bytes(),sealed)
+        self.assertEqual((self.root/'integration-render-count').read_text(),'2')
+        self.commit(); self.assertEqual(integration.validate_candidate(self.repo,self.base)['pending_migrations'],['0750_second.sql'])
+    def test_actual_generator_sink_rejects_reseal_and_wrong_successor(self):
+        target=self.repo/'mcp-server/src/scac-mutation-registry.v97.generated.js'
+        integration.check_generated_write(self.repo,target,target.read_bytes(),self.base)
+        for path,data in [(target,b'edited'),(self.repo/'mcp-server/src/scac-mutation-registry.v99.generated.js',b'wrong')]:
+            with self.assertRaises(MigrationNumberError): integration.check_generated_write(self.repo,path,data,self.base)
+    def test_empty_zero_refusal_nonzero_partial_exception_and_acknowledgement(self):
+        for code in ['pass','print("private-canary-123");raise SystemExit(75)', 'raise SystemExit(2)',
+                     'open("migrations/0749_only.sql","w").write("partial")','raise Exception("private-canary-123")']:
+            self.receipt=self.root/(str(abs(hash(code)))+'.json')
+            self.write('migrations/0749_pending.sql','select 2;')
+            with self.assertRaises(MigrationNumberError): self.render(['0749_pending.sql'],[sys.executable,'-c',code])
+            raw=self.receipt.read_bytes(); self.assertNotIn(b'private-canary-123',raw)
+            self.assertEqual(json.loads(raw)['state'],'refused')
+            with self.assertRaises(MigrationNumberError): self.render(['0749_pending.sql'],[sys.executable,'-c',code])
+            if (self.repo/'migrations/0749_only.sql').exists(): (self.repo/'migrations/0749_only.sql').unlink()
+    def test_poisoned_git_environment_cannot_move_the_bound_repository(self):
+        with patch.dict(os.environ,{'GIT_DIR':'/nonexistent-poison','GIT_INDEX_FILE':'/nonexistent-index'}):
+            self.assertEqual(integration.allocation_plan(self.repo,self.base,['0749_pending.sql'])['base'],self.base)
+
+    def test_wrong_base_dirty_proof_and_interrupted_receipt_refuse(self):
+        with self.assertRaises(MigrationNumberError): integration.validate_candidate(self.repo,'f'*40)
+        self.write('migrations/0749_pending.sql','select 2;')
+        with self.assertRaises(MigrationNumberError): integration.validate_candidate(self.repo,self.base)
+        self.receipt.write_text('{"state":"running"}')
+        with self.assertRaises(MigrationNumberError): self.render(['0749_pending.sql'])
+        self.assertFalse((self.root/'integration-render-count').exists())
+
+
+class RestoreForwardTests(unittest.TestCase):
+    def setUp(self):
+        spec=importlib.util.spec_from_file_location('integration_local_pg',REPO/'ops/local-pg-ci.py')
+        self.pg=importlib.util.module_from_spec(spec);sys.modules[spec.name]=self.pg;spec.loader.exec_module(self.pg)
+        self.tmp=tempfile.TemporaryDirectory(prefix='integration-db-adapter-');self.addCleanup(self.tmp.cleanup)
+        self.events=[];self.envs=[]
+        self.bins=self.pg.PostgresBinaries(*[Path('/fake')/n for n in ['initdb','pg_ctl','createdb','psql']])
+    def run_case(self,fail=None,moved=False):
+        outer=self;pg=self.pg
+        class Runner:
+            def run(self,command,*,env=None,cwd=None,capture=False):
+                args=tuple(map(str,command));outer.events.append(args);outer.envs.append(dict(env or {}))
+                if fail and fail(args,env): return pg.CommandResult(4,'','private-canary-123')
+                return pg.CommandResult(0,'{}' if args[-1]=='--fingerprint-only' else '','')
+        binding={'base':'a'*40,'head':'b'*40,'tree':'c'*40}
+        source=[binding,{**binding,'tree':'d'*40}] if moved else [binding,binding]
+        with (patch.object(pg,'find_postgres_binaries',return_value=self.bins),
+              patch.object(pg,'port_is_available',return_value=True),
+              patch.object(pg,'refuse_hosted_execution'),
+              patch.object(pg.tempfile,'mkdtemp',return_value=self.tmp.name),
+              patch.object(integration,'validate_candidate',side_effect=source),
+              patch.object(integration,'git',return_value=b'-- exact current main schema'),
+              patch.dict(os.environ,{'CANARY_TOKEN':'private-canary-123'})):
+            return pg.run_local_ci(repo=REPO,ci_class='migration',port=55432,runner=Runner(),integration_base='a'*40)
+    def test_restore_forward_consumers_precede_canonical_candidate_proof(self):
+        self.assertEqual(self.run_case(),0)
+        restore=next(i for i,a in enumerate(self.events) if a[-1].endswith('integration-main-schema.sql'))
+        forward=next(i for i,a in enumerate(self.events) if a[-3:] == (str(REPO/'tools/migrate.py'),'--apply','--yes'))
+        consumers=[i for i,a in enumerate(self.events) if a[-1].endswith(('find-rule-supersedes.test.mjs','catch-me-up-writer-route.test.mjs'))]
+        canonical=next(i for i,a in enumerate(self.events) if str(REPO/'ops/ci.sh') in a)
+        self.assertLess(restore,forward);self.assertEqual(len(consumers),2)
+        self.assertTrue(all(forward<i<canonical for i in consumers))
+        self.assertTrue(all('CANARY_TOKEN' not in env for env in self.envs))
+    def test_restore_forward_or_consumer_failure_stops_and_disposes(self):
+        predicates=[lambda a,e:a[-1].endswith('integration-main-schema.sql'),
+                    lambda a,e:a[-3:]==(str(REPO/'tools/migrate.py'),'--apply','--yes'),
+                    lambda a,e:a[-1].endswith('find-rule-supersedes.test.mjs'),
+                    lambda a,e:a[-1].endswith('catch-me-up-writer-route.test.mjs')]
+        # Each case gets a new temporary cluster directory after disposal.
+        for fail in predicates:
+            with self.subTest(fail=fail):
+                self.events.clear();self.envs.clear();Path(self.tmp.name).mkdir(exist_ok=True)
+                output=io.StringIO()
+                with redirect_stdout(output),redirect_stderr(output): self.assertEqual(self.run_case(fail),4)
+                self.assertNotIn('private-canary-123',output.getvalue())
+                self.assertFalse(any(str(REPO/'ops/ci.sh') in a for a in self.events))
+                self.assertTrue(any(a[0]=='/fake/pg_ctl' and a[-1]=='stop' for a in self.events))
+    def test_changed_source_refuses_after_consumer_proof(self):
+        with self.assertRaises(self.pg.LocalPGRefusal): self.run_case(moved=True)
+        self.assertFalse(any(str(REPO/'ops/ci.sh') in a for a in self.events))
+        self.assertTrue(any(a[0]=='/fake/pg_ctl' and a[-1]=='stop' for a in self.events))
+
+if __name__=='__main__': unittest.main()
