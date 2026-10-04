@@ -173,6 +173,12 @@ RAN=0
 # not an associative array — see the bash 3.2 note above CLASS_ORDER.
 CLASS_TIMINGS=""
 CLASS_RESULTS=""
+# Coverage a class announced but did not deliver: a suite that answered 78, a
+# quarantined check, a probe with no credential. The class still reads OK here
+# (that policy is the header's, and unchanged), but its --result-file row says
+# partial, so a receipt can never certify checks that did not run.
+INCOMPLETE=0
+incomplete() { INCOMPLETE=$((INCOMPLETE+1)); }
 
 ok()   { RAN=$((RAN+1)); printf '  \033[32mOK\033[0m    %-11s %s\n' "$1" "${2:-}"; }
 bad()  { RAN=$((RAN+1)); printf '  \033[31mFAIL\033[0m  %-11s %s\n' "$1" "${2:-}"; FAILED=$((FAILED+1)); FAILED_CLASSES="$FAILED_CLASSES $1"; }
@@ -484,6 +490,7 @@ check_contract() {
     run_quiet "$LOGDIR/contract-capture-verb.log" "$PY" ops/capture-verb-reachability.py
     crc=$?
     if [ "$crc" -eq 78 ]; then
+      incomplete
       printf '        \033[33mnot run\033[0m  capture-verb-reachability — %s\n' \
         "$(tail -1 "$LOGDIR/contract-capture-verb.log" 2>/dev/null)" >&2
     elif [ "$crc" -ne 0 ]; then
@@ -883,6 +890,7 @@ PYEOF
     bad gates "failed:$failures"
     gates_name_the_move $failures
   elif [ -n "$skiplist" ]; then
+    incomplete
     # Deliberately NOT a plain OK. The class ran with reduced coverage, and the
     # summary line says so — an exception that reads as a clean pass is how a
     # bounded check gets mistaken for a complete one.
@@ -1056,6 +1064,7 @@ check_pushfloor() {
                floor_fail types \
                  "mypy on the files this push changes. Fix them, or iterate with: .venv/bin/mypy$existing_py"; }
       else
+        incomplete
         printf '        \033[33mnot run\033[0m  types — mypy absent; the hosted types class still covers this\n' >&2
       fi
     fi
@@ -1160,6 +1169,7 @@ check_pushfloor() {
     # note would only advise running something already running.
     if [ -n "$unclassified" ] && [ -n "$ONLY" ] && ! selected gates; then
       ran="$ran gates-deferred"
+      incomplete
       printf '        \033[33mdeferred\033[0m   gates — no paired selftest for:%s — the full class runs hosted (required check on main)\n' \
         "$unclassified" >&2
       printf '                   run it locally now: ops/ci.sh --only gates · durable fix: add ops/<gate>-selftest.py\n' >&2
@@ -2079,6 +2089,7 @@ check_artifact() {
       # against the same ledger and fails closed, so the deploy is where a shrink
       # is actually stopped.
       if [ "${CARR_CI_PORTABLE_ONLY:-0}" = "1" ]; then
+        incomplete
         ok artifact "$shipping verbs; shrink guard not run here (portable runner has no ledger credential — the deploy enforces it)"
       else
         skip artifact "$shipping verbs counted, but no ledger credential — the shrink comparison did not run"
@@ -2124,9 +2135,11 @@ for c in $CLASS_ORDER; do
   _class_failed=$FAILED
   _class_skipped=$SKIPPED
   _class_ran=$RAN
+  _class_incomplete=$INCOMPLETE
   "check_$c"
   _class_status=passed
   [ "$SKIPPED" -gt "$_class_skipped" ] && _class_status=partial
+  [ "$INCOMPLETE" -gt "$_class_incomplete" ] && _class_status=partial
   [ "$FAILED" -gt "$_class_failed" ] && _class_status=refused
   CLASS_RESULTS="$CLASS_RESULTS$_class_name $_class_status $((RAN - _class_ran))
 "

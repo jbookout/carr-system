@@ -69,6 +69,36 @@ class CheckArtifacts(unittest.TestCase):
                     self.assertEqual(artifact["classes"][0]["checks"], 1)
                     self.assertEqual(run.returncode == 0, rc == 0)
 
+    def test_gate_suite_declining_with_exit_78_is_partial_coverage_not_a_pass(self):
+        # Real producer: the actual gates loop and timeout helper, one baseline
+        # check passing and one selftest declining to run.
+        spec = importlib.util.spec_from_file_location("review_evidence", ROOT / "ops/local-review-evidence.py")
+        adapter = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(adapter)
+        with tempfile.TemporaryDirectory(prefix="review-floor-gates-") as td:
+            root = Path(td)
+            for folder in ["ops", "hooks", "bin"]:
+                (root / folder).mkdir()
+            shutil.copy(ROOT / "ops/ci.sh", root / "ops/ci.sh")
+            shutil.copy(ROOT / "bin/with-timeout.py", root / "bin/with-timeout.py")
+            (root / "hooks/gate-integrity.py").write_text("raise SystemExit(0)\n")
+            result = root / "result.json"
+            for rc, expected in [(0, "passed"), (78, "partial")]:
+                with self.subTest(rc=rc):
+                    (root / "ops/fixture-selftest.py").write_text(f"print('fixture'); raise SystemExit({rc})\n")
+                    run = subprocess.run(["bash", str(root / "ops/ci.sh"), "--strict", "--only", "gates",
+                                          "--result-file", str(result)], env=fixture_env(),
+                                         capture_output=True, text=True)
+                    # Ordinary CI policy is unchanged: exit 78 still exits zero.
+                    self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                    artifact = json.loads(result.read_text())
+                    self.assertEqual(artifact["classes"][0]["status"], expected)
+                    if rc:
+                        with self.assertRaises(adapter.Refusal):
+                            adapter.validate_ci(artifact, ["gates"])
+                    else:
+                        adapter.validate_ci(artifact, ["gates"])
+
     def test_inherited_main_abort_never_publishes_a_passing_result(self):
         with tempfile.TemporaryDirectory(prefix="review-floor-inherited-") as td:
             root = Path(td)
@@ -241,6 +271,67 @@ RESULT
             with self.assertRaises(self.adapter.Refusal):
                 self.adapter.verify(self.root, "origin/main", "", receipt)
 
+    def test_index_suppressed_tracked_bytes_cannot_reuse_evidence(self):
+        path = "ops/scac-mutation-inventory.mjs"
+        healthy = (self.root / path).read_text()
+        receipt = self.collect()
+        for flag in ["--assume-unchanged", "--skip-worktree"]:
+            with self.subTest(flag=flag):
+                self.git("update-index", flag, path)
+                (self.root / path).write_text(
+                    "export function assertCurrentSourceInventoryMatchesFixture() { throw Error('mismatch'); }\n")
+                self.assertEqual(self.git("status", "--porcelain", "--untracked-files=no"), "")
+                with self.assertRaises(self.adapter.Refusal):
+                    self.adapter.verify(self.root, "origin/main", "", receipt)
+                (self.root / path).write_text(healthy)
+                self.git("update-index", flag.replace("--", "--no-", 1), path)
+        self.adapter.verify(self.root, "origin/main", "", receipt)
+
+    def test_untracked_runtime_source_after_collection_invalidates(self):
+        receipt = self.collect()
+        (self.root / "mcp-server/src/injected.js").write_text("export const injected = true;\n")
+        with self.assertRaises(self.adapter.Refusal):
+            self.adapter.verify(self.root, "origin/main", "", receipt)
+        (self.root / "mcp-server/src/injected.js").unlink()
+        self.adapter.verify(self.root, "origin/main", "", receipt)
+
+    def test_alternate_root_ci_interpreter_and_its_replacement_are_bound(self):
+        # .venv is ignored, so only the runtime binding can see this movement.
+        self.edit(".gitignore", ".venv/\n")
+        receipt = self.collect()
+        venv = self.root / ".venv/bin/python"
+        venv.parent.mkdir(parents=True)
+        venv.symlink_to(sys.executable)
+        with self.assertRaises(self.adapter.Refusal):  # PATH python3 -> root venv
+            self.adapter.verify(self.root, "origin/main", "", receipt)
+        receipt = self.collect()
+        venv.unlink()
+        venv.write_text(f"#!/bin/sh\nexec {sys.executable} \"$@\"\n")
+        venv.chmod(0o755)
+        with self.assertRaises(self.adapter.Refusal):  # same version, different interpreter
+            self.adapter.verify(self.root, "origin/main", "", receipt)
+
+    def test_inherited_scan_range_cannot_narrow_the_real_secret_scan(self):
+        shutil.copy(ROOT / "ops/ci.sh", self.root / "ops/ci.sh")
+        shutil.copy(ROOT / "ops/ci-secret-scan.py", self.root / "ops/ci-secret-scan.py")
+        (self.root / "bin").mkdir()
+        shutil.copy(ROOT / "bin/with-timeout.py", self.root / "bin/with-timeout.py")
+        for stub in ["hooks/gate-integrity.py", "ops/no-client-deliverables-gate.py", "ops/stale-config-check.py"]:
+            (self.root / stub).write_text("raise SystemExit(0)\n")
+        self.git("add", "ops", "bin", "hooks")
+        self.git("commit", "-qm", "real floor")
+        self.git("update-ref", "refs/remotes/origin/main", self.git("rev-parse", "HEAD"))
+        self.edit("README.md", "clean candidate\n")
+        with patch.dict(os.environ, {"CARR_CI_RANGE": "HEAD..HEAD"}):
+            receipt = self.collect()  # control: a clean tree passes the full scan
+        self.adapter.verify(self.root, "origin/main", "", receipt)
+        self.edit("README.md", "-----BEGIN " + "OPENSSH PRIVATE KEY-----\n")
+        with patch.dict(os.environ, {"CARR_CI_RANGE": "HEAD..HEAD"}):
+            with self.assertRaises(self.adapter.Refusal):
+                self.collect()
+        with self.assertRaises(self.adapter.Refusal):
+            self.collect()
+
     def test_missing_seal_acknowledgement_is_refused_independently(self):
         self.collect()
         with self.assertRaises(self.adapter.Refusal):
@@ -270,11 +361,42 @@ RESULT
                     pass
 
     def test_unknown_and_broad_selection_keep_broader_checks(self):
+        # Spelled in pieces: this file names paths in strings, so a literal
+        # name would make this suite a textual consumer of it.
         for paths in [["unclassified/thing"], ["README.md"] * 31, ["ops/ci.sh"], [".github/workflows/ci.yml"],
-                      ["ops/unclassified-runtime.mjs"]]:
-            self.assertEqual(self.adapter.select_classes(paths), self.adapter.class_order(ROOT))
-        self.assertIn("migration", self.adapter.select_classes(["migrations/0002_fixture.sql"]))
-        self.assertIn("contract", self.adapter.select_classes(["mcp-server/src/fixture.js"]))
+                      ["ops/" + "unclassified" + "-runtime.mjs"]]:
+            self.assertEqual(self.adapter.select_classes(ROOT, paths), self.adapter.class_order(ROOT))
+        self.assertIn("migration", self.adapter.select_classes(ROOT, ["migrations/0002_fixture.sql"]))
+        self.assertIn("unit", self.adapter.select_classes(ROOT, ["mcp-server/src/fixture.js"]))
+
+    def test_direct_canonical_consumers_select_the_class_that_executes_them(self):
+        # ci.sh names these runners in the classes that execute them; a directory
+        # prefix or a paired selftest is not a dependency closure.
+        for path, owner in [("tools/migrate.py", "migration"), ("tools/release-manifest.py", "artifact"),
+                            ("tools/doctorcre-artifact.py", "artifact")]:
+            with self.subTest(path=path):
+                self.assertIn(owner, self.adapter.select_classes(ROOT, [path]))
+
+    def test_selection_narrows_only_to_verified_consumers(self):
+        # Fixture inventory: a gate selftest glob and a named migration runner.
+        self.edit("ops/ci.sh", (self.root / "ops/ci.sh").read_text() + (
+            "check_gates() {\n  for t in tools/test-*.py; do python3 \"$t\"; done\n}\n"
+            "check_migration() {\n  python3 tools/runner.py\n}\n"))
+        (self.root / "tools").mkdir()
+        (self.root / "tools/leaf.py").write_text("VALUE = 1\n")
+        (self.root / "tools/test-leaf.py").write_text("import leaf\n")
+        (self.root / "tools/helper.py").write_text("VALUE = 2\n")
+        (self.root / "tools/runner.py").write_text("import helper\n")
+        (self.root / "tools/orphan.py").write_text("VALUE = 3\n")
+        self.git("add", "tools")
+        self.git("commit", "-qm", "tools")
+        order = self.adapter.class_order(self.root)
+        self.assertEqual(self.adapter.select_classes(self.root, ["tools/leaf.py"]),
+                         [c for c in order if c in {"pushfloor", "types", "gates", "secret", "freshness"}])
+        # Imported by a runner the migration class names: ci.sh is in its closure.
+        self.assertEqual(self.adapter.select_classes(self.root, ["tools/helper.py"]), order)
+        # Executed by nothing ci.sh can see: no verified coverage, so everything.
+        self.assertEqual(self.adapter.select_classes(self.root, ["tools/orphan.py"]), order)
 
     def test_installed_unit_package_dependency_movement_invalidates(self):
         (self.root / "practice-plugin").mkdir()

@@ -15,6 +15,7 @@ Only hashes and fixed check identities persist; child output/body stay private.
 from __future__ import annotations
 
 import argparse
+from fnmatch import fnmatch
 import hashlib
 import importlib.metadata
 import json
@@ -22,6 +23,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -34,6 +36,7 @@ from migration_number_contract import validate_migration_names, MigrationNumberE
 
 FLOOR = ["pushfloor", "secret", "freshness"]
 SCHEMA = "carr-local-review-evidence/v1"
+CLOSURE_LIMIT = 50  # consumer closures wider than this are not narrowed
 
 
 class Refusal(ValueError):
@@ -48,15 +51,27 @@ def json_digest(value) -> str:
     return digest(json.dumps(value, sort_keys=True, separators=(",", ":")).encode())
 
 
-def run(root: Path, argv: list[str], *, timeout: int = 120) -> str:
+def child_env() -> dict:
+    """Environment every check runs under; everything left in it is bound.
+
+    CARR_CI_RANGE would narrow the scans below the full depth this floor is
+    judged at, and the PR body reaches checks only as the explicit, hashed file.
+    """
+    env = scrubbed_env()
+    for key in ["CARR_CI_RANGE", "CARR_PR_BODY_FILE", "GITHUB_EVENT_PATH"]:
+        env.pop(key, None)
+    return env
+
+
+def run(root: Path, argv: list[str], *, timeout: int = 120, accept: tuple[int, ...] = (0,)) -> str:
     try:
         out = subprocess.run([sys.executable, str(ROOT / "bin/with-timeout.py"), str(timeout), *argv],
-                             cwd=root, env=scrubbed_env(), capture_output=True,
+                             cwd=root, env=child_env(), capture_output=True,
                              text=True, timeout=timeout + 30)
     except (OSError, subprocess.SubprocessError, UnicodeError) as exc:
         # Error strings and argv can carry credentials. Persist neither.
         raise Refusal(f"check unavailable ({type(exc).__name__}); retry after repair") from None
-    if out.returncode:
+    if out.returncode not in accept:
         raise Refusal(f"check refused (exit {out.returncode}); repair the failing check")
     return out.stdout
 
@@ -77,48 +92,152 @@ def class_order(root: Path) -> list[str]:
     return classes
 
 
-def select_classes(paths: list[str], order: list[str] | None = None) -> list[str]:
-    """Conservative review selection, distinct from the unchanged push floor."""
-    selected = set(FLOOR)
-    order = class_order(ROOT) if order is None else order
+def class_consumers(root: Path) -> dict[str, list[str]]:
+    """Path patterns each check_<class> body in ci.sh executes or reads.
+
+    Read from the canonical runner itself, so a class gains coverage by naming
+    a path and nothing here has to be kept in step. Comments are not consumers.
+    """
+    text = (root / "ops/ci.sh").read_text()
+    top = {p.split("/", 1)[0] for p in git(root, "ls-files", "-z").split("\0") if "/" in p}
+    consumers = {}
+    for name, body in re.findall(r"^check_([a-z]+)\(\) \{\n(.*?)^\}", text, re.M | re.S):
+        code = "\n".join(line for line in body.splitlines() if not line.lstrip().startswith("#"))
+        patterns = set(re.findall(r"[\w.*-]+(?:/[\w.*-]+)+", code))
+        # A package loop (`for pkg in mcp-server workspace`), a `cd`, or a bare
+        # `migrations/` argument consumes the whole tree. Other bare words (a
+        # SQL schema called ops) are not paths.
+        trees = re.findall(r"\bcd\s+\"?([\w-]+)", code) + re.findall(r"(?<![\w./-])([\w-]+)/(?![\w.*-])", code)
+        for words in re.findall(r"\bfor\s+\w+\s+in\s+([^;\n]*)", code):
+            trees += words.split()
+        patterns.update(f"{word}/*" for word in trees if word in top)
+        consumers[name] = sorted(patterns)
+    return consumers
+
+
+def referencers(root: Path, words: set[str], *excluded: str) -> list[str]:
+    found = run(root, ["git", "grep", "-l", "-z", "-w", "-F", *[a for w in sorted(words) for a in ("-e", w)],
+                       "--", ".", ":(exclude)*.md", ":(exclude)*.txt",
+                       *[f":(exclude){p}" for p in excluded]], accept=(0, 1))
+    return [name for name in found.split("\0") if name]
+
+
+def consumer_closure(root: Path, path: str) -> set[str] | None:
+    """Every tracked file that names `path`, transitively; None past the bound.
+
+    A module is reached by its stem (`import release_manifest`, `tools/release-
+    manifest.py`); a data file or plug-in by a scan of its directory, so the
+    directory name is searched too. ci.sh is left out of that second search
+    only because its own directory use is already read as class patterns.
+    Prose names things it never executes and is excluded.
+    """
+    closure, queue = {path}, [path]
+    while queue:
+        member = Path(queue.pop())
+        found = referencers(root, {member.stem, member.stem.replace("-", "_")})
+        if member.parent.name:
+            found += referencers(root, {member.parent.name}, "ops/ci.sh")
+        for name in found:
+            if name not in closure:
+                closure.add(name)
+                queue.append(name)
+        if len(closure) > CLOSURE_LIMIT:
+            return None
+    return closure
+
+
+def select_classes(root: Path, paths: list[str]) -> list[str]:
+    """Narrow only to classes whose ci.sh body verifiably reaches the change.
+
+    Anything ci.sh names directly, anything it cannot be shown to execute, and
+    any closure too wide to bound selects the whole inventory.
+    """
+    order = class_order(root)
     if len(paths) > 30:
         return order.copy()
+    selected = set(FLOOR)
+    consumers = class_consumers(root)
     for path in paths:
         if path in {"README.md", "LICENSE"}:
             continue
-        if path.startswith("mcp-server/"):
-            selected.update(["unit", "contract", "artifact"])
-        elif path.startswith(("migrations/", "db/")):
-            selected.update(["migration", "contract", "gates"])
-        elif path.startswith(("ops/", "hooks/", "evals/")):
-            if path.startswith("ops/") and (not path.endswith(".py") or
-                    not path.endswith("-selftest.py") and not (ROOT / "ops" / (Path(path).stem + "-selftest.py")).is_file()):
-                return order.copy()
-            selected.update(["gates", "types"])
-        elif path.startswith(("tools/", "lib/", "shared/", "pipelines/", "generators/", "fill-engine/")):
-            selected.update(["unit", "types", "gates"])
-        else:
-            return order.copy()  # no certified narrow dependency closure
-        if path.endswith(("lock.json", ".lock")) or path in {"ops/ci.sh", "evals/surfaces.json"}:
+        if path.endswith(("lock.json", ".lock")) or path.startswith(".github/") or path in {
+                "ops/ci.sh", "evals/surfaces.json"}:
             return order.copy()
+        closure = consumer_closure(root, path)
+        if closure is None or "ops/ci.sh" in closure:
+            return order.copy()
+        reached = {name for name, patterns in consumers.items()
+                   for member in closure if any(fnmatch(member, p) for p in patterns)}
+        if not reached:
+            return order.copy()  # nothing verified executes it
+        selected |= reached
+        if path.endswith(".py"):
+            selected.add("types")  # bin/type-check.sh reads every Python file
     if not selected.issubset(order):
         raise Refusal("required class absent from CI inventory; repair selection")
     return [name for name in order if name in selected]
 
 
+RUNTIME_PROBE = ("import importlib.metadata as m, json, platform, sys; print(json.dumps("
+                 "[sys.executable, platform.python_version(), "
+                 "sorted((str(d.metadata['Name']), d.version) for d in m.distributions())]))")
+
+
+def ci_python(root: Path) -> list:
+    """The interpreter and packages ci.sh at `root` selects, with its bytes."""
+    venv = root / ".venv/bin/python"  # ci.sh: [ -x "$PY" ] || PY=python3
+    chosen = str(venv) if os.access(venv, os.X_OK) else shutil.which("python3", path=child_env().get("PATH"))
+    if not chosen:
+        raise Refusal("no Python for canonical CI; install one before collecting")
+    resolved = Path(chosen).resolve()
+    return [chosen, str(resolved), digest(resolved.read_bytes()), json.loads(run(root, [chosen, "-c", RUNTIME_PROBE]))]
+
+
 def environment(root: Path) -> dict:
     # Installed dependency state is not necessarily the committed lockfile.
-    distributions = sorted((d.metadata["Name"], d.version) for d in importlib.metadata.distributions())
+    distributions = sorted((str(d.metadata["Name"]), d.version) for d in importlib.metadata.distributions())
     lockfiles = [p for p in git(root, "ls-files", "-z", "*package-lock.json").split("\0") if p]
     installed = [str(Path(p).parent / "node_modules/.package-lock.json") for p in lockfiles]
     ignored_locks = {p: digest((root / p).read_bytes()) if (root / p).is_file() else None for p in installed}
-    env = scrubbed_env()
-    for key in ["PWD", "OLDPWD", "SHLVL", "_", "GITHUB_EVENT_PATH", "CARR_PR_BODY_FILE", "CARR_CI_RANGE"]:
+    env = child_env()
+    for key in ["PWD", "OLDPWD", "SHLVL", "_"]:  # shell bookkeeping, never a check input
         env.pop(key, None)
     return {"system": platform.system(), "machine": platform.machine(),
             "python": platform.python_version(), "node": run(root, ["node", "--version"]).strip(),
-            "runtime_sha256": json_digest([distributions, ignored_locks, sys.executable]),
+            "runtime_sha256": json_digest([distributions, sys.executable, ci_python(root), ignored_locks]),
             "env_sha256": json_digest(env)}
+
+
+def file_bytes(path: Path) -> bytes:
+    return os.readlink(path).encode() if path.is_symlink() else path.read_bytes()
+
+
+def physical_source(root: Path) -> str:
+    """Prove the bytes on disk are HEAD's; return a digest of untracked inputs.
+
+    Hashes each tracked file the way git does and compares it with the commit
+    tree, so assume-unchanged and skip-worktree cannot hide an edit. Untracked,
+    unignored files can be loaded by the checks, so they are bound instead.
+    """
+    hasher = hashlib.sha256 if git(root, "rev-parse", "--show-object-format") == "sha256" else hashlib.sha1
+    for entry in run(root, ["git", "ls-tree", "-r", "-z", "--full-tree", "HEAD"]).split("\0"):
+        if not entry:
+            continue
+        meta, name = entry.split("\t", 1)
+        mode, _, oid = meta.split()
+        if mode == "160000":
+            continue  # a submodule is its own repository, not bytes here
+        path = root / name
+        try:
+            data = file_bytes(path)
+        except OSError:
+            raise Refusal("tracked source missing on disk; restore the committed candidate") from None
+        # Content and link-ness only: core.fileMode is false here, so the
+        # executable bit on disk legitimately differs from the tree.
+        if path.is_symlink() != (mode == "120000") or hasher(b"blob %d\0" % len(data) + data).hexdigest() != oid:
+            raise Refusal("source on disk differs from the commit; commit or restore it")
+    untracked = [p for p in git(root, "ls-files", "-z", "--others", "--exclude-standard").split("\0") if p]
+    return json_digest({p: digest(file_bytes(root / p)) for p in sorted(untracked)})
 
 
 def binding(root: Path, base: str, body: str) -> tuple[dict, list[str]]:
@@ -126,6 +245,7 @@ def binding(root: Path, base: str, body: str) -> tuple[dict, list[str]]:
         raise Refusal("wrong repository root; use the assigned worktree")
     if git(root, "status", "--porcelain", "--untracked-files=no"):
         raise Refusal("source/index differs from HEAD; commit the tested candidate")
+    untracked = physical_source(root)
     base_sha = git(root, "rev-parse", f"{base}^{{commit}}")
     if base_sha != git(root, "rev-parse", "origin/main^{commit}"):
         raise Refusal("wrong current base; fetch origin/main and recollect")
@@ -138,7 +258,7 @@ def binding(root: Path, base: str, body: str) -> tuple[dict, list[str]]:
         "ops/migration-order-gate.py", "tools/migration_number_contract.py", "ops/git_env.py",
         "bin/with-timeout.py", "ops/ai_eval.py", "tools/room-bridge/evaluation_kernel.py"]}
     return {"head": git(root, "rev-parse", "HEAD"), "tree": git(root, "rev-parse", "HEAD^{tree}"),
-            "base": base_sha, "environment": environment(root),
+            "untracked_sha256": untracked, "base": base_sha, "environment": environment(root),
             "checker_revision": json_digest(revision), "body_sha256": digest(body.encode())}, paths
 
 
@@ -188,7 +308,7 @@ def validate_ci(data, classes: list[str]) -> None:
 
 def collect(root: Path, base: str, body: str) -> dict:
     source, paths = binding(root, base, body)
-    classes = select_classes(paths, class_order(root))
+    classes = select_classes(root, paths)
     checks = [eval_check(root, base, body), migration_union(root, base)]
     checks.append(checked(root, "source-seal", ["node", "--input-type=module", "-e",
         "import {assertCurrentSourceInventoryMatchesFixture} from './ops/scac-mutation-inventory.mjs';"
@@ -217,7 +337,7 @@ def verify(root: Path, base: str, body: str, receipt: dict) -> dict:
         raise Refusal("invalid receipt schema; recollect")
     if receipt["schema"] != SCHEMA or receipt["binding"] != source:
         raise Refusal("stale source/base/environment/checker/body evidence; recollect")
-    classes = select_classes(paths, class_order(root))
+    classes = select_classes(root, paths)
     if receipt["classes"] != classes:
         raise Refusal("selected coverage changed; recollect")
     validate_ci(receipt["ci"], classes)
