@@ -16,6 +16,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 SOURCE = Path(__file__).resolve().parents[1]
+JOB_KINDS = frozenset({"job_failed", "job_dead", "job_hang", "job_silent", "job_over_limit"})
+PR_KINDS = frozenset({"pr_blocked_review", "pr_ci_red", "pr_conflict", "pr_draft_idle", "pr_ready"})
+PIPELINE_KINDS = frozenset({"pipeline_blocked", "pipeline_stale"})
+# An unreadable evidence source cannot prove the findings it feeds have cleared.
+EVIDENCE_ERROR_KINDS = frozenset({"collection_error", "environment"})
+RELEASE_LANE = re.compile(r"^release-pipeline\[([^\]]+)\]: (.*)$")
+RELEASE_PROGRESS = ("batch ", "main is ")
+
+
+class MissingTool(RuntimeError):
+    def __init__(self, tool):
+        super().__init__(f"required tool {tool!r} is not on PATH {os.environ.get('PATH', '')!r}")
+        self.tool = tool
 
 
 def load_config(path):
@@ -121,25 +134,39 @@ def detect(facts, config, now):
         if latest and not latest[2] and green(checks) and not pr.get("isDraft") and pr.get("mergeable") == "MERGEABLE" and (repo, str(number), head) not in queue and not pr.get("mergeQueueEntry"):
             found.append(finding("pr_ready", subject, "approved current head with green CI outside merge queue", config, **fields))
     for log in facts.get("logs", []):
-        kind = "queue_error" if log["type"] == "queue" else "pipeline_blocked"
-        patterns = config["queue_error_patterns"] if kind == "queue_error" else ["BLOCKED"]
+        if log["type"] == "queue":
+            kind, lines = "queue_error", [line for line in log.get("tail", "").splitlines()
+                                          if any(p.lower() in line.lower() for p in config["queue_error_patterns"])]
+        else:
+            kind, lines = "pipeline_blocked", [line for line in release_outcomes(log.get("tail", "")).values()
+                                               if line.split(": ", 1)[1].startswith("BLOCKED")]
         # Line digest identifies a durable failure, rather than rediscovering it each interval.
-        for line in log.get("tail", "").splitlines():
-            if any(p.lower() in line.lower() for p in patterns):
-                subject = log["path"] + ":" + hashlib.sha256(line.encode()).hexdigest()[:16]
-                found.append(finding(kind, subject, line, config))
+        for line in lines:
+            subject = log["path"] + ":" + hashlib.sha256(line.encode()).hexdigest()[:16]
+            found.append(finding(kind, subject, line, config))
         if log["type"] == "release" and now - epoch(log["mtime"]) >= t["pipeline_stale_seconds"]:
             found.append(finding("pipeline_stale", log["path"], "release log stopped updating", config))
     for branch in facts.get("branches", []):
         if branch["name"].startswith("claude/") and now - epoch(branch["updated"]) >= t["branch_idle_seconds"]:
             found.append(finding("branch_idle", branch["repo"] + ":" + branch["name"], "claude branch idle for configured limit", config))
     for error in facts.get("errors", []):
-        found.append(finding("collection_error", error["source"], error["reason"], config))
+        extra = {"blinds": error["blinds"]} if "blinds" in error else {}
+        found.append(finding(error.get("kind", "collection_error"), error["source"], error["reason"], config, **extra))
     for f in found:
         text = f["reason"].lower()
         f["needs_joe"] = next((k for k, patterns in config["needs_joe_patterns"].items()
                                if any(p in text for p in patterns)), None)
     return found
+
+
+def release_outcomes(text):
+    """Each lane's latest outcome line; a later SHIPPED or FAILED supersedes BLOCKED."""
+    outcomes = {}
+    for line in text.splitlines():
+        match = RELEASE_LANE.match(line)
+        if match and not match.group(2).startswith(RELEASE_PROGRESS):
+            outcomes[match.group(1)] = line
+    return outcomes
 
 
 def path_at(root, configured):
@@ -185,8 +212,13 @@ def tail(path, limit):
 
 
 def command(argv, config, cwd=None):
-    result = subprocess.run(argv, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True,
-                            text=True, timeout=config["thresholds"]["command_timeout_seconds"])
+    try:
+        result = subprocess.run(argv, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True,
+                                text=True, timeout=config["thresholds"]["command_timeout_seconds"])
+    except FileNotFoundError as exc:
+        if cwd is not None and not Path(cwd).is_dir():
+            raise
+        raise MissingTool(argv[0]) from exc
     if result.returncode:
         raise RuntimeError(f"{argv[0]} exit {result.returncode}: {result.stderr.strip()} {result.stdout.strip()}")
     return result.stdout
@@ -357,10 +389,15 @@ def reconcile(root, config, found, effects, now, complete=True):
                 append(findings_path, {**row, "reported": True})
             except Exception:
                 pass  # Original failure remains durable and visible; no recursive record writes.
-    # Evidence-source failures cannot prove an old condition has cleared.
-    if complete and not any(f["kind"] == "collection_error" for f in found):
+    # Evidence-source failures cannot prove an old condition has cleared. An error
+    # that does not name what it blinds (an unknown source) blinds everything.
+    blinded = set()
+    for f in found:
+        if f["kind"] in EVIDENCE_ERROR_KINDS:
+            blinded |= set(f["blinds"]) if "blinds" in f else {None}
+    if complete and None not in blinded:
         for key, prior in previous.items():
-            if key not in current and not prior.get("cleared_at"):
+            if key not in current and not prior.get("cleared_at") and prior.get("kind") not in blinded:
                 if prior.get("board_recovery"):
                     try:
                         effects.clear(prior, list(current.values()))
@@ -393,8 +430,15 @@ def collect_pr(repo, number, config):
 
 def collect(root, config):
     facts = {"jobs": [], "prs": [], "logs": [], "branches": [], "errors": [], "queue": ""}
-    def error(source, exc):
-        facts["errors"].append({"source": source, "reason": str(exc)})
+    missing = {}
+    def error(source, exc, blinds):
+        if isinstance(exc, MissingTool):
+            # One absent tool is one environment defect, however many sources needed it.
+            entry = missing.setdefault(exc.tool, {"kind": "environment", "source": exc.tool,
+                                                  "reason": str(exc), "blinds": set()})
+            entry["blinds"] |= blinds
+        else:
+            facts["errors"].append({"source": source, "reason": str(exc), "blinds": sorted(blinds)})
     try:
         jobs = read_latest(path_at(root, config["paths"]["registry"]))
         for job in jobs.values():
@@ -410,13 +454,13 @@ def collect(root, config):
                     job["log_mtime"] = job["start"]
             facts["jobs"].append(job)
     except Exception as exc:
-        error("job registry", exc)
+        error("job registry", exc, JOB_KINDS)
     queue = path_at(root, config["paths"]["merge_queue"])
     if queue.exists():
         try:
             facts["queue"] = queue.read_text()
         except OSError as exc:
-            error("merge queue", exc)
+            error("merge queue", exc, {"pr_ready"})
     for repo in config["repositories"]:
         try:
             pages = json.loads(command(["gh", "api", "--paginate", "--slurp", f"repos/{repo}/pulls?state=open&per_page=100"], config))
@@ -425,9 +469,9 @@ def collect(root, config):
                     try:
                         facts["prs"].append(collect_pr(repo, pr["number"], config))
                     except Exception as exc:
-                        error(f"{repo}#{pr['number']}", exc)
+                        error(f"{repo}#{pr['number']}", exc, PR_KINDS)
         except Exception as exc:
-            error(repo + " PRs", exc)
+            error(repo + " PRs", exc, PR_KINDS)
         try:
             pages = json.loads(command(["gh", "api", "--paginate", "--slurp", f"repos/{repo}/branches?per_page=100"], config))
             for page in pages:
@@ -437,7 +481,7 @@ def collect(root, config):
                         facts["branches"].append({"repo": repo, "name": branch["name"],
                                                   "updated": commit["commit"]["committer"]["date"]})
         except Exception as exc:
-            error(repo + " branches", exc)
+            error(repo + " branches", exc, {"branch_idle"})
     logs = [(p, "queue") for p in config["paths"]["queue_logs"]] + [(config["paths"]["release_log"], "release")]
     for configured, kind in logs:
         log = path_at(root, configured)
@@ -447,7 +491,8 @@ def collect(root, config):
             facts["logs"].append({"path": str(log), "type": kind, "mtime": log.stat().st_mtime,
                                   "tail": tail(log, config["thresholds"]["log_tail_bytes"])})
         except OSError as exc:
-            error(str(log), exc)
+            error(str(log), exc, {"queue_error"} if kind == "queue" else PIPELINE_KINDS)
+    facts["errors"].extend({**e, "blinds": sorted(e["blinds"])} for e in missing.values())
     # A successful restarted job supersedes the killed attempt's expected exit.
     recovered = {j.get("root_id") for j in facts["jobs"] if j.get("restart_count", 0) and j.get("exit_code") == 0}
     for job in facts["jobs"]:

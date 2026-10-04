@@ -97,12 +97,69 @@ class ReplayTests(unittest.TestCase):
             {"id": "over", "start": 1000, "limit": 999, "alive": True, "log_mtime": 2000},
             {"id": "failed", "exit_code": 1, "log_tail": "authentication required"}],
             "branches": [{"repo": "repo", "name": "claude/old", "updated": -10000}],
-            "logs": [{"type": "release", "path": "release.log", "mtime": 1000, "tail": "BLOCKED worker"}]}
+            "logs": [{"type": "release", "path": "release.log", "mtime": 1000, "tail": "release-pipeline[worker]: BLOCKED synthetic_reason — synthetic fixture"}]}
         found = w.detect(facts, c, 2000)
         self.assertEqual({f["kind"] for f in found}, {"job_dead", "job_silent", "job_over_limit", "job_failed", "branch_idle", "pipeline_blocked", "pipeline_stale"})
         self.assertEqual(next(f["needs_joe"] for f in found if f["kind"] == "job_failed"), "credentials")
         facts["jobs"][1]["log_mtime"] = 1400.1
         self.assertNotIn("job_silent", {f["kind"] for f in w.detect(facts, c, 2000)})
+
+    def test_release_block_counts_only_while_it_is_the_lane_outcome(self):
+        import job_watchdog as w
+        c = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        tail = "\n".join([
+            "release-pipeline[app]: batch 56b686af9a0c..a49899340f8d: 331 path(s), 247 release path(s)",
+            "release-pipeline[app]: BLOCKED checks_pending — `test` still running on a49899340f8d",
+            "release-pipeline[worker]: batch c7118b067230..179741a1fb13: 252 path(s), 24 release path(s)",
+            "release-pipeline[worker]: BLOCKED github_unreadable — gh api exited 1",
+            "release-pipeline[app]: batch 56b686af9a0c..a49899340f8d: 331 path(s), 247 release path(s)",
+            "  -> app-release: npm run release:production",
+            "release-pipeline[app]: SHIPPED a49899340f8d",
+            "release-pipeline[worker]: main is f66c3f5f7799; newest green canary target is 179741a1fb13",
+            "release-pipeline[worker]: batch c7118b067230..179741a1fb13: 252 path(s), 24 release path(s)",
+        ])
+        found = w.detect({"logs": [{"type": "release", "path": "release.log", "mtime": 2000, "tail": tail}]}, c, 2000)
+        self.assertEqual([f["reason"] for f in found if f["kind"] == "pipeline_blocked"],
+                         ["release-pipeline[worker]: BLOCKED github_unreadable — gh api exited 1"])
+        shipped = tail + "\nrelease-pipeline[worker]: FAILED at staging-prepare (exit 2); log x"
+        found = w.detect({"logs": [{"type": "release", "path": "release.log", "mtime": 2000, "tail": shipped}]}, c, 2000)
+        self.assertNotIn("pipeline_blocked", {f["kind"] for f in found})
+
+    def test_missing_tool_is_one_environment_finding(self):
+        from unittest.mock import patch
+        import job_watchdog as w
+        c = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.dict(os.environ, {"PATH": directory}):
+            c["paths"]["merge_queue"] = directory + "/queue.txt"
+            c["paths"]["queue_logs"] = []
+            facts = w.collect(Path(directory), c)
+        found = w.detect(facts, c, 2000)
+        self.assertEqual([(f["kind"], f["subject"]) for f in found], [("environment", "gh")])
+        self.assertIn("PATH", found[0]["reason"])
+        self.assertIn("pr_ci_red", found[0]["blinds"])
+        self.assertIn("branch_idle", found[0]["blinds"])
+        self.assertNotIn("pipeline_blocked", found[0]["blinds"])
+
+    def test_evidence_error_retains_only_the_findings_it_blinds(self):
+        import job_watchdog as w
+        c = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        class Effects:
+            def act(self, action, f):
+                return {}
+            def report(self, f):
+                return {}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pipeline = w.finding("pipeline_blocked", "release.log:abc", "BLOCKED checks_pending", c)
+            red = w.finding("pr_ci_red", "repo#1@abc", "hosted CI failed", c)
+            w.reconcile(root, c, [pipeline, red], Effects(), 100)
+            missing = w.detect({"errors": [{"kind": "environment", "source": "gh", "reason": "gh missing",
+                                             "blinds": sorted(w.PR_KINDS)}]}, c, 200)
+            w.reconcile(root, c, missing, Effects(), 200)
+            state = w.read_latest(root / c["paths"]["findings"])
+            self.assertEqual(state[pipeline["key"]]["cleared_at"], w.stamp(200))
+            self.assertIsNone(state[red["key"]]["cleared_at"])
 
     def test_current_head_latest_review_and_active_fixer(self):
         import job_watchdog as w
