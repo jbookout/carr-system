@@ -8936,7 +8936,16 @@ registerTools({
         `select d.id, d.sent_status, d.lint_passed, d.leak_check_passed,
                 to_jsonb(d.prepared_at)#>>'{}' as prepared_at, d.note
            from v_deal_room_document d where d.deal_id=$1 order by d.prepared_at desc limit 20`, [s.id]);
-      return stripDealPlaceholders({ deal_id: s.id, ...deal.rows[0], thread: thread.rows,
+      // Only the current sourced lease belongs on an obligation timeline.
+      // Never derive rent commencement or an option date from a term or note.
+      const lease = await c.query(
+        `select id, version, status, to_jsonb(executed_on)#>>'{}' as executed_on,
+                to_jsonb(commencement_on)#>>'{}' as commencement_on,
+                to_jsonb(expiration_on)#>>'{}' as expiration_on,
+                options_note, evidence_kind, evidence_ref, source
+           from v_deal_room_current_lease where deal_id=$1`, [s.id]);
+      return stripDealPlaceholders({ schema_version: "deal-timeline.v1", lease: lease.rows[0] || null,
+        deal_id: s.id, ...deal.rows[0], thread: thread.rows,
         critical_dates: criticalDates.rows, next_actions: actions.rows,
         activities: activities.rows, participants: participants.rows,
         premises: premises.rows, negotiation_rounds: negotiation.rows,
