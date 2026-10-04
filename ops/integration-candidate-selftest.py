@@ -129,7 +129,8 @@ class RestoreForwardTests(unittest.TestCase):
                 if fail and fail(args,env): return pg.CommandResult(4,'','private-canary-123')
                 return pg.CommandResult(0,'{}' if args[-1]=='--fingerprint-only' else '','')
         binding={'base':'a'*40,'head':'b'*40,'tree':'c'*40}
-        source=[binding,{**binding,'tree':'d'*40}] if moved else [binding,binding]
+        source=([binding,binding,{**binding,'tree':'d'*40}] if moved=='canonical' else
+                [binding,{**binding,'tree':'d'*40}] if moved else [binding,binding,binding])
         with (patch.object(pg,'find_postgres_binaries',return_value=self.bins),
               patch.object(pg,'port_is_available',return_value=True),
               patch.object(pg,'refuse_hosted_execution'),
@@ -149,11 +150,21 @@ class RestoreForwardTests(unittest.TestCase):
         self.assertEqual(sum(a[0]=='/fake/initdb' for a in self.events),2)
         self.assertIn(':55433/',self.envs[forward]['DATABASE_URL'])
         self.assertIn(':55432/',self.envs[canonical]['CARR_CI_DATABASE_URL'])
-        self.assertEqual(sum(a[0]=='/fake/pg_ctl' and a[-1]=='stop' for a in self.events),2)
+        self.assertEqual(sum(a[0]=='/fake/pg_ctl' and a[-1]=='stop' for a in self.events),3)
+        stop_primary=next(i for i,a in enumerate(self.events) if a[0]=='/fake/pg_ctl' and a[-1]=='stop')
+        init_integration=[i for i,a in enumerate(self.events) if a[0]=='/fake/initdb'][1]
+        self.assertLess(stop_primary,init_integration)
+        stop_integration=next(i for i,a in enumerate(self.events) if a[0]=='/fake/pg_ctl' and a[-1]=='stop' and 'integration-data' in ' '.join(a))
+        self.assertLess(consumers[-1],stop_integration)
+        self.assertLess(stop_integration,canonical)
         self.assertTrue(all(forward<i<canonical for i in consumers))
         self.assertTrue(all('CANARY_TOKEN' not in env for env in self.envs))
     def test_restore_forward_or_consumer_failure_stops_and_disposes(self):
-        predicates=[lambda a,e:a[-1].endswith('integration-main-schema.sql'),
+        predicates=[lambda a,e:a[0]=='/fake/pg_ctl' and a[-1]=='stop' and 'integration-data' not in ' '.join(a),
+                    lambda a,e:a[0]=='/fake/initdb' and 'integration-data' in ' '.join(a),
+                    lambda a,e:a[0]=='/fake/pg_ctl' and a[-1]=='start' and 'integration-data' in ' '.join(a),
+                    lambda a,e:a[0]=='/fake/pg_ctl' and a[-1]=='stop' and 'integration-data' in ' '.join(a),
+                    lambda a,e:a[-1].endswith('integration-main-schema.sql'),
                     lambda a,e:a[-3:]==(str(REPO/'tools/migrate.py'),'--apply','--yes'),
                     lambda a,e:a[-1].endswith('find-rule-supersedes.test.mjs'),
                     lambda a,e:a[-1].endswith('catch-me-up-writer-route.test.mjs')]
@@ -166,6 +177,11 @@ class RestoreForwardTests(unittest.TestCase):
                 self.assertNotIn('private-canary-123',output.getvalue())
                 self.assertFalse(any(str(REPO/'ops/ci.sh') in a for a in self.events))
                 self.assertTrue(any(a[0]=='/fake/pg_ctl' and a[-1]=='stop' for a in self.events))
+    def test_changed_source_refuses_after_canonical_proof(self):
+        with self.assertRaises(self.pg.LocalPGRefusal): self.run_case(moved='canonical')
+        self.assertTrue(any(str(REPO/'ops/ci.sh') in a for a in self.events))
+        self.assertTrue(any(a[0]=='/fake/pg_ctl' and a[-1]=='stop' for a in self.events))
+
     def test_changed_source_refuses_after_consumer_proof(self):
         with self.assertRaises(self.pg.LocalPGRefusal): self.run_case(moved=True)
         self.assertFalse(any(str(REPO/'ops/ci.sh') in a for a in self.events))

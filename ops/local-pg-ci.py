@@ -568,6 +568,15 @@ def run_local_ci(
             # database name. Preserve the canonical lane's fresh-role baseline.
             # Restore current main, forward the candidate and prove consumers.
             from integration_candidate import git, validate_candidate
+            # Keep one active cluster: macOS has a small shared-memory ID budget.
+            paused = command_runner.run(
+                [binaries.pg_ctl, "-D", data, "-m", "fast", "-w", "stop"],
+                env=clean_env, cwd=repo, capture=True,
+            )
+            if paused.returncode:
+                print("local-db-ci: canonical PostgreSQL pause failed", file=sys.stderr)
+                return paused.returncode
+            start_attempted = False
             schema = root / "integration-main-schema.sql"
             schema.write_bytes(git(repo, "show", f"{integration_base}:db/schema.sql"))
             integration_dsn = f"postgres://carr_ci@127.0.0.1:{integration_port}/carr_ci_integration"
@@ -604,6 +613,23 @@ def run_local_ci(
                     return proof.returncode
             if validate_candidate(repo, integration_base) != integration_source:
                 raise LocalPGRefusal("integration source changed during restore/forward/consumer proof")
+            disposed = command_runner.run(
+                [binaries.pg_ctl, "-D", integration_data, "-m", "fast", "-w", "stop"],
+                env=clean_env, cwd=repo, capture=True,
+            )
+            if disposed.returncode:
+                print("local-db-ci: integration PostgreSQL stop failed", file=sys.stderr)
+                return disposed.returncode
+            integration_started = False
+            start_attempted = True
+            resumed = command_runner.run(
+                [binaries.pg_ctl, "-D", data, "-l", root / "postgres.log",
+                 "-o", f"-h 127.0.0.1 -p {port}", "-w", "start"],
+                env=clean_env, cwd=repo, capture=True,
+            )
+            if resumed.returncode:
+                print("local-db-ci: canonical PostgreSQL resume failed", file=sys.stderr)
+                return resumed.returncode
             print("local-db-ci: " + json.dumps(integration_source, sort_keys=True))
         ci_env = dict(clean_env)
         ci_env["CARR_CI_DATABASE_URL"] = dsn
@@ -915,6 +941,9 @@ def run_local_ci(
                         exit_code = snapshot.returncode
                     else:
                         print(snapshot.stdout, end="")
+                if exit_code == 0 and integration_base is not None:
+                    if validate_candidate(repo, integration_base) != integration_source:
+                        raise LocalPGRefusal("integration source changed during canonical candidate proof")
                 if exit_code == 0:
                     print(
                         f"local-db-ci: {ci_class} proof and atomic Joe authority lifecycle "
