@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -867,6 +868,54 @@ class EvidenceChain(unittest.TestCase):
         self.assertTrue(any("without a new version" in e for e in errs), errs)
 
 
+class ReplayReuse(unittest.TestCase):
+    def test_baseline_reuse_binds_commit_and_harness_and_returns_independent_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            harness = root / RD / "run_eval.py"
+            harness.parent.mkdir(parents=True)
+            code = r"""import argparse, json
+from pathlib import Path
+p = argparse.ArgumentParser()
+p.add_argument('--observe')
+p.add_argument('--trace-reads')
+a = p.parse_args()
+value = int(Path('input.txt').read_text()) * FACTOR
+Path(a.observe).write_text(json.dumps({'value': value}) + '\n')
+Path(a.trace_reads).write_text(json.dumps(['input.txt']))
+"""
+            harness.write_text(code.replace("FACTOR", "1"))
+            source = root / "input.txt"
+            source.write_text("7")
+            env = fixture_env()
+
+            def git(*args):
+                return subprocess.run(["git", *args], cwd=root, env=env,
+                                      check=True, capture_output=True, text=True).stdout.strip()
+
+            git("init", "-q")
+            git("config", "user.name", "selftest")
+            git("config", "user.email", "selftest@example.invalid")
+            git("add", "input.txt", f"{RD}/run_eval.py")
+            git("commit", "-qm", "baseline")
+            first_ref = git("rev-parse", "HEAD")
+            first = cer.replay_rule_delivery(root, first_ref)
+            self.assertEqual(first["baseline"]["rows"], [{"value": 7}])
+            first["baseline"]["rows"].clear()
+            source.write_text("11")
+            second = cer.replay_rule_delivery(root, first_ref)
+            self.assertEqual(second["baseline"]["rows"], [{"value": 7}])
+            self.assertEqual(second["candidate"]["rows"], [{"value": 11}])
+            harness.write_text(code.replace("FACTOR", "2"))
+            third = cer.replay_rule_delivery(root, first_ref)
+            self.assertEqual(third["baseline"]["rows"], [{"value": 14}])
+            self.assertEqual(third["candidate"]["rows"], [{"value": 22}])
+            git("add", "input.txt", f"{RD}/run_eval.py")
+            git("commit", "-qm", "new baseline")
+            fourth = cer.replay_rule_delivery(root, git("rev-parse", "HEAD"))
+            self.assertEqual(fourth["baseline"]["rows"], [{"value": 22}])
+
+
 class RuleDeliveryEvidenceChain(unittest.TestCase):
     """The four refusals the evidence chain exists for, on the real rule-delivery receipt."""
 
@@ -892,6 +941,22 @@ class RuleDeliveryEvidenceChain(unittest.TestCase):
     def test_checked_in_receipt_passes_against_its_own_evidence(self):
         self.assertEqual(self.r["schema_version"], 2)
         self.assertEqual(cer.validate_receipt(self.receipt, "rule-delivery", ROOT), [])
+
+    def test_repeated_validation_reuses_immutable_baseline_across_roots(self):
+        # One baseline snapshot per commit/harness, even for separate fixtures.
+        # Candidate observations still need a fresh run on every validation.
+        with tempfile.TemporaryDirectory() as tmp:
+            other = Path(tmp)
+            mirror(self.receipt, other)
+            with patch.object(cer.subprocess, "run", wraps=subprocess.run) as run:
+                self.assertEqual(self.errors(), [])
+                self.assertEqual(cer.validate_receipt(self.receipt, "rule-delivery", other), [])
+            commands = [call.args[0] for call in run.call_args_list]
+            archives = [cmd for cmd in commands if "archive" in cmd]
+            observations = [cmd for cmd in commands if "--observe" in cmd]
+            self.assertLessEqual(len(archives), 1, "repeated immutable baseline extraction")
+            self.assertLessEqual(len(observations), 3, "repeated immutable baseline replay")
+            self.assertGreaterEqual(len(observations), 2, "candidate must always replay")
 
     def test_deleting_a_failing_candidate_row_fails(self):
         self.assertEqual(self.errors(), [])

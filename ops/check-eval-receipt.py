@@ -62,7 +62,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import io
-import shutil
 import tarfile
 import tempfile
 import json
@@ -584,37 +583,57 @@ def _recompute_errors(r: dict, measured: Any) -> list[str]:
     return errs
 
 
-def replay_rule_delivery(root: Path, baseline_ref: str) -> dict:
-    """Authenticate deterministic observations by executing both source trees.
+# Only immutable baseline results are reusable. Serialized values keep callers
+# from mutating the cache; no receipt-provided manifest participates in its key.
+_BASELINE_REPLAYS: dict[tuple[str, str], str] = {}
 
-    Each subprocess gets an empty bytecode cache namespace. Its read trace
-    establishes the complete measured set, independently of receipt manifests.
-    The baseline comes from an immutable Git commit, using the candidate harness.
-    """
+
+def _observe_rule_delivery(tree: Path, tmp: Path, arm: str) -> dict:
     harness = "evals/rule-delivery/run_eval.py"
     separately_bound = {harness, "evals/rule-delivery/make_report.py",
                         "evals/rule-delivery/expectations.v1.json"}
+    obs, trace = tmp / f"{arm}.jsonl", tmp / f"{arm}.reads.json"
+    env = dict(os.environ, PYTHONPYCACHEPREFIX=str(tmp / f"{arm}-cache"))
+    subprocess.run([sys.executable, "-B", str(tree / harness), "--observe", str(obs),
+                    "--trace-reads", str(trace)], cwd=tree, env=env,
+                   capture_output=True, check=True, timeout=120)
+    reads = set(json.loads(trace.read_text())) - separately_bound
+    reads = {p for p in reads if "__pycache__" not in p.split("/")}
+    return {"rows": [json.loads(line) for line in obs.read_text().splitlines()],
+            "dependencies": {p: hashlib.sha256((tree / p).read_bytes()).hexdigest()
+                             for p in sorted(reads)}}
+
+
+def replay_rule_delivery(root: Path, baseline_ref: str) -> dict:
+    """Authenticate observations, reusing only immutable baseline work.
+
+    Resolve the commit in the caller's repository on every call. The baseline
+    cache binds that commit and the candidate harness bytes, lasts only for this
+    process, and never caches errors. Candidate source always executes afresh.
+    Each subprocess gets an empty bytecode cache namespace and its read trace
+    establishes the complete measured set independently of receipt manifests.
+    """
+    harness = "evals/rule-delivery/run_eval.py"
+    code = (root / harness).read_bytes()
+    commit = subprocess.run(["git", "-C", str(root), "rev-parse", "--verify",
+                             baseline_ref + "^{commit}"], capture_output=True,
+                            text=True, check=True).stdout.strip()
+    key = (commit, hashlib.sha256(code).hexdigest())
     with tempfile.TemporaryDirectory(prefix="eval-receipt-replay-") as scratch:
         tmp = Path(scratch)
-        archive = subprocess.run(["git", "-C", str(root), "archive", "--format=tar", baseline_ref],
-                                 capture_output=True, check=True).stdout
-        baseline = tmp / "baseline"
-        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
-            tar.extractall(baseline, filter="data")
-        shutil.copy2(root / harness, baseline / harness)
-        out = {}
-        for arm, tree in (("baseline", baseline), ("candidate", root)):
-            obs, trace = tmp / f"{arm}.jsonl", tmp / f"{arm}.reads.json"
-            env = dict(os.environ, PYTHONPYCACHEPREFIX=str(tmp / f"{arm}-cache"))
-            subprocess.run([sys.executable, "-B", str(tree / harness), "--observe", str(obs),
-                            "--trace-reads", str(trace)], cwd=tree, env=env,
-                           capture_output=True, check=True, timeout=120)
-            reads = set(json.loads(trace.read_text())) - separately_bound
-            reads = {p for p in reads if "__pycache__" not in p.split("/")}
-            out[arm] = {"rows": [json.loads(line) for line in obs.read_text().splitlines()],
-                        "dependencies": {p: hashlib.sha256((tree / p).read_bytes()).hexdigest()
-                                         for p in sorted(reads)}}
-        return out
+        if key not in _BASELINE_REPLAYS:
+            archive = subprocess.run(["git", "-C", str(root), "archive", "--format=tar", commit],
+                                     capture_output=True, check=True).stdout
+            baseline = tmp / "baseline"
+            with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+                tar.extractall(baseline, filter="data")
+            (baseline / harness).write_bytes(code)
+            result = _observe_rule_delivery(baseline, tmp, "baseline")
+            if len(_BASELINE_REPLAYS) >= 4:
+                del _BASELINE_REPLAYS[next(iter(_BASELINE_REPLAYS))]
+            _BASELINE_REPLAYS[key] = json.dumps(result)
+        return {"baseline": json.loads(_BASELINE_REPLAYS[key]),
+                "candidate": _observe_rule_delivery(root, tmp, "candidate")}
 
 
 def _rule_delivery_replay_errors(ev: dict, root: Path, cohorts: dict) -> list[str]:
