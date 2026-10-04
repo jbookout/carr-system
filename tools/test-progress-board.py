@@ -139,6 +139,46 @@ class BoardCase(unittest.TestCase):
 
 
 class ProgressBoardCLI(BoardCase):
+    def test_conditional_recovery_compares_after_acquiring_shared_lock(self):
+        import fcntl
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("task", "demo", "work", "--title", "Work", "--status", "running",
+                       "--executor", "executor", "--note", "Old evidence")
+        expected = {"status": "running", "note": "Old evidence"}
+        code = '''
+import fcntl, importlib.util, sys
+spec = importlib.util.spec_from_file_location("board", sys.argv[1])
+board = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(board)
+real_lock = fcntl.flock
+def lock(fd, operation):
+    if operation == fcntl.LOCK_EX:
+        print("write-lock", flush=True)
+    return real_lock(fd, operation)
+fcntl.flock = lock
+board.main(["task", "demo", "work", "--status", "done", "--note", "Recovered",
+            "--expected-task", sys.argv[2]])
+'''
+        path = self.root / "boards/demo.json"
+        with (self.root / "boards/demo.lock").open("a+") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            with subprocess.Popen([sys.executable, "-c", code, str(SCRIPT), json.dumps(expected)],
+                                  env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as writer:
+                try:
+                    self.assertEqual(writer.stdout.readline().strip(), "write-lock")
+                    state = self.read_state("demo")
+                    state["tasks"]["work"].update(status="review", note="Fresh executor evidence")
+                    path.write_text(json.dumps(state))
+                finally:
+                    fcntl.flock(handle, fcntl.LOCK_UN)
+                _, errors = writer.communicate(timeout=5)
+                self.assertEqual(writer.returncode, 0, errors)
+        self.assertEqual(self.read_state("demo"), state)
+        # Matching ownership permits recovery through the same CLI transaction.
+        self.run_board("task", "demo", "work", "--status", "running", "--note", "Resumed",
+                       "--expected-task", json.dumps({"status": "review", "note": "Fresh executor evidence"}))
+        self.assertEqual(self.read_state("demo")["tasks"]["work"]["note"], "Resumed")
+
     def test_init_task_ask_answer_and_deliver(self):
         self.run_board("init", "demo", "--title", "Demo project")
         self.run_board("task", "demo", "build", "--title", "Build board", "--status", "running",
