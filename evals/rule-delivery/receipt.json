@@ -2,11 +2,11 @@
   "adapter": {
     "adapter_id": "rule-delivery-production-functions",
     "adapter_version": "1",
-    "configuration_fingerprint": "sha256:27c20c9686173ca17a5ea59ce2f532a231918b6efa5f05790b9b38b0f1c0ea66",
+    "configuration_fingerprint": "sha256:e859bc9b2dd6b96fcc3162e29ff060cb3fa72ed626ad6adf0ed495f3b8765cfb",
     "harness_id": "evals/rule-delivery/run_eval.py",
     "harness_version": "e7662e16e2007982b67031209807aac4340b2135c4c8000a947dbfd212477a6e",
     "model_id": "deterministic-no-model",
-    "native_session_ref": "01a104c4-0b26-7453-90d7-aae39dad146b",
+    "native_session_ref": "01a107e1-e0ac-7ac3-aa56-bc9f34a931ef",
     "provider_id": "none",
     "surface": "offline_programmatic"
   },
@@ -167,7 +167,7 @@
       "ops/rule_delivery_eval.py": "7c846223ccc026f4f16a51dca0f695986cefadfc5f412c23adf73f57d08d022a",
       "ops/rule_trigger_compile.py": "356aed19e2c4fc0f90da04e2d0461bdedf5820e88c97c9f3a70fc88f3d43fcb1",
       "ops/rule_trigger_delivery.py": "64746e5fc5c65e2ff67a72dfb0217598964448283e1c7f7d0fb56dde0c3bc3f3",
-      "ops/typesafe_client.py": "bea1130c741ae6778a01fc33feee57574e0fdf97771dbf6a7b536880feca69bf",
+      "ops/typesafe_client.py": "13fc2ad80f1959bb6d8f95e11602328a760565a3a390faefbf844b6e31bac386",
       "tools/judge/interface.py": "2e0440cc85660f83f4456829006f3f00a956e414c4c72e8217ab1a22622f3ed2"
     },
     "expectations": {
@@ -194,7 +194,7 @@
       "result": "pass"
     }
   },
-  "measured_on": "2026-10-03",
+  "measured_on": "2026-10-04",
   "min_useful_gain": 0.7,
   "noise_floor": 0.3,
   "notes": [
