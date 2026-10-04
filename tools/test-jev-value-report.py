@@ -421,6 +421,23 @@ class BlockingReviewTests(unittest.TestCase):
                     self.assertEqual(report["totals"]["outcomes_verified"], 1)
                     self.assertEqual(report["sites"]["review"]["recommendation"], "keep")
 
+    def test_03_validation_without_regressions_preserves_attributed_fix(self):
+        self.assert_attributed_fix_survives_validation(
+            "Validation confirms no regression in existing behavior.")
+
+    def test_03_validation_without_errors_preserves_attributed_fix(self):
+        self.assert_attributed_fix_survives_validation(
+            "The corrected request now returns successfully with no error.")
+
+    def assert_attributed_fix_survives_validation(self, validation):
+        commit = {"sha": "synthetic", "date": START.isoformat(),
+                  "subject": "Fix the bug Jev caught", "body": validation}
+        report = jvr.build_report(sources(commits=[commit]), START, END)
+        self.assertEqual(report["totals"]["outcomes_verified"], 1)
+        self.assertEqual(report["sites"]["review"]["recommendation"], "keep")
+        self.assertEqual(report["sites"]["review"]["evidence"][0]["quote"],
+                         "Fix the bug Jev caught")
+
     def test_04_final_totals_match_text_and_sites(self):
         report = jvr.build_report(sources(calls=[call("review")], judge=[judge("build_advisory", elapsed_ms=1000)],
                    commits=[{"sha": "synthetic", "date": START.isoformat(), "subject": "Jev caught a bug"}],

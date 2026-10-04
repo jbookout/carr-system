@@ -286,22 +286,27 @@ def recommend(key, site):
 def positive_attribution(commit):
     """Commit-message convention: Jev <finder verb> <positive defect noun>.
 
-    Search subject and body. The message must claim a bug/gap/defect/error/
-    regression and must not say no finding, no fix, or a deferred fix. This is
-    commit-attributed evidence, not an independently verified causal outcome.
+    Search subject and body for a positive defect claim. Negation applies to
+    that claim; separate validation prose does not deny the finding. Messages
+    denying or deferring a fix remain excluded. This is commit-attributed
+    evidence, not an independently verified causal outcome.
     """
     message = "\n".join(str(commit.get(k) or "") for k in ("subject", "body"))
-    if re.search(rf"\b(?:nothing|none|no\s+(?:{DEFECT_NOUN}s?|finding|issue|fix|change)|"
-                 rf"not\s+(?:(?:a|an)\s+)?(?:{DEFECT_NOUN}s?|fixed)|"
-                 r"defer(?:red)?|unfixed)\b", message, re.I):
+    if re.search(r"\b(?:no\s+(?:fix|change)|not\s+fixed|defer(?:red)?|unfixed)\b",
+                 message, re.I):
         return None
     for match in JEV_FINDER.finditer(message):
         claim = re.split(r"[.;\n]", message[match.end():], maxsplit=1)[0]
+        prefix = re.split(r"[.;\n]", message[:match.start()])[-1]
+        attribution = prefix + match.group(0) + claim
+        if re.search(rf"\b(?:nothing|none|no\s+(?:{DEFECT_NOUN}s?|finding|issue)|"
+                     rf"not\s+(?:(?:a|an)\s+)?{DEFECT_NOUN}s?)\b",
+                     attribution, re.I):
+            continue
         if re.search(rf"\b{DEFECT_NOUN}\b", claim, re.I):
             return match.group(0) + claim
-        prefix = re.split(r"[.;\n]", message[:match.start()])[-1]
         if re.search(rf"\bfix(?:es|ed)?\b.*\b{DEFECT_NOUN}\b", prefix, re.I):
-            return prefix.strip() + match.group(0) + claim
+            return attribution.strip()
     return None
 
 
