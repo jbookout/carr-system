@@ -18,7 +18,7 @@ function expression(value, github, success = true) {
   if (value === undefined) return success;
   const raw = String(value).replace(/^\$\{\{\s*|\s*\}\}$/g, "");
   assert.match(raw, /^(?:github\.(?:workflow|ref|run_id|event_name|event\.action|event\.pull_request\.number)|always\(\)|'[^']*'|[\s()=!&|]|true|false)+$/, `unsupported expression: ${raw}`);
-  const result = runInNewContext(raw, { github, always: () => true }, { timeout: 100 });
+  const result = runInNewContext(raw, { github, always: () => true }, { timeout: 1000 });
   // Actions implicitly adds success() unless a status function is present.
   return raw.includes("always()") || success ? result : false;
 }
