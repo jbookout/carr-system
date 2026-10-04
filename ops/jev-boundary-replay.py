@@ -97,6 +97,7 @@ def flags(rows):
             out.add("failure")
         if check == "path_repair" and verdict == "path_found": out.add("path_repair")
         if check == "done_claim" and verdict == "unsupported": out.add("done_unsupported")
+        if check == "done_claim" and verdict == "needs_review": out.add("done_review")
         if check == "review_triage" and verdict == "needs_review": out.add("review_high")
     return out
 

@@ -94,6 +94,8 @@ class FakeServer:
         self.portfolio_receipt = PORTFOLIO_RECEIPT
         self.portfolio_intact = True
         self.portfolio_effects = 0
+        self.acceptance = True
+        self.acceptance_source = True
 
     def __call__(self, verb, args):
         self.calls.append((verb, json.loads(json.dumps(args))))
@@ -114,7 +116,12 @@ class FakeServer:
         for m in args["members"]:
             if not any(x["release_key"] == args["release_key"] and x["commit_sha"] == m["commit_sha"]
                        and x["slice_id"] == m["slice_id"] for x in self.members):
-                self.members.append({**m, "release_key": args["release_key"], "id": f"mem-{len(self.members)}"})
+                criteria = next(c['checkable_done'] for c in self.catalog if c['proposed_id'] == m['slice_id'])
+                receipts = [{'schema':'slice-acceptance/v1','slice_id':m['slice_id'],'criterion':c,
+                             'source_sha':m['commit_sha'] if self.acceptance_source else '0'*40,
+                             'status':'passed','candidate_passes':True,'evidence_ref':'server-check:fixture'}
+                            for c in criteria if allowed_kinds(c) == ['shipped_release:']] if self.acceptance else []
+                self.members.append({**m, 'acceptance_receipts':receipts, "release_key": args["release_key"], "id": f"mem-{len(self.members)}"})
         return {"ok": True}
 
     def v_register_slice_criteria_from_catalog(self, args):
@@ -249,7 +256,7 @@ class FakeServer:
     def v_read_slice_completion(self, args):
         sid = args["slice_id"]
         members = [{"id": m["id"], "release_key": m["release_key"], "commit_sha": m["commit_sha"],
-                    "pr_number": m.get("pr_number"), "subject": m["subject"]} for m in self.members
+                    "pr_number": m.get("pr_number"), "subject": m["subject"], "slice_id":m["slice_id"], "acceptance_receipts":m.get("acceptance_receipts",[])} for m in self.members
                    if m["slice_id"] == sid]
         criteria = []
         for c in self.registered.get(sid, []):
@@ -285,30 +292,15 @@ def fake_git(commits, reach):
     return run
 
 
-class FakeJev:
-    """Matches every shipped criterion to one member; records calls. The
-    marker asks Jev nothing else: the kind is the server's."""
-
-    def __init__(self, match="m0", match_prob=0.9):
-        self.match, self.match_prob = match, match_prob
-        self.calls: list[list[str]] = []
-
-    def __call__(self, state, questions, facets):
-        self.calls.append(facets)
-        assert all(q.startswith("evidence_matching_") for q in questions), questions
-        return {qid: {"type": "choice", "choice": self.match, "probabilities": {self.match: self.match_prob}}
-                for qid in questions}
-
-
 COMMITS = [(SHA_S00, "S00 portfolio negatives gate (#9)"),
            (SHA_R03, "R03 sweep runner keeps HEAD==pin (#850)"),
            (SHA_J303, "J303 client-shared tours allowlist (#12)"),
            (SHA_F08, SRC)]
 
 
-def marker(server, jev=None, commits=COMMITS, reach=None):
+def marker(server, commits=COMMITS, reach=None):
     reach = reach if reach is not None else {REL1: {SHA_F08, SHA_S00}, REL2: {SHA_F08, SHA_R03, SHA_S00}}
-    return sdm.Marker(call=server, git_run=fake_git(commits, reach), ask=jev or FakeJev(), out=lambda _s: None)
+    return sdm.Marker(call=server, git_run=fake_git(commits, reach), out=lambda _s: None)
 
 
 def by_id(outcomes):
@@ -348,7 +340,7 @@ class Run(unittest.TestCase):
                            "member": member_of(server, "V5-F08"), "via": "automation"}])
         # J303's merge is in no complete release yet.
         self.assertEqual(out["V5-J303"].status, "in_progress")
-        self.assertIn("no shipped change of this slice was matched", out["V5-J303"].reason)
+        self.assertIn("typed acceptance missing or ambiguous; needs review", out["V5-J303"].reason)
         # A runtime outcome no kind can show stays unbound: blocked, named.
         self.assertEqual(out["V5-R01"].status, "blocked")
         self.assertIn("Joe pilot observed for two weeks -> no server-resolvable evidence kind", out["V5-R01"].reason)
@@ -414,7 +406,7 @@ class Run(unittest.TestCase):
         server = FakeServer()
         marker(server).run()
         before = len(server.writes())
-        marker(server, FakeJev()).run()
+        marker(server).run()
         self.assertEqual(server.writes()[before:], [])
 
     def test_a_partner_hold_is_skipped_untouched(self):
@@ -428,14 +420,16 @@ class Run(unittest.TestCase):
 
     def test_a_none_match_proposes_nothing(self):
         server = FakeServer()
-        out = by_id(marker(server, FakeJev(match="none")).run())
+        server.acceptance = False
+        out = by_id(marker(server).run())
         self.assertNotIn(("V5-F08", F08_SHIP), server.bindings)
         self.assertEqual(out["V5-F08"].status, "in_progress")
-        self.assertIn(f"{F08_SHIP} -> no shipped change of this slice was matched", out["V5-F08"].reason)
+        self.assertIn(f"{F08_SHIP} -> typed acceptance missing or ambiguous; needs review", out["V5-F08"].reason)
 
     def test_a_low_confidence_match_proposes_nothing(self):
         server = FakeServer()
-        out = by_id(marker(server, FakeJev(match_prob=0.4)).run())
+        server.acceptance_source = False
+        out = by_id(marker(server).run())
         self.assertNotIn(("V5-F08", F08_SHIP), server.bindings)
         self.assertEqual(out["V5-F08"].status, "in_progress")
 
@@ -462,7 +456,7 @@ class Run(unittest.TestCase):
         server = FakeServer()
         server.registered["V5-F08"] = [F08_SHIP, F08_RESTORE]
         server.partner_bind("V5-F08", F08_SHIP, "unbound")
-        out = by_id(marker(server, FakeJev()).run({"V5-F08"}))
+        out = by_id(marker(server).run({"V5-F08"}))
         self.assertNotIn(F08_SHIP, [a.get("criterion") for v, a in server.calls
                                     if v == "bind-slice-criterion-evidence"])
         self.assertEqual(out["V5-F08"].status, "blocked")

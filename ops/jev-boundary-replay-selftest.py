@@ -22,9 +22,10 @@ assert by_id["unrelated_prompt"]["after"]["false_positives"] == 0
 assert by_id["failed_test_injection"]["after"]["calls"] == 1
 assert set(by_id["failed_test_injection"]["after"]["found"]) == {"security", "failure", "ci_failed"}
 for case_id in ("unsupported_stop", "ordinary_diff_stop"):
-    assert "done_unsupported" in by_id[case_id]["after"]["found"], by_id[case_id]
-assert by_id["ordinary_diff_stop"]["before"]["calls"] == 2
-assert by_id["ordinary_diff_stop"]["after"]["calls"] == 1
+    assert "done_review" in by_id[case_id]["after"]["found"], by_id[case_id]
+    assert "done_unsupported" not in by_id[case_id]["after"]["found"], by_id[case_id]
+assert by_id["ordinary_diff_stop"]["before"]["calls"] == 0  # legacy dispatch uses current predicates
+assert by_id["ordinary_diff_stop"]["after"]["calls"] == 0
 assert by_id["repeated_stop"]["after"]["calls"] == 0
 if have_logs:
     spend = module.spend_replay()

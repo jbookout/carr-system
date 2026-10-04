@@ -36,8 +36,7 @@ WHAT ONE RUN DOES, per catalog slice (the catalog is doctrine
      wording (ops.slice_criterion_allowed_kinds), and the bind door refuses
      anything else. For a criterion still unbound (and never bound by a
      partner): a live_check / accepted_record kind is bound as allowed; a
-     shipped_release kind is bound only to ONE release member that Jev
-     evidence_matching picks for that exact criterion, and that binding is a
+     shipped_release kind is bound only to ONE release member with a typed server acceptance receipt for that exact criterion, and that binding is a
      PROPOSAL the server never treats as effective until a partner confirms
      it (the Worker holds no GitHub credential, so the server cannot verify
      the PR itself). An empty allowlist (refusals, runtime outcomes) binds
@@ -91,7 +90,6 @@ PARKED = {"V5-D03": "parked by Joe", "V5-D04": "parked by Joe"}
 BARE_ID = re.compile(r"(?<![\w-])((?:F|A|S)\d{2}|J\d{3})(?![\w-])")
 PR_NUMBER = re.compile(r"\(#(\d+)\)\s*$")
 NAMESPACE = uuid.UUID("8f0b3a52-5f0e-4c55-9d7c-6b1a0f3e2d11")
-MATCH_MIN = 0.70
 OUT_DIR = REPO / "out" / "slice-done-marker"
 
 # The one portfolio the accepted-record sources resolve against.
@@ -149,14 +147,8 @@ def git(*args: str) -> str:
     return proc.stdout
 
 
-def jev_ask(state: dict, questions: dict, facets: list[str]) -> dict:
-    sys.path.insert(0, str(REPO / "ops"))
-    from typesafe_client import ask  # noqa: PLC0415 — only a live run needs the vendor client
-    return ask(state, questions, facets=facets).get("answers", {})
 
 
-def jev_choice(instructions: str, options: dict[str, str]) -> dict:
-    return {"type": "choice", "instructions": instructions, "criteria": dict(options)}
 
 
 # ── the marker ────────────────────────────────────────────────────────────────
@@ -172,17 +164,8 @@ class SliceOutcome:
 
 class Marker:
     def __init__(self, *, call: Callable[[str, dict], dict], git_run: Callable[..., str],
-                 ask: Callable[[dict, dict, list[str]], dict] | None, dry_run: bool = False,
-                 out: Callable[[str], None] = print, cache_path: Path | None = None):
-        self.call, self.git, self.ask, self.dry_run, self.out = call, git_run, ask, dry_run, out
-        self.cache_path = cache_path
-        self.cache: dict[str, Any] = {}
-        if cache_path and cache_path.exists():
-            try:
-                self.cache = json.loads(cache_path.read_text())
-            except ValueError:
-                self.cache = {}
-
+                 dry_run: bool = False, out: Callable[[str], None] = print):
+        self.call, self.git, self.dry_run, self.out = call, git_run, dry_run, out
     # -- catalog -----------------------------------------------------------
     def catalog(self) -> list[dict]:
         doc = self.call("read-doctrine", {"document": CATALOG_DOC})
@@ -248,43 +231,30 @@ class Marker:
         return written
 
     # -- Jev ---------------------------------------------------------------
-    def _cached_ask(self, kind: str, state: dict, questions: dict, facets: list[str]) -> dict:
-        if not questions:
-            return {}
-        key = hashlib.sha256(json.dumps([kind, state, questions], sort_keys=True).encode()).hexdigest()
-        if key in self.cache:
-            return self.cache[key]
-        if self.ask is None:
-            return {}
-        answers = self.ask(state, questions, facets)
-        self.cache[key] = answers
-        return answers
 
-    @staticmethod
-    def _pick(answer: dict | None, floor: float) -> str | None:
-        if not answer or answer.get("type") != "choice":
-            return None
-        choice = answer.get("choice")
-        prob = (answer.get("probabilities") or {}).get(choice)
-        if prob is None:
-            prob = answer.get("confidence") or 0.0
-        return choice if float(prob) >= floor else None
 
     def match(self, item: dict, criteria: list[str], members: list[dict]) -> dict[str, str | None]:
-        opts = {f"m{j}": f"PR #{m.get('pr_number') or '?'}: {m['subject']} -- "
-                         f"{getattr(self, '_bodies', {}).get(m['commit_sha'], '')[:300]}"
-                for j, m in enumerate(members)}
-        opts["none"] = "No listed shipped change implements this criterion."
-        state = {"slice": {"id": item.get("proposed_id"), "title": item.get("title")}, "criteria": criteria}
-        questions = {f"evidence_matching_{i}": jev_choice(
-            f"Which shipped change implements criterion `criteria[{i}]` of this slice? Choose `none` unless "
-            "the change clearly implements that exact criterion.", opts) for i in range(len(criteria))}
-        answers = self._cached_ask("match", state, questions, ["evidence_matching"])
-        out: dict[str, str | None] = {}
-        for i, c in enumerate(criteria):
-            pick = self._pick(answers.get(f"evidence_matching_{i}"), MATCH_MIN)
-            out[c] = members[int(pick[1:])]["id"] if pick and pick != "none" else None
-        return out
+        """Match exact typed server acceptance receipts to a delivered member.
+
+        Commit subjects are membership hints, never acceptance evidence. Missing
+        or ambiguous acceptance returns None and leaves the criterion in review.
+        """
+        result = {}
+        sid = item.get("proposed_id")
+        for criterion in criteria:
+            candidates = set()
+            for member in members:
+                if member.get("slice_id") != sid:
+                    continue
+                for receipt in member.get("acceptance_receipts",[]):
+                    if (isinstance(receipt,dict) and receipt.get("schema") == "slice-acceptance/v1"
+                            and receipt.get("slice_id") == sid and receipt.get("criterion") == criterion
+                            and receipt.get("source_sha") == member.get("commit_sha")
+                            and receipt.get("status") == "passed" and receipt.get("candidate_passes") is True
+                            and receipt.get("evidence_ref") and member.get("id")):
+                        candidates.add(member["id"])
+            result[criterion] = next(iter(candidates)) if len(candidates) == 1 else None
+        return result
 
     # -- one slice ---------------------------------------------------------
     def read(self, slice_id: str) -> dict:
@@ -330,7 +300,7 @@ class Marker:
             allowed = kinds[c].get("allowed_kinds") or []
             if "shipped_release:" in allowed:
                 if matched.get(c):
-                    self._bind(sid, c, "shipped_release", None, "Jev evidence_matching: proposed PR, "
+                    self._bind(sid, c, "shipped_release", None, "typed acceptance receipt: proposed PR, "
                                "awaiting partner confirmation", member=matched[c])
                     bound_any = True
                     would[c] = f"a shipped_release proposal on member {matched[c]}"
@@ -372,7 +342,7 @@ class Marker:
                     and k.get("binding_source") == "registration":
                 # Still waiting on a shipped change: in progress, not blocked.
                 refs[c] = None
-                missing.append(f"{c} -> no shipped change of this slice was matched to it yet")
+                missing.append(f"{c} -> typed acceptance missing or ambiguous; needs review")
             elif kind == "unbound":
                 refs[c] = None
                 unbound.append(f"{c} -> " + ("unbound by a partner" if k.get("binding_source") == "binding:authority"
@@ -442,9 +412,6 @@ class Marker:
                 outcomes.append(self.mark_slice(item))
             except MarkerError as exc:
                 outcomes.append(SliceOutcome(item["proposed_id"], "error", str(exc)[:400], "error"))
-        if self.cache_path and not self.dry_run:
-            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-            self.cache_path.write_text(json.dumps(self.cache, sort_keys=True))
         return outcomes
 
 
@@ -453,10 +420,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true", help="compute and print; write nothing")
     ap.add_argument("--slices", default="", help="comma-separated slice ids (default: every catalog slice)")
     ap.add_argument("--release-key", default="", help="the release that just shipped (logged)")
-    ap.add_argument("--no-jev", action="store_true", help="match nothing new (cached answers only)")
+
     args = ap.parse_args(argv)
-    marker = Marker(call=run_sh_call, git_run=git, ask=None if args.no_jev else jev_ask,
-                    dry_run=args.dry_run, cache_path=OUT_DIR / "jev-cache.json")
+    marker = Marker(call=run_sh_call, git_run=git, dry_run=args.dry_run)
     if args.release_key:
         print(f"slice-done-marker: after release {args.release_key}")
     try:

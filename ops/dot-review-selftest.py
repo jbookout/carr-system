@@ -110,9 +110,9 @@ class DotReview(unittest.TestCase):
         mod = load('ops/jev_done_checks.py'); judge = FakeJudge()
         paths = ['a-b.py', 'a_b.py', 'file_0_a_b.py', 'file_1_a_b.py']
         answer = mod.triage_review(diff(paths), '', judge_module=judge, client=FakeClient)
-        self.assertEqual(len(paths), len(judge.state['files']), answer)
+        self.assertEqual(set(paths), set(answer['detail']['files']), answer)
         self.assertEqual(len(paths), len(answer['detail']['files']), answer)
-        self.assertEqual(len(paths), len(set(judge.state['files'].values())), answer)
+        self.assertFalse(hasattr(judge, 'state'), answer)
 
     def test_r10_session_checkout_read_identity(self):
         gate = load('hooks/unread-artifact-gate.py')
@@ -264,8 +264,9 @@ class DotReview(unittest.TestCase):
 
     def test_control_unique_triage_key_compatibility(self):
         mod = load('ops/jev_done_checks.py'); judge = FakeJudge()
-        mod.triage_review(diff(['src/widgets.py']), '', judge_module=judge, client=FakeClient)
-        self.assertIn(mod._safe_id('src/widgets.py'), judge.state['files'])
+        answer = mod.triage_review(diff(['src/widgets.py']), '', judge_module=judge, client=FakeClient)
+        self.assertIn('src/widgets.py', answer['detail']['files'])
+        self.assertFalse(hasattr(judge, 'state'), answer)
 
     def test_b11_newest_ci_outcome(self):
         mod = load('ops/release-pipeline.py')
@@ -335,7 +336,8 @@ class DotReview(unittest.TestCase):
         # src/, not ops/: ops/ is tier 3 in ops/config/review-tiers.v1.json, so
         # it floors high without reaching the judge this test inspects.
         answer=mod.triage_review(diff(['src/a-b.py','src/a_b.py']), '',judge_module=judge,client=FakeClient)
-        self.assertEqual(2,len(judge.state['files']),answer)
+        self.assertEqual({'src/a-b.py','src/a_b.py'},set(answer['detail']['files']),answer)
+        self.assertFalse(hasattr(judge, 'state'), answer)
 
     def test_b19_triage_overflow_risky_path(self):
         mod=load('ops/jev_done_checks.py');judge=FakeJudge()

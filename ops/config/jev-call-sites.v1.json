@@ -13,7 +13,9 @@
       "daily_budget": 300,
       "owner": "orchestrator",
       "value": "judged rules reached the session beyond the compiled match on 9% of human prompts (234 of ~2,560, 2026-09-27..10-04); worker briefs are machine-written and fall back to the deterministic overlap pick",
-      "sources": ["ops/rule_trigger_delivery.py"]
+      "sources": [
+        "ops/rule_trigger_delivery.py"
+      ]
     },
     {
       "caller": "jev_rule_select",
@@ -25,55 +27,23 @@
       "daily_budget": 20,
       "owner": "orchestrator",
       "value": "15,663 calls in 7 days before retirement, 14 on 2026-10-04; kept registered at a token budget so a stray caller is bounded rather than silent",
-      "sources": ["ops/jev_rule_select.py"]
+      "sources": [
+        "ops/jev_rule_select.py"
+      ]
     },
     {
       "caller": "jev_session_watch",
-      "trigger": "PostToolUse, only when the tool result failed (non-zero exit or failure markers) or brought in outside content (WebFetch/WebSearch/external shell); the stuck/drift watch is throttled by its own state files",
+      "trigger": "Explicit uncertain bug-location diagnosis only; progress, repairs and test mapping are deterministic. Boundary annotation is separately being retired.",
       "runs_in": "interactive Claude sessions via hooks/jev-supervisor.py",
       "attribution": "session",
       "unattended": "off",
       "hourly_budget": 20,
       "daily_budget": 150,
       "owner": "orchestrator",
-      "value": "at failures it named a class (code_bug 70, environment 55, permission 27), a repaired path (40) or a culprit line (22) in 425 answered boundaries on 2026-10-03/04; on successful tool calls it only ever said unavailable/none",
-      "sources": ["ops/jev_session_watch.py"]
-    },
-    {
-      "caller": "jev_done_checks",
-      "trigger": "Stop after a human request (notification turns skipped), deduped by claim and diff hash",
-      "runs_in": "interactive Claude sessions via hooks/jev-supervisor.py",
-      "attribution": "session",
-      "unattended": "off",
-      "hourly_budget": 15,
-      "daily_budget": 100,
-      "owner": "orchestrator",
-      "value": "flagged 35 unsupported and 19 uncertain done-claims and 82 changes needing review out of 169 Stop boundaries (2026-10-03/04)",
-      "sources": ["ops/jev_done_checks.py"]
-    },
-    {
-      "caller": "jev_requirements",
-      "trigger": "Stop: is each requirement of the last human request met; an unmet one reopens the turn",
-      "runs_in": "Claude and Codex sessions via hooks/completion-evidence-gate.py",
-      "attribution": "session",
-      "unattended": "allowed",
-      "hourly_budget": 15,
-      "daily_budget": 80,
-      "owner": "orchestrator",
-      "value": "verdict is consumed by code (reopens a turn); 340 calls in 7 days, all session-attributed, no fixture traffic",
-      "sources": ["ops/jev_requirements.py"]
-    },
-    {
-      "caller": "jev_handoff",
-      "trigger": "Stop and AskUserQuestion/record-defect, only after the keyword cue regex fires",
-      "runs_in": "interactive Claude sessions via hooks/conduct-stop-gate.py and hooks/escalation-gate.py",
-      "attribution": "session",
-      "unattended": "off",
-      "hourly_budget": 15,
-      "daily_budget": 80,
-      "owner": "orchestrator",
-      "value": "acts only where Jev says the message hands work to Joe and the keyword scan missed it; 56% of its 7-day calls were selftest fixtures, now refused",
-      "sources": ["ops/jev_handoff.py"]
+      "value": "Bounded uncertain diagnosis retained; caller-level improvement remains unmeasured.",
+      "sources": [
+        "ops/jev_session_watch.py"
+      ]
     },
     {
       "caller": "stale_claim_judge",
@@ -85,7 +55,9 @@
       "daily_budget": 60,
       "owner": "orchestrator",
       "value": "sends a turn back when it claims something is stale against commits that say otherwise",
-      "sources": ["ops/stale_claim_judge.py"]
+      "sources": [
+        "ops/stale_claim_judge.py"
+      ]
     },
     {
       "caller": "jev_defect_class",
@@ -97,7 +69,9 @@
       "daily_budget": 40,
       "owner": "orchestrator",
       "value": "advisory class at a real filing boundary (rare); its selftest was the largest single fixture burner (a 'pick' prompt repeated 91 times on 2026-10-04)",
-      "sources": ["ops/jev_defect_class.py"]
+      "sources": [
+        "ops/jev_defect_class.py"
+      ]
     },
     {
       "caller": "jev_executor_tier",
@@ -109,7 +83,9 @@
       "daily_budget": 40,
       "owner": "orchestrator",
       "value": "verdict consumed by code (rewrites or denies the subagent model); ~4 calls a day",
-      "sources": ["ops/jev_executor_tier.py"]
+      "sources": [
+        "ops/jev_executor_tier.py"
+      ]
     },
     {
       "caller": "jev_code_review",
@@ -121,31 +97,9 @@
       "daily_budget": 150,
       "owner": "orchestrator",
       "value": "task-fit at >=0.85 becomes must-address; 92% of its 7-day calls were selftest fixtures, now refused",
-      "sources": ["ops/jev_code_review.py"]
-    },
-    {
-      "caller": "jev_change_tolls",
-      "trigger": "git push (ops/githooks/pre-push): which deterministic toll verifiers this diff owes; cached per diff for 24h",
-      "runs_in": "any session or worker that pushes",
-      "attribution": "session_or_job",
-      "unattended": "allowed",
-      "hourly_budget": 20,
-      "daily_budget": 150,
-      "owner": "orchestrator",
-      "value": "verdict consumed by code (selects the verifiers that hold a push); the same diff was re-asked on every push and from every fixture run",
-      "sources": ["ops/jev_change_tolls.py"]
-    },
-    {
-      "caller": "headless_tasks",
-      "trigger": "room-bridge headless task completion check",
-      "runs_in": "launchd com.carr.room-bridge",
-      "attribution": "session_or_job",
-      "unattended": "allowed",
-      "hourly_budget": 10,
-      "daily_budget": 40,
-      "owner": "orchestrator",
-      "value": "verdict consumed by code (accepts or fails a headless run); ~1 call a day",
-      "sources": ["lib/headless_tasks.py"]
+      "sources": [
+        "ops/jev_code_review.py"
+      ]
     },
     {
       "caller": "jev_model_route",
@@ -157,7 +111,9 @@
       "daily_budget": 40,
       "owner": "orchestrator",
       "value": "verdict consumed by code (chooses the desk)",
-      "sources": ["ops/jev_model_route.py"]
+      "sources": [
+        "ops/jev_model_route.py"
+      ]
     },
     {
       "caller": "jev_deal_read",
@@ -169,7 +125,9 @@
       "daily_budget": 60,
       "owner": "orchestrator",
       "value": "rendered on the partner-facing deal cards; ~6 calls a day",
-      "sources": ["ops/jev_deal_read.py"]
+      "sources": [
+        "ops/jev_deal_read.py"
+      ]
     },
     {
       "caller": "post_call_jev",
@@ -181,19 +139,9 @@
       "daily_budget": 60,
       "owner": "orchestrator",
       "value": "annotates the post-call review pack Joe reads",
-      "sources": ["tools/dictation-rig/bin/post_call_jev.py"]
-    },
-    {
-      "caller": "slice-done-marker",
-      "trigger": "after a release ships: does the evidence match each slice criterion",
-      "runs_in": "ops/release-pipeline.py detached child (CARR_JEV_JOB=release-pipeline.slice-marker)",
-      "attribution": "session_or_job",
-      "unattended": "allowed",
-      "hourly_budget": 20,
-      "daily_budget": 40,
-      "owner": "orchestrator",
-      "value": "writes slice completion marks",
-      "sources": ["ops/slice-done-marker.py"]
+      "sources": [
+        "tools/dictation-rig/bin/post_call_jev.py"
+      ]
     },
     {
       "caller": "jev_fact_boundary",
@@ -205,7 +153,9 @@
       "daily_budget": 20,
       "owner": "orchestrator",
       "value": "off by default; budget bounds an opt-in",
-      "sources": ["ops/jev_fact_boundary.py"]
+      "sources": [
+        "ops/jev_fact_boundary.py"
+      ]
     },
     {
       "caller": "jev_intake",
@@ -217,19 +167,9 @@
       "daily_budget": 20,
       "owner": "orchestrator",
       "value": "flash desk only; no hook wires it",
-      "sources": ["ops/jev_intake.py"]
-    },
-    {
-      "caller": "jev_notebook",
-      "trigger": "flash desk mistake notebook lookup",
-      "runs_in": "interactive flash runs",
-      "attribution": "session",
-      "unattended": "off",
-      "hourly_budget": 5,
-      "daily_budget": 20,
-      "owner": "orchestrator",
-      "value": "flash desk only; no hook wires it",
-      "sources": ["ops/jev_notebook.py"]
+      "sources": [
+        "ops/jev_intake.py"
+      ]
     },
     {
       "caller": "jev_scorecard",
@@ -241,7 +181,9 @@
       "daily_budget": 20,
       "owner": "orchestrator",
       "value": "flash desk only; no hook wires it",
-      "sources": ["ops/jev_scorecard.py"]
+      "sources": [
+        "ops/jev_scorecard.py"
+      ]
     },
     {
       "caller": "jev_best_of",
@@ -253,7 +195,9 @@
       "daily_budget": 20,
       "owner": "orchestrator",
       "value": "flash desk only; no hook wires it",
-      "sources": ["ops/jev_best_of.py"]
+      "sources": [
+        "ops/jev_best_of.py"
+      ]
     },
     {
       "caller": "flash-script",
@@ -265,7 +209,9 @@
       "daily_budget": 20,
       "owner": "orchestrator",
       "value": "flash desk only",
-      "sources": ["tools/flash-script.py"]
+      "sources": [
+        "tools/flash-script.py"
+      ]
     },
     {
       "caller": "jev_build_advisory",
@@ -277,7 +223,9 @@
       "daily_budget": 0,
       "owner": "orchestrator",
       "value": "1,740 calls in 7 days, none since 2026-10-03; registered at zero so a revived caller is refused until someone budgets it on evidence",
-      "sources": ["ops/jev_build_advisory.py"]
+      "sources": [
+        "ops/jev_build_advisory.py"
+      ]
     },
     {
       "caller": "rule_gold_label",
@@ -289,7 +237,9 @@
       "daily_budget": 60,
       "owner": "orchestrator",
       "value": "eval labels; on demand only",
-      "sources": ["ops/rule_gold_label.py"]
+      "sources": [
+        "ops/rule_gold_label.py"
+      ]
     },
     {
       "caller": "rule_delivery_eval",
@@ -301,7 +251,9 @@
       "daily_budget": 60,
       "owner": "orchestrator",
       "value": "eval measurement; on demand only",
-      "sources": ["ops/rule_delivery_eval.py"]
+      "sources": [
+        "ops/rule_delivery_eval.py"
+      ]
     },
     {
       "caller": "judge_paired_eval",
@@ -313,7 +265,9 @@
       "daily_budget": 60,
       "owner": "orchestrator",
       "value": "eval measurement; on demand only",
-      "sources": ["tools/judge/paired_eval.py"]
+      "sources": [
+        "tools/judge/paired_eval.py"
+      ]
     },
     {
       "caller": "adhoc:*",
@@ -325,7 +279,9 @@
       "daily_budget": 40,
       "owner": "orchestrator",
       "value": "64 explicit review/diagnosis judgments in 7 days under ad-hoc caller names; they now share one prefix and one budget",
-      "sources": ["ops/typesafe_client.py"]
+      "sources": [
+        "ops/typesafe_client.py"
+      ]
     }
   ]
 }
