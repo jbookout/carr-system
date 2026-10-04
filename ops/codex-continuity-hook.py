@@ -222,6 +222,20 @@ def record_event(event_type, payload, meta, highwater, checkpoint_marker=None,
     args = {**_base_identity(meta), "event_type": event_type, "cursor": cursor,
             "transcript_ref": meta["transcript_path"],
             "idempotency_key": _event_key(event_type, meta, occurrence)}
+    result = call_verb("codex-record-event", args, deadline=deadline)
+    if (event_type != "post_compact" or result["status"] != "rejected"
+            or result.get("error") != "codex_event_binding_conflict"):
+        return result
+    # The canonical receipt needs only one chain scan and one store call.
+    # Recover a legacy binding only after the store proves a conflict, and
+    # reuse this validated occurrence so recovery cannot duplicate scan cost.
+    recovery = read_recovery(meta, deadline=deadline, remaining_calls=2)
+    if recovery["status"] != "ok":
+        return recovery
+    if recovery["response"].get("found") is not True:
+        return result
+    args.update(_base_identity(meta))
+    args["idempotency_key"] = _event_key(event_type, meta, occurrence)
     return call_verb("codex-record-event", args, deadline=deadline)
 
 
@@ -587,6 +601,8 @@ def read_recovery(meta, deadline=None, remaining_calls=1):
             and recovered["response"].get("found") is True):
         meta["project_id"] = legacy_project
         return recovered
+    if recovered["status"] != "ok":
+        return {**recovered, "binding_conflict": result}
     return result
 
 
@@ -605,10 +621,14 @@ def _legacy_desktop_project(meta):
         project = state["local-projects"][project_id]
         if project.get("id") != project_id:
             return None
+        roots = project.get("rootPaths")
+        if (not isinstance(roots, list) or not roots
+                or not all(isinstance(root, str) and pathlib.Path(root).is_absolute()
+                           for root in roots)):
+            return None
         cwd = pathlib.Path(meta["cwd"]).resolve()
         if not any(cwd.is_relative_to(pathlib.Path(root).resolve())
-                   for root in project.get("rootPaths", [])
-                   if isinstance(root, str) and pathlib.Path(root).is_absolute()):
+                   for root in roots):
             return None
         return project_id
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
@@ -1059,15 +1079,6 @@ def main():
         record_event("pre_compact", payload, meta, highwater,
                      checkpoint_marker(recovery), deadline=deadline)
     elif event == "PostCompact":
-        # Validate the native chain before any record-store call. A malformed
-        # compaction must not produce even a recovery read or event receipt.
-        try:
-            HISTORY.compaction_occurrence(meta, "post", deadline=deadline)
-        except HISTORY.HistoryFailure as exc:
-            code = exc.args[0] if exc.args else exc.__class__.__name__
-            _warning(f"unverified native hook ignored ({code})")
-            return 0
-        read_recovery(meta, deadline=deadline, remaining_calls=2)
         record_event("post_compact", payload, meta, highwater,
                      deadline=deadline)
     return 0
