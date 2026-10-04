@@ -165,6 +165,7 @@ WRITE_ACTION_PREFIXES = {
     "update", "write",
 }
 WRITE_ACTION_EXACT = {
+    "advance-leads",  # evidence-driven stages and approval-only drafts
     "whats-new",  # explicit mark_seen persists the authenticated partner's watermark
     "acknowledge-board-answer",  # durable Received receipt for a board answer
     "answer-board-question",      # human partner records a durable answer
@@ -346,6 +347,7 @@ WRITE_ACTION_EXACT = {
     "run-migration-shadow",
 }
 HUMAN_ONLY_WRITE_ACTION_EXACT = {
+    "advance-leads",  # evidence-driven stages and approval-only drafts
     "acknowledge-ready-plan-amendment",  # WR-000126 authenticated human-only notice write.
 }
 # The three reason classes that carry a latch identity. Named constants rather

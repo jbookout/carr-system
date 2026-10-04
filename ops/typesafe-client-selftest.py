@@ -40,8 +40,33 @@ SPEC = importlib.util.spec_from_file_location("typesafe_client", MODULE_PATH)
 assert SPEC and SPEC.loader
 client = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(client)
+# The call-site registry, attribution and fixture refusal are exercised by
+# ops/jev-call-sites-selftest.py. This suite tests the transport beneath them,
+# so every fixture caller is admitted as a budget-free scheduled job. Bound on
+# this suite's private module copy, not as module patches: a nested TestSuite
+# run (OfflineBudgetIsolationTests) runs module cleanups and would stop them.
+_PERMISSIVE_SITE = {"caller": "*", "trigger": "selftest", "runs_in": "selftest",
+                    "attribution": "session_or_job", "unattended": "allowed",
+                    "hourly_budget": 10**9, "daily_budget": 10**9, "owner": "selftest",
+                    "value": "selftest", "sources": ["ops/typesafe_client.py"]}
+setattr(client, "load_call_sites", lambda path=None: {"hourly_paid_call_cap": 10**9,
+                                                     "sites": {"*": _PERMISSIVE_SITE}})
+setattr(client, "call_site", lambda caller, registry: _PERMISSIVE_SITE)
+for _name in ("CARR_JEV_OFFLINE", "CARR_HOOK_FIXTURE", "CARR_JEV_WORKER"):
+    os.environ.pop(_name, None)
+os.environ["CARR_JEV_JOB"] = "typesafe-client-selftest"
 REAL_ALERT_SINK = client._emit_spend_alert
 REAL_MAIL_SINK = getattr(client, "_email_spend_alert", None)
+_CAP_ROOT = tempfile.TemporaryDirectory()
+
+
+def setUpModule():
+    # The production cap counter is canonical and shared by every session, so
+    # a test that reached it would spend the real daily Jev budget.
+    unittest.addModuleCleanup(_CAP_ROOT.cleanup)
+    patcher = patch.object(client, "JEV_DAILY_CAP_LOG", os.path.join(_CAP_ROOT.name, "calls.jsonl"))
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
 
 
 class FakeResponse(io.BytesIO):
@@ -483,11 +508,15 @@ class DailyCapMailTests(unittest.TestCase):
             self.assertEqual(command[2:4], ["--to", "joe"])
             self.assertEqual(kwargs["timeout"], 35)
             self.assertTrue(kwargs["check"])
-            self.assertEqual(kwargs["stderr"], subprocess.DEVNULL)
+            # stderr is read for a fixed failure category, never logged raw.
+            self.assertEqual(kwargs["stderr"], subprocess.PIPE)
             with patch.object(os.sys, "argv", command[1:]), patch.object(handover, "creds", return_value=("fixture@example.invalid", "fixture")), patch.object(handover.smtplib, "SMTP", FakeSMTP), patch("sys.stdout", io.StringIO()):
                 handover.main()
         alert = {"message": "Jev daily cap 50% · 5/10 paid calls", "threshold": 50}
-        with patch.dict(handover.ALLOWED, joe="self-config@carr.us"), patch.object(client.subprocess, "run", run):
+        with tempfile.NamedTemporaryFile() as configured, \
+                patch.object(client, "GMAIL_ENV_PATH", configured.name), \
+                patch.dict(os.environ, {client.ALERT_SINK_ENV: ""}), \
+                patch.dict(handover.ALLOWED, joe="self-config@carr.us"), patch.object(client.subprocess, "run", run):
             REAL_MAIL_SINK(alert)
         self.assertEqual(len(messages), 1)
         self.assertEqual(messages[0]["To"], "self-config@carr.us")
@@ -796,17 +825,18 @@ class SpendHealthTests(unittest.TestCase):
         self.assertIn('if CANONICAL_SECTION == "jev-spend":', health)
         self.assertIn('sys.exit(_spend_module.nightly_exit_status(_spend_line))', health)
 
-    def test_nightly_alarm_fails_closed_when_usage_or_loop_action_is_unknown(self):
+    def test_nightly_alarm_fails_only_when_reader_or_loop_action_fails(self):
         spend = importlib.util.module_from_spec(SPEND_SPEC)
         SPEND_SPEC.loader.exec_module(spend)
         self.assertEqual(spend.nightly_exit_status("OK jev spend — $0.000"), 0)
         self.assertEqual(spend.nightly_exit_status("WARN jev spend — $0.600"), 0)
-        for line in ("UNKNOWN jev spend — missing usage",
+        self.assertEqual(spend.nightly_exit_status("UNKNOWN jev spend — missing usage"), 0)
+        for line in ("UNKNOWN jev spend — Worker usage unavailable",
                      "UNAVAILABLE jev spend — Worker unreachable",
                      "WARN jev spend — $0.600 · loop action FAILED (RuntimeError)"):
             self.assertEqual(spend.nightly_exit_status(line), 1)
 
-    def test_unsettled_worker_attempt_keeps_nightly_alarm_unknown(self):
+    def test_unsettled_worker_attempt_is_informational_for_nightly(self):
         spend = importlib.util.module_from_spec(SPEND_SPEC)
         SPEND_SPEC.loader.exec_module(spend)
         with tempfile.TemporaryDirectory() as d:
@@ -819,6 +849,30 @@ class SpendHealthTests(unittest.TestCase):
                 worker_usage=lambda _day: {"calls": 0, "input_tokens": 0,
                                             "unknown": 1, "pending_attempts": 1})
             self.assertIn("1 call or attempt missing usage", line)
+            self.assertEqual(spend.nightly_exit_status(line), 0)
+
+    def test_abandoned_attempts_are_reported_separately(self):
+        spend = importlib.util.module_from_spec(SPEND_SPEC)
+        SPEND_SPEC.loader.exec_module(spend)
+        with tempfile.TemporaryDirectory() as d:
+            line = spend.check_spend(Path(d) / "absent", MODULE_PATH.parent / "config" / "jev-cost-guard.v1.json",
+                Path(d) / "loop", lambda *_: None,
+                worker_usage=lambda _day: {"calls": 0, "input_tokens": 0, "unknown": 0,
+                    "pending_attempts": 1, "abandoned_attempts": 2, "abandon_after_seconds": 3600})
+            self.assertIn("2 abandoned attempts", line)
+            self.assertIn("older than 3600s", line)
+            self.assertIn("owner orchestrator", line)
+            self.assertEqual(spend.nightly_exit_status(line), 0)
+
+    def test_unreadable_local_log_fails_with_named_response(self):
+        spend = importlib.util.module_from_spec(SPEND_SPEC)
+        SPEND_SPEC.loader.exec_module(spend)
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "calls.jsonl"
+            log.write_bytes(b"\xff")
+            line = spend.check_spend(log, MODULE_PATH.parent / "config" / "jev-cost-guard.v1.json", Path(d) / "loop")
+            self.assertIn("UNAVAILABLE", line)
+            self.assertIn("owner orchestrator", line)
             self.assertEqual(spend.nightly_exit_status(line), 1)
 
     def test_narrow_health_cli_exits_before_unrelated_checks(self):
@@ -1016,6 +1070,11 @@ class LibraryShapeTests(unittest.TestCase):
 
 
 class DispatchOwnershipTests(unittest.TestCase):
+    def test_tests_never_reserve_against_the_canonical_daily_cap(self):
+        canonical = os.path.join(client.CANONICAL_REPO, "out")
+        self.assertNotEqual(os.path.commonpath([os.path.abspath(client.JEV_DAILY_CAP_LOG), canonical]),
+                            canonical, "a selftest ask would spend the real daily Jev cap")
+
     def test_runtime_router_preserves_explicit_transcript_owner(self):
         session = 'dispatch-runtime'
         with tempfile.TemporaryDirectory() as directory:
@@ -1048,6 +1107,7 @@ import importlib.util, io, json, sys
 from unittest.mock import patch
 spec = importlib.util.spec_from_file_location('standalone_client', sys.argv[1])
 client = importlib.util.module_from_spec(spec); spec.loader.exec_module(client)
+client.JEV_DAILY_CAP_LOG = sys.argv[2]
 class Response(io.StringIO):
     status = 200
     def __init__(self):
@@ -1056,7 +1116,8 @@ class Response(io.StringIO):
             'usage':{'input_tokens':20,'output_tokens':6}}))
 with patch.object(client.urllib.request, 'urlopen', lambda *a, **k: Response()):
     client.ask('state', {'architecture_or_design':client.noul('judge design')},
-               api_key='offline', cache_ttl_seconds=0, calls_log=sys.argv[2])
+               api_key='offline', cache_ttl_seconds=0, calls_log=sys.argv[2],
+               caller='adhoc:standalone-owner-fixture')
 """
             result = subprocess.run([__import__('sys').executable, '-c', code,
                                      str(MODULE_PATH.resolve()), str(log)],
@@ -1107,6 +1168,28 @@ with patch.object(client.urllib.request, 'urlopen', lambda *a, **k: Response()):
                 self.assertIsInstance(rows[0]['human_turn_id'], str)
                 self.assertIsNone(rows[1]['human_turn_id'])
                 self.assertTrue(all(row['ok'] for row in rows))
+
+
+class OfflineBudgetIsolationTests(unittest.TestCase):
+    def test_ownership_fixtures_never_reserve_the_workstation_budget(self):
+        canonical_budget = os.path.join(client.CANONICAL_REPO, "out", "jev-calls.jsonl")
+        reserve = client._reserve_paid_call
+        destinations = []
+
+        def isolated_reservation(*args, **kwargs):
+            destinations.append(client.JEV_DAILY_CAP_LOG)
+            self.assertNotEqual(client.JEV_DAILY_CAP_LOG, canonical_budget,
+                                "fake transport must use a disposable quota")
+            return reserve(*args, **kwargs)
+
+        suite = unittest.TestSuite(DispatchOwnershipTests(name) for name in (
+            "test_runtime_router_preserves_explicit_transcript_owner",
+            "test_ask_discovers_exact_native_session_and_keeps_unknown_owner_unbound"))
+        result = unittest.TestResult()
+        with patch.object(client, "_reserve_paid_call", isolated_reservation):
+            suite.run(result)
+        self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+        self.assertEqual(len(destinations), 5)
 
 
 class CredentialTests(unittest.TestCase):
