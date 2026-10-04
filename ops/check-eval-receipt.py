@@ -23,6 +23,18 @@ headline can hide. A receipt is a small projection of that shape, and this file
 reuses the kernel's own vocabulary and its critical_dimension_blockers() rather
 than carrying a second copy. Offline suites bind through ops/ai_eval.py.
 
+A RECEIPT IS RECOMPUTED, NEVER TRUSTED. Its `evidence` block binds, by
+sha256, the harness and scorer code (`source`), every file the measured run
+read (`dependencies`), the raw per-case observations of both arms
+(`cohorts`), and the labels they are graded against (`expectations`, a
+versioned file: the same version must keep the same bytes as at the merge
+base, so relabelling is an explicit new version). The check requires the
+two cohorts to be the same cases with the same splits and inputs as the
+expectations, re-runs the bound scorer, and refuses any dimension, interval,
+case count or oracle/null control that differs from what the receipt says.
+So deleting a failing row, shrinking the owed denominator, editing result
+bytes and carrying over a stale summary all fail.
+
 WHAT A RECEIPT MAY NOT SAY. "ship" when the primary dimension's paired delta
 interval contains zero, when a critical dimension failed or regressed, when the
 grader failed its validation, or when the eval's noise floor is not smaller
@@ -48,6 +60,8 @@ in a pull-request run).
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -69,9 +83,15 @@ REAL_SOURCES = {"production_trace", "human_judged_hard_case"}
 GRADER_KINDS = {"programmatic", "pairwise", "pointwise_rubric", "human"}
 DECISIONS = {"ship", "ship_cost_at_parity", "do_not_merge", "inconclusive"}
 IN_NOISE_PHRASE = "do not merge on quality grounds"
+SCHEMA_VERSION = 2
 REQUIRED = {"schema_version", "surface", "change", "measured_on", "rung", "adapter", "cases", "split",
             "repeats", "grader", "noise_floor", "min_useful_gain", "primary_dimension", "dimensions",
-            "stage_results", "cost", "verdict"}
+            "stage_results", "cost", "verdict", "evidence"}
+EVIDENCE_FIELDS = {"scorer", "source", "dependencies", "expectations", "cohorts"}
+ARMS = ("baseline", "candidate")
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
+RECOMPUTE_TOLERANCE = 1e-9
+CONTROLS = ("oracle_pass_rate", "null_pass_rate")
 OPTIONAL = {"overall", "offline_suite", "rounds", "notes"}
 MEASURE_FIELDS = {"baseline", "candidate", "delta"}
 PLACEHOLDER_REASONS = re.compile(r"^(n/?a|none|tbd|trivial|minor|docs?( only)?|not needed.*|no change.*|skip.*|-+)$", re.I)
@@ -207,7 +227,8 @@ def _direction(delta: dict) -> str:
     return "equivalent"
 
 
-def validate_receipt(r: Any, surface: str, root: Path = ROOT) -> list[str]:
+def claim_errors(r: Any, surface: str, root: Path = ROOT) -> list[str]:
+    """Does the receipt's claim hold together: shape, kernel vocabulary, and a verdict its numbers allow."""
     errs: list[str] = []
     if not isinstance(r, dict):
         return ["receipt must be a JSON object"]
@@ -218,8 +239,9 @@ def validate_receipt(r: Any, surface: str, root: Path = ROOT) -> list[str]:
         errs.append(f"unknown fields: {', '.join(sorted(unknown))}")
     if missing:
         return errs
-    if r["schema_version"] != 1:
-        errs.append("schema_version must be 1")
+    if r["schema_version"] != SCHEMA_VERSION:
+        errs.append(f"schema_version must be {SCHEMA_VERSION}: a version 1 receipt carried hand-copied numbers "
+                    f"with no evidence chain; regenerate it with its producer")
     if r["surface"] != surface:
         errs.append(f"surface is {r['surface']!r} but the receipt lives under evals/{surface}/")
     for key in ("change", "measured_on"):
@@ -406,6 +428,243 @@ def _offline_suite_errors(block: Any, root: Path) -> list[str]:
     return []
 
 
+# ------------------------------------------------------------------ evidence
+def validate_receipt(r: Any, surface: str, root: Path = ROOT, base: str | None = None) -> list[str]:
+    """Every refusal for one receipt: its claim, then the evidence that has to reproduce it."""
+    errs = claim_errors(r, surface, root)
+    if isinstance(r, dict) and "evidence" in r:
+        errs += evidence_errors(r, surface, root, base)
+    return errs
+
+
+def _repo_file(root: Path, rel: Any, label: str, errs: list[str], under: str | None = None) -> Path | None:
+    if (not isinstance(rel, str) or not rel or rel.startswith("/") or "\\" in rel
+            or any(part in ("", ".", "..") for part in rel.split("/"))):
+        errs.append(f"{label}: {rel!r} must be a repository-relative path")
+        return None
+    if under and not rel.startswith(under):
+        errs.append(f"{label}: {rel} must live under {under}")
+        return None
+    path = root / rel
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError:
+        errs.append(f"{label}: {rel} does not exist")
+        return None
+    if not resolved.is_relative_to(root.resolve()) or not resolved.is_file():
+        errs.append(f"{label}: {rel} must be a file inside the repository")
+        return None
+    return path
+
+
+def _bound_bytes(root: Path, rel: Any, digest: Any, label: str, errs: list[str],
+                 under: str | None = None) -> bytes | None:
+    """The file's bytes, only when they hash to the digest the receipt binds."""
+    path = _repo_file(root, rel, label, errs, under)
+    if path is None:
+        return None
+    if not isinstance(digest, str) or not HEX64.match(digest):
+        errs.append(f"{label}: {rel} needs a 64-hex sha256")
+        return None
+    data = path.read_bytes()
+    actual = hashlib.sha256(data).hexdigest()
+    if actual != digest:
+        errs.append(f"{label}: {rel} sha256 is {actual}, but the receipt binds {digest}")
+        return None
+    return data
+
+
+def _manifest(root: Path, block: Any, label: str, errs: list[str]) -> dict[str, str]:
+    if not isinstance(block, dict) or not block:
+        errs.append(f"evidence.{label} must bind at least one file by sha256")
+        return {}
+    for rel, digest in sorted(block.items()):
+        _bound_bytes(root, rel, digest, f"evidence.{label}", errs)
+    return block
+
+
+def _expectations_version_errors(root: Path, rel: str, version: str, data: bytes, base: str | None) -> list[str]:
+    """Labels are versioned: the same version at the merge base must be the same bytes."""
+    if base is None:
+        return []
+    rc, _ = git(root, "cat-file", "-e", f"{base}:{rel}")
+    if rc != 0:
+        return []
+    proc = subprocess.run(["git", "-C", str(root), "show", f"{base}:{rel}"], capture_output=True)
+    if proc.returncode != 0:
+        return [f"evidence.expectations: cannot read {rel} at the merge base {base}"]
+    try:
+        base_version = json.loads(proc.stdout).get("version")
+    except (json.JSONDecodeError, AttributeError):
+        return []
+    if base_version == version and proc.stdout != data:
+        return [f"evidence.expectations: {rel} changed its labels without a new version (still {version!r}); "
+                f"relabelling is a new expectations version, never an edit in place"]
+    return []
+
+
+def _cohort(rows_bytes: bytes, arm: str, cases: dict[str, Any], errs: list[str]) -> list[dict] | None:
+    """Parse one arm and require it to be exactly the expectation set: no gaps, no repeats, same inputs."""
+    rows, seen, before = [], set(), len(errs)
+    for n, line in enumerate(rows_bytes.decode("utf-8", "replace").splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as exc:
+            errs.append(f"evidence.cohorts.{arm}: line {n} is not JSON: {exc}")
+            continue
+        cid = row.get("case_id") if isinstance(row, dict) else None
+        if not isinstance(cid, str):
+            errs.append(f"evidence.cohorts.{arm}: line {n} has no case_id")
+            continue
+        if cid in seen:
+            errs.append(f"evidence.cohorts.{arm} repeats case {cid}")
+            continue
+        seen.add(cid)
+        exp = cases.get(cid)
+        if exp is None:
+            errs.append(f"evidence.cohorts.{arm} carries case {cid}, which the expectations do not label")
+            continue
+        if row.get("split") != exp["split"]:
+            errs.append(f"evidence.cohorts.{arm}: case {cid} is in split {row.get('split')!r}, "
+                        f"the expectations say {exp['split']!r}")
+        if row.get("input_sha256") != exp["input_sha256"]:
+            errs.append(f"evidence.cohorts.{arm}: case {cid} was run on a different input than the expectations label")
+        rows.append(row)
+    missing = sorted(set(cases) - seen)
+    if missing:
+        errs.append(f"evidence.cohorts.{arm} is missing {len(missing)} labelled case(s): {', '.join(missing[:5])}"
+                    + (" ..." if len(missing) > 5 else ""))
+    return rows if len(errs) == before else None
+
+
+def _same(a: Any, b: Any) -> bool:
+    return _num(a) and _num(b) and abs(a - b) <= RECOMPUTE_TOLERANCE
+
+
+def _recompute_errors(r: dict, measured: Any) -> list[str]:
+    if not isinstance(measured, dict) or not isinstance(measured.get("dimensions"), dict):
+        return ["evidence.scorer must return {dimensions, controls}"]
+    errs: list[str] = []
+    dims = {d.get("dimension_id"): d for d in r["dimensions"] if isinstance(d, dict)}
+    for did in sorted(set(measured["dimensions"]) - set(dims)):
+        errs.append(f"dimension {did} is measured by the scorer but missing from the receipt")
+    for did, d in sorted(dims.items(), key=lambda kv: str(kv[0])):
+        m = measured["dimensions"].get(did)
+        if not isinstance(m, dict):
+            errs.append(f"dimension {did} is not produced by the evidence scorer")
+            continue
+        for part, keys in (("baseline", ("score", "ci_low", "ci_high")),
+                           ("candidate", ("score", "ci_low", "ci_high")),
+                           ("delta", ("value", "ci_low", "ci_high"))):
+            for key in keys:
+                said = (d.get(part) or {}).get(key) if isinstance(d.get(part), dict) else None
+                got = (m.get(part) or {}).get(key) if isinstance(m.get(part), dict) else None
+                if not _same(said, got):
+                    errs.append(f"dimension {did} {part}.{key}: receipt says {said!r}, recomputed from the "
+                                f"cohorts it is {got!r}")
+    controls = measured.get("controls")
+    validation = r["grader"].get("validation", {}) if isinstance(r.get("grader"), dict) else {}
+    for key in CONTROLS:
+        got = controls.get(key) if isinstance(controls, dict) else None
+        if not _same(validation.get(key), got):
+            errs.append(f"grader.validation.{key}: receipt says {validation.get(key)!r}, recomputed it is {got!r}")
+    return errs
+
+
+def evidence_errors(r: dict, surface: str, root: Path = ROOT, base: str | None = None) -> list[str]:
+    """Re-derive the receipt from the files it binds; any disagreement is a refusal."""
+    ev = r["evidence"]
+    if not isinstance(ev, dict) or set(ev) != EVIDENCE_FIELDS:
+        return [f"evidence must carry exactly {sorted(EVIDENCE_FIELDS)}"]
+    errs: list[str] = []
+    home = f"evals/{surface}/"
+    source = _manifest(root, ev["source"], "source", errs)
+    _manifest(root, ev["dependencies"], "dependencies", errs)
+
+    scorer = ev["scorer"]
+    if not isinstance(scorer, dict) or set(scorer) != {"path", "function"} or not isinstance(scorer.get("function"), str):
+        errs.append("evidence.scorer must be exactly {path, function}")
+        scorer = None
+    elif scorer["path"] not in source:
+        errs.append(f"evidence.scorer {scorer['path']} must be bound in evidence.source, or nothing pins what scored")
+        scorer = None
+
+    cases: dict[str, Any] | None = None
+    expectations = None
+    x = ev["expectations"]
+    if not isinstance(x, dict) or set(x) != {"path", "version", "sha256"} or not isinstance(x.get("version"), str):
+        errs.append("evidence.expectations must be exactly {path, version, sha256}")
+    else:
+        data = _bound_bytes(root, x["path"], x["sha256"], "evidence.expectations", errs, under=home)
+        if data is not None:
+            errs += _expectations_version_errors(root, x["path"], x["version"], data, base)
+            try:
+                expectations = json.loads(data)
+            except json.JSONDecodeError as exc:
+                errs.append(f"evidence.expectations: {x['path']} is not JSON: {exc}")
+            if expectations is not None:
+                cases = _expectation_cases(expectations, x["version"], errs)
+
+    cohorts: dict[str, list[dict]] = {}
+    c = ev["cohorts"]
+    if not isinstance(c, dict) or set(c) != set(ARMS):
+        errs.append(f"evidence.cohorts must be exactly {list(ARMS)}: the two arms of one paired comparison")
+    else:
+        for arm in ARMS:
+            block = c[arm]
+            if not isinstance(block, dict) or set(block) != {"path", "sha256"}:
+                errs.append(f"evidence.cohorts.{arm} must be exactly {{path, sha256}}")
+                continue
+            data = _bound_bytes(root, block["path"], block["sha256"], f"evidence.cohorts.{arm}", errs, under=home)
+            if data is not None and cases is not None:
+                rows = _cohort(data, arm, cases, errs)
+                if rows is not None:
+                    cohorts[arm] = rows
+
+    if cases is not None and isinstance(r.get("cases"), dict):
+        counts = {"total": len(cases),
+                  "train": sum(1 for v in cases.values() if v["split"] == "train"),
+                  "test": sum(1 for v in cases.values() if v["split"] == "test"),
+                  "should_not_fire": sum(1 for v in cases.values() if v["should_not_fire"])}
+        for key, n in counts.items():
+            if r["cases"].get(key) != n:
+                errs.append(f"cases.{key} says {r['cases'].get(key)!r}; the bound expectations hold {n}")
+
+    if errs or scorer is None or len(cohorts) != len(ARMS):
+        return errs
+    try:
+        spec = importlib.util.spec_from_file_location(
+            f"eval_scorer_{source[scorer['path']][:16]}", root / scorer["path"])
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        measured = getattr(module, scorer["function"])(expectations, cohorts["baseline"], cohorts["candidate"])
+    except Exception as exc:  # the scorer refusing its own evidence is a finding, not a crash
+        return [f"evidence.scorer {scorer['path']}:{scorer['function']} refused the evidence: "
+                f"{type(exc).__name__}: {exc}"]
+    return _recompute_errors(r, measured)
+
+
+def _expectation_cases(doc: Any, version: str, errs: list[str]) -> dict[str, Any] | None:
+    if not isinstance(doc, dict) or doc.get("version") != version:
+        errs.append(f"evidence.expectations: the file's version is "
+                    f"{doc.get('version') if isinstance(doc, dict) else None!r}, the receipt binds {version!r}")
+        return None
+    cases = doc.get("cases")
+    if not isinstance(cases, dict) or not cases:
+        errs.append("evidence.expectations must label at least one case under cases")
+        return None
+    for cid, case in cases.items():
+        if (not isinstance(case, dict) or case.get("split") not in ("train", "test")
+                or not isinstance(case.get("should_not_fire"), bool)
+                or not isinstance(case.get("input_sha256"), str) or not HEX64.match(case["input_sha256"])):
+            errs.append(f"evidence.expectations: case {cid} needs split (train|test), should_not_fire (bool) "
+                        f"and input_sha256")
+            return None
+    return cases
+
+
 # ------------------------------------------------------------------ PR body
 def parse_no_eval(body: str | None, known: set[str]) -> tuple[dict[str, str], list[str]]:
     found: dict[str, str] = {}
@@ -553,7 +812,7 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, json.JSONDecodeError) as exc:
             failures.append(f"{rel}: unreadable: {exc}")
             continue
-        failures += [f"{rel}: {e}" for e in validate_receipt(receipt, sid, root)]
+        failures += [f"{rel}: {e}" for e in validate_receipt(receipt, sid, root, mb)]
         verdict = receipt.get("verdict") if isinstance(receipt, dict) else None
         decision = verdict.get("decision") if isinstance(verdict, dict) else None
         if sid in touched and decision in ("do_not_merge", "inconclusive"):

@@ -6,13 +6,19 @@ sits inside the noise and still says "ship", a critical dimension that regressed
 while the headline rose, a grader nobody graded twice, a test split that was
 not sealed, a no-eval line that gives no reason. A gate that only ever passes
 its fixtures proves nothing about what it refuses.
+
+The evidence chain has its own refusals, run against the real rule-delivery
+receipt: deleting a failing candidate row, shrinking the owed-rule denominator,
+changing result bytes and reusing a stale summary each fail the check.
 """
 
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -50,9 +56,12 @@ def dimension(dim_id, *, critical, base, cand, delta, direction, status="passed"
 
 
 def good_receipt():
-    """A clear, attributable win on the primary dimension, nothing critical lost."""
+    """A clear, attributable win on the primary dimension, nothing critical lost.
+
+    Its numbers are hand-written, so only claim_errors() may judge it; a receipt
+    that has to pass the whole gate comes from evidenced_receipt()."""
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "surface": "jev-judgments",
         "change": "State the refusal condition once, before the examples, in the done-claim question family.",
         "measured_on": "2026-09-29",
@@ -92,7 +101,144 @@ def good_receipt():
         ],
         "cost": {"baseline_usd_per_case": 0.0041, "candidate_usd_per_case": 0.0043},
         "verdict": {"decision": "ship", "statement": "Test-split judgment accuracy rose 0.62 to 0.81, outside noise."},
+        "evidence": {},
     }
+
+
+# ------------------------------------------------------------------ evidence
+def sha_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def sha_file(path: Path) -> str:
+    return sha_bytes(path.read_bytes())
+
+
+SYNTH_SCORER = '''\
+import random
+
+
+def _interval(draws):
+    draws = sorted(draws)
+    return draws[int(0.025 * len(draws))], draws[int(0.975 * len(draws)) - 1]
+
+
+def score(expectations, baseline, candidate):
+    ids = sorted(cid for cid, case in expectations["cases"].items() if case["split"] == "test")
+    b = {r["case_id"]: r for r in baseline}
+    n = {r["case_id"]: r for r in candidate}
+    out = {}
+    for dim in expectations["dimensions"]:
+        rng = random.Random(7)
+        picks = [[rng.choice(ids) for _ in ids] for _ in range(400)]
+
+        def mean(side, pick):
+            return sum(side[i]["scores"][dim] for i in pick) / len(pick)
+        blo, bhi = _interval([mean(b, p) for p in picks])
+        clo, chi = _interval([mean(n, p) for p in picks])
+        dlo, dhi = _interval([mean(n, p) - mean(b, p) for p in picks])
+        out[dim] = {"baseline": {"score": mean(b, ids), "ci_low": blo, "ci_high": bhi},
+                    "candidate": {"score": mean(n, ids), "ci_low": clo, "ci_high": chi},
+                    "delta": {"value": mean(n, ids) - mean(b, ids), "ci_low": dlo, "ci_high": dhi}}
+    return {"dimensions": out, "controls": {"oracle_pass_rate": 1.0, "null_pass_rate": 0.0}}
+'''
+
+
+def write_jsonl(path: Path, rows: list[dict]) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
+    return sha_file(path)
+
+
+def evidenced_receipt(root: Path, surface: str, *, judgment=(25, 33), precision=(36, 36)) -> dict:
+    """good_receipt() backed by a real evidence chain written under root.
+
+    80 cases (40 train, 40 test, 16 should-not-fire); on the test split the
+    baseline gets judgment[0] cases right and the candidate judgment[1], and the
+    same for precision. Every measured number comes from the synthetic scorer."""
+    edir = root / "evals" / surface
+    edir.mkdir(parents=True, exist_ok=True)
+    (edir / "score.py").write_text(SYNTH_SCORER)
+    dims = ["correct-judgment", "should-not-fire-precision"]
+    cases, base_rows, cand_rows = {}, [], []
+    for split, prefix in (("train", "r"), ("test", "t")):
+        for i in range(40):
+            cid = f"{prefix}{i:02d}"
+            inp = sha_bytes(cid.encode())
+            cases[cid] = {"split": split, "should_not_fire": i < 8, "input_sha256": inp}
+            for rows, (right, kept) in ((base_rows, (judgment[0], precision[0])),
+                                        (cand_rows, (judgment[1], precision[1]))):
+                on_test = split == "test"
+                rows.append({"case_id": cid, "split": split, "input_sha256": inp,
+                             "scores": {dims[0]: int(on_test and i < right),
+                                        dims[1]: int(on_test and i < kept)}})
+    expectations = {"version": "synthetic-expectations/v1", "dimensions": dims, "cases": cases}
+    exp_path = edir / "expectations.v1.json"
+    exp_path.write_text(json.dumps(expectations, indent=1, sort_keys=True) + "\n")
+    evidence = {
+        "scorer": {"path": f"evals/{surface}/score.py", "function": "score"},
+        "source": {f"evals/{surface}/score.py": sha_file(edir / "score.py")},
+        "dependencies": {"evals/surfaces.json": sha_file(root / "evals" / "surfaces.json")},
+        "expectations": {"path": f"evals/{surface}/expectations.v1.json",
+                         "version": "synthetic-expectations/v1", "sha256": sha_file(exp_path)},
+        "cohorts": {"baseline": {"path": f"evals/{surface}/baseline.jsonl",
+                                 "sha256": write_jsonl(edir / "baseline.jsonl", base_rows)},
+                    "candidate": {"path": f"evals/{surface}/candidate.jsonl",
+                                  "sha256": write_jsonl(edir / "candidate.jsonl", cand_rows)}},
+    }
+    spec = importlib.util.spec_from_file_location(f"synth_{surface}", edir / "score.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    measured = mod.score(expectations, base_rows, cand_rows)["dimensions"]
+    r = good_receipt()
+    r["surface"] = surface
+    r["evidence"] = evidence
+    for d in r["dimensions"]:
+        m = measured[d["dimension_id"]]
+        d.update(baseline=m["baseline"], candidate=m["candidate"], delta=m["delta"],
+                 direction_vs_baseline=cer._direction(m["delta"]))
+    return r
+
+
+RD = "evals/rule-delivery"
+
+
+def evidence_paths(receipt: dict) -> set[str]:
+    ev = receipt["evidence"]
+    return (set(ev["source"]) | set(ev["dependencies"]) | {ev["expectations"]["path"]}
+            | {c["path"] for c in ev["cohorts"].values()})
+
+
+def mirror(receipt: dict, dest: Path) -> None:
+    """Copy every file the receipt's evidence binds, plus the registry, into dest."""
+    for rel in evidence_paths(receipt) | {"evals/surfaces.json"}:
+        (dest / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / rel, dest / rel)
+    (dest / RD / "receipt.json").write_text(json.dumps(receipt, indent=1, sort_keys=True) + "\n")
+
+
+def read_jsonl(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def load_scorer(root: Path, receipt: dict):
+    sc = receipt["evidence"]["scorer"]
+    spec = importlib.util.spec_from_file_location(f"scorer_{abs(hash(str(root)))}", root / sc["path"])
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return getattr(mod, sc["function"])
+
+
+def failing_candidate_case(root: Path, receipt: dict) -> tuple[str, str]:
+    """A test-split candidate case that misses an owed rule, and one rule it misses."""
+    ev = receipt["evidence"]
+    exp = json.loads((root / ev["expectations"]["path"]).read_text())["cases"]
+    for row in read_jsonl(root / ev["cohorts"]["candidate"]["path"]):
+        case = exp[row["case_id"]]
+        missed = sorted(set(case["expected"]) - set(row["delivered"]))
+        if case["split"] == "test" and missed:
+            return row["case_id"], missed[0]
+    raise AssertionError("no failing candidate case to tamper with")
 
 
 def in_noise_receipt():
@@ -163,7 +309,7 @@ class Globs(unittest.TestCase):
 
 class Receipts(unittest.TestCase):
     def errors(self, receipt, surface="jev-judgments"):
-        return cer.validate_receipt(receipt, surface, ROOT)
+        return cer.claim_errors(receipt, surface, ROOT)
 
     def test_clear_win_passes(self):
         self.assertEqual(self.errors(good_receipt()), [])
@@ -481,58 +627,260 @@ class EndToEnd(unittest.TestCase):
         out = self.run_check(f"no-eval: session-instructions: {NoEvalLines.REASON}")
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
-    def test_valid_receipt_changed_in_the_pr_passes(self):
-        r = good_receipt(); r["surface"] = "session-instructions"
-        self.commit("AGENTS.md", "boot, changed\n")
+    def fails(self, out) -> list[str]:
+        return [line for line in out.stderr.splitlines() if "FAIL" in line]
+
+    def commit_receipt(self, r):
         self.commit("evals/session-instructions/receipt.json", json.dumps(r))
+
+    def test_valid_receipt_changed_in_the_pr_passes(self):
+        self.commit("AGENTS.md", "boot, changed\n")
+        self.commit_receipt(evidenced_receipt(self.repo, "session-instructions"))
         out = self.run_check("")
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_nonshipping_receipt_cannot_satisfy_a_changed_surface(self):
         for decision in ("do_not_merge", "inconclusive"):
             with self.subTest(decision=decision):
-                r = good_receipt(); r["surface"] = "session-instructions"
+                r = evidenced_receipt(self.repo, "session-instructions")
                 r["verdict"] = {"decision": decision, "statement": "Measured result does not authorize shipping."}
                 self.commit("AGENTS.md", f"boot, changed for {decision}\n")
-                self.commit("evals/session-instructions/receipt.json", json.dumps(r))
+                self.commit_receipt(r)
                 out = self.run_check(f"no-eval: session-instructions: {NoEvalLines.REASON}")
                 self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+                self.assertEqual(len(self.fails(out)), 1, out.stderr)
                 self.assertIn(decision, out.stdout + out.stderr)
 
     def test_critical_regression_do_not_merge_receipt_blocks_pr(self):
-        r = good_receipt(); r["surface"] = "session-instructions"
-        r["dimensions"][1] = dimension("should-not-fire-precision", critical=True,
-                                       base=(0.94, 0.89, 0.98), cand=(0.80, 0.74, 0.86),
-                                       delta=(-0.14, -0.20, -0.08), direction="regressed")
+        r = evidenced_receipt(self.repo, "session-instructions", precision=(36, 20))
+        self.assertEqual(r["dimensions"][1]["direction_vs_baseline"], "regressed")
         r["verdict"] = {"decision": "do_not_merge",
                         "statement": "Blocked: critical dimension should-not-fire-precision regressed."}
-        self.assertEqual(cer.validate_receipt(r, "session-instructions", ROOT), [])
+        self.assertEqual(cer.validate_receipt(r, "session-instructions", self.repo), [])
         self.commit("AGENTS.md", "boot, changed\n")
-        self.commit("evals/session-instructions/receipt.json", json.dumps(r))
+        self.commit_receipt(r)
         out = self.run_check("")
         self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertEqual(len(self.fails(out)), 1, out.stderr)
         self.assertIn("do_not_merge", out.stdout + out.stderr)
 
     def test_stale_receipt_from_an_earlier_change_does_not_count(self):
-        r = good_receipt(); r["surface"] = "session-instructions"
         self.git("checkout", "-q", "--detach", "base")
-        self.commit("evals/session-instructions/receipt.json", json.dumps(r))
+        self.commit_receipt(evidenced_receipt(self.repo, "session-instructions"))
         self.git("branch", "-f", "base", "HEAD")
         self.git("checkout", "-qb", "work2")
         self.commit("AGENTS.md", "boot, changed again\n")
         self.assertEqual(self.run_check("").returncode, 1)
 
     def test_in_noise_receipt_saying_ship_fails(self):
-        r = in_noise_receipt(); r["surface"] = "session-instructions"
+        r = evidenced_receipt(self.repo, "session-instructions", judgment=(25, 26))
+        self.assertEqual(r["dimensions"][0]["direction_vs_baseline"], "equivalent")
         self.commit("AGENTS.md", "boot, changed\n")
-        self.commit("evals/session-instructions/receipt.json", json.dumps(r))
+        self.commit_receipt(r)
         out = self.run_check("")
         self.assertEqual(out.returncode, 1)
         self.assertIn("do not merge on quality grounds", out.stdout + out.stderr)
 
+    def test_hand_numbered_receipt_without_evidence_fails(self):
+        self.commit("AGENTS.md", "boot, changed\n")
+        self.commit_receipt(dict(good_receipt(), surface="session-instructions"))
+        out = self.run_check("")
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertIn("evidence", out.stderr)
+
     def test_malformed_receipt_fails_even_when_its_surface_did_not_change(self):
         self.commit("evals/rule-delivery/receipt.json", "{not json")
         self.assertEqual(self.run_check("").returncode, 1)
+
+
+class EvidenceChain(unittest.TestCase):
+    """The generic chain on a small synthetic eval: hashes, pairing, counts, recompute."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        (self.root / "evals").mkdir()
+        shutil.copy2(ROOT / "evals" / "surfaces.json", self.root / "evals" / "surfaces.json")
+        self.r = evidenced_receipt(self.root, "jev-judgments")
+        self.cand = self.root / "evals" / "jev-judgments" / "candidate.jsonl"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def errors(self, r=None):
+        return cer.validate_receipt(self.r if r is None else r, "jev-judgments", self.root)
+
+    def rebind(self, which="candidate"):
+        c = self.r["evidence"]["cohorts"][which]
+        c["sha256"] = sha_file(self.root / c["path"])
+
+    def test_evidenced_receipt_passes(self):
+        self.assertEqual(self.errors(), [])
+
+    def test_schema_version_1_receipts_are_refused(self):
+        r = copy.deepcopy(self.r); r["schema_version"] = 1
+        self.assertTrue(any("schema_version" in e for e in self.errors(r)))
+
+    def test_missing_evidence_fails(self):
+        r = copy.deepcopy(self.r); del r["evidence"]
+        self.assertTrue(any("evidence" in e for e in self.errors(r)))
+
+    def test_duplicate_candidate_row_fails(self):
+        rows = read_jsonl(self.cand)
+        write_jsonl(self.cand, rows + rows[-1:])
+        self.rebind()
+        self.assertTrue(any("repeats case" in e for e in self.errors()), self.errors())
+
+    def test_changed_candidate_input_fails(self):
+        rows = read_jsonl(self.cand)
+        rows[0]["input_sha256"] = "0" * 64
+        write_jsonl(self.cand, rows)
+        self.rebind()
+        self.assertTrue(any("input" in e for e in self.errors()), self.errors())
+
+    def test_scorer_must_be_bound_source(self):
+        r = copy.deepcopy(self.r); r["evidence"]["source"] = {}
+        self.assertTrue(any("scorer" in e for e in self.errors(r)))
+
+    def test_dependencies_must_be_bound(self):
+        r = copy.deepcopy(self.r); r["evidence"]["dependencies"] = {}
+        self.assertTrue(any("dependencies" in e for e in self.errors(r)))
+
+    def test_changed_dependency_fails(self):
+        (self.root / "evals" / "surfaces.json").write_text("{}\n")
+        self.assertTrue(any("evals/surfaces.json" in e and "sha256" in e for e in self.errors()))
+
+    def test_paths_outside_the_repository_fail(self):
+        r = copy.deepcopy(self.r)
+        r["evidence"]["dependencies"]["../outside.json"] = "0" * 64
+        self.assertTrue(any("repository-relative" in e for e in self.errors(r)))
+
+    def test_dropping_a_measured_dimension_fails(self):
+        r = copy.deepcopy(self.r)
+        r["dimensions"] = r["dimensions"][:1]
+        r["stage_results"] = r["stage_results"][1:]
+        self.assertTrue(any("should-not-fire-precision" in e and "scorer" in e for e in self.errors(r)),
+                        self.errors(r))
+
+    def test_case_counts_must_match_the_expectations(self):
+        r = copy.deepcopy(self.r)
+        r["cases"].update(total=79, train=39)
+        self.assertTrue(any("cases.total" in e for e in self.errors(r)), self.errors(r))
+
+    def test_oracle_and_null_controls_are_recomputed(self):
+        r = copy.deepcopy(self.r)
+        r["grader"]["validation"]["null_pass_rate"] = 0.2
+        self.assertTrue(any("null_pass_rate" in e for e in self.errors(r)), self.errors(r))
+
+
+class RuleDeliveryEvidenceChain(unittest.TestCase):
+    """The four refusals the evidence chain exists for, on the real rule-delivery receipt."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.receipt = json.loads((ROOT / RD / "receipt.json").read_text())
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.r = copy.deepcopy(self.receipt)
+        mirror(self.r, self.root)
+        ev = self.r["evidence"]
+        self.cand = self.root / ev["cohorts"]["candidate"]["path"]
+        self.exp = self.root / ev["expectations"]["path"]
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def errors(self, root=None):
+        return cer.validate_receipt(self.r, "rule-delivery", root or self.root)
+
+    def test_checked_in_receipt_passes_against_its_own_evidence(self):
+        self.assertEqual(self.r["schema_version"], 2)
+        self.assertEqual(cer.validate_receipt(self.receipt, "rule-delivery", ROOT), [])
+
+    def test_deleting_a_failing_candidate_row_fails(self):
+        self.assertEqual(self.errors(), [])
+        case_id, _ = failing_candidate_case(self.root, self.r)
+        write_jsonl(self.cand, [row for row in read_jsonl(self.cand) if row["case_id"] != case_id])
+        self.assertTrue(any("sha256" in e for e in self.errors()), "unbound bytes went unnoticed")
+        self.r["evidence"]["cohorts"]["candidate"]["sha256"] = sha_file(self.cand)
+        errs = self.errors()
+        self.assertTrue(any("candidate" in e and "missing" in e and case_id in e for e in errs), errs)
+
+    def test_shrinking_the_owed_rule_denominator_fails(self):
+        self.assertEqual(self.errors(), [])
+        case_id, rule = failing_candidate_case(self.root, self.r)
+        doc = json.loads(self.exp.read_text())
+        doc["cases"][case_id]["expected"].remove(rule)
+        self.exp.write_text(json.dumps(doc, indent=1, sort_keys=True) + "\n")
+        self.r["evidence"]["expectations"]["sha256"] = sha_file(self.exp)
+        # Summary left as it was: the recompute disagrees.
+        self.assertTrue(any("recomputed" in e for e in self.errors()), self.errors())
+        # Summary rewritten to match the smaller denominator: the version still binds the old labels.
+        scorer = load_scorer(self.root, self.r)
+        measured = scorer(doc, read_jsonl(self.root / self.r["evidence"]["cohorts"]["baseline"]["path"]),
+                          read_jsonl(self.cand))
+        for d in self.r["dimensions"]:
+            m = measured["dimensions"][d["dimension_id"]]
+            d.update(baseline=m["baseline"], candidate=m["candidate"], delta=m["delta"],
+                     direction_vs_baseline=cer._direction(m["delta"]))
+        self.assertEqual(self.errors(), [], "the shrunk chain is internally consistent")
+        repo = self.root
+        env = fixture_env()
+
+        def git(*args):
+            subprocess.run(["git", *args], cwd=repo, env=env, check=True, capture_output=True)
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "selftest@example.invalid"); git("config", "user.name", "selftest")
+        shrunk = self.exp.read_bytes()
+        mirror(self.receipt, repo)  # the merge base carries the original labels and receipt
+        git("add", "-A"); git("commit", "-qm", "base"); git("branch", "base")
+        self.exp.write_bytes(shrunk)
+        (repo / RD / "receipt.json").write_text(json.dumps(self.r, indent=1, sort_keys=True) + "\n")
+        git("commit", "-qam", "shrink the owed rules, same version")
+        body = repo.parent / "body.md"; body.write_text("")
+        out = subprocess.run([sys.executable, str(ROOT / "ops" / "check-eval-receipt.py"), "--root", str(repo),
+                              "--base", "base", "--pr-body-file", str(body)],
+                             cwd=repo, env=env, capture_output=True, text=True)
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertIn("without a new version", out.stderr)
+
+    def test_changing_result_bytes_fails(self):
+        self.assertEqual(self.errors(), [])
+        rows = read_jsonl(self.cand)
+        case_id, rule = failing_candidate_case(self.root, self.r)
+        for row in rows:
+            if row["case_id"] == case_id:
+                row["delivered"] = sorted(set(row["delivered"]) | {rule})
+        write_jsonl(self.cand, rows)
+        errs = self.errors()
+        self.assertTrue(any(self.r["evidence"]["cohorts"]["candidate"]["path"] in e and "sha256" in e
+                            for e in errs), errs)
+
+    def test_reusing_a_stale_summary_fails(self):
+        self.assertEqual(self.errors(), [])
+        rows = read_jsonl(self.cand)
+        case_id, rule = failing_candidate_case(self.root, self.r)
+        for row in rows:
+            if row["case_id"] == case_id:
+                row["delivered"] = sorted(set(row["delivered"]) | {rule})
+        write_jsonl(self.cand, rows)
+        self.r["evidence"]["cohorts"]["candidate"]["sha256"] = sha_file(self.cand)
+        errs = self.errors()
+        self.assertTrue(any("human-required-recall" in e and "recomputed" in e for e in errs), errs)
+
+    def test_verified_input_hashes_carry_forward(self):
+        """The inputs PR #1325's replay verified are bound at the same bytes."""
+        deps = self.r["evidence"]["dependencies"]
+        for path, digest in {
+            "evals/rule-delivery/hard_cases.v1.json": "abc3a372b4ea3c25bd2b1db10850b3ebf1d5239049711ab3a015df378cd844ff",
+            "ops/fixtures/rule-delivery-eval/cases.v2.json": "20d0a652e02559241e25a8b40ebb2f700a939c7ef7dc38114d5d7978a559e0f7",
+            "ops/rule_trigger_delivery.py": "64746e5fc5c65e2ff67a72dfb0217598964448283e1c7f7d0fb56dde0c3bc3f3",
+            "ops/rule_trigger_compile.py": "356aed19e2c4fc0f90da04e2d0461bdedf5820e88c97c9f3a70fc88f3d43fcb1",
+            "ops/config/rule-jit-triggers.v1.json": "bcf2c4dd152c1df6613a62ddfc333ca4060da6dd983c51d27f51125713ab323e",
+        }.items():
+            self.assertEqual(deps.get(path), digest, path)
 
 
 CONTROL_KEY = "eval_receipt"
