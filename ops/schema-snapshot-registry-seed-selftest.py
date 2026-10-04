@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Registry seed rows must survive pg_dump's empty search_path on rebuild."""
 
+import ast
 import hashlib
 import json
 import os
@@ -272,7 +273,7 @@ assert GENERATOR.count("e.entry_digest is distinct from 'sha256:'||encode(public
 assert GENERATOR.count("ops.scac_mutation_registry_seal_valid(historical.registry_version)") >= 2
 for version in range(1, 9):
     assert GENERATOR.count(f"'scac-mutation-registry.v{version}'") >= 2
-assert set(FULL_SET_SEALS) == {f"scac-mutation-registry.v{version}" for version in range(1, 105)}
+assert set(FULL_SET_SEALS) == {f"scac-mutation-registry.v{version}" for version in range(1, 106)}
 assert all(len(value) == 71 and value.startswith("sha256:") for value in FULL_SET_SEALS.values())
 assert FULL_SET_SEALS["scac-mutation-registry.v10"] != "sha256:" + "0" * 64
 assert FULL_SET_SEALS["scac-mutation-registry.v20"] == (
@@ -765,7 +766,7 @@ assert "SCAC_VERSION_COUNT=102" in GENERATOR
 assert "SCAC_FULL_SET_SEAL_COUNT=101" in GENERATOR
 assert "ops.scac_mutation_catalog_v102_current()" in GENERATOR
 assert 'scac-mutation-registry.v102.generated.js' in GENERATOR
-assert "0770_find_rule_scac_successor.sql" in GENERATOR
+assert "0786_find_rule_scac_successor.sql" in GENERATOR
 assert "FIND_RULE_REGISTRY_APPLIED" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=103" in GENERATOR
 assert "SCAC_VERSION_COUNT=103" in GENERATOR
@@ -774,15 +775,50 @@ assert "ops.scac_mutation_catalog_v103_current()" in GENERATOR
 assert 'scac-mutation-registry.v103.generated.js' in GENERATOR
 assert '"scac-mutation-registry.v102"' in registry_gate
 assert '"scac-mutation-registry.v103"' in registry_gate
-assert '"scac-mutation-registry.v104"' in registry_gate
-assert '"scac-mutation-registry.v105"' not in registry_gate
-assert "0775_relationship_scac_successor.sql" in GENERATOR
-assert "RELATIONSHIP_REGISTRY_APPLIED" in GENERATOR
+assert "0787_jev_cap_scac_successor.sql" in GENERATOR
+assert "JEV_CAP_REGISTRY_APPLIED" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=104" in GENERATOR
 assert "SCAC_VERSION_COUNT=104" in GENERATOR
 assert "SCAC_FULL_SET_SEAL_COUNT=103" in GENERATOR
 assert "ops.scac_mutation_catalog_v104_current()" in GENERATOR
 assert 'scac-mutation-registry.v104.generated.js' in GENERATOR
+assert '"scac-mutation-registry.v104"' in registry_gate
+assert "0797_relationship_scac_successor.sql" in GENERATOR
+assert "RELATIONSHIP_REGISTRY_APPLIED" in GENERATOR
+assert "SCAC_CURRENT_NUMBER=105" in GENERATOR
+assert "SCAC_VERSION_COUNT=105" in GENERATOR
+assert "SCAC_FULL_SET_SEAL_COUNT=104" in GENERATOR
+assert "ops.scac_mutation_catalog_v105_current()" in GENERATOR
+assert 'scac-mutation-registry.v105.generated.js' in GENERATOR
+assert '"scac-mutation-registry.v105"' in registry_gate
+
+# The reference-monitor acceptance must follow the same live frontier and
+# independently pin its sealed predecessor's generated contract.
+monitor_tree = ast.parse((ROOT / "ops/siep18-reference-monitor-local-pg-gate.py").read_text())
+monitor_names = {"LIVE_REGISTRY_VERSION", "LIVE_REGISTRY_ORDINAL", "SEALED_PREDECESSOR_VERSION",
+                 "SEALED_PREDECESSOR_DIGEST", "SEALED_PREDECESSOR_ENTRY_COUNTS",
+                 "SEALED_PREDECESSOR_MIGRATION", "LIVE_REGISTRY_MIGRATION"}
+monitor_pins = {node.targets[0].id: ast.literal_eval(node.value)
+                for node in monitor_tree.body if isinstance(node, ast.Assign)
+                and isinstance(node.targets[0], ast.Name) and node.targets[0].id in monitor_names}
+assert monitor_pins["LIVE_REGISTRY_VERSION"] == "scac-mutation-registry.v105"
+assert monitor_pins["LIVE_REGISTRY_ORDINAL"] == 105
+assert monitor_pins["SEALED_PREDECESSOR_VERSION"] == "scac-mutation-registry.v104"
+predecessor_runtime = (ROOT / "mcp-server/src/scac-mutation-registry.v104.generated.js").read_text()
+predecessor_constants = dict(re.findall(r'^export const (SCAC_MUTATION_REGISTRY_\w+) = (.*);$',
+                                       predecessor_runtime, re.MULTILINE))
+assert monitor_pins["SEALED_PREDECESSOR_DIGEST"] == "sha256:" + json.loads(predecessor_constants["SCAC_MUTATION_REGISTRY_DIGEST"])
+predecessor_seal = json.loads(subprocess.run(
+    ["node", "--input-type=module", "-e", """
+    import { registrySeal, frozenInventory, JEV_CAP_V104_DB_CATALOG_BASELINE }
+      from './ops/scac-mutation-inventory.mjs';
+    console.log(JSON.stringify(registrySeal('scac-mutation-registry.v104',
+      frozenInventory('scac-mutation-registry.v104'), JEV_CAP_V104_DB_CATALOG_BASELINE)));
+    """], cwd=ROOT, capture_output=True, text=True, check=True).stdout)
+assert monitor_pins["SEALED_PREDECESSOR_ENTRY_COUNTS"] == (
+    predecessor_seal["entryCount"], predecessor_seal["sourceEntryCount"])
+assert monitor_pins["SEALED_PREDECESSOR_MIGRATION"] == "migrations/0787_jev_cap_scac_successor.sql"
+assert monitor_pins["LIVE_REGISTRY_MIGRATION"] == "migrations/0797_relationship_scac_successor.sql"
 
 assert "0720_doctorcre_a03_review_scac_successor.sql" in GENERATOR
 assert "V5_A03_REVIEW_REGISTRY_APPLIED" in GENERATOR
@@ -967,14 +1003,14 @@ loader_end = GENERATOR.index(
 )
 loader = GENERATOR[loader_start:loader_end]
 loaded_sql = subprocess.run(
-    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"), "103", "104"],
+    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"), "104", "105"],
     check=True,
     capture_output=True,
     text=True,
 ).stdout
-assert loaded_sql.count("scac-mutation-registry.v") == 103
-assert loaded_sql.count("sha256:") == 103
-assert FULL_SET_SEALS["scac-mutation-registry.v103"] in loaded_sql, (
+assert loaded_sql.count("scac-mutation-registry.v") == 104
+assert loaded_sql.count("sha256:") == 104
+assert FULL_SET_SEALS["scac-mutation-registry.v104"] in loaded_sql, (
     "the newest sealed history must actually reach the SQL the snapshot embeds"
 )
 
@@ -983,7 +1019,7 @@ assert FULL_SET_SEALS["scac-mutation-registry.v103"] in loaded_sql, (
 # feed the loader deliberately broken input and require a nonzero exit, so a
 # seal set that lost v22, gained a stray version, or carried a malformed digest
 # cannot be rendered into a snapshot as if it were sealed history.
-def loader_rejects(seals: dict, count: str, current: str = "104") -> bool:
+def loader_rejects(seals: dict, count: str, current: str = "105") -> bool:
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
         json.dump(seals, handle)
         path = handle.name

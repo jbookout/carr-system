@@ -9,7 +9,7 @@
 // at request time. A Worker has no filesystem, so this is a checked-in module.
 
 export const RULE_BOOT_CLASSES_SOURCE = "ops/config/rule-classes.v1.json";
-export const RULE_BOOT_CLASSES_DIGEST = "sha256:1931a25aa4d3903a4f6024f222491a6e33ef446e5b9fa30ccbe73385cc0045a7";
+export const RULE_BOOT_CLASSES_DIGEST = "sha256:7663735056573c5c6055640f932128b4868a18cfd90ecdcbc5aff80029cf2efe";
 export const RULE_BOOT_BUDGET_TOKENS = 40000;
 export const RULE_BOOT_CHARS_PER_TOKEN = 3.6;
 
@@ -191,6 +191,7 @@ export const RULE_BOOT_CLASSES = Object.freeze({
   "e65efc68": Object.freeze({"cls": "c", "on": false, "summary": "When building any gate, hook, linter, or CI check, write and run its test before the implementation.", "when": "building any gate, hook, linter, or CI validator"}),
   "e8868cbe": Object.freeze({"cls": "d", "on": true, "summary": "(Full text is in the always-on section; no summary is faithful enough to stand for it.)", "when": "before shipping any build/automation/agent/task, before parking work on Joe, and on Fridays or weekend-spanning runs"}),
   "eaa31ac5": Object.freeze({"cls": "d", "on": true, "summary": "Never claim something was handed off, sent, or delivered without naming the specific recipient.", "when": "completion_evidence gate (delivery claim)"}),
+  "ede4b241": Object.freeze({"cls": "b", "on": false, "summary": "When launching a cloud session, pick Sonnet 5.5 for well-scoped checkable work and Opus 5.5 for design, gates and reviews.", "when": "dispatching work to another model or launching a cloud session (model choice)"}),
   "ede4c735": Object.freeze({"cls": "b", "on": false, "summary": "Lint prospect-visible drafts (outreach, social, proposals) hard; internal-only text is exempt.", "when": "writing any prospect-visible draft"}),
   "eeb3d106": Object.freeze({"cls": "c", "on": false, "summary": "When building or reviewing any workstation surface, use pulse rate as a redundant urgency channel, honoring reduced-motion.", "when": "building or reviewing any CARR workstation surface"}),
   "efbdfb1a": Object.freeze({"cls": "a", "on": true, "summary": "Once a non-trivial build works, ask if a materially simpler shape now exists", "when": "after a non-trivial build works, before shipping"}),

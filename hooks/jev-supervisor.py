@@ -27,14 +27,10 @@ TWO MODES, chosen by the CARR_JEV_SUPERVISOR environment variable:
                      CARR_JEV_SUPERVISOR=shadow explicitly to go back to this.
 
 EVENTS
-  PostToolUse (any tool):
-    #8  stuck/drift watch        #9  runaway-thinking cutoff
-    #11 planted-instruction screen on tool output
-    #20 wrong path repair on a missing-file error
-    #22 failure-type triage and #16 bug locator on a failed command
-    #19 "already exists?" and #21 test picker and #13 test quality on an edit
-  Stop:
-    #14 "done" claim check       #17 review triage of the turn's diff
+  PostToolUse: one boundary request batches triggered security, failure,
+               path, bug, duplicate, and test questions. A quiet tool result
+               may run the throttled progress watch.
+  Stop: one request batches a new done claim and new diff review.
 
 Budget: each Jev call carries its own short timeout inside the library, and
 the whole hook stops starting new checks once BUDGET_SECONDS is spent, so a slow
@@ -44,6 +40,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -125,6 +122,10 @@ def _notable(result):
     if not isinstance(result, dict):
         return False
     verdict = str(result.get("verdict", ""))
+    if verdict == "unavailable" and result.get("check") in {
+            "boundary_judgment", "stop_boundary", "inspect_tool_event",
+            "inspect_stop_boundary"}:
+        return True
     quiet = {"ok", "clear", "clean", "not_triggered", "skipped", "unavailable", "none",
              "no_claim", "supported", "local", "progressing", "no_match", "low", "solid",
              "picked", "routed", "matched", "none_fits", "not_a_failure", "no_source",
@@ -143,24 +144,46 @@ def _line(result):
 
 
 class Run:
-    def __init__(self):
+    def __init__(self, receipt_path=None):
         self.started = time.monotonic()
         self.results = []
+        self.receipt_path = receipt_path or os.path.join(REPO, "out", "jev-boundary-decisions.jsonl")
 
     def left(self):
         return BUDGET_SECONDS - (time.monotonic() - self.started)
 
     def do(self, fn, *args, **kwargs):
+        name = getattr(fn, "__name__", "?")
         if self.left() <= 1.0:
+            if name in {"inspect_tool_event", "inspect_stop_boundary"}:
+                self._unavailable(name, "time_budget_exhausted")
             return None
         try:
             result = fn(*args, **kwargs)
         except Exception as exc:  # a library bug must never reach the session
-            result = {"check": getattr(fn, "__name__", "?"), "verdict": "unavailable",
+            if name in {"inspect_tool_event", "inspect_stop_boundary"}:
+                self._unavailable(name, "inspection_error")
+                return None
+            result = {"check": name, "verdict": "unavailable",
                       "confidence": None, "escalate": False, "detail": {"error": repr(exc)[:300]}}
         if isinstance(result, dict):
             self.results.append(result)
         return result
+
+    def _unavailable(self, name, reason):
+        self.results.append({"check": "boundary_judgment", "verdict": "unavailable",
+                             "confidence": None, "escalate": True,
+                             "detail": {"advice": f"{name} unavailable ({reason}); inspect boundary manually"}})
+        receipt = {"schema": "jev-boundary-decision/v1", "family": name,
+                   "status": "unavailable", "reason": reason, "questions": [],
+                   "triggers": [], "outcomes": [{"check": "boundary_judgment",
+                                              "verdict": "unavailable"}]}
+        try:
+            os.makedirs(os.path.dirname(self.receipt_path), exist_ok=True)
+            with open(self.receipt_path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(receipt, sort_keys=True) + "\n")
+        except OSError:
+            pass
 
 
 def post_tool_use(payload, run):
@@ -174,60 +197,69 @@ def post_tool_use(payload, run):
     task = _task(transcript)
     watch = _lib("jev_session_watch")
 
-    # #11 — anything the agent just read could carry planted instructions.
-    if tool in ("Read", "WebFetch", "WebSearch", "Bash", "Grep") and out:
-        run.do(watch.screen_tool_output, tool, out, task)
+    code = _exit_code(response)
+    findings = run.do(watch.inspect_tool_event, tool, ti, out, code, task,
+                      root, transcript)
+    if isinstance(findings, list):
+        run.results.extend(row for row in findings if isinstance(row, dict))
+        # A second semantic request for one tool result would repeat evidence.
+        if not findings and transcript:
+            run.do(watch.watch_progress, transcript, task)
 
-    if tool == "Bash":
-        command = str(ti.get("command", ""))
-        code = _exit_code(response)
-        failed = (code not in (None, 0)) or bool(re.search(r"Traceback \(most recent call last\)|"
-                                                           r"AssertionError|FAILED|Error:", out))
-        if failed:
-            run.do(watch.triage_failure, command, out, code if code is not None else 1)
-            if TEST_COMMAND.search(command) or "Traceback (most recent call last)" in out:
-                frames = TRACEBACK_FILE.findall(out) or NODE_FRAME.findall(out)
-                inside = [(p, n) for p, n in frames
-                          if os.path.isfile(p if os.path.isabs(p) else os.path.join(cwd, p))
-                          and "site-packages" not in p and "node_modules" not in p]
-                if inside:
-                    path = inside[-1][0]
-                    full = path if os.path.isabs(path) else os.path.join(cwd, path)
-                    try:
-                        with open(full, encoding="utf-8", errors="replace") as fh:
-                            source = fh.read()
-                        run.do(watch.locate_bug, source, path, out)
-                    except OSError:
-                        pass
-        if MISSING_FILE.search(out):
-            for token in MISSING_PATH_TOKEN.findall(command)[:2]:
-                if not os.path.exists(os.path.join(cwd, token)):
-                    run.do(watch.repair_path, token, root)
-                    break
 
-    if tool in ("Read", "Edit", "Write", "MultiEdit") and MISSING_FILE.search(out):
-        bad = str(ti.get("file_path", ""))
-        if bad and not os.path.exists(bad):
-            run.do(watch.repair_path, os.path.relpath(bad, root) if bad.startswith(root) else bad, root)
+NOTIFICATION_WRAPPER = re.compile(
+    r"(?:<task-notification(?:\s[^>]*)?>[\s\S]*</task-notification>|"
+    r"<ci-monitor-event(?:\s[^>]*)?>[\s\S]*</ci-monitor-event>|"
+    r"\[SYSTEM NOTIFICATION(?:\s[^\]]*)?\][\s\S]*)")
 
-    if tool in ("Edit", "Write", "MultiEdit"):
-        path = str(ti.get("file_path", ""))
-        added = str(ti.get("content") or ti.get("new_string") or "")
-        if tool == "MultiEdit":
-            added = "\n".join(str(e.get("new_string", "")) for e in ti.get("edits") or [])
-        rel = os.path.relpath(path, root) if path.startswith(root) else path
-        for name in NEW_DEF.findall(added)[:1]:
-            run.do(watch.check_existing, name, added[:4000], root)
-        if TEST_PATH.search(rel):
-            done = _lib("jev_done_checks")
-            run.do(done.check_test_quality, added[:8000], "", task)
-        else:
-            run.do(watch.pick_tests, [rel], root)
 
-    # #8 and #9 own cheap transcript-tail triggers; they run on every call.
-    if transcript:
-        run.do(watch.watch_progress, transcript, task)
-        run.do(watch.check_thinking, transcript)
+def _request_provenance(rec):
+    """Classify a user request; tool results are not requests.
+
+    Provenance flags and origins take precedence over text. Only a leading
+    notification wrapper counts; mentioning its name in human prose does not.
+    """
+    if rec.get("type") != "user":
+        return None
+    message = rec.get("message")
+    if not isinstance(message, dict):
+        return "unknown"
+    content = message.get("content")
+    if isinstance(content, list):
+        blocks = [b for b in content if isinstance(b, dict)]
+        if any(b.get("type") == "tool_result" for b in blocks):
+            return None
+        content = "\n".join(b["text"] for b in blocks
+                            if b.get("type") == "text" and isinstance(b.get("text"), str))
+    origin = rec.get("origin") if isinstance(rec.get("origin"), dict) else {}
+    if (rec.get("isMeta") or rec.get("isSidechain") or rec.get("isCompactSummary")
+            or origin.get("kind") not in (None, "", "human", "user", "keyboard")):
+        return "notification"
+    if not isinstance(content, str) or not content.strip():
+        return "unknown"
+    if NOTIFICATION_WRAPPER.fullmatch(content.strip()):
+        return "notification"
+    return "human"
+
+
+def _transcript_records(transcript):
+    """Read a bounded tail once per consumer; unavailable provenance stays unknown."""
+    try:
+        with open(transcript, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 2_000_000))
+            lines = fh.read().decode("utf-8", errors="replace").splitlines()
+    except (OSError, TypeError, ValueError):
+        return []
+    records = []
+    for raw in lines:
+        try:
+            rec = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(rec, dict):
+            records.append(rec)
+    return records
 
 
 def _last_test_evidence(transcript):
@@ -237,41 +269,17 @@ def _last_test_evidence(transcript):
     risk attributing an earlier task's test to this one.
     """
     evidence = {}
-    try:
-        with open(transcript, "rb") as fh:
-            fh.seek(0, os.SEEK_END)
-            size = fh.tell()
-            fh.seek(max(0, size - 2_000_000))
-            lines = fh.read().decode("utf-8", errors="replace").splitlines()
-    except OSError:
-        return evidence
     commands = {}
     tests = []
     saw_request = False
-    for raw in lines:
-        try:
-            rec = json.loads(raw)
-        except ValueError:
+    for rec in _transcript_records(transcript):
+        message = rec.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if _request_provenance(rec) == "human":
+            saw_request = True
+            commands.clear()
+            tests.clear()
             continue
-        if not isinstance(rec, dict):
-            continue
-        content = (rec.get("message") or {}).get("content")
-        origin = rec.get("origin") if isinstance(rec.get("origin"), dict) else {}
-        if (rec.get("type") == "user" and not rec.get("isMeta")
-                and not rec.get("isSidechain") and not rec.get("isCompactSummary")
-                and origin.get("kind") in (None, "", "human", "user", "keyboard")):
-            human_text = (isinstance(content, str) and bool(content.strip()))
-            if isinstance(content, list):
-                blocks = [b for b in content if isinstance(b, dict)]
-                human_text = (not any(b.get("type") == "tool_result" for b in blocks)
-                              and any(b.get("type") == "text" and
-                                      isinstance(b.get("text"), str) and b["text"].strip()
-                                      for b in blocks))
-            if human_text:
-                saw_request = True
-                commands.clear()
-                tests.clear()
-                continue
         if not saw_request:
             continue
         if not isinstance(content, list):
@@ -353,10 +361,82 @@ def stop(payload, run):
                                                    capture_output=True, text=True, timeout=10).stdout[-3000:]
         except Exception:
             pass
-    if final:
-        run.do(done.check_done_claim, final, evidence)
-    if diff.strip():
-        run.do(done.triage_review, diff, task)
+    findings = run.do(done.inspect_stop_boundary, final, evidence, diff, task,
+                      payload.get("session_id") or "")
+    if isinstance(findings, list):
+        run.results.extend(row for row in findings if isinstance(row, dict))
+
+
+def fact_boundary(payload, run):
+    """Source-grounded claim check at the completion-report and record-write
+    acknowledgement boundaries (ops/jev_fact_boundary.py). Kept apart from
+    stop() and post_tool_use(): it owns its trigger, retrieval and decision,
+    runs on what budget they leave, and a failure here returns quietly.
+    OFF unless CARR_JEV_FACT_BOUNDARY=on: every search-doctrine call it makes
+    side-writes a log_retrieval_query row that retrieval curation mines, so
+    it stays opt-in until a non-logging read path exists."""
+    if os.environ.get("CARR_JEV_FACT_BOUNDARY", "off").strip().lower() != "on":
+        return None
+    try:
+        lib = _lib("jev_fact_boundary")
+        boundary = lib.boundary_from_hook(payload)
+    except Exception:
+        return None
+    if not boundary:
+        return None
+    return run.do(lib.check_boundary, boundary, budget_seconds=run.left() - 1.0)
+
+
+# JUDGMENT POINTS ONLY (Joe, 2026-09-25: Jev at judgment calls, not every turn;
+# 2026-10-03: "fix whatever is causing the heavy usage now"). Measured that
+# morning: one orchestrator session paid for ~300 Jev requests in an hour, most
+# of them the injection screen re-reading its own local command output (rule
+# text is full of "never"/"always") and turn-end claim checks on background
+# notification turns. A tool result is a judgment point only when it brings in
+# outside content or failed. Unknown tool provenance retains the library's
+# deterministic security floor; local Read/Grep and simple shell readers
+# bypass inspection when they carry no failure evidence.
+# A turn end is checked unless the latest request is a known notification.
+# The shared daily paid-call cap owns the spending bound.
+LOCAL_READ_COMMANDS = {"cat", "ls", "pwd", "head", "tail", "wc"}
+
+
+def _local_shell_read(tool_input):
+    """Trust only a single known reader without shell evaluation or chaining."""
+    if not isinstance(tool_input, dict):
+        return False
+    command = tool_input.get("command")
+    if not isinstance(command, str) or any(c in command for c in "$`;|&><\n()"):
+        return False
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return False
+    return bool(words) and words[0] in LOCAL_READ_COMMANDS
+
+
+def judgment_point(event, payload):
+    """Whether this hook event is worth a paid Jev request at all."""
+    if event == "PostToolUse":
+        name = (payload.get("tool_name") or "").lower()
+        if name not in {"bash", "read", "grep"}:
+            return True
+        if name == "bash" and not _local_shell_read(payload.get("tool_input")):
+            return True
+        response = payload.get("tool_response")
+        code = _exit_code(response)
+        if code not in (None, 0):
+            return True
+        output = _text(response)[-MAX_OUTPUT_CHARS:]
+        watch = _lib("jev_session_watch")
+        return bool(MISSING_FILE.search(output) or watch.FAILURE_MARKERS.search(output))
+    if event == "Stop":
+        for rec in reversed(_transcript_records(payload.get("transcript_path") or "")):
+            provenance = _request_provenance(rec)
+            if provenance is not None:
+                return provenance != "notification"
+        return True  # unknown provenance retains completion checking
+    return False
 
 
 def main():
@@ -364,17 +444,22 @@ def main():
         payload = json.load(sys.stdin)
     except Exception:
         return 0
-    if MODE == "off" or payload.get("session_id") == "selftest":
+    if not isinstance(payload, dict) or MODE == "off" or payload.get("session_id") == "selftest":
         return 0
     event = payload.get("hook_event_name") or payload.get("hookEventName") or ""
+    if event == "Stop" and payload.get("stop_hook_active"):
+        return 0
     run = Run()
     try:
         if event == "PostToolUse":
-            post_tool_use(payload, run)
-        elif event == "Stop":
-            if payload.get("stop_hook_active"):
-                return 0
+            if judgment_point(event, payload):
+                post_tool_use(payload, run)
+            # The optional fact library owns its record-write trigger, including
+            # successful acknowledgements through Bash and MCP.
+            fact_boundary(payload, run)
+        elif event == "Stop" and judgment_point(event, payload):
             stop(payload, run)
+            fact_boundary(payload, run)
     except Exception:
         return 0
     if MODE != "advise":

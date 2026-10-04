@@ -932,6 +932,17 @@ check_pushfloor() {
   local changed=""
   if [ -n "${CARR_CI_RANGE:-}" ]; then
     changed="$(git diff --name-only --diff-filter=ACMR "$CARR_CI_RANGE" 2>/dev/null || true)"
+    # Updating an existing branch imports main's admitted files into the
+    # pushed range. Predict only files whose final content/mode differs from
+    # main; those identical to main cannot be this branch's change. Keep the
+    # original range on an unreadable main, and never narrow CARR_CI_RANGE:
+    # the secret scanner must still inspect every blob this push carries.
+    local main_changed=""
+    if main_changed="$(git diff --name-only origin/main HEAD 2>/dev/null)"; then
+      changed="$(LC_ALL=C comm -12 \
+        <(printf '%s\n' "$changed" | LC_ALL=C sort -u) \
+        <(printf '%s\n' "$main_changed" | LC_ALL=C sort -u))"
+    fi
   fi
 
   floor_fail() {  # floor_fail <name> <remedy>
@@ -960,6 +971,14 @@ check_pushfloor() {
   if [ -n "$changed" ] && [ -f ops/githooks/path-hygiene-check.py ]; then
     local added
     added="$(git diff --name-only --diff-filter=ACR "$CARR_CI_RANGE" 2>/dev/null || true)"
+    # Filename admission depends on whether the path already exists on main,
+    # independently of whether this branch changed that file's contents.
+    local main_paths=""
+    if main_paths="$(git ls-tree -r --name-only origin/main 2>/dev/null)"; then
+      added="$(LC_ALL=C comm -23 \
+        <(printf '%s\n' "$added" | LC_ALL=C sort -u) \
+        <(printf '%s\n' "$main_paths" | LC_ALL=C sort -u))"
+    fi
     if [ -n "$added" ]; then
       # shellcheck disable=SC2086
       run_quiet "$LOGDIR/pushfloor-path-hygiene.log" \
@@ -1246,6 +1265,15 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
       node --test mcp-server/test/find-rule-supersedes.test.mjs; then
     tail -30 "$LOGDIR/migration-rule-supersession.log" >&2
     bad migration "rule lookup or atomic teach supersession database proof failed"
+    return
+  fi
+
+  # The timeline verbs run as carr_writer; prove that role can read every view
+  # their real handlers touch (the 42501 that failed r-2026-10-03-01).
+  if ! CARR_WRITER_READ_TEST_DATABASE_URL="$dsn" run_quiet "$LOGDIR/migration-writer-read-route.log" \
+      node --test mcp-server/test/catch-me-up-writer-route.test.mjs; then
+    tail -30 "$LOGDIR/migration-writer-read-route.log" >&2
+    bad migration "timeline verbs cannot read their views as carr_writer"
     return
   fi
 

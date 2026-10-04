@@ -21,21 +21,21 @@ from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connec
 
 REPO = Path(__file__).resolve().parents[1]
 
-# W14 seals the exact referral writer schema; prior rule lookup remains history.
+# 0797 seals exact referral attribution as v105 after the capped Worker v104.
 # Both are pinned: an unreviewed frontier or a rewritten predecessor must fail closed.
-LIVE_REGISTRY_VERSION = "scac-mutation-registry.v104"
-LIVE_REGISTRY_ORDINAL = 104
-SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v103"
+LIVE_REGISTRY_VERSION = "scac-mutation-registry.v105"
+LIVE_REGISTRY_ORDINAL = 105
+SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v104"
 SEALED_PREDECESSOR_ORDINAL = LIVE_REGISTRY_ORDINAL - 1
 SEALED_PREDECESSOR_DIGEST = (
-    "sha256:6560a285ebd4a71d9ed3b63b644f13e06d0f1ccbddadf174d990f4f2453434b7"
+    "sha256:1c07f71f0e640610e413506b3b31e59e611c30cf1997255b7720ba393b8cdd35"
 )
-SEALED_PREDECESSOR_ENTRY_COUNTS = (2615, 1085)
+SEALED_PREDECESSOR_ENTRY_COUNTS = (2619, 1085)
 SEALED_PREDECESSOR_MIGRATION = (
-    "migrations/0770_find_rule_scac_successor.sql"
+    "migrations/0787_jev_cap_scac_successor.sql"
 )
 LIVE_REGISTRY_MIGRATION = (
-    "migrations/0775_relationship_scac_successor.sql"
+    "migrations/0797_relationship_scac_successor.sql"
 )
 
 LIVE_CATALOG_CURRENT_FN = f"ops.scac_mutation_catalog_v{LIVE_REGISTRY_ORDINAL}_current()"
