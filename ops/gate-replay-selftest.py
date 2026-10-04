@@ -111,6 +111,47 @@ with subprocess.Popen([sys.executable, "-c", clock_probe], env=clock_env,
     check("stdlib subprocess timeouts retain real time", lines[2:] == ["real timeout"], output + error)
 
 
+# Waiters imported after startup must use real deadlines, even though gate code
+# reads logical monotonic time. Exercise timeout failures and completed results.
+waiter_probe = """
+import concurrent.futures as futures
+import queue
+import time
+
+def expires(label, call, exception):
+    started = time.perf_counter()
+    try:
+        call()
+    except exception:
+        elapsed = time.perf_counter() - started
+        assert 0.03 <= elapsed < 0.5, (label, elapsed)
+    else:
+        raise AssertionError(label + " did not time out")
+
+q = queue.Queue()
+expires("queue get", lambda: q.get(timeout=0.05), queue.Empty)
+q = queue.Queue(maxsize=1)
+q.put("first")
+expires("queue put", lambda: q.put("second", timeout=0.05), queue.Full)
+f = futures.Future()
+expires("future result", lambda: f.result(timeout=0.05), futures.TimeoutError)
+expires("as_completed", lambda: next(futures.as_completed([f], timeout=0.05)), futures.TimeoutError)
+started = time.perf_counter()
+done, pending = futures.wait([f], timeout=0.05)
+assert not done and pending == {f}
+assert 0.03 <= time.perf_counter() - started < 0.5
+f.set_result("done")
+assert f.result(timeout=0.05) == "done"
+assert list(futures.as_completed([f], timeout=0.05)) == [f]
+print("real waiter deadlines")
+"""
+waiter = subprocess.run([sys.executable, "-c", waiter_probe], env=clock_env,
+                        capture_output=True, text=True, timeout=10)
+check("stdlib queue and future waits retain real deadlines",
+      waiter.returncode == 0 and waiter.stdout.strip() == "real waiter deadlines",
+      waiter.stdout + waiter.stderr)
+
+
 # ---------------------------------------------------------------- leak guard
 
 PLANTED = {

@@ -39,11 +39,18 @@ _EPOCH = os.environ.get("CARR_GATE_REPLAY_EPOCH")
 if _EPOCH:
     import sys
     import time as _time
-    # These modules capture their deadline clocks at import. Load them before
-    # replacing the application clock: process/thread waits must stay bounded
-    # by real elapsed time, independently of the replayed gate's clock reads.
+    # Capture real deadline clocks before replacing the application clock.
+    # Blocking waits must not depend on replay clock reads.
     import subprocess as _subprocess
     import threading as _threading
+    import queue as _queue
+    import concurrent.futures._base as _futures_base
+    from types import SimpleNamespace as _SimpleNamespace
+
+    # Futures dereferences its time module during iteration instead of capturing
+    # a function at import, as queue/threading/subprocess do. Give its deadlines
+    # a private real clock; application imports still see the logical clock.
+    setattr(_futures_base, "time", _SimpleNamespace(monotonic=_time.monotonic))
 
     _PINNED = float(_EPOCH)
     _elapsed = 0.0
