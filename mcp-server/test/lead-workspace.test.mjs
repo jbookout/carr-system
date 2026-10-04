@@ -59,19 +59,19 @@ test('Claim authenticated human on unowned New preserves stage; refuses claimed,
  for(const fields of [{live_party:false},{stage:'qualified'},{owner_id:id(2)},{client_id:id(2)},{is_client:true},{linked_client:true},{suppressed:true}]){const bad=new Fake();Object.assign(bad.row,fields);await assert.rejects(()=>TOOLS['claim-lead'].handler(bad,human,args()),e=>e.payload.error==='lead_not_claimable');assert.equal(bad.updated,undefined)}
  const stale=new Fake();stale.row.version=2;await assert.rejects(()=>TOOLS['claim-lead'].handler(stale,human,args()),e=>e.payload.error==='version_conflict');
 });
-test('Archived stage migration is explicit and never rewrites history',async()=>{const s=await readFile(new URL('../../migrations/0808_lead_archived_stage.sql',import.meta.url),'utf8');assert.match(s,/'archived'/);assert.match(s,/on conflict/);assert.doesNotMatch(s,/update (?:lead|event)\s|delete from/i)});
+test('Archived stage migration is explicit and never rewrites history',async()=>{const s=await readFile(new URL('../../migrations/0813_lead_archived_stage.sql',import.meta.url),'utf8');assert.match(s,/'archived'/);assert.match(s,/on conflict/);assert.doesNotMatch(s,/update (?:lead|event)\s|delete from/i)});
 
 test('actor switch between read and command refuses all three writes before mutation',async()=>{for(const verb of ['claim-lead','link-lead-client','update-lead']){const db=new Fake();await assert.rejects(()=>TOOLS[verb].handler(db,human,args({expected_actor:'dell',client_id:id(800),confirmed:true,fields:{stage:'qualified'}})),e=>e.payload.error==='account_changed');assert.equal(db.updated,undefined)}});
 
- test('Leads frontier follows the immutable Observatory registry', async()=>{
+ test('Leads frontier follows the immutable lead automation registry', async()=>{
   const { SCAC_MUTATION_REGISTRY_VERSION, registeredOperation } = await import('../src/mutation-registry.js');
-  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, 'scac-mutation-registry.v106');
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, 'scac-mutation-registry.v107');
   assert.equal(registeredOperation('confirm-merge').human_only, true);
   for (const name of ['claim-lead','link-lead-client','update-lead','lead-board'])
     assert.ok(registeredOperation(name));
-  const migration = await readFile(new URL('../../migrations/0809_leads_scac_successor.sql',import.meta.url),'utf8');
-  assert.match(migration,/0807_observatory_room_read_scac_successor.sql/);
-  assert.match(migration,/0808_lead_archived_stage.sql/);
+  const migration = await readFile(new URL('../../migrations/0814_leads_scac_successor.sql',import.meta.url),'utf8');
+  assert.match(migration,/0812_lead_automation_scac_successor.sql/);
+  assert.match(migration,/0813_lead_archived_stage.sql/);
  });
 
 test('reference monitor pins the predecessor counts sealed by main', async()=>{
