@@ -734,7 +734,7 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
         from unittest.mock import patch
         original = importlib.util.spec_from_file_location
         def fail_cap_loader(name, *args, **kwargs):
-            if name == "jev_cap_client":
+            if name in ("jev_cap_client", "jev_site_client"):
                 raise ImportError("fixture missing client configuration")
             return original(name, *args, **kwargs)
         with patch.object(importlib.util, "spec_from_file_location", fail_cap_loader):
