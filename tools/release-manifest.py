@@ -242,9 +242,14 @@ def source_contract(sha_ref: str) -> dict[str, object]:
 def digest_files(sha: str, paths: tuple[str, ...]) -> str:
     """Digest of named files' CONTENT at this SHA, missing files named as absent
     rather than skipped — a lock that disappeared must change the digest."""
+    # One tree read preserves literal paths (including whitespace), tree/gitlink
+    # objects and explicit missing-file markers without per-file process startup.
+    raw = git_bytes("ls-tree", "-r", "-t", "-z", sha).decode("utf-8")
+    objects = {path: metadata.split()[2] for entry in raw.split("\0") if entry
+               for metadata, _, path in [entry.partition("\t")]}
     h = hashlib.sha256()
     for path in sorted(paths):
-        blob = git("rev-parse", f"{sha}:{path}").strip() if path_exists(sha, path) else "ABSENT"
+        blob = objects.get(path, "ABSENT")
         h.update(path.encode())
         h.update(b"\0")
         h.update(blob.encode())

@@ -44,14 +44,18 @@ WHAT IT PROVES
 import atexit
 import copy
 import importlib.util
+import hashlib
 import json
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / "ops"))
+from git_env import fixture_env
 TOOL = REPO / "tools" / "release-manifest.py"
 
 _spec = importlib.util.spec_from_file_location("release_manifest", TOOL)
@@ -90,8 +94,40 @@ def git(*args: str) -> str:
                           capture_output=True, text=True).stdout
 
 
+def check_named_file_digest() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        def fixture_git(*args):
+            return subprocess.run(["git", "-C", str(root), *args],
+                                  capture_output=True, text=True, check=True, env=fixture_env()).stdout.strip()
+        fixture_git("init", "-q")
+        fixture_git("config", "user.name", "test")
+        fixture_git("config", "user.email", "test@example.invalid")
+        paths = ("a.txt", "nested/a.txt", "odd\r\n ü.txt", "nested", "missing")
+        (root / "nested").mkdir()
+        for path in paths[:3]:
+            (root / path).write_text(path)
+        fixture_git("add", "--", *paths[:3])
+        fixture_git("commit", "-qm", "fixture")
+        sha = fixture_git("rev-parse", "HEAD")
+        expected = hashlib.sha256()
+        for path in sorted(paths):
+            oid = "ABSENT" if path == "missing" else fixture_git("rev-parse", f"{sha}:{path}")
+            expected.update((path + "\0" + oid + "\n").encode())
+        (root / "a.txt").write_text("uncommitted change")
+        with mock.patch.dict("os.environ", fixture_env(), clear=True), \
+             mock.patch.object(RELEASE_MANIFEST, "REPO", root), \
+             mock.patch.object(subprocess, "run", wraps=subprocess.run) as reads:
+            observed = RELEASE_MANIFEST.digest_files(sha, paths)
+        check("0h. named-file digest retains exact objects, directories, absent paths and dirty-tree isolation",
+              observed == "sha256:" + expected.hexdigest())
+        check("0i. named-file digest uses one immutable Git read regardless of file count",
+              reads.call_count == 1, f"observed {reads.call_count} Git processes")
+
+
 def main() -> int:
     print("release-manifest-selftest: P0-1 rebuild clause")
+    check_named_file_digest()
     tool_source = TOOL.read_text(encoding="utf-8")
     ledger_start = tool_source.index("def migration_tree_ledger")
     ledger_end = tool_source.index("def ensure_exact_schema_prefix", ledger_start)
