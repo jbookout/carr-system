@@ -391,6 +391,36 @@ class BlockingReviewTests(unittest.TestCase):
                                               "body": message}]), START, END)
                 self.assertEqual(sum(s["outcomes_verified"] for s in body_report["sites"].values()), expected)
 
+    def test_03_rejects_negation_of_every_accepted_defect_noun(self):
+        messages = ["Jev found no regression; fix a typo found by local tests",
+                    "Jev found no error; no action needed"]
+        for noun in ("bug", "gap", "defect", "error", "regression"):
+            article = "an" if noun == "error" else "a"
+            messages.extend([f"Jev found no {noun}", f"Jev found no {noun}s",
+                             f"Jev flagged a concern, not {article} {noun}"])
+        for message in messages:
+            for field in ("subject", "body"):
+                with self.subTest(message=message, field=field):
+                    report = jvr.build_report(sources(commits=[{
+                        "sha": "synthetic", "date": START.isoformat(), field: message,
+                    }]), START, END)
+                    self.assertEqual(report["totals"]["outcomes_verified"], 0)
+                    self.assertFalse(any(site["evidence"] for site in report["sites"].values()))
+                    self.assertFalse(any(site["recommendation"] == "keep"
+                                         for site in report["sites"].values()))
+
+    def test_03_accepts_positive_attribution_for_every_defect_noun(self):
+        for noun in ("bug", "gap", "defect", "error", "regression"):
+            article = "an" if noun == "error" else "a"
+            for field in ("subject", "body"):
+                with self.subTest(noun=noun, field=field):
+                    report = jvr.build_report(sources(commits=[{
+                        "sha": "synthetic", "date": START.isoformat(),
+                        field: f"Jev caught {article} {noun}",
+                    }]), START, END)
+                    self.assertEqual(report["totals"]["outcomes_verified"], 1)
+                    self.assertEqual(report["sites"]["review"]["recommendation"], "keep")
+
     def test_04_final_totals_match_text_and_sites(self):
         report = jvr.build_report(sources(calls=[call("review")], judge=[judge("build_advisory", elapsed_ms=1000)],
                    commits=[{"sha": "synthetic", "date": START.isoformat(), "subject": "Jev caught a bug"}],

@@ -104,6 +104,7 @@ NATURE = {
 }
 REVIEWISH = re.compile(r"review|diagnos|evidence|confirm|triage|defect", re.I)
 JEV_FINDER = re.compile(r"\bJev(?:'s\s+[\w-]+)?\s+(?:flagged|caught|found|spotted|identified|surfaced|noticed)\b")
+DEFECT_NOUN = r"(?:bug|gap|defect|error|regression)"
 Z_ALPHA, Z_BETA = 1.959964, 0.841621  # two-sided 5%, 80% power
 EFFECT_SHARE = 0.25  # detect a 25% change in mean CI rounds per PR
 
@@ -290,15 +291,16 @@ def positive_attribution(commit):
     commit-attributed evidence, not an independently verified causal outcome.
     """
     message = "\n".join(str(commit.get(k) or "") for k in ("subject", "body"))
-    if re.search(r"\b(?:nothing|none|no\s+(?:bug|defect|finding|issue|fix|change)|"
-                 r"not\s+(?:a\s+)?(?:bug|fixed)|defer(?:red)?|unfixed)\b", message, re.I):
+    if re.search(rf"\b(?:nothing|none|no\s+(?:{DEFECT_NOUN}s?|finding|issue|fix|change)|"
+                 rf"not\s+(?:(?:a|an)\s+)?(?:{DEFECT_NOUN}s?|fixed)|"
+                 r"defer(?:red)?|unfixed)\b", message, re.I):
         return None
     for match in JEV_FINDER.finditer(message):
         claim = re.split(r"[.;\n]", message[match.end():], maxsplit=1)[0]
-        if re.search(r"\b(?:bug|gap|defect|error|regression)\b", claim, re.I):
+        if re.search(rf"\b{DEFECT_NOUN}\b", claim, re.I):
             return match.group(0) + claim
         prefix = re.split(r"[.;\n]", message[:match.start()])[-1]
-        if re.search(r"\bfix(?:es|ed)?\b.*\b(?:bug|gap|defect|error|regression)\b", prefix, re.I):
+        if re.search(rf"\bfix(?:es|ed)?\b.*\b{DEFECT_NOUN}\b", prefix, re.I):
             return prefix.strip() + match.group(0) + claim
     return None
 
