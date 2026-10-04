@@ -27,7 +27,8 @@ EVIDENCE = {
     "branches": frozenset({"branch_idle"}),
 }
 # An unreadable evidence source cannot prove the findings it feeds have cleared.
-EVIDENCE_ERROR_KINDS = frozenset({"collection_error", "environment"})
+EVIDENCE_ERROR_KINDS = frozenset({"collection_error", "environment", "rate_limited"})
+RATE_LIMIT = re.compile(r"API rate limit|secondary rate limit", re.I)
 RELEASE_LANE = re.compile(r"^release-pipeline\[([^\]]+)\]: (.*)$")
 # Lines that end a lane's tick (ops/release-pipeline.py run_lane). Anything else the
 # lane prints, such as a failed loop filing after BLOCKED, never replaces its outcome.
@@ -430,7 +431,12 @@ PR_FIELDS = "number,headRefOid,headRefName,updatedAt,isDraft,mergeable,comments,
 
 def collect_pr(repo, number, config):
     pr = json.loads(command(["gh", "pr", "view", str(number), "--repo", repo, "--json", PR_FIELDS], config))
-    # gh pr's JSON fields omit queue membership; query the provider's queue entry.
+    pr["repo"] = repo
+    # gh pr's JSON fields omit queue membership. Only a repository that uses
+    # GitHub's merge queue can have an entry, so others skip the query.
+    pr["mergeQueueEntry"] = None
+    if repo not in config.get("github_merge_queue_repositories", []):
+        return pr
     owner, name = repo.split("/")
     query = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){mergeQueueEntry{id}}}}"
     queued = json.loads(command(["gh", "api", "graphql", "-f", "query=" + query,
@@ -439,16 +445,39 @@ def collect_pr(repo, number, config):
     if queued.get("errors"):
         raise RuntimeError(json.dumps(queued["errors"]))
     pr["mergeQueueEntry"] = queued["data"]["repository"]["pullRequest"]["mergeQueueEntry"]
-    pr["repo"] = repo
     return pr
 
 
-def collect(root, config):
+def settled(pr):
+    """No pending check or mergeability: nothing will change without bumping updated_at."""
+    return pr.get("mergeable") != "UNKNOWN" and not any(
+        c.get("status", "COMPLETED") != "COMPLETED" or c.get("state") in {"PENDING", "EXPECTED"}
+        for c in pr.get("statusCheckRollup") or [])
+
+
+def rate_limit_reason(config):
+    try:
+        resources = json.loads(command(["gh", "api", "rate_limit"], config))["resources"]
+    except Exception as exc:
+        return f"GitHub API rate limit exhausted; reset time unreadable: {exc}"
+    spent = {k: r for k, r in resources.items() if k in {"core", "graphql"} and r["remaining"] == 0}
+    return "GitHub API rate limit exhausted: " + "; ".join(
+        f"{k} {r['used']}/{r['limit']} resets {stamp(r['reset'])}"
+        for k, r in sorted((spent or resources).items()) if k in {"core", "graphql"})
+
+
+def collect(root, config, now=None):
+    now = time.time() if now is None else now
     facts = {"jobs": [], "prs": [], "logs": [], "branches": [], "errors": [], "queue": ""}
-    missing = {}
+    missing, limited = {}, {}
     def error(subject, exc, evidence):
         blinds = EVIDENCE[evidence]
-        if isinstance(exc, MissingTool):
+        if RATE_LIMIT.search(str(exc)):
+            # One exhausted allowance is one scan-level finding, not one per PR.
+            entry = limited.setdefault("github", {"kind": "rate_limited", "source": "github",
+                                                  "reason": rate_limit_reason(config), "blinds": set()})
+            entry["blinds"] |= blinds
+        elif isinstance(exc, MissingTool):
             # One absent tool is one environment defect, however many sources needed it.
             entry = missing.setdefault(exc.tool, {"kind": "environment", "source": exc.tool,
                                                   "reason": str(exc), "blinds": set()})
@@ -478,15 +507,39 @@ def collect(root, config):
             facts["queue"] = queue.read_text()
         except OSError as exc:
             error("merge queue", exc, "merge_queue")
+    # Each PR's GraphQL snapshot is reused while the REST listing shows the same
+    # head and updated_at, bounded by an age limit for changes that bump neither.
+    cache_path = path_at(root, config["paths"]["pr_cache"])
+    try:
+        cache = json.loads(cache_path.read_text())
+    except (OSError, ValueError):
+        cache = {}
+    t = config["thresholds"]
     for repo in config["repositories"]:
         try:
             pages = json.loads(command(["gh", "api", "--paginate", "--slurp", f"repos/{repo}/pulls?state=open&per_page=100"], config))
+            # Closed PRs leave the cache; an unlisted repository keeps its entries.
+            cache = {k: v for k, v in cache.items() if not k.startswith(repo + "#")} | {
+                f"{repo}#{pr['number']}": cache[f"{repo}#{pr['number']}"]
+                for page in pages for pr in page if f"{repo}#{pr['number']}" in cache}
             for page in pages:
                 for pr in page:
+                    key, version = f"{repo}#{pr['number']}", [pr["head"]["sha"], pr["updated_at"]]
+                    entry = cache.get(key)
+                    if entry and (limited or (entry["version"] == version and now - entry["collected_at"] <
+                                              t["pr_cache_seconds" if settled(entry["pr"]) else "pr_cache_pending_seconds"])):
+                        facts["prs"].append(entry["pr"])  # Rate-limited: keep the previous state.
+                        continue
+                    if limited:
+                        continue  # Never collected; the rate_limited finding blinds its kinds.
                     try:
-                        facts["prs"].append(collect_pr(repo, pr["number"], config))
+                        cache[key] = {"version": version, "collected_at": now,
+                                      "pr": collect_pr(repo, pr["number"], config)}
+                        facts["prs"].append(cache[key]["pr"])
                     except Exception as exc:
                         error(f"{repo}#{pr['number']}", exc, "prs")
+                        if limited and entry:
+                            facts["prs"].append(entry["pr"])
         except Exception as exc:
             error(repo + " PRs", exc, "prs")
         try:
@@ -509,7 +562,14 @@ def collect(root, config):
                                   "tail": tail(log, config["thresholds"]["log_tail_bytes"])})
         except OSError as exc:
             error(str(log), exc, kind + "_log")
-    facts["errors"].extend({**e, "blinds": sorted(e["blinds"])} for e in missing.values())
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        staged = cache_path.with_suffix(".tmp")
+        staged.write_text(json.dumps(cache, separators=(",", ":")))
+        staged.replace(cache_path)
+    except OSError:
+        pass  # A lost cache only costs the next scan a full collection.
+    facts["errors"].extend({**e, "blinds": sorted(e["blinds"])} for e in [*missing.values(), *limited.values()])
     # A successful restarted job supersedes the killed attempt's expected exit.
     recovered = {j.get("root_id") for j in facts["jobs"] if j.get("restart_count", 0) and j.get("exit_code") == 0}
     for job in facts["jobs"]:
@@ -706,11 +766,14 @@ def scan(root, config, config_path=None):
                             "previous_status": prior_runs.get("scan", {}).get("status")})
             effects = Effects(root, config)
             effects.config_path = Path(config_path or SOURCE / "ops/config/job-watchdog.json").resolve()
-            facts = collect(root, config)
+            facts = collect(root, config, now)
             found = reconcile(root, config, detect(facts, config, now), effects, now)
             append(ledger, {"key": "scan", "status": "completed", "at": stamp(),
                             "findings": len(found), "collection_errors": len(facts["errors"])})
             print(digest(root, config))
             return 1 if facts["errors"] or any(f["kind"] in {"action_error", "record_error"} for f in found) else 0
     except BlockingIOError:
-        return 0  # Another scan owns the entire interval's effects.
+        # Another scan owns the entire interval's effects; say so instead of vanishing.
+        append(path_at(root, config["paths"]["scan_ledger"]),
+               {"key": "scan_skipped", "status": "skipped", "at": stamp(), "reason": "another scan holds the scan lock"})
+        return 0
