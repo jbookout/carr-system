@@ -127,7 +127,7 @@ def main() -> int:
           temporary.get("same_run_teardown_required") is True
           and temporary.get("cleanup_failure_is_run_failure") is True
           and 0 < temporary.get("max_lifetime_minutes", 0) <= 120)
-    release_abandon = (REPO / "ops" / "release-abandon-selftest.py").read_text(
+    release_abandon = (REPO / "ops" / "release-abandon-local-pg-gate.py").read_text(
         encoding="utf-8"
     )
     check("the release-abandon fixture never falls back to a metered Neon branch",

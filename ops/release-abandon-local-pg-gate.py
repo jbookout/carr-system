@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""release-abandon-selftest.py — a release can be ended without shipping, and it
+# ci: db-gate
+# doctrine: engineering-workflow-sop
+"""release-abandon-local-pg-gate.py — a release can be ended without shipping, and it
 has to say why. Fixtures written before the verb (rule e65efc68).
 
 WHAT PROMPTED IT. The first real releases went through ops.release on 2026-08-16
@@ -23,12 +25,10 @@ to erase one that shipped. A row that reached approved-and-deployed is history;
 letting it be marked abandoned would let a deploy be written out of the record
 after the fact, which is the opposite of what a release ledger is for.
 
-WHERE THESE RUN. They need a Postgres carrying the schema and nothing more —
-NOT Neon specifically. CI supplies a disposable loopback PostgreSQL service via
-CARR_CI_DATABASE_URL admits this fixture, which owns a separate local cluster
-so roles cannot leak into later CI classes. A developer push without that
-explicit fixture DSN reports the database cases as not run. No metered Neon
-branch substitutes for the disposable fixture.
+WHERE THESE RUN. CI's migration class supplies a disposable loopback PostgreSQL
+admission DSN through DATABASE_URL. This proof owns separate local clusters so
+roles cannot leak into other checks. Missing admission fails the proof. No
+metered Neon branch substitutes for the disposable fixture.
 """
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ REPO = Path(__file__).resolve().parent.parent
 # be imported normally.
 _spec = importlib.util.spec_from_file_location("db_tap", REPO / "tools" / "db-tap.py")
 if _spec is None or _spec.loader is None:
-    sys.exit("release-abandon-selftest: could not load tools/db-tap.py")
+    sys.exit("release-abandon-local-pg-gate: could not load tools/db-tap.py")
 db_tap = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(db_tap)
 ABANDON_DB = "abandon_check"
@@ -150,7 +150,7 @@ def provision_authority_principal(dsn: str) -> None:
 def isolated_ci_database(base_dsn: str) -> Iterator[str]:
     """Own a fresh cluster: databases alone do not isolate PostgreSQL roles.
 
-    The gate fixture applies pending role migrations before the migration class.
+    The fixture applies pending role migrations in its private cluster.
     A sibling database leaves those cluster-global roles behind when dropped,
     causing a later role-creation migration to refuse the unknown login.
     Keep the CI loopback admission check, but never connect to its shared server.
@@ -301,13 +301,13 @@ def _cases(dsn: str) -> None:
         dsn, "-c",
         "update ops.release "
         "set verifier_actor='independent-selftest', "
-        "    verifier_evidence_ref='ops/release-abandon-selftest.py#verification', "
+        "    verifier_evidence_ref='ops/release-abandon-local-pg-gate.py#verification', "
         "    rollback_ready=true, "
-        "    rollback_plan_ref='ops/release-abandon-selftest.py#rollback' "
+        "    rollback_plan_ref='ops/release-abandon-local-pg-gate.py#rollback' "
         "where release_key='rel-abandon-b'; "
         "update ops.release "
         "set verifier_actor='independent-selftest', "
-        "    verifier_evidence_ref='ops/release-abandon-selftest.py#verification' "
+        "    verifier_evidence_ref='ops/release-abandon-local-pg-gate.py#verification' "
         "where release_key='rel-shipped'")
     check("0b. promoted fixtures carry verifier and rollback evidence",
           ready.returncode == 0, (ready.stderr or ready.stdout).strip()[:160])
@@ -515,27 +515,28 @@ def legacy_approval_receipt_refusal(dsn: str) -> None:
 def main() -> int:
     # CI's throwaway Postgres first: it is cheaper, faster, and means these
     # fixtures actually run on the surface that gates the merge.
-    ci_dsn = os.environ.get("CARR_CI_DATABASE_URL")
+    ci_dsn = os.environ.get("DATABASE_URL")
     if ci_dsn:
-        print("release-abandon-selftest: using an owned disposable PostgreSQL cluster")
+        print("release-abandon-local-pg-gate: using an owned disposable PostgreSQL cluster")
         try:
             with isolated_ci_database(ci_dsn) as legacy_dsn:
                 legacy_approval_receipt_refusal(legacy_dsn)
             with isolated_ci_database(ci_dsn) as isolated_dsn:
                 run_cases(isolated_dsn)
         except Exception:
-            print("release-abandon-selftest: disposable PostgreSQL fixture unavailable",
+            print("release-abandon-local-pg-gate: disposable PostgreSQL fixture unavailable",
                   file=sys.stderr)
             return 1
-        print(f"\nrelease-abandon-selftest: {PASSED}/{PASSED + len(FAILED)} passed")
+        print(f"\nrelease-abandon-local-pg-gate: {PASSED}/{PASSED + len(FAILED)} passed")
         if FAILED:
             print("FAILURES: " + ", ".join(FAILED))
             return 1
+        print("db-gate-proof: release abandonment and immutable legacy receipts exercised")
         return 0
 
-    print("release-abandon-selftest: database cases NOT RUN — "
-          "CARR_CI_DATABASE_URL is absent; metered-provider fallback is disabled")
-    return 0
+    print("release-abandon-local-pg-gate: database fixture required — "
+          "DATABASE_URL is absent; metered-provider fallback is disabled")
+    return 1
 
 
 if __name__ == "__main__":
