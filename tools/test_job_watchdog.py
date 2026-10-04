@@ -25,6 +25,95 @@ def tearDownModule():
 
 
 class ReplayTests(unittest.TestCase):
+    def test_ci_replacement_attempts_restore_ready_without_false_red(self):
+        import job_watchdog as w
+        config = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        head = "a" * 40
+        def check(name, conclusion, minute):
+            return {"__typename": "CheckRun", "name": name, "workflowName": "CI",
+                    "provider": "github-actions", "status": "COMPLETED",
+                    "conclusion": conclusion, "startedAt": f"2026-01-01T00:{minute}:00Z"}
+        checks = [check("gates", "CANCELLED", "01"), check("strict", "FAILURE", "01"),
+                  check("gates", "SUCCESS", "02"), check("strict", "SUCCESS", "02")]
+        pr = {"repo": "jbookout/carr-system", "number": 1, "headRefOid": head,
+              "updatedAt": "2026-01-01T00:00:00Z", "mergeable": "MERGEABLE",
+              "comments": [{"body": "REVIEW: APPROVED\nReviewed-SHA: " + head,
+                            "createdAt": "2026-01-01T00:03:00Z"}]}
+        for order in (checks, list(reversed(checks))):
+            with self.subTest(order=order):
+                self.assertTrue(w.green(order))
+                found = w.detect({"prs": [{**pr, "statusCheckRollup": order}]}, config, 2000000000)
+                self.assertEqual([f["kind"] for f in found], ["pr_ready"])
+
+    def test_ci_current_pending_or_failed_attempt_does_not_inherit_success(self):
+        import job_watchdog as w
+        config = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        old = {"__typename": "CheckRun", "provider": "github-actions", "workflowName": "CI",
+               "name": "strict", "startedAt": "2026-01-01T00:01:00Z",
+               "completedAt": "2026-01-01T00:05:00Z", "status": "COMPLETED", "conclusion": "SUCCESS"}
+        pr = {"repo": "jbookout/carr-system", "number": 1, "headRefOid": "a" * 40,
+              "updatedAt": "2026-01-01T00:00:00Z"}
+        for status, conclusion in (("IN_PROGRESS", None), ("COMPLETED", "FAILURE")):
+            with self.subTest(status=status):
+                checks = [old, {**old, "startedAt": "2026-01-01T00:02:00Z",
+                                "completedAt": None, "status": status, "conclusion": conclusion}]
+                self.assertFalse(w.green(checks))
+                kinds = {f["kind"] for f in w.detect({"prs": [{**pr, "statusCheckRollup": checks}]}, config, 2000000000)}
+                self.assertEqual("pr_ci_red" in kinds, conclusion == "FAILURE")
+
+    def test_ci_identity_keeps_providers_workflows_and_context_types_separate(self):
+        import job_watchdog as w
+        old = {"__typename": "CheckRun", "provider": "app-one", "workflowName": "CI",
+               "name": "strict", "startedAt": "2026-01-01T00:01:00Z",
+               "status": "COMPLETED", "conclusion": "FAILURE"}
+        for identity in ({"provider": "app-two"}, {"workflowName": "DB"},
+                         {"__typename": "StatusContext", "context": "strict", "state": "SUCCESS"}):
+            with self.subTest(identity=identity):
+                checks = [old, {**old, **identity, "startedAt": "2026-01-01T00:02:00Z", "conclusion": "SUCCESS"}]
+                self.assertFalse(w.green(checks))
+
+    def test_ci_gh_export_resolves_actions_reruns_and_status_contexts(self):
+        import job_watchdog as w
+        actions = {"__typename": "CheckRun", "workflowName": "CI", "name": "strict",
+                   "status": "COMPLETED", "conclusion": "FAILURE", "startedAt": "2026-01-01T00:01:00Z",
+                   "detailsUrl": "https://github.com/example/repo/actions/runs/100/job/101"}
+        status = {"__typename": "StatusContext", "context": "lint", "state": "ERROR",
+                  "startedAt": "2026-01-01T00:01:00Z", "targetUrl": "https://checks.example/lint/100"}
+        checks = [actions, {**actions, "conclusion": "SUCCESS", "startedAt": "2026-01-01T00:02:00Z",
+                            "detailsUrl": "https://github.com/example/repo/actions/runs/200/job/201"},
+                  status, {**status, "state": "SUCCESS", "startedAt": "2026-01-01T00:02:00Z",
+                           "targetUrl": "https://checks.example/lint/200"}]
+        self.assertTrue(w.green(checks))
+
+    def test_ci_ambiguous_attempts_stay_fail_closed_and_ids_break_time_ties(self):
+        import job_watchdog as w
+        old = {"__typename": "CheckRun", "provider": "app-one", "workflowName": "CI",
+               "name": "strict", "status": "COMPLETED", "conclusion": "FAILURE"}
+        self.assertFalse(w.green([old, {**old, "conclusion": "SUCCESS"}]))
+        self.assertFalse(w.green([]))
+        old = {**old, "startedAt": "2026-01-01T00:01:00Z", "databaseId": 1}
+        self.assertTrue(w.green([{**old, "databaseId": 2, "conclusion": "SUCCESS"}, old]))
+
+    def test_collected_ci_keeps_provider_workflow_and_head_bindings(self):
+        import job_watchdog as w
+        from unittest.mock import patch
+        head = "a" * 40
+        raw = {"__typename": "CheckRun", "name": "strict", "databaseId": 2,
+               "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "2026-01-01T00:02:00Z",
+               "checkSuite": {"app": {"id": "app-one"},
+                              "workflowRun": {"workflow": {"id": "workflow-one"}}}}
+        response = {"data": {"repository": {"pullRequest": {"mergeQueueEntry": None,
+                    "commits": {"nodes": [{"commit": {"oid": head, "statusCheckRollup": {
+                        "contexts": {"nodes": [raw], "pageInfo": {"hasNextPage": False}}}}}]}}}}}
+        with patch.object(w, "command", side_effect=[json.dumps({"headRefOid": head}), json.dumps(response)]) as command:
+            pr = w.collect_pr("example/repo", 1, w.load_config(ROOT / "ops/config/job-watchdog.json"))
+            self.assertEqual(pr["statusCheckRollup"], [raw])
+            self.assertIn("checkSuite", command.call_args.args[0][4])
+        response["data"]["repository"]["pullRequest"]["commits"]["nodes"][0]["commit"]["oid"] = "b" * 40
+        with patch.object(w, "command", side_effect=[json.dumps({"headRefOid": head}), json.dumps(response)]):
+            with self.assertRaisesRegex(RuntimeError, "head changed"):
+                w.collect_pr("example/repo", 1, w.load_config(ROOT / "ops/config/job-watchdog.json"))
+
     def test_fixtures_have_only_synthetic_name_vocabulary(self):
         # No record-layer access or client-name literals. Unknown name-like
         # words form the denylist relative to this closed synthetic vocabulary.

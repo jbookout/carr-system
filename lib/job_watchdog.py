@@ -14,6 +14,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 SOURCE = Path(__file__).resolve().parents[1]
 
@@ -55,7 +56,51 @@ def reviewed_head(comment):
     return match.group(1) if match else (comment.get("commit") or {}).get("oid")
 
 
+def current_check_attempts(checks):
+    """Resolve attempts per provider/workflow/context; retain ambiguous evidence."""
+    groups = {}
+    for index, check in enumerate(checks):
+        kind = check.get("__typename") or ("StatusContext" if "state" in check else "CheckRun")
+        suite = check.get("checkSuite") or {}
+        workflow = ((suite.get("workflowRun") or {}).get("workflow") or {})
+        url = check.get("detailsUrl") or check.get("targetUrl") or ""
+        parsed = urlsplit(url)
+        provider = ((suite.get("app") or {}).get("id") or check.get("provider") or
+                    (check.get("creator") or {}).get("login") or parsed.netloc)
+        context = check.get("name") if kind == "CheckRun" else check.get("context")
+        identity = (kind, provider, workflow.get("id") or check.get("workflowName"), context)
+        # Missing identity cannot prove that one check supersedes another.
+        key = identity if provider and context else ("unidentified", index)
+        groups.setdefault(key, []).append(check)
+    current = []
+    for attempts in groups.values():
+        def run_id(check):
+            value = check.get("databaseId")
+            if isinstance(value, int) and value > 0:
+                return value
+            match = re.search(r"/actions/runs/\d+/(?:job|jobs)/(\d+)(?:[/?#]|$)", check.get("detailsUrl") or "")
+            return int(match.group(1)) if match else None
+
+        ids = [run_id(c) for c in attempts]
+        if all(value is not None for value in ids):
+            ranks = ids
+        else:
+            try:
+                ranks = [epoch(c.get("startedAt") or c.get("createdAt")) for c in attempts]
+            except (AttributeError, TypeError, ValueError):
+                # No trustworthy ordering: every attempt must pass.
+                current.extend(attempts)
+                continue
+        latest = max(ranks)
+        current.extend(c for c, rank in zip(attempts, ranks) if rank == latest)
+    return current
+
+
 def green(checks):
+    return _green_current(current_check_attempts(checks))
+
+
+def _green_current(checks):
     if not checks:
         return False
     return all((c.get("conclusion") in {"SUCCESS", "SKIPPED", "NEUTRAL"}
@@ -110,7 +155,7 @@ def detect(facts, config, now):
                            and "exit_code" not in j and j.get("alive") for j in jobs)
         if latest and latest[2] and now - max(head_time, latest[0]) >= t["review_idle_seconds"] and not active_fixer:
             found.append(finding("pr_blocked_review", subject, latest[1].get("body", "CHANGES REQUESTED"), config, **fields))
-        checks = pr.get("statusCheckRollup") or []
+        checks = current_check_attempts(pr.get("statusCheckRollup") or [])
         if any(c.get("conclusion") in {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"}
                or c.get("state") in {"FAILURE", "ERROR"} for c in checks):
             found.append(finding("pr_ci_red", subject, "hosted CI failed on current head", config, **fields))
@@ -118,7 +163,7 @@ def detect(facts, config, now):
             found.append(finding("pr_conflict", subject, "current head has merge conflicts", config, **fields))
         if pr.get("isDraft") and now - epoch(pr["updatedAt"]) >= t["draft_idle_seconds"]:
             found.append(finding("pr_draft_idle", subject, "draft idle for configured limit", config, **fields))
-        if latest and not latest[2] and green(checks) and not pr.get("isDraft") and pr.get("mergeable") == "MERGEABLE" and (repo, str(number), head) not in queue and not pr.get("mergeQueueEntry"):
+        if latest and not latest[2] and _green_current(checks) and not pr.get("isDraft") and pr.get("mergeable") == "MERGEABLE" and (repo, str(number), head) not in queue and not pr.get("mergeQueueEntry"):
             found.append(finding("pr_ready", subject, "approved current head with green CI outside merge queue", config, **fields))
     for log in facts.get("logs", []):
         kind = "queue_error" if log["type"] == "queue" else "pipeline_blocked"
@@ -373,20 +418,41 @@ def reconcile(root, config, found, effects, now, complete=True):
     return list(current.values())
 
 
-PR_FIELDS = "number,headRefOid,headRefName,updatedAt,isDraft,mergeable,comments,reviews,commits,statusCheckRollup,mergeStateStatus"
+PR_FIELDS = "number,headRefOid,headRefName,updatedAt,isDraft,mergeable,comments,reviews,commits,mergeStateStatus"
 
 
 def collect_pr(repo, number, config):
     pr = json.loads(command(["gh", "pr", "view", str(number), "--repo", repo, "--json", PR_FIELDS], config))
-    # gh pr's JSON fields omit queue membership; query the provider's queue entry.
+    # gh's exporter omits check providers and workflow IDs. Read those with
+    # queue membership, bound to the same head, so equal names cannot collide.
     owner, name = repo.split("/")
-    query = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){mergeQueueEntry{id}}}}"
+    query = """query($owner:String!,$name:String!,$number:Int!){
+      repository(owner:$owner,name:$name){pullRequest(number:$number){
+        mergeQueueEntry{id}
+        commits(last:1){nodes{commit{oid statusCheckRollup{contexts(first:100){
+          pageInfo{hasNextPage}
+          nodes{__typename
+            ... on CheckRun{databaseId name status conclusion startedAt completedAt detailsUrl
+              checkSuite{app{id} workflowRun{workflow{id}}}}
+            ... on StatusContext{context state createdAt targetUrl creator{login}}
+          }
+        }}}}}
+      }}
+    }"""
     queued = json.loads(command(["gh", "api", "graphql", "-f", "query=" + query,
                                 "-f", "owner=" + owner, "-f", "name=" + name,
                                 "-F", "number=" + str(number)], config))
     if queued.get("errors"):
         raise RuntimeError(json.dumps(queued["errors"]))
-    pr["mergeQueueEntry"] = queued["data"]["repository"]["pullRequest"]["mergeQueueEntry"]
+    observed = queued["data"]["repository"]["pullRequest"]
+    commit = observed["commits"]["nodes"][0]["commit"]
+    if commit["oid"] != pr["headRefOid"]:
+        raise RuntimeError("PR head changed while collecting CI evidence")
+    contexts = (commit.get("statusCheckRollup") or {}).get("contexts") or {"nodes": []}
+    if (contexts.get("pageInfo") or {}).get("hasNextPage"):
+        raise RuntimeError("CI evidence exceeds the bounded check collection")
+    pr["statusCheckRollup"] = contexts["nodes"]
+    pr["mergeQueueEntry"] = observed["mergeQueueEntry"]
     pr["repo"] = repo
     return pr
 
