@@ -2139,7 +2139,10 @@ class Pipeline:
         wt = self.store.release_worktree("app", sha)
         self.add_worktree("app-worktree", repo_dir, wt, sha)
         self.step("app-npm-ci", ["npm", "ci", "--no-audit", "--no-fund"], wt, timeout=1800)
-        self.step("app-release", ["npm", "run", "release:production"], wt, timeout=3600,
+        # Keep package hooks/tests outside the deploy environment. Invoke the
+        # publisher directly so npm pre/post-release hooks cannot inherit it.
+        self.step("app-build", ["node", "scripts/prepare-release.mjs"], wt, timeout=3600)
+        self.step("app-release", ["node", "scripts/release-production.mjs"], wt, timeout=900,
                   env=self.deploy_env())
         if self.dry_run:
             self.out(f"  [dry-run] GET {lane_cfg['live_release_url']} and require source_commit == {sha}")

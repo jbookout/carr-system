@@ -58,6 +58,21 @@ def git(cwd: Path, *args: str) -> str:
                           capture_output=True, text=True).stdout.strip()
 
 
+class WorkflowCredentialDefaults(unittest.TestCase):
+    def test_new_controller_jobs_inherit_only_read_permissions(self):
+        def check(text):
+            default = text.split("\njobs:", 1)[0]
+            self.assertRegex(default, r"(?m)^permissions:\n  contents: read$")
+            self.assertNotRegex(default, r"(?m)^  [a-z-]+: write$")
+        for name in ("automerge-pilot.yml", "source-merge-controller.yml"):
+            text = (HERE.parent / ".github/workflows" / name).read_text()
+            check(text)
+            with self.assertRaises(AssertionError):
+                check(text.replace("permissions:\n  contents: read", "permissions:\n  contents: write", 1))
+            with self.assertRaises(AssertionError):
+                check(text.replace("permissions:\n  contents: read\n", "", 1))
+
+
 class FakeRunner:
     """Answers by step name (the log file's name), records everything."""
 
@@ -2161,17 +2176,28 @@ class AppLane(Base):
 
         def run(argv, **kw):
             res = orig(argv, **kw)
-            if argv[:3] == ["npm", "run", "release:production"]:
+            if argv[:2] == ["node", "scripts/release-production.mjs"]:
                 live["source_commit"] = sha
             return res
         runner.run = run  # type: ignore[method-assign]
         self.assertEqual(pipe.tick(["app"]), 0)
-        self.assertEqual(runner.names()[:4], ["wrangler-auth", "app-worktree", "app-npm-ci", "app-release"])
+        self.assertEqual(runner.names()[:5], ["wrangler-auth", "app-worktree", "app-npm-ci", "app-build", "app-release"])
         self.assertEqual(self.fx.records()[-1]["status"], "shipped")
         # The slice marker follows Worker releases only: the app lane records
         # no ops.release row for membership to attach to.
         self.assertEqual(self.fx.slice_marks, [])
         self.assertNotIn("slice_marker", self.fx.records()[-1])
+
+    def test_failed_credential_free_build_never_reaches_publication(self):
+        self.fx.commit({"src/worker.js": "1"})
+        runner = FakeRunner(fail_at="app-build")
+        pipe = self.fx.pipeline(runner, cfg=self.cfg())
+        pipe.http = lambda _u: {"source_commit": self.fx.base, "environment": "production"}
+        self.assertEqual(pipe.tick(["app"]), 1)
+        self.assertIn("app-build", runner.names())
+        self.assertNotIn("app-release", runner.names())
+        self.assertNotIn("CLOUDFLARE_API_TOKEN", runner.envs["app-build"])
+        self.assertEqual(self.fx.records()[-1]["step"], "app-build")
 
     def test_live_readback_retries_stale_response_and_records_each_payload(self):
         pipe = self.fx.pipeline(FakeRunner(), cfg=self.cfg())
@@ -2978,13 +3004,18 @@ class DeployCredential(unittest.TestCase):
 
         def run(argv, **kw):
             res = orig(argv, **kw)
-            if argv[:3] == ["npm", "run", "release:production"]:
+            if argv[:2] == ["node", "scripts/release-production.mjs"]:
                 live["source_commit"] = sha
             return res
         runner.run = run  # type: ignore[method-assign]
         self.assertEqual(pipe.tick(["app"]), 0)
         self.assertEqual(runner.envs["app-release"].get("CLOUDFLARE_API_TOKEN"), CF_TOKEN)
         self.assertNotIn("CLOUDFLARE_API_TOKEN", runner.envs["app-npm-ci"])
+        self.assertNotIn("CLOUDFLARE_API_TOKEN", runner.envs["app-build"])
+        self.assertEqual(runner.calls[runner.names().index("app-build")][1],
+                         ["node", "scripts/prepare-release.mjs"])
+        self.assertEqual(runner.calls[runner.names().index("app-release")][1],
+                         ["node", "scripts/release-production.mjs"])
         self.assert_never_echoed()
 
         (self.cred / "tokens.env").write_text("")
@@ -3052,7 +3083,7 @@ class DeployCredential(unittest.TestCase):
                     original_run = runner.run
                     def run(argv, **kw):
                         result = original_run(argv, **kw)
-                        if argv[:3] == ["npm", "run", "release:production"]:
+                        if argv[:2] == ["node", "scripts/release-production.mjs"]:
                             live["sha"] = sha
                         return result
                     runner.run = run
@@ -3104,7 +3135,7 @@ class DeployCredential(unittest.TestCase):
         def run(argv, **kw):
             result = original_run(argv, **kw)
             live["worker"] = worker_live["sha"]
-            if argv[:3] == ["npm", "run", "release:production"]:
+            if argv[:2] == ["node", "scripts/release-production.mjs"]:
                 live["app"] = sha
             return result
         runner.run = run
