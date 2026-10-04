@@ -37,5 +37,5 @@ test('Codex session read has its own sealed successor', () => {
   assert.match(sql, /scac-mutation-registry\.v97/);
   const runtime = read('mcp-server/src/scac-mutation-registry.v97.generated.js');
   assert.match(runtime, /mcp-tool:list-my-codex-sessions/);
-  assert.match(read('mcp-server/src/mutation-registry.js'), /scac-mutation-registry\.v102\.generated\.js/);
+  assert.match(read('mcp-server/src/mutation-registry.js'), /scac-mutation-registry\.v105\.generated\.js/);
 });

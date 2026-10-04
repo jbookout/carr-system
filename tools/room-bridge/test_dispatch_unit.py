@@ -247,7 +247,7 @@ def main() -> int:
             assert lis.lines, "nothing reached the desk socket"
             frame = json.loads(lis.lines[0])
             assert frame["type"] == "user", frame
-            assert frame["message"]["content"] == "count the open loops", frame
+            assert frame["message"]["content"] == desks.DESK_INSTRUCTION + "\n\ncount the open loops", frame
             assert frame["origin"]["kind"] == "peer", frame
             assert frame["origin"]["from"].startswith("hermes:"), frame
         finally:
@@ -267,7 +267,7 @@ def main() -> int:
         "argv=sys.argv[1:]\n"
         f"open({str(argv_log)!r},'a').write(json.dumps(argv)+chr(10))\n"
         "resuming = 'resume' in argv[:2]\n"
-        "tid = argv[argv.index('-o')+2] if resuming else 'thread-first-0001'\n"
+        "tid = argv[-2] if resuming else 'thread-first-0001'\n"
         "print(json.dumps({'type':'thread.started','thread_id':tid}))\n"
         "out=None\n"
         "for i,a in enumerate(argv):\n"
@@ -304,7 +304,7 @@ def main() -> int:
         assert "-m" in argv and argv[argv.index("-m") + 1] == "gpt-5.1-codex-mini", argv
         assert "-c" in argv and argv[argv.index("-c") + 1] == "model_reasoning_effort=low", argv
         assert "-C" in argv and argv[argv.index("-C") + 1] == str(root), argv
-        assert argv[-1] == "rename the variable", argv
+        assert argv[-1] == desks.DESK_INSTRUCTION + "\n\nrename the variable", argv
 
     check("a task reaches codex headless at the desk's model and directory", dispatch_to_codex)
 

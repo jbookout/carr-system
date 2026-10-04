@@ -484,8 +484,12 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0767_doc_whats_new_scac_successor.sql",
     ),
     (
-        "0768_dot_database_design.sql",
-        "0769_dot_database_design_scac_successor.sql",
+        "0785_rule_teach_supersession.sql",
+        "0786_find_rule_scac_successor.sql",
+    ),
+    (
+        "0790_dot_database_design.sql",
+        "0791_dot_database_design_scac_successor.sql",
     ),
 )
 
@@ -615,8 +619,12 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0767_doc_whats_new_scac_successor.sql",
     ),
     (
-        "0768_dot_database_design.sql",
-        "0769_dot_database_design_scac_successor.sql",
+        "0785_rule_teach_supersession.sql",
+        "0786_find_rule_scac_successor.sql",
+    ),
+    (
+        "0790_dot_database_design.sql",
+        "0791_dot_database_design_scac_successor.sql",
     ),
 )
 
