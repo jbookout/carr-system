@@ -800,6 +800,18 @@ class EvidenceChain(unittest.TestCase):
                 del r[field]
                 self.assertTrue(self.errors(r))
 
+    def test_malformed_claim_prerequisites_return_findings(self):
+        mutations = [lambda r: r.update(rung=[]),
+                     lambda r: r["grader"].update(validation=[]),
+                     lambda r: r["cases"].update(sources=[{}]),
+                     lambda r: r["stage_results"][0].update(dimension_ids=[{}]),
+                     lambda r: r["verdict"].update(decision=[])]
+        for n, mutate in enumerate(mutations):
+            with self.subTest(shape=n):
+                r = copy.deepcopy(self.r)
+                mutate(r)
+                self.assertTrue(self.errors(r))
+
     def test_malformed_scorer_paths_return_findings(self):
         for value in ([], {}, None, 4):
             with self.subTest(path=value):

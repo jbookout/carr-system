@@ -435,11 +435,14 @@ def _offline_suite_errors(block: Any, root: Path) -> list[str]:
 # ------------------------------------------------------------------ evidence
 def validate_receipt(r: Any, surface: str, root: Path = ROOT, base: str | None = None) -> list[str]:
     """Every refusal for one receipt: its claim, then the evidence that has to reproduce it."""
-    errs = claim_errors(r, surface, root)
-    if (isinstance(r, dict) and not (REQUIRED - set(r))
-            and isinstance(r.get("dimensions"), list) and isinstance(r.get("grader"), dict)):
-        errs += evidence_errors(r, surface, root, base)
-    return errs
+    try:
+        errs = claim_errors(r, surface, root)
+    except (TypeError, KeyError, AttributeError) as exc:
+        # Untrusted JSON can carry containers where claim fields require scalars.
+        return [f"receipt shape invalid: {type(exc).__name__}: {exc}"]
+    if errs:
+        return errs
+    return evidence_errors(r, surface, root, base)
 
 
 def _repo_file(root: Path, rel: Any, label: str, errs: list[str], under: str | None = None) -> Path | None:
