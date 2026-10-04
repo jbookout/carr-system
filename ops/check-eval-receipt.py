@@ -61,12 +61,16 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
+import io
+import shutil
+import tarfile
+import tempfile
 import json
 import os
 import re
 import subprocess
 import sys
+import types
 from pathlib import Path
 from typing import Any
 
@@ -432,7 +436,8 @@ def _offline_suite_errors(block: Any, root: Path) -> list[str]:
 def validate_receipt(r: Any, surface: str, root: Path = ROOT, base: str | None = None) -> list[str]:
     """Every refusal for one receipt: its claim, then the evidence that has to reproduce it."""
     errs = claim_errors(r, surface, root)
-    if isinstance(r, dict) and "evidence" in r:
+    if (isinstance(r, dict) and not (REQUIRED - set(r))
+            and isinstance(r.get("dimensions"), list) and isinstance(r.get("grader"), dict)):
         errs += evidence_errors(r, surface, root, base)
     return errs
 
@@ -487,19 +492,22 @@ def _expectations_version_errors(root: Path, rel: str, version: str, data: bytes
     """Labels are versioned: the same version at the merge base must be the same bytes."""
     if base is None:
         return []
-    rc, _ = git(root, "cat-file", "-e", f"{base}:{rel}")
+    # A version belongs to the surface, independent of its filename.
+    home = "/".join(rel.split("/")[:2]) + "/"
+    rc, listing = git(root, "ls-tree", "-r", "--name-only", base, "--", home)
     if rc != 0:
-        return []
-    proc = subprocess.run(["git", "-C", str(root), "show", f"{base}:{rel}"], capture_output=True)
-    if proc.returncode != 0:
-        return [f"evidence.expectations: cannot read {rel} at the merge base {base}"]
-    try:
-        base_version = json.loads(proc.stdout).get("version")
-    except (json.JSONDecodeError, AttributeError):
-        return []
-    if base_version == version and proc.stdout != data:
-        return [f"evidence.expectations: {rel} changed its labels without a new version (still {version!r}); "
-                f"relabelling is a new expectations version, never an edit in place"]
+        return [f"evidence.expectations: cannot list labels at the merge base {base}"]
+    for old_rel in listing.splitlines():
+        proc = subprocess.run(["git", "-C", str(root), "show", f"{base}:{old_rel}"], capture_output=True)
+        if proc.returncode != 0:
+            return [f"evidence.expectations: cannot read {old_rel} at the merge base {base}"]
+        try:
+            doc = json.loads(proc.stdout)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if isinstance(doc, dict) and "cases" in doc and doc.get("version") == version and proc.stdout != data:
+            return [f"evidence.expectations: {rel} changed its labels without a new version (still {version!r}); "
+                    f"version identity is frozen across path changes from {old_rel}"]
     return []
 
 
@@ -573,18 +581,78 @@ def _recompute_errors(r: dict, measured: Any) -> list[str]:
     return errs
 
 
+def replay_rule_delivery(root: Path, baseline_ref: str) -> dict:
+    """Authenticate deterministic observations by executing both source trees.
+
+    Each subprocess gets an empty bytecode cache namespace. Its read trace
+    establishes the complete measured set, independently of receipt manifests.
+    The baseline comes from an immutable Git commit, using the candidate harness.
+    """
+    harness = "evals/rule-delivery/run_eval.py"
+    separately_bound = {harness, "evals/rule-delivery/make_report.py",
+                        "evals/rule-delivery/expectations.v1.json"}
+    with tempfile.TemporaryDirectory(prefix="eval-receipt-replay-") as scratch:
+        tmp = Path(scratch)
+        archive = subprocess.run(["git", "-C", str(root), "archive", "--format=tar", baseline_ref],
+                                 capture_output=True, check=True).stdout
+        baseline = tmp / "baseline"
+        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+            tar.extractall(baseline, filter="data")
+        shutil.copy2(root / harness, baseline / harness)
+        out = {}
+        for arm, tree in (("baseline", baseline), ("candidate", root)):
+            obs, trace = tmp / f"{arm}.jsonl", tmp / f"{arm}.reads.json"
+            env = dict(os.environ, PYTHONPYCACHEPREFIX=str(tmp / f"{arm}-cache"))
+            subprocess.run([sys.executable, "-B", str(tree / harness), "--observe", str(obs),
+                            "--trace-reads", str(trace)], cwd=tree, env=env,
+                           capture_output=True, check=True, timeout=120)
+            reads = set(json.loads(trace.read_text())) - separately_bound
+            reads = {p for p in reads if "__pycache__" not in p.split("/")}
+            out[arm] = {"rows": [json.loads(line) for line in obs.read_text().splitlines()],
+                        "dependencies": {p: hashlib.sha256((tree / p).read_bytes()).hexdigest()
+                                         for p in sorted(reads)}}
+        return out
+
+
+def _rule_delivery_replay_errors(ev: dict, root: Path, cohorts: dict) -> list[str]:
+    baseline = ev.get("baseline")
+    if (not isinstance(baseline, dict) or set(baseline) != {"ref", "dependencies"}
+            or not isinstance(baseline.get("ref"), str)
+            or not re.fullmatch(r"[0-9a-f]{40}", baseline["ref"])
+            or not isinstance(baseline.get("dependencies"), dict)):
+        return ["evidence.baseline must bind an immutable 40-hex Git ref and its complete replay dependencies"]
+    required_source = {"evals/rule-delivery/run_eval.py", "evals/rule-delivery/make_report.py"}
+    if set(ev["source"]) != required_source or ev["scorer"] != {
+            "path": "evals/rule-delivery/run_eval.py", "function": "score_receipt"}:
+        return ["rule-delivery replay requires its canonical harness, producer and scorer"]
+    try:
+        fresh = replay_rule_delivery(root, baseline["ref"])
+    except Exception as exc:
+        return [f"rule-delivery replay refused: {type(exc).__name__}: {exc}"]
+    errs = []
+    for arm in ARMS:
+        bound = ev["dependencies"] if arm == "candidate" else baseline["dependencies"]
+        if fresh[arm]["dependencies"] != bound:
+            errs.append(f"evidence.{arm}: complete replay dependency manifest differs from measured source")
+        if fresh[arm]["rows"] != sorted(cohorts[arm], key=lambda row: row["case_id"]):
+            errs.append(f"evidence.cohorts.{arm}: observations differ from the authenticated source replay")
+    return errs
+
+
 def evidence_errors(r: dict, surface: str, root: Path = ROOT, base: str | None = None) -> list[str]:
     """Re-derive the receipt from the files it binds; any disagreement is a refusal."""
     ev = r["evidence"]
-    if not isinstance(ev, dict) or set(ev) != EVIDENCE_FIELDS:
-        return [f"evidence must carry exactly {sorted(EVIDENCE_FIELDS)}"]
+    fields = EVIDENCE_FIELDS | ({"baseline"} if surface == "rule-delivery" else set())
+    if not isinstance(ev, dict) or set(ev) != fields:
+        return [f"evidence must carry exactly {sorted(fields)}"]
     errs: list[str] = []
     home = f"evals/{surface}/"
     source = _manifest(root, ev["source"], "source", errs)
     _manifest(root, ev["dependencies"], "dependencies", errs)
 
     scorer = ev["scorer"]
-    if not isinstance(scorer, dict) or set(scorer) != {"path", "function"} or not isinstance(scorer.get("function"), str):
+    if (not isinstance(scorer, dict) or set(scorer) != {"path", "function"}
+            or not isinstance(scorer.get("function"), str) or not isinstance(scorer.get("path"), str)):
         errs.append("evidence.scorer must be exactly {path, function}")
         scorer = None
     elif scorer["path"] not in source:
@@ -635,15 +703,21 @@ def evidence_errors(r: dict, surface: str, root: Path = ROOT, base: str | None =
     if errs or scorer is None or len(cohorts) != len(ARMS):
         return errs
     try:
-        spec = importlib.util.spec_from_file_location(
-            f"eval_scorer_{source[scorer['path']][:16]}", root / scorer["path"])
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        path = root / scorer["path"]
+        code = _bound_bytes(root, scorer["path"], source[scorer["path"]], "evidence.scorer", errs)
+        if code is None:
+            return errs
+        module = types.ModuleType(f"eval_scorer_{source[scorer['path']][:16]}")
+        module.__file__ = str(path)
+        exec(compile(code, str(path), "exec"), module.__dict__)
         measured = getattr(module, scorer["function"])(expectations, cohorts["baseline"], cohorts["candidate"])
     except Exception as exc:  # the scorer refusing its own evidence is a finding, not a crash
         return [f"evidence.scorer {scorer['path']}:{scorer['function']} refused the evidence: "
                 f"{type(exc).__name__}: {exc}"]
-    return _recompute_errors(r, measured)
+    errs = _recompute_errors(r, measured)
+    if surface == "rule-delivery":
+        errs += _rule_delivery_replay_errors(ev, root, cohorts)
+    return errs
 
 
 def _expectation_cases(doc: Any, version: str, errs: list[str]) -> dict[str, Any] | None:

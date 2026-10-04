@@ -417,14 +417,22 @@ def observe_all():
 
 def trace_repo_reads():
     """Record every file under the repository this process opens from now on."""
-    root = os.path.realpath(REPO) + os.sep
+    repo = os.path.realpath(REPO)
+    root = repo + os.sep
     seen = set()
 
     def hook(event, args):
         if event == "open" and args and isinstance(args[0], (str, bytes, os.PathLike)):
             path = os.path.realpath(os.fsdecode(args[0]))
             if path.startswith(root):
-                seen.add(os.path.relpath(path, REPO))
+                seen.add(os.path.relpath(path, repo))
+                if path.endswith(".pyc"):
+                    try:
+                        source = importlib.util.source_from_cache(path)
+                    except ValueError:
+                        source = path[:-1]
+                    if os.path.isfile(source):
+                        seen.add(os.path.relpath(source, repo))
     sys.addaudithook(hook)
     return seen
 

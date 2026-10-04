@@ -19,14 +19,10 @@ import argparse
 import datetime
 import hashlib
 import importlib.util
-import io
 import json
 import os
-import shutil
 import subprocess
 import sys
-import tarfile
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
@@ -46,6 +42,7 @@ KEPT = "kept"
 def _gate():
     """ops/check-eval-receipt.py, which owns the receipt rules the producer must not restate."""
     spec = importlib.util.spec_from_file_location("check_eval_receipt", os.path.join(REPO, "ops", "check-eval-receipt.py"))
+    assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -69,31 +66,7 @@ def read_jsonl(path):
         return [json.loads(line) for line in handle if line.strip()]
 
 
-# ----------------------------------------------------------------- observing
-
-def observe(tree, out_dir, trace=False):
-    """Run this harness's --observe inside tree; (rows, repo files read or None)."""
-    obs, reads = os.path.join(out_dir, "observations.jsonl"), os.path.join(out_dir, "reads.json")
-    cmd = [sys.executable, os.path.join(tree, REL, "run_eval.py"), "--observe", obs]
-    subprocess.run(cmd + (["--trace-reads", reads] if trace else []), cwd=tree, check=True)
-    if not trace:
-        return read_jsonl(obs), None
-    with open(reads, encoding="utf-8") as handle:
-        return read_jsonl(obs), json.load(handle)
-
-
-def observe_baseline(ref):
-    """Observe the tree at ref with the current harness copied in; nothing else of now leaks in."""
-    with tempfile.TemporaryDirectory(prefix="rule-delivery-baseline-") as tmp:
-        tree = os.path.join(tmp, "tree")
-        archive = subprocess.run(["git", "archive", "--format=tar", ref], cwd=REPO,
-                                 capture_output=True, check=True).stdout
-        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
-            tar.extractall(tree, filter="data")
-        shutil.copy2(os.path.join(HERE, "run_eval.py"), os.path.join(tree, REL, "run_eval.py"))
-        rows, _ = observe(tree, tmp)
-        return rows
-
+# ----------------------------------------------------------------- measured source
 
 def tracked(paths):
     out = subprocess.run(["git", "ls-files", "-z", "--", *paths], cwd=REPO, capture_output=True,
@@ -101,20 +74,11 @@ def tracked(paths):
     return {p for p in out.split("\0") if p}
 
 
-def dependencies(reads):
-    """Every tracked file the candidate replay read, minus what evidence binds separately."""
-    reads = {p for p in reads if "__pycache__" not in p.split("/")}
-    untracked = sorted(reads - tracked(reads))
-    if untracked:
-        raise SystemExit(f"refusing: the replay read untracked files a receipt cannot bind: {untracked}")
-    bound_elsewhere = set(SOURCE) | set(COHORTS.values()) | {os.path.relpath(R.EXPECTATIONS, REPO)}
-    return sorted(reads - bound_elsewhere)
-
 
 # ----------------------------------------------------------------- assembling
 
 def assemble_receipt(template, expectations, baseline, candidate, source, deps, *,
-                     measured_on, session_ref):
+                     measured_on, session_ref, baseline_evidence=None):
     """receipt.json from its evidence. Pure: the selftest reassembles the checked-in
     receipt from its own cohorts and requires the same bytes."""
     measured = R.score_receipt(expectations, baseline, candidate)
@@ -129,6 +93,7 @@ def assemble_receipt(template, expectations, baseline, candidate, source, deps, 
                           "sha256": hashlib.sha256(jsonl(rows).encode()).hexdigest()}
                     for arm, rows in (("baseline", baseline), ("candidate", candidate))},
     }
+    evidence["baseline"] = baseline_evidence or template["evidence"]["baseline"]
     refs = [COHORTS["baseline"], COHORTS["candidate"]]
     authored = {d["dimension_id"]: d for d in template["dimensions"]}
     if set(authored) != set(measured["dimensions"]):
@@ -186,15 +151,23 @@ def receipt(args):
     if drift:
         raise SystemExit(f"refusing: {len(drift)} case label(s) drifted from {R.EXPECTATIONS_VERSION} "
                          f"(first {drift[0]}); freeze a new expectations version before measuring")
-    with tempfile.TemporaryDirectory(prefix="rule-delivery-candidate-") as tmp:
-        candidate, reads = observe(REPO, tmp, trace=True)
-    baseline = observe_baseline(args.baseline_ref)
+    gate = _gate()
+    ref = subprocess.run(["git", "rev-parse", args.baseline_ref + "^{commit}"], cwd=REPO,
+                         check=True, capture_output=True, text=True).stdout.strip()
+    fresh = gate.replay_rule_delivery(__import__("pathlib").Path(REPO), ref)
+    candidate, baseline = fresh["candidate"]["rows"], fresh["baseline"]["rows"]
+    # Every measured candidate input must have a durable repository home.
+    deps = fresh["candidate"]["dependencies"]
+    untracked = set(deps) - tracked(list(deps))
+    if untracked:
+        raise SystemExit(f"refusing: replay read untracked inputs: {sorted(untracked)}")
+    doc = assemble_receipt(template, expectations, baseline, candidate, manifest(SOURCE), deps,
+                           measured_on=datetime.date.today().isoformat(),
+                           session_ref=args.session_ref or template["adapter"]["native_session_ref"],
+                           baseline_evidence={"ref": ref, "dependencies": fresh["baseline"]["dependencies"]})
     os.makedirs(os.path.join(REPO, EVIDENCE), exist_ok=True)
     for arm, rows in (("baseline", baseline), ("candidate", candidate)):
         write_text(COHORTS[arm], jsonl(rows))
-    doc = assemble_receipt(template, expectations, baseline, candidate, manifest(SOURCE),
-                           manifest(dependencies(reads)), measured_on=datetime.date.today().isoformat(),
-                           session_ref=args.session_ref or template["adapter"]["native_session_ref"])
     write_text(os.path.relpath(RECEIPT, REPO), json.dumps(doc, indent=2, sort_keys=True) + "\n")
     for d in doc["dimensions"]:
         print(f"{d['dimension_id']:32s} {d['baseline']['score']:.4f} -> {d['candidate']['score']:.4f}  "

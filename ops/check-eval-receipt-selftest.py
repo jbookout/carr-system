@@ -18,6 +18,8 @@ import copy
 import hashlib
 import importlib.util
 import json
+import os
+import py_compile
 import shutil
 import subprocess
 import sys
@@ -160,7 +162,9 @@ def evidenced_receipt(root: Path, surface: str, *, judgment=(25, 33), precision=
     edir.mkdir(parents=True, exist_ok=True)
     (edir / "score.py").write_text(SYNTH_SCORER)
     dims = ["correct-judgment", "should-not-fire-precision"]
-    cases, base_rows, cand_rows = {}, [], []
+    cases: dict[str, dict] = {}
+    base_rows: list[dict] = []
+    cand_rows: list[dict] = []
     for split, prefix in (("train", "r"), ("test", "t")):
         for i in range(40):
             cid = f"{prefix}{i:02d}"
@@ -187,6 +191,7 @@ def evidenced_receipt(root: Path, surface: str, *, judgment=(25, 33), precision=
                                   "sha256": write_jsonl(edir / "candidate.jsonl", cand_rows)}},
     }
     spec = importlib.util.spec_from_file_location(f"synth_{surface}", edir / "score.py")
+    assert spec and spec.loader
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     measured = mod.score(expectations, base_rows, cand_rows)["dimensions"]
@@ -214,6 +219,12 @@ def mirror(receipt: dict, dest: Path) -> None:
     for rel in evidence_paths(receipt) | {"evals/surfaces.json"}:
         (dest / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / rel, dest / rel)
+    if not (dest / ".git").exists():
+        env = fixture_env()
+        subprocess.run(["git", "init", "-q", str(dest)], env=env, check=True, capture_output=True)
+        common = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                                cwd=ROOT, env=env, check=True, capture_output=True, text=True).stdout.strip()
+        (dest / ".git" / "objects" / "info" / "alternates").write_text(common + "/objects\n")
     (dest / RD / "receipt.json").write_text(json.dumps(receipt, indent=1, sort_keys=True) + "\n")
 
 
@@ -224,6 +235,7 @@ def read_jsonl(path: Path) -> list[dict]:
 def load_scorer(root: Path, receipt: dict):
     sc = receipt["evidence"]["scorer"]
     spec = importlib.util.spec_from_file_location(f"scorer_{abs(hash(str(root)))}", root / sc["path"])
+    assert spec and spec.loader
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return getattr(mod, sc["function"])
@@ -772,6 +784,76 @@ class EvidenceChain(unittest.TestCase):
         r["grader"]["validation"]["null_pass_rate"] = 0.2
         self.assertTrue(any("null_pass_rate" in e for e in self.errors(r)), self.errors(r))
 
+    def test_cached_scorer_executes_hashed_source_bytes(self):
+        path = self.root / self.r["evidence"]["scorer"]["path"]
+        py_compile.compile(str(path), doraise=True)
+        stamp = path.stat()
+        path.write_text(path.read_text().replace('"oracle_pass_rate": 1.0', '"oracle_pass_rate": 0.5'))
+        os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        self.r["evidence"]["source"][self.r["evidence"]["scorer"]["path"]] = sha_file(path)
+        self.assertTrue(any("oracle_pass_rate" in e for e in self.errors()), self.errors())
+
+    def test_partial_receipts_return_findings(self):
+        for field in cer.REQUIRED:
+            with self.subTest(field=field):
+                r = copy.deepcopy(self.r)
+                del r[field]
+                self.assertTrue(self.errors(r))
+
+    def test_malformed_scorer_paths_return_findings(self):
+        for value in ([], {}, None, 4):
+            with self.subTest(path=value):
+                r = copy.deepcopy(self.r)
+                r["evidence"]["scorer"]["path"] = value
+                self.assertTrue(self.errors(r))
+
+    def test_moved_expectations_keep_version_identity(self):
+        env = fixture_env()
+        def git(*args):
+            return subprocess.run(["git", *args], cwd=self.root, env=env,
+                                  check=True, capture_output=True).stdout.decode().strip()
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "selftest@example.invalid")
+        git("config", "user.name", "selftest")
+        git("add", "evals")
+        git("commit", "-qm", "base")
+        base = git("rev-parse", "HEAD")
+        x = self.r["evidence"]["expectations"]
+        old = self.root / x["path"]
+        moved = old.with_name("moved-labels.json")
+        doc = json.loads(old.read_text())
+        doc["cases"]["r00"]["extra-label"] = "changed"
+        moved.write_text(json.dumps(doc))
+        x.update(path=moved.relative_to(self.root).as_posix(), sha256=sha_file(moved))
+        errs = cer.validate_receipt(self.r, "jev-judgments", self.root, base=base)
+        self.assertTrue(any("without a new version" in e for e in errs), errs)
+
+    def test_version_identity_survives_filename_extension_change(self):
+        env = fixture_env()
+        def git(*args):
+            return subprocess.run(["git", *args], cwd=self.root, env=env,
+                                  check=True, capture_output=True).stdout.decode().strip()
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "selftest@example.invalid")
+        git("config", "user.name", "selftest")
+        x = self.r["evidence"]["expectations"]
+        old = self.root / x["path"]
+        renamed = old.with_suffix(".labels")
+        old.rename(renamed)
+        x["path"] = renamed.relative_to(self.root).as_posix()
+        git("add", "evals")
+        git("commit", "-qm", "base")
+        base = git("rev-parse", "HEAD")
+        x = self.r["evidence"]["expectations"]
+        old = self.root / x["path"]
+        moved = old.with_name("moved-labels.json")
+        doc = json.loads(old.read_text())
+        doc["cases"]["r00"]["extra-label"] = "changed"
+        moved.write_text(json.dumps(doc))
+        x.update(path=moved.relative_to(self.root).as_posix(), sha256=sha_file(moved))
+        errs = cer.validate_receipt(self.r, "jev-judgments", self.root, base=base)
+        self.assertTrue(any("without a new version" in e for e in errs), errs)
+
 
 class RuleDeliveryEvidenceChain(unittest.TestCase):
     """The four refusals the evidence chain exists for, on the real rule-delivery receipt."""
@@ -869,6 +951,43 @@ class RuleDeliveryEvidenceChain(unittest.TestCase):
         self.r["evidence"]["cohorts"]["candidate"]["sha256"] = sha_file(self.cand)
         errs = self.errors()
         self.assertTrue(any("human-required-recall" in e and "recomputed" in e for e in errs), errs)
+
+
+    def test_changed_measured_source_cannot_reuse_observations(self):
+        rel = "hooks/rule-pack-preuse-reselection.py"
+        path = self.root / rel
+        original = path.read_bytes()
+        for mode in ("drop", "rebind"):
+            with self.subTest(mode=mode):
+                self.r = copy.deepcopy(self.receipt)
+                path.write_bytes(original + b"\nrouted_rule_ids = lambda *args, **kwargs: []\nmatched_triggers = lambda *args, **kwargs: []\n")
+                if mode == "drop":
+                    del self.r["evidence"]["dependencies"][rel]
+                else:
+                    self.r["evidence"]["dependencies"][rel] = sha_file(path)
+                errs = self.errors()
+                self.assertTrue(any("replay" in e or "complete" in e for e in errs), errs)
+
+    def test_cold_and_warm_imports_bind_same_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp) / "tree"
+            mirror(self.receipt, tree)
+            manifests = []
+            env = dict(os.environ)
+            env.pop("PYTHONDONTWRITEBYTECODE", None)
+            env.pop("PYTHONPYCACHEPREFIX", None)
+            for run in ("cold", "warm"):
+                out = Path(tmp) / run
+                out.mkdir()
+                obs, trace = out / "observations.jsonl", out / "reads.json"
+                subprocess.run([sys.executable, str(tree / RD / "run_eval.py"),
+                                "--observe", str(obs), "--trace-reads", str(trace)], env=env, check=True)
+                rows, reads = read_jsonl(obs), json.loads(trace.read_text())
+                self.assertEqual(rows, read_jsonl(self.cand))
+                manifests.append({p for p in reads if "__pycache__" not in p.split("/")})
+                self.assertTrue(list((tree / "hooks" / "__pycache__").glob("rule-pack-preuse-reselection*.pyc")))
+            self.assertEqual(manifests[0], manifests[1])
+            self.assertIn("hooks/rule-pack-preuse-reselection.py", manifests[1])
 
     def test_verified_input_hashes_carry_forward(self):
         """The inputs PR #1325's replay verified are bound at the same bytes."""
