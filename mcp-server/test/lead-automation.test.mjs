@@ -15,7 +15,7 @@ const plan=(l=lead,a=contact,d=[])=>planLeadMoves([l],[a],d,NOW);
 
 test("exact reply plus verified lease evidence qualifies with provenance",()=>{
   assert.deepEqual(plan()[0],{lead_id:lead.id,party_id:lead.party_id,from_stage:"new",to_stage:"qualified",base_version:3,
-    activity_id:contact.id,evidence_ref:"local-mail:synthetic-001",strength:"strong",status:"applied"});
+    reason:"Reply received 2026-10-01",activity_id:contact.id,evidence_ref:"local-mail:synthetic-001",strength:"strong",status:"applied"});
 });
 test("weak, unbound and missing lease evidence produces proposals",()=>{
   for(const a of [change(contact,{match:"domain"}),change(contact,{party_id:"other"}),change(contact,{evidence_ref:null}),{...contact,owed:"identity"}])
@@ -89,7 +89,7 @@ class Fake {
   }
 }
 const human={id:"actor-example",human:true};
-const tools=leadAutomationTools({withEnvelope:async(c,a,v,args,f)=>f(),writeEvent:async(c,...args)=>c.events.push(args),ToolError:class extends Error{constructor(value){super(value.error);}}});
+const tools=leadAutomationTools({invoices:{preview:async()=>[],apply:async()=>[]},withEnvelope:async(c,a,v,args,f)=>f(),writeEvent:async(c,...args)=>c.events.push(args),ToolError:class extends Error{constructor(value){super(value.error);}}});
 test("dry runs issue SELECT only, use the same planner and never prepare drafts",async()=>{
   for(const [name,args] of [["lead-stage-preview",{}],["advance-leads",{idempotency_key:"synthetic-preview",dry_run:true}]]){
     const db=new Fake();const r=await tools[name].handler(db,human,args);
@@ -170,7 +170,7 @@ test("malformed contact metadata cannot break the whole job",()=>{
 test("lead successor preserves human-only party merges and all v105 MCP contracts", async () => {
   const { frozenInventory, boundInventoryRows } = await import("../../ops/scac-mutation-inventory.mjs");
   const { SCAC_MUTATION_REGISTRY_VERSION, registeredOperation } = await import("../src/mutation-registry.js");
-  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, "scac-mutation-registry.v106");
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, "scac-mutation-registry.v107");
   const before = frozenInventory("scac-mutation-registry.v105");
   const after = frozenInventory("scac-mutation-registry.v106");
   const byKey = new Map(boundInventoryRows(after).map(row => [row.ingress_key, row]));
