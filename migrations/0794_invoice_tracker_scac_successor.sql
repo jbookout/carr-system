@@ -248,8 +248,8 @@ begin
   if (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v105')<>2625
     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v105' and ingress_kind not in ('db_function_acl','db_relation_acl','db_column_acl'))<>1087
     or bad_hash or v.registry_digest is distinct from 'sha256:e6ab133e48523930f3ec1a694974fac3486e5dde695e0d655812ac7d7922d1fc'
-    or v.entry_set_digest is distinct from 'sha256:d569d8d8233d94806aa8fe9e60dbf20a8ca931d94527e2bd7e6c23c580f51c71' then
-    raise exception 'Invoice tracker v105 seed or entry-set seal drifted: actual % expected %', v.entry_set_digest, 'sha256:d569d8d8233d94806aa8fe9e60dbf20a8ca931d94527e2bd7e6c23c580f51c71';
+    or v.entry_set_digest is distinct from 'sha256:657f2ef564a068756493bd4767b4193cb7680349363ecf0be7ac3b4ac85f001c' then
+    raise exception 'Invoice tracker v105 seed or entry-set seal drifted: actual % expected %', v.entry_set_digest, 'sha256:657f2ef564a068756493bd4767b4193cb7680349363ecf0be7ac3b4ac85f001c';
   end if;
 end $invoice_tracker_v105_seed$;
 
