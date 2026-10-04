@@ -21,7 +21,7 @@ NOW = datetime(2026, 10, 2, 12, tzinfo=timezone.utc)
 class GrokSessionTests(unittest.TestCase):
     def test_public_health_section_is_narrow_and_propagates_status(self):
         # Supply synthetic results through the helper seam. This entrypoint
-        # must exit before DB/other-provider health readers can run.
+        # must finish without running DB/other-provider health readers.
         harness = '''import runpy, sys, types
 sys.path.insert(0, sys.argv.pop(1))
 status = sys.argv.pop(1)
@@ -36,8 +36,13 @@ runpy.run_path(path, run_name="__main__")
                                      str(ROOT / "tools/health-check.py"), "--section", "grok-session"],
                                     capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, code, result.stderr)
-            self.assertEqual(len(result.stdout.splitlines()), 1)
             self.assertIn(status + " Grok session", result.stdout)
+            self.assertTrue(result.stdout.rstrip().endswith(
+                "Projection freshness/tamper checks are recovery evidence; use --recovery --reason <why>."))
+            self.assertNotIn("jev paid cap", result.stdout)
+            self.assertNotIn("credential health", result.stdout)
+            self.assertNotIn("jev spend", result.stdout)
+            self.assertEqual("CANONICAL_FINDING grok_session" in result.stdout, status == "FAIL")
 
     def test_nested_timestamp_storage_is_supported_without_retaining_scope_keys(self):
         with tempfile.TemporaryDirectory() as directory:

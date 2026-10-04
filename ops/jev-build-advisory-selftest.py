@@ -283,6 +283,9 @@ class MachineEnvelopeTests(unittest.TestCase):
 
 
 class EditCoverageTests(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch.dict(os.environ, CARR_JEV_WORKER=""))
+
     def test_patch_target_extraction_covers_codex_shapes(self):
         with tempfile.TemporaryDirectory() as tmp:
             patch = "*** Begin Patch\n*** Update File: src/a.py\n*** Move to: src/b.py\n*** End Patch"
@@ -301,6 +304,7 @@ class EditCoverageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             env = fixture_env()
+            env["CARR_JEV_WORKER"] = ""
             (root / "src").mkdir()
             self.assertFalse((root / "ops/jev_code_review.py").exists())
             target = root / "src/a.py"
