@@ -731,12 +731,21 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
 
     def test_loader_errors_are_contained_in_canonical_health_and_cli(self):
         import io, contextlib, importlib.util, runpy, sys
+        from types import SimpleNamespace
         from unittest.mock import patch
         original = importlib.util.spec_from_file_location
         def fail_cap_loader(name, *args, **kwargs):
             if name == "jev_cap_client":
                 raise ImportError("fixture missing client configuration")
-            return original(name, *args, **kwargs)
+            spec = original(name, *args, **kwargs)
+            if name == "jev_site_client":
+                # The CLI loads both readers. Keep the independent site reader
+                # offline and healthy while testing the cap loader's refusal.
+                spec.loader = SimpleNamespace(
+                    create_module=lambda spec: None,
+                    exec_module=lambda module: setattr(module, "spend_by_site_health",
+                                                       lambda: "OK jev spend by site — fixture"))
+            return spec
         with patch.object(importlib.util, "spec_from_file_location", fail_cap_loader):
             ns = self.namespace()
             with contextlib.redirect_stdout(io.StringIO()) as out:
