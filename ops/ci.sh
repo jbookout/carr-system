@@ -785,13 +785,22 @@ PYEOF
   # reasoned no-eval line in the PR body. Enforced only in a pull_request run,
   # where GITHUB_EVENT_PATH carries the body; elsewhere a missing receipt is
   # advisory and a malformed one still fails. Procedure: evals/README.md.
+  # migration-order-gate JOINED 2026-10-03, after 0757, the 0769/0770 pair and
+  # 0783 each merged below a number main had already released and stopped every
+  # worker release at staging-prepare ("partial candidate ledger is not an exact
+  # source prefix"). Same kind: repository content only — it compares this
+  # tree's migrations/ against origin/$GITHUB_BASE_REF (origin/main locally) and
+  # refuses any ADDED number not strictly above the base maximum. Because strict
+  # status checks force update-branch before merge, and update-branch raises
+  # `synchronize`, a PR that fell behind main re-runs this and turns red until
+  # renumbered. An unreadable base exits 2, which fails like any nonzero.
   for inv in enforcement-coverage-check audit-queue-freshness-check map-row-evidence-check \
              rule-enforcement-map-check rule-load-layer-check rule-classification-parity-check \
              reachability-check selftest-git-isolation-check \
              drive-dependency-inventory drive-retirement-readiness-gate \
              mechanism-doctrine-gate scheduler-cutover-coverage-gate \
              boot-budget-check core-rule-ids-check rule-route-coverage \
-             rule-boot-classes-check check-eval-receipt; do
+             rule-boot-classes-check check-eval-receipt migration-order-gate; do
     [ -f "ops/$inv.py" ] || continue
     run_quiet "$LOGDIR/gate-$inv.log" "$PY" "ops/$inv.py" \
       || { inherited_abort "$inv" "$PY" "ops/$inv.py"
