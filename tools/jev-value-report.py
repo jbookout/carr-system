@@ -286,10 +286,12 @@ def recommend(key, site):
 def positive_attribution(commit):
     """Commit-message convention: Jev <finder verb> <positive defect noun>.
 
-    Search subject and body for a positive defect claim. Negation applies to
-    that claim; separate validation prose does not deny the finding. Messages
-    denying or deferring a fix remain excluded. This is commit-attributed
-    evidence, not an independently verified causal outcome.
+    Search subject and body for a positive defect claim. Any negation inside
+    the claim's sentence denies it, and so does a denial of the claimed
+    defect noun anywhere in subject or body ("found no bug"). Negating a
+    different noun ("no regression" after a fixed bug) is validation prose and
+    keeps the claim. Messages denying or deferring a fix remain excluded. This
+    is commit-attributed evidence, not an independently verified causal outcome.
     """
     message = "\n".join(str(commit.get(k) or "") for k in ("subject", "body"))
     if re.search(r"\b(?:no\s+(?:fix|change)|not\s+fixed|defer(?:red)?|unfixed)\b",
@@ -299,15 +301,23 @@ def positive_attribution(commit):
         claim = re.split(r"[.;\n]", message[match.end():], maxsplit=1)[0]
         prefix = re.split(r"[.;\n]", message[:match.start()])[-1]
         attribution = prefix + match.group(0) + claim
-        if re.search(rf"\b(?:nothing|none|no\s+(?:{DEFECT_NOUN}s?|finding|issue)|"
-                     rf"not\s+(?:(?:a|an)\s+)?{DEFECT_NOUN}s?)\b",
+        if re.search(rf"\b(?:nothing|none|{_denial(DEFECT_NOUN + '|finding|issue')})\b",
                      attribution, re.I):
             continue
-        if re.search(rf"\b{DEFECT_NOUN}\b", claim, re.I):
-            return match.group(0) + claim
-        if re.search(rf"\bfix(?:es|ed)?\b.*\b{DEFECT_NOUN}\b", prefix, re.I):
-            return attribution.strip()
+        if found := re.search(rf"\b{DEFECT_NOUN}\b", claim, re.I):
+            noun, quote = found.group(0), match.group(0) + claim
+        elif fixed := re.search(rf"\bfix(?:es|ed)?\b.*\b({DEFECT_NOUN})\b", prefix, re.I):
+            noun, quote = fixed.group(1), attribution.strip()
+        else:
+            continue
+        if not re.search(rf"\b{_denial(re.escape(noun))}\b", message, re.I):
+            return quote
     return None
+
+
+def _denial(nouns):
+    """Regex for "no <noun>" or "not a <noun>", singular or plural."""
+    return rf"(?:no\s+(?:{nouns})s?|not\s+(?:(?:a|an)\s+)?(?:{nouns})s?)"
 
 
 def build_report(sources, start, end):

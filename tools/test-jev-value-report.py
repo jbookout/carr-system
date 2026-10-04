@@ -429,6 +429,21 @@ class BlockingReviewTests(unittest.TestCase):
         self.assert_attributed_fix_survives_validation(
             "The corrected request now returns successfully with no error.")
 
+    def test_03_body_denial_of_attributed_bug_excludes_fix(self):
+        self.assert_cross_field_denial_excluded(
+            "Fix suspected bug Jev flagged",
+            "Investigation found no bug; the patch only fixes a typo.")
+
+    def test_03_subject_denial_of_attributed_bug_excludes_fix(self):
+        self.assert_cross_field_denial_excluded(
+            "No bug found; fix typo", "Jev flagged a suspected bug.")
+
+    def assert_cross_field_denial_excluded(self, subject, body):
+        commit = {"sha": "synthetic", "date": START.isoformat(), "subject": subject, "body": body}
+        report = jvr.build_report(sources(commits=[commit]), START, END)
+        self.assertEqual(report["totals"]["outcomes_verified"], 0)
+        self.assertFalse(any(site["evidence"] for site in report["sites"].values()))
+
     def assert_attributed_fix_survives_validation(self, validation):
         commit = {"sha": "synthetic", "date": START.isoformat(),
                   "subject": "Fix the bug Jev caught", "body": validation}
