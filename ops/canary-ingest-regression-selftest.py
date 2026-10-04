@@ -191,6 +191,24 @@ class Regressions(unittest.TestCase):
                 result = (0, b'')
         self.assertEqual(result, (413, b''))
 
+    def test_5_connection_rejected_during_connect_still_proves_recovery(self):
+        connect = socket.create_connection
+        first = True
+        def connect_or_reset(*args, **kwargs):
+            nonlocal first
+            if first:
+                first = False
+                raise ConnectionResetError('worker limit rejected handshake')
+            return connect(*args, **kwargs)
+        with patch.object(socket, 'create_connection', side_effect=connect_or_reset):
+            self.test_5_abandoned_headers_and_bodies_release_bounded_workers()
+        self.assertFalse(first)
+
+    def test_5_all_connect_rejections_cannot_pass_vacuously(self):
+        with patch.object(socket, 'create_connection', side_effect=ConnectionResetError('all rejected')):
+            with self.assertRaisesRegex(AssertionError, 'no abandoned connection'):
+                self.test_5_abandoned_headers_and_bodies_release_bounded_workers()
+
     def test_5_connection_rejected_before_send_is_closed_and_workers_recover(self):
         connect = socket.create_connection
         rejected = Mock()
@@ -214,7 +232,12 @@ class Regressions(unittest.TestCase):
             stalled = []
             try:
                 for i in range(8):
-                    sock = socket.create_connection(server.server_address, timeout=2)
+                    try:
+                        sock = socket.create_connection(server.server_address, timeout=2)
+                    except ConnectionResetError:
+                        # Overload rejection can complete during the handshake,
+                        # before create_connection returns an owned socket.
+                        continue
                     stalled.append(sock)
                     try:
                         sock.sendall(b'POST /ingest HTTP/1.0\r\n' if i % 2 == 0 else
@@ -223,6 +246,7 @@ class Regressions(unittest.TestCase):
                         # A full worker pool may reject before this sender runs.
                         # Keep the socket in the closure/recovery proof below.
                         pass
+                self.assertTrue(stalled, 'no abandoned connection exercised the worker proof')
                 time.sleep(0.08)
                 workers = sum('process_request_thread' in t.name
                               for t in threading.enumerate() if t.is_alive())
