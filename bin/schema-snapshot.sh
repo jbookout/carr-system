@@ -1313,7 +1313,7 @@ if [ "$LEAD_AUTOMATION_REGISTRY_APPLIED" = t ] && [ "$OBSERVATORY_ROOM_READ_REGI
 fi
 
 DOC_ACTIVITY_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0821_doc_activity_scac_successor.sql')" \
+  "select exists (select 1 from schema_migrations where filename='0825_doc_activity_scac_successor.sql')" \
   2>/dev/null)"
 case "$DOC_ACTIVITY_REGISTRY_APPLIED" in
   t|f) ;;

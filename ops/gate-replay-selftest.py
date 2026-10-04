@@ -419,11 +419,11 @@ assert len(called) == 1, called
 assert run.results[0]["detail"]["advice"].startswith(
     "inspect_stop_boundary unavailable (time_budget_exhausted)"), run.results
 '''
-probe = subprocess.run([sys.executable, "-c", budget_probe, str(REPO)],
+budget_result = subprocess.run([sys.executable, "-c", budget_probe, str(REPO)],
                        capture_output=True, text=True, timeout=10,
                        env=git_env.fixture_env())
 check("host scheduling delays cannot exhaust the replayed Stop inspection budget",
-      probe.returncode == 0, probe.stderr)
+      budget_result.returncode == 0, budget_result.stderr)
 
 # ---------------------------------------------------------------- manifest coverage
 

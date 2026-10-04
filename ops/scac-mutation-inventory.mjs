@@ -21268,7 +21268,7 @@ export function renderGeneratedFrontier() {
   artifacts["mcp-server/src/scac-mutation-registry.v107.generated.js"] =
     renderRuntimeProjection(v107Rows, { version: REGISTRY_V107_VERSION,
       dbCatalogBaseline: DOC_ACTIVITY_V107_DB_CATALOG_BASELINE });
-  artifacts["migrations/0821_doc_activity_scac_successor.sql"] =
+  artifacts["migrations/0825_doc_activity_scac_successor.sql"] =
     renderDocActivityRegistrySql(v107Rows, artifacts["migrations/0812_lead_automation_scac_successor.sql"]);
 
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
@@ -22319,7 +22319,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     await writeFile(resolve("mcp-server/src/scac-mutation-registry.v107.generated.js"),
       renderRuntimeProjection(rows, { version: REGISTRY_V107_VERSION,
         dbCatalogBaseline: DOC_ACTIVITY_V107_DB_CATALOG_BASELINE }));
-    await writeFile(resolve("migrations/0821_doc_activity_scac_successor.sql"), renderDocActivityRegistrySql(rows));
+    await writeFile(resolve("migrations/0825_doc_activity_scac_successor.sql"), renderDocActivityRegistrySql(rows));
     process.stdout.write("Doc activity v107 frontier generated\n");
   } else if (process.argv[2] === "--write-observatory-frontier") {
     const rows = frozenInventory(REGISTRY_V105_VERSION);

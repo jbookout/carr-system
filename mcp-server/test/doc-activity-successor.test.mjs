@@ -17,9 +17,9 @@ test('Doc activity follows delivered Observatory and lead automation without rew
 });
 
 test('Doc activity migration has a unique number and binds the exact delivered predecessor', () => {
-  const name = '0821_doc_activity_scac_successor.sql';
+  const name = '0825_doc_activity_scac_successor.sql';
   const names = readdirSync(new URL('../../migrations', import.meta.url)).filter(name => name.endsWith('.sql'));
-  assert.deepEqual(names.filter(name => name.startsWith('0821_')), [name]);
+  assert.deepEqual(names.filter(name => name.startsWith('0825_')), [name]);
   assert.ok(!names.includes('0788_doc_activity_scac_successor.sql'));
   const sql = read(`migrations/${name}`);
   const predecessor = read('migrations/0812_lead_automation_scac_successor.sql');
