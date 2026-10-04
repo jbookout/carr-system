@@ -192,7 +192,6 @@ import {
 // cost ledger, the Doc conversation store and the R03 notification store.
 // The line below is the ONE place the runtime version is chosen.
 // v104 seals ask-jev cache-only and single-paid-attempt transport modes.
-// v105 admits the Leads workspace after the capped Worker contract.
 // Superseded note (WR-000110): v29 was the selector because that request
 // installed the V5-F02
 // program-controller seams: one new SECURITY DEFINER writer with two grantees,
@@ -200,7 +199,10 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v105.generated.js";
+} from "./scac-mutation-registry.v106.generated.js";
+
+// v105 admits bounded newest Observatory reads and preserves bridge polling.
+// v104 preserves the capped Jev Worker contract.
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 
