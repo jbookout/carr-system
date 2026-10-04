@@ -76,6 +76,16 @@ export CARR_JEV_OFFLINE=1
 
 PY="$REPO/.venv/bin/python"
 [ -x "$PY" ] || PY=python3
+# Explicit review preflight/admission uses the same class implementations.
+# This opt-in path never adds a full suite to an ordinary pre-push invocation.
+case "${1:-}" in
+  --review-floor|--review-admit)
+    _review_command=collect
+    [ "$1" = --review-admit ] && _review_command=admit
+    shift
+    exec "$PY" "$REPO/ops/local-review-evidence.py" "$_review_command" "$@"
+    ;;
+esac
 # Every gate selftest is an untrusted child: it may exercise a deliberately
 # failing fixture, and a hung fixture must not hold the whole CI run forever.
 # 120s is below the observed 249–317s full-run budget while leaving room for
@@ -85,6 +95,7 @@ CI_TIMEOUT_HELPER="$REPO/bin/with-timeout.py"
 
 STRICT=0
 ONLY=""
+RESULT_FILE=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --strict) STRICT=1 ;;
@@ -94,6 +105,8 @@ while [ "$#" -gt 0 ]; do
     # cheaper suite of its own that could then drift from the one CI runs.
     # Commas are translated to spaces so both spellings work.
     --only)   ONLY="$ONLY $(echo "${2:-}" | tr ',' ' ')"; shift ;;
+    --result-file) RESULT_FILE="${2:?--result-file needs a path}"; shift ;;
+    --pr-body-file) export CARR_PR_BODY_FILE="${2:?--pr-body-file needs a path}"; shift ;;
     --list)   LIST=1 ;;
     -h|--help) sed -n '1,40p' "$0"; exit 0 ;;
     *) echo "ci.sh: unknown argument: $1" >&2; exit 64 ;;
@@ -159,6 +172,13 @@ RAN=0
 # "real defect" vs "environment skew" without opening forty logs. Plain string,
 # not an associative array — see the bash 3.2 note above CLASS_ORDER.
 CLASS_TIMINGS=""
+CLASS_RESULTS=""
+# Coverage a class announced but did not deliver: a suite that answered 78, a
+# quarantined check, a probe with no credential. The class still reads OK here
+# (that policy is the header's, and unchanged), but its --result-file row says
+# partial, so a receipt can never certify checks that did not run.
+INCOMPLETE=0
+incomplete() { INCOMPLETE=$((INCOMPLETE+1)); }
 
 ok()   { RAN=$((RAN+1)); printf '  \033[32mOK\033[0m    %-11s %s\n' "$1" "${2:-}"; }
 bad()  { RAN=$((RAN+1)); printf '  \033[31mFAIL\033[0m  %-11s %s\n' "$1" "${2:-}"; FAILED=$((FAILED+1)); FAILED_CLASSES="$FAILED_CLASSES $1"; }
@@ -470,6 +490,7 @@ check_contract() {
     run_quiet "$LOGDIR/contract-capture-verb.log" "$PY" ops/capture-verb-reachability.py
     crc=$?
     if [ "$crc" -eq 78 ]; then
+      incomplete
       printf '        \033[33mnot run\033[0m  capture-verb-reachability — %s\n' \
         "$(tail -1 "$LOGDIR/contract-capture-verb.log" 2>/dev/null)" >&2
     elif [ "$crc" -ne 0 ]; then
@@ -810,8 +831,13 @@ PYEOF
              boot-budget-check core-rule-ids-check rule-route-coverage \
              rule-boot-classes-check check-eval-receipt migration-order-gate; do
     [ -f "ops/$inv.py" ] || continue
-    run_quiet "$LOGDIR/gate-$inv.log" "$PY" "ops/$inv.py" \
-      || { inherited_abort "$inv" "$PY" "ops/$inv.py"
+    local inv_args=()
+    if [ "$inv" = check-eval-receipt ] && [ -n "${CARR_PR_BODY_FILE:-}" ]; then
+      inv_args=(--pr-body-file "$CARR_PR_BODY_FILE")
+    fi
+    # bash 3.2 treats an empty array as unset under `set -u`.
+    run_quiet "$LOGDIR/gate-$inv.log" "$PY" "ops/$inv.py" ${inv_args[@]+"${inv_args[@]}"} \
+      || { inherited_abort "$inv" "$PY" "ops/$inv.py" ${inv_args[@]+"${inv_args[@]}"}
            failures="$failures $inv"; tail -12 "$LOGDIR/gate-$inv.log" >&2; }
   done
 
@@ -864,6 +890,7 @@ PYEOF
     bad gates "failed:$failures"
     gates_name_the_move $failures
   elif [ -n "$skiplist" ]; then
+    incomplete
     # Deliberately NOT a plain OK. The class ran with reduced coverage, and the
     # summary line says so — an exception that reads as a clean pass is how a
     # bounded check gets mistaken for a complete one.
@@ -1037,6 +1064,7 @@ check_pushfloor() {
                floor_fail types \
                  "mypy on the files this push changes. Fix them, or iterate with: .venv/bin/mypy$existing_py"; }
       else
+        incomplete
         printf '        \033[33mnot run\033[0m  types — mypy absent; the hosted types class still covers this\n' >&2
       fi
     fi
@@ -1141,6 +1169,7 @@ check_pushfloor() {
     # note would only advise running something already running.
     if [ -n "$unclassified" ] && [ -n "$ONLY" ] && ! selected gates; then
       ran="$ran gates-deferred"
+      incomplete
       printf '        \033[33mdeferred\033[0m   gates — no paired selftest for:%s — the full class runs hosted (required check on main)\n' \
         "$unclassified" >&2
       printf '                   run it locally now: ops/ci.sh --only gates · durable fix: add ops/<gate>-selftest.py\n' >&2
@@ -2060,6 +2089,7 @@ check_artifact() {
       # against the same ledger and fails closed, so the deploy is where a shrink
       # is actually stopped.
       if [ "${CARR_CI_PORTABLE_ONLY:-0}" = "1" ]; then
+        incomplete
         ok artifact "$shipping verbs; shrink guard not run here (portable runner has no ledger credential — the deploy enforces it)"
       else
         skip artifact "$shipping verbs counted, but no ledger credential — the shrink comparison did not run"
@@ -2102,10 +2132,39 @@ for c in $CLASS_ORDER; do
   # belonged. Restoring `c` also keeps anything after this loop honest.
   _class_name="$c"
   _class_t0="$(date +%s)"
+  _class_failed=$FAILED
+  _class_skipped=$SKIPPED
+  _class_ran=$RAN
+  _class_incomplete=$INCOMPLETE
   "check_$c"
+  _class_status=passed
+  [ "$SKIPPED" -gt "$_class_skipped" ] && _class_status=partial
+  [ "$INCOMPLETE" -gt "$_class_incomplete" ] && _class_status=partial
+  [ "$FAILED" -gt "$_class_failed" ] && _class_status=refused
+  CLASS_RESULTS="$CLASS_RESULTS$_class_name $_class_status $((RAN - _class_ran))
+"
   CLASS_TIMINGS="$CLASS_TIMINGS $_class_name=$(( $(date +%s) - _class_t0 ))s"
   c="$_class_name"
 done
+
+# A receipt consumer reads these measured outcomes, never the final exit code
+# alone (known gaps can exit zero while a class remains red).
+if [ -n "$RESULT_FILE" ]; then
+  "$PY" - "$RESULT_FILE" "$STRICT" "$CLASS_RESULTS" <<'PYRESULT'
+import json, os, sys, tempfile
+from pathlib import Path
+target = Path(sys.argv[1]).resolve()
+rows = [line.split() for line in sys.argv[3].splitlines() if line.strip()]
+data = {"schema": "carr-ci-result/v1", "strict": sys.argv[2] == "1",
+        "classes": [{"name": name, "status": status, "checks": int(count)}
+                    for name, status, count in rows]}
+fd, temp = tempfile.mkstemp(dir=target.parent, prefix=".ci-result-")
+with os.fdopen(fd, "w") as out:
+    json.dump(data, out)
+os.replace(temp, target)
+PYRESULT
+  [ "$?" -eq 0 ] || exit 2
+fi
 
 # One greppable line each, every run, pass or fail — this is the raw material
 # for the failure taxonomy and the duration budget. `ci-timing` answers "which
