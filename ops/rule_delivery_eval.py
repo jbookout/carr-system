@@ -243,8 +243,12 @@ class JevProxy:
         self.noul, self.choice, self.score = tsc.noul, tsc.choice, tsc.score
 
     def ask(self, state, questions, **kwargs):
+        kwargs.pop("caller", None)
+        kwargs.pop("version", None)
         kwargs["calls_log"] = self.calls_log
-        return self._tsc.ask(state, questions, **kwargs)
+        semantic = _load(os.path.join(os.path.dirname(os.path.dirname(__file__)), "ops", "jev_semantic.py"), "jev_semantic_eval")
+        return semantic.ask(state, questions, client=self._tsc, caller="rule_delivery_eval",
+                            version="vendor-v1", **kwargs)
 
 
 def _quiet_judge(repo, tag):
@@ -427,21 +431,11 @@ def build_adapters(repo, *, jev="off", client_factory=None, calls_log=os.devnull
             client_factory = lambda sink: JevProxy(tsc, sink)  # noqa: E731
         client = client_factory(calls_log)
         rtd_live = _quiet_rule_trigger_delivery(repo, "live")
-        jrs = _load(os.path.join(repo, "ops", "jev_rule_select.py"), "jrs_eval")
-        quiet = _quiet_judge(repo, "jrs")
 
         def prompt_full(case):
-            return prompt_delivery(rtd_live, case["prompt"], client=client)
+            return prompt_delivery(rtd_live, case["prompt"], client=client, ask=client.ask)
 
-        def legacy(case):
-            rows = jrs.select(case["prompt"], client=client, judge=quiet,
-                              cache_path=None, session_id=None)
-            rules = {row["id"] for row in rows if row.get("probability") is not None}
-            return {"rules": rules,
-                    "packs": {p for r in rules for p in meta.get(r, {}).get("packs", [])}}
-
-        adapters += [{"name": "prompt_full", "select": prompt_full, "jev": True},
-                     {"name": "jev_rule_select", "select": legacy, "jev": True}]
+        adapters += [{"name": "prompt_full", "select": prompt_full, "jev": True}]
     elif jev != "off":
         raise ValueError("jev must be 'off' or 'live'")
     return adapters

@@ -220,6 +220,15 @@ def mirror(receipt: dict, dest: Path) -> None:
     for rel in evidence_paths(receipt) | {"evals/surfaces.json"}:
         (dest / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / rel, dest / rel)
+        # The real receipt is immutable historical evidence. Mirror its bound
+        # revision when the current source has changed; never bless new bytes.
+        expected = receipt.get("evidence", {}).get("dependencies", {}).get(rel)
+        if expected and sha_file(dest/rel) != expected:
+            rev = subprocess.check_output(["git","log","-1","--format=%H","--",RD+"/receipt.json"],cwd=ROOT,text=True).strip()
+            bound = subprocess.check_output(["git","show",rev+":"+rel],cwd=ROOT)
+            if hashlib.sha256(bound).hexdigest() != expected:
+                raise AssertionError("historical receipt source binding unavailable: "+rel)
+            (dest/rel).write_bytes(bound)
     if not (dest / ".git").exists():
         env = fixture_env()
         subprocess.run(["git", "init", "-q", str(dest)], env=env, check=True, capture_output=True)
@@ -940,7 +949,7 @@ class RuleDeliveryEvidenceChain(unittest.TestCase):
 
     def test_checked_in_receipt_passes_against_its_own_evidence(self):
         self.assertEqual(self.r["schema_version"], 2)
-        self.assertEqual(cer.validate_receipt(self.receipt, "rule-delivery", ROOT), [])
+        self.assertEqual(cer.validate_receipt(self.receipt, "rule-delivery", self.root), [])
 
     def test_repeated_validation_reuses_immutable_baseline_across_roots(self):
         # One baseline snapshot per commit/harness, even for separate fixtures.

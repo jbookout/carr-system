@@ -80,7 +80,7 @@ test("qualified Jev sees only eligible ambiguous candidates; exact answers and s
   const askJev=async request=>{
     calls++;
     assert.doesNotMatch(JSON.stringify(request),/DO NOT DISCLOSE/);
-    return {model:"jev-synthetic",usage:{input_tokens:100,output_tokens:10},answers:
+    return {model:"jev-1.13.0",synthetic:true,usage:{input_tokens:100,output_tokens:10},answers:
       Object.fromEntries(Object.keys(request.questions).map((key,i)=>[key,{type:"noul",noul:i?0.9:0.1}]))};
   };
   const options={env:{CARR_JEV_RERANK_MODE:"noul"},askJev};
@@ -89,7 +89,7 @@ test("qualified Jev sees only eligible ambiguous candidates; exact answers and s
   const result=await searchExistingRecords(fakeClient(rows),fixture.callers.amber.actor,{q:"saved knowledge"},options);
   assert.equal(calls,1);
   assert.equal(result.semantic.judged,true);
-  assert.equal(result.hits[0].record_id,"second");
+  assert.equal(result.hits[0].record_id,rows[0].record_id, "uncalibrated semantic order is advisory");
   for (const shortlist of [[rows[0]],[{...rows[0],exact_match:true},rows[1]],[{...rows[0],lexical_score:1},{...rows[1],lexical_score:0.1}]])
     await searchExistingRecords(fakeClient(shortlist),fixture.callers.amber.actor,{q:"saved knowledge"},options);
   assert.equal(calls,1);

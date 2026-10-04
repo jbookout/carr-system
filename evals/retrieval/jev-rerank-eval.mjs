@@ -1,3 +1,5 @@
+import {cachedSemanticAsk} from "../../mcp-server/src/jev-semantic.js";
+// Caller "jev_rerank_eval". cachedSemanticAsk owns request cache/model validation in the imported reranker.
 // Offline evaluation harness for the Jev reranking trial.
 //
 // It scores the CURRENT deterministic order and each Jev variant over the
@@ -109,11 +111,11 @@ export function replayAsk(recording) {
 const PYTHON_BRIDGE = [
   "import json, sys, time",
   "sys.path.insert(0, 'ops')",
-  "import typesafe_client",
+  "import typesafe_client, jev_semantic",
   "req = json.load(sys.stdin)",
   "try:",
   "    started = time.monotonic()",
-  "    result = typesafe_client.ask(req['state'], req['questions'], model=req.get('model') or typesafe_client.DEFAULT_MODEL, caller=\"jev_rerank_eval\", cache_ttl_seconds=0)",
+  "    result = jev_semantic.ask(req['state'], req['questions'], client=typesafe_client, caller=\"jev_rerank_eval\", version=\"eval-v1\")",
   "    print(json.dumps({'ok': True, 'latency_ms': (time.monotonic() - started) * 1000, 'result': result}))",
   "except typesafe_client.TypeSafeError as err:",
   "    print(json.dumps({'ok': False, 'error': str(err)}))",
@@ -125,12 +127,14 @@ const PYTHON_BRIDGE = [
 // Python around ask(), so interpreter start-up is not billed to Jev.
 export function pythonJevBridge({ repo = REPO, spawn = spawnSync, python = "python3" } = {}) {
   return async request => {
+    if (request.model !== JEV_RERANK_MODEL) throw new Error("jev bridge requires the pinned model");
     const run = spawn(python, ["-c", PYTHON_BRIDGE], { cwd: repo, input: JSON.stringify(request),
       encoding: "utf8", maxBuffer: 16 * 1024 * 1024, timeout: 180000 });
     if (run.error) throw run.error;
     if (run.status !== 0) throw new Error(`jev bridge exited ${run.status}: ${String(run.stderr || "").slice(-400)}`);
     const out = JSON.parse(run.stdout);
     if (out.ok !== true) throw new Error(out.error || "jev bridge failed");
+    if (out.result.model !== JEV_RERANK_MODEL) throw new Error("jev bridge returned an unpinned model");
     return { ...out.result, latency_ms: out.latency_ms };
   };
 }
@@ -150,7 +154,7 @@ function metered(askJev, now, meter) {
   return async request => {
     const started = now();
     meter.requests += 1;
-    const result = await askJev(request);
+    const result = await cachedSemanticAsk(askJev, request, "meter-v1");
     meter.latency_ms += typeof result?.latency_ms === "number" ? result.latency_ms : now() - started;
     const usage = result?.usage;
     if (usage && Number.isInteger(usage.input_tokens)) meter.input_tokens += usage.input_tokens;
@@ -176,7 +180,7 @@ export async function evaluateVariant({ fixture, variant, askJev, taxonomy = DOC
     if (variant !== "deterministic") {
       outcome = await jevRerank({ mode: variant, situation: c.situation, candidates: c.candidates,
         askJev: askJev ? metered(askJev, now, meter) : undefined, taxonomy, model });
-      order = outcome.order;
+      order = outcome.advisory_order || outcome.order;
     }
     const labels = order.map(x => x.relevance);
     rows.push({

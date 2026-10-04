@@ -218,7 +218,12 @@ def cli(argv=None):
     args = parser.parse_args(argv)
     ts = _client()
     def live_jev(state, questions, **options):
-        return ts._ask_jev(state, questions, caller="judge_paired_eval", cache_ttl_seconds=0, **options)
+        if options.get("model") != "jev-1.13.0":
+            raise ValueError("paired eval requires pinned jev-1.13.0 corpus")
+        spec = importlib.util.spec_from_file_location("jev_semantic", ROOT / "ops" / "jev_semantic.py")
+        semantic = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(semantic)
+        return semantic.ask(state, questions, transport=ts._ask_jev, caller="judge_paired_eval", version="paired-v1")
     report = run(freeze(json.loads(Path(args.receipts).read_text())), live_jev,
                  ts.JUDGE.provider_decisions, repeats=args.repeats,
                  rates=json.loads(Path(args.rates).read_text()) if args.rates else None)

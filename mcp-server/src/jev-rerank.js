@@ -1,3 +1,4 @@
+import {cachedSemanticAsk} from "./jev-semantic.js";
 // Offline Jev reranking trial for doctrine source selection. Default OFF.
 // The production report-problem writer does not import or call this module.
 //
@@ -39,7 +40,7 @@ export const JEV_RERANK_FLAG = "CARR_JEV_RERANK_MODE";
 export const JEV_RERANK_MODES = Object.freeze(["score", "noul", "beam"]);
 export const JEV_RERANK_SHORTLIST_MAX = 10;
 export const BEAM_WIDTH = 3;
-export const JEV_RERANK_MODEL = "jev-latest";
+export const JEV_RERANK_MODEL = "jev-1.13.0";
 // Flat ambiguity: top relevance within 0.1 of the second. Beam ambiguity: the
 // top path is less than twice as likely as the second (margin < ln 2 nats).
 // Both are starting points to replace once live answers are measured.
@@ -112,7 +113,7 @@ export function buildFlatRerankRequest(situation, candidates, variant) {
       throw new Error(`unknown flat rerank variant: ${variant}`);
     }
   });
-  return { state: { situation: String(situation ?? "") }, questions };
+  return { state: { situation: String(situation ?? "").slice(0, 4000) }, questions };
 }
 
 function isProbability(value) {
@@ -174,7 +175,7 @@ function fallback(result, reason) {
 }
 
 async function ask(askJev, request, model) {
-  const result = await askJev({ state: request.state, questions: request.questions, model });
+  const result = await cachedSemanticAsk(askJev, { state: request.state, questions: request.questions, model }, "rerank-v1");
   return result;
 }
 
@@ -190,13 +191,13 @@ export async function rerankShortlist({ situation, candidates, variant, askJev, 
   let answered;
   try {
     answered = await ask(askJev, request, model);
-  } catch {
-    return fallback({ ...result, requests: 1 }, "jev_unavailable");
+  } catch (error) {
+    return fallback({ ...result, requests: 1 }, /semantic answer|resolved model/.test(error.message) ? "invalid_jev_answer" : "jev_unavailable");
   }
-  result = { ...result, requests: 1 };
+  result = { ...result, requests: answered.cache_hit ? 0 : 1 };
   const relevance = readAnswers(request.questions, answered);
   if (!relevance) return fallback(result, "invalid_jev_answer");
-  result.usage = addUsage(null, answered.usage);
+  result.usage = answered.cache_hit ? {input_tokens:0,output_tokens:0} : addUsage(null, answered.usage);
   const scored = head.map((candidate, i) => ({ candidate, rank: i + 1, relevance: relevance[key(i)] }))
     .sort((a, b) => b.relevance - a.relevance || a.rank - b.rank);
   const scores = scored.map(row => ({ deterministic_rank: row.rank, section_key: row.candidate.section_key ?? null,
@@ -204,7 +205,7 @@ export async function rerankShortlist({ situation, candidates, variant, askJev, 
   const margin = round(scored[0].relevance - scored[1].relevance);
   return {
     ...result, judged: true, reason: null, model: answered.model,
-    order: [...scored.map(row => row.candidate), ...tail],
+    order: all, advisory_order: [...scored.map(row => row.candidate), ...tail], review_required: true,
     scores,
     ambiguity: { top_rank: scored[0].rank, second_rank: scored[1].rank, margin,
       ambiguous: margin < FLAT_AMBIGUITY_MARGIN },
@@ -257,19 +258,9 @@ function nodeQuestion(level, node) {
       false: "The section is about another subject, only shares words with the problem, or is background a responder would not start from." } };
 }
 
-// Ask one level. Nodes carry {id, label, parentScore}. A level with a single
-// node is not asked: every path shares it, so it cannot change the order.
-async function scoreLevel(level, nodes, situation, askJev, model, state) {
-  if (nodes.length === 1) return new Map([[nodes[0].id, nodes[0].parentScore]]);
-  const questions = {};
-  nodes.forEach((node, i) => { questions[key(i)] = nodeQuestion(level, node); });
-  state.requests += 1;
-  const answered = await ask(askJev, { state: { situation: String(situation ?? "") }, questions }, model);
-  const probabilities = readAnswers(questions, answered);
-  if (!probabilities) throw Object.assign(new Error("invalid"), { reason: "invalid_jev_answer" });
-  state.usage = addUsage(state.usage, answered.usage);
-  state.model = answered.model;
-  return new Map(nodes.map((node, i) => [node.id, node.parentScore + logp(probabilities[key(i)])]));
+// All levels are asked speculatively against one situation. Arithmetic and beam pruning stay in code.
+function scoreLevel(level, nodes, probabilities) {
+  return new Map(nodes.map(node => [node.id, node.parentScore + logp(probabilities[level+":"+node.id])]));
 }
 
 function keepTop(nodes, scores, width) {
@@ -301,13 +292,28 @@ export async function beamRerank({ situation, candidates, askJev, taxonomy, k = 
   if (!mapped.length) return fallback(result, "no_mapped_candidates");
 
   const state = { requests: 0, usage: null, model: null };
+  const allClasses = [...new Set(mapped.map(m=>m.doc.class))].sort();
+  const allDocs = [...new Map(mapped.map(m=>[m.doc.slug,m.doc])).values()].sort((a,b)=>a.slug.localeCompare(b.slug));
+  const questions = {};
+  for (const klass of allClasses) questions["class:"+klass] = nodeQuestion("class", {label:klass+": "+taxonomy.classes[klass]});
+  for (const doc of allDocs) questions["document:"+doc.slug] = nodeQuestion("document", {label:doc.title,slug:doc.slug});
+  for (const m of mapped) questions["section:"+m.rank] = nodeQuestion("section", {label:rerankCandidateText(m.candidate)});
+  let probabilities;
+  try {
+    state.requests = 1;
+    const answered = await ask(askJev, {state:{situation:String(situation??"").slice(0,4000)},questions}, model);
+    probabilities = readAnswers(questions,answered);
+    if (!probabilities) return fallback({...result,requests:1},"invalid_jev_answer");
+    state.requests = answered.cache_hit ? 0 : 1;
+    state.usage=answered.cache_hit ? {input_tokens:0,output_tokens:0} : answered.usage; state.model=answered.model;
+  } catch { return fallback({...result,requests:1},"jev_unavailable"); }
   let sectionScores;
   let beamSections;
   try {
     const classNodes = [...new Set(mapped.map(m => m.doc.class))].sort()
       .map((klass, order) => ({ id: klass, order, parentScore: 0,
         label: `${klass}: ${taxonomy.classes[klass] || klass}` }));
-    const classScores = await scoreLevel("class", classNodes, situation, askJev, model, state);
+    const classScores = scoreLevel("class", classNodes, probabilities);
     const keptClasses = new Set(keepTop(classNodes, classScores, k).map(n => n.id));
 
     const docNodes = [];
@@ -316,13 +322,13 @@ export async function beamRerank({ situation, candidates, askJev, taxonomy, k = 
       docNodes.push({ id: m.doc.slug, slug: m.doc.slug, label: m.doc.title, order: m.rank,
         parentScore: classScores.get(m.doc.class) });
     }
-    const docScores = await scoreLevel("document", docNodes, situation, askJev, model, state);
+    const docScores = scoreLevel("document", docNodes, probabilities);
     const keptDocs = new Set(keepTop(docNodes, docScores, k).map(n => n.id));
 
     beamSections = mapped.filter(m => keptDocs.has(m.doc.slug));
     const sectionNodes = beamSections.map(m => ({ id: m.rank, order: m.rank,
       label: rerankCandidateText(m.candidate), parentScore: docScores.get(m.doc.slug) }));
-    sectionScores = await scoreLevel("section", sectionNodes, situation, askJev, model, state);
+    sectionScores = scoreLevel("section", sectionNodes, probabilities);
   } catch (error) {
     return fallback({ ...result, requests: state.requests, usage: state.usage },
       error?.reason || "jev_unavailable");
@@ -343,7 +349,7 @@ export async function beamRerank({ situation, candidates, askJev, taxonomy, k = 
     : { top_rank: ranked[0].rank, second_rank: null, margin: null, ambiguous: false };
   return {
     ...result, judged: true, reason: null, model: state.model, requests: state.requests, usage: state.usage,
-    order: [...ranked.map(m => m.candidate), ...rest.map(row => row.candidate), ...tail],
+    order: all, advisory_order: [...ranked.map(m => m.candidate), ...rest.map(row => row.candidate), ...tail], review_required: true,
     scores, ambiguity,
   };
 }

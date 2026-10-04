@@ -829,7 +829,7 @@ PYEOF
              drive-dependency-inventory drive-retirement-readiness-gate \
              mechanism-doctrine-gate scheduler-cutover-coverage-gate \
              boot-budget-check core-rule-ids-check rule-route-coverage \
-             rule-boot-classes-check check-eval-receipt migration-order-gate; do
+             rule-boot-classes-check check-eval-receipt migration-order-gate check-jev-conformance; do
     [ -f "ops/$inv.py" ] || continue
     local inv_args=()
     if [ "$inv" = check-eval-receipt ] && [ -n "${CARR_PR_BODY_FILE:-}" ]; then

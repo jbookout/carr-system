@@ -1,4 +1,6 @@
-import test from "node:test";
+import {clearSemanticCache} from "../src/jev-semantic.js";
+beforeEach(clearSemanticCache);
+import test, {beforeEach} from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -33,7 +35,7 @@ function labelOracle(fixture) {
       answers[key] = q.type === "noul" ? { type: "noul", noul: label / 3 }
         : { type: "score", score: label * 3, confidence: 0.8 };
     }
-    return { model: "synthetic-label-oracle", answers, usage: { input_tokens: 1000, output_tokens: 10 } };
+    return { model: "jev-1.13.0", synthetic: true, answers, usage: { input_tokens: 1000, output_tokens: 10 } };
   };
 }
 
@@ -125,27 +127,28 @@ test("a failed Jev case is scored on the deterministic order it fell back to", a
   assert.equal(report.summary.input_tokens, 0);
 });
 
-test("the live bridge goes through ops/typesafe_client.ask with the duplicate cache off", async () => {
+test("the live bridge goes through ops/typesafe_client.ask through the versioned semantic cache", async () => {
   const calls = [];
   const spawn = (cmd, args, options) => {
     calls.push({ cmd, args, options });
     return { status: 0, stdout: JSON.stringify({ ok: true, latency_ms: 812.5,
-      result: { model: "jev-1.13", answers: { c00: { type: "noul", noul: 0.7 } }, usage: { input_tokens: 400, output_tokens: 3 } } }), stderr: "" };
+      result: { model: "jev-1.13.0", answers: { c00: { type: "noul", noul: 0.7 } }, usage: { input_tokens: 400, output_tokens: 3 } } }), stderr: "" };
   };
   const ask = pythonJevBridge({ repo: REPO, spawn });
-  const out = await ask({ state: { situation: "x" }, questions: { c00: { type: "noul", instructions: "i" } }, model: "jev-latest" });
-  assert.equal(out.model, "jev-1.13");
+  const out = await ask({ state: { situation: "x" }, questions: { c00: { type: "noul", instructions: "i" } }, model: "jev-1.13.0" });
+  assert.equal(out.model, "jev-1.13.0");
   assert.equal(out.latency_ms, 812.5);
+  await assert.rejects(ask({state:{},questions:{},model:"jev-latest"}), /pinned model/);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].cmd, "python3");
   assert.equal(calls[0].args[0], "-c");
   assert.match(calls[0].args[1], /import typesafe_client/);
-  assert.match(calls[0].args[1], /cache_ttl_seconds=0/);
+  assert.match(calls[0].args[1], /jev_semantic.ask/);
   assert.match(calls[0].args[1], /caller="jev_rerank_eval"/);
   assert.deepEqual(JSON.parse(calls[0].options.input).questions, { c00: { type: "noul", instructions: "i" } });
   const failing = pythonJevBridge({ repo: REPO, spawn: () => ({ status: 0,
     stdout: JSON.stringify({ ok: false, error: "cannot read the TypeSafe credential" }), stderr: "" }) });
-  await assert.rejects(failing({ state: {}, questions: {}, model: "m" }), /cannot read the TypeSafe credential/);
+  await assert.rejects(failing({ state: {}, questions: {}, model: "jev-1.13.0" }), /cannot read the TypeSafe credential/);
 });
 
 test("recorded live answers replay without a vendor call", async () => {
@@ -189,7 +192,7 @@ test("main --live runs every requested variant through the bridge and writes the
     const answers = Object.fromEntries(Object.entries(request.questions).map(([k, q]) =>
       [k, q.type === "noul" ? { type: "noul", noul: 0.5 } : { type: "score", score: 4.5, confidence: 0.5 }]));
     return { status: 0, stdout: JSON.stringify({ ok: true, latency_ms: 100,
-      result: { model: "jev-x", answers, usage: { input_tokens: 10, output_tokens: 1 } } }), stderr: "" };
+      result: { model: "jev-1.13.0", answers, usage: { input_tokens: 10, output_tokens: 1 } } }), stderr: "" };
   };
   const report = await main(["--live", "--variants", "noul", "--out", "out/x.json"],
     { stdout: () => {}, spawn, writeReport: (path, body) => written.push([path, JSON.parse(body)]) });

@@ -1,4 +1,6 @@
-import test from 'node:test';
+import {clearSemanticCache} from "../src/jev-semantic.js";
+beforeEach(clearSemanticCache);
+import test, {beforeEach} from 'node:test';
 import assert from 'node:assert/strict';
 import { dealReadingState, readDealWithJev } from '../src/jev-deal-reading.js';
 
@@ -116,16 +118,17 @@ test('current structured deal facts can support a short explicit next step', asy
   };
   let payload;
   const answer = await readDealWithJev(deal, {
+    now: new Date("2026-09-21"),
     askJev: async request => {
       payload = request;
-      return { model: 'jev-test', answers: {
+      return { model: 'jev-1.13.0', answers: {
         movement: { score: 3 }, waiting_on: { choice: 'client' }, silence_is_bad: { noul: 0.2 },
       } };
     },
   });
   assert.equal(answer.judged, true);
   assert.equal(payload.state.deal.latest_negotiation.side, 'landlord');
-  assert.equal(payload.state.deal.active_dates[0].due_on, '2026-09-25');
+  assert.equal(payload.state.deal.active_dates[0].due_relative_to_today, 'future_or_today');
   assert.equal(payload.state.deal.sent_documents_recorded, 1);
   assert.equal(JSON.stringify(payload).includes('Private address'), false);
   assert.equal(JSON.stringify(payload).includes('999'), false);
@@ -141,7 +144,7 @@ test('old completed dates cannot hide a current open deadline', () => {
         note: 'The current offer expires unless the tenant replies.' },
     ],
   }, new Date('2026-09-21'));
-  assert.deepEqual(found.state.deal.active_dates.map(d => d.due_on), ['2026-09-25']);
+  assert.deepEqual(found.state.deal.active_dates.map(d => d.due_relative_to_today), ['future_or_today']);
   assert.match(found.state.deal.history.join('\n'), /current offer expires/);
   assert.doesNotMatch(found.state.deal.history.join('\n'), /Historic deadline/);
 });

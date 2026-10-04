@@ -1,44 +1,4 @@
-"""jev_scorecard.py — a repeatable harness for the local flash model (#25).
-
-WHAT THIS IS FOR. Every other check in this family (ops/jev_best_of.py,
-ops/jev_notebook.py, and the four already sealed — jev_rule_select.py,
-jev_precheck.py, jev_code_review.py, jev_requirements.py) makes a claim about
-how well a judgment performs. A claim like that decays the moment the local
-model, the prompt, or the judge's own prompts change, unless something reruns
-the SAME suite of tasks the SAME way and reports the SAME numbers back. This
-module is that something: a library, not a one-off script, so a runner
-(written elsewhere, per the brief this was built from) can call it on a
-schedule or after a model swap and get a comparable answer each time.
-
-THE SUITE IS THE ONE FROM THE EXPERIMENT THAT PROVED THIS FAMILY OF CHECKS.
-ops/config/flash-scorecard-tasks.v1.json converts the 16 held-out coding tasks
-in the session scratchpad's jevx/tasks/ — the run that measured ops/jev_best_of
-.py's numbers — into data: id, category, lang, prompt, and either a hidden
-`test` (most tasks: implement a function, hidden tests check it) or, for the
-one write-tests task, `impl` plus `mutants` (write a test suite; it must pass
-the correct implementation and kill every mutant). Grading mirrors that
-experiment's lib/grade.py harness exactly, because a scorecard that grades
-differently from the run it is meant to be comparable to is not a scorecard.
-
-TWO KINDS OF GRADING, AND ONLY ONE OF THEM TOUCHES JEV. run_task() is entirely
-deterministic: it calls the local OpenAI-compatible server, runs the
-candidate's actual code against the task's actual hidden tests in a temp
-directory, and reports a real exit code — the same "keep verifiable facts in
-code" doctrine ops/jev_best_of.py's prefilter applies. grade_fuzzy() is for the
-DIFFERENT, narrower job of scoring free-text output against qualitative
-sub-checks nothing can subprocess-run ("does this explanation mention X", "is
-this tone appropriate") — several independent yes/no facts about the SAME
-output, which per ops/jev_judge.py's docstring is one Noul per fact, batched
-into ONE request, never a request per fact and never one broad question asked
-to cover several judgments at once.
-
-IT IS A LIBRARY AND MUST STAY ONE. No shebang and no main guard: either turns a
-.py file into a registered script entrypoint in the sealed source inventory,
-moves the frontier, and owes a forward-only registry successor. The detector is
-a regex over the whole file with no notion of docstrings, so the construct is
-described here and never spelled. ops/typesafe_client.py carries the long form.
-The runner CLI that drives this library is somebody else's file, not this one.
-"""
+"""Deterministic execution grades exact tests and mutations. One bounded cached semantic batch proposes fuzzy subcheck scores for review. Semantic scores never become an automatic pass/fail grade."""
 
 import importlib.util
 import json
@@ -583,7 +543,7 @@ def grade_fuzzy(output, subchecks, *, client=None, judge=None):
     }
     subject = {"output": (output or "")[:8000]}
     try:
-        answer = judge.judge(subject, questions, client=client)
+        answer = _sibling("jev_semantic").ask(subject, questions, client=client, caller="jev_scorecard", version="vendor-v1", transport=judge.judge)
     except Exception as exc:
         try:
             judge.record("supervise.scorecard_fuzzy", (output or "")[:200], None, None, error=exc)
@@ -596,8 +556,8 @@ def grade_fuzzy(output, subchecks, *, client=None, judge=None):
     probs = {}
     for i, subcheck in enumerate(subchecks):
         probs[subcheck] = float(answer["answers"][f"c{i}"]["noul"])
-    verdict = all(p >= 0.5 for p in probs.values())
-    escalate = any(0.35 <= p <= 0.65 for p in probs.values())
+    verdict = "review_required"
+    escalate = True  # no labeled validation for automatic acceptance
     judge.record("supervise.scorecard_fuzzy", (output or "")[:200], answer, existing_decision=None)
     return {"check": "scorecard_fuzzy", "verdict": verdict, "confidence": None,
             "escalate": escalate, "detail": {"subchecks": probs, "model": answer.get("model")}}

@@ -366,8 +366,14 @@ def compile_rule(rule, *, all_rules, pack_keywords, verbs, history, client, ask)
     cands, near = candidates(rule, all_rules=all_rules, pack_keywords=pack_keywords,
                              verbs=verbs, history=history)
     questions, state, index = questions_for(rule, cands, near, client)
-    answer = ask(state, questions, facets=["semantic_creation"])
-    return interpret(rule, answer, index, model=answer.get("model") or "unknown")
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("jev_semantic", os.path.join(REPO, "ops", "jev_semantic.py"))
+    semantic = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(semantic)
+    answer = semantic.ask(state, questions, transport=ask, caller="rule_trigger_compile",
+                          version="vendor-v1", facets=["semantic_creation"] )
+    proposal = interpret(rule, answer, index, model=answer.get("model") or "unknown")
+    return dict(proposal, proposed_mode=proposal.get("mode"), mode="review_required")
 
 
 def document(entries):
