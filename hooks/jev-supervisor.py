@@ -74,6 +74,9 @@ def _lib(name):
     return module
 
 
+POLICY = _lib("typesafe_client")
+
+
 def _text(value):
     """A tool response as plain text, whatever shape the harness gave it."""
     if value is None:
@@ -472,9 +475,9 @@ def main():
         return 0
     if not isinstance(payload, dict) or MODE == "off" or payload.get("session_id") == "selftest":
         return 0
-    # Every check this hook dispatches is registered unattended=off in
-    # ops/config/jev-call-sites.v1.json; nobody reads an advisory in a worker.
-    if os.environ.get("CARR_JEV_WORKER", "").strip().lower() == "off":
+    # The registry/client owns each site's policy, including mixed policies.
+    enabled = {site for site in SUPERVISOR_SITES if POLICY.call_site_enabled(site)}
+    if not enabled:
         return 0
     event = payload.get("hook_event_name") or payload.get("hookEventName") or ""
     if event == "Stop" and payload.get("stop_hook_active"):
@@ -482,14 +485,17 @@ def main():
     run = Run()
     try:
         if event == "PostToolUse":
-            if judgment_point(event, payload):
+            if "jev_session_watch" in enabled and judgment_point(event, payload):
                 post_tool_use(payload, run)
             # The optional fact library owns its record-write trigger, including
             # successful acknowledgements through Bash and MCP.
-            fact_boundary(payload, run)
+            if "jev_fact_boundary" in enabled:
+                fact_boundary(payload, run)
         elif event == "Stop" and judgment_point(event, payload):
-            stop(payload, run)
-            fact_boundary(payload, run)
+            if "jev_done_checks" in enabled:
+                stop(payload, run)
+            if "jev_fact_boundary" in enabled:
+                fact_boundary(payload, run)
     except Exception:
         return 0
     if MODE != "advise":

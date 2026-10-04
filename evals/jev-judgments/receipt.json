@@ -2,11 +2,11 @@
  "adapter": {
   "adapter_id": "jev-judgments-admission-replay",
   "adapter_version": "1",
-  "configuration_fingerprint": "sha256:3794d926640b38f54b4504d2996a31cd30b882f9669f6a540125f31eda5e3381",
+  "configuration_fingerprint": "sha256:8a13e991514f9524d335e8a5df824c2aa8c8a44cb594de93fae3b65de195910d",
   "harness_id": "evals/jev-judgments/run_eval.py",
-  "harness_version": "327cfc98e87fd5bd99bfde86b05b8aadb2f25c94b933e22c94c6ed8aaf218d26",
+  "harness_version": "416f75ee20be8c75303cc12e18b4106b6aff8b7fc92e4a717e7a9ea666fbae14",
   "model_id": "deterministic-no-model",
-  "native_session_ref": "9c7378ff-74e6-4e2a-ae9b-31d35ab1c08a",
+  "native_session_ref": "9300cddb-0fd7-4985-b5f8-b7fc02a2fd41",
   "provider_id": "none",
   "surface": "offline_programmatic"
  },
@@ -95,8 +95,13 @@
    "mcp-server/src/judge-providers.v1.json": "48b8ca8b4defec4b82fd36f708498c707eab5f861ae0046f857ae06ae8d981ab",
    "ops/config/jev-call-sites.v1.json": "805ce9f514cc9bbb9f354389af038f1bde05674e90edf9dadf4a6228cac36ad8",
    "ops/config/jev-cost-guard.v1.json": "f8da9d20d6019c5bd9528683c61594dca09f07488d66ce998c53ae8bc3c24089",
-   "ops/typesafe_client.py": "4d09c1378d6f5544c595cd85c80987f1c35beb1ddf296a583faa98ab5276ec9d",
-   "tools/judge/interface.py": "2e0440cc85660f83f4456829006f3f00a956e414c4c72e8217ab1a22622f3ed2"
+   "ops/typesafe_client.py": "aaff0cb469980665a36e28d1ee676c9b887560170cccf45939c961ab9cb0feae",
+   "tools/judge/interface.py": "2e0440cc85660f83f4456829006f3f00a956e414c4c72e8217ab1a22622f3ed2",
+   "tools/room-bridge/design_kernel.py": "7545fd6ec1d18f7df2b14cc67a65eae1190d3369fc00a96a5297fe71d5b34f80",
+   "tools/room-bridge/evaluation_kernel.py": "3b5084bf92946fbbbb6b8190eb8c5a7503080950c380f0b12106d6874155dc34",
+   "tools/room-bridge/evaluation_rubrics.py": "315a8f800989a7eebe6a9c5ceeee087893858593bb1e0460f951919cb7f9279a",
+   "tools/room-bridge/execution_contract.py": "d02dd4f4211bd59afe8b6a834f9791bf2bbf04d98d30630c68425c12989334cc",
+   "tools/room-bridge/policy_learning.py": "61929dddb0ab1ebac091871f8f0e2f2f692bd047b36d0a35edcb967ea1ab7aac"
   },
   "expectations": {
    "path": "evals/jev-judgments/expectations.v1.json",
@@ -108,7 +113,7 @@
    "path": "evals/jev-judgments/score.py"
   },
   "source": {
-   "evals/jev-judgments/run_eval.py": "327cfc98e87fd5bd99bfde86b05b8aadb2f25c94b933e22c94c6ed8aaf218d26",
+   "evals/jev-judgments/run_eval.py": "416f75ee20be8c75303cc12e18b4106b6aff8b7fc92e4a717e7a9ea666fbae14",
    "evals/jev-judgments/score.py": "71511dc3ab33fc63455ada0e3f26f2d1a3cd0b09dfa21fcd121a5835cff4ca65"
   }
  },
@@ -156,6 +161,6 @@
  "surface": "jev-judgments",
  "verdict": {
   "decision": "ship",
-  "statement": "Test split: wasted calls refused 0.00 -> 1.00 (delta +1.00, 95% [+1.00, +1.00]); judgment points still paid 1.00 -> 1.00. Paid share of all cases 1.00 -> 0.53."
+  "statement": "Test split: wasted calls refused 0.00 -> 1.00 (delta +1.00, 95% [+1.00, +1.00]); judgment points still paid 1.00 -> 1.00. Paid share of all cases 1.00 -> 0.53. Measured improvement with passing critical dimensions and controls."
  }
 }

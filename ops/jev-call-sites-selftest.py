@@ -22,15 +22,24 @@ from __future__ import annotations
 import ast
 import importlib.util
 import io
+import multiprocessing
 import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from git_env import fixture_env
+ENV = fixture_env()
 
 REPO = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("typesafe_client_sites", REPO / "ops" / "typesafe_client.py")
@@ -104,6 +113,56 @@ class Harness(unittest.TestCase):
         if not self.log.exists():
             return []
         return [json.loads(line) for line in self.log.read_text().splitlines() if line.strip()]
+
+
+class WildcardBudgetTests(Harness):
+    def test_suffixes_share_hourly_daily_budget_pause_and_health(self):
+        self.enterContext(patch.object(client, "JEV_CALL_SITES_PATH", str(REGISTRY_PATH)))
+        for hour in range(4):
+            self.now(2026, 10, 4, hour, 10)
+            for suffix in range(10):
+                self.ask(f"{hour}-{suffix}", caller=f"adhoc:probe{hour}-{suffix}")
+            with self.assertRaises(client.JevCallRefused):
+                self.ask("extra", caller=f"adhoc:extra{hour}")
+            self.assertIsNotNone(client.active_pause(sites=["adhoc:another"]))
+        self.now(2026, 10, 4, 4, 10)
+        with self.assertRaises(client.JevCallRefused) as caught:
+            self.ask("new hour", caller="adhoc:new")
+        self.assertEqual(caught.exception.code, "site_daily_budget")
+        self.assertEqual(len(self.requests), 40)
+        health = client.spend_by_site_health()
+        self.assertIn("WARN", health)
+        self.assertIn("adhoc:*=40/40", health)
+        self.assertNotIn("/?", health)
+        self.assertTrue(any(row.get("caller") == "adhoc:probe0-0" for row in self.rows()))
+
+
+class RecordingAttributionTests(Harness):
+    def test_quill_post_call_checks_work_without_agent_environment(self):
+        self.enterContext(patch.object(client, "JEV_CALL_SITES_PATH", str(REGISTRY_PATH)))
+        self.enterContext(patch.dict(os.environ, {"XPC_SERVICE_NAME": "com.digimata.quill"}))
+        self.enterContext(patch.object(client, "read_api_key", lambda *a: "offline-fixture"))
+        spec = importlib.util.spec_from_file_location("post_call_jev", REPO / "tools/dictation-rig/bin/post_call_jev.py")
+        post = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(post)
+        self.enterContext(patch.object(post, "_client", lambda: client))
+        answers = {"deal_match": {"type": "choice", "choice": "deal-fixture", "confidence": 0.99},
+                   "speaker_right": {"type": "noul", "noul": 0.99},
+                   "details_supported": {"type": "noul", "noul": 0.99}}
+        def opener(request, timeout=None):
+            self.requests.append(request)
+            return FakeResponse(json.dumps({**ANSWER, "answers": answers}).encode())
+        self.enterContext(patch.object(client.urllib.request, "urlopen", opener))
+        self.enterContext(patch.dict(client.ask.__kwdefaults__, cache_path=str(self.root / "cache.json")))
+        pack = {"session": "recording-fixture", "joe_tasks": [
+            {"id": "item-fixture", "deal_id": "deal-fixture", "task": "send details", "evidence": "send details"}]}
+        post.check_distillation(pack, {"deals": [{"id": "deal-fixture", "name": "Fixture"}]},
+                                {"segments": [{"speaker": "Me", "text": "send details"}]})
+        self.assertEqual(len(self.requests), 1)
+        self.assertNotIn("unavailable", pack["joe_tasks"][0]["checks"])
+        self.assertEqual(client._job_label(), "com.digimata.quill")
+        with patch.dict(os.environ, {"XPC_SERVICE_NAME": "com.unrelated.service"}):
+            self.assertIsNone(client._job_label())
 
 
 class RegistryAdmissionTests(Harness):
@@ -350,6 +409,105 @@ class ChangeTollsDedupeTests(unittest.TestCase):
         self.assertEqual(len(self.asked), 1)
         self.tolls.owed({"files": ["hooks/y.py"], "behind_main": 0})
         self.assertEqual(len(self.asked), 2)
+
+    def test_same_name_question_revision_requires_a_fresh_judgment(self):
+        state = {"files": ["hooks/x.py"]}
+        self.tolls.owed(state)
+        text, fix = self.tolls.TOLLS["gate_rebless"]
+        with patch.dict(self.tolls.TOLLS, gate_rebless=(text + " Revised criterion.", fix)):
+            self.tolls.owed(state)
+        self.assertEqual(len(self.asked), 2)
+
+    def test_changed_file_contents_invalidate_collected_state(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        subprocess.run(["git", "init", "-q", str(root)], env=ENV, check=True)
+        subprocess.run(["git", "remote", "add", "origin", str(root)], cwd=root, env=ENV, check=True)
+        (root / "fixture.py").write_text("old contents")
+        subprocess.run(["git", "add", "fixture.py"], cwd=root, env=ENV, check=True)
+        subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                        "commit", "-qm", "fixture"], cwd=root, env=ENV, check=True)
+        (root / "fixture.py").write_text("first revision")
+        first = self.tolls.change(base="HEAD", repo=str(root))
+        self.tolls.owed(first)
+        (root / "fixture.py").write_text("second revision")
+        second = self.tolls.change(base="HEAD", repo=str(root))
+        self.tolls.owed(second)
+        self.assertEqual(len(self.asked), 2)
+
+    def concurrent(self, states):
+        original = self.tolls._client()
+        start = threading.Barrier(2)
+        class SlowClient:
+            noul = original.noul
+            @staticmethod
+            def ask(*args, **kwargs):
+                time.sleep(0.1)
+                return original.ask(*args, **kwargs)
+        def invoke(state):
+            start.wait(timeout=3)
+            return self.tolls.owed(state)
+        with patch.object(self.tolls, "_client", lambda: SlowClient), ThreadPoolExecutor(2) as pool:
+            return list(pool.map(invoke, states))
+
+    def test_concurrent_same_state_pays_once(self):
+        state = {"files": ["hooks/x.py"]}
+        answers = self.concurrent([state, state])
+        self.assertEqual(answers[0], answers[1])
+        self.assertEqual(len(self.asked), 1)
+
+    def test_separate_processes_share_one_cache_claim(self):
+        ctx = multiprocessing.get_context("fork")
+        count, start = ctx.Value("i", 0), ctx.Event()
+        original = self.tolls._client()
+        class ProcessClient:
+            noul = original.noul
+            @staticmethod
+            def ask(*args, **kwargs):
+                with count.get_lock():
+                    count.value += 1
+                time.sleep(0.1)
+                return original.ask(*args, **kwargs)
+        def invoke():
+            start.wait(3)
+            self.tolls.owed({"files": ["hooks/x.py"]})
+        with patch.object(self.tolls, "_client", lambda: ProcessClient):
+            workers = [ctx.Process(target=invoke) for _ in range(2)]
+            for worker in workers:
+                worker.start()
+            start.set()
+            for worker in workers:
+                worker.join(5)
+                self.assertEqual(worker.exitcode, 0)
+        self.assertEqual(count.value, 1)
+
+    def test_concurrent_different_states_preserve_both_entries(self):
+        states = [{"files": ["hooks/x.py"]}, {"files": ["hooks/y.py"]}]
+        self.concurrent(states)
+        for state in states:
+            self.tolls.owed(state)
+        self.assertEqual(len(self.asked), 2)
+
+    def test_readers_never_observe_partial_cache_json(self):
+        self.tolls.owed({"files": ["hooks/x.py"]})
+        entered, release = threading.Event(), threading.Event()
+        original = self.tolls.json.dump
+        def partial(value, fh, **kwargs):
+            fh.write("{")
+            fh.flush()
+            entered.set()
+            release.wait(timeout=3)
+            fh.seek(0)
+            fh.truncate()
+            return original(value, fh, **kwargs)
+        with patch.object(self.tolls.json, "dump", partial), ThreadPoolExecutor(1) as pool:
+            write = pool.submit(self.tolls.owed, {"files": ["hooks/y.py"]})
+            try:
+                self.assertTrue(entered.wait(timeout=3))
+                persisted = json.loads(Path(self.tolls.CACHE_PATH).read_text())
+                self.assertTrue(persisted)
+            finally:
+                release.set()
+                write.result(timeout=3)
 
     def test_cache_expires_after_a_day(self):
         state = {"files": ["hooks/x.py"]}
