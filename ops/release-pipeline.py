@@ -2486,6 +2486,21 @@ def report(store: Store, day: str) -> str:
     return "\n".join(lines)
 
 
+def worktree_registration(repo_dir: Path, path: Path) -> list[str] | None:
+    """Read one exact registration, including any Git lock, without path quoting."""
+    proc = subprocess.run(["git", "-C", str(repo_dir), "worktree", "list", "--porcelain", "-z"],
+                          env=child_env(), stdin=subprocess.DEVNULL,
+                          capture_output=True, text=True, timeout=300)
+    if proc.returncode != 0:
+        raise SystemExit(f"release-pipeline: cannot inspect worktree registrations in {repo_dir}: "
+                         f"{proc.stderr.strip()[:300]}; failure NOT cleared")
+    for entry in proc.stdout.split("\0\0"):
+        fields = entry.split("\0")
+        if fields[0] == f"worktree {path.resolve()}":
+            return fields
+    return None
+
+
 def clear_failed(store: Store, lane: str, sha: str, reason: str, *, repo_dir: Path) -> str:
     """The one sanctioned way to let a failed SHA be attempted again (after a
     fix outside the repository, such as a restored credential). A fix merged to
@@ -2493,34 +2508,54 @@ def clear_failed(store: Store, lane: str, sha: str, reason: str, *, repo_dir: Pa
 
     The failed run kept its worktree for diagnosis, and add_worktree refuses
     an existing one, so the retry would burn the SHA again. The kept worktree
-    is moved aside (never deleted) and `repo_dir`'s worktree list pruned."""
-    state = store.load()
-    lane_state = state.get(lane) or {}
-    if not lane_state.get("failed_sha"):
-        return f"release-pipeline[{lane}]: nothing to clear"
-    if lane_state["failed_sha"] != sha:
-        raise SystemExit(f"release-pipeline[{lane}]: failed SHA is {lane_state['failed_sha']}, not {sha}")
-    kept = store.release_worktree(lane, sha)
-    moved = None
-    if kept.exists():
-        stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        moved = store.root / "worktrees-cleared" / f"{kept.name}-{stamp}"
-        moved.parent.mkdir(parents=True, exist_ok=True)
-        os.rename(kept, moved)
-        proc = subprocess.run(["git", "-C", str(repo_dir), "worktree", "prune"], env=child_env(),
-                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300)
-        if proc.returncode != 0:
-            raise SystemExit(f"release-pipeline[{lane}]: moved {kept} to {moved}, but `git -C {repo_dir} "
-                             f"worktree prune` failed: {proc.stderr.strip()[:300]}; failure NOT cleared")
-    previous = {k: lane_state.get(k) for k in ("failed_sha", "failed_step", "failed_at")}
-    lane_state.update({"failed_sha": None, "failed_step": None, "failed_at": None})
-    state[lane] = lane_state
-    store.save(state)
-    store.record({"lane": lane, "sha": sha, "status": "failure_cleared", "reason": reason, **{
-        "cleared_" + k: v for k, v in previous.items()}, **({"cleared_worktree": str(moved)} if moved else {})})
-    retired = f"; kept worktree moved to {moved}" if moved else ""
-    return (f"release-pipeline[{lane}]: cleared failed {sha[:12]} ({previous['failed_step']}){retired}; "
-            "next tick retries it")
+    is moved aside (never deleted), with resumable retirement intent bound to
+    the full SHA. The tick lock covers state, filesystem, Git and receipt; a
+    lock or a retained registration refuses clearance before retry is allowed."""
+    with single_run_lock(store.root) as got:
+        if not got:
+            raise SystemExit(f"release-pipeline[{lane}]: another run holds the lock; failure NOT cleared")
+        state = store.load()
+        lane_state = state.get(lane) or {}
+        if not lane_state.get("failed_sha"):
+            return f"release-pipeline[{lane}]: nothing to clear"
+        if lane_state["failed_sha"] != sha:
+            raise SystemExit(f"release-pipeline[{lane}]: failed SHA is {lane_state['failed_sha']}, not {sha}")
+        kept = store.release_worktree(lane, sha)
+        registration = worktree_registration(repo_dir, kept)
+        if registration and any(f == "locked" or f.startswith("locked ") for f in registration):
+            raise SystemExit(f"release-pipeline[{lane}]: {kept} is locked; failure NOT cleared")
+        retirement = lane_state.get("failed_worktree_retirement")
+        moved = Path(retirement["path"]) if retirement and retirement["sha"] == sha else None
+        if kept.exists():
+            if moved is None:
+                stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                moved = store.root / "worktrees-cleared" / f"{kept.name}-{stamp}-{uuid.uuid4().hex}"
+                # Write intent before moving: interruption on either side of the
+                # rename must leave enough state to resume the same retirement.
+                lane_state["failed_worktree_retirement"] = {"sha": sha, "path": str(moved)}
+                state[lane] = lane_state
+                store.save(state)
+            moved.parent.mkdir(parents=True, exist_ok=True)
+            os.rename(kept, moved)
+        if moved is not None or registration is not None:
+            proc = subprocess.run(["git", "-C", str(repo_dir), "worktree", "prune"], env=child_env(),
+                                  stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300)
+            if proc.returncode != 0:
+                raise SystemExit(f"release-pipeline[{lane}]: retiring {kept}: `git -C {repo_dir} "
+                                 f"worktree prune` failed: {proc.stderr.strip()[:300]}; failure NOT cleared")
+            if worktree_registration(repo_dir, kept) is not None:
+                raise SystemExit(f"release-pipeline[{lane}]: {kept} is still registered after prune; "
+                                 "failure NOT cleared")
+        previous = {k: lane_state.get(k) for k in ("failed_sha", "failed_step", "failed_at")}
+        lane_state.update({"failed_sha": None, "failed_step": None, "failed_at": None})
+        lane_state.pop("failed_worktree_retirement", None)
+        state[lane] = lane_state
+        store.save(state)
+        store.record({"lane": lane, "sha": sha, "status": "failure_cleared", "reason": reason, **{
+            "cleared_" + k: v for k, v in previous.items()}, **({"cleared_worktree": str(moved)} if moved else {})})
+        retired = f"; kept worktree moved to {moved}" if moved else ""
+        return (f"release-pipeline[{lane}]: cleared failed {sha[:12]} ({previous['failed_step']}){retired}; "
+                "next tick retries it")
 
 
 def main(argv: list[str] | None = None) -> int:
