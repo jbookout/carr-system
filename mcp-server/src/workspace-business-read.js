@@ -98,6 +98,7 @@ function classifyReadError(error) {
 export function parseBusinessApiPath(pathname) {
   if (typeof pathname !== "string" || !pathname.startsWith(BUSINESS_API_PREFIX)) return null;
   const parts = pathname.slice(BUSINESS_API_PREFIX.length).split("/");
+  if (parts.length === 1 && parts[0] === "leases") return { dataset: "leases", id: null };
   if (parts.length > 2 || !DATASETS.includes(parts[0])) return null;
   if (parts.length === 1) return { dataset: parts[0], id: null };
   return UUID.test(parts[1]) ? { dataset: parts[0], id: parts[1].toLowerCase() } : null;
@@ -735,6 +736,10 @@ export function createWorkspaceBusinessReader() {
     const route = parseBusinessApiPath(url.pathname);
     if (!route) throw businessError("RECORD_NOT_FOUND");
     const resolved = correlationId || env.CORRELATION_ID;
+    if (route.dataset === "leases") {
+      requireExactKeys(url.searchParams, [], actor.slug);
+      return readLeaseRadar({ client, actor, correlationId: resolved });
+    }
     if (route.id) {
       const {contract} = parseBusinessRecordQuery(url.searchParams, actor.slug);
       return readBusinessRecord({ client, actor, dataset: route.dataset, id: route.id, contract, correlationId: resolved });
@@ -742,4 +747,22 @@ export function createWorkspaceBusinessReader() {
     const query = parseBusinessQuery(route.dataset, url.searchParams, actor.slug);
     return readBusinessList({ client, actor, query, correlationId: resolved });
   };
+}
+
+
+// The lease projection shares the existing authenticated business HTTP door.
+// Dates are recorded facts, never synthesized from term_months or market data.
+export const LEASE_RADAR_SQL = `select starts_on::text, ends_on::text, leases
+  from public.v_client_lease_radar`;
+
+export async function readLeaseRadar({ client, actor, tenant = organizationTenantForActor(actor), correlationId, now = () => new Date() }) {
+  assertAudience(actor, tenant);
+  if (!correlationId) throw businessError("INTERNAL_ERROR");
+  let head;
+  try { head = (await client.query(LEASE_RADAR_SQL, [])).rows?.[0]; }
+  catch (error) { throw classifyReadError(error); }
+  const leases = rowsOf(head?.leases);
+  if (!leases || !/^\d{4}-\d{2}-\d{2}$/.test(head?.starts_on) || !/^\d{4}-\d{2}-\d{2}$/.test(head?.ends_on)) throw businessError("FRESHNESS_UNKNOWN");
+  return { schema_version: "lease-radar.v1", actor: actor.slug, observed_at: now().toISOString(),
+    window: { starts_on: head.starts_on, ends_on: head.ends_on }, leases };
 }
