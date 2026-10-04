@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import os
+import re
 import sys
 from contextlib import redirect_stderr
 from pathlib import Path
@@ -531,6 +532,13 @@ check("start failure still removes cluster", remove_start_failure.call_count == 
 
 run_sh = (REPO / "run.sh").read_text(encoding="utf-8")
 check("one-command route is registered", "local-db-ci)" in run_sh and "ops/local-pg-ci.py" in run_sh)
+
+# The complete hosted lane reached its 25-minute job limit after migration CI
+# had passed. Setup, post-CI DB acceptance, and teardown also need budget.
+workflow = (REPO / ".github/workflows/db-acceptance.yml").read_text()
+job_timeout = re.search(r"^    timeout-minutes: (\d+)$", workflow, re.MULTILINE)
+check("hosted migration job has room for setup, acceptance and teardown",
+      job_timeout is not None and 35 <= int(job_timeout[1]) <= 45)
 
 print(f"local PG CI selftest — {passed}/{passed + len(failed)} passed")
 if failed:
