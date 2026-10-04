@@ -414,6 +414,10 @@ def production_untouched(res: dict) -> bool:
 def main() -> int:
     print("deploy-worker-do-migration-selftest: a pending DO migration ships; every doubt ships nothing")
     source = SCRIPT.read_text(encoding="utf-8")
+    baseline = tomllib.loads((REPO / "mcp-server" / "wrangler.toml").read_text(encoding="utf-8"))
+    fixture = tomllib.loads(wrangler_toml([]))
+    check("fixture removes production migrations without discarding subsequent environment tables",
+          fixture.get("migrations", []) == [] and fixture.get("env") == baseline.get("env"))
 
     # A. current main: no [[migrations]] at all
     res = run(source, tags=[], state={})

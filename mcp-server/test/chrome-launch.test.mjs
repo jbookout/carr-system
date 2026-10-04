@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { launchChrome } from "../../dealroom/test/chrome-launch.mjs";
 
 const fixture = new URL("./fixtures/chrome-launch-fixture.mjs", import.meta.url);
@@ -150,6 +151,59 @@ test("a browser that ignores SIGTERM is killed before the retry", async () => {
     assert.equal(fake.calls[0].child.signalCode, "SIGKILL");
     assert.equal(existsSync(fake.calls[0].profile), false);
   } finally { await browser.close(); }
+});
+
+test("Chrome waits through a transient EPERM group probe after SIGKILL before retrying", { skip: process.platform === "win32" }, async (t) => {
+  const kill = process.kill.bind(process);
+  let killed = false, injected = false;
+  const fake = fakeChrome(["hang-ignore-term", "ready"], (calls) => {
+    if (calls.length === 1) {
+      assert.equal(injected, true, "the post-kill probe exercised EPERM");
+      assert.throws(() => kill(-calls[0].child.pid, 0), { code: "ESRCH" }, "the group must disappear before retry");
+      assert.equal(existsSync(calls[0].profile), false);
+    }
+  });
+  t.mock.method(process, "kill", (pid, signal) => {
+    if (pid === -fake.calls[0]?.child.pid) {
+      if (signal === "SIGKILL") killed = true;
+      if (signal === 0 && killed && !injected) {
+        injected = true;
+        throw Object.assign(new Error("group awaiting reap"), { code: "EPERM" });
+      }
+    }
+    return kill(pid, signal);
+  });
+  t.after(() => {
+    for (const { child } of fake.calls) {
+      try { kill(-child.pid, "SIGKILL"); }
+      catch (error) { if (error.code !== "ESRCH") throw error; }
+    }
+  });
+  const browser = await launchChrome("fake-chrome", { spawnChrome: fake.spawnChrome, timeoutMs: 1500 });
+  try {
+    assert.equal(fake.calls.length, 2);
+    assert.equal(fake.calls[0].child.signalCode, "SIGKILL");
+  } finally { await browser.close(); }
+});
+
+test("Chrome refuses retry when EPERM probes never establish group disappearance", { skip: process.platform === "win32" }, async (t) => {
+  const kill = process.kill.bind(process);
+  const fake = fakeChrome(["exit", "ready"]);
+  t.after(async () => {
+    for (const { profile, child } of fake.calls) {
+      try { kill(-child.pid, "SIGKILL"); }
+      catch (error) { if (error.code !== "ESRCH") throw error; }
+      await rm(profile, { recursive: true, force: true });
+    }
+  });
+  t.mock.method(process, "kill", (pid, signal) => {
+    if (pid === -fake.calls[0]?.child.pid && signal === 0) {
+      throw Object.assign(new Error("group remains unsignalable"), { code: "EPERM" });
+    }
+    return kill(pid, signal);
+  });
+  await assert.rejects(launchChrome("fake-chrome", { spawnChrome: fake.spawnChrome, timeoutMs: 1500 }), /process tree did not exit after SIGKILL/);
+  assert.equal(fake.calls.length, 1, "an unverified group never competes with a retry");
 });
 
 test("simultaneous browser launches use independent profiles and ports", async (t) => {

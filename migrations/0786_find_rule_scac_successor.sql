@@ -4,7 +4,7 @@ declare v ops.scac_mutation_registry_version%rowtype; registration jsonb;
 begin
   if not exists(select 1 from public.schema_migrations where filename='0768_confirm_merge_human_only_scac_successor.sql' and sha256='ee82c2b17dfe413bbf147048fc154a6525810b8019ee31ee8bb0e4942fdbaf4d') then
     raise exception 'Find rule v103 requires exact applied 0768'; end if;
-  if not exists(select 1 from public.schema_migrations where filename='0769_rule_teach_supersession.sql' and sha256='a30147f6806cffacd26f3cec76420cfe088782675bc201b8cb180ac3ba8db124') then
+  if not exists(select 1 from public.schema_migrations where filename='0785_rule_teach_supersession.sql' and sha256='a30147f6806cffacd26f3cec76420cfe088782675bc201b8cb180ac3ba8db124') then
     raise exception 'Find rule v103 requires exact supersession migration'; end if;
   select * into v from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v102';
   if v.registry_digest is distinct from 'sha256:e4d54f752db9af067b65e84eb45f4297acad7100b54553f763bd981609830dc9' or v.entry_count<>2606

@@ -400,8 +400,8 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     # deferred-epoch-trigger shape as the pairs above: 0708 applied alone
     # would be refused at commit, so the pair must be one transaction.
     (
-        "0774_workflow_census_store.sql",
-        "0775_workflow_census_store_scac_successor.sql",
+        "0808_workflow_census_store.sql",
+        "0809_workflow_census_store_scac_successor.sql",
     ),
     (
         "0708_action_class_successor_registry.sql",
@@ -488,8 +488,8 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0767_doc_whats_new_scac_successor.sql",
     ),
     (
-        "0769_rule_teach_supersession.sql",
-        "0770_find_rule_scac_successor.sql",
+        "0785_rule_teach_supersession.sql",
+        "0786_find_rule_scac_successor.sql",
     ),
 )
 
@@ -563,8 +563,8 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0707_amend_closed_loop_scac_successor.sql",
     ),
     (
-        "0774_workflow_census_store.sql",
-        "0775_workflow_census_store_scac_successor.sql",
+        "0808_workflow_census_store.sql",
+        "0809_workflow_census_store_scac_successor.sql",
     ),
     (
         "0708_action_class_successor_registry.sql",
@@ -623,8 +623,8 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0767_doc_whats_new_scac_successor.sql",
     ),
     (
-        "0769_rule_teach_supersession.sql",
-        "0770_find_rule_scac_successor.sql",
+        "0785_rule_teach_supersession.sql",
+        "0786_find_rule_scac_successor.sql",
     ),
 )
 

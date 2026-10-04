@@ -41,6 +41,8 @@ exactly as they bind Joe, with zero mechanical enforcement on his side today.
     ops/config-as-code.py verify-codex-continuity
     ops/config-as-code.py install-codex-continuity-mcp --apply
     ops/config-as-code.py verify-codex-continuity-mcp
+    ops/config-as-code.py install-progress-board [--repo CHECKOUT] --apply
+    ops/config-as-code.py verify-progress-board [--repo CHECKOUT]
     ops/config-as-code.py remove-codex-continuity --apply
 
 `check` is what belongs in run.sh health: it answers "is the live config still
@@ -221,83 +223,9 @@ CODEX_PERMISSIONS_END = "# <<< CARR managed permissions <<<"
 TOKENS = [(tok, real) for tok, real in
           (("{{VAULT}}", VAULT), ("{{REPO}}", REPO), ("{{HOME}}", HOME)) if real]
 
-# RUNS ON EXACTLY ONE MACHINE. Not a statement about Joe; a statement about what
-# the job writes. Each of these mutates state that is SHARED between the two
-# machines, so a second copy is either duplicated work or a two-writer conflict.
-# Widened 2026-08-10 during the Dell migration audit, when the set held only the
-# video pipeline and the other five would have been installed on his Mac:
-#
-#   videopipeline       — Joe's Movies folder; Dell has no video pipeline.
-#   nightly-record-layer— pushes the corpus to the shared vault and mirrors
-#                         doctrine to a path hardcoded to Joe's Google Drive
-#                         (bin/nightly.sh:154), which cannot resolve on another
-#                         machine. The cadence engine inside it IS idempotent,
-#                         so the risk is the vault writes, not double-spawning.
-#   rules-refresh       — writes the shared compiled-rules renders, and the cost
-#                         ruling in its own plist is decisive: Neon free is
-#                         100 CU-h/month at ~5 min per wake, so a second Mac
-#                         waking it hourly doubles the burn and can SUSPEND the
-#                         database for the rest of the month.
-#   local-briefs        — maintains Joe's local review queue. Legacy brief files
-#                         are explicit recovery only; a second scheduler would
-#                         duplicate the same owner-specific maintenance.
-#   partner-ping        — writes the shared record. One pinger is the point.
-#   cutover-watch       — writes the shared record (a loop update on #532) and
-#                         holds its own sentinel of what it last reported under
-#                         out/cutover-watch/, which is per-machine and would
-#                         make two Macs disagree about what is "new" — the
-#                         same partner-ping shape (one watcher, one shared
-#                         record) with the added risk of two update-loop calls
-#                         racing on the same loop's base_version.
-#
-# What the second machine still needs from the nightly is the record-derived
-# fetch allowlist, which is per-machine and gitignored. That is why
-# com.carr.fetch-allowlist.plist exists as its own job rather than being
-# inherited from the nightly chain.
-PRIMARY_ONLY = {
-    "com.carr.videopipeline.plist",
-    # com.carr.preflight-watch.plist was listed here until 2026-08-22. It watched
-    # DELL's migration packet from Joe's Mac and was built to remove itself once
-    # his A15 closed. A15 is closed, the watcher unloaded and deleted its own
-    # plist as designed, and bin/preflight-watch.sh is retired with this entry —
-    # which had been naming a plist that exists in neither ops/launchd/ nor
-    # ~/Library/LaunchAgents. A lifecycle that completes should leave nothing
-    # behind pointing at it (rule def3e84e, artifact tombstones: nothing
-    # silently rots).
-    "com.carr.nightly-record-layer.plist",
-    "com.carr.rules-refresh.plist",
-    "com.carr.local-briefs.plist",
-    "com.carr.partner-ping.plist",
-    "com.carr.cutover-watch.plist",
-    # The V5-F09 census writer records under this Mac's actor; the census
-    # reader's writer list names joe-local only, so a second machine's run
-    # would be recorded and then read back as an unknown writer.
-    "com.carr.workflow-census-writer.plist",
-    # Joe 2026-09-26: the Mac Studio is the hub and the MacBook is a thin client
-    # into it, so work that acts on shared state runs on the primary alone.
-    # room-bridge: both Macs carried the same Model Room desks and raced for
-    # each turn; it also wakes the engineering controller, whose one Worker
-    # token lives on the primary.  release-pipeline and control-plane-tick
-    # would release and enqueue twice.  The cadence sweep would escalate twice.
-    # nightly-exports-daytime-retry is the safety net for nightly-record-layer,
-    # which is already primary-only.  timebomb-audit scans the same tracked
-    # source on every Mac.  Device-bound jobs (dictation, call mode, capture,
-    # keymap, local servers, spool flush, fleet sync) stay on every machine.
-    "com.carr.room-bridge.plist",
-    "com.carr.release-pipeline.plist",
-    "com.carr.control-plane-tick.plist",
-    "com.carr.delivery-cadence-a05-sweep.plist",
-    "com.carr.nightly-exports-daytime-retry.plist",
-    "com.carr.timebomb-audit.plist",
-    # WR-000178: the Studio's Tailscale stayed stopped ~6h after the 2026-09-30
-    # reboot and cut SSH to the MacBook. The hub is the node that must come up.
-    "com.carr.tailscale-up.plist",
-}
+from lib.launchd_scope import PRIMARY_ONLY, SECONDARY_ONLY
 
 
-# The mirror image: jobs only the SECOND machine needs, because the primary
-# already gets the same effect from a chain the second machine must not run.
-SECONDARY_ONLY = {"com.carr.fetch-allowlist.plist"}
 
 
 # Versioned definitions that deliberately must not become live merely because
@@ -829,14 +757,35 @@ def codex_permissions_source():
 
 
 def canonical_codex_permissions(raw):
-    """Render a live CARR-owned Codex permission slice in portable source form."""
-    default = re.search(r'^default_permissions\s*=\s*"[^"]+"\s*$', raw, re.M)
-    marker = re.search(re.escape(CODEX_PERMISSIONS_BEGIN) + r'\n(.*?)'
-                       + re.escape(CODEX_PERMISSIONS_END), raw, re.S)
-    if not default or not marker:
+    """Read reserved semantic paths, independent of comments and TOML syntax."""
+    import tomllib
+    import tomlkit
+    try:
+        source = codex_permissions_source()
+        if source is None:
+            return None
+        default_line, body = source
+        expected = tomllib.loads(default_line + "\n" + body)
+        parsed = tomllib.loads(portable(raw))
+        default = parsed.get('default_permissions')
+        permissions = parsed.get('permissions')
+        if not isinstance(default, str) or default not in expected['permissions'] \
+                or not isinstance(permissions, dict):
+            return None
+        profiles = {}
+        for name in expected['permissions']:
+            profile = permissions.get(name)
+            if not isinstance(profile, dict):
+                return None
+            profiles[name] = profile
+        observed = {'default_permissions': default, 'permissions': profiles}
+        # Equal semantics render in the source's form. Changed values remain
+        # visible to drift checks and pull; unrelated settings stay outside it.
+        if observed == expected:
+            return default_line + "\n\n" + body
+        return tomlkit.dumps(observed)
+    except (tomllib.TOMLDecodeError, ValueError, TypeError, AttributeError):
         return None
-    rendered = default.group(0).strip() + "\n\n" + marker.group(1).strip() + "\n"
-    return portable(rendered)
 
 
 def live_codex_permissions():
@@ -845,22 +794,110 @@ def live_codex_permissions():
     return None if raw is None else canonical_codex_permissions(raw)
 
 
-def install_codex_permissions(raw, default_line, body):
-    """Replace only the managed CARR slice of Codex's user-owned config.toml."""
-    default_re = re.compile(r'^default_permissions\s*=\s*"[^"]+"\s*\n?', re.M)
-    if default_re.search(raw):
-        planned = default_re.sub(default_line + "\n", raw, count=1)
-    else:
-        first_table = re.search(r'^\[', raw, re.M)
-        at = first_table.start() if first_table else len(raw)
-        planned = raw[:at] + default_line + "\n" + raw[at:]
+def codex_permission_syntax(raw):
+    """Locate real headers and marker comments, excluding strings and arrays.
 
-    managed = CODEX_PERMISSIONS_BEGIN + "\n" + body.rstrip() + "\n" + CODEX_PERMISSIONS_END
-    marker_re = re.compile(re.escape(CODEX_PERMISSIONS_BEGIN) + r'\n.*?'
-                           + re.escape(CODEX_PERMISSIONS_END), re.S)
-    if marker_re.search(planned):
-        return marker_re.sub(managed, planned, count=1)
-    return planned.rstrip() + "\n\n" + managed + "\n"
+    Recovery removes standalone reserved tables, including old duplicates.
+    TOML Kit owns key/value interpretation after that recovery.
+    """
+    import tomllib
+    headers, markers = [], []
+    multiline = None
+    depth = 0
+    offset = 0
+    tokens = re.compile(r'''"""|''' + "'''" + r'''|"(?:\\.|[^"\\])*"|'[^']*'|#[^\n]*|[\[\]{}]''')
+    for line in raw.splitlines(keepends=True):
+        if multiline is None and depth == 0:
+            if line.strip() in (CODEX_PERMISSIONS_BEGIN, CODEX_PERMISSIONS_END):
+                markers.append((offset, offset + len(line), line.strip()))
+            if re.match(r'^\s*\[', line):
+                try:
+                    table = tomllib.loads(line + '\n__carr_slice__ = true\n')
+                except tomllib.TOMLDecodeError:
+                    pass  # An array continuation is not a table boundary.
+                else:
+                    permissions = table.get('permissions', {})
+                    owned = bool(set(permissions) & {'carr_unattended', 'carr_drive_readonly'})
+                    headers.append((offset, owned))
+        cursor = 0
+        while cursor < len(line):
+            if multiline is not None:
+                end = line.find(multiline, cursor)
+                if end < 0:
+                    break
+                # An escaped quote cannot close a multiline basic string.
+                escapes = len(line[:end]) - len(line[:end].rstrip('\\'))
+                cursor = end + 3
+                if multiline == '"""' and escapes % 2:
+                    continue
+                # One or two content quotes may precede the closing delimiter.
+                while cursor < min(end + 5, len(line)) and line[cursor] == multiline[0]:
+                    cursor += 1
+                multiline = None
+            else:
+                token = tokens.search(line, cursor)
+                if token is None:
+                    break
+                cursor = token.end()
+                value = token.group()
+                if value in ('"""', "'''"):
+                    multiline = value
+                elif value.startswith('#'):
+                    break
+                elif value in ('[', '{'):
+                    depth += 1
+                elif value in (']', '}'):
+                    depth -= 1
+        offset += len(line)
+    spans = [(start, headers[i + 1][0] if i + 1 < len(headers) else len(raw))
+             for i, (start, owned) in enumerate(headers) if owned]
+    return spans, markers
+
+
+def install_codex_permissions(raw, default_line, body):
+    """Repair reserved semantic paths; preserve every unrelated TOML value."""
+    import tomllib
+    import tomlkit
+    from tomlkit.items import InlineTable
+
+    expected = tomllib.loads(default_line + "\n" + body)
+    spans, markers = codex_permission_syntax(raw)
+    # Marker ownership covers comment lines only, never enclosed user data.
+    spans.extend((start, end) for start, end, _ in markers)
+    merged = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+        else:
+            merged.append((start, end))
+    pieces, cursor = [], 0
+    for start, end in merged:
+        pieces.append(raw[cursor:start])
+        cursor = end
+    pieces.append(raw[cursor:])
+    document = tomlkit.parse("".join(pieces))
+    document['default_permissions'] = expected['default_permissions']
+    permissions = document.get('permissions')
+    if permissions is not None:
+        for name in expected['permissions']:
+            permissions.pop(name, None)
+        if not permissions:
+            del document['permissions']
+        elif isinstance(permissions, InlineTable):
+            # Inline parents are sealed in TOML; open the retained siblings so
+            # canonical profile headers can be declared alongside them.
+            retained = tomlkit.table()
+            for name, value in permissions.items():
+                retained.add(name, value)
+            document['permissions'] = retained
+    planned = (tomlkit.dumps(document).rstrip() + "\n\n" + CODEX_PERMISSIONS_BEGIN
+               + "\n" + body.rstrip() + "\n" + CODEX_PERMISSIONS_END + "\n")
+    parsed = tomllib.loads(planned)
+    if parsed.get('default_permissions') != expected['default_permissions'] or any(
+            parsed.get('permissions', {}).get(name) != profile
+            for name, profile in expected['permissions'].items()):
+        raise ValueError('Codex permission repair did not produce the required profiles/default')
+    return planned
 
 
 def codex_configuration_state():
@@ -1930,6 +1967,60 @@ def install_launchd_plist(filename, dest, body, body_matches):
     return "failed"
 
 
+def cmd_install_progress_board(apply=False, repo=None):
+    """Migrate the existing board agent to the repository wrapper, then read
+    launchd's arguments back. This does not create a new schedule or label.
+    Defaults to the canonical checkout. An explicit repository checkout allows
+    the installed consumer to be verified before its PR merges; keep that
+    checkout available until migrating back to the canonical checkout. Board
+    state remains in the canonical out directory across either migration.
+    """
+    runtime_repo = os.path.abspath(os.path.expanduser(repo)) if repo else REPO
+    wrapper = os.path.join(runtime_repo, "ops", "progress-board-render.sh")
+    python = os.path.join(runtime_repo, ".venv", "bin", "python")
+    if not os.path.isfile(wrapper) or not os.access(python, os.X_OK):
+        print("progress-board: selected checkout wrapper or repository interpreter unavailable; "
+              "select a repository checkout containing the wrapper and interpreter")
+        return 1
+    label = "local.carr-progress-board"
+    dest = os.path.join(HOME, "Library", "LaunchAgents", label + ".plist")
+    try:
+        with open(dest, "rb") as handle:
+            current = plistlib.load(handle)
+        if not isinstance(current, dict) or current.get("Label") != label:
+            raise ValueError("unexpected board agent label")
+    except (OSError, ValueError, plistlib.InvalidFileException) as exc:
+        print(f"progress-board: existing agent unavailable: {exc}; no schedule created")
+        return 1
+    desired = dict(current)
+    desired["ProgramArguments"] = ["/bin/bash", wrapper]
+    desired["WorkingDirectory"] = runtime_repo
+    desired["EnvironmentVariables"] = dict(current.get("EnvironmentVariables", {}))
+    desired["EnvironmentVariables"]["PROGRESS_BOARD_ROOT"] = os.path.join(REPO, "out")
+    def registered_arguments():
+        observed = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+                                  capture_output=True, text=True, check=False, timeout=15)
+        args = re.search(r"(?ms)^\s*arguments = \{\n(.*?)^\s*\}", observed.stdout or "")
+        return ([line.strip() for line in args.group(1).splitlines()]
+                if observed.returncode == 0 and args else [])
+
+    matches = desired == current and registered_arguments() == desired["ProgramArguments"]
+    if apply:
+        outcome = install_launchd_plist(os.path.basename(dest), dest,
+                                       plistlib.dumps(desired).decode("utf-8"), matches)
+        if outcome not in {"loaded", "kept"}:
+            return 1
+    elif not matches:
+        print("progress-board: existing agent needs migration: "
+              "ops/config-as-code.py install-progress-board --apply")
+        return 1
+    if registered_arguments() != desired["ProgramArguments"]:
+        print("progress-board: launchd arguments unverified; migration is incomplete")
+        return 1
+    print(f"progress-board: verified registered repository wrapper: {wrapper}")
+    return 0
+
+
 def write_claude_settings(path, document, before, sink=None):
     """Write the settings render, optionally exposing one redacted fake witness.
 
@@ -2791,6 +2882,14 @@ def main():
         return cmd_verify_codex_continuity()
     if mode == "install":
         return cmd_install(apply)
+    if mode in {"install-progress-board", "verify-progress-board"}:
+        import argparse
+        parser = argparse.ArgumentParser(prog=f"config-as-code.py {mode}")
+        parser.add_argument("--repo", help="repository checkout to run; defaults to canonical checkout")
+        parser.add_argument("--apply", action="store_true")
+        options = parser.parse_args(sys.argv[2:])
+        return cmd_install_progress_board(options.apply if mode == "install-progress-board" else False,
+                                          repo=options.repo)
     if mode == "reinstall-launchd-calendar":
         return cmd_reinstall_launchd_calendar(sys.argv[2:])
     if mode == "launchd-handoff-smoke":

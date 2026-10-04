@@ -1,4 +1,4 @@
--- 0774_workflow_census_store.sql
+-- 0808_workflow_census_store.sql
 --
 -- The durable, server-attested store for the V5-F09 workflow census: the owner
 -- lib/control_plane_workflow_truth_reader.py has reported owed since PR #984

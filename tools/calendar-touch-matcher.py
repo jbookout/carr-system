@@ -308,8 +308,11 @@ def main():
         if len(row) > 4:
             event.update(event_id=row[4], start_at=row[5])
         if when == "upcoming":
-            if email not in upcoming or day < upcoming[email][0]:
-                upcoming[email] = (day, title)
+            start = (datetime.datetime.fromisoformat(row[5]) if len(row) > 4 else
+                     datetime.datetime.combine(datetime.date.fromisoformat(day),
+                                               datetime.time.min, datetime.timezone.utc))
+            if email not in upcoming or start < upcoming[email][0]:
+                upcoming[email] = (start, day, title)
             continue
         if email not in latest:
             latest[email] = day
@@ -380,7 +383,7 @@ def main():
             print()
             print("UPCOMING — scheduled, NOT a touch, listed so it is never counted as one:")
             for email, label in sorted(known_up.items(), key=lambda kv: upcoming[kv[0]][0]):
-                day, title = upcoming[email]
+                _, day, title = upcoming[email]
                 print(f"  {day}  {label} — {title[:55]}")
 
     if unknown:

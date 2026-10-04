@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
+import { frozenInventory } from '../../ops/scac-mutation-inventory.mjs';
 
 const root = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const read = name => readFileSync(resolve(root, name), 'utf8');
@@ -37,5 +38,29 @@ test('Codex session read has its own sealed successor', () => {
   assert.match(sql, /scac-mutation-registry\.v97/);
   const runtime = read('mcp-server/src/scac-mutation-registry.v97.generated.js');
   assert.match(runtime, /mcp-tool:list-my-codex-sessions/);
-  assert.match(read('mcp-server/src/mutation-registry.js'), /scac-mutation-registry\.v104\.generated\.js/);
+  assert.match(read('mcp-server/src/mutation-registry.js'), /scac-mutation-registry\.v106\.generated\.js/);
+});
+
+// Both branches advanced the registry: Observatory must follow the delivered Jev cap seal.
+test('Observatory read preserves the Jev cap predecessor and has a forward seal', () => {
+  const sql = read('migrations/0807_observatory_room_read_scac_successor.sql');
+  assert.match(sql, /0787_jev_cap_scac_successor[.]sql/);
+  assert.match(sql, /scac-mutation-registry\.v104/);
+  assert.match(sql, /scac-mutation-registry\.v105/);
+  const runtime = read('mcp-server/src/scac-mutation-registry.v105.generated.js');
+  assert.match(runtime, /mcp-tool:read-room-latest/);
+  const predecessor = frozenInventory('scac-mutation-registry.v104');
+  const successor = frozenInventory('scac-mutation-registry.v105');
+  assert.deepEqual(successor.filter(row => row.ingress_key !== 'mcp-tool:read-room-latest'), predecessor);
+  const added = successor.find(row => row.ingress_key === 'mcp-tool:read-room-latest');
+  assert.equal(added.write, false);
+  assert.equal(added.authority_only, false);
+});
+
+test('Observatory successor has an unshared migration number at the end of main', () => {
+  const names = readdirSync(resolve(root, 'migrations')).filter(name => name.endsWith('.sql')).sort();
+  const successors = names.filter(name => /_observatory_room_read_scac_successor[.]sql$/.test(name));
+  assert.deepEqual(successors, ['0807_observatory_room_read_scac_successor.sql']);
+  assert.deepEqual(names.filter(name => name.startsWith('0807_')), successors);
+  assert.ok(successors[0] > '0800_deal_timeline_lease_read.sql');
 });

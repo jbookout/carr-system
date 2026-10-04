@@ -785,13 +785,22 @@ PYEOF
   # reasoned no-eval line in the PR body. Enforced only in a pull_request run,
   # where GITHUB_EVENT_PATH carries the body; elsewhere a missing receipt is
   # advisory and a malformed one still fails. Procedure: evals/README.md.
+  # migration-order-gate JOINED 2026-10-03, after 0757, the 0769/0770 pair and
+  # 0783 each merged below a number main had already released and stopped every
+  # worker release at staging-prepare ("partial candidate ledger is not an exact
+  # source prefix"). Same kind: repository content only — it compares this
+  # tree's migrations/ against origin/$GITHUB_BASE_REF (origin/main locally) and
+  # refuses any ADDED number not strictly above the base maximum. Because strict
+  # status checks force update-branch before merge, and update-branch raises
+  # `synchronize`, a PR that fell behind main re-runs this and turns red until
+  # renumbered. An unreadable base exits 2, which fails like any nonzero.
   for inv in enforcement-coverage-check audit-queue-freshness-check map-row-evidence-check \
              rule-enforcement-map-check rule-load-layer-check rule-classification-parity-check \
              reachability-check selftest-git-isolation-check \
              drive-dependency-inventory drive-retirement-readiness-gate \
              mechanism-doctrine-gate scheduler-cutover-coverage-gate \
              boot-budget-check core-rule-ids-check rule-route-coverage \
-             rule-boot-classes-check check-eval-receipt; do
+             rule-boot-classes-check check-eval-receipt migration-order-gate; do
     [ -f "ops/$inv.py" ] || continue
     run_quiet "$LOGDIR/gate-$inv.log" "$PY" "ops/$inv.py" \
       || { inherited_abort "$inv" "$PY" "ops/$inv.py"
@@ -932,6 +941,17 @@ check_pushfloor() {
   local changed=""
   if [ -n "${CARR_CI_RANGE:-}" ]; then
     changed="$(git diff --name-only --diff-filter=ACMR "$CARR_CI_RANGE" 2>/dev/null || true)"
+    # Updating an existing branch imports main's admitted files into the
+    # pushed range. Predict only files whose final content/mode differs from
+    # main; those identical to main cannot be this branch's change. Keep the
+    # original range on an unreadable main, and never narrow CARR_CI_RANGE:
+    # the secret scanner must still inspect every blob this push carries.
+    local main_changed=""
+    if main_changed="$(git diff --name-only origin/main HEAD 2>/dev/null)"; then
+      changed="$(LC_ALL=C comm -12 \
+        <(printf '%s\n' "$changed" | LC_ALL=C sort -u) \
+        <(printf '%s\n' "$main_changed" | LC_ALL=C sort -u))"
+    fi
   fi
 
   floor_fail() {  # floor_fail <name> <remedy>
@@ -960,6 +980,14 @@ check_pushfloor() {
   if [ -n "$changed" ] && [ -f ops/githooks/path-hygiene-check.py ]; then
     local added
     added="$(git diff --name-only --diff-filter=ACR "$CARR_CI_RANGE" 2>/dev/null || true)"
+    # Filename admission depends on whether the path already exists on main,
+    # independently of whether this branch changed that file's contents.
+    local main_paths=""
+    if main_paths="$(git ls-tree -r --name-only origin/main 2>/dev/null)"; then
+      added="$(LC_ALL=C comm -23 \
+        <(printf '%s\n' "$added" | LC_ALL=C sort -u) \
+        <(printf '%s\n' "$main_paths" | LC_ALL=C sort -u))"
+    fi
     if [ -n "$added" ]; then
       # shellcheck disable=SC2086
       run_quiet "$LOGDIR/pushfloor-path-hygiene.log" \
@@ -1246,6 +1274,15 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
       node --test mcp-server/test/find-rule-supersedes.test.mjs; then
     tail -30 "$LOGDIR/migration-rule-supersession.log" >&2
     bad migration "rule lookup or atomic teach supersession database proof failed"
+    return
+  fi
+
+  # The timeline verbs run as carr_writer; prove that role can read every view
+  # their real handlers touch (the 42501 that failed r-2026-10-03-01).
+  if ! CARR_WRITER_READ_TEST_DATABASE_URL="$dsn" run_quiet "$LOGDIR/migration-writer-read-route.log" \
+      node --test mcp-server/test/catch-me-up-writer-route.test.mjs; then
+    tail -30 "$LOGDIR/migration-writer-read-route.log" >&2
+    bad migration "timeline verbs cannot read their views as carr_writer"
     return
   fi
 
