@@ -207,6 +207,10 @@ def process_group_alive(pgid):
         return True
     except ProcessLookupError:
         return False
+    except PermissionError:
+        # A signal-zero refusal does not prove the group is gone. Keep polling
+        # until ESRCH; an inaccessible survivor must still prevent relaunch.
+        return True
 
 
 def board_task(root, config, card, executor, status, note, project=None, pr=None, repo=None, needs_joe=False, health=None,
