@@ -9,11 +9,15 @@ test('Leads follows the shipped Jev-cap frontier without replacing its contracts
     assert.ok(registeredOperation(name), `${name} must survive the integration`);
   assert.equal(registeredOperation('confirm-merge').human_only, true);
   const names = (await readdir(new URL('../../migrations/', import.meta.url))).filter(name => /^\d+_.*\.sql$/.test(name));
-  for (const number of ['0773', '0783', '0784'])
+  for (const number of ['0787', '0795', '0796'])
     assert.equal(names.filter(name => name.startsWith(`${number}_`)).length, 1, 'new Leads migration numbers must be unique');
-  const sql = await readFile(new URL('../../migrations/0784_leads_scac_successor.sql', import.meta.url), 'utf8');
-  assert.match(sql, /0773_jev_cap_scac_successor.sql/);
-  assert.match(sql, /0783_lead_archived_stage.sql/);
+  const sorted = names.sort();
+  assert.ok(sorted.indexOf('0787_jev_cap_scac_successor.sql') < sorted.indexOf('0795_lead_archived_stage.sql') &&
+    sorted.indexOf('0795_lead_archived_stage.sql') < sorted.indexOf('0796_leads_scac_successor.sql'),
+    'Leads migrations must sort after the predecessor they pin, or the applied ledger stops being a prefix');
+  const sql = await readFile(new URL('../../migrations/0796_leads_scac_successor.sql', import.meta.url), 'utf8');
+  assert.match(sql, /0787_jev_cap_scac_successor.sql/);
+  assert.match(sql, /0795_lead_archived_stage.sql/);
   assert.match(sql, /scac-mutation-registry\.v104/);
   assert.match(sql, /scac-mutation-registry\.v105/);
   assert.match(sql, /scac_mutation_registration_v104\('sha256:[0-9a-f]{64}','mcp-tool:update-lead'\)/);
