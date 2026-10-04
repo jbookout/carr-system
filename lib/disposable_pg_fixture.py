@@ -37,3 +37,12 @@ def postgres_fixture_group():
             finally:
                 _depth = 0
                 fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+if __name__ == '__main__':
+    import sys
+    # Node fixtures hold this subprocess's stdin open until their PostgreSQL
+    # teardown completes. EOF also releases the lease if the caller exits.
+    with postgres_fixture_group():
+        print('ready', flush=True)
+        sys.stdin.read()
