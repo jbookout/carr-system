@@ -1376,6 +1376,11 @@ def test_hosted_migration_budget_covers_observed_acceptance_runtime():
     Both workflows run the canonical migration class; its budget must also
     cover the separate database lane. Read the actual job/matrix wiring,
     so an unused budget cannot pass.
+
+    The database lane runs that class and then its own acceptance programs.
+    On 2026-10-04 it routinely took 22-24 minutes, and six branches
+    (PR 1470's run 37182226032 among them) were cancelled at a 25-minute cap
+    after every check had passed. It needs the same headroom.
     """
     job = _hosted_workflow()["jobs"]["classes"]
     groups = job["strategy"]["matrix"]["classes"]
@@ -1393,9 +1398,12 @@ def test_hosted_migration_budget_covers_observed_acceptance_runtime():
     check("hosted migration budget covers the database lane budget",
           isinstance(database_budget, int) and migration_budget >= database_budget > 0,
           {"migration_minutes": migration_budget, "database_minutes": database_budget})
+    bounded_headroom = range(30, 36)
+    check("database lane has bounded headroom over its observed 24-minute run",
+          database_budget in bounded_headroom, database_budget)
     migration = [migration_budget for group in groups if group == "migration"]
     check("migration job has bounded headroom over the observed 24-minute run",
-          len(migration) == 1 and 30 <= migration[0] <= 35, migration)
+          len(migration) == 1 and migration[0] in bounded_headroom, migration)
     other = [other_budget for group in groups if group != "migration"]
     check("other class groups retain their 20-minute budgets",
           len(other) == 2 and all(budget == 20 for budget in other), other)
