@@ -17,6 +17,32 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 SOURCE = Path(__file__).resolve().parents[1]
+# Each evidence source and the finding kinds detect derives from it. detect refuses
+# a kind its source does not declare, and an unreadable source blinds exactly these.
+EVIDENCE = {
+    "jobs": frozenset({"job_failed", "job_dead", "job_hang", "job_silent", "job_over_limit"}),
+    "prs": frozenset({"pr_blocked_review", "pr_ci_red", "pr_conflict", "pr_draft_idle", "pr_ready"}),
+    "merge_queue": frozenset({"pr_ready"}),
+    "queue_log": frozenset({"queue_error"}),
+    "release_log": frozenset({"pipeline_blocked", "pipeline_stale"}),
+    "branches": frozenset({"branch_idle"}),
+}
+# An unreadable evidence source cannot prove the findings it feeds have cleared.
+EVIDENCE_ERROR_KINDS = frozenset({"collection_error", "environment"})
+RELEASE_LANE = re.compile(r"^release-pipeline\[([^\]]+)\]: (.*)$")
+# Lines that end a lane's tick (ops/release-pipeline.py run_lane). Anything else the
+# lane prints, such as a failed loop filing after BLOCKED, never replaces its outcome.
+RELEASE_OUTCOME = re.compile(
+    r"SHIPPED |BLOCKED |FAILED at |UNEXPECTED |doc/test-only batch"
+    r"|main \w+ is already released|\w+ failed at .*; waiting for a fix-forward merge"
+    r"|target \w+ is at or before the failed .*; waiting for a green fix-forward"
+    r"|disabled |lane \S+ disabled ")
+
+
+class MissingTool(RuntimeError):
+    def __init__(self, tool):
+        super().__init__(f"required tool {tool!r} is not on PATH {os.environ.get('PATH', '')!r}")
+        self.tool = tool
 
 
 def load_config(path):
@@ -111,6 +137,10 @@ def _green_current(checks):
 def detect(facts, config, now):
     """Classify an immutable snapshot; no I/O, models, or effects."""
     found = []
+    def emit(source, kind, subject, reason, **fields):
+        if kind not in EVIDENCE[source]:
+            raise ValueError(f"{kind} is not declared as derived from {source} in EVIDENCE")
+        found.append(finding(kind, subject, reason, config, **fields))
     t = config["thresholds"]
     jobs = facts.get("jobs", [])
     for job in jobs:
@@ -118,19 +148,19 @@ def detect(facts, config, now):
         fields = {"job": job, "card": job.get("card", subject)}
         if "exit_code" in job:
             if job["exit_code"] != 0 and not job.get("superseded"):
-                found.append(finding("job_failed", subject, f"exit {job['exit_code']}: {job.get('log_tail', '')}", config, **fields))
+                emit("jobs", "job_failed", subject, f"exit {job['exit_code']}: {job.get('log_tail', '')}", **fields)
             continue
         if not job.get("alive"):
-            found.append(finding("job_dead", subject, "registered PID is dead or changed without an exit record", config, **fields))
+            emit("jobs", "job_dead", subject, "registered PID is dead or changed without an exit record", **fields)
             continue
         tail = job.get("log_tail", "")
         evidence = "\nLog evidence: " + tail if tail else ""
         if any(re.search(p, tail) for p in config["hang_patterns"]):
-            found.append(finding("job_hang", subject, "interactive hang signature in log tail" + evidence, config, **fields))
+            emit("jobs", "job_hang", subject, "interactive hang signature in log tail" + evidence, **fields)
         elif now - epoch(job.get("log_mtime", job["start"])) >= t["silent_seconds"]:
-            found.append(finding("job_silent", subject, "log silent for at least the configured limit" + evidence, config, **fields))
+            emit("jobs", "job_silent", subject, "log silent for at least the configured limit" + evidence, **fields)
         if now - epoch(job["start"]) >= job["limit"]:
-            found.append(finding("job_over_limit", subject, "registered run exceeded its time limit" + evidence, config, **fields))
+            emit("jobs", "job_over_limit", subject, "registered run exceeded its time limit" + evidence, **fields)
     queue = {tuple(line.split()[:3]) for line in facts.get("queue", "").splitlines() if len(line.split()) >= 3}
     for pr in facts.get("prs", []):
         repo, number, head = pr["repo"], pr["number"], pr["headRefOid"]
@@ -154,37 +184,50 @@ def detect(facts, config, now):
         active_fixer = any(j.get("pr") == number and j.get("repo") == repo and j.get("head") == head
                            and "exit_code" not in j and j.get("alive") for j in jobs)
         if latest and latest[2] and now - max(head_time, latest[0]) >= t["review_idle_seconds"] and not active_fixer:
-            found.append(finding("pr_blocked_review", subject, latest[1].get("body", "CHANGES REQUESTED"), config, **fields))
+            emit("prs", "pr_blocked_review", subject, latest[1].get("body", "CHANGES REQUESTED"), **fields)
         checks = current_check_attempts(pr.get("statusCheckRollup") or [])
         if any(c.get("conclusion") in {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"}
                or c.get("state") in {"FAILURE", "ERROR"} for c in checks):
-            found.append(finding("pr_ci_red", subject, "hosted CI failed on current head", config, **fields))
+            emit("prs", "pr_ci_red", subject, "hosted CI failed on current head", **fields)
         if pr.get("mergeable") == "CONFLICTING" or pr.get("mergeStateStatus") == "DIRTY":
-            found.append(finding("pr_conflict", subject, "current head has merge conflicts", config, **fields))
+            emit("prs", "pr_conflict", subject, "current head has merge conflicts", **fields)
         if pr.get("isDraft") and now - epoch(pr["updatedAt"]) >= t["draft_idle_seconds"]:
-            found.append(finding("pr_draft_idle", subject, "draft idle for configured limit", config, **fields))
+            emit("prs", "pr_draft_idle", subject, "draft idle for configured limit", **fields)
         if latest and not latest[2] and _green_current(checks) and not pr.get("isDraft") and pr.get("mergeable") == "MERGEABLE" and (repo, str(number), head) not in queue and not pr.get("mergeQueueEntry"):
-            found.append(finding("pr_ready", subject, "approved current head with green CI outside merge queue", config, **fields))
+            emit("prs", "pr_ready", subject, "approved current head with green CI outside merge queue", **fields)
     for log in facts.get("logs", []):
-        kind = "queue_error" if log["type"] == "queue" else "pipeline_blocked"
-        patterns = config["queue_error_patterns"] if kind == "queue_error" else ["BLOCKED"]
+        source = log["type"] + "_log"
+        if log["type"] == "queue":
+            kind, lines = "queue_error", [line for line in log.get("tail", "").splitlines()
+                                          if any(p.lower() in line.lower() for p in config["queue_error_patterns"])]
+        else:
+            kind, lines = "pipeline_blocked", [line for line in release_outcomes(log.get("tail", "")).values()
+                                               if line.split(": ", 1)[1].startswith("BLOCKED")]
         # Line digest identifies a durable failure, rather than rediscovering it each interval.
-        for line in log.get("tail", "").splitlines():
-            if any(p.lower() in line.lower() for p in patterns):
-                subject = log["path"] + ":" + hashlib.sha256(line.encode()).hexdigest()[:16]
-                found.append(finding(kind, subject, line, config))
+        for line in lines:
+            emit(source, kind, log["path"] + ":" + hashlib.sha256(line.encode()).hexdigest()[:16], line)
         if log["type"] == "release" and now - epoch(log["mtime"]) >= t["pipeline_stale_seconds"]:
-            found.append(finding("pipeline_stale", log["path"], "release log stopped updating", config))
+            emit(source, "pipeline_stale", log["path"], "release log stopped updating")
     for branch in facts.get("branches", []):
         if branch["name"].startswith("claude/") and now - epoch(branch["updated"]) >= t["branch_idle_seconds"]:
-            found.append(finding("branch_idle", branch["repo"] + ":" + branch["name"], "claude branch idle for configured limit", config))
+            emit("branches", "branch_idle", branch["repo"] + ":" + branch["name"], "claude branch idle for configured limit")
     for error in facts.get("errors", []):
-        found.append(finding("collection_error", error["source"], error["reason"], config))
+        found.append(finding(error["kind"], error["source"], error["reason"], config, blinds=error["blinds"]))
     for f in found:
         text = f["reason"].lower()
         f["needs_joe"] = next((k for k, patterns in config["needs_joe_patterns"].items()
                                if any(p in text for p in patterns)), None)
     return found
+
+
+def release_outcomes(text):
+    """Each lane's latest tick-ending line; a later SHIPPED or FAILED supersedes BLOCKED."""
+    outcomes = {}
+    for line in text.splitlines():
+        match = RELEASE_LANE.match(line)
+        if match and RELEASE_OUTCOME.match(match.group(2)):
+            outcomes[match.group(1)] = line
+    return outcomes
 
 
 def path_at(root, configured):
@@ -230,8 +273,13 @@ def tail(path, limit):
 
 
 def command(argv, config, cwd=None):
-    result = subprocess.run(argv, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True,
-                            text=True, timeout=config["thresholds"]["command_timeout_seconds"])
+    try:
+        result = subprocess.run(argv, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True,
+                                text=True, timeout=config["thresholds"]["command_timeout_seconds"])
+    except FileNotFoundError as exc:
+        if cwd is not None and not Path(cwd).is_dir():
+            raise
+        raise MissingTool(argv[0]) from exc
     if result.returncode:
         raise RuntimeError(f"{argv[0]} exit {result.returncode}: {result.stderr.strip()} {result.stdout.strip()}")
     return result.stdout
@@ -403,9 +451,13 @@ def reconcile(root, config, found, effects, now, complete=True):
             except Exception:
                 pass  # Original failure remains durable and visible; no recursive record writes.
     # Evidence-source failures cannot prove an old condition has cleared.
-    if complete and not any(f["kind"] == "collection_error" for f in found):
+    blinded = set()
+    for f in found:
+        if f["kind"] in EVIDENCE_ERROR_KINDS:
+            blinded |= set(f["blinds"])
+    if complete:
         for key, prior in previous.items():
-            if key not in current and not prior.get("cleared_at"):
+            if key not in current and not prior.get("cleared_at") and prior.get("kind") not in blinded:
                 if prior.get("board_recovery"):
                     try:
                         effects.clear(prior, list(current.values()))
@@ -459,8 +511,17 @@ def collect_pr(repo, number, config):
 
 def collect(root, config):
     facts = {"jobs": [], "prs": [], "logs": [], "branches": [], "errors": [], "queue": ""}
-    def error(source, exc):
-        facts["errors"].append({"source": source, "reason": str(exc)})
+    missing = {}
+    def error(subject, exc, evidence):
+        blinds = EVIDENCE[evidence]
+        if isinstance(exc, MissingTool):
+            # One absent tool is one environment defect, however many sources needed it.
+            entry = missing.setdefault(exc.tool, {"kind": "environment", "source": exc.tool,
+                                                  "reason": str(exc), "blinds": set()})
+            entry["blinds"] |= blinds
+        else:
+            facts["errors"].append({"kind": "collection_error", "source": subject, "reason": str(exc),
+                                    "blinds": sorted(blinds)})
     try:
         jobs = read_latest(path_at(root, config["paths"]["registry"]))
         for job in jobs.values():
@@ -476,13 +537,13 @@ def collect(root, config):
                     job["log_mtime"] = job["start"]
             facts["jobs"].append(job)
     except Exception as exc:
-        error("job registry", exc)
+        error("job registry", exc, "jobs")
     queue = path_at(root, config["paths"]["merge_queue"])
     if queue.exists():
         try:
             facts["queue"] = queue.read_text()
         except OSError as exc:
-            error("merge queue", exc)
+            error("merge queue", exc, "merge_queue")
     for repo in config["repositories"]:
         try:
             pages = json.loads(command(["gh", "api", "--paginate", "--slurp", f"repos/{repo}/pulls?state=open&per_page=100"], config))
@@ -491,9 +552,9 @@ def collect(root, config):
                     try:
                         facts["prs"].append(collect_pr(repo, pr["number"], config))
                     except Exception as exc:
-                        error(f"{repo}#{pr['number']}", exc)
+                        error(f"{repo}#{pr['number']}", exc, "prs")
         except Exception as exc:
-            error(repo + " PRs", exc)
+            error(repo + " PRs", exc, "prs")
         try:
             pages = json.loads(command(["gh", "api", "--paginate", "--slurp", f"repos/{repo}/branches?per_page=100"], config))
             for page in pages:
@@ -503,7 +564,7 @@ def collect(root, config):
                         facts["branches"].append({"repo": repo, "name": branch["name"],
                                                   "updated": commit["commit"]["committer"]["date"]})
         except Exception as exc:
-            error(repo + " branches", exc)
+            error(repo + " branches", exc, "branches")
     logs = [(p, "queue") for p in config["paths"]["queue_logs"]] + [(config["paths"]["release_log"], "release")]
     for configured, kind in logs:
         log = path_at(root, configured)
@@ -513,7 +574,8 @@ def collect(root, config):
             facts["logs"].append({"path": str(log), "type": kind, "mtime": log.stat().st_mtime,
                                   "tail": tail(log, config["thresholds"]["log_tail_bytes"])})
         except OSError as exc:
-            error(str(log), exc)
+            error(str(log), exc, kind + "_log")
+    facts["errors"].extend({**e, "blinds": sorted(e["blinds"])} for e in missing.values())
     # A successful restarted job supersedes the killed attempt's expected exit.
     recovered = {j.get("root_id") for j in facts["jobs"] if j.get("restart_count", 0) and j.get("exit_code") == 0}
     for job in facts["jobs"]:

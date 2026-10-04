@@ -186,12 +186,146 @@ class ReplayTests(unittest.TestCase):
             {"id": "over", "start": 1000, "limit": 999, "alive": True, "log_mtime": 2000},
             {"id": "failed", "exit_code": 1, "log_tail": "authentication required"}],
             "branches": [{"repo": "repo", "name": "claude/old", "updated": -10000}],
-            "logs": [{"type": "release", "path": "release.log", "mtime": 1000, "tail": "BLOCKED worker"}]}
+            "logs": [{"type": "release", "path": "release.log", "mtime": 1000, "tail": "release-pipeline[worker]: BLOCKED synthetic_reason — synthetic fixture"}]}
         found = w.detect(facts, c, 2000)
         self.assertEqual({f["kind"] for f in found}, {"job_dead", "job_silent", "job_over_limit", "job_failed", "branch_idle", "pipeline_blocked", "pipeline_stale"})
         self.assertEqual(next(f["needs_joe"] for f in found if f["kind"] == "job_failed"), "credentials")
         facts["jobs"][1]["log_mtime"] = 1400.1
         self.assertNotIn("job_silent", {f["kind"] for f in w.detect(facts, c, 2000)})
+
+    def test_release_block_counts_only_while_it_is_the_lane_outcome(self):
+        import job_watchdog as w
+        c = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        tail = "\n".join([
+            "release-pipeline[app]: batch 56b686af9a0c..a49899340f8d: 331 path(s), 247 release path(s)",
+            "release-pipeline[app]: BLOCKED checks_pending — `test` still running on a49899340f8d",
+            "release-pipeline[worker]: batch c7118b067230..179741a1fb13: 252 path(s), 24 release path(s)",
+            "release-pipeline[worker]: BLOCKED github_unreadable — gh api exited 1",
+            "release-pipeline[app]: batch 56b686af9a0c..a49899340f8d: 331 path(s), 247 release path(s)",
+            "  -> app-release: npm run release:production",
+            "release-pipeline[app]: SHIPPED a49899340f8d",
+            "release-pipeline[worker]: main is f66c3f5f7799; newest green canary target is 179741a1fb13",
+            "release-pipeline[worker]: batch c7118b067230..179741a1fb13: 252 path(s), 24 release path(s)",
+        ])
+        found = w.detect({"logs": [{"type": "release", "path": "release.log", "mtime": 2000, "tail": tail}]}, c, 2000)
+        self.assertEqual([f["reason"] for f in found if f["kind"] == "pipeline_blocked"],
+                         ["release-pipeline[worker]: BLOCKED github_unreadable — gh api exited 1"])
+        shipped = tail + "\nrelease-pipeline[worker]: FAILED at staging-prepare (exit 2); log x"
+        found = w.detect({"logs": [{"type": "release", "path": "release.log", "mtime": 2000, "tail": shipped}]}, c, 2000)
+        self.assertNotIn("pipeline_blocked", {f["kind"] for f in found})
+
+    def test_release_block_survives_follow_up_lines_that_are_not_outcomes(self):
+        import job_watchdog as w
+        c = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        blocked = "release-pipeline[worker]: BLOCKED github_unreadable — gh api exited 1"
+        # Lines the pipeline prints after BLOCKED in the same tick; none ends the lane's tick.
+        for follow_up in ("release-pipeline[worker]: could not file the loop: OSError",
+                          "release-pipeline[worker]: diagnosis dispatch FAILED: exit 1",
+                          "release-pipeline[worker]: dry run complete; nothing executed"):
+            with self.subTest(follow_up=follow_up):
+                tail = "\n".join(["release-pipeline[worker]: batch a..b: 3 path(s), 1 release path(s)",
+                                  blocked, follow_up])
+                found = w.detect({"logs": [{"type": "release", "path": "r.log", "mtime": 2000, "tail": tail}]}, c, 2000)
+                self.assertEqual([f["reason"] for f in found if f["kind"] == "pipeline_blocked"], [blocked])
+
+    def test_every_tick_ending_release_line_supersedes_block(self):
+        import job_watchdog as w
+        c = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        for outcome in ("SHIPPED 179741a1fb13",
+                        "FAILED at staging-prepare (exit 2); log x",
+                        "UNEXPECTED KeyError: 'sha'",
+                        "main 179741a1fb13 is already released",
+                        "179741a1fb13 failed at upload; waiting for a fix-forward merge",
+                        "target 179741a1fb13 is at or before the failed 179741a1fb13 (upload); waiting for a green fix-forward",
+                        "doc/test-only batch; nothing to release",
+                        "lane worker disabled by ops/config/release-pipeline.v1.json",
+                        "disabled on this machine by /synthetic/release-pipeline.off"):
+            with self.subTest(outcome=outcome):
+                tail = "release-pipeline[worker]: BLOCKED github_unreadable — gh api exited 1\nrelease-pipeline[worker]: " + outcome
+                found = w.detect({"logs": [{"type": "release", "path": "r.log", "mtime": 2000, "tail": tail}]}, c, 2000)
+                self.assertNotIn("pipeline_blocked", {f["kind"] for f in found})
+
+    def test_every_finding_kind_is_declared_once_by_its_evidence_source(self):
+        import job_watchdog as w
+        c = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        meta = {"collection_error", "environment", "action_error", "record_error", "board_error"}
+        declared = set().union(*w.EVIDENCE.values())
+        self.assertEqual(set(c["next_actions"]), declared | meta)
+        self.assertFalse(declared & meta)
+        self.assertEqual(w.EVIDENCE_ERROR_KINDS, {"collection_error", "environment"})
+
+    def test_detect_refuses_a_kind_its_source_does_not_declare(self):
+        from unittest.mock import patch
+        import job_watchdog as w
+        c = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        facts = {"branches": [{"repo": "repo", "name": "claude/old", "updated": -10000}]}
+        with patch.dict(w.EVIDENCE, {"branches": frozenset()}):
+            with self.assertRaisesRegex(ValueError, "branch_idle"):
+                w.detect(facts, c, 2000)
+
+    def test_evidence_error_must_name_its_kind_and_blinds(self):
+        import job_watchdog as w
+        c = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        for missing in ("kind", "blinds"):
+            with self.subTest(missing=missing):
+                error = {"kind": "collection_error", "source": "s", "reason": "r", "blinds": ["branch_idle"]}
+                del error[missing]
+                with self.assertRaises(KeyError):
+                    w.detect({"errors": [error]}, c, 2000)
+        with tempfile.TemporaryDirectory() as directory:
+            unnamed = w.finding("collection_error", "s", "r", c)
+            with self.assertRaises(KeyError):
+                w.reconcile(Path(directory), c, [unnamed], None, 100)
+
+    def test_collect_names_kind_and_blinds_on_every_error(self):
+        import job_watchdog as w
+        c = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / c["paths"]["registry"]).parent.mkdir(parents=True, exist_ok=True)
+            (root / c["paths"]["registry"]).write_text("not json\n")
+            c["repositories"] = []
+            c["paths"]["queue_logs"] = []
+            facts = w.collect(root, c)
+        self.assertEqual(facts["errors"], [{"kind": "collection_error", "source": "job registry",
+                                            "reason": facts["errors"][0]["reason"],
+                                            "blinds": sorted(w.EVIDENCE["jobs"])}])
+
+    def test_missing_tool_is_one_environment_finding(self):
+        from unittest.mock import patch
+        import job_watchdog as w
+        c = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.dict(os.environ, {"PATH": directory}):
+            c["paths"]["merge_queue"] = directory + "/queue.txt"
+            c["paths"]["queue_logs"] = []
+            facts = w.collect(Path(directory), c)
+        found = w.detect(facts, c, 2000)
+        self.assertEqual([(f["kind"], f["subject"]) for f in found], [("environment", "gh")])
+        self.assertIn("PATH", found[0]["reason"])
+        self.assertIn("pr_ci_red", found[0]["blinds"])
+        self.assertIn("branch_idle", found[0]["blinds"])
+        self.assertNotIn("pipeline_blocked", found[0]["blinds"])
+
+    def test_evidence_error_retains_only_the_findings_it_blinds(self):
+        import job_watchdog as w
+        c = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        class Effects:
+            def act(self, action, f):
+                return {}
+            def report(self, f):
+                return {}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pipeline = w.finding("pipeline_blocked", "release.log:abc", "BLOCKED checks_pending", c)
+            red = w.finding("pr_ci_red", "repo#1@abc", "hosted CI failed", c)
+            w.reconcile(root, c, [pipeline, red], Effects(), 100)
+            missing = w.detect({"errors": [{"kind": "environment", "source": "gh", "reason": "gh missing",
+                                             "blinds": sorted(w.EVIDENCE["prs"])}]}, c, 200)
+            w.reconcile(root, c, missing, Effects(), 200)
+            state = w.read_latest(root / c["paths"]["findings"])
+            self.assertEqual(state[pipeline["key"]]["cleared_at"], w.stamp(200))
+            self.assertIsNone(state[red["key"]]["cleared_at"])
 
     def test_current_head_latest_review_and_active_fixer(self):
         import job_watchdog as w
@@ -485,7 +619,8 @@ class StateTests(unittest.TestCase):
                     w.board_task(root, c, card, "executor", "running", "Original work in progress")
                 f = w.finding("job_hang", "synthetic-job", "Waiting for authentication...", c, card=card)
                 if mode == "collection":
-                    f = w.detect({"errors": [{"source": "synthetic-source", "reason": "evidence unavailable"}]}, c, 100)[0]
+                    f = w.detect({"errors": [{"kind": "collection_error", "source": "synthetic-source",
+                                              "reason": "evidence unavailable", "blinds": []}]}, c, 100)[0]
                     card = effects.card(f)
                 other = w.finding("job_over_limit", "synthetic-job", "another active failure", c, card=card)
                 found = [f, other] if mode == "other-finding" else [f]
@@ -566,7 +701,8 @@ class StateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             effects = w.Effects(root, c)
-            f = w.finding("collection_error", "synthetic-source", "evidence unavailable", c, card="reopened")
+            f = w.finding("collection_error", "synthetic-source", "evidence unavailable", c,
+                          card="reopened", blinds=[])
             w.reconcile(root, c, [f], effects, 100)
             w.reconcile(root, c, [], effects, 200)
             w.board_task(root, c, "reopened", "executor", "review", "New verification in progress")
@@ -614,7 +750,8 @@ class StateTests(unittest.TestCase):
             w.reconcile(root, c, [f], Effects(), 100)
             state = w.read_latest(root / c["paths"]["findings"])
             self.assertTrue(any(x["kind"] == "action_error" for x in state.values()))
-            w.reconcile(root, c, [w.finding("collection_error", "repo", "network unavailable", c)], Effects(), 200)
+            w.reconcile(root, c, [w.finding("collection_error", "repo", "network unavailable", c,
+                                            blinds=sorted(w.EVIDENCE["prs"]))], Effects(), 200)
             self.assertIsNone(w.read_latest(root / c["paths"]["findings"])[f["key"]]["cleared_at"])
 
     def test_second_hang_is_blocked_without_another_restart(self):
