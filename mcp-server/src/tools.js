@@ -31,6 +31,7 @@ import { claudeContinuityTools } from "./claude-continuity.js";
 import { incidentTools } from "./incident.js";
 import { evidenceActivationTools } from "./evidence-activation.js";
 import { resourceObservationTools } from "./resource-observation.v5.js";
+import { leadAutomationTools } from "./lead-automation.js";
 import { jevCallReceiptTools } from "./jev-call-receipt.js";
 import { workflowCutoverTools } from "./workflow-cutover.v5.js";
 import { engineeringRuntimeTools } from "./engineering-runtime.js";
@@ -332,12 +333,12 @@ async function withEnvelope(client, actor, verb, args, fn) {
     },
     args: { ...args, idempotency_key: undefined },
   });
-  // Shape writes need same-key serialization before their replay read:
+  // Shape and lead writes need same-key serialization before their replay read:
   // otherwise two first calls can both see no tool_call row, and the loser
   // reports a version conflict instead of the promised replay.
   // Keep this scoped until the shared envelope's existing fake-client suites
   // are migrated to model the extra query for every historical write verb.
-  if (verb === "teach" || verb === "whats-new" || verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "answer-work-request-for-joe" || verb === "decline-work-request" || verb === "supersede-work-request" || verb === "propose-ready-plan" || verb === "review-heavy-build-plan" || verb === "accept-ready-plan" || verb === "propose-ready-plan-amendment" || verb === "accept-ready-plan-amendment" || verb === "acknowledge-ready-plan-amendment" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease" || verb === "observe-memory" || verb === "promote-memory" || verb === "correct-memory" || verb === "forget-memory" || verb === "register-engineering-slice-plan" || verb === "admit-engineering-slice" || verb === "review-engineering-slice" || verb === "append-tour-rights-receipt" || verb === "revoke-tour-rights-receipt" || verb === "append-tour-source-evidence" || verb === "append-tour-field-assertion" || verb === "create-tour-public-projection-draft" || verb === "seal-tour-public-projection" || verb === "append-tour-property-identifier-assertion" || verb === "append-tour-coordinate-candidate" || verb === "append-tour-entrance-verification-receipt" || verb === "codex-checkpoint" || verb === "codex-record-event" || verb === "ask-jev" || TOUR_DOMAIN_SERIALIZED_WRITES.has(verb) || BOARD_ANSWER_WRITE_VERBS.has(verb) || MEETING_MODE_WRITE_VERBS.includes(verb))
+  if (["record-lead-contact", "advance-leads", "approve-lead-draft", "approve-lead-move"].includes(verb) || verb === "teach" || verb === "whats-new" || verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "answer-work-request-for-joe" || verb === "decline-work-request" || verb === "supersede-work-request" || verb === "propose-ready-plan" || verb === "review-heavy-build-plan" || verb === "accept-ready-plan" || verb === "propose-ready-plan-amendment" || verb === "accept-ready-plan-amendment" || verb === "acknowledge-ready-plan-amendment" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease" || verb === "observe-memory" || verb === "promote-memory" || verb === "correct-memory" || verb === "forget-memory" || verb === "register-engineering-slice-plan" || verb === "admit-engineering-slice" || verb === "review-engineering-slice" || verb === "append-tour-rights-receipt" || verb === "revoke-tour-rights-receipt" || verb === "append-tour-source-evidence" || verb === "append-tour-field-assertion" || verb === "create-tour-public-projection-draft" || verb === "seal-tour-public-projection" || verb === "append-tour-property-identifier-assertion" || verb === "append-tour-coordinate-candidate" || verb === "append-tour-entrance-verification-receipt" || verb === "codex-checkpoint" || verb === "codex-record-event" || verb === "ask-jev" || TOUR_DOMAIN_SERIALIZED_WRITES.has(verb) || BOARD_ANSWER_WRITE_VERBS.has(verb) || MEETING_MODE_WRITE_VERBS.includes(verb))
     await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [key]);
   const prior = await client.query("select request_hash, response from tool_call where idempotency_key=$1", [key]);
   if (prior.rows.length) {
@@ -3291,6 +3292,7 @@ export const TOOLS = {
           order by sort,slug`)).rows;
       const leads = (await c.query(
         `select id,registry_ref,name,specialty,city,county,state,lane,stage,
+                (select party_id from lead where lead.id=v_lead_board.id) as party_id,
                 stage_label,stage_sort,score,segment,suppressed,est_lease_event,
                 event_confidence,last_touch,next_action_date,owner,owner_label,
                 base_version,created_at,updated_at
@@ -8729,6 +8731,7 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "evidence-activation": "mcp-server/src/evidence-activation.js",
   "resource-observation": "mcp-server/src/resource-observation.v5.js",
   "jev-call-receipt": "mcp-server/src/jev-call-receipt.js",
+  "lead-automation": "mcp-server/src/lead-automation.js",
   "workflow-cutover": "mcp-server/src/workflow-cutover.v5.js",
   "memory": "mcp-server/src/memory.js",
   "codex-continuity": "mcp-server/src/codex-continuity.js",
@@ -9857,6 +9860,7 @@ registerTools(resourceObservationTools({ withEnvelope, ToolError }), "resource-o
 // server-timestamped receipt (migration 0587) before returning the answers, so
 // Jev gates credit only rows the gated model could not forge locally. See
 // src/jev-call-receipt.js.
+registerTools(leadAutomationTools({ withEnvelope, writeEvent, ToolError }), "lead-automation");
 registerTools(jevCallReceiptTools({ withEnvelope, ToolError }), "jev-call-receipt");
 // DoctorCRE V5-R02: workflow cutover, caller migration and retirement
 // readiness. Composes accept-workflow / disable-legacy-schedule rather than
