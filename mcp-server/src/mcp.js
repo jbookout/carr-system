@@ -30,6 +30,8 @@ import { jevAskBinding, prefetchJevAnswer, reserveJevCallAttempt,
 import { foundationAssuranceSeatConnection } from
   "./foundation-assurance-seat-connection.v5.js";
 import { stampedGitSha } from "./build-stamp.js";
+import { anchorCommittedCensusWrite, applyCommittedCensusReanchor, readWorkflowCensusAnchor,
+  registerWorkflowCensusPending } from "./workflow-census-anchor.js";
 import { parksADecision, classifyLoopText, needsDecider, loopRowText,
          ESCALATION_REASON, BLOCKER_DECIDER_REASON } from "./verb-gate-checks.js";
 import { controllerOperationInput, controllerToolList, isEngineeringControllerActor,
@@ -909,6 +911,10 @@ export async function callTool(env, actor, name, args, profile = "full", judgeWo
             return run;
           }
         : null,
+      // The V5-F09 census read returns the external anchor beside the chain;
+      // attached for that verb only, and read-only (GET of the stored head).
+      workflowCensusAnchor: name === "read-workflow-census"
+        ? () => readWorkflowCensusAnchor(env) : undefined,
     };
     // Record AFTER the response is ready, via ctx.waitUntil, so recording never
     // adds latency to the read the caller is waiting on. ok/errorKind are
@@ -959,6 +965,14 @@ export async function callTool(env, actor, name, args, profile = "full", judgeWo
     client.seatConnection = foundationAssuranceSeatConnection(env, Pool);
   if (tool.oracleSeatOnly === true && tool.oracleFamily === "foundation-assurance")
     client.foundationAssuranceRuntime = foundationAssuranceRuntimeBinding(env);
+  // The V5-F09 census write and re-anchor read the external anchor's head
+  // before their door, which refuses unless the database head matches it.
+  if (name === "record-workflow-census" || name === "record-workflow-census-reanchor")
+    client.workflowCensusAnchor = () => readWorkflowCensusAnchor(env);
+  // Before commit, the census write registers the row the door INSERTED as the
+  // anchor's pending head; the post-commit advance must equal it (R3-C1).
+  if (name === "record-workflow-census")
+    client.workflowCensusPending = (row, key) => registerWorkflowCensusPending(env, row, key);
   let jevPrefetched, jevAsk, jevRequest;
   let jevKeyLocked = false;
   const writerRead = tool.writerConnection === true && !tool.write;
@@ -1011,6 +1025,18 @@ export async function callTool(env, actor, name, args, profile = "full", judgeWo
     await client.query("commit");
     if (jevPrefetched?.ok === true && result?.ok === true)
       await jevAsk.cacheAfterCommit(jevRequest, jevPrefetched.result);
+    // V5-F09 CENSUS ANCHOR, AFTER COMMIT (workflow-census-anchor.js). The
+    // committed head goes to the Durable Object outside the database, so a
+    // later wholesale rewrite of the table no longer matches it. A failed
+    // advance is reported by name: the row is committed, and re-sending the
+    // same idempotency_key replays it and re-advances the anchor.
+    if (name === "record-workflow-census")
+      return await anchorCommittedCensusWrite(env, result, payload => new ToolError(payload),
+        args?.idempotency_key);
+    // The re-anchor receipt is committed first, then applied to the anchor as
+    // a compare-and-set on the old head it names.
+    if (name === "record-workflow-census-reanchor")
+      return await applyCommittedCensusReanchor(env, result, payload => new ToolError(payload));
     return result;
   } catch (e) {
     await client.query("rollback").catch(() => {});

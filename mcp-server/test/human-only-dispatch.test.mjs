@@ -103,6 +103,9 @@ test("the registry still carries the humanOnly verbs this gate was built for", (
     "record-lifecycle-correction",
     "record-tour-map-promotion-receipt",
     "record-tour-pdf-human-review",
+    // V5-F09 census (0708): moving the census anchor to the database head is
+    // a partner-authority act, on a receipt.
+    "record-workflow-census-reanchor",
     // V5-D01: registering an action-class successor permanently fixes its
     // owner and activation_predicate (unique, append-only, immutable), so the
     // first registration is a partner act on the authority connection.

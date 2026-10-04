@@ -1,3 +1,4 @@
+// v104 admits workflow census over main v103 without rewriting historical seals.
 import {
   SCAC_MUTATION_DB_METADATA_AUTHORITY,
   SCAC_MUTATION_OPERATIONS,
@@ -199,7 +200,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v105.generated.js";
+} from "./scac-mutation-registry.v106.generated.js";
 
 // v105 admits bounded newest Observatory reads and preserves bridge polling.
 // v104 preserves the capped Jev Worker contract.
