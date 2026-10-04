@@ -44,6 +44,7 @@
 // in an error. An upstream error body is truncated and scrubbed of the key
 // string before it can reach a ToolError.
 
+import requestContract from "./jev-request-contract.v1.json" with { type: "json" };
 import { ToolError as LeafToolError } from "./tool-error.js";
 import { judgeBinding, providerFor } from "./judge-provider.js";
 
@@ -61,13 +62,13 @@ const MIN_ATTEMPT_MS = 1000;
 const MAX_ERROR_BODY_CHARS = 300;
 const JEV_CACHE_SECONDS = 60;
 const MAX_STATE_CHARS = 96000;
-const MAX_QUESTIONS = 64;
+const MAX_QUESTIONS = requestContract.max_questions;
 const MAX_SESSION_ID_CHARS = 200;
 const READ_LIMIT_DEFAULT = 200;
 const READ_LIMIT_MAX = 500;
 
 export const JEV_PURPOSES = Object.freeze(["call", "build_advisory"]);
-export const JEV_QUESTION_TYPES = Object.freeze(["noul", "choice", "score"]);
+export const JEV_QUESTION_TYPES = Object.freeze(Object.keys(requestContract.question_types));
 export const JEV_FACETS = Object.freeze([
   "architecture_or_design", "semantic_creation", "diagnosis",
   "verification_selection", "evidence_matching", "next_action_priority",
@@ -376,16 +377,23 @@ function validateSessionId(ToolError, value) {
 
 function validateQuestions(ToolError, questions) {
   if (!isPlainObject(questions))
-    throw new ToolError({ error: "jev_questions_invalid", hint: "questions must be an object of question id -> question" });
+    throw new ToolError({ error: "jev_questions_invalid" });
   const entries = Object.entries(questions);
-  if (entries.length < 1 || entries.length > MAX_QUESTIONS)
-    throw new ToolError({ error: "jev_questions_invalid",
-      hint: `questions must hold 1..${MAX_QUESTIONS} entries; got ${entries.length}` });
-  for (const [id, question] of entries) {
-    if (id.length === 0 || !isPlainObject(question) || !JEV_QUESTION_TYPES.includes(question.type) ||
-        typeof question.instructions !== "string" || question.instructions.trim() === "")
-      throw new ToolError({ error: "jev_questions_invalid", question_id: id.slice(0, 200),
-        hint: `each question needs type in ${JEV_QUESTION_TYPES.join("|")} and a non-empty string instructions` });
+  if (entries.length < requestContract.min_questions || entries.length > MAX_QUESTIONS)
+    throw new ToolError({ error: "jev_questions_invalid", reason: "question_count_invalid" });
+  for (const [index, [id, question]] of entries.entries()) {
+    const refuse = reason => { throw new ToolError({ error: "jev_questions_invalid",
+      question_index: index, reason }); };
+    if (!id || !isPlainObject(question)) refuse("question_invalid");
+    const rule = typeof question.type === "string" && Object.hasOwn(requestContract.question_types, question.type)
+      ? requestContract.question_types[question.type] : null;
+    if (!rule) refuse("type_invalid");
+    if (typeof question.instructions !== "string" || !question.instructions.trim())
+      refuse("instructions_invalid");
+    const criteria = question.criteria;
+    if (criteria == null && rule.optional) continue;
+    const rightShape = rule.criteria === "object" ? isPlainObject(criteria) : Array.isArray(criteria);
+    if (!rightShape || Object.keys(criteria).length < rule.min_items) refuse("criteria_invalid");
   }
 }
 
