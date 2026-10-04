@@ -2,7 +2,7 @@
   "schema_version": 1,
   "surface": "jev-judgments",
   "change": "Restore non-private routing cues and probabilities lost during identity anonymization",
-  "measured_on": "2026-10-03",
+  "measured_on": "2026-10-04",
   "rung": "regression",
   "adapter": {
     "surface": "offline_programmatic",
@@ -12,14 +12,14 @@
     "harness_version": "3.14.7",
     "provider_id": "local",
     "model_id": "none-programmatic",
-    "native_session_ref": "01a0ff81-760f-7463-848d-6158c765f240",
-    "configuration_fingerprint": "sha256:bc2b65c2e9c65754088bcce8c9079ee1384c78c56335445a075917ae0b523421"
+    "native_session_ref": "01a10521-a7dc-75c3-8129-73ce618fa765",
+    "configuration_fingerprint": "sha256:bb10c3c9dcbc58ec6f94cc4a6fc3f470ff07cb5a869af5ad839dd8690d6d21cf"
   },
   "cases": {
-    "total": 1946,
-    "train": 973,
-    "test": 973,
-    "should_not_fire": 210,
+    "total": 1960,
+    "train": 980,
+    "test": 980,
+    "should_not_fire": 218,
     "sources": [
       "human_judged_hard_case",
       "synthesized"
@@ -42,7 +42,7 @@
     }
   },
   "noise_floor": 0.0,
-  "min_useful_gain": 0.0010277492291880796,
+  "min_useful_gain": 0.0056122448979591955,
   "primary_dimension": "public-cue-routing",
   "dimensions": [
     {
@@ -55,9 +55,9 @@
         "github:jbookout/carr-system/1436#blocking-finding-7"
       ],
       "baseline": {
-        "score": 0.9979445015416238,
-        "ci_low": 0.9979445015416238,
-        "ci_high": 0.9979445015416238
+        "score": 0.9887755102040816,
+        "ci_low": 0.9887755102040816,
+        "ci_high": 0.9887755102040816
       },
       "candidate": {
         "score": 1.0,
@@ -65,9 +65,9 @@
         "ci_high": 1.0
       },
       "delta": {
-        "value": 0.0020554984583761593,
-        "ci_low": 0.0020554984583761593,
-        "ci_high": 0.0020554984583761593
+        "value": 0.011224489795918391,
+        "ci_low": 0.011224489795918391,
+        "ci_high": 0.011224489795918391
       }
     }
   ],
@@ -94,7 +94,8 @@
   },
   "notes": [
     "Exact finite-set census intervals; no claim about unseen prompts or model quality.",
-    "Baseline is the reviewed PR head; oracle is origin/main; private identities are excluded before case generation.",
+    "Baseline is the reviewed PR head; oracle is merged main 98080b3c11b7aa7adcc22f4dda81e851178e1b21; private identities are excluded before case generation.",
+    "The main-merge-receipt.json artifact preserves main production-function replay evidence; this census measures public cues only.",
     "Programmatic regression and second-pass measurement; no external model-work call is needed."
   ]
 }

@@ -1,6 +1,6 @@
 """Deterministic public cue regression; emits aggregates, never private prompts.
 
-The reviewed head is the before-fix baseline; origin/main supplies the routing
+The reviewed head is the before-fix baseline; the pinned merged main supplies the routing
 oracle. Every public keyword and a should-not-fire control is exercised twice.
 No model transcripts are opened. Hashes select one of two text variants per
 cue for training; only aggregate held-out scores are emitted. Intervals describe
@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / 'ops'))
 import pii_guard
-ORIGINAL = '0e1ca6525af547e829dba5286111f2aa21c3dcd6'
+ORIGINAL = '98080b3c11b7aa7adcc22f4dda81e851178e1b21'
 REVIEWED = 'b919c806bae16dd3951ae0b523925316492c35c1'
 
 
@@ -80,7 +80,7 @@ def receipt(surface, rows):
         'adapter': {'surface': 'offline_programmatic', 'adapter_id': 'public-routing-census',
                     'adapter_version': '1', 'harness_id': 'python-stdlib-regex', 'harness_version': sys.version.split()[0],
                     'provider_id': 'local', 'model_id': 'none-programmatic',
-                    'native_session_ref': '01a0ff81-760f-7463-848d-6158c765f240',
+                    'native_session_ref': '01a10521-a7dc-75c3-8129-73ce618fa765',
                     'configuration_fingerprint': 'sha256:' + hashlib.sha256(
                         (REPO / 'ops/config/rule-jit-triggers.v1.json').read_bytes()).hexdigest()},
         'cases': {'total': sum(map(len, rows.values())), 'train': len(rows['train']),
@@ -101,7 +101,8 @@ def receipt(surface, rows):
         'cost': {'baseline_usd_per_case': 0.0, 'candidate_usd_per_case': 0.0},
         'verdict': {'decision': 'ship', 'statement': 'Public cue routing restored with zero finite-set regressions.'},
         'notes': ['Exact finite-set census intervals; no claim about unseen prompts or model quality.',
-                  'Baseline is the reviewed PR head; oracle is origin/main; private identities are excluded before case generation.',
+                  'Baseline is the reviewed PR head; oracle is merged main ' + ORIGINAL + '; private identities are excluded before case generation.',
+                  'The main-merge-receipt.json artifact preserves main production-function replay evidence; this census measures public cues only.',
                   'Programmatic regression and second-pass measurement; no external model-work call is needed.'],
     }
 

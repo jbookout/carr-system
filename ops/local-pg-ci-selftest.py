@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import os
+import re
 import sys
 from contextlib import redirect_stderr
 from pathlib import Path
@@ -119,6 +120,19 @@ with patch.dict(os.environ, {**DECLARED_HOSTED, "GITHUB_REPOSITORY": "someone/fo
         check("a fork is refused", True)
     else:
         check("a fork is refused", False)
+
+# The DB workflow runs canonical migration CI followed by integration and
+# ownership/assurance validators. Its deadline must exceed the migration-only
+# job's own budget, or it cancels healthy downstream work (PR 1436 run
+# 37096033436 passed canonical migration before the 25-minute cancellation).
+ci_workflow = (REPO / ".github/workflows/ci.yml").read_text()
+db_workflow = (REPO / ".github/workflows/db-acceptance.yml").read_text()
+migration_budget_match = re.search(r"matrix.classes == 'migration' && (\d+)", ci_workflow)
+db_budget_match = re.search(r"timeout-minutes: (\d+)", db_workflow)
+assert migration_budget_match and db_budget_match, "workflow budget declarations must be readable"
+migration_budget = int(migration_budget_match.group(1))
+db_budget = int(db_budget_match.group(1))
+check("full DB lane allows migration budget plus downstream acceptance", db_budget > migration_budget)
 
 # Export is a manual hosted-only mode; unlike the ordinary local DB lane it
 # must not be invokable from a developer shell or write into the repository.
