@@ -41,6 +41,8 @@ exactly as they bind Joe, with zero mechanical enforcement on his side today.
     ops/config-as-code.py verify-codex-continuity
     ops/config-as-code.py install-codex-continuity-mcp --apply
     ops/config-as-code.py verify-codex-continuity-mcp
+    ops/config-as-code.py install-progress-board [--repo CHECKOUT] --apply
+    ops/config-as-code.py verify-progress-board [--repo CHECKOUT]
     ops/config-as-code.py remove-codex-continuity --apply
 
 `check` is what belongs in run.sh health: it answers "is the live config still
@@ -221,77 +223,9 @@ CODEX_PERMISSIONS_END = "# <<< CARR managed permissions <<<"
 TOKENS = [(tok, real) for tok, real in
           (("{{VAULT}}", VAULT), ("{{REPO}}", REPO), ("{{HOME}}", HOME)) if real]
 
-# RUNS ON EXACTLY ONE MACHINE. Not a statement about Joe; a statement about what
-# the job writes. Each of these mutates state that is SHARED between the two
-# machines, so a second copy is either duplicated work or a two-writer conflict.
-# Widened 2026-08-10 during the Dell migration audit, when the set held only the
-# video pipeline and the other five would have been installed on his Mac:
-#
-#   videopipeline       — Joe's Movies folder; Dell has no video pipeline.
-#   nightly-record-layer— pushes the corpus to the shared vault and mirrors
-#                         doctrine to a path hardcoded to Joe's Google Drive
-#                         (bin/nightly.sh:154), which cannot resolve on another
-#                         machine. The cadence engine inside it IS idempotent,
-#                         so the risk is the vault writes, not double-spawning.
-#   rules-refresh       — writes the shared compiled-rules renders, and the cost
-#                         ruling in its own plist is decisive: Neon free is
-#                         100 CU-h/month at ~5 min per wake, so a second Mac
-#                         waking it hourly doubles the burn and can SUSPEND the
-#                         database for the rest of the month.
-#   local-briefs        — maintains Joe's local review queue. Legacy brief files
-#                         are explicit recovery only; a second scheduler would
-#                         duplicate the same owner-specific maintenance.
-#   partner-ping        — writes the shared record. One pinger is the point.
-#   cutover-watch       — writes the shared record (a loop update on #532) and
-#                         holds its own sentinel of what it last reported under
-#                         out/cutover-watch/, which is per-machine and would
-#                         make two Macs disagree about what is "new" — the
-#                         same partner-ping shape (one watcher, one shared
-#                         record) with the added risk of two update-loop calls
-#                         racing on the same loop's base_version.
-#
-# What the second machine still needs from the nightly is the record-derived
-# fetch allowlist, which is per-machine and gitignored. That is why
-# com.carr.fetch-allowlist.plist exists as its own job rather than being
-# inherited from the nightly chain.
-PRIMARY_ONLY = {
-    "com.carr.videopipeline.plist",
-    # com.carr.preflight-watch.plist was listed here until 2026-08-22. It watched
-    # DELL's migration packet from Joe's Mac and was built to remove itself once
-    # his A15 closed. A15 is closed, the watcher unloaded and deleted its own
-    # plist as designed, and bin/preflight-watch.sh is retired with this entry —
-    # which had been naming a plist that exists in neither ops/launchd/ nor
-    # ~/Library/LaunchAgents. A lifecycle that completes should leave nothing
-    # behind pointing at it (rule def3e84e, artifact tombstones: nothing
-    # silently rots).
-    "com.carr.nightly-record-layer.plist",
-    "com.carr.rules-refresh.plist",
-    "com.carr.local-briefs.plist",
-    "com.carr.partner-ping.plist",
-    "com.carr.cutover-watch.plist",
-    # Joe 2026-09-26: the Mac Studio is the hub and the MacBook is a thin client
-    # into it, so work that acts on shared state runs on the primary alone.
-    # room-bridge: both Macs carried the same Model Room desks and raced for
-    # each turn; it also wakes the engineering controller, whose one Worker
-    # token lives on the primary.  release-pipeline and control-plane-tick
-    # would release and enqueue twice.  The cadence sweep would escalate twice.
-    # nightly-exports-daytime-retry is the safety net for nightly-record-layer,
-    # which is already primary-only.  timebomb-audit scans the same tracked
-    # source on every Mac.  Device-bound jobs (dictation, call mode, capture,
-    # keymap, local servers, spool flush, fleet sync) stay on every machine.
-    "com.carr.room-bridge.plist",
-    "com.carr.release-pipeline.plist",
-    "com.carr.control-plane-tick.plist",
-    "com.carr.delivery-cadence-a05-sweep.plist",
-    "com.carr.nightly-exports-daytime-retry.plist",
-    "com.carr.timebomb-audit.plist",
-    "com.carr.job-watchdog.plist",
-}
+from lib.launchd_scope import PRIMARY_ONLY, SECONDARY_ONLY
 
 
-# The mirror image: jobs only the SECOND machine needs, because the primary
-# already gets the same effect from a chain the second machine must not run.
-SECONDARY_ONLY = {"com.carr.fetch-allowlist.plist"}
 
 
 # Versioned definitions that deliberately must not become live merely because
@@ -1459,6 +1393,16 @@ def definition_only_installed_plists():
     return [f for f in carr_plists() if f in DEFINITION_ONLY]
 
 
+def pending_launchd_reloads():
+    """CARR jobs whose disk render has not been verified as loaded."""
+    if not os.path.isdir(LAUNCHD_SRC):
+        return []
+    suffix = ".plist.pending-reload"
+    return sorted(name[:-len(".pending-reload")]
+                  for name in os.listdir(LAUNCHD_SRC)
+                  if name.startswith("com.carr.") and name.endswith(suffix))
+
+
 # STARTINTERVAL IS REFUSED IN EVERY CARR LAUNCHAGENT TEMPLATE (2026-09-26).
 # On the Mac Studio, macOS 27.0, launchd never fires an agent scheduled with
 # StartInterval: `launchctl print` shows `runs = 0` and `pended nondemand spawn
@@ -1576,7 +1520,13 @@ def _cmd_check():
         (f"launchd template {rel} (SCHEDULE REFUSED)", problem)
         for rel, problem in refused_launchd_templates()
     ]
-    drift = missing + untracked + different + disallowed + refused
+    pending_reloads = [
+        (f"launchd {name} (PENDING RELOAD)",
+         "disk bytes do not prove the new definition is loaded; retry installation "
+         "from an external process and verify launchd registration")
+        for name in pending_launchd_reloads()
+    ]
+    drift = missing + untracked + different + disallowed + refused + pending_reloads
     if not drift and not unversioned:
         prerequisite_report = prerequisite_failure_report(PREREQUISITE_CHECK(REPO))
         if prerequisite_report:
@@ -1604,7 +1554,8 @@ def _cmd_check():
     # intentionally omitted from normal pairs() on a secondary.  Otherwise
     # "16 of 4" could claim to have checked only four items while reporting
     # sixteen violations, which is operationally misleading.
-    checked_items = len(configured_pairs) + len(disallowed) + len(refused)
+    checked_items = (len(configured_pairs) + len(disallowed) + len(refused)
+                     + len(pending_reloads))
     headline = f"config-as-code: DRIFT — {len(drift)} of {checked_items} items"
     if missing:
         headline += f" — {len(missing)} MISSING FROM MACHINE: " + ", ".join(
@@ -1806,6 +1757,21 @@ def hand_off_self_reload(filename, dest, body, label, launchctl=LAUNCHCTL_BIN):
     return "deferred"
 
 
+def launchd_registration(label):
+    """Read the job's registered plist path, or distinguish absence from error."""
+    inspected = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+                               capture_output=True, text=True, check=False)
+    if inspected.returncode == 0:
+        path_match = re.search(r"(?m)^\s*path = (.+)$", inspected.stdout or "")
+        if path_match:
+            return "loaded", path_match.group(1).strip()
+        return "failed", "launchctl print omitted the registered path"
+    detail = ((inspected.stderr or "") + "\n" + (inspected.stdout or "")).strip()
+    if inspected.returncode == 113 and f'Could not find service "{label}"' in detail:
+        return "absent", ""
+    return "failed", detail[:80] or "unknown launchctl error"
+
+
 def install_launchd_plist(filename, dest, body, body_matches):
     """Render and load one plist without letting an active job unload itself.
 
@@ -1814,7 +1780,9 @@ def install_launchd_plist(filename, dest, body, body_matches):
     it here kills the receipt wrapper.  That case leaves the destination
     untouched and hands the reload to a detached one-shot that runs only after
     this job has exited (hand_off_self_reload); if the hand-off cannot be
-    started it fails with the exact external-install remedy.
+    started it fails with the exact external-install remedy. For other jobs,
+    a pending marker survives interrupted or failed reloads until launchd is
+    observed absent before load and registered at the installed path after it.
     """
     try:
         label = plistlib.loads(body.encode("utf-8")).get("Label", "")
@@ -1822,27 +1790,126 @@ def install_launchd_plist(filename, dest, body, body_matches):
         label = ""
     active_label = os.environ.get(ACTIVE_LAUNCHD_LABEL_ENV, "").strip()
     is_active_self = bool(label and active_label == label)
+    pending = dest + ".pending-reload"
+
+    if not label:
+        print(f"      INSPECT FAILED ({filename} has no valid launchd label); "
+              "destination left unchanged")
+        return "failed"
 
     if is_active_self:
+        if os.path.exists(pending):
+            print(f"      PENDING RELOAD ({label}; active installer cannot verify its own "
+                  "loaded definition); run install from an external process")
+            return "failed"
         if body_matches:
             print(f"      kept loaded (active installer job {label}; body unchanged)")
             return "kept"
         return hand_off_self_reload(filename, dest, body, label)
 
+    # Every non-self mutation first proves this label is absent or belongs to
+    # this destination. A pending retry is an obligation to reconcile, not
+    # authority to unload a same-label job registered from another path.
+    state, detail = launchd_registration(label)
+    if state == "loaded" and detail != dest:
+        print(f"      INSPECT FAILED ({label} is loaded from an unexpected path); "
+              "destination left unchanged")
+        return "failed"
+    if state == "failed":
+        print(f"      INSPECT FAILED ({detail}); destination left unchanged")
+        return "failed"
+    if body_matches and not os.path.exists(pending) and state == "loaded":
+        # The hourly installer must not disturb a definition that is already
+        # loaded. Repeated unload/load cycles can strand a RunAtLoad/KeepAlive
+        # job in launchd's pending-spawn state even though its plist is right.
+        print(f"      kept loaded ({label}; body unchanged)")
+        return "kept"
+
+    # This marker is written before the disk plist changes. A failed or
+    # interrupted reload leaves it behind across installer processes, so a
+    # matching file and matching launchctl path cannot mask an old definition.
+    with open(pending, "w", encoding="utf-8") as fh:
+        fh.write(hashlib.sha256(body.encode("utf-8")).hexdigest() + "\n")
     if not body_matches:
         with open(dest, "w", encoding="utf-8") as fh:
             fh.write(body)
 
     subprocess.run(["launchctl", "unload", "-w", dest],
                    capture_output=True, check=False)
+    state, detail = launchd_registration(label)
+    if state != "absent":
+        print(f"      UNLOAD FAILED ({detail if state == 'failed' else 'job remains loaded'}); "
+              "pending reload retained")
+        return "failed"
     r = subprocess.run(["launchctl", "load", "-w", dest],
                        capture_output=True, text=True, check=False)
     if r.returncode == 0:
-        print("      loaded")
-        return "loaded"
+        state, detail = launchd_registration(label)
+        if (state == "loaded" and detail == dest
+                and launchd_texts_match(read(dest), body)):
+            os.unlink(pending)
+            print("      loaded")
+            return "loaded"
+        print(f"      LOAD UNVERIFIED ({detail if state == 'failed' else state}); "
+              "pending reload retained")
+        return "failed"
     print(f"      LOAD FAILED ({(r.stderr or r.stdout).strip()[:80]}) "
-          f"— migration will remain incomplete")
+          "— pending reload retained; migration will remain incomplete")
     return "failed"
+
+
+def cmd_install_progress_board(apply=False, repo=None):
+    """Migrate the existing board agent to the repository wrapper, then read
+    launchd's arguments back. This does not create a new schedule or label.
+    Defaults to the canonical checkout. An explicit repository checkout allows
+    the installed consumer to be verified before its PR merges; keep that
+    checkout available until migrating back to the canonical checkout. Board
+    state remains in the canonical out directory across either migration.
+    """
+    runtime_repo = os.path.abspath(os.path.expanduser(repo)) if repo else REPO
+    wrapper = os.path.join(runtime_repo, "ops", "progress-board-render.sh")
+    python = os.path.join(runtime_repo, ".venv", "bin", "python")
+    if not os.path.isfile(wrapper) or not os.access(python, os.X_OK):
+        print("progress-board: selected checkout wrapper or repository interpreter unavailable; "
+              "select a repository checkout containing the wrapper and interpreter")
+        return 1
+    label = "local.carr-progress-board"
+    dest = os.path.join(HOME, "Library", "LaunchAgents", label + ".plist")
+    try:
+        with open(dest, "rb") as handle:
+            current = plistlib.load(handle)
+        if not isinstance(current, dict) or current.get("Label") != label:
+            raise ValueError("unexpected board agent label")
+    except (OSError, ValueError, plistlib.InvalidFileException) as exc:
+        print(f"progress-board: existing agent unavailable: {exc}; no schedule created")
+        return 1
+    desired = dict(current)
+    desired["ProgramArguments"] = ["/bin/bash", wrapper]
+    desired["WorkingDirectory"] = runtime_repo
+    desired["EnvironmentVariables"] = dict(current.get("EnvironmentVariables", {}))
+    desired["EnvironmentVariables"]["PROGRESS_BOARD_ROOT"] = os.path.join(REPO, "out")
+    def registered_arguments():
+        observed = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+                                  capture_output=True, text=True, check=False, timeout=15)
+        args = re.search(r"(?ms)^\s*arguments = \{\n(.*?)^\s*\}", observed.stdout or "")
+        return ([line.strip() for line in args.group(1).splitlines()]
+                if observed.returncode == 0 and args else [])
+
+    matches = desired == current and registered_arguments() == desired["ProgramArguments"]
+    if apply:
+        outcome = install_launchd_plist(os.path.basename(dest), dest,
+                                       plistlib.dumps(desired).decode("utf-8"), matches)
+        if outcome not in {"loaded", "kept"}:
+            return 1
+    elif not matches:
+        print("progress-board: existing agent needs migration: "
+              "ops/config-as-code.py install-progress-board --apply")
+        return 1
+    if registered_arguments() != desired["ProgramArguments"]:
+        print("progress-board: launchd arguments unverified; migration is incomplete")
+        return 1
+    print(f"progress-board: verified registered repository wrapper: {wrapper}")
+    return 0
 
 
 def write_claude_settings(path, document, before, sink=None):
@@ -2139,7 +2206,7 @@ def cmd_install(apply):
             continue
         body = concrete(source)
         body_matches = launchd_texts_match(read(dest), source)
-        if body_matches and not apply:
+        if body_matches and not apply and not os.path.exists(dest + ".pending-reload"):
             continue
         gone = missing_targets(body)
         if gone:
@@ -2154,9 +2221,9 @@ def cmd_install(apply):
             # e313a3ca). Writing the plist and stopping leaves the job on disk
             # and dead: on a fresh machine that means the nightly never runs,
             # so the record-derived fetch allowlist is generated once by the
-            # migration and then never refreshed as clients are added. unload
-            # is expected to fail when the job was never loaded; that is not
-            # an error, which is why only the load result is reported.
+            # migration and then never refreshed as clients are added. A
+            # pending marker keeps an interrupted reload visible until an
+            # absent-before/load/registered-after sequence verifies it.
             outcome = install_launchd_plist(f, dest, body, body_matches)
             if outcome == "failed":
                 launchd_activation_failures.append(f)
@@ -2706,6 +2773,14 @@ def main():
         return cmd_verify_codex_continuity()
     if mode == "install":
         return cmd_install(apply)
+    if mode in {"install-progress-board", "verify-progress-board"}:
+        import argparse
+        parser = argparse.ArgumentParser(prog=f"config-as-code.py {mode}")
+        parser.add_argument("--repo", help="repository checkout to run; defaults to canonical checkout")
+        parser.add_argument("--apply", action="store_true")
+        options = parser.parse_args(sys.argv[2:])
+        return cmd_install_progress_board(options.apply if mode == "install-progress-board" else False,
+                                          repo=options.repo)
     if mode == "reinstall-launchd-calendar":
         return cmd_reinstall_launchd_calendar(sys.argv[2:])
     if mode == "launchd-handoff-smoke":

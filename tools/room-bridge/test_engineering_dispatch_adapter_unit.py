@@ -192,7 +192,7 @@ def request() -> dict:
 class ValidEngineeringDesk:
     def resolve(self, name):
         assert name == "engineering-codex"
-        return {"name": name, "kind": "codex-session", "model": "gpt-5.6-sol", "effort": "xhigh",
+        return {"name": name, "kind": "codex-session", "model": "gpt-6.1-sol", "effort": "xhigh",
                 "cwd": str(ROOT), "sandbox": "workspace-write",
                 "add_dirs": adapter._dedicated_writable_roots(), "room_seat": None}
 
@@ -203,8 +203,17 @@ def test_writable_roots_are_exactly_the_two_authorized_machine_paths():
         "/Users/booko/carr-system/out",
     )
     assert adapter._dedicated_writable_roots() == list(adapter.AUTHORIZED_WRITABLE_ROOTS)
-    if Path(adapter.AUTHORIZED_WRITABLE_ROOTS[0]).is_dir():
+    # Another checkout on the same host does not make this clone an installed
+    # desk. Authenticate this repository's metadata, not a sibling's existence.
+    if adapter._git_common_dir() == Path(adapter.AUTHORIZED_WRITABLE_ROOTS[0]):
         assert _resolve_live_writable_roots() == list(adapter.AUTHORIZED_WRITABLE_ROOTS)
+    else:
+        try:
+            _resolve_live_writable_roots()
+        except adapter.DispatchRefusal:
+            pass
+        else:
+            raise AssertionError("private clone accepted the installed desk's write boundary")
 
 
 def test_network_access_is_exactly_the_two_github_delivery_hosts():
@@ -691,7 +700,7 @@ def test_tracked_bootstrap_registers_one_unseated_exact_desk_and_wrapper_has_no_
         registry = adapter.desks.Registry(Path(root) / "hermes-desks.json")
         entry = adapter.install_dedicated_codex_desk(registry)
         assert entry["name"] == "engineering-codex"
-        assert entry["kind"] == "codex-session" and entry["model"] == "gpt-5.6-sol"
+        assert entry["kind"] == "codex-session" and entry["model"] == "gpt-6.1-sol"
         assert entry["effort"] == "xhigh" and entry["sandbox"] == "workspace-write"
         assert entry["add_dirs"] == adapter._dedicated_writable_roots()
         assert entry.get("room_seat") is None and entry["thread_id"] is None

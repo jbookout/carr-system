@@ -203,6 +203,7 @@ CHILD_ENV_NAMES = ("HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "SHELL
 # line), so no step can fall back to wrangler's interactive OAuth login.
 CLOUDFLARE_TOKEN_NAME = "CLOUDFLARE_API_TOKEN"
 CLOUDFLARE_TOKEN_FILE = "tokens.env"   # under credential_dir
+CREDENTIAL_INVENTORY_PATH = REPO / "ops/config/credential-inventory.v1.json"
 
 
 # ── results and the command runner seam ───────────────────────────────────────
@@ -215,9 +216,13 @@ class Result:
 
 
 class StepFailed(Exception):
-    def __init__(self, step: str, rc: int, log: str, detail: str = ""):
+    """`capability` names a credential no fix-forward PR can supply; the lane
+    then also files one CARR loop naming it (once per name), like Blocked."""
+
+    def __init__(self, step: str, rc: int, log: str, detail: str = "", capability: str | None = None):
         super().__init__(f"{step} exited {rc}")
         self.step, self.rc, self.log, self.detail = step, rc, log, detail
+        self.capability = capability
 
 
 class Blocked(Exception):
@@ -651,8 +656,8 @@ def queue_turn(lane: str, sha: str, step: str, rc: int, log: str, record_path: s
     SHA must never share an id with the first. The queue key gains a suffix on
     later attempts for the same reason at the Hermes queue."""
     key = f"release-fix-{sha[:8]}" + (f"-{attempt}" if attempt > 1 else "")
-    ahead = ("PRODUCTION MIGRATIONS WERE APPLIED in this run before it stopped "
-             "(db_ahead_of_worker: true): the database is ahead of the serving Worker, so the fix "
+    ahead = ("PRODUCTION MIGRATIONS WERE ATTEMPTED in this run before it stopped "
+             "(db_ahead_of_worker: true): the database may be ahead of the serving Worker, so the fix "
              "must keep the new schema working with the currently deployed Worker.\n"
              if db_ahead_of_worker else "")
     if do_migration:
@@ -676,18 +681,26 @@ def queue_turn(lane: str, sha: str, step: str, rc: int, log: str, record_path: s
             "msg_id": str(uuid.uuid5(ROOM_NAMESPACE, f"{lane}:{sha}:{step}:{run_id}"))}
 
 
-def blocker_loop(capability: str, detail: str) -> dict:
+def blocker_loop(capability: str, detail: str, *, remedy: str = "", recovery: str = "") -> dict:
+    """Route health repairs to their lane and credentials to their decider."""
+    continuation = recovery or ("It stops at that step every tick until this "
+                                "exists; nothing is released meanwhile.")
     health_repair = capability in {"health_baseline_hard_error", "health_baseline_stalled"}
     blocker_detail = (f"The authorized release-repair lane must restore and verify the health baseline: {detail}"
                       if health_repair else
-                      f"Joe is the provisioning decider for the named unattended credential: {detail}")
-    return {"idempotency_key": str(uuid.uuid5(ROOM_NAMESPACE, "release-pipeline-blocker:" + capability)),
-            "kind": "open_loop", "owner": "Claude" if health_repair else "Joe", "domain": "system", "marker": "none",
+                      f"Joe is the provisioning decider for the named unattended credential: {detail}; Joe grants it")
+    args = {"kind": "open_loop", "owner": "Claude" if health_repair else "Joe", "domain": "system", "marker": "none",
             "blocker": "other_lane" if health_repair else "capability", "blocker_detail": blocker_detail,
             "body": (f"The scripted release pipeline (ops/release-pipeline.py) cannot run "
-                     f"unattended: {detail}. It stops at that step every tick until this "
-                     f"exists; nothing is released meanwhile."),
+                     f"unattended: {detail}. {continuation} {remedy}".rstrip()),
             "unblocks": "unattended Worker/app release on every merge to main"}
+    # The record envelope refuses key reuse with different request bytes.
+    # Dedup by capability remains in filed_blockers; retries replay the pending
+    # payload verbatim, while a revised remedy gets its own operation key.
+    args["idempotency_key"] = str(uuid.uuid5(
+        ROOM_NAMESPACE, "release-pipeline-blocker:" + capability + ":" +
+        json.dumps(args, sort_keys=True, separators=(",", ":"))))
+    return args
 
 
 # ── the pipeline ──────────────────────────────────────────────────────────────
@@ -1068,8 +1081,10 @@ class Pipeline:
             return 1
         finally:
             self.remove_worktrees()
-        ok = baseline_complete and live_complete and not any(
-            f.get("hard_error") for f in baseline_findings)
+        ok = (baseline_complete and live_complete
+              and (baseline_res.rc == 0 or (baseline_res.rc == 1 and baseline_findings))
+              and (live_res.rc == 0 or (live_res.rc == 1 and live_findings)) and not any(
+                  f.get("hard_error") for f in baseline_findings + live_findings))
         self.out("  health-preflight: " + ("OK" if ok else "FAILED — see rc/findings above"))
         return 0 if ok else 1
 
@@ -1369,11 +1384,13 @@ class Pipeline:
 
     def ci_run(self, gh: Any, lane_cfg: dict, pr: int, head_sha: str) -> int:
         ci = [r for r in gh.runs_for(head_sha)
-              if r.get("name") == lane_cfg["ci_workflow_name"] and r.get("event") == "pull_request"
-              and r.get("conclusion") == "success"]
+              if r.get("name") == lane_cfg["ci_workflow_name"] and r.get("event") == "pull_request"]
         if not ci:
             raise Blocked("ci_not_green", f"PR #{pr} has no successful {lane_cfg['ci_workflow_name']} run")
         run_id = max(int(r["id"]) for r in ci)
+        newest = max(ci, key=lambda r: (int(r["id"]), int(r.get("run_attempt", 1))))
+        if newest.get("conclusion") != "success":
+            raise Blocked("ci_not_green", f"PR #{pr} newest CI run {run_id} is not successful")
         jobs = gh.jobs(run_id)
         if not any(j.get("name") == lane_cfg["ci_required_job"] and j.get("conclusion") == "success" for j in jobs):
             raise Blocked("ci_not_green", f"PR #{pr} run {run_id} lacks a green `{lane_cfg['ci_required_job']}`")
@@ -1413,7 +1430,7 @@ class Pipeline:
                 self.out(f"  [dry-run] a real run would FAIL here: {detail}")
                 return dict(self.env)
             self.out(f"  !! {detail}")
-            raise StepFailed("credential-missing", 1, "", detail)
+            raise StepFailed("credential-missing", 1, "", detail, capability=CLOUDFLARE_TOKEN_NAME)
         env = dict(self.env)
         env[CLOUDFLARE_TOKEN_NAME] = token
         return env
@@ -1422,11 +1439,30 @@ class Pipeline:
         """Before any worktree exists: the deploy token must be present and
         accepted. Either failure stops the lane and dispatches; neither is a
         silent hold, because a missing token never heals itself."""
-        who = self.step("wrangler-auth", [str(wrangler), "whoami"], cwd, timeout=120,
-                        env=self.deploy_env())
-        if not self.dry_run and "not authenticated" in who.out.lower():
-            raise StepFailed("credential-missing", 1, who.log,
-                             f"credential rejected: wrangler whoami does not accept {CLOUDFLARE_TOKEN_NAME}")
+        try:
+            who = self.step("wrangler-auth", [str(wrangler), "whoami"], cwd, timeout=120,
+                            env=self.deploy_env())
+        except StepFailed as failure:
+            if failure.step != "wrangler-auth":
+                raise
+            # Wrangler throws on token verification rejection. Read the step's
+            # output before classifying it; network errors remain step failures.
+            try:
+                output = Path(failure.log).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                raise failure
+            who = Result(failure.rc, output, failure.log)
+            if not self._auth_rejected(who.out):
+                raise
+        if not self.dry_run and self._auth_rejected(who.out):
+            raise StepFailed("credential-missing", who.rc or 1, who.log,
+                             f"credential rejected: wrangler whoami does not accept {CLOUDFLARE_TOKEN_NAME}",
+                             capability=f"{CLOUDFLARE_TOKEN_NAME}:rejected")
+
+    @staticmethod
+    def _auth_rejected(output: str) -> bool:
+        return bool(re.search(r"not authenticated|authentication error|invalid access token|"
+                              r"\[code:\s*(?:9106|9109|10000)\]", output, re.IGNORECASE))
 
     def add_worktree(self, name: str, repo_dir: Path, wt: Path, sha: str, *, mark_mutated: bool = True) -> None:
         """`mark_mutated=False` is for the worker lane's health baseline: the
@@ -1510,11 +1546,28 @@ class Pipeline:
                 self.out("release-pipeline: another run holds the lock; this tick is a no-op")
                 return 0
             rc = 0
+            if not self.dry_run:
+                # Notification delivery is independent of failed-SHA release
+                # suppression, including when main has not changed.
+                state = self.store.load()
+                for capability, pending in list(state.get("pending_blockers", {}).items()):
+                    row = {"status": "blocker_notification", "lane": pending["lane"],
+                           "capability": capability, "run_id": self.run_id}
+                    self.deliver_blocker(state, capability, row)
+                    self.store.record(row)
+                for capability, pending in list(state.get("pending_diagnoses", {}).items()):
+                    row = {"status": "capability_diagnosis", "lane": pending["lane"],
+                           "sha": pending["sha"], "capability": capability, "run_id": self.run_id}
+                    self.deliver_diagnosis(state, capability, row)
+                    self.store.record(row)
             for lane in lanes:
                 rc = max(rc, self.run_lane(lane))
             return rc
 
     def run_lane(self, lane: str) -> int:
+        self.mutated = False
+        self.db_ahead_of_worker = False
+        self.do_migration = None
         lane_cfg = self.cfg[lane]
         why = kill_switch(self.cfg, lane)
         if why:
@@ -1599,19 +1652,12 @@ class Pipeline:
             row: dict[str, Any] = {"lane": lane, "sha": sha, "from_sha": base, "status": "blocked",
                    "reason": b.reason, "detail": b.detail, "run_id": self.run_id}
             if b.capability:
-                filed = state.setdefault("filed_blockers", {})
-                if b.capability not in filed:
-                    ok, res = self.call_verb("add-loop", blocker_loop(b.capability, b.detail))
-                    row["loop_filed"] = ok
-                    if ok:
-                        filed[b.capability] = self.today
-                    else:
-                        self.out(f"release-pipeline[{lane}]: could not file the loop: {res}")
-                self.store.save(state)
+                self.file_blocker(state, lane, b.capability, b.detail, row)
             self.store.record(row)
             return 3 if b.capability else 0
         except StepFailed as f:
-            return self.fail(lane, state, sha, base, f.step, f.rc, f.log, f.detail)
+            return self.fail(lane, state, sha, base, f.step, f.rc, f.log, f.detail,
+                             capability=f.capability)
         except Exception as exc:  # noqa: BLE001 — an unexpected error is recorded and dispatched, never lost
             detail = f"{type(exc).__name__}: {str(exc)[:300]}"
             self.out(f"release-pipeline[{lane}]: UNEXPECTED {detail}")
@@ -1631,6 +1677,48 @@ class Pipeline:
                 return 1
             return self.fail(lane, state, sha, base, "unexpected", 1, "-", detail)
 
+    def file_blocker(self, state: dict, lane: str, capability: str, detail: str, row: dict,
+                     *, failed_sha: str = "") -> None:
+        """One CARR loop per capability name, ever (state.filed_blockers);
+        persist the complete notification before trying the record endpoint."""
+        filed = state.setdefault("filed_blockers", {})
+        if capability not in filed:
+            pending = state.setdefault("pending_blockers", {})
+            if capability not in pending:
+                remedy = ""
+                if capability.split(":", 1)[0] == CLOUDFLARE_TOKEN_NAME:
+                    inventory = json.loads(CREDENTIAL_INVENTORY_PATH.read_text(encoding="utf-8"))
+                    entry = next(c for c in inventory["credentials"] if c["name"] == "cloudflare-deploy-token")
+                    checked_path = expand(self.cfg.get("credential_dir", "~/.config/carr")) / CLOUDFLARE_TOKEN_FILE
+                    remedy = entry["replacement_plan"].replace(entry["probe"]["path"], str(checked_path))
+                recovery = (f"The {lane} lane failed for SHA {failed_sha} and will not retry it. "
+                            "After repairing and verifying the credential, run "
+                            "ops/release-pipeline.py report to read every currently failed lane, "
+                            "its full SHA and its exact clear-failed command. Other lanes may fail "
+                            "on this same credential after this notification. Run the reported "
+                            "command for each lane paused by this credential; the next tick retries "
+                            "those SHAs. "
+                            "A fix-forward merge with a new main SHA also resumes the lane."
+                            if failed_sha else "")
+                pending[capability] = {"lane": lane, "args": blocker_loop(
+                    capability, detail, remedy=remedy, recovery=recovery)}
+                self.store.save(state)
+            self.deliver_blocker(state, capability, row)
+
+    def deliver_blocker(self, state: dict, capability: str, row: dict) -> None:
+        pending = state["pending_blockers"][capability]
+        try:
+            ok, res = self.call_verb("add-loop", pending["args"])
+        except Exception as exc:  # noqa: BLE001 — retain notification for the next tick
+            ok, res = False, type(exc).__name__
+        row["loop_filed"] = ok
+        if ok:
+            state.setdefault("filed_blockers", {})[capability] = self.today
+            del state["pending_blockers"][capability]
+        else:
+            self.out(f"release-pipeline[{pending['lane']}]: could not file the loop: {res}")
+        self.store.save(state)
+
     def dispatch(self, state: dict, lane: str, sha: str, turn: dict, *, allow_dedup: bool = False
                  ) -> tuple[bool, Any]:
         """Post the fix-session turn. A `deduplicated: true` answer means the
@@ -1646,28 +1734,69 @@ class Pipeline:
             self.store.save(state)
         return ok, res
 
+    def deliver_diagnosis(self, state: dict, capability: str, row: dict) -> None:
+        """Replay the saved first turn until acknowledged, then suppress by capability."""
+        pending = state["pending_diagnoses"][capability]
+        try:
+            # Unlike a newly composed failure turn, this is an exact replay of
+            # the same msg_id and operation key. A lost acknowledgement may
+            # therefore return deduplicated without losing any turn content.
+            ok, res = self.dispatch(state, pending["lane"], pending["sha"],
+                                    pending["args"], allow_dedup=True)
+        except Exception as exc:  # noqa: BLE001 — preserve the request for a later tick
+            ok, res = False, type(exc).__name__
+        row["dispatched"] = ok
+        if ok:
+            state.setdefault("diagnosed_capabilities", {})[capability] = self.today
+            del state["pending_diagnoses"][capability]
+            self.store.save(state)
+        else:
+            self.out(f"release-pipeline[{pending['lane']}]: diagnosis dispatch FAILED: {res}")
+
     def fail(self, lane: str, state: dict, sha: str, base: str, step: str, rc: int, log: str,
-             detail: str) -> int:
+             detail: str, *, capability: str | None = None) -> int:
         self.out(f"release-pipeline[{lane}]: FAILED at {step} (exit {rc}); log {log or '-'}")
         if self.dry_run:
             return 1
         state.setdefault(lane, {}).update({
             "failed_sha": sha, "failed_step": step,
             "failed_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")})
-        self.store.save(state)
         attempt = int((state[lane].get("dispatches") or {}).get(sha, 0)) + 1
-        ok, res = (False, "no SHA") if not sha else self.dispatch(
-            state, lane, sha, queue_turn(lane, sha, step, rc, log, str(self.store.records_path),
-                                         db_ahead_of_worker=self.db_ahead_of_worker,
-                                         do_migration=self.do_migration,
-                                         run_id=self.run_id, attempt=attempt))
+        extra: dict[str, Any] = {}
+        if capability:
+            pending = state.setdefault("pending_diagnoses", {})
+            diagnosed = capability in state.get("diagnosed_capabilities", {})
+            if not diagnosed and capability not in pending and sha:
+                pending[capability] = {"lane": lane, "sha": sha, "args": queue_turn(
+                    lane, sha, step, rc, log, str(self.store.records_path),
+                    db_ahead_of_worker=self.db_ahead_of_worker, do_migration=self.do_migration,
+                    run_id=self.run_id, attempt=attempt)}
+            # Save the failed SHA and first turn together, before even filing
+            # the loop: a crash after its acknowledgement cannot lose diagnosis.
+            self.store.save(state)
+            self.file_blocker(state, lane, capability, detail, extra, failed_sha=sha)
+            if diagnosed:
+                extra["dispatch_skipped"] = "capability_already_diagnosed"
+                extra["dispatched"] = False
+                self.out(f"release-pipeline[{lane}]: no fix session dispatched; "
+                         "the capability's first diagnosis was already delivered")
+            elif capability in pending:
+                self.deliver_diagnosis(state, capability, extra)
+            ok = extra.get("dispatched", False)
+        else:
+            self.store.save(state)
+            ok, res = (False, "no SHA") if not sha else self.dispatch(
+                state, lane, sha, queue_turn(lane, sha, step, rc, log, str(self.store.records_path),
+                                             db_ahead_of_worker=self.db_ahead_of_worker,
+                                             do_migration=self.do_migration,
+                                             run_id=self.run_id, attempt=attempt))
         self.store.record({"lane": lane, "sha": sha, "from_sha": base, "status": "failed",
                            "step": step, "rc": rc, "log": log, "detail": detail,
                            "db_ahead_of_worker": self.db_ahead_of_worker,
                            "do_migration": self.do_migration,
                            "run_dir": str(self.run_dir), "executed": list(self.executed),
-                           "dispatched": ok, "run_id": self.run_id})
-        if not ok:
+                           "dispatched": ok, "run_id": self.run_id, **extra})
+        if not capability and not ok:
             self.out(f"release-pipeline[{lane}]: diagnosis dispatch FAILED: {res}")
         return 1
 
@@ -1764,9 +1893,11 @@ class Pipeline:
         if pending or self.dry_run:
             if self.dry_run:
                 self.out("  [dry-run] next line runs only when migrate-plan lists pending > 0")
-            self.step("migrate-apply", ["bin/migrate-prod.sh", "--apply"], wt)
             if not self.dry_run:
+                # Batches commit separately. Once apply starts, a failure can
+                # leave production changed; retain the warning on every exit.
                 self.db_ahead_of_worker = True
+            self.step("migrate-apply", ["bin/migrate-prod.sh", "--apply"], wt)
 
         # 5. upload the immutable candidate, verifier bound at upload time
         key = ("<next free r-%s-NN>" % self.today) if self.dry_run else next_release_key(
@@ -2308,9 +2439,8 @@ def parse_provider_version(res: Result) -> str:
 
 def report(store: Store, day: str) -> str:
     rows = [r for r in store.records() if str(r.get("ts", "")).startswith(day)]
-    if not rows:
-        return f"release-pipeline {day}: nothing shipped, failed or blocked."
-    lines = [f"release-pipeline {day}:"]
+    lines = ([f"release-pipeline {day}:"] if rows else
+             [f"release-pipeline {day}: nothing shipped, failed or blocked."])
     for r in rows:
         if r.get("status") == "shipped":
             extra = f" release {r.get('release_key')}" if r.get("release_key") else ""
@@ -2320,6 +2450,17 @@ def report(store: Store, day: str) -> str:
                          f"(exit {r.get('rc')}; log {r.get('log')}; dispatched={r.get('dispatched')})")
         elif r.get("status") == "blocked":
             lines.append(f"  BLOCKED {r['lane']} {str(r.get('sha'))[:12]}: {r.get('reason')} — {r.get('detail')}")
+    # Daily history can be empty or old; recovery must read the current lane
+    # state, including failures suppressed by the credential's single loop.
+    state = store.load()
+    for lane in ("worker", "app"):
+        failed = state.get(lane) or {}
+        sha = failed.get("failed_sha")
+        if sha:
+            lines.append(f"  CURRENT FAILED {lane} {sha} at {failed.get('failed_step')}")
+            lines.append("  After repairing and verifying this lane's failure, clear it with:")
+            lines.append(f"  ops/release-pipeline.py clear-failed --lane {lane} --sha {sha} "
+                         '--reason "external repair verified"')
     return "\n".join(lines)
 
 

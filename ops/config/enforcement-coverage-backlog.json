@@ -4,6 +4,7 @@
   "_why_these_remain": "They are modules imported BY gates, blessed so tampering stays detectable, denying nothing on their own. A control naming one would claim enforcement that does not exist there. They are listed rather than silently filtered, because a silent filter is how a real gate gets excluded by accident — and this file exists because exactly that kind of blindness cost a day.",
   "unmapped_gates": [
     "hook_meter.py",
+    "grok_invocation.py",
     "hook-meter-run.py",
     "cmd_text.py",
     "conduct_patterns.py",
@@ -21,6 +22,7 @@
     "job-watchdog-digest.py"
   ],
   "reasons": {
+    "grok_invocation.py": "shared helper — authenticates the bounded read-only Grok process owner and limits process readback time; imported by lifecycle hooks and the meter, has no standalone entrypoint or refusal, and is hash-covered because its predicate decides whether lifecycle hooks run",
     "hook_meter.py": "shared helper — the live/fixture/unclassified split and the telemetry writer, imported by the 21 gates that write out/hook-guard.log; denies nothing itself, and every gate that imports it does so inside a try so that losing it cannot change a verdict",
     "hook-meter-run.py": "measurement, not enforcement — every wired gate now runs inside it so each firing can be timed and recorded, but it reaches no verdict of its own: it passes the gate's exit code, stdout and stderr through untouched, which ops/hook-meter-selftest.py proves by firing 14 real gates bare and wrapped and requiring byte-identical results. A control naming it would claim a refusal it never makes. It lives in hooks/ rather than ops/ deliberately, so gate-integrity.py hashes it like every other file in the enforcement path — it is blessed for tamper-detection, not because it enforces anything",
     "cmd_text.py": "shared helper — command-text extraction imported by the Bash-facing gates; denies nothing itself",

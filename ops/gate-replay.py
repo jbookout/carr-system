@@ -1190,7 +1190,7 @@ def run_only(manifest: Dict[str, Any], args: argparse.Namespace) -> int:
     errors = [e for e in behaviour_errors(manifest, report.results) if e.startswith("SCENARIO")]
     for line in errors:
         print(line)
-    return 1 if errors else 0
+    return 1 if errors or any(r.verdict == "error" for r in report.results) else 0
 
 
 def main(argv: Optional[List[str]] = None) -> int:

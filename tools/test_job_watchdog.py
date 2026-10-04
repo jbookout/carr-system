@@ -13,6 +13,17 @@ sys.path.insert(0, str(ROOT / "lib"))
 FIXTURES = ROOT / "tools/fixtures/job-watchdog"
 
 
+def setUpModule():
+    from unittest.mock import patch
+    global board_publication
+    board_publication = patch.dict(os.environ, {"PROGRESS_BOARD_LOCAL_ONLY": "1"})
+    board_publication.start()
+
+
+def tearDownModule():
+    board_publication.stop()
+
+
 class ReplayTests(unittest.TestCase):
     def test_fixtures_have_only_synthetic_name_vocabulary(self):
         # No record-layer access or client-name literals. Unknown name-like
@@ -369,7 +380,7 @@ class StateTests(unittest.TestCase):
             state = json.loads((root / "out/boards/carr-v5.json").read_text())
             self.assertEqual(state["tasks"]["credential"]["status"], "blocked")
             self.assertEqual(state["tasks"]["credential"]["lane"], "needs-joe")
-            self.assertIn("Needs Joe", (root / "out/boards/carr-v5.html").read_text())
+            self.assertIn("authentication", state["tasks"]["credential"]["blocked_reason"])
 
     def test_recovery_reconciles_watchdog_owned_board_state(self):
         import job_watchdog as w
@@ -407,7 +418,7 @@ class StateTests(unittest.TestCase):
                     self.assertEqual(task["status"], "blocked")
                 else:
                     self.assertEqual(task["status"], {"created":"done", "collection":"done", "existing":"running", "external-update":"review"}[mode])
-                    self.assertEqual(task["health"], "healthy")
+                    self.assertEqual(task.get("health", "healthy"), "healthy")
                     self.assertIsNone(task["lane"])
                     self.assertNotIn(f["reason"], task["note"])
                     self.assertNotIn("Next action:", task["note"])
@@ -415,6 +426,49 @@ class StateTests(unittest.TestCase):
                         self.assertEqual(task["note"], "Original work in progress")
                     if mode == "external-update":
                         self.assertEqual(task["note"], "New executor evidence")
+
+    def test_recovery_keeps_executor_update_after_ownership_read(self):
+        from unittest.mock import patch
+        import job_watchdog as w
+        c = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        for sibling in (False, True):
+            with self.subTest(sibling=sibling), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                env = dict(os.environ, PROGRESS_BOARD_ROOT=str(root / "out"),
+                           PROGRESS_BOARD_LOCAL_ONLY="1")
+                def cli(*args):
+                    subprocess.run([sys.executable, str(ROOT / "tools/progress_board.py"), *args],
+                                   env=env, capture_output=True, text=True, check=True)
+                cli("init", c["board"], "--title", "Synthetic board")
+                cli("task", c["board"], "shared-card", "--title", "Synthetic work",
+                    "--executor", "old-executor", "--status", "running", "--note", "Old evidence")
+                board = root / "out/boards" / (c["board"] + ".json")
+                before = json.loads(board.read_text())["tasks"]["shared-card"]
+                cli("task", c["board"], "shared-card", "--status", "blocked", "--health", "blocked",
+                    "--note", "Watchdog overlay", "--reason", "Synthetic failure", "--next-action", "Recover")
+                f = w.finding("job_hang", "synthetic-job", "Synthetic failure", c, card="shared-card")
+                f["board_recovery"] = {"card": "shared-card", "before": before,
+                                       "note": "Watchdog overlay", "lane": None}
+                w.append(root / c["paths"]["findings"], f)
+                original = w.board_task
+                def interleaving_write(*args, **kwargs):
+                    # The ownership read has happened. Another participating writer
+                    # commits under the production board lock before recovery writes.
+                    cli("task", c["board"], "shared-card", "--executor", "new-executor",
+                        "--status", "review", "--health", "healthy", "--note", "New executor evidence")
+                    return original(*args, **kwargs)
+                with patch.object(w, "board_task", side_effect=interleaving_write), \
+                     patch.dict(os.environ, {"PROGRESS_BOARD_LOCAL_ONLY": "1"}):
+                    remaining = [w.finding("job_failed", "sibling", "Another failure", c,
+                                           card="shared-card")] if sibling else []
+                    effects = w.Effects(root, c)
+                    effects.report = lambda f: {}
+                    w.reconcile(root, c, remaining, effects, 200)
+                task = json.loads(board.read_text())["tasks"]["shared-card"]
+                self.assertEqual(task["status"], "review")
+                self.assertEqual(task["executor"], "new-executor")
+                self.assertEqual(task["note"], "New executor evidence")
+                self.assertEqual(w.read_latest(root / c["paths"]["findings"])[f["key"]]["cleared_at"], w.stamp(200))
 
     def test_reopened_finding_restores_the_new_board_owner_state(self):
         import job_watchdog as w

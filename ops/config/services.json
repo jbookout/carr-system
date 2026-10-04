@@ -71,6 +71,23 @@
 
   "services": [
     {
+      "key": "tailscale-up",
+      "name": "Tailscale recovery at login",
+      "purpose": "Starts a stopped primary Mac node once at login using its stored preferences and node key. Ordinary health reads the local backend state; logged-out nodes require sign-in.",
+      "family": "Local Mac edge",
+      "criticality": "high",
+      "owner_actor": "joe",
+      "repo_path": "bin/tailscale-up.sh",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.tailscale-up.plist",
+          "notes": "Primary-only RunAtLoad, no repeating cadence or KeepAlive. ops/tailscale_health.py reads the backend independently of login frequency."
+        }
+      ]
+    },
+    {
       "key": "carr-mcp",
       "name": "CARR record and doctrine API (Cloudflare Worker)",
       "purpose": "Every record verb, the doctrine store, the Deal Room web host, and OAuth.",
@@ -901,6 +918,25 @@
                     "expected_cadence_seconds": 1800,
           "cadence_grace_seconds": 2700,
           "notes": "KeepAlive server with NO PORT TO KNOCK ON, so its probe is process liveness only — a weaker claim than the other two, and the run detail says which signal was used so the row is never read as more than it is. A wedged process and a healthy one both have a PID. Same wrapper exemption and reason as call-mode; same 2026-08-18 grace widening (900→2700) for the spool delay."
+        }
+      ]
+    },
+    {
+      "key": "canary-ingest-sink",
+      "name": "Notes-sweep canary ingest sink",
+      "purpose": "Isolated loopback-only ingest destination that proves the notes-sweep CANARY's whole posting path (auth, body shape, external_id dedup) without touching the live ingest socket.",
+      "family": "Local Mac edge",
+      "criticality": "low",
+      "owner_actor": "joe",
+      "repo_path": "tools/canary-ingest-sink.py",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.canary-ingest-sink.plist",
+          "expected_cadence_seconds": 1800,
+          "cadence_grace_seconds": 2700,
+          "notes": "KeepAlive server, same shape as doc-engine and call-mode: the health question is 'is it up', never 'did it fire recently', so it is probed by bin/probe-keepalive.py opening a TCP connection to 127.0.0.1:4684 rather than by recent-run freshness — a connect proves it is ACCEPTING. Same wrapper exemption and reason as the other two KeepAlive servers: bin/run-scheduled.sh records on child exit, and a KeepAlive child exiting just means launchd restarted it. Refuses to bind unless a mode-0600 credential file is present, so it will show DOWN until ~/.config/carr/notes-canary.env exists — that is a config precondition, not a service defect."
         }
       ]
     },

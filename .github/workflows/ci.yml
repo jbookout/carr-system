@@ -92,6 +92,7 @@ name: CI
 # workdays for either partner, so that is exactly the window with no other cover.
 on:
   pull_request:
+    types: [opened, synchronize, reopened, edited]
   schedule:
     # 06:20 UTC daily. Sits after the nightly backup (02:35 UTC) and the 05:10
     # edge-liveness slot, and before the automerge pilot (08:30 UTC weekdays), so
@@ -115,17 +116,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Grouped by measured duration (2026-09-23 main run): gates 252s and
-        # migration 268s each stand alone; everything else together is about
-        # 160s. Every class must appear in exactly one group.
+        # 2026-10-01 run 36928008916: this combined group took 310s (unit
+        # 228s, types 36s, secret 33s, other classes 13s), below ten minutes.
+        # Keep the heavier gates and migration classes separate. Every class
+        # must appear in exactly one group (ops/ci-selftest.py verifies this).
         classes:
           - "pushfloor unit types contract secret dependency binding artifact freshness"
           - "gates"
           - "migration"
-    # The slowest group (migration, 268s on 2026-09-23) plus about 90s of
-    # setup. The ceiling stays generous: a group that hangs should time out,
-    # not a group that grew by a minute.
-    timeout-minutes: 20
+    # Both PR 1121 and PR 1406 exhausted a 20-minute migration job while
+    # their separate database acceptance passed. Preserve measured headroom
+    # and cover that lane's declared budget without extending other groups.
+    # zsh setup retains its own short deadline below.
+    timeout-minutes: ${{ matrix.classes == 'migration' && 35 || 20 }}
 
     services:
       # The migration class needs a database to apply 130 forward migrations to.
@@ -175,7 +178,7 @@ jobs:
       # 60-second line saves anything. The 2026-08-20 reasoning (18 runs, 203s
       # to 275s, median 249s, a 240s line in reach) no longer describes the job:
       # in the week of 2026-09-23 the last 15 hosted runs took 14 to 18 minutes
-      # each, against the 30-minute ceiling above, and almost all of that is
+      # each, against the then-current ceiling, and almost all of that was
       # ops/ci.sh --strict doing genuine work. The dependency-cache conclusion
       # above was measured on the four-minute job and has not been re-measured
       # at this length. Spend still has to come out of run COUNT, not from
@@ -198,13 +201,40 @@ jobs:
           python -m pip install -r requirements.lock
 
       - name: Install Node dependencies
-        run: npm --prefix mcp-server ci
+        run: |
+          npm --prefix mcp-server ci
+          npm --prefix practice-plugin ci
 
       - name: Install zsh
         # bin/review-council-runner.sh has a #!/bin/zsh shebang and its test
-        # invokes it by that interpreter. Installing zsh keeps that suite in CI
-        # rather than excluding it — the coverage is worth 3 seconds of apt.
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh
+        # invokes it by that interpreter. The runner already carries apt
+        # indexes: try the required install first. Only stale/missing indexes
+        # need a refresh. Bound both network waits and the entire setup step;
+        # an unavailable package still fails the job, never skips its tests.
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          apt_options=(-o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
+          if ! sudo apt-get "${apt_options[@]}" install -y -qq zsh; then
+            sudo apt-get "${apt_options[@]}" update -qq
+            sudo apt-get "${apt_options[@]}" install -y -qq zsh
+          fi
+
+      - name: Install PostgreSQL 17
+        # Role-migration fixtures own clusters so roles cannot leak into the
+        # service container used by the migration class.
+        if: contains(matrix.classes, 'gates')
+        run: |
+          set -euo pipefail
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            "https://www.postgresql.org/media/keys/ACCC4CF8.asc"
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-17
+          /usr/lib/postgresql/17/bin/initdb --version
+          echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
 
       - name: Create the Neon admin role the migrations expect
         # Migration 0005 grants the privilege bundles to neondb_owner, which
@@ -232,6 +262,9 @@ jobs:
           # reason in the output; nothing is dropped silently.
           CARR_CI_PORTABLE_ONLY: "1"
         run: ops/ci.sh --strict --only "${{ matrix.classes }}"
+      - name: Require a written pull request description
+        if: ${{ github.event_name == 'pull_request' && matrix.classes == 'gates' }}
+        run: python3 ops/pr-description-check.py
 
   checks:
     # THE REQUIRED CONTEXT. Its name is what the ruleset requires, so it must

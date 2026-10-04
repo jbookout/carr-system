@@ -16,7 +16,7 @@ test('property evidence does not reuse the shipped feedback migration numbers or
   assert.match(sql, /filename='0750_tour_client_feedback_scac_successor\.sql' and sha256='[0-9a-f]{64}'/);
   assert.match(sql, /scac_mutation_registration_v98/);
   assert.match(sql, /scac-mutation-registry\.v99/);
-  assert.match(read('mcp-server/src/mutation-registry.js'), /scac-mutation-registry\.v99\.generated\.js/);
+  assert.match(read('mcp-server/src/mutation-registry.js'), /scac-mutation-registry\.v104\.generated\.js/);
   assert.match(read('mcp-server/src/scac-mutation-registry.v98.generated.js'), /mcp-tool:read-tour-feedback/);
 });
 
@@ -28,5 +28,5 @@ test('property evidence follows the current SCAC seal with a distinct version', 
   assert.match(read('mcp-server/src/scac-mutation-registry.v99.generated.js'),
     /SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry\.v99"/);
   assert.match(read('mcp-server/src/mutation-registry.js'),
-    /scac-mutation-registry\.v99\.generated\.js/);
+    /scac-mutation-registry\.v104\.generated\.js/);
 });

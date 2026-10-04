@@ -1,4 +1,4 @@
-"""Implementation of grok-run.sh; stdout contains only joined Grok text."""
+"""Implementation of grok-run.sh; stdout contains the substantive Grok answer."""
 import argparse
 import json
 import os
@@ -8,7 +8,9 @@ import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools/room-bridge"))
-from grok_wire import MODEL, invoke_cli, parse_stream
+from grok_wire import MODEL, TIMEOUT_S, invoke_cli, parse_stream
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ops"))
+from grok_session import sign_in_alert, authentication_result
 
 PREFIX = "Do not call any CARR or record-layer tool; do not write anything unless asked."
 
@@ -59,9 +61,8 @@ def preflight():
             if rank < target_rank:
                 raise PreflightError("grok-run: CLI still behind after upgrade")
     models = command(["grok", "models"], 60)
-    message = models.stdout + models.stderr
-    if re.search(r"not authenticated|unauthenticated|authentication required|sign.?in|grok login", message, re.I):
-        raise PreflightError("Grok needs sign-in: a human runs grok login", 3)
+    if authentication_result(models) == "refused":
+        raise PreflightError("Grok needs sign-in: run grok login", 3)
     if models.returncode:
         raise PreflightError("grok-run: grok models preflight failed")
     return version
@@ -87,6 +88,8 @@ def main():
         "GROK_RUN_FAKE_NDJSON replays a fixture without calling Grok/npm."))
     parser.add_argument("--effort", choices=("low", "medium", "high"), default="high")
     parser.add_argument("--max-turns", type=int, default=60)
+    parser.add_argument("--timeout-seconds", type=int, default=int(TIMEOUT_S),
+                        help="model invocation timeout in seconds (1-1800; default: 180)")
     parser.add_argument("--writable", action="store_true")
     prompt = parser.add_mutually_exclusive_group(required=True)
     prompt.add_argument("--prompt")
@@ -94,6 +97,8 @@ def main():
     args = parser.parse_args()
     if args.max_turns < 1:
         parser.error("--max-turns must be a positive integer")
+    if not 1 <= args.timeout_seconds <= 1800:
+        parser.error("--timeout-seconds must be between 1 and 1800")
     try:
         requested_prompt = args.prompt_file.read_text(encoding="utf-8") if args.prompt_file else args.prompt
         fixture = os.environ.get("GROK_RUN_FAKE_NDJSON")
@@ -103,7 +108,8 @@ def main():
         else:
             cli_version = preflight()
             result = invoke_cli(PREFIX + "\n\n" + requested_prompt, effort=args.effort,
-                                max_turns=args.max_turns, writable=args.writable)
+                                max_turns=args.max_turns, writable=args.writable,
+                                timeout_seconds=args.timeout_seconds)
             output, receipt, code = parse_output(result.stdout.splitlines(), cli_version, result.returncode)
         serialized = json.dumps(receipt, sort_keys=True) + "\n"
         if os.environ.get("GROK_RUN_RECEIPT"):
@@ -114,7 +120,13 @@ def main():
             sys.stdout.write(output + ("" if output.endswith("\n") else "\n"))
         return code
     except PreflightError as error:
-        print(error, file=sys.stderr)
+        line = str(error)
+        if error.code == 3:
+            try:
+                sign_in_alert()
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+                line += " · alert FAILED"
+        print(line, file=sys.stderr)
         return error.code
     except (OSError, ValueError, subprocess.TimeoutExpired) as error:
         print(f"grok-run: {type(error).__name__}", file=sys.stderr)

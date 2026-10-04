@@ -8,6 +8,9 @@ import tempfile
 import textwrap
 import unittest
 import sys
+import importlib.util
+import io
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools/room-bridge"))
 import grok_wire
@@ -15,9 +18,100 @@ import grok_wire
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "bin/grok-run.sh"
 FIXTURES = ROOT / "ops/fixtures/grok-run"
+spec = importlib.util.spec_from_file_location("grok_runner", ROOT / "bin/grok_run.py")
+assert spec is not None and spec.loader is not None
+runner = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runner)
 
 
 class GrokRunTests(unittest.TestCase):
+    def test_sign_in_exit_alerts_once_without_provider_diagnostics(self):
+        with mock.patch.object(sys, "argv", ["grok-run", "--prompt", "test"]), \
+                mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch.object(runner, "preflight", side_effect=runner.PreflightError("Grok needs sign-in: run grok login", 3)), \
+                mock.patch.object(runner, "sign_in_alert", create=True) as alert, \
+                mock.patch.object(sys, "stderr", io.StringIO()) as stderr:
+            self.assertEqual(runner.main(), 3)
+            alert.assert_called_once_with()
+            self.assertEqual(stderr.getvalue().strip(), "Grok needs sign-in: run grok login")
+
+    def test_alert_failure_preserves_sign_in_exit_and_reports_failure(self):
+        with mock.patch.object(sys, "argv", ["grok-run", "--prompt", "test"]), \
+                mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch.object(runner, "preflight", side_effect=runner.PreflightError("Grok needs sign-in: run grok login", 3)), \
+                mock.patch.object(runner, "sign_in_alert", create=True, side_effect=RuntimeError("private diagnostic")), \
+                mock.patch.object(sys, "stderr", io.StringIO()) as stderr:
+            self.assertEqual(runner.main(), 3)
+            self.assertIn("alert FAILED", stderr.getvalue())
+            self.assertNotIn("private diagnostic", stderr.getvalue())
+
+    def test_unattributed_hook_turns_cannot_nominate_an_earlier_answer(self):
+        # Minimized from the private 2026-10-02 Grok hook-turn capture. Retain
+        # response/usage boundaries; replace source prose and omit rule text.
+        raw = (FIXTURES / "hook-turns.ndjson").read_text()
+        text, _, code = runner.parse_output(raw.splitlines(), "fixture")
+        self.assertEqual(code, 0)
+        # This historical capture has no task/response provenance. Its prose
+        # cannot authorize replacing the final response with an earlier one.
+        self.assertEqual(text, "Noted. Standing by.")
+        desk = grok_wire.parse_result(raw, 0)
+        self.assertEqual(desk["status"], "completed")
+        self.assertEqual(desk["result"], text)
+
+    def test_short_literal_answers_are_preserved(self):
+        end = json.loads((FIXTURES / "hook-turns.ndjson").read_text().splitlines()[-1])
+        for ack in ("Noted. Standing by.", "Noted. No tools were called.", "No action."):
+            with self.subTest(ack=ack):
+                raw = [json.dumps({"type": "text", "data": ack}), json.dumps(end)]
+                text, _, code = runner.parse_output(raw, "fixture")
+                self.assertEqual(text, ack)
+                self.assertEqual(code, 0)
+
+    def test_corrections_and_literal_answers_through_both_public_callers(self):
+        end = json.loads((FIXTURES / "hook-turns.ndjson").read_text().splitlines()[-1])
+        correction = "The rule boot stopped after page 3. Pages 1 and 2 are already complete; retry page 3."
+        for answer in (correction, "No action.", "The lifecycle warning is noted. Restart the failed job."):
+            for earlier in ([], [{"type": "text", "data": "The boot stopped after page 1."}, {"type": "usage"}]):
+                with self.subTest(answer=answer, earlier=bool(earlier)):
+                    raw = '\n'.join(map(json.dumps, [*earlier, {"type": "text", "data": answer}, {"type": "usage"}, end]))
+                    provider = mock.Mock(return_value=subprocess.CompletedProcess([], 0, raw, ''))
+                    desk = grok_wire.run_task({"model": "grok-4.7", "effort": "high", "sandbox": "read-only"}, 'Explain the result', run=provider)
+                    self.assertEqual(desk.get("result"), answer)
+                    self.assertEqual(desk["status"], "completed")
+                    for writable in (False, True):
+                        argv = ['grok-run', '--prompt', 'Explain the result'] + (['--writable'] if writable else [])
+                        with mock.patch.object(sys, 'argv', argv), mock.patch.object(runner, 'preflight', return_value='fixture'), \
+                                mock.patch.object(runner, 'invoke_cli', return_value=provider.return_value), \
+                                mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(sys, 'stdout', io.StringIO()) as stdout, \
+                                mock.patch.object(sys, 'stderr', io.StringIO()):
+                            self.assertEqual(runner.main(), 0)
+                            self.assertEqual(stdout.getvalue().strip(), answer)
+
+    def test_latest_short_substantive_answer_wins(self):
+        events = [json.loads(line) for line in (FIXTURES / "hook-turns.ndjson").read_text().splitlines()]
+        events[-1:-1] = [{"type": "text", "data": "The answer is 42."}, {"type": "usage"}]
+        text, _, code = runner.parse_output(map(json.dumps, events), "fixture")
+        self.assertEqual((text, code), ("The answer is 42.", 0))
+
+    def test_timeout_option_reaches_provider_and_preserves_default(self):
+        for value in (None, "1", "600", "1800"):
+            with self.subTest(timeout=value):
+                argv = ["grok-run", "--prompt", "test"]
+                if value is not None:
+                    argv += ["--timeout-seconds", value]
+                provider = mock.Mock(return_value=subprocess.CompletedProcess(
+                    [], 0, (FIXTURES / "good.ndjson").read_text(), ""))
+                with mock.patch.object(sys, "argv", argv), \
+                        mock.patch.dict(os.environ, {}, clear=True), \
+                        mock.patch.object(runner, "preflight", return_value="1.0.10"), \
+                        mock.patch.object(runner, "invoke_cli", side_effect=
+                            lambda *a, **kw: grok_wire.invoke_cli(*a, **kw, run=provider)), \
+                        mock.patch.object(sys, "stdout", io.StringIO()), \
+                        mock.patch.object(sys, "stderr", io.StringIO()):
+                    self.assertEqual(runner.main(), 0)
+                self.assertEqual(provider.call_args.kwargs["timeout"],
+                                 180 if value is None else int(value))
+
     def run_fixture(self, fixture, *args, receipt_file=False):
         with tempfile.TemporaryDirectory(prefix="grok-run-test-") as directory:
             env = dict(os.environ)
@@ -49,6 +143,19 @@ class GrokRunTests(unittest.TestCase):
         self.assertEqual(run.returncode, 4)
         self.assertEqual(receipt["stopReason"], "cancelled")
 
+    def test_accounting_after_completed_response_preserves_runner_and_desk_answer(self):
+        run, receipt = self.run_fixture("accounting-after-response.ndjson")
+        self.assertEqual(run.returncode, 0)
+        self.assertEqual(run.stdout, "Final answer\n")
+        self.assertEqual(receipt["stopReason"], "end_turn")
+        self.assertEqual(receipt["actual_models"], ["grok-4.7-build"])
+        desk = grok_wire.run_task(
+            {"model": "grok-4.7", "effort": "high", "sandbox": "read-only"}, "test",
+            run=lambda argv, **kw: subprocess.CompletedProcess(
+                argv, 0, (FIXTURES / "accounting-after-response.ndjson").read_text(), ""))
+        self.assertEqual(desk["status"], "completed")
+        self.assertEqual(desk["result"], "Final answer")
+
     def test_wrong_model_refuses_substitution(self):
         run, receipt = self.run_fixture("wrong-model.ndjson")
         self.assertEqual(run.returncode, 5)
@@ -72,7 +179,7 @@ class GrokRunTests(unittest.TestCase):
     def test_recorded_live_cli_cost_and_text(self):
         run, receipt = self.run_fixture("live-ok.ndjson")
         self.assertEqual(run.returncode, 0)
-        self.assertEqual(run.stdout, "OKOKOKOKOKOKOKOKOK\n")
+        self.assertEqual(run.stdout, "OK\n")
         self.assertEqual(receipt["actual_models"], ["grok-4.7-build"])
         self.assertEqual(receipt["num_turns"], 9)
         self.assertEqual(receipt["cost_usd"], 0.04628488)
@@ -164,7 +271,13 @@ class GrokRunTests(unittest.TestCase):
             for name in ("GROK_RUN_FAKE_NDJSON", "GROK_RUN_RECEIPT"):
                 env.pop(name, None)
             selected = [str(prompt_file) if arg == "PROMPT_FILE" else arg for arg in args]
-            run = subprocess.run(["bash", str(RUNNER), *selected], env=env,
+            launch = ["bash", str(RUNNER), *selected]
+            if not auth:
+                # The fake provider's auth refusal exercises main's contract;
+                # transports are tested separately, never against the live store.
+                harness = "import sys; sys.path.insert(0, sys.argv.pop(1)); import grok_run; grok_run.sign_in_alert=lambda:None; sys.exit(grok_run.main())"
+                launch = [sys.executable, "-c", harness, str(ROOT / "bin"), *selected]
+            run = subprocess.run(launch, env=env,
                                  capture_output=True, text=True, timeout=10)
             calls_file = scratch / "calls.jsonl"
             calls = [json.loads(line) for line in calls_file.read_text().splitlines()] if calls_file.exists() else []
@@ -214,7 +327,7 @@ class GrokRunTests(unittest.TestCase):
         run, calls = self.run_cli("--prompt", "test", installed="1.0.10", auth=False)
         self.assertEqual(run.returncode, 3)
         self.assertEqual(run.stdout, "")
-        self.assertEqual(run.stderr, "Grok needs sign-in: a human runs grok login\n")
+        self.assertEqual(run.stderr, "Grok needs sign-in: run grok login\n")
         self.assertEqual(calls[-1], ["grok", "models"])
         self.assertNotIn(["grok", "login"], calls)
 
@@ -241,6 +354,13 @@ class GrokRunTests(unittest.TestCase):
             run, calls = self.run_cli(*args)
             self.assertEqual(run.returncode, 2)
             self.assertEqual(calls, [])
+
+    def test_invalid_timeouts_fail_before_preflight(self):
+        for value in ("0", "-1", "1801", "nan", "inf", "1.5"):
+            with self.subTest(timeout=value):
+                run, calls = self.run_cli("--prompt", "test", "--timeout-seconds", value)
+                self.assertEqual(run.returncode, 2)
+                self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

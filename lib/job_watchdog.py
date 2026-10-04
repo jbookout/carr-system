@@ -209,7 +209,8 @@ def process_group_alive(pgid):
         return False
 
 
-def board_task(root, config, card, executor, status, note, project=None, pr=None, repo=None, needs_joe=False, health=None):
+def board_task(root, config, card, executor, status, note, project=None, pr=None, repo=None, needs_joe=False, health=None,
+               expected_task=None, reason=None, next_action=None):
     project = project or config["board"]
     board = root / "out/boards" / (project + ".json")
     env = dict(os.environ, PROGRESS_BOARD_ROOT=str(root / "out"))
@@ -226,6 +227,11 @@ def board_task(root, config, card, executor, status, note, project=None, pr=None
                 "--title", prior.get("title", card), "--executor", prior.get("executor", executor) if executor == "orchestrator" else executor, "--status", status,
                 "--health", health or ("blocked" if status == "blocked" else "healthy"), "--note", note]
         argv.extend(["--lane", config["needs_joe_lane"] if needs_joe else "status"])
+        if expected_task is not None:
+            argv.extend(["--expected-task", json.dumps(expected_task)])
+        if status == "blocked":
+            argv.extend(["--reason", reason or note,
+                         "--next-action", next_action or config["next_actions"]["job_failed"]])
         if pr is not None:
             argv.extend(["--pr", str(pr), "--repo", repo])
         result = subprocess.run(argv, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True,
@@ -458,10 +464,11 @@ class Effects:
     def card(self, f):
         return f.get("card") or "wd-" + hashlib.sha256(f["subject"].encode()).hexdigest()[:16]
 
-    def show_finding(self, f):
+    def show_finding(self, f, expected_task=None):
         return board_task(self.root, self.config, self.card(f), "orchestrator", "blocked",
                           f["reason"] + "\nNext action: " + f["next_action"],
-                          pr=f.get("pr"), repo=f.get("repo"), needs_joe=bool(f.get("needs_joe")))
+                          pr=f.get("pr"), repo=f.get("repo"), needs_joe=bool(f.get("needs_joe")),
+                          expected_task=expected_task, reason=f["reason"], next_action=f["next_action"])
 
     def report(self, f):
         c = self.config
@@ -502,22 +509,19 @@ class Effects:
     def clear(self, f, active):
         recovery = f["board_recovery"]
         card = recovery["card"]
-        board = self.root / "out/boards" / (self.config["board"] + ".json")
-        task = json.loads(board.read_text()).get("tasks", {}).get(card)
-        if not task or any(task.get(k) != v for k, v in
-                           {"status": "blocked", "health": "blocked", "note": recovery["note"],
-                            "lane": recovery["lane"]}.items()):
-            return  # Another executor now owns this card's displayed state.
+        owned = {"status": "blocked", "health": "blocked", "note": recovery["note"],
+                 "lane": recovery["lane"]}
         siblings = [row for row in active if self.card(row) == card]
         if siblings:
-            self.show_finding(siblings[-1])
+            self.show_finding(siblings[-1], expected_task=owned)
             return
         before = recovery["before"]
         board_task(self.root, self.config, card, before.get("executor", "orchestrator"),
                    before.get("status", "done"),
                    before.get("note", "Watchdog finding recovered; evidence source is healthy."),
                    needs_joe=before.get("lane") == self.config["needs_joe_lane"],
-                   health=before.get("health", "healthy"))
+                   health=before.get("health", "healthy"), expected_task=owned,
+                   reason=before.get("blocked_reason"), next_action=before.get("next_action"))
 
     def launch(self, f, argv, cwd, *, job_id, restart_count=0, root_id=None):
         c = self.config
