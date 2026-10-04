@@ -61,9 +61,8 @@ It never sees ordinary text searches or authentication readback as model work.
 KILL SWITCH: set CARR_PRECHECK=0. Anything in front of every shell call needs
 one, and that is engineering rather than caution.
 
-UNATTENDED WORKERS: the orchestrator sets CARR_JEV_WORKER=off in a Codex
-worker's environment, and the command precheck is skipped there entirely.
-Model Room route text still appears when applicable.
+UNATTENDED WORKERS get the same check: it is deterministic and makes no paid
+call, so CARR_JEV_WORKER=off no longer changes anything here.
 """
 
 import json
@@ -353,8 +352,6 @@ def advisory(payload):
                 warnings.append(route)
                 break
             if not command.strip() or is_pure_read(command) or SENSITIVE_COMMAND.search(command):
-                continue
-            if os.environ.get("CARR_JEV_WORKER") == "off":
                 continue
             probability, facts, reasons = check(command, repo)
             if probability is None:

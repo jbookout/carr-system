@@ -58,12 +58,12 @@ class NeverDeniesTests(AttendedFixture):
     """A probabilistic refusal in front of every shell call turns a model's
     uncertainty into a blocked session. This must never happen."""
 
-    def test_worker_flagged_hook_skips_automatic_judgment(self):
-        with mock.patch.dict(os.environ, {"CARR_JEV_WORKER": "off"}), \
-                mock.patch.object(hook, "check") as check:
+    def test_worker_flagged_hook_runs_the_same_free_check(self):
+        with mock.patch.dict(os.environ, {"CARR_JEV_WORKER": "off", "CARR_PRECHECK": "1"}), \
+                mock.patch.object(hook, "check", return_value=(None, {}, {})) as check:
             self.assertEqual(run({"tool_name": "exec_command", "tool_input": {
                 "cmd": "./ops/ci.sh --nope"}}), (0, ""))
-        check.assert_not_called()
+        check.assert_called_once()
 
     def test_normal_attended_hook_still_calls_judgment(self):
         with mock.patch.dict(os.environ, {"CARR_JEV_WORKER": "", "CARR_PRECHECK": "1"}), \
