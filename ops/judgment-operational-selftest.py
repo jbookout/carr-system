@@ -68,6 +68,10 @@ def has_credential():
     # when this workstation happens to hold an operational credential.
     if os.environ.get("CARR_JEV_OFFLINE_REPLAY") == "1":
         return False
+    # ops/ci.sh exports CARR_JEV_OFFLINE, and the client refuses every paid
+    # call under it; skip rather than report a refusal as a dead judgment.
+    if os.environ.get("CARR_JEV_OFFLINE") or os.environ.get("CARR_HOOK_FIXTURE"):
+        return False
     if os.environ.get("TYPESAFE_API_KEY"):
         return True
     path = os.path.expanduser("~/.config/carr/typesafe.env")
@@ -128,9 +132,9 @@ class MessageBoundaryJevTests(unittest.TestCase):
         self.assertNotIn("required_actions", row["advisory"])
 
 
-@unittest.skipUnless(has_credential(), SKIP)
 class ShellPreCheckTests(unittest.TestCase):
-    """Fires on every Bash call, from the delegation gate."""
+    """Fires on every Bash call, from the delegation gate. Deterministic since
+    the 2026-10-04 Jev audit (no paid call), so it runs without a credential."""
 
     def setUp(self):
         self.module = load("command_precheck")

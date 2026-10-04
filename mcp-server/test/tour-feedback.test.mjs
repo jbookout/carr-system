@@ -1,3 +1,4 @@
+import { CURRENT_REGISTRY_VERSION } from "../../ops/scac-mutation-inventory.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -97,7 +98,7 @@ test("Tour feedback successor follows current main without reusing its seal or m
   assert.match(successor, /scac-mutation-registry\.v97/);
   assert.match(successor, /scac-mutation-registry\.v98/);
   assert.match(runtime, /scac-mutation-registry\.v98/);
-  assert.match(selector, /scac-mutation-registry\.v105\.generated\.js/);
+  assert.match(selector, new RegExp(CURRENT_REGISTRY_VERSION.replaceAll(".", "\\.") + "\\.generated\\.js"));
   const migration = fs.readFileSync(path.join(root, "migrations/0749_tour_client_feedback.sql"));
   const digest = createHash("sha256").update(migration).digest("hex");
   assert.match(successor, new RegExp(`filename='0749_tour_client_feedback\\.sql' and sha256='${digest}'`));

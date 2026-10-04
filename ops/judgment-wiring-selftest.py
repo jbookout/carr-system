@@ -293,7 +293,7 @@ class JudgmentWiringTests(unittest.TestCase):
         than investigated.
         """
         modules = judgment_modules()
-        for known in ("command_precheck.py", "jev_defect_class.py"):
+        for known in ("jev_defect_class.py", "jev_session_watch.py"):
             self.assertIn(known, modules,
                           "the judgment detector stopped seeing a known judgment")
 
