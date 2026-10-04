@@ -248,11 +248,11 @@ class ReplayTests(unittest.TestCase):
     def test_every_finding_kind_is_declared_once_by_its_evidence_source(self):
         import job_watchdog as w
         c = w.load_config(ROOT / "ops/config/job-watchdog.json")
-        meta = {"collection_error", "environment", "action_error", "record_error", "board_error"}
+        meta = {"collection_error", "environment", "rate_limited", "action_error", "record_error", "board_error"}
         declared = set().union(*w.EVIDENCE.values())
         self.assertEqual(set(c["next_actions"]), declared | meta)
         self.assertFalse(declared & meta)
-        self.assertEqual(w.EVIDENCE_ERROR_KINDS, {"collection_error", "environment"})
+        self.assertEqual(w.EVIDENCE_ERROR_KINDS, {"collection_error", "environment", "rate_limited"})
 
     def test_detect_refuses_a_kind_its_source_does_not_declare(self):
         from unittest.mock import patch
@@ -311,6 +311,8 @@ class ReplayTests(unittest.TestCase):
         import job_watchdog as w
         c = w.load_config(ROOT / "ops/config/job-watchdog.json")
         class Effects:
+            def prepare(self, action, f):
+                return True
             def act(self, action, f):
                 return {}
             def report(self, f):
@@ -346,6 +348,321 @@ class ReplayTests(unittest.TestCase):
         job = {"id": "fix", "card": "fix", "repo": p["repo"], "pr": 8, "head": p["headRefOid"],
                "alive": True, "start": 1999999900, "limit": 3600, "log_mtime": 2000000000}
         self.assertEqual(w.detect({"prs": [p], "jobs": [job]}, c, 2000000000), [])
+
+
+class GithubBudgetTests(unittest.TestCase):
+    """The scan spends GitHub GraphQL only on PRs whose REST listing changed."""
+
+    REPO = "jbookout/carr-system"
+
+    def setUp(self):
+        import job_watchdog as w
+        self.w = w
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        c = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        c["repositories"] = [self.REPO]
+        c["paths"]["merge_queue"] = "queue.txt"
+        c["paths"]["queue_logs"] = []
+        c["paths"]["release_log"] = "release.log"
+        self.c = c
+        self.listing = [{"number": 7, "head": {"sha": "a" * 40}, "updated_at": "2026-10-04T10:00:00Z"}]
+        self.calls = []
+        self.limited = False
+
+    def gh(self, argv, config, cwd=None):
+        self.calls.append(argv)
+        target = argv[-1]
+        if "pulls?state=open" in target:
+            return json.dumps([self.listing])
+        if "branches?" in target:
+            return "[[]]"
+        if argv[:2] == ["gh", "api"] and target == "rate_limit":
+            return json.dumps({"resources": {
+                "core": {"limit": 5000, "used": 12, "remaining": 4988, "reset": 2000000000},
+                "graphql": {"limit": 5000, "used": 5000, "remaining": 0, "reset": 2000003600}}})
+        if self.limited:
+            raise RuntimeError("gh exit 1: GraphQL: API rate limit exceeded for user ID 1. ")
+        if argv[:3] == ["gh", "pr", "view"]:
+            number = int(argv[3])
+            pr = next(p for p in self.listing if p["number"] == number)
+            return json.dumps({"number": number, "headRefOid": pr["head"]["sha"], "headRefName": "claude/x",
+                               "updatedAt": pr["updated_at"], "isDraft": False, "mergeable": "MERGEABLE",
+                               "comments": [], "reviews": [], "commits": [], "mergeStateStatus": "CLEAN",
+                               "statusCheckRollup": [{"conclusion": "FAILURE", "status": "COMPLETED"}]})
+        if argv[:3] == ["gh", "api", "graphql"]:
+            return json.dumps({"data": {"repository": {"pullRequest": {"mergeQueueEntry": None}}}})
+        raise AssertionError(f"unexpected command {argv}")
+
+    def transport(self, argv, config, cwd=None):
+        """Serve self.gh's snapshot as gh does: checks arrive head-bound via GraphQL."""
+        out = self.gh(argv, config, cwd)
+        if argv[:3] == ["gh", "pr", "view"]:
+            pr = json.loads(out)
+            self.served = (pr["headRefOid"], pr.pop("statusCheckRollup"))
+            return json.dumps(pr)
+        if argv[:3] == ["gh", "api", "graphql"]:
+            reply = json.loads(out)
+            head, checks = self.served
+            reply["data"]["repository"]["pullRequest"]["commits"] = {"nodes": [{"commit": {
+                "oid": head, "statusCheckRollup": {"contexts": {
+                    "nodes": checks, "pageInfo": {"hasNextPage": False}}}}}]}
+            return json.dumps(reply)
+        return out
+
+    def collect(self, now):
+        from unittest.mock import patch
+        self.calls.clear()
+        with patch.object(self.w, "command", side_effect=self.transport):
+            return self.w.collect(self.root, self.c, now)
+
+    def graphql_calls(self):
+        return [a for a in self.calls if a[:3] in (["gh", "pr", "view"], ["gh", "api", "graphql"])]
+
+    def test_unchanged_pr_is_not_recollected_until_the_cache_expires(self):
+        first = self.collect(1000)
+        self.assertEqual(len(self.graphql_calls()), 2, "snapshot and check identities per collected PR")
+        second = self.collect(1000 + 120)
+        self.assertEqual(self.graphql_calls(), [])
+        self.assertEqual(second["prs"], first["prs"])
+        self.assertEqual([f["kind"] for f in self.w.detect(second, self.c, 1120)], ["pr_ci_red"])
+        self.collect(1000 + self.c["thresholds"]["pr_cache_seconds"])
+        self.assertEqual(len(self.graphql_calls()), 2)
+
+    def test_changed_head_or_update_recollects(self):
+        self.collect(1000)
+        self.listing[0]["head"]["sha"] = "b" * 40
+        facts = self.collect(1120)
+        self.assertEqual(len(self.graphql_calls()), 2)
+        self.assertEqual(facts["prs"][0]["headRefOid"], "b" * 40)
+        self.listing[0]["updated_at"] = "2026-10-04T10:05:00Z"
+        self.collect(1240)
+        self.assertEqual(len(self.graphql_calls()), 2)
+
+    def test_pending_checks_recollect_on_the_short_interval(self):
+        original = self.gh
+        def pending(argv, config, cwd=None):
+            out = original(argv, config, cwd)
+            if argv[:3] == ["gh", "pr", "view"]:
+                pr = json.loads(out)
+                pr["statusCheckRollup"] = [{"status": "IN_PROGRESS", "conclusion": ""}]
+                return json.dumps(pr)
+            return out
+        self.gh = pending
+        self.collect(1000)
+        self.collect(1000 + self.c["thresholds"]["pr_cache_pending_seconds"])
+        self.assertEqual(len(self.graphql_calls()), 2)
+
+    def test_collection_reads_snapshot_then_head_bound_checks_and_queue(self):
+        self.collect(1000)
+        self.assertEqual([a[:3] for a in self.graphql_calls()], [["gh", "pr", "view"], ["gh", "api", "graphql"]])
+
+    def test_rate_limit_is_one_scan_finding_and_keeps_pr_state(self):
+        cached = self.collect(1000)
+        self.listing += [{"number": n, "head": {"sha": str(n) * 40}, "updated_at": "2026-10-04T10:00:00Z"}
+                         for n in (8, 9)]
+        self.listing[0]["head"]["sha"] = "c" * 40
+        self.limited = True
+        facts = self.collect(1120)
+        self.assertEqual(len(self.graphql_calls()), 1, "stop spending after the first rate-limit refusal")
+        found = self.w.detect(facts, self.c, 1120)
+        self.assertEqual(sorted(f["kind"] for f in found), ["pr_ci_red", "rate_limited"])
+        limit = next(f for f in found if f["kind"] == "rate_limited")
+        self.assertIn("graphql", limit["reason"])
+        self.assertIn(self.w.stamp(2000003600), limit["reason"])
+        self.assertNotIn("collection_error", [f["kind"] for f in found])
+        self.assertEqual(facts["prs"], cached["prs"], "previous PR state is kept")
+
+        class Effects:
+            def prepare(self, action, f):
+                return True
+            def act(self, action, f):
+                return {}
+            def report(self, f):
+                return {}
+        prior = self.w.finding("pr_conflict", "jbookout/carr-system#8@" + "8" * 40, "conflict", self.c)
+        self.w.reconcile(self.root, self.c, [prior], Effects(), 100)
+        self.w.reconcile(self.root, self.c, found, Effects(), 200)
+        self.assertIsNone(self.w.read_latest(self.root / self.c["paths"]["findings"])[prior["key"]]["cleared_at"])
+
+    def test_overlapping_scan_exits_cleanly_and_records_the_skip(self):
+        from unittest.mock import patch
+        lock = self.w.path_at(self.root, self.c["paths"]["scan_lock"])
+        with self.w.locked(lock, blocking=False), \
+             patch.object(self.w, "collect", side_effect=AssertionError("overlapping scan collected")):
+            self.assertEqual(self.w.scan(self.root, self.c), 0)
+        rows = [json.loads(s) for s in self.w.path_at(self.root, self.c["paths"]["scan_ledger"]).read_text().splitlines()]
+        self.assertEqual([(r["key"], r["status"]) for r in rows], [("scan_skipped", "skipped")])
+
+    def test_branch_limit_blinds_skipped_prs_and_preserves_prior_conflict(self):
+        other = "jbookout/doctorcre-app"
+        self.c["repositories"].append(other)
+        original = self.gh
+        def limited_branch(argv, config, cwd=None):
+            if f"repos/{self.REPO}/branches?" in argv[-1]:
+                self.calls.append(argv)
+                raise RuntimeError("API rate limit exceeded")
+            return original(argv, config, cwd)
+        self.gh = limited_branch
+        facts = self.collect(1000)
+        error = next(e for e in facts["errors"] if e["kind"] == "rate_limited")
+        self.assertTrue(self.w.EVIDENCE["prs"] <= set(error["blinds"]))
+        prior = self.w.finding("pr_conflict", other + "#7@" + "a" * 40, "conflict", self.c)
+        self.w.append(self.root / self.c["paths"]["findings"], {**prior, "reported": True, "cleared_at": None})
+        from unittest.mock import Mock
+        effects = Mock()
+        effects.report.return_value = {}
+        self.w.reconcile(self.root, self.c, self.w.detect(facts, self.c, 1000), effects, 1000)
+        self.assertIsNone(self.w.read_latest(self.root / self.c["paths"]["findings"])[prior["key"]]["cleared_at"])
+
+    def test_cached_readiness_does_not_consume_enqueue_before_ci_recovers(self):
+        from unittest.mock import patch
+        original = self.gh
+        state = ["SUCCESS"]
+        def approved(argv, config, cwd=None):
+            out = original(argv, config, cwd)
+            if argv[:3] == ["gh", "pr", "view"]:
+                pr = json.loads(out)
+                pr["comments"] = [{"body": "REVIEW: APPROVED\nReviewed-SHA: " + "a" * 40,
+                                   "createdAt": pr["updatedAt"]}]
+                pr["statusCheckRollup"] = [{"status": "IN_PROGRESS" if state[0] == "PENDING" else "COMPLETED",
+                                            "conclusion": state[0]}]
+                return json.dumps(pr)
+            return out
+        self.gh = approved
+        queue = self.root / "queue.txt"
+        queue.write_text(self.REPO + " 7 " + "a" * 40 + "\n")
+        self.assertEqual(self.w.detect(self.collect(1000), self.c, 1000), [])
+        queue.write_text("")
+        state[0] = "PENDING"
+        effects = self.w.Effects(self.root, self.c)
+        with patch.object(self.w, "command", side_effect=self.transport), patch.object(effects, "report", return_value={}):
+            stale = self.w.detect(self.w.collect(self.root, self.c, 1120), self.c, 1120)
+            self.assertEqual([f["kind"] for f in stale], ["pr_ready"])
+            self.w.reconcile(self.root, self.c, stale, effects, 1120)
+            self.assertEqual(self.w.read_latest(self.root / self.c["paths"]["actions"]), {})
+            self.assertEqual(queue.read_text(), "")
+            state[0] = "SUCCESS"
+            found = self.w.reconcile(self.root, self.c, stale, effects, 1240)
+            self.assertNotIn("action_error", [f["kind"] for f in found])
+            self.assertEqual(len(queue.read_text().splitlines()), 1)
+            actions = self.w.read_latest(self.root / self.c["paths"]["actions"])
+            self.assertEqual(actions[stale[0]["key"]]["status"], "done")
+            self.w.reconcile(self.root, self.c, stale, effects, 3000)
+            self.assertEqual(len(queue.read_text().splitlines()), 1)
+
+    def test_empty_checks_recollect_when_checks_are_created(self):
+        original = self.gh
+        empty = [True]
+        def checks(argv, config, cwd=None):
+            out = original(argv, config, cwd)
+            if empty[0] and argv[:3] == ["gh", "pr", "view"]:
+                pr = json.loads(out)
+                pr["statusCheckRollup"] = []
+                return json.dumps(pr)
+            return out
+        self.gh = checks
+        self.assertEqual(self.w.detect(self.collect(1000), self.c, 1000), [])
+        empty[0] = False
+        facts = self.collect(1360)
+        self.assertEqual(len(self.graphql_calls()), 2)
+        self.assertEqual([f["kind"] for f in self.w.detect(facts, self.c, 1360)], ["pr_ci_red"])
+
+    def test_unknown_check_result_uses_pending_interval(self):
+        original = self.gh
+        for index, rollup in enumerate(([{}], [{"status": "COMPLETED", "conclusion": None}])):
+            with self.subTest(rollup=rollup):
+                def unknown(argv, config, cwd=None):
+                    out = original(argv, config, cwd)
+                    if argv[:3] == ["gh", "pr", "view"]:
+                        pr = json.loads(out)
+                        pr["statusCheckRollup"] = rollup
+                        return json.dumps(pr)
+                    return out
+                self.gh = unknown
+                self.collect(5000 * (index + 1))
+                self.collect(5000 * (index + 1) + 360)
+                self.assertEqual(len(self.graphql_calls()), 2)
+
+    def test_invalid_cache_is_discarded_and_repaired(self):
+        cache = self.w.path_at(self.root, self.c["paths"]["pr_cache"])
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        for corrupt in ([], None, {self.REPO + "#7": {"version": ["a" * 40, self.listing[0]["updated_at"]]}},
+                        {self.REPO + "#7": {"version": ["a" * 40, self.listing[0]["updated_at"]],
+                                            "collected_at": 1000, "pr": {"mergeable": "MERGEABLE"}}}):
+            with self.subTest(corrupt=corrupt):
+                cache.write_text(json.dumps(corrupt))
+                facts = self.collect(1120)
+                self.assertEqual([p["number"] for p in facts["prs"]], [7])
+                self.assertEqual(facts["errors"], [])
+                self.assertIsInstance(json.loads(cache.read_text()), dict)
+                self.assertEqual(self.collect(1240)["prs"], facts["prs"])
+
+    def test_invalid_entry_does_not_prevent_later_pr_collection(self):
+        self.collect(1000)
+        cache = self.w.path_at(self.root, self.c["paths"]["pr_cache"])
+        contents = json.loads(cache.read_text())
+        contents[self.REPO + "#7"] = {"version": ["a" * 40, self.listing[0]["updated_at"]]}
+        cache.write_text(json.dumps(contents))
+        self.listing.append({"number": 8, "head": {"sha": "b" * 40}, "updated_at": self.listing[0]["updated_at"]})
+        facts = self.collect(1120)
+        self.assertEqual([p["number"] for p in facts["prs"]], [7, 8])
+        self.assertEqual(facts["errors"], [])
+
+    def test_invalid_nested_review_cache_is_recollected(self):
+        self.collect(1000)
+        cache = self.w.path_at(self.root, self.c["paths"]["pr_cache"])
+        contents = json.loads(cache.read_text())
+        contents[self.REPO + "#7"]["pr"]["reviews"] = [{"state": [], "body": ""}]
+        cache.write_text(json.dumps(contents))
+        facts = self.collect(1120)
+        self.assertEqual(len(self.graphql_calls()), 2)
+        self.assertEqual([f["kind"] for f in self.w.detect(facts, self.c, 1120)], ["pr_ci_red"])
+
+    def test_exhausted_allowance_is_diagnosed_once_and_stops_provider_reads(self):
+        self.c["repositories"].append("jbookout/doctorcre-app")
+        original = self.gh
+        def exhausted(argv, config, cwd=None):
+            if "pulls?" in argv[-1] or "branches?" in argv[-1]:
+                self.calls.append(argv)
+                raise RuntimeError("API rate limit exceeded")
+            return original(argv, config, cwd)
+        self.gh = exhausted
+        facts = self.collect(1000)
+        self.assertEqual(len([a for a in self.calls if a[-1] == "rate_limit"]), 1)
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(len(facts["errors"]), 1)
+        self.assertEqual(set(facts["errors"][0]["blinds"]), self.w.EVIDENCE["prs"] | self.w.EVIDENCE["branches"])
+
+    def test_partial_rate_limit_diagnostic_never_aborts_collection(self):
+        original = self.gh
+        for resources in ({"graphql": {"remaining": 0}}, {"graphql": []},
+                          {"graphql": {"remaining": 0, "used": 1, "limit": 1, "reset": "later"}}, []):
+            with self.subTest(resources=resources):
+                def partial(argv, config, cwd=None):
+                    if argv[-1] == "rate_limit":
+                        self.calls.append(argv)
+                        return json.dumps({"resources": resources})
+                    return original(argv, config, cwd)
+                self.gh = partial
+                self.limited = True
+                facts = self.collect(1000)
+                self.assertEqual(len(facts["errors"]), 1)
+                self.assertEqual(facts["errors"][0]["kind"], "rate_limited")
+                self.assertIn("unreadable", facts["errors"][0]["reason"])
+                self.assertIn("API rate limit exceeded", facts["errors"][0]["reason"])
+
+    def test_secondary_limit_preserves_provider_retry_guidance(self):
+        original = self.gh
+        def secondary(argv, config, cwd=None):
+            if argv[:3] == ["gh", "pr", "view"]:
+                self.calls.append(argv)
+                raise RuntimeError("secondary rate limit: retry after 60 seconds")
+            return original(argv, config, cwd)
+        self.gh = secondary
+        error = self.collect(1000)["errors"][0]
+        self.assertIn("secondary rate limit: retry after 60 seconds", error["reason"])
 
 
 class RunnerTests(unittest.TestCase):
@@ -716,6 +1033,8 @@ class StateTests(unittest.TestCase):
         import job_watchdog as w
         c = w.load_config(ROOT / "ops/config/job-watchdog.json")
         class Effects:
+            def prepare(self, action, f):
+                return True
             calls = []
             def act(self, action, f):
                 self.calls.append((action, f["key"]))
@@ -739,6 +1058,8 @@ class StateTests(unittest.TestCase):
         import job_watchdog as w
         c = w.load_config(ROOT / "ops/config/job-watchdog.json")
         class Effects:
+            def prepare(self, action, f):
+                return True
             def act(self, action, f):
                 raise AssertionError("must never retry ambiguous intent")
             def report(self, f):
@@ -758,6 +1079,8 @@ class StateTests(unittest.TestCase):
         import job_watchdog as w
         c = w.load_config(ROOT / "ops/config/job-watchdog.json")
         class Effects:
+            def prepare(self, action, f):
+                return True
             calls = []
             def report(self, f):
                 self.calls.append("report")
@@ -817,6 +1140,8 @@ class StateTests(unittest.TestCase):
         import job_watchdog as w
         c = w.load_config(ROOT / "ops/config/job-watchdog.json")
         class Effects:
+            def prepare(self, action, f):
+                return True
             reported = []
             def report(self, f):
                 self.reported.append(f["kind"])

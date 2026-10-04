@@ -2286,7 +2286,8 @@ class Robustness(Base):
         sha = self.fx.commit({"migrations/0600_x.sql": "select 1;"})
         verbs: list = []
         self.fx.pipeline(FakeRunner(fail_at="staging-prepare"), verbs=verbs).tick(["worker"])
-        rp.clear_failed(rp.Store(self.fx.repo / "out/release-pipeline"), "worker", sha, "retry")
+        rp.clear_failed(rp.Store(self.fx.repo / "out/release-pipeline"), "worker", sha, "retry",
+                        repo_dir=self.fx.repo)
         self.fx.pipeline(FakeRunner(pending=1, fail_at="upload"), verbs=verbs).tick(["worker"])
         turns = [a for v, a in verbs if v == "add-room-turn"]
         self.assertEqual(len(turns), 2)
@@ -2325,13 +2326,227 @@ class Robustness(Base):
         self.fx.pipeline(FakeRunner(fail_at="upload")).tick(["worker"])
         store = rp.Store(self.fx.repo / "out/release-pipeline")
         with self.assertRaises(SystemExit):
-            rp.clear_failed(store, "worker", "0" * 40, "wrong sha")
-        rp.clear_failed(store, "worker", sha, "credential restored")
+            rp.clear_failed(store, "worker", "0" * 40, "wrong sha", repo_dir=self.fx.repo)
+        msg = rp.clear_failed(store, "worker", sha, "credential restored", repo_dir=self.fx.repo)
+        self.assertEqual(msg, f"release-pipeline[worker]: cleared failed {sha[:12]} (upload); next tick retries it")
         self.assertEqual(self.fx.records()[-1]["status"], "failure_cleared")
+        self.assertNotIn("cleared_worktree", self.fx.records()[-1])
+        self.assertFalse((store.root / "worktrees-cleared").exists())
         live = {"sha": self.fx.base}
         runner = FakeRunner(live=live)
         self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
         self.assertEqual(self.fx.state()["worker"]["last_released_sha"], sha)
+
+    def test_clear_failed_retires_the_kept_diagnosis_worktree(self):
+        # 2026-10-04, twice: the failed run's worktree stayed for diagnosis,
+        # so the retry clear-failed allowed burned the SHA again at
+        # "<wt> already exists". Clearing moves it aside (never deletes it).
+        sha = self.fx.commit({"mcp-server/src/a.js": "1"})
+        self.fx.pipeline(FakeRunner(fail_at="upload")).tick(["worker"])
+        store = rp.Store(self.fx.repo / "out/release-pipeline")
+        kept = store.release_worktree("worker", sha)
+        kept.parent.mkdir(parents=True, exist_ok=True)
+        git(self.fx.repo, "worktree", "add", "--detach", str(kept), sha)
+        (kept / "diagnosis.log").write_text("evidence")
+        msg = rp.clear_failed(store, "worker", sha, "credential restored", repo_dir=self.fx.repo)
+        self.assertFalse(kept.exists())
+        moved = [p for p in (store.root / "worktrees-cleared").iterdir()]
+        self.assertEqual(len(moved), 1)
+        self.assertTrue(moved[0].name.startswith(f"worker-{sha[:12]}-"))
+        self.assertEqual((moved[0] / "diagnosis.log").read_text(), "evidence")
+        self.assertIn(str(moved[0]), msg)
+        rec = self.fx.records()[-1]
+        self.assertEqual((rec["status"], rec["cleared_worktree"]), ("failure_cleared", str(moved[0])))
+        # Pruned: the old path is no longer a registered worktree.
+        self.assertNotIn(str(kept), git(self.fx.repo, "worktree", "list", "--porcelain"))
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live)
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
+        self.assertIn("worktree", runner.names())
+        self.assertEqual(self.fx.state()["worker"]["last_released_sha"], sha)
+        # And a real `git worktree add` at the same path now succeeds.
+        git(self.fx.repo, "worktree", "add", "--detach", str(kept), sha)
+
+
+class ClearFailedRetirement(Base):
+    def setUp(self):
+        super().setUp()
+        self.sha = self.fx.commit({"mcp-server/src/a.js": "1"})
+        self.store = rp.Store(self.fx.repo / "out/release-pipeline")
+        self.store.save({"worker": {"failed_sha": self.sha, "failed_step": "upload"}})
+        self.kept = self.store.release_worktree("worker", self.sha)
+        self.kept.parent.mkdir(parents=True, exist_ok=True)
+        git(self.fx.repo, "worktree", "add", "--detach", str(self.kept), self.sha)
+        (self.kept / "diagnosis.log").write_text("evidence")
+
+    def clear(self):
+        return rp.clear_failed(self.store, "worker", self.sha, "repair verified", repo_dir=self.fx.repo)
+
+    def assert_retry_available(self):
+        self.assertIsNone(self.store.load()["worker"]["failed_sha"])
+        moved = Path(self.store.records()[-1]["cleared_worktree"])
+        self.assertEqual((moved / "diagnosis.log").read_text(), "evidence")
+        git(self.fx.repo, "worktree", "add", "--detach", str(self.kept), self.sha)
+
+    def test_clear_resumes_after_prune_failure(self):
+        original = subprocess.run
+
+        def run(argv, **kwargs):
+            if argv[-2:] == ["worktree", "prune"]:
+                return subprocess.CompletedProcess(argv, 7, "", "injected prune failure")
+            return original(argv, **kwargs)
+
+        with mock.patch.object(rp.subprocess, "run", side_effect=run):
+            with self.assertRaises(SystemExit):
+                self.clear()
+        self.assertFalse(self.kept.exists())
+        self.assertEqual(self.store.load()["worker"]["failed_sha"], self.sha)
+        self.clear()
+        self.assert_retry_available()
+
+    def test_new_failed_sha_does_not_reuse_an_older_retirement(self):
+        original = subprocess.run
+
+        def run(argv, **kwargs):
+            if argv[-2:] == ["worktree", "prune"]:
+                return subprocess.CompletedProcess(argv, 7, "", "injected prune failure")
+            return original(argv, **kwargs)
+
+        with mock.patch.object(rp.subprocess, "run", side_effect=run):
+            with self.assertRaises(SystemExit):
+                self.clear()
+        old_archive = next((self.store.root / "worktrees-cleared").iterdir())
+        self.sha = self.fx.commit({"mcp-server/src/a.js": "2"})
+        state = self.store.load()
+        state["worker"]["failed_sha"] = self.sha
+        self.store.save(state)
+        self.kept = self.store.release_worktree("worker", self.sha)
+        git(self.fx.repo, "worktree", "add", "--detach", str(self.kept), self.sha)
+        (self.kept / "diagnosis.log").write_text("evidence")
+        self.clear()
+        self.assert_retry_available()
+        self.assertEqual((old_archive / "diagnosis.log").read_text(), "evidence")
+
+    def test_clear_resumes_after_prune_timeout(self):
+        original = subprocess.run
+
+        def run(argv, **kwargs):
+            if argv[-2:] == ["worktree", "prune"]:
+                raise subprocess.TimeoutExpired(argv, 300)
+            return original(argv, **kwargs)
+
+        with mock.patch.object(rp.subprocess, "run", side_effect=run):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                self.clear()
+        self.assertEqual(self.store.load()["worker"]["failed_sha"], self.sha)
+        self.clear()
+        self.assert_retry_available()
+
+    def test_clear_resumes_after_interruption_between_rename_and_prune(self):
+        original = os.rename
+
+        def rename(src, dst):
+            original(src, dst)
+            raise OSError("injected interruption after rename")
+
+        with mock.patch.object(rp.os, "rename", side_effect=rename):
+            with self.assertRaises(OSError):
+                self.clear()
+        self.assertFalse(self.kept.exists())
+        self.assertEqual(self.store.load()["worker"]["failed_sha"], self.sha)
+        self.clear()
+        self.assert_retry_available()
+
+    def test_clear_preserves_a_locked_diagnosis_worktree(self):
+        git(self.fx.repo, "worktree", "lock", "--reason", "diagnosis in progress", str(self.kept))
+        before = self.store.load()
+        with self.assertRaisesRegex(SystemExit, "locked"):
+            self.clear()
+        self.assertEqual(self.store.load(), before)
+        self.assertEqual((self.kept / "diagnosis.log").read_text(), "evidence")
+        self.assertFalse((self.store.root / "worktrees-cleared").exists())
+        self.assertEqual(self.store.records(), [])
+        git(self.fx.repo, "worktree", "unlock", str(self.kept))
+        self.clear()
+        self.assert_retry_available()
+
+    def test_clear_refuses_successful_prune_that_retains_registration(self):
+        original = subprocess.run
+
+        def run(argv, **kwargs):
+            if argv[-2:] == ["worktree", "prune"]:
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            return original(argv, **kwargs)
+
+        with mock.patch.object(rp.subprocess, "run", side_effect=run):
+            with self.assertRaisesRegex(SystemExit, "still registered"):
+                self.clear()
+        self.assertEqual(self.store.load()["worker"]["failed_sha"], self.sha)
+        self.assertEqual(self.store.records(), [])
+        self.clear()
+        self.assert_retry_available()
+
+    def test_clear_refuses_while_tick_lock_is_held(self):
+        before = self.store.load()
+        with rp.single_run_lock(self.store.root) as held:
+            self.assertTrue(held)
+            with self.assertRaisesRegex(SystemExit, "another run holds the lock"):
+                self.clear()
+        self.assertEqual(self.store.load(), before)
+        self.assertEqual((self.kept / "diagnosis.log").read_text(), "evidence")
+        self.assertEqual(self.store.records(), [])
+
+    def test_concurrent_clearance_cannot_start_a_retry_during_rename(self):
+        original = os.rename
+        competing = False
+
+        def rename(src, dst):
+            nonlocal competing
+            # The competing clearance must fail before it can clear the SHA
+            # and allow a tick to create a new worktree at the original path.
+            if not competing:
+                competing = True
+                with self.assertRaisesRegex(SystemExit, "another run holds the lock"):
+                    self.clear()
+            original(src, dst)
+
+        with mock.patch.object(rp.os, "rename", side_effect=rename):
+            self.clear()
+        self.assert_retry_available()
+
+    def test_tick_cannot_update_another_lane_during_prune(self):
+        state = self.store.load()
+        state["app"] = {"last_released_sha": self.fx.base}
+        self.store.save(state)
+        original = subprocess.run
+        runner = FakeRunner()
+        pipe = self.fx.pipeline(runner)
+        output: list[str] = []
+        pipe.out = output.append
+
+        def run(argv, **kwargs):
+            if argv[-2:] == ["worktree", "prune"]:
+                self.assertEqual(pipe.tick(["worker", "app"]), 0)
+                self.assertTrue(any("another run holds the lock" in line for line in output))
+                self.assertEqual(runner.calls, [])
+            return original(argv, **kwargs)
+
+        with mock.patch.object(rp.subprocess, "run", side_effect=run):
+            self.clear()
+        self.assertEqual(self.store.load()["app"], state["app"])
+        self.assert_retry_available()
+
+    def test_clear_keeps_lock_until_receipt_is_written(self):
+        original = self.store.record
+
+        def record(row):
+            with self.assertRaisesRegex(SystemExit, "another run holds the lock"):
+                self.clear()
+            original(row)
+
+        with mock.patch.object(self.store, "record", side_effect=record):
+            self.clear()
+        self.assert_retry_available()
 
 
 class Blockers(Base):
@@ -2824,7 +3039,7 @@ class DeployCredential(unittest.TestCase):
                 self.assertEqual(paused_pipe.tick([lane]), 0)
                 self.assertEqual(paused.calls, [])
                 self.assertEqual(self.fx.state()[lane]["failed_sha"], sha)
-                rp.clear_failed(store, lane, sha, "credential restored and verified")
+                rp.clear_failed(store, lane, sha, "credential restored and verified", repo_dir=self.fx.repo)
                 live = {"sha": self.fx.base}
                 runner = FakeRunner(live=live)
                 pipe = self.pipeline(runner, app=lane == "app")
@@ -2878,7 +3093,8 @@ class DeployCredential(unittest.TestCase):
         for cmd in commands:
             self.assertEqual(cmd[cmd.index("--sha") + 1], sha)
             rp.clear_failed(store, cmd[cmd.index("--lane") + 1],
-                            cmd[cmd.index("--sha") + 1], cmd[cmd.index("--reason") + 1])
+                            cmd[cmd.index("--sha") + 1], cmd[cmd.index("--reason") + 1],
+                            repo_dir=self.fx.repo)
 
         worker_live = {"sha": self.fx.base}
         runner = FakeRunner(live=worker_live)
