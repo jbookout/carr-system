@@ -731,21 +731,12 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
 
     def test_loader_errors_are_contained_in_canonical_health_and_cli(self):
         import io, contextlib, importlib.util, runpy, sys
-        from types import SimpleNamespace
         from unittest.mock import patch
         original = importlib.util.spec_from_file_location
         def fail_cap_loader(name, *args, **kwargs):
-            if name == "jev_cap_client":
+            if name in ("jev_cap_client", "jev_site_client"):
                 raise ImportError("fixture missing client configuration")
-            spec = original(name, *args, **kwargs)
-            if name == "jev_site_client":
-                # The CLI loads both readers. Keep the independent site reader
-                # offline and healthy while testing the cap loader's refusal.
-                spec.loader = SimpleNamespace(
-                    create_module=lambda spec: None,
-                    exec_module=lambda module: setattr(module, "spend_by_site_health",
-                                                       lambda: "OK jev spend by site — fixture"))
-            return spec
+            return original(name, *args, **kwargs)
         with patch.object(importlib.util, "spec_from_file_location", fail_cap_loader):
             ns = self.namespace()
             with contextlib.redirect_stdout(io.StringIO()) as out:
@@ -760,7 +751,10 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
             self.assertEqual(exited.exception.code, 1)
             self.assertIn("UNKNOWN jev paid cap", narrow.getvalue())
             self.assertIn("ImportError", narrow.getvalue())
-            [finding] = json.loads(findings.read_text())["findings"]
+            rows = json.loads(findings.read_text())["findings"]
+            self.assertEqual({row["key"] for row in rows}, {"jev_paid_cap", "jev_site_budget"})
+            self.assertTrue(all(row["hard_error"] for row in rows))
+            [finding] = [row for row in rows if row["key"] == "jev_paid_cap"]
             self.assertEqual(finding["key"], "jev_paid_cap")
             self.assertTrue(finding["hard_error"])
 
