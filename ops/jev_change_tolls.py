@@ -30,12 +30,14 @@ being authoritative here would cost a correct change that could not ship.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import importlib.util
 import json
 import os
 import subprocess
 import time
+import tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TIMEOUT_SECONDS = 60.0
@@ -233,7 +235,15 @@ def change(base="origin/main", repo=REPO):
     merged = subprocess.run(
         ["git", "log", "--merges", "--oneline", f"{base}..HEAD"],
         capture_output=True, text=True, cwd=repo, timeout=60).stdout.strip()
+    contents = {}
+    for rel in sorted(set(added + edited)):
+        try:
+            with open(os.path.join(repo, rel), "rb") as fh:
+                contents[rel] = hashlib.sha256(fh.read()).hexdigest()
+        except OSError:
+            contents[rel] = None
     return {"files": {"added": added, "edited": edited, "deleted": deleted},
+            "file_content_sha256": contents,
             "added_files_with_a_shebang_or_main_guard": shebangs,
             "edited_files_that_are_script_entrypoints": edited_entrypoints,
             "this_branch_merged_another_branch": bool(merged)}
@@ -319,35 +329,66 @@ def verify(state=None, *, floor=None, client=None, api_key=None, repo=REPO):
 
 
 def _answers(tsc, state, api_key, cached):
-    """The tolls' answers for this diff, from the per-diff cache when allowed."""
-    key = hashlib.sha256(json.dumps({"change": state, "tolls": sorted(TOLLS)}, sort_keys=True,
+    """Bind answers to the question payload and file contents; claim before paying.
+
+    The stable lock file covers lookup, request and atomic replacement across
+    processes. Acquisition and transport share a deadline; a paused peer makes
+    this advisory unavailable before transport, without paying without a claim.
+    """
+    questions = {name: tsc.noul(text) for name, (text, _) in TOLLS.items()}
+    deadline = time.monotonic() + TIMEOUT_SECONDS
+    def request():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Jev toll judgment unavailable: request deadline exhausted")
+        return tsc.ask({"change": state}, questions, timeout=remaining,
+                       api_key=api_key).get("answers") or {}
+    if not cached:
+        return request()
+    key = hashlib.sha256(json.dumps({"change": state, "questions": questions}, sort_keys=True,
                                     default=str).encode("utf-8")).hexdigest()
-    now = time.time()
-    entries = {}
-    if cached:
+    directory = os.path.dirname(os.path.abspath(CACHE_PATH))
+    os.makedirs(directory, exist_ok=True)
+    with open(CACHE_PATH + ".lock", "a", encoding="utf-8") as lock:
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("Jev toll cache lock unavailable: request deadline exhausted") from None
+                time.sleep(min(0.05, remaining))
+        now = time.time()
         try:
             with open(CACHE_PATH, encoding="utf-8") as fh:
                 entries = json.load(fh)
         except (OSError, ValueError):
             entries = {}
-        hit = entries.get(key) if isinstance(entries, dict) else None
-        if isinstance(hit, dict) and isinstance(hit.get("answers"), dict) \
-                and now - float(hit.get("at", 0)) < CACHE_TTL_SECONDS:
-            return hit["answers"]
-    questions = {name: tsc.noul(text) for name, (text, _) in TOLLS.items()}
-    answers = tsc.ask({"change": state}, questions, timeout=TIMEOUT_SECONDS,
-                      api_key=api_key).get("answers") or {}
-    if cached:
+        def fresh(entry):
+            try:
+                return (isinstance(entry, dict) and isinstance(entry.get("answers"), dict)
+                        and 0 <= now - float(entry.get("at", 0)) < CACHE_TTL_SECONDS)
+            except (ValueError, TypeError):
+                return False
+        kept = {k: v for k, v in (entries if isinstance(entries, dict) else {}).items() if fresh(v)}
+        if key in kept:
+            return kept[key]["answers"]
+        answers = request()
+        kept[key] = {"at": time.time(), "answers": answers}
+        temp_path = None
         try:
-            kept = {k: v for k, v in (entries if isinstance(entries, dict) else {}).items()
-                    if isinstance(v, dict) and now - float(v.get("at", 0)) < CACHE_TTL_SECONDS}
-            kept[key] = {"at": now, "answers": answers}
-            os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
-            with open(CACHE_PATH, "w", encoding="utf-8") as fh:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=directory,
+                                             prefix=".tolls-", delete=False) as fh:
+                temp_path = fh.name
                 json.dump(kept, fh)
-        except (OSError, TypeError, ValueError):
-            pass  # a cache that cannot be written only costs the next push a call
-    return answers
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(temp_path, CACHE_PATH)
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                os.unlink(temp_path)
+        return answers
 
 
 def owed(state=None, *, client=None, api_key=None, floor=WARN_AT):

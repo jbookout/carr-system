@@ -263,12 +263,12 @@ def call_site(caller, registry):
 
 
 def _job_label():
-    """A scheduled job's own label: CARR_JEV_JOB, or launchd's com.carr.* service name."""
+    """A job label, including the existing Quill recording daemon's launch path."""
     label = (os.environ.get("CARR_JEV_JOB") or "").strip()
     if label:
         return label
     service = (os.environ.get("XPC_SERVICE_NAME") or "").strip()
-    return service if service.startswith("com.carr.") else None
+    return service if service.startswith("com.carr.") or service == "com.digimata.quill" else None
 
 
 def _unattended():
@@ -1252,6 +1252,7 @@ def _windows(now):
 _BUDGET_TABLES = (
     "CREATE TABLE IF NOT EXISTS site_usage (day TEXT, hour TEXT, site TEXT, "
     "count INTEGER NOT NULL, PRIMARY KEY(day,hour,site))",
+    "CREATE TABLE IF NOT EXISTS budget_seed (day TEXT PRIMARY KEY)",
     # One refusal row per (code, site, session, window) reaches the call log;
     # the rest are counted here, so a refused burner cannot flood the log.
     "CREATE TABLE IF NOT EXISTS refusal_log (window TEXT PRIMARY KEY, count INTEGER NOT NULL)",
@@ -1266,6 +1267,50 @@ _BUDGET_TABLES = (
 def _budget_tables(db):
     for statement in _BUDGET_TABLES:
         db.execute(statement)
+
+
+UNATTRIBUTED_SITE = "__unattributed__"
+
+
+def _seed_site_usage(db, log_path, day, hour, registry):
+    """Upgrade/rebuild once under the reservation lock, retaining paid evidence.
+
+    Receipts use the existing validated seed parser. Existing reservations may
+    exceed receipts (a process can die before appending one), so neither the
+    daily counter nor a site bucket is reduced. Unattributed usage consumes
+    every site's allowance; an unknown time consumes the current hour too.
+    """
+    if db.execute("SELECT 1 FROM budget_seed WHERE day=?", (day,)).fetchone():
+        return
+    buckets = {}
+    for receipt in _logged_attempt_rows(log_path, day):
+        stamp = datetime.fromisoformat(receipt["ts"].replace("Z", "+00:00"))
+        name = receipt.get("caller")
+        entry = call_site(name, registry) if registry else None
+        identity = entry["caller"] if entry else UNATTRIBUTED_SITE
+        key = (_windows(stamp)[1], identity)
+        buckets[key] = buckets.get(key, 0) + 1
+    # Normalize concrete wildcard buckets before comparing them with receipts.
+    for name, bucket_hour, count in db.execute(
+            "SELECT site,hour,count FROM site_usage WHERE day=?", (day,)).fetchall():
+        entry = call_site(name, registry) if registry else None
+        identity = entry["caller"] if entry else UNATTRIBUTED_SITE
+        if identity != name:
+            db.execute("DELETE FROM site_usage WHERE day=? AND hour=? AND site=?", (day, bucket_hour, name))
+            db.execute("INSERT INTO site_usage VALUES (?,?,?,?) ON CONFLICT(day,hour,site) "
+                       "DO UPDATE SET count=count+excluded.count", (day, bucket_hour, identity, count))
+    for (bucket_hour, identity), count in buckets.items():
+        db.execute("INSERT INTO site_usage VALUES (?,?,?,?) ON CONFLICT(day,hour,site) "
+                   "DO UPDATE SET count=MAX(count,excluded.count)", (day, bucket_hour, identity, count))
+    recorded = db.execute("SELECT COALESCE(SUM(count),0) FROM site_usage WHERE day=?", (day,)).fetchone()[0]
+    row = db.execute("SELECT attempts FROM daily_cap WHERE day=?", (day,)).fetchone()
+    total = max(row[0] if row else 0, recorded)
+    if total > recorded:
+        db.execute("INSERT INTO site_usage VALUES (?,?,?,?) ON CONFLICT(day,hour,site) "
+                   "DO UPDATE SET count=count+excluded.count", (day, hour, UNATTRIBUTED_SITE, total - recorded))
+    db.execute("INSERT INTO daily_cap VALUES (?,?,0) ON CONFLICT(day) "
+               "DO UPDATE SET attempts=MAX(attempts,excluded.attempts)", (day, total))
+    db.execute("INSERT INTO budget_seed VALUES (?)", (day,))
 
 
 def _record_refusal(questions, facets, caller, question_kind, prompt_sha256, code, session, now=None):
@@ -1399,6 +1444,25 @@ def _after_worker_vendor_failure(status, reason, caller):
                              code="vendor_spend_unknown", site=caller)
 
 
+def _site_enabled(entry):
+    return not (_unattended() and entry["unattended"] == "off")
+
+
+def call_site_enabled(caller):
+    """Whether this site's registry policy permits dispatch in this environment.
+
+    Admission still owns attribution and accounting. Advisory dispatchers use
+    this projection to avoid running checks that the same policy will refuse.
+    """
+    if not _unattended():
+        return True
+    try:
+        entry = call_site(caller, load_call_sites())
+        return entry is not None and _site_enabled(entry)
+    except TypeSafeError:
+        return False
+
+
 def _admit_paid_call(caller, session, questions, facets, question_kind, prompt_sha256):
     """The registry gate, before any transport: the site entry, or JevCallRefused.
 
@@ -1427,7 +1491,7 @@ def _admit_paid_call(caller, session, questions, facets, question_kind, prompt_s
             code = "unregistered_caller"
         elif not session and not (entry["attribution"] == "session_or_job" and _job_label()):
             code = "unattributed_call"
-        elif _unattended() and entry["unattended"] == "off":
+        elif not _site_enabled(entry):
             code = "unattended_worker_off"
     if code:
         _record_refusal(questions, facets, caller, question_kind, prompt_sha256, code, session)
@@ -1458,6 +1522,7 @@ def _reserve_paid_call(questions, facets, caller, question_kind, prompt_sha256,
     refused = None
     probe_token = None
     repair_credit = False
+    site_id = site["caller"] if site is not None else caller
     try:
         os.makedirs(os.path.dirname(os.path.abspath(log_path)), exist_ok=True)
         db = sqlite3.connect(_cap_db_path(), timeout=1.0)
@@ -1476,13 +1541,12 @@ def _reserve_paid_call(questions, facets, caller, question_kind, prompt_sha256,
             hold = db.execute("SELECT until FROM credit_hold WHERE id=1").fetchone()
             lease = db.execute("SELECT until FROM credit_probe WHERE id=1").fetchone()
             credit_blocked = bool(hold and (hold[0] > instant or (lease and lease[0] > instant)))
+            _seed_site_usage(db, log_path, day, hour, registry)
             row = db.execute("SELECT attempts, notified FROM daily_cap WHERE day=?", (day,)).fetchone()
-            if row is None:
-                row = (_logged_attempts(log_path, day), 0)
-                db.execute("DELETE FROM daily_cap WHERE day < ?", (day,))
-                db.execute("INSERT INTO daily_cap VALUES (?,?,0)", (day, row[0]))
-                db.execute("DELETE FROM site_usage WHERE day < ?", (day,))
-                db.execute("DELETE FROM budget_pause WHERE resets_at <= ?", (now.strftime("%Y-%m-%dT%H:%M:%SZ"),))
+            db.execute("DELETE FROM daily_cap WHERE day < ?", (day,))
+            db.execute("DELETE FROM site_usage WHERE day < ?", (day,))
+            db.execute("DELETE FROM budget_seed WHERE day < ?", (day,))
+            db.execute("DELETE FROM budget_pause WHERE resets_at <= ?", (now.strftime("%Y-%m-%dT%H:%M:%SZ"),))
             allowed = row[0] < cap and not credit_blocked
             if credit_blocked:
                 refused = ("vendor_credit_exhausted", caller,
@@ -1494,16 +1558,19 @@ def _reserve_paid_call(questions, facets, caller, question_kind, prompt_sha256,
             if allowed and registry is not None and site is not None:
                 hour_used = db.execute("SELECT COALESCE(SUM(count),0) FROM site_usage WHERE hour=?",
                                        (hour,)).fetchone()[0]
-                site_day = db.execute("SELECT COALESCE(SUM(count),0) FROM site_usage WHERE day=? AND site=?",
-                                      (day, caller)).fetchone()[0]
-                site_hour = db.execute("SELECT COALESCE(SUM(count),0) FROM site_usage WHERE hour=? AND site=?",
-                                       (hour, caller)).fetchone()[0]
+                # Include concrete names written before wildcard accounting was fixed.
+                rows = db.execute("SELECT site,hour,count FROM site_usage WHERE day=?", (day,)).fetchall()
+                matched = [(h, n) for name, h, n in rows
+                           if name == UNATTRIBUTED_SITE or
+                           (call_site(name, registry) or {}).get("caller", name) == site_id]
+                site_day = sum(n for _, n in matched)
+                site_hour = sum(n for h, n in matched if h == hour)
                 if hour_used >= registry["hourly_paid_call_cap"]:
                     refused = ("hourly_paid_call_cap", "*", next_hour)
                 elif site_day >= site["daily_budget"]:
-                    refused = ("site_daily_budget", caller, next_day)
+                    refused = ("site_daily_budget", site_id, next_day)
                 elif site_hour >= site["hourly_budget"]:
-                    refused = ("site_hourly_budget", caller, next_hour)
+                    refused = ("site_hourly_budget", site_id, next_hour)
                 if refused:
                     allowed = False
                     db.execute("INSERT OR IGNORE INTO budget_pause VALUES (?,?,?)", refused)
@@ -1514,7 +1581,7 @@ def _reserve_paid_call(questions, facets, caller, question_kind, prompt_sha256,
                                (probe_token, instant + CREDIT_PROBE_SECONDS))
                 db.execute("UPDATE daily_cap SET attempts=attempts+1 WHERE day=?", (day,))
                 db.execute("INSERT INTO site_usage VALUES (?,?,?,1) ON CONFLICT(day,hour,site) "
-                           "DO UPDATE SET count=count+1", (day, hour, caller))
+                           "DO UPDATE SET count=count+1", (day, hour, site_id))
             alerts = _claim_spend_alerts(db, log_path, day, row[0], allowed, cap, caller)
             db.commit()
         finally:
@@ -1549,7 +1616,8 @@ def active_pause(*, sites=None, now=None):
     """The budget pause in force now, as {"scope", "resets_at"}, or None.
 
     Global pauses (daily cap, hourly cap) always count; a site budget pause
-    counts only for the named `sites`. Read-only; never raises.
+    counts only for the named `sites`. Read-only; storage failures raise
+    TypeSafeError so advisory callers stay visible.
     """
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     day, _, _, next_day = _windows(now)
@@ -1565,15 +1633,17 @@ def active_pause(*, sites=None, now=None):
                 return {"scope": "daily_paid_call_cap", "resets_at": next_day}
             if not db.execute("SELECT 1 FROM sqlite_master WHERE name='budget_pause'").fetchone():
                 return None
-            names = ["*"] + list(sites or [])
+            registry = load_call_sites()
+            names = ["*"] + [(call_site(name, registry) or {}).get("caller", name)
+                             for name in sites or []]
             marks = ",".join("?" * len(names))
             found = db.execute(f"SELECT scope,resets_at FROM budget_pause WHERE resets_at > ? "
                                f"AND site IN ({marks}) ORDER BY resets_at DESC LIMIT 1",
                                (stamp, *names)).fetchone()
         finally:
             db.close()
-    except (OSError, sqlite3.Error, TypeSafeError):
-        return None
+    except (OSError, sqlite3.Error, TypeSafeError) as exc:
+        raise TypeSafeError(f"Jev pause storage unavailable ({type(exc).__name__})") from None
     return {"scope": found[0], "resets_at": found[1]} if found else None
 
 
@@ -1597,8 +1667,8 @@ def pause_notice(session, *, sites=None, now=None):
             _budget_tables(db)
             fresh = db.execute("INSERT OR IGNORE INTO pause_notice VALUES (?,?,?)",
                                (str(session), pause["scope"], pause["resets_at"])).rowcount == 1
-    except (OSError, sqlite3.Error):
-        return None
+    except (OSError, sqlite3.Error) as exc:
+        raise TypeSafeError(f"Jev notice storage unavailable ({type(exc).__name__})") from None
     if not fresh:
         return None
     resumes = pause["resets_at"].replace("T", " ").replace(":00Z", " UTC")
@@ -1617,8 +1687,8 @@ def outage_notice(session, *, now=None):
             _budget_tables(db)
             fresh = db.execute("INSERT OR IGNORE INTO pause_notice VALUES (?,?,?)",
                                (str(session), "outage", hour)).rowcount == 1
-    except (OSError, sqlite3.Error):
-        return None
+    except (OSError, sqlite3.Error) as exc:
+        raise TypeSafeError(f"Jev notice storage unavailable ({type(exc).__name__})") from None
     if not fresh:
         return None
     return ("[jev] unavailable this hour (vendor or account outage, not a cap); "
@@ -1653,6 +1723,15 @@ def spend_by_site_health(*, now=None):
                 total = row[0] if row else 0
             finally:
                 db.close()
+        grouped = {}
+        for name, used in usage.items():
+            identity = (call_site(name, registry) or {}).get("caller", name)
+            grouped[identity] = grouped.get(identity, 0) + used
+        usage = grouped
+        unattributed = usage.pop(UNATTRIBUTED_SITE, 0)
+        if unattributed:
+            usage = {name: usage.get(name, 0) + unattributed for name in registry["sites"]} | {
+                name: used for name, used in usage.items() if name not in registry["sites"]}
         over = [name for name, used in usage.items()
                 if name in registry["sites"] and used >= registry["sites"][name]["daily_budget"]]
         status = "WARN" if over or total * 100 >= cap * 50 else "OK"
@@ -1660,6 +1739,7 @@ def spend_by_site_health(*, now=None):
                  for name, used in sorted(usage.items(), key=lambda kv: (-kv[1], kv[0]))]
         return (f"{status} jev spend by site — UTC {day} · {total}/{cap} paid attempts · this hour "
                 f"{hour_used}/{registry['hourly_paid_call_cap']} · {' '.join(parts) or 'no site spend'}"
+                f"{' · unattributed=' + str(unattributed) + ' charged to each site' if unattributed else ''}"
                 f"{' · over budget: ' + ','.join(sorted(over)) if over else ''} · {SITE_SPEND_ACTION}")
     except (OSError, sqlite3.Error, TypeSafeError) as exc:
         return f"UNKNOWN jev spend by site — {type(exc).__name__} · {SITE_SPEND_ACTION}"

@@ -128,6 +128,10 @@ class JudgeUnavailable(RuntimeError):
     is visible in the log rather than silently reducing coverage.
     """
 
+    def __init__(self, message, *, reason="inspection_error"):
+        super().__init__(message)
+        self.reason = reason
+
 
 def _client():
     """Import the vendor client lazily, so importing this module costs nothing."""
@@ -171,6 +175,7 @@ def judge(subject, questions, *, timeout=20.0, client=None, api_key=None,
     retry-after is otherwise unbounded.
     """
     started = time.monotonic()
+    tsc = None
     try:
         tsc = client or _client()
         extra = {}
@@ -188,7 +193,9 @@ def judge(subject, questions, *, timeout=20.0, client=None, api_key=None,
                          cache_ttl_seconds=tsc.JUDGE_CACHE_TTL_SECONDS)
         answer = tsc.ask(subject, questions, timeout=timeout, api_key=api_key, **extra)
     except Exception as exc:  # deliberately broad: see JudgeUnavailable
-        raise JudgeUnavailable(f"{type(exc).__name__}: {exc}") from None
+        reason = (getattr(exc, "code", None) or "vendor_unavailable"
+                  if isinstance(exc, getattr(tsc, "TypeSafeError", ())) else "inspection_error")
+        raise JudgeUnavailable(f"{type(exc).__name__}: {exc}", reason=reason) from None
     answer["elapsed_ms"] = int((time.monotonic() - started) * 1000)
     return answer
 

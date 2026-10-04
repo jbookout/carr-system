@@ -771,7 +771,8 @@ class QuietUnavailabilityTests(unittest.TestCase):
             said.add(key)
             return "[jev] unavailable this hour; Jev checks are skipped and this is said once."
 
-        self.client = SimpleNamespace(active_pause=lambda sites=None: self.pause,
+        enabled = self.hook.POLICY.call_site_enabled
+        self.client = SimpleNamespace(call_site_enabled=enabled, active_pause=lambda sites=None: self.pause,
                                       pause_notice=pause_notice, outage_notice=outage_notice)
         self.hook._lib = lambda name: self.client if name == "typesafe_client" else self.fake(name)
         self.hook._git_root = lambda cwd: self.dir
@@ -785,8 +786,47 @@ class QuietUnavailabilityTests(unittest.TestCase):
 
     def unavailable(self, *args, **kwargs):
         self.hook  # noqa: B018 - keeps the fixture's shape obvious
-        return [result("boundary_judgment", "unavailable",
-                       "Jev boundary judgment unavailable; inspect this result manually")]
+        row = result("boundary_judgment", "unavailable",
+                     "Jev boundary judgment unavailable; inspect this result manually")
+        row["detail"]["reason"] = "vendor_unavailable"
+        return [row]
+
+    def test_notice_storage_failure_retains_unavailable_advisory(self):
+        # Load the real client, not this class's notice fake.
+        spec = importlib.util.spec_from_file_location("notice_client", os.path.join(REPO, "ops/typesafe_client.py"))
+        live = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(live)
+        self.hook._lib = lambda name: live
+        for error in (live.sqlite3.OperationalError("database is locked"),
+                      live.sqlite3.DatabaseError("file is not a database"),
+                      PermissionError("unwritable")):
+            with self.subTest(error=str(error)), mock.patch.object(live.sqlite3, "connect", side_effect=error):
+                lines = self.hook._quiet_unavailable(self.unavailable(), "s1")
+                self.assertEqual(len(lines), 1)
+                self.assertIn("unavailable", lines[0])
+                with mock.patch.object(live, "active_pause", return_value=self.pause):
+                    self.assertEqual(len(self.hook._quiet_unavailable(self.unavailable(), "s1")), 1)
+
+    def test_local_failures_keep_manual_warning_after_real_outage_notice(self):
+        spec = importlib.util.spec_from_file_location("healthy_notice_client", os.path.join(REPO, "ops/typesafe_client.py"))
+        live = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(live)
+        self.hook._lib = lambda name: live
+        with mock.patch.object(live, "JEV_DAILY_CAP_LOG", os.path.join(self.dir, "calls.jsonl")):
+            with live.sqlite3.connect(live._cap_db_path()) as db:
+                db.execute("CREATE TABLE daily_cap (day TEXT PRIMARY KEY, attempts INTEGER, notified INTEGER)")
+                live._budget_tables(db)
+            self.assertIsNotNone(live.outage_notice("s1"))
+            for reason in ("inspection_error", "time_budget_exhausted", "unattended_worker_off"):
+                with self.subTest(reason=reason):
+                    run = self.hook.Run()
+                    run.receipt_path = os.path.join(self.dir, "boundary.jsonl")
+                    run._unavailable("inspect_tool_event", reason)
+                    for _ in range(2):
+                        lines = self.hook._quiet_unavailable(run.results, "s1")
+                        self.assertEqual(len(lines), 1)
+                        self.assertIn(reason, lines[0])
+                        self.assertIn("inspect boundary manually", lines[0])
 
     def test_cap_pause_is_one_line_per_session_per_window(self):
         self.fake_inspect()
@@ -810,6 +850,29 @@ class QuietUnavailabilityTests(unittest.TestCase):
         self.fake_inspect(extra=[result("triage_failure", "code_bug", "the bug is in calc.py")])
         _, out = run_main(self.hook, self.failing())
         self.assertIn("code_bug", out)
+
+    def test_unattended_dispatch_uses_mixed_registry_policy(self):
+        spec = importlib.util.spec_from_file_location("policy_client", os.path.join(REPO, "ops/typesafe_client.py"))
+        live = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(live)
+        registry = live.load_call_sites()
+        registry["sites"]["jev_session_watch"]["unattended"] = "allowed"
+        calls = []
+        with mock.patch.dict(os.environ, {"CARR_JEV_WORKER": "off", "CARR_JEV_FACT_BOUNDARY": "on"}), \
+                mock.patch.object(live, "load_call_sites", return_value=registry), \
+                mock.patch.object(self.hook, "POLICY", live):
+            self.hook._lib = lambda name: live if name == "typesafe_client" else self.fake(name)
+            self.hook.post_tool_use = lambda *a: calls.append("watch")
+            self.hook.fact_boundary = lambda *a: calls.append("fact")
+            self.hook.stop = lambda *a: calls.append("done")
+            # The same registry admits the watch and refuses the other sites.
+            with mock.patch.object(live, "_fixture_offline", return_value=False):
+                live._admit_paid_call("jev_session_watch", "s1", {}, None, "noul", "fixture")
+                with self.assertRaises(live.JevCallRefused):
+                    live._admit_paid_call("jev_fact_boundary", "s1", {}, None, "noul", "fixture")
+            run_main(self.hook, self.failing())
+            run_main(self.hook, {"hook_event_name": "Stop", "session_id": "s1", "cwd": self.dir})
+        self.assertEqual(calls, ["watch"])
 
     def test_unattended_worker_runs_no_supervisor_check(self):
         with mock.patch.dict(os.environ, {"CARR_JEV_WORKER": "off"}):

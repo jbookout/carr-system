@@ -42,6 +42,9 @@ from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
+sys.path.insert(0, str(REPO / "tools" / "room-bridge"))
+import evaluation_kernel as kernel
+
 EXPECTATIONS = HERE / "expectations.v1.json"
 VERSION = "jev-judgments-expectations/v1"
 WINDOW = ("2026-09-28", "2026-10-05")
@@ -285,11 +288,14 @@ def report(base_ref):
     for did, m in first["dimensions"].items():
         lo, hi = m["delta"]["ci_low"], m["delta"]["ci_high"]
         direction = "improved" if lo > 0 else "regressed" if hi < 0 else "equivalent"
-        dims.append({"dimension_id": did, "critical": True, "status": "passed",
+        status = "passed" if m["candidate"]["score"] == 1.0 and direction != "regressed" else "failed"
+        dims.append({"dimension_id": did, "critical": True, "status": status,
                      "direction_vs_baseline": direction,
                      "evidence_refs": ["evals/jev-judgments/evidence/baseline.jsonl",
                                        "evals/jev-judgments/evidence/candidate.jsonl"], **m})
-    deps = [p for p in ARM_FILES if (REPO / p).exists()] + ["evals/jev-judgments/expectations.v1.json"]
+    policy_files = [f"tools/room-bridge/{name}.py" for name in
+                    ("evaluation_kernel", "execution_contract", "evaluation_rubrics", "design_kernel", "policy_learning")]
+    deps = [p for p in ARM_FILES if (REPO / p).exists()] + policy_files + ["evals/jev-judgments/expectations.v1.json"]
     fingerprint = hashlib.sha256("".join(_sha(REPO / p) for p in ARM_FILES if (REPO / p).exists())
                                  .encode()).hexdigest()
     harness = _sha(HERE / "run_eval.py")
@@ -348,8 +354,31 @@ def report(base_ref):
         f"(delta {refusal['delta']['value']:+.2f}, 95% [{refusal['delta']['ci_low']:+.2f}, {refusal['delta']['ci_high']:+.2f}]); "
         f"judgment points still paid {retention['baseline']['score']:.2f} -> {retention['candidate']['score']:.2f}. "
         f"Paid share of all cases {paid['baseline']:.2f} -> {paid['candidate']:.2f}.")
+    blockers = kernel.critical_dimension_blockers(
+        [{field: d[field] for field in kernel.DIMENSION_FIELDS} for d in dims])
+    grader_ok = receipt["grader"]["validation"]["result"] == "pass"
+    stage_ok = not blockers and grader_ok
+    receipt["stage_results"][0]["status"] = "passed" if stage_ok else "failed"
+    primary = next(d for d in dims if d["dimension_id"] == receipt["primary_dimension"])
+    cheaper = receipt["cost"]["candidate_usd_per_case"] < receipt["cost"]["baseline_usd_per_case"]
+    resolved = receipt["noise_floor"] < receipt["min_useful_gain"]
+    if not stage_ok:
+        decision = "do_not_merge"
+        reason = "Blocked by " + ", ".join(blockers + ([] if grader_ok else ["grader controls"])) + "."
+    elif not resolved:
+        decision, reason = "inconclusive", "Noise floor exceeds the useful gain."
+    elif primary["direction_vs_baseline"] == "improved":
+        decision, reason = "ship", "Measured improvement with passing critical dimensions and controls."
+    else:
+        decision = "ship_cost_at_parity" if cheaper else "inconclusive"
+        reason = "Do not merge on quality grounds; primary gain is inside the noise."
+    if primary["direction_vs_baseline"] == "equivalent" and "do not merge on quality grounds" not in reason.lower():
+        reason += " Do not merge on quality grounds; primary gain is inside the noise."
+    receipt["verdict"]["decision"] = decision
+    receipt["verdict"]["statement"] += " " + reason
     (HERE / "receipt.json").write_text(json.dumps(receipt, indent=1, sort_keys=True) + "\n")
     print(receipt["verdict"]["statement"])
+    return 0 if decision in {"ship", "ship_cost_at_parity"} else 1
 
 
 def main(argv=None):
@@ -363,7 +392,7 @@ def main(argv=None):
     if args.report:
         base = args.base or subprocess.run(["git", "merge-base", "HEAD", "origin/main"], cwd=REPO,
                                            capture_output=True, text=True, check=True).stdout.strip()
-        report(base)
+        return report(base)
     return 0
 
 
