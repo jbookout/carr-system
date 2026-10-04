@@ -250,8 +250,8 @@ begin
   if (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v107')<>2664
     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v107' and ingress_kind not in ('db_function_acl','db_relation_acl','db_column_acl'))<>1112
     or bad_hash or v.registry_digest is distinct from 'sha256:13c9034b9529491f2061270e9495634f06fb7aa32adda3129b21b1c4d6dcd47c'
-    or v.entry_set_digest is distinct from 'sha256:608381ead817856b1188a8866e9d4879d3225171e0dd0ac33b1a9e1195ac2bdc' then
-    raise exception 'Automation undo v107 seed or entry-set seal drifted: actual % expected %', v.entry_set_digest, 'sha256:608381ead817856b1188a8866e9d4879d3225171e0dd0ac33b1a9e1195ac2bdc';
+    or v.entry_set_digest is distinct from 'sha256:3dd02d729e0d7229f4f04cf861f664fb1545b78697d2a6cb90628b606e7a31a4' then
+    raise exception 'Automation undo v107 seed or entry-set seal drifted: actual % expected %', v.entry_set_digest, 'sha256:3dd02d729e0d7229f4f04cf861f664fb1545b78697d2a6cb90628b606e7a31a4';
   end if;
 end $automation_undo_v107_seed$;
 

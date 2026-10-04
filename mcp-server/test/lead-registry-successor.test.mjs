@@ -33,3 +33,16 @@ test('audited automation preserves the exact v106 delivered seal', () => {
   const runner=readFileSync(new URL('../../tools/migrate.py',import.meta.url),'utf8');
   assert.equal((runner.match(/"0822_automation_reason_undo_archive_invoice.sql",\s*"0823_automation_undo_scac_successor.sql"/g)||[]).length,2);
 });
+
+// Independent PostgreSQL acceptance observed this full-entry seal for the
+// renumbered migration runner. Pin both halves so source resealing cannot
+// accidentally retain a digest measured before the source seed changed.
+test('renumbered automation source binds its measured PostgreSQL full-entry seal', () => {
+  const migration = readFileSync(new URL('../../migrations/0823_automation_undo_scac_successor.sql', import.meta.url), 'utf8');
+  const seed = migration.split('$automation_undo_v107_source$')[1];
+  assert.equal(createHash('sha256').update(seed).digest('hex'), '4f51c52d2b48fd843287c9cc6005df3166c57dc1b029f34bea6afc8ff2384788');
+  const seals = JSON.parse(readFileSync(new URL('../../ops/config/scac-registry-full-entry-set-seals.json', import.meta.url), 'utf8'));
+  const measured = 'sha256:3dd02d729e0d7229f4f04cf861f664fb1545b78697d2a6cb90628b606e7a31a4';
+  assert.equal(seals['scac-mutation-registry.v107'], measured);
+  assert.ok(migration.includes(`v.entry_set_digest is distinct from '${measured}'`));
+});
