@@ -36,11 +36,11 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
     running = true;
     const connect = async () => {
       const c = new pg.Client({ host: dir, user: 'fixture', database: 'postgres' });
-      await c.connect();
-      // Due-date transitions use the brokerage calendar in the store. UTC
-      // fixture dates fall one day ahead during Central evening CI runs.
+      await c.connect(); clients.push(c);
+      // CURRENT_DATE fixtures use the same business day as the feature, even
+      // when the PostgreSQL cluster and CI host default to UTC.
       await c.query("set time zone 'America/Chicago'");
-      clients.push(c); return c;
+      return c;
     };
     const c = await connect();
     await c.query('create schema ops; create role carr_writer; create role carr_authority; create role carr_reader; grant usage on schema ops to carr_writer,carr_authority,carr_reader;');
