@@ -73,6 +73,7 @@
     "pipeline_blocked": "Inspect the BLOCKED line and unblock the release stage.",
     "pipeline_stale": "Inspect the release worker and restart only after verifying its state.",
     "collection_error": "Restore the named evidence source; retained findings remain open.",
+    "environment": "Install the named tool or put it on the job's launchd PATH; findings it feeds remain open.",
     "action_error": "Verify the recorded action intent and any process before retrying.",
     "record_error": "Restore record-layer access and retry the same idempotency key.",
     "board_error": "Restore progress-board reporting and replay the finding."

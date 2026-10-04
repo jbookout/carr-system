@@ -200,7 +200,11 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v105.generated.js";
+} from "./scac-mutation-registry.v106.generated.js";
+
+// v106 admits evidence-driven lead stages and approval-only drafts.
+// v105 admits bounded newest Observatory reads and preserves bridge polling.
+// v104 preserves the capped Jev Worker contract.
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 
